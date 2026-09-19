@@ -1,0 +1,178 @@
+childBlocks: null
+color: null
+conditions: null
+description: ''
+enabled: true
+entryType: null
+field: 1bbafb5d-c8cf-4079-bc77-d7454f822431 # Content Builder
+fieldLayouts:
+  342c540b-1f16-4094-91d1-2e6a1588e7c6:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: b7586571-7fcf-403b-b0e8-b46817477117 # Bleed Image Position
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: 'Image Position'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 42c4a025-fbc2-48d8-8427-ff320b267d8d
+            userCondition: null
+            warning: null
+            width: 50
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 42c584fe-c18f-4638-9870-26dd109cb2b5 # Column Width
+            handle: null
+            includeInCards: false
+            instructions: 'This is measured in columns.'
+            label: 'Image width'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 70ea1499-c052-448e-aa51-39535658e253
+            userCondition: null
+            warning: null
+            width: 50
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 0da09cff-7ad7-4db1-8e3a-6fe76ddf6f39 # Image
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 6132f52c-97e9-40ea-a7b8-df5d0938a083
+            userCondition: null
+            warning: null
+            width: 50
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: af7c04fd-c083-40c2-b7a3-eeafbff97caf # Caption
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 337928b2-1476-4168-ba74-a33a8f7b50ab
+            userCondition: null
+            warning: null
+            width: 50
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            elementCondition: null
+            type: craft\fieldlayoutelements\HorizontalRule
+            uid: 0daf6122-b1f0-4113-b46a-17338e94c8c7
+            userCondition: null
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 56e4d199-12f7-453f-af17-b79dc615088f # Rich Text
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 71d1dd70-6cc9-41fd-9922-39f5a34c636a
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: bf6ede02-0f3a-4855-8e01-f07171d76594
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 0aaedf49-0dd2-4544-b6f2-6cf353afee31 # Section Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: a221a42d-59d9-4a6b-b4d2-ee843915b3e6
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 294ed368-67f1-40ad-9751-544925dd1965 # Background Properties
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: __blank__
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 8aa0f78b-c9cd-4e07-a255-532bd67e3dab
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 4ec5cb85-8f1f-48d3-8408-3de272d3fb6b # Custom CSS
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 3dc8f439-00b3-4808-872d-5ef63b0e6757
+            userCondition: null
+            warning: null
+            width: 100
+        name: 'Section Options'
+        uid: 55eaa6ab-edf6-472b-8371-7229a008be9c
+        userCondition: null
+group: 9546349b-883f-4682-b6b5-419da3c477e7 # Content
+groupChildBlockTypes: true
+handle: leftRightFullWidthBleedImage
+icon: null
+iconFilename: ''
+ignorePermissions: true
+maxBlocks: 0
+maxChildBlocks: 0
+maxSiblingBlocks: 0
+minBlocks: 0
+minChildBlocks: 0
+minSiblingBlocks: 0
+name: 'Left / Right / Full Width Bleed Image'
+topLevel: true

@@ -1,0 +1,25 @@
+columnSuffix: null
+handle: solutions
+instructions: null
+name: Solutions
+searchable: true
+settings:
+  allowSelfRelations: true
+  branchLimit: null
+  defaultPlacement: end
+  maintainHierarchy: false
+  maxRelations: null
+  minRelations: null
+  selectionLabel: null
+  showCardsInGrid: false
+  showSiteMenu: true
+  showUnpermittedEntries: true
+  showUnpermittedSections: true
+  sources:
+    - 'section:24a0ad2e-6df6-43e0-a1a0-d92ccbd0af19'
+  targetSiteId: null
+  validateRelatedElements: false
+  viewMode: null
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Entries

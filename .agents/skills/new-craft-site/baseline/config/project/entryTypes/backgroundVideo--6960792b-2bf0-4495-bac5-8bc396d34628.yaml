@@ -1,0 +1,38 @@
+color: null
+fieldLayouts:
+  5792efb6-8b41-445b-8c18-0c10940cb565:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 9ee33f10-b830-4407-a470-d95f2eb29120 # Background Properties - Background Video - Video
+            handle: null
+            includeInCards: true
+            instructions: null
+            label: Video
+            providesThumbs: true
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: acf07145-4141-415b-9b67-31c688292a65
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 093d493e-d7c6-416a-a9e0-83d4c073e666
+        userCondition: null
+handle: backgroundVideo
+hasTitleField: false
+icon: null
+name: 'Background Video'
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

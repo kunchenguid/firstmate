@@ -1,0 +1,38 @@
+color: null
+fieldLayouts:
+  b301aa8a-9478-4596-83c1-63adfd0c76fd:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: e2ef3131-5173-40bb-b690-e713919aae71 # Header Content - Header Content - Header Content
+            handle: headerContent
+            includeInCards: true
+            instructions: null
+            label: 'Header Content'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 7e50dfd8-2482-4ed8-a0f2-f6ff3ea04bfc
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: c930f75c-3d75-4686-97c8-acf2c52308e4
+        userCondition: null
+handle: headerContent
+hasTitleField: false
+icon: null
+name: 'Header Content'
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

@@ -1,0 +1,36 @@
+columnSuffix: null
+handle: footerBackgroundImage
+instructions: null
+name: 'Footer Background Image'
+searchable: true
+settings:
+  allowSelfRelations: false
+  allowSubfolders: false
+  allowUploads: true
+  allowedKinds:
+    - image
+  branchLimit: null
+  defaultPlacement: end
+  defaultUploadLocationSource: 'volume:414779dc-2bf4-48e5-b1b9-b59f8849e6a6'
+  defaultUploadLocationSubpath: null
+  maintainHierarchy: false
+  maxRelations: 1
+  minRelations: null
+  previewMode: full
+  restrictFiles: true
+  restrictLocation: false
+  restrictedDefaultUploadSubpath: null
+  restrictedLocationSource: 'volume:414779dc-2bf4-48e5-b1b9-b59f8849e6a6'
+  restrictedLocationSubpath: null
+  selectionLabel: null
+  showCardsInGrid: false
+  showSiteMenu: true
+  showUnpermittedFiles: false
+  showUnpermittedVolumes: false
+  sources: '*'
+  targetSiteId: null
+  validateRelatedElements: false
+  viewMode: list
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Assets

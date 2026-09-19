@@ -1,0 +1,55 @@
+color: null
+fieldLayouts:
+  afa331e0-d74e-4831-a7c0-cf818745db5e:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 62ec7213-1cb6-4a67-8841-a71e1f1a444f # Thumbnail - Thumbnail - Asset
+            handle: asset
+            includeInCards: false
+            instructions: null
+            label: Asset
+            providesThumbs: true
+            required: true
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 3e35a69a-e04a-4f3c-8520-33e440b026b2
+            userCondition: null
+            warning: null
+            width: 25
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 25443bff-5535-4ae0-ac85-268c345a49b2 # Thumbnail - Thumbnail - Alt Text
+            handle: altText
+            includeInCards: true
+            instructions: null
+            label: 'Alt Text'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 2580bce1-7785-4345-b616-e95361dffd7e
+            userCondition: null
+            warning: null
+            width: 75
+        name: Content
+        uid: ded303d5-d1be-4adc-b957-ff3b089e46ad
+        userCondition: null
+handle: thumbnail
+hasTitleField: false
+icon: null
+name: Thumbnail
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

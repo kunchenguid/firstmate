@@ -1,0 +1,22 @@
+columnSuffix: null
+handle: collections
+instructions: null
+name: Collections
+searchable: false
+settings:
+  allowSelfRelations: false
+  branchLimit: null
+  defaultPlacement: end
+  maintainHierarchy: true
+  maxRelations: null
+  minRelations: null
+  selectionLabel: null
+  showCardsInGrid: false
+  showSiteMenu: true
+  source: 'group:f47551cc-660a-487a-980a-f9ced1e2e67a'
+  targetSiteId: null
+  validateRelatedElements: false
+  viewMode: null
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Categories

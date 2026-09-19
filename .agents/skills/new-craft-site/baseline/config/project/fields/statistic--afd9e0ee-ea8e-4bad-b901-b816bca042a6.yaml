@@ -1,0 +1,56 @@
+columnSuffix: null
+handle: statistic
+instructions: null
+name: Statistic
+searchable: false
+settings:
+  addRowLabel: 'Add a row'
+  columns:
+    __assoc__:
+      -
+        - col1
+        -
+          __assoc__:
+            -
+              - heading
+              - Statistic
+            -
+              - handle
+              - statistic
+            -
+              - width
+              - ''
+            -
+              - type
+              - singleline
+      -
+        - col2
+        -
+          __assoc__:
+            -
+              - heading
+              - Description
+            -
+              - handle
+              - description
+            -
+              - width
+              - ''
+            -
+              - type
+              - singleline
+  defaults:
+    -
+      __assoc__:
+        -
+          - col1
+          - ''
+        -
+          - col2
+          - ''
+  maxRows: 1
+  minRows: null
+  staticRows: false
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Table

@@ -1,0 +1,68 @@
+color: null
+fieldLayouts:
+  80fb6bcf-3f83-467d-ba7d-75b7162ba21b:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            autocapitalize: true
+            autocomplete: false
+            autocorrect: true
+            class: null
+            dateAdded: '2024-12-03T17:03:19+00:00'
+            disabled: false
+            elementCondition: null
+            id: null
+            includeInCards: false
+            inputType: null
+            instructions: null
+            label: null
+            max: null
+            min: null
+            name: null
+            orientation: null
+            placeholder: null
+            providesThumbs: false
+            readonly: false
+            required: true
+            size: null
+            step: null
+            tip: null
+            title: null
+            type: craft\fieldlayoutelements\entries\EntryTitleField
+            uid: 05f66326-0107-4a38-b0f0-5bb648332f3a
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-12-03T17:11:19+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 56e4d199-12f7-453f-af17-b79dc615088f # Rich Text
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 4d676271-bd5b-4d7a-af5a-fbed85376843
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: ba2c248c-70cc-4dac-b3d6-c76f5dcd19a7
+        userCondition: null
+handle: modifiedSchedule
+hasTitleField: true
+icon: null
+name: 'Modified Schedule'
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

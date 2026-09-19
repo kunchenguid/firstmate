@@ -1,0 +1,72 @@
+color: null
+fieldLayouts:
+  de6ad92d-43aa-440a-b127-31910650a2d6:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: c416e6c8-cb9f-44ea-84f6-831ffdbb4eec # Header Builder - Header Builder - Overlay
+            handle: overlay
+            includeInCards: true
+            instructions: null
+            label: Overlay
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: f63fa908-1fc9-4d3b-97cc-a7e9de6d3039
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 3aa99f66-da26-4c18-8595-00c015b17ec9 # Header Builder - Header Builder - Background Image/s
+            handle: backgroundImage
+            includeInCards: false
+            instructions: null
+            label: 'Background Image/s'
+            providesThumbs: true
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 6ffee73b-b450-439f-bed2-6e88eb60796e
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 4da69bb0-5a99-4804-8628-0f4551e37776 # Header Builder - Header Builder - Introduction Text
+            handle: richText
+            includeInCards: false
+            instructions: null
+            label: 'Introduction Text'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: a260eb27-401f-4eba-be73-590566ce09df
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: 590b00be-703e-4e6e-9df8-0be4a0736914
+        userCondition: null
+handle: headerBuilder
+hasTitleField: false
+icon: null
+name: 'Header Builder'
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

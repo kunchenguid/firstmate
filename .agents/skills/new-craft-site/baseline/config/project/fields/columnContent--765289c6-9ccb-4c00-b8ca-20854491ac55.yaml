@@ -1,0 +1,25 @@
+columnSuffix: null
+handle: columnContent
+instructions: null
+name: 'Multi Column - Column Item - Column Content'
+searchable: true
+settings:
+  availableTransforms: '*'
+  availableVolumes: '*'
+  characterLimit: null
+  ckeConfig: 1dbd8cc1-8139-41b5-8949-331d6c73bfd5 # Standard
+  createButtonLabel: null
+  defaultTransform: null
+  expandEntryButtons: false
+  fullGraphqlData: false
+  parseEmbeds: false
+  purifierConfig: null
+  purifyHtml: true
+  showUnpermittedFiles: false
+  showUnpermittedVolumes: false
+  showWordCount: false
+  sourceEditingGroups: '*'
+  wordLimit: null
+translationKeyFormat: null
+translationMethod: none
+type: craft\ckeditor\Field

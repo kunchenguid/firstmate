@@ -1,0 +1,56 @@
+columnSuffix: null
+handle: disclaimer
+instructions: null
+name: Disclaimer
+searchable: false
+settings:
+  addRowLabel: 'Add a row'
+  columns:
+    __assoc__:
+      -
+        - col1
+        -
+          __assoc__:
+            -
+              - heading
+              - Symbol
+            -
+              - handle
+              - symbol
+            -
+              - width
+              - ''
+            -
+              - type
+              - singleline
+      -
+        - col2
+        -
+          __assoc__:
+            -
+              - heading
+              - Content
+            -
+              - handle
+              - content
+            -
+              - width
+              - ''
+            -
+              - type
+              - multiline
+  defaults:
+    -
+      __assoc__:
+        -
+          - col1
+          - ''
+        -
+          - col2
+          - ''
+  maxRows: null
+  minRows: null
+  staticRows: false
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Table

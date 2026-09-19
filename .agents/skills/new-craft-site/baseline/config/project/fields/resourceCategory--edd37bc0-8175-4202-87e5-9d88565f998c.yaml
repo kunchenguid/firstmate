@@ -1,0 +1,22 @@
+columnSuffix: null
+handle: resourceCategory
+instructions: null
+name: 'Resource Category'
+searchable: false
+settings:
+  allowSelfRelations: false
+  branchLimit: null
+  defaultPlacement: end
+  maintainHierarchy: false
+  maxRelations: null
+  minRelations: null
+  selectionLabel: null
+  showCardsInGrid: false
+  showSiteMenu: false
+  source: 'group:e40757a8-5728-4107-96e0-fc0e1c7ec119' # Resource Category
+  targetSiteId: null
+  validateRelatedElements: false
+  viewMode: list
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Categories

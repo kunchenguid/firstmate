@@ -1,0 +1,12 @@
+columnSuffix: null
+handle: contentBuilderToggle
+instructions: null
+name: 'Content Builder Toggle'
+searchable: false
+settings:
+  default: false
+  offLabel: 'Rich Text'
+  onLabel: 'Content Builder'
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Lightswitch

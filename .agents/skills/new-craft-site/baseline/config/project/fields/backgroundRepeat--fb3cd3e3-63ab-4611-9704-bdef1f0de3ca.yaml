@@ -1,0 +1,55 @@
+columnSuffix: null
+handle: backgroundRepeat
+instructions: null
+name: 'Background Properties - Background Image - Background Repeat'
+searchable: false
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - 'No Repeat'
+        -
+          - value
+          - no-repeat
+        -
+          - default
+          - '1'
+    -
+      __assoc__:
+        -
+          - label
+          - Repeat
+        -
+          - value
+          - repeat
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - 'Repeat X'
+        -
+          - value
+          - repeat-x
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - 'Repeat Y'
+        -
+          - value
+          - repeat-y
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Dropdown

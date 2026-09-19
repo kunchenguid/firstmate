@@ -1,0 +1,10 @@
+columnSuffix: null
+handle: linksColor
+instructions: null
+name: 'Links Color'
+searchable: true
+settings:
+  allowCustomColors: true
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Color

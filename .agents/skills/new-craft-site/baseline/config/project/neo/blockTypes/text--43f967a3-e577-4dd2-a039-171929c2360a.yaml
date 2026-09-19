@@ -1,0 +1,47 @@
+childBlocks: null
+color: null
+conditions: null
+description: ''
+enabled: true
+entryType: null
+field: 0949e5db-99d8-44db-99cf-becde5273d27 # Simple Content Builder
+fieldLayouts:
+  0bb70f66-767e-4164-accc-21b52f2fe4e1:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 56e4d199-12f7-453f-af17-b79dc615088f # Rich Text
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 605e1d19-7122-480b-b60b-460d98691b14
+            userCondition: null
+            warning: null
+            width: 100
+        name: Text
+        uid: bfd49028-284d-4fcb-a79f-dcc04aa611b2
+        userCondition: null
+group: null
+groupChildBlockTypes: true
+handle: text
+icon: null
+iconFilename: ''
+ignorePermissions: true
+maxBlocks: 0
+maxChildBlocks: 0
+maxSiblingBlocks: 0
+minBlocks: 0
+minChildBlocks: 0
+minSiblingBlocks: 0
+name: Text
+topLevel: false

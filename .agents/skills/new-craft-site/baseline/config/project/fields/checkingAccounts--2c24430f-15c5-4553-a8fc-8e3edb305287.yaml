@@ -1,0 +1,54 @@
+columnSuffix: null
+handle: checkingAccounts
+instructions: null
+name: 'Checking Accounts'
+searchable: false
+settings:
+  allowSelfRelations: false
+  branchLimit: null
+  defaultPlacement: end
+  maintainHierarchy: false
+  maxRelations: null
+  minRelations: null
+  selectionCondition:
+    __assoc__:
+      -
+        - elementType
+        - craft\elements\Entry
+      -
+        - fieldContext
+        - global
+      -
+        - class
+        - craft\elements\conditions\entries\EntryCondition
+      -
+        - conditionRules
+        -
+          -
+            __assoc__:
+              -
+                - class
+                - craft\elements\conditions\entries\TypeConditionRule
+              -
+                - uid
+                - 12b478d7-d9a4-4235-9c2b-7e7f152dd15a
+              -
+                - operator
+                - in
+              -
+                - values
+                -
+                  - 33799b51-9f1b-4628-a9cb-4ae1b857a184 # Product
+  selectionLabel: null
+  showCardsInGrid: false
+  showSiteMenu: false
+  showUnpermittedEntries: true
+  showUnpermittedSections: true
+  sources:
+    - 'section:2fd6ad63-9f6a-49a9-bc85-19a26a205f94' # Pages
+  targetSiteId: null
+  validateRelatedElements: false
+  viewMode: list
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Entries

@@ -1,0 +1,11 @@
+fill: null
+format: png
+handle: favicon
+height: 30
+interlace: none
+mode: fit
+name: Favicon
+position: center-center
+quality: 30
+upscale: true
+width: 30

@@ -1,0 +1,26 @@
+columnSuffix: null
+handle: headerBuilder
+instructions: null
+name: 'Header Builder'
+searchable: true
+settings:
+  createButtonLabel: null
+  defaultIndexViewMode: cards
+  enableVersioning: false
+  entryTypes:
+    -
+      __assoc__:
+        -
+          - uid
+          - 72ba59a7-9527-46b4-955f-36fc94077714 # Header Builder
+  includeTableView: false
+  maxEntries: 1
+  minEntries: null
+  pageSize: null
+  propagationKeyFormat: null
+  propagationMethod: all
+  showCardsInGrid: false
+  viewMode: blocks
+translationKeyFormat: null
+translationMethod: site
+type: craft\fields\Matrix

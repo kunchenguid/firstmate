@@ -1,0 +1,11 @@
+fill: null
+format: jpg
+handle: fullWidth
+height: 1080
+interlace: none
+mode: crop
+name: 'Full Width'
+position: center-center
+quality: 30
+upscale: true
+width: 1800

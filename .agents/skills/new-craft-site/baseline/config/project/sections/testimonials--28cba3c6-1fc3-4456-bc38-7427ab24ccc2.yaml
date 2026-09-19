@@ -1,0 +1,28 @@
+defaultPlacement: end
+enableVersioning: true
+entryTypes:
+  -
+    uid: 71ea67de-8640-4e07-8afd-73a249e067db # Testimonial
+handle: testimonials
+maxAuthors: 1
+name: Testimonials
+previewTargets:
+  -
+    __assoc__:
+      -
+        - label
+        - 'Primary entry page'
+      -
+        - refresh
+        - '1'
+      -
+        - urlFormat
+        - '{url}'
+propagationMethod: all
+siteSettings:
+  a57193b9-dd25-415d-a670-e4b6a0c7b8cb: # $SYSTEM_NAME
+    enabledByDefault: true
+    hasUrls: false
+    template: null
+    uriFormat: null
+type: channel

@@ -1,0 +1,55 @@
+columnSuffix: null
+handle: buttonStyle
+instructions: null
+name: 'CTA - Internal - Button Style'
+searchable: false
+settings:
+  customOptions: false
+  options:
+    -
+      __assoc__:
+        -
+          - label
+          - Default
+        -
+          - value
+          - ''
+        -
+          - default
+          - '1'
+    -
+      __assoc__:
+        -
+          - label
+          - Primary
+        -
+          - value
+          - button-primary
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - Secondary
+        -
+          - value
+          - button-secondary
+        -
+          - default
+          - ''
+    -
+      __assoc__:
+        -
+          - label
+          - Tertiary
+        -
+          - value
+          - button-tertiary
+        -
+          - default
+          - ''
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Dropdown

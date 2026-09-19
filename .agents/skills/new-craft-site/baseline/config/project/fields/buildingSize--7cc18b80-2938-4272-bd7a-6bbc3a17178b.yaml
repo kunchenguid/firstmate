@@ -1,0 +1,19 @@
+columnSuffix: null
+handle: buildingSize
+instructions: null
+name: 'Building Size'
+searchable: false
+settings:
+  decimals: 0
+  defaultValue: null
+  max: null
+  min: 0
+  prefix: null
+  previewCurrency: null
+  previewFormat: decimal
+  size: null
+  step: null
+  suffix: sf
+translationKeyFormat: null
+translationMethod: none
+type: craft\fields\Number

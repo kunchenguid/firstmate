@@ -1,0 +1,64 @@
+childBlocks: null
+color: null
+conditions: null
+description: ''
+enabled: true
+entryType: null
+field: 1bbafb5d-c8cf-4079-bc77-d7454f822431 # Content Builder
+fieldLayouts:
+  2f76f9c8-9b47-40c5-a88f-a3c2230b357b:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2025-02-12T16:16:54+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: d6d7ff25-dee9-4a07-9807-7c3b163c6020 # Content Horizontal Alignment
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: Alignment
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: c20bf613-66c6-4b96-a421-46b4c69921de
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: b2efe7c7-3670-4d96-ac2f-d74dbdf41348 # CTA
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 9e5459eb-8267-4942-a62a-fac213b3e47c
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: d054c6e7-67f4-44e0-97c2-9eb6568dc4f8
+        userCondition: null
+group: 9546349b-883f-4682-b6b5-419da3c477e7 # Content
+groupChildBlockTypes: true
+handle: cta
+icon: null
+iconFilename: ''
+ignorePermissions: true
+maxBlocks: 0
+maxChildBlocks: 0
+maxSiblingBlocks: 0
+minBlocks: 0
+minChildBlocks: 0
+minSiblingBlocks: 0
+name: CTA
+topLevel: false

@@ -1,0 +1,55 @@
+color: null
+fieldLayouts:
+  fae06376-668a-4629-b7f5-11a6ba3db933:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 0c87f445-707b-482b-ac65-ea9d4f78eaa9 # Multi Column - Column Item - Column Properties
+            handle: columnProperties
+            includeInCards: false
+            instructions: null
+            label: 'Column Properties'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 914e4e8c-e00d-4f5b-8c15-c756cc7b06fa
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 765289c6-9ccb-4c00-b8ca-20854491ac55 # Multi Column - Column Item - Column Content
+            handle: null
+            includeInCards: true
+            instructions: null
+            label: 'Column Content'
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 511db4f5-5f65-4d96-9d27-3926416d1f56
+            userCondition: null
+            warning: null
+            width: 100
+        name: Content
+        uid: f17f7caf-1455-4473-93ef-43d4e56f247d
+        userCondition: null
+handle: columnItem
+hasTitleField: false
+icon: null
+name: 'Column Item'
+showSlugField: false
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site

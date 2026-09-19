@@ -1,0 +1,131 @@
+color: null
+fieldLayouts:
+  6b967f65-6de2-4bb9-89d6-378f86359ad0:
+    tabs:
+      -
+        elementCondition: null
+        elements:
+          -
+            autocapitalize: true
+            autocomplete: false
+            autocorrect: true
+            class: null
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            disabled: false
+            elementCondition: null
+            id: null
+            includeInCards: false
+            inputType: null
+            instructions: null
+            label: null
+            max: null
+            min: null
+            name: null
+            orientation: null
+            placeholder: null
+            providesThumbs: false
+            readonly: false
+            required: true
+            size: null
+            step: null
+            tip: null
+            title: null
+            type: craft\fieldlayoutelements\entries\EntryTitleField
+            uid: c98180bb-cf98-47d6-8afb-3a03b76c5f86
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 1bbafb5d-c8cf-4079-bc77-d7454f822431 # Content Builder
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 9d049cc1-41d1-44fa-a8fb-97ae497e2903
+            userCondition: null
+            warning: null
+            width: 100
+        name: 'Content Builder'
+        uid: e4796ef9-e993-4199-81ef-1f6a4f76ead4
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 08071a9d-05fe-4df1-acbe-09fcc54b9d2a # SEO
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: 9bf9c5b2-79b7-43f1-8495-0f4716ee817c
+            userCondition: null
+            warning: null
+            width: 100
+        name: SEO
+        uid: dee947d4-dd15-42bf-b186-f965a75cccdc
+        userCondition: null
+      -
+        elementCondition: null
+        elements:
+          -
+            dateAdded: '2024-10-10T19:06:31+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: 4ec5cb85-8f1f-48d3-8408-3de272d3fb6b # Custom CSS
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: a79df37c-4ff1-4a5c-b6f3-52286b104833
+            userCondition: null
+            warning: null
+            width: 100
+          -
+            dateAdded: '2025-04-17T13:27:00+00:00'
+            editCondition: null
+            elementCondition: null
+            fieldUid: f1b15bc6-0acd-41bb-b6e1-72e31f8c6d3b # FDIC Logo Toggle
+            handle: null
+            includeInCards: false
+            instructions: null
+            label: null
+            providesThumbs: false
+            required: false
+            tip: null
+            type: craft\fieldlayoutelements\CustomField
+            uid: c3f81d17-a77c-4c2d-852b-e2115852db44
+            userCondition: null
+            warning: null
+            width: 100
+        name: Utlities
+        uid: b299263a-fe9a-4958-9f26-093205e5d7ec
+        userCondition: null
+handle: pages
+hasTitleField: true
+icon: null
+name: Page
+showSlugField: true
+showStatusField: true
+slugTranslationKeyFormat: null
+slugTranslationMethod: site
+titleFormat: null
+titleTranslationKeyFormat: null
+titleTranslationMethod: site
