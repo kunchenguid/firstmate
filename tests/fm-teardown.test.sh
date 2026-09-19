@@ -2181,11 +2181,13 @@ SH
 
   teardown_bin=$TEARDOWN
   case "$mode" in
-    missing-adapter|missing-parser|missing-explicit-close-helper)
+    missing-adapter|missing-unreadable-adapter|missing-parser|missing-explicit-close-helper)
       mkdir -p "$case_dir/test-root"
       cp -R "$ROOT/bin" "$case_dir/test-root/bin"
       if [ "$mode" = missing-adapter ]; then
         rm -f "$case_dir/test-root/bin/backends/herdr.sh"
+      elif [ "$mode" = missing-unreadable-adapter ]; then
+        chmod 000 "$case_dir/test-root/bin/backends/herdr.sh"
       elif [ "$mode" = missing-explicit-close-helper ]; then
         sed -i.bak 's/^fm_backend_herdr_explicit_close_pane_confirmed()/fm_backend_herdr_explicit_close_pane_confirmed_unavailable()/' \
           "$case_dir/test-root/bin/backends/herdr.sh"
@@ -2223,9 +2225,237 @@ SH
 test_herdr_flat_teardown_preflight_refuses_before_changes() {
   assert_herdr_teardown_preflight_refuses_before_changes unresolvable-lock
   assert_herdr_teardown_preflight_refuses_before_changes missing-adapter
+  assert_herdr_teardown_preflight_refuses_before_changes missing-unreadable-adapter
   assert_herdr_teardown_preflight_refuses_before_changes missing-parser
   assert_herdr_teardown_preflight_refuses_before_changes missing-explicit-close-helper
   pass "herdr flat teardown preflight refuses before every destructive change"
+}
+
+write_adapter_prerequisite_meta() {
+  local case_dir=$1 state=$2 id=$3 backend=$4 kind=$5 wt=$6
+  local endpoint=()
+  mkdir -p "$state" "$state/$id.inbox"
+  case "$backend" in
+    tmux) endpoint=("window=firstmate:fm-$id") ;;
+    herdr) endpoint=("window=fixture:w1:p1" "backend=herdr" "herdr_session=fixture"
+      "herdr_workspace_id=w1" "herdr_tab_id=w1:t1" "herdr_pane_id=w1:p1") ;;
+    zellij) endpoint=("window=fixture-$id:7" "backend=zellij" "zellij_session=fixture-$id"
+      "zellij_tab_id=3" "zellij_pane_id=7") ;;
+    cmux) endpoint=("window=workspace-1:surface-1" "backend=cmux"
+      "cmux_workspace_id=workspace-1" "cmux_surface_id=surface-1") ;;
+    orca) endpoint=("window=fm-$id" "backend=orca" "terminal=term-$id"
+      "orca_worktree_id=wt-$id::$wt") ;;
+  esac
+  fm_write_meta "$state/$id.meta" "${endpoint[@]}" "endpoint_task_id=$id" \
+    "worktree=$wt" "project=$case_dir/project" "kind=$kind" "mode=local-only" \
+    "spawn_gen=adapter-fixture-$id"
+  printf 'done: fixture result\n' > "$state/$id.status"
+  printf 'pending steering\n' > "$state/$id.inbox/message"
+  printf 'turn ended\n' > "$state/$id.turn-ended"
+  printf 'progress\n' > "$state/$id.progress"
+  printf 'extension\n' > "$state/$id.pi-ext.ts"
+}
+
+assert_adapter_prerequisite_teardown() (
+  local backend=$1 route=$2 availability=$3 case_dir code state home nested other leaf_state
+  local adapter rc wt_pid tmp_pid title title_home title_root entry refs branch status
+  local args=()
+  case_dir=$(make_case "adapter-$backend-$route-$availability")
+  code="$case_dir/test-root"
+  mkdir -p "$code" "$case_dir/primary-home" "$case_dir/tasktmp" "$case_dir/before"
+  cp -R "$ROOT/bin" "$code/bin"
+  # shellcheck disable=SC2016 # FM_FIXTURE expands when the fixture adapter runs.
+  printf '\nfm_backend_herdr_presentation_lock_namespace() { printf "%%s" "$FM_FIXTURE/herdr-locks"; }\n' \
+    >> "$code/bin/backends/herdr.sh"
+  # shellcheck disable=SC2016 # FM_FIXTURE expands when the fixture reaper runs.
+  printf '#!/usr/bin/env bash\nprintf "orphan sweep\\n" >> "${FM_FIXTURE:?}/mutations"\n' \
+    > "$code/bin/fm-remote-job-reap-orphans.sh"
+  case "$route" in
+    task|forced-task) seed_backlog_in_flight "$case_dir" ;;
+    *)
+      printf 'manual\n' > "$case_dir/config/backlog-backend"
+      printf '# Backlog\n\n## In flight\n\n- task-x1: fixture\n' > "$case_dir/data/backlog.md" ;;
+  esac
+  mkdir -p "$case_dir/data/task-x1" "$case_dir/wt/.claude"
+  printf 'brief\n' > "$case_dir/data/task-x1/brief.md"
+  printf 'report\n' > "$case_dir/data/task-x1/report.md"
+  printf 'hook\n' > "$case_dir/wt/.claude/settings.local.json"
+  printf 'copy contents\n' > "$case_dir/wt/sentinel"
+  printf '.claude/\nsentinel\n' >> "$case_dir/project/.git/info/exclude"
+  printf 'temporary work\n' > "$case_dir/tasktmp/sentinel"
+  : > "$case_dir/mutations"
+  state="$case_dir/state"
+  home="$case_dir/secondmate-home"
+  nested="$home/nested-home"
+  leaf_state=$state
+  other=tmux
+  [ "$backend" != tmux ] || other=zellij
+  if [ "$route" != task ]; then args=(--force); fi
+  case "$route" in
+    forced-parent|child|grandchild)
+      mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+      printf 'task-x1\n' > "$home/.fm-secondmate-home"
+      if [ "$route" != grandchild ]; then
+        printf '%s\n' "- task-x1 - fixture (home: $home; scope: test; projects: project; added 2026-01-01)" \
+          > "$case_dir/data/secondmates.md"
+      fi
+      git -C "$case_dir/project" worktree add -q -b fm/a-healthy "$case_dir/sibling-wt" main
+      write_adapter_prerequisite_meta "$case_dir" "$home/state" a-healthy "$other" ship "$case_dir/sibling-wt"
+      if [ "$route" = forced-parent ]; then
+        write_adapter_prerequisite_meta "$case_dir" "$state" task-x1 "$backend" secondmate "$home"
+      else
+        write_adapter_prerequisite_meta "$case_dir" "$state" task-x1 "$other" secondmate "$home"
+        leaf_state="$home/state"
+        if [ "$route" = grandchild ]; then
+          mkdir -p "$nested/state" "$nested/data" "$nested/config" "$nested/projects"
+          printf 'nested-sm\n' > "$nested/.fm-secondmate-home"
+          write_adapter_prerequisite_meta "$case_dir" "$home/state" nested-sm "$other" secondmate "$nested"
+          printf 'home=%s\n' "$nested" >> "$home/state/nested-sm.meta"
+          leaf_state="$nested/state"
+        fi
+        write_adapter_prerequisite_meta "$case_dir" "$leaf_state" task-x1 "$backend" ship "$case_dir/wt"
+      fi
+      printf 'home=%s\n' "$home" >> "$state/task-x1.meta"
+      ;;
+    *) write_adapter_prerequisite_meta "$case_dir" "$state" task-x1 "$backend" ship "$case_dir/wt" ;;
+  esac
+  printf 'tasktmp=%s\n' "$case_dir/tasktmp" >> "$leaf_state/task-x1.meta"
+  cat > "$case_dir/fakebin/runtime" <<'SH'
+#!/usr/bin/env bash
+set -eu
+name=${0##*/}
+case "$name:$*" in
+  tmux:kill-window*|herdr:pane\ close*|zellij:*close-tab-by-id*|cmux:close-workspace*|orca:terminal\ close*)
+    printf '%s %s\n' "$name" "$*" >> "$FM_FIXTURE/mutations"
+    : > "$FM_FIXTURE/closed-$name"
+    exit 0 ;;
+  treehouse:return*|orca:worktree\ rm*)
+    if [ "$name" = treehouse ]; then path=$3; else path=${4#*::}; fi
+    case "$path" in "$FM_FIXTURE/wt"|"$FM_FIXTURE/sibling-wt") ;; *) exit 91 ;; esac
+    printf '%s %s\n' "$name" "$*" >> "$FM_FIXTURE/mutations"
+    rm -rf -- "$path"
+    exit 0 ;;
+  orca:worktree\ show*) printf '{"result":{"worktree":{"path":"%s"}}}\n' "${4#*::}" ;;
+  herdr:session\ list*) printf '{"sessions":[{"name":"fixture","running":true,"socket_path":"%s/herdr.sock"}]}\n' "$FM_FIXTURE" ;;
+  herdr:pane\ get*)
+    if [ -e "$FM_FIXTURE/closed-herdr" ]; then
+      printf '{"error":{"code":"pane_not_found"}}\n'; exit 1
+    fi
+    printf '{"result":{"pane":{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1"}}}\n' ;;
+  herdr:workspace\ list*) printf '{"result":{"workspaces":[]}}\n' ;;
+  zellij:list-sessions*) printf 'fixture-task-x1\nfixture-a-healthy\nfixture-nested-sm\n' ;;
+  zellij:*list-panes*) printf '[{"id":7,"tab_id":3,"is_plugin":false}]\n' ;;
+  zellij:*list-tabs*)
+    if [ "$FM_FIXTURE_BACKEND" = zellij ]; then title=$FM_FIXTURE_TITLE; else title="fm-${2#fixture-}"; fi
+    printf '[{"tab_id":3,"name":"%s"}]\n' "$title" ;;
+  cmux:workspace\ list*) printf '{"workspaces":[{"id":"workspace-1","title":"%s"}]}\n' "$FM_FIXTURE_TITLE" ;;
+  cmux:list-panes*) printf '{"panes":[{"surface_ids":["surface-1"]}]}\n' ;;
+  cmux:list-windows*) printf '[]\n' ;;
+  *) exit 1 ;;
+esac
+SH
+  cat > "$case_dir/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+for pair in "$FM_FIXTURE_WT_PID:wt" "$FM_FIXTURE_TMP_PID:tasktmp"; do
+  pid=${pair%%:*}
+  if kill -0 "$pid" 2>/dev/null; then
+    printf 'p%s\nn%s/%s\n' "$pid" "$FM_FIXTURE" "${pair#*:}"
+  fi
+done
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/runtime" "$case_dir/fakebin/lsof"
+  for entry in tmux herdr zellij cmux orca treehouse; do
+    cp "$case_dir/fakebin/runtime" "$case_dir/fakebin/$entry"
+  done
+  title_home="$case_dir/primary-home"; title_root=$code
+  if [ "$backend" = zellij ] && { [ "$route" = child ] || [ "$route" = grandchild ]; }; then
+    title_home=${leaf_state%/state}; title_root=$title_home
+  fi
+  title=$(FM_ROOT="$title_root" FM_HOME="$title_home" bash -c \
+    '. "$1/bin/fm-backend-hometag-lib.sh"; printf "fm-%s-task-x1" "$(fm_backend_hometag)"' _ "$code")
+  adapter="$code/bin/backends/$backend.sh"
+  case "$availability" in
+    missing) rm "$adapter" ;;
+    unreadable)
+      chmod 000 "$adapter"
+      [ ! -r "$adapter" ] || fail "adapter fixture requires a user subject to file read permissions" ;;
+  esac
+  refs=$(git -C "$case_dir/project" show-ref)
+  branch=$(git -C "$case_dir/wt" symbolic-ref HEAD)
+  status=$(git -C "$case_dir/wt" status --porcelain)
+  for entry in state data config wt tasktmp secondmate-home sibling-wt primary-home; do
+    [ ! -d "$case_dir/$entry" ] || cp -Rp "$case_dir/$entry" "$case_dir/before/$entry"
+  done
+  ( cd "$case_dir/wt" && exec sleep 120 ) &
+  wt_pid=$!
+  ( cd "$case_dir/tasktmp" && exec sleep 120 ) &
+  tmp_pid=$!
+  trap 'kill "$wt_pid" "$tmp_pid" 2>/dev/null || true; wait "$wt_pid" "$tmp_pid" 2>/dev/null || true' EXIT
+  rc=0
+  FM_ROOT_OVERRIDE="$code" FM_HOME="$case_dir/primary-home" HOME="$case_dir/primary-home" \
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    FM_TEARDOWN_GUARD_DONE=1 FM_FIXTURE="$case_dir" FM_FIXTURE_TITLE="$title" FM_FIXTURE_BACKEND="$backend" \
+    FM_FAKE_AXI_STATUS='' FM_FAKE_NM_RUNS_LIST='' \
+    FM_FIXTURE_WT_PID="$wt_pid" FM_FIXTURE_TMP_PID="$tmp_pid" \
+    FM_BACKEND_HERDR_BIN="$case_dir/fakebin/herdr" \
+    PATH="$case_dir/fakebin:$PATH" \
+    "$code/bin/fm-teardown.sh" task-x1 "${args[@]+"${args[@]}"}" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  if [ "$availability" = valid ]; then
+    expect_code 0 "$rc" "$backend $route: readable adapter should preserve successful cleanup: $(cat "$case_dir/stderr")"
+    assert_absent "$state/task-x1.meta" "$backend $route: successful cleanup retained metadata"
+    assert_present "$case_dir/closed-$backend" "$backend $route: adapter never closed the endpoint"
+    assert_grep 'teardown task-x1 complete' "$case_dir/stdout" "$backend $route: completion was not reported"
+    case "$route" in
+      task|forced-task)
+        assert_absent "$case_dir/wt" "$backend $route: copy was not removed"
+        assert_absent "$case_dir/tasktmp" "$backend $route: tasktmp was not removed"
+        [ "$(backlog_row_state "$case_dir")" = "done" ] || fail "$backend $route: backlog was not closed"
+        kill -0 "$wt_pid" 2>/dev/null && fail "$backend $route: worktree process survived cleanup"
+        kill -0 "$tmp_pid" 2>/dev/null && fail "$backend $route: tasktmp process survived cleanup"
+        if git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1; then
+          fail "$backend $route: task branch survived cleanup"
+        fi ;;
+      *)
+        assert_absent "$home" "$backend $route: secondmate home survived cleanup"
+        assert_absent "$case_dir/sibling-wt" "$backend $route: sibling cleanup was skipped"
+        if [ "$route" != forced-parent ]; then
+          assert_absent "$case_dir/wt" "$backend $route: descendant copy survived cleanup"
+        fi ;;
+    esac
+  else
+    expect_code 1 "$rc" "$backend $route $availability: missing prerequisite must fail"
+    assert_grep "$backend teardown prerequisites are unavailable for task-x1; nothing was changed" \
+      "$case_dir/stderr" "$backend $route $availability: prerequisite refusal was not explained: $(cat "$case_dir/stderr")"
+    [ ! -s "$case_dir/mutations" ] || fail "$backend $route $availability: cleanup ran before refusal"
+    if grep -q 'teardown task-x1 complete\|continuing past a close' "$case_dir/stdout" "$case_dir/stderr"; then
+      fail "$backend $route $availability: prerequisite failure was treated as completed cleanup"
+    fi
+    kill -0 "$wt_pid" 2>/dev/null || fail "$backend $route $availability: worktree process was killed"
+    kill -0 "$tmp_pid" 2>/dev/null || fail "$backend $route $availability: tasktmp process was killed"
+    for entry in "$case_dir/before"/*; do
+      diff -r "$entry" "$case_dir/${entry##*/}" > "$case_dir/preservation.diff" \
+        || fail "$backend $route $availability: ${entry##*/} changed: $(cat "$case_dir/preservation.diff")"
+    done
+    [ "$(git -C "$case_dir/project" show-ref)" = "$refs" ] || fail "$backend $route $availability: refs changed"
+    [ "$(git -C "$case_dir/wt" symbolic-ref HEAD)" = "$branch" ] || fail "$backend $route $availability: branch changed"
+    [ "$(git -C "$case_dir/wt" status --porcelain)" = "$status" ] || fail "$backend $route $availability: copy status changed"
+  fi
+  pass "$backend $route $availability adapter: exit status and cleanup preservation"
+)
+
+test_teardown_adapter_prerequisites() {
+  local backend route availability
+  for backend in tmux zellij cmux herdr orca; do
+    for route in task forced-task forced-parent child grandchild; do
+      [ "$backend:$route" != orca:forced-parent ] || continue
+      for availability in missing unreadable valid; do
+        assert_adapter_prerequisite_teardown "$backend" "$route" "$availability" \
+          || fail "$backend $route $availability adapter regression"
+      done
+    done
+  done
 }
 
 configure_secondmate_with_herdr_child() {  # <case-dir>
@@ -3666,6 +3896,7 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+test_teardown_adapter_prerequisites
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
