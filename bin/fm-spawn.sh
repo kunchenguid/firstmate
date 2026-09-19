@@ -1537,6 +1537,35 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
+  # With no explicit model or effort, a same-harness relaunch carries the axes
+  # already recorded for this task. The replacement must never boot silently
+  # on the harness's own default model: a silent vendor default is exactly the
+  # failure mode this launch plane exists to prevent, and the republished
+  # record would then claim default as if someone had chosen it. fm-control
+  # resolves and passes these axes itself, so this restore only covers a
+  # direct --relaunch call on an already-stopped task. A harness switch still
+  # resets an unnamed axis, because a model chosen for one harness does not
+  # transfer to another.
+  if [ "$KIND" != secondmate ] && [ "$ARG3" = "$RELAUNCH_PRIOR_HARNESS" ]; then
+    if [ -z "$MODEL" ]; then
+      RELAUNCH_PRIOR_MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+      case "$RELAUNCH_PRIOR_MODEL" in
+        '' | default | -)
+          echo "warning: relaunching $ID on $ARG3 with no recorded model; the replacement boots on the harness's own default model - pass --model to pin one" >&2
+          ;;
+        *) MODEL=$RELAUNCH_PRIOR_MODEL ;;
+      esac
+    fi
+    if [ -z "$EFFORT" ]; then
+      RELAUNCH_PRIOR_EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+      case "$RELAUNCH_PRIOR_EFFORT" in
+        '' | default | -)
+          echo "warning: relaunching $ID on $ARG3 with no recorded effort; the replacement boots on the harness's own default effort - pass --effort to pin one" >&2
+          ;;
+        *) EFFORT=$RELAUNCH_PRIOR_EFFORT ;;
+      esac
+    fi
+  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
   '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)

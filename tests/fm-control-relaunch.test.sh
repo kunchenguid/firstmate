@@ -17,6 +17,9 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. A direct fm-spawn --relaunch carries the recorded model and effort into
+#      the replacement on the same harness, and warns loudly when the record
+#      holds no concrete model instead of booting the harness default silently.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -970,6 +973,40 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
 }
 
+test_spawn_relaunch_carries_the_recorded_model_and_effort() {
+  local dir out
+  dir=$(new_case spawnaxes rl22)
+  add_ship_task "$dir" rl22 claude
+  {
+    grep -v -e '^model=' -e '^effort=' "$dir/home/state/rl22.meta"
+    echo "model=z-ai/glm-5.3-flash"
+    echo "effort=max"
+  } > "$dir/home/state/rl22.meta.new"
+  mv "$dir/home/state/rl22.meta.new" "$dir/home/state/rl22.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl22 --relaunch)
+  [ "$(meta_field "$dir" rl22 model)" = z-ai/glm-5.3-flash ] \
+    || fail "fm-spawn --relaunch must carry the recorded model into the replacement, got '$(meta_field "$dir" rl22 model)'"
+  [ "$(meta_field "$dir" rl22 effort)" = max ] \
+    || fail "fm-spawn --relaunch must carry the recorded effort into the replacement, got '$(meta_field "$dir" rl22 effort)'"
+  printf '%s\n' "$out" | grep -q 'no recorded model' \
+    && fail "a relaunch carrying a recorded model must not warn about a missing one: $out"
+  pass "fm-spawn --relaunch: with no explicit axes it carries the task's recorded model and effort, never a silent harness default"
+}
+
+test_spawn_relaunch_without_a_recorded_model_warns_instead_of_booting_silently() {
+  local dir out
+  dir=$(new_case spawnaxeswarn rl23)
+  add_ship_task "$dir" rl23 claude
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl23 --relaunch)
+  assert_contains "$out" "no recorded model" \
+    "a relaunch whose record holds no concrete model must say so loudly instead of booting silently"
+  [ "$(meta_field "$dir" rl23 model)" = default ] \
+    || fail "without a recorded model the replacement boots on the harness default and says so"
+  pass "fm-spawn --relaunch: a missing recorded model warns loudly instead of silently booting the harness default"
+}
+
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
   local dir home id brief launch out mode rule
   for mode in no-mistakes direct-PR local-only; do
@@ -1707,6 +1744,8 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_carries_the_recorded_model_and_effort
+test_spawn_relaunch_without_a_recorded_model_warns_instead_of_booting_silently
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
