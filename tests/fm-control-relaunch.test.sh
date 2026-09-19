@@ -991,8 +991,10 @@ test_spawn_relaunch_keeps_the_recorded_working_branch_contract() {
   out=$(run_spawn "$dir" rl40 --relaunch) \
     || fail "a relaunch of a task on a registered working branch should succeed: $out"
   launch="$dir/home/data/rl40/launch-brief.md"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
   assert_grep 'This worktree is based on `develop`' "$launch" \
     "the replacement worker was not told which branch its worktree is on"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
   assert_grep 'passing `--base develop`' "$launch" \
     "the replacement direct-PR worker was not told to open its PR against that branch"
 
@@ -1044,6 +1046,7 @@ test_relaunched_promoted_ship_reads_the_base_contract_once() {
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
     "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1) \
     || fail "scout promotion should succeed: $out"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
   assert_grep 'This worktree is based on `develop`' "$brief" \
     "promotion did not write the base contract into the durable brief"
 

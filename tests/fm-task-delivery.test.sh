@@ -355,10 +355,12 @@ STUB
   payload="$TMP_ROOT/promote-base/payload-promote-base-registered"
   assert_grep 'Return to a clean default-branch base' "$payload" \
     "the promotion instructions no longer carry the default-branch step being superseded"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
   assert_grep 'This worktree is based on `develop`' "$payload" \
     "a promoted worker on a registered working branch was not told which branch it is on"
   assert_grep 'supersedes any of them that names a different base' "$payload" \
     "the recorded working branch did not supersede the default-branch promotion step"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
   assert_grep 'passing `--base develop`' "$payload" \
     "a promoted direct-PR worker was not told to open its PR against the recorded branch"
 

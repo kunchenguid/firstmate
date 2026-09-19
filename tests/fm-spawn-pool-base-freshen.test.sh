@@ -421,6 +421,7 @@ scaffold_real_brief() { # <id> <fm-brief.sh args...>
 
 test_launch_brief_names_the_branch_the_slot_is_on() {
   local rec id out status launch captured source_bytes plain_pr
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
   plain_pr='push your branch and open a PR with `gh-axi`, then append'
 
   id='pool-brief-registered-r1'
@@ -438,10 +439,12 @@ test_launch_brief_names_the_branch_the_slot_is_on() {
   assert_present "$launch" "the spawn handed the worker no launch brief"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/develop)" ] \
     || fail "the slot this launch brief describes is not on the registered working branch"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
   assert_grep 'This worktree is based on `develop`' "$launch" \
     "the worker was never told which branch its worktree is actually on"
   assert_grep 'supersedes any of them that names a different base' "$launch" \
     "the brief's default-branch Setup text was left standing unsuperseded"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
   assert_grep 'passing `--base develop`' "$launch" \
     "a direct-PR worker on a registered working branch was not told to target it"
 
@@ -460,6 +463,7 @@ test_launch_brief_names_the_branch_the_slot_is_on() {
   expect_code 0 "$status" \
     "a no-mistakes ship on a registered working branch should launch"$'\n'"$out"
   launch="$HOME_DIR/data/$id/launch-brief.md"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
   assert_grep 'This worktree is based on `develop`' "$launch" \
     "a no-mistakes worker was never told which branch its worktree is actually on"
   assert_no_grep '--base' "$launch" \
@@ -480,6 +484,7 @@ test_launch_brief_names_the_branch_the_slot_is_on() {
     "a no-mistakes worker was not told how to stop on a PR opened against another branch"
   # A no-mistakes worker has two `done:` gates and no PR exists at the first, so
   # the check names the final one outright rather than a moment with two readings.
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
   assert_grep 'before you report `done: PR {url} checks green`' "$launch" \
     "the PR-base check is anchored to a gate that can be read as the pre-PR one"
 
@@ -516,6 +521,7 @@ test_launch_brief_names_the_branch_the_slot_is_on() {
   launch="$HOME_DIR/data/$id/launch-brief.md"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$(git -C "$POOL_DIR" rev-parse origin/develop)" ] \
     || fail "the slot this scout brief describes is not on the registered working branch"
+  # shellcheck disable=SC2016 # Backticks are literal text in the brief being asserted.
   assert_grep 'This worktree is based on `develop`' "$launch" \
     "a scout was left reading that its worktree is on the default branch"
   assert_no_grep '--base' "$launch" "a scout was handed a PR base it will never use"
