@@ -174,7 +174,12 @@ record_pi_busy() {  # <state-dir> <id>
     --source pi-ext --event agent-start
 }
 
-reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
+# Bound cleanup too: a fixture that ignores TERM must not keep running until a
+# legitimate re-surface makes the preceding within-window assertion fail.
+reap() {
+  kill "$1" 2>/dev/null || true
+  wait_for_exit "$1" 20 || true
+}
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
@@ -2524,6 +2529,49 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
     [ "$bare" -eq 1 ] || fail "[$name] elapsed re-surface changed the wake identity: $(cat "$state/.wake-queue")"
   done
   pass "a parked live worker surfaces once, absorbs pane churn for the whole re-surface window, then re-surfaces when it elapses"
+}
+
+# Cleanup must not turn a successful within-window observation into a false
+# churn failure by waiting until the watcher's legitimate re-surface deadline.
+# Ignoring TERM at exec time makes the real watcher survive the first cleanup
+# signal; the test must still reap it before that deadline without queuing a wake.
+test_parked_watch_cleanup_bounds_a_term_ignoring_watcher() {
+  local dir state fakebin out capture_file window key throttle started elapsed wakes
+  local WATCH
+  dir=$(make_case parked-cleanup-term); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window=test:fm-parked
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  throttle="$state/.paused-resurfaced-$key"
+  WATCH="$dir/watch-ignore-term"
+  cat > "$WATCH" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+export FM_PAUSE_RESURFACE_SECS=60
+exec "$FM_TEST_REAL_WATCH"
+SH
+  chmod +x "$WATCH"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  printf 'captain-held [key=route]: awaiting the routing call\n' > "$state/parked.status"
+  printf '%s' "$(seen_sig "$state/parked.status")" > "$state/.seen-parked_status"
+  printf 'parked, elapsed 1s' > "$capture_file"
+  printf '%s' "$(hash_text 'parked, elapsed 1s')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  FM_TEST_REAL_WATCH="$ROOT/bin/fm-watch.sh" \
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+    || fail "TERM-ignoring parked worker did not surface on first sight"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the TERM-ignoring worker's first sight"
+  started=$(file_mtime "$throttle")
+
+  printf 'parked, elapsed 2s' > "$capture_file"
+  FM_TEST_REAL_WATCH="$ROOT/bin/fm-watch.sh" \
+    parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+    || fail "TERM-ignoring parked worker exited during the within-window observation"
+  elapsed=$(( $(date +%s) - started ))
+  wakes=$(awk -F '\t' '$3 == "stale" { n++ } END { print n + 0 }' "$state/.wake-queue")
+  [ "$wakes" -eq 0 ] \
+    || fail "parked-worker cleanup waited ${elapsed}s and admitted $wakes due recheck(s) after a 60s cadence"
+  [ "$elapsed" -lt 60 ] || fail "parked-worker cleanup outlasted the re-surface window"
+  pass "parked-worker cleanup bounds a TERM-ignoring watcher before its legitimate re-surface deadline"
 }
 
 test_live_paused_until_controls_recheck_time() {
@@ -5613,6 +5661,7 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
 test_live_declared_wait_churn_honors_the_resurface_throttle
+test_parked_watch_cleanup_bounds_a_term_ignoring_watcher
 test_live_paused_until_controls_recheck_time
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane
