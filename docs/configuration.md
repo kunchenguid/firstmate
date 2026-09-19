@@ -272,6 +272,7 @@ Persistent secondmate routes live locally in `data/secondmates.md`.
 The concise single-line route contract is owned by the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#routing-table), including the parser-compatible fields, one-sentence summary requirement, `home:` pointer to the seeded charter, and limit on extra registry prose.
 A remote route adds `host:` and `root:` before the existing fields and places the whole secondmate home on that SSH host; it does not make ordinary workers remotely placeable.
 [`remote-secondmates.md`](remote-secondmates.md) owns current remote setup, operation, and safety behavior.
+A [restricted account-task route](account-task-route.md) is a separate fixed SSH forced-command protocol for an attendedly qualified execution account; it is not a secondmate route, inherits no primary material, and never installs or repairs itself.
 Use `fm-home-seed.sh validate` to check the complete operational registry contract documented by the command itself.
 The main first mate routes by reading those scopes with judgment; the project list is provisioning data, not exclusive ownership.
 Use `fm-home-seed.sh <id> - {<project>...|--no-projects}` to lease a fresh local firstmate worktree for the secondmate home.
