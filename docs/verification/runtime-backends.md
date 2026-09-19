@@ -2095,3 +2095,18 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Hermes
+
+Hermes Agent (hermes-agent by Nous Research) is a single-binary AI agent that runs interactively in a terminal.
+It is a verified primary harness: the session-start digest, turn-end guard, and background watcher are delivered through a Hermes plugin (`bin/hermes-plugin/firstmate/`), and the runtime adapter (`bin/backends/hermes.sh`) owns spawn/steer/state dispatch.
+Hermes sets `HERMES_CLI=1` on its CLI and every tool subprocess; `bin/fm-harness.sh` detects it by marker and ancestry.
+The plugin installs through `bin/fm-hermes-plugin-install.sh`, which copies the plugin tree into `~/.hermes/plugins/firstmate/`.
+
+```sh
+bin/fm-test-run.sh tests/fm-backend-hermes.test.sh
+```
+
+The adapter is EXPERIMENTAL: no dedicated real-Hermes CI lane exists yet, and the portable regression above pins the PID-file state machine (missing/unreadable/dead) and the `fm_backend_agent_state` dispatch wiring only.
+Live spawn/steer against a real Hermes worker, plugin hook delivery under compaction, and the background watcher's wake-on-event path are not yet covered by an automated guard.
+[`hermes.md`](hermes.md) owns the fuller verification record, including plugin load evidence and the supervision protocol links.

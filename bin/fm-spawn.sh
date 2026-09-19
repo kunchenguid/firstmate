@@ -3296,6 +3296,7 @@ spawn_send_text_line() { # <target> <text>
   zellij) fm_backend_zellij_send_text_line "$1" "$2" "$W" ;;
   orca) fm_backend_orca_send_text_line "$1" "$2" ;;
   cmux) fm_backend_cmux_send_text_line "$1" "$2" "$W" ;;
+  hermes) fm_backend_hermes_steer "$1" "$2" ;;  # inbox-only; no terminal injection
   esac
 }
 spawn_current_path() { # <target>
@@ -3304,6 +3305,7 @@ spawn_current_path() { # <target>
   herdr) fm_backend_herdr_current_path "$1" ;;
   zellij) fm_backend_zellij_current_path "$1" "$W" ;;
   cmux) fm_backend_cmux_current_path "$1" "$W" ;;
+  hermes) ;;  # no-op: hermes workers are one-shot, no persistent terminal path
   esac
 }
 spawn_send_literal() { # <target> <text>
