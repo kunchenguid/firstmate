@@ -10,6 +10,7 @@
 # what keeps an older build from reaching a dispatch intake at all.
 
 FM_QUOTA_AXI_MIN=0.1.29
+# shellcheck disable=SC2034 # Public constant consumed by scripts that source this library.
 FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 
 fm_quota_axi_compatible() {
