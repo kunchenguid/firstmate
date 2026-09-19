@@ -22,8 +22,10 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-cursor-lib.sh"
 
 # Known harness command names; extend when a new adapter is verified. omp is
-# anchored exactly like pi: its process name is the bare word `omp` (verified,
-# omp 18.1.11), and a substring match would claim ompd or comp.
+# anchored exactly like pi: the bare word `omp` (a Bun-compiled binary,
+# verified omp 18.1.11), and since 18.1.22 a bun script whose argv runs the
+# launcher path (`bun .../.bun/bin/omp`, matched by fm_omp_args_are_omp
+# below). A substring match would claim ompd or comp.
 FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
 
 # The same harnesses as exact executable names. Keep in sync with
@@ -52,6 +54,34 @@ fm_harness_path_name() {  # <path>
   return 1
 }
 
+# True when the whitespace-separated command line $1 runs the omp launcher
+# under bun: argv[0] names bun and the argument after it is a path whose final
+# component is exactly `omp` (verified, omp 18.1.22:
+# `bun /Users/.../.bun/bin/omp`, a #!/usr/bin/env bun script, which passes no
+# interpreter flags).
+#
+# Only argv[0] and the script argument are ever consulted, so a bare `bun run`
+# and any command that merely mentions omp in a later flag value never match.
+# The single owner of the bun-launcher rule, shared by the ancestry matcher
+# below, the fm-harness.sh verdict, and the backend liveness classifier.
+fm_omp_args_are_omp() {  # <args>
+  local args=$1 argv0 rest token
+  [ -n "$args" ] || return 1
+  args=${args#"${args%%[![:space:]]*}"}
+  argv0=${args%%[[:space:]]*}
+  case "${argv0##*/}" in
+    bun) ;;
+    *) return 1 ;;
+  esac
+  rest=${args#"$argv0"}
+  rest=${rest#"${rest%%[![:space:]]*}"}
+  token=${rest%%[[:space:]]*}
+  case "$token" in
+    */omp) return 0 ;;
+  esac
+  return 1
+}
+
 # True when the process described by command name $1 and full argument string $2
 # is a verified harness. Sets FM_HARNESS_IS_CLAUDE for the ancestry walk.
 #
@@ -62,7 +92,7 @@ fm_harness_path_name() {  # <path>
 #      argv[0] in `ps -o comm=`, while procps on Linux reports the kernel exec
 #      name and ignores argv[0] entirely, so a version-named Claude Code binary
 #      is identified by its install path on macOS and by argv[0] on Linux.
-#   3. a bare interpreter (node, python) running a harness script path.
+#   3. a bare interpreter (node, bun, python) running a harness script path.
 #   4. Cursor's own structural identity, owned by bin/fm-cursor-lib.sh.
 FM_HARNESS_IS_CLAUDE=0
 fm_harness_process_matches() {  # <comm> <args>
@@ -83,6 +113,15 @@ fm_harness_process_matches() {  # <comm> <args>
     *node*|*python*)
       if printf '%s' "$args" | grep -qE "$FM_HARNESS_RE"; then
         case "$args" in *claude*) FM_HARNESS_IS_CLAUDE=1 ;; esac
+        return 0
+      fi
+      ;;
+    # bun runs omp's launcher script, and nothing else harness-shaped: only
+    # the omp argv rule applies here, never the shared name grep above, so a
+    # bun process carrying claude/codex/etc. in its arguments cannot claim
+    # those harnesses.
+    *bun*)
+      if fm_omp_args_are_omp "$args"; then
         return 0
       fi
       ;;

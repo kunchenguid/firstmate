@@ -112,7 +112,7 @@ These steps are never automated and are always reported rather than silently att
 - The first console login on that Mac, and automatic login in System Settings > Users & Groups when the machine runs headless and must come back on its own after a reboot.
 - FileVault, which holds a reboot at pre-boot authentication before any login session exists.
 - Installing any missing required tool that no safe wrapper can resolve.
-- The required remote tool set is `git`, `jq`, `herdr`, compatible `tasks-axi`, `treehouse`, and at least one of `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi`; macOS additionally requires `lsof` so the doctor and guard can prove which process owns the session socket.
+- The required remote tool set is `git`, `jq`, `herdr`, compatible `tasks-axi`, `treehouse`, and at least one of `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, `kimi`, or `omp`; macOS additionally requires `lsof` so the doctor and guard can prove which process owns the session socket.
 - Each worker runtime's own `/login`, and any keychain password prompt that login needs.
 
 Firstmate never writes an auto-login password, never changes FileVault, and never stores an account password.
@@ -159,6 +159,8 @@ Launch or recover the remote second mate with the same command used for a local 
 bin/fm-spawn.sh <id> --secondmate
 ```
 
+Remote placement is selected by the route's recorded `host:` field in `data/secondmates.md`, never by a `--remote` flag.
+Oh My Pi (`omp`) is supported by both the ordinary remote spawn path and host-local `launch` and `relaunch`, using the same host-local secondmate launch contract as a local omp secondmate.
 The primary resolves the verified secondmate harness and optional model and effort, runs the same readiness gate the seed runs, transfers the inherited-material allowlist, and asks the remote host to launch on Herdr in `fm-remote`.
 All remote secondmates on one host share `fm-remote` and retain separate `2ndmate-<id>` workspaces inside it.
 An explicit request for any other backend is refused rather than honored, and the remote host refuses one too.

@@ -324,6 +324,7 @@ family_for_basename() {
     fm-remote-doctor.test.sh|fm-remote-herdr-guard.test.sh|fm-remote-job.test.sh|fm-remote-job-orphan-reap.test.sh|\
     fm-remote-transport-lanes.test.sh|\
     fm-remote-reply.test.sh|fm-remote-secondmate-lifecycle-e2e.test.sh|\
+    fm-remote-secondmate-omp.test.sh|\
     fm-remote-secondmate-trace-context.test.sh|\
     fm-secondmate-harness.test.sh|fm-secondmate-lifecycle-e2e.test.sh|\
     fm-secondmate-liveness.test.sh|fm-secondmate-reconcile.test.sh|\
@@ -778,6 +779,7 @@ tests/fm-remote-job-orphan-reap.test.sh 2905
 tests/fm-remote-job.test.sh 59354
 tests/fm-remote-reply.test.sh 118669
 tests/fm-remote-secondmate-lifecycle-e2e.test.sh 241208
+tests/fm-remote-secondmate-omp.test.sh 3000
 tests/fm-remote-secondmate-parent-binding.test.sh 32176
 tests/fm-remote-secondmate-trace-context.test.sh 59689
 tests/fm-remote-transport-lanes.test.sh 62635
