@@ -138,7 +138,7 @@ test_rejects_missing_description() {
 
 test_accepts_supported_description_forms() {
   local dir form out code
-  for form in plain literal; do
+  for form in plain literal double-quoted single-quoted; do
     dir="$TMP_ROOT/description-$form/verify-timetracker"
     make_good_skill "$dir"
     case "$form" in
@@ -147,6 +147,12 @@ test_accepts_supported_description_forms() {
         ;;
       literal)
         sed -i 's/^description: >-$/description: |-/' "$dir/SKILL.md"
+        ;;
+      double-quoted)
+        sed -i '/^description: >-$/,+2c\description: "Drive the app: capture proof"' "$dir/SKILL.md"
+        ;;
+      single-quoted)
+        sed -i "/^description: >-$/,+2c\\description: 'Drive the app: capture proof'" "$dir/SKILL.md"
         ;;
     esac
     out=$(run_check "$dir") && code=0 || code=$?

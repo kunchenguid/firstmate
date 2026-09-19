@@ -78,11 +78,13 @@ if ! printf '%s\n' "$FRONTMATTER" | awk '
       || value ~ /^0[oO][0-7_]+$/
     timestamp = value ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]?-[0-9][0-9]?$/ \
       || value ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]?-[0-9][0-9]?[Tt][^[:space:]]+$/
-    if (value ~ /^[[:alnum:]]/ \
+    quoted = value ~ /^"([^"\\]|\\.)+"$/ \
+      || value ~ /^\047([^\047]|\047\047)+\047$/
+    if (quoted || (value ~ /^[[:alnum:]]/ \
         && lower !~ /^(null|~|true|false|yes|no|on|off)$/ \
         && !numeric \
         && !timestamp \
-        && value !~ /:[[:space:]]|:$/) valid = 1
+        && value !~ /:[[:space:]]|:$/)) valid = 1
     next
   }
   block && /^[[:space:]]+/ && /[^[:space:]]/ { valid = 1; next }
