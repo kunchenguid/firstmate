@@ -207,6 +207,14 @@ test_ship_modes_generate_clean_briefs() {
     brief="$home/data/$id/brief.md"
     assert_present "$brief" "$id: brief was not scaffolded"
     assert_grep "# Definition of done" "$brief" "$id: brief missing Definition of done section"
+    # The generated handoff instructions are the worker-facing contract.
+    assert_grep 'distinguish committed, tested, published, and green-CI evidence' "$brief" "$id: evidence stages"
+    assert_grep 'commit SHA, tests run and their result' "$brief" "$id: handoff must cite evidence"
+    assert_grep 'skipped, approval-gated, not-run, not-configured, or unknown' "$brief" "$id: non-green CI vocabulary"
+    if [ "$mode" = no-mistakes ]; then
+      assert_grep 'done: committed;' "$brief" "$id: implementation checkpoint"
+      assert_grep 'done: green-CI;' "$brief" "$id: verified CI checkpoint"
+    fi
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"

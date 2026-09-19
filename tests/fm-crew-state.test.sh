@@ -882,7 +882,7 @@ test_gate_block_parked_not_superseded() {
   pass "gate block parked run is not flagged superseded"
 }
 
-test_ci_ready_done_log_beats_monitoring_run() {
+test_ci_ready_log_without_evidence_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-ready)
   make_repo_on_branch "$d/wt" fm/feat-ci
@@ -891,15 +891,14 @@ test_ci_ready_done_log_beats_monitoring_run() {
   printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/feat-ci.status"
   FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-ci)"
   local out; out=$(run_crew_state "$d" feat-ci)
-  assert_contains "$out" "state: done" "ci-ready status log -> done"
-  assert_contains "$out" "source: status-log" "ci-ready state comes from the status log"
-  assert_contains "$out" "checks green" "ci-ready detail preserves the report"
-  assert_not_contains "$out" "state: working" "ci-ready is not hidden by monitoring run"
-  pass "ci-ready status log beats monitoring run"
+  assert_contains "$out" "state: working" "status prose alone cannot prove CI readiness"
+  assert_contains "$out" "source: run-step" "matching run remains authoritative"
+  assert_not_contains "$out" "checks green" "no observed passing checks means no green claim"
+  pass "ci-ready status prose without passing-check evidence stays working"
 }
 
 # Regression for the PR #252 incident: the crew's own status log never got a
-# "done: ... checks green" line (log_reports_ci_ready above does not apply),
+# "done: ... checks green" line,
 # but the ci step's log tail shows CI is actually green and only waiting on
 # merge/close. fm-crew-state must surface this as done, not "validating
 # (running)", so a green PR is never silently absorbed as still-in-progress.
@@ -950,7 +949,8 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   FM_FAKE_CI_LOGS="no CI checks reported - still monitoring until merged or closed"
   local out; out=$(run_crew_state "$d" feat-cinochecks)
   assert_contains "$out" "state: done" "terminal no-checks ci-monitor run -> done"
-  assert_contains "$out" "checks green" "terminal no-checks ci-monitor detail mentions checks green"
+  assert_contains "$out" "CI: no checks reported" "zero checks are explicit"
+  assert_not_contains "$out" "checks green" "zero checks are not passing checks"
   pass "terminal no-checks ci-monitor marker surfaces done"
 }
 
@@ -1648,9 +1648,9 @@ EOF
 )"
   FM_FAKE_CI_LOGS="CI checks running, waiting for results..."
   local out; out=$(run_crew_state "$d" feat-coarseready)
-  assert_contains "$out" "state: done" "coarse ready status -> done"
-  assert_contains "$out" "source: status-log" "coarse ready status remains status-log sourced"
-  assert_not_contains "$out" "state: working" "coarse ready status must not be suppressed by another branch log"
+  assert_contains "$out" "state: working" "coarse run has no passing-check evidence"
+  assert_contains "$out" "source: run-step" "coarse run remains authoritative"
+  assert_not_contains "$out" "checks green" "status prose cannot certify coarse CI"
   pass "coarse run does not probe another branch's ci log"
 }
 
@@ -3527,6 +3527,58 @@ test_captured_completed_history() {
   pass 'captured completed status yields to synthetic subsequent development'
 }
 
+test_handoff_completion_evidence() {
+  reset_fakes
+  local d out
+  d=$(new_case handoff-evidence)
+  make_repo_on_branch "$d/wt" fm/handoff-evidence
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/handoff-evidence.meta" "window=fm:fm-handoff-evidence" "worktree=$d/wt" "kind=ship" "harness=claude"
+  arm_idle_record "$d/state" handoff-evidence
+  printf 'done: committed\n' > "$d/state/handoff-evidence.status"
+  out=$(run_crew_state "$d" handoff-evidence)
+  assert_contains "$out" 'worker checkpoint; delivery unverified' 'committed is only a worker checkpoint'
+  assert_contains "$out" 'committed' 'retain the actual checkpoint'
+  assert_not_contains "$out" 'checks green' 'a commit does not prove CI'
+
+  printf 'done: PR https://github.com/o/r/pull/2 checks green\n' > "$d/state/handoff-evidence.status"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/handoff-evidence)"
+  FM_FAKE_AXI_STATUS="${FM_FAKE_AXI_STATUS/ci,running/ci,skipped}"
+  FM_FAKE_CI_LOGS='all CI checks passed - still monitoring until merged or closed'
+  out=$(run_crew_state "$d" handoff-evidence)
+  assert_contains "$out" 'CI skipped' 'CI skip is explicit despite status prose and old log'
+  assert_not_contains "$out" 'checks green' 'skipped CI never reads green'
+
+  FM_FAKE_AXI_STATUS="$FM_FAKE_AXI_STATUS
+outcome: passed-with-skips"
+  out=$(run_crew_state "$d" handoff-evidence)
+  assert_contains "$out" 'CI skipped' 'terminal skipped CI remains explicit'
+  assert_not_contains "$out" 'checks green' 'terminal skip is not green'
+
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/handoff-evidence)
+outcome: passed-with-override"
+  out=$(run_crew_state "$d" handoff-evidence)
+  assert_contains "$out" 'state: done' 'terminal override is a completed checkpoint'
+  assert_contains "$out" 'CI not green/unverified' 'terminal override keeps CI evidence non-green'
+  assert_not_contains "$out" 'state: unknown' 'supported terminal override is not unknown'
+
+  FM_FAKE_AXI_STATUS="$(run_parked fm/handoff-evidence)
+outcome: checks-passed"
+  out=$(run_crew_state "$d" handoff-evidence)
+  assert_contains "$out" 'state: parked' 'approval gate remains parked'
+  assert_not_contains "$out" 'checks green' 'approval gate never reads green'
+
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/handoff-evidence)
+outcome: checks-passed"
+  FM_FAKE_CI_LOGS='no CI checks reported - still monitoring until merged or closed'
+  out=$(run_crew_state "$d" handoff-evidence)
+  assert_contains "$out" 'CI: no checks reported' 'checks-passed headline cannot turn no-checks into green'
+  assert_not_contains "$out" 'checks green' 'no-checks readiness is not green'
+  pass "committed, skipped, approval-gated, and no-checks handoffs do not read as CI green"
+}
+
+test_handoff_completion_evidence
+
 test_captured_axi_status_shapes
 test_captured_inventory_replay
 test_captured_authority_transition
@@ -3548,7 +3600,7 @@ test_latest_status_subshell_work_does_not_grow_with_history
 test_genuine_parked_not_superseded
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
-test_ci_ready_done_log_beats_monitoring_run
+test_ci_ready_log_without_evidence_stays_working
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done

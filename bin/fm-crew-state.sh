@@ -57,7 +57,10 @@
 #      disagreement reports unknown with available candidate ids.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
+#      passed/checks-passed -> done, failed/cancelled -> failed. A done state
+#      is a checkpoint, not proof of green CI: only an attributed passing-check
+#      marker earns that detail; skipped CI and absent checks stay explicit,
+#      and a parked approval gate outranks a terminal headline. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
@@ -147,6 +150,9 @@ SEP=' · '
 # Emit the one canonical line and exit 0. Detail is optional.
 emit() {  # <state> <source> [detail]
   local line="state: $1${SEP}source: $2"
+  if [ "$1" = "done" ] && [ "$2" = status-log ] && [ "${KIND:-}" = ship ]; then
+    line="$line${SEP}worker checkpoint; delivery unverified"
+  fi
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
@@ -450,14 +456,6 @@ nm_gate_findings_count() {
   case "$rest" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s' "$rest"
 }
-log_reports_ci_ready() {
-  [ "$LOG_VERB" = "done" ] || return 1
-  case "$(status_line_note "$LOG_LINE")" in
-    *PR*"checks green"*|*"checks green"*PR*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 # 0 when a status-log line reports positive daemon socket failure rather than a
 # client-side timeout or generic unreachability.
 log_reports_daemon_socket_down() {  # <line>
@@ -593,7 +591,7 @@ nm_daemon_probe_down() {
 
 nm_ci_step_status() {
   local row rest
-  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing)"?[[:space:]]*,' | head -1)
+  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,[[:space:]]*"?(running|fixing|skipped|pending|awaiting_approval)"?[[:space:]]*,' | head -1)
   [ -n "$row" ] || return 0
   row=$(trim "$row")
   rest=${row#*,}
@@ -630,7 +628,8 @@ nm_effective_ci_step_status() {
 # actual PR #252 run). Reads the ci step's log tail via `axi logs` and scans it
 # for the MOST RECENT recognized marker (the log is append-only/chronological,
 # so the last match is current): green with nothing red after it means CI is
-# green right now, still only waiting on merge/close.
+# green right now, still only waiting on merge/close. A terminal no-checks
+# marker is ready for review but is not evidence of passing checks.
 nm_ci_checks_state() {
   local run_id log_tail marker
   run_id=$(strip_quotes "$(nm_field id)")
@@ -641,7 +640,8 @@ nm_ci_checks_state() {
     | grep -E 'CI checks passed|no CI checks reported - still monitoring|no CI checks reported yet|checks failed|issues detected|CI checks running|base branch advanced.*re-arming CI monitor timeout' \
     | tail -1)
   case "$marker" in
-    *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
+    *"checks passed"*) printf 'green' ;;
+    *"no CI checks reported - still monitoring"*) printf 'no-checks' ;;
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
   esac
@@ -808,7 +808,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     # supervisor through fm-classify-lib.sh's status_span_first_actionable.
     case "$COARSE_STATUS" in
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
-      completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
+      completed) RUN_STATE="done";  RUN_DETAIL="run completed; CI unverified" ;;
       failed)
         # The ledger row is terminal but the coarse path has no steps table
         # and no ci log, so the orphaned-monitor shape cannot be recognized
@@ -832,18 +832,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     has_gate=0
     nm_has_gate && has_gate=1
 
-    if [ -n "$outcome" ]; then
-      case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
-        checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
-        failed)
-          if nm_reclassify_failed_run_as_held_green; then :; else
-            RUN_STATE=failed; RUN_DETAIL="run failed"
-          fi ;;
-        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
-        *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
-      esac
-    elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
+    if [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
       if [ "$has_gate" = 1 ]; then
         gate=$(nm_gate_line_name)
       else
@@ -858,11 +847,31 @@ if [ "$HAVE_RUN" = 1 ]; then
       if printf '%s\n' "$RUN_OUT" | grep -q 'ask-user'; then
         RUN_DETAIL="$RUN_DETAIL (ask-user: authority decision)"
       fi
+    elif [ -n "$outcome" ]; then
+      case "$outcome" in
+        passed)        RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
+        checks-passed)
+          RUN_STATE="done"
+          CI_LOG_STATE=$(nm_ci_checks_state)
+          case "$CI_LOG_STATE" in
+            green) RUN_DETAIL="checks green: PR ready for review" ;;
+            no-checks) RUN_DETAIL="PR ready for review; CI: no checks reported" ;;
+            *) RUN_DETAIL="CI readiness reported; passing checks unverified" ;;
+          esac ;;
+        passed-with-skips) RUN_STATE="done"; RUN_DETAIL="run completed with skipped steps; CI unverified" ;;
+        passed-with-override) RUN_STATE="done"; RUN_DETAIL="run completed with CI override; CI not green/unverified" ;;
+        failed)
+          if nm_reclassify_failed_run_as_held_green; then :; else
+            RUN_STATE=failed; RUN_DETAIL="run failed"
+          fi ;;
+        cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
+        *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
+      esac
     else
       case "$status" in
         ci)             RUN_STATE=working; RUN_DETAIL="ci running" ;;
         running|fixing) RUN_STATE=working; RUN_DETAIL="validating ($status)" ;;
-        completed)      RUN_STATE="done"; RUN_DETAIL="run completed" ;;
+        completed)      RUN_STATE="done"; RUN_DETAIL="run completed; CI unverified" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
@@ -879,6 +888,9 @@ if [ "$HAVE_RUN" = 1 ]; then
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
               RUN_DETAIL="checks green: PR ready for review (still monitoring for merge/close)"
+            elif [ "$CI_LOG_STATE" = no-checks ]; then
+              RUN_STATE="done"
+              RUN_DETAIL="PR ready for review; CI: no checks reported"
             fi
             ;;
           fixing)
@@ -889,21 +901,23 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
-  if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
-    if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
-    [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
-    if [ "$RUN_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    elif [ "$CI_STEP_STATUS" = running ] && [ -z "$CI_LOG_STATE" ]; then
-      CI_LOG_STATE=$(nm_ci_checks_state)
-    elif [ "$CI_STEP_STATUS" = fixing ]; then
-      CI_LOG_STATE=not-ready
-    fi
-    if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
-    fi
+  if [ "$RUN_SOURCE" != coarse ]; then
+    CI_STEP_STATUS=$(nm_effective_ci_step_status)
+    case "$CI_STEP_STATUS" in
+      skipped)
+        RUN_DETAIL="CI skipped; $RUN_DETAIL"
+        if [ "$RUN_STATE" = "done" ]; then
+          RUN_DETAIL="run completed; CI skipped (no green-CI evidence)"
+        fi
+        ;;
+      pending|awaiting_approval)
+        if [ "$RUN_STATE" = "done" ]; then
+          RUN_DETAIL="CI $CI_STEP_STATUS; passing checks unverified"
+        else
+          RUN_DETAIL="$RUN_DETAIL; CI $CI_STEP_STATUS"
+        fi
+        ;;
+    esac
   fi
 
   # Reconcile the status log. A needs-decision/blocked log line that the run-step

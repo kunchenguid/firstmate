@@ -1379,7 +1379,7 @@ pause_state_class() {  # <window> <task>
 # the only record when the worker itself is waiting. It is not the only record
 # there is: once firstmate hands work to the captain, the wait is written into the
 # BACKLOG by bin/fm-captain-hold.sh, and the worker's last line stays whatever it
-# was - routinely `done: PR ...` after a delivery, which no line predicate can
+# was - routinely a terminal PR-delivery line after a delivery, which no line predicate can
 # read as a wait. An alarm bounded only by the line therefore re-fires for the
 # captain's whole thinking time, on exactly the work they already have in hand.
 #

@@ -15,6 +15,7 @@ No agent harness and no model runs anywhere in the fixture.
 
 The child's only action is the ordinary crewmate status append, typed into its own pane with `tmux send-keys`.
 The mate's only actions are the scripts a firstmate runs when it registers a PR and when it holds a task for the captain and records the answer.
+This historical fixture uses the legacy `done: PR ... checks green` line to verify backward-compatible parent delivery; current worker contracts use `done: published; PR <url>` for publication and `done: green-CI; PR <url> checks green` only for observed passing checks.
 
 ## Transcript
 

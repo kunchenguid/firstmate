@@ -345,6 +345,25 @@ test_pr_field_requires_recorded_pr_or_ready_signal_line() {
   pass "pr= requires the recorded PR or a ready-signal terminal line, and never a scout"
 }
 
+test_pr_field_accepts_published_and_green_ci_lines() {
+  local id key
+  make_world pr-vocabulary; bind_secondmate local
+  write_child "$MATE" published 'done: published; PR https://example.test/owner/repo/pull/66'
+  write_child "$MATE" green-ci 'done: green-CI; PR https://example.test/owner/repo/pull/77 checks green'
+  for id in published green-ci; do
+    awk '$0 !~ /^pr=/' "$MATE/state/$id.meta" > "$MATE/state/$id.meta.tmp"
+    mv "$MATE/state/$id.meta.tmp" "$MATE/state/$id.meta"
+  done
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  key=$(reported_outcome_key "$MATE" published 'done') || fail "published receipt key missing"
+  grep -Fxq "done [key=$key]: child published done: published; PR https://example.test/owner/repo/pull/66 pr=https://example.test/owner/repo/pull/66 mode=no-mistakes yolo=off" \
+    "$MAIN/state/mate.status" || fail "published handoff lost its PR: $(cat "$MAIN/state/mate.status")"
+  key=$(reported_outcome_key "$MATE" green-ci 'done') || fail "green-CI receipt key missing"
+  grep -Fxq "done [key=$key]: child green-ci done: green-CI; PR https://example.test/owner/repo/pull/77 checks green pr=https://example.test/owner/repo/pull/77 mode=no-mistakes yolo=off" \
+    "$MAIN/state/mate.status" || fail "green-CI handoff lost its PR: $(cat "$MAIN/state/mate.status")"
+  pass "published and green-CI handoffs retain their PR"
+}
+
 # If a terminal ledger line lands while the authoritative state read is in
 # flight, the ledger path remains the single owner on the next poll.
 test_terminal_line_during_state_read_yields_to_ledger_delivery() {
@@ -901,6 +920,7 @@ test_secondmate_unterminated_prose_reports_run_outcome
 test_busy_child_does_not_starve_later_ledger_outcomes
 test_secondmate_ledger_delivery_carries_report_and_failure
 test_pr_field_requires_recorded_pr_or_ready_signal_line
+test_pr_field_accepts_published_and_green_ci_lines
 test_terminal_line_during_state_read_yields_to_ledger_delivery
 test_terminal_line_after_inactive_delivery_is_not_reported_twice
 test_progress_after_inactive_delivery_starts_a_new_event
