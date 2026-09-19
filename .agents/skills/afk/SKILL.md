@@ -2,7 +2,7 @@
 name: afk
 description: >-
   Enter the away posture when the captain invokes /afk, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It reads the captain's away words back as a mandate, writes the durable away-posture record after their go, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (on Pi the supervision branch takes every wake with main parked; the daemon still delivers batched digests on the other harnesses for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes.
+  It reads the captain's away words back as a mandate, writes the durable away-posture record after their go, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (on Pi the supervision branch takes every safe actionable wake with main parked; the daemon still delivers batched digests on the other harnesses for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes.
 user-invocable: true
 metadata:
   internal: true
@@ -41,7 +41,7 @@ Hold-for-return is the default and the only reach profile this release records: 
 4. **Per harness, after the record exists:**
    - **Pi and pi-signed**: stop here.
      The away daemon is no longer launched on Pi; the ordinary supervision session (`docs/pi-supervision-branch.md`) keeps running with the record present, and `bin/fm-afk-launch.sh start` refuses on these harnesses.
-     With the record present main is parked: the supervision branch takes every wake, captain outcomes accumulate for the return brief, and main's standing authority relocates to the branch through the guarded scripts (`docs/pi-supervision-branch.md` "Postures"); main still wakes only for a broken branch or a watcher failure.
+     With the record present main is parked: the supervision branch takes every safe actionable wake, captain outcomes accumulate for the return brief, and main's standing authority relocates to the branch through the guarded scripts (`docs/pi-supervision-branch.md` "Postures"); only a wake the branch declines (including a broken branch or unsafe scan) or a watcher failure wakes main.
      `/quiet` needs nothing extra on Pi: the attended branch already keeps routine wakes out of this conversation, so quiet-while-present is the attended posture's own shape there.
    - **Harness WITH a native in-pane tracked-background tool** (claude's background bash, grok's background tool): run `bin/fm-afk-launch.sh start-native`, then run `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool.
      This is a deliberate no-separate-terminal exception because the harness-hosted job creates no terminal or layout mutation, and a shell launcher cannot invoke a harness-native background tool.
@@ -60,8 +60,8 @@ Hold-for-return is the default and the only reach profile this release records: 
   Declared external waits keep their condition-aware, hours-long recheck cadence (`bin/fm-watch.sh`, `bin/fm-classify-lib.sh`).
 - Recorded clauses are not executed by this release.
   Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, no recorded clause is authority by itself, and merge authority plus ask-user findings keep exactly the rules they have when attended (`AGENTS.md` section 7 and `ask-user-authority`); anything that needs the captain holds for their return.
-- On Pi, main is parked and the supervision branch handles every wake under main's standing authority plus the record's merge grants, through the same guarded scripts main would use: a granted or `yolo` task merges only green at its live head, already-queued work whose blockers cleared dispatches within the spend cap, and only a finding `ask-user-authority` lets firstmate decide is answered.
-  Anything else holds for the return, local-only landing always waits for the captain, and main still wakes only for a broken branch or a watcher failure (`docs/pi-supervision-branch.md` "Postures").
+- On Pi, main is parked and the supervision branch handles every safe actionable wake under main's standing authority plus the record's merge grants, through the same guarded scripts main would use: a granted or `yolo` task merges only green at its live head, already-queued work whose blockers cleared dispatches within the spend cap, and only a finding `ask-user-authority` lets firstmate decide is answered.
+  Anything else holds for the return, local-only landing always waits for the captain, and only a wake the branch declines (including a broken branch or unsafe scan) or a watcher failure wakes main (`docs/pi-supervision-branch.md` "Postures").
 - The session-start digest reports the posture under its AFK subsection, so a restart re-enters the posture from the record, not from memory.
 
 ## How to exit: the return

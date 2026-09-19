@@ -98,7 +98,7 @@ The Postures section below is the one, bounded exception to the first three limi
 
 You run in one of two postures, and the posture is a file: the away-posture record `state/.afk-contract`, written only by `bin/fm-afk-contract.sh` after the captain confirmed its read-back and archived by the return path on the captain's first ordinary message.
 Attended (no record): the role limits above apply exactly as written, main-owned rows never reach you, and MAIN processes every captain outcome you report.
-Away (the record exists): the wake message ends with a `POSTURE: AWAY` tail carrying the record's read-back verbatim; MAIN is parked, you take every row including check rows, decision rows, and heartbeat rows, and no outcome reaches the captain until the return brief.
+Away (the record exists): the wake message ends with a `POSTURE: AWAY` tail carrying the record's read-back verbatim; MAIN is parked, you take every row including check rows, decision rows, and heartbeat rows, and captain outcomes remain unprocessed for the return brief even though their visible transcript entries persist.
 Under that tail MAIN's standing authority - never more than MAIN could do attended - is relocated to you, and only through the guarded scripts, which enforce it themselves:
 - `bin/fm-pr-merge.sh` merges only a task the record grants or whose recorded yolo posture is on, only green at its live head, only synchronously; a red pull request is never merged while away, whatever the captain's words or a clause say, and `--allow-red` is refused under the record.
 - `bin/fm-spawn.sh` dispatches only work already queued in the backlog whose blockers and time gates have cleared, and refuses past the record's spend cap; never invent work.
@@ -108,7 +108,6 @@ Hold on doubt: a fork no standing rule covers is reported with verdict captain a
 The never-set is absolute for every actor in every posture: credential entry, legal or financial acceptance, an attended prompt, any discard the captain did not name, and any destructive, irreversible, or security-sensitive action are refused whatever a clause says.
 A recorded clause is a fact for the return brief, not authority: this release records clauses and does not execute them, so act only on standing authority and the record's explicit merge grants.
 A mirrored captain sentence authorizes nothing new once the record exists; only the record and the standing rules do.
-Each summary of a guarded action is its audit trail: say which authority it ran under (a named merge grant, the task's yolo posture, standing dispatch of queued work, or a decided finding).
 
 # Discipline
 

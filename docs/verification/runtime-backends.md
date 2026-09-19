@@ -2018,14 +2018,18 @@ FM_PI_PACKAGE_DIR=<pi-0.85.1 package> npm exec --yes --package=typescript@5.9.3 
 ```text
 ok - under the away-posture record every actionable row is offered to the branch while broken-queue wakes and watcher-failure alarms still reach main
 ok - under the away-posture record the wake carries the verbatim read-back tail, claims every row, opens no processing turn, cancels a pending request, and presents the accumulated rows after archive
+ok - an accepted away-only wake rejects after archive, while a drained task-local wake stays a quiet no-op
+ok - a claimed heartbeat row on a non-heartbeat away wake lifts task scoping for the fleet report
 ok - the away-posture record relocates the PR merge and a spawn under the spend cap to the branch, never local landing, and only while confirmed and valid
+ok - relocated branch spawn admits only already-queued dispatchable work, including on a manual-backend home
+ok - the away spend cap is rechecked under the task-set lock so concurrent spawns cannot both publish
 ok - fm-send --resolve-key: a decision answer refuses the attended branch before sending, a blocked: key stays steering, and the away-posture record relocates the answer
 ok - under the away-posture record the branch merges a granted green task, is held without a grant, cannot waive a red check, and is refused at the partition while attended
 ok - real Pi SDK 0.81.1 accepts the branch session construction and preserves an unpromptable wake
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.85.1
 ```
 
-Every record read in those regressions goes through the real `bin/fm-afk-contract.sh`, so a proposal, an archived record, and an invalid record are proven to restore the attended shape rather than being assumed to.
+Every record read in those regressions ultimately goes through the real `bin/fm-afk-contract.sh`, with fixture wrappers used only to archive at deterministic call boundaries; a proposal, an archived record, and an invalid record are proven to restore attended guarded-action behavior rather than being assumed to.
 Against the installed 0.81.1 package the typecheck reports a pre-existing `ModelsRefreshOptions.providers` mismatch in the branch's provider-registration path that this change does not touch; the option exists from the 0.84 line on, which is why the typecheck evidence uses the newer package as the earlier entries do.
 The real Pi/Herdr return guard (`FM_AFK_PI_HERDR_E2E=1 tests/fm-afk-pi-herdr-return-e2e.test.sh`) remains the owner of the live return-brief proof; it loads no supervision extension into its synthetic primary and does not yet exercise the parked-main scenario, which is a follow-up for a Herdr-lab-guarded task.
 

@@ -506,9 +506,9 @@ EOF
   [ "$count" -gt 0 ] || printf '  (nothing)\n'
 
   # 5. handled while away. Every outcome the away session recorded in the
-  # store during the window counts as handled: on Pi the supervision branch
-  # took every wake with main parked, so this total is what supervision did
-  # with nobody watching (the captain rows themselves are listed above).
+  # store during the window counts as handled. On Pi the supervision branch
+  # took every safe actionable wake it could while main was parked; wakes it
+  # declined still fell back to main. The captain rows are listed above.
   printf 'Handled while away:\n'
   routine=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { n++ } END { print n + 0 }')
   captain=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { n++ } END { print n + 0 }')
