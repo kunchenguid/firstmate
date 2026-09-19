@@ -24,8 +24,8 @@
 #      its agent left running.
 set -u
 
-# shellcheck source=tests/lib.sh
-. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/fixtures.sh
+. "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 RESTART="$ROOT/bin/fm-secondmate-restart.sh"
 
@@ -131,12 +131,14 @@ new_case() {
   local dir="$TMP_ROOT/$1-$RANDOM"
   mkdir -p "$dir/home/state" "$dir/home/data" "$dir/home/config" "$dir/fake"
   printf 'claude\n' > "$dir/home/config/secondmate-harness"
+  fm_test_worker_accounts "$dir/home"
   : > "$dir/fake/literal"
   : > "$dir/fake/keys"
   : > "$dir/fake/rings"
   printf 'claude' > "$dir/fake/command"
   printf 'claude' > "$dir/fake/becomes"
   make_stub "$dir"
+  fm_test_fake_account_auth "$dir/fakebin"
   printf '%s\n' "$dir"
 }
 
@@ -556,6 +558,7 @@ test_native_ultra_restart_keeps_local_and_remote_profiles() {
   add_local_mate "$dir" sm1
   arm_answer "$dir" sm1
   printf 'pi codex-native/gpt-6-astra ultra\n' > "$dir/home/config/secondmate-harness"
+  printf '%s\n' "$dir/home/accounts/pi" codex-native > "$dir/home/config/pi-account"
   printf 'pi' > "$dir/fake/becomes"
   printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
   chmod +x "$dir/fakebin/pi"
