@@ -98,6 +98,8 @@ export class ToolExecutionComponent {
   updateArgs(args) {
     this.args = args;
   }
+  setArgsComplete() {}
+  setExecutionStarted() {}
   updateResult(result) {
     this.resultOutput = (result?.content ?? []).map((block) => block.text ?? "");
   }
@@ -928,8 +930,17 @@ tool.rememberOmpCalmToolCalls(announcement);
 const mode = new Agent.InteractiveMode();
 mode.addMessageToChat({ ...announcement, content: [announcement.content[1]] });
 
-// Watcher arming: no updateArgs and the live result object has no toolName.
+vis.setCalmPresentation(true);
+
+// Watcher arming: OMP supplies name+args via the constructor and calls
+// setArgsComplete/setExecutionStarted with the toolCallId before the first
+// render; the result object (when it arrives) carries no toolName.
 const armer = new Agent.ToolExecutionComponent("fm_watch_arm_omp", {});
+armer.setArgsComplete("call-armer");
+armer.setExecutionStarted("call-armer");
+if (lines(armer).length !== 0) {
+  throw new Error(`Calm-on must hide the fm_watch_arm_omp row from its first render while it runs, got ${JSON.stringify(lines(armer))}`);
+}
 armer.updateResult(finalResult("watcher: started omp extension arm child"), false, "call-armer");
 
 // Rebuilt drain: constructor args only, updateResult has no toolName.
@@ -965,7 +976,6 @@ grep.updateResult(finalResult("docs/calm.md: mentions fm-watch.sh"), false, "cal
 const cat = new Agent.ToolExecutionComponent("bash", { command: "cat bin/fm-wake-drain.sh" });
 cat.updateResult(finalResult("script body mentions fm-wake-drain.sh"), false, "call-cat");
 
-vis.setCalmPresentation(true);
 for (const [name, component] of operational) {
   if (lines(component).length !== 0) {
     throw new Error(`Calm-on must hide the ${name} tool row, got ${JSON.stringify(lines(component))}`);
