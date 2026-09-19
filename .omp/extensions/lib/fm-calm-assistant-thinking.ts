@@ -2,10 +2,12 @@
 // notes while Calm is on.
 //
 // Verified against omp 18.1.17, which exports AssistantMessageComponent with
-// updateContent and setHideThinkingBlock from @oh-my-pi/pi-coding-agent. This
-// adapter probes those exact seams and throws if either is missing so
-// fm-calm.ts can skip only this adapter with a diagnostic. Message data, model
-// context, session storage, and export rendering are never rewritten.
+// updateContent from @oh-my-pi/pi-coding-agent. This adapter probes that exact
+// seam and throws if it is missing so fm-calm.ts can skip only this adapter with
+// a diagnostic. Message data, model context, session storage, and export
+// rendering are never rewritten, and OMP's own hide-thinking field is never
+// written: Calm-on collapse is a presentation-layer filter of the message it
+// passes to the stock component.
 import * as OmpCodingAgent from "@oh-my-pi/pi-coding-agent";
 import { calmTextIsSubstantive } from "../../../.pi/extensions/lib/fm-calm-preservation.ts";
 import { calmPresentationHides } from "../../../.pi/extensions/lib/fm-calm-visibility-core.ts";
@@ -26,8 +28,6 @@ type AssistantMessageUpdateOptions = {
 };
 
 type AssistantMessageComponentLike = {
-  hideThinkingBlock?: boolean;
-  setHideThinkingBlock(hide: boolean): void;
   invalidate(): void;
   updateContent(message: AssistantMessage, options?: AssistantMessageUpdateOptions): void;
 };
@@ -40,12 +40,10 @@ type CalmAssistantThinkingPatch = {
     AssistantMessageUpdateOptions | undefined
   >;
   presentationMessages: WeakMap<AssistantMessageComponentLike, AssistantMessage>;
-  capturedThinkingHidden: WeakMap<AssistantMessageComponentLike, boolean>;
   originalUpdateContent: AssistantMessageComponentLike["updateContent"] | undefined;
   hidesThinking: () => boolean;
   hidesWorkingNote: () => boolean;
   remember: (component: AssistantMessageComponentLike) => void;
-  setThinkingVisibility: (component: AssistantMessageComponentLike) => void;
   applyToRemembered: () => void;
   reset: () => void;
 };
@@ -81,32 +79,19 @@ export function installOmpCalmAssistantThinking(): void {
     originalMessages: new WeakMap(),
     originalOptions: new WeakMap(),
     presentationMessages: new WeakMap(),
-    capturedThinkingHidden: new WeakMap(),
     originalUpdateContent: undefined,
     hidesThinking: () => calmPresentationHides("assistant-thinking"),
     hidesWorkingNote: () => calmPresentationHides("assistant-working-note"),
     remember(component) {
       patch.remembered.add(component);
     },
-    setThinkingVisibility(component) {
-      if (patch.hidesThinking()) {
-        if (!patch.capturedThinkingHidden.has(component)) {
-          patch.capturedThinkingHidden.set(component, component.hideThinkingBlock === true);
-        }
-        component.setHideThinkingBlock(true);
-      } else if (patch.capturedThinkingHidden.has(component)) {
-        const native = patch.capturedThinkingHidden.get(component) === true;
-        patch.capturedThinkingHidden.delete(component);
-        component.setHideThinkingBlock(native);
-      }
-    },
     applyToRemembered() {
+      const shouldHideThinking = patch.hidesThinking();
       const shouldHideWorkingNote = patch.hidesWorkingNote();
       for (const component of patch.remembered) {
         try {
-          patch.setThinkingVisibility(component);
           const originalMessage = patch.originalMessages.get(component);
-          if (shouldHideWorkingNote && originalMessage) {
+          if (originalMessage && (shouldHideThinking || shouldHideWorkingNote)) {
             component.updateContent(originalMessage, patch.originalOptions.get(component));
           } else if (originalMessage && patch.originalUpdateContent) {
             patch.originalUpdateContent.call(
@@ -135,9 +120,7 @@ export function installOmpCalmAssistantThinking(): void {
   }
   const prototype = (
     AssistantMessageComponent as {
-      prototype: AssistantMessageComponentLike & {
-        setHideThinkingBlock?: unknown;
-      };
+      prototype: AssistantMessageComponentLike;
     }
   ).prototype;
   const stockUpdateContent = prototype.updateContent;
@@ -145,11 +128,6 @@ export function installOmpCalmAssistantThinking(): void {
     throw new Error("Firstmate Calm requires OMP AssistantMessageComponent.updateContent");
   }
   patch.originalUpdateContent = stockUpdateContent;
-  if (typeof prototype.setHideThinkingBlock !== "function") {
-    throw new Error(
-      "Firstmate Calm requires OMP AssistantMessageComponent.setHideThinkingBlock",
-    );
-  }
 
   prototype.updateContent = function (
     this: AssistantMessageComponentLike,
@@ -167,26 +145,28 @@ export function installOmpCalmAssistantThinking(): void {
       patch.originalMessages.set(this, message);
       patch.originalOptions.set(this, options);
     }
-    const hideWorkingNote =
+    const hidesThinking = patch.hidesThinking();
+    const hidesWorkingNote =
       patch.hidesWorkingNote() &&
       isMidTurnAssistantMessage(message) &&
       message.content.some(
         (block) => block.type === "text" && !calmTextIsSubstantive(block.text ?? ""),
       );
     const presentationMessage =
-      hideWorkingNote
+      hidesThinking || hidesWorkingNote
         ? {
             ...message,
             content: message.content.filter(
               (block) =>
+                !(hidesThinking && block.type === "thinking") &&
                 !(
+                  hidesWorkingNote &&
                   block.type === "text" &&
                   !calmTextIsSubstantive(block.text ?? "")
                 ),
             ),
           }
         : message;
-    patch.setThinkingVisibility(this);
     patch.presentationMessages.set(this, presentationMessage);
     stockUpdateContent.call(this, presentationMessage, options);
   };
