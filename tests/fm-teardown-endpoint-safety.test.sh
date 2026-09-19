@@ -53,6 +53,27 @@ claim_pool_slot() {  # <case> <task-id> [home]
   printf 'task=%s\nhome=%s\n' "$id" "$home" > "$dir/pool/1/.fm-slot-owner"
 }
 
+# A fake `orca` CLI whose `worktree show` answers with whatever path
+# FM_TEST_ORCA_WORKTREE_PATH names at run time, so one case can prove Orca
+# itself resolves the recorded worktree id to a DIFFERENT, still-real path -
+# the stale/reassigned-worktree shape - without a real Orca runtime.
+install_fake_orca() {  # <case>
+  local dir=$1
+  cat > "$dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+printf 'orca' >> "${FM_RUNTIME_LOG:?}"
+printf ' <%s>' "$@" >> "${FM_RUNTIME_LOG:?}"
+printf '\n' >> "${FM_RUNTIME_LOG:?}"
+if [ "$1" = worktree ] && [ "$2" = show ]; then
+  printf '{"ok":true,"result":{"worktree":{"path":"%s"}}}\n' "${FM_TEST_ORCA_WORKTREE_PATH:?}"
+  exit 0
+fi
+printf '{"ok":true,"result":{}}\n'
+exit 0
+SH
+  chmod +x "$dir/fakebin/orca"
+}
+
 run_case() {  # <case> <id>
   local dir=$1 id=$2
   FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
@@ -1324,6 +1345,99 @@ test_orca_close_failure_refuses_even_under_force() {
   pass "fm-teardown: an Orca close its missing CLI never attempted refuses even under --force, keeping the record naming the terminal"
 }
 
+# Orca proves worktree ownership through require_orca_worktree_path_match,
+# never through the treehouse pool-slot claim (Orca worktrees are not pool
+# slots, so that claim silently has nothing to check for them). A stale
+# recorded worktree - Orca reassigned the id to a different real path - must
+# refuse before Fix 1/Fix 2 (no-mistakes conclude, process reap) or the hook
+# removal below ever touch the recorded path, for every kind and --force
+# alike; a scout task and a forced ship task are exactly the two shapes that
+# used to skip the early Orca check and only re-verify it after the reap.
+assert_orca_stale_worktree_refuses_before_touching_it() {  # <case> <id> <worker-pid> <description>
+  local dir=$1 id=$2 worker=$3 description=$4
+  [ -s "$dir/stderr" ] || fail "$description: teardown produced no refusal output"
+  assert_grep "not inspected worktree" "$dir/stderr" \
+    "$description: the refusal should name the Orca worktree path mismatch"
+  kill -0 "$worker" 2>/dev/null \
+    || fail "$description: teardown reaped a live process before proving the stale Orca worktree was still this task's"
+  assert_present "$dir/worktree/.claude/settings.local.json" \
+    "$description: teardown removed the Claude hook file before proving Orca worktree ownership"
+  assert_no_grep "reaping leaked" "$dir/stderr" \
+    "$description: teardown reaped worktree processes before the Orca path-match proof ran"
+  assert_no_grep "teardown $id complete" "$dir/stdout" \
+    "$description: teardown reported a completed cleanup despite the stale worktree"
+}
+
+test_orca_scout_stale_worktree_refuses_before_reaping() {
+  local dir id=orca-scout-stale worker rc
+  dir=$(make_case orca-scout-stale)
+  install_fake_orca "$dir"
+  mkdir -p "$dir/worktree/.claude" "$dir/elsewhere-worktree"
+  printf '{}' > "$dir/worktree/.claude/settings.local.json"
+
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-1" \
+    "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=orca" "orca_worktree_id=worktree-1::/orca/worktree-1" "kind=scout"
+
+  # Staged in this shell, not a command substitution: see the reassigned pool
+  # slot fixture above for why this must not be a $(...) subshell child.
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  env -u TMUX -u TMUX_PANE \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    FM_TEST_ORCA_WORKTREE_PATH="$dir/elsewhere-worktree" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] \
+    || fail "an Orca scout task whose recorded worktree no longer matches Orca's own record completed cleanup"
+  assert_orca_stale_worktree_refuses_before_touching_it "$dir" "$id" "$worker" \
+    "orca scout task with a stale recorded worktree"
+
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  pass "fm-teardown: an Orca scout task's stale recorded worktree refuses before any process is reaped or hook removed"
+}
+
+test_orca_forced_ship_stale_worktree_refuses_before_reaping() {
+  local dir id=orca-ship-stale-forced worker rc
+  dir=$(make_case orca-ship-stale-forced)
+  install_fake_orca "$dir"
+  mkdir -p "$dir/worktree/.claude" "$dir/elsewhere-worktree"
+  printf '{}' > "$dir/worktree/.claude/settings.local.json"
+
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-2" \
+    "worktree=$dir/worktree" "project=$dir/project" \
+    "backend=orca" "orca_worktree_id=worktree-2::/orca/worktree-2" "kind=ship" "mode=no-mistakes"
+
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  env -u TMUX -u TMUX_PANE \
+    FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
+    FM_TEST_ORCA_WORKTREE_PATH="$dir/elsewhere-worktree" \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" --force \
+    > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -ne 0 ] \
+    || fail "a forced Orca ship teardown continued past a stale recorded worktree that no longer matches Orca's own record"
+  assert_orca_stale_worktree_refuses_before_touching_it "$dir" "$id" "$worker" \
+    "forced orca ship task with a stale recorded worktree"
+
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+  pass "fm-teardown: a forced Orca ship teardown's stale recorded worktree still refuses before any process is reaped or hook removed"
+}
+
 test_already_gone_endpoint_still_completes_without_a_refusal() {
   local dir socket session='already gone' id=gone-task
   [ -n "$REAL_TMUX" ] || { echo "skip - tmux not installed"; return 0; }
@@ -1380,6 +1494,8 @@ test_forced_teardown_continues_past_a_close_it_could_not_make
 test_unreadable_close_read_refuses_while_a_definitive_absence_completes
 test_forced_secondmate_child_close_failure_still_refuses
 test_orca_close_failure_refuses_even_under_force
+test_orca_scout_stale_worktree_refuses_before_reaping
+test_orca_forced_ship_stale_worktree_refuses_before_reaping
 test_already_gone_endpoint_still_completes_without_a_refusal
 test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
