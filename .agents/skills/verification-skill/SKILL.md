@@ -32,14 +32,15 @@ If the checkout does not build or run as-is, fix that first within the task's sc
 
 ## Generate the skill
 
-Write `<project>/.agents/skills/verify-<app>/SKILL.md` with YAML frontmatter (`name: verify-<app>`, and a `description` naming the app, the surface, and when to reach for it) and these sections, each grounded in what the interview found - no placeholders left:
+Write `<project>/.agents/skills/verify-<app>/SKILL.md` with YAML frontmatter (`name: verify-<app>`, and a `description` naming the app, the surface, and when to reach for it) and the five required sections below, each grounded in what the interview found - no placeholders left:
 
 - **Launch**: the exact command that starts the app for verification and how to tell it is ready (a log line, a prompt, a file appearing). Include teardown. A short-lived CLI has no server to keep alive: launch means build once, then run each drive in its own isolated session.
 - **Doctor**: one read-only check that answers "is this instance worth driving?" - binary or container present, right version, input data valid, credentials loadable. Run it first whenever anything looks off.
 - **Drive**: the harness recipe with real commands from this repo, not invented examples. Prefer stable handles: subcommand names, config keys, pipeline parameter names, file paths.
 - **Evidence**: what to capture for a proof and where it goes. Exercise the real user path, not internal entry points or test-only shortcuts; capture the action and the resulting state, not just the final output; verify side effects (files written, rows written, artifacts produced) alongside what is visible. When the safe path is a dry-run or test mode, observe what it actually skips rather than trusting its name.
 - **Cleanup**: tear down what the run created. Never kill by process name; kill what you started. Cleanup removes instances and scratch state, never the evidence; proof artifacts survive teardown at a location the skill names.
-- **Helpers**: any script the skill ships is executable and its invocation is shown in the skill body; a helper the reader must reverse-engineer is not a helper.
+Add a **Helpers** section only when the skill ships helper scripts.
+Every helper is executable and its invocation is shown in the skill body; a helper the reader must reverse-engineer is not a helper.
 
 ## Seed the feature map
 
