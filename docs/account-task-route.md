@@ -25,6 +25,7 @@ A complete result is the first valid task-bound `report.md` and `result.json` pa
 
 The receiver must run as the destination account through a dedicated SSH key whose forced command invokes `python3 -I` and the fixed binding path.
 Every request rechecks the effective account name and UID, owner-only binding and ledger, disjoint account-local roots, pinned source and mutable executables, exact repository configuration, absent personal material, existing unreadable denial canaries, the empty worker environment allowlist, and the prequalified tmux socket, server PID, session, and global-environment digest.
+A selected task worktree must resolve strictly beneath the qualified workspace root; the root itself and paths outside it are refused before task metadata is published or a worker launches.
 Any binding, guard, account, canary, runtime, or qualification drift disables new mutation.
 Restoring the old bytes does not re-enable that epoch.
 
