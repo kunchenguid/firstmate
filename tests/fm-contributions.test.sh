@@ -537,6 +537,88 @@ test_home_summary_coverage() {
   pass 'parent consumes measured child coverage and refuses expired child silence'
 }
 
+# A long-lived home's parsed backlog has no contract size bound: every
+# structured field of every row accumulates. Handing that whole payload to jq on
+# one exec argument fails with E2BIG above Linux's 128 KiB MAX_ARG_STRLEN, and
+# --contribution-input exits 0 regardless, so contribution coverage silently
+# degraded with no diagnostic naming the cause. Build a backlog whose parsed
+# form decisively exceeds that limit and require the whole ownership pair back.
+test_oversized_backlog_reaches_contribution_input() {
+  local home out pad i backlog_bytes
+  home=$(new_home oversized-backlog)
+  record "$home" delivery 21 open mergeable
+  pad=$(printf 'p%.0s' $(seq 1 160))
+  i=1
+  while [ "$i" -le 400 ]; do
+    printf -- '- [ ] filler-%03d - Queued row %03d %s (repo: sample) (kind: ship) (since 2026-09-01)\n' \
+      "$i" "$i" "$pad"
+    i=$((i + 1))
+  done >> "$home/data/backlog.md"
+  with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/input.json" \
+    2> "$home/input.err" \
+    || fail "could not collect contribution input for an oversized backlog: $(cat "$home/input.err")"
+  [ ! -s "$home/input.err" ] \
+    || fail "contribution input reported an error for an oversized backlog: $(cat "$home/input.err")"
+  backlog_bytes=$(jq -c '.backlog' "$home/input.json" | wc -c) \
+    || fail 'contribution input did not carry a readable backlog'
+  [ "$backlog_bytes" -gt 131072 ] \
+    || fail "oversized backlog fixture did not exceed the per-argument limit: $backlog_bytes"
+  jq -e '(.backlog.records | length) == 401
+    and ([.backlog.records[] | select(.id == "delivery")] | length) == 1
+    and (.tasks | type) == "array"' "$home/input.json" >/dev/null \
+    || fail 'an oversized backlog was dropped from the contribution input'
+  out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all) \
+    || fail 'could not project contributions from an oversized backlog'
+  printf '%s' "$out" | jq -e '.known == 1 and .checked == 1 and .rows[0].task == "delivery"' >/dev/null \
+    || fail "an oversized backlog lost contribution coverage: $out"
+  pass 'an oversized backlog reaches contribution coverage without exec argument transport'
+}
+
+# The canonical input is produced by a separate command that stages the parsed
+# backlog through a private temporary transport, so an unusable or full TMPDIR
+# now fails that producer where it previously had no temporary file at all.
+# Prove the producer refuses to print a partial payload, and that the poll
+# stops loudly with the producer's own diagnostic instead of observing a home
+# whose ownership it never read.
+test_contribution_input_staging_failure_is_loud() {
+  local home rc=0
+  home=$(new_home input-staging-failure)
+  record "$home" delivery 24 open mergeable
+  printf 'not a directory\n' > "$home/badtmp"
+  with_home "$home" env TMPDIR="$home/badtmp" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input \
+    > "$home/input.json" 2> "$home/input.err" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail 'an unusable staging directory still reported successful contribution input'
+  [ ! -s "$home/input.json" ] \
+    || fail "a failed contribution input printed a payload: $(cat "$home/input.json")"
+  grep -q 'fm-fleet-snapshot: temporary transport directory creation failed' "$home/input.err" \
+    || fail "the staging failure was not named: $(cat "$home/input.err")"
+  pass 'an unusable staging directory fails the contribution input instead of printing nothing'
+}
+
+test_unavailable_contribution_input_stops_the_poll() {
+  local home rc=0
+  home=$(new_home input-unavailable)
+  forge_home "$home"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'a healthy poll failed before the input was made unavailable'
+  cp "$home/data/delivery/contributions.json" "$home/before.json"
+  chmod 000 "$home/data/backlog.md"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll > "$home/poll.out" 2> "$home/poll.err" || rc=$?
+  chmod 644 "$home/data/backlog.md"
+  [ "$rc" -ne 0 ] || fail 'an unavailable contribution input still reported a successful poll'
+  [ ! -s "$home/poll.out" ] || fail "a failed poll printed coverage: $(cat "$home/poll.out")"
+  grep -q 'fm-contributions: canonical contribution input unavailable' "$home/poll.err" \
+    || fail "the poll did not name its unavailable input: $(cat "$home/poll.err")"
+  grep -q 'fm-fleet-snapshot: backlog read failed' "$home/poll.err" \
+    || fail "the producer diagnostic did not reach the caller: $(cat "$home/poll.err")"
+  cmp -s "$home/before.json" "$home/data/delivery/contributions.json" \
+    || fail 'a failed poll mutated durable contribution evidence'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'the failed poll left the observation lock or durable state unusable'
+  pass 'an unavailable contribution input stops the poll instead of measuring empty coverage'
+}
+
 test_unreadable_pending_is_not_empty() {
   local home
   home=$(new_home unreadable-pending)
@@ -789,7 +871,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_failure_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_oversized_backlog_reaches_contribution_input test_contribution_input_staging_failure_is_loud test_unavailable_contribution_input_stops_the_poll test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_failure_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

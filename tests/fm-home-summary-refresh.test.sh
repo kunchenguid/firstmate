@@ -18,6 +18,10 @@ LARGE_HOME="$TMP_ROOT/large-home"
 STATELESS_HOME="$TMP_ROOT/stateless-home"
 LARGE_CHILD_HOME="$TMP_ROOT/large-child-home"
 LARGE_PARENT_HOME="$TMP_ROOT/large-parent-home"
+DECISIONS_HOME="$TMP_ROOT/decisions-home"
+OVERSIZED_HOME="$TMP_ROOT/oversized-home"
+MIRROR_CHILD_HOME="$TMP_ROOT/mirror-child-home"
+MIRROR_PARENT_HOME="$TMP_ROOT/mirror-parent-home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 WATCH_PID=
 SLOW_WRITER_PID=
@@ -256,6 +260,304 @@ jq -e '.secondmate_current.records[0]
   "$TMP_ROOT/large-parent-snapshot.json" >/dev/null \
   || fail "parent fleet snapshot did not preserve the large child invalidity"
 pass "parent snapshot consumes large child ledgers without argument transport"
+
+# A single long-lived task's whole-status-log open-decision fold has no size
+# bound of its own: every still-open needs-decision/blocked note accumulates
+# until resolved. That per-task payload rides through fm-fleet-snapshot.sh
+# independently of the backlog-transport fix above, so it needs its own
+# argv-safe proof: many distinct never-resolved decisions on one in-flight
+# task, each long enough that the accumulated fold decisively exceeds Linux's
+# 128 KiB MAX_ARG_STRLEN per-argument limit.
+mkdir -p "$DECISIONS_HOME/state" "$DECISIONS_HOME/data" "$DECISIONS_HOME/config" \
+  "$DECISIONS_HOME/projects"
+printf '# Seeded Firstmate home\n' > "$DECISIONS_HOME/AGENTS.md"
+printf 'decisions\n' > "$DECISIONS_HOME/.fm-secondmate-home"
+cat > "$DECISIONS_HOME/data/backlog.md" <<'EOF'
+## In flight
+- [ ] held-task - Task with many long-held decisions (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+fm_write_meta "$DECISIONS_HOME/state/held-task.meta" \
+  "window=fmtest:fm-held-task" \
+  "project=firstmate" \
+  "harness=claude" \
+  "kind=ship" \
+  "mode=no-mistakes" \
+  "spawn_gen=fm.held123456"
+# Few distinct keys, each with a long note: status_open_decisions folds the
+# open set with an O(n^2) per-key scan, so many short-lived keys would make
+# this fixture pathologically slow without adding argv-transport coverage.
+# The fold's cost tracks key COUNT; the argv limit tracks folded BYTE size, so
+# few keys with long notes exercises the byte limit without that slowdown.
+decisions_note=$(printf 'z%.0s' $(seq 1 2500))
+i=1
+while [ "$i" -le 60 ]; do
+  printf 'needs-decision [key=decision-%s]: %s\n' "$i" "$decisions_note"
+  i=$((i + 1))
+done > "$DECISIONS_HOME/state/held-task.status"
+[ "$(wc -c < "$DECISIONS_HOME/state/held-task.status")" -gt 131072 ] \
+  || fail "large open-decisions fixture did not exceed the per-argument limit"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$DECISIONS_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/decisions-summary.json" \
+  2> "$TMP_ROOT/decisions-summary.err" \
+  || fail "secondmate home-summary mode failed for many long held decisions: $(cat "$TMP_ROOT/decisions-summary.err")"
+[ ! -s "$TMP_ROOT/decisions-summary.err" ] \
+  || fail "secondmate home-summary mode reported an error for many long held decisions: $(cat "$TMP_ROOT/decisions-summary.err")"
+jq -e '.schema == "fm-secondmate-home-summary.v1"
+  and .counts.decisions_open == 60
+  and .counts.endpoints == 1
+  and (.endpoints | length) == 1
+  and (.endpoints[0].id == "held-task")
+  and (.decisions_open | length) == 20
+  and (.omitted[] | select(.surface == "decisions_open") | .count) == 40' \
+  "$TMP_ROOT/decisions-summary.json" >/dev/null \
+  || fail "large open-decisions summary dropped or truncated the held task's decisions: $(cat "$TMP_ROOT/decisions-summary.json")"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$DECISIONS_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "home-summary writer failed for many long held decisions"
+jq -e '.schema == "fm-secondmate-home-summary.v1" and .counts.decisions_open == 60' \
+  "$DECISIONS_HOME/state/home-summary.json" >/dev/null \
+  || fail "large open-decisions home-summary was not published with its full decision count"
+pass "many long held decisions on one task publish without exec argument transport"
+
+# Nothing bounds a SINGLE status line: an agent appends notes directly and
+# fm-procevent-remote-reply.sh mirrors a remote payload line with no size cap.
+# One such line above Linux's 128 KiB MAX_ARG_STRLEN used to break every jq that
+# carried it on argv - the crew-state read, the status-event composition, and the
+# per-task row - and the row was dropped without any command reporting failure,
+# which is what made the published summary read as an orphaned, unreadable home.
+# Publish one, then require the full line back untruncated.
+mkdir -p "$OVERSIZED_HOME/state" "$OVERSIZED_HOME/data" "$OVERSIZED_HOME/config" \
+  "$OVERSIZED_HOME/projects/task"
+printf '# Seeded Firstmate home\n' > "$OVERSIZED_HOME/AGENTS.md"
+printf 'oversized\n' > "$OVERSIZED_HOME/.fm-secondmate-home"
+fm_git_init_commit "$OVERSIZED_HOME/projects/task"
+cat > "$OVERSIZED_HOME/data/backlog.md" <<'EOF'
+## In flight
+- [ ] big-line-task - Task holding one huge status line (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+fm_write_meta "$OVERSIZED_HOME/state/big-line-task.meta" \
+  "window=fmtest:fm-big-line-task" \
+  "worktree=$OVERSIZED_HOME/projects/task" \
+  "project=firstmate" \
+  "harness=claude" \
+  "kind=ship" \
+  "mode=no-mistakes" \
+  "spawn_gen=fm.bigline123456"
+oversized_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$OVERSIZED_HOME/state" big-line-task)
+"$ROOT/bin/fm-busy-event.sh" apply "$OVERSIZED_HOME/state" big-line-task idle \
+  --gen "$oversized_gen" --source claude-hook --event stop
+oversized_note=$(head -c 200000 /dev/zero | LC_ALL=C tr '\0' 'y')
+printf 'needs-decision [key=oversized]: %s\n' "$oversized_note" \
+  > "$OVERSIZED_HOME/state/big-line-task.status"
+[ "$(wc -c < "$OVERSIZED_HOME/state/big-line-task.status")" -gt 131072 ] \
+  || fail "oversized status-line fixture did not exceed the per-argument limit"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$OVERSIZED_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --secondmate-home-summary > "$TMP_ROOT/oversized-summary.json" \
+  2> "$TMP_ROOT/oversized-summary.err" \
+  || fail "secondmate home-summary mode failed for one oversized status line: $(cat "$TMP_ROOT/oversized-summary.err")"
+[ ! -s "$TMP_ROOT/oversized-summary.err" ] \
+  || fail "secondmate home-summary mode reported an error for one oversized status line: $(cat "$TMP_ROOT/oversized-summary.err")"
+jq -e '.schema == "fm-secondmate-home-summary.v1"
+  and .valid == true
+  and .invalidity.kind == null
+  and .counts.decisions_open == 1
+  and .counts.endpoints == 1
+  and (.decisions_open[0] | .id == "big-line-task" and .key == "oversized")' \
+  "$TMP_ROOT/oversized-summary.json" >/dev/null \
+  || fail "an oversized status line dropped the task from the home summary: $(jq -c '{valid,invalidity,counts}' "$TMP_ROOT/oversized-summary.json")"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$OVERSIZED_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --json > "$TMP_ROOT/oversized-snapshot.json" \
+  || fail "fleet snapshot json mode failed for one oversized status line"
+jq -e --argjson bytes "${#oversized_note}" '(.tasks | length) == 1
+  and (.tasks[0].id == "big-line-task")
+  and (.tasks[0].current_state.state == "parked")
+  and (.tasks[0].current_state.source == "status-log")
+  and (.tasks[0].current_state.detail | length) == $bytes
+  and (.tasks[0].hints.open_decisions | length) == 1
+  and (.tasks[0].hints.open_decisions[0].summary | length) == $bytes
+  and (.tasks[0].hints.last_event_text | length) > $bytes' \
+  "$TMP_ROOT/oversized-snapshot.json" >/dev/null \
+  || fail "the oversized status line was dropped or truncated in the fleet snapshot"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$OVERSIZED_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "home-summary writer failed for one oversized status line"
+jq -e '.valid == true and .counts.decisions_open == 1' \
+  "$OVERSIZED_HOME/state/home-summary.json" >/dev/null \
+  || fail "the oversized-status-line home summary was not published as readable"
+pass "one oversized status line publishes a readable home summary untruncated"
+
+# The same bytes reach a PARENT through the secondmate aggregation, which
+# re-exports the mirrored line, its note, and the keyed decision fold. A local
+# registered home covers the structured-home record and a remote route covers the
+# mirrored parent-event fallback, while an ordinary task sorted AFTER the
+# oversized one proves a per-task payload can no longer omit unrelated tasks.
+mkdir -p "$MIRROR_CHILD_HOME/state" "$MIRROR_CHILD_HOME/data" \
+  "$MIRROR_CHILD_HOME/config" "$MIRROR_CHILD_HOME/projects" "$MIRROR_CHILD_HOME/bin"
+printf '# Seeded Firstmate home\n' > "$MIRROR_CHILD_HOME/AGENTS.md"
+printf 'ccc-mate\n' > "$MIRROR_CHILD_HOME/.fm-secondmate-home"
+printf '%s\n' '## In flight' '' '## Queued' '' '## Done' \
+  > "$MIRROR_CHILD_HOME/data/backlog.md"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$MIRROR_CHILD_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$WRITER" || fail "mirror child home-summary publication failed"
+mkdir -p "$MIRROR_PARENT_HOME/state" "$MIRROR_PARENT_HOME/data" \
+  "$MIRROR_PARENT_HOME/config" "$MIRROR_PARENT_HOME/projects/task" "$TMP_ROOT/mirrorbin"
+printf '# Seeded Firstmate home\n' > "$MIRROR_PARENT_HOME/AGENTS.md"
+fm_git_init_commit "$MIRROR_PARENT_HOME/projects/task"
+cat > "$MIRROR_PARENT_HOME/data/backlog.md" <<'EOF'
+## In flight
+- [ ] aaa-big - Task holding one huge status line (repo: firstmate) (kind: ship) (since 2026-08-28)
+- [ ] bbb-plain - Ordinary task sorted after it (repo: firstmate) (kind: ship) (since 2026-08-28)
+
+## Queued
+
+## Done
+EOF
+{
+  printf -- '- ccc-mate - local fixture domain (home: %s; scope: fixture work; projects: firstmate; added 2026-08-28)\n' \
+    "$MIRROR_CHILD_HOME"
+  printf -- '- ddd-remote - remote fixture domain (host: remote-mac; root: /remote/root; home: /remote/home; scope: fixture work; projects: alpha; added 2026-08-28)\n'
+} > "$MIRROR_PARENT_HOME/data/secondmates.md"
+for mirror_id in aaa-big bbb-plain; do
+  fm_write_meta "$MIRROR_PARENT_HOME/state/$mirror_id.meta" \
+    "window=fmtest:fm-$mirror_id" \
+    "worktree=$MIRROR_PARENT_HOME/projects/task" \
+    "project=firstmate" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=fm.$mirror_id.123456"
+done
+fm_write_secondmate_meta "$MIRROR_PARENT_HOME/state/ccc-mate.meta" \
+  "$MIRROR_CHILD_HOME" "fmtest:fm-ccc-mate" firstmate claude
+fm_write_meta "$MIRROR_PARENT_HOME/state/ddd-remote.meta" \
+  "window=remote:ddd-remote" \
+  "endpoint_task_id=ddd-remote" \
+  "worktree=/remote/home/never-locally-present" \
+  "harness=claude" \
+  "kind=secondmate" \
+  "mode=secondmate" \
+  "home=/remote/home" \
+  "remote_host=remote-mac" \
+  "remote_root=/remote/root" \
+  "remote_backend=herdr" \
+  "remote_herdr_session=fm-remote" \
+  "remote_target=fm-remote:w1:p1"
+printf 'needs-decision [key=mirrored]: %s\n' "$oversized_note" \
+  > "$MIRROR_PARENT_HOME/state/aaa-big.status"
+printf 'working: ordinary short note\n' > "$MIRROR_PARENT_HOME/state/bbb-plain.status"
+printf 'needs-decision [key=child-gate]: %s\n' "$oversized_note" \
+  > "$MIRROR_PARENT_HOME/state/ccc-mate.status"
+printf 'needs-decision [key=mirrored-remote]: %s\n' "$oversized_note" \
+  > "$MIRROR_PARENT_HOME/state/ddd-remote.status"
+cat > "$TMP_ROOT/mirrorbin/refusing-ssh" <<'SH'
+#!/usr/bin/env bash
+cat > /dev/null
+exit 255
+SH
+chmod +x "$TMP_ROOT/mirrorbin/refusing-ssh"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$MIRROR_PARENT_HOME" \
+  FM_SSH_BIN="$TMP_ROOT/mirrorbin/refusing-ssh" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --json > "$TMP_ROOT/mirror-snapshot.json" \
+  2> "$TMP_ROOT/mirror-snapshot.err" \
+  || fail "parent fleet snapshot failed for mirrored oversized status lines: $(cat "$TMP_ROOT/mirror-snapshot.err")"
+jq -e '[.tasks[].id] == ["aaa-big","bbb-plain","ccc-mate","ddd-remote"]' \
+  "$TMP_ROOT/mirror-snapshot.json" >/dev/null \
+  || fail "an oversized per-task payload omitted tasks from the parent snapshot: $(jq -c '[.tasks[].id]' "$TMP_ROOT/mirror-snapshot.json")"
+jq -e --argjson bytes "${#oversized_note}" '.secondmate_current.records
+  | (length == 2)
+  and (.[0] | .id == "ccc-mate"
+       and .provenance.summary_source == "local-ledger"
+       and (.parent_event.raw | length) > $bytes
+       and (.parent_event.note | length) == $bytes
+       and (.parent_event.open_decisions | length) == 1
+       and (.parent_event.open_decisions[0].key == "child-gate")
+       and (.parent_event.reconciliation.decisions | length) == 1)
+  and (.[1] | .id == "ddd-remote"
+       and .provenance.selected == "parent-event-fallback"
+       and (.parent_event.raw | length) > $bytes
+       and (.parent_event.open_decisions | length) == 1)' \
+  "$TMP_ROOT/mirror-snapshot.json" >/dev/null \
+  || fail "the parent aggregation dropped a mirrored oversized status line: $(jq -c '[.secondmate_current.records[] | {id,sel:.provenance.selected,raw:(.parent_event.raw|length)}]' "$TMP_ROOT/mirror-snapshot.json")"
+pass "mirrored oversized status lines survive the parent secondmate aggregation"
+
+# The open-decision write-failure branch is the one path that still reaches exec
+# arguments, so it must stay bounded: a fold small enough to fit one argument may
+# ride argv, a larger fold must degrade to no open decisions, and NEITHER may drop
+# the task or fail the snapshot. Inject a REAL write failure instead of asserting
+# on source: give one task an id long enough that the transport filename
+# "<id>.open-decisions.json" exceeds the filesystem's 255-byte name limit while the
+# shorter observation filenames this loop writes first still fit, so exactly the
+# open-decision write fails (ENAMETOOLONG) with the rest of the task intact.
+WRITE_FAIL_ID=$(printf 'w%.0s' $(seq 1 236))
+mkdir -p "$TMP_ROOT/namecheck"
+if printf 'x' 2>/dev/null > "$TMP_ROOT/namecheck/$WRITE_FAIL_ID.crew-state-detail" \
+  && ! printf 'x' 2>/dev/null > "$TMP_ROOT/namecheck/$WRITE_FAIL_ID.open-decisions.json"; then
+  run_write_fail_snapshot() {  # <status-note> <out-json> <out-err>
+    local note=$1 out=$2 err=$3 home="$TMP_ROOT/write-fail-home"
+    rm -rf "$home"
+    mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects"
+    printf '# Seeded Firstmate home\n' > "$home/AGENTS.md"
+    {
+      printf '%s\n' '## In flight'
+      printf -- '- [ ] %s - Task whose decision transport cannot be written (repo: firstmate) (kind: ship) (since 2026-08-28)\n' \
+        "$WRITE_FAIL_ID"
+      printf '%s\n' '- [ ] zzz-sibling - Ordinary task sorted after it (repo: firstmate) (kind: ship) (since 2026-08-28)'
+      printf '%s\n' '' '## Queued' '' '## Done'
+    } > "$home/data/backlog.md"
+    fm_write_meta "$home/state/$WRITE_FAIL_ID.meta" \
+      "window=fmtest:fm-write-fail" "project=firstmate" "harness=claude" \
+      "kind=ship" "mode=no-mistakes" "spawn_gen=fm.writefail123456"
+    fm_write_meta "$home/state/zzz-sibling.meta" \
+      "window=fmtest:fm-zzz-sibling" "project=firstmate" "harness=claude" \
+      "kind=ship" "mode=no-mistakes" "spawn_gen=fm.sibling123456"
+    printf 'needs-decision [key=transport]: %s\n' "$note" \
+      > "$home/state/$WRITE_FAIL_ID.status"
+    printf 'working: ordinary short note\n' > "$home/state/zzz-sibling.status"
+    PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+      FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+      "$SNAPSHOT" --json > "$out" 2> "$err"
+  }
+
+  run_write_fail_snapshot 'pick a route' \
+    "$TMP_ROOT/write-fail-small.json" "$TMP_ROOT/write-fail-small.err" \
+    || fail "a failed open-decision write aborted the snapshot for a small fold: $(cat "$TMP_ROOT/write-fail-small.err")"
+  jq -e --arg id "$WRITE_FAIL_ID" '[.tasks[].id] == [$id,"zzz-sibling"]
+    and (.tasks[0].hints.open_decisions | length) == 1
+    and (.tasks[0].hints.open_decisions[0].key == "transport")
+    and (.tasks[0].hints.pending_decision == true)' \
+    "$TMP_ROOT/write-fail-small.json" >/dev/null \
+    || fail "a failed open-decision write lost a task or its small fold: $(jq -c '[.tasks[] | {id:(.id|length),d:(.hints.open_decisions|length)}]' "$TMP_ROOT/write-fail-small.json")"
+
+  # The same failed write with a fold far above the per-argument limit must not
+  # hand those bytes to exec: the row survives with no open decisions rather than
+  # taking the whole task down with a failed jq.
+  run_write_fail_snapshot "$oversized_note" \
+    "$TMP_ROOT/write-fail-big.json" "$TMP_ROOT/write-fail-big.err" \
+    || fail "a failed open-decision write aborted the snapshot for an oversized fold: $(cat "$TMP_ROOT/write-fail-big.err")"
+  jq -e --arg id "$WRITE_FAIL_ID" --argjson bytes "${#oversized_note}" \
+    '[.tasks[].id] == [$id,"zzz-sibling"]
+    and (.tasks[0].hints.open_decisions | length) == 0
+    and (.tasks[0].hints.last_event_text | length) > $bytes
+    and (.tasks[1].current_state.state | length) > 0' \
+    "$TMP_ROOT/write-fail-big.json" >/dev/null \
+    || fail "an oversized fold on the write-failure path dropped a task or rode exec arguments: $(jq -c '[.tasks[] | {id:(.id|length),d:(.hints.open_decisions|length)}]' "$TMP_ROOT/write-fail-big.json")"
+  pass "a failed open-decision write keeps every task row and never hands an oversized fold to exec"
+else
+  echo "skip: this filesystem's name limit cannot isolate an open-decision transport write failure"
+fi
 
 mkdir -p "$CADENCE_HOME/state" "$CADENCE_HOME/data" "$CADENCE_HOME/config" \
   "$CADENCE_HOME/projects"
