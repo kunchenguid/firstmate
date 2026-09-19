@@ -98,7 +98,6 @@ function redrawTranscript(ui: ExtensionContext["ui"]): void {
 }
 
 export default function (pi: ExtensionAPI) {
-  const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
   const preferencePath = calmPreferencePath(
     {
       FM_HOME: process.env.FM_HOME,

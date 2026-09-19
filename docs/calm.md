@@ -67,7 +67,9 @@ FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 
 Calm on OMP is the `.omp/extensions/fm-calm.ts` extension, auto-discovered with the existing watcher and turn-end extensions.
 It shares the same `config/calm` preference and visibility policy as Pi, and registers `/calm` through OMP's public `registerCommand` seam.
-While Calm is on, canonically classified Firstmate operational user rows and FIRSTMATE_OP / watcher / drain tool rows draw at zero height, collapsed thinking is hidden, and short mid-turn working notes follow the shared preservation rule above.
+While Calm is on, canonically classified Firstmate operational user rows draw at zero height, collapsed thinking is hidden, and short mid-turn working notes follow the shared preservation rule above.
+An operational FIRSTMATE_OP / watcher / drain tool row draws at zero height when OMP still tracks the tool call or has completed it, including from the row's first render while the tool runs.
+A session resumed after the process died during an operational tool call can show that single rebuilt row at full height, because OMP's transcript rebuild passes no tool-call identity to any method this adapter wraps; the version-specific binding seam that would close that residual was considered and declined as net-negative coupling.
 Genuine user prompts and the genuine final assistant reply stay visible.
 Presentation only: model context, session storage, `/export`, watcher arming, and the turn-end guard stay unchanged.
 The animated working boat remains Pi-only on this slice; OMP leaves the stock working row alone.

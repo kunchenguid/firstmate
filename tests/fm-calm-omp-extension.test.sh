@@ -1009,6 +1009,39 @@ JS
   pass "OMP Calm hides drain/watcher operational tool rows while keeping ordinary tools, and Calm off restores them"
 }
 
+test_rebuilt_pending_operational_row_stays_visible() {
+  local fixture out status
+  fixture="$TMP_ROOT/rebuild-pending"
+  install_omp_calm_fixture "$fixture"
+  out=$(cd "$fixture" && node --input-type=module 2>&1 <<'JS'
+import { pathToFileURL } from "node:url";
+import * as Agent from "@oh-my-pi/pi-coding-agent";
+
+const tool = await import(pathToFileURL(`${process.cwd()}/.omp/extensions/lib/fm-calm-operational-tool.ts`).href);
+const vis = await import(pathToFileURL(`${process.cwd()}/.pi/extensions/lib/fm-calm-visibility-core.ts`).href);
+tool.installOmpCalmOperationalToolLayout();
+tool.rememberOmpCalmToolCalls({
+  role: "assistant",
+  content: [{ type: "toolCall", id: "call-pending", name: "fm_watch_arm_omp", arguments: {} }],
+});
+vis.setCalmPresentation(true);
+
+// OMP's rebuild path creates the row from the constructor and never hands the
+// adapter the toolCallId when the paired result is missing, so the measured gap
+// is that this single rebuilt row still draws at full height under Calm.
+const pending = new Agent.ToolExecutionComponent("fm_watch_arm_omp", {});
+const rendered = pending.render(200) || [];
+if (rendered.length === 0) {
+  throw new Error("the rebuilt-pending operational row is expected to stay visible until a toolCallId is bound");
+}
+JS
+)
+  status=$?
+  expect_code 0 "$status" "rebuilt-pending operational row: $out"
+  [ -z "$out" ] || fail "rebuilt-pending operational row printed output: $out"
+  pass "OMP Calm pins the measured rebuilt-pending operational-row gap (visible until a toolCallId is bound)"
+}
+
 test_calm_off_retry_preserves_options() {
   local fixture out status
   fixture="$TMP_ROOT/off-retry"
@@ -1105,5 +1138,6 @@ test_session_replacement_resets_remembered
 test_session_replacement_keeps_midturn_classification
 test_restored_transcript_seeds_midturn_classification
 test_operational_tool_rows_hide_show
+test_rebuilt_pending_operational_row_stays_visible
 test_calm_off_retry_preserves_options
 test_degraded_public_api_seam
