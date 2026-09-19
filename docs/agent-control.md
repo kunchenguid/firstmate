@@ -104,6 +104,7 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 - `exit`'s composer-empty check, above, is itself a fail-closed boundary that `relaunch` inherits by stopping the old agent through `exit`.
 - `fm-spawn --relaunch` independently refuses unless the recorded endpoint is positively agent-free, so a replacement can never join a live agent.
   It also requires the shell to be in the recorded worktree: tmux refuses immediately when it is not, while Herdr sends one `cd` to the recorded path and refuses unless a subsequent path read confirms the move.
+  A crewmate relaunch also refuses when its recorded pool slot now belongs to another task, or when the slot's owner claim cannot be read; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh)'s header owns that check.
 
 ## Capability matrix
 
