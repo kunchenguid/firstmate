@@ -131,16 +131,17 @@ Bootstrap reports successful AGENTS.md re-read sends as `BOOTSTRAP_INFO:` and on
 A separate, literal-content config reread is required whenever inherited `config/*` material changes under an already-running secondmate.
 For a local home, after each successful allowlisted config write, both the locked bootstrap convergence path and mid-session `bin/fm-config-push.sh` use the shared propagation report to build one per-home generation-specific private instruction file from the validated destination post-write bytes for only the declared config items that actually changed for that home, in declaration order.
 Each changed path is printed with clear begin/end delimiters and the destination file's full exact new bytes unparsed, or the explicit token `ABSENT` when propagation removed the destination copy.
-The instruction uses only minimal framing that these are defaults/rules and do not remove judgment; it never includes SHA values, selected profiles, parsed summaries, or any other generated interpretation.
+The instruction gives `config/worker-writing-style.md` mandatory framing that its rules apply as written and are not subject to worker discretion.
+Every other config item retains the existing defaults-and-judgment framing, and the instruction never includes SHA values, selected profiles, parsed summaries, or any other generated interpretation.
 `data/captain-shared.md` is not a config file and is never inlined into this instruction file or message.
 Homes whose allowlisted config files were all unchanged receive no config-reread message when no retry is pending.
 Different homes may receive different changed-file sets based on their pre-push destination bytes.
 Delivery uses the existing routed secondmate path (`fm-send`) with only a single-line `CONFIG_REREAD: <absolute generation-specific instruction path>` pointer; a failed instruction publication retains the generated exact bytes in a bounded private retry queue when possible, legacy retry reports remain recoverable, a failed publication or retry-marker write retains the exact generation until it can be delivered, a failed send records a per-generation durable retry marker when possible, and all failures surface a concrete `CONFIG_REREAD:` diagnostic without claiming the live agent already re-read the values.
 The propagation, generation publication, and pointer-delivery sequence holds one per-home inheritance lock, so concurrent mid-session pushes cannot deliver an older generation after a newer one.
-A newly launched or relaunched secondmate already reads its files at launch, so its pending config-reread generations are discarded or quarantined after cleanup failure and it needs no redundant live-agent config nudge unless propagation changes files after launch.
+Launch supersedes pending config-reread generations, so they are discarded or quarantined after cleanup failure and no redundant live-agent config nudge is sent unless propagation changes files after launch.
 Quarantined pre-relaunch generations are retained in bounded private history, and cleanup skips creating an empty quarantine generation.
 Successfully delivered generations are retained only within a bounded per-home state history, while pending generations remain until delivery succeeds or a launch supersedes them.
-A remote home receives the same allowlisted bytes through `fm-remote-inherit.sh` and gets one marked re-read instruction after a changed transfer.
+A remote home receives the same allowlisted bytes through `fm-remote-inherit.sh` and gets one marked re-read instruction after a changed transfer; that fixed instruction also carries the standing mandatory `config/worker-writing-style.md` intake rule, because it names no per-generation changed-item set.
 The parent records that nudge before delivery, retains it after a failed send, and retries the exact same route during locked bootstrap convergence.
 It does not receive a pointer to a primary-local generation path that cannot exist on that host.
 Inherited harness and runtime-backend defaults must not harden `fm-spawn` to reject a deliberate runtime choice that differs from those defaults.

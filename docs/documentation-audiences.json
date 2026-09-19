@@ -515,6 +515,18 @@
     {
       "path": "tests/captures/no-mistakes-v1.70.1/README.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-brief/absent-scout.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-brief/absent-secondmate.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "tests/fixtures/fm-brief/absent-ship.md",
+      "audience": "maintainer-verification"
     }
   ]
 }
