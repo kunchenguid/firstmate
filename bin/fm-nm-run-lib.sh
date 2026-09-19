@@ -4,7 +4,8 @@
 # ONE owner for the no-mistakes run-attribution primitives used by
 # fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
 # (pre-teardown run abort, see its "Fix 1" header comment). Crew-state binds
-# an EXECUTING run (pending, running, fixing, or ci) on the task's branch
+# an EXECUTING run (pending or running; also fixing or ci on the legacy
+# bare-status surface) on the task's branch
 # regardless of head (fm_nm_run_is_executing); every other run still needs
 # strict branch-and-head identity. Both callers then recognize a provable
 # pipeline-owned continuation through fm_nm_runs_status_for_worktree below:
@@ -346,6 +347,16 @@ fm_nm_run_is_parked() {  # <toon-output>
 # daemon died still saying `running`. The head-free route through it is the
 # caller's to license, and fm-crew-state.sh pairs it with an explicit
 # daemon-down probe for exactly that reason.
+# The accepted words span BOTH surfaces, which do not share a vocabulary. The
+# overview table fm_nm_select_run validates carries only
+# pending|running|completed|failed|cancelled (:196), so on the modern
+# selected-run route only pending and running ever reach here. The id-addressed
+# `axi status` DETAIL object also reports `fixing` and `ci`, which
+# fm-crew-state.sh has always classified at its full path, and on the legacy
+# bare-status route (no overview table, so the selector answers `unavailable`
+# and never validates a word) those two reach here as the crew's own live run.
+# Dropping them would report a fix round or a ci wait on a legacy surface as
+# idle, which is the misreport this predicate exists to prevent.
 fm_nm_run_is_executing() {  # <toon-output>
   fm_nm_run_is_active "$1" || return 1
   fm_nm_run_is_parked "$1" && return 1
@@ -380,17 +391,14 @@ fm_nm_run_is_executing() {  # <toon-output>
 #     ancestor, a terminal unresolvable row) prints nothing, so branch-name
 #     coincidence, arbitrary remote state, and other tasks' runs never match.
 # An older live row never displaces a newer terminal result.
-# When optional $5 is `live-any-head`, a newest same-branch row that is ACTIVE
-# (running or pending) is the answer whatever its head: the pipeline rebases the
-# branch, so a live row's head need not resolve to or descend from the worktree
-# head, and the older row that does match the local head is history. Only the
-# read-only current-state report passes it, and only when `axi status` answered
-# ANOTHER branch's run: a same-branch run the strict head rule rejected is
-# parked or terminal, and this coarse row cannot tell those apart. Teardown
-# never passes it.
+# There is no branch-name-only acceptance here: a live row whose head this copy
+# cannot tie to the worktree is not this worktree's run just because the branch
+# name matches. The one live bind is the EXECUTING record on the `axi status`
+# route (fm_nm_run_is_executing above), which the caller pairs with its own
+# liveness evidence.
 # Read-only: git reads resolve objects in place; custody never changes.
-fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head] [live-any-head]
-  local wt=$1 branch=$2 list=$3 expected_head=${4:-} live_any_head=${5:-}
+fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head]
+  local wt=$1 branch=$2 list=$3 expected_head=${4:-}
   local local_full row_full row st br sha day clock pr extra year_num month_num day_num max_day pending_st=''
   local decided=''
   local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 0
@@ -441,9 +449,6 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
         "$sha"*) ;;
         *) case "$sha" in "$expected_head"*) ;; *) break ;; esac ;;
       esac
-    fi
-    if [ "$live_any_head" = live-any-head ]; then
-      case "$st" in running|pending) decided=$st; break ;; esac
     fi
     row_full=$(fm_nm_resolve_commit "$wt" "$sha")
     if [ -n "$row_full" ]; then

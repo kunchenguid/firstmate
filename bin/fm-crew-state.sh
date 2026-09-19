@@ -37,7 +37,9 @@
 #      active or terminal (from `axi status`, or the coarse `no-mistakes runs`
 #      fallback)? Branch name alone is not enough: a historical run on a reused
 #      branch whose head was rewritten or diverged must not be attributed.
-#      A run EXECUTING on this crew's branch (pending, running, fixing, or ci)
+#      A run EXECUTING on this crew's branch (pending or running through the
+#      overview-backed route; also fixing or ci on the legacy bare-status
+#      surface, whose detail object carries those words)
 #      is authoritative REGARDLESS of head (fm_nm_run_is_executing in
 #      bin/fm-nm-run-lib.sh) as long as an explicit probe has not ANSWERED that
 #      the daemon is down (nm_daemon_answered_down): the pipeline rebases the
@@ -62,17 +64,18 @@
 #      pipeline-owned continuation - the branch's ACTIVE newest ledger row,
 #      anchored by the row immediately before it having ended at exactly this
 #      worktree's head (rule owned by fm_nm_runs_status_for_worktree in
-#      bin/fm-nm-run-lib.sh). In the coarse runs-ledger fallback, and only
-#      when `axi status` answered ANOTHER named branch's run, a newest
-#      same-branch row that is running or pending answers whatever its head -
-#      but, like every other head-free route, only while the daemon has not
-#      answered that it is down, so a live ledger row never binds on a dead
-#      instrument and the crew's own status log keeps the answer.
+#      bin/fm-nm-run-lib.sh). The coarse runs-ledger fallback has NO
+#      branch-name-only acceptance: an executing `axi status` record is the one
+#      live bind, so a ledger row that cannot be tied to this worktree's head
+#      never answers on branch name alone. A live coarse answer whose daemon has
+#      ANSWERED down reads unknown and names the dead instrument, exactly as the
+#      terminal record below does.
 #      fm_nm_select_run in bin/fm-nm-run-lib.sh owns complete run selection
 #      and ambiguity reporting. The selected run's id-addressed status must
 #      agree on id, branch, and live/terminal class before attribution;
 #      disagreement reports unknown with available candidate ids.
-#      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
+#      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working
+#      (the id-addressed detail read carries step words the overview does not),
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
@@ -604,6 +607,7 @@ nm_reclassify_failed_run_as_held_green() {
 # refused socket, timeout, non-zero answer - means the daemon is not provably
 # up, which is the only fact the coarse fallback needs.
 nm_daemon_probe_down() {
+  [ "$NM_DAEMON_ANSWER" = down ] && return 0
   fm_nm_run_checked "$WT" "$NM_TIMEOUT" daemon status >/dev/null || return 0
   return 1
 }
@@ -691,8 +695,8 @@ nm_ci_checks_state() {
 # active run reliably gets that run answered, even under concurrent load), or
 # it names this branch's run but the strict head rule rejected it - a run that
 # is parked or terminal, since an executing same-branch run binds before this
-# fallback is reached, so the ledger resolves it STRICTLY and only a
-# foreign-branch answer gets live-any-head. The real
+# fallback is reached. The ledger resolves every answer STRICTLY: it never
+# accepts a row on branch name alone. The real
 # run-listing command is the top-level `no-mistakes runs` (the `axi` surface
 # has no runs-listing subcommand; tests/fm-crew-state.test.sh owns the
 # 2026-07-02 dead-code incident history this fallback replaced).
@@ -828,23 +832,20 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # `[ -n "$RUN_OUT" ]`: an empty/timed-out primary call means the CLI
         # itself did not respond, so retrying it immediately with a second
         # bounded call would just double the wait for no better answer.
-        # `live-any-head` only for a foreign-branch answer: a same-branch run
-        # that reached here is parked or terminal, and a bare live ledger row
-        # can neither tell those apart nor license reusing that run's detail.
-        coarse_mode=""
-        if [ -n "$run_branch" ] && [ "$run_branch" != "$CREW_BRANCH" ]; then
-          coarse_mode=live-any-head
-        fi
-        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)" "" "$coarse_mode")
-        if [ -n "$COARSE_STATUS" ] \
-          && { [ "$(fm_nm_run_status_class "$COARSE_STATUS")" != live ] || ! nm_daemon_answered_down; }; then
+        COARSE_STATUS=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
+        if [ -n "$COARSE_STATUS" ]; then
           HAVE_RUN=1
           # A branch-matching answer the strict rule rejected is this branch's
           # own current run once the ledger proves the pipeline-owned
           # continuation, so its axi TOON is the authoritative run detail
           # (RUN_SOURCE stays full); only a foreign-branch answer leaves
-          # coarse status-word detail.
+          # coarse status-word detail. A live answer with the daemon answered
+          # down keeps the coarse status-word detail either way: the dead
+          # instrument has to be named, and the full TOON would print `working`.
           [ "$run_branch" = "$CREW_BRANCH" ] || RUN_SOURCE=coarse
+          if [ "$(fm_nm_run_status_class "$COARSE_STATUS")" = live ] && nm_daemon_answered_down; then
+            RUN_SOURCE=coarse
+          fi
         fi
       fi
     fi
@@ -865,7 +866,17 @@ if [ "$HAVE_RUN" = 1 ]; then
     # read above. The status event span remains independently available to the
     # supervisor through fm-classify-lib.sh's status_span_first_actionable.
     case "$COARSE_STATUS" in
-      pending|running) RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
+      pending|running)
+        # Same instrument as the failed row below, and the weaker record of the
+        # two: never finalized. With the daemon answered down nothing is
+        # executing this row, and the verdict has to say so rather than let a
+        # dead instrument read as work in progress.
+        if nm_daemon_answered_down; then
+          RUN_STATE=unknown
+          RUN_DETAIL="no-mistakes daemon unreachable; last ledger record $COARSE_STATUS - unverified"
+        else
+          RUN_STATE=working; RUN_DETAIL="validating (background run)"
+        fi ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
       failed)
         # The ledger row is terminal but the coarse path has no steps table

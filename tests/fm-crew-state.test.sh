@@ -2703,12 +2703,12 @@ EOF
   pass "coarse scan anchors the unresolvable active row instead of falling to an older one"
 }
 
-# The newest same-branch ledger row is ACTIVE at an unresolvable head and the
-# row before it sits at an OLDER local commit, so the ledger anchor proves
-# nothing. A running row on the task's branch is authoritative regardless of
-# head (the pipeline rebases and commits in its own checkout), so it still binds
-# through the coarse list and the older failed row never surfaces.
-test_coarse_live_row_binds_without_head_anchor() {
+# Coarse negative control: the anchor must end at EXACTLY this worktree's
+# head. The newest same-branch row is active at an unresolvable head, but the
+# row immediately before it sits at an OLDER local commit, so the ledger
+# proves nothing - unknown attribution stops the scan, never falls to the
+# older failed row, and the busy pane answers instead.
+test_coarse_mismatched_anchor_falls_to_pane_not_older_row() {
   reset_fakes
   local d old_short; d=$(new_case f10-coarse-no-anchor)
   make_repo_on_branch "$d/wt" fm/feat-f10g
@@ -2723,14 +2723,16 @@ test_coarse_live_row_binds_without_head_anchor() {
   failed     fm/feat-f10g ${old_short}  2026-08-27 12:09
 EOF
 )"
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" feat-f10g
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-f10g)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-f10g busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
   local out; out=$(run_crew_state "$d" feat-f10g)
-  assert_not_contains "$out" "state: failed" "a live newest row must not fall to the older failed row"
-  assert_contains "$out" "source: run-step" "the live newest row binds through the runs list without an anchor"
-  assert_contains "$out" "state: working" "the live run reads working"
-  assert_contains "$out" "validating (background run)" "coarse resolution keeps coarse run detail"
-  pass "coarse scan binds the newest live row regardless of head"
+  assert_not_contains "$out" "state: failed" "a mismatched anchor must not fall to the older failed row"
+  assert_not_contains "$out" "source: run-step" "unknown attribution must not bind a run"
+  assert_contains "$out" "state: working" "the busy crew still reads working through the pane fallback"
+  assert_contains "$out" "source: pane" "without an exact anchor the pane answers, not the runs rows"
+  pass "coarse scan with a mismatched anchor stays unknown and lets the pane answer"
 }
 
 # The same ledger with the newest row TERMINAL keeps the strict rule: a finished
@@ -3458,23 +3460,55 @@ branch_sync:
   pass 'a live rebased run beats an older failed run at the local head'
 }
 
-# The same live run reads working for every executing status word.
+# The same live run reads working for every EXECUTING status word the CLI can
+# actually deliver here. `fm_nm_select_run` validates the overview status column
+# against pending|running|completed|failed|cancelled, so those are the only live
+# words that reach the predicate; the overview and the id-addressed detail read
+# the same runs.status column, so the fixture carries one word in BOTH surfaces.
 test_live_rebased_run_reads_working_for_every_executing_status() {
   local status d rebased out
-  for status in pending running fixing ci; do
-    make_competing_runs_case "live-rebased-$status" running failed
+  for status in pending running; do
+    make_competing_runs_case "live-rebased-$status" "$status" failed
     d=$TMP_ROOT/live-rebased-$status
     rebased=$(make_rebased_head "$d/wt")
     FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed "/01NEW/s/,[a-f0-9]*,\"\"\$/,$rebased,\"\"/")
     FM_FAKE_RUN_HEAD=$rebased
     FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed "s/01RUN/01NEW/; s/status: running/status: $status/")"
     FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
-    FM_FAKE_CI_LOGS="CI checks running"
     out=$(run_crew_state "$d" competing)
     assert_contains "$out" 'state: working' "$status run with a rebased head reads working"
     assert_contains "$out" 'source: run-step' "$status run with a rebased head is run-step sourced"
     assert_not_contains "$out" 'state: failed' "$status run with a rebased head is never failed"
     pass "$status run with a rebased head reads working"
+  done
+}
+
+# The LEGACY bare-status surface carries run-level `fixing` and `ci`, which the
+# overview table's vocabulary does not include. The selector never validates a
+# word there (it answers `unavailable` with no table), so those runs are the
+# crew's own live run and must bind at a rebased head like any other.
+test_legacy_surface_binds_fixing_and_ci_at_a_rebased_head() {
+  local status d rebased out
+  for status in fixing ci; do
+    reset_fakes
+    d=$(new_case "legacy-live-$status")
+    make_repo_on_branch "$d/wt" fm/feat-legacylive
+    rebased=$(make_rebased_head "$d/wt")
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-legacylive.meta" "window=fm:fm-feat-legacylive" "worktree=$d/wt" "kind=ship" "harness=claude"
+    printf 'failed: earlier stage run\n' > "$d/state/feat-legacylive.status"
+    FM_FAKE_RUN_HEAD=$rebased
+    FM_FAKE_AXI_STATUS="$(run_running fm/feat-legacylive | sed "s/status: running/status: $status/")
+branch_sync:
+  state: synced"
+    FM_FAKE_RUNS_LIST=""
+    FM_FAKE_BUSY=0
+    arm_idle_record "$d/state" feat-legacylive
+    out=$(run_crew_state "$d" feat-legacylive)
+    assert_contains "$out" "source: run-step" "a legacy $status run at a rebased head binds"
+    assert_contains "$out" "state: working" "a legacy $status run reads working"
+    assert_not_contains "$out" "state: failed" "the stale failed event must not answer for a live $status run"
+    pass "legacy surface binds a $status run at a rebased head"
   done
 }
 
@@ -3583,8 +3617,9 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-anchor
   out=$(run_crew_state "$d" feat-anchor)
-  assert_not_contains "$out" "source: run-step" "an anchored live row must not bind with the daemon answering down"
-  assert_contains "$out" "source: status-log" "the status log answers for the unbound anchored row"
+  assert_contains "$out" "state: unknown" "an anchored live row must not read as work with the daemon answering down"
+  assert_contains "$out" "daemon unreachable" "the dead instrument is named rather than dropped silently"
+  assert_not_contains "$out" "state: working" "a dead instrument never reads as work in progress"
   pass "the anchored continuation route obeys the daemon rule too"
 }
 
@@ -3761,49 +3796,31 @@ branch_sync:
 }
 
 # The coarse live row is evidence from the same instrument as the coarse failed
-# row, so an answered-down daemon must unverify it the same way.
+# row, so an answered-down daemon must unverify it the same way - and say so.
+# The row sits at this worktree's own head, so identity is proven and only
+# liveness is in question.
 test_coarse_live_row_with_daemon_down_is_unverified() {
   reset_fakes
-  local d rebased out; d=$(new_case coarse-live-daemon-down)
+  local d local_short out; d=$(new_case coarse-live-daemon-down)
   make_repo_on_branch "$d/wt" fm/feat-cldd
-  rebased=$(make_rebased_head "$d/wt")
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-cldd.meta" "window=fm:fm-feat-cldd" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'working: implementing\n' > "$d/state/feat-cldd.status"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   running    fm/other-crew aaaaaaa  2026-08-23 14:00
-  running    fm/feat-cldd ${rebased}  2026-08-23 13:53
+  running    fm/feat-cldd ${local_short}  2026-08-23 13:53
 EOF
 )"
   FM_FAKE_DAEMON_DOWN=1
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-cldd
   out=$(run_crew_state "$d" feat-cldd)
-  assert_not_contains "$out" "source: run-step" "a live ledger row must not bind with the daemon answering down"
-  assert_contains "$out" "source: status-log" "the status log answers for the unbound ledger row"
-  pass "a coarse live row does not bind with the daemon answering down"
-}
-
-# `live-any-head` is documented as the FOREIGN-branch concession. An `axi status`
-# answer with no branch: key at all is not a foreign-branch answer - it is an
-# unreadable one - so the coarse route must stay strict and a same-branch row at
-# an unresolvable head must not bind.
-test_branchless_status_does_not_enable_live_any_head() {
-  reset_fakes
-  local d out; d=$(new_case branchless-status)
-  make_repo_on_branch "$d/wt" fm/feat-bl
-  make_fakebin "$d" >/dev/null
-  fm_write_meta "$d/state/feat-bl.meta" "window=fm:fm-feat-bl" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'working: implementing\n' > "$d/state/feat-bl.status"
-  FM_FAKE_AXI_STATUS="$(run_running fm/feat-bl | grep -v '^  branch:')"
-  FM_FAKE_RUNS_LIST="  running    fm/feat-bl f0f0f0f0  2026-08-27 13:53"
-  FM_FAKE_BUSY=0
-  arm_idle_record "$d/state" feat-bl
-  out=$(run_crew_state "$d" feat-bl)
-  assert_not_contains "$out" "source: run-step" "a branchless answer must not license the coarse live-any-head route"
-  assert_contains "$out" "source: status-log" "the status log answers instead"
-  pass "a branchless axi answer keeps the coarse route strict"
+  assert_contains "$out" "state: unknown" "a live ledger row must not read as work with the daemon answering down"
+  assert_contains "$out" "daemon unreachable" "the dead instrument is named in the verdict"
+  assert_contains "$out" "unverified" "the record is reported unverified, not working"
+  pass "a coarse live row with the daemon down reads unverified"
 }
 
 # A coarse ledger row keeps a PARKED run's status word at `running`
@@ -3812,16 +3829,16 @@ test_branchless_status_does_not_enable_live_any_head() {
 # needs-decision event was superseded.
 test_coarse_live_row_does_not_claim_gate_superseded() {
   reset_fakes
-  local d rebased out; d=$(new_case coarse-gate-signal)
+  local d local_short out; d=$(new_case coarse-gate-signal)
   make_repo_on_branch "$d/wt" fm/feat-cg
-  rebased=$(make_rebased_head "$d/wt")
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-cg.meta" "window=fm:fm-feat-cg" "worktree=$d/wt" "kind=ship" "harness=claude"
   printf 'needs-decision: review gate has an ask-user finding\n' > "$d/state/feat-cg.status"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   running    fm/other-crew aaaaaaa  2026-08-23 14:00
-  running    fm/feat-cg ${rebased}  2026-08-23 13:53
+  running    fm/feat-cg ${local_short}  2026-08-23 13:53
 EOF
 )"
   FM_FAKE_BUSY=0
@@ -3833,9 +3850,11 @@ EOF
   pass "a coarse live row never claims the gate event was superseded"
 }
 
-# Coarse ledger only (axi answers another branch): the newest row on the task's
-# branch is running at a rebased head that resolves but diverged.
-test_coarse_live_rebased_row_is_authoritative() {
+# Coarse negative control (axi answers another branch): a live row on the task's
+# branch at a rebased head is not tied to this worktree by anything but the
+# branch name, so the ledger must not answer for it and the older failed row
+# must not answer either.
+test_coarse_live_rebased_row_is_not_attributed() {
   reset_fakes
   local d rebased short out; d=$(new_case coarse-live-rebased)
   make_repo_on_branch "$d/wt" fm/feat-rebased2
@@ -3843,6 +3862,7 @@ test_coarse_live_rebased_row_is_authoritative() {
   rebased=$(make_rebased_head "$d/wt")
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-rebased2.meta" "window=fm:fm-feat-rebased2" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-rebased2.status"
   FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   running    fm/other-crew aaaaaaa  2026-08-23 14:00
@@ -3850,11 +3870,13 @@ test_coarse_live_rebased_row_is_authoritative() {
   failed     fm/feat-rebased2 ${short}  2026-08-23 12:09
 EOF
 )"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-rebased2
   out=$(run_crew_state "$d" feat-rebased2)
-  assert_contains "$out" 'state: working' 'coarse live rebased row reads working'
-  assert_contains "$out" 'source: run-step' 'coarse live rebased row is run-step sourced'
-  assert_not_contains "$out" 'state: failed' 'the older failed row must not read as current'
-  pass 'coarse live rebased row is authoritative over an older failed row'
+  assert_not_contains "$out" 'source: run-step' 'a branch-name-only live row must not bind'
+  assert_not_contains "$out" 'state: failed' 'the older failed row must not answer either'
+  assert_contains "$out" 'source: status-log' 'the status log answers without an attributable run'
+  pass 'a coarse live row at a rebased head is not attributed'
 }
 
 # Negative control: once the rebased run has FAILED it is finished history on a
@@ -4156,7 +4178,7 @@ test_local_advanced_past_run_head_invalidates
 test_pipeline_owned_active_run_beats_superseded_failed_row
 test_failed_run_with_no_later_run_still_surfaces
 test_coarse_unresolvable_active_row_never_falls_to_older_row
-test_coarse_live_row_binds_without_head_anchor
+test_coarse_mismatched_anchor_falls_to_pane_not_older_row
 test_coarse_terminal_row_at_foreign_head_not_attributed
 test_executing_run_binds_without_pipeline_owned_sync
 test_non_pipeline_owned_parked_unresolvable_head_not_attributed
@@ -4192,6 +4214,7 @@ test_superseded_cancelled_run_preserves_replacement_gate
 test_live_rebased_run_beats_older_failed_run_at_local_head
 test_live_rebased_run_reads_working_for_every_executing_status
 test_legacy_live_rebased_run_is_authoritative
+test_legacy_surface_binds_fixing_and_ci_at_a_rebased_head
 test_live_record_at_diverged_head_needs_a_live_daemon
 test_live_record_at_diverged_head_binds_while_daemon_answers
 test_anchored_continuation_still_needs_a_live_daemon
@@ -4202,9 +4225,8 @@ test_selected_run_anchored_continuation_needs_a_live_daemon
 test_selected_run_anchored_continuation_binds_while_daemon_answers
 test_unanswered_daemon_probe_does_not_suppress_live_run
 test_coarse_live_row_with_daemon_down_is_unverified
-test_branchless_status_does_not_enable_live_any_head
 test_coarse_live_row_does_not_claim_gate_superseded
-test_coarse_live_rebased_row_is_authoritative
+test_coarse_live_rebased_row_is_not_attributed
 test_terminal_rebased_run_is_not_attributed
 test_competing_live_runs_report_unknown_with_both_ids
 test_newer_failed_run_is_not_hidden_by_older_live_run
