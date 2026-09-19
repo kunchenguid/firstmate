@@ -593,13 +593,14 @@ write_task_meta() {  # <case-dir> <id> <kind> <mode> [extra-line...]
 run_spawn() {  # <case-dir> <args...>
   local case_dir=$1
   shift
-  # A claude spawn pre-registers workspace trust in the launching user's own
-  # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
-  # without it this suite would write the developer's real ~/.claude.json.
+  # A claude or kimi spawn pre-registers workspace trust in the launching
+  # user's own store (bin/fm-claude-trust.sh, bin/fm-kimi-trust.sh), so it runs
+  # against a throwaway HOME with both store overrides cleared; without that
+  # this suite would write the developer's real ~/.claude.json or ~/.kimi-code.
   mkdir -p "$case_dir/user-home"
   FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" HOME="$case_dir/user-home" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
-    CLAUDE_CONFIG_DIR='' \
+    CLAUDE_CONFIG_DIR='' KIMI_CODE_HOME='' \
     PATH="$case_dir/fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }
@@ -1501,6 +1502,8 @@ test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
 
 test_dispatch_interruption_during_kimi_readiness_fails_before_commit() {
   local case_dir home id out rc=0
+  command -v node >/dev/null 2>&1 \
+    || fail "test needs node: bin/fm-kimi-trust.sh refuses without it and the spawn would fail before readiness"
   id=atomic-dispatch-kimi-readiness-signal-b5
   case_dir=$(make_home dispatch-kimi-readiness-signal "$id")
   home=$(home_of "$case_dir")

@@ -290,15 +290,25 @@
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
-# Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog.
-# Its launch-readiness loop reads the visible viewport - so the spawn refuses at
-# preflight on a backend with no viewport-bounded capture - recognizes the
-# complete dialog, re-selects the already highlighted affirmative option on
-# every poll the complete dialog is still there, refuses any ready verdict while
-# dialog text is on that pane, and requires two consecutive captures that are
-# each ready and dialog-free before the ordinary readiness gates can pass. A
-# blank viewport read proves nothing either way: it costs the poll and restarts
-# that count. A viewport read that fails outright fails readiness at once.
+# Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog,
+# so every crewmate/scout kimi launch pre-registers the worktree in Kimi's own
+# per-root trust store through bin/fm-kimi-trust.sh before any per-task state
+# exists, and a failed registration REFUSES the spawn exactly as claude's does
+# (the claude paragraph below owns that contract). Trust there is per exact
+# root and never inherited, which is why the captain's already trusted home did
+# nothing for the worktrees beneath it. The launch-readiness loop keeps the
+# live answer as the backstop for a dialog that renders anyway: it reads the
+# visible viewport - so the spawn refuses at preflight on a backend with no
+# viewport-bounded capture - recognizes the complete dialog, re-selects the
+# already highlighted affirmative option on every poll the complete dialog is
+# still there, refuses any ready verdict while dialog text is on that pane, and
+# requires two consecutive captures that are each ready and dialog-free before
+# the ordinary readiness gates can pass. A blank viewport read proves nothing
+# either way: it costs the poll and restarts that count. A viewport read that
+# fails outright fails readiness at once, and a dialog seen on a pre-registered
+# worktree is reported as a trust failure naming both of its causes - an
+# unhonoured record or a store the pane did not read - never as a delivery
+# drop.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
@@ -326,7 +336,8 @@
 # resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
 # the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
 # park owns that home's supervision (docs/supervision-protocols/cursor.md).
-# claude is the one harness whose pre-launch setup can REFUSE the spawn: before
+# claude and kimi are the harnesses whose pre-launch setup can REFUSE the spawn
+# (kimi's registration is described above; this paragraph is claude's). Before
 # any per-task state exists, and before its worktree .claude/settings.local.json
 # hooks are written, every claude launch pre-registers the directory the pane
 # starts in - the task worktree, or the secondmate home for a --secondmate spawn -
@@ -3384,6 +3395,17 @@ kimi_ready_signal_is_present() { # <plain-pane-capture>
   kimi_composer_is_empty
 }
 
+# What the trust-dialog diagnostics append when the worktree was pre-registered
+# before launch (bin/fm-kimi-trust.sh). A dialog that renders anyway is a trust
+# problem, not a delivery one - three consecutive dispatches were once read as
+# pointer drops because nothing named the dialog underneath - but it has two
+# causes and the diagnostic names both rather than sending the operator down
+# one: the record was not honoured, or the pane read a different store.
+kimi_trust_preregistered_note() {
+  [ "$KIMI_TRUST_PREREGISTERED" -eq 1 ] || return 0
+  printf '%s' "; the worktree was pre-registered in Kimi's trust store before launch, so either Kimi did not honour that record (check bin/fm-kimi-trust.sh against the installed Kimi's store format) or the pane read a different store because KIMI_CODE_HOME is not forwarded onto the launch"
+}
+
 kimi_wait_for_ready() {
   local pane capture_rc i=0 max=${FM_KIMI_READY_POLLS:-60} interval=${FM_KIMI_POLL_INTERVAL:-0.5}
   local trust_enters=0 trust_seen=0 trust_still_visible=0 trust_markers_pending=0
@@ -3440,11 +3462,11 @@ kimi_wait_for_ready() {
     [ "$i" -ge "$max" ] || sleep "$interval"
   done
   if [ "$trust_still_visible" -eq 1 ]; then
-    KIMI_READY_FAILURE_DETAIL="kimi trust dialog did not clear after selecting 'Trust this folder' on $trust_enters poll(s); saw 'Trust this folder?', the navigation hint, selected 'Trust this folder', and the negative Don't trust option"
+    KIMI_READY_FAILURE_DETAIL="kimi trust dialog did not clear after selecting 'Trust this folder' on $trust_enters poll(s); saw 'Trust this folder?', the navigation hint, selected 'Trust this folder', and the negative Don't trust option$(kimi_trust_preregistered_note)"
   elif [ "$trust_seen" -eq 1 ]; then
-    KIMI_READY_FAILURE_DETAIL="kimi trust dialog was answered but the pane never advanced to a verified ready signal; saw 'Trust this folder?', the navigation hint, selected 'Trust this folder', and the negative Don't trust option"
+    KIMI_READY_FAILURE_DETAIL="kimi trust dialog was answered but the pane never advanced to a verified ready signal; saw 'Trust this folder?', the navigation hint, selected 'Trust this folder', and the negative Don't trust option$(kimi_trust_preregistered_note)"
   elif [ "$trust_markers_pending" -eq 1 ]; then
-    KIMI_READY_FAILURE_DETAIL="kimi did not show a verified ready signal before brief delivery; trust dialog text stayed on screen without the complete dialog, so the pane was never safe to answer or to treat as ready"
+    KIMI_READY_FAILURE_DETAIL="kimi did not show a verified ready signal before brief delivery; trust dialog text stayed on screen without the complete dialog, so the pane was never safe to answer or to treat as ready$(kimi_trust_preregistered_note)"
   fi
   return 1
 }
@@ -3762,7 +3784,19 @@ fi
 # path that was not pre-registered, refuses to count a busy turn as ready until
 # it has done so. agy is crewmate/scout only (refused above for secondmate), so
 # only the worktree shape applies.
+# kimi gates a fresh worktree behind its own folder-trust dialog and honours a
+# per-root record written ahead of launch (bin/fm-kimi-trust.sh, whose header
+# owns the store format, the scope test, and why it has no secondmate-home
+# mode). Its dialog preselects the safe answer like agy's, but three
+# consecutive live dispatches proved the post-launch answer is not a control
+# firstmate can rely on: the pane wedged on the dialog every time and every
+# failure read as a delivery drop. So a failed registration is fatal here, the
+# claude contract, and the post-launch gate (kimi_wait_for_ready) stays only
+# as the backstop. A secondmate kind gets no registration and so still depends
+# on that backstop: the helper has no secondmate-home mode yet, which its
+# header records as a gap rather than a decided scope.
 AGY_TRUST_PREREGISTERED=0
+KIMI_TRUST_PREREGISTERED=0
 case "$HARNESS" in
 claude*)
   if [ "$KIND" = secondmate ]; then
@@ -3782,6 +3816,15 @@ agy)
     else
       echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
     fi
+  fi
+  ;;
+kimi)
+  if [ "$KIND" != secondmate ]; then
+    if ! "$FM_ROOT/bin/fm-kimi-trust.sh" "$WT" "$PROJ_ABS" >/dev/null; then
+      echo "error: could not pre-register Kimi workspace trust for $WT; refusing to launch a kimi worker that would wedge on the folder-trust dialog; inspect window $T" >&2
+      exit 1
+    fi
+    KIMI_TRUST_PREREGISTERED=1
   fi
   ;;
 esac

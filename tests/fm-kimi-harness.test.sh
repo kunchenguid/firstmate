@@ -20,6 +20,11 @@ KIMI_RUNTIME_TASK_TMP=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
+# bin/fm-kimi-trust.sh writes Kimi's trust record through node, and the spawn
+# refuses without it, so the minimal spawn PATH carries the real node the way
+# it carries the real jq.
+NODE_BIN=$(command -v node) || fail "test needs node"
+if command -v sha256sum >/dev/null 2>&1; then SHA256=sha256sum; else SHA256="shasum -a 256"; fi
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 cleanup_kimi_harness() {
@@ -205,6 +210,7 @@ SH
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
+  ln -s "$NODE_BIN" "$fakebin/node"
   printf '%s\n' "$fakebin"
 }
 
@@ -240,7 +246,7 @@ EOF
 run_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
   shift 6
-  HOME="$home" FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+  HOME="$home" KIMI_CODE_HOME='' FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
@@ -271,7 +277,7 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp
+  local id rec out rc launch pointer brief_real meta task_tmp wt_real record
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -309,7 +315,15 @@ test_kimi_launch_then_send_is_verified() {
     "kimi spawn did not install its guarded global hook region"
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
   assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
-  pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
+  # The worktree must be trusted in Kimi's own per-root store BEFORE the
+  # launch, under the exact name Kimi derives (wd_<slug>_<sha256 prefix of the
+  # resolved path>), or the pane parks on the folder-trust dialog and the
+  # pointer above lands in front of it.
+  wt_real=$(cd "$WT_DIR" && pwd -P)
+  record="$HOME_DIR/.kimi-code/workspace-trust/wd_wt_$(printf '%s' "$wt_real" | $SHA256 | cut -c1-12)"
+  assert_present "$record" "kimi spawn did not pre-register its worktree in Kimi's trust store"
+  assert_grep "\"root\":\"$wt_real\"" "$record" "kimi trust record does not name the resolved worktree"
+  pass "fm-spawn: kimi pre-trusts its worktree, launches, delivers its brief, and registers a guarded turn-end token"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
@@ -811,7 +825,40 @@ test_kimi_stuck_trust_dialog_fails_before_delivery() {
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "Kimi pointer was sent through a stuck trust dialog"
   assert_grep 'failed: kimi trust dialog did not clear' "$HOME_DIR/state/$id.status" \
     "stuck Kimi trust dialog did not leave a supervisor-visible failure"
+  # The worktree was pre-registered before launch, so a dialog on screen is a
+  # trust failure; the diagnostic must say so, and must name both causes rather
+  # than let the next reader conclude delivery dropped or chase the wrong one.
+  assert_contains "$out" "pre-registered in Kimi's trust store" \
+    "a trust dialog on a pre-registered worktree was not reported as a trust failure"
+  assert_contains "$out" "did not honour that record" \
+    "the trust diagnostic did not offer the unhonoured-record cause"
+  assert_contains "$out" "read a different store" \
+    "the trust diagnostic did not offer the different-store cause"
   pass "fm-spawn: a Kimi trust dialog must visibly clear before brief delivery"
+}
+
+# The registration is fatal, the claude contract: a worker launched without it
+# wedges on the dialog before it reads anything, so the spawn refuses before
+# any launch, pointer, task record, busy record, or temp root exists. A regular
+# file where the store directory belongs is one way the helper cannot write.
+test_kimi_spawn_refuses_when_trust_cannot_be_registered() {
+  local id rec out rc
+  id="kimi-trust-refused-$$"
+  rec=$(make_spawn_case trust-refused "$id")
+  read_spawn_record "$rec"
+  : > "$HOME_DIR/.kimi-code/workspace-trust"
+  rc=0
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a Kimi spawn whose trust registration failed should refuse"
+  assert_contains "$out" "could not pre-register Kimi workspace trust" \
+    "the refused Kimi spawn did not name the trust registration as the reason"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "Kimi was launched although its worktree could not be trusted"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "a brief pointer was sent to a Kimi launch that was refused"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused Kimi spawn published a task record"
+  [ ! -e "$HOME_DIR/state/$id.busy-state" ] || fail "a refused Kimi spawn stranded a busy record"
+  [ ! -e "$HOME_DIR/state/$id.busy-gen" ] || fail "a refused Kimi spawn stranded a busy generation"
+  [ ! -e "/tmp/fm-$id" ] || { rm -rf "/tmp/fm-$id"; fail "a refused Kimi spawn stranded a temp root no teardown can find"; }
+  pass "fm-spawn: a Kimi spawn refuses, before any launch or task state, when its worktree trust cannot be registered"
 }
 
 test_kimi_trust_detection_requires_the_complete_dialog() {
@@ -1013,6 +1060,7 @@ test_kimi_blank_frame_between_banners_restarts_the_ready_count
 test_kimi_failed_viewport_read_fails_readiness_at_once
 test_kimi_partial_trust_dialog_blocks_the_ready_verdict
 test_kimi_stuck_trust_dialog_fails_before_delivery
+test_kimi_spawn_refuses_when_trust_cannot_be_registered
 test_kimi_trust_detection_requires_the_complete_dialog
 test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity

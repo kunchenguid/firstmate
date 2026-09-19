@@ -508,6 +508,69 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Kimi workspace trust
+
+Verified 2026-09-19 on Kimi Code CLI 2.0.1, Linux x86_64, tmux 3.7c.
+Kimi gates every folder it has not trusted behind a `Trust this folder?` dialog before it creates a session, and no launch flag suppresses it.
+
+```sh
+kimi --version
+kimi --help | grep -ci trust
+```
+
+```
+2.0.1
+0
+```
+
+The store's layout was established from the installed executable's own bundled source, which `strings` exposes, and then checked against a record Kimi had already written on this machine.
+The functions are `encodeWorkDirKey` and `slugifyWorkDirName` in `_base/utils/workdir-slug.ts`, `trustKey`, `readWorkspaceTrust`, and `writeWorkspaceTrust` in `workspace/workspaceTrust/trustRecord.ts`, `canonicalWorkspaceRoot` in `_base/utils/paths.ts`, the JSON codec `JSON.stringify(value)` in `persistence/backends/node-fs/atomicDocumentStore.ts`, and `resolveKimiHome`, which reads `KIMI_CODE_HOME` before `~/.kimi-code`.
+`readWorkspaceTrust` looks up one key derived from the exact working directory and never walks ancestors, and the TUI's startup gate (`maybeRunWorkspaceTrustPrompt`) shows the dialog whenever that lookup for `process.cwd()` is false, whether or not the folder has project MCP configuration.
+
+```sh
+strings -n 6 ~/.kimi-code/bin/kimi | grep -c 'WORKDIR_KEY_PREFIX = "wd_"'
+stat -c '%a %n' ~/.kimi-code/workspace-trust ~/.kimi-code/workspace-trust/wd_bemsas_495d3edf4d70
+printf '%s' /home/bemsas | sha256sum | cut -c1-12
+```
+
+```
+1
+700 /home/bemsas/.kimi-code/workspace-trust
+600 /home/bemsas/.kimi-code/workspace-trust/wd_bemsas_495d3edf4d70
+495d3edf4d70
+```
+
+The record Kimi wrote for the home directory carries exactly the name `bin/fm-kimi-trust.sh` derives, the store directory is mode 0700, and the record is mode 0600; `tests/fm-kimi-trust.test.sh` pins that derivation portably for dotted, spaced, punctuated, non-ASCII, over-long, and empty-slug basenames, the one-line record body, both modes, idempotency, preservation of unrelated records, and every refusal.
+That home-directory record is also the evidence that trust is not inherited: it existed throughout the three failed dispatches and did nothing for the worktrees beneath it.
+
+Suppression itself was then observed against the installed Kimi with a control arm and a treatment arm, through the guard that refreshes this record.
+The control arm launches an unregistered fresh linked worktree with the same launch line `bin/fm-spawn.sh` types, waits for either the dialog or a ready composer, and passes only on the dialog; it then sends the single Escape that revealed the dialog under the failed spawns, which is Kimi's `Don't trust` answer, and checks that declining wrote nothing.
+The treatment arm registers a sibling worktree through `bin/fm-kimi-trust.sh`, launches it identically, requires two consecutive viewport captures that are ready and free of dialog text, delivers a brief pointer the way the spawn does, and waits for the brief's computed answer.
+
+```sh
+FM_KIMI_TRUST_LIVE=1 tests/fm-kimi-trust-live-e2e.test.sh
+```
+
+```
+ok - control arm: kimi 2.0.1 parks an unregistered fresh worktree on the folder-trust dialog
+ok - control arm: declining the dialog exits kimi and records nothing
+ok - treatment arm: the helper registered /home/bemsas/.kimi-code/workspace-trust/wd_treatment_d30df9eeebe6
+ok - treatment arm: kimi 2.0.1 launched the pre-registered worktree straight to a ready composer
+ok - treatment arm: the brief pointer was delivered (after 1 re-submitted Enter)
+ok - treatment arm: kimi 2.0.1 reached its brief and ran it in the pre-registered worktree with no key pressed on its behalf
+ok - treatment arm: /exit stopped the kimi process
+ok - cleanup: the lab record was removed from /home/bemsas/.kimi-code/workspace-trust and verified absent
+```
+
+The pre-registered worker reached its brief with no key pressed on its behalf, which is the definition of done for the fix.
+The one re-submitted Enter is Kimi swallowing a keypress inside its startup window, the retry hazard the delivery core already covers; it is not a trust event, and the dialog never rendered on that pane.
+
+Three limitations belong beside that result.
+The guard writes into the operator's real store, because Kimi's credentials live in the same home and staging a throwaway `KIMI_CODE_HOME` would only reach a login prompt; it touches `workspace-trust/` alone, refuses to start when a record for either lab worktree already exists, removes only the record it created, and verifies it is gone, while Kimi's own session artifacts for the treatment run stay where Kimi puts them.
+`bin/fm-spawn.sh` does not forward `KIMI_CODE_HOME` onto the launch the way it forwards `CLAUDE_CONFIG_DIR`, so a pane whose shell carries a different value reads a different store and meets the dialog; the spawn's live answer remains the backstop for that case, and its diagnostic now names both trust causes, the unhonoured record and the different store, instead of asserting one.
+Kimi 2.0.1 launched with `KIMI_CODE_HOME` exported empty does not fall back to the default home but exits at startup with `error: failed to start shell: ENOENT: no such file or directory, mkdir ''` before any dialog, so the guard must run with the variable unset, and the unit suites that set it empty never launch a real kimi.
+No kimi secondmate home is registered, because `bin/fm-kimi-trust.sh` has only the worktree shape; a kimi secondmate therefore still meets the dialog and still depends on the spawn's live backstop, and closing that gap needs a `--secondmate-home` mode like the claude helper's rather than a widening of the worktree scope test.
+
 ## Codex hook trust
 
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.
@@ -902,7 +965,7 @@ The CLI matrix was checked directly:
 | Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter. |
 | Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
-| Viewport capture | `herdr pane read <pane> --source visible` | Verified on 2026-09-17 against Herdr 0.8.0 (protocol 19): `herdr pane read --help` documents `--source <SOURCE>` with `[possible values: visible, recent, recent-unwrapped, detection]`; `--source visible` exited 0 and returned 51 lines (the viewport) while `--source recent --lines 200` returned 200. This is the viewport-only read behind `fm_backend_herdr_visible_capture`, which Kimi's trust-dialog gate requires. |
+| Viewport capture | `herdr pane read <pane> --source visible` | Verified on 2026-09-17 against Herdr 0.8.0 (protocol 19): `herdr pane read --help` documents `--source <SOURCE>` with `[possible values: visible, recent, recent-unwrapped, detection]`; `--source visible` exited 0 and returned 51 lines (the viewport) while `--source recent --lines 200` returned 200. This is the viewport-only read behind `fm_backend_herdr_visible_capture`, which Kimi's trust-dialog backstop gate requires. |
 | Native state | `herdr agent get <pane>` | Working and done transitions were visible on some harnesses; live Claude Code 2.1.236 on Herdr 0.8.0 kept `agent_status=idle` for an entire landed turn, including a multi-second tool call, so submit confirmation falls through to the shared composer verdict. Native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
 | Close | `herdr pane close <pane> --session <name>` | The exact one-pane task tab closed; closing a final tab could remove the workspace. |
