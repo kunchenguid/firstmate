@@ -310,6 +310,27 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: agy:-  provider=agy  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible' "agy uses its resolver-only authoritative quota provider"
 assert_contains "$out" "  profile: --harness 'agy'" "provider-less agy rule resolves"
 
+AUTH_REQUIRED_AGY="$TMP_ROOT/auth-required-agy.json"
+jq '(.providers[] | select(.provider == "agy") | .state) = {
+  "status":"auth_required","stale":false,"error":"Antigravity sign-in required"
+} |
+(.providers[] | select(.provider == "agy") | .quotaSemantics) = {
+  "status":"unknown","effectiveAvailability":[]
+}' "$QUOTA" > "$AUTH_REQUIRED_AGY"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$AUTH_REQUIRED_AGY" run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:-  provider=agy  -> eligible, unranked: provider agy unmeasured (unknown) [auth_required: Antigravity sign-in required]: disclosed uncertainty' "auth_required remains unranked and exposes the external authentication boundary"
+assert_not_contains "$out" 'candidate: agy:-  provider=agy  scope=' "auth_required never fabricates a quota scope"
+assert_not_contains "$out" 'profile: --harness '\''agy'\''' "auth_required never authorizes AGY dispatch"
+pass "auth_required AGY evidence stays unknown while its external cause remains visible"
+
+TOP_UNKNOWN_AGY="$TMP_ROOT/top-unknown-agy.json"
+jq '(.providers[] | select(.provider == "agy") | .quotaSemantics) |= (.status = "unknown" | .effectiveAvailability[0].scope = "gemini_only")' "$QUOTA" > "$TOP_UNKNOWN_AGY"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TOP_UNKNOWN_AGY" run code out err "$BRIEF"
+assert_contains "$out" 'candidate: agy:-  provider=agy  scope=gemini_only  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible' "known Agy scope remains rankable under top-level unknown semantics"
+assert_contains "$out" "  profile: --harness 'agy'" "known Agy sub-scope can win dispatch"
+
 GEMINI_RULE="$TMP_ROOT/gemini-rule.json"
 printf '%s\n' '{"rules":[{"when":"Gemini work.","use":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}}]}' > "$GEMINI_RULE"
 cp "$GEMINI_RULE" "$RULES"

@@ -22,6 +22,7 @@ UNKNOWN_EXHAUSTED="$LAB/unknown-exhausted.json"
 KNOWN_UNKNOWN="$LAB/known-unknown.json"
 KNOWN_EMPTY="$LAB/known-empty.json"
 SEMANTICS_MISMATCH="$LAB/semantics-mismatch.json"
+MALFORMED_UNKNOWN_ROW="$LAB/malformed-unknown-row.json"
 PARTIAL="$LAB/partial.json"
 NO_APPLICABLE="$LAB/no-applicable.json"
 APPLICABLE_VETO="$LAB/applicable-veto.json"
@@ -284,11 +285,18 @@ ok "known-empty quota fails closed"
 
 jq '(.providers[] | select(.provider == "claude").quotaSemantics.status) = "unknown"' \
   "$LAB/captured.json" > "$SEMANTICS_MISMATCH"
-if err=$(call_choose --snapshot "$SEMANTICS_MISMATCH" --candidate claude:default 2>&1); then
-  fail "unknown semantics with known entries unexpectedly dispatched"
+out=$(call_choose --snapshot "$SEMANTICS_MISMATCH" --candidate claude:default)
+[ "$out" = "claude default" ] || fail "unknown top-level status with known entries returned: $out"
+ok "top-level unknown status permits known availability entries"
+
+jq '(.providers[] | select(.provider == "claude").quotaSemantics.status) = "unknown" |
+    (.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability[0]) = {"scope":"all_models","status":"known"}' \
+  "$LAB/captured.json" > "$MALFORMED_UNKNOWN_ROW"
+if err=$(call_choose --snapshot "$MALFORMED_UNKNOWN_ROW" --candidate claude:default 2>&1); then
+  fail "malformed known row under unknown provider status unexpectedly dispatched"
 fi
-[ "$err" = "error: invalid quota-axi provider data" ] || fail "semantics mismatch returned: $err"
-ok "semantics and availability statuses must agree"
+[ "$err" = "error: invalid quota-axi provider data" ] || fail "malformed known row returned: $err"
+ok "malformed known row under unknown provider status fails closed"
 
 jq '(.providers[] | select(.provider == "claude").quotaSemantics.effectiveAvailability) = [{"scope":"all_models","status":"unknown","runway":{"status":"exhausted_now"}}]' \
   "$LAB/captured.json" > "$UNKNOWN_EXHAUSTED"

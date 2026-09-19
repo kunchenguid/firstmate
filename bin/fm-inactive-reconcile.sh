@@ -475,6 +475,30 @@ report_child() { # <id>
   report_child_ledger_locked "$id" "$meta"
 }
 
+reap_terminal_child_locked() { # <id> <meta>
+  local id=$1 meta=$2 backend target pids pid
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
+  backend=$(clean_field "$(meta_field "$meta" backend)")
+  [ -n "$backend" ] || backend=tmux
+  target=$(clean_field "$(meta_field "$meta" window)")
+  [ -n "$target" ] || return 0
+  if [ "$backend" = tmux ] && command -v tmux >/dev/null 2>&1; then
+    pids=$(tmux list-panes -t "$target" -F '#{pane_pid}' 2>/dev/null || true)
+    for pid in $pids; do
+      if [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; then
+        kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+      fi
+    done
+  fi
+  if [ -f "$SCRIPT_DIR/fm-backend.sh" ]; then
+    # shellcheck source=bin/fm-backend.sh
+    . "$SCRIPT_DIR/fm-backend.sh"
+    fm_backend_kill "$backend" "$target" 2>/dev/null || true
+  elif [ "$backend" = tmux ] && command -v tmux >/dev/null 2>&1; then
+    tmux kill-window -t "$target" 2>/dev/null || true
+  fi
+}
+
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
   local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
@@ -504,7 +528,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
-  pr=$(pr_for_task "$meta")
+  pr=$(pr_for_task "$meta" "$status")
   incarnation=$(meta_incarnation "$meta")
   fingerprint=$(sha256_text "$incarnation|$id|$state|$pr|$(clean_field "$last")")
   if [ -n "$self" ]; then
@@ -513,7 +537,10 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     outcome_key="inactive-outcome-main-$id-$state"
   fi
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" "$(sha256_text "$last")" || return 1
-  [ -n "$RECORD_PENDING" ] || return 0
+  if [ -z "$RECORD_PENDING" ]; then
+    reap_terminal_child_locked "$id" "$meta" || true
+    return 0
+  fi
   if [ -n "$self" ]; then
     if report_to_parent "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then
       mark_reported "$RECORD_PENDING" || return 1
@@ -521,12 +548,14 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
       notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
         "inactive terminal outcome needs parent report: child=$id state=$state"
     fi
+    reap_terminal_child_locked "$id" "$meta" || true
     return 0
   fi
   record_phase_set "$RECORD_PENDING" presentation || return 1
   payload="inactive terminal outcome awaiting captain presentation: child=$id state=$state"
   [ -z "$pr" ] || payload="$payload pr=$pr"
   queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
+  reap_terminal_child_locked "$id" "$meta" || true
 }
 
 reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>

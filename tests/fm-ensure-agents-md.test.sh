@@ -33,7 +33,7 @@ test_created_agents_md_includes_self_governance() {
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "fm-ensure-agents-md.sh failed for empty project"
   agents="$repo/AGENTS.md"
   assert_present "$agents" "AGENTS.md was not created"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_absent "$repo/CLAUDE.md" "fresh setup created a CLAUDE.md file"
   assert_grep "## Maintaining this file" "$agents" "self-governance section heading missing"
   assert_grep "Keep this file for knowledge useful to almost every future agent session in this project." "$agents" \
     "self-governance section lost the future-session bar"
@@ -46,16 +46,16 @@ test_created_agents_md_includes_self_governance() {
   pass "fm-ensure-agents-md.sh: created AGENTS.md includes self-governance section"
 }
 
-test_fresh_setup_writes_real_claude_pointer() {
+test_fresh_setup_does_not_write_claude_pointer() {
   local repo out
   repo="$TMP_ROOT/fresh-pointer-project"
   mkdir -p "$repo"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
-    || fail "fm-ensure-agents-md.sh failed creating a fresh pointer"
+    || fail "fm-ensure-agents-md.sh failed creating a fresh setup"
   assert_contains "$out" "created:" "fresh setup did not report created"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_absent "$repo/CLAUDE.md" "fresh setup created a CLAUDE.md file"
   [ ! -L "$repo/CLAUDE.md" ] || fail "fresh setup created a CLAUDE.md symlink"
-  pass "fm-ensure-agents-md.sh: fresh setup writes a real @AGENTS.md pointer"
+  pass "fm-ensure-agents-md.sh: fresh setup does not write a CLAUDE.md pointer"
 }
 
 test_promoted_claude_md_includes_self_governance() {
@@ -70,7 +70,7 @@ EOF
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "fm-ensure-agents-md.sh failed for CLAUDE.md promotion"
   agents="$repo/AGENTS.md"
   assert_present "$agents" "AGENTS.md was not created during promotion"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_absent "$repo/CLAUDE.md" "promotion recreated a CLAUDE.md pointer"
   assert_grep "Run tests with \`make test\`." "$agents" \
     "promotion lost existing CLAUDE.md content"
   count=$(grep -Fc "## Maintaining this file" "$agents")
@@ -93,7 +93,7 @@ test_promoted_claude_md_without_trailing_newline_keeps_blank_separator() {
     "newline-less promotion did not append the self-governance section"
   before=$(grep -B1 -Fx '## Maintaining this file' "$agents" | head -n 1)
   [ -z "$before" ] || fail "self-governance heading not preceded by a blank line (got: $before)"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_absent "$repo/CLAUDE.md" "promotion recreated a CLAUDE.md pointer"
   pass "fm-ensure-agents-md.sh: newline-less promotion keeps a blank separator line"
 }
 
@@ -153,7 +153,7 @@ test_correct_symlink_migrates_to_pointer_without_clobbering_agents() {
   pass "fm-ensure-agents-md.sh: correct symlink migrates to pointer without clobbering AGENTS.md"
 }
 
-test_existing_agents_md_without_claude_gains_section_and_pointer() {
+test_existing_agents_md_without_claude_gains_section() {
   local repo agents out count
   repo="$TMP_ROOT/existing-bare-project"
   mkdir -p "$repo"
@@ -162,31 +162,29 @@ test_existing_agents_md_without_claude_gains_section_and_pointer() {
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
     || fail "fm-ensure-agents-md.sh failed for existing AGENTS.md without CLAUDE.md"
   assert_contains "$out" "updated:" "injection without CLAUDE.md did not report an update"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_absent "$repo/CLAUDE.md" "injection created a CLAUDE.md file"
   assert_grep "Deploy with kubectl." "$agents" "injection dropped existing AGENTS.md content"
   count=$(grep -Fc "## Maintaining this file" "$agents")
   [ "$count" -eq 1 ] || fail "injection wrote $count self-governance sections"
-  pass "fm-ensure-agents-md.sh: existing AGENTS.md without CLAUDE.md gains section and pointer"
+  pass "fm-ensure-agents-md.sh: existing AGENTS.md without CLAUDE.md gains section"
 }
 
 test_existing_agents_md_with_section_reports_unchanged() {
   local repo agents out
   repo="$TMP_ROOT/fully-formed-project"
   mkdir -p "$repo"
-  # Build a fully-formed project (AGENTS.md with the section + canonical pointer).
+  # Build a fully-formed project (AGENTS.md with the section).
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
     || fail "fm-ensure-agents-md.sh failed building the fully-formed fixture"
   agents="$repo/AGENTS.md"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_absent "$repo/CLAUDE.md" "fixture building created CLAUDE.md"
   cp "$agents" "$repo/.before"
-  cp "$repo/CLAUDE.md" "$repo/.claude-before"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
     || fail "fm-ensure-agents-md.sh failed on already-formed project"
   assert_contains "$out" "unchanged:" "already-formed project was not reported unchanged"
   diff "$repo/.before" "$agents" >/dev/null \
     || fail "already-formed AGENTS.md was modified"
-  cmp -s "$repo/.claude-before" "$repo/CLAUDE.md" \
-    || fail "already-formed CLAUDE.md was modified"
+  assert_absent "$repo/CLAUDE.md" "re-run created CLAUDE.md"
   pass "fm-ensure-agents-md.sh: AGENTS.md that already has the section stays unchanged"
 }
 
@@ -210,13 +208,19 @@ test_marked_project_guidance_stays_unchanged() {
         || fail "ensure failed for marked project ($route)"
       cmp -s "$repo/.before" "$repo/AGENTS.md" \
         || fail "marked project guidance was modified ($route)"
-      assert_claude_pointer "$repo/CLAUDE.md"
+      case "$route" in
+        pointer|symlink) assert_claude_pointer "$repo/CLAUDE.md" ;;
+        *) assert_absent "$repo/CLAUDE.md" ;;
+      esac
       out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
         || fail "ensure failed on marked project re-run ($route)"
       assert_contains "$out" "unchanged:" "marked project re-run did not report unchanged"
       cmp -s "$repo/.before" "$repo/AGENTS.md" \
         || fail "marked project re-run modified guidance ($route)"
-      assert_claude_pointer "$repo/CLAUDE.md"
+      case "$route" in
+        pointer|symlink) assert_claude_pointer "$repo/CLAUDE.md" ;;
+        *) assert_absent "$repo/CLAUDE.md" ;;
+      esac
     done
   done
   pass "fm-ensure-agents-md.sh: marked project guidance is preserved across ensure paths and line endings"
@@ -241,7 +245,7 @@ test_reworded_guidance_requires_first_line_marker() {
       assert_grep '## Editing these notes' "$repo/AGENTS.md" "ensure removed project guidance"
       count=$(grep -Fxc "## Maintaining this file${eol%$'\n'}" "$repo/AGENTS.md")
       [ "$count" -eq 1 ] || fail "guidance without a first-line mark did not gain the canonical section"
-      assert_claude_pointer "$repo/CLAUDE.md"
+      assert_absent "$repo/CLAUDE.md" "ensure created a CLAUDE.md file"
       cp "$repo/AGENTS.md" "$repo/.after-first"
       "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
         || fail "ensure failed on unmarked project re-run"
@@ -416,12 +420,12 @@ test_lowercase_agents_md_refuses_case_fragile_pointer() {
 }
 
 test_created_agents_md_includes_self_governance
-test_fresh_setup_writes_real_claude_pointer
+test_fresh_setup_does_not_write_claude_pointer
 test_promoted_claude_md_includes_self_governance
 test_promoted_claude_md_without_trailing_newline_keeps_blank_separator
 test_existing_agents_md_with_symlink_gains_self_governance
 test_correct_symlink_migrates_to_pointer_without_clobbering_agents
-test_existing_agents_md_without_claude_gains_section_and_pointer
+test_existing_agents_md_without_claude_gains_section
 test_existing_agents_md_with_section_reports_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged
 test_existing_crlf_agents_md_without_section_preserves_crlf
