@@ -1047,7 +1047,9 @@ EOF
   # The skill's order - hold the work item the question gates, then run
   # complete with it - leaves command_complete's captain-held transfer as the
   # lane's last line. Settlement retracts it under its own key, with no worker
-  # alive, and a replayed settlement appends nothing more.
+  # alive, and both readers then read past the settled bookkeeping to the
+  # needs-decision the transfer answered; a replayed settlement appends
+  # nothing more.
   lane=sample-transfer-lane
   tasks_in "$home" add "$lane" "Guard the transfer sample" --kind scout --repo sample >/dev/null \
     || fail "could not create the transfer lane"
@@ -1069,12 +1071,16 @@ EOF
     || fail "answer could not close the transfer lane"
   run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
     || fail "transfer answer retry was not idempotent"
-  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
-    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
-  [ "$last" = "resolved [key=route]: captain call answered by fm-captain-hold" ] \
-    || fail "settlement left the lane's captain-held transfer standing: $last"
+  [ "$(tail -n 1 "$home/state/$lane.status")" = "resolved [key=route]: captain call answered by fm-captain-hold" ] \
+    || fail "settlement did not retract the lane's captain-held transfer: $(tail -n 1 "$home/state/$lane.status")"
   [ "$(grep -c '^resolved \[key=route\]' "$home/state/$lane.status")" = 1 ] \
     || fail "a replayed settlement retracted the transfer twice"
+  for reader in last_status_line last_worker_status_line; do
+    last=$(bash -c '. "$1"; "$3" "$2"' _ \
+      "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status" "$reader")
+    [ "$last" = "needs-decision [key=route]: choose route north or route south" ] \
+      || fail "$reader did not read past the settled transfer to the answered decision: $last"
+  done
 
   # A transfer naming several calls keeps the lane held until the last of them
   # is settled.
@@ -1103,11 +1109,37 @@ EOF
     || fail "answer could not close the access call"
   last=$(bash -c '. "$1"; last_status_line "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
-  case "$last" in
-    "resolved [key=route]: captain call answered by fm-captain-hold"|\
-    "resolved [key=access]: captain call answered by fm-captain-hold") ;;
-    *) fail "settling the last named call left the transfer standing: $last" ;;
-  esac
+  [ "$last" = "needs-decision [key=access]: choose open or restricted sample access" ] \
+    || fail "settling the last named call did not read past the lane's transfers: $last"
+
+  # A lane held itself while its transfer to another call is its last line gets
+  # no mirror, so settling that other call must not strip the lane's own
+  # standing declaration; settling the lane's own call then retracts it.
+  lane=sample-gated-lane
+  tasks_in "$home" add "$lane" "Scout the gated sample" --kind scout --repo sample >/dev/null \
+    || fail "could not create the gated lane"
+  write_origin_meta "$home" "$lane"
+  printf 'needs-decision [key=scope]: choose the sample scope\n' > "$home/state/$lane.status"
+  run_captain "$home" hold sample-scope-choice --title "Choose the sample scope" \
+    --reason "scope choice pending" >/dev/null || fail "could not hold the scope call"
+  run_captain "$home" complete "$lane" sample-scope-choice >/dev/null \
+    || fail "could not transfer the gated lane's decision"
+  run_captain "$home" hold "$lane" --reason "lane gate pending" >/dev/null \
+    || fail "could not hold the gated lane"
+  [ "$(grep -c '^captain-held ' "$home/state/$lane.status")" = 1 ] \
+    || fail "a hold over a standing transfer duplicated its declaration"
+  run_captain "$home" answer sample-scope-choice --decision-file "$home/transfer.txt" >/dev/null \
+    || fail "answer could not close the scope call"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  bash -c '. "$1"; status_is_captain_held "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$last" \
+    || fail "settling another call stripped the lane's own standing hold: $last"
+  run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
+    || fail "answer could not close the gated lane"
+  last=$(bash -c '. "$1"; last_status_line "$2"' _ \
+    "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
+  [ "$last" = "needs-decision [key=scope]: choose the sample scope" ] \
+    || fail "settling the lane's own call left its transfer standing: $last"
 
   # A decision-only hold has no lane, so it mints no status log.
   run_captain "$home" hold sample-plain-call \

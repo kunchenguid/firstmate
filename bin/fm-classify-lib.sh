@@ -134,15 +134,27 @@ FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT='captain-held'
 # log while a log whose tail holds no event still gets a full pass.
 FM_CLASSIFY_EVENT_WINDOW_LINES=200
 
-# The ERE matching this lane's own hold-mirror lines under <verb-ere>:
-# bin/fm-captain-hold.sh writes its declaration and retraction on a held
-# lane's log under the key captain-hold-<task>-<n>, and every reader that
-# treats those lines specially derives the key from the log's filename
-# through this one pattern.
+# The lines bin/fm-captain-hold.sh writes on a lane's log. Its hold mirror
+# declares a hold as `captain-held [key=captain-hold-<task>-<n>]` and every
+# reader that treats those lines specially derives the key from the log's
+# filename through _fm_hold_mirror_line_ere. `complete` transfers a still-open
+# decision as `captain-held [key=<k>]: tracked by <ids>`
+# (FM_HOLD_TRANSFER_ERE, capturing <k> and <ids>). Settlement retracts either
+# with `resolved [key=<key>]: captain call <how> by fm-captain-hold`
+# (FM_HOLD_RETRACTION_ERE).
+FM_HOLD_TRANSFER_ERE='^captain-held \[key=([A-Za-z0-9._-]+)\]: tracked by ([A-Za-z0-9._,-]+)$'
+FM_HOLD_RETRACTION_ERE='^resolved \[key=[A-Za-z0-9._-]+\]: captain call .+ by fm-captain-hold$'
+
 _fm_hold_mirror_line_ere() {  # <status-file> <verb-ere>
   local task=${1##*/}
   task=${task%.status}
   printf '^(%s) \\[key=captain-hold-%s-[0-9]+\\]:' "$2" "${task//./\\.}"
+}
+
+# Every hold-command line on this lane's log: mirror, transfers, retractions.
+_fm_hold_line_ere() {  # <status-file>
+  printf '%s|%s|%s' "$(_fm_hold_mirror_line_ere "$1" 'captain-held|resolved')" \
+    "$FM_HOLD_TRANSFER_ERE" "$FM_HOLD_RETRACTION_ERE"
 }
 
 # Return the last recognized status event, ignoring continuation prose and blanks
@@ -151,59 +163,58 @@ _fm_hold_mirror_line_ere() {  # <status-file> <verb-ere>
 # was appended, so a consumer can name the head it is superseding; asking for it
 # always reads the whole file, since a bounded window cannot bound two events.
 # This is an event read; status_current_line below reconciles open decisions.
-# One settlement reads through the raw stream: when the latest event is the
-# hold mirror's own retraction (the resolved [key=captain-hold-<task>-<n>]
-# line), the pair has settled and the retraction is the hold command's
-# bookkeeping, not worker state, so the worker's own view from
-# last_worker_status_line stands in - a lane that was done, paused, or failed
-# before the hold reads that way to the watcher, the away-mode daemon, and the
-# return brief again. A hold still standing is returned raw, because those
-# readers must see it.
+# A settled hold reads through the raw stream: when the latest event is a
+# retraction the hold command wrote, every hold-command line is its
+# bookkeeping, not worker state, and is read past to the event the worker last
+# wrote - a lane that was done, paused, or failed before the hold, or whose
+# transferred needs-decision was just answered, reads that way to the watcher,
+# the away-mode daemon, and the return brief again. A hold or transfer still
+# standing is returned raw, because those readers must see it.
 last_status_line() {  # <status-file> [<previous-event-var>]
-  local latest
-  latest=$(_fm_last_status_event '' "$1")
-  if [[ $latest =~ $(_fm_hold_mirror_line_ere "$1" 'resolved') ]]; then
-    last_worker_status_line "$@"
-    return
-  fi
-  if [ "$#" -gt 1 ]; then
-    _fm_last_status_event '' "$@"
-    return
-  fi
-  printf '%s\n' "$latest"
+  _fm_status_read '' "$@"
 }
 
-# last_status_line read past bin/fm-captain-hold.sh's hold mirror: the
-# `captain-held` declaration and `resolved` retraction it writes on a held
-# lane's log under the key captain-hold-<task>-<n>. Those lines are the hold
-# command's, not the worker's, so a reader of the worker's own state (crew
-# state, the terminal-outcome ledger) must not let them displace the event the
-# worker last wrote. The watcher and away-mode daemon read last_status_line
-# directly: it keeps a standing hold visible to them and reads past the pair
-# itself once the hold settles.
+# last_status_line read past bin/fm-captain-hold.sh's hold mirror at all
+# times. Those lines are the hold command's, not the worker's, so a reader of
+# the worker's own state (crew state, the terminal-outcome ledger) must not let
+# them displace the event the worker last wrote; a settled transfer is read
+# past exactly as last_status_line reads it. The watcher and away-mode daemon
+# read last_status_line directly, which keeps a standing hold visible to them.
 last_worker_status_line() {  # <status-file> [<previous-event-var>]
-  _fm_last_status_event "$(_fm_hold_mirror_line_ere "$1" 'captain-held|resolved')" "$@"
+  _fm_status_read "$(_fm_hold_mirror_line_ere "$1" 'captain-held|resolved')" "$@"
 }
 
-# 0 when the log's latest raw event is the hold mirror's own retraction - the
-# settled pair last_status_line reads through - so a caller can tell a lane
+_fm_status_read() {  # <skip-ere> <status-file> [<previous-event-var>]
+  local latest
+  latest=$(_fm_last_status_event "$1" "$2")
+  if [[ $latest =~ $FM_HOLD_RETRACTION_ERE ]]; then
+    _fm_last_status_event "$(_fm_hold_line_ere "$2")" "${@:2}"
+  elif [ "$#" -gt 2 ]; then
+    _fm_last_status_event "$@"
+  else
+    printf '%s\n' "$latest"
+  fi
+}
+
+# 0 when the log's latest raw event is a hold-command retraction - the settled
+# bookkeeping last_status_line reads through - so a caller can tell a lane
 # whose only lifted wait was the hold from a worker that moved on.
-status_hold_mirror_settled() {  # <status-file>
-  [[ $(_fm_last_status_event '' "$1") =~ $(_fm_hold_mirror_line_ere "$1" 'resolved') ]]
+status_hold_settled() {  # <status-file>
+  [[ $(_fm_last_status_event '' "$1") =~ $FM_HOLD_RETRACTION_ERE ]]
 }
 
 # status_observed_signature of the log as its worker left it: the hold
-# mirror's own lines at the end of the log are left out of its size, so a
+# command's own lines at the end of the log are left out of its size, so a
 # throttle bound to the worker's declaration survives firstmate recording or
 # settling a hold on it, while any worker append still changes it.
 status_worker_signature() {  # <status-file>
-  local f=$1 size mirror line
+  local f=$1 size hold line
   local LC_ALL=C
   size=$(_fm_status_file_size "$f") || size=''
   case "$size" in ''|*[!0-9]*) status_observed_signature "$f"; return ;; esac
-  mirror=$(_fm_hold_mirror_line_ere "$f" 'captain-held|resolved')
+  hold=$(_fm_hold_line_ere "$f")
   while IFS= read -r line; do
-    [[ $line =~ $mirror ]] || break
+    [[ $line =~ $hold ]] || break
     size=$((size - ${#line} - 1))
   done < <(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null \
     | awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }')

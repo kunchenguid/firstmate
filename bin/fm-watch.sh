@@ -1415,7 +1415,7 @@ task_captain_call_open() {  # <task>
 # signature as its worker left it (status_worker_signature). Any new worker
 # event - a replacement wait, a fresh delivery, a blocker - changes it and so
 # starts its own window instead of inheriting the silence of the one before it,
-# while the hold mirror firstmate records itself does not.
+# while the hold-command lines firstmate records itself do not.
 stale_wait_declaration() {  # <task>
   printf 'declared:%s' "$(status_worker_signature "$STATE/$1.status" || true)"
 }
@@ -2489,7 +2489,7 @@ EOF
     key=$(window_key "$w")
     last=$(last_status_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
-      if status_hold_mirror_settled "$STATE/$task.status"; then
+      if status_hold_settled "$STATE/$task.status"; then
         clear_pause_state "$key"
       else
         clear_pause_tracking "$key"
