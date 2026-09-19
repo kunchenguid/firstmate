@@ -1573,6 +1573,38 @@ test_self_announced_close_does_not_rewake_but_next_note_does() {
   pass "a self-announced close never wakes its own home, and the next real note still does"
 }
 
+test_separate_self_announced_answers_after_fold_do_not_rewake() {
+  local dir state fakebin out status_file pid rc
+  dir=$(make_case multi-answer-fold); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
+  status_file="$state/task.status"
+  {
+    printf 'needs-decision [key=k1]: pick REST or RPC\n'
+    printf 'needs-decision [key=k2]: pick us-east or eu-west\n'
+  } > "$status_file"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \
+    || fail "the OPEN DECISIONS fold drain failed"
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_wake_status_append_self_announced "$2" "$3" "resolved [key=k1]: answered: REST" || exit $?
+    fm_wake_status_append_self_announced "$2" "$3" "resolved [key=k2]: answered: eu-west" || exit $?
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$status_file" || rc=$?
+  [ "$rc" -eq 0 ] || fail "the folded answers were not self-announced (rc=$rc)"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle worker'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "separate folded answers re-woke the watcher: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "separate folded answers printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "separate folded answers enqueued a durable wake"; }
+  printf 'blocked: need staging credentials\n' >> "$status_file"
+  wait_for_exit "$pid" 100 || fail "a later worker line after two folded answers was swallowed"
+  grep -F "signal: $status_file" "$out" >/dev/null \
+    || fail "the later worker line did not surface as a signal"
+  pass "separate self-announced answers after a fold never wake, and the next real note still does"
+}
+
 # --- actionable wakes are surfaced (queue + exit) ---------------------------
 
 test_actionable_signal_surfaced() {
@@ -5473,6 +5505,7 @@ test_working_note_not_working_surfaced
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_secondmate_buried_block_wakes_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
+test_separate_self_announced_answers_after_fold_do_not_rewake
 test_actionable_signal_surfaced
 test_needs_decision_signal_payload_marked_for_branch_exclusion
 test_needs_decision_reconciliation_required_still_marked

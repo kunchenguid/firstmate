@@ -180,6 +180,46 @@ test_answer_close_is_self_announced() {
   pass "fm-send --resolve-key: the close never re-wakes its own home, later lines still do"
 }
 
+# Two distinct --resolve-key answers after an OPEN DECISIONS fold (no watcher
+# seen marker) must each stay quiet. This is the multi-decision residual: lag
+# verbs on unread status lines are not enough, because each answer is its own
+# event. A later worker line on the same task still wakes.
+test_separate_resolve_key_answers_after_fold_do_not_rewake() {
+  local dir fb log home rc
+  dir="$TMP_ROOT/separate-answers"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home separate-answers)
+  fm_write_meta "$home/state/t7.meta" "window=sess:fm-t7" "kind=ship"
+  {
+    printf 'needs-decision [key=budget]: approve spend?\n'
+    printf 'needs-decision [key=vendor]: pick a vendor\n'
+  } > "$home/state/t7.status"
+
+  drain_out "$home" >/dev/null
+
+  run_send "$fb" "$home" "$log" t7 --resolve-key budget "approved"; rc=$?
+  expect_code 0 "$rc" "the first folded answer should succeed"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t7.status" \
+    || fail "the first --resolve-key answer after a fold was left to re-wake this home"
+
+  run_send "$fb" "$home" "$log" t7 --resolve-key vendor "acme"; rc=$?
+  expect_code 0 "$rc" "the second folded answer should succeed"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t7.status" \
+    || fail "the second --resolve-key answer after a fold was left to re-wake this home"
+
+  printf 'blocked: need staging credentials\n' >> "$home/state/t7.status"
+  if FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_signal_seen_current "$2" "$3"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t7.status"; then
+    fail "a later worker line after two folded answers was swallowed"
+  fi
+  pass "fm-send --resolve-key: separate answers after a fold do not each re-wake; later lines still do"
+}
+
 # The reported failure behind issue #2109: a worker that put the colon first
 # (needs-decision: [key=X] ...) had its key silently folded to "default", so
 # the answer's --resolve-key X refused with "no open decision or blocker with
@@ -724,6 +764,7 @@ test_remote_reserved_pending_reply_key_closes_locally() {
 
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
+test_separate_resolve_key_answers_after_fold_do_not_rewake
 test_colon_first_key_position_is_answerable
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes

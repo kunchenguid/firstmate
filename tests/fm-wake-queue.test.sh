@@ -1628,6 +1628,117 @@ test_self_announced_append_guards() {
   pass "self-announced appends suppress only their own bytes and fail toward waking"
 }
 
+# Two distinct --resolve-key closes after an OPEN DECISIONS fold must not each
+# leave the file wake-worthy. The fold listed both keys; each answer records its
+# own byte range so later scans treat those ranges as already owned. A worker
+# line that is not in that ledger still wakes, including a worker `resolved`
+# sitting in the folded span (lag verbs are only keyed needs-decision/blocked).
+test_separate_self_announced_answers_after_fold_are_owned() {
+  local dir state status rc
+  dir=$(make_case multi-answer-owned)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  {
+    printf 'needs-decision [key=k1]: pick REST or RPC\n'
+    printf 'needs-decision [key=k2]: pick us-east or eu-west\n'
+  } > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \
+    || fail "the OPEN DECISIONS fold drain failed"
+
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: REST' \
+    || fail "the first folded answer was not self-announced (rc=$?)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "the first folded answer was left to re-wake this home"
+
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k2]: answered: eu-west' \
+    || fail "the second folded answer was not self-announced (rc=$?)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "the second folded answer was left to re-wake this home"
+
+  printf 'blocked [key=creds]: need staging credentials\n' >> "$status"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a later worker line after two owned answers was swallowed"
+
+  pass "separate self-announced answers after a fold stay owned; a later worker line still wakes"
+}
+
+test_folded_worker_resolved_is_not_owned_lag() {
+  local dir state status rc
+  dir=$(make_case folded-worker-resolved)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  {
+    printf 'needs-decision [key=budget]: approve spend?\n'
+    printf 'needs-decision [key=vendor]: vendor A or B?\n'
+    printf 'resolved [key=vendor]: picked vendor B myself, cheaper\n'
+  } > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \
+    || fail "the OPEN DECISIONS fold drain failed"
+
+  rc=0
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=budget]: answered: approved' || rc=$?
+  [ "$rc" -eq 1 ] || fail "a close over a folded worker resolved did not fail toward waking (rc=$rc)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a worker resolved in the folded span was treated as already owned"
+
+  pass "a worker resolved in fold lag still wakes after this home's close"
+}
+
+test_owned_appends_are_not_replayed_as_unread() {
+  local dir state status out
+  dir=$(make_case owned-unread)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  {
+    printf 'needs-decision [key=k1]: first\n'
+    printf 'needs-decision [key=k2]: second\n'
+  } > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \
+    || fail "the OPEN DECISIONS fold drain failed"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: first' \
+    || fail "the first owned close failed"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k2]: answered: second' \
+    || fail "the second owned close failed"
+  printf 'blocked: need staging credentials\n' >> "$status"
+  append_wake "$state" signal t.status "signal: $status" \
+    || fail "could not queue the later worker signal"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2>"$dir/drain.err" \
+    || fail "drain after the worker line failed"
+  out=$(cat "$dir/drain.out")
+  printf '%s' "$out" | grep -F 'blocked: need staging credentials' >/dev/null \
+    || fail "the later worker line was not annotated: $out"
+  if printf '%s' "$out" | grep -E 'resolved \[key=k[12]\]' >/dev/null; then
+    fail "an owned bookkeeping close was replayed as unread: $out"
+  fi
+  pass "owned append ranges are not replayed as unread on a later real wake"
+}
+
 # A trap that fires inside a lock's critical section abandons the holding
 # frame, and the exit path then re-acquires the same lock (a TERM inside a
 # recovery-marker section is the reproduced case: the watcher's reap wedged
@@ -1994,6 +2105,9 @@ test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt
 test_self_announced_append_guards
+test_separate_self_announced_answers_after_fold_are_owned
+test_folded_worker_resolved_is_not_owned_lag
+test_owned_appends_are_not_replayed_as_unread
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher

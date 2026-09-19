@@ -27,7 +27,7 @@
 # A missing, malformed, identity-mismatched, or past-end classified position reads
 # from byte 0, preferring a bounded duplicate over a lost event.
 #
-# There are three documented exceptions. The absorb classification
+# There are four documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -37,9 +37,12 @@
 # open-decisions fold" below) also writes: it persists a per-status-file byte
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time. crew_worktree_written_since reads the task's meta file and walks
-# a bounded slice of its worktree instead of a status file, so callers run it only
-# at the moment they would otherwise escalate.
+# log every time. status_home_appends_record writes the per-task home-owned
+# append ledger (see "home-owned status-append ledger" below) so later drains
+# and signal scans can treat this home's own bookkeeping bytes as already owned.
+# crew_worktree_written_since reads the task's meta file and walks a bounded slice
+# of its worktree instead of a status file, so callers run it only at the moment
+# they would otherwise escalate.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -1319,13 +1322,14 @@ status_presentation_marker_commit() {
 
 status_retire_presentation_task() {  # <state> <task-id>
   local state=$1 task=$2 lock manifest tmp data row_task ident offset backstop extra rc=0 found=0
-  local signal_marker heartbeat_marker daemon_marker
+  local signal_marker heartbeat_marker daemon_marker home_appends
   lock="$state/.status-presentation-lock"
   manifest="$state/.status-presentation-cursor"
   tmp="$manifest.tmp.$$"
   signal_marker=$(status_signal_seen_marker_path "$state" "$task")
   heartbeat_marker=$(status_heartbeat_seen_marker_path "$state" "$task")
   daemon_marker=$(status_daemon_seen_marker_path "$state" "$task")
+  home_appends="$state/.$task.home-appends"
 
   # A remote-home teardown can legitimately retire an endpoint ID that has no
   # status log in that home. Do not contend with that home's unrelated status
@@ -1335,6 +1339,7 @@ status_retire_presentation_task() {  # <state> <task-id>
   if [ ! -e "$state/$task.status" ] && [ ! -L "$state/$task.status" ] \
     && [ ! -e "$state/.$task.open-decisions-cursor" ] \
     && [ ! -L "$state/.$task.open-decisions-cursor" ] \
+    && [ ! -e "$home_appends" ] && [ ! -L "$home_appends" ] \
     && [ ! -e "$signal_marker" ] && [ ! -L "$signal_marker" ] \
     && [ ! -e "$heartbeat_marker" ] && [ ! -L "$heartbeat_marker" ] \
     && [ ! -e "$daemon_marker" ] && [ ! -L "$daemon_marker" ]; then
@@ -1384,7 +1389,7 @@ EOF
   fi
   if [ "$rc" -eq 0 ]; then
     rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" \
-      "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
+      "$home_appends" "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
   fi
   fm_lock_release "$lock" || rc=1
   return "$rc"
@@ -1571,6 +1576,8 @@ status_open_decisions_cursor_offset() {  # <status-file>
 # print nothing.
 status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
   local f=$1 captured_end=${2:-} cf offset size actual_size chunk_file line rc=0
+  local pos line_start owned_ranges
+  local LC_ALL=C
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
   chunk_file="$cf.unread.$$"
@@ -1589,9 +1596,16 @@ status_new_lines_since_cursor() {  # <status-file> [<captured-end-offset>]
   [ "$offset" -lt "$size" ] || return 0
   _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
     || { rm -f "$chunk_file"; return 1; }
+  owned_ranges=$(status_home_appends_ranges "$f")
+  pos=$offset
   while IFS= read -r line || [ -n "$line" ]; do
+    line_start=$pos
+    pos=$((pos + ${#line} + 1))
     case "$line" in
-      *[![:space:]]*) printf '%s\n' "$line" || { rc=1; break; } ;;
+      *[![:space:]]*)
+        _fm_offset_in_home_append_ranges "$owned_ranges" "$line_start" && continue
+        printf '%s\n' "$line" || { rc=1; break; }
+        ;;
     esac
   done < "$chunk_file"
   rm -f "$chunk_file"
@@ -1733,6 +1747,172 @@ window_to_task() {
   t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
 }
 
+# --- home-owned status-append ledger ----------------------------------------
+#
+# This home's bookkeeping closes (fm_wake_status_append_self_announced) record
+# the exact byte range they appended so later drains and signal scans can treat
+# those bytes as already owned. That is the multi-answer path: two distinct
+# --resolve-key closes must not each force a captain-facing wake solely because
+# each one appended a status line, while a worker-authored line that is not in
+# this ledger still signals.
+# The ledger does not use lag verbs to hide a worker `resolved` line. Only
+# bytes this home itself recorded as owned are skipped.
+#
+# Path: state/.<task>.home-appends
+# Format:
+#   v1
+#   ident=<file-ident>
+#   <start><TAB><end>
+# Ranges are half-open [start, end), merged when adjacent or overlapping.
+# An identity mismatch (file rotated) discards the ledger. Teardown deletes it.
+# Not a pure status-file read: status_home_appends_record writes this sidecar.
+
+status_home_appends_path() {  # <status-file>
+  local f=$1 dir base
+  dir=$(dirname "$f")
+  base=$(basename "$f")
+  printf '%s/.%s.home-appends' "$dir" "${base%.status}"
+}
+
+status_home_appends_ranges() {  # <status-file> -> start<TAB>end lines
+  local f=$1 path ident data first rest line start end extra
+  path=$(status_home_appends_path "$f")
+  [ -f "$path" ] && [ -r "$path" ] && [ ! -L "$path" ] || return 0
+  ident=$(_fm_open_decisions_file_ident "$f") || return 0
+  data=$(LC_ALL=C command cat "$path" 2>/dev/null) || return 0
+  first=${data%%$'\n'*}
+  [ "$first" = v1 ] || return 0
+  rest=${data#*$'\n'}
+  [ "$rest" != "$data" ] || return 0
+  line=${rest%%$'\n'*}
+  case "$line" in ident=*) ;; *) return 0 ;; esac
+  [ "${line#ident=}" = "$ident" ] || return 0
+  case "$rest" in
+    *$'\n'*) rest=${rest#*$'\n'} ;;
+    *) return 0 ;;
+  esac
+  while IFS=$(printf '\t') read -r start end extra || [ -n "$start" ]; do
+    [ -n "$start" ] || continue
+    [ -z "$extra" ] || continue
+    case "$start:$end" in *[!0-9:]*) continue ;; esac
+    [ "$end" -gt "$start" ] || continue
+    printf '%s\t%s\n' "$start" "$end" || return 1
+  done <<EOF
+$rest
+EOF
+}
+
+_fm_offset_in_home_append_ranges() {  # <ranges-text> <offset>
+  local ranges=$1 offset=$2 start end
+  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
+  while IFS=$(printf '\t') read -r start end; do
+    [ -n "$start" ] || continue
+    case "$start:$end" in *[!0-9:]*) continue ;; esac
+    if [ "$offset" -ge "$start" ] && [ "$offset" -lt "$end" ]; then
+      return 0
+    fi
+  done <<EOF
+$ranges
+EOF
+  return 1
+}
+
+status_home_appends_contains_offset() {  # <status-file> <offset>
+  _fm_offset_in_home_append_ranges "$(status_home_appends_ranges "$1")" "$2"
+}
+
+status_home_appends_covers() {  # <status-file> <start> <end>
+  local start=$2 end=$3 range_start range_end
+  case "$start:$end" in *[!0-9:]*) return 1 ;; esac
+  [ "$end" -ge "$start" ] || return 1
+  [ "$end" -eq "$start" ] && return 0
+  while IFS=$(printf '\t') read -r range_start range_end; do
+    [ -n "$range_start" ] || continue
+    case "$range_start:$range_end" in *[!0-9:]*) continue ;; esac
+    [ "$range_start" -le "$start" ] || continue
+    if [ "$range_end" -gt "$start" ]; then
+      start=$range_end
+    fi
+    if [ "$start" -ge "$end" ]; then
+      return 0
+    fi
+  done <<EOF
+$(status_home_appends_ranges "$1")
+EOF
+  [ "$start" -ge "$end" ]
+}
+
+status_home_appends_record() {  # <status-file> <start> <end>
+  local f=$1 start=$2 end=$3 path ident tmp merged
+  local LC_ALL=C
+  case "$start:$end" in *[!0-9:]*) return 1 ;; esac
+  [ "$end" -gt "$start" ] || return 1
+  ident=$(_fm_open_decisions_file_ident "$f") || return 1
+  path=$(status_home_appends_path "$f")
+  merged=$(printf '%s\n%s\t%s\n' "$(status_home_appends_ranges "$f")" "$start" "$end" | awk '
+    NF == 2 && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $2+0 > $1+0 {
+      n++
+      s[n] = $1 + 0
+      e[n] = $2 + 0
+    }
+    END {
+      for (i = 1; i <= n; i++) {
+        for (j = i + 1; j <= n; j++) {
+          if (s[j] < s[i] || (s[j] == s[i] && e[j] < e[i])) {
+            t = s[i]; s[i] = s[j]; s[j] = t
+            t = e[i]; e[i] = e[j]; e[j] = t
+          }
+        }
+      }
+      m = 0
+      for (i = 1; i <= n; i++) {
+        if (m == 0 || s[i] > me[m]) {
+          m++
+          ms[m] = s[i]
+          me[m] = e[i]
+        } else if (e[i] > me[m]) {
+          me[m] = e[i]
+        }
+      }
+      for (i = 1; i <= m; i++) printf "%s\t%s\n", ms[i], me[i]
+    }
+  ') || return 1
+  tmp="$path.tmp.$$"
+  {
+    printf 'v1\nident=%s\n' "$ident"
+    if [ -n "$merged" ]; then
+      printf '%s' "$merged"
+      case "$merged" in *$'\n') ;; *) printf '\n' ;; esac
+    fi
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$path" || { rm -f "$tmp"; return 1; }
+}
+
+# 0 when every non-blank line in [start, end) is a keyed needs-decision or
+# blocked line. Empty spans succeed. A worker `resolved`, `failed`, `paused`,
+# `working`, or unkeyed line fails, so lag never hides those.
+_fm_status_span_is_decision_lag() {  # <status-file> <start> <end>
+  local f=$1 start=$2 end=$3 chunk line verb
+  local LC_ALL=C
+  case "$start:$end" in *[!0-9:]*) return 1 ;; esac
+  [ "$end" -ge "$start" ] || return 1
+  [ "$end" -eq "$start" ] && return 0
+  chunk=$(_fm_status_read_span "$f" "$start" "$((end - start))") || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    verb=$(status_line_verb "$line")
+    case "$verb" in
+      needs-decision|blocked) ;;
+      *) return 1 ;;
+    esac
+    _fm_key_before_colon "$line" || _fm_key_at_note_head "$line" >/dev/null || return 1
+    _fm_decision_key "$line" >/dev/null || return 1
+  done <<EOF
+$chunk
+EOF
+  return 0
+}
+
 # Capture the bytes of an append-only status log at or after <start-offset> under
 # one size-and-identity snapshot.
 # The record form produces `<endpoint>\t<identity>\t<events>` and returns 0 when
@@ -1756,6 +1936,8 @@ window_to_task() {
 # reconciliation signal and never treated here as an open decision.
 # status_open_decisions remains the single owner of open/closed semantics,
 # including same-key reopening and reserved-key handling.
+# Bytes recorded in this home's owned-append ledger are not classified as
+# events: this home already wrote them as bookkeeping.
 # Every other captain-relevant event is terminal and always actionable.
 _fm_decision_origin_drop() {  # <origins> <key>
   local origin
@@ -1804,6 +1986,8 @@ _fm_status_open_decision_origins() {  # <status-file> [<kind>]
 status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
   local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file full_file prefix_file result
   local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
+  local pos line_start owned_ranges
+  local LC_ALL=C
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
@@ -1830,9 +2014,14 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
     rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2;
   }
   [ "$cur_ident" = "$ident" ] || { rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2; }
+  owned_ranges=$(status_home_appends_ranges "$f")
+  pos=$start
   while IFS= read -r line || [ -n "$line" ]; do
+    line_start=$pos
+    pos=$((pos + ${#line} + 1))
     line_number=$((line_number + 1))
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+    _fm_offset_in_home_append_ranges "$owned_ranges" "$line_start" && continue
     if status_is_captain_held "$line"; then
       # A transfer closes the status-log decision and remains non-actionable to
       # stale classification. The side-band marker lets signal routing surface
