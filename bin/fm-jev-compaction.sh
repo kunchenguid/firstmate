@@ -246,7 +246,7 @@ if [ "$n" -gt 0 ]; then
     i=$FM_JEV_COMPACTION_KEEP_ANCHOR
     while [ "$i" -lt "$n" ]; do
       if fm_jev_compaction_lt "${scores[$i]}" "$THRESHOLD"; then
-        park_flags[$i]=1
+        park_flags[i]=1
       fi
       i=$((i + 1))
     done
@@ -254,7 +254,7 @@ if [ "$n" -gt 0 ]; then
     i=$((n - 1))
     while [ "$i" -ge "$FM_JEV_COMPACTION_KEEP_ANCHOR" ]; do
       if fm_jev_compaction_lt "${scores[$i]}" "$THRESHOLD"; then
-        park_flags[$i]=1
+        park_flags[i]=1
         i=$((i - 1))
         continue
       fi

@@ -441,6 +441,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/jev-compaction.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },
