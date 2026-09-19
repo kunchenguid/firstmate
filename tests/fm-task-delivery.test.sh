@@ -423,6 +423,38 @@ test_promotion_persists_the_selected_ship_branch() {
   pass "fm-promote: a selected branch prefix reaches both worker instructions and durable task state"
 }
 
+# The promotion instructions embed the branch in the `git checkout -b` command
+# the worker executes, so a ref-format-valid metacharacter prefix must stay
+# literal there, exactly as it does in a generated ship brief.
+test_promotion_branch_command_is_shell_safe() {
+  local home id prefix marker meta instructions command repo branch
+  home="$TMP_ROOT/promote-branch-shell-safe/home"
+  marker="$TMP_ROOT/promote-branch-shell-safe-marker"
+  id=promote-branch-safe-e3
+  prefix="\$(touch\${IFS}$marker)/"
+  meta="$home/state/$id.meta"
+  mkdir -p "$home/state"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+    || fail "shell-safe promotion scout brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Promote the shell-safe fixture." "Use the configured branch exactly."
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode local-only --yolo off --branch-prefix "$prefix" >/dev/null 2>&1 \
+    || fail "a ref-format-valid metacharacter prefix should promote safely"
+  instructions="$home/data/$id/ship-instructions.md"
+  command=$(sed -n 's/.*create your branch: `\(.*\)`\.$/\1/p' "$instructions")
+  [ -n "$command" ] || fail "promotion instructions exposed no branch-creation command"
+  repo="$TMP_ROOT/promote-branch-shell-safe-repo"
+  git init -q "$repo" || fail "could not initialize shell-safety fixture repository"
+  ( cd "$repo" && eval "$command" ) || fail "promotion branch-creation command did not run"
+  assert_absent "$marker" "promotion branch command executed the prefix's command substitution"
+  branch=$(git -C "$repo" branch --show-current)
+  [ "$branch" = "$prefix$id" ] \
+    || fail "promotion branch command did not create the literal configured branch (got '$branch')"
+  pass "fm-promote: ref-format-valid shell metacharacters stay literal in promotion branch commands"
+}
+
 test_local_merge_uses_the_recorded_ship_branch() {
   local home proj id main fix out
   home="$TMP_ROOT/local-merge-branch/home"
@@ -995,6 +1027,7 @@ test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_promotion_persists_the_selected_ship_branch
+test_promotion_branch_command_is_shell_safe
 test_local_merge_uses_the_recorded_ship_branch
 test_project_mode_maps_the_conditional_policy
 test_spawn_and_promote_require_filled_task_subsections
