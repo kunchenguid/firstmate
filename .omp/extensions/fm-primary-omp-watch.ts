@@ -35,9 +35,12 @@
 // stored record is eligible only while it can still be the pending close it was
 // written for: created within 10 minutes, among the newest 32 records, and
 // still naming live runtime state when it carries state references. Every
-// load, merge, and persist path applies these bounds, so the store cannot grow without bound and
-// a session_start can never replay a long tail of closes for work that has
-// already finished - each record is a fresh snapshot of the actionable state,
+// load, merge, persist, and delivery path applies these bounds - the disk store
+// and the in-memory retained list alike, because an extension loaded across a
+// long-lived session otherwise held its records forever and re-delivered a
+// close hours past its window - so neither can grow without bound and neither a
+// session_start nor a later cycle can replay a long tail of closes for work
+// that has already finished - each record is a fresh snapshot of the actionable state,
 // a newer close supersedes an older one, the durable wake queue already keeps
 // the row the watcher reported, and a condition that is still actionable is
 // re-detected by the new session's first watcher cycle. A close whose delivery
@@ -54,9 +57,33 @@
 // consumes at the user message_start carrying the exact wake text; either
 // event finishes the pending record, and a still-unconsumed record rides the
 // replacement handoff.
+//
+// Close liveness (stated once here):
+// handoffWorkIsLive is the single owner of whether a close still names live
+// work, and EVERY delivery path applies it - the ordinary pending pipeline, a
+// replacement replay, and the send boundary alike. Gating it on the
+// replacement set alone left an ordinary re-delivery of a finished close free
+// to announce dead work: an extension loaded before a task finished kept its
+// in-memory record and re-sent it, once per re-arm, hours after the task and
+// its files were gone. A close that fails the test is finished, not merely
+// skipped, so no later path can resurrect it.
+//
+// Failure notices (stated once here):
+// A failure notice reports one continuity episode, so it is surfaced exactly
+// once per episode. surfaceFailure sends without a pending record, so it never
+// reached the consumption or liveness discipline above and re-emitted the same
+// composed text on any later close of the same generation - an already-answered
+// failure became a permanent false alarm until the session was replaced. The
+// generation therefore remembers the notices it has reported for the current
+// episode, and endFailureEpisode is the single owner of ending that episode: a
+// successor that verifies a live watcher or a healthy actionable delivery clears
+// the memory, so a fresh episode still reports and a closed one stays silent. It
+// resets the bounded retry counter only for a delivered close, never for mere
+// readiness, because clearing it on startup would let a watcher that starts and
+// dies immediately re-arm forever instead of reporting its exhaustion.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // typebox resolves inside omp's extension loader (verified, omp 18.1.11); the
@@ -120,6 +147,11 @@ type SessionGeneration = {
   pendingActionables: PendingActionableClose[];
   replacementActionables: Set<string>;
   cleanupFailure: string;
+  // Whether a failure notice has already surfaced during this continuity episode.
+  // surfaceFailure sends without a pending close, so it has no consumption or
+  // liveness state of its own and must suppress every later failure until a
+  // verifiably restored successor ends the episode.
+  failureReported: boolean;
   // Main follow-ups omp has accepted but not yet consumed, by pending token.
   // Never cleared at shutdown: a delivery continuation that runs after the
   // replacement began reads it to tell a main-queued wake (replayed) from a
@@ -147,7 +179,10 @@ const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
 // Replacement-handoff bounds (contract: "Replacement handoff lifetime" above).
-const handoffTtlMs = 600_000;
+// The age bound is the same 10 minutes in production; it is overridable so a
+// regression can drive the bound with real elapsed time instead of waiting one
+// out, exactly as the rearm knobs above are.
+const handoffTtlMs = positiveInteger("FM_OMP_HANDOFF_TTL_MS", 600_000);
 const handoffMaxPending = 32;
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
 // bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
@@ -322,32 +357,156 @@ function validatePendingActionable(value: unknown): PendingActionableClose {
   return value as PendingActionableClose;
 }
 
-function handoffWorkIsLive(pending: PendingActionableClose): boolean {
-  const line = actionableLine(pending.message);
-  const references: string[] = [];
-  if (line.startsWith("signal:")) {
-    references.push(...line.slice("signal:".length).trim().split(/\s+/).filter((path) => path.startsWith(`${state}/`)));
-  } else {
-    const check = /^check:\s+(.+?\.check\.sh):(?:\s|$)/.exec(line)?.[1];
-    if (check?.startsWith(`${state}/`)) references.push(check);
+// A close names the work it reports through its actionable line, and it is live
+// only while that work can still exist. Every delivery path - ordinary, replay,
+// or retry - drops a close whose work is gone instead of announcing it again,
+// so a finished task can never re-announce itself. Each kind resolves its work
+// from the message:
+//   - `signal:` names state paths directly, so each one must still exist and,
+//     when it is a `.status`/`.turn-ended` path, its task must still have a meta
+//     unless that path is a home-scoped channel log rather than a task (see
+//     below). This is the signal-side counterpart of the check branch's
+//     home-scoped exemption: both keep a reference live when it names no task at
+//     all, and neither keeps a dead task record live.
+//   - `check: <state>/<task>.check.sh: ...` names a task-scoped poll, live while
+//     that task still has a meta OR the armed check script still exists. The
+//     second half is deliberate: a merged-PR poll retires its own script before
+//     it emits the wake (bin/fm-watch.sh), and a home-scoped check such as the
+//     Relay poll shim is not a task at all, so requiring the script alone would
+//     suppress merge notifications and requiring the task alone would suppress
+//     the home-scoped ones.
+//   - `stale: <window>` names a backend window, resolved through the
+//     window=/terminal= target recorded in state/*.meta exactly as
+//     bin/fm-classify-lib.sh's window_to_task resolves it, then required to
+//     still have a meta. This is the case that fell through as unconditionally
+//     live and replayed a pane whose task was long gone.
+//   - `heartbeat` is the fleet-wide review the watcher raises from its own
+//     cadence, so a bare one names no task and stays live inside the window and
+//     cap below. A suffixed `heartbeat: <window>` does name a window, so it
+//     resolves exactly like stale rather than being assumed live. Both are
+//     deliberate statements about a known kind, never a default.
+// An unrecognized line is never assumed live.
+function metaExists(task: string): boolean {
+  // Keyed on the creation alphabet in bin/fm-pr-lib.sh (fm_task_id_path_safe,
+  // which fm_task_id_creation_valid wraps): any non-empty run of A-Za-z0-9._-
+  // that does not begin with '.', so a leading '_' or '-' is a supported task.
+  if (!task || task.startsWith(".") || /[^A-Za-z0-9._-]/.test(task)) return false;
+  return existsSync(`${state}/${task}.meta`);
+}
+
+// Names of state-resident logs that are home-scoped channels rather than tasks,
+// so no `<name>.meta` can exist for them by construction. The only production
+// entry is a remote secondmate home's parent-channel log: its destination is
+// owned by bin/fm-parent-channel-lib.sh's remote route, and
+// bin/secondmate-report.sh, bin/fm-inactive-reconcile.sh, and
+// bin/fm-merge-outcome-lib.sh append to it (bin/fm-procevent-remote-reply.sh
+// mirrors it into the parent's own status stream). Requiring a task meta there
+// would drop a routed reply the parent must read.
+// This is a deliberate name-keyed allow-list, never a wildcard, a suffix, or a
+// default that keeps any meta-less reference live - a torn-down task leaves a
+// `.status` file with no meta too, and that close must still be dropped.
+// bin/fm-pending-reply-lib.sh keys the same channel-log exemption on this name.
+const homeScopedChannelLogs: Record<string, true> = { "parent-replies.status": true };
+
+// The window's task, resolved the way bin/fm-classify-lib.sh's window_to_task
+// does: the recorded window=/terminal= target first, then the tmux-shaped
+// "<session>:fm-<id>" form when no metadata matches.
+function windowToTask(window: string): string {
+  if (!window) return "";
+  let entries: string[];
+  try {
+    entries = readdirSync(state);
+  } catch {
+    entries = [];
   }
+  for (const entry of entries) {
+    if (!entry.endsWith(".meta")) continue;
+    let recordedWindow = "";
+    let terminal = "";
+    let text: string;
+    try {
+      text = readFileSync(`${state}/${entry}`, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of text.split(/\r?\n/)) {
+      if (line.startsWith("window=")) recordedWindow = line.slice("window=".length);
+      else if (line.startsWith("terminal=")) terminal = line.slice("terminal=".length);
+    }
+    if ((recordedWindow && recordedWindow === window) || (terminal && terminal === window)) {
+      return entry.slice(0, -".meta".length);
+    }
+  }
+  const tail = window.slice(window.lastIndexOf(":") + 1);
+  return tail.startsWith("fm-") ? tail.slice("fm-".length) : tail;
+}
+
+function signalWorkIsLive(line: string): boolean {
+  const references = line
+    .slice("signal:".length)
+    .trim()
+    .split(/\s+/)
+    .filter((path) => path.startsWith(`${state}/`));
+  // A signal line with no state-scoped reference names nothing resolvable. Keep
+  // it live rather than dropping it: production always writes state-scoped
+  // paths (bin/fm-watch.sh), so this is defensive only, and dropping an
+  // unresolvable close risks losing a real announcement, which is the worse
+  // failure of the two.
   if (references.length === 0) return true;
   for (const path of references) {
     if (!existsSync(path)) return false;
+    const relative = path.slice(state.length + 1);
+    if (homeScopedChannelLogs[relative]) continue;
     const suffix = path.endsWith(".turn-ended") ? ".turn-ended" : path.endsWith(".status") ? ".status" : "";
-    if (suffix && !existsSync(`${path.slice(0, -suffix.length)}.meta`)) return false;
+    if (suffix && !metaExists(relative.slice(0, -suffix.length))) return false;
   }
   return true;
 }
 
-// Keeps only records that can still be the pending close they were written for,
-// oldest first (the order a replacement replays them in). The token's middle
+function handoffWorkIsLive(pending: PendingActionableClose): boolean {
+  const line = actionableLine(pending.message);
+  if (line.startsWith("signal:")) return signalWorkIsLive(line);
+  if (line.startsWith("check:")) {
+    const check = /^check:\s+(.+?\.check\.sh):(?:\s|$)/.exec(line)?.[1];
+    // A check outside this state directory (a home-scoped shim such as the Relay
+    // poll) is not task-resolvable at all, so it stays live, as does one whose
+    // script is still armed.
+    if (!check?.startsWith(`${state}/`) || existsSync(check)) return true;
+    return metaExists(check.slice(state.length + 1, -".check.sh".length));
+  }
+  if (line.startsWith("stale:")) {
+    const window = line.slice("stale:".length).trim().split(/\s+/)[0] ?? "";
+    return metaExists(windowToTask(window));
+  }
+  if (/^heartbeat($|:)/.test(line)) {
+    // A bare heartbeat names no task: it is the fleet-wide review the watcher
+    // raises from its own cadence, so there is no task identity to test and it
+    // stays live under the window and cap below. A suffixed one does name a
+    // window, so it resolves exactly like stale rather than being assumed live.
+    const window = line.slice("heartbeat".length).replace(/^:\s*/, "").trim();
+    if (!window) return true;
+    return metaExists(windowToTask(window));
+  }
+  return false;
+}
+
+// Whether a record can still be the pending close it was written for: young
+// enough to still be that close, and still naming live work. The token's middle
 // field is the creating process's epoch milliseconds, so a record carries its
-// own age without a second on-disk format.
+// own age without a second on-disk format. This is the single owner of the
+// predicate; the store's bounds and every delivery path apply it, so a record
+// that has aged past its replacement window is retired instead of replayed no
+// matter where it is being held.
+function retainedCloseIsEligible(pending: PendingActionableClose): boolean {
+  if (Date.now() - Number(pending.token.split("-")[1]) > handoffTtlMs) return false;
+  return handoffWorkIsLive(pending);
+}
+
+// Keeps only records that can still be the pending close they were written for,
+// oldest first (the order a replacement replays them in).
 function eligibleHandoff(pending: PendingActionableClose[]): PendingActionableClose[] {
-  const now = Date.now();
   return pending
-    .filter((item) => now - Number(item.token.split("-")[1]) <= handoffTtlMs && handoffWorkIsLive(item))
+    .filter(retainedCloseIsEligible)
     .sort((a, b) => Number(a.token.split("-")[1]) - Number(b.token.split("-")[1]))
     .slice(-handoffMaxPending);
 }
@@ -501,7 +660,7 @@ function createGeneration(): SessionGeneration {
     seq: 0,
     pendingActionables: [],
     replacementActionables: new Set(),
-    cleanupFailure: "",
+    failureReported: false,
     unconsumedWakes: new Map(),
     deferredClose: null,
   };
@@ -588,7 +747,18 @@ export default function (pi: ExtensionAPI) {
       "watcher",
       `FIRSTMATE WATCHER WAKE: ${message}\n\nRun bin/fm-wake-drain.sh first and handle the queued wake. After handling the drain output, proactively summarize to the captain any decision, blocker, failure, terminal outcome, or review-ready result before running the printed acknowledgement. Watcher continuity is extension-owned.`,
     );
-    if (pending && owner.replacementActionables.has(pending.token) && !handoffWorkIsLive(pending)) {
+    // Every delivery of a close is gated on its work still being live and its
+    // replacement window not having lapsed, not only a replacement's replay: an
+    // ordinary re-delivery of a finished or long-aged close is the same phantom
+    // announcement, so the test cannot be scoped to the replacement set. The
+    // record is finished rather than merely skipped, so a later path cannot
+    // resurrect it either.
+    if (pending && !retainedCloseIsEligible(pending)) {
+      try {
+        finishPendingActionable(owner, pending);
+      } catch (error) {
+        surfaceCleanupFailure(owner, error);
+      }
       if (failure) surfaceFailure(owner, failure);
       return true;
     }
@@ -688,6 +858,15 @@ export default function (pi: ExtensionAPI) {
   }
 
   function surfaceFailure(owner: SessionGeneration, message: string): void {
+    // A failure notice reports one continuity episode. surfaceFailure sends
+    // without a pending close, so it never reached the consumption or liveness
+    // discipline that retires actionable wakes: an already-answered failure
+    // re-emitted the same composed text on every later close of the same
+    // generation, indefinitely, and each repeat cost a supervision turn.
+    // Reporting an episode once and clearing on verified restoration makes the
+    // notice exactly-once instead.
+    if (owner.failureReported) return;
+    owner.failureReported = true;
     void sendWake(owner, message).catch(() => {
       // omp owns delivery errors; continuity restoration never waits on prompting.
     });
@@ -768,7 +947,12 @@ export default function (pi: ExtensionAPI) {
           (item) => !item.delivered && !owner.unconsumedWakes.has(item.token),
         );
         if (!pending) break;
-        if (owner.replacementActionables.has(pending.token) && !handoffWorkIsLive(pending)) {
+        // A dead or aged replacement record is dropped here, before its
+        // restoration, so a doomed record never spins an arm cycle.
+        // A dead record on any other path is dropped at the send boundary
+        // instead, which runs after this pipeline has restored continuity, so
+        // dropping a finished close never leaves supervision unarmed.
+        if (owner.replacementActionables.has(pending.token) && !retainedCloseIsEligible(pending)) {
           finishPendingActionable(owner, pending);
           continue;
         }
@@ -890,6 +1074,17 @@ export default function (pi: ExtensionAPI) {
         resolveReady(ready);
       });
     });
+  }
+
+  // The single owner of ending a continuity episode: a verified successor
+  // watcher or a healthy actionable delivery both prove continuity is restored,
+  // so both clear the episode state a later failure would otherwise inherit.
+  // resetRetries is false when continuity was proven only by readiness, because
+  // clearing the bounded retry counter there would let a watcher that starts and
+  // immediately dies re-arm forever instead of reporting its exhaustion.
+  function endFailureEpisode(owner: SessionGeneration, resetRetries: boolean): void {
+    if (resetRetries) owner.retryFailures = 0;
+    owner.failureReported = false;
   }
 
   async function retireArm(armChild: ChildProcess | null): Promise<boolean> {
@@ -1020,6 +1215,12 @@ export default function (pi: ExtensionAPI) {
       if (readinessSettled) return;
       readinessSettled = true;
       verified = ready;
+      // A successor that confirms a live, fresh watcher is a continuity
+      // restoration, so it ends the episode. Retry accounting is deliberately
+      // left alone here: the arm child prints started/attached before it has
+      // proven it will stay up, so clearing the bound would turn a watcher that
+      // starts and immediately dies into a silent, unbounded re-arm loop.
+      if (ready && generationIsLive(owner)) endFailureEpisode(owner, false);
       resolveReadiness(ready);
     };
     const observeEstablishedArm = (): void => {
@@ -1059,7 +1260,11 @@ export default function (pi: ExtensionAPI) {
         const pending = armPendingActionable.get(armChild) ?? createPendingActionable(classification.message, predecessor);
         enqueuePendingActionable(owner, pending);
         if (!generationIsLive(owner)) return;
-        owner.retryFailures = 0;
+        // An actionable close is a healthy delivery, so it ends any continuity
+        // episode exactly as a verified successor does. Unlike readiness alone,
+        // a delivered close has proven the cycle did real work, so the bounded
+        // retry accounting restarts too.
+        endFailureEpisode(owner, true);
         void processPendingActionables(owner);
         return;
       }
