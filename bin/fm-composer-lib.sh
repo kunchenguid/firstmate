@@ -1337,7 +1337,7 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # a leftbar composer region (<first-row>..<last-row>), or -1 when the region
 # carries none. Recognition is structural and position-gated:
 #   - the run is the contiguous rows immediately above the footer row (the
-#     region's LAST row when it matches the footer, else the last row); the
+#     region's LAST row, which must match the footer); the
 #     string wraps BOTTOM-aligned, so a cwd:branch shorter than the rail
 #     leaves blank rail rows ABOVE its fragments and never between them and
 #     the footer (verified live on 1.18.31, 2026-09-18: the one-fragment
@@ -1370,21 +1370,17 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
   local screen=$1 first=$2 last=$3
   local plain row raw rest frag indent len joined='' start=-1
-  local footer_row=-1
   local footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
-  # The footer row is the region's LAST row when it matches the footer (the
-  # same rule the classification loop applies); the furniture run ends on the
-  # row above it.
+  # The footer row is the region's LAST row (the same rule the classification
+  # loop applies); the furniture run ends on the row above it, and a last row
+  # that is not the footer leaves the region without such furniture.
   raw=$(_fm_composer_screen_row "$last" "$plain")
   rest=$(_fm_composer_row_content "$raw" 0)
   case "$rest" in '┃'*) rest=${rest#┃} ;; *) rest= ;; esac
   fm_composer_normalize_trim_var rest
-  if fm_composer_idle_matches "$rest" "$footer_re" sensitive; then
-    footer_row=$last
-  fi
-  row=$last
-  [ "$footer_row" -ge 0 ] && row=$((footer_row - 1))
+  fm_composer_idle_matches "$rest" "$footer_re" sensitive || return 1
+  row=$((last - 1))
   while [ "$row" -ge "$first" ]; do
     raw=$(_fm_composer_screen_row "$row" "$plain")
     rest=$raw
