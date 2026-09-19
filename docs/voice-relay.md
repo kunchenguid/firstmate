@@ -86,8 +86,11 @@ virtual environment of its own:
 
 ```
 python3 -m venv ~/.fm-voice-venv
-~/.fm-voice-venv/bin/pip install aws-sdk-bedrock-runtime
+~/.fm-voice-venv/bin/pip install aws-sdk-bedrock-runtime awscrt
 ```
+
+`awscrt` is not optional, because the SDK's default HTTP transport cannot carry the bidirectional duplex stream `InvokeModelWithBidirectionalStream` needs, so the relay asks the SDK for its CRT-backed transport instead.
+That transport raises `MissingDependencyError` at connect time when `awscrt` is not installed.
 
 Then tell this home which account and model to use.
 The relay carries no default for any of these, because a region, a model id and an AWS profile name somebody's account and somebody's choices, and inheriting those from whoever wrote the code is not a sensible way to start talking to a paid API.

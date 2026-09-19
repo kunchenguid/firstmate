@@ -3756,7 +3756,7 @@ E2E_REGION=eu-north-1
 E2E_MODEL=amazon.nova-2-sonic-v1:0
 E2E_REQUEST="take the flaky sign-in test on alpha and open a pull request for it"
 mkdir -p "$E2E/bin" "$E2E/laptop" "$E2E/desktop-home" "$E2E/laptop-home" \
-  "$E2E/fakesdk/aws_sdk_bedrock_runtime" \
+  "$E2E/fakesdk/aws_sdk_bedrock_runtime" "$E2E/fakesdk/smithy_http/aio" \
   "$E2E/home/data" "$E2E/home/state" "$E2E/home/config"
 
 # The laptop holds the two files the guide says to copy, and nothing else.
@@ -3944,6 +3944,7 @@ class _Stream:
             "model_id": model_id,
             "endpoint": config.endpoint_uri,
             "region": config.region,
+            "transport": type(config.transport).__name__,
             "credential_key_id": config.credentials.get("aws_access_key_id"),
             "tool_names_offered": [],
             "audio_bytes_in": 0,
@@ -4075,14 +4076,16 @@ class _Stream:
 
 
 class AsyncBedrockRuntimeConfig:
-    def __init__(self, endpoint_uri, region, credentials):
+    def __init__(self, endpoint_uri, region, transport, credentials):
         self.endpoint_uri = endpoint_uri
         self.region = region
+        self.transport = transport
         self.credentials = credentials
 
     @classmethod
-    async def resolve(cls, endpoint_uri=None, region=None, **credentials):
-        return cls(endpoint_uri, region, credentials)
+    async def resolve(cls, endpoint_uri=None, region=None, transport=None,
+                      **credentials):
+        return cls(endpoint_uri, region, transport, credentials)
 
 
 class AsyncBedrockRuntimeClient:
@@ -4127,6 +4130,16 @@ models = _submodule(
     BidirectionalInputPayloadPart=BidirectionalInputPayloadPart,
     InvokeModelWithBidirectionalStreamInputChunk=(
         InvokeModelWithBidirectionalStreamInputChunk))
+PY
+
+# The transport stand-in, at the same import boundary bin/fm-voice-relay.py
+# uses. Real awscrt is not installed here, so this only has to be distinct from
+# the SDK's default transport, which the session record above checks for.
+touch "$E2E/fakesdk/smithy_http/__init__.py" "$E2E/fakesdk/smithy_http/aio/__init__.py"
+cat > "$E2E/fakesdk/smithy_http/aio/crt.py" <<'PY'
+class AWSCRTHTTPClient:
+    def __init__(self, *args, **kwargs):
+        pass
 PY
 
 # What the desktop side of the connection has, and the laptop side does not. The
@@ -4254,6 +4267,10 @@ for session in sessions:
           "endpoint was %r" % session["endpoint"])
     check(session["credential_key_id"] == key,
           "session opened with %r" % session["credential_key_id"])
+    # The SDK's own default transport cannot carry this duplex stream; the relay
+    # must ask for the CRT one explicitly rather than falling through to it.
+    check(session["transport"] == "AWSCRTHTTPClient",
+          "session opened with transport %r" % session["transport"])
     check(session["tool_names_offered"] ==
           ["get_fleet_status", "hand_over_to_firstmate"],
           "tools offered were %r" % session["tool_names_offered"])
