@@ -1,0 +1,41 @@
+{
+  "id": "firstmate.cockpit-surface-labelled",
+  "version": 1,
+  "sourceContract": "governance.run-evaluation.v1",
+  "consumerContract": "governance.cockpit-run-evaluation-export.v1",
+  "validatorOrigin": {
+    "repository": "00_Architektur",
+    "branch": "codex/run-evaluation-contract-v1",
+    "commit": "b5f4104f93d075cd9140c4dcb6cf06fbeb1501ac",
+    "path": "scripts/validate_run_evaluation.py",
+    "sha256": "5f9ef989ed02260ff61328c7ca91f84529ab1a61f28abd01ba162780b6bbefc7",
+    "canonicalMainAtCopy": false
+  },
+  "allowedDataClasses": [
+    "synthetic",
+    "public",
+    "internal_non_sensitive"
+  ],
+  "allowedEvidenceVisibility": "surface_labelled",
+  "prohibitedContent": [
+    "free_text",
+    "private_path",
+    "prompt",
+    "secret",
+    "transcript"
+  ],
+  "withheldReasonCodes": [
+    "byte_limit",
+    "classification_blocked",
+    "duplicate_source",
+    "evaluation_identity_conflict",
+    "record_limit",
+    "redaction_blocked",
+    "revision_conflict",
+    "revision_superseded",
+    "source_invalid",
+    "source_read_failed",
+    "source_symlink_blocked"
+  ],
+  "projectionOnly": true
+}
