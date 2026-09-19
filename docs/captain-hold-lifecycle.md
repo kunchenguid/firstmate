@@ -67,7 +67,10 @@ Watcher and away-mode classification read the last event line of `state/<id>.sta
 A repeated hold leaves the standing declaration untouched.
 A decision-only hold has no lane and nothing classifies a lane-less log, so it stays in the backlog alone rather than creating a status log that no teardown would retire.
 Every settlement path - close, release, repair, or an evidence-backed reconcile close - retracts the declaration itself with the matching keyed `resolved` line, so a stopped worker can never leave the lane reading as an answer still owed.
+The same settlement retracts a `complete` transfer, `captain-held [key=<k>]: tracked by <ids>`, that names the settled task and is still some lane's last event: it appends `resolved [key=<k>]` once none of the tasks the transfer names is still an open captain call.
+The transfer already closed `<k>`, so that retraction changes no decision, and a lane waiting on several calls keeps reading as held until the last one is answered.
 The keyed pair closes only the hold lifecycle's own key, so a worker's unrelated open status decisions survive both sides, and both mirror lines go through the guarded self-announced append, so the turn recording them does not re-wake its own home.
+The watcher's stale path agrees: its re-surface throttle is bound to the log's signature without the mirror's own trailing lines, and a settled pair lifts only the pause the hold itself set, so neither a hold nor its release restarts a lane's recheck cadence or re-surfaces a lane the watcher already surfaced.
 While the hold stands, the watcher and away-mode daemon read the declaration as the lane's last line; once the pair settles, `last_status_line` in `bin/fm-classify-lib.sh` itself reads past the mirror's own retraction to the worker's last event, so a settled lane is done, paused, or failed again to every raw reader instead of looking like a quiet worker.
 Readers of the worker's own state at any time - `fm-crew-state.sh` and the terminal-outcome ledger in `bin/fm-inactive-reconcile.sh` - read past both mirror lines through `last_worker_status_line`, so a hold never changes a lane's reported state or re-reports an outcome it already delivered.
 
@@ -529,7 +532,7 @@ The suite does not test the accepted merge-to-cleanup re-hold window or asynchro
   This includes the `release` mode, mode-matched replay idempotence, and the refusal of drifted, mode-mismatched, absent, unheld, and already-closed keys.
 - The chat channel reaches the same intake.
 - Hold-set stamping precedes visible hold state, preserves an active lifecycle's timestamp, and resets after release.
-- The status-log mirror holds: a held lane whose last line was `paused:` gains a self-announced `captain-held` declaration a repeated hold does not duplicate; release, closing answer, and reconcile close each retract it with no worker alive; a re-hold starts a new keyed lifecycle; a worker's unrelated open decision survives both sides; a decision-only hold creates no status log; and the divergence guard stays silent over the mirror's own key.
+- The status-log mirror holds: a held lane whose last line was `paused:` gains a self-announced `captain-held` declaration a repeated hold does not duplicate; release, closing answer, and reconcile close each retract it with no worker alive; a re-hold starts a new keyed lifecycle; a worker's unrelated open decision survives both sides; a `complete` transfer left as the lane's last line is retracted once under its own key while a transfer naming a still-open call stays; a decision-only hold creates no status log; and the divergence guard stays silent over the mirror's own key.
 - Interrupted answer closure retains the stamp until close and restores resolution-first ordering on retry.
 - Deferral through `--until` leaves `captain_actionable` false until due.
 
