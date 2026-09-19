@@ -34,6 +34,9 @@
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
+#   kiro-hook        Kiro V2 agent-config hooks (userPromptSubmit opens; stop
+#                    closes) - kiro's ONLY state source; its per-turn stop hook
+#                    also keeps the turn-ended notification touch
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -57,15 +60,25 @@
 #      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
 #      task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
-# Grok, Rovo, and AGY are the ONLY rendered-text classifications that survive the
-# redesign, because none of their structured lifecycles was credited-live-verified
+# Grok, Rovo, and AGY are the only harnesses whose rendered text is their SOLE
+# classification, because none of their structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
 # path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
 # hook surface at all, see references/harness/agy.md); each is scoped to
-# its own harness= and can never classify another adapter. The delivery
-# guards in bin/fm-composer-lib.sh match rendered footers for submit
-# acknowledgement and away-mode supervisor injection only; neither is a
-# recorded worker state source.
+# its own harness= and can never classify another adapter.
+# Kiro is different: its kiro-hook record above is its ONLY state source (a
+# live-verified per-turn userPromptSubmit/stop pair, references/harness/kiro.md),
+# and it has no rendered-tail arm here. Its `Kiro is working` footer is matched
+# only by the delivery guards in bin/fm-composer-lib.sh, never as a recorded
+# worker state, and its single consumer there is the harness-less union entry in
+# FM_DELIVERY_BUSY_REGEX_DEFAULT, which the tmux submit core reads for submit
+# acknowledgement. kiro declares no per-harness signature of its own, because
+# the two harness-scoped delivery readers are away-mode injection (primary
+# harness) and pending-reply observation (a secondmate's), and kiro can be
+# neither. So a kiro task with no record classifies unknown
+# missing, and an abnormal turn end (no StopFailure/SessionEnd equivalent
+# exists on kiro V2) leaves the record busy until the next userPromptSubmit
+# re-opens it - docs/verification/kiro.md owns that disclosure.
 #
 # The muse pull source is semantic, not rendered: it folds muse's own durable
 # session event log. It has no writer, no arm, and no gen, because
@@ -198,6 +211,7 @@ fm_busy_sources_for_harness() {  # <harness>
       ;;
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
+    kiro) adapter=kiro-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)

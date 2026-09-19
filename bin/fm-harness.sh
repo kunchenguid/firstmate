@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|kiro|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -133,7 +133,7 @@ harness_marker() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # codex, opencode, kimi, muse, and agy publish no harness-identity marker at all, so
+  # codex, opencode, kimi, muse, agy, and kiro publish no harness-identity marker at all, so
   # they are never named here and are identified by ancestry alone. That is the
   # whole reason a foreign marker must not outrank ancestry: with markers winning
   # unconditionally, any retained CLAUDECODE would silently rename one of them.
@@ -228,6 +228,18 @@ harness_process_verdict() {  # <pid>
     # inherited launcher value, not an agy identity), so like muse it is
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
+    # kiro (Kiro CLI) publishes no harness-identity marker of its own (a live
+    # 2.21.4 tool subprocess carries no KIRO_* identity variable; KIRO_HOME is
+    # a firstmate-set config-relocation path, not an identity), so like muse
+    # and agy it is detected by ancestry alone. The installed command is a
+    # toolbox/aim-sandbox wrapper whose foreground process name is exactly
+    # `kiro-cli` (verified, kiro-cli 2.21.4: `ps -o comm=` and tmux
+    # #{pane_current_command} both report kiro-cli; the aim-sandbox and the
+    # compiled bun/node binary run as descendants). Anchored, never *kiro*, so
+    # unrelated commands cannot be misread as this harness. kiro is a
+    # crewmate/scout adapter only and is never a primary or secondmate, so
+    # this arm only lets a kiro crewmate identify its own harness.
+    kiro-cli) echo "comm kiro"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
