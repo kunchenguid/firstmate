@@ -3322,6 +3322,54 @@ test_structured_child_decision_reaches_captains_call
 test_bad_secondmate_homes_never_revive_parent_work
 test_oversized_secondmate_summary_stays_strict_unknown
 test_secondmate_and_child_bounds_are_disclosed
+# A worker on a harness with no verified semantic busy source used to project as
+# `unknown` no matter what it had reported, so the fleet board rendered finished
+# work as state unavailable. Its declared outcome must now reach Underway - and
+# must stay there: a declaration is the worker's word about its DELIVERABLE, and
+# landed work is a separate structured fact (a Done backlog row), so a completed
+# declaration must never promote a task into the recent-completions baseline.
+#
+# The crew's note here is deliberately longer than this projection's 90-character
+# `doing` bound, because that bound is what makes the ordering load-bearing: with
+# the unverified-activity disclosure appended after the note it was the first
+# thing truncated away, leaving the board showing a bare completion claim with
+# nothing saying the activity behind it was never observed.
+test_unverifiable_harness_worker_projects_underway_not_landed() {
+  local home fakebin backlog json
+  home=$(make_home unverifiable-underway); write_fixture "$home"
+  backlog="$home/data/backlog.md"
+  awk '
+    /^- \[ \] scout-x - Investigate the thing/ {
+      print "- [ ] legacy-codex - Build the export path (repo: firstmate) (kind: ship) (since 2026-07-11)"
+    }
+    { print }
+  ' "$backlog" > "$backlog.tmp" && mv "$backlog.tmp" "$backlog"
+  fm_write_meta "$home/state/legacy-codex.meta" \
+    "window=firstmate:fm-legacy-codex" \
+    "worktree=$home/projects/ship-wt" \
+    "project=firstmate" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  # No semantic record is written, and none ever could be: fm-spawn arms no busy
+  # wiring for this harness, which is the whole reason the verdict is permanent.
+  printf 'done: %s\n' \
+    "ready in branch fm/legacy-codex; every focused check passed, the generated output was compared against the recorded baseline, and the preview copy was left untouched" \
+    > "$home/state/legacy-codex.status"
+  fakebin=$(make_fakebin "$home")
+  json=$(run "$home" "$fakebin" --json)
+  printf '%s' "$json" | jq -e '
+    ([.in_flight[] | select(.id == "legacy-codex")]) as $row
+    | ($row | length) == 1
+      and ($row[0].state == "done")
+      and ($row[0].doing | test("activity unverified"))
+      and ($row[0].doing | test("ready in branch fm/legacy-codex"))
+      and ($row[0].doing | endswith("…"))
+      and (.landed | any(.id == "legacy-codex") | not)
+  ' >/dev/null || fail "an unverifiable-harness completion must reach Underway, keep its disclosure through truncation, and not claim it landed: $json"
+  pass "a truncated completion keeps its unverified-activity disclosure, reaches Underway, and never lands"
+}
+
 test_parent_decision_is_untrusted_contradiction_only
 test_parent_evidence_reconciles_by_verb_and_key
 test_nonprogressing_child_states_are_explicit
@@ -3356,6 +3404,7 @@ test_completed_scout_report_not_pending
 test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
 test_queued_item_prose_never_hides_it
+test_unverifiable_harness_worker_projects_underway_not_landed
 test_include_prs_is_the_only_fetch_path
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call

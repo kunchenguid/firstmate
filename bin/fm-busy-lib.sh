@@ -152,6 +152,31 @@ fm_busy_codex_semantic_source() {
   fm_busy_codex_appserver_observable || fm_busy_codex_hooks_verified
 }
 
+# fm_busy_verdict_unverified_harness: 0 when <verdict> reports that this HARNESS
+# has no verified semantic source AT ALL, rather than that an existing source
+# failed to answer. Only the gated arms at the top of fm_busy_classify produce
+# that shape: they short-circuit before any record, native, or fallback read, so
+# the verdict is permanent for the installed binary and carries NO information
+# about whether the worker is generating right now.
+#
+# Every OTHER unknown does carry such information, and callers must keep treating
+# it as evidence: missing, malformed, gen-mismatch and source-mismatch each mean a
+# source that should have answered did not, capture-failed and no-target mean the
+# endpoint could not be read, and the per-harness pull sources mean the worker's
+# own transcript or session log was unreadable. In all of those the worker may be
+# mid-turn, so a stale completion event must not be trusted over them.
+#
+# This separates "this adapter can never show activity" from "we lost the signal
+# right now". A caller that needs the first case to stop suppressing other
+# evidence uses this; nothing here weakens the busy/idle contract, and when a
+# gate above opens the verdict becomes busy or idle and this returns 1 again.
+fm_busy_verdict_unverified_harness() {  # <verdict>
+  case "$1" in
+    'unknown codex-unverified'|'unknown kimi-unverified') return 0 ;;
+  esac
+  return 1
+}
+
 fm_busy_record_path() {  # <state-dir> <id>
   printf '%s/%s.busy-state' "$1" "$2"
 }

@@ -230,6 +230,11 @@ In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycl
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 
+While a gate stays closed, its verdict is permanent for the installed binary and says nothing about whether the worker is generating, so [`bin/fm-crew-state.sh`](../../bin/fm-crew-state.sh) does not let it suppress that crew's own status declaration.
+`fm_busy_verdict_unverified_harness` in [`bin/fm-busy-lib.sh`](../../bin/fm-busy-lib.sh) is the single owner of which verdicts have that shape, and it names only the two gated arms above, so every contingent unknown still outranks a possibly-stale log.
+This adds no new dependency on vendor output: the exception is keyed on firstmate's own gate, and reopening either gate retires it by construction, because the verdict then resolves to busy or idle and the predicate stops matching.
+Reverify this row after a Codex or Kimi upgrade; a gate that opens needs the wiring landed in the same change, not a reader exception left behind.
+
 Deterministic entry points:
 
 ```sh

@@ -100,10 +100,12 @@ During no-mistakes' `ci` monitor phase, it also reads the ci step log tail becau
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
 `bin/fm-crew-state.sh` owns the evidence guard that recognizes ended CI monitors after green checks, including cancelled runs and skipped rebase steps; a passed run alone never proves a forge merge.
 In the coarse runs-ledger fallback, which has no steps table and no ci log, a terminal failed record whose daemon an explicit `daemon status` probe proves down reports unknown as unverified instead: an instrument failure must never read as work failure.
-Only when no matching run exists does it consult semantic busy state; exact busy reports working, exact idle permits fallback to the log's resolved current declaration - the newest decision the fold still holds open, otherwise the latest recognized event - when its verb maps to a recognized run-state, and unknown or a dead pane stays unknown instead of trusting a stale log.
+Only when no matching run exists does it consult semantic busy state; exact busy reports working and exact idle permits fallback to the log's resolved current declaration - the newest decision the fold still holds open, otherwise the latest recognized event - when its verb maps to a recognized run-state.
+Unknown and a dead pane normally stay unknown instead of trusting a stale log; the narrow exception is an `unknown codex-unverified` or `unknown kimi-unverified` verdict, which says that adapter has no verified semantic source at all and therefore permits a qualified status-log declaration only while no outstanding or same-second-or-newer steering invalidates it.
 Decision-only events such as `resolved` never become current state or leak their prose into the current-state detail.
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
-The semantic branch reports working only on an exact busy verdict and names the source that produced it; an unknown verdict never becomes working, never permits the status-log fallback, and never becomes a silent idle.
+The semantic branch reports working only on an exact busy verdict and names the source that produced it; an unknown verdict never becomes working or a silent idle.
+Only the structurally unverifiable Codex and standalone Kimi verdicts permit the qualified status-log exception above; every contingent unknown still suppresses the fallback.
 Published-contribution records, PR verdict freshness against the observed current head, actor classification, measured coverage, and incoming forge signals are owned by `bin/fm-contributions.sh` and verified by `tests/fm-contributions.test.sh`.
 GitHub PRs and issues are observed; unsupported forges remain disclosed as unmeasured coverage rather than fleet work.
 The existing Bearings Captain's Call consumes that coverage, and its skill owns supervisor triage through existing captain holds and durable check wakes.
@@ -202,6 +204,7 @@ Kimi behind Pi inherits Pi's lifecycle.
 Codex and standalone Kimi classify unknown behind explicit probes until a semantic source is live-verified for them, and Grok, Rovo, and AGY each keep one clearly isolated rendered-tail fallback that can only ever classify their own task.
 
 Missing, malformed, stale, untrusted, or unverified semantic state is unknown, never idle, and unknown is never promoted to busy either.
+The current-state reader's qualified declaration fallback for structurally unverifiable Codex and standalone Kimi adapters does not change that busy-state verdict or treat it as idle.
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
 Endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
 `state/<id>.turn-ended` files remain wake notifications, not current state.
