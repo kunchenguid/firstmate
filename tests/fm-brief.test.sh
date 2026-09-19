@@ -840,6 +840,62 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+test_ship_and_scout_forbid_agent_coauthor() {
+  local home brief
+  home="$TMP_ROOT/coauthor-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" coauthor-ship firstmate --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/coauthor-ship/brief.md"
+  assert_grep "Never add an agent name as a commit co-author on any commit." "$brief" \
+    "ship brief did not forbid an agent commit co-author"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" coauthor-scout firstmate --scout >/dev/null 2>&1
+  brief="$home/data/coauthor-scout/brief.md"
+  assert_grep "Never add an agent name as a commit co-author on any commit." "$brief" \
+    "scout brief did not forbid an agent commit co-author"
+  pass "fm-brief.sh: ship and scout briefs forbid an agent commit co-author"
+}
+
+test_ship_comment_and_doc_rule_is_ship_only() {
+  local home brief
+  home="$TMP_ROOT/comment-rule-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" comment-ship firstmate --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/comment-ship/brief.md"
+  assert_grep "Rename or restructure before adding a comment; add one only where its absence would cause a mistake." "$brief" \
+    "ship brief lost the accident-test comment bar"
+  assert_grep "Docs must never restate a fact a machine-readable file already declares." "$brief" \
+    "ship brief lost the one-source-of-truth docs rule"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" comment-scout firstmate --scout >/dev/null 2>&1
+  brief="$home/data/comment-scout/brief.md"
+  assert_no_grep "add one only where its absence would cause a mistake" "$brief" \
+    "scout brief picked up the code-bearing comment rule despite writing only a report"
+  pass "fm-brief.sh: ship briefs carry the comment/docs accident-test bar, scout briefs do not"
+}
+
+test_ship_and_scout_forbid_self_polling_on_wait() {
+  local home kind id brief
+  home="$TMP_ROOT/no-self-poll-home"
+  mkdir -p "$home/data"
+
+  for kind in ship scout; do
+    id="no-poll-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
+        "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
+        "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'After `needs-decision` or `blocked`, wait idle for firstmate'"'"'s reply - never poll, loop, or schedule your own wakeups to check for it.' "$brief" \
+      "$kind brief did not forbid self-polling while parked on a firstmate-delivered reply"
+    assert_no_grep "or \`awaiting\`, wait idle" "$brief" \
+      "$kind brief told a self-clearing declared wait to park for a firstmate reply that never comes"
+  done
+  pass "fm-brief.sh: ship and scout briefs park only on the states firstmate must clear"
+}
+
 # A scout brief offers the Lavish review loop only when bootstrap confirms the
 # supported lavish-axi floor at scaffold time; a missing or older build gets a
 # text-report instruction instead, so a scout never drives a below-floor Lavish.
@@ -947,5 +1003,8 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
+test_ship_and_scout_forbid_agent_coauthor
+test_ship_comment_and_doc_rule_is_ship_only
+test_ship_and_scout_forbid_self_polling_on_wait
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor

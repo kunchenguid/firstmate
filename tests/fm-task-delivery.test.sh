@@ -397,6 +397,47 @@ STUB
   pass "fm-promote: a promoted worker receives the same mode-specific delivery contract a briefed one does"
 }
 
+# A promoted scout keeps the scout brief it was scaffolded with, and that
+# scaffold deliberately omits the ship-only comment/docs accident-test rule
+# since a scout's deliverable is a report, not committed code. fm-promote.sh
+# must therefore carry the rule in the ship instructions it hands the worker.
+test_promotion_delivers_ship_only_comment_rule() {
+  local home meta id out sendroot payload
+  home="$TMP_ROOT/promote-comment/home"
+  sendroot="$TMP_ROOT/promote-comment/sendroot"
+  mkdir -p "$home/state" "$sendroot/bin"
+  cat > "$sendroot/bin/fm-send.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s' "$2" > "$FM_TEST_CAPTURE"
+STUB
+  chmod +x "$sendroot/bin/fm-send.sh"
+
+  id=promote-comment
+  meta="$home/state/$id.meta"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+    || fail "scout brief generation should succeed"
+  assert_no_grep "add one only where its absence would cause a mistake" \
+    "$home/data/$id/brief.md" \
+    "scout brief unexpectedly carried the ship-only comment/docs rule before promotion"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Ship the delivery-contract change." "Preserve the selected delivery mode."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode direct-PR --yolo off 2>&1) \
+    || fail "promotion should succeed"
+
+  payload="$TMP_ROOT/promote-comment/payload"
+  ( cd "$sendroot" \
+    && FM_TEST_CAPTURE="$payload" \
+       eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
+    || fail "promotion's delivery command did not run"
+  assert_present "$payload" "promotion delivered no message to the worker"
+  assert_grep "Rename or restructure before adding a comment; add one only where its absence would cause a mistake." "$payload" \
+    "promoted worker did not receive the ship-only comment/docs rule"
+  assert_grep "Docs must never restate a fact a machine-readable file already declares." "$payload" \
+    "promoted worker did not receive the one-source-of-truth docs rule"
+  pass "fm-promote: a promoted scout receives the ship-only comment/docs rule its scout brief never carried"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -890,6 +931,7 @@ test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
+test_promotion_delivers_ship_only_comment_rule
 test_project_mode_maps_the_conditional_policy
 test_spawn_and_promote_require_filled_task_subsections
 echo "# all fm-task-delivery tests passed"
