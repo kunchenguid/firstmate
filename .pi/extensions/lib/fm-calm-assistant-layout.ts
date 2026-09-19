@@ -81,7 +81,7 @@ function installAssistantRenderBoundary(
   controller.assistantRender ??= (component, width) =>
     controller.originalRender!.call(component, width);
   controller.renderWrapper ??= function (width: number): string[] {
-    return controller.assistantRender!(this, width);
+    return controller.assistantRender!(this as unknown as PiAssistantMessageComponent, width);
   };
   if (prototypeRender !== controller.renderWrapper) {
     AssistantMessageComponent.prototype.render = controller.renderWrapper;
@@ -149,7 +149,7 @@ export function installCalmAssistantLayout(
   );
 
   activeController.assistantRender = (_component, width): string[] => {
-    const lines = activeController.originalRender.call(_component, width);
+    const lines = activeController.originalRender!.call(_component, width);
     if (!calmPresentationHides("assistant-thinking") || lines.length === 0) return lines;
     return lines.map(
       (line) =>
@@ -182,7 +182,7 @@ export function installCalmAssistantLayout(
       !isNoopAcknowledgement;
     const hideOperationalTurn =
       isNoopAcknowledgement || (operationalRun && !isCleanOperationalResponse);
-    const operationalMessage = hideOperationalTurn
+    const operationalMessage = (hideOperationalTurn
       ? { ...sourceMessage, content: [], stopReason: undefined, errorMessage: undefined }
       : operationalRun
         ? {
@@ -190,7 +190,7 @@ export function installCalmAssistantLayout(
             content: sourceMessage.content.filter((block) => block.type === "text"),
             errorMessage: undefined,
           }
-        : sourceMessage;
+        : sourceMessage) as AssistantMessage;
     const calmOwnsThinking = calmPresentationHides("assistant-thinking");
     const thinkingOwned =
       calmOwnsThinking ||
@@ -206,7 +206,7 @@ export function installCalmAssistantLayout(
             content: sourceMessage.content.filter((block) => block.type !== "thinking"),
           }
         : sourceMessage;
-    const renderedMessage = presentationMessage;
+    const renderedMessage = presentationMessage as AssistantMessage;
 
     activeController.presentations.set(component, {
       source: sourceMessage,
