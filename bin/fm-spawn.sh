@@ -1366,13 +1366,8 @@ spawn_refuse_if_away_spend_cap() {
   [ "$RELAUNCH" -ne 1 ] || return 0
   [ "$KIND" != secondmate ] || return 0
   [ -f "$STATE/.afk-contract" ] || return 0
-  cap=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field spend_max_concurrent_workers 2>/dev/null || true)
-  case "$cap" in
-  '' | *[!0-9]* | 0)
-    echo "error: spawn refused - the away-posture record at $STATE/.afk-contract has no readable spend cap; nothing was dispatched" >&2
-    exit 1
-    ;;
-  esac
+  FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" validate >/dev/null 2>&1 || return 0
+  cap=$(FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-afk-contract.sh" field spend_max_concurrent_workers)
   live=0
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
