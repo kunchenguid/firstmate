@@ -32,7 +32,7 @@ def known($input; $saved):
    + [$saved[] | .task as $task | .records[] | {task:$task,url}])
   | unique_by([.task,.url]);
 def latest_checks:
-  group_by(.name) | map(sort_by([(.started_at // ""),(.id // 0)]) | last);
+  group_by(.name) | map(sort_by([(.pipeline // 0),(.started_at // ""),(.id // 0)]) | last);
 def projected($input; $saved; $now; $max_age):
   known($input; $saved) as $known
   | [$known[] as $k
@@ -51,8 +51,7 @@ def projected($input; $saved; $now; $max_age):
     | ($record.error == null and ($o.state | IN("merged","closed"))) as $final
     | (($final or ($checked != null and ($now - $checked) >= 0 and ($now - $checked) <= $max_age))
        and (if $record.kind == "pr" then $observed_head != null
-            else $record.error == null and $record.observation != null end)
-       and ($k.url | startswith("https://github.com/"))) as $fresh
+            else $record.error == null and $record.observation != null end)) as $fresh
     | (($o.checks // []) | latest_checks) as $checks
     | [$checks[] | select(.status == "completed" and (.conclusion == null or .conclusion == ""))] as $no_verdict
     | [$checks[] | select(.status != "completed")] as $pending
@@ -63,10 +62,8 @@ def projected($input; $saved; $now; $max_age):
        else $record.verdict + {freshness:(if $stale then "STALE" elif $fresh then "current" else "unverified" end)} end) as $verdict
     | ([$o.reviews[]? | select(.state != "COMMENTED")] | group_by(.user.login)
        | map(sort_by([.submitted_at,.id]) | last)
-       | map(. + {freshness:(if $observed_head != null and .commit_id != $observed_head then "STALE" elif $fresh then "current" else "unverified" end)})) as $reviews
-    | (if ($k.url | startswith("https://github.com/") | not) then
-         {actor:"unmeasured",reason:"unsupported forge; coverage is unmeasured"}
-       elif $o.state == "merged" or $o.state == "closed" then
+       | map(. + {freshness:(if $observed_head != null and .commit_id != null and .commit_id != $observed_head then "STALE" elif $fresh then "current" else "unverified" end)})) as $reviews
+    | (if $o.state == "merged" or $o.state == "closed" then
          if $fresh then {actor:"nobody",reason:("forge reports " + $o.state)}
          else {actor:"fleet",reason:"terminal observation needs refresh"} end
        elif $hold != null then {actor:"captain",reason:$hold.hold_reason,hold:$hold.id}
@@ -92,7 +89,7 @@ def projected($input; $saved; $now; $max_age):
          {actor:"fleet",reason:"checks green; merge is authorized by delivery posture"}
        elif $o.can_merge == true then {actor:"captain",reason:"checks green; merge approval needed"}
        else {actor:"maintainer",reason:"delivery awaits the maintainer"} end) as $action
-    | $k + {kind:($record.kind // (if ($k.url | contains("/issues/")) then "issue" else "pr" end)),
+    | $k + {kind:($record.kind // (if ($k.url | test("^https://github.com/[^/]+/[^/]+/issues/[1-9][0-9]*$")) then "issue" else "pr" end)),
          checked_at:$record.checked_at,checked:$fresh,final:$final,head:($observed_head // $recorded_head // $o.head),verdict:$verdict,reviews:$reviews,
          distinct_checks:($checks | length),missing_verdicts:(($no_verdict | length) + (($o.absent_checks // []) | length)),
          pending_checks:($pending | length),failed_checks:($failed | length),

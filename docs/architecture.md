@@ -105,7 +105,7 @@ Decision-only events such as `resolved` never become current state or leak their
 In that status-log fallback, a declared external wait reports the distinct `paused` state with its reason.
 The semantic branch reports working only on an exact busy verdict and names the source that produced it; an unknown verdict never becomes working, never permits the status-log fallback, and never becomes a silent idle.
 Published-contribution records, PR verdict freshness against the observed current head, actor classification, measured coverage, and incoming forge signals are owned by `bin/fm-contributions.sh` and verified by `tests/fm-contributions.test.sh`.
-GitHub PRs and issues are observed; unsupported forges remain disclosed as unmeasured coverage rather than fleet work.
+GitHub pull requests and issues and GitLab merge requests are observed; no other forge URL shape is owned.
 The existing Bearings Captain's Call consumes that coverage, and its skill owns supervisor triage through existing captain holds and durable check wakes.
 
 For whole-fleet review, `bin/fm-fleet-snapshot.sh --json` emits schema `fm-fleet-snapshot.v1` from the backlog, task metadata, local current crew state, supervision-owned endpoint evidence, PR/report pointers, scout reports, bounded current summaries from registered secondmate homes, and secondmate return-channel guidance.

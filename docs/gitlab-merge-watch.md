@@ -31,7 +31,8 @@ That `glab` is a locally built 1.82.0; only its build tag and commit are elided,
 
 ## The evidence project
 
-All live evidence here reads <https://gitlab.com/KarotKris/gitlab-merge-watch-fixture>, a public project that exists only to be this evidence.
+All live evidence in the watch and merge sections reads <https://gitlab.com/KarotKris/gitlab-merge-watch-fixture>, a public project that exists only to be this evidence.
+The Contribution observation section below additionally reads merge request 3933 on the public gitlab-org/cli project, because the fixture runs no CI and only a project with pipelines can document the pipeline-job lane shapes.
 It holds one deliberately merged merge request and one deliberately open one, so both outcomes can be shown against real data.
 Every command against it reads a public merge request and needs no credential, so a reader can rerun each one and see the same output.
 Its README asks that the open merge request be left open.
@@ -177,6 +178,69 @@ A GitHub task is unaffected by a missing `glab`:
 $ PATH="$noglab" fm-pr-check.sh e6 https://github.com/kunchenguid/firstmate/pull/750
 armed: state/e6.check.sh
 ```
+
+## Contribution observation
+
+`bin/fm-contributions.sh` observes a task's published merge request the same way it observes GitHub pull requests: state, draft, mergeability, approvals, pipeline checks, and maintainer comments all normalize into the `fm-contributions.v1` observation.
+That GitLab support was verified on 2026-09-18 with the glab 1.53.0 from the Versions section above, reading only public merge requests: the fixture merge requests and gitlab-org/cli merge request 3933 for the CI lane shapes.
+
+The observation reads the MR core, its discussions, its approvals, and every pipeline the MR endpoint reports, then re-reads the core to confirm the head did not move while those lanes were fetched.
+
+The MR core already carries the fields the schema needs:
+
+```
+$ glab api --hostname gitlab.com projects/KarotKris%2Fgitlab-merge-watch-fixture/merge_requests/2 | jq -c '{state,draft,sha,merge_status,user,author:.author.username}'
+{"state":"opened","draft":false,"sha":"66b8a6777bea5e291d7fa2fc20c42ad7686f6bc8","merge_status":"can_be_merged","user":{"can_merge":false},"author":"KarotKris"}
+```
+
+`state` maps directly, with `opened` normalized to the schema's `open`.
+`draft` and `sha` pass through.
+`merge_status` maps `can_be_merged` to mergeable and `cannot_be_merged` to conflicting.
+`user.can_merge` is the observer's own merge permission, the same read-only substitute GitHub supplies through `repo.permissions.push`.
+
+An MR without approved-by entries still tells how approvals are enforced:
+
+```
+$ glab api --hostname gitlab.com projects/KarotKris%2Fgitlab-merge-watch-fixture/merge_requests/2/approvals | jq -c '{approved,approved_by,has_approval_rules}'
+{"approved":true,"approved_by":[],"has_approval_rules":false}
+$ glab api --hostname gitlab.com projects/gitlab-org%2Fcli/merge_requests/3933/approvals | jq -c '{approved,approved_by,has_approval_rules,approvals_left}'
+{"approved":false,"approved_by":[],"has_approval_rules":true,"approvals_left":1}
+```
+
+`approved == true` maps to the schema's `APPROVED` review decision, and real approval rules that are still unsatisfied map to `REVIEW_REQUIRED`.
+Each `approved_by` entry becomes one review with `APPROVED` state, so a maintainer approval is a review the verdict cascade can count.
+
+The fixture project runs no CI, so its pipelines endpoint legitimately reads empty:
+
+```
+$ glab api --hostname gitlab.com projects/KarotKris%2Fgitlab-merge-watch-fixture/merge_requests/2/pipelines
+[]
+```
+
+On a project that does run CI, the MR pipelines endpoint returns pipeline records whose jobs are the named check lanes:
+
+```
+$ glab api --hostname gitlab.com projects/gitlab-org%2Fcli/merge_requests/3933/pipelines?per_page=2 | jq -c '.[] | {id,status,ref,sha}'
+{"id":2859197360,"status":"success","ref":"refs/merge-requests/3933/merge","sha":"09e9d98ae5598990eb484cbb49f70ba0c8a49bb7"}
+{"id":2858934587,"status":"success","ref":"refs/merge-requests/3933/merge","sha":"3b99de74ef75ebe474f5bc0669bd5196c8265fdf"}
+$ glab api --hostname gitlab.com projects/gitlab-org%2Fcli/pipelines/2859197360/jobs?per_page=3 | jq -c '.[] | {name,status,started_at}'
+{"name":"review-docs-cleanup","status":"manual","started_at":null}
+{"name":"review-docs-deploy","status":"manual","started_at":null}
+{"name":"dependency-scanning-profile-0","status":"success","started_at":"2026-09-17T18:36:05.751Z"}
+```
+
+Each pipeline's jobs normalize into checks with the job name as the lane, and GitLab lanes keep their pipeline id, so the newest-attempt-per-name projection orders lanes by pipeline recency first and the newest pipeline's lane wins per name across pushes.
+`success`, `failed`, `canceled`, and `skipped` are completed conclusions; `manual`, `scheduled`, and `blocked` lanes normalize to a completed `skipped` conclusion, so an untriggered manual deploy job or a job waiting on it never keeps an open merge request classified as checks still running and the MR's own mergeability is what gates ready-to-merge; everything else stays in progress.
+
+`glab api` paginates like `gh api` but has no `--slurp`, so the monitor fetches with `--paginate` and lets `jq -s` assemble the pages:
+
+```
+$ glab api --hostname gitlab.com projects/gitlab-org%2Fcli/merge_requests/3933/discussions?per_page=1 --paginate | jq -s length
+19
+```
+
+Discussions and approvals by users other than the MR author become comment and review events, exactly the maintainer-signal contract GitHub comments and reviews already feed, and GitLab system notes are dropped.
+All reads go through `glab api --hostname <host>`, so a merge request on any self-hosted instance resolves without a hardcoded host, same as the merge watch.
 
 ## Registration version
 
