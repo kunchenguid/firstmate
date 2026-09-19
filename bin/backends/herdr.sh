@@ -1911,14 +1911,16 @@ fm_backend_herdr_workspace_prune_seeded_default_tab() {  # <session> <workspace_
 fm_backend_herdr_home_binding_path() { printf '%s/state/%s' "$FM_HOME" "$FM_BACKEND_HERDR_HOME_BINDING_FILE"; }
 fm_backend_herdr_home_binding_field() { local f=$1 k=$2 n; n=$(grep -c "^${k}=" "$f" 2>/dev/null || true); [ "$n" = 1 ] || return 1; grep "^${k}=" "$f" | cut -d= -f2-; }
 fm_backend_herdr_home_binding_snapshot() {
-  local f=$1 k v
+  local f=$1 k v upper_k
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
   [ "$(wc -l < "$f" | tr -d '[:space:]')" = 9 ] || return 1
   for k in version home session socket workspace_id owner_kind generation anchor_tab_id anchor_pane_id; do
     v=$(fm_backend_herdr_home_binding_field "$f" "$k") || return 1
     [ -n "$v" ] || [ "$k" = anchor_tab_id ] || [ "$k" = anchor_pane_id ] || return 1
     case "$v" in *[[:space:]]*) return 1 ;; esac
-    eval "FM_BACKEND_HERDR_BINDING_${k^^}=\$v"
+    # `${k^^}` is bash 4+; this codebase also runs under stock macOS bash 3.2.
+    upper_k=$(printf '%s' "$k" | tr '[:lower:]' '[:upper:]')
+    eval "FM_BACKEND_HERDR_BINDING_${upper_k}=\$v"
   done
   [ "$FM_BACKEND_HERDR_BINDING_VERSION" = "$FM_BACKEND_HERDR_HOME_BINDING_VERSION" ] || return 1
   [ "$FM_BACKEND_HERDR_BINDING_OWNER_KIND" = primary ] || [ "$FM_BACKEND_HERDR_BINDING_OWNER_KIND" = secondmate ] || return 1
