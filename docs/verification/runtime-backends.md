@@ -2070,7 +2070,9 @@ Under the captain's `unicode` symbol preset the idle screen through Herdr was a 
 
 Before the status-row rule the shared classifier folded that row into the bare composer's wrap region and read the idle pane `pending`, so `bin/fm-send.sh` skipped its doorbell on the first live omp worker.
 After the rule, the same live Herdr capture read `empty`, a steer's doorbell landed, and the worker opened a turn on it.
-`tests/fm-composer-lib.test.sh` pins the unicode idle row, the nerd-preset idle row, the busy spinner row, and typed text over the same fixture in both locales.
+On 2026-09-18, current live captures also included slash context cells with K or M totals, such as `15.4%/1M`, and unknown-token totals such as `53K/?` and `40K/?`; the classifier recognizes those cells even when surrounding separators differ.
+A boxed `composer.shape: box` panel remains outside this rule and reads `unknown`; the worker overlay pins omp to the borderless shape.
+`tests/fm-composer-lib.test.sh` pins the unicode idle row, the nerd-preset idle row, the busy spinner row, slash context cells, and typed text over the same fixture in both locales.
 
 ### Busy state and lifecycle
 

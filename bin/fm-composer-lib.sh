@@ -438,10 +438,20 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # preset's `pi` is deliberately absent because that preset's `sep.dot` is
 # ` - `, so its status row never carries a middle dot and a `pi ·` alternative
 # could only ever match typed text), when it opens with one of omp's spinner
-# frames then an elapsed cell, or when it carries the context-usage cell after
-# a middle dot. It is consulted only as the boundary BELOW a bare composer,
-# never on the composer row itself.
-FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
+# frames then an elapsed cell, or when it carries the context-usage cell.
+# 2026-09-18, live through Herdr on the fleet's omp panes: the context cell is
+# matched by its own bytes alone, with no separator requirement, because the
+# observed rows separate their cells with ` · ` or ` > ` and no single
+# separator is common to them. The observed cell shapes are `15.4%/272K` and
+# `11.7%/1M` (a K or M total after the slash) and the unknown-token-total
+# shapes `53K/?` and `40K/?`. The K-era cell matched none of the new shapes,
+# so idle panes read `pending`/`unknown` and the steer, relaunch, and stop
+# paths refused with "composer visibly holds pending text".
+# Known limitation: omp's `composer.shape: box` panel (status row as a boxed
+# top border, input on the bottom border) is out of scope and reads `unknown`;
+# firstmate pins every omp worker to the borderless shape, and `unknown`
+# refuses rather than types.
+FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[0-9]+(\.[0-9]+)?%/([0-9]+[KM]|\?)|[0-9]+K/\?'
 # Braille-pattern cells (U+2800..U+28FF) are animation furniture: codex-cli
 # 0.154.0 draws an idle "starfield" of them on the row above its `›` prompt
 # row, on the `›` row itself after the dim `Ask Codex to do anything`
