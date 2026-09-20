@@ -1175,29 +1175,42 @@ contribution_owner_meta() {  # <home>
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
 }
 
+# Pretty-printed exactly as the parser serializes its own backlog document, and
+# never larger than it: every record here carries the raw line alone, while the
+# parser adds its parsed fields around it.
+backlog_argv_probe() {  # <home>
+  # shellcheck disable=SC2094
+  jq -Rn --arg path "$1/data/backlog.md" \
+    '{path:$path,present:true,records:[inputs|{raw:.}]}' < "$1/data/backlog.md"
+}
+
 # The contributions poll consumes this payload whole. Handing the documents to
 # jq as command-line arguments died at the kernel's argument limit once the
 # backlog grew, so the poll read an empty payload and concluded nothing was
 # pending. Nothing here may be capped or sampled to fit.
 test_contribution_input_carries_a_whole_backlog() {
-  local home out backlog rows=400
+  local home out backlog probe rows=400
   home=$(make_home contribution-input-whole-backlog)
   contribution_owner_meta "$home"
-  # Grow until the payload genuinely cannot travel as one argument, so the
-  # case cannot go vacuous on a platform with a larger limit.
+  # Grow until the backlog document cannot travel as one argument, so the case
+  # cannot go vacuous on a platform with a larger limit.
   while :; do
     write_contribution_backlog "$home" "$rows"
-    out=$(FM_HOME="$home" "$SNAPSHOT" --contribution-input) \
-      || fail "contribution input failed on a $rows-row backlog"
-    [ -n "$out" ] \
-      || fail "contribution input printed nothing on a $rows-row backlog"
-    backlog=$(printf '%s' "$out" | jq -c '.backlog') \
-      || fail "contribution input was not valid JSON on a $rows-row backlog"
-    env true "$backlog" 2>/dev/null || break
+    probe=$(backlog_argv_probe "$home") \
+      || fail "could not serialize a $rows-row backlog"
+    env true "$probe" 2>/dev/null || break
     [ "$rows" -lt 12800 ] \
       || fail "could not build a backlog too large for a single command-line argument"
     rows=$((rows * 2))
   done
+  out=$(FM_HOME="$home" "$SNAPSHOT" --contribution-input) \
+    || fail "contribution input failed on a $rows-row backlog"
+  [ -n "$out" ] \
+    || fail "contribution input printed nothing on a $rows-row backlog"
+  backlog=$(printf '%s' "$out" | jq '.backlog') \
+    || fail "contribution input was not valid JSON on a $rows-row backlog"
+  ! env true "$backlog" 2>/dev/null \
+    || fail "a $rows-row backlog still fits in one command-line argument"
   printf '%s' "$out" | jq -e --argjson rows "$rows" '
     (.backlog.present == true)
       and (.backlog.records | length) == $rows
