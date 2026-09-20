@@ -1508,10 +1508,10 @@ status_observed_signature() {  # <file> [<size> <ident>]
   if ! _status_observe_fields "$f" "${2-}" "${3-}"; then
     _status_observe_fields "$f" "${2-}" "${3-}" || return 2
   fi
-  status_observation_succeeded "$f"
   encoded=$(printf '%s\0%s\0%s\0%s\0%s\0%s' "${_STATUS_OBSERVED_FIELDS[@]}" \
     | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
   [ -n "$encoded" ] || return 1
+  status_observation_succeeded "$f"
   printf 'r1:%s' "$encoded"
 }
 
@@ -1547,8 +1547,10 @@ status_observed_signature() {  # <file> [<size> <ident>]
 # of 0 counts every call, which the pure unit tests use.
 #
 # One predicate opens and ends an episode: the same three-helper observation the
-# signature is built from. status_observed_signature ends the episode itself when
-# it succeeds, so a caller that proved less than that - a span read, which needs
+# signature is built from. status_observed_signature ends the episode itself once
+# it has a signature in hand - after the encode, not before it, because the
+# encode forks too and a caller that got no signature is about to count the
+# failure. A caller that proved less than that - a span read, which needs
 # only identity and size - must never claim the reset, or a failure confined to
 # the path-state helper would leave the count oscillating and the bound would
 # never fire. status_observation_check is that predicate for a caller that needs
@@ -1665,7 +1667,12 @@ status_observation_succeeded() {  # <status-file>: a proven observation ends the
 
 # The episode-ending predicate for a caller that proved less than a signature.
 # 0 when the same three helpers the signature is built from all answer.
+# With no episode open there is nothing to end, and the builtin sidecar test
+# answers that on its own: the three helpers are forked only while an episode is
+# open, so the healthy path adds no load to the fork storm this bound exists for.
 status_observation_check() {  # <status-file>
+  _status_unobservable_marker "$1"
+  [ -s "$_STATUS_UNOBSERVABLE_MARKER" ] || return 0
   _status_observe_fields "$1" || return 1
   status_observation_succeeded "$1"
 }

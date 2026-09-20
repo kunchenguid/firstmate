@@ -498,6 +498,66 @@ test_unobservable_episode_ends_only_on_a_full_observation() {
   pass "only a full three-helper observation ends a bounded-skip episode"
 }
 
+# A signature is not fully observed until it is encoded. All three helpers can
+# answer while the od/tr pipeline still fails to fork under the same pressure,
+# and the caller then receives a failure and counts it. Ending the episode
+# before the encode would zero the count the caller is about to advance, so the
+# count would oscillate and the bound could never be reached.
+test_unobservable_episode_survives_an_encode_failure() {
+  local dir f fakebin before
+  dir=$(make_case unobservable-encode); f="$dir/task.status"
+  printf 'working: x\n' > "$f"
+  fakebin="$dir/encode-bin"; mkdir -p "$fakebin"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fakebin/od"; chmod +x "$fakebin/od"
+  (
+    skipped() { FM_UNOBSERVABLE_POLLS=3 FM_UNOBSERVABLE_MIN_GAP=0 status_observation_skipped "$1"; }
+    skipped "$f" && fail "the first failed observation reported before the bound"
+    skipped "$f" && fail "the second failed observation reported before the bound"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 2 ] || fail "the episode counted $STATUS_UNOBSERVABLE_COUNT"
+    before=$(cat "$dir/.unobservable-task")
+    PATH="$fakebin:$PATH" status_observed_signature "$f" >/dev/null \
+      && fail "an encode failure still produced a signature"
+    [ "$(cat "$dir/.unobservable-task")" = "$before" ] \
+      || fail "an encode failure ended the episode: $(cat "$dir/.unobservable-task")"
+    skipped "$f" || fail "the episode did not continue to the bound after an encode failure"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 3 ] || fail "the count reached $STATUS_UNOBSERVABLE_COUNT"
+    exit 0
+  ) || exit 1
+  pass "an encode failure leaves the bounded-skip episode intact"
+}
+
+# The healthy path must not pay for the bound. With no episode open there is
+# nothing to end, so the predicate answers from a builtin file test alone and
+# forks none of the three helpers - this runs for every status log on every
+# catch-all scan and every wake, and the fork storm is what breaks the host the
+# bound exists for.
+test_observation_check_forks_nothing_without_an_episode() {
+  local dir f
+  dir=$(make_case unobservable-check-cost); f="$dir/task.status"
+  printf 'working: x\n' > "$f"
+  make_observe_readers "$dir"
+  (
+    observe() {
+      FM_STATUS_IDENTITY_READER="$dir/observe-identity" \
+        FM_STATUS_SIZE_READER="$dir/observe-size" \
+        FM_STATUS_PATH_STATE_READER="$dir/observe-path-state" "$@"
+    }
+    [ ! -s "$dir/.unobservable-task" ] || fail "fixture: an episode was already open"
+    observe status_observation_check "$f" || fail "the predicate failed with no episode open"
+    [ ! -s "$dir/observe-calls" ] \
+      || fail "the predicate forked a helper with no episode open: $(cat "$dir/observe-calls")"
+    # With an episode open it runs the real three-helper observation and ends it.
+    FM_UNOBSERVABLE_POLLS=3 FM_UNOBSERVABLE_MIN_GAP=0 status_observation_skipped "$f" || :
+    [ -s "$dir/.unobservable-task" ] || fail "fixture: the episode was not opened"
+    observe status_observation_check "$f" || fail "the predicate refused a healthy observation"
+    [ -s "$dir/observe-calls" ] \
+      || fail "the predicate skipped the observation while an episode was open"
+    [ ! -s "$dir/.unobservable-task" ] || fail "the predicate did not end the episode"
+    exit 0
+  ) || exit 1
+  pass "the episode-ending predicate forks nothing when no episode is open"
+}
+
 test_stale_is_terminal_classifier() {
   local dir state
   dir=$(make_case classify-stale); state="$dir/state"
@@ -6342,6 +6402,8 @@ test_marker_writers_refuse_failed_observations
 test_unobservable_bound_counts_consecutive_skips
 test_unobservable_count_is_bounded_by_elapsed_time
 test_unobservable_episode_ends_only_on_a_full_observation
+test_unobservable_episode_survives_an_encode_failure
+test_observation_check_forks_nothing_without_an_episode
 test_stale_is_terminal_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier
