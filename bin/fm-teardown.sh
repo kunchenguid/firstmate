@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
+# stop the exact task-named chrome-devtools-axi browser session and retire
+# Lavish pollers registered for artifacts under this home's data/<task-id>/
+# after the existing endpoint-close gate (best effort, with failures on stderr),
 # clear volatile state, and transition this home's backlog item for ship and
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
@@ -3453,6 +3456,48 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fm_treehouse_slot_owner_release "$WT" "$ID"
 fi
 
+# Read Lavish argv from private source records using fm-procevent.sh's
+# one-argument-per-line format, never its human-readable list output.
+# Canonical artifact containment prevents aliases from reaching another task.
+cleanup_task_sessions() {
+  local record adapter argc line artifact data_root
+  local -a poll_argv
+  if command -v chrome-devtools-axi >/dev/null 2>&1; then
+    CHROME_DEVTOOLS_AXI_SESSION="$ID" chrome-devtools-axi stop >&2 \
+      || echo "warning: browser session cleanup failed for $ID" >&2
+  fi
+  [ -d "$DATA" ] || return 0
+  data_root=$(cd "$DATA" && pwd -P) || {
+    echo "warning: cannot resolve task artifact root for $ID" >&2
+    return 0
+  }
+  for record in "$STATE/procevent/"*.source; do
+    [ -f "$record" ] && [ ! -L "$record" ] || continue
+    adapter=$(sed -n 's/^adapter=//p' "$record" | head -1)
+    [ "$adapter" = lavish ] || continue
+    argc=$(sed -n 's/^argc=//p' "$record" | head -1)
+    [ "$argc" = 3 ] || continue
+    poll_argv=()
+    while IFS= read -r line; do
+      [ "${#poll_argv[@]}" -ge 3 ] || poll_argv+=("$line")
+    done < <(sed -n '/^argv:$/,$p' "$record" | tail -n +2)
+    [ "${#poll_argv[@]}" -eq 3 ] || continue
+    case "${poll_argv[0]}" in */fm-procevent-lavish.sh) ;; *) continue ;; esac
+    [ "${poll_argv[1]}" = poll ] || continue
+    artifact=$(perl -MCwd=realpath -e '
+      $p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n";
+    ' "${poll_argv[2]}" 2>/dev/null) || {
+      echo "warning: cannot resolve Lavish artifact in $record" >&2
+      continue
+    }
+    case "$artifact" in "$data_root/$ID/"*) ;; *) continue ;; esac
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-procevent-lavish.sh" retire "$artifact" >&2 \
+      || echo "warning: Lavish poller cleanup failed for $artifact" >&2
+  done
+  return 0
+}
+
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
@@ -3528,6 +3573,10 @@ if [ "$BACKEND" = herdr ]; then
     exit 1
   fi
 fi
+# The unlanded-work checks and existing endpoint-close gate have passed.
+# Keep auxiliary cleanup best effort without changing backend/worktree ordering.
+cleanup_task_sessions || echo "warning: auxiliary session cleanup failed for $ID" >&2
+
 if [ "$KIND" != secondmate ]; then
   if ! FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       "$SCRIPT_DIR/fm-inactive-reconcile.sh" report "$ID"; then

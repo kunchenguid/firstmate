@@ -165,6 +165,13 @@ case "${1:-}" in
 esac
 exit 0
 SH
+  # Never reach a real task browser session from the teardown fixtures.
+  cat > "$fakebin/chrome-devtools-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "$CHROME_DEVTOOLS_AXI_SESSION" "$*" >> "$FM_STATE_OVERRIDE/browser-stop.log"
+exit "${FM_FAKE_BROWSER_STOP_RC:-0}"
+SH
+  chmod +x "$fakebin/chrome-devtools-axi"
   chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
 
   # Bare origin so the clone has an `origin` remote and origin/HEAD.
@@ -3665,6 +3672,63 @@ EOF
     "abort-then-reap-then-remove-order: the leaked process was not yet reaped when the worktree return ran"
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
+
+# Register through the real process-event interface without starting a runner.
+# Teardown must retire only registrations for this task, even with spaces in paths.
+register_review_page() {
+  local case_dir=$1 task=$2 artifact source_id
+  mkdir -p "$case_dir/data/$task"
+  artifact="$case_dir/data/$task/review page.html"
+  printf '<html></html>\n' > "$artifact"
+  source_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$artifact") || return 1
+  FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-procevent.sh" register lavish "$source_id" \
+    -- "$ROOT/bin/fm-procevent-lavish.sh" poll "$artifact" >/dev/null || return 1
+  printf '%s\n' "$source_id"
+}
+
+test_task_session_cleanup() {
+  local scenario case_dir own other sibling rc
+  for scenario in allowed refused browser-failed; do
+    case_dir=$(make_case "session-$scenario")
+    write_meta "$case_dir" local-only ship
+    own=$(register_review_page "$case_dir" task-x1) || fail "register own review"
+    other=$(register_review_page "$case_dir" other-task) || fail "register other review"
+    sibling=$(register_review_page "$case_dir" task-x10) || fail "register prefix sibling review"
+    if [ "$scenario" = refused ]; then
+      printf 'unlanded\n' > "$case_dir/wt/dirty.txt"
+    fi
+    export FM_FAKE_BROWSER_STOP_RC=0
+    [ "$scenario" != browser-failed ] || export FM_FAKE_BROWSER_STOP_RC=1
+    rc=0
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    unset FM_FAKE_BROWSER_STOP_RC
+    if [ "$scenario" = refused ]; then
+      [ "$rc" -ne 0 ] || fail "dirty worktree teardown succeeded"
+      [ ! -e "$case_dir/state/browser-stop.log" ] || fail "refusal stopped a browser"
+      [ -f "$case_dir/state/procevent/$own.source" ] || fail "refusal retired own poller"
+    else
+      expect_code 0 "$rc" "$scenario auxiliary cleanup must not fail teardown"
+      [ "$(cat "$case_dir/state/browser-stop.log")" = 'task-x1 stop' ] \
+        || fail "browser cleanup did not target exactly task-x1 once"
+      [ ! -e "$case_dir/state/procevent/$own.source" ] || fail "own poller survived teardown"
+      [ ! -e "$case_dir/state/task-x1.meta" ] || fail "cleanup left task metadata"
+      # The adapter's retirement remains idempotent once teardown has retired it.
+      FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+        "$ROOT/bin/fm-procevent-lavish.sh" retire "$case_dir/data/task-x1/review page.html" \
+        >/dev/null || fail "repeated review retirement failed"
+      if [ "$scenario" = browser-failed ]; then
+        grep -q 'warning: browser session cleanup failed for task-x1' "$case_dir/stderr" \
+          || fail "browser cleanup failure was not reported"
+      fi
+    fi
+    [ -f "$case_dir/state/procevent/$other.source" ] || fail "other task poller was retired"
+    [ -f "$case_dir/state/procevent/$sibling.source" ] || fail "task prefix sibling poller was retired"
+  done
+  pass "task session cleanup is scoped, best effort, and skipped on refusal"
+}
+
+test_task_session_cleanup
 
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
