@@ -41,7 +41,10 @@
 #     <line>                       one record line per input line (or `words: -`
 #     ...                          when /afk carried no words); `|` retains a
 #                                  final newline and `|-` records its absence
-# The words block runs to the end of the record or to the next top-level field.
+# The words block runs to the end of a version 2 record; in a version 1 record
+# only its legacy clauses:, refused:, and merge_grants: sections end it. Any
+# other line after the header that is not a stored line is damage, not a
+# boundary, so a truncated mandate can never read as a whole one.
 # A version 1 record (the retired clause model) still validates and reads: its
 # scalar fields and words are read exactly as above, and its clauses:, refused:,
 # and merge_grants: sections are ignored, so an upgrade never breaks a live away
@@ -237,13 +240,15 @@ fm_afk_contract_read_field() {  # <path> <name>
   sed -n "s/^${name}: //p" "$path" | head -1
 }
 
-# The words block runs from its header to the end of the record or to the next
-# top-level field (a version 1 record's clauses: section ends it). Every stored
-# line carries the two-space record prefix; anything else there is damage.
+# The words block runs from its header to the end of a version 2 record, and in a
+# version 1 record to one of its legacy sections. Every stored line carries the
+# two-space record prefix; anything else there is damage, and reading refuses
+# rather than returning the mandate truncated at the damage.
 fm_afk_contract_read_words() {  # <path>
-  local path=$1
+  local path=$1 version
   [ -f "$path" ] || return 1
-  awk -v record="$path" '
+  version=$(fm_afk_contract_read_field "$path" version)
+  awk -v record="$path" -v version="$version" '
     function die(reason) {
       printf "fm-afk-contract: record %s has an invalid words block: %s\n", record, reason > "/dev/stderr"
       bad = 1
@@ -254,16 +259,18 @@ fm_afk_contract_read_words() {  # <path>
     /^words: -$/ && !found { found = scalar = 1; next }
     !found { next }
     /^[^ ]/ {
+      if (version != "1" || ($0 != "clauses:" && $0 != "refused:" && $0 != "merge_grants:")) {
+        die("the line after the stored words is neither a stored line nor a section this record version ends the block at: " $0)
+      }
       if (inwords && count == 0) die("the block indicator has no stored lines")
-      done = 1
       exit
     }
     inwords && /^  / { lines[++count] = substr($0, 3); next }
-    { die("a stored line lacks its two-space record prefix") }
+    { die("a line after the words field is not a stored line with its two-space record prefix") }
     END {
       if (bad) exit 2
       if (!found) die("the words field is missing")
-      if (!done && inwords && count == 0) die("the block indicator has no stored lines")
+      if (inwords && count == 0) die("the block indicator has no stored lines")
       for (i = 1; i <= count; i++) {
         printf "%s", lines[i]
         if (i < count || keep_final) printf "\n"
@@ -325,7 +332,7 @@ fm_afk_contract_render_readback() {  # <path> <title>
   printf '  expected return: %s\n' "$( [ "$expected" = - ] && printf 'not given' || printf '%s' "$expected")"
   printf '  spend cap: %s concurrent workers\n' "$spend"
   printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)"
-  words=$(fm_afk_contract_read_words "$path"; printf x)
+  words=$(fm_afk_contract_read_words "$path"; rc=$?; printf x; exit "$rc") || return 1
   words=${words%x}
   if [ -n "$words" ]; then
     printf '  your words (verbatim):\n'
@@ -339,7 +346,7 @@ fm_afk_contract_render_readback() {  # <path> <title>
 fm_afk_contract_render_announcement() {  # <path>
   local path=$1 expected words mandate_text
   expected=$(fm_afk_contract_read_field "$path" expected_return)
-  words=$(fm_afk_contract_read_words "$path"; printf x)
+  words=$(fm_afk_contract_read_words "$path"; rc=$?; printf x; exit "$rc") || return 1
   words=${words%x}
   if [ -n "$words" ]; then
     mandate_text='Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, waits for your return.'
@@ -394,7 +401,7 @@ fm_afk_contract_parse_inputs() {  # <args...>; sets WORDS, EXPECTED_RETURN, SPEN
     [ -f "$words_file" ] || { fm_afk_contract_log "words file not found: $words_file"; return 2; }
     # Command substitution strips trailing newlines; the sentinel keeps the
     # file's bytes verbatim, trailing newlines included.
-    WORDS=$(cat "$words_file"; printf x) || return 1
+    WORDS=$(cat "$words_file"; rc=$?; printf x; exit "$rc") || return 1
     WORDS=${WORDS%x}
   fi
   return 0
@@ -410,7 +417,7 @@ fm_afk_contract_cmd_propose() {
     fm_afk_contract_log "failed to write the proposal at $proposal"
     return 1
   }
-  fm_afk_contract_render_readback "$proposal" 'Away posture read-back (proposed, not yet confirmed):'
+  fm_afk_contract_render_readback "$proposal" 'Away posture read-back (proposed, not yet confirmed):' || return 1
   printf 'Say go to confirm; restate your instructions first if this reading is not what you meant.\n'
 }
 
@@ -441,7 +448,7 @@ fm_afk_contract_cmd_confirm() {
   elif [ -f "$record" ]; then
     fm_afk_contract_validate "$record" 1 || return 1
     fm_afk_contract_log "away posture already recorded at $(fm_afk_contract_read_field "$record" entered); nothing to confirm"
-    fm_afk_contract_render_announcement "$record"
+    fm_afk_contract_render_announcement "$record" || return 1
     return 0
   else
     fm_afk_contract_log "no away-posture proposal exists; run propose before confirm"
@@ -484,7 +491,7 @@ fm_afk_contract_cmd_confirm() {
     fm_afk_contract_log "replaced the earlier away posture; its record is archived at $archived"
   fi
   rm -f "$proposal"
-  fm_afk_contract_render_announcement "$record"
+  fm_afk_contract_render_announcement "$record" || return 1
 }
 
 fm_afk_contract_cmd_archive() {
@@ -539,9 +546,9 @@ fm_afk_contract_main() {
       path=$(fm_afk_contract_select_path "$@") || { fm_afk_contract_usage >&2; return 2; }
       [ -f "$path" ] || { fm_afk_contract_log "no record at $path"; return 1; }
       if [ "$path" = "$(fm_afk_contract_proposal_path)" ]; then
-        fm_afk_contract_render_readback "$path" 'Away posture read-back (proposed, not yet confirmed):'
+        fm_afk_contract_render_readback "$path" 'Away posture read-back (proposed, not yet confirmed):' || return 1
       else
-        fm_afk_contract_render_readback "$path" 'Away posture (confirmed):'
+        fm_afk_contract_render_readback "$path" 'Away posture (confirmed):' || return 1
       fi ;;
     field)
       [ "$#" -ge 1 ] || { fm_afk_contract_usage >&2; return 2; }

@@ -259,6 +259,66 @@ test_validation_rejects_damaged_words_blocks() {
   pass "validation and archive refuse damaged words blocks"
 }
 
+# A stored line that lost its two-space prefix is damage, not the end of the
+# words: reading must refuse rather than hand back the mandate truncated at the
+# damage, because a dropped tail can take a hold or condition with it. Version 2
+# words run to the end of the record; a version 1 record's words end only at one
+# of its legacy sections.
+test_a_damaged_words_line_never_truncates_the_mandate() {
+  local home record out rc
+
+  home=$(make_home truncated-v2)
+  contract "$home" propose --words $'merge A when green\nhold B until I return' >/dev/null \
+    || fail "the multi-line v2 proposal failed"
+  contract "$home" confirm >/dev/null || fail "the multi-line v2 confirmation failed"
+  record="$home/state/.afk-contract"
+  [ "$(contract "$home" words)" = $'merge A when green\nhold B until I return' ] \
+    || fail "the intact v2 record lost a words line"
+  sed 's/^  hold B until I return$/hold B until I return/' "$record" > "$home/damaged"
+  mv "$home/damaged" "$record"
+  assert_words_read_refuses_the_damage "$home" "$record" 'version 2'
+
+  home=$(make_home truncated-v1)
+  write_v1_record "$home" $'merge A when green\n  hold B until I return'
+  record="$home/state/.afk-contract"
+  contract "$home" validate || fail "the intact multi-line v1 record must still validate"
+  [ "$(contract "$home" words)" = $'merge A when green\nhold B until I return' ] \
+    || fail "the intact v1 record lost a words line before its clauses section"
+  sed 's/^  hold B until I return$/hold B until I return/' "$record" > "$home/damaged"
+  mv "$home/damaged" "$record"
+  assert_words_read_refuses_the_damage "$home" "$record" 'version 1'
+
+  pass "a words line that lost its record prefix fails validate, read, read-back, and archive instead of truncating the mandate"
+}
+
+assert_words_read_refuses_the_damage() {  # <home> <record> <label>
+  local home=$1 record=$2 label=$3 out rc
+  set +e
+  out=$(contract "$home" validate 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "validation accepted the truncated $label words block"
+  assert_contains "$out" 'invalid words block:' "the $label truncation was not named as a damaged words block"
+  set +e
+  out=$(contract "$home" words 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "words read the truncated $label block"
+  assert_not_contains "$out" 'merge A when green' "the damaged $label record handed back a truncated mandate"
+  set +e
+  out=$(contract "$home" readback 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "readback rendered the truncated $label mandate"
+  assert_not_contains "$out" 'your words (verbatim)' "the damaged $label record still rendered its words"
+  set +e
+  contract "$home" archive >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "archive accepted the truncated $label words block"
+  [ -f "$record" ] || fail "the refused archive still moved the damaged $label record"
+}
+
 test_archive_moves_the_record_aside_and_is_idempotent() {
   local home epoch path
   home=$(make_home archive)
@@ -460,6 +520,7 @@ test_confirming_a_new_proposal_archives_the_standing_record
 test_failed_replacement_keeps_the_standing_record
 test_failed_final_replacement_rolls_back_the_superseded_archive
 test_validation_rejects_damaged_words_blocks
+test_a_damaged_words_line_never_truncates_the_mandate
 test_archive_moves_the_record_aside_and_is_idempotent
 test_inputs_are_validated
 test_retired_clause_and_grant_inputs_are_usage_errors_by_name

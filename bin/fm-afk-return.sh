@@ -377,7 +377,11 @@ HELD_READ_FAILED=0
 HELD_READ_PATH=
 render_words_record() {  # <record> [superseded-time]
   local record=$1 superseded=${2:-} words
-  words=$("$CONTRACT" words --path "$record"; printf x)
+  if ! words=$("$CONTRACT" words --path "$record"; rc=$?; printf x; exit "$rc"); then
+    MANDATE_COUNT=$((MANDATE_COUNT + 1))
+    printf '  your words are unreadable in %s; catch-up stays gated until the record is restored\n' "$record"
+    return 1
+  fi
   words=${words%x}
   [ -n "$words" ] || return 0
   MANDATE_COUNT=$((MANDATE_COUNT + 1))
