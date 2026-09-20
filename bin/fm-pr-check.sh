@@ -104,6 +104,9 @@ trap pr_check_cleanup EXIT
 trap 'exit 1' HUP INT TERM
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
+PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
+fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK"
+PR_POLL_PUBLISH_LOCK_HELD=1
 fm_pr_poll_unpublish_runnable "$STATE" "$ID" \
   || { echo "error: could not publish PR poll" >&2; exit 1; }
 
@@ -141,9 +144,6 @@ fm_pr_metadata_identity_parse "$META" || exit 1
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 
-PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
-fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK"
-PR_POLL_PUBLISH_LOCK_HELD=1
 if fm_pr_poll_publish_prepared; then
   fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
   PR_POLL_PUBLISH_LOCK_HELD=0

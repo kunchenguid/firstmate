@@ -848,6 +848,101 @@ SH
   pass "concurrent watchers observe only complete private poll publications"
 }
 
+wait_publication_barrier() {
+  local marker=$1 i
+  for i in $(seq 1 250); do
+    [ ! -e "$marker" ] || return 0
+    sleep 0.02
+  done
+  fail "publication barrier was not reached: $marker"
+}
+
+test_reader_overlaps_registration_transaction() {
+  local stage dir state watcher_pid writer_pid rc
+  for stage in unlink metadata registration runnable; do
+    dir=$(make_case "reader-overlap-$stage")
+    state="$dir/home/state"
+    write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+    seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+    cat > "$dir/fakebin/basename" <<'SH'
+#!/usr/bin/env bash
+if [ "$#" = 2 ] && [ "$1" = "$FM_TEST_RACE_STATE/task-a.check.sh" ] && [ "$2" = .check.sh ]; then
+  : > "$FM_TEST_RACE_DIR/reader-ready"
+  for ((i=0; i<500; i++)); do
+    [ ! -e "$FM_TEST_RACE_DIR/reader-release" ] || break
+    sleep 0.01
+  done
+  [ -e "$FM_TEST_RACE_DIR/reader-release" ] || exit 92
+fi
+exec /usr/bin/basename "$@"
+SH
+    cat > "$dir/fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+case "${!#}" in
+  "$FM_TEST_RACE_STATE/.pr-poll-publish-task-a.lock/pid")
+    if [ "${FM_TEST_RACE_READER:-0}" = 1 ]; then
+      : > "$FM_TEST_RACE_DIR/reader-lock-attempt"
+    fi
+    ;;
+esac
+exec /bin/cat "$@"
+SH
+    cat > "$dir/mutation" <<'SH'
+#!/usr/bin/env bash
+operation=$1
+shift
+last=${!#}
+case "$operation:$last" in
+  "rm:$FM_TEST_RACE_STATE/task-a.check.sh") stage=unlink ;;
+  "mv:$FM_TEST_RACE_STATE/task-a.meta") stage=metadata ;;
+  "mv:$FM_TEST_RACE_STATE/task-a.pr-poll-registration") stage=registration ;;
+  "mv:$FM_TEST_RACE_STATE/task-a.check.sh") stage=runnable ;;
+  *) stage=other ;;
+esac
+if [ "$stage" != other ] && [ "${FM_TEST_RACE_READER:-0}" != 1 ]; then
+  [ -d "$FM_TEST_RACE_STATE/.pr-poll-publish-task-a.lock" ] || exit 91
+fi
+"/bin/$operation" "$@" || exit $?
+if [ "$stage" = "$FM_TEST_RACE_STAGE" ] && [ ! -e "$FM_TEST_RACE_DIR/writer-ready" ]; then
+  : > "$FM_TEST_RACE_DIR/writer-ready"
+  for ((i=0; i<500; i++)); do
+    [ ! -e "$FM_TEST_RACE_DIR/writer-release" ] || break
+    sleep 0.01
+  done
+  [ -e "$FM_TEST_RACE_DIR/writer-release" ] || exit 93
+fi
+SH
+    printf '#!/usr/bin/env bash\nexec "%s/mutation" mv "$@"\n' "$dir" > "$dir/fakebin/mv"
+    printf '#!/usr/bin/env bash\nexec "%s/mutation" rm "$@"\n' "$dir" > "$dir/fakebin/rm"
+    chmod +x "$dir/mutation" "$dir/fakebin/"{basename,cat,mv,rm}
+    FM_TEST_RACE_DIR="$dir" FM_TEST_RACE_STATE="$state" FM_TEST_RACE_READER=1 \
+      FM_TEST_RACE_STAGE=none FM_TEST_GH_STATE=MERGED FM_TEST_GH_LOG="$dir/gh.log" \
+      run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" &
+    watcher_pid=$!
+    wait_publication_barrier "$dir/reader-ready"
+    FM_TEST_RACE_DIR="$dir" FM_TEST_RACE_STATE="$state" FM_TEST_RACE_STAGE="$stage" \
+      run_check_entry "$dir" task-a https://github.com/o/r/pull/2 > "$dir/write.out" 2> "$dir/write.err" &
+    writer_pid=$!
+    wait_publication_barrier "$dir/writer-ready"
+    : > "$dir/reader-release"
+    wait_publication_barrier "$dir/reader-lock-attempt"
+    [ ! -s "$dir/watch.out" ] || fail "$stage: reader classified partial publication"
+    [ ! -s "$dir/gh.log" ] || fail "$stage: reader polled during publication"
+    : > "$dir/writer-release"
+    wait "$writer_pid" || fail "$stage: registration failed: $(cat "$dir/write.err")"
+    rc=0
+    wait "$watcher_pid" || rc=$?
+    [ "$rc" = 0 ] || fail "$stage: watcher failed: $(cat "$dir/watch.err")"
+    grep -q '^check: .*task-a.check.sh: merged$' "$dir/watch.out" \
+      || fail "$stage: watcher did not authenticate the replacement: $(cat "$dir/watch.out")"
+    grep -q 'https://github.com/o/r/pull/2' "$dir/gh.log" \
+      || fail "$stage: watcher did not poll the replacement PR"
+    ! grep -q 'https://github.com/o/r/pull/1' "$dir/gh.log" \
+      || fail "$stage: watcher polled the stale PR"
+  done
+  pass "concurrent reader waits across unlink, metadata, registration, and runnable publication"
+}
+
 assert_probe_log_scan_safe() {
   local log=$1
   [ -f "$log" ] || fail "publication probe log was missing"
@@ -2849,12 +2944,14 @@ test_device_rerecord_serializes_direct_rearm() {
     PATH="$dir/fakebin:$BASE_PATH" "$PR_CHECK" task-a "$url_b" > "$dir/rearm.out" 2> "$dir/rearm.err" &
   rearm_pid=$!
   for i in $(seq 1 100); do
-    if fm_pr_metadata_identity_parse "$state/task-a.meta" && [ "$FM_PR_META_URL" = "$url_b" ]; then
+    if find "$state" -name '.fm-pr-poll-check.*' -print | grep . >/dev/null; then
       break
     fi
     sleep 0.02
   done
-  [ "$FM_PR_META_URL" = "$url_b" ] || fail "direct re-arm did not rewrite metadata before publication"
+  [ "$i" -lt 100 ] || fail "direct re-arm did not stage its replacement"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" || fail "blocked metadata became invalid"
+  [ "$FM_PR_META_URL" = "$url_a" ] || fail "blocked re-arm rewrote metadata"
   sleep 1
   process_is_live_non_zombie "$rearm_pid" || fail "direct re-arm did not wait for poll publication"
   cmp -s "$dir/published.pr-poll" "$state/task-a.pr-poll" \
@@ -2922,6 +3019,18 @@ SH
 }
 
 test_parser_matrix
+if [ "${1:-}" = publication ]; then
+  test_reader_overlaps_registration_transaction
+  test_device_rerecord_serializes_direct_rearm
+  test_device_rerecord_serializes_rerecord
+  test_device_renumbered_poll_stays_armed
+  test_publication_states_are_invisible_until_bound
+  test_postrename_poll_validation_revokes_and_retries
+  exit 0
+fi
+
+test_reader_overlaps_registration_transaction
+
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed

@@ -2260,17 +2260,11 @@ retire_merged_pr_poll() {  # <id>
 rerecord_device_shifted_pr_poll() {  # <id>
   local id=$1
   fm_pr_poll_registration_device_shifted "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" || return 1
-  PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
-  fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
-  PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$id.lock"
-  fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK" || exit 1
   if fm_pr_poll_registration_rerecord_device "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
     triage_log "re-recorded PR poll identity for $id after its state volume device number changed"
   else
     triage_log "PR poll identity for $id was not re-recorded; the locked proof or rewrite did not hold"
   fi
-  pr_poll_publish_release || exit 1
-  pr_poll_control_release || exit 1
   return 0
 }
 
@@ -2383,6 +2377,19 @@ while :; do
         fi
       else
         id=$(basename "$c" .check.sh)
+        if ! fm_pr_task_id_valid "$id"; then
+          rejected_checks="$rejected_checks $c"
+          continue
+        fi
+        PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
+        fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
+        PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$id.lock"
+        fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK" || exit 1
+        if [ ! -e "$c" ]; then
+          pr_poll_publish_release || exit 1
+          pr_poll_control_release || exit 1
+          continue
+        fi
         if fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh" \
           || { rerecord_device_shifted_pr_poll "$id" \
             && fm_pr_poll_snapshot_capture "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; }; then
@@ -2392,23 +2399,27 @@ while :; do
           host=$FM_PR_POLL_SNAPSHOT_HOST
           path=$FM_PR_POLL_SNAPSHOT_PATH
           number=$FM_PR_POLL_SNAPSHOT_NUMBER
-          PR_POLL_CONTROL_LOCK="$STATE/.control-$id.lock"
-          fm_lock_acquire_wait "$PR_POLL_CONTROL_LOCK" || exit 1
           if ! fm_pr_poll_snapshot_matches "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh"; then
+            pr_poll_publish_release || exit 1
             pr_poll_control_release || exit 1
             triage_log "PR poll for $id changed before its validated check; skipping the stale snapshot"
             continue
           fi
+          pr_poll_publish_release || exit 1
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
             "$provider" "$url" "$host" "$path" "$number" || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
+          pr_poll_publish_release || exit 1
+          pr_poll_control_release || exit 1
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT
           run_check_capture "$custom_snapshot" || exit 1
           out=$FM_CHECK_RESULT
           fm_custom_check_snapshot_cleanup
         else
           fm_custom_check_snapshot_cleanup
+          pr_poll_publish_release || exit 1
+          pr_poll_control_release || exit 1
           rejected_checks="$rejected_checks $c"
           continue
         fi
