@@ -163,7 +163,8 @@ cmp -s "$TMP_ROOT/published-normalized.json" "$TMP_ROOT/fresh-normalized.json" \
 pass "watcher-carried status append publishes the real home summary"
 
 # A structured in-flight inventory above Linux MAX_ARG_STRLEN must remain
-# publishable through both fleet snapshot modes and the real home-summary writer.
+# publishable through json, secondmate-home-summary, and contribution-input
+# snapshot modes, and through the real home-summary writer.
 mkdir -p "$LARGE_HOME/state" "$LARGE_HOME/data" "$LARGE_HOME/config" \
   "$LARGE_HOME/projects"
 printf '# Seeded Firstmate home\n' > "$LARGE_HOME/AGENTS.md"
@@ -197,11 +198,18 @@ jq -e '.schema == "fm-secondmate-home-summary.v1"' "$TMP_ROOT/large-summary.json
   >/dev/null || fail "large secondmate home-summary output was not valid"
 PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
   FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
+  "$SNAPSHOT" --contribution-input > "$TMP_ROOT/large-contribution-input.json" \
+  || fail "contribution-input mode failed for a large backlog"
+jq -e '(.backlog.records | length) == 1200 and (.tasks | type) == "array"' \
+  "$TMP_ROOT/large-contribution-input.json" >/dev/null \
+  || fail "large contribution-input did not preserve the backlog"
+PATH="$FAKEBIN:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$LARGE_HOME" \
+  FM_SNAPSHOT_NOW="$NOW_ONE" FM_SNAPSHOT_NOW_EPOCH="$EPOCH_ONE" \
   "$WRITER" || fail "home-summary writer failed for a large backlog"
 jq -e '.schema == "fm-secondmate-home-summary.v1"' \
   "$LARGE_HOME/state/home-summary.json" >/dev/null \
   || fail "large secondmate home-summary was not published"
-pass "large backlog snapshots and home-summary publication stay within exec limits"
+pass "large backlog snapshots, contribution-input, and home-summary publication stay within exec limits"
 
 mkdir -p "$STATELESS_HOME/data" "$STATELESS_HOME/config" \
   "$STATELESS_HOME/projects"
