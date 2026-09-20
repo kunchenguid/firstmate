@@ -235,20 +235,20 @@ run_native_ahoy_regressions() {
         opencode run --standalone --format json --auto "/ahoy"
   ) >/dev/null || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode native first-message Ahoy exited $status"
-  session_id=$(sqlite3 "$first_db" 'select id from session order by time_created desc limit 1;')
+  session_id=$(sqlite3 "$first_db" 'select id from session_v2 order by time_created desc limit 1;')
   startup_text=$(sqlite3 -json "$first_db" \
-    "select json_extract(p.data,'$.text') text from message m join part p on p.message_id=m.id where json_extract(m.data,'$.role')='user' and json_extract(p.data,'$.text') like '%FIRSTMATE_OP:%' order by m.time_created limit 1;" \
+    "select json_extract(m.data,'$.text') text from session_message m where m.type='user' and json_extract(m.data,'$.text') like '%FIRSTMATE_OP:%' order by m.time_created limit 1;" \
     | jq -r '.[0].text')
   [ "$startup_text" = "$CURRENT_START" ] \
     || fail "OpenCode native first-message session stored an unexpected typed startup input: $startup_text"
   assistant_text=$(sqlite3 -json "$first_db" \
-    "select json_extract(p.data,'$.text') text from message m join part p on p.message_id=m.id where json_extract(m.data,'$.role')='assistant' and json_extract(p.data,'$.type')='text' order by m.time_created desc limit 1;" \
+    "select c.value->>'text' text from session_message m, json_each(json_extract(m.data,'$.content')) c where m.type='assistant' and c.value->>'type'='text' order by m.time_created desc, m.seq desc limit 1;" \
     | jq -r '.[0].text')
   printf '%s\n' "$assistant_text" | grep -Fq "AHOY_BEARINGS_BRANCH" \
     || fail "OpenCode native first-message Ahoy did not take Bearings: $assistant_text"
   [ "$(sed -n '1p' "$first_home/state/session-start-count")" = 1 ] \
     || fail "OpenCode native first-message Ahoy did not preserve one session-start execution"
-  session_count=$(sqlite3 "$first_db" 'select count(*) from session;')
+  session_count=$(sqlite3 "$first_db" 'select count(*) from session_v2;')
   [ "$session_count" = 1 ] || fail "OpenCode native first-message Ahoy left the original session"
 
   "$TMUX" -L "$SOCKET" new-session -d -s "$native_session" -c "$AHOY_PROJECT" \
@@ -263,9 +263,9 @@ run_native_ahoy_regressions() {
   "$TMUX" -L "$SOCKET" send-keys -t "$native_session" -l "Respond exactly PRIOR_BOUNDARY_ACK."
   "$TMUX" -L "$SOCKET" send-keys -t "$native_session" Enter
   wait_for_db_count "$later_db" \
-    "select count(*) from message m join part p on p.message_id=m.id where json_extract(m.data,'$.role')='assistant' and json_extract(p.data,'$.type')='text' and json_extract(p.data,'$.text') like '%PRIOR_BOUNDARY_ACK%';" \
+    "select count(*) from session_message m, json_each(json_extract(m.data,'$.content')) c where m.type='assistant' and c.value->>'type'='text' and c.value->>'text' like '%PRIOR_BOUNDARY_ACK%';" \
     1 || fail "OpenCode native later-message setup did not preserve the genuine captain boundary"
-  session_id=$(sqlite3 "$later_db" 'select id from session order by time_created desc limit 1;')
+  session_id=$(sqlite3 "$later_db" 'select id from session_v2 order by time_created desc limit 1;')
   [ "$(sed -n '1p' "$later_home/state/session-start-count")" = 1 ] \
     || fail "OpenCode native later-message setup did not run session start exactly once"
   "$TMUX" -L "$SOCKET" kill-server
@@ -280,13 +280,13 @@ run_native_ahoy_regressions() {
   ) >/dev/null || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode native later-message Ahoy exited $status"
   assistant_text=$(sqlite3 -json "$later_db" \
-    "select json_extract(p.data,'$.text') text from message m join part p on p.message_id=m.id where m.session_id='$session_id' and json_extract(m.data,'$.role')='assistant' and json_extract(p.data,'$.type')='text' order by m.time_created desc limit 1;" \
+    "select c.value->>'text' text from session_message m, json_each(json_extract(m.data,'$.content')) c where m.session_id='$session_id' and m.type='assistant' and c.value->>'type'='text' order by m.time_created desc, m.seq desc limit 1;" \
     | jq -r '.[0].text')
   printf '%s\n' "$assistant_text" | grep -Fq "AHOY_BEARINGS_BRANCH" \
     && fail "OpenCode native later-message Ahoy gathered Bearings: $assistant_text"
   [ "$(sed -n '1p' "$later_home/state/session-start-count")" = 1 ] \
     || fail "OpenCode native later-message Ahoy reran session start"
-  session_count=$(sqlite3 "$later_db" 'select count(*) from session;')
+  session_count=$(sqlite3 "$later_db" 'select count(*) from session_v2;')
   [ "$session_count" = 1 ] || fail "OpenCode native later-message Ahoy left the original session"
 }
 
