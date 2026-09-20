@@ -306,7 +306,8 @@ test_poll_mentions_wake_once_per_durable_offer() {
     "$ROOT/bin/fm-x-poll.sh"); rc=$?
   expect_code 0 "$rc" "repeated pending mention poll exit"
   [ -z "$out" ] || fail "an already offered pending mention must stay silent (got: $out)"
-  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_RELAY_URL="https://relay.test" \
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FMX_NOW_OVERRIDE=1700000045 \
+    FMX_RELAY_URL="https://relay.test" \
     FAKE_DISMISS_CODE=200 "$ROOT/bin/fm-x-dismiss.sh" req-repeat); rc=$?
   expect_code 0 "$rc" "successful dismiss before relay re-offer exit"
   [ "$out" = "req-repeat" ] || fail "the dismiss fixture must succeed before the re-offer"

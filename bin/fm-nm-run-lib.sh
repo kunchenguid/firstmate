@@ -2,9 +2,8 @@
 # Shared no-mistakes axi run attribution primitives.
 #
 # ONE owner for the no-mistakes run-attribution primitives used by
-# fm-crew-state.sh (read-only current-state reporting), fm-teardown.sh
-# (pre-teardown run abort, see its "Fix 1" header comment), and fm-dod-lib.sh
-# (the custody check a Gerrit no-mistakes ready report must pass). Crew-state binds
+# fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
+# (pre-teardown run abort, see its "Fix 1" header comment). Crew-state binds
 # an EXECUTING run (pending, running, fixing or ci) on the task's branch
 # regardless of head (fm_nm_run_is_executing); every other run still needs
 # strict branch-and-head identity. Both callers then recognize a provable
@@ -406,7 +405,7 @@ fm_nm_run_is_parked() {  # <toon-output>
 # daemon-down probe for exactly that reason.
 # All four accepted words reach here on BOTH surfaces. The overview table
 # fm_nm_select_run validates carries a narrower column
-# (pending|running|completed|failed|cancelled, its unknown_status check), but that column is not
+# (pending|running|completed|failed|cancelled, :196), but that column is not
 # what this predicate reads: the selected-run route re-reads the run by id and
 # passes that DETAIL object, whose own vocabulary check admits `fixing` and `ci`
 # as live, and the legacy bare-status route passes the same detail shape.

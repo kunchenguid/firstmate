@@ -297,6 +297,18 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": ".omo/evidence/code-correctness-review-code-review.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": ".omo/evidence/pre-push-gate-review-manual-qa.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": ".omo/evidence/pre-push-gate-review.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },

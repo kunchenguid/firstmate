@@ -104,20 +104,8 @@ An expired deferral therefore remains answerable.
 
 While originating task metadata is live, the `complete` subcommand unions the reviewed captain-held task ids, called the reviewed inventory, into `decision_keys=` and appends `decisions_reviewed=1`.
 A post-teardown visual review can complete against the surviving report and durable tasks without recreating volatile task metadata.
-
-`complete` accepts `--none` as an explicit semantic inventory result.
-`--none` is refused while the origin still has a lifecycle-open keyed status decision.
-Before recording completion, `complete` verifies every listed task against tasks-axi.
-The origin is never its own inventory entry, so a hold that failed cannot be vouched for by the origin row.
-For a historical inventory that names its own origin, hold a separate captain task with `--origin`, replace only the invalid entry in the final `decision_keys=` line of the origin metadata with that task id while preserving all other entries, and re-run `complete`.
-An entry whose recorded origin differs from the one being completed is refused.
-An entry with no recorded origin, such as a hold made before origins were recorded or without `--origin`, is accepted on the durability check alone and named in the output.
-
-With a non-empty inventory, `complete` appends a `captain-held [key=<key>]` transfer event for every still-open keyed status decision.
-The event names the reviewed inventory.
-`bin/fm-classify-lib.sh` recognizes it as closing the live status copy without claiming that the captain has answered it.
-
-### Checking before scout teardown (`verify`)
+It accepts `--none` as an explicit semantic inventory result, refused while the origin still has a lifecycle-open keyed status decision, and verifies every listed task against tasks-axi before recording completion.
+With a non-empty inventory it appends a `captain-held [key=<key>]` transfer event naming the reviewed inventory for every still-open keyed status decision, which `bin/fm-classify-lib.sh` recognizes as closing the live status copy without claiming that the captain has answered it.
 
 Scout teardown calls the read-only `verify` subcommand after checking for the report and before removing any source state.
 `verify` checks three things:

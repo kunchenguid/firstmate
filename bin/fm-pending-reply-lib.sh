@@ -1323,19 +1323,8 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   fi
   [ -n "$parent_status" ] || return 1
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
-  key=$(fm_pending_reply_escalation_key "$corr")
-  line="blocked [key=$key]: $payload"
-  # A record that already escalated reaches here again only after a reset, so
-  # a closed decision means the operator settled the earlier episode and this
-  # loss is a new one. While the decision is open the identical line is a retry.
-  new_episode=1
-  if [ -n "$(fm_pending_reply_get "$rec" escalated_epoch)" ]; then
-    case $'\n'"$(status_open_decisions "$parent_status")" in
-      *$'\n'"$key"$'\t'*) ;;
-      *) new_episode=0 ;;
-    esac
-  fi
-  if [ "$new_episode" -eq 0 ] || ! status_event_recorded "$parent_status" "$line"; then
+  line="blocked [key=$(fm_pending_reply_escalation_key "$corr")]: $payload"
+  if ! status_event_recorded "$parent_status" "$line"; then
     printf '%s\n' "$(status_stamp_line "$line")" >> "$parent_status" 2>/dev/null || return 1
   fi
   now=$(fm_pending_reply_now)

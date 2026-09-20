@@ -1024,15 +1024,6 @@ assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-arm
 remote_env "$ADAPTER" ingest ios "$RESULT_TWELVE" >/dev/null 2>&1 || true
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "continuity replay duplicated the escalation"
-first_offset=$(sed -n 's/^offset=//p' "$PARENT/state/remote-replies/ios.cursor")
-first_hash=$(sed -n 's/^prefix_sha256=//p' "$PARENT/state/remote-replies/ios.cursor" | tr 'A-F' 'a-f')
-first_prefix=$(printf '%.12s' "$first_hash")
-assert_grep "at offset ${first_offset} prefix ${first_prefix} retirements 0" "$PARENT/state/ios.status" \
-  "continuity break did not record the reader position"
-assert_no_grep "prefix ${first_hash}" "$PARENT/state/ios.status" \
-  "continuity break recorded the full prefix hash"
-assert_absent "$PARENT/state/remote-replies/ios.retirements" \
-  "a route that has never been retired gained a retirement count"
 status_line_at_epoch "$(grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" >/dev/null \
   || fail "new continuity escalation has unknown emission time"
 if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then

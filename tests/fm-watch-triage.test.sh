@@ -1797,74 +1797,6 @@ test_self_announced_close_after_open_decisions_fold_does_not_rewake() {
   pass "a close after OPEN DECISIONS fold never wakes its own home, and the next real note still does"
 }
 
-# Any actor's drain folds OPEN DECISIONS, including a Pi branch drain, so a
-# fold is no proof the watcher's owner saw the line. A fresh worker decision the
-# fold already read must still wake when this home appended nothing.
-test_folded_worker_decision_without_home_append_still_wakes() {
-  local dir state fakebin out status_file pid
-  dir=$(make_case folded-decision-wakes); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
-  status_file="$state/task.status"
-  printf 'working: building\n' > "$status_file"
-  prime_status_seen "$state" "$status_file" || fail "could not prime the announced baseline"
-  printf 'needs-decision [key=k3]: pick a region\n' >> "$status_file"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \
-    || fail "the OPEN DECISIONS fold drain failed"
-  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle worker'
-  watch_bg "$state" "$fakebin" "$out"
-  pid=$!
-  wait_for_exit "$pid" 100 || fail "a folded worker decision with no home append was swallowed"
-  grep -F "signal: $status_file" "$out" >/dev/null \
-    || fail "the folded worker decision did not surface as a signal: $(cat "$out")"
-  pass "a folded worker decision with no home append still wakes"
-}
-
-# Two distinct --resolve-key answers to decisions the watcher never classified
-# leave the marker alone, since a fold is no proof the watcher's owner saw them.
-# That costs one wake for the worker's decisions, not one per answer, because
-# both answers ride inside the same surfaced span; the watcher's own commit
-# then covers them, so the next cycle is quiet and the next real note still
-# wakes. The ledger's separate job - vouching for owned bytes the watcher has
-# NOT classified - is pinned at library level by
-# test_separate_self_announced_answers_after_fold_are_owned.
-test_separate_self_announced_answers_after_fold_wake_once() {
-  local dir state fakebin out status_file pid rc answer
-  dir=$(make_case multi-answer-fold); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
-  status_file="$state/task.status"
-  {
-    printf 'needs-decision [key=k1]: pick REST or RPC\n'
-    printf 'needs-decision [key=k2]: pick us-east or eu-west\n'
-  } > "$status_file"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \
-    || fail "the OPEN DECISIONS fold drain failed"
-  for answer in 'resolved [key=k1]: answered: REST' 'resolved [key=k2]: answered: eu-west'; do
-    rc=0
-    FM_STATE_OVERRIDE="$state" bash -c '
-      . "$1"; fm_wake_status_append_self_announced "$2" "$3" "$4"
-    ' _ "$ROOT/bin/fm-wake-lib.sh" "$state" "$status_file" "$answer" || rc=$?
-    [ "$rc" -eq 1 ] || fail "an answer over unclassified worker decisions did not fail toward waking (rc=$rc)"
-  done
-  export FM_FAKE_CREW_STATE='state: unknown · source: none · idle worker'
-  watch_bg "$state" "$fakebin" "$out"
-  pid=$!
-  wait_for_exit "$pid" 100 || fail "the unclassified worker decisions were swallowed"
-  grep -F "signal: $status_file" "$out" >/dev/null \
-    || fail "the worker decisions did not surface as a signal: $(cat "$out")"
-  ack_stopped_cycle "$state" || fail "could not handle the worker decisions' wake"
-  : > "$out"
-  watch_bg "$state" "$fakebin" "$out"
-  pid=$!
-  if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"; fail "the owned answers re-woke the watcher: $(cat "$out")"
-  fi
-  [ ! -s "$out" ] || { reap "$pid"; fail "the owned answers printed a wake reason: $(cat "$out")"; }
-  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the owned answers enqueued another durable wake"; }
-  printf 'blocked: need staging credentials\n' >> "$status_file"
-  wait_for_exit "$pid" 100 || fail "a later worker line after two owned answers was swallowed"
-  grep -F "signal: $status_file" "$out" >/dev/null \
-    || fail "the later worker line did not surface as a signal"
-  pass "separate answers over unclassified decisions wake once, and the next real note still does"
-}
-
 test_self_announced_close_after_fold_still_surfaces_folded_worker_failure() {
   local dir state fakebin out status_file pid rc
   dir=$(make_case self-close-folded-failure); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -1898,10 +1830,10 @@ test_self_announced_close_after_fold_still_surfaces_folded_worker_failure() {
 
 test_self_announced_close_after_fold_still_surfaces_folded_secondmate_lines() {
   local dir state fakebin out status_file pid rc lagging n=0
-  # A secondmate's note carries no captain verb, and a decision the mate
+  # A secondmate's pause carries no captain verb, and a decision the mate
   # raised and closed itself is never listed as open; the fold shows neither,
-  # yet both are parent-directed content and must still wake.
-  for lagging in 'note: vendor quote arrived, holding it for the parent' \
+  # yet every secondmate append is parent-directed and must still wake.
+  for lagging in 'paused: waiting on vendor quote' \
     $'needs-decision [key=vendor]: vendor A or B?\nresolved [key=vendor]: picked vendor B myself, cheaper'; do
     n=$((n + 1))
     dir=$(make_case "self-close-folded-mate-$n"); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
@@ -6656,8 +6588,6 @@ test_secondmate_routine_progress_absorbed_then_note_surfaced
 test_secondmate_buried_block_wakes_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does
 test_self_announced_close_after_open_decisions_fold_does_not_rewake
-test_folded_worker_decision_without_home_append_still_wakes
-test_separate_self_announced_answers_after_fold_wake_once
 test_self_announced_close_after_fold_still_surfaces_folded_worker_failure
 test_self_announced_close_after_fold_still_surfaces_folded_secondmate_lines
 test_actionable_signal_surfaced

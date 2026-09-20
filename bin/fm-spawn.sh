@@ -80,11 +80,9 @@
 #   rebind is a recovery, never a teardown. Only a crewmate or scout rebinds: a
 #   secondmate whose endpoint is gone is respawned by its own owner
 #   (`--secondmate`, driven by the session-start liveness sweep).
-#   Every fresh ship/scout launch and replacement explicitly enters the recorded
-#   worktree immediately before trust setup and brief delivery, and a pre-launch
-#   cwd check refuses any endpoint that still reports another copy; a Herdr shell
-#   that has drifted out of the recorded worktree is told once to return, and
-#   only a shell that will not go refuses.
+#   The replacement still never starts outside the copy
+#   holding the work: a Herdr shell that has drifted out of the recorded
+#   worktree is told once to return, and only a shell that will not go refuses.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -5415,7 +5413,6 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   exit 1
 fi
 sleep 0.3
-SPAWN_LAUNCH_SENT=1
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then

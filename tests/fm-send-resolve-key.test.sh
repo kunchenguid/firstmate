@@ -875,7 +875,7 @@ test_decision_answer_partition_relocates_under_the_record() {
   # ordinary lease guard alone.
   FM_SUPERVISION_ACTOR=branch run_send "$fb" "$home" "$log" t1 --resolve-key token "refreshed the token; resume"; rc=$?
   expect_code 0 "$rc" "an attended branch resolving a blocker is ordinary steering"
-  grep -qF 'resolved [key=token]: answered: refreshed the token; resume' "$home/state/t1.status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t1.status" | grep -qF 'resolved [key=token]: answered: refreshed the token; resume' \
     || fail "the branch's blocker answer did not close the key:"$'\n'"$(cat "$home/state/t1.status")"
   grep -qF "refreshed the token; resume" "$home/state/t1.inbox/001.msg" \
     || fail "the branch's blocker answer did not reach the worker's inbox"
@@ -887,7 +887,7 @@ test_decision_answer_partition_relocates_under_the_record() {
     FM_SUPERVISION_ACTOR=branch "$SEND" t1 --resolve-key api-shape "go with REST" 2>&1); rc=$?
   expect_code 0 "$rc" "under the away-posture record the branch's decision answer must be sent: $out"
   assert_contains "$out" "main is parked" "the relocation did not announce itself"
-  grep -qF 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t1.status" | grep -qF 'resolved [key=api-shape]: answered: go with REST' \
     || fail "the relocated answer did not close the decision:"$'\n'"$(cat "$home/state/t1.status")"
   grep -qF "go with REST" "$home/state/t1.inbox/002.msg" \
     || fail "the relocated answer did not reach the worker's inbox"
@@ -901,7 +901,7 @@ test_decision_answer_partition_relocates_under_the_record() {
   printf 'needs-decision [key=db]: postgres or sqlite\n' >> "$home/state/t1.status"
   run_send "$fb" "$home" "$log" t1 --resolve-key db "postgres"; rc=$?
   expect_code 0 "$rc" "main answering a decision attended is unaffected by the partition"
-  grep -qF 'resolved [key=db]: answered: postgres' "$home/state/t1.status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t1.status" | grep -qF 'resolved [key=db]: answered: postgres' \
     || fail "main's attended decision answer did not close the key"
   pass "fm-send --resolve-key: a decision answer refuses the attended branch before sending, a blocked: key stays steering, and the away-posture record relocates the answer"
 }

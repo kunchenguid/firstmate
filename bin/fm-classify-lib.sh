@@ -243,11 +243,19 @@ status_prefix_unrecognized() {  # <status-line>
 # An unrecognized status prefix is an event too, so that declaration is the
 # latest line instead of disappearing behind an earlier recognized one.
 _fm_status_event_scan() {
-  local line last='' prev='' fallback='' legacy_re
+  local line last='' prev='' fallback='' verb legacy_re unstamped
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
-    _fm_status_line_is_event "$line" "$legacy_re" && { prev=$last; last=$line; }
+    case "$line" in *:*) status_line_verb "$line" verb ;; *) verb='' ;; esac
+    case "$verb" in
+      working|needs-decision|blocked|done|failed|note|\
+      "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
+      "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
+      "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") prev=$last; last=$line ;;
+      *) _fm_status_unstamped "$line" unstamped
+         _fm_classify_matches "$unstamped" "$legacy_re" && { prev=$last; last=$line; } ;;
+    esac
   done
   printf '%s\n%s\n' "$prev" "${last:-$fallback}"
   [ -n "$last" ]
@@ -550,12 +558,6 @@ _fm_status_unstamped() {  # <status-line> <out-var> -> line with its stamp remov
 # all other bytes, including correlation metadata, still identify the event.
 # Both sides normalize through _fm_status_untimed, so a stamped retry of an
 # already-recorded event can never read as a new one.
-# A match stays recorded for the life of the file, whatever follows it: a
-# later resolved line for the same key does not make the line new again, so a
-# caller that re-reads an unchanged source after an operator resolve (the
-# continuity break in bin/fm-procevent-remote-reply.sh, which does not advance
-# its cursor) appends nothing. A caller that owns evidence of a new episode
-# decides that itself, as bin/fm-pending-reply-lib.sh's escalation does.
 status_event_recorded() {  # <status-file> <new-status-line>
   local wanted line untimed
   [ -f "$1" ] || return 1
@@ -741,7 +743,7 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   fi
   printf '%s' "$n"
 }
-_fm_decision_key() {  # <status-line> [<keyless>] -> key slug, or <keyless> (default "default") when no token
+_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   local k unstamped
   _fm_status_unstamped "$1" unstamped
   if _fm_key_before_colon "$unstamped"; then
@@ -749,7 +751,7 @@ _fm_decision_key() {  # <status-line> [<keyless>] -> key slug, or <keyless> (def
     k=${k#*\[key=}
     k=${k%%\]*}
   else
-    k=$(_fm_key_at_note_head "$unstamped") || { printf '%s' "${2-default}"; return 0; }
+    k=$(_fm_key_at_note_head "$unstamped") || { printf 'default'; return 0; }
   fi
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"
@@ -926,25 +928,6 @@ EOF
   [ -n "$current" ] || current=$(status_declared_wait_line "$1")
   [ -n "$current" ] || current=$(last_status_line "$1")
   printf '%s\n' "$current"
-}
-
-# The subset of status_open_decisions the task raised about its own work: a
-# reserved-namespace key is raised by a supervisor library about the task (a
-# pending-reply escalation), a `remote-reply-continuity-` key is the parent's
-# own blocker about a broken remote reply mirror
-# (bin/fm-procevent-remote-reply.sh), and a `captain-hold-` key relays a child
-# decision a secondmate escalated to the captain (bin/fm-captain-hold.sh) while
-# it keeps working, so the task is not waiting on any of them. Pending-reply
-# recovery and a fire-and-forget retry ring consult this set and leave a task
-# alone while it is non-empty.
-status_own_open_decisions() {  # <status-file>
-  local line prefix
-  status_open_decisions "$1" | while IFS= read -r line || [ -n "$line" ]; do
-    for prefix in ${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT} remote-reply-continuity- captain-hold-; do
-      case "$line" in "$prefix"*) continue 2 ;; esac
-    done
-    printf '%s\n' "$line"
-  done
 }
 
 # 0 when the fold above still holds at least one decision OPENED by

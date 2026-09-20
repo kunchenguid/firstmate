@@ -40,6 +40,7 @@ SH
 #!/usr/bin/env bash
 case "${1:-}" in
   display-message) printf '%%1\n' ;;
+  list-panes) printf '%s\n' "${FM_TMUX_PANES:-}" ;;
   capture-pane) printf 'idle\n> \n' ;;
   kill-window) [ -z "${FM_TMUX_KILL_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TMUX_KILL_LOG" ;;
 esac
@@ -1042,9 +1043,17 @@ SH
 test_inactive_terminal_child_endpoint_is_reaped() {
   local kill_log="$WORLD/tmux_kill.log"
   make_world reaper; write_child "$MAIN" dead-child 'done: finished'
-  FM_TMUX_KILL_LOG="$kill_log" FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  FM_TMUX_PANES=$'fm-dead-child\t123' FM_TMUX_KILL_LOG="$kill_log" FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
   grep -q 'firstmate:=fm-dead-child' "$kill_log" 2>/dev/null || fail "terminal child endpoint was not reaped"
   pass "inactive terminal child endpoint is reaped"
+}
+
+test_inactive_terminal_child_does_not_reap_reused_endpoint() {
+  local kill_log="$WORLD/tmux_kill.log"
+  make_world reaper-reused; write_child "$MAIN" dead-child 'done: finished'
+  FM_TMUX_PANES=$'fm-other-child\t123' FM_TMUX_KILL_LOG="$kill_log" FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  [ ! -s "$kill_log" ] || fail "terminal child reaped a reused endpoint: $(cat "$kill_log")"
+  pass "inactive terminal child preserves a reused endpoint"
 }
 
 test_main_direct_terminal_presentation_receipt
@@ -1085,5 +1094,6 @@ test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
 test_reconciliation_sets_no_forge_mode_for_state_read
 test_inactive_terminal_child_endpoint_is_reaped
+test_inactive_terminal_child_does_not_reap_reused_endpoint
 
 echo "all inactive reconciliation tests passed"
