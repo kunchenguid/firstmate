@@ -897,6 +897,75 @@ test_away_plan_gated_403_does_not_block_the_merge() {
   pass "away merge proceeds on a plan-gated 403 because that repository cannot have a merge queue"
 }
 
+# The exemption must hold for the per-task away merge grant the captain
+# actually records, not only a standing yolo=on posture, and it must leave the
+# green-check requirement untouched: a red head refuses at the same live-read
+# gate an attended merge reaches, before any queue state is read.
+test_away_grant_plan_gated_403_merges_but_red_still_refuses() {
+  local case_dir rc head url
+  head=c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1
+  url=https://github.com/example/repo/pull/92
+
+  case_dir=$(make_case away-grant-plan-gated-403)
+  mkdir -p "$case_dir/wt" "$case_dir/home"
+  add_gh_mocks "$case_dir" "$head"
+  printf 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature (HTTP 403)\n' \
+    > "$case_dir/github-rules-fail-body"
+  write_away_record "$case_dir" --grant task-x1
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "away-grant-plan-gated-403: a granted merge must not be blocked by a plan-gated 403"
+  assert_logged_gh_merge "$case_dir" 92 example/repo --squash
+  assert_grep "merge landed: task-x1 $url away-grant" "$case_dir/state/.wake-queue" \
+    "away-grant-plan-gated-403: the landed merge was not recorded under the grant that authorized it"
+
+  head=d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2
+  url=https://github.com/example/repo/pull/93
+  case_dir=$(make_case away-grant-plan-gated-403-red)
+  mkdir -p "$case_dir/wt" "$case_dir/home"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_red_json "$case_dir" "$head" lint
+  printf 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature (HTTP 403)\n' \
+    > "$case_dir/github-rules-fail-body"
+  write_away_record "$case_dir" --grant task-x1
+  set +e
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "away-grant-plan-gated-403-red: a red head must still refuse"
+  assert_grep "check 'lint' is not green" "$case_dir/stderr" \
+    "away-grant-plan-gated-403-red: the plan-gated exemption hid a red check"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-grant-plan-gated-403-red: gh pr merge ran on a red PR"
+  pass "a plan-gated 403 proceeds under an away grant without weakening the green-check gate"
+}
+
+# The exemption is specific to GitHub's plan limitation. A general rules-read
+# failure must still refuse an away merge even when the task carries a grant,
+# so the plan-limitation match never widens into "any failed rules read".
+test_away_grant_general_rules_failure_still_refuses() {
+  local case_dir rc url head
+  head=e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2
+  url=https://github.com/example/repo/pull/94
+  case_dir=$(make_case away-grant-general-rules-failure)
+  mkdir -p "$case_dir/wt" "$case_dir/home"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/github-rules-fail"
+  write_away_record "$case_dir" --grant task-x1
+  set +e
+  FM_TEST_HOME="$case_dir/home" run_pr_merge "$case_dir" task-x1 "$url" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 2 "$rc" "away-grant-general-rules-failure: a general rules failure must still refuse"
+  assert_grep 'merge-queue state does not prove an immediate merge' "$case_dir/stderr" \
+    "away-grant-general-rules-failure: the refusal did not name the unproven queue state"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "away-grant-general-rules-failure: gh pr merge ran despite an unreadable rules response"
+  pass "an away grant does not turn a general branch-rules failure into a queue-free proof"
+}
+
 test_github_no_queue_rule_says_nothing_about_a_queue() {
   local case_dir rc
   case_dir=$(make_case github-no-queue-rule)
@@ -3212,6 +3281,8 @@ test_away_branch_actor_merges_only_with_a_grant
 test_away_branch_refuses_when_record_archived_during_preflight
 test_away_posture_refuses_asynchronous_merge_paths
 test_away_plan_gated_403_does_not_block_the_merge
+test_away_grant_plan_gated_403_merges_but_red_still_refuses
+test_away_grant_general_rules_failure_still_refuses
 test_away_grant_does_not_bypass_red_or_identity
 test_unreadable_away_record_refuses_merge
 test_away_record_cannot_change_between_the_authority_read_and_the_merge
