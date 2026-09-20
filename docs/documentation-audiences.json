@@ -369,6 +369,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/lavish-connection-limit.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/orca-backend.md",
       "audience": "operator-current"
     },
