@@ -1267,6 +1267,7 @@ Entries contain only fixed route names, result codes, attempt counts, a safe-run
 Enable this only after proving the installed Gemini provider preserves the requested identity without silently mapping to another model and that subscription auth is available.
 The target must be registered and within the session's model scope, the home lock must be owned, and Pi must expose the guarded `setModelIfCurrent` API that checks session, source model, cancellation, and intervening mutations again after authentication.
 Older Pi versions fail closed; ordinary `setModel` is not a safe substitute because authentication can yield before it changes the session model.
+The single transition attempt has a 10-second deadline; expiry aborts its guard so authentication finishing later cannot change the model.
 
 The provider must mark the final failure with `terminal:true`, `eventsEmitted:false`, and `phase:before_message_stream_start` in a `provider_transport_failure` diagnostic.
 An earlier WebSocket failure followed by successful SSE or an unclassified SSE/auth failure is insufficient.
