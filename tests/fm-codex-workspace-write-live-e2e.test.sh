@@ -16,13 +16,7 @@ set -u
 # shellcheck source=bin/fm-codex-workspace-write-lib.sh
 . "$ROOT/bin/fm-codex-workspace-write-lib.sh"
 
-if [ "${FM_CODEX_WORKSPACE_WRITE_LIVE:-0}" != 1 ]; then
-  echo "skip: set FM_CODEX_WORKSPACE_WRITE_LIVE=1 to run the token-spending Codex workspace-write grant proof"
-  exit 0
-fi
-
-command -v codex >/dev/null 2>&1 \
-  || { echo "not ok - FM_CODEX_WORKSPACE_WRITE_LIVE=1 but codex is not installed" >&2; exit 1; }
+fm_live_gate opt-in FM_CODEX_WORKSPACE_WRITE_LIVE codex
 
 echo "# codex under test: $(codex --version 2>&1 | head -1)"
 
