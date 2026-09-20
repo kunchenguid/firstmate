@@ -40,7 +40,7 @@ export async function createTurnendGuardHandler(ctx) {
   const skippedSessionIDs = new Set();
 
   return async (event) => {
-    if (event.type !== "session.idle") return;
+    if (event.type !== "session.idle" && (event.type !== "session.status" || event.data.status?.type !== "idle")) return;
     const sessionID = event.data.sessionID;
     if (!sessionID) return;
 

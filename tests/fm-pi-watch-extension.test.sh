@@ -3222,7 +3222,7 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const ctx = { location: { project: { directory: process.env.WORKTREE } }, session: { prompt: async () => {} } };
 const handleEvent = await mod.createWatchArmHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await handleEvent({ type: "session.idle", data: { sessionID: "session-test" } });
+await handleEvent({ type: "session.status", data: { sessionID: "session-test", status: { type: "idle" } } });
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }

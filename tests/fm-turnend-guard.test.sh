@@ -1029,7 +1029,7 @@ const ctx = {
   },
 };
 const handleEvent = await mod.createTurnendGuardHandler(ctx);
-await handleEvent({ type: "session.idle", data: { sessionID: "session-test" } });
+await handleEvent({ type: "session.status", data: { sessionID: "session-test", status: { type: "idle" } } });
 if (!promptBody.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) {
   console.error(`untyped operational prompt: ${promptBody}`);
   process.exit(1);
