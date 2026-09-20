@@ -688,6 +688,48 @@ done
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
 }
+validate_positional_shape() {
+  local first idpart pair pair_id pair_proj batch=0
+  [ "${#POS[@]}" -gt 0 ] && [ -n "${POS[0]:-}" ] || {
+    echo "error: spawn requires a task id positional argument (<task-id>)" >&2
+    return 1
+  }
+  if [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; then
+    return 0
+  fi
+  first=${POS[0]}
+  idpart=${first%%=*}
+  if [ "$first" != "$idpart" ]; then
+    case "$idpart" in
+    */*) ;;
+    *) batch=1 ;;
+    esac
+  fi
+  if [ "$batch" -eq 1 ]; then
+    for pair in "${POS[@]}"; do
+      case "$pair" in
+      *=*)
+        pair_id=${pair%%=*}
+        pair_proj=${pair#*=}
+        [ -n "$pair_id" ] || {
+          echo "error: spawn requires a task id positional argument (<task-id>)" >&2
+          return 1
+        }
+        [ -n "$pair_proj" ] || {
+          echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
+          return 1
+        }
+        ;;
+      esac
+    done
+  else
+    [ "${#POS[@]}" -gt 1 ] && [ -n "${POS[1]:-}" ] || {
+      echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
+      return 1
+    }
+  fi
+}
+validate_positional_shape || exit 1
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -1351,16 +1393,6 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       rc=2
       continue
     fi
-    [ -n "$pair_id" ] || {
-      echo "error: spawn requires a task id positional argument (<task-id>)" >&2
-      rc=2
-      continue
-    }
-    [ -n "$pair_proj" ] || {
-      echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
-      rc=2
-      continue
-    }
     if [ "$KIND" = scout ]; then
       if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$pair_id" "$pair_proj" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else
         echo "batch: FAILED to spawn $pair_id ($pair_proj)" >&2
@@ -1375,10 +1407,6 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   done
   exit "$rc"
 fi
-[ "${#POS[@]}" -gt 0 ] && [ -n "${POS[0]:-}" ] || {
-  echo "error: spawn requires a task id positional argument (<task-id>)" >&2
-  exit 1
-}
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || {
   echo "error: invalid task id" >&2
@@ -1714,10 +1742,6 @@ elif [ "$KIND" = secondmate ]; then
     ;;
   esac
 else
-  [ "${#POS[@]}" -gt 1 ] && [ -n "${POS[1]:-}" ] || {
-    echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
-    exit 1
-  }
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}
 fi

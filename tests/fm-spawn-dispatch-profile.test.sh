@@ -1275,6 +1275,7 @@ test_missing_project_ship_spawn_refuses_with_actionable_error() {
   mkdir -p "$case_dir"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   fm_test_spawn_home "$home" pi
+  enable_dispatch_profile "$home"
 
   out=$(run_spawn "$home" "$case_dir" "$fakebin" "$launchlog" \
     "$id" --mode no-mistakes --yolo off)
