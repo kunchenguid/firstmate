@@ -32,8 +32,10 @@ Graduation (firstmate DEC-001 adoption, 2026-09-20):
     chat editor with a human in the loop, while every reader of this copy is
     an autonomous worker whose brief forbids waiting for one. The section
     maps "the user" onto the task, turns the Edit job into a self-pass over
-    the worker's own text, retires the draft and audience questions, and
-    subordinates the skill to the brief. Nothing else in the body changed:
+    the worker's own text, retires the draft and audience questions, drops
+    the chat-shaped `What changed` output and its `eval.md` check so a
+    delivered report or PR body never carries an editorial recap of its own
+    edits, and subordinates the skill to the brief. Nothing else changed:
     the editing principles, word lists, pattern taxonomy, and workflow are
     the asset and remain as retrieved from the source.
   - Loaded by generated ship, scout, and secondmate-charter briefs at their
@@ -52,6 +54,7 @@ A fleet worker has no human in the loop, so read "the user" below as the task it
 2. Never ask who the reader is or where the piece will be published. The brief names both: the report's reader is the supervisor who ordered it, a PR body's reader is the reviewer, a status line's reader is firstmate and the captain.
 3. Wherever a rule below says to ask - for the core point, a missing source, an unclear claim - resolve it from the brief and the work you just did. If you genuinely cannot, drop the claim rather than inventing it; do not open a needs-decision escalation over wording.
 4. The brief and the harness outrank this skill. When a rule fights a required format, a delivery contract, or a fixed template, the constraint wins and the rest of the rules still apply to the prose inside it.
+5. A self-pass returns only the corrected text. The workflow's **What changed** output and the `eval.md` check that pairs with it do not apply: the deliverable carries the prose, never a recap of your own edits to it. Every other `eval.md` check still runs.
 
 ## Two jobs
 

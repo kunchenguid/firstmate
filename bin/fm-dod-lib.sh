@@ -43,7 +43,11 @@
 # mode block below, the scout Definition of done, and the secondmate charter
 # in bin/fm-brief.sh. The two referenced skills own the writing rules; this
 # line and AGENTS.md section 11 only point at them and never restate their
-# content.
+# content. The caller passes the directory the skills are reachable at in the
+# brief's own frame: a same-host ship or scout brief takes the default
+# generating-checkout path, while a secondmate charter passes the home-relative
+# `.agents/skills`, because a charter is published verbatim to a remote home
+# (bin/fm-remote-home-seed.sh) where the parent's paths name nothing.
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -246,8 +250,9 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_prose_skills_line() {
-  printf '%s\n' "Reader-facing prose you author (reports and other delivered docs, commit messages, PR title and body, status and reply lines) follows the fleet prose skills: read \`$FM_ROOT/.agents/skills/i-have-adhd/SKILL.md\` and \`$FM_ROOT/.agents/skills/no-ai-slop/SKILL.md\` (with its \`eval.md\` self-check) before writing any of it."
+fm_prose_skills_line() {  # [<skills-dir>]
+  local skills=${1:-$FM_ROOT/.agents/skills}
+  printf '%s\n' "Reader-facing prose you author (reports and other delivered docs, commit messages, PR title and body, status and reply lines) follows the fleet prose skills: read \`$skills/i-have-adhd/SKILL.md\` and \`$skills/no-ai-slop/SKILL.md\` (with its \`eval.md\` self-check) before writing any of it."
 }
 
 fm_dod_block() {  # <mode> <task-id>

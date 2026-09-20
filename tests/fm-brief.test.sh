@@ -892,7 +892,10 @@ test_scout_and_secondmate_load_decision_hold_policy() {
 # Every generated brief points its agent at the fleet prose skills where it
 # shapes reader-facing prose, including the secondmate charter: a secondmate's
 # docs and parent-channel lines reach the captain directly, not through a crew
-# brief.
+# brief. A ship or scout brief runs on the generating host and takes that
+# checkout's absolute path; a charter is published verbatim into a remote home
+# (bin/fm-remote-home-seed.sh rewrites only the status path), so it must carry
+# no path from the generating checkout at all.
 test_briefs_reference_fleet_prose_skills() {
   local home kind brief
   home="$TMP_ROOT/prose-skills-home"
@@ -916,11 +919,13 @@ test_briefs_reference_fleet_prose_skills() {
     "$ROOT/bin/fm-brief.sh" prose-mate --secondmate --no-projects >/dev/null 2>&1 \
     || fail "secondmate scaffold failed"
   brief="$home/data/prose-mate/brief.md"
-  assert_grep "$ROOT/.agents/skills/i-have-adhd/SKILL.md" "$brief" \
-    "secondmate charter does not reference the i-have-adhd prose skill"
-  assert_grep "$ROOT/.agents/skills/no-ai-slop/SKILL.md" "$brief" \
-    "secondmate charter does not reference the no-ai-slop prose skill"
+  assert_grep '`.agents/skills/i-have-adhd/SKILL.md`' "$brief" \
+    "secondmate charter does not reference the i-have-adhd prose skill host-locally"
+  assert_grep '`.agents/skills/no-ai-slop/SKILL.md`' "$brief" \
+    "secondmate charter does not reference the no-ai-slop prose skill host-locally"
   assert_grep "eval.md" "$brief" "secondmate charter does not name the no-ai-slop self-check"
+  assert_no_grep "$ROOT/" "$brief" \
+    "secondmate charter embeds a generating-checkout path that names nothing in a remote home"
   pass "fm-brief: ship, scout, and charter scaffolds reference the fleet prose skills"
 }
 
