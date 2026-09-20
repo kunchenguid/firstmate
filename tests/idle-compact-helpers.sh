@@ -76,7 +76,7 @@ stub_always_safe() {
 
 stub_recording_send() {  # <logfile>
   local log=$1
-  # shellcheck disable=SC2317  # invoked indirectly by the state-machine functions under test
+  # shellcheck disable=SC2317,SC2329  # invoked indirectly by the state-machine functions under test
   fm_idle_compact_send() { printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$log"; return 0; }
 }
 
