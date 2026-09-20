@@ -123,7 +123,7 @@ test_batch_empty_fields_refuse_with_actionable_errors() {
   assert_not_contains "$out" "cd: " "an empty batch project must not expose a raw cd error"
   assert_not_contains "$out" "unbound variable" "an empty batch project must not expose a shell error"
 
-  out=$(run_ship_spawn =projects/none)
+  out=$(run_ship_spawn '=projects/none')
   status=$?
   [ "$status" -ne 0 ] || fail "a batch pair without a task id should exit non-zero"
   printf '%s\n' "$out" | grep -F 'error: spawn requires a task id positional argument (<task-id>)' >/dev/null \
