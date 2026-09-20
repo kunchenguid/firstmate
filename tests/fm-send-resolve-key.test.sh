@@ -705,6 +705,32 @@ test_long_decision_key_refuses_before_send() {
   pass "fm-send --resolve-key: an overlong decision key refuses before sending"
 }
 
+# The cap bounds the line that is actually APPENDED. The self-announced append
+# stamps each close with its emission time, so a cap measured before the stamp
+# lets the stored line overrun it and every 220-capped rendering downstream
+# silently loses that much real note text.
+test_stamped_close_line_stays_within_the_status_line_cap() {
+  local dir fb log home rc answer line
+  dir="$TMP_ROOT/cap-with-stamp"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home cap-with-stamp)
+  fm_write_meta "$home/state/t1.meta" "window=sess:fm-t1" "kind=ship"
+  printf 'needs-decision [key=api-shape]: REST or gRPC\n' > "$home/state/t1.status"
+  answer=$(printf 'x%.0s' {1..400})
+
+  run_send "$fb" "$home" "$log" t1 --resolve-key api-shape "$answer"; rc=$?
+  expect_code 0 "$rc" "answering with an over-long note should succeed, not refuse"
+  line=$(grep -F 'resolved [key=api-shape]' "$home/state/t1.status") \
+    || fail "the closing resolved line is missing:"$'\n'"$(cat "$home/state/t1.status")"
+  case "$line" in
+    *' [at='*']: '*) : ;;
+    *) fail "the appended close carries no emission stamp: $line" ;;
+  esac
+  [ "${#line}" -le 220 ] \
+    || fail "the appended close is ${#line} characters, past the 220-character cap: $line"
+  pass "fm-send --resolve-key: a stamped close line stays inside the status-line cap"
+}
+
 test_failed_close_recovery_command_is_shell_safe() {
   local dir fb log home err marker answer rc diagnostic manual out
   dir="$TMP_ROOT/manual-close"; mkdir -p "$dir"
@@ -842,6 +868,7 @@ test_reserved_pending_reply_key_closes_through_resolve_key
 test_unrelated_writer_cannot_close_or_hijack_reserved_key
 test_unclosable_reserved_key_refuses_before_send
 test_long_decision_key_refuses_before_send
+test_stamped_close_line_stays_within_the_status_line_cap
 test_failed_close_recovery_command_is_shell_safe
 test_remote_reserved_pending_reply_key_closes_locally
 test_decision_answer_partition_relocates_under_the_record

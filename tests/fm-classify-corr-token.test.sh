@@ -727,8 +727,42 @@ test_malformed_event_time_is_ordinary_bytes() {
   pass "malformed event times stay ordinary line bytes without hiding the event"
 }
 
+# The decision fold reads the head/note separator on the same unstamped copy the
+# note and key readers use, so a worker's mis-spelled time tag cannot decide
+# whether a captain's decision survives. Without that, a readable "[at=17:00]"
+# hands the fold a colon it never wrote: a colonless terminal line closes every
+# open decision, and a colonless declaration opens a phantom one no later line
+# can close.
+test_malformed_event_time_never_moves_the_decision_fold() {
+  local dir status tag
+  dir=$(make_case fold-malformed-event-time)
+  status="$dir/state/task.status"
+  printf 'kind=ship\n' > "$dir/state/task.meta"
+  for tag in '[at=17:00]' '[at=10:30]' '[at=2026-09-20T14:03:00Z]' '[at=<epoch>]' '[at=bad]'; do
+    printf '%s\n%s\n' \
+      'needs-decision [key=api-shape] [at=1700000000]: REST or gRPC?' \
+      "done $tag finished the audit" > "$status"
+    case "$(status_open_decisions "$status")" in
+      'api-shape'$'\t''needs-decision'$'\t''REST or gRPC?') : ;;
+      *) fail "malformed tag $tag closed an open decision: [$(status_open_decisions "$status")]" ;;
+    esac
+    printf '%s\n' "needs-decision $tag which base branch" > "$status"
+    [ -z "$(status_open_decisions "$status")" ] \
+      || fail "malformed tag $tag opened a phantom decision: [$(status_open_decisions "$status")]"
+  done
+  # The real separator still closes, so the tolerance above did not disarm the
+  # terminal rule itself.
+  printf '%s\n%s\n' \
+    'needs-decision [key=api-shape] [at=1700000000]: REST or gRPC?' \
+    'done [at=1700000001]: finished the audit' > "$status"
+  [ -z "$(status_open_decisions "$status")" ] \
+    || fail "a well-formed terminal event stopped closing the decision"
+  pass "malformed event times never open or close a decision"
+}
+
 test_captain_override_ignores_event_time
 test_malformed_event_time_is_ordinary_bytes
+test_malformed_event_time_never_moves_the_decision_fold
 test_optional_event_time
 test_tokened_opener_opens_and_tokened_closer_closes
 test_token_is_read_through_in_every_position_it_is_written_in

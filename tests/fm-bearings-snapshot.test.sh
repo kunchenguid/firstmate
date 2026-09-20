@@ -431,6 +431,7 @@ SH
       and .parent_event.activity_scan.available == true
   ' >/dev/null || fail "GNU stat fixture corrupted the authoritative secondmate summary: $canonical"
   assert_contains "$(cat "$stat_log")" '-c %a' "GNU registry mode must use stat -c"
+  assert_contains "$(cat "$stat_log")" '-c %Y' "GNU status-observation mtime must use stat -c"
   printf '%s' "$canonical" | jq -e '
     .secondmate_current.records[] | select(.id == "domain-alpha")
     | .parent_event.age_seconds == null and (.parent_event | has("emitted_at_epoch") | not)
