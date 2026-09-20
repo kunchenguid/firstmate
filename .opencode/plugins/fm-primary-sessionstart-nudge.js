@@ -20,8 +20,7 @@ export async function createSessionstartNudgeHandler(ctx) {
 
   return async (event) => {
     if (event.type !== "session.created") return;
-    const data = event.data;
-    const sessionID = data.info?.id ?? data.sessionID;
+    const sessionID = event.data.sessionID;
     if (!sessionID || handledSessions.has(sessionID) || !root) return;
     handledSessions.add(sessionID);
 

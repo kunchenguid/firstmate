@@ -28,7 +28,7 @@ export async function createCdCheckHandler(ctx) {
   const root = pluginRoot(ctx);
 
   return async (event) => {
-    if (!root || !["shell", "bash"].includes(event.tool)) return;
+    if (!root || event.tool !== "shell") return;
     const command = event.input?.command;
     if (!command || typeof command !== "string") return;
 

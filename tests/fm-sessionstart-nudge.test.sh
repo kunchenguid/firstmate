@@ -188,7 +188,7 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const handleEvent = await mod.createSessionstartNudgeHandler(ctx);
 const event = {
   type: "session.created",
-  data: { sessionID: "session-nudge-test", info: { id: "session-nudge-test" } },
+  data: { sessionID: "session-nudge-test" },
 };
 await handleEvent(event);
 await handleEvent(event);
