@@ -27,17 +27,22 @@ While supervision is still needed and away mode remains inactive, an actionable 
 ## Actionable wake ordering
 
 After an actionable Pi, omp, or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.
-It confirms the handling handoff against that successor before scheduling the follow-up, retries once against the current generation and successor, and treats a failed confirmation as a restoration failure: it classifies the error, retires a successor that is no longer alive, and surfaces exactly one typed message.
+It confirms the handling handoff against that successor before scheduling the follow-up and retries a rejected confirmation once against the current generation and successor.
+Pi and OpenCode retain a live successor after rejected confirmation; if it has died, they confirm retirement and attempt one further bounded restoration before delivering the wake with the accumulated typed failure details.
+Pi routes that failure-bearing wake to main even if the replacement succeeds.
+omp retires a dead successor and delivers the confirmation failure without that additional restoration attempt.
 A failed confirmation is never swallowed.
 It waits at most one readiness timeout per attempt, then sends TERM and waits a bounded retirement confirmation before the next lock-verified exponential retry.
 If the unready arm does not retire within that bound, the adapter keeps ownership, starts no overlapping retry, and delivers the typed fallback immediately.
 When that retained arm later closes, its actual close is classified as a new supervised event without replaying the earlier fallback.
 After the configured retry bound is exhausted, it delivers the original wake with a typed continuity-restoration failure even if every successor arm hung without reporting readiness.
 This is deliberate Option B ordering: the fleet is protected before the model handles the wake whenever restoration succeeds, but the model is never left blind when it does not.
-In OpenCode, a close that lands while a restoration is already in flight is merged into one pending slot instead of being dropped: an actionable close upgrades or joins the slot, a failure close joins it, and the slot drains through the same restore-then-deliver path once the in-flight restoration settles, so every actionable close either proves a live successor for the current lock-owning generation or appends one bounded typed failure that the repair-only tool call can fix without starting a duplicate arm.
+OpenCode merges closes that arrive during restoration or wake delivery into one pending slot, with actionable closes taking priority over failures.
+After delivery settles, an actionable slot takes the restore-then-deliver path; a failure-only slot schedules a retry only when no child, retry, or restoration already owns continuity.
+Merged notifications point to the durable queue, where `bin/fm-wake-drain.sh` handles the queued rows.
 In OpenCode, a close from an arm the in-flight restoration already retired is owned by that restoration and never re-enters the slot, while a close that arrives after restoration settles follows the normal path even when its arm was retired earlier.
 Pi retains each actionable close in its existing queue, carries pending wakes across session replacement, and defers a verified successor failure until the active delivery settles.
-A repair call that lands mid-restoration reports the in-flight restoration and starts nothing.
+A Pi or OpenCode repair call that lands mid-restoration reports the in-flight restoration and starts nothing.
 
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi, omp, and OpenCode do.
 The durable wake queue preserves actionable events during the residual active-turn window, and the bounded turn-end guard enforces recovery at Stop when no watcher is live and no open generation claim is still deciding, so a finished, hung, or identity-mismatched claim cannot suppress it ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).

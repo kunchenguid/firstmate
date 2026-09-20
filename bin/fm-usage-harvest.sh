@@ -9,6 +9,8 @@
 # window, then sums the worker's own session-log usage into exactly one JSON
 # line appended to data/usage-ledger.jsonl. data/usage-ledger.jsonl is
 # gitignored runtime data.
+# Local and remote teardown call this best-effort before removing task state;
+# a failed harvest warns but does not prevent teardown.
 #
 # Ledger line schema (this file is the single owner of that schema; the
 # report script is a consumer):
@@ -27,6 +29,8 @@
 # Turn estimate: count of "^working:" lines in the status file.
 #
 # Per-request usage sources:
+#   The task window filters whole files by mtime, not individual events by
+#   timestamp; every matching file is reduced in full.
 #   harness=claude: <claude-projects>/<worktree with '/' and '.' -> '-'>/*.jsonl in
 #     the task window. Each assistant message carries one API request's usage
 #     at .message.usage (input_tokens, cache_read_input_tokens,
@@ -47,7 +51,7 @@
 #     another machine, so its logs are not on this filesystem), an absent log
 #     tree, or no in-window match: token fields are null with source
 #     "unavailable".
-# A corrupt log line is skipped best-effort by the parser.
+# A malformed JSON line stops that file's reduction; its usage is omitted.
 #
 # Idempotent: if the ledger already contains a line whose "task" is
 # <task-id>, the command exits 0 without appending.

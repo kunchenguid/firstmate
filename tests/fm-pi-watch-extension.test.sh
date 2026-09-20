@@ -4229,6 +4229,12 @@ if (!repair.content[0]?.text.includes("already owns an arm child")) {
 await new Promise((resolve) => setTimeout(resolve, 200));
 const stable = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean);
 if (stable.length !== 3) throw new Error(`repair duplicated the successor chain: ${stable.join(" | ")}`);
+if (process.env.FM_TEST_EVIDENCE_DIR) {
+  writeFileSync(`${process.env.FM_TEST_EVIDENCE_DIR}/pi-churn.json`, JSON.stringify({
+    scenario: "Two actionable closes during slow delivery", prompts, armRows: stable,
+    liveSuccessorPids: liveArmPids(), repairResponse: repair,
+  }, null, 2));
+}
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
 EOF
@@ -4333,6 +4339,12 @@ if (expectedLive === 0 && !prompts[0].includes("exhausted the successor retry"))
 await new Promise((resolve) => setTimeout(resolve, 300));
 if (rows().length !== 3 || liveArms().length !== expectedLive || prompts.length !== 1) {
   throw new Error(`delivery did not stay settled: ${rows().join(" | ")}, ${prompts.length} prompts`);
+}
+if (process.env.FM_TEST_EVIDENCE_DIR) {
+  writeFileSync(`${process.env.FM_TEST_EVIDENCE_DIR}/${process.env.FM_ADAPTER}-rejected-${process.env.FM_FAILURE_MODE}.json`, JSON.stringify({
+    scenario: "Rejected confirmation and dead successor", prompts, armRows: rows(),
+    rowsAtPrompt, liveAtPrompt, liveSuccessorPids: liveArms(),
+  }, null, 2));
 }
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
