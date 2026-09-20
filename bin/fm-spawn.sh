@@ -26,8 +26,10 @@
 #   refused as a flag value.
 #   Ship/scout launches always put fm-dod-lib.sh's current worker role scope
 #   first in the private launch-brief overlay, including the exact task-owned
-#   steering inbox. This never rewrites a project's instruction files or a
-#   secondmate's charter.
+#   steering inbox. A REMOTE-route secondmate launch puts that home's
+#   host-local steering inbox first, because only a remote route can inherit a
+#   charter naming a steering inbox on a host this agent cannot reach. Neither
+#   path rewrites a project's instruction files or a secondmate's charter.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
@@ -455,6 +457,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 if ! LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-allowlist"); then
   exit 1
 fi
@@ -1706,6 +1710,39 @@ shell_quote() {
   printf "'"
 }
 
+# A secondmate home whose durable parent binding reports a REMOTE route. Only
+# that shape can carry a charter naming a steering inbox in the parent's own
+# home, which this agent's host cannot reach. An absent or unparsable binding is
+# not a remote route, so the standing charter stays the sole authority.
+secondmate_launch_route_is_remote() { # <home>
+  local home=$1
+  fm_secondmate_parent_record_parse "$home/.fm-secondmate-parent" || return 1
+  [ "$FM_SECONDMATE_PARENT_ROUTE" = remote ]
+}
+
+render_secondmate_launch_brief() { # <source-charter> <launch-brief> <id>
+  local source=$1 launch=$2 id=$3 tmp q_inbox
+  q_inbox=$(shell_quote "$STATE/$id.inbox")
+  mkdir -p "$(dirname "$launch")" || return 1
+  tmp="$(dirname "$launch")/.launch-brief.md.${BASHPID:-$$}"
+  {
+    cat <<EOF
+# Current secondmate launch route
+This launch-time route contract supersedes any conflicting instruction-inbox path in the standing charter below.
+Your firstmate instruction inbox for this launch is $q_inbox; this exact path belongs to this routed secondmate endpoint, so read and acknowledge its messages under the charter's own instruction-inbox procedure and do not substitute another home or the charter's older path.
+
+EOF
+    cat "$source"
+  } >"$tmp" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+  mv "$tmp" "$launch" || {
+    rm -f -- "$tmp"
+    return 1
+  }
+}
+
 resolve_pi_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
@@ -2698,6 +2735,14 @@ fi
   echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2
   exit 1
 }
+if [ "$KIND" = secondmate ] && secondmate_launch_route_is_remote "$PROJ_ABS"; then
+  SOURCE_BRIEF=$BRIEF
+  BRIEF="$DATA/$ID/launch-brief.md"
+  if ! render_secondmate_launch_brief "$SOURCE_BRIEF" "$BRIEF" "$ID"; then
+    echo "error: could not render current secondmate launch route for $SOURCE_BRIEF" >&2
+    exit 1
+  fi
+fi
 if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
   if fm_brief_task_placeholders_present "$BRIEF"; then
     echo "error: $BRIEF still contains {TASK} or {FIRSTMATE_SPEC}; fill ## Captain's intent and ## Firstmate spec before spawn" >&2

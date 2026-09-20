@@ -22,6 +22,7 @@
 #
 # Known provisioning failure rolls the registry back. SSH status 255 preserves
 # the route and any newly scaffolded brief because completion is unknown and a same-route rerun converges.
+# The remote charter copy replaces the parent's local parent-channel and steering-inbox paths with the remote home paths the route actually uses.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -147,11 +148,15 @@ REG_EXISTED=0
 [ -f "$REG" ] && { cp "$REG" "$TMP/registry.before"; REG_EXISTED=1; }
 
 # Keep the parent charter as its durable source, but publish a remote copy whose
-# status path is the remote append-only relay log rather than a local Mac path.
+# parent-channel and steering-inbox paths are remote-home paths rather than local
+# parent-home paths.
 PARENT_STATUS="$STATE/$ID.status"
 REMOTE_STATUS="$REMOTE_HOME/state/parent-replies.status"
+PARENT_INBOX="$STATE/$ID.inbox"
+REMOTE_INBOX="$REMOTE_HOME/state/parent-route/$ID.inbox"
 while IFS= read -r line || [ -n "$line" ]; do
-  printf '%s\n' "${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}"
+  line=${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}
+  printf '%s\n' "${line//"$PARENT_INBOX"/"$REMOTE_INBOX"}"
 done < "$BRIEF" > "$TMP/charter.remote"
 
 PROJECTS_CSV=

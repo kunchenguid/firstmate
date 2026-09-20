@@ -32,6 +32,9 @@
 # code root from origin. Because this home is a standalone clone, the target
 # commit is imported here first and the fast-forward itself is the shared one in
 # bin/fm-ff-lib.sh, so the clean, ancestry, and branch guards have a single owner.
+# Every read of that code root - the sync rev-parse, either import fetch, and the
+# update leg's own code-root refresh - goes through bin/fm-git-code-root-lib.sh,
+# because the host may keep the root under another account than the agent user.
 # A private parent-route state directory stores only the remote secondmate
 # agent's endpoint record; the home's own
 # state/*.meta remains reserved for workers the secondmate supervises.
@@ -65,6 +68,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-task-inbox-lib.sh
 . "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-git-code-root-lib.sh
+. "$SCRIPT_DIR/fm-git-code-root-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -332,12 +337,12 @@ cmd_observe() {
 import_home_commit() { # <home> <commit>
   local home=$1 commit=$2
   if git -C "$home" cat-file -e "$commit^{commit}" 2>/dev/null; then return 0; fi
-  if git -C "$home" fetch --quiet --no-tags -- "$FM_ROOT" "$commit" 2>/dev/null \
+  if fm_git_code_root_run "$FM_ROOT" git -C "$home" fetch --quiet --no-tags -- "$FM_ROOT" "$commit" 2>/dev/null \
     && git -C "$home" cat-file -e "$commit^{commit}" 2>/dev/null; then
     return 0
   fi
   if git -C "$home" remote get-url origin >/dev/null 2>&1 \
-    && git -C "$home" fetch --quiet --no-tags -- origin "$commit" 2>/dev/null \
+    && fm_git_code_root_run "$FM_ROOT" git -C "$home" fetch --quiet --no-tags -- origin "$commit" 2>/dev/null \
     && git -C "$home" cat-file -e "$commit^{commit}" 2>/dev/null; then
     return 0
   fi
@@ -353,7 +358,8 @@ cmd_sync() {
     case "$commit" in *[!0-9a-f]*) die "sync target must be a full 40-character commit id" ;; esac
     [ "${#commit}" -eq 40 ] || die "sync target must be a full 40-character commit id"
   else
-    commit=$(git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null) || die "remote code root HEAD is unreadable"
+    commit=$(fm_git_code_root_run "$FM_ROOT" git -C "$FM_ROOT" rev-parse HEAD 2>/dev/null) \
+      || die "remote code root HEAD is unreadable"
   fi
   import_home_commit "$TARGET_HOME" "$commit" \
     || die "remote home could not import $commit from this host's Firstmate copy or the home's origin; run /updatefirstmate to refresh this host's copy, or push that commit first"
@@ -378,7 +384,8 @@ cmd_update() {
   local id=$1 update_out root_status
   validate_id "$id"
   validate_home "$id"
-  if ! update_out=$(FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
+  if ! update_out=$(fm_git_code_root_run "$FM_ROOT" \
+    env FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     "$SCRIPT_DIR/fm-update.sh" 2>&1); then
     [ -z "$update_out" ] || printf '%s\n' "$update_out" >&2
     die "remote code root update failed"

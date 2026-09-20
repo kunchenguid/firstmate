@@ -7,9 +7,11 @@
 # the self-describing doorbell line, and the watcher's re-ring ladder policy.
 # bin/fm-send.sh writes and rings locally, the host-local remote steer leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) writes idempotently and rings
-# on the remote host, bin/fm-watch.sh polls and re-rings, and the brief
-# scaffold (bin/fm-brief.sh) tells the worker how to read and acknowledge;
-# none of them restates the format.
+# on the remote host, bin/fm-watch.sh polls and re-rings, the brief
+# scaffold (bin/fm-brief.sh) tells the worker how to read and acknowledge, and
+# a remote-route secondmate launch (bin/fm-spawn.sh) names only the reachable
+# inbox path for that launch, because a seeded charter can carry a path on the
+# parent's host; none of them restates the format.
 #
 # Design (captain-adopted, data/fm-send-reliability-reframe-s1/report.md): the
 # payload moves to the filesystem, which is reliable; the terminal carries only

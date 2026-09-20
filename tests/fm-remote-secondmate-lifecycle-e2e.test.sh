@@ -659,6 +659,8 @@ assert_present "$REMOTE_HOME/.fm-secondmate-home" "remote provisioning did not p
 assert_present "$REMOTE_HOME/projects/alpha/.git" "remote provisioning did not clone the project on that host"
 assert_grep "$REMOTE_HOME/state/parent-replies.status" "$REMOTE_HOME/data/charter.md" "remote charter did not use its append-only reply log"
 assert_no_grep "$PARENT/state/ios.status" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local status path"
+assert_grep "$REMOTE_HOME/state/parent-route/ios.inbox" "$REMOTE_HOME/data/charter.md" "remote charter did not use its host-local steering inbox"
+assert_no_grep "$PARENT/state/ios.inbox" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local steering inbox"
 if FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
   remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$TMP_ROOT/other-home" alpha \
@@ -725,6 +727,27 @@ assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omi
 assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/ios.meta" "parent metadata omitted the pinned remote Herdr session"
 assert_grep 'remote_target=fm-remote:' "$PARENT/state/ios.meta" "parent metadata did not record an fm-remote endpoint"
 assert_grep 'herdr_session=fm-remote' "$REMOTE_HOME/state/parent-route/ios.meta" "remote metadata did not record the pinned Herdr session"
+remote_launch_brief="$REMOTE_HOME/data/.parent-route/ios/launch-brief.md"
+assert_present "$remote_launch_brief" "remote secondmate launch did not publish its current route overlay"
+# The delivered brief is the launch-route overlay followed by the standing
+# charter verbatim, so the overlay is exactly the lines above that copy.
+remote_charter_lines=$(wc -l < "$REMOTE_HOME/data/charter.md")
+remote_brief_lines=$(wc -l < "$remote_launch_brief")
+remote_overlay_lines=$((remote_brief_lines - remote_charter_lines))
+[ "$remote_overlay_lines" -gt 0 ] || fail "remote launch brief carried no route overlay above the standing charter"
+tail -n "$remote_charter_lines" "$remote_launch_brief" | cmp -s - "$REMOTE_HOME/data/charter.md" \
+  || fail "remote launch brief did not carry the standing charter verbatim below its route overlay"
+head -n "$remote_overlay_lines" "$remote_launch_brief" > "$TMP_ROOT/remote-launch-route.overlay"
+assert_grep '# Current secondmate launch route' "$TMP_ROOT/remote-launch-route.overlay" "remote launch brief omitted the launch-time route contract"
+assert_grep "$REMOTE_HOME/state/parent-route/ios.inbox" "$TMP_ROOT/remote-launch-route.overlay" "remote launch brief did not put the host-local steering inbox first"
+assert_no_grep "$PARENT/state/ios.inbox" "$remote_launch_brief" "remote launch brief retained the inaccessible local steering inbox"
+# The steering-inbox receive-and-ack procedure has one owner, so the overlay may
+# correct the route but must never become a second copy of charter-owned lines.
+grep -v '^[[:space:]]*$' "$TMP_ROOT/remote-launch-route.overlay" > "$TMP_ROOT/remote-launch-route.lines" || true
+if grep -Fx -f "$REMOTE_HOME/data/charter.md" "$TMP_ROOT/remote-launch-route.lines" \
+  > "$TMP_ROOT/remote-launch-route.restated"; then
+  fail "remote launch overlay restated charter-owned lines: $(head -n 1 "$TMP_ROOT/remote-launch-route.restated")"
+fi
 assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the fm-remote session"
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"

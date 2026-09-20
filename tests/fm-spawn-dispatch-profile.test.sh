@@ -836,7 +836,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
   cmp -s "$ROOT/AGENTS.md" "$sm/AGENTS.md" || fail "secondmate launch rewrote the supervisor contract"
   cmp -s "$CASE_DIR/charter-before" "$sm/data/charter.md" || fail "secondmate launch rewrote the charter"
-  assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
+  assert_absent "$HOME_DIR/data/$id/launch-brief.md" "local-route secondmate launch received a launch overlay"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "< '$sm/data/charter.md'" "secondmate launch lost its original charter"
   assert_contains "$launch" "FM_PI_HARNESS=pi-signed '$FAKEBIN_DIR/pi-signed' --tui-mode regular -e '$sm/.pi/extensions/fm-primary-turnend-guard.ts' -e '$sm/.pi/extensions/fm-primary-pi-watch.ts'" \
@@ -845,7 +845,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
     printf '# evidence begin: persistent secondmate\n%s\n' "$out"
     printf 'launch command:\n%s\noriginal charter:\n' "$launch"
     cat "$sm/data/charter.md"
-    printf 'supervisor AGENTS.md and charter remain byte-identical; no worker overlay created\n# evidence end\n'
+    printf 'supervisor AGENTS.md and charter remain byte-identical; no launch overlay created\n# evidence end\n'
   fi
   pass "pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics"
 }

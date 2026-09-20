@@ -8,7 +8,9 @@
 # base64 parent SSH alias, and one base64 project record per line. Each project
 # record's origin is the URL the parent resolved and named, so this host clones
 # from it and re-validates it through bin/fm-project-origin-lib.sh instead of
-# trusting the sender. The remote code root is cloned into an absent home,
+# trusting the sender. The remote code root is cloned into an absent home
+# through bin/fm-git-code-root-lib.sh, which owns the one git exception that
+# lets this host read a code root another account owns,
 # project origins are cloned on this host, the project registry and charter are
 # published, the durable .fm-secondmate-parent record names this home's route to its parent as
 # "remote" - read by bin/fm-teardown.sh's cleanup gate so a delegated public
@@ -26,6 +28,8 @@ MAX_MANIFEST_BYTES=1048576
 
 # shellcheck source=bin/fm-project-origin-lib.sh
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
+# shellcheck source=bin/fm-git-code-root-lib.sh
+. "$SCRIPT_DIR/fm-git-code-root-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 
@@ -174,7 +178,8 @@ if [ -e "$FM_HOME" ] || [ -L "$FM_HOME" ]; then
   fi
 else
   CREATED_HOME=1
-  git clone --quiet -- "$FM_ROOT" "$FM_HOME" || die "could not clone the remote Firstmate home"
+  fm_git_code_root_run "$FM_ROOT" git clone --quiet -- "$FM_ROOT" "$FM_HOME" \
+    || die "could not clone the remote Firstmate home"
 fi
 for operational_dir in data state config projects; do
   operational_path="$FM_HOME/$operational_dir"
