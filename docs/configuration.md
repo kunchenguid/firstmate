@@ -231,15 +231,14 @@ Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](f
 ## Jev review assist (optional, per-operator)
 
 no-mistakes v1.79.0+ can send each review turn's diff to TypeSafe's Jev model to rank which surrounding files are worth reading first; the ranked list only enriches the review prompt, the ordinary cold complete review remains authoritative, and Jev is advisory only and never gates delivery.
-`jev.review_assist` is **global-only**: it does not exist in, and cannot be set from, a repo's tracked `.no-mistakes.yaml` (verified in no-mistakes' own end-to-end tests - a pushed or default-branch repo config setting this key never contacts TypeSafe).
-An operator opts in locally, per machine, in their own `~/.no-mistakes/config.yaml`:
+This repository opts in through its tracked `.no-mistakes.yaml`:
 
 ```yaml
 jev:
   review_assist: true
 ```
 
-It also needs `TYPESAFE_API_KEY` set in the daemon's environment; without a key the step log says so and review proceeds without a pre-brief, exactly as when the setting is off.
+The operator still needs `TYPESAFE_API_KEY` set in the daemon's environment; without a key the step log says so and review proceeds without a pre-brief, exactly as when the setting is off.
 On every call failure, oversized reply, or missing key, no-mistakes falls back to the ordinary cold review with no pre-brief - this repo does not depend on Jev being reachable.
 
 **What is sent.** Per review turn, no-mistakes sends only the diff of reviewable files plus up to 40 candidate file paths - paths only, never their content - ranked by name rarity and directory proximity. No project name, PR body, or brief text is part of this call.

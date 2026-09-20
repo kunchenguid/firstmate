@@ -400,8 +400,8 @@ claim_inactive_report_for_ledger() { # <task> <incarnation> <state> <ledger-fing
 # the child's meta lock. Returns 0 when the line is delivered, already
 # delivered, or nothing is owed, and 1 when it is owed but the parent channel
 # could not be written (the notice is queued once per record).
-report_child_ledger_locked() { # <id> <meta>
-  local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
+report_child_ledger_locked() {
+  local id=$1 meta=$2 reap_timeout=${3:-} status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line reap_rc=0
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
   state=$(status_line_verb "$last")
@@ -410,7 +410,12 @@ report_child_ledger_locked() { # <id> <meta>
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
-  if ! reap_terminal_child_locked "$id" "$meta"; then
+  if [ -n "$reap_timeout" ]; then
+    reap_terminal_child_bounded "$reap_timeout" "$id" "$meta" || reap_rc=$?
+  else
+    reap_terminal_child_locked "$id" "$meta" || reap_rc=$?
+  fi
+  if [ "$reap_rc" -ne 0 ]; then
     if [ -n "$RECORD_PENDING" ]; then
       notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
         "child terminal cleanup needs retry before parent report: child=$id state=$state"
@@ -418,6 +423,7 @@ report_child_ledger_locked() { # <id> <meta>
       publish_actionable "inactive-reconcile:$fingerprint" \
         "child terminal cleanup needs retry before parent report: child=$id state=$state" || true
     fi
+    [ "$reap_rc" -eq 124 ] && return 124
     return 1
   fi
   [ -n "$RECORD_PENDING" ] || return 0
@@ -451,16 +457,14 @@ report_child_ledger_locked() { # <id> <meta>
   return 1
 }
 
-# Every direct child's ledger, under its meta lock. Cheap file reads only, so
-# it runs on every poll in a secondmate home; a delivery failure is already
-# queued as a notice and never fails the scan.
 ledger_pass() {
-  local meta id lock
+  local deadline=$1 meta id lock remaining report_rc=0
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
     valid_id "$id" || continue
     [ "$(meta_field "$meta" kind)" != secondmate ] || continue
+    [ "$(date +%s)" -lt "$deadline" ] || return 3
     lock=$(fm_meta_lock_path "$meta") || continue
     fm_lock_try_acquire "$lock" || continue
     if [ ! -f "$meta" ] || [ -L "$meta" ] \
@@ -468,8 +472,16 @@ ledger_pass() {
       fm_lock_release "$lock"
       continue
     fi
-    report_child_ledger_locked "$id" "$meta" || true
+    remaining=$((deadline - $(date +%s)))
+    if [ "$remaining" -le 0 ]; then
+      fm_lock_release "$lock"
+      return 3
+    fi
+    report_child_ledger_locked "$id" "$meta" "$remaining" || report_rc=$?
     fm_lock_release "$lock"
+    [ "$report_rc" -ne 124 ] || return 3
+    report_rc=0
+    [ "$(date +%s)" -lt "$deadline" ] || return 3
   done
 }
 
@@ -516,8 +528,14 @@ reap_terminal_child_locked() { # <id> <meta>
   esac
 }
 
+reap_terminal_child_bounded() {
+  local timeout=$1 id=$2 meta=$3
+  [ "$timeout" -gt 0 ] || return 124
+  fm_run_timed "$timeout" "$SCRIPT_DIR/fm-inactive-reconcile.sh" _reap-terminal-child "$id" "$meta"
+}
+
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0 reap_rc=0
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -554,7 +572,8 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     outcome_key="inactive-outcome-main-$id-$state"
   fi
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" "$(sha256_text "$last")" || return 1
-  if ! reap_terminal_child_locked "$id" "$meta"; then
+  reap_terminal_child_bounded "$timeout" "$id" "$meta" || reap_rc=$?
+  if [ "$reap_rc" -ne 0 ]; then
     if [ -n "$RECORD_PENDING" ]; then
       if [ -n "$self" ]; then
         notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
@@ -567,6 +586,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
       publish_actionable "inactive-reconcile:$fingerprint" \
         "inactive terminal cleanup needs retry before delivery: child=$id state=$state" || true
     fi
+    [ "$reap_rc" -eq 124 ] && return 3
     return 1
   fi
   if [ -z "$RECORD_PENDING" ]; then
@@ -637,9 +657,14 @@ scan() {
   local startup=${1:-0} self='' cursor deadline rc=0 marker_rc=0
   mkdir -p "$STATE" "$OUTCOME_DIR" || return 1
   [ ! -L "$OUTCOME_DIR" ] || return 1
+  deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
   if self=$(home_secondmate_id); then
     # The ledger-first delivery is per poll, not per cadence.
-    ledger_pass
+    ledger_pass "$deadline" || {
+      rc=$?
+      [ "$rc" -eq 3 ] && return 0
+      return "$rc"
+    }
   else
     marker_rc=$?
     self=''
@@ -655,7 +680,6 @@ scan() {
       "inactive terminal outcomes remain unreconciled: invalid .fm-secondmate-home marker" || true
     return 0
   fi
-  deadline=$(( $(date +%s) + FM_INACTIVE_RECONCILE_BUDGET_SECS ))
   SCAN_FIRST_VISIT_PENDING=1
   scan_pass "$cursor" after "$deadline" "$self" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$cursor" ]; then
@@ -707,6 +731,10 @@ case "$mode" in
     elif [ "$?" -ne 124 ]; then
       exit 1
     fi
+    ;;
+  _reap-terminal-child)
+    [ "$#" -eq 3 ] || exit 2
+    reap_terminal_child_locked "$2" "$3"
     ;;
   _scan-locked)
     [ "$#" -eq 2 ] || exit 2
