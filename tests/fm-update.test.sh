@@ -383,13 +383,16 @@ test_remote_leg_raises_the_fork_sync_status() {
   expected_status=$(. "$ROOT/bin/fm-ff-lib.sh"; printf '%s\n' "$REMOTE_UPDATE_FAILED_STATUS")
 
   # This host's own update exits nonzero: its FF_UPDATE_FAILED classifier fired.
+  # shellcheck disable=SC2031 # False positive: cross-file taint from tests/lib.sh's unrelated fm_test_tmproot() local root; not modified in a subshell here.
   cat > "$root/bin/fm-update.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'fork sync: FAILED protected fork branch\n'
 exit 1
 SH
+  # shellcheck disable=SC2031 # False positive: cross-file taint from tests/lib.sh's unrelated fm_test_tmproot() local root; not modified in a subshell here.
   chmod +x "$root/bin/fm-update.sh"
   rc=0
+  # shellcheck disable=SC2031 # False positive: cross-file taint from tests/lib.sh's unrelated fm_test_tmproot() local root; not modified in a subshell here.
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$control" update sm1 2>&1) || rc=$?
   expect_code "$expected_status" "$rc" \
     "a fork-synchronization failure on this host must raise the distinct status, not the generic die"
@@ -398,19 +401,23 @@ SH
 
   # The root update completes but proves no safe origin result: an ordinary
   # failure, not the classifier, so it stays exit 1 and the parent reads a skip.
+  # shellcheck disable=SC2031 # False positive: cross-file taint from tests/lib.sh's unrelated fm_test_tmproot() local root; not modified in a subshell here.
   cat > "$root/bin/fm-update.sh" <<'SH'
 #!/usr/bin/env bash
 printf 'firstmate: skipped: dirty working tree\n'
 exit 0
 SH
+  # shellcheck disable=SC2031 # False positive: cross-file taint from tests/lib.sh's unrelated fm_test_tmproot() local root; not modified in a subshell here.
   chmod +x "$root/bin/fm-update.sh"
   rc=0
+  # shellcheck disable=SC2031 # False positive: cross-file taint from tests/lib.sh's unrelated fm_test_tmproot() local root; not modified in a subshell here.
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$control" update sm1 2>&1) || rc=$?
   expect_code 1 "$rc" "an unsafe root origin update is an ordinary skip, not the fork-sync status"
 
   # A home guard rejection never reaches this host's update at all, so it cannot
   # be escalated into a fleet-wide fork-sync failure either.
   rc=0
+  # shellcheck disable=SC2031 # False positive: cross-file taint from tests/lib.sh's unrelated fm_test_tmproot() local root; not modified in a subshell here.
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" "$control" update sm2 2>&1) || rc=$?
   expect_code 1 "$rc" "an unusable remote home is an ordinary skip, not the fork-sync status"
   assert_contains "$out" "remote home belongs to sm1, not sm2" \

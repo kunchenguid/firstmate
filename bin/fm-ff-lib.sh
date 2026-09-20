@@ -379,6 +379,7 @@ fetch_once() {
   fi
   FF_FETCH_ERROR="fetch failed"
   if ! ff_sync_origin_fork "$dir"; then
+    # shellcheck disable=SC2034 # Read by bin/fm-update.sh (exit "$FF_UPDATE_FAILED") after sourcing this library.
     FF_UPDATE_FAILED=1
     return 1
   fi
@@ -433,6 +434,7 @@ remote_sync_failure_reason() { # <exit-status> <output>
 # FF_UPDATE_FAILED result the local route already sets, instead of collapsing
 # into an ordinary skip the caller cannot distinguish from ubiquitous
 # transport failure.
+# shellcheck disable=SC2034 # Read by bin/fm-update.sh and bin/fm-remote-secondmate-control.sh after sourcing this library.
 REMOTE_UPDATE_FAILED_STATUS=3
 
 dirty_status() {
@@ -508,6 +510,7 @@ ff_target() {
       echo "$label: skipped: $FF_FETCH_ERROR"
       return 0
     fi
+    # shellcheck disable=SC2034 # Read by bin/fm-update.sh (echo "origin-verified: $FF_RUN_VERIFIED") after sourcing this library.
     [ -z "$FF_FORK_UNVERIFIED" ] || FF_RUN_VERIFIED=no
   fi
   default=$(default_branch "$dir") || {
