@@ -57,6 +57,18 @@ export_harvest_env() {  # <home-data>
   export FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_USAGE_CLAUDE_DIR FM_USAGE_CODEX_DIR
 }
 
+# A retired remote home may contain the task record itself. A best-effort
+# harvest after retirement must fail without recreating that home.
+missing_record_case() {
+  local home="$TMP_ROOT/retired-home" out rc=0
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state/parent-route" \
+    FM_DATA_OVERRIDE="$home/data/.parent-route" "$HARVEST" retired 2>&1) || rc=$?
+  expect_code 1 "$rc" "missing task record must fail"$'\n'"$out"
+  assert_contains "$out" "no task record:" "missing record names the failure"
+  [ ! -e "$home" ] || fail "harvest recreated a retired home"
+  pass "missing task record does not recreate a retired home"
+}
+
 # --- claude: request dedupe, cache folding, encoding resolution, window -----
 
 claude_case() {
@@ -88,7 +100,7 @@ JSON
   cat > "$logdir/session-future.jsonl" <<'JSON'
 {"type":"assistant","message":{"id":"msgX","model":"claude-test","usage":{"input_tokens":999,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":999}}}
 JSON
-  touch -t "$(date -r $(( $(file_mtime_epoch "$state/$id.status") + 7200 )) +%Y%m%d%H%M.%S)" \
+  fm_touch_epoch "$(( $(file_mtime_epoch "$state/$id.status") + 7200 ))" \
     "$logdir/session-future.jsonl"
   mkdir -p "$FM_USAGE_CLAUDE_DIR/wrong-encoded-dir"
   printf '%s\n' '{"type":"assistant","message":{"id":"msgY","model":"claude-test","usage":{"input_tokens":777,"output_tokens":777}}}' \
@@ -159,7 +171,7 @@ JSON
 {"type":"session_meta","payload":{"cwd":"$wt"}}
 {"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":999,"output_tokens":999}}}}
 JSON
-  touch -t "$(date -r $(( $(file_mtime_epoch "$home/state/$id.status") + 7200 )) +%Y%m%d%H%M.%S)" \
+  fm_touch_epoch "$(( $(file_mtime_epoch "$home/state/$id.status") + 7200 ))" \
     "$d1/rollout-future.jsonl"
   touch -m -r "$d1/rollout-match.jsonl" "$home/state/$id.status"
 
@@ -246,9 +258,9 @@ JSON
   # and the session log lands mid-window. Without the meta-mtime start fallback
   # the birthless window collapses to [T, T] and drops the earlier log.
   base=$(file_mtime_epoch "$state/$id.status")
-  touch -t "$(date -r "$base" +%Y%m%d%H%M.%S)" "$state/$id.status"
-  touch -t "$(date -r $((base - 100)) +%Y%m%d%H%M.%S)" "$state/$id.meta"
-  touch -t "$(date -r $((base - 50)) +%Y%m%d%H%M.%S)" "$logdir/session.jsonl"
+  fm_touch_epoch "$base" "$state/$id.status"
+  fm_touch_epoch "$((base - 100))" "$state/$id.meta"
+  fm_touch_epoch "$((base - 50))" "$logdir/session.jsonl"
 
   fb="$TMP_ROOT/nobirth-fakebin"
   nobirth_stat_bin "$fb"
@@ -410,6 +422,7 @@ SH
   pass "teardown integration: harvest failure is non-fatal"
 }
 
+missing_record_case
 claude_case
 claude_nobirth_case
 codex_case
