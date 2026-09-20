@@ -31,6 +31,23 @@ file_birth_epoch() {  # <file>
   printf '%s' "$t"
 }
 
+# Format an epoch for touch on both BSD and GNU date implementations.
+touch_time() {  # <epoch>
+  date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null \
+    || date -d "@$1" +%Y%m%d%H%M.%S
+}
+
+missing_task_case() {
+  local home="$TMP_ROOT/retired-home" out rc
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$HARVEST" retired 2>&1)
+  rc=$?
+  expect_code 1 "$rc" "missing task harvest must fail"
+  assert_contains "$out" "no task record:" "missing task should explain the refusal"
+  assert_absent "$home" "harvest must not recreate a retired home"
+  pass "missing task harvest leaves the retired home absent"
+}
+
 # harvest_case <id> <harness> [model] [effort] : create a home with one task
 # whose worktree is $TMP_ROOT/wt-<id>, status and meta included, and echo the
 # data dir. Exports the FM_USAGE_* fixture dirs per case.
@@ -88,7 +105,7 @@ JSON
   cat > "$logdir/session-future.jsonl" <<'JSON'
 {"type":"assistant","message":{"id":"msgX","model":"claude-test","usage":{"input_tokens":999,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":999}}}
 JSON
-  touch -t "$(date -r $(( $(file_mtime_epoch "$state/$id.status") + 7200 )) +%Y%m%d%H%M.%S)" \
+  touch -t "$(touch_time $(( $(file_mtime_epoch "$state/$id.status") + 7200 )))" \
     "$logdir/session-future.jsonl"
   mkdir -p "$FM_USAGE_CLAUDE_DIR/wrong-encoded-dir"
   printf '%s\n' '{"type":"assistant","message":{"id":"msgY","model":"claude-test","usage":{"input_tokens":777,"output_tokens":777}}}' \
@@ -159,7 +176,7 @@ JSON
 {"type":"session_meta","payload":{"cwd":"$wt"}}
 {"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":999,"output_tokens":999}}}}
 JSON
-  touch -t "$(date -r $(( $(file_mtime_epoch "$home/state/$id.status") + 7200 )) +%Y%m%d%H%M.%S)" \
+  touch -t "$(touch_time $(( $(file_mtime_epoch "$home/state/$id.status") + 7200 )))" \
     "$d1/rollout-future.jsonl"
   touch -m -r "$d1/rollout-match.jsonl" "$home/state/$id.status"
 
@@ -219,7 +236,13 @@ while [ "$#" -gt 0 ]; do
 done
 case "$fmt" in
   %W) printf '0\n' ;;
-  %Y) /usr/bin/stat -f %m -- "$file" 2>/dev/null || /usr/bin/stat -c %Y -- "$file" ;;
+  %Y)
+    # GNU stat can print filesystem output before rejecting BSD arguments.
+    # Capture each attempt so failed-probe stdout cannot contaminate the epoch.
+    value=$(/usr/bin/stat -f %m -- "$file" 2>/dev/null) \
+      || value=$(/usr/bin/stat -c %Y -- "$file") || exit 1
+    printf '%s\n' "$value"
+    ;;
   *) exit 1 ;;
 esac
 SH
@@ -246,9 +269,9 @@ JSON
   # and the session log lands mid-window. Without the meta-mtime start fallback
   # the birthless window collapses to [T, T] and drops the earlier log.
   base=$(file_mtime_epoch "$state/$id.status")
-  touch -t "$(date -r "$base" +%Y%m%d%H%M.%S)" "$state/$id.status"
-  touch -t "$(date -r $((base - 100)) +%Y%m%d%H%M.%S)" "$state/$id.meta"
-  touch -t "$(date -r $((base - 50)) +%Y%m%d%H%M.%S)" "$logdir/session.jsonl"
+  touch -t "$(touch_time "$base")" "$state/$id.status"
+  touch -t "$(touch_time $((base - 100)))" "$state/$id.meta"
+  touch -t "$(touch_time $((base - 50)))" "$logdir/session.jsonl"
 
   fb="$TMP_ROOT/nobirth-fakebin"
   nobirth_stat_bin "$fb"
@@ -410,6 +433,7 @@ SH
   pass "teardown integration: harvest failure is non-fatal"
 }
 
+missing_task_case
 claude_case
 claude_nobirth_case
 codex_case

@@ -74,14 +74,6 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 CLAUDE_DIR="${FM_USAGE_CLAUDE_DIR:-${HOME:-}/.claude/projects}"
 CODEX_DIR="${FM_USAGE_CODEX_DIR:-${HOME:-}/.codex/sessions}"
 
-# Portable directory-lock helpers (fm_lock_try_acquire / fm_lock_release) let
-# the idempotent check-and-append below run as one critical section, so two
-# concurrent harvests of the same task cannot both pass the existence check and
-# each append a duplicate row. The acquire is bounded (see below) so it never
-# blocks the synchronous teardown caller indefinitely.
-# shellcheck source=bin/fm-wake-lib.sh
-. "$SCRIPT_DIR/fm-wake-lib.sh"
-
 err() { printf 'error: %s\n' "$1" >&2; }
 
 if [ "$#" -ne 1 ] || [ -z "$1" ] || case "$1" in *[!A-Za-z0-9._-]*) true ;; *) false ;; esac; then
@@ -94,6 +86,16 @@ ID=$1
 META="$STATE/$ID.meta"
 STATUS="$STATE/$ID.status"
 [ -f "$META" ] || { err "no task record: $META"; exit 1; }
+
+# Validate the task before loading helpers that create the state directory.
+# Remote retirement can already have removed the containing home.
+# Portable directory-lock helpers (fm_lock_try_acquire / fm_lock_release) let
+# the idempotent check-and-append below run as one critical section, so two
+# concurrent harvests of the same task cannot both pass the existence check and
+# each append a duplicate row. The acquire is bounded (see below) so it never
+# blocks the synchronous teardown caller indefinitely.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 meta_get() {  # <key>
   grep "^$1=" "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true
