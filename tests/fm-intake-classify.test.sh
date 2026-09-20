@@ -19,6 +19,8 @@ SCOUT_REQUEST_FILE="$TMP_ROOT/scout-request.md"
 ANSWER_REQUEST_FILE="$TMP_ROOT/answer-request.md"
 RESPONSE="$TMP_ROOT/response.json"
 BASE_PATH=$PATH
+REAL_HEAD=$(command -v head)
+REAL_WC=$(command -v wc)
 mkdir -p "$HOME_DIR" "$LOG"
 
 cat > "$REQUEST_FILE" <<'MD'
@@ -62,6 +64,26 @@ printf '%s' "${FAKE_CURL_HTTP:-200}"
 SH
 chmod +x "$FAKEBIN/curl"
 
+cat > "$FAKEBIN/head" <<'SH'
+#!/usr/bin/env bash
+if [ "${FAKE_HEAD_FAIL:-0}" = 1 ]; then
+  printf '%s' 'partial request'
+  exit 74
+fi
+exec "${REAL_HEAD:?}" "$@"
+SH
+chmod +x "$FAKEBIN/head"
+
+cat > "$FAKEBIN/wc" <<'SH'
+#!/usr/bin/env bash
+if [ "${FAKE_WC_FAIL:-0}" = 1 ]; then
+  printf '%s\n' '17'
+  exit 74
+fi
+exec "${REAL_WC:?}" "$@"
+SH
+chmod +x "$FAKEBIN/wc"
+
 write_response() {  # <deliverable> <deliverable-confidence> <intent-noul> <score> <score-confidence>
   local ship=0.02 scout=0.02 answer_now=0.02 unclear=0.02
   case "$1" in
@@ -104,7 +126,7 @@ run() {
   printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
 }
 
-export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" CHILD_ENV_LOG="$LOG/child-env"
+export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" CHILD_ENV_LOG="$LOG/child-env" REAL_HEAD REAL_WC
 KEY='test-key-9f1c2d3e-never-on-argv'
 code='' out='' err=''
 
@@ -236,6 +258,18 @@ JSON
 TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
 expect_code 0 "$code" "malformed response exits 0"
 assert_contains "$out" 'response is not a typed intake answer' "malformed response is structured"
+reset_log
+FAKE_HEAD_FAIL=1 TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
+expect_code 0 "$code" "request snapshot failure exits 0"
+assert_contains "$out" '  status: error' "request snapshot failure is structured"
+assert_contains "$out" 'request read failed' "request snapshot failure is named"
+assert_absent "$LOG/argv" "request snapshot failure makes no network call"
+reset_log
+FAKE_WC_FAIL=1 TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
+expect_code 0 "$code" "request measurement failure exits 0"
+assert_contains "$out" '  status: error' "request measurement failure is structured"
+assert_contains "$out" 'request measurement failed' "request measurement failure is named"
+assert_absent "$LOG/argv" "request measurement failure makes no network call"
 reset_log
 TYPESAFE_API_KEY=$KEY TMPDIR="$TMP_ROOT/missing-tmp" run code out err "$REQUEST_FILE"
 expect_code 0 "$code" "temporary file setup failure exits 0"

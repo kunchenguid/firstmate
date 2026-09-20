@@ -101,9 +101,10 @@ command -v jq >/dev/null 2>&1 || die "jq required"
 REQUEST_SNAPSHOT=$(mktemp 2>/dev/null) || emit_error "temporary file setup failed"
 RESP_FILE=$(mktemp 2>/dev/null) || { rm -f "$REQUEST_SNAPSHOT"; emit_error "temporary file setup failed"; }
 trap 'rm -f "$REQUEST_SNAPSHOT" "$RESP_FILE"' EXIT
-head -c "$REQUEST_MAX_BYTES" "$REQUEST_FILE" > "$REQUEST_SNAPSHOT" || die "could not read request file: $REQUEST_FILE"
-REQUEST_BYTES=$(wc -c < "$REQUEST_FILE" | tr -d '[:space:]')
-case "$REQUEST_BYTES" in ''|*[!0-9]*) die "could not measure request file: $REQUEST_FILE" ;; esac
+head -c "$REQUEST_MAX_BYTES" "$REQUEST_FILE" > "$REQUEST_SNAPSHOT" || emit_error "request read failed"
+REQUEST_BYTES=$(wc -c < "$REQUEST_FILE") || emit_error "request measurement failed"
+REQUEST_BYTES=${REQUEST_BYTES//[[:space:]]/}
+case "$REQUEST_BYTES" in ''|*[!0-9]*) emit_error "request measurement failed" ;; esac
 if [ "$REQUEST_BYTES" -gt "$REQUEST_MAX_BYTES" ]; then REQUEST_TRUNCATED=true; else REQUEST_TRUNCATED=false; fi
 
 # ---- one System One request ----------------------------------------------------
