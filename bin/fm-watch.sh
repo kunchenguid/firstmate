@@ -1631,18 +1631,19 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       # decoration overrides the daemon's own pause verdict for the pane: the
       # ladder then climbs on every re-arm, escalating a crew that declared the
       # wait itself once per FM_STALE_ESCALATE_SECS for as long as the wait lasts.
-      # The one-shot is keyed on the DECLARATION (the status log's signature),
-      # never on the pane hash: a busy pane's harness footer ticks on every
-      # capture, so a hash-keyed one-shot would re-fire on every poll and the
-      # daemon, which relaunches the watcher after each handled wake, would be
-      # woken in a loop for the whole declared wait. The suppressor therefore
-      # advances to the declaration rather than the hash, and the daemon is woken
-      # once per distinct declaration. The wedge timer, escalation count and
-      # write-deferral chain are cleared exactly as handle_paused_stale clears
-      # them, so an undeclared busy phase that had already started the timer does
-      # not resume its count the moment the declaration is lifted. Normal-mode
-      # pause tracking stays unwritten here, exactly as the idle away-mode handoff
-      # leaves it, because the daemon owns that bookkeeping.
+      # The one-shot is keyed on the DECLARATION (stale_wait_declaration below
+      # owns that identity), never on the pane hash: a busy pane's harness
+      # footer ticks on every capture, so a hash-keyed one-shot would re-fire on
+      # every poll and the daemon, which relaunches the watcher after each
+      # handled wake, would be woken in a loop for the whole declared wait. The
+      # suppressor therefore advances to the declaration rather than the hash,
+      # and the daemon is woken once per distinct declaration. The wedge timer,
+      # escalation count and write-deferral chain are cleared exactly as
+      # handle_paused_stale clears them, so an undeclared busy phase that had
+      # already started the timer does not resume its count the moment the
+      # declaration is lifted. Normal-mode pause tracking stays unwritten here,
+      # exactly as the idle away-mode handoff leaves it, because the daemon owns
+      # that bookkeeping.
       key=$(window_key "$win")
       rm -f "$since_file" "$escalation_file"
       clear_write_tracking "$key"
