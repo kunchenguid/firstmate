@@ -249,6 +249,8 @@ class RouteTest(unittest.TestCase):
               'Synthetic completion contract.\n')
         write(self.home / 'config/launch-env-allowlist', '')
         write(self.home / 'projects/demo/.git/config', '[core]\nrepositoryformatversion = 0\n')
+        self.treehouse_config = self.home / 'projects/demo/treehouse.toml'
+        write(self.treehouse_config, f'root = {json.dumps(str(self.a / "workspaces"))}\n')
         self.sock = socket.socket(socket.AF_UNIX)
         self.socket_path = self.a / 'runtime/socket'
         # macOS Unix socket paths are short; use a descriptor-created socket at
@@ -293,7 +295,7 @@ class RouteTest(unittest.TestCase):
                  self.code / '.agents/skills/captain-hold-lifecycle/SKILL.md',
                  self.home / 'config',
                  *[Path(path) for path in self.b['tools'].values()],
-                 self.home / 'projects/demo/.git/config']
+                 self.home / 'projects/demo/.git/config', self.treehouse_config]
         for path in paths:
             p = subprocess.run([PYTHON, '-I', str(self.script), 'digest', str(path)], capture_output=True)
             self.assertEqual(p.returncode, 0, p.stdout)
@@ -412,6 +414,48 @@ class RouteTest(unittest.TestCase):
 
     def test_pinned_executable_drift_disables(self):
         write(self.tools / 'pi', STUB + '\n# changed\n', 0o700)
+        self.assertEqual(self.call(self.request())[1]['refused'], 'route-drift-disabled')
+        self.assertEqual(self.calls(), [])
+
+    def test_treehouse_root_config_is_required_and_exact(self):
+        self.b['guards'].pop(str(self.treehouse_config))
+        write(self.path, json.dumps(self.b))
+        self.assertEqual(self.call(self.request())[1]['refused'], 'route-drift-disabled')
+        self.assertEqual(self.calls(), [])
+
+    def test_treehouse_root_config_wrong_root_or_extra_value_refuses(self):
+        for content in ('root = "/invented/wrong-root"\n',
+                        f'root = {json.dumps(str(self.a / "workspaces"))}\nmax_trees = 1\n'):
+            with self.subTest(content=content):
+                write(self.treehouse_config, content)
+                self.pin()
+                rc, result = self.call(self.request())
+                self.assertEqual(rc, 78)
+                self.assertEqual(result['refused'], 'route-drift-disabled')
+                self.assertEqual(self.calls(), [])
+                ledger = self.home / 'state/account-route/ledger.json'
+                if ledger.exists():
+                    ledger.unlink()
+                self.sequence += 1
+
+    def test_treehouse_root_config_must_be_owner_only(self):
+        self.treehouse_config.chmod(0o644)
+        self.pin()
+        self.assertEqual(self.call(self.request())[1]['refused'], 'route-drift-disabled')
+        self.assertEqual(self.calls(), [])
+
+    def test_treehouse_root_config_link_refuses(self):
+        target = self.home / 'projects/demo/treehouse-target.toml'
+        write(target, self.treehouse_config.read_text())
+        self.treehouse_config.unlink()
+        self.treehouse_config.symlink_to(target)
+        self.assertEqual(self.call(self.request())[1]['refused'], 'route-drift-disabled')
+        self.assertEqual(self.calls(), [])
+
+    def test_account_treehouse_override_refuses(self):
+        override = self.a / '.config/treehouse'
+        override.mkdir(parents=True, mode=0o700)
+        write(override / 'config.toml', 'root = "/invented/override"\n')
         self.assertEqual(self.call(self.request())[1]['refused'], 'route-drift-disabled')
         self.assertEqual(self.calls(), [])
 

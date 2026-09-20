@@ -34,7 +34,8 @@ BINDING (owner-only JSON, exact fields; examples and receipt limits in the doc):
  schema='fm-account-route.v1', route, epoch, user, uid, account_home, home,
  code_root, workspace_root, search_path (directory list), tools (fixed executable
  name -> absolute path), repositories (selector -> name under home/projects),
- profile={kind: scout|ship,model,effort}, runtime={socket,session,pid,
+ one guarded owner-only treehouse.toml per repository with the sole exact root
+ value equal to workspace_root, profile={kind: scout|ship,model,effort}, runtime={socket,session,pid,
  environment_sha256}, guards (absolute file/directory -> digest), absent
  (absolute paths), denied (existing unreadable non-secret canary paths), receipt
  (64 hex), expires.
@@ -458,17 +459,25 @@ class Route:
                             self.root / ".agents/skills/captain-hold-lifecycle/SKILL.md"]
         owned_guards = {str(path) for path in runtime_surfaces}
         owned_guards.add(str(self.home / "config"))
-        owned_guards.update(str(self.home / "projects" / name / ".git/config")
-                            for name in self.b["repositories"].values())
+        repository_roots = [self.home / "projects" / name
+                            for name in self.b["repositories"].values()]
+        owned_guards.update(str(root / ".git/config") for root in repository_roots)
+        treehouse_configs = [root / "treehouse.toml" for root in repository_roots]
+        owned_guards.update(str(path) for path in treehouse_configs)
         required = set(owned_guards)
         required.update(self.tool(name) for name in self.b["tools"])
         require(required <= set(self.b["guards"]), "incomplete-guards")
         for path, expected in self.b["guards"].items():
             require(fingerprint(Path(path), self.uid, path in owned_guards) == expected,
                     "guard-drift")
+        expected_treehouse = ("root = " + json.dumps(self.b["workspace_root"]) + "\n").encode()
+        for path in treehouse_configs:
+            require(read_file(path, self.uid, private=True) == expected_treehouse,
+                    "treehouse-root-mismatch")
         absent = [self.home / p for p in (".env", ".fm-secondmate-home", ".fm-secondmate-parent",
                   "data/captain.md", "data/captain-shared.md", "data/secondmates.md", "data/learnings.md",
                   "config/x-mode.env", "state/mail.check.sh", "state/public-followup", "state/procevent")]
+        absent.append(Path(self.b["account_home"]) / ".config/treehouse/config.toml")
         absent.extend(Path(p) for p in self.b["absent"])
         require(all(not os.path.lexists(p) for p in absent), "forbidden-material")
         for parent, pattern in ((self.home / "config", "signal*"), (self.home / "data", "signal*"),

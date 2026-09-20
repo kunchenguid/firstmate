@@ -12,6 +12,7 @@ It does not claim that any live cross-account installation has passed qualificat
 
 Version 1 supports Pi workers on one already-running dedicated tmux server and one non-shared named session.
 The destination binding fixes the account user and UID, account home, Firstmate code root, operational home, workspace root, repository selectors, worker kind, model, effort, runtime identity, executable paths, source and configuration guards, absence checks, denial canaries, qualification receipt digest, route epoch, and expiry.
+Each selected repository must also have one owner-only guarded `treehouse.toml` whose sole bytes set `root` to the binding's exact workspace root; an account-level Treehouse configuration is forbidden so it cannot override the route-owned root or add hooks.
 A scout uses the ordinary scout delivery contract.
 A ship always uses `no-mistakes` with autonomous merge disabled.
 
@@ -24,8 +25,9 @@ A complete result is the first valid task-bound `report.md` and `result.json` pa
 ## Isolation boundary
 
 The receiver must run as the destination account through a dedicated SSH key whose forced command invokes `python3 -I` and the fixed binding path.
-Every request rechecks the effective account name and UID, owner-only binding and ledger, disjoint account-local roots, pinned source and mutable executables, exact repository configuration, absent personal material, existing unreadable denial canaries, the empty worker environment allowlist, and the prequalified tmux socket, server PID, session, and global-environment digest.
+Every request rechecks the effective account name and UID, owner-only binding and ledger, disjoint account-local roots, pinned source and mutable executables, exact repository and Treehouse root configuration, absent account-global Treehouse configuration and personal material, existing unreadable denial canaries, the empty worker environment allowlist, and the prequalified tmux socket, server PID, session, and global-environment digest.
 A selected task worktree must resolve strictly beneath the qualified workspace root; the root itself and paths outside it are refused before task metadata is published or a worker launches.
+The repository-local Treehouse contract directs acquisition into that root before this independent post-acquisition check; the check remains the final refusal boundary rather than repairing a misconfigured pool.
 Any binding, guard, account, canary, runtime, or qualification drift latches the epoch disabled and refuses the current request.
 Restoring the old bytes does not re-enable that epoch.
 
@@ -45,13 +47,14 @@ A qualifying operator performs these steps without copying a personal Firstmate 
 
 1. Create or select a destination login and fresh destination-owned code, operational-home, workspace, and project roots beneath that account's home.
 2. Populate only the destination-local Firstmate code and approved project clones, create private `data`, `state`, `config`, and `projects` directories, and create an empty `config/launch-env-allowlist`.
-3. Start a dedicated destination-owned tmux server and a non-`default`, non-`firstmate`, non-`fm-remote` session without using a personal socket or shared service-repair path.
-4. Construct the owner-only destination binding with the exact fields documented in `bin/fm-account-task.py`.
-5. Resolve every required mutable executable to one absolute path, pin every required runtime surface and executable with `fm-account-task.py digest`, and bind the exact project `.git/config` files.
-6. Record non-secret absence paths and existing denial canaries, then bind the external attended qualification artifact by its SHA-256 receipt digest and a bounded expiry.
-7. Install a dedicated public key with a forced command equivalent to `command="/absolute/python3 -I /absolute/firstmate/bin/fm-account-task.py receive /absolute/binding.json",restrict,no-user-rc` and retain explicit no-PTY, no-forwarding, and no-agent-forwarding restrictions where the installed OpenSSH version requires them separately.
-8. Create an owner-only sender record in the controlling account with the fixed route, epoch, SSH alias, and absolute SSH executable.
-9. Configure that alias for the dedicated key, strict host-key verification, and no general account login through the restricted credential.
+3. In every selected repository, create an owner-only regular `treehouse.toml` containing exactly `root = "<absolute-workspace-root>"` plus one newline, with no other key, comment, or whitespace; require the account-level `$HOME/.config/treehouse/config.toml` path to remain absent.
+4. Start a dedicated destination-owned tmux server and a non-`default`, non-`firstmate`, non-`fm-remote` session without using a personal socket or shared service-repair path.
+5. Construct the owner-only destination binding with the exact fields documented in `bin/fm-account-task.py`.
+6. Resolve every required mutable executable to one absolute path, pin every required runtime surface and executable with `fm-account-task.py digest`, and bind each exact project `.git/config` and repository-local `treehouse.toml`.
+7. Record non-secret absence paths and existing denial canaries, then bind the external attended qualification artifact by its SHA-256 receipt digest and a bounded expiry.
+8. Install a dedicated public key with a forced command equivalent to `command="/absolute/python3 -I /absolute/firstmate/bin/fm-account-task.py receive /absolute/binding.json",restrict,no-user-rc` and retain explicit no-PTY, no-forwarding, and no-agent-forwarding restrictions where the installed OpenSSH version requires them separately.
+9. Create an owner-only sender record in the controlling account with the fixed route, epoch, SSH alias, and absolute SSH executable.
+10. Configure that alias for the dedicated key, strict host-key verification, and no general account login through the restricted credential.
 
 The script never writes these installation files and never repairs a failed step.
 Use the executable's header rather than this page as the exact JSON field reference.
