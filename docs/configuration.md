@@ -513,14 +513,16 @@ The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captai
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
-Every keyed outcome also appends one resolution receipt to the home's gitignored `state/dispatch-receipts.jsonl`, holding the brief and rules content hashes, the answering model id, the request id, usage, the full probabilities, the confidence, and the chosen profile, and never the key or any rule `why`.
+Every keyed outcome also appends one resolution receipt to the home's gitignored `state/dispatch-receipts.jsonl`, holding the brief and rules content hashes, the answering model id, the request id, usage, the full probabilities, the confidence, the reason a non-clear outcome gives, and the chosen profile, and never the key or any rule `why`.
 On `clear` only, after passing the profile line to `fm-spawn`, firstmate reruns the script with `--record-dispatch` for the profile it actually dispatched, which appends a dispatch receipt joined by brief content hash to that brief's latest resolution, so chosen-versus-dispatched disagreement is inspectable; no other outcome records a dispatch.
-Resolve-path receipt writes are best-effort and silent: a failure never changes the resolver's stdout, exit status, or latency, because every receipt is written after its block is printed.
+Resolve-path receipt writes are best-effort and silent on the resolve run itself: a failure never changes the resolver's stdout or exit status, because every receipt is written after its block is printed, and it is not swallowed either, because the `--record-dispatch` run for that brief then reports on stderr that no resolution receipt carries its content hash.
+It does cost the resolver's own process lifetime after the block, and that cost is bounded rather than incidental: receipt work stays at or under a 100 ms median on an idle home and at or under 200 ms under the held-lock fixture, both measured in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 A `--record-dispatch` run that cannot land its join instead names the reason on one stderr line and still exits 0, so an absent dispatch receipt is never mistaken for an agreeing one; the file is append-only and unbounded, and the home's `state/` directory is gitignored.
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-1.13.0`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+That model is pinned to the exact version the floor was exercised against rather than tracking the `jev-latest` alias, so a vendor release cannot move the answers behind the floor without a change here.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
 ## Toolchain

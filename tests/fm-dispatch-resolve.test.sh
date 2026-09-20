@@ -665,6 +665,7 @@ assert_contains "$out" '  status: error' "http 429 is an error outcome"
 assert_contains "$out" '  reason: http 429 after' "http status is reported"
 assert_contains "$err" 'dispatch-resolve: error (http 429' "error also goes to stderr"
 assert_equals 'error' "$(jq -rs '[.[] | select(.receipt_type == "resolution")] | last.status' "$RECEIPTS")" "error writes a receipt"
+assert_contains "$(jq -rs '[.[] | select(.receipt_type == "resolution")] | last.reason' "$RECEIPTS")" 'http 429 after' "an error receipt carries the reason the block printed"
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_CURL_FAIL=1 run code out err "$BRIEF"
 expect_code 0 "$code" "curl failure exits 0"

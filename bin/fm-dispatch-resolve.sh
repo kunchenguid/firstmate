@@ -47,7 +47,9 @@
 #   separate --record-dispatch run appends a second receipt joined to the
 #   latest resolution for the same brief content hash, and names on stderr
 #   why a join did not land. A resolve-path receipt failure is silent and
-#   never changes resolver stdout, exit status, or latency. The JSONL file is
+#   changes neither resolver stdout nor exit status; it does cost the run's
+#   own process lifetime, bounded in docs/configuration.md, and a later join
+#   for the same brief names the missing resolution. The JSONL file is
 #   append-only and waits only briefly for the lock, so a contended resolve
 #   receipt is dropped rather than delaying the block already printed.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
@@ -194,6 +196,7 @@ write_resolution_receipt() { # <result-json>
         probabilities: ($result.probabilities // null),
         confidence: ($result.confidence // null),
         status: $result.status,
+        reason: ($result.reason // null),
         chosen_profile: ($result.chosen.profile // null)
       }') || return 1
   receipt_append "$record"

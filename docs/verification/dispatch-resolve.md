@@ -10,6 +10,7 @@ Task chronology, the captain's rules, and the briefs themselves stay in the priv
 
 Verified 2026-09-16 against `https://api.typesafe.ai`.
 `GET /v1/models` listed `jev-latest` and `jev-preview`, both released 2026-09-10; a `jev-latest` request answered as `jev-1.13.0`.
+Every dated record below requested the alias; the shipped resolver has pinned `jev-1.13.0` since, so these runs are history rather than the current contract.
 `POST /v1/systemone` takes `{model, state, questions}`; a `choice` question returns `{choice, probabilities, confidence}` with the probabilities summing to 1.
 Observed error shapes: 401 `authentication_error` for a bad key, 403 when the header is missing, 422 with a `detail[].loc` naming the offending field, 400 `api_usage_error` for an unknown model, 405 on GET.
 No rate-limit headers were present on any response; every response carried `x-typesafe-request-id`.
@@ -86,7 +87,8 @@ The harness below separates the moment the resolver's first stdout byte is reada
 | Brief and rules content hashes, taken before the block | 3 to 4 ms |
 | A `--record-dispatch` join run, end to end | 71 to 83 ms |
 
-The receipt costs tens of milliseconds of the resolver's own process lifetime, not a few.
+The receipt path's contract is a measured bound, not a few milliseconds: receipt work after the block stays at or under a 100 ms median on an idle home, and at or under 200 ms under the held-lock fixture described below.
+Both hold on these figures - the idle median is 42 ms across seven harness runs (40, 41, 41, 42, 42, 44, 52), and the worst single contended run is 149 ms.
 The first-stdout-byte row is a re-measurement taken after three forks were removed from the work ahead of the block: `dirname`, `basename`, and the `cd`/`pwd -P` subshell that resolved the brief path.
 Neither figure reaches stdout: the block is complete and readable at the first number in every case, and exit status is 0 throughout.
 One `jq -cn` to build the record dominates the idle figure; the retry budget dominates the contended one.
@@ -95,15 +97,21 @@ The receipts lock is one per home, `state/.dispatch-receipts.lock`, not one per 
 The two paths therefore wait on it for different lengths, under separately named budgets.
 
 `RESOLVE_LOCK_ATTEMPTS` is 7, the smallest value that lost no record at three-way contention: 7 records of 300 at 5 attempts, 1 of 300 at 6, and none of 900 at 7.
-It is deliberately not raised, because the resolve path may not extend the resolver's process to save a best-effort receipt; a contended resolve receipt is dropped instead, and that drop is silent by design, as the contended row above records.
+It is deliberately not raised, because the resolve path may not extend the resolver's process further to save a best-effort receipt; a contended resolve receipt is dropped instead, and that drop is silent on the resolve run by design, as the contended row above records.
 
 `DISPATCH_LOCK_ATTEMPTS` is 21, the smallest value that lost no record with twelve simultaneous `--record-dispatch` runs against a 200-record home, which is the parallel intake AGENTS.md permits.
 That probe lost 187 records of 360 at 7 attempts, 132 of 360 at 10, 48 of 360 at 14, 10 of 720 at 19, 2 of 720 at 20, and none of 1,440 at 21 across two independent 60-trial runs.
 The join runs after the spawn and prints nothing to the resolver's stdout, so the longer wait cannot reach the resolve path's latency.
 
 Contention past either budget drops the record by design rather than waiting.
-A `--record-dispatch` run that cannot take the lock appends nothing, names itself on the stderr drop line, and still exits 0, so that loss is observable; the resolve path stays silent because it may not write to either stream after its block.
+A `--record-dispatch` run that cannot take the lock appends nothing, names itself on the stderr drop line, and still exits 0, so that loss is observable; a lost resolve receipt is observable one step later, when the join for that brief reports on stderr that no resolution receipt carries its content hash, so neither loss is swallowed.
 The suite asserts that shape rather than a fixed append count - each concurrent run either appends its record or reports the drop, with no third outcome, and the file stays valid JSONL with no partial or interleaved line.
+
+The held-lock fixture is the contention case both the bound above and the contended row are measured under, and the suite holds the lock the same way in `tests/fm-dispatch-resolve.test.sh` ("a blocked receipt cannot delay the resolver block").
+A live process creates `state/.dispatch-receipts.lock` as a symlink to its own PID before the resolve starts and removes it only after the resolve has exited, so the owner is demonstrably alive for the whole run and the resolver spends its entire `RESOLVE_LOCK_ATTEMPTS` budget before dropping the record.
+Measurement is the same split as the idle case: the timer records the moment the first stdout byte is readable and the moment the process exits, and receipt work is the difference, so the fixture changes what the receipt path does and nothing about how it is timed.
+
+An `error` receipt records the run's `reason` verbatim, and an HTTP failure reason carries up to 200 bytes of the remote response body - the same bytes the block already printed to stdout - so a receipts file can hold remote text durably; it is neither trimmed nor redacted.
 
 The receipts file is append-only and unbounded, so the `jq -s` slurp the join holds the lock across grows with a home's history.
 It grows slowly: an end-to-end `--record-dispatch` run cost 81 ms at 100 records (28 KiB), 98 ms at 500 (141 KiB), 106 ms at 1,500 (426 KiB), and 122 ms at 5,000 (1,424 KiB).
