@@ -3244,12 +3244,18 @@ EOF
   pass "OpenCode watcher plugin uses the effective FM_HOME state"
 }
 
-test_opencode_primary_watch_plugin_arms_on_interrupted_turn() {
-  local plugin repo home log out status
+# Drives one session.execution.interrupted reason through a freshly loaded
+# plugin and prints the number of times bin/fm-watch-arm.sh ran. Each reason
+# needs its own node process: the plugin keeps arm state in module scope, so a
+# prior arm would gate the next spawn and make the result depend on timing.
+run_opencode_interrupted_arm() {
+  local plugin reason repo home log
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
-  repo="$TMP_ROOT/opencode-interrupted-root"
-  home="$TMP_ROOT/opencode-interrupted-home"
-  log="$TMP_ROOT/opencode-interrupted.log"
+  reason="$1"
+  repo="$TMP_ROOT/opencode-interrupted-$reason-root"
+  home="$TMP_ROOT/opencode-interrupted-$reason-home"
+  log="$TMP_ROOT/opencode-interrupted-$reason.log"
+  rm -rf "$repo" "$home" "$log"
   mkdir -p "$repo/bin" "$home/state" "$home/config"
   git init -q "$repo"
   : > "$repo/AGENTS.md"
@@ -3260,7 +3266,7 @@ printf 'armed\n' >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+  PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_REASON="$reason" node <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -3269,38 +3275,28 @@ const ctx = { location: { project: { directory: process.env.WORKTREE } }, sessio
 const handleEvent = await mod.createWatchArmHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 
-const settle = async () => {
-  for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
+const armCount = () => {
+  if (!existsSync(process.env.FM_ARM_LOG)) return 0;
+  return readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter(Boolean).length;
 };
 
 await handleEvent({
   type: "session.execution.interrupted",
-  data: { sessionID: "session-test", reason: "user" },
+  data: { sessionID: "session-test", reason: process.env.FM_REASON },
 });
-await settle();
-if (!existsSync(process.env.FM_ARM_LOG)) {
-  console.error("an interrupted turn did not re-arm the watcher");
-  process.exit(1);
+for (let i = 0; i < 250 && armCount() === 0; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
 }
-const armed = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").length;
-
-await handleEvent({
-  type: "session.execution.interrupted",
-  data: { sessionID: "session-shutdown", reason: "shutdown" },
-});
-await new Promise((resolve) => setTimeout(resolve, 300));
-const after = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").length;
-if (after !== armed) {
-  console.error(`a shutdown interrupt must not re-arm: ${armed} -> ${after}`);
-  process.exit(1);
-}
+console.log(armCount() > 0 ? "armed" : "not-armed");
 EOF
-)
-  status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must re-arm on an interrupted turn"
-  [ -z "$out" ] || fail "OpenCode interrupted-arm test printed output: $out"
+}
+
+test_opencode_primary_watch_plugin_arms_on_interrupted_turn() {
+  local user_result shutdown_result
+  user_result=$(run_opencode_interrupted_arm user 2>&1)
+  [ "$user_result" = "armed" ] || fail "an interrupted turn must re-arm the watcher: $user_result"
+  shutdown_result=$(run_opencode_interrupted_arm shutdown 2>&1)
+  [ "$shutdown_result" = "not-armed" ] || fail "a shutdown interrupt must not re-arm the watcher: $shutdown_result"
   pass "OpenCode watcher plugin re-arms on an interrupted turn but not on shutdown"
 }
 
