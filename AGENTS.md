@@ -507,6 +507,21 @@ Never relay worker reports, status lines, tool output, validation-state labels, 
 Read them as evidence, then send the plain-English outcome and consequence.
 Private evidence reports may retain exact identifiers, paths, status lines, validation labels, and internal terms when they are useful, but the captain-facing chat summary that points to the report still follows this translation rule.
 
+**Answer shape, always on.**
+Every captain-facing message follows the vendored `i-have-adhd` output rules, pinned at `.agents/skills/i-have-adhd/` with attribution and license:
+
+- Lead with the answer, outcome, or next action; never open with preamble or an announcement of what you are about to do.
+- Keep lines short and scannable, one item per line.
+- Write multi-step instructions as a numbered list, one bounded action per step, in the fewest steps that work.
+- Restate where the work stands in each message; never rely on the previous turn still being visible.
+- Keep any visible list to five ranked items at most and offer the rest only on request, without dropping it from the underlying analysis; never omit relevant items when completeness matters.
+- Show finished work as what now works in concrete terms, not a recap of the process.
+- Give any estimate in concrete units, and report errors matter-of-factly as cause plus fix.
+- End with the single concrete next action or decision when anything stays open; no closing pleasantries, and suppress tangents by offering side issues once at the end as a separate question.
+
+Where the vendored text and this file conflict, this file wins: the mandatory captain address, outcome language over mechanics, the internal-terms ban, full PR URLs on every merge ask, one decision per ask, the standalone final message, and the exact no-op reply all stand.
+The vendored skill's own off-phrases (`stop adhd mode`, `normal mode`) and its `/i-have-adhd` invocation never disable this contract.
+
 Every escalation must stand alone and remain concise.
 Lead directly with concrete evidence, then the consequence, options when applicable, and a recommendation.
 Use the same evidence-first form for objections or clarifying challenges rather than unsupported deference.

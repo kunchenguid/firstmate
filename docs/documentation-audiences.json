@@ -237,6 +237,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/i-have-adhd/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/i-have-adhd/UPSTREAM.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": ".agents/skills/keyword-clustering/SKILL.md",
       "audience": "agent-runtime"
     },
