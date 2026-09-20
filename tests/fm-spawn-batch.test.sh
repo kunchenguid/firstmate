@@ -113,6 +113,25 @@ ROWS
 # A ship batch carries one shared delivery contract. Missing flags must stop the
 # whole batch before any pair is dispatched, so a batch can never launch workers
 # whose delivery posture was never decided.
+test_batch_empty_fields_refuse_with_actionable_errors() {
+  local out status
+  out=$(run_ship_spawn batch-empty-project-z13=)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a batch pair without a project should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'error: ship spawn requires a project directory positional argument (<project-dir>)' >/dev/null \
+    || fail "an empty batch project did not name the required project directory argument"
+  assert_not_contains "$out" "cd: " "an empty batch project must not expose a raw cd error"
+  assert_not_contains "$out" "unbound variable" "an empty batch project must not expose a shell error"
+
+  out=$(run_ship_spawn =projects/none)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a batch pair without a task id should exit non-zero"
+  printf '%s\n' "$out" | grep -F 'error: spawn requires a task id positional argument (<task-id>)' >/dev/null \
+    || fail "an empty batch task did not name the required task id argument"
+  assert_not_contains "$out" "unbound variable" "an empty batch task must not expose a shell error"
+  pass "batch dispatch refuses empty task and project fields before re-exec"
+}
+
 test_batch_requires_the_shared_delivery_contract() {
   local out status
   out=$(run_spawn nope-batch-nomode-z9=projects/none-a nope-batch-nomode-z10=projects/none-b)
@@ -145,6 +164,7 @@ test_scout_batch_refuses_delivery_flags() {
 
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
+test_batch_empty_fields_refuse_with_actionable_errors
 test_batch_requires_the_shared_delivery_contract
 test_scout_batch_refuses_delivery_flags
 test_projects_path_scoping

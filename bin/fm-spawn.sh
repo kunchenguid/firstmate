@@ -1336,7 +1336,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$YOLO_SET" -eq 0 ] || shared_args+=(--yolo "$YOLO")
   for pair in "${POS[@]}"; do
     case "$pair" in
-    *=*) : ;;
+    *=*)
+      pair_id=${pair%%=*}
+      pair_proj=${pair#*=}
+      ;;
     *)
       echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2
       rc=2
@@ -1347,21 +1350,32 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
       echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
       rc=2
       continue
-    elif [ "$KIND" = scout ]; then
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else
-        echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2
+    fi
+    [ -n "$pair_id" ] || {
+      echo "error: spawn requires a task id positional argument (<task-id>)" >&2
+      rc=2
+      continue
+    }
+    [ -n "$pair_proj" ] || {
+      echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
+      rc=2
+      continue
+    }
+    if [ "$KIND" = scout ]; then
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$pair_id" "$pair_proj" "${shared_args[@]+"${shared_args[@]}"}" --scout; then :; else
+        echo "batch: FAILED to spawn $pair_id ($pair_proj)" >&2
         rc=1
       fi
     else
-      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}"; then :; else
-        echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2
+      if FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$pair_id" "$pair_proj" "${shared_args[@]+"${shared_args[@]}"}"; then :; else
+        echo "batch: FAILED to spawn $pair_id ($pair_proj)" >&2
         rc=1
       fi
     fi
   done
   exit "$rc"
 fi
-[ "${#POS[@]}" -gt 0 ] || {
+[ "${#POS[@]}" -gt 0 ] && [ -n "${POS[0]:-}" ] || {
   echo "error: spawn requires a task id positional argument (<task-id>)" >&2
   exit 1
 }
@@ -1700,7 +1714,7 @@ elif [ "$KIND" = secondmate ]; then
     ;;
   esac
 else
-  [ "${#POS[@]}" -gt 1 ] || {
+  [ "${#POS[@]}" -gt 1 ] && [ -n "${POS[1]:-}" ] || {
     echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
     exit 1
   }
