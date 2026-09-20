@@ -25,7 +25,7 @@ QUOTA="$TMP_ROOT/quota.json"
 RECEIPTS="$HOME_DIR/state/dispatch-receipts.jsonl"
 BASE_PATH=$PATH
 mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
-for command_name in bash basename chmod cp dirname jq mktemp rm; do
+for command_name in bash chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
 done
 
@@ -296,8 +296,13 @@ RELATIVE_BRIEF=$(basename "$BRIEF")
 spelling_receipt=$(jq -sc '[.[] | select(.receipt_type == "dispatch")] | last' "$RECEIPTS")
 assert_equals "$((dispatch_count_before_spelling + 1))" "$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")" "a differently spelled brief path still joins its resolution"
 assert_equals "$(jq -r .resolution_id <<<"$clear_receipt")" "$(jq -r .resolution_id <<<"$spelling_receipt")" "the join is the brief content hash"
-assert_equals "$(jq -r .brief_path <<<"$clear_receipt")" "$(jq -r .brief_path <<<"$spelling_receipt")" "brief_path is recorded resolved, so both spellings agree"
 pass "the dispatch join survives any spelling of the same brief path"
+
+# --- brief_path is display only, recorded as the caller spelled it -------------
+(cd "$TMP_ROOT" && PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" \
+  "$TOOL" "./$RELATIVE_BRIEF" >/dev/null 2>&1)
+assert_equals "./$RELATIVE_BRIEF" "$(jq -sr '[.[] | select(.receipt_type == "resolution")] | last | .brief_path' "$RECEIPTS")" "brief_path is the path as spelled on the command line"
+pass "brief_path records the caller's spelling and nothing else"
 
 # --- a join that does not land says so, once, on stderr -----------------------
 EDITED_BRIEF="$TMP_ROOT/edited-brief.md"

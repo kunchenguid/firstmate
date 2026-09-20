@@ -63,6 +63,7 @@ It proves the documented starter configuration resolves its Pi default through t
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
 It proves the request uses the fixed endpoint and model, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
+It proves `brief_path` is display only and recorded exactly as the caller spelled it, so the same brief resolved from two working directories can show two different-looking paths; `brief_sha256` is the field that identifies the brief and carries the dispatch join.
 `tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
 
 ```console
@@ -79,13 +80,14 @@ The harness below separates the moment the resolver's first stdout byte is reada
 
 | Measure | Result |
 | --- | --- |
-| Resolve run, receipts idle: first stdout byte | 173 to 184 ms |
-| Resolve run, receipts idle: receipt work after the block | 49 to 50 ms |
-| Resolve run, lock held by a live owner: receipt work after the block, then dropped | 132 to 138 ms |
-| Brief and rules content hashes, taken before the block | 3 ms |
-| A `--record-dispatch` join run, end to end | 88 to 90 ms |
+| Resolve run, receipts idle: first stdout byte | 165 to 194 ms |
+| Resolve run, receipts idle: receipt work after the block | 40 to 52 ms |
+| Resolve run, lock held by a live owner: receipt work after the block, then dropped | 127 to 149 ms |
+| Brief and rules content hashes, taken before the block | 3 to 4 ms |
+| A `--record-dispatch` join run, end to end | 71 to 83 ms |
 
 The receipt costs tens of milliseconds of the resolver's own process lifetime, not a few.
+The first-stdout-byte row is a re-measurement taken after three forks were removed from the work ahead of the block: `dirname`, `basename`, and the `cd`/`pwd -P` subshell that resolved the brief path.
 Neither figure reaches stdout: the block is complete and readable at the first number in every case, and exit status is 0 throughout.
 One `jq -cn` to build the record dominates the idle figure; the retry budget dominates the contended one.
 
@@ -109,10 +111,10 @@ Whether a home that old wants pruning or rotation is out of scope for this chang
 
 ```console
 $ bash receipt-cost.sh   # the harness below, saved to a scratch file and run from the repository root
-idle:      stdout 173 ms, exit 222 ms, receipt 49 ms after the block
-locked:    stdout 184 ms, exit 316 ms, receipt 132 ms after the block, then dropped
-hashes:    3 ms before the block
-join run:  90 ms end to end
+idle:      stdout 175 ms, exit 218 ms, receipt 42 ms after the block
+locked:    stdout 165 ms, exit 307 ms, receipt 142 ms after the block, then dropped
+hashes:    4 ms before the block
+join run:  74 ms end to end
 ```
 
 The harness, run from the repository root:

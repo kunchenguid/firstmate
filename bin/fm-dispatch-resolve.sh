@@ -91,7 +91,7 @@ RECEIPTS="$FM_HOME/state/dispatch-receipts.jsonl"
 RECEIPT_LOCK="$FM_HOME/state/.dispatch-receipts.lock"
 
 RULES='' BRIEF_SNAPSHOT='' RESP_FILE='' RESP_HEADERS='' QUOTA=''
-RULES_SHA256='' BRIEF_SHA256='' REQUEST_ID='' BRIEF_ABS=''
+RULES_SHA256='' BRIEF_SHA256='' REQUEST_ID=''
 LAT_MS=null RECEIPT_LOCK_HELD=0
 
 # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
@@ -106,13 +106,6 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-
-abs_path() { # <path>
-  local dir base
-  dir=$(dirname -- "$1") || return 1
-  base=$(basename -- "$1") || return 1
-  (cd "$dir" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$base") || printf '%s\n' "$1"
-}
 
 sha256_file() { # <path>
   if command -v sha256sum >/dev/null 2>&1; then
@@ -182,7 +175,7 @@ write_resolution_receipt() { # <result-json>
   resolution_id=$(sha256_text "$timestamp|$$|$RANDOM|$BRIEF_SHA256|$REQUEST_ID") || return 1
   record=$(jq -cn \
     --arg timestamp "$timestamp" --arg resolution_id "sha256:$resolution_id" \
-    --arg brief_path "$BRIEF_ABS" --arg brief_sha "$BRIEF_SHA256" \
+    --arg brief_path "$BRIEF" --arg brief_sha "$BRIEF_SHA256" \
     --arg rules_sha "$RULES_SHA256" \
     --arg requested_model "$TS_MODEL" --arg request_id "$REQUEST_ID" \
     --argjson result "$result" '
@@ -299,7 +292,6 @@ command -v jq >/dev/null 2>&1 || die "jq required"
 BRIEF_SNAPSHOT=$(mktemp) || die "mktemp failed"
 cp "$BRIEF" "$BRIEF_SNAPSHOT" || die "could not snapshot brief file: $BRIEF"
 chmod 400 "$BRIEF_SNAPSHOT" || die "could not protect brief snapshot"
-BRIEF_ABS=$(abs_path "$BRIEF") || BRIEF_ABS=$BRIEF
 BRIEF_SHA256=$(sha256_file "$BRIEF_SNAPSHOT") || BRIEF_SHA256=''
 
 if [ "$MODE" = dispatch ]; then
