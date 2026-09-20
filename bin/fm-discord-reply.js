@@ -3,14 +3,18 @@
  * Self-hosted Discord connector reply helper.
  * Posts reply messages directly to Discord API using native Node 22 fetch.
  */
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const token = process.env.FM_DISCORD_BOT_TOKEN || process.env.FM_DISCORD_TOKEN;
 const fmHome = process.env.FM_HOME || process.env.FM_ROOT || ".";
 const stateDir = process.env.FM_STATE_OVERRIDE || join(fmHome, "state");
 const contextDir = join(stateDir, "x-context");
 const outboxDir = join(stateDir, "x-outbox");
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const xLib = join(scriptDir, "fm-x-lib.sh");
 
 const args = process.argv.slice(2);
 if (args.length < 2) {
@@ -24,6 +28,15 @@ const endpoint = args[2] || "answer";
 const imagePath = args[3] || "";
 
 const dryRun = ["1", "true", "yes"].includes((process.env.FMX_DRY_RUN || "").toLowerCase());
+
+function publishPrivate(dir, base, content, mode) {
+	const result = spawnSync(
+		"bash",
+		["-c", '. "$1"; fmx_private_artifact_publish_stdin "$2" "$3" "$4"', "fm-discord-publish", xLib, dir, base, String(mode)],
+		{ input: content, stdio: ["pipe", "ignore", "ignore"] },
+	);
+	if (result.status !== 0) throw new Error(`private artifact publication failed for ${dir}/${base}`);
+}
 
 async function main() {
 	let reqPayload = {};
@@ -61,7 +74,6 @@ async function main() {
 	const chunks = Array.isArray(reqPayload.texts) && reqPayload.texts.length > 0 ? reqPayload.texts : [text];
 
 	if (dryRun) {
-		if (!existsSync(outboxDir)) mkdirSync(outboxDir, { recursive: true, mode: 0o700 });
 		const outboxRecord = {
 			request_id: reqId,
 			platform: "discord",
@@ -73,7 +85,7 @@ async function main() {
 		if (imagePath) {
 			outboxRecord.image = { source_path: imagePath };
 		}
-		writeFileSync(join(outboxDir, `${reqId}.json`), JSON.stringify(outboxRecord, null, 2), { mode: 0o600 });
+		publishPrivate(outboxDir, `${reqId}.json`, JSON.stringify(outboxRecord, null, 2), 600);
 		console.error(`fm-discord-reply: DRY RUN - would POST reply to Discord channel ${channelId} (recorded: state/x-outbox/${reqId}.json)`);
 		console.log(reqId);
 		process.exit(0);

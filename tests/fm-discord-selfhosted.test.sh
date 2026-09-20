@@ -25,47 +25,36 @@ test_poll_no_token_is_hard_noop() {
 }
 
 test_ingestion_payload_shape_and_wake() {
-  local home inbox_file ctx_file wake_out platform source
+  local home inbox_file ctx_file wake_out platform source port server_pid
   home="$TMP_ROOT/ingestion-test"
-  mkdir -p "$home/state/x-inbox" "$home/state/x-context"
-  chmod 700 "$home/state" "$home/state/x-inbox" "$home/state/x-context"
+  mkdir -p "$home/state"
+  chmod 700 "$home/state"
+
+  node -e '
+    const http = require("node:http");
+    const messages = {
+      "1000000000000000001": [{ id: "1352000000000000099", channel_id: "1000000000000000001", guild_id: "1000000000000000000", author: { username: "captain" }, content: "<@999> add login fix to backlog", mentions: [{ id: "999" }] }],
+      "2000000000000000001": [{ id: "1352000000000000100", channel_id: "2000000000000000001", author: { username: "captain" }, content: "<@999> private request", mentions: [{ id: "999" }] }],
+      "1551134713727426570": [{ id: "1352000000000000101", channel_id: "1551134713727426570", guild_id: "1000000000000000000", author: { username: "captain" }, content: "<@999> collision request", mentions: [{ id: "999" }] }]
+    };
+    http.createServer((req, res) => {
+      let body = { id: "999" };
+      const match = req.url.match(/^\/channels\/([^/]+)\/messages/);
+      if (match) body = messages[match[1]] || [];
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(body));
+    }).listen(0, "127.0.0.1", function () { console.log(this.address().port); });
+  ' > "$home/server.port" 2>"$home/server.err" &
+  server_pid=$!
+  while [ ! -s "$home/server.port" ]; do sleep 0.01; done
+  port=$(head -n 1 "$home/server.port")
 
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DISCORD_BOT_TOKEN="fake-test-token" \
-  FM_DISCORD_CHANNELS="1000000000000000001" FM_DISCORD_EXCLUDES="1551134713727426570" \
-  node -e '
-    import { writeFileSync } from "node:fs";
-    import { join } from "node:path";
-    const home = process.env.FM_HOME;
-    const reqId = "discord-sh-1352000000000000099";
-    const payload = {
-      request_id: reqId,
-      text: "add login fix to backlog",
-      author_handle: "captain",
-      platform: "discord",
-      source: "discord-selfhosted",
-      reply_max_chars: 1900,
-      tweet_id: "discord:1000000000000000001:1352000000000000099",
-      channel_id: "1000000000000000001",
-      message_id: "1352000000000000099",
-      guild_id: "1000000000000000000",
-      in_reply_to: null,
-      in_reply_to_chain: [],
-      attachments: []
-    };
-    const ctx = {
-      request_id: reqId,
-      platform: "discord",
-      source: "discord-selfhosted",
-      channel_id: "1000000000000000001",
-      message_id: "1352000000000000099",
-      reply_max_chars: "1900",
-      recorded_at: Math.floor(Date.now() / 1000)
-    };
-    writeFileSync(join(home, "state", "x-inbox", reqId + ".json"), JSON.stringify(payload, null, 2), { mode: 0o600 });
-    writeFileSync(join(home, "state", "x-context", reqId + ".json"), JSON.stringify(ctx, null, 2), { mode: 0o600 });
-    writeFileSync(join(home, "state", "x-context", reqId + ".offered.json"), JSON.stringify({ request_id: reqId }), { mode: 0o600 });
-    console.log("x-mention " + reqId);
-  ' > "$home/wake.log"
+  FM_DISCORD_ALLOWED_CHANNELS="1000000000000000001,2000000000000000001,1551134713727426570" \
+  FM_DISCORD_EXCLUDES="1551134713727426570" FM_DISCORD_ALLOW_DMS=false \
+  FM_DISCORD_API_BASE="http://127.0.0.1:$port" "$ROOT/bin/fm-discord-poll.sh" > "$home/wake.log"
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
 
   wake_out=$(cat "$home/wake.log")
   assert_equals "x-mention discord-sh-1352000000000000099" "$wake_out" "wake line emitted"
@@ -79,6 +68,8 @@ test_ingestion_payload_shape_and_wake() {
   source=$(jq -r '.source' "$inbox_file")
   assert_equals "discord" "$platform" "inbox platform"
   assert_equals "discord-selfhosted" "$source" "inbox source"
+  assert_absent "$home/state/x-inbox/discord-sh-1352000000000000100.json" "DM is ignored when disabled"
+  assert_absent "$home/state/x-inbox/discord-sh-1352000000000000101.json" "excluded collision channel is ignored"
 
   pass "self-hosted Discord ingestion writes x-inbox payload shape and fires x-mention wake"
 }
@@ -89,12 +80,13 @@ test_reply_dry_run_routing() {
   mkdir -p "$home/state/x-inbox" "$home/state/x-context"
   chmod 700 "$home/state" "$home/state/x-inbox" "$home/state/x-context"
   req_id="discord-sh-1352000000000000099"
+  printf 'FMX_DRY_RUN=1\n' > "$home/.env"
 
   printf '{"request_id":"%s","platform":"discord","source":"discord-selfhosted","channel_id":"1000000000000000001","message_id":"1352000000000000099"}' "$req_id" \
     > "$home/state/x-context/$req_id.json"
   chmod 600 "$home/state/x-context/$req_id.json"
 
-  out=$(PATH="$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FMX_DRY_RUN=1 FM_DISCORD_BOT_TOKEN="fake-token" \
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DISCORD_BOT_TOKEN="fake-token" \
     "$ROOT/bin/fm-x-reply.sh" "$req_id" "aye captain, work is underway"); rc=$?
 
   expect_code 0 "$rc" "reply exit code"
@@ -109,17 +101,6 @@ test_reply_dry_run_routing() {
   assert_equals "discord-selfhosted" "$source" "outbox source"
 
   pass "fm-x-reply routes self-hosted Discord requests to self-hosted reply adapter"
-}
-
-test_collision_exclusion_filter() {
-  local result
-  result=$(FM_HOME="$TMP_ROOT" FM_DISCORD_EXCLUDE_CHANNELS="1551134713727426570" node -e '
-    const excludes = (process.env.FM_DISCORD_EXCLUDE_CHANNELS || "").split(",");
-    console.log(excludes.includes("1551134713727426570"));
-  ')
-  assert_equals "true" "$result" "gajae-way channel ID is excluded"
-
-  pass "collision handling excludes gajae-way channel 1551134713727426570"
 }
 
 test_bootstrap_activation() {
@@ -148,5 +129,4 @@ test_bootstrap_activation() {
 test_poll_no_token_is_hard_noop
 test_ingestion_payload_shape_and_wake
 test_reply_dry_run_routing
-test_collision_exclusion_filter
 test_bootstrap_activation

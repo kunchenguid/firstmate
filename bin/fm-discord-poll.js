@@ -3,8 +3,10 @@
  * Self-hosted Discord connector poll helper.
  * Uses native Node 22 fetch to poll Discord REST API for bot mentions.
  */
-import { writeFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const token = process.env.FM_DISCORD_BOT_TOKEN || process.env.FM_DISCORD_TOKEN;
 if (!token) {
@@ -15,6 +17,10 @@ const fmHome = process.env.FM_HOME || process.env.FM_ROOT || ".";
 const stateDir = process.env.FM_STATE_OVERRIDE || join(fmHome, "state");
 const inboxDir = join(stateDir, "x-inbox");
 const contextDir = join(stateDir, "x-context");
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const xLib = join(scriptDir, "fm-x-lib.sh");
+const apiBase = (process.env.FM_DISCORD_API_BASE || "https://discord.com/api/v10").replace(/\/$/, "");
+const allowDms = !["0", "false", "no", "off"].includes((process.env.FM_DISCORD_ALLOW_DMS || "true").toLowerCase());
 
 const channelIds = (process.env.FM_DISCORD_CHANNELS || process.env.FM_DISCORD_CHANNEL_ID || "")
 	.split(",")
@@ -31,10 +37,19 @@ const apiHeaders = {
 	"User-Agent": "FirstmateDiscordSelfHosted/1.0",
 };
 
+function publishPrivate(dir, base, content, mode) {
+	const result = spawnSync(
+		"bash",
+		["-c", '. "$1"; fmx_private_artifact_publish_stdin "$2" "$3" "$4"', "fm-discord-publish", xLib, dir, base, String(mode)],
+		{ input: content, stdio: ["pipe", "ignore", "ignore"] },
+	);
+	if (result.status !== 0) throw new Error(`private artifact publication failed for ${dir}/${base}`);
+}
+
 async function main() {
 	try {
 		// 1. Get bot user profile
-		const meRes = await fetch("https://discord.com/api/v10/users/@me", { headers: apiHeaders });
+		const meRes = await fetch(`${apiBase}/users/@me`, { headers: apiHeaders });
 		if (!meRes.ok) {
 			if ([401, 403].includes(meRes.status)) {
 				console.log(`x-mode-error self-hosted Discord HTTP ${meRes.status}`);
@@ -48,11 +63,11 @@ async function main() {
 		let targetChannels = [...channelIds];
 		if (targetChannels.length === 0) {
 			// If no channel is explicitly listed, try fetching bot's guilds and their channels
-			const guildsRes = await fetch("https://discord.com/api/v10/users/@me/guilds", { headers: apiHeaders });
+			const guildsRes = await fetch(`${apiBase}/users/@me/guilds`, { headers: apiHeaders });
 			if (guildsRes.ok) {
 				const guilds = await guildsRes.json();
 				for (const guild of guilds.slice(0, 5)) {
-					const chRes = await fetch(`https://discord.com/api/v10/guilds/${guild.id}/channels`, { headers: apiHeaders });
+					const chRes = await fetch(`${apiBase}/guilds/${guild.id}/channels`, { headers: apiHeaders });
 					if (chRes.ok) {
 						const channels = await chRes.json();
 						for (const ch of channels) {
@@ -68,7 +83,7 @@ async function main() {
 		// 3. Poll each target channel
 		for (const chId of targetChannels) {
 			if (excludeIds.includes(chId)) continue;
-			const msgsRes = await fetch(`https://discord.com/api/v10/channels/${chId}/messages?limit=10`, { headers: apiHeaders });
+			const msgsRes = await fetch(`${apiBase}/channels/${chId}/messages?limit=10`, { headers: apiHeaders });
 			if (!msgsRes.ok) continue;
 			const msgs = await msgsRes.json();
 			if (!Array.isArray(msgs)) continue;
@@ -78,6 +93,7 @@ async function main() {
 
 				// Check if mentioned or DM
 				const isDM = !msg.guild_id;
+				if (isDM && !allowDms) continue;
 				const isMentioned = Array.isArray(msg.mentions) && msg.mentions.some((m) => m.id === botId);
 				const contentHasBotMention = msg.content && (msg.content.includes(`<@${botId}>`) || msg.content.includes(`<@!${botId}>`));
 
@@ -138,15 +154,9 @@ async function main() {
 					recorded_at: Math.floor(Date.now() / 1000),
 				};
 
-				if (!existsSync(inboxDir)) mkdirSync(inboxDir, { recursive: true, mode: 0o700 });
-				if (!existsSync(contextDir)) mkdirSync(contextDir, { recursive: true, mode: 0o700 });
-
-				const inboxFile = join(inboxDir, `${reqId}.json`);
-				const contextFile = join(contextDir, `${reqId}.json`);
-
-				writeFileSync(inboxFile, JSON.stringify(payload, null, 2), { mode: 0o600 });
-				writeFileSync(contextFile, JSON.stringify(contextRecord, null, 2), { mode: 0o600 });
-				writeFileSync(offeredFile, JSON.stringify({ request_id: reqId, recorded_at: Math.floor(Date.now() / 1000) }), { mode: 0o600 });
+				publishPrivate(inboxDir, `${reqId}.json`, JSON.stringify(payload, null, 2), 600);
+				publishPrivate(contextDir, `${reqId}.json`, JSON.stringify(contextRecord, null, 2), 600);
+				publishPrivate(contextDir, `${reqId}.offered.json`, JSON.stringify({ request_id: reqId, recorded_at: Math.floor(Date.now() / 1000) }), 600);
 
 				console.log(`x-mention ${reqId}`);
 			}

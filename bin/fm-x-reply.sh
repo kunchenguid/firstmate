@@ -322,6 +322,7 @@ fi
 
 if command -v fm_discord_is_selfhosted_request >/dev/null 2>&1 \
   && fm_discord_is_selfhosted_request "$REQ" "$STATE"; then
+  [ -n "$FMX_DRY" ] && export FMX_DRY_RUN=1
   export FM_HOME FM_STATE_OVERRIDE="$STATE"
   exec "$SCRIPT_DIR/fm-discord-reply.sh" "$REQ" "$PAYLOAD_FILE" "$ENDPOINT" "${IMAGE_PATH:-}"
 fi

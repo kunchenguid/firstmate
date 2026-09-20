@@ -29,4 +29,6 @@ export FM_DISCORD_CHANNELS="${FM_DISCORD_CHANNELS:-}"
 export FM_DISCORD_EXCLUDES="${FM_DISCORD_EXCLUDES:-1551134713727426570}"
 export FM_DISCORD_ALLOW_DMS="${FM_DISCORD_DMS:-true}"
 
+fmx_context_registry_prune "$STATE" 2>/dev/null || true
+
 exec node "$SCRIPT_DIR/fm-discord-poll.js"

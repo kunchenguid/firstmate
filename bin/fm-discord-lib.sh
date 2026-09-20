@@ -29,6 +29,15 @@ fm_discord_poll_shim_content() {
     "exec $(printf '%q' "$root/bin/fm-discord-poll.sh")"
 }
 
+fm_discord_poll_shim_valid() {
+  local file=$1 home=$2 root expected device
+  expected=$(fm_discord_poll_shim_content "$home" "$root") || return 1
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  device=$(fmx_private_artifact_dir_device "$(dirname "$file")") || return 1
+  fmx_single_link_file_mode_valid "$file" 700 "$device" || return 1
+  cmp -s <(printf '%s\n' "$expected") "$file"
+}
+
 # Resolve self-hosted Discord settings.
 # FM_DISCORD_BOT_TOKEN (required for active self-hosted Discord connection)
 # FM_DISCORD_CHANNEL_ID or FM_DISCORD_ALLOWED_CHANNELS (optional target channel IDs)
