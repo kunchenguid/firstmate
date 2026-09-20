@@ -5001,7 +5001,7 @@ if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
         --repeat --edge --action-env "FM_HOME=$FM_HOME" \
         --condition "$FM_ROOT/bin/fm-nm-state-condition.sh" "$WT" "$NM_SNAPSHOT" \
         --action "$FM_ROOT/bin/fm-send.sh" "$ID" \
-            "no-mistakes state changed: run \`no-mistakes axi status\` in your worktree, append \`resolved: run returned\`, and answer the parked gate." \
+            "no-mistakes state changed: run \`no-mistakes axi status\` in your worktree, append \`resolved [at=<epoch>]: run returned\`, and answer the parked gate." \
         >/dev/null 2>&1
     then
         echo "armed: when-nm-state-$ID (pipeline-state watch)"

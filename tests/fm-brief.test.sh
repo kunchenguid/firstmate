@@ -465,8 +465,8 @@ test_no_mistakes_dod_names_pipeline_state_watch() {
     "no-mistakes DOD must name this task's deterministic pipeline-state watch (D5)"
   assert_grep "paused: no-mistakes run in progress, clears on its own" "$brief" \
     "no-mistakes DOD must tell the worker to declare paused: while a pipeline round runs"
-  assert_grep "resolved: run returned" "$brief" \
-    "no-mistakes DOD must tell the worker to resolve the pause once the run parks"
+  assert_grep "resolved [at=<epoch>]: run returned" "$brief" \
+    "no-mistakes DOD must tell the worker to resolve the pause once the run parks, with a worker-written stamp"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-nm-state-scout1 some-proj --scout >/dev/null 2>&1
   brief="$home/data/brief-nm-state-scout1/brief.md"
