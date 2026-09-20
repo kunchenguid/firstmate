@@ -72,23 +72,35 @@ export const FmPrimaryTurnendGuard = async ({ client, directory, worktree }) => 
       if (await letWatchArmRun(sessionID, client)) return;
 
       const result = await runGuard(root);
-      if (result.code !== 2) return;
-
+      if (result.code === 2) {
+        try {
+          const text = await encodeFirstmateOperationalInput(
+            root,
+            "turn-end-guard",
+            "TURN WOULD END BLIND - supervision is off. " +
+              "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
+              result.stderr,
+          );
+          await client.session.promptAsync({
+            path: { id: sessionID },
+            body: { parts: [{ type: "text", text }] },
+          });
+          skipNextIdle = true;
+        } catch {
+          skipNextIdle = false;
+        }
+        return;
+      }
       try {
-        const text = await encodeFirstmateOperationalInput(
-          root,
-          "turn-end-guard",
-          "TURN WOULD END BLIND - supervision is off. " +
-            "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-            result.stderr,
-        );
-        await client.session.promptAsync({
-          path: { id: sessionID },
-          body: {
-            parts: [{ type: "text", text }],
-          },
-        });
-        skipNextIdle = true;
+        const summary = await runProcess(`${root}/bin/fm-turnend-summary.sh`, []);
+        if (summary.code === 0 && summary.stdout.trim()) {
+          const text = await encodeFirstmateOperationalInput(root, "turn-end-summary", summary.stdout);
+          await client.session.promptAsync({
+            path: { id: sessionID },
+            body: { parts: [{ type: "text", text }] },
+          });
+          skipNextIdle = true;
+        }
       } catch {
         skipNextIdle = false;
       }

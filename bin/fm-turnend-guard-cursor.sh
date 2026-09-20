@@ -147,6 +147,13 @@ emit_followup() {  # <kind> <body> [reset-budget]
   exit 0
 }
 
+emit_summary_followup() {
+  local summary
+  summary=$("$SCRIPT_DIR/fm-turnend-summary.sh" 2>/dev/null) || exit 0
+  [ -n "$summary" ] || exit 0
+  emit_followup turn-end-summary "$summary"
+}
+
 budget_read() {
   local session count
   BUDGET_COUNT=0
@@ -364,11 +371,9 @@ $WAKE
 Run bin/fm-wake-drain.sh first, handle the wake, then run its exact WAKE_ACK_REQUIRED --ack-through command. Until that post-handling acknowledgement, interruption leaves the wake durable for idempotent re-handling. This stop hook owns watcher continuity: when the handling turn ends, the next needed cycle parks automatically - do NOT run bin/fm-watch-arm.sh after an ordinary wake." reset-budget
 fi
 
-# A verified live cycle with a fresh beacon is positive recovery even though this
-# park closed without a wake of its own: the next turn end parks again.
 if [ "$HEALTHY" -eq 1 ]; then
   budget_reset_if_ours
-  exit 0
+  emit_summary_followup
 fi
 
 # The park could not establish supervision. Ask the SHARED predicate whether

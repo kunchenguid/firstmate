@@ -457,18 +457,28 @@ async function claimSessionstartMessage(
   return sessionstartMessage(generation, result);
 }
 
-// The shared guard reads stop_hook_active exactly as it does from Claude's
-// payload: a true value allows the stop, which is what bounds omp to one
-// forced continuation per turn.
+// The shared summary is read-only and consumes exactly one fleet snapshot.
+function runSummary(): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolveResult) => {
+    const child = spawn(`${root}/bin/fm-turnend-summary.sh`, {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", () => resolveResult({ code: 0, stdout: "", stderr: "" }));
+    child.on("close", (code) => resolveResult({ code: code ?? 0, stdout, stderr }));
+  });
+}
+
 function runGuard(stopHookActive: boolean): Promise<{ code: number; stderr: string }> {
   return new Promise((resolveResult) => {
     const child = spawn(`${root}/bin/fm-turnend-guard.sh`, {
       stdio: ["pipe", "ignore", "pipe"],
     });
     let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
     child.on("error", () => resolveResult({ code: 0, stderr: "" }));
     child.on("close", (code) => resolveResult({ code: code ?? 0, stderr }));
     child.stdin.end(JSON.stringify({ stop_hook_active: stopHookActive }));
@@ -593,27 +603,31 @@ export default function (pi: ExtensionAPI) {
     return { block: true, reason: result.stderr.trim() || "denied by the watcher-arm PreToolUse seatbelt" };
   });
 
-  // The blocking turn boundary. Returning undefined lets the session settle;
-  // returning { continue: true, additionalContext } compels one more agent
-  // loop with the guard text attached (verified on omp 18.1.2 and 18.1.11).
+  // Recovery always wins. The summary is delivered only after the guard allows
+  // the turn, and stop_hook_active bounds the summary to one continuation.
   pi.on?.("session_stop", async (event) => {
     const stopHookActive = Boolean(event && (event as { stop_hook_active?: unknown }).stop_hook_active === true);
     const result = await runGuard(stopHookActive);
-    if (result.code !== 2) return undefined;
-    let content: string;
-    try {
-      content = encodeFirstmateOperationalInput(
-        "turn-end-guard",
-        "TURN WOULD END BLIND - supervision is off. " +
+    if (result.code === 2) {
+      let content: string;
+      try {
+        content = encodeFirstmateOperationalInput(
+          "turn-end-guard",
+          "TURN WOULD END BLIND - supervision is off. " +
+            "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
+            result.stderr,
+        );
+      } catch {
+        content = "TURN WOULD END BLIND - supervision is off. " +
           "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-          result.stderr,
-      );
-    } catch {
-      content = "TURN WOULD END BLIND - supervision is off. " +
-        "The watcher cycle is missing, failed, or unhealthy. Follow the harness recovery instruction below before ending the turn.\n\n" +
-        result.stderr;
+          result.stderr;
+      }
+      return { continue: true, additionalContext: content };
     }
-    return { continue: true, additionalContext: content };
+    if (stopHookActive) return undefined;
+    const summary = await runSummary();
+    if (summary.code !== 0 || !summary.stdout.trim()) return undefined;
+    return { continue: true, additionalContext: encodeFirstmateOperationalInput("turn-end-summary", summary.stdout) };
   });
 
   markLoaded();
