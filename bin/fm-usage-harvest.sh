@@ -160,6 +160,7 @@ matched_files() {
   find "$dir" ${depthargs[@]+"${depthargs[@]}"} -type f -name '*.jsonl' -print 2>/dev/null || true
 }
 
+# shellcheck disable=SC2016 # jq, not the shell, owns $t, $start, and $end.
 EVENT_WINDOW='
   def event_epoch:
     try (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) catch null;
