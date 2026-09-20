@@ -626,13 +626,12 @@ fm_backend_zellij_endpoint_confirmed_gone() {
   fm_backend_zellij_parse_target "$target" || return 1
   sessions=$(zellij list-sessions --short --no-formatting 2>/dev/null) || return 1
   printf '%s\n' "$sessions" | grep -qxF -- "$FM_BACKEND_ZELLIJ_SESSION" || return 0
-  if [ -n "$expected_label" ]; then
-    scoped=$(fm_backend_zellij_scoped_title "$expected_label")
-    tabs=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-tabs --json 2>/dev/null) || return 1
-    count=$(printf '%s' "$tabs" | jq -er --arg scoped "$scoped" --arg bare "$expected_label" \
-      '[.[]? | select(.name == $scoped or .name == $bare)] | length' 2>/dev/null) || return 1
-    [ "$count" -eq 0 ] || return 1
-  fi
+  [ -n "$expected_label" ] || return 1
+  scoped=$(fm_backend_zellij_scoped_title "$expected_label")
+  tabs=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-tabs --json 2>/dev/null) || return 1
+  count=$(printf '%s' "$tabs" | jq -er --arg scoped "$scoped" --arg bare "$expected_label" \
+    '[.[]? | select(.name == $scoped or .name == $bare)] | length' 2>/dev/null) || return 1
+  [ "$count" -eq 0 ] || return 1
   panes=$(fm_backend_zellij_cli "$FM_BACKEND_ZELLIJ_SESSION" action list-panes --json 2>/dev/null) || return 1
   count=$(printf '%s' "$panes" | jq -er --argjson p "$FM_BACKEND_ZELLIJ_PANE" \
     '[.[]? | select(.id == $p and .is_plugin == false)] | length' 2>/dev/null) || return 1

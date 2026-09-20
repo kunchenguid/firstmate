@@ -824,7 +824,20 @@ secondmate_liveness_one() {  # <meta> <id>
     dead|missing)
       if [ "$agent_state" = dead ]; then
         cause="confirmed agent absence on existing endpoint"
-        fm_backend_kill "$backend" "$target" 2>/dev/null || true
+        case "$backend" in
+          zellij)
+            fm_backend_kill "$backend" "$target" "$(fm_meta_get "$meta" zellij_tab_id)" "fm-$id" 2>/dev/null
+            ;;
+          cmux)
+            fm_backend_kill "$backend" "$target" '' "fm-$id" 2>/dev/null
+            ;;
+          *)
+            fm_backend_kill "$backend" "$target" 2>/dev/null
+            ;;
+        esac || {
+          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint cleanup could not be confirmed (backend=$backend)"
+          return 0
+        }
       else
         cause="recorded endpoint confidently missing"
       fi
