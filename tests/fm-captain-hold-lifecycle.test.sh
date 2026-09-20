@@ -97,6 +97,11 @@ complete_through_sibling() {  # <home> <origin-id>
     && run_captain "$home" complete "$id" "$id-call"
 }
 
+# Hold-command appends stamp emission time; compare the unstamped bytes.
+unstamp_line() {
+  printf '%s' "$1" | sed -E 's/ \[at=[0-9]+\]//'
+}
+
 request_reconciles() {  # <home> <source-id> <task-id>...
   local home=$1 source_id=$2 id
   shift 2
@@ -999,7 +1004,7 @@ EOF
     || fail "could not prime the announced status baseline"
   run_captain "$home" hold "$id" --reason "operator review pending" >/dev/null \
     || fail "could not hold the gated work item"
-  grep -Fx "captain-held [key=captain-hold-$id-1]: operator review pending" \
+  grep -E "^captain-held \\[key=captain-hold-$id-1\\]( \\[at=[0-9]+\\])?: operator review pending$" \
     "$home/state/$id.status" >/dev/null \
     || fail "hold did not declare the hold on the task's status log"
   last=$(bash -c '. "$1"; last_status_line "$2"' _ \
@@ -1021,7 +1026,7 @@ EOF
   printf 'Proceed as planned.\n' > "$home/go.txt"
   run_captain "$home" answer "$id" --decision-file "$home/go.txt" --release >/dev/null \
     || fail "answer --release failed on the held work item"
-  grep -Fx "resolved [key=captain-hold-$id-1]: captain call released by fm-captain-hold" \
+  grep -E "^resolved \\[key=captain-hold-$id-1\\]( \\[at=[0-9]+\\])?: captain call released by fm-captain-hold$" \
     "$home/state/$id.status" >/dev/null \
     || fail "release did not retract the status-log declaration"
   last=$(bash -c '. "$1"; last_status_line "$2"' _ \
@@ -1042,13 +1047,13 @@ EOF
   # A re-hold starts a new declaration, and a closing answer retracts it.
   run_captain "$home" hold "$id" --reason "second operator review" >/dev/null \
     || fail "could not re-hold the released work item"
-  grep -Fx "captain-held [key=captain-hold-$id-2]: second operator review" \
+  grep -E "^captain-held \\[key=captain-hold-$id-2\\]( \\[at=[0-9]+\\])?: second operator review$" \
     "$home/state/$id.status" >/dev/null \
     || fail "re-hold did not declare a new lifecycle on the status log"
   printf 'Ship it as reviewed.\n' > "$home/ship.txt"
   run_captain "$home" answer "$id" --decision-file "$home/ship.txt" >/dev/null \
     || fail "answer could not close the re-held work item"
-  grep -Fx "resolved [key=captain-hold-$id-2]: captain call answered by fm-captain-hold" \
+  grep -E "^resolved \\[key=captain-hold-$id-2\\]( \\[at=[0-9]+\\])?: captain call answered by fm-captain-hold$" \
     "$home/state/$id.status" >/dev/null \
     || fail "a closing answer did not retract the status-log declaration"
   last=$(bash -c '. "$1"; last_status_line "$2"' _ \
@@ -1080,14 +1085,14 @@ EOF
     || fail "could not transfer the lane's decision to its captain-held task"
   last=$(bash -c '. "$1"; last_status_line "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$lane.status")
-  [ "$last" = "captain-held [key=route]: tracked by $lane" ] \
+  [ "$(unstamp_line "$last")" = "captain-held [key=route]: tracked by $lane" ] \
     || fail "complete did not leave its transfer as the lane's last line: $last"
   printf 'Take route north.\n' > "$home/transfer.txt"
   run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
     || fail "answer could not close the transfer lane"
   run_captain "$home" answer "$lane" --decision-file "$home/transfer.txt" >/dev/null \
     || fail "transfer answer retry was not idempotent"
-  [ "$(tail -n 1 "$home/state/$lane.status")" = "resolved [key=route]: captain call answered by fm-captain-hold" ] \
+  [ "$(unstamp_line "$(tail -n 1 "$home/state/$lane.status")")" = "resolved [key=route]: captain call answered by fm-captain-hold" ] \
     || fail "settlement did not retract the lane's captain-held transfer: $(tail -n 1 "$home/state/$lane.status")"
   [ "$(grep -c '^resolved \[key=route\]' "$home/state/$lane.status")" = 1 ] \
     || fail "a replayed settlement retracted the transfer twice"
@@ -1173,7 +1178,7 @@ EOF
   assert_absent "$home/state/$lane.status" "the silent lane already had a status log"
   run_captain "$home" hold "$lane" --reason "operator review pending" >/dev/null \
     || fail "could not hold the silent lane"
-  grep -Fx "captain-held [key=captain-hold-$lane-1]: operator review pending" \
+  grep -E "^captain-held \\[key=captain-hold-$lane-1\\]( \\[at=[0-9]+\\])?: operator review pending$" \
     "$home/state/$lane.status" >/dev/null \
     || fail "hold did not declare the hold on a lane with no status log"
   FM_STATE_OVERRIDE="$home/state" bash -c '
@@ -1195,7 +1200,7 @@ EOF
   run_captain "$home" reconcile close "$lane" \
     --evidence-file "$home/evidence.txt" >/dev/null \
     || fail "reconcile close failed on the held lane"
-  grep -Fx "resolved [key=captain-hold-$lane-1]: captain call reconciled by fm-captain-hold" \
+  grep -E "^resolved \\[key=captain-hold-$lane-1\\]( \\[at=[0-9]+\\])?: captain call reconciled by fm-captain-hold$" \
     "$home/state/$lane.status" >/dev/null \
     || fail "reconcile close did not retract the status-log declaration"
 
