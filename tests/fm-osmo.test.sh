@@ -328,6 +328,33 @@ test_cli_transcription() {
   assert_eq "transcribed" "$status" "cli transcriber marks status transcribed"
   assert_contains "This is transcribed dialogue" "$text" "cli transcriber captures output text"
   assert_eq "cli_transcriber" "$source" "transcription source indicates cli_transcriber"
+
+  # Test empty output from successful CLI transcriber
+  local empty_json
+  empty_json=$("$OSMO_CMD" catalog \
+    --drive "$fixture_drive" \
+    --cache-dir "$cache_dir-empty" \
+    --transcriber "true" \
+    --json)
+  local empty_status empty_text
+  empty_status=$(echo "$empty_json" | jq -r '.clips[0].transcription.status')
+  empty_text=$(echo "$empty_json" | jq -r '.clips[0].transcription.text')
+  assert_eq "transcribed" "$empty_status" "empty cli transcriber output still records transcribed status"
+  assert_eq "" "$empty_text" "empty cli transcriber output records empty text"
+
+  # Test path containing spaces with template formatting
+  local space_cache="$TMP_ROOT/cache with spaces"
+  local space_json
+  space_json=$("$OSMO_CMD" catalog \
+    --drive "$fixture_drive" \
+    --cache-dir "$space_cache" \
+    --transcriber 'python3 -c "import sys, pathlib; pathlib.Path(sys.argv[2]).write_text(\"Formatted from template\")" {input} {output}' \
+    --json)
+  local space_status space_text
+  space_status=$(echo "$space_json" | jq -r '.clips[0].transcription.status')
+  space_text=$(echo "$space_json" | jq -r '.clips[0].transcription.text')
+  assert_eq "transcribed" "$space_status" "template transcriber with spaces records transcribed status"
+  assert_contains "Formatted from template" "$space_text" "template transcriber with spaces writes output correctly"
 }
 
 # -----------------------------------------------------------------------------

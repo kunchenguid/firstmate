@@ -300,16 +300,16 @@ def run_headless_cli_transcriber(audio_path, output_dir, transcriber_cmd=None):
     if cmd_str:
         try:
             if "{input}" in cmd_str:
-                formatted_cmd = cmd_str.format(input=audio_path, output=out_transcript)
+                formatted_cmd = cmd_str.format(input=shlex.quote(audio_path), output=shlex.quote(out_transcript))
                 args = shlex.split(formatted_cmd)
             elif "{audio}" in cmd_str:
-                formatted_cmd = cmd_str.format(audio=audio_path)
+                formatted_cmd = cmd_str.format(audio=shlex.quote(audio_path))
                 args = shlex.split(formatted_cmd)
             else:
                 args = shlex.split(cmd_str) + [audio_path]
 
             res = subprocess.run(args, capture_output=True, text=True, timeout=180)
-            text = None
+            text = ""
 
             if os.path.exists(out_transcript) and os.path.getsize(out_transcript) > 0:
                 with open(out_transcript, "r", encoding="utf-8") as f:
@@ -319,14 +319,14 @@ def run_headless_cli_transcriber(audio_path, output_dir, transcriber_cmd=None):
                 with open(out_transcript, "w", encoding="utf-8") as f:
                     f.write(text)
 
-            if res.returncode == 0 and text:
+            if res.returncode == 0:
                 return {
                     "status": "transcribed",
                     "text": text,
                     "source": "cli_transcriber",
                     "command": cmd_str,
                 }
-            elif res.returncode != 0:
+            else:
                 err_msg = res.stderr.strip() or res.stdout.strip() or f"exit code {res.returncode}"
                 return {
                     "status": "transcription_failed",
@@ -368,22 +368,35 @@ def run_headless_cli_transcriber(audio_path, output_dir, transcriber_cmd=None):
             ]
             res = subprocess.run(whisper_cmd, capture_output=True, text=True, timeout=180)
             txt_file = os.path.join(output_dir, f"{stem}.txt")
-            text = None
+            text = ""
             if os.path.exists(txt_file) and os.path.getsize(txt_file) > 0:
                 with open(txt_file, "r", encoding="utf-8") as f:
                     text = f.read().strip()
             elif res.returncode == 0 and res.stdout.strip():
                 text = res.stdout.strip()
 
-            if res.returncode == 0 and text:
+            if res.returncode == 0:
                 return {
                     "status": "transcribed",
                     "text": text,
                     "source": "whisper_cli",
                     "model": cached_model_path,
                 }
+            else:
+                err_msg = res.stderr.strip() or res.stdout.strip() or f"exit code {res.returncode}"
+                return {
+                    "status": "transcription_failed",
+                    "text": None,
+                    "source": "whisper_cli",
+                    "error": err_msg,
+                }
         except Exception as e:
-            log(f"Whisper CLI execution failed: {e}")
+            return {
+                "status": "transcription_failed",
+                "text": None,
+                "source": "whisper_cli",
+                "error": str(e),
+            }
 
     return {
         "status": "approval_required",
