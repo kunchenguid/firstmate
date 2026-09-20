@@ -5,9 +5,10 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
-# stdout with no trailing blank line. The caller validates the mode; an unknown
-# mode is refused rather than silently rendered as the pipeline contract.
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> <data-dir> prints
+# the block on stdout with no trailing blank line. The caller validates the
+# mode; an unknown mode is refused rather than silently rendered as the
+# pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
@@ -229,11 +230,27 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
    For a no-mistakes ask-user gate specifically, escalate all ask-user findings as one event plus one snapshot file, using that same shape even when the gate holds only a single ask-user finding: write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority), to \`$data/$id/nm-<run>-findings.txt\`, then report the gate with
    \`needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file=$data/$id/nm-<run>-findings.txt\`
    naming every ask-user finding id from that gate. The status line only points at the file; it never restates or summarizes a finding's content.
+   Also append the finding-retention ledger contract below for every finding in that same snapshot, so an ask-user finding a later round drops from its gate still survives here.
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+# The one owner of the finding-retention ledger contract a no-mistakes worker
+# hand-appends to (workers on a project other than firstmate have no firstmate
+# bin/ on PATH, so this is plain file appends, never a script invocation).
+# bin/fm-nm-findings-lib.sh's header is the one owner of the ledger's exact
+# JSONL event shapes and fold rule; this block only tells the worker when to
+# append and never restates that format.
+fm_nm_findings_retention_block() {  # <data-dir> <task-id>
+  local data=$1 id=$2
+  cat <<EOF
+Every no-mistakes gate that presents findings - review, document, lint, or any other step, not only an ask-user gate - is a finding-retention checkpoint. Before responding to it, append one line per currently presented finding to \`$data/$id/nm-findings-ledger.jsonl\` (create it if absent; never rewrite or delete an existing line), shaped \`{"round":<n>,"step":"<step>","finding":<the finding object exactly as the gate reported it, unedited>}\`.
+After responding, append one more line for every finding your response actually disposed of, shaped \`{"round":<n>,"step":"<step>","finding_id":"<id>","disposition":"fixed"|"skipped-closed"|"deferred","deferred_owner":"<owner>","deferred_id":"<external-id>"}\` (only "deferred" carries deferred_owner/deferred_id, and never "deferred" without both). A finding's identity is its step plus its id: use the same "step" the finding's seen line carries, because two steps may report the same id and a disposition closes only the finding of its own step. A finding you did not select this round gets no disposition line: it stays open in the ledger, and you must list it again, unedited, the next time any gate presents it. A finding a gate presents again after you already disposed of it is open again until you append a newer disposition line for it.
+Before your final \`done:\` line, fold that ledger yourself - bin/fm-nm-findings-lib.sh's header is the one owner of the exact fold rule: the latest disposition per (step, finding id) wins unless a seen line for that same step and id comes after it, and a finding with no disposition line, or seen again after its latest one, is open - and state the closed, deferred (with owner/id), and still-open step/id pairs in your \`done:\` summary. Never report every finding addressed while the ledger still holds an open one.
+EOF
+}
+
+fm_dod_block() {  # <mode> <task-id> <data-dir>
+  local mode=$1 id=$2 data=$3
   case "$mode" in
     direct-PR)
       cat <<EOF
@@ -288,6 +305,10 @@ Two firstmate-specific rules layer on top of that guidance:
   When the decision comes back, feed it to the gate with \`no-mistakes axi respond\` and let the pipeline apply it - do not route the question to "the user" or implement the fix yourself.
 - NEVER pass \`--yes\` (or \`-y\`) to \`no-mistakes axi run\` or \`no-mistakes axi respond\`. It is banned fleet-wide.
   It auto-resolves every gate including ask-user findings with no escalation, and answering your own ask-user finding is a hard rule violation.
+
+EOF
+      fm_nm_findings_retention_block "$data" "$id"
+      cat <<EOF
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
 EOF
