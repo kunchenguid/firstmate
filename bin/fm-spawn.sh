@@ -1865,7 +1865,7 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE__'
     if [ "$kind" = secondmate ]; then
@@ -2395,8 +2395,8 @@ effort_flag_for_harness() {
     # rovo_config_override_flag below) so it is built there, merged with the
     # mandatory allowedExternalPaths grant, rather than here.
     # opencode's interactive `opencode --prompt` launch has a verified --model
-    # flag but no verified effort flag. Its `opencode run --variant` flag belongs
-    # to a different, non-interactive launch mode, so fm-spawn does not pass it.
+    # flag but no separate effort flag. V2 encodes variants in the model
+    # reference after `#`, so fm-spawn does not pass an effort option.
     # kimi provider catalogs expose supported and default effort values, but a
     # launch flag and mapping have not been live-verified; the requested axis
     # stays in task metadata but never reaches the launch command. Cursor encodes
@@ -4125,35 +4125,51 @@ const busyEvent = (state, event) =>
       "--gen", "$BUSY_GEN", "--source", "opencode-plugin", "--event", event,
     ], () => resolve());
   });
-export const FmBusyState = async () => {
+export const createBusyStateHandler = () => {
   let activeSession = null;
-  return {
-    event: async ({ event }) => {
-      if (event.type === "session.status") {
-        const sessionID = event.properties.sessionID;
-        const statusType = event.properties.status && event.properties.status.type;
-        if (statusType === "busy" || statusType === "retry") {
-          if (activeSession === null) activeSession = sessionID;
-          if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
-          return;
-        }
-        if (statusType === "idle" && sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-status-idle");
-        }
+  return async (event) => {
+    const data = event.data;
+    if (event.type === "session.status") {
+      const sessionID = data.sessionID;
+      const statusType = data.status && data.status.type;
+      if (statusType === "busy" || statusType === "retry") {
+        if (activeSession === null) activeSession = sessionID;
+        if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
         return;
       }
-      if (event.type === "session.idle") {
-        if (event.properties.sessionID === activeSession) {
-          activeSession = null;
-          await busyEvent("idle", "session-idle");
-        }
-        await new Promise((resolve) => {
-          execFile("touch", ["$TURNEND"], () => resolve());
-        });
+      if (statusType === "idle" && sessionID === activeSession) {
+        activeSession = null;
+        await busyEvent("idle", "session-status-idle");
       }
-    },
+      return;
+    }
+    if (event.type === "session.idle") {
+      if (data.sessionID === activeSession) {
+        activeSession = null;
+        await busyEvent("idle", "session-idle");
+      }
+      await new Promise((resolve) => {
+        execFile("touch", ["$TURNEND"], () => resolve());
+      });
+    }
   };
+};
+export default {
+  id: "firstmate.busy-state",
+  setup(ctx) {
+    const controller = new AbortController();
+    const handleEvent = createBusyStateHandler();
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          await handleEvent(event);
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) console.error(error);
+      }
+    })();
+    return () => controller.abort();
+  },
 };
 EOF
     exclude_path '.opencode/plugins/fm-busy-state.js'

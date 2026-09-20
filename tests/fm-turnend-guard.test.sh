@@ -1021,19 +1021,16 @@ import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let promptBody = "";
-const client = {
+const ctx = {
+  location: { directory: process.env.DIRECTORY, project: { directory: process.env.WORKTREE } },
   session: {
-    promptAsync: async (request) => {
-      promptBody = request.body.parts[0].text;
+    prompt: async (request) => {
+      promptBody = request.text;
     },
   },
 };
-const hooks = await mod.FmPrimaryTurnendGuard({
-  client,
-  directory: process.env.DIRECTORY,
-  worktree: process.env.WORKTREE,
-});
-await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+const handleEvent = await mod.createTurnendGuardHandler(ctx);
+await handleEvent({ type: "session.idle", data: { sessionID: "session-test" } });
 if (!promptBody.startsWith("\u2063FIRSTMATE_OP: v1 turn-end-guard: ")) {
   console.error(`untyped operational prompt: ${promptBody}`);
   process.exit(1);

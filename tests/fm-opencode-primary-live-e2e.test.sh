@@ -115,8 +115,8 @@ run_ahoy_case() {
   first_out=$(
     cd "$AHOY_PROJECT" &&
       OPENCODE_DB="$db" OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
-        OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
-        opencode run --pure --format json "$preceding"
+        OPENCODE_CONFIG_CONTENT='{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}' \
+        opencode run --standalone --format json "$preceding"
   ) || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode Ahoy $label setup exited $status: $first_out"
   session_id=$(printf '%s\n' "$first_out" | jq -r 'select(.sessionID != null) | .sessionID' | head -1)
@@ -126,8 +126,8 @@ run_ahoy_case() {
   second_out=$(
     cd "$AHOY_PROJECT" &&
       OPENCODE_DB="$db" OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
-        OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
-        opencode run --pure --format json --session "$session_id" "/ahoy"
+        OPENCODE_CONFIG_CONTENT='{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}' \
+        opencode run --standalone --format json --session "$session_id" "/ahoy"
   ) || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode Ahoy $label case exited $status: $second_out"
   assistant_text=$(printf '%s\n' "$second_out" | jq -r 'select(.type == "text") | .part.text' | tail -1)
@@ -153,6 +153,9 @@ run_ahoy_transcript_regressions() {
   cp "$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
     "$ROOT/.opencode/plugins/package.json" \
     "$AHOY_PROJECT/.opencode/plugins/"
+  mkdir -p "$AHOY_PROJECT/.opencode/plugins/lib"
+  cp "$ROOT/.opencode/plugins/lib/fm-v2-plugin.js" \
+    "$AHOY_PROJECT/.opencode/plugins/lib/fm-v2-plugin.js"
   cp \
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
@@ -228,7 +231,7 @@ run_native_ahoy_regressions() {
     cd "$AHOY_PROJECT" &&
       OPENCODE_DB="$first_db" FM_HOME="$first_home" \
         OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
-        OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
+        OPENCODE_CONFIG_CONTENT='{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}' \
         opencode run --format json --auto "/ahoy"
   ) >/dev/null || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode native first-message Ahoy exited $status"
@@ -249,7 +252,7 @@ run_native_ahoy_regressions() {
   [ "$session_count" = 1 ] || fail "OpenCode native first-message Ahoy left the original session"
 
   "$TMUX" -L "$SOCKET" new-session -d -s "$native_session" -c "$AHOY_PROJECT" \
-    "env OPENCODE_DB='$later_db' FM_HOME='$later_home' OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --auto"
+    "env OPENCODE_DB='$later_db' FM_HOME='$later_home' OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_CONFIG_CONTENT='{\"permissions\":[{\"action\":\"*\",\"resource\":\"*\",\"effect\":\"allow\"}]}' opencode --auto"
   i=0
   while [ "$i" -lt 120 ]; do
     "$TMUX" -L "$SOCKET" capture-pane -p -t "$native_session" 2>/dev/null | grep -Fq "$OPENCODE_VERSION" && break
@@ -272,7 +275,7 @@ run_native_ahoy_regressions() {
     cd "$AHOY_PROJECT" &&
       OPENCODE_DB="$later_db" FM_HOME="$later_home" \
         OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
-        OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
+        OPENCODE_CONFIG_CONTENT='{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}' \
         opencode run --format json --auto --session "$session_id" "/ahoy"
   ) >/dev/null || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode native later-message Ahoy exited $status"
@@ -294,6 +297,7 @@ git clone -q "$ROOT" "$PROJECT"
 mkdir -p "$PROJECT/.opencode/plugins/lib"
 cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$PROJECT/.opencode/plugins/fm-primary-watch-arm.js"
 cp "$ROOT/.opencode/plugins/lib/fm-operational-input.js" "$PROJECT/.opencode/plugins/lib/fm-operational-input.js"
+cp "$ROOT/.opencode/plugins/lib/fm-v2-plugin.js" "$PROJECT/.opencode/plugins/lib/fm-v2-plugin.js"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
 cp "$ROOT/bin/fm-operational-input.sh" "$PROJECT/bin/fm-operational-input.sh"
 chmod +x "$PROJECT/bin/fm-operational-input.sh"
@@ -303,7 +307,7 @@ printf 'project=fixture\n' > "$HOME_DIR/state/opencode-e2e.meta"
 # shellcheck disable=SC2016 # The model, not this test shell, expands FM_HOME.
 PROMPT='Use the terminal to run `printf ready > "$FM_HOME/state/opencode-model-initial"`, then respond briefly. If a later watcher wake arrives, run bin/fm-wake-drain.sh, then run `printf handled > "$FM_HOME/state/opencode-model-handled"`. Never run or request any watcher arm command.'
 "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -c "$PROJECT" \
-  "env OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; opencode --auto; rc=\$?; printf \"OPENCODE_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
+  "env OPENCODE_CONFIG_CONTENT='{\"permissions\":[{\"action\":\"*\",\"resource\":\"*\",\"effect\":\"allow\"}]}' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; opencode --auto; rc=\$?; printf \"OPENCODE_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
 
 # Send the initial prompt through the ready composer so this exercises the same
 # persistent TUI path as a primary session.

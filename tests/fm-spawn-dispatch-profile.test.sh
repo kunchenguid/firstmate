@@ -636,7 +636,7 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   assert_contains "$launch" "opencode --model 'anthropic/claude-sonnet-4-5' --prompt" \
     "opencode launch did not thread model"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
-  assert_not_contains "$launch" "--variant" "opencode launch must not pass run-only --variant"
+  assert_not_contains "$launch" "--variant" "opencode launch must not pass the removed V1 --variant flag"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
   pass "opencode receives --model and omits the unsupported effort axis"
 }

@@ -176,25 +176,22 @@ test_opencode_plugin_delivers_exact_nudge_once() {
 import { pathToFileURL } from "node:url";
 
 const prompts = [];
-const client = {
+const ctx = {
+  location: { directory: process.env.WORKTREE },
   session: {
-    promptAsync: async (request) => {
-      prompts.push(request.body.parts[0].text);
+    prompt: async (request) => {
+      prompts.push(request.text);
     },
   },
 };
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const hooks = await mod.FmPrimarySessionstartNudge({
-  client,
-  directory: process.env.WORKTREE,
-  worktree: process.env.WORKTREE,
-});
+const handleEvent = await mod.createSessionstartNudgeHandler(ctx);
 const event = {
   type: "session.created",
-  properties: { sessionID: "session-nudge-test", info: { id: "session-nudge-test" } },
+  data: { sessionID: "session-nudge-test", info: { id: "session-nudge-test" } },
 };
-await hooks.event({ event });
-await hooks.event({ event });
+await handleEvent(event);
+await handleEvent(event);
 if (prompts.length !== 1) throw new Error(`expected one prompt, got ${prompts.length}`);
 if (prompts[0] !== process.env.EXPECTED) throw new Error(`unexpected prompt: ${prompts[0]}`);
 EOF

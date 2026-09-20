@@ -156,27 +156,39 @@ test_pi_extension_stale_incarnation_rejected() {
 }
 
 # drive_oc_plugin <plugin-path> <events-json-lines...>: load the generated
-# OpenCode plugin in a plain Node host and feed it one event per argument, in
-# order, through the same hooks.event entry OpenCode calls.
+# OpenCode plugin in a plain Node host and feed events through its V2 setup and
+# subscription boundary.
 drive_oc_plugin() {
   local plugin=$1
   shift
   PLUGIN_PATH="$plugin" node --input-type=module - "$@" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN_PATH).href);
-const hooks = await mod.FmBusyState({});
-for (const arg of process.argv.slice(2)) {
-  await hooks.event({ event: JSON.parse(arg) });
-}
+const events = process.argv.slice(2).map((arg) => JSON.parse(arg));
+let subscriptionFinished;
+const finished = new Promise((resolve) => {
+  subscriptionFinished = resolve;
+});
+const ctx = {
+  event: {
+    subscribe: () => (async function* () {
+      for (const event of events) yield event;
+      subscriptionFinished();
+    })(),
+  },
+};
+const cleanup = await mod.default.setup(ctx);
+await finished;
+await cleanup();
 EOF
 }
 
 oc_status() {  # <sessionID> <type>
-  printf '{"type":"session.status","properties":{"sessionID":"%s","status":{"type":"%s"}}}' "$1" "$2"
+  printf '{"type":"session.status","data":{"sessionID":"%s","status":{"type":"%s"}}}' "$1" "$2"
 }
 
 oc_idle() {  # <sessionID>
-  printf '{"type":"session.idle","properties":{"sessionID":"%s"}}' "$1"
+  printf '{"type":"session.idle","data":{"sessionID":"%s"}}' "$1"
 }
 
 test_opencode_plugin_semantic_lifecycle() {

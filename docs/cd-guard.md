@@ -116,7 +116,7 @@ The cd-guard never duplicates shell lexing; it adds only the cd-specific decisio
 | Claude | `.claude/settings.json` PreToolUse Bash hook forwarding stdin with `--claude` | Blocks the tool call; stderr deny object, stdout empty. |
 | Codex | `.codex/hooks.json` PreToolUse hook that anchors from `pwd -P`, verifies the hook-loaded firstmate root, and forwards the payload | Blocks on exit 2 and displays stderr. |
 | Grok | `.grok/hooks/fm-primary-cd-check.json` PreToolUse hook anchored on `${GROK_WORKSPACE_ROOT:-}` | Consumes the stdout `decision=deny` object. |
-| OpenCode | `.opencode/plugins/fm-primary-cd-check.js` `tool.execute.before` | Throws, which surfaces as the failed tool result. |
+| OpenCode | `.opencode/plugins/fm-primary-cd-check.js` V2 `execute.before` tool hook | Throws, which surfaces as the failed tool result. |
 | Pi | `.pi/extensions/fm-primary-turnend-guard.ts` `tool_call` handler | Returns `{block: true}`; piggybacks on the already-loaded primary extension so no extra `-e` flag is needed. |
 | omp | `.omp/extensions/fm-primary-turnend-guard.ts` `tool_call` handler | Returns `{block: true, reason}` and omp surfaces the reason to the model; runs before the watcher-arm seatbelt in the same auto-discovered extension, so no `-e` flag is needed. |
 | Cursor | `.cursor/hooks.json` `preToolUse` hook matching `tool_name` `Shell`, forwarding stdin with `--cursor` | Prints Cursor's own `{"permission":"deny","user_message":...}` object on stdout and exits 0, because Cursor reads the returned object rather than the exit status. Without `--cursor` the Cursor-delivered payload is the Claude-settings duplicate Cursor also loads, and allows; `docs/arm-pretool-check.md` owns that shared predicate. |
@@ -160,7 +160,7 @@ The launch commands mirrored `docs/arm-pretool-check.md`'s validation:
 ```sh
 claude -p "$PROMPT" --dangerously-skip-permissions --output-format text
 codex exec --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"
-OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode run --print-logs --log-level INFO "$PROMPT"
+OPENCODE_CONFIG_CONTENT='{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}' opencode run --print-logs --log-level INFO "$PROMPT"
 pi -p -e .pi/extensions/fm-primary-turnend-guard.ts --no-context-files --no-session "$PROMPT"
 grok --trust -p "$PROMPT" --permission-mode bypassPermissions --output-format plain
 ```

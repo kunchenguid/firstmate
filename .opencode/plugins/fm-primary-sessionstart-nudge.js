@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { pluginRoot, subscribeToEvents } from "./lib/fm-v2-plugin.js";
 
 const handledSessions = new Set();
 
@@ -16,45 +15,30 @@ function runProcess(command, args) {
   });
 }
 
-function resolvePath(anchor) {
-  try {
-    return realpathSync(anchor);
-  } catch {
-    return resolve(anchor);
-  }
-}
+export async function createSessionstartNudgeHandler(ctx) {
+  const root = pluginRoot(ctx);
 
-async function resolveRoot(anchor) {
-  if (!anchor) return "";
-  const result = await runProcess("git", ["-C", anchor, "rev-parse", "--show-toplevel"]);
-  const root = result.stdout.trim();
-  if (result.code === 0 && root) return root;
-  return resolvePath(anchor);
-}
+  return async (event) => {
+    if (event.type !== "session.created") return;
+    const data = event.data;
+    const sessionID = data.info?.id ?? data.sessionID;
+    if (!sessionID || handledSessions.has(sessionID) || !root) return;
+    handledSessions.add(sessionID);
 
-export const FmPrimarySessionstartNudge = async ({ client, directory, worktree }) => {
-  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
+    const result = await runProcess(`${root}/bin/fm-sessionstart-nudge.sh`, []);
+    const nudge = result.code === 0 ? result.stdout.trim() : "";
+    if (!nudge) return;
 
-  return {
-    event: async ({ event }) => {
-      if (event.type !== "session.created") return;
-      const sessionID = event.properties?.info?.id ?? event.properties?.sessionID;
-      if (!sessionID || handledSessions.has(sessionID) || !root) return;
-      handledSessions.add(sessionID);
-
-      const result = await runProcess(`${root}/bin/fm-sessionstart-nudge.sh`, []);
-      const nudge = result.code === 0 ? result.stdout.trim() : "";
-      if (!nudge) return;
-
-      try {
-        await client.session.promptAsync({
-          path: { id: sessionID },
-          body: {
-            parts: [{ type: "text", text: nudge }],
-          },
-        });
-      } catch {
-      }
-    },
+    try {
+      await ctx.session.prompt({ sessionID, text: nudge });
+    } catch {
+    }
   };
+}
+
+export default {
+  id: "firstmate.primary-sessionstart-nudge",
+  async setup(ctx) {
+    return subscribeToEvents(ctx, await createSessionstartNudgeHandler(ctx));
+  },
 };
