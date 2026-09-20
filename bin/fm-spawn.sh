@@ -228,6 +228,15 @@
 #   and scout batches. The loop lives here, in bash, so callers never hand-write a
 #   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
 #   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
+# Launch delivery:
+#   Every harness and backend receives its complete launch command from a
+#   never-reused 0600 file in a 0700 home-scoped task namespace under /tmp, while
+#   the pane receives only a short source line.
+#   This keeps commands beyond the terminal's roughly 1,024-byte input boundary
+#   intact, prevents a delayed source line from being rebound by a relaunch, and
+#   prevents equal task ids in different Firstmate homes from sharing a file.
+#   Spawn refuses an unsafe pre-existing task temp root or launch namespace, and
+#   task teardown removes only the current home's launch namespace.
 # Launch environment (config/launch-env-allowlist):
 #   Absent means unchanged ambient inheritance. A present readable regular file
 #   opts every launch (ship, scout, secondmate, raw command, and relaunch) into
@@ -4593,14 +4602,9 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
-# Stage the launch command in a private file and type only a short line that
-# sources it. A fresh pane shell can still be starting up when the text arrives,
-# and while it is busy the typed bytes wait in the terminal line buffer, which
-# silently truncates input past about 1,024 bytes on macOS. A long launch then
-# lands as an unfinished command line and no agent starts. Sourcing runs the
-# command in the pane shell exactly as if it had been typed. The directory is
-# namespaced by this home's identity so the same task id in another Firstmate
-# home cannot share /tmp/fm-<id>/launch.sh.
+# Implement the launch-delivery contract in this script's header. The full
+# home-identity hash isolates equal task ids across homes, and the spawn token in
+# the final filename keeps a buffered source line bound to this incarnation.
 spawn_launch_home_token() {
   local home=$1 root hash
   root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
