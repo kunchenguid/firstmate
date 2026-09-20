@@ -180,6 +180,10 @@ FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
 
 The [`fm-send.sh` header](../bin/fm-send.sh) owns the exact delivery-status contract.
 A routed request is delivered as a durable record in the remote home's steering inbox plus a best-effort doorbell, never by typing the payload into the pane; exit 0 means the record durably exists.
+That inbox lives under the remote home's private parent-route state directory, whose shape [`bin/fm-parent-route-lib.sh`](../bin/fm-parent-route-lib.sh) owns.
+The charter published to that host names the inbox there, so a mate checking its own inbox at a checkpoint or at startup reads a path that exists on its own machine rather than one belonging to the supervising home.
+A mate provisioned before that rewrite keeps the supervising home's path in its existing `data/charter.md`, and relaunching it is not enough, because the launch re-serves that same file.
+Re-run `bin/fm-remote-home-seed.sh` with the same id, host, root and home to republish the charter, then relaunch the mate.
 Every remote transport attempt is bounded by `FM_SEND_REMOTE_BUDGET`; that header owns the setting's default and validation contract.
 An unconfirmed SSH transport (exit 255) is retried identically once, while a budget expiry is not retried because completion is unknown; either outcome preserves this ordinary reply-bearing request's pending-reply expectation for the record that may have landed.
 If delivery remains unconfirmed, only the exact `FM_PENDING_REPLY_EXISTING_CORR=<id>` resend command printed by `fm-send` is safe to run later because it preserves the request body and lets the remote enqueue deduplicate onto the same record; a plain rerun mints a different correlation and is not idempotent.

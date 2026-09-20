@@ -43,6 +43,10 @@ MAX_MANIFEST_BYTES=1048576
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-project-origin-lib.sh
 . "$SCRIPT_DIR/fm-project-origin-lib.sh"
+# shellcheck source=bin/fm-parent-route-lib.sh
+. "$SCRIPT_DIR/fm-parent-route-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -146,12 +150,27 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-home-seed.XXXXXX") || die "cannot cre
 REG_EXISTED=0
 [ -f "$REG" ] && { cp "$REG" "$TMP/registry.before"; REG_EXISTED=1; }
 
-# Keep the parent charter as its durable source, but publish a remote copy whose
-# status path is the remote append-only relay log rather than a local Mac path.
+# Keep the parent charter as its durable source, but publish a remote copy in
+# which the two paths the scaffold resolved against the GENERATING home's own
+# state directory - bin/fm-brief.sh's STATUS_FILE and INBOX_DIR, which name
+# nothing on the remote filesystem - become their host-side counterparts: the
+# status path becomes the remote append-only relay log, and the steering inbox
+# becomes the one the host-local control plane actually writes into, under the
+# private parent-route state directory. That pair is the whole rewrite: a
+# further state-derived path added to the scaffold needs its own substitution
+# here, and the remote lifecycle e2e fails when any generating-home state path
+# survives into a published charter. Without the inbox rewrite a remote mate
+# that checks its own inbox at a checkpoint or at startup finds an absent path
+# and concludes there is nothing to do, recovering only by the accident that a
+# steer's doorbell line carries the host-side path.
 PARENT_STATUS="$STATE/$ID.status"
 REMOTE_STATUS="$REMOTE_HOME/state/parent-replies.status"
+PARENT_INBOX=$(fm_task_inbox_dir "$STATE" "$ID")
+REMOTE_INBOX=$(fm_task_inbox_dir "$(fm_parent_route_state_dir "$REMOTE_HOME")" "$ID")
 while IFS= read -r line || [ -n "$line" ]; do
-  printf '%s\n' "${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}"
+  line=${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}
+  line=${line//"$PARENT_INBOX"/"$REMOTE_INBOX"}
+  printf '%s\n' "$line"
 done < "$BRIEF" > "$TMP/charter.remote"
 
 PROJECTS_CSV=

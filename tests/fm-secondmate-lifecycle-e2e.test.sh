@@ -79,6 +79,11 @@ phase_seed() {
   assert_present "$SUB/.fm-secondmate-home" "seed did not mark the subhome"
   assert_present "$SUB/data/charter.md" "seed did not copy the charter into the subhome"
   assert_grep 'customer onboarding charter' "$SUB/data/charter.md" "charter body was not copied verbatim"
+  # A LOCAL route's steering inbox lives in the supervising home's own state
+  # directory, which the mate shares, so the charter keeps that path verbatim.
+  # Only the remote route rewrites it to the host-side parent-route location.
+  assert_grep "$HOME_DIR/state/design.inbox" "$SUB/data/charter.md" \
+    "local charter did not keep the supervising home's steering inbox path"
 
   # Projects cloned; remote-backed origins preserved.
   assert_present "$SUB/projects/alpha/.git" "alpha was not cloned"

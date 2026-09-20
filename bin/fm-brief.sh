@@ -205,6 +205,11 @@ shell_quote() {
   printf "'"
 }
 
+# Both resolve against THIS home's state directory. A remote secondmate reads
+# its charter on another machine, where that directory names nothing, so
+# bin/fm-remote-home-seed.sh substitutes each for its host-side counterpart when
+# it publishes; a further state-derived path added here needs its own
+# substitution there.
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 

@@ -659,6 +659,25 @@ assert_present "$REMOTE_HOME/.fm-secondmate-home" "remote provisioning did not p
 assert_present "$REMOTE_HOME/projects/alpha/.git" "remote provisioning did not clone the project on that host"
 assert_grep "$REMOTE_HOME/state/parent-replies.status" "$REMOTE_HOME/data/charter.md" "remote charter did not use its append-only reply log"
 assert_no_grep "$PARENT/state/ios.status" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local status path"
+# The steering inbox the mate reads on its own initiative must be the one the
+# host-local control plane writes into, not a path that exists only on the
+# parent. A mate carrying the parent path finds nothing and idles with unread
+# instructions on its own disk.
+assert_grep "$REMOTE_HOME/state/parent-route/ios.inbox" "$REMOTE_HOME/data/charter.md" \
+  "remote charter did not name the host-side steering inbox"
+# The sentence must carry the path exactly as the mate will use it: the
+# scaffold shell-quotes it, so nothing but the path may sit inside the quotes.
+# A substring match alone cannot tell '<path>' from '"<path>"', and stock macOS
+# bash 3.2 produces the latter when a substitution's double-quoted replacement
+# runs inside a double-quoted expansion - a directory that exists nowhere.
+assert_grep "Firstmate steers you through durable message files in '$REMOTE_HOME/state/parent-route/ios.inbox'." \
+  "$REMOTE_HOME/data/charter.md" \
+  "remote charter did not name the host-side steering inbox as a usable quoted path"
+assert_no_grep "$PARENT/state/ios.inbox" "$REMOTE_HOME/data/charter.md" \
+  "remote charter retained the inaccessible local steering inbox path"
+# Nothing the charter names may resolve against the generating home at all.
+assert_no_grep "$PARENT/state/" "$REMOTE_HOME/data/charter.md" \
+  "remote charter retained a generating-home state path"
 if FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
   remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$TMP_ROOT/other-home" alpha \
