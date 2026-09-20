@@ -89,10 +89,23 @@ The receipt costs tens of milliseconds of the resolver's own process lifetime, n
 Neither figure reaches stdout: the block is complete and readable at the first number in every case, and exit status is 0 throughout.
 One `jq -cn` to build the record dominates the idle figure; the retry budget dominates the contended one.
 
-The lock retry budget is 7 attempts because that is the smallest value that loses no record at the concurrency an intake actually produces, which is one resolve and one post-spawn join per brief.
-Three concurrent `--record-dispatch` runs against a seeded receipts file lost 7 records of 300 at 5 attempts and 1 of 300 at 6 attempts, and none of 900 at 7.
-Contention beyond that budget drops the record by design rather than waiting: a join that cannot take the lock appends nothing, names itself on the stderr drop line, and still exits 0, so the loss is observable rather than silent.
+The receipts lock is one per home, `state/.dispatch-receipts.lock`, not one per brief, and AGENTS.md directs firstmate to dispatch isolated work with no concurrency cap, so several independent intakes in one turn contend on it.
+The two paths therefore wait on it for different lengths, under separately named budgets.
+
+`RESOLVE_LOCK_ATTEMPTS` is 7, the smallest value that lost no record at three-way contention: 7 records of 300 at 5 attempts, 1 of 300 at 6, and none of 900 at 7.
+It is deliberately not raised, because the resolve path may not extend the resolver's process to save a best-effort receipt; a contended resolve receipt is dropped instead, and that drop is silent by design, as the contended row above records.
+
+`DISPATCH_LOCK_ATTEMPTS` is 21, the smallest value that lost no record with twelve simultaneous `--record-dispatch` runs against a 200-record home, which is the parallel intake AGENTS.md permits.
+That probe lost 187 records of 360 at 7 attempts, 132 of 360 at 10, 48 of 360 at 14, 10 of 720 at 19, 2 of 720 at 20, and none of 1,440 at 21 across two independent 60-trial runs.
+The join runs after the spawn and prints nothing to the resolver's stdout, so the longer wait cannot reach the resolve path's latency.
+
+Contention past either budget drops the record by design rather than waiting.
+A `--record-dispatch` run that cannot take the lock appends nothing, names itself on the stderr drop line, and still exits 0, so that loss is observable; the resolve path stays silent because it may not write to either stream after its block.
 The suite asserts that shape rather than a fixed append count - each concurrent run either appends its record or reports the drop, with no third outcome, and the file stays valid JSONL with no partial or interleaved line.
+
+The receipts file is append-only and unbounded, so the `jq -s` slurp the join holds the lock across grows with a home's history.
+It grows slowly: an end-to-end `--record-dispatch` run cost 81 ms at 100 records (28 KiB), 98 ms at 500 (141 KiB), 106 ms at 1,500 (426 KiB), and 122 ms at 5,000 (1,424 KiB).
+Whether a home that old wants pruning or rotation is out of scope for this change and has no owner yet.
 
 ```console
 $ bash receipt-cost.sh   # the harness below, saved to a scratch file and run from the repository root

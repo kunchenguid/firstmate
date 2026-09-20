@@ -48,7 +48,8 @@
 #   latest resolution for the same brief content hash, and names on stderr
 #   why a join did not land. A resolve-path receipt failure is silent and
 #   never changes resolver stdout, exit status, or latency. The JSONL file is
-#   append-only and stops accepting records at its fixed 1 MiB bound.
+#   append-only and waits only briefly for the lock, so a contended resolve
+#   receipt is dropped rather than delaying the block already printed.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
 #   existing unreadable rules file, malformed rules, or missing jq), which is
 #   actionable, never selected around.
@@ -84,7 +85,8 @@ TS_MODEL=jev-1.13.0
 TS_BASE=https://api.typesafe.ai
 TS_TIMEOUT=5
 DEFAULT_WHEN="No listed rule applies to this task."
-RECEIPT_MAX_BYTES=1048576
+RESOLVE_LOCK_ATTEMPTS=7
+DISPATCH_LOCK_ATTEMPTS=21
 RECEIPTS="$FM_HOME/state/dispatch-receipts.jsonl"
 RECEIPT_LOCK="$FM_HOME/state/.dispatch-receipts.lock"
 
@@ -132,10 +134,10 @@ sha256_text() { # <text>
   fi
 }
 
-receipt_lock_acquire() {
-  local attempt=0 owner
+receipt_lock_acquire() { # <attempt-budget>
+  local budget=$1 attempt=0 owner
   mkdir -p "$FM_HOME/state" 2>/dev/null || return 1
-  while [ "$attempt" -lt 7 ]; do
+  while [ "$attempt" -lt "$budget" ]; do
     if ln -s "$$" "$RECEIPT_LOCK" 2>/dev/null; then
       RECEIPT_LOCK_HELD=1
       return 0
@@ -158,22 +160,16 @@ receipt_lock_release() {
 }
 
 receipt_append_locked() { # <one-line-json>
-  local record=$1 current_bytes=0 record_bytes
-  record_bytes=$(LC_ALL=C printf '%s\n' "$record" | wc -c) || return 1
-  case "$record_bytes" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$record_bytes" -le "$RECEIPT_MAX_BYTES" ] || return 1
+  local record=$1
   if [ -e "$RECEIPTS" ]; then
     [ -f "$RECEIPTS" ] && [ ! -L "$RECEIPTS" ] || return 1
-    current_bytes=$(LC_ALL=C wc -c < "$RECEIPTS") || return 1
-    case "$current_bytes" in ''|*[!0-9]*) return 1 ;; esac
   fi
-  [ $((current_bytes + record_bytes)) -le "$RECEIPT_MAX_BYTES" ] || return 1
   (umask 077; printf '%s\n' "$record" >> "$RECEIPTS") 2>/dev/null
 }
 
 receipt_append() { # <one-line-json>
   local record=$1 rc=0
-  receipt_lock_acquire || return 1
+  receipt_lock_acquire "$RESOLVE_LOCK_ATTEMPTS" || return 1
   receipt_append_locked "$record" || rc=1
   receipt_lock_release || rc=1
   return "$rc"
@@ -226,7 +222,7 @@ record_actual_dispatch() {
   timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || join_failed "no timestamp" || return 1
   dispatch_id=$(sha256_text "$timestamp|$$|$RANDOM|$BRIEF_SHA256|$profile") ||
     join_failed "no sha256 available" || return 1
-  receipt_lock_acquire || join_failed "the receipts lock stayed busy" || return 1
+  receipt_lock_acquire "$DISPATCH_LOCK_ATTEMPTS" || join_failed "the receipts lock stayed busy" || return 1
   if [ ! -s "$RECEIPTS" ]; then
     receipt_lock_release || true
     join_failed "this home has no resolution receipts yet"

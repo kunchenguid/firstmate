@@ -747,16 +747,9 @@ assert_equals '' "$(grep -v 'no dispatch receipt' "$CONCURRENT_ERR")" "a concurr
 jq -e -s 'all(.[]; type == "object")' "$RECEIPTS" >/dev/null || fail "concurrent receipt appends remain valid JSONL"
 assert_equals "$(wc -l < "$RECEIPTS")" "$(jq -s 'length' "$RECEIPTS")" "concurrent appends leave no partial or interleaved line"
 
-mv "$RECEIPTS" "$TMP_ROOT/receipts-before-bound"
-dd if=/dev/zero of="$RECEIPTS" bs=1048500 count=1 2>/dev/null
-TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-expect_code 0 "$code" "full receipt file leaves resolver exit 0"
-assert_equals '1048500' "$(wc -c < "$RECEIPTS")" "receipt append refuses to exceed the 1 MiB bound"
-rm -f "$RECEIPTS"
-mv "$TMP_ROOT/receipts-before-bound" "$RECEIPTS"
 assert_not_contains "$(cat "$RECEIPTS")" "$KEY" "concurrent receipts never contain the API key"
 assert_not_contains "$(cat "$RECEIPTS")" 'SECRET-WHY-TEXT' "concurrent receipts never contain rule rationale"
-pass "receipt writes are best-effort, concurrent-safe, append-only, and bounded"
+pass "receipt writes are best-effort, concurrent-safe, and append-only"
 
 # --- configuration errors exit 2 and select nothing ----------------------------------
 reset_log
