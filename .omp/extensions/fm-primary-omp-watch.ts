@@ -1046,6 +1046,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand?.("fm-watch-arm-omp", {
     description: "Arm firstmate watcher supervision through the omp extension instead of foreground bash.",
     handler: async (_args, ctx) => {
+      if (generation.stopping) generation = createGeneration();
+      activateGeneration(generation);
       const result = activateOwnedWatch(generation);
       ctx?.ui?.notify?.(result.message, result.ok ? "info" : "warning");
     },
@@ -1061,6 +1063,8 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({}),
     execute: async () => {
+      if (generation.stopping) generation = createGeneration();
+      activateGeneration(generation);
       const result = activateOwnedWatch(generation);
       return {
         content: [{ type: "text", text: result.message }],

@@ -565,13 +565,25 @@ if (sent[0].o?.deliverAs !== "followUp") throw new Error("wake must be delivered
 await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: sent[0].m }, {});
 await handlers.get("session_shutdown")({}, {});
 if (existsSync(`${process.env.FM_HOME}/state/extensions/omp-primary-watch/session-replacement-actionable.json`)) throw new Error("a consumed wake must not ride the replacement handoff");
+// omp may emit session_shutdown without a later session_start in the same
+// process. Both manual repair entry points must replace that stopped generation
+// rather than permanently returning the shutting-down result.
+const repaired = await tool.execute();
+if (!/^watcher: started omp extension arm child 2;/.test(repaired.content[0].text)) throw new Error(`tool did not self-heal a stopped generation: ${repaired.content[0].text}`);
+await handlers.get("session_shutdown")({}, {});
+const notifications = [];
+await command("", { ui: { notify(message, level) { notifications.push({ message, level }); } } });
+if (notifications.length !== 1 || notifications[0].level !== "info" || !/^watcher: started omp extension arm child 3;/.test(notifications[0].message)) {
+  throw new Error(`command did not self-heal a stopped generation: ${JSON.stringify(notifications)}`);
+}
+await handlers.get("session_shutdown")({}, {});
 process.exit(0);
 EOF
 )
   status=$?
   expect_code 0 "$status" "omp watch extension contract: $out"
   [ -z "$out" ] || fail "omp watch extension test printed output: $out"
-  pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
+  pass ".omp watch extension: manual tool and command repair stopped generations, arm once, repeat as a no-op, and deliver an actionable close as one follow-up"
 }
 
 test_detection_anchored_name_and_marker_precedence
