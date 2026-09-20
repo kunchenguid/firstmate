@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
-import { pluginRoot, subscribeToEvents } from "./lib/fm-v2-plugin.js";
+import { executionEnded, pluginRoot, subscribeToEvents } from "./lib/fm-v2-plugin.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
@@ -506,7 +506,7 @@ export async function createWatchArmHandler(ctx, generation = ++activeGeneration
 
   const handleEvent = async (event) => {
     if (!generationIsActive(generation)) return;
-    if (event.type !== "session.execution.succeeded" && event.type !== "session.execution.failed") return;
+    if (!executionEnded(event)) return;
     const sessionID = event.data.sessionID;
     if (!sessionID) return;
     void ensureArm(paths, sessionID, ctx, "", false, generation);

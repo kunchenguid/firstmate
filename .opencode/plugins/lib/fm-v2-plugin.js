@@ -17,6 +17,17 @@ export function subscribeToEvents(ctx, handleEvent) {
   return () => controller.abort();
 }
 
+const EXECUTION_ENDED = new Set([
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+]);
+
+export function executionEnded(event) {
+  if (!EXECUTION_ENDED.has(event.type)) return false;
+  return event.data?.reason !== "shutdown";
+}
+
 export function pluginRoot(ctx) {
   const directory = ctx.location.project.directory;
   try {

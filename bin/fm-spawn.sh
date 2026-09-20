@@ -4120,14 +4120,21 @@ EOF
     cat >"$WT/.opencode/plugins/fm-busy-state.js" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
-// Semantic state comes from OpenCode's session.status events: busy and retry
-// are active, idle is inactive. Scoping latches the first session that
+// Semantic state comes from OpenCode's session.execution lifecycle: started is
+// active, and succeeded, failed, and interrupted are the three terminal events
+// OpenCode itself projects to idle. Scoping latches the first session that
 // reports activity (the worker's main session - a subagent child session can
 // only start while the main session is already busy) and ignores other
-// sessions' status until the latched session settles, so a child's idle can
-// never clear the worker's busy state. The session.idle touch stays the
+// sessions' events until the latched session settles, so a child's completion
+// can never clear the worker's busy state. The turn-end touch stays the
 // watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
+const EXECUTION_ENDED = new Set([
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+]);
+const executionEnded = (event) => EXECUTION_ENDED.has(event.type);
 const busyEvent = (state, event) =>
   new Promise((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -4145,7 +4152,7 @@ export const createBusyStateHandler = () => {
       if (sessionID === activeSession) await busyEvent("busy", "session-execution-started");
       return;
     }
-    if (event.type === "session.execution.succeeded" || event.type === "session.execution.failed") {
+    if (executionEnded(event)) {
       if (sessionID !== activeSession) return;
       activeSession = null;
       await busyEvent("idle", "session-execution-ended");

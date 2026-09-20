@@ -187,7 +187,7 @@ oc_started() {  # <sessionID>
   printf '{"type":"session.execution.started","data":{"sessionID":"%s"}}' "$1"
 }
 
-oc_ended() {  # <sessionID> [succeeded|failed]
+oc_ended() {  # <sessionID> [succeeded|failed|interrupted]
   printf '{"type":"session.execution.%s","data":{"sessionID":"%s"}}' "${2:-succeeded}" "$1"
 }
 
@@ -230,6 +230,14 @@ test_opencode_plugin_semantic_lifecycle() {
   [ -f "$state/$id.turn-ended" ] || fail "a failed turn must also touch the notification marker"
   out=$(classify opencode "$id" "$state")
   [ "$out" = "idle opencode-plugin" ] || fail "a failed turn must still classify idle, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_plugin "$plugin" \
+    "$(oc_started ses_main)" \
+    "$(oc_ended ses_main interrupted)") || fail "execution-interrupted drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "an interrupted turn must also touch the notification marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "an interrupted turn must still classify idle, got '$out'"
 
   rm -f "$state/$id.turn-ended"
   out=$(drive_oc_plugin "$plugin" \
