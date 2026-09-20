@@ -16,6 +16,13 @@
 # after its durable wake is appended.
 # The receipt binds the terminal observation to the canonical registration and
 # lets a restart finish fixed-path removal without executing state-file bytes.
+#
+# Publication boundary: the watcher glob is state/<id>.check.sh.
+# fm_pr_poll_publish_prepared unpublishes that runnable name before replacing
+# the sidecar or identity registration, then publishes the sidecar, then the
+# registration, then the runnable name last, so a scan cannot execute or reject
+# a partially bound poll. Failure after unpublishing revokes the remaining dest
+# names. Re-arming after a PR head change uses the same transaction.
 
 FM_PR_PROVIDER=
 FM_PR_URL=
@@ -442,6 +449,23 @@ fm_pr_poll_cleanup() {
   FM_PR_POLL_REG_TMP=
 }
 
+# Hide the scan-visible runnable name so a replacement cannot leave a check
+# whose sidecar, registration, or metadata identity is incomplete. Absent is
+# success. A symlink or other non-regular dest is refused without removal.
+fm_pr_poll_unpublish_runnable() {
+  local state=$1 id=$2 check state_device
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  check="$state/$id.check.sh"
+  if [ ! -e "$check" ] && [ ! -L "$check" ]; then
+    return 0
+  fi
+  state_device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_regular_destination_on_device_or_absent "$check" "$state_device" || return 1
+  rm -f -- "$check" || return 1
+  [ ! -e "$check" ] && [ ! -L "$check" ]
+}
+
 fm_pr_poll_revoke_final() {
   local failed=0
   # Neutralize the runnable name first so a failed rearm cannot consume state
@@ -541,6 +565,9 @@ fm_pr_poll_publish_prepared() {
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_DATA_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_REG_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
   fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_CHECK_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
+  if ! fm_pr_poll_unpublish_runnable "${FM_PR_POLL_CHECK_DEST%/*}" "$FM_PR_POLL_EXPECT_ID"; then
+    return 1
+  fi
 
   if ! mv -f -- "$FM_PR_POLL_DATA_TMP" "$FM_PR_POLL_DATA_DEST"; then
     fm_pr_poll_revoke_final || true

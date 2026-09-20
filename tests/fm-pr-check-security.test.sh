@@ -20,6 +20,7 @@ TMP_ROOT=$(fm_test_tmproot fm-pr-check-security)
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
 REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
+REAL_RM=$(command -v rm)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
 # The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
@@ -845,6 +846,174 @@ SH
     n=$((n + 1))
   done
   pass "concurrent watchers observe only complete private poll publications"
+}
+
+assert_probe_log_scan_safe() {
+  local log=$1
+  [ -f "$log" ] || fail "publication probe log was missing"
+  ! grep -q ': unauthenticated$' "$log" \
+    || fail "scan rejected a partially published poll: $(cat "$log")"
+  ! grep -q ': custom$' "$log" \
+    || fail "scan executed a partially published poll as a custom check: $(cat "$log")"
+}
+
+install_publication_scan_probe() {
+  local dir=$1 state=$2 id=$3
+  cat > "$dir/scan-visible.sh" <<SH
+#!/usr/bin/env bash
+set -eu
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-check-lib.sh"
+state='$state'
+id='$id'
+template='$POLL'
+check="\$state/\$id.check.sh"
+if [ ! -e "\$check" ] && [ ! -L "\$check" ]; then
+  printf 'absent'
+  exit 0
+fi
+if fm_pr_poll_snapshot_capture "\$state" "\$id" "\$template"; then
+  printf 'authenticated'
+  exit 0
+fi
+if fm_custom_check_snapshot_prepare "\$state" "\$id"; then
+  fm_custom_check_snapshot_cleanup
+  printf 'custom'
+  exit 0
+fi
+fm_custom_check_snapshot_cleanup
+printf 'unauthenticated'
+SH
+  chmod +x "$dir/scan-visible.sh"
+  cat > "$dir/fakebin/mv" <<SH
+#!/usr/bin/env bash
+last=\${!#}
+fail_path=\${FM_TEST_MV_FAIL_PATH-}
+if [ -n "\$fail_path" ] && [ "\$last" = "\$fail_path" ]; then
+  exit 1
+fi
+"${REAL_MV}" "\$@" || exit \$?
+case "\$last" in
+  *.check.sh|*.pr-poll-registration|*.pr-poll|*.meta)
+    printf '%s %s: %s\\n' mv "\$(basename "\$last")" "\$("$dir/scan-visible.sh")" \
+      >> '$dir/probe.log'
+    ;;
+esac
+SH
+  cat > "$dir/fakebin/rm" <<SH
+#!/usr/bin/env bash
+last=\${!#}
+"${REAL_RM}" "\$@" || exit \$?
+case "\$last" in
+  *.check.sh)
+    printf '%s %s: %s\\n' rm "\$(basename "\$last")" "\$("$dir/scan-visible.sh")" \
+      >> '$dir/probe.log'
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/mv" "$dir/fakebin/rm"
+  : > "$dir/probe.log"
+}
+
+test_publication_states_are_invisible_until_bound() {
+  local dir state rc head
+
+  dir=$(make_case publication-first-arm-probe)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  install_publication_scan_probe "$dir" "$state" task-a
+  fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
+    || fail "could not prepare first-arm probe poll"
+  PATH="$dir/fakebin:$BASE_PATH" fm_pr_poll_publish_prepared \
+    || fail "first-arm probed publication failed"
+  assert_probe_log_scan_safe "$dir/probe.log"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "first-arm probed publication was not bound"
+  grep -q ': authenticated$' "$dir/probe.log" \
+    || fail "first-arm probe never observed the completed runnable name"
+
+  dir=$(make_case publication-replacement-probe)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/1 github.com o/r 1 "$POLL" \
+    || fail "could not prepare replacement prior poll"
+  fm_pr_poll_publish_prepared || fail "could not publish replacement prior poll"
+  install_publication_scan_probe "$dir" "$state" task-a
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/2
+  fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/2 github.com o/r 2 "$POLL" \
+    || fail "could not prepare replacement probe poll"
+  PATH="$dir/fakebin:$BASE_PATH" fm_pr_poll_publish_prepared \
+    || fail "replacement probed publication failed"
+  assert_probe_log_scan_safe "$dir/probe.log"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "replacement probed publication was not bound"
+  grep -q '^rm task-a.check.sh: absent$' "$dir/probe.log" \
+    || fail "replacement did not unpublish the runnable name before dest writes"
+
+  dir=$(make_case publication-rollback-probe)
+  state="$dir/home/state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/3
+  fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/3 github.com o/r 3 "$POLL" \
+    || fail "could not prepare rollback prior poll"
+  fm_pr_poll_publish_prepared || fail "could not publish rollback prior poll"
+  install_publication_scan_probe "$dir" "$state" task-a
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/4
+  fm_pr_poll_prepare "$state" task-a github https://github.com/o/r/pull/4 github.com o/r 4 "$POLL" \
+    || fail "could not prepare rollback replacement poll"
+  set +e
+  FM_TEST_MV_FAIL_PATH="$state/task-a.pr-poll-registration" \
+    PATH="$dir/fakebin:$BASE_PATH" fm_pr_poll_publish_prepared
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "registration dest fault was reported as success"
+  fm_pr_poll_cleanup
+  assert_no_final_poll "$state"
+  assert_probe_log_scan_safe "$dir/probe.log"
+
+  dir=$(make_case publication-rearm-head-probe)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  FM_TEST_GH_HEAD=$head run_check_entry "$dir" task-a https://github.com/o/r/pull/5 \
+    >/dev/null || fail "could not arm current-head fixture through fm-pr-check.sh"
+  grep -qxF "pr_head=$head" "$state/task-a.meta" || fail "current-head fixture did not record pr_head"
+  install_publication_scan_probe "$dir" "$state" task-a
+  head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  FM_TEST_GH_HEAD=$head PATH="$dir/fakebin:$BASE_PATH" \
+    FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    "$PR_CHECK" task-a https://github.com/o/r/pull/5 >/dev/null \
+    || fail "current-head re-arm through fm-pr-check.sh failed"
+  assert_probe_log_scan_safe "$dir/probe.log"
+  grep -qxF "pr_head=$head" "$state/task-a.meta" || fail "current-head re-arm did not refresh pr_head"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "current-head re-arm was not bound"
+  grep -q '^rm task-a.check.sh: absent$' "$dir/probe.log" \
+    || fail "current-head re-arm left the prior runnable name visible"
+
+  dir=$(make_case publication-public-url-rearm-probe)
+  state="$dir/home/state"
+  write_task_meta "$dir"
+  run_check_entry "$dir" task-a https://github.com/o/r/pull/6 >/dev/null \
+    || fail "could not arm public replacement fixture"
+  install_publication_scan_probe "$dir" "$state" task-a
+  PATH="$dir/fakebin:$BASE_PATH" \
+    FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
+    FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    "$PR_CHECK" task-a https://github.com/o/r/pull/7 >/dev/null \
+    || fail "public URL replacement through fm-pr-check.sh failed"
+  assert_probe_log_scan_safe "$dir/probe.log"
+  grep -qxF 'pr=https://github.com/o/r/pull/7' "$state/task-a.meta" \
+    || fail "public URL replacement did not refresh canonical metadata"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "public URL replacement was not bound"
+  grep -q '^rm task-a.check.sh: absent$' "$dir/probe.log" \
+    || fail "public URL replacement did not hide the runnable name before metadata rewrite"
+  pass "scans cannot execute or reject a partially published poll, including rollback and current-head re-arm"
 }
 
 test_poll_publication_refuses_unsafe_destinations() {
@@ -2784,6 +2953,7 @@ test_device_renumbered_poll_stays_armed
 test_device_rerecord_refuses_tampered_artifacts
 test_device_rerecord_serializes_direct_rearm
 test_device_rerecord_serializes_rerecord
+test_publication_states_are_invisible_until_bound
 test_postrename_poll_validation_revokes_and_retries
 test_bootstrap_leaves_unauthenticated_checks
 test_custom_snapshot_cleanup_on_signal
