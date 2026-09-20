@@ -3293,26 +3293,26 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
       verdict=$(fm_backend_herdr_composer_state "$target")
       # The transition is the proof; the composer verdict only has to be
       # something other than a cleared composer (cursor's mid-turn row reads
-      # unknown or, on older strips, pending). Without a transition, an
-      # unknown composer on this never-idle baseline keeps retrying exactly
-      # as pending does, so the retries-exhausted path still reports pending:
-      # a steer that very likely landed on an already-busy pane must never be
-      # reported as text-not-submitted, because the caller then discards its
-      # pending-reply expectation, and a silently lost steer is worse than an
-      # unconfirmed one.
+      # unknown or, on older strips, pending). Without a transition, unknown
+      # on this never-idle baseline is one Enter then `pending`: never retried
+      # (an unreadable target gets no blind Enters), never rewritten, and
+      # never handed to the queued-Enter conversion below, which may only see
+      # a genuinely read pending. It is reported as unconfirmed rather than
+      # text-not-submitted because a steer that very likely landed on an
+      # already-busy pane must not make the caller discard its pending-reply
+      # expectation; a silently lost steer is worse than an unconfirmed one.
       case "$verdict" in pending|unknown)
         if [ "$raw_status" != working ] \
           && [ "$footer_baseline" = idle ] \
           && [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then
           verdict=busy
-        elif [ "$verdict" = unknown ]; then
-          verdict=pending
         fi
         ;;
       esac
       case "$verdict" in
         busy) printf 'empty'; return 0 ;;
         empty) printf 'empty'; return 0 ;;
+        unknown) printf 'pending'; return 0 ;;
       esac
     fi
     i=$((i + 1))

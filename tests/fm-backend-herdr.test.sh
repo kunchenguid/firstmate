@@ -4526,24 +4526,60 @@ test_send_text_submit_confirms_never_idle_native_state_via_footer_transition() {
 }
 
 test_send_text_submit_never_idle_native_state_keeps_pending_without_a_transition() {
-  local dir log resp fb out
+  local dir log resp fb out enter_count
   dir="$TMP_ROOT/submit-cursor-no-transition"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # The pane was ALREADY mid-turn before our Enter, so its busy footer is not
   # evidence about OUR message: the verdict must stay pending rather than
   # borrowing someone else's turn as proof of our delivery. The mid-turn row
   # itself reads unknown (no bright cell survives the software-cursor strip),
-  # and that no-transition unknown must retry and exhaust to exactly pending,
-  # never unknown: fm-send maps unknown to text-not-submitted and discards the
-  # pending-reply expectation for a steer that very likely landed.
+  # and that no-transition unknown is one Enter then exactly pending - never
+  # unknown, which fm-send maps to text-not-submitted and answers by
+  # discarding the pending-reply expectation for a steer that very likely
+  # landed; and never a second Enter, which would be a blind keypress into a
+  # pane whose composer could not be read.
   printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/2.out"
   herdr_cursor_midturn_plain > "$resp/3.out"
   herdr_cursor_midturn_ansi > "$resp/5.out"
-  herdr_cursor_midturn_ansi > "$resp/7.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = pending ] || fail "a pane already busy before our Enter must not confirm from that same busy footer, and must exhaust to pending rather than unknown, got '$out'"
-  pass "fm_backend_herdr_send_text_submit: an already-busy footer baseline is never accepted as proof that this Enter landed, and the exhausted verdict stays pending"
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = pending ] || fail "a pane already busy before our Enter must not confirm from that same busy footer, and its no-transition unknown must report pending rather than unknown, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a no-transition unknown composer must get exactly one Enter and no blind retries, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: an already-busy footer baseline is never accepted as proof that this Enter landed; the no-transition unknown row is one Enter then pending"
+}
+
+# Sibling of the test above on a native `working` baseline with a composer
+# that cannot be read at all: the pre-fix rewrite of unknown into pending let
+# this reach fm_composer_queued_enter_verdict, where pending plus native
+# working converts to `empty`, a positive delivery claim from a composer that
+# was never read. The conversion may only ever see a genuinely read pending;
+# an unreadable composer with no transition is one Enter then pending.
+test_send_text_submit_working_baseline_unreadable_composer_is_pending_after_one_enter() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-working-unreadable-composer"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # 1: send-text
+  # 2: agent get - working, so the native idle-baseline path is skipped
+  # 3: pane read - footer baseline fails
+  # 4: send-keys enter
+  # 5: pane read --format ansi - composer read fails
+  # 6: pane read - plain fallback fails too, so the composer is unknown
+  # 7+: any further agent get would be working again (queued-Enter busy)
+  local n
+  for n in 2 7 8 9 10 11 12; do
+    printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/$n.out"
+  done
+  printf '1\n' > "$resp/3.exit"
+  printf '1\n' > "$resp/5.exit"
+  printf '1\n' > "$resp/6.exit"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.01 0.01' "$ROOT" )
+  [ "$out" != empty ] || fail "an unreadable composer on a native working baseline must never be converted into a positive empty delivery"
+  [ "$out" = pending ] || fail "an unreadable composer with no footer transition on a working baseline must report pending after one Enter, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "an unreadable composer must get exactly one Enter and no blind retries, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: an unreadable composer on a native working baseline is one Enter then pending, never a converted empty"
 }
 
 # Regression for the submit-confirmation side of the 2026-07-07 incident:
@@ -5441,6 +5477,7 @@ test_composer_state_cursor_midturn_row_never_reads_empty
 test_rendered_busy_state_reads_the_cursor_busy_token
 test_send_text_submit_confirms_never_idle_native_state_via_footer_transition
 test_send_text_submit_never_idle_native_state_keeps_pending_without_a_transition
+test_send_text_submit_working_baseline_unreadable_composer_is_pending_after_one_enter
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change
