@@ -797,7 +797,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     append=${append//\{one short line\}/test event}
     append=${append//<epoch>/$now}
     case "$append" in
-      *'$('*) fail "$kind scaffold left an unevaluated command in its status-append line" ;;
+      *"\$("*) fail "$kind scaffold left an unevaluated command in its status-append line" ;;
     esac
     mkdir -p "$home/state"
     bash -c "$append" || fail "generated status command failed"
@@ -809,8 +809,8 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     # rule 4's echo: substitute each one's named placeholders and read the stamp
     # back. Extracting by "append" as well as by the stamp means dropping a stamp
     # from any instruction fails here rather than shrinking the set.
-    templates=$(grep -o -e 'append `[^`]*: [^`]*`' \
-      -e '`[^`]*\[at=<epoch>\][^`]*`' "$brief" \
+    templates=$(grep -o -e "append \`[^\`]*: [^\`]*\`" \
+      -e "\`[^\`]*\[at=<epoch>\][^\`]*\`" "$brief" \
       | sed 's/^append //' | tr -d '`' | sort -u)
     signals=0
     while IFS= read -r template; do
@@ -819,7 +819,7 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         'echo "'*) template=${template#echo \"}; template=${template%%\" >>*} ;;
       esac
       case "$template" in
-        *'$('*) fail "$kind signal embeds an unevaluated command: $template" ;;
+        *"\$("*) fail "$kind signal embeds an unevaluated command: $template" ;;
       esac
       now=$(date +%s)
       line=${template//\{state\}/done}

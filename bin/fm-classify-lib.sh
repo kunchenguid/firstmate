@@ -345,15 +345,17 @@ status_stamp_width() {  # -> characters a stamp adds to a line
   printf '%s' "${#tag}"
 }
 
-# Strip the one well-formed time tag _fm_status_at_epoch accepts, for the two
-# readers that ask what a stamp MEANS: emission time and retry-dedup identity.
+# Strip the one well-formed time tag _fm_status_at_epoch accepts, for readers
+# that need a stamped line as the exact bytes it carried before stamping:
+# retry-dedup identity here, and the pending-reply escalation match in
+# bin/fm-pending-reply-lib.sh, which compares against its own literal spellings.
 # Every other [at=...] byte run - malformed, duplicate, or outside the canonical
 # bounds - is ordinary line bytes here, never a time tag, so a retry of it stays
-# a distinct event. Captain-relevance asks a different question and owns a more
-# tolerant rule in _fm_status_unstamped below; do not route a relevance-adjacent
-# reader through this one. It reads the grammar from that single parser rather
-# than a second spelling of it, and a sweep that normalizes a line at a time
-# never pays a fork for the match it prepares.
+# a distinct event. A reader that instead asks where the HEAD ends owns a more
+# tolerant rule in _fm_status_unstamped below and must route through that one;
+# do not route such a reader through this one. It reads the grammar from that
+# single parser rather than a second spelling of it, and a sweep that normalizes
+# a line at a time never pays a fork for the match it prepares.
 _fm_status_untimed() {  # <status-line> <out-var> -> line without a time tag
   local __fm_untimed_epoch __fm_untimed_head __fm_untimed_tag __fm_untimed_before
   if _fm_status_at_epoch "$1" __fm_untimed_epoch; then
@@ -368,11 +370,14 @@ _fm_status_untimed() {  # <status-line> <out-var> -> line without a time tag
 }
 
 # Strip every time-tag-shaped run a worker could have written as the stamp,
-# however malformed its value. Captain-relevance asks a different question from
-# emission time and dedup: a tag is metadata a worker appended, so it must never
-# decide whether a terminal event reaches its supervisor - not when the worker
-# left the brief's <epoch> placeholder unsubstituted, and not when they wrote a
-# readable time whose colons swallow the head/note separator.
+# however malformed its value. This is the shared head-boundary rule for every
+# reader that asks where a line's head ends rather than what its stamp means:
+# captain-relevance, the event scan, and the note, key, and decision-fold
+# readers. A tag is metadata a worker appended, so it must never decide whether
+# a terminal event reaches its supervisor, which note or key that event carries,
+# or whether a decision opens or closes - not when the worker left the brief's
+# <epoch> placeholder unsubstituted, and not when they wrote a readable time
+# whose colons swallow the head/note separator.
 # A run is the stamp only while nothing before it holds a colon; once one does,
 # the head has ended and every later [at=...] is note text the override may
 # legitimately match on, so scanning stops there. The caller's own bytes are
