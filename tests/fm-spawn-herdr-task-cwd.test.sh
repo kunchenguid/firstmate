@@ -90,6 +90,11 @@ EOF
       jq --arg p "${3:-}" '{result:{pane:(.panes[]|select(.pane_id==$p))}}' "$STATE"
     fi
     ;;
+  "pane send-text")
+    # Launch delivery, which runs AFTER the task record is published: failing
+    # it is how a case reaches the abort path with a record already written.
+    [ "${FM_FAKE_HERDR_SEND_FAIL:-0}" = 1 ] && exit 1
+    ;;
   "pane close")
     jq --arg p "${3:-}" '.panes |= [.[]|select(.pane_id != $p)]' "$STATE" | save
     ;;
@@ -152,6 +157,16 @@ case "${1:-}" in
     ;;
   return)
     [ "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" = 1 ] && exit 1
+    # The real `treehouse return --force` cleans and resets the checkout before
+    # the slot goes back to the pool, so anything unlanded in it is gone. The
+    # fake does the same, or a test could not tell a returned slot from a kept
+    # one by looking at the work.
+    case " $* " in
+      *" --force "*)
+        git -C "${!#}" reset --hard -q 2>/dev/null || true
+        git -C "${!#}" clean -fdq 2>/dev/null || true
+        ;;
+    esac
     awk -F'\t' -v p="${!#}" -v h="$holder" '$1 != p || (h != "" && $2 != h)' "$LEASES" > "$LEASES.tmp"
     mv "$LEASES.tmp" "$LEASES"
     ;;
@@ -311,8 +326,39 @@ test_recorded_worktree_is_reused_with_its_work() {
   pass "a same-identity Herdr respawn reuses the worktree it already leases, unlanded work intact"
 }
 
+# The reuse corridor's abort: a respawn that took the slot the task already
+# held owns none of the work in it, so an abort must never hand that slot back
+# - `treehouse return --force` deletes untracked files and resets the checkout.
+# The abort cannot re-read the record to tell a reused slot from a fresh one,
+# because the rollback has already removed it, so only what was captured when
+# the slot was reused can decide this.
+test_aborted_reuse_keeps_its_worktree_and_work() {
+  local id=herdr-cwd-f6 out status marker
+  make_case aborted-reuse-keeps-work "$id"
+  mkdir -p "$CASE_DIR/user-home"
+  out=$(run_herdr_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "first herdr spawn should succeed"$'\n'"$out"
+  printf 'unlanded\n' > "$WT_DIR/work.txt"
+  printf 'edited by the worker\n' >> "$WT_DIR/README.md"
+  out=$(FM_FAKE_HERDR_SEND_FAIL=1 run_herdr_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a respawn whose launch delivery fails should not report success"$'\n'"$out"
+  [ -f "$WT_DIR/work.txt" ] && grep -q 'edited by the worker' "$WT_DIR/README.md" \
+    || fail "the aborted respawn discarded the unlanded work in the worktree it had only reused"
+  if grep -q -- "return --force --if-lease-holder fm-$id $WT_DIR" "$CASE_DIR/treehouse.log"; then
+    fail "the aborted respawn force-returned the slot it reused; teardown owns that slot's return"
+  fi
+  marker="$HOME_DIR/state/.treehouse-lease-retained/$id.$(basename "$(dirname "$WT_DIR")").retained"
+  if [ ! -e "$HOME_DIR/state/$id.meta" ] && [ ! -f "$marker" ]; then
+    fail "the abort left the slot leased with no record naming it, so no session start would surface it"
+  fi
+  pass "an aborted respawn keeps the worktree it reused, with its unlanded work"
+}
+
 test_task_pane_is_created_in_its_worktree
 test_aborted_spawn_returns_its_lease
+test_aborted_reuse_keeps_its_worktree_and_work
 test_retained_lease_is_recorded_for_session_start
 test_failed_lease_creates_no_pane
 test_recorded_worktree_is_reused_with_its_work

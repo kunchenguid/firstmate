@@ -1120,7 +1120,7 @@ spawn_fresh_commit_rollback() {
 spawn_recorded_worktree() {
   local meta="$STATE/$ID.meta"
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
-  grep '^worktree=' "$meta" 2>/dev/null | head -n 1 | cut -d= -f2- || true
+  fm_meta_get "$meta" worktree
 }
 
 # Whether <worktree> is still durably leased to THIS task, read from the lease
@@ -1296,7 +1296,17 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_SLOT_LEASED" = 1 ] && [ -n "${WT:-}" ] &&
     [ "$(spawn_recorded_worktree)" != "$WT" ]; then
     SPAWN_SLOT_LEASED=0
-    if spawn_abort_task_pane_survives; then
+    if [ "$SPAWN_SLOT_REUSED" = 1 ]; then
+      # This spawn took the slot the task already held rather than one from the
+      # pool, so the work in it is the previous worker's, not this spawn's to
+      # discard: `treehouse return --force` deletes untracked files and resets
+      # the checkout. The rollback above can already have removed the record
+      # that named this slot, so the guard above cannot tell a reused slot from
+      # a fresh one - only this flag, set when the reuse happened, can. The
+      # slot stays leased and the retained record is what makes it visible.
+      echo "warning: task $ID's leased Treehouse worktree $WT was reused from this task's own earlier lease and may hold that work, so the aborted spawn leaves it leased rather than returning it; inspect it, then release it with 'treehouse return --if-lease-holder $W $WT'" >&2
+      spawn_record_retained_lease "the aborted spawn reused this task's existing lease and left the work in the slot untouched"
+    elif spawn_abort_task_pane_survives; then
       echo "warning: herdr pane $HERDR_PROJECTION_ABORT_TASK_PANE for $ID survived its refused close, so task $ID's leased Treehouse worktree $WT is left leased rather than returned under that pane's own shell; close the pane, then release it with 'treehouse return --if-lease-holder $W $WT'" >&2
       spawn_record_retained_lease "herdr pane $HERDR_PROJECTION_ABORT_TASK_PANE survived its refused close during an aborted spawn"
     elif ! (cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$W" "$WT") >/dev/null 2>&1; then
@@ -4944,6 +4954,11 @@ spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
+  # The abort endpoint identity goes with the cleanup it describes. A later
+  # abort attempts no close at all, so leaving these set made the retained-lease
+  # record and its startup line report a refused close that never ran.
+  HERDR_PROJECTION_ABORT_SESSION=
+  HERDR_PROJECTION_ABORT_TASK_PANE=
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter

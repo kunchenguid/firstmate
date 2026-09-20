@@ -1554,10 +1554,10 @@ detect_retained_treehouse_leases() {
     holder=$(fm_meta_get "$marker" holder)
     worktree=$(fm_meta_get "$marker" worktree)
     reason=$(fm_meta_get "$marker" reason)
-    if [ -z "$holder" ] || [ -z "$worktree" ]; then
-      echo "TREEHOUSE_LEASE: retained-slot record $marker is unreadable; inspect it (task=, holder=, worktree=, reason=) and reclaim the slot it names by hand"
-      continue
-    fi
+    # No unreadable-record branch: fm_treehouse_lease_retained_write refuses an
+    # empty holder or worktree, rejects embedded newlines, and commits the
+    # record atomically, so a record that exists carries both fields. The
+    # writer is the guard, and a hand-edited marker is out of scope.
     echo "TREEHOUSE_LEASE: pool slot $worktree is still leased to $holder for task ${task:-unknown} (${reason:-reason not recorded}); once nothing is running in it, reclaim it with: treehouse return --if-lease-holder $holder $worktree, then rm $marker"
   done
 }
