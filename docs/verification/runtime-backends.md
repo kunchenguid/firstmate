@@ -992,6 +992,24 @@ Observed 2026-08-19:
 ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8.0 reports empty for a landed idle steer
 ```
 
+Measured 2026-09-20 against Herdr 0.9.0 and Muse Code 1.3.0 in an isolated `fm-lab-` session.
+A Muse pane registers `agent=muse` after a few seconds of delayed registration (no agent, then `unknown`, then `idle`), flips `agent_status` to `working` for a landed turn, and returns to `idle` after.
+Its idle composer is a bare `❯` row carrying a gray placeholder with a lone separator rule directly below, which the shared classifier reads as `unknown`, so the composer fallback can never confirm a Muse delivery and the native busy transition is the only positive proof.
+Two landed echo-provider steers each confirmed `empty` with exactly one `Enter`, one submitted prompt row, and one echo reply.
+A restarted pane with no registered agent refused with `unknown` instead of confirming on its shell.
+The portable regressions in `tests/fm-backend-herdr.test.sh` pin the verdicts: a muse-native working sample confirms with zero composer reads, the idle titled window reads `unknown`, and a restarted husk refuses.
+Refresh the live Muse proof with the same command (the Muse leg needs only the `muse` binary; the echo provider spends no model tokens):
+
+```sh
+FM_HERDR_SUBMIT_CONFIRM_LIVE=1 tests/fm-herdr-submit-confirm-live-e2e.test.sh
+```
+
+Observed 2026-09-20:
+
+```text
+ok - live Herdr submit confirm: Muse (Muse Code 1.3.0 (1.3.0-R3401.1)) on herdr 0.9.0 reports empty and renders one submitted prompt plus its reply in isolated session fm-lab-herdr-submit-con-86766-25087
+```
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

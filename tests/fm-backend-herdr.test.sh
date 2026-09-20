@@ -4540,6 +4540,85 @@ test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmat
   pass "fm_backend_composer_state (herdr): the pre-injection empty-box guard still refuses a genuinely non-empty composer, unaffected by the submit-confirmation change"
 }
 
+# --- the muse native-idle route (real Muse Code 1.3.0 on Herdr 0.9.0) --------
+# Measured live: a Muse pane registers `agent=muse` after a few seconds of
+# delayed registration (no agent, then unknown, then idle), flips
+# agent_status to `working` for a landed turn, and returns to idle after.
+# Its idle composer is a bare `❯` row carrying a gray `Type @ ...`
+# placeholder with a lone separator rule directly below, which the shared
+# classifier's pi-separator staleness rule reads as `unknown` - so the
+# composer fallback can never confirm a Muse delivery and the native busy
+# transition is the only positive proof. The fixture below reconstructs that
+# idle window preserving the classification-relevant structure (glyph and
+# placeholder colors, no dim flag on the placeholder, lone separator below);
+# the live guard proves the same verdict against the real bytes.
+
+# The idle window: dim titled rule, bright-glyph composer row with a dark
+# non-dim placeholder, lone dim separator rule, status footer.
+herdr_muse_idle_ansi() {
+  printf '%b' '\x1b[0m\x1b[2m\x1b[38;2;103;108;116m\xe2\x94\x80\xe2\x94\x80 Voice input (opt + v to start) \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[0m\n\x1b[0m\x1b[38;2;90;160;255m\xe2\x9d\xaf \x1b[0m\x1b[38;2;103;108;116mType @ to search and insert workspace file paths\x1b[0m\n\x1b[0m\x1b[2m\x1b[38;2;103;108;116m\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\xe2\x94\x80\x1b[0m\n\x1b[0m\x1b[38;2;103;108;116m  \x1b[0m\x1b[38;2;90;160;255mecho\x1b[0m\x1b[38;2;138;144;152m \xc2\xb7 ws \xc2\xb7 YOLO\x1b[0m'
+}
+
+# Non-vacuity anchor for the submit test below: the idle Muse composer
+# genuinely reads `unknown`, so the delivery that test asserts can only be
+# coming from the native busy transition and never from a softened composer
+# verdict. The classifier is deliberately NOT taught this shape: the lone
+# separator below the composer is exactly what the staleness rule protects.
+test_composer_state_muse_idle_titled_window_reads_unknown() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-muse-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  herdr_muse_idle_ansi > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "muse's idle placeholder-plus-separator composer must stay 'unknown', got '$out'"
+  pass "fm_backend_herdr_composer_state: muse's idle titled composer window reads unknown (why delivery needs the native signal)"
+}
+
+test_send_text_submit_confirms_muse_native_working_without_reading_composer() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-muse-native"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The live probe shape on Muse Code 1.3.0 / Herdr 0.9.0: a registered
+  # muse-native idle baseline, post-Enter samples staying idle, then one
+  # `working` sample as the turn starts. The composer is never consulted.
+  # 1: send-text  2: baseline idle (agent=muse)  3: send-keys enter
+  # 4,5,6: agent get -> idle  7: agent get -> working
+  printf '{"result":{"agent":{"agent":"muse","agent_status":"idle"}}}\n' > "$resp/2.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/4.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/5.out"
+  printf '{"result":{"agent":{"agent_status":"idle"}}}\n' > "$resp/6.out"
+  printf '{"result":{"agent":{"agent_status":"working"}}}\n' > "$resp/7.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=4 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 3 0.03 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "a muse-native idle baseline followed by a working sample must confirm delivery, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a native-confirmed muse submit must not send a needless extra Enter, sent $enter_count Enter(s)"
+  [ "$(grep -c $'\x1f''pane'$'\x1f''read' "$log")" -eq 0 ] || fail "send_text_submit must never call 'pane read' on the muse native route - its idle composer reads unknown and must not be consulted"
+  pass "fm_backend_herdr_send_text_submit: a muse-native working sample confirms delivery with one Enter and zero composer reads"
+}
+
+test_send_text_submit_refuses_restarted_husk_without_agent() {
+  local dir log resp fb out enter_count
+  dir="$TMP_ROOT/submit-muse-husk"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Measured live after a lab server restart: the Muse registration is gone
+  # (`agent_not_found`), the pane is a plain shell, and the submit must
+  # refuse rather than confirm. The `:` text is the shell no-op, matching
+  # the live probe.
+  # 1: send-text  2: agent get -> agent_not_found  3: footer baseline read
+  # 4: send-keys enter  5: composer read -> shell prompt, unknown
+  printf '{"error":{"code":"agent_not_found","message":"agent target w1:p2 not found"},"id":"cli:agent:get"}\n' > "$resp/2.out"
+  printf 'captain@ship ws %% :\ncaptain@ship ws %%\n' > "$resp/3.out"
+  printf 'captain@ship ws %% :\ncaptain@ship ws %%\n' > "$resp/5.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 ":" 2 0.01 0.01' "$ROOT" )
+  [ "$out" = unknown ] || fail "a restarted husk with no registered agent must refuse confirmation, got '$out'"
+  enter_count=$(grep -c $'\x1f''pane'$'\x1f''send-keys'$'\x1f''w1:p2'$'\x1f''enter' "$log")
+  [ "$enter_count" -eq 1 ] || fail "a refused husk submit must stop after its single Enter, sent $enter_count Enter(s)"
+  pass "fm_backend_herdr_send_text_submit: a restarted pane with no native agent refuses (unknown), never confirming on a shell"
+}
+
 # A slow transition landing partway through a single Enter attempt's own
 # budget must not provoke a needless extra Enter - end-to-end through
 # send_text_submit itself (test_wait_for_working_catches_a_slow_transition_mid_window
@@ -5387,6 +5466,9 @@ test_send_text_submit_never_idle_native_state_keeps_pending_without_a_transition
 test_send_text_submit_confirms_despite_codex_idle_tip_composer
 test_composer_state_codex_dynamic_idle_tip_reads_empty_when_faint
 test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmation_change
+test_composer_state_muse_idle_titled_window_reads_unknown
+test_send_text_submit_confirms_muse_native_working_without_reading_composer
+test_send_text_submit_refuses_restarted_husk_without_agent
 test_send_text_submit_slow_transition_within_one_enter_needs_no_extra_enter
 test_send_text_submit_send_failed
 test_send_text_submit_unknown_on_capture_failure

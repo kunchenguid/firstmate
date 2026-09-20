@@ -233,6 +233,7 @@ Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the sha
 Typed-plane text is typed once; only Enter is retried.
 
 On an idle or done native baseline, submit confirmation first waits for `working` or `blocked` across a bounded polling window.
+Muse registers that baseline natively (an `agent=muse` idle registration after a few seconds of delayed registration), while its idle composer reads `unknown`, so a Muse submit confirms through the native busy transition and never through the composer fallback.
 If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer is delivery, and proven pending text retries Enter.
 After the retry budget, `fm_composer_queued_enter_verdict` treats proven pending text plus a generating busy signal as a queued delivered Enter, and keeps an idle pending composer as a genuine swallow.
 On an already active or unreadable baseline, the adapter falls back to conservative composer clearance, with a pre-Enter rendered-footer transition when that baseline is unavailable.
