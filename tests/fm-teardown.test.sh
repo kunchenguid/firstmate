@@ -3689,15 +3689,26 @@ register_review_page() {
   printf '%s\n' "$source_id"
 }
 
-SESSION_TEST_PIDS=()
-cleanup_session_test_processes() {
+SESSION_TEST_IDENTITIES=()
+forget_session_test_processes() {
   local pid
-  for pid in "${SESSION_TEST_PIDS[@]:-}"; do
-    [ -z "$pid" ] || kill -KILL "$pid" 2>/dev/null || true
+  for pid in "$@"; do
+    [ -z "$pid" ] || unset "SESSION_TEST_IDENTITIES[$pid]"
   done
-  fm_test_cleanup
 }
-trap cleanup_session_test_processes EXIT
+
+cleanup_session_test_processes() {
+  local pid current
+  for pid in "${!SESSION_TEST_IDENTITIES[@]}"; do
+    current=$(fm_test_pid_identity "$pid" 2>/dev/null) || current=
+    if [ -n "$current" ] && [ "$current" = "${SESSION_TEST_IDENTITIES[$pid]}" ]; then
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+    forget_session_test_processes "$pid"
+  done
+}
+trap 'cleanup_session_test_processes; fm_test_cleanup' EXIT
 
 start_test_bridge() {
   local case_dir=$1 cwd=$2 task=$3 session=$4 label=$5 child=${6:-no} attempt
@@ -3723,15 +3734,17 @@ PYTHON
       "$case_dir/$label.ready" "$child" "$case_dir"
   ) >/dev/null 2>&1 &
   BRIDGE_PID=$!
-  SESSION_TEST_PIDS+=("$BRIDGE_PID")
   for ((attempt=0; attempt<50; attempt++)); do
     [ ! -f "$case_dir/$label.ready" ] || break
     sleep 0.1
   done
   [ -f "$case_dir/$label.ready" ] || fail "bridge never became ready"
+  SESSION_TEST_IDENTITIES[$BRIDGE_PID]=$(fm_test_pid_identity "$BRIDGE_PID") \
+    || fail "cannot capture bridge identity"
   if [ "$child" = yes ]; then
     BRIDGE_CHILD_PID=$(cat "$case_dir/$label.ready.child")
-    SESSION_TEST_PIDS+=("$BRIDGE_CHILD_PID")
+    SESSION_TEST_IDENTITIES[$BRIDGE_CHILD_PID]=$(fm_test_pid_identity "$BRIDGE_CHILD_PID") \
+      || fail "cannot capture bridge child identity"
   fi
 }
 
@@ -3790,6 +3803,7 @@ test_task_session_cleanup() {
       fi
       [ -z "$bridge" ] || wait "$bridge" 2>/dev/null || true
     fi
+    forget_session_test_processes "$bridge"
     [ -f "$case_dir/state/procevent/$other.source" ] || fail "other task poller was retired"
     [ -f "$case_dir/state/procevent/$sibling.source" ] || fail "task prefix sibling poller was retired"
     unset FM_PROCEVENT_CLAIM_ROOT
@@ -3822,6 +3836,7 @@ test_task_bridge_attribution() {
     wait "$sibling" 2>/dev/null || true
     wait "$same_id" 2>/dev/null || true
     wait "$own" 2>/dev/null || true
+    forget_session_test_processes "$sibling" "$same_id" "$own" "$child"
   done
   pass "default and custom bridge trees stop while sibling and other-home bridges survive"
 }
@@ -3857,13 +3872,33 @@ test_child_task_session_cleanup() {
   kill -TERM "$sibling"
   wait "$sibling" 2>/dev/null || true
   wait "$own" 2>/dev/null || true
+  forget_session_test_processes "$sibling" "$own" "$child"
   unset FM_PROCEVENT_CLAIM_ROOT
   pass "forced secondmate cleanup retires child task browsers and pollers"
 }
 
+test_session_process_cleanup_identity() {
+  local case_dir pid identity
+  case_dir=$(make_case session-cleanup-identity)
+  start_test_bridge "$case_dir" "$case_dir/wt" task-x1 default identity
+  pid=$BRIDGE_PID
+  identity=${SESSION_TEST_IDENTITIES[$pid]}
+  SESSION_TEST_IDENTITIES[$pid]="previous-process-$identity"
+  cleanup_session_test_processes
+  kill -0 "$pid" 2>/dev/null || fail "cleanup killed a process with a different identity"
+  [ "${#SESSION_TEST_IDENTITIES[@]}" -eq 0 ] || fail "cleanup retained a stale PID"
+  SESSION_TEST_IDENTITIES[$pid]=$identity
+  cleanup_session_test_processes
+  ! kill -0 "$pid" 2>/dev/null || fail "cleanup left a matching process alive"
+  [ "${#SESSION_TEST_IDENTITIES[@]}" -eq 0 ] || fail "cleanup retained a completed PID"
+  pass "session cleanup signals only matching process identities and removes tracked entries"
+}
+
+test_session_process_cleanup_identity
 test_task_session_cleanup
 test_task_bridge_attribution
 test_child_task_session_cleanup
+[ "${#SESSION_TEST_IDENTITIES[@]}" -eq 0 ] || fail "completed session tests retained process entries"
 [ "${1:-}" != --sessions-only ] || exit 0
 
 test_local_only_fork_remote_allows
