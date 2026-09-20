@@ -2040,6 +2040,51 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+test_recovery_generation_honors_termination() {
+  local dir
+  dir=$(make_case recovery-generation-term)
+  # Interrupt generation minting while the recovery lock is held. A pair of
+  # command substitutions in one assignment caused Bash 5.2 to parse the TERM
+  # trap with the wrong parser state and silently continue instead of exiting.
+  python3 - "$BASH" "$ROOT/bin/fm-wake-lib.sh" "$dir/state" <<'PY' || fail "recovery generation lost termination"
+import os
+import signal
+import subprocess
+import sys
+
+script = r'''
+export FM_STATE_OVERRIDE=$2
+. "$1"
+marker="$STATE/.watcher-down"
+trap 'fm_lock_release "$marker.lock"' EXIT
+trap 'exit 143' TERM
+set -T
+trap 'if [ "${FUNCNAME[0]:-}" = fm_current_pid ] &&
+         [ -n "${FM_LOCK_OWNER_DIR:-}" ] && [ ! -e "$STATE/interrupted" ]; then
+        : > "$STATE/interrupted"
+        kill -TERM "$$"
+      fi' DEBUG
+fm_recovery_marker_publish "$marker" downtime
+printf 'continued after TERM\n'
+'''
+p = subprocess.Popen([sys.argv[1], "-c", script, "_", *sys.argv[2:]],
+                     start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+try:
+    out, err = p.communicate(timeout=10)
+except subprocess.TimeoutExpired:
+    os.killpg(p.pid, signal.SIGKILL)
+    p.communicate()
+    raise SystemExit("recovery publication hung after TERM")
+if p.returncode != 143 or out or err:
+    raise SystemExit(f"termination rc={p.returncode}, stdout={out!r}, stderr={err!r}")
+if not os.path.exists(os.path.join(sys.argv[3], "interrupted")):
+    raise SystemExit("fixture did not send TERM while holding the recovery lock")
+if os.path.lexists(os.path.join(sys.argv[3], ".watcher-down.lock")):
+    raise SystemExit("termination left the recovery lock held")
+PY
+  pass "termination during recovery generation exits and releases the lock without parser errors"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -5508,6 +5553,7 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
+test_recovery_generation_honors_termination
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle

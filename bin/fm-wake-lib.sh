@@ -631,11 +631,16 @@ _fm_atomic_replace() {
 }
 
 _fm_recovery_marker_write_locked() {
-  local marker=$1 kind=$2 generation=${3:-} status=${4:-pending} tmp
+  local marker=$1 kind=$2 generation=${3:-} status=${4:-pending} tmp pid
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   case "$status" in pending|announced) ;; *) return 1 ;; esac
   tmp=$(mktemp "${marker}.tmp.XXXXXX") || return 1
-  [ -n "$generation" ] || generation="$(fm_current_pid).$(date +%s).${tmp##*.}"
+  if [ -z "$generation" ]; then
+    # Keep one command substitution per assignment: Bash 5.2 can lose a TERM
+    # trap between substitutions while parsing the rest of the same word.
+    fm_current_pid pid || return 1
+    generation="$pid.$(date +%s).${tmp##*.}"
+  fi
   if ! printf '%s:%s:%s\n' "$status" "$kind" "$generation" > "$tmp" \
     || ! chmod 0600 "$tmp" \
     || ! _fm_atomic_replace "$tmp" "$marker"; then

@@ -61,6 +61,14 @@ seed_project_skills() {
   mkdir -p "$proj/.agents/skills/pager" "$proj/.agents/skills/review"
   printf '# pager\n' > "$proj/.agents/skills/pager/SKILL.md"
   printf '# review\n' > "$proj/.agents/skills/review/SKILL.md"
+  mkdir -p "$home/.agents/skills/pager"
+  cat > "$home/.agents/skills/pager/SKILL.md" <<'EOF'
+---
+name: pager
+description: Find and explain pager workflows.
+---
+Use pager workflows.
+EOF
 }
 
 make_case() {
@@ -113,6 +121,63 @@ read_case() {
   IFS='|' read -r _ HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR LAUNCH_LOG ID <<EOF
 $1
 EOF
+}
+
+test_shadow_launch_is_log_only() {
+  local rec out status record overlay first_id second_id window TEST_RELAUNCH=0
+  write_pager_response
+  cat > "$RESPONSE" <<'JSON'
+{ "model": "jev-1.13.0",
+  "answers": { "skill": { "type": "choice", "choice": "pager", "confidence": 0.9,
+    "probabilities": { "pager": 0.9, "none": 0.1 } } },
+  "usage": { "input_tokens": 10, "output_tokens": 4 } }
+JSON
+  rec=$(make_case shadow-log t-shadow-log)
+  read_case "$rec"
+  mkdir -p "$HOME_DIR/user-home/.pi/agent/skills/pager"
+  cp "$HOME_DIR/.agents/skills/pager/SKILL.md" "$HOME_DIR/user-home/.pi/agent/skills/pager/SKILL.md"
+  shasum -a 256 "$HOME_DIR/.agents/skills/pager/SKILL.md" | awk '{print $1}' | jq -Rsc 'split("\n")[:-1]' > "$HOME_DIR/config/jev-skill-public.json"
+  rm -rf "$HOME_DIR/.agents/skills"
+  out=$(HOME="$HOME_DIR" TYPESAFE_API_KEY=$TS_KEY run_ship \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$ID" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "shadow launch should succeed: $out"
+  record=$(printf '%s\n' "$HOME_DIR"/state/jev-skill-shadow/cases/*.json)
+  overlay="$HOME_DIR/data/$ID/launch-brief.md"
+  assert_present "$record" "shadow launch did not write an experiment record"
+  jq -e '.shadow == true and ((.live_loaded // false) == false)' "$record" >/dev/null \
+    || fail "shadow launch must never mark a live load"
+  assert_no_grep '# Jev-selected skills' "$overlay" \
+    "shadow launch must not mutate the launch overlay"
+  first_id=$(sed -n 's/^spawn_gen=//p' "$HOME_DIR/state/$ID.meta")
+  assert_equals "$first_id" "$(jq -r '.experiment_id' "$record")" "case ID must identify the worker launch"
+  assert_equals "$first_id" "$(cat "$HOME_DIR/data/$ID/jev-skill-launches")" "task must retain launch association"
+  jq -e '.questions | (.skill.criteria // .detail.criteria) | has("pager")' "$HOME_DIR/request.json" >/dev/null || fail "approved Pi-only skill must be offered"
+  mv "$FAKEBIN_DIR/tmux" "$FAKEBIN_DIR/tmux-spawn"
+  cat > "$FAKEBIN_DIR/tmux" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'#{pane_current_command}'*) printf 'bash\n'; exit 0 ;;
+  *'#{pane_tty}'*) exit 0 ;;
+esac
+exec "$(dirname "$0")/tmux-spawn" "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/tmux"
+  TEST_RELAUNCH=1
+  window=$(sed -n 's/^window=//p' "$HOME_DIR/state/$ID.meta")
+  out=$(FM_FAKE_DUPLICATE_WINDOW="${window#*:}" HOME="$HOME_DIR" TYPESAFE_API_KEY=$TS_KEY run_ship \
+    "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$ID")
+  status=$?
+  expect_code 0 "$status" "shadow relaunch succeeds: $out"
+  second_id=$(sed -n 's/^spawn_gen=//p' "$HOME_DIR/state/$ID.meta")
+  [ "$first_id" != "$second_id" ] || fail "relaunch needs independent case ID"
+  assert_equals "$first_id"$'\n'"$second_id" "$(cat "$HOME_DIR/data/$ID/jev-skill-launches")" "both launch associations must survive"
+  record="$HOME_DIR/state/jev-skill-shadow/cases/$second_id.json"
+  jq -e --arg id "$second_id" '.experiment_id == $id' "$record" >/dev/null || fail "relaunch case must use same ID as metadata"
+  FM_HOME="$HOME_DIR" "$ROOT/bin/fm-jev-skill-select.sh" --harness grok --task-id "$ID" --launch-id "$second_id" --comparison-label no-fit >/dev/null || fail "record ID must work for offline labeling"
+  jq -e '.comparison_label == "no-fit"' "$record" >/dev/null || fail "label must persist on originating launch"
+  assert_no_grep '# Jev-selected skills' "$overlay" "shadow relaunch must preserve instructions"
+  pass "shadow launch associations survive relaunch and approved Pi-only skills are offered"
 }
 
 test_live_selection_reaches_overlay() {
@@ -318,6 +383,7 @@ JSON
   pass "Codex discovers default and overridden skill homes only for Codex launches"
 }
 
+test_shadow_launch_is_log_only
 test_relaunch_clears_live_evidence
 test_live_selection_reaches_overlay
 test_disabled_and_none_match_today
