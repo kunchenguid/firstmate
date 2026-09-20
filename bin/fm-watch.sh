@@ -1268,7 +1268,7 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
   statusf="$STATE/$task.status"
   last=$(status_declared_wait_line "$statusf")
   if status_is_captain_held "$last"; then
-    wait_record 'captain-held' 'awaiting the captain - verified hold transfer' \
+    wait_record 'captain-held' 'awaiting the captain - a captain-held declaration' \
       captain 'answer the held decision or release the hold' "$statusf"
     return 0
   fi
@@ -1573,7 +1573,7 @@ handle_paused_stale() {  # <window> <task> <hash>
       return 0
     fi
     detail="captain-held, awaiting the captain"
-    reason="captain-held ${age}s, awaiting the captain - verified hold transfer, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
+    reason="captain-held ${age}s, awaiting the captain - a captain-held declaration, rechecked on a long cadence not a wedge; answer the held decision or release the hold"
   elif until=$(status_paused_until "$last"); then
     if [ "$now" -lt "$until" ] && [ "$age" -lt "$PAUSE_RESURFACE_SECS" ]; then
       triage_log "absorbed stale (paused until $(( until - now ))s from now, declared time not reached): $win"
