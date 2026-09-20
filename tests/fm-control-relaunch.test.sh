@@ -17,6 +17,8 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. Every refusal the launch owner can raise without the old agent gone
+#      fires before the stop, through fm-spawn --relaunch --preflight.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1684,6 +1686,94 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   pass "relaunch heals an item that drifted out of In flight while the task stayed live"
 }
 
+# --- 7. launch-owner refusals run before the stop -----------------------------
+#
+# Every refusal the launch owner (fm-spawn --relaunch) can raise without
+# needing the old agent gone must fire while that agent is still running, or a
+# refused replacement leaves the task with no worker at all.
+
+# assert_untouched_after_refusal <case-dir> <id> <brief-before> <out>
+assert_untouched_after_refusal() {
+  local dir=$1 id=$2 brief_before=$3 out=$4
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "a refused relaunch stopped the running agent"$'\n'"$out"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "a refused relaunch sent the agent: $(cat "$dir/fake/literal")"
+  [ "$(cat "$dir/home/data/$id/brief.md")" = "$brief_before" ] \
+    || fail "a refused relaunch must restore the instructions byte-exact"
+  assert_contains "$out" "refused before its agent was touched" \
+    "the refusal should say the running agent was left alone"
+}
+
+test_held_backlog_item_refuses_before_stopping_the_agent() {
+  local dir out rc brief_before meta_before
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog gate is inert"
+    return 0
+  }
+  dir=$(new_case held rl50)
+  add_ship_task "$dir" rl50 claude
+  seed_backlog "$dir" rl50 in_flight
+  tasks-axi hold rl50 --reason "captain scope question pending" --kind captain \
+    --file "$dir/home/data/backlog.md" >/dev/null
+  brief_before=$(cat "$dir/home/data/rl50/brief.md")
+  meta_before=$(cat "$dir/home/state/rl50.meta")
+  out=$(run_control "$dir" rl50 relaunch --note "back into the worktree"); rc=$?
+  expect_code 1 "$rc" "a held backlog item should refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "not dispatchable" "the refusal should name the launch owner's backlog gate"
+  assert_untouched_after_refusal "$dir" rl50 "$brief_before" "$out"
+  [ "$(cat "$dir/home/state/rl50.meta")" = "$meta_before" ] \
+    || fail "a refused relaunch must leave the durable record byte-identical"
+  [ "$(journal_field "$dir" rl50 phase)" = "failed:noted" ] \
+    || fail "the journal should record a pre-stop refusal, got '$(journal_field "$dir" rl50 phase)'"
+  [ "$(backlog_state "$dir" rl50)" = in_flight ] \
+    || fail "a refused relaunch moved its item to $(backlog_state "$dir" rl50)"
+  pass "fm-control relaunch: a held backlog item refuses while the running agent is untouched"
+}
+
+test_pending_close_refuses_before_stopping_the_agent() {
+  local dir out rc brief_before marker
+  dir=$(new_case close-first rl51)
+  add_ship_task "$dir" rl51 claude
+  marker="$dir/home/state/rl51.backlog-close"
+  printf 'id=rl51\n' > "$marker"
+  brief_before=$(cat "$dir/home/data/rl51/brief.md")
+  out=$(run_control "$dir" rl51 relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a pending close should refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "pending authoritative backlog close" "the refusal should name the pending close"
+  assert_untouched_after_refusal "$dir" rl51 "$brief_before" "$out"
+  assert_present "$marker" "a refused relaunch discarded the pending close"
+  pass "fm-control relaunch: a launch-owner refusal fires before the agent is stopped"
+}
+
+test_spawn_relaunch_preflight_checks_a_live_endpoint_without_touching_it() {
+  local dir out rc meta_before
+  dir=$(new_case preflight rl52)
+  add_ship_task "$dir" rl52 claude
+  meta_before=$(cat "$dir/home/state/rl52.meta")
+  out=$(run_spawn "$dir" rl52 --relaunch --preflight --harness claude); rc=$?
+  expect_code 0 "$rc" "a preflight over a live, launchable task should pass"$'\n'"$out"
+  assert_contains "$out" "relaunch-preflight rl52 ok" "the preflight should report its verdict"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a preflight must not stop the agent"
+  [ -z "$(cat "$dir/fake/literal")" ] && [ ! -s "$dir/fake/keys" ] \
+    || fail "a preflight must send nothing to the endpoint"
+  [ "$(cat "$dir/home/state/rl52.meta")" = "$meta_before" ] \
+    || fail "a preflight must leave the durable record byte-identical"
+  [ ! -e "$dir/home/data/rl52/launch-brief.md" ] \
+    || fail "a preflight must not publish launch instructions"
+
+  printf '%s' "$dir/proj" > "$dir/fake/cwd"
+  printf 'id=rl52\n' > "$dir/home/state/rl52.backlog-close"
+  out=$(run_spawn "$dir" rl52 --relaunch --preflight --harness claude); rc=$?
+  expect_code 1 "$rc" "a preflight should still raise the launch owner's refusals"
+  assert_contains "$out" "pending authoritative backlog close" "the preflight refusal should be the real one"
+
+  out=$(run_spawn "$dir" rl52 --preflight --harness claude); rc=$?
+  expect_code 1 "$rc" "--preflight without --relaunch should refuse"
+  assert_contains "$out" "--preflight applies to --relaunch only" "the refusal should name the misuse"
+  pass "fm-spawn --relaunch --preflight: runs the launch owner's refusals without touching a live task"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -1740,3 +1830,6 @@ test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_held_backlog_item_refuses_before_stopping_the_agent
+test_pending_close_refuses_before_stopping_the_agent
+test_spawn_relaunch_preflight_checks_a_live_endpoint_without_touching_it
