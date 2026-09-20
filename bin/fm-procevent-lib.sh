@@ -392,14 +392,12 @@ fm_procevent_registration_publish_locked() {  # <state> <adapter> <source-id> <a
 
 # Publish one task-owned registration. The single source record persists across
 # rounds; the handled marker, not a second ownership record, holds the round open.
-fm_procevent_task_registration_publish_locked() {  # <state> <adapter> <source-id> <task-id> <artifact> <argv...>
-  local state=$1 adapter=$2 id=$3 task=$4 artifact=$5 reg dest tmp arg identity
-  shift 5
+fm_procevent_task_registration_publish_locked() {  # <state> <adapter> <source-id> <task-id> <argv...>
+  local state=$1 adapter=$2 id=$3 task=$4 reg dest tmp arg identity
+  shift 4
   fm_procevent_adapter_valid "$adapter" || return 1
   fm_procevent_source_id_valid "$id" || return 1
   fm_pr_task_id_valid "$task" || return 1
-  [ -n "$artifact" ] || return 1
-  case "$artifact" in *$'\n'*) return 1 ;; esac
   [ "$#" -ge 1 ] || return 1
   for arg in "$@"; do
     case "$arg" in *$'\n'*) return 1 ;; esac
@@ -413,7 +411,6 @@ fm_procevent_task_registration_publish_locked() {  # <state> <adapter> <source-i
     printf 'adapter=%s\n' "$adapter"
     printf 'kind=task-owned\n'
     printf 'owner_task=%s\n' "$task"
-    printf 'artifact=%s\n' "$artifact"
     printf 'argc=%s\n' "$#"
     printf 'argv:\n'
     printf '%s\n' "$@"

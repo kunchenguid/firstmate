@@ -5,7 +5,7 @@
 #
 # Usage:
 #   fm-procevent.sh register <adapter> <source-id> -- <argv>...
-#   fm-procevent.sh register-task <adapter> <source-id> <task-id> <artifact> -- <argv>...
+#   fm-procevent.sh register-task <adapter> <source-id> <task-id> -- <argv>...
 #   fm-procevent.sh register-extension <adapter> <source-id> --config-ref <reference>
 #   fm-procevent.sh start <source-id>
 #   fm-procevent.sh reconcile
@@ -381,7 +381,6 @@ source_field() {  # <source-id> <field>
 }
 source_kind() { source_field "$1" kind; }
 source_owner_task() { source_field "$1" owner_task; }
-source_artifact() { source_field "$1" artifact; }
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
 stranded_file() { printf '%s/.%s.stranded\n' "$REG" "$1"; }
@@ -509,16 +508,14 @@ cmd_register() {
 }
 
 cmd_register_task() {
-  local adapter=${1-} id=${2-} task=${3-} artifact=${4-} sep=${5-} result pending pending_adapter
+  local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
   local reply_source='' reply_dest reply_tmp arg i
   local -a argv=()
-  shift 5 2>/dev/null || usage
+  shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "register-task is reserved for the Lavish adapter"
   fm_procevent_adapter_valid "$adapter" || die "adapter name must be lowercase alphanumeric or dash: $adapter"
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe and at most 64 characters: $id"
   fm_pr_task_id_valid "$task" || die "task id is invalid: $task"
-  [ -n "$artifact" ] || die "task-owned registration needs an artifact"
-  case "$artifact" in *$'\n'*) die "artifact paths cannot contain newlines" ;; esac
   [ "$sep" = -- ] || usage
   [ "$#" -ge 1 ] || die "register-task needs at least one argv element after --"
   argv=("$@")
@@ -576,7 +573,7 @@ cmd_register_task() {
       die "cannot persist agent reply"
     fi
   fi
-  if ! fm_procevent_task_registration_publish_locked "$STATE" "$adapter" "$id" "$task" "$artifact" "${argv[@]}"; then
+  if ! fm_procevent_task_registration_publish_locked "$STATE" "$adapter" "$id" "$task" "${argv[@]}"; then
     fm_procevent_source_lock_release "$id"
     die "cannot publish task-owned registration"
   fi
