@@ -230,7 +230,7 @@ Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](f
 
 ## Jev review assist (optional, per-operator)
 
-no-mistakes v1.79.0+ can send each review turn's diff to TypeSafe's Jev model to rank which surrounding files are worth reading first; the ranked list only adds candidate paths to the review prompt, and the existing cold review remains the sole merge-gate decision point.
+no-mistakes v1.79.0+ can send each review turn's diff to TypeSafe's Jev model to rank which surrounding files are worth reading first; the ranked list only enriches the review prompt, the ordinary cold complete review remains authoritative, and Jev is advisory only and never gates delivery.
 `jev.review_assist` is **global-only**: it does not exist in, and cannot be set from, a repo's tracked `.no-mistakes.yaml` (verified in no-mistakes' own end-to-end tests - a pushed or default-branch repo config setting this key never contacts TypeSafe).
 An operator opts in locally, per machine, in their own `~/.no-mistakes/config.yaml`:
 
@@ -242,11 +242,10 @@ jev:
 It also needs `TYPESAFE_API_KEY` set in the daemon's environment; without a key the step log says so and review proceeds without a pre-brief, exactly as when the setting is off.
 On every call failure, oversized reply, or missing key, no-mistakes falls back to the ordinary cold review with no pre-brief - this repo does not depend on Jev being reachable.
 
-**What is sent.** Per review turn, no-mistakes sends the diff of the files under review (never files matched by this repo's `ignore_patterns`, which are not "reviewable") plus up to 40 candidate file paths - paths only, never their content - ranked by name rarity and directory proximity. No project name, PR body, or brief text is part of this call.
+**What is sent.** Per review turn, no-mistakes sends only the diff of reviewable files plus up to 40 candidate file paths - paths only, never their content - ranked by name rarity and directory proximity. No project name, PR body, or brief text is part of this call.
 
 **Data boundary.** This repository's captain-private and gitignored paths (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) are untracked, so they can never appear in a git diff and are never reachable by this or any other diff-based review path.
 The remaining operator responsibility is ordinary git hygiene: keep secrets out of tracked files, since no-mistakes has no Jev-specific secret redaction beyond the review step's existing findings pipeline.
-An operator who wants tighter control over what becomes "reviewable" (and therefore diff-eligible for a Jev call) can extend this repo's own `ignore_patterns` for paths that should never enter any review, Jev-assisted or not.
 
 **Audit.** The review step log already records whether a pre-brief was requested, whether it was used, and the reason for any fallback (`no-mistakes axi logs --step review --full`); no separate Jev-specific audit log exists in this repo, since the call itself happens inside the no-mistakes daemon process, outside firstmate's own scripts.
 
