@@ -290,7 +290,12 @@
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+<<<<<<< HEAD
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
+=======
+#     __CODEXADDROOTS__ repeatable --add-dir grant for a codex crew/scout launch
+#                  (nine task-exact writable roots; see the codex paragraph below)
+>>>>>>> c184e77 (fix(spawn): grant codex crews their task-exact writable roots)
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -307,9 +312,19 @@
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
+<<<<<<< HEAD
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+=======
+# A codex crew/scout launch carries nine task-exact --add-dir roots
+# (bin/fm-codex-workspace-write-lib.sh): the shared object store, this
+# worktree's admin directory, the task report directory, status file, and
+# instruction inbox, plus the exact fm/<id> branch ref and reflog transactions.
+# The grant paths are pre-created before launch because exact-file roots do
+# not authorize creating parent directories, and a launch that cannot resolve
+# them is refused rather than broadened. Secondmate launches carry no grant.
+>>>>>>> c184e77 (fix(spawn): grant codex crews their task-exact writable roots)
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -521,6 +536,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-codex-workspace-write-lib.sh
+. "$SCRIPT_DIR/fm-codex-workspace-write-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -1793,6 +1810,7 @@ launch_template() {
   local harness=$1 kind=${2:-ship}
   # shellcheck disable=SC2016  # single quotes are deliberate: $(cat ...) expands in the crewmate pane, not here
   case "$harness" in
+<<<<<<< HEAD
   # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
   # predicted-next-prompt ghost text, which renders as dim/faint text inside an
   # otherwise-empty composer and would otherwise read like real typed input when
@@ -2035,6 +2053,84 @@ launch_template() {
   # would silently discard the first (confirmed live).
   rovo) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __ROVOBIN__ run --yolo __MODELFLAG____ROVOCONFIGOVERRIDE__' ;;
   *) return 1 ;;
+=======
+    # CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false disables claude's interactive
+    # predicted-next-prompt ghost text, which renders as dim/faint text inside an
+    # otherwise-empty composer and would otherwise read like real typed input when
+    # firstmate captures the pane (see the harness-adapters skill). It is a per-launch env
+    # prefix scoped to this firstmate-launched agent; it never touches the captain's
+    # global config. The CLI's --prompt-suggestions flag is print/SDK-mode only and
+    # does NOT suppress the interactive ghost text (verified empirically), so the env
+    # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
+    # the defense-in-depth backstop for any pane this flag cannot reach.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --permission-mode auto __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    codex)
+      if [ "$kind" = secondmate ]; then
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      else
+        printf '%s' 'codex __CODEXADDROOTS____MODELFLAG____EFFORTFLAG__-s workspace-write -a never -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
+      ;;
+    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    pi|pi-signed)
+      printf '%s' '__PIBIN____PITUIMODE__'
+      if [ "$kind" = secondmate ]; then
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      else
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      fi
+      ;;
+    # grok (Grok Build TUI): a positional prompt starts the supervised interactive
+    # session. --always-approve auto-approves every tool execution (verified: the
+    # crewmate runs fully autonomously, no permission gate), which an unattended
+    # crewmate needs; it is the targeted equivalent of claude's
+    # --permission-mode auto. grok's turn-end signal does NOT ride the
+    # launch command - it is a Stop-event hook installed below (global hook +
+    # per-task pointer), so the template is identical for ship/scout/secondmate.
+    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # Cursor Agent CLI. --trust suppresses the workspace-trust prompt that
+    # would otherwise block every spawn, since each task gets a fresh worktree
+    # path cursor has never seen, and it is also what loads the project hooks.
+    # --auto-review --sandbox enabled replaces the former blanket --yolo bypass
+    # with a sandboxed, auto-reviewing autonomy posture. --workspace pins the
+    # exact worktree. -w/--worktree is deliberately never passed: it allocates a
+    # SECOND worktree under ~/.cursor/worktrees and would break firstmate's
+    # isolation contract. The binary is resolved rather than named because
+    # `cursor` is not the CLI (the installed names are cursor-agent and the
+    # legacy alias agent), and the foreign primary markers are cleared so an
+    # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
+    # only reads the environment. Cursor exposes no effort flag, so the shared
+    # effort axis is deliberately omitted and stays in task metadata only.
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --auto-review --sandbox enabled __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    # Kimi Code rejects a positional prompt, so it launches bare and receives
+    # only an absolute brief pointer after the TUI readiness gate below.
+    # Its turn-end signal is a globally configured Stop hook plus a guarded
+    # per-task worktree token, so no launch placeholder belongs here.
+    kimi) printf '%s' '__KIMIBIN__ __MODELFLAG__--auto' ;;
+    # muse (Muse Code): a positional prompt starts the supervised interactive
+    # session. --yolo is the single flag that makes a crewmate pane viable: muse
+    # ships approval prompts AND a filesystem/network sandbox ON by default
+    # (--sandbox-network defaults to proxy-only, which refuses outright without a
+    # managed proxy), and it gates a fresh workspace behind a trust dialog. One
+    # --yolo disables approval, disables the sandbox so git and network work, and
+    # trusts the workspace for the run, so no dialog appears on the fresh
+    # per-task worktree (verified, muse 0.1.0-R708.1).
+    # MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on is the privacy control:
+    # muse otherwise loads the OPERATOR's foreign personal rules from ~/.claude
+    # into every run and ships them to Meta-hosted inference, even under an
+    # isolated XDG_CONFIG_HOME. exec mode's --no-foreign-personal-context flag is
+    # NOT accepted by the interactive TUI (it exits with "unexpected argument"),
+    # so this env var is the only control that reaches a pane worker. Verified to
+    # drop the foreign rules_file context block while KEEPING the project's own
+    # AGENTS.md rules, which the crewmate contract depends on.
+    # muse's turn-end signal rides neither the launch command nor a hook: its
+    # plugin engine is off in the default build, so firstmate folds muse's own
+    # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
+    # written below. Nothing to place in the template for it.
+    # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
+    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    *) return 1 ;;
+>>>>>>> c184e77 (fix(spawn): grant codex crews their task-exact writable roots)
   esac
 }
 
@@ -4584,6 +4680,27 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+CODEX_ADDROOTS=
+if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
+  fm_codex_workspace_write_prepare "$WT" "$DATA/$ID" "$STATE_REAL/$ID.status" "$STATE_REAL/$ID.inbox" "$ID" || {
+    echo "error: could not prepare narrow Codex workspace-write roots for linked worktree '$WT'; refusing to launch a worker that cannot branch, commit, or report" >&2
+    exit 1
+  }
+  CODEX_ROOTS=$(fm_codex_workspace_write_roots "$WT" "$DATA/$ID" "$STATE_REAL/$ID.status" "$STATE_REAL/$ID.inbox" "$ID") || {
+    echo "error: could not resolve narrow Codex workspace-write roots for linked worktree '$WT'; refusing to broaden the task sandbox" >&2
+    exit 1
+  }
+  [ "$(printf '%s\n' "$CODEX_ROOTS" | wc -l | tr -d ' ')" -eq 9 ] || {
+    echo "error: Codex workspace-write grant resolved to an unexpected root set; refusing to launch" >&2
+    exit 1
+  }
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    CODEX_ADDROOTS="$CODEX_ADDROOTS --add-dir $(shell_quote "$root")"
+  done <<EOF
+$CODEX_ROOTS
+EOF
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -4604,6 +4721,7 @@ LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OMPWORKERCFG__/$sq_ompcfg}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+LAUNCH=${LAUNCH//__CODEXADDROOTS__/$CODEX_ADDROOTS}
 case "$HARNESS" in
 pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;

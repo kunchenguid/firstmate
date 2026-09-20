@@ -1648,6 +1648,21 @@ FM_CMUX_CLAUDE_COMPOSER_LIVE=1 bin/fm-test-run.sh tests/fm-cmux-claude-composer-
 That guard still addresses the worker by task selector, so it no longer reaches the typed submit path and is not a current refresh entry point for this guarantee.
 The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
+## Codex CLI sandbox grant
+
+Measured 2026-09-20 against codex-cli 0.155.1 on macOS.
+An unmodified `-s workspace-write` launch confines model-command writes to the task worktree, so a real worker run failed with `fatal: cannot lock ref 'refs/heads/fm/<id>'` on branch creation and `operation not permitted` on a status append outside the worktree, while an ordinary in-worktree edit succeeded.
+The launch now carries nine task-exact repeatable `--add-dir` roots (bin/fm-codex-workspace-write-lib.sh): the shared object store, the task worktree's admin directory, the task report directory, status file, and instruction inbox, plus the exact `fm/<id>` branch ref and reflog transactions with their lock files.
+The enforced sandbox list printed by that run confirms the flags are additive alongside the workdir rather than replacing operator roots.
+A repeat run under the grant created the branch, committed a fixture, published the report and status, and acknowledged the inbox, while a sibling branch ref, a sibling status file, and the shared Git config stayed denied with verbatim seatbelt errors.
+Two vendor behaviors are pinned for future guard design: the workspace-write sandbox always allows `/tmp` and `$TMPDIR` writes, so a live denial proof must build its lab outside the temp root or every assertion is vacuous; and git operations print a benign `packed-refs.lock: Operation not permitted` error while still succeeding, because that file is deliberately not granted.
+Portable composition coverage is `tests/fm-codex-workspace-write.test.sh`.
+Refresh the live proof with:
+
+```sh
+FM_CODEX_WORKSPACE_WRITE_LIVE=1 tests/fm-codex-workspace-write-live-e2e.test.sh
+```
+
 ## Codex App host tools
 
 A reusable Desktop host-tool smoke ran on 2026-07-06 against Codex Desktop bundle version 26.623.101652, build 4674, bundle id `com.openai.codex`.
