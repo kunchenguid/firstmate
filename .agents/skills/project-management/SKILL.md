@@ -2,7 +2,7 @@
 name: project-management
 description: >-
   Agent-only procedure for Firstmate project management.
-  Use before adding, creating, removing, or initializing a project.
+  Use before adding, creating, removing, or initializing a project, or before dispatching implementation for a new project.
   Cloning or registering a project is add intake and uses the same trigger.
   Owns project add, create, clone, remove, initialization, registry, delivery-mode, autonomy, and outward-consent decisions.
 user-invocable: false
@@ -12,7 +12,7 @@ metadata:
 
 # project-management
 
-Use this procedure before adding, creating, removing, or initializing a project.
+Use this procedure before adding, creating, removing, or initializing a project, and before dispatching implementation for a new project.
 Cloning or registering a project is add intake and uses the same trigger.
 This skill is the single owner of Firstmate's project-management procedure.
 It does not replace `secondmate-provisioning`, which owns project clones inside persistent secondmate homes.
@@ -93,15 +93,13 @@ Keep unresolved choices on the configured backlog under the existing captain-hol
 
 Firstmate conducts the captain dialogue and delegates project investigation, design, and artifact writes under `AGENTS.md`'s existing role and project-write boundaries.
 Preparation workers may work in isolated copies on the documents and scaffolding below, but must not implement product behavior before this protocol is complete.
-For projects entering this protocol, select `no-mistakes` for PR delivery instead of the conditional or direct-PR defaults above; keep purely local projects `local-only` without inventing a remote or PR.
-Resolve any conflicting explicit delivery instruction with the captain rather than silently skipping the required review.
 
 ### 1. Product Intent (PRD.md)
 
 Read available project documentation before asking questions and distinguish documented facts from choices requiring the captain's answer.
-Use `grilling` to interview the captain on product goals, target audience, core user journeys, and functional requirements until shared understanding is confirmed.
-Use `to-spec` to synthesize those interview answers into the requirements specification, not to conduct the interview: that skill explicitly performs synthesis without an interview.
-Keep its output in root `PRD.md` for this protocol rather than publishing to an unconfigured issue tracker, and commit it through the project's authorized preparation path.
+Interview the captain on product goals, target audience, core user journeys, and functional requirements until shared understanding is confirmed, using a grilling skill as an aid when the harness provides one.
+Synthesize those interview answers into the requirements specification rather than treating the raw interview as the specification.
+Keep that specification in root `PRD.md` for this protocol rather than publishing to an unconfigured issue tracker, and commit it through the project's authorized preparation path.
 Do not claim a separate docs-grounded grilling variant exists; grounding comes from the preceding document read.
 
 ### 2. Domain Dictionary (CONTEXT.md)
@@ -124,7 +122,7 @@ Keep both consistent with `PRD.md`, `CONTEXT.md`, and `VISION.md`; explicitly re
 
 ### 5. Hard-Questions Stress Test
 
-Use `grilling` for one bounded stress-test pass over the proposed requirements and architecture: what will break, what edge cases are missing, and what is overengineered?
+Run one bounded stress-test pass over the proposed requirements and architecture, using a grilling skill as an aid when the harness provides one: what will break, what edge cases are missing, and what is overengineered?
 Resolve every identified edge case with an explicit accepted behavior or refusal, and update `PRD.md` and `architecture.md` with the answers before proceeding.
 Refresh `architecture-essentials.md` when a critical decision or schema changes.
 Do not silently assume answers, start an endless new design exercise, or advance while an answer is still missing.
@@ -140,16 +138,14 @@ Keep scaffolding within the accepted design, without product behavior or specula
 
 ### 7. Backlog Slicing & TDD Implementation
 
-Use `to-tickets` for tracer-bullet vertical slices spanning database, API, UI, and tests wherever those layers apply, with independently verifiable outcomes and explicit blocking dependencies.
+Slice the requirements into tracer-bullet vertical slices spanning database, API, UI, and tests wherever those layers apply, with independently verifiable outcomes and explicit blocking dependencies.
 Confirm the slice boundaries and public test seams with the captain before dispatch.
-Use its slicing method, not an assumed tasks-axi integration or its default per-ticket files and external tracker publication.
 Record the approved slices through the configured backlog backend contract in [`docs/configuration.md`](../../../docs/configuration.md#backlog-backend-taskstoml--configbacklog-backend); a manual home hand-edits its backlog file, while a tasks-axi home uses the existing home-scoped wrapper.
 Do not invent a per-project tasks-axi ticketing command or migrate the home's backlog backend for onboarding.
 Before the first implementation spawn, verify that steps 1 through 6 are committed and available on the implementation base, the approved slices are recorded, and no alignment decision remains open.
-Record those completion references with the backlog work so later dispatches can verify them without re-running the sequence.
 Only then dispatch implementation crewmates into isolated worktrees under the normal task lifecycle.
-Require `tdd` in their instructions for all guardrail and domain logic, with behavior tests at the agreed public seams and Red-Green-Refactor loops.
-For this protocol, explicitly require the refactor phase after green while preserving behavior, rather than inheriting `tdd`'s default deferral of refactoring to review.
+Require Red-Green-Refactor loops in their instructions for all guardrail and domain logic, with behavior tests at the agreed public seams, naming a tdd skill as an aid when the harness provides one.
+Explicitly require the refactor phase after green while preserving behavior, rather than deferring refactoring to review.
 Pass every completed PR through no-mistakes adversarial review and green checks before presenting it for captain merge approval; onboarding grants no merge authority.
 
 ## Remove
