@@ -19,12 +19,13 @@
 #    "output_tokens":<int|null>,"reasoning_tokens":<int|null>,
 #    "source":<claude-projects|codex-sessions|unavailable>}
 #
-# Wall clock: status-file birth epoch -> status-file mtime epoch; the meta
-# file's mtime is the fallback end when the status file is absent, and a
-# missing birth timestamp falls back to the meta-file mtime (the spawn-time
-# marker, portable where birth time is unavailable) and then the status mtime
-# as the start.
-# Turn estimate: count of "^working:" lines in the status file.
+# Wall clock: earliest status event or status-file birth -> status-file mtime.
+# Without either start timestamp, metadata mtime is a best-effort legacy
+# fallback; metadata mtime also supplies the end when status is absent.
+# Turn estimate: working events recognized by fm-classify-lib.sh, including
+# stamped and legacy lines.
+# Collection runs through harvest time after worker retirement. Usage event
+# timestamps select that window; timestamp-free legacy records use log mtime.
 #
 # Per-request usage sources:
 #   harness=claude: <claude-projects>/<worktree with '/' and '.' -> '-'>/*.jsonl in
@@ -77,6 +78,7 @@ CODEX_DIR="${FM_USAGE_CODEX_DIR:-${HOME:-}/.codex/sessions}"
 # blocks the synchronous teardown caller indefinitely.
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 err() { printf 'error: %s\n' "$1" >&2; }
 
@@ -126,12 +128,26 @@ iso_from_epoch() {  # <epoch>
     || return 1
 }
 
+COLLECT_EPOCH=$(date +%s)
 END_EPOCH=$(file_mtime_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$META")
-START_EPOCH=$(file_birth_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$META" 2>/dev/null || file_mtime_epoch "$STATUS" 2>/dev/null || printf '%s' "$END_EPOCH")
+START_EPOCH=$(file_birth_epoch "$STATUS" 2>/dev/null || true)
+TURNS=0
+if [ -f "$STATUS" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    status_line_verb "$line" verb
+    [ "$verb" != working ] || TURNS=$((TURNS + 1))
+    if epoch=$(status_line_at_epoch "$line") && [ "$epoch" -le "$END_EPOCH" ]; then
+      if [ -z "$START_EPOCH" ] || [ "$epoch" -lt "$START_EPOCH" ]; then
+        START_EPOCH=$epoch
+      fi
+    fi
+  done < "$STATUS"
+fi
+if [ -z "$START_EPOCH" ]; then
+  START_EPOCH=$(file_mtime_epoch "$META" 2>/dev/null || printf '%s' "$END_EPOCH")
+fi
 WALL=$((END_EPOCH - START_EPOCH))
 [ "$WALL" -ge 0 ] || WALL=0
-TURNS=$(grep -c '^working:' "$STATUS" 2>/dev/null || true)
-case "$TURNS" in ''|*[!0-9]*) TURNS=0 ;; esac
 
 # Ref files pin find's mtime window portably (BSD and GNU find both compare
 # against -newer file mtimes, and touch -t exists on both).
@@ -149,10 +165,8 @@ epoch_to_touch() {  # <epoch>
   date -r "$1" -u +%Y%m%d%H%M.%S 2>/dev/null || date -u -d "@$1" +%Y%m%d%H%M.%S
 }
 # find -newer compares sub-second mtimes, so the refs only narrow to
-# [START-1, END+1]; the per-file epoch filter below then applies the true
-# inclusive whole-second window [START_EPOCH, END_EPOCH].
+# [START-1, ...]; event timestamps supply the collection cutoff.
 TZ=UTC touch -t "$(epoch_to_touch "$((START_EPOCH - 1))")" "$REFDIR/start"
-TZ=UTC touch -t "$(epoch_to_touch "$((END_EPOCH + 1))")" "$REFDIR/end"
 
 LEDGER="$DATA/usage-ledger.jsonl"
 
@@ -166,12 +180,20 @@ matched_files() {  # <dir> <maxdepth-or-empty> : print in-window *.jsonl paths
   fi
   while IFS= read -r f; do
     m=$(file_mtime_epoch "$f") || continue
-    if [ "$m" -ge "$START_EPOCH" ] && [ "$m" -le "$END_EPOCH" ]; then
+    if [ "$m" -ge "$START_EPOCH" ]; then
       printf '%s\n' "$f"
     fi
   done < <(find "$dir" ${depthargs[@]+"${depthargs[@]}"} -type f -name '*.jsonl' \
-    -newer "$REFDIR/start" ! -newer "$REFDIR/end" -print 2>/dev/null) || true
+    -newer "$REFDIR/start" -print 2>/dev/null) || true
 }
+
+USAGE_WINDOW_FILTER='
+  def in_window:
+    (if .timestamp == null then $mtime
+     else try (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) catch null
+     end) as $at
+    | $at != null and $at >= $start and $at <= $end;
+'
 
 IT=null; CT=null; OT=null; RT=null
 case "$HARNESS" in
@@ -185,9 +207,10 @@ case "$HARNESS" in
         # One entry per content block repeats one request's usage; dedupe on
         # .message.id so every request is counted exactly once.
         while IFS= read -r f; do
-          row=$(jq -Rrn '
+          row=$(jq -Rrn --argjson start "$START_EPOCH" --argjson end "$COLLECT_EPOCH" \
+            --argjson mtime "$(file_mtime_epoch "$f")" "$USAGE_WINDOW_FILTER"'
             reduce (inputs | fromjson? | select(type == "object")) as $l ({seen:{},m:null,n:0,it:0,ct:0,ot:0,rt:0};
-              if $l.type == "assistant" and ($l.message.usage // null) != null then
+              if $l.type == "assistant" and ($l.message.usage // null) != null and ($l | in_window) then
                 ($l.message.id // "no-id") as $id
                 | if .seen[$id] then . else
                     .seen[$id] = 1
@@ -199,7 +222,7 @@ case "$HARNESS" in
                     | .rt += ($l.message.usage.output_tokens_details.thinking_tokens // 0)
                     | (if .m == null then .m = ($l.message.model // null) else . end)
                   end
-              elif $l.type == "assistant" and ($l.message.model // null) != null and .m == null then
+              elif $l.type == "assistant" and ($l.message.model // null) != null and .m == null and ($l | in_window) then
                 .m = $l.message.model
               else . end)
             | select(.n > 0)
@@ -226,14 +249,15 @@ FMINNER
         IT=0; CT=0; OT=0; RT=0
         found=0
         while IFS= read -r f; do
-          row=$(jq -Rrn '
+          row=$(jq -Rrn --argjson start "$START_EPOCH" --argjson end "$COLLECT_EPOCH" \
+            --argjson mtime "$(file_mtime_epoch "$f")" "$USAGE_WINDOW_FILTER"'
             reduce (inputs | fromjson? | select(type == "object")) as $l ({cwd:null,m:null,n:0,it:0,ct:0,ot:0,rt:0};
               if $l.type == "session_meta" then
                 .cwd = ($l.payload.cwd // .cwd)
-              elif $l.type == "turn_context" and ($l.payload.model // null) != null then
+              elif $l.type == "turn_context" and ($l.payload.model // null) != null and ($l | in_window) then
                 .m = $l.payload.model
               elif $l.type == "event_msg" and $l.payload.type == "token_count"
-                   and ($l.payload.info.last_token_usage // null) != null then
+                   and ($l.payload.info.last_token_usage // null) != null and ($l | in_window) then
                 .n += 1
                 | .it += ($l.payload.info.last_token_usage.input_tokens // 0)
                 | .ct += (($l.payload.info.last_token_usage.cached_input_tokens // 0)

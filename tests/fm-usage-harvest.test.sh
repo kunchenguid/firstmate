@@ -478,6 +478,69 @@ usage_recovery_case() {
   pass "$harness $mode: malformed lines and missing models"
 }
 
+retirement_window_case() {
+  local harness=$1 id="retirement-$1" base data home wt logdir encoded fb out
+  wt="$TMP_ROOT/wt-$id"
+  data=$(harvest_case "$id" "$harness" "$wt" fallback-model)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  base=$(date +%s)
+  if [ "$harness" = claude ]; then
+    encoded=${wt//\//-}
+    encoded=${encoded//./-}
+    logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
+  else
+    logdir="$FM_USAGE_CODEX_DIR/$id"
+  fi
+  mkdir -p "$logdir"
+  python3 - "$harness" "$wt" "$base" "$logdir" "$home" "$id" <<'PYFIXTURE'
+import datetime
+import json
+import os
+import pathlib
+import sys
+harness, wt, base, logdir, home, task = sys.argv[1:]
+base = int(base)
+state = pathlib.Path(home) / "state"
+status = state / (task + ".status")
+status.write_text(
+    f"working [at={base - 100}]: started\n"
+    "working: legacy continuation\n"
+    f"working [at={base - 50}]: continued\n"
+    f"done [at={base - 20}]: finished\n"
+    "note: working: quoted text\n"
+)
+os.utime(status, (base - 20, base - 20))
+os.utime(state / (task + ".meta"), (base, base))
+def event(at, tokens):
+    stamp = datetime.datetime.fromtimestamp(at, datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    if harness == "claude":
+        return {"timestamp": stamp, "type": "assistant", "message": {
+            "id": str(at), "model": "test-model", "usage": {"input_tokens": tokens}}}
+    return {"timestamp": stamp, "type": "event_msg", "payload": {
+        "type": "token_count", "info": {"last_token_usage": {"input_tokens": tokens}}}}
+for name, records, mtime in [
+    ("final", [event(base - 200, 999), event(base - 10, 12), event(base + 100, 999)], base + 500),
+    ("early", [event(base - 70, 5)], base - 60),
+]:
+    if harness == "codex":
+        records.insert(0, {"type": "session_meta", "payload": {"cwd": wt}})
+    path = pathlib.Path(logdir) / (name + ".jsonl")
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    os.utime(path, (mtime, mtime))
+PYFIXTURE
+  fb="$TMP_ROOT/retirement-$harness-fakebin"
+  nobirth_stat_bin "$fb"
+  out=$(PATH="$fb:$PATH" "$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "$harness retirement harvest succeeds: $out"
+  jq -e --argjson start "$((base - 100))" '
+    .source != "unavailable" and .input_tokens == 17 and .wall_secs == 80
+    and .turns == 3 and (.spawned_at | fromdateiso8601) == $start
+  ' "$data/usage-ledger.jsonl" >/dev/null \
+    || fail "$harness retirement includes final usage, preserves start, and counts stamped events"
+  pass "$harness retirement: event window, rewritten metadata, stamped and legacy turns"
+}
+
 claude_case
 claude_nobirth_case
 codex_case
@@ -490,4 +553,5 @@ teardown_case
 for harness in claude codex; do
   usage_recovery_case "$harness" recovered
   usage_recovery_case "$harness" unavailable
+  retirement_window_case "$harness"
 done
