@@ -31,6 +31,24 @@ file_birth_epoch() {  # <file>
   printf '%s' "$t"
 }
 
+set_mtime_epoch() {  # <file> <epoch>
+  python3 - "$1" "$2" <<'PYTIME' || fail "could not set fixture mtime: $1"
+import os
+import sys
+os.utime(sys.argv[1], (int(sys.argv[2]), int(sys.argv[2])))
+PYTIME
+  [ "$(file_mtime_epoch "$1")" = "$2" ] || fail "fixture mtime differs: $1"
+}
+
+# A failed late harvest must not resurrect an already-retired home.
+retired_home="$TMP_ROOT/retired-home"
+out=$(FM_STATE_OVERRIDE="$retired_home/state" FM_DATA_OVERRIDE="$retired_home/data" \
+  "$HARVEST" retired-task 2>&1)
+expect_code 1 "$?" "harvest without a task record must fail"
+assert_contains "$out" "no task record:" "missing task record is reported"
+[ ! -e "$retired_home" ] || fail "harvest recreated a retired home"
+pass "usage harvest: missing task record leaves a retired home absent"
+
 # harvest_case <id> <harness> [model] [effort] : create a home with one task
 # whose worktree is $TMP_ROOT/wt-<id>, status and meta included, and echo the
 # data dir. Exports the FM_USAGE_* fixture dirs per case.
@@ -88,8 +106,7 @@ JSON
   cat > "$logdir/session-future.jsonl" <<'JSON'
 {"type":"assistant","message":{"id":"msgX","model":"claude-test","usage":{"input_tokens":999,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":999}}}
 JSON
-  touch -t "$(date -r $(( $(file_mtime_epoch "$state/$id.status") + 7200 )) +%Y%m%d%H%M.%S)" \
-    "$logdir/session-future.jsonl"
+  set_mtime_epoch "$logdir/session-future.jsonl" "$(( $(file_mtime_epoch "$state/$id.status") + 7200 ))"
   mkdir -p "$FM_USAGE_CLAUDE_DIR/wrong-encoded-dir"
   printf '%s\n' '{"type":"assistant","message":{"id":"msgY","model":"claude-test","usage":{"input_tokens":777,"output_tokens":777}}}' \
     > "$FM_USAGE_CLAUDE_DIR/wrong-encoded-dir/other.jsonl"
@@ -159,8 +176,7 @@ JSON
 {"type":"session_meta","payload":{"cwd":"$wt"}}
 {"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":999,"output_tokens":999}}}}
 JSON
-  touch -t "$(date -r $(( $(file_mtime_epoch "$home/state/$id.status") + 7200 )) +%Y%m%d%H%M.%S)" \
-    "$d1/rollout-future.jsonl"
+  set_mtime_epoch "$d1/rollout-future.jsonl" "$(( $(file_mtime_epoch "$home/state/$id.status") + 7200 ))"
   touch -m -r "$d1/rollout-match.jsonl" "$home/state/$id.status"
 
   out=$("$HARVEST" "$id" 2>&1)
@@ -246,9 +262,9 @@ JSON
   # and the session log lands mid-window. Without the meta-mtime start fallback
   # the birthless window collapses to [T, T] and drops the earlier log.
   base=$(file_mtime_epoch "$state/$id.status")
-  touch -t "$(date -r "$base" +%Y%m%d%H%M.%S)" "$state/$id.status"
-  touch -t "$(date -r $((base - 100)) +%Y%m%d%H%M.%S)" "$state/$id.meta"
-  touch -t "$(date -r $((base - 50)) +%Y%m%d%H%M.%S)" "$logdir/session.jsonl"
+  set_mtime_epoch "$state/$id.status" "$base"
+  set_mtime_epoch "$state/$id.meta" "$((base - 100))"
+  set_mtime_epoch "$logdir/session.jsonl" "$((base - 50))"
 
   fb="$TMP_ROOT/nobirth-fakebin"
   nobirth_stat_bin "$fb"
