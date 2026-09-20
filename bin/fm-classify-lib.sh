@@ -1014,12 +1014,12 @@ _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
   fi
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     ident=$(LC_ALL=C /usr/bin/stat -f '%d:%i' "$f" 2>/dev/null) || return 1
-    epoch=$(LC_ALL=C /usr/bin/stat -f '%B' "$f" 2>/dev/null) || epoch=0
-    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C /usr/bin/stat -f '%FB' "$f" 2>/dev/null) || birth=''; else birth=''; fi
+    epoch=$(LC_ALL=C /usr/bin/stat -f '%B' "$f" 2>/dev/null) || return 1
+    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C /usr/bin/stat -f '%FB' "$f" 2>/dev/null) || return 1; else birth=''; fi
   else
     ident=$(LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null) || return 1
-    epoch=$(LC_ALL=C stat -c '%W' "$f" 2>/dev/null) || epoch=0
-    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -c '%w' "$f" 2>/dev/null) || birth=''; else birth=''; fi
+    epoch=$(LC_ALL=C stat -c '%W' "$f" 2>/dev/null) || return 1
+    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -c '%w' "$f" 2>/dev/null) || return 1; else birth=''; fi
   fi
   case "$ident$birth" in *$'\t'*|*$'\n'*|'') return 1 ;; esac
   if [ -n "$birth" ]; then printf 'strong:%s:%s' "$ident" "$birth"; else printf 'weak:%s' "$ident"; fi
@@ -1521,10 +1521,16 @@ status_observed_signature() {  # <file> [<size> <ident>]
 # cursor), a successful observation empties the sidecar, and the count reaching
 # FM_UNOBSERVABLE_POLLS (default 3, the consecutive-error budget shape of
 # bin/fm-procevent-when.sh's --error-budget) makes status_observation_skipped
-# return 0 exactly once per failure episode so the caller reports it. After that
-# it returns 1 until the file is observable again and a new episode starts. The
-# error tokens are never a throttle key; only this counter is. An absent and an
-# empty sidecar both mean "no episode in progress".
+# return 0 so the caller reports it. The error tokens are never a throttle key;
+# only this counter is. An absent and an empty sidecar both mean "no episode in
+# progress".
+#
+# Enqueue before suppress, as everywhere else in this codebase: a due skip keeps
+# returning 0 on every later poll until a caller has durably queued the report
+# and confirmed it with status_observation_reported, which is the only writer of
+# the reported flag. A report that could not be appended therefore leaves the
+# episode owed rather than burning it, and after the flag is set the episode
+# stays silent until the file is observable again and a new one starts.
 #
 # The count is per supervisor cycle, not per call: several sites observe the same
 # log within one poll (the signal scan, its grace-period rescan, the heartbeat
@@ -1542,6 +1548,9 @@ status_observed_signature() {  # <file> [<size> <ident>]
 FM_UNOBSERVABLE_POLLS=${FM_UNOBSERVABLE_POLLS:-3}
 STATUS_UNOBSERVABLE_COUNT=0
 _STATUS_UNOBSERVABLE_MARKER=
+_STATUS_UNOBSERVABLE_N=0
+_STATUS_UNOBSERVABLE_REPORTED=0
+_STATUS_UNOBSERVABLE_CYCLE=
 
 _status_unobservable_marker() {  # <status-file> -> sets _STATUS_UNOBSERVABLE_MARKER
   local f=$1 dir base
@@ -1550,24 +1559,39 @@ _status_unobservable_marker() {  # <status-file> -> sets _STATUS_UNOBSERVABLE_MA
   _STATUS_UNOBSERVABLE_MARKER="$dir/.unobservable-${base%.status}"
 }
 
-status_observation_skipped() {  # <status-file> [<cycle>] -> 0 when this skip is the episode's one report
-  local f=$1 cycle=${2-} marker raw='' rest='' count reported stored bound due=1
-  _status_unobservable_marker "$f"
-  marker=$_STATUS_UNOBSERVABLE_MARKER
-  if [ -r "$marker" ]; then
-    IFS= read -r raw < "$marker" || :
+_status_unobservable_read() {  # <status-file> -> sets the marker path and the three sidecar fields
+  local raw='' rest=''
+  _status_unobservable_marker "$1"
+  if [ -r "$_STATUS_UNOBSERVABLE_MARKER" ]; then
+    IFS= read -r raw < "$_STATUS_UNOBSERVABLE_MARKER" || :
   fi
-  count=$raw; reported=0; stored=''
+  _STATUS_UNOBSERVABLE_N=$raw
+  _STATUS_UNOBSERVABLE_REPORTED=0
+  _STATUS_UNOBSERVABLE_CYCLE=''
   case "$raw" in
-    *$'\t'*) count=${raw%%$'\t'*}; rest=${raw#*$'\t'} ;;
+    *$'\t'*) _STATUS_UNOBSERVABLE_N=${raw%%$'\t'*}; rest=${raw#*$'\t'} ;;
   esac
   case "$rest" in
-    *$'\t'*) reported=${rest%%$'\t'*}; stored=${rest#*$'\t'} ;;
-    *) reported=$rest ;;
+    *$'\t'*)
+      _STATUS_UNOBSERVABLE_REPORTED=${rest%%$'\t'*}
+      _STATUS_UNOBSERVABLE_CYCLE=${rest#*$'\t'}
+      ;;
+    *) _STATUS_UNOBSERVABLE_REPORTED=$rest ;;
   esac
-  case "$count" in ''|*[!0-9]*) count=0 ;; esac
-  [ "$reported" = 1 ] || reported=0
-  if [ -n "$cycle" ] && [ "$cycle" = "$stored" ] && [ "$count" -gt 0 ]; then
+  case "$_STATUS_UNOBSERVABLE_N" in ''|*[!0-9]*) _STATUS_UNOBSERVABLE_N=0 ;; esac
+  [ "$_STATUS_UNOBSERVABLE_REPORTED" = 1 ] || _STATUS_UNOBSERVABLE_REPORTED=0
+}
+
+_status_unobservable_write() {  # <count> <reported> <cycle>, into the marker just read
+  { printf '%s\t%s\t%s' "$1" "$2" "$3" > "$_STATUS_UNOBSERVABLE_MARKER"; } 2>/dev/null || :
+}
+
+status_observation_skipped() {  # <status-file> [<cycle>] -> 0 while this episode still owes its report
+  local cycle=${2-} count reported bound
+  _status_unobservable_read "$1"
+  count=$_STATUS_UNOBSERVABLE_N
+  reported=$_STATUS_UNOBSERVABLE_REPORTED
+  if [ -n "$cycle" ] && [ "$cycle" = "$_STATUS_UNOBSERVABLE_CYCLE" ] && [ "$count" -gt 0 ]; then
     STATUS_UNOBSERVABLE_COUNT=$count
     return 1
   fi
@@ -1575,12 +1599,15 @@ status_observation_skipped() {  # <status-file> [<cycle>] -> 0 when this skip is
   case "$bound" in ''|*[!0-9]*|0) bound=3 ;; esac
   count=$((count + 1))
   STATUS_UNOBSERVABLE_COUNT=$count
-  if [ "$reported" -eq 0 ] && [ "$count" -ge "$bound" ]; then
-    reported=1
-    due=0
-  fi
-  { printf '%s\t%s\t%s' "$count" "$reported" "$cycle" > "$marker"; } 2>/dev/null || :
-  return "$due"
+  _status_unobservable_write "$count" "$reported" "$cycle"
+  [ "$reported" -eq 0 ] && [ "$count" -ge "$bound" ]
+}
+
+status_observation_reported() {  # <status-file>: the episode's report is durably queued
+  _status_unobservable_read "$1"
+  [ "$_STATUS_UNOBSERVABLE_N" -gt 0 ] || return 0
+  _status_unobservable_write "$_STATUS_UNOBSERVABLE_N" 1 "$_STATUS_UNOBSERVABLE_CYCLE"
+  return 0
 }
 
 status_observation_succeeded() {  # <status-file>: a successful observation ends the episode

@@ -393,7 +393,10 @@ test_marker_writers_refuse_failed_observations() {
 # same episode stay silent, and a successful observation ends the episode so the
 # next failure reports once again. The count is per supervisor cycle: several
 # skips passed one cycle token advance it once, so the bound stays a count of
-# polls however many sites observe the same log within one poll.
+# polls however many sites observe the same log within one poll. The episode is
+# owed until a caller confirms the durable enqueue with
+# status_observation_reported, so a report that could not be queued is retried
+# rather than burned.
 test_unobservable_bound_counts_consecutive_skips() {
   local dir f
   dir="$TMP_ROOT/unobservable-bound"; mkdir -p "$dir"
@@ -405,13 +408,19 @@ test_unobservable_bound_counts_consecutive_skips() {
     status_observation_skipped "$f" && fail "the second skip reported before the bound"
     status_observation_skipped "$f" || fail "the third skip did not report at the bound"
     [ "$STATUS_UNOBSERVABLE_COUNT" = 3 ] || fail "the count at the bound was $STATUS_UNOBSERVABLE_COUNT"
-    status_observation_skipped "$f" && fail "a fourth skip reported the same episode again"
-    status_observation_skipped "$f" && fail "a fifth skip reported the same episode again"
+    # The report was not confirmed, so the episode is still owed.
+    status_observation_skipped "$f" || fail "an unconfirmed report was not owed on the next skip"
+    status_observation_skipped "$f" || fail "an unconfirmed report was not still owed"
+    status_observation_reported "$f"
+    status_observation_skipped "$f" && fail "a skip after the confirmed report reported the episode again"
+    status_observation_skipped "$f" && fail "a later skip reported the same episode again"
     status_observation_succeeded "$f"
     [ ! -s "$dir/.unobservable-task" ] || fail "a successful observation left an episode in the sidecar"
     status_observation_skipped "$f" && fail "a new episode reported on its first skip"
     status_observation_skipped "$f" && fail "a new episode reported on its second skip"
     status_observation_skipped "$f" || fail "a new episode did not report at the bound"
+    status_observation_reported "$f"
+    status_observation_skipped "$f" && fail "the new episode reported twice"
     # The same failure observed several times inside one cycle counts once.
     status_observation_succeeded "$f"
     status_observation_skipped "$f" poll-1 && fail "the first skip of cycle 1 reported before the bound"
@@ -425,6 +434,7 @@ test_unobservable_bound_counts_consecutive_skips() {
     status_observation_skipped "$f" poll-3 || fail "the third cycle did not report at the bound"
     [ "$STATUS_UNOBSERVABLE_COUNT" = 3 ] || fail "the count at the bound was $STATUS_UNOBSERVABLE_COUNT"
     status_observation_skipped "$f" poll-3 && fail "a repeat skip in the reporting cycle reported again"
+    status_observation_reported "$f"
     status_observation_skipped "$f" poll-4 && fail "a later cycle reported the same episode again"
     exit 0
   ) || exit 1

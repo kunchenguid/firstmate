@@ -1794,6 +1794,7 @@ unobservable_enqueue() {  # <scan-output>
     [ "$tag" = UNOBSERVABLE ] || continue
     reason=$(unobservable_reason "$f" "$count")
     fm_wake_append check "unobservable:${f##*/}" "$reason" || return 1
+    status_observation_reported "$f"
     all="${all:+$all; }$reason"
   done <<EOF
 $1
@@ -1811,6 +1812,7 @@ unobservable_report() {  # <status-file>
   status_observation_skipped "$1" "$WATCH_CYCLE" || return 1
   UNOBSERVABLE_REASON=$(unobservable_reason "$1" "$STATUS_UNOBSERVABLE_COUNT")
   fm_wake_append check "unobservable:${1##*/}" "$UNOBSERVABLE_REASON" || exit 1
+  status_observation_reported "$1"
 }
 UNOBSERVABLE_REASON=
 

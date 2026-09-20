@@ -1194,8 +1194,10 @@ housekeeping() {  # <state>
         # next catch-all scan reads it again, and only a persistent failure is
         # escalated, once per episode, when its consecutive skips reach the bound.
         ident=$(status_observed_signature "$f") || {
-          status_observation_skipped "$f" "$scan_cycle" \
-            && escalate_add "$state" "${f##*/}: status log unobservable, $STATUS_UNOBSERVABLE_COUNT consecutive failed observations, stat helpers failing"
+          if status_observation_skipped "$f" "$scan_cycle" \
+            && escalate_add "$state" "${f##*/}: status log unobservable, $STATUS_UNOBSERVABLE_COUNT consecutive failed observations, stat helpers failing"; then
+            status_observation_reported "$f" || true
+          fi
           continue
         }
         status_observation_succeeded "$f"
