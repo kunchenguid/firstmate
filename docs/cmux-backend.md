@@ -108,6 +108,7 @@ The sibling never carries an `fm-` title and is ignored by recovery.
 The exact window membership is re-read before this operation.
 A selected workspace that is not last closes normally; selection itself is not the trigger.
 Firstmate does not attempt to close the macOS window because cmux's socket cannot close a window holding a live terminal.
+The shared cleanup path also requires a post-close proof that the recorded workspace and scoped task workspace are absent; an unreadable or ambiguous proof fails closed and retains the task identity.
 
 Real tests share the captain's running app rather than creating an isolated cmux session.
 `tests/cmux-test-safety.sh` permits cleanup only for an exact currently listed `fm-test-` workspace and never enumerates and closes unrelated workspaces or relaunches the app.
