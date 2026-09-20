@@ -3739,11 +3739,11 @@ PYTHON
     sleep 0.1
   done
   [ -f "$case_dir/$label.ready" ] || fail "bridge never became ready"
-  SESSION_TEST_IDENTITIES[$BRIDGE_PID]=$(fm_test_pid_identity "$BRIDGE_PID") \
+  SESSION_TEST_IDENTITIES[BRIDGE_PID]=$(fm_test_pid_identity "$BRIDGE_PID") \
     || fail "cannot capture bridge identity"
   if [ "$child" = yes ]; then
     BRIDGE_CHILD_PID=$(cat "$case_dir/$label.ready.child")
-    SESSION_TEST_IDENTITIES[$BRIDGE_CHILD_PID]=$(fm_test_pid_identity "$BRIDGE_CHILD_PID") \
+    SESSION_TEST_IDENTITIES[BRIDGE_CHILD_PID]=$(fm_test_pid_identity "$BRIDGE_CHILD_PID") \
       || fail "cannot capture bridge child identity"
   fi
 }
@@ -3883,11 +3883,11 @@ test_session_process_cleanup_identity() {
   start_test_bridge "$case_dir" "$case_dir/wt" task-x1 default identity
   pid=$BRIDGE_PID
   identity=${SESSION_TEST_IDENTITIES[$pid]}
-  SESSION_TEST_IDENTITIES[$pid]="previous-process-$identity"
+  SESSION_TEST_IDENTITIES[pid]="previous-process-$identity"
   cleanup_session_test_processes
   kill -0 "$pid" 2>/dev/null || fail "cleanup killed a process with a different identity"
   [ "${#SESSION_TEST_IDENTITIES[@]}" -eq 0 ] || fail "cleanup retained a stale PID"
-  SESSION_TEST_IDENTITIES[$pid]=$identity
+  SESSION_TEST_IDENTITIES[pid]=$identity
   cleanup_session_test_processes
   ! kill -0 "$pid" 2>/dev/null || fail "cleanup left a matching process alive"
   [ "${#SESSION_TEST_IDENTITIES[@]}" -eq 0 ] || fail "cleanup retained a completed PID"
