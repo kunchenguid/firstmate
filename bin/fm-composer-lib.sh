@@ -1843,6 +1843,35 @@ _fm_composer_classify_pi_rows() {  # <screen> <styled>
   printf 'empty'
 }
 
+# A native Pi binding can outlive its process after a Muse replacement. Only
+# the current separated region's agent glyph AND adjacent Muse status footer
+# can disambiguate that overlap; launch metadata or a model name in transcript
+# cannot. This changes delivery classification, never native lifecycle state.
+_fm_composer_muse_overlap() {  # <screen> <glyph-row>
+  local screen=$1 row=$2 plain glyph footer effort
+  [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ] || return 1
+  [ "$row" -eq "$((FM_COMPOSER_SCAN_PI_OPEN + 1))" ] || return 1
+  [ "$row" -eq "$((FM_COMPOSER_SCAN_PI_CLOSE - 1))" ] || return 1
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  glyph=$(_fm_composer_screen_row "$row" "$plain")
+  fm_composer_normalize_trim_var glyph
+  case "$glyph" in ❯*) ;; *) return 1 ;; esac
+  footer=$(_fm_composer_screen_row "$((FM_COMPOSER_SCAN_PI_CLOSE + 1))" "$plain")
+  fm_composer_normalize_trim_var footer
+  # Two independent footer cells, in their rendered order. A single model
+  # mention is insufficient. Unknown future footer layouts fail closed.
+  case "$footer" in
+    muse-*' · '*' · '*) ;;
+    *) return 1 ;;
+  esac
+  effort=${footer#*' · '}
+  effort=${effort%%' · '*}
+  case "$effort" in
+    off|minimal|low|medium|high|xhigh|max) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <identity> <bare-row>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 row=$5 agent
   if [ "$has_identity" != 1 ]; then
@@ -1859,6 +1888,14 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
   fi
   agent=${identity%%$'\t'*}
   if [ "$agent" = pi ]; then
+    case "${identity#*$'\t'}" in
+      idle|done)
+        if _fm_composer_muse_overlap "$screen" "$row"; then
+          _fm_composer_classify_bare_row "$screen" "$styled" "$row"
+          return 0
+        fi
+        ;;
+    esac
     _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
   else
     _fm_composer_classify_bare_row "$screen" "$styled" "$row"

@@ -131,6 +131,45 @@ age_path() {  # <path>  (set mtime well past any grace under test)
   touch -t 202001010000 "$1"
 }
 
+# The escalation marker transfers ownership to recovery, not another enqueue.
+# Exercise the real classifier and existing ring API against the stale binding.
+test_recovery_rings_original_escalated_record() (
+  . "$ROOT/bin/fm-task-inbox-lib.sh"
+  . "$ROOT/bin/fm-composer-lib.sh"
+  local state rec screen log rc
+  state="$TMP_ROOT/recover-original/state"
+  mkdir -p "$state"
+  rec=$(fm_task_inbox_write "$state" t1 'start validation once') || fail "write failed"
+  age_path "$rec"
+  fm_task_inbox_record_escalated "$state" t1 "$rec"
+  [ "$(fm_task_inbox_due_action "$state" t1)" = quiet ] || fail "escalated record should stay quiet"
+  screen=$'────────────────────────────────────────────\n❯ \n────────────────────────────────────────────\nmuse-spark-1.3 · xhigh · project · YOLO'
+  log="$state/rings"
+  fm_backend_agent_state() { printf '%s' "${agent_state:-alive}"; }
+  fm_backend_composer_state() {
+    fm_composer_classify_screen $'styled=1\ncursor=0\nidentity=1\nrows=60' "$screen" '' $'pi\tdone'
+  }
+  fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$log"; printf empty; }
+  fm_task_inbox_ring herdr 'session:pane' "$rec" || fail "corrected composer blocked original record"
+  [ "$(wc -l < "$log" | tr -d ' ')" = 1 ] || fail "recovery must ring once"
+  [ -f "$rec" ] || fail "ring is not acknowledgement"
+  [ "$(cat "$state/t1.inbox/.escalated")" = 001.msg ] || fail "ring reset escalation ownership"
+  [ "$(fm_task_inbox_due_action "$state" t1)" = quiet ] || fail "ring restarted an unbounded watcher ladder"
+  screen=${screen/❯ /❯ unfinished input}
+  rc=0; fm_task_inbox_ring herdr 'session:pane' "$rec" || rc=$?
+  [ "$rc" = 1 ] || fail "actual pending input was not protected"
+  agent_state=dead
+  rc=0; fm_task_inbox_ring herdr 'session:pane' "$rec" || rc=$?
+  [ "$rc" = 3 ] || fail "dead endpoint was not refused"
+  [ "$(wc -l < "$log" | tr -d ' ')" = 1 ] || fail "protected endpoint received another ring"
+  mkdir -p "$state/t1.inbox/handled"
+  mv "$rec" "$state/t1.inbox/handled/"
+  fm_task_inbox_oldest_unhandled "$state" t1 >/dev/null && fail "acknowledged validation would dispatch again"
+  [ "$(fm_task_inbox_due_action "$state" t1)" = quiet ] || fail "acknowledgement did not silence recovery"
+  [ "$(find "$state/t1.inbox" -name '*.msg' | wc -l | tr -d ' ')" = 1 ] || fail "recovery duplicated durable instruction"
+  pass "inbox: corrected composer re-rings original escalated record once, preserving acknowledgement and budget"
+)
+
 test_write_is_durable_and_exact() {
   local state rec rec2 doorbell doorbell2 doorbell3 expected actual expected2 actual2 text
   state="$TMP_ROOT/write/state"; mkdir -p "$state"
@@ -697,6 +736,7 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
   pass "watcher: dead-pane recovery overrides stale busy state"
 }
 
+test_recovery_rings_original_escalated_record || exit 1
 test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
