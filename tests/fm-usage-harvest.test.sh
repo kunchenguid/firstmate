@@ -541,6 +541,39 @@ PYFIXTURE
   pass "$harness retirement: event window, rewritten metadata, stamped and legacy turns"
 }
 
+claude_profile_case() (
+  local mode=$1 id="profile-$1" wt data home encoded profile override logdir out
+  wt="$TMP_ROOT/wt-$id"
+  data=$(harvest_case "$id" claude "$wt" default default)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  profile="$TMP_ROOT/alternate profile-$mode"
+  override="$TMP_ROOT/explicit-projects-$mode"
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  mkdir -p "$profile/projects/$encoded" "$override/$encoded"
+  printf '%s\n' '{"type":"assistant","message":{"id":"profile","usage":{"input_tokens":12}}}' \
+    > "$profile/projects/$encoded/session.jsonl"
+  printf '%s\n' '{"type":"assistant","message":{"id":"override","usage":{"input_tokens":34}}}' \
+    > "$override/$encoded/session.jsonl"
+  export CLAUDE_CONFIG_DIR="$profile"
+  unset FM_USAGE_CLAUDE_DIR
+  if [ "$mode" = override ]; then
+    export FM_USAGE_CLAUDE_DIR="$override"
+    logdir="$override/$encoded"
+  else
+    logdir="$profile/projects/$encoded"
+  fi
+  touch -m -r "$logdir/session.jsonl" "$home/state/$id.status"
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "Claude $mode profile harvest succeeds: $out"
+  local expected=12
+  [ "$mode" != override ] || expected=34
+  jq -e --argjson expected "$expected" '.source == "claude-projects" and .input_tokens == $expected' \
+    "$data/usage-ledger.jsonl" >/dev/null || fail "Claude $mode profile precedence"
+  pass "Claude $mode profile resolves usage logs"
+)
+
 claude_case
 claude_nobirth_case
 codex_case
@@ -555,3 +588,6 @@ for harness in claude codex; do
   usage_recovery_case "$harness" unavailable
   retirement_window_case "$harness"
 done
+
+claude_profile_case alternate
+claude_profile_case override

@@ -55,7 +55,7 @@
 #
 # Overrides (test seams and alternate homes):
 #   FM_ROOT_OVERRIDE, FM_HOME, FM_STATE_OVERRIDE, FM_DATA_OVERRIDE  as usual
-#   FM_USAGE_CLAUDE_DIR   default $HOME/.claude/projects
+#   FM_USAGE_CLAUDE_DIR   default ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects
 #   FM_USAGE_CODEX_DIR    default $HOME/.codex/sessions
 #
 # Exit status: 0 on a successful or already-present harvest, 1 on a missing
@@ -68,7 +68,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-CLAUDE_DIR="${FM_USAGE_CLAUDE_DIR:-${HOME:-}/.claude/projects}"
+CLAUDE_DIR="${FM_USAGE_CLAUDE_DIR:-${CLAUDE_CONFIG_DIR:-${HOME:-}/.claude}/projects}"
 CODEX_DIR="${FM_USAGE_CODEX_DIR:-${HOME:-}/.codex/sessions}"
 
 # Portable directory-lock helpers (fm_lock_try_acquire / fm_lock_release) let

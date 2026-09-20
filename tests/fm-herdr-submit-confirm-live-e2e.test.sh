@@ -156,12 +156,32 @@ if [ "$MUSE_AVAILABLE" = 1 ]; then
   done
   [ "$muse_idle" = 1 ] || fail "Muse ($MUSE_VERSION) on $HERDR_VER never registered a native idle muse agent in the lab pane"
 
+  MUSE_TRACE="$TMP_ROOT/muse-submit.trace"
+  : > "$MUSE_TRACE"
+  eval "$(declare -f fm_backend_herdr_wait_for_working | sed '1s/fm_backend_herdr_wait_for_working/fm_live_original_wait_for_working/')"
+  eval "$(declare -f fm_backend_herdr_composer_state | sed '1s/fm_backend_herdr_composer_state/fm_live_original_composer_state/')"
+  fm_backend_herdr_wait_for_working() {
+    local result rc
+    result=$(fm_live_original_wait_for_working "$@")
+    rc=$?
+    printf 'native-wait %s %s\n' "$rc" "$result" >> "$MUSE_TRACE"
+    printf '%s' "$result"
+    return "$rc"
+  }
+  fm_backend_herdr_composer_state() {
+    printf 'composer-fallback\n' >> "$MUSE_TRACE"
+    fm_live_original_composer_state "$@"
+  }
+
   MUSE_TOKEN="FMMUSEPONG$$_$RANDOM"
   muse_verdict=$(fm_backend_herdr_send_text_submit "$MUSE_TARGET" "Reply with exactly $MUSE_TOKEN and nothing else." 3 0.4 0.4) \
     || fail "send_text_submit failed to run against Muse ($MUSE_VERSION) on $HERDR_VER"
   CHECKED=$((CHECKED + 1))
   [ "$muse_verdict" = empty ] \
     || fail "Muse ($MUSE_VERSION) on $HERDR_VER: a landed idle steer must confirm empty, got '$muse_verdict'"
+
+  [ "$(cat "$MUSE_TRACE")" = 'native-wait 0 busy' ] \
+    || fail "Muse ($MUSE_VERSION) on $HERDR_VER: submit must confirm native busy without composer fallback; trace: $(cat "$MUSE_TRACE")"
 
   # Confirm the instruction reached Muse exactly once, not merely that the
   # composer cleared. The flattened token count is the exactly-once signal:
