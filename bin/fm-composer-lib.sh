@@ -95,19 +95,18 @@
 # dark/muted TRUECOLOR foreground - and keeps only normal-intensity,
 # normally-coloured text.
 # It also drops the one cell a harness's SOFTWARE CURSOR draws on top of a
-# placeholder (issue #4912): claude draws its cursor as a
-# reverse-video cell (SGR 7) when it is not using the terminal's native
-# cursor, and on an empty composer that cell covers the FIRST character of the
-# prompt-suggestion ghost, which is then neither dim nor dark and used to
-# survive the strip as one bright letter - enough to read a genuinely idle
-# supervisor composer as `pending` and defer every away-mode escalation for
-# hours (the same shape read a lone `P` off cursor-agent's placeholder). A
-# reverse-video cell is held back until the
-# next visible cell decides: de-emphasised means the cursor sits on the
-# placeholder it hid and the cell is dropped; bright, or end of row, means
-# typed text under the cursor and the cell is kept. Typed input elsewhere on
-# the row is never touched, so a half-typed line stays `pending` whatever the
-# cursor covers.
+# placeholder (issue #4912): claude draws its cursor as a reverse-video cell
+# (SGR 7) when it is not using the terminal's native cursor, and on an empty
+# composer that cell covers the FIRST character of the prompt-suggestion
+# ghost, which is then neither dim nor dark and used to survive the strip as
+# one bright letter - enough to read a genuinely idle supervisor composer as
+# `pending` and defer every away-mode escalation for hours (the same shape
+# read a lone `P` off cursor-agent's placeholder). A reverse-video cell is
+# held back until the next visible cell decides: de-emphasised means the
+# cursor sits on the placeholder it hid and the cell is dropped; bright, or
+# end of row, means typed text under the cursor and the cell is kept. Typed
+# input elsewhere on the row is never touched, so a half-typed line stays
+# `pending` whatever the cursor covers.
 # Ghost stripping is a STYLE test, so it cannot see furniture a harness draws
 # at normal intensity: codex-cli 0.154.0 animates a braille "starfield" around
 # its idle composer in greys on both sides of the ghost luminance ceiling, so
