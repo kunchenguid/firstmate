@@ -2073,6 +2073,9 @@ fm_wake_actor_pending_count() {  # <actor> [<rows-file> <owner-file>]
 # These helpers own wake-facing marker routing, the legacy turn-ended signature,
 # drain-time staleness checks, and guarded bookkeeping writes.
 
+# For a status file this fails with no output when the file could not be
+# observed this poll (fm-classify-lib.sh's status_observed_signature), and every
+# caller treats that as "skip this poll", never as a changed state.
 fm_wake_signal_sig() {  # <file> -> reported-state signature
   case "$1" in
     *.status)

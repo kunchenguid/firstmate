@@ -176,6 +176,52 @@ record_pi_busy() {  # <state-dir> <id>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
+# Install the three status-observation readers the classifier exposes as seams
+# (FM_STATUS_IDENTITY_READER, FM_STATUS_SIZE_READER, FM_STATUS_PATH_STATE_READER)
+# into <dir>/observe-{identity,size,path-state}. While <dir>/observe-fail exists
+# every reader fails, reproducing the poll in which every forked stat helper
+# failed at once while the bash builtin file tests still passed; without it each
+# reader defers to the real helper, so its output is byte-identical to a
+# reader-less observation. Every call appends its name to <dir>/observe-calls.
+make_observe_readers() {  # <dir>
+  local dir=$1 name fn var
+  for name in identity size path-state; do
+    case "$name" in
+      identity) fn=_fm_open_decisions_file_ident; var=FM_STATUS_IDENTITY_READER ;;
+      size) fn=_fm_status_file_size; var=FM_STATUS_SIZE_READER ;;
+      path-state) fn=_status_observed_path_state; var=FM_STATUS_PATH_STATE_READER ;;
+    esac
+    cat > "$dir/observe-$name" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "$name" >> "$dir/observe-calls"
+[ -e "$dir/observe-fail" ] && exit 1
+unset $var
+. "$ROOT/bin/fm-classify-lib.sh"
+$fn "\$1"
+EOF
+    chmod +x "$dir/observe-$name"
+  done
+}
+
+# Start a watcher whose status observations go through make_observe_readers.
+watch_bg_observed() {  # <state> <fakebin> <out> <reader-dir>
+  FM_STATUS_IDENTITY_READER="$4/observe-identity" \
+  FM_STATUS_SIZE_READER="$4/observe-size" \
+  FM_STATUS_PATH_STATE_READER="$4/observe-path-state" \
+    watch_bg "$1" "$2" "$3"
+}
+
+# Encode six observation fields in the r1 signature format the seen markers
+# record, so a test can hand a writer the exact bytes a poisoned marker held.
+encode_status_signature() {  # <size> <ident> <path-state> <link-target> <access> <kind>
+  printf 'r1:%s' "$(printf '%s\0%s\0%s\0%s\0%s\0%s' "$@" | LC_ALL=C od -An -v -tx1 | tr -d ' \n')"
+}
+
+queue_rows_for() {  # <state> <kind> <key> -> count of queued rows
+  [ -e "$1/.wake-queue" ] || { printf '0'; return 0; }
+  grep -c "$(printf '\t%s\t%s\t' "$2" "$3")" "$1/.wake-queue" || true
+}
+
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
 size_of() { LC_ALL=C wc -c < "$1" | tr -d '[:space:]'; }
@@ -290,6 +336,56 @@ test_malformed_seen_signature_reads_the_whole_log() {
   status_span_has_actionable "$f" "$offset" \
     || fail "a malformed seen signature skipped the actionable start of the log"
   pass "a malformed seen signature causes the whole status log to be classified"
+}
+
+# A stat, size, identity, or readlink helper that fails for a status file which
+# still exists is a failed observation, never a state: the signature read fails
+# with no output, and neither marker writer records a signature carrying the
+# error tokens, so a poisoned reported state cannot be written. An absent path
+# and a dangling link keep their signatures, because there the helpers cannot
+# succeed and the tokens ARE the observable state.
+test_marker_writers_refuse_failed_observations() {
+  local dir f marker before sig out rc size ident failed_sig fail_reader gone gsig asig seam
+  dir="$TMP_ROOT/marker-guard"; mkdir -p "$dir"
+  f="$dir/task.status"
+  printf 'done: shipped\n' > "$f"
+  fail_reader="$dir/fail"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$fail_reader"; chmod +x "$fail_reader"
+  sig=$(status_observed_signature "$f") || fail "a readable status file has no signature"
+  for seam in FM_STATUS_SIZE_READER FM_STATUS_IDENTITY_READER FM_STATUS_PATH_STATE_READER; do
+    out=$(
+      export "$seam=$fail_reader"
+      bash -c '. "$1"; status_observed_signature "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$f"
+    )
+    rc=$?
+    [ "$rc" -eq 2 ] && [ -z "$out" ] \
+      || fail "a failing $seam produced a signature instead of a failed observation (rc=$rc out=$out)"
+  done
+  marker="$dir/.seen-task_status"
+  status_presentation_marker_report "$marker" "$sig" || fail "a real signature was refused by marker_report"
+  before=$(cat "$marker")
+  # The exact shape the poisoned markers held: every helper failed on a
+  # readable regular file.
+  failed_sig=$(encode_status_signature size-error identity-error stat-error - readable readable)
+  status_presentation_marker_report "$marker" "$failed_sig" \
+    && fail "marker_report recorded a failed-observation signature as the reported state"
+  [ "$(cat "$marker")" = "$before" ] || fail "a refused marker_report changed the marker"
+  size=$(_fm_status_file_size "$f"); ident=$(_fm_open_decisions_file_ident "$f")
+  FM_STATUS_PATH_STATE_READER="$fail_reader" status_presentation_marker_commit "$marker" "$f" "$size" "$ident" \
+    && fail "marker_commit recorded a classified endpoint from a failed observation"
+  [ "$(cat "$marker")" = "$before" ] || fail "a refused marker_commit changed the marker"
+  status_presentation_marker_commit "$marker" "$f" "$size" "$ident" \
+    || fail "marker_commit refused a successful observation"
+  [ "$(status_presentation_marker_offset "$marker" "$f")" = "$size" ] \
+    || fail "the successful commit did not record its classified endpoint"
+  gone="$dir/gone.status"
+  ln -s "$dir/never-written" "$gone"
+  gsig=$(status_observed_signature "$gone") || fail "a dangling status link lost its signature"
+  status_presentation_marker_report "$dir/.seen-gone_status" "$gsig" \
+    || fail "a dangling status link's signature was refused as a failed observation"
+  asig=$(status_observed_signature "$dir/absent.status") || fail "an absent status path lost its signature"
+  [ -n "$asig" ] || fail "an absent status path produced an empty signature"
+  pass "marker writers refuse failed observations while absent and dangling states keep their signatures"
 }
 
 test_stale_is_terminal_classifier() {
@@ -1499,6 +1595,139 @@ test_working_note_not_working_surfaced() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "surfaced working: note was not queued"
   [ -s "$state/.seen-task_status" ] || fail "surfaced working: note did not advance its .seen-* suppressor"
   pass "a no-verb working: note whose crew is idle with no running pipeline is surfaced"
+}
+
+# --- status signature that could not be observed this poll -------------------
+# Three times in one week every forked stat helper failed in one poll while the
+# bash builtin file tests still passed. The signature became the error tokens,
+# which differed from the recorded reported state, so an unchanged log (one
+# untouched for three days) was surfaced; the error signature was then recorded,
+# so the next poll's real signature differed again and surfaced it a second time.
+# A failed observation must be skipped for that poll and never recorded.
+
+test_unobservable_status_signature_is_skipped_and_never_recorded() {
+  local dir state fakebin out pid marker before status_file
+  dir=$(make_case unobservable-signature); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  status_file="$state/task.status"
+  printf 'working: quiet since yesterday\n' > "$status_file"
+  prime_status_seen "$state" "$status_file"
+  marker="$state/.seen-task_status"
+  [ -s "$marker" ] || fail "fixture: the seen marker was not primed"
+  before=$(cat "$marker")
+  make_observe_readers "$dir"
+  : > "$dir/observe-fail"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · fake default'
+  watch_bg_observed "$state" "$fakebin" "$out" "$dir"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited on a status log whose signature could not be observed: $(cat "$out")"
+  fi
+  [ -s "$dir/observe-calls" ] || { reap "$pid"; fail "fixture: the failing observation readers were never consulted"; }
+  [ "$(queue_rows_for "$state" signal task.status)" = 0 ] \
+    || { reap "$pid"; fail "an unobservable status signature was queued as a signal: $(cat "$state/.wake-queue")"; }
+  [ "$(cat "$marker")" = "$before" ] \
+    || { reap "$pid"; fail "a failed observation was recorded into the seen marker: $(cat "$marker")"; }
+  [ ! -e "$state/.hb-surfaced-task" ] \
+    || { reap "$pid"; fail "a failed observation was recorded into the heartbeat marker"; }
+  # The helpers recover. The unchanged log still matches the marker it kept, so
+  # the second wake of the incident cannot fire either.
+  rm -f "$dir/observe-fail"
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited on an unchanged status log after its stat helpers recovered: $(cat "$out")"
+  fi
+  [ "$(queue_rows_for "$state" signal task.status)" = 0 ] \
+    || { reap "$pid"; fail "an unchanged status log woke firstmate after its stat helpers recovered: $(cat "$state/.wake-queue")"; }
+  [ "$(cat "$marker")" = "$before" ] \
+    || { reap "$pid"; fail "an unchanged status log rewrote its seen marker after recovery"; }
+  # The scan is not blind: a real event through the same recovered readers surfaces.
+  printf 'blocked: a real event after recovery\n' >> "$status_file"
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a real event once its stat helpers recovered"
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the surfaced signal after recovery"
+  [ "$(queue_rows_for "$state" signal task.status)" = 1 ] \
+    || fail "the real event after recovery did not queue exactly one row: $(cat "$state/.wake-queue")"
+  [ "$(cat "$marker")" != "$before" ] || fail "the surfaced real event did not advance the seen marker"
+  pass "a status signature that cannot be observed is skipped for the poll and never recorded"
+}
+
+# The failure above is distinguished from a genuinely missing or unreadable
+# status file by whether the path exists: those states still surface exactly as
+# before, are bounded to one report by recording their observed state, and a
+# readability change is still a new state.
+test_missing_and_unreadable_status_files_still_surface() {
+  local dir state fakebin out pid dark gone root=0
+  dir=$(make_case genuine-unreadable-surfaces); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  gone="$state/gone.status"; dark="$state/dark.status"
+  ln -s "$state/never-written" "$gone"
+  printf 'blocked: hidden behind permissions\n' > "$dark"
+  chmod 000 "$dark"
+  if [ -r "$dark" ]; then root=1; chmod 600 "$dark"; rm -f "$dark"; fi
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · fake default'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a dangling status link: $(cat "$out")"
+  [ "$(queue_rows_for "$state" signal gone.status)" = 1 ] \
+    || fail "a dangling status link did not queue exactly one row: $(cat "$state/.wake-queue")"
+  [ -s "$state/.seen-gone_status" ] || fail "a dangling status link did not record its reported state"
+  if [ "$root" -eq 0 ]; then
+    [ "$(queue_rows_for "$state" signal dark.status)" = 1 ] \
+      || { chmod 600 "$dark"; fail "an unreadable status file did not queue exactly one row: $(cat "$state/.wake-queue")"; }
+    [ -s "$state/.seen-dark_status" ] || { chmod 600 "$dark"; fail "an unreadable status file did not record its reported state"; }
+  fi
+  # Their recorded state bounds each to one report while nothing changes. The
+  # handled rows are drained and acknowledged first, and the later rounds are
+  # armed as the successor a supervision turn arms after handling a wake (the
+  # parked_watch_round pattern below), so they stay in the poll loop instead of
+  # re-announcing the previous round's downtime.
+  ack_stopped_cycle "$state" || { chmod 600 "$dark" 2>/dev/null || true; fail "the surfaced rows could not be drained and acknowledged"; }
+  FM_WATCH_HANDLING_SUCCESSOR=1 watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; chmod 600 "$dark" 2>/dev/null || true
+    fail "watcher re-surfaced an unchanged dangling or unreadable status file: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ "$(queue_rows_for "$state" signal gone.status)" = 0 ] \
+    || { chmod 600 "$dark" 2>/dev/null || true; fail "an unchanged dangling status link was queued again"; }
+  [ "$(queue_rows_for "$state" signal dark.status)" = 0 ] \
+    || { chmod 600 "$dark" 2>/dev/null || true; fail "an unchanged unreadable status file was queued again"; }
+  if [ "$root" -eq 1 ]; then
+    pass "a dangling status link still surfaces once (unreadable half skipped: permissions cannot deny reads here)"
+    return
+  fi
+  # Readability restored is a new observable state, and now a classified one.
+  chmod 600 "$dark"
+  FM_WATCH_HANDLING_SUCCESSOR=1 watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a status file whose permissions were restored"
+  [ "$(queue_rows_for "$state" signal dark.status)" = 1 ] \
+    || fail "restored readability did not queue exactly one row: $(cat "$state/.wake-queue" 2>/dev/null) watcher: $(cat "$out")"
+  [ "$(queue_rows_for "$state" signal gone.status)" = 0 ] \
+    || fail "the unchanged dangling status link rode along with the readability change"
+  pass "genuinely missing and unreadable status files still surface once per observed state"
+}
+
+# The grace-period rescan lists every file the first scan listed, and each
+# listed line used to append its own queue row, so every surfaced status file
+# arrived as two rows with the same epoch and payload.
+test_signal_batch_queues_one_row_per_file() {
+  local dir state fakebin out pid
+  dir=$(make_case one-row-per-file); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  printf 'blocked: need the captain\n' > "$state/task.status"
+  printf 'blocked: need the captain too\n' > "$state/other.status"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · fake default'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface two blocked status files"
+  [ "$(queue_rows_for "$state" signal task.status)" = 1 ] \
+    || fail "the grace-period rescan queued the same status file more than once: $(cat "$state/.wake-queue")"
+  [ "$(queue_rows_for "$state" signal other.status)" = 1 ] \
+    || fail "the grace-period rescan queued the second status file more than once: $(cat "$state/.wake-queue")"
+  [ "$(grep -c "$(printf '\tsignal\t')" "$state/.wake-queue")" = 2 ] \
+    || fail "a two-file signal batch did not queue exactly two rows: $(cat "$state/.wake-queue")"
+  pass "one signal batch queues exactly one row per changed status file"
 }
 
 test_secondmate_status_note_surfaced_despite_busy_agent() {
@@ -5946,6 +6175,7 @@ test_status_span_actionable_classifier
 test_status_span_survives_a_later_routine_append
 test_status_span_respects_decision_closure
 test_malformed_seen_signature_reads_the_whole_log
+test_marker_writers_refuse_failed_observations
 test_stale_is_terminal_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier
@@ -5981,6 +6211,9 @@ test_turn_ended_oversized_churn_bound_surfaced
 test_turn_ended_invalid_churn_deadline_surfaced
 test_turn_ended_surfaced_batch_opens_no_partial_deadline
 test_working_note_not_working_surfaced
+test_unobservable_status_signature_is_skipped_and_never_recorded
+test_missing_and_unreadable_status_files_still_surface
+test_signal_batch_queues_one_row_per_file
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_secondmate_buried_block_wakes_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does

@@ -1316,18 +1316,20 @@ busy_turn_over_age() {  # <task>
 handle_paused_stale() {  # <window> <task> <hash>
   local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age
   key=$(window_key "$win")
+  statusf="$STATE/$task.status"
+  # The declaration is read before any marker moves: a log that cannot be
+  # observed this poll leaves the whole sighting for the next poll to classify.
+  declaration=$(stale_wait_declaration "$task") || { stale_skip_unobserved "$win"; return 0; }
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
-  statusf="$STATE/$task.status"
   mtime=$(stat_mtime "$statusf")
   case "$mtime" in ''|*[!0-9]*) mtime=$(date +%s) ;; esac
   now=$(date +%s)
   age=$(( now - mtime ))
   last=$(last_status_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
-  declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
   if status_is_captain_held "$last"; then
     if afk_record_present; then
       triage_log "absorbed stale (captain-held, never rechecked while the away-posture record exists): $win"
@@ -1405,9 +1407,9 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       # pause tracking stays unwritten here, exactly as the idle away-mode handoff
       # leaves it, because the daemon owns that bookkeeping.
       key=$(window_key "$win")
+      declared=$(stale_wait_declaration "$task") || { stale_skip_unobserved "$win"; return 0; }
       rm -f "$since_file" "$escalation_file"
       clear_write_tracking "$key"
-      declared="declared:$(fm_wake_signal_sig "$statusf" || true)"
       if captain_held_silenced "$(last_status_line "$statusf")"; then
         printf '%s' "$declared" > "$STATE/.stale-$key"
         triage_log "absorbed busy over-age pane (captain-held, never rechecked while the away-posture record exists): $win"
@@ -1549,8 +1551,17 @@ task_captain_call_open() {  # <task>
 # signature. Any new status event - a replacement wait, a fresh delivery, a
 # blocker - changes it and so starts its own window instead of inheriting the
 # silence of the one before it.
-stale_wait_declaration() {  # <task>
-  printf 'declared:%s' "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+stale_wait_declaration() {  # <task> -> 0 with the declaration, 1 when the log could not be observed this poll
+  local sig
+  sig=$(fm_wake_signal_sig "$STATE/$1.status") || return 1
+  printf 'declared:%s' "$sig"
+}
+
+# A status log whose signature could not be observed this poll is not a new
+# declaration: every caller leaves its markers alone, so the same sighting is
+# classified again by the next poll instead of alarming on the failure.
+stale_skip_unobserved() {  # <window>
+  triage_log "skipped stale (status signature unobservable this poll): $1"
 }
 
 # The same scope for a captain call, carrying the CALL's own lifecycle identity
@@ -1561,8 +1572,10 @@ stale_wait_declaration() {  # <task>
 # That first sight is the one alarm this bound must never swallow - a decision
 # waiting on the captain that is never surfaced is invisible, where a delivery
 # announced twice is merely noise.
-captain_call_declaration() {  # <task> <call-identity>
-  printf 'captain-hold:%s:%s' "$2" "$(fm_wake_signal_sig "$STATE/$1.status" || true)"
+captain_call_declaration() {  # <task> <call-identity> -> 1 when the log could not be observed this poll
+  local sig
+  sig=$(fm_wake_signal_sig "$STATE/$1.status") || return 1
+  printf 'captain-hold:%s:%s' "$2" "$sig"
 }
 
 # 0 when <declaration> has already been alarmed for this window inside the
@@ -1598,11 +1611,15 @@ stale_wait_record() {  # <window-key>
 # While the away-posture record exists the bound is absolute: an open captain
 # call is never rechecked, whatever the throttle says, because nobody is there
 # to answer it and the return brief lists it.
+# Returns 0 to absorb the sighting, 1 to alarm, and 2 when the call is open but
+# the status log could not be observed this poll, so the caller skips the
+# sighting without recording anything.
 captain_call_stale_bound() {  # <window-key> <task>
   local key=$1 task=$2
   STALE_WAIT_DECLARATION=
   task_captain_call_open "$task" || return 1
-  STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY")
+  STALE_WAIT_DECLARATION=$(captain_call_declaration "$task" "$CAPTAIN_CALL_IDENTITY") \
+    || { STALE_WAIT_DECLARATION=; return 2; }
   afk_record_present && return 0
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
@@ -1627,7 +1644,7 @@ captain_call_stale_bound() {  # <window-key> <task>
 # above): the status line the worker declared, and the backlog hold firstmate
 # recorded once the captain took the work in hand.
 surface_nonterminal_stale() {  # <window> <hash>
-  local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1 until now
+  local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1 until now bound_rc
   key=$(window_key "$win")
   task=$(window_to_task "$win" "$STATE")
   last=$(last_status_line "$STATE/$task.status")
@@ -1635,7 +1652,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   if status_is_paused "$last"; then
     declared=0
     bounded=0
-    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
+    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task") || { stale_skip_unobserved "$win"; return 0; }
     if until=$(status_paused_until "$last"); then
       now=$(date +%s)
       if [ "$now" -lt "$until" ]; then
@@ -1650,17 +1667,20 @@ surface_nonterminal_stale() {  # <window> <hash>
   elif status_is_captain_held "$last"; then
     declared=0
     bounded=0
-    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task")
+    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task") || { stale_skip_unobserved "$win"; return 0; }
     if captain_held_silenced "$last"; then
       throttled=0
     else
       stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
     fi
-  elif captain_call_stale_bound "$key" "$task"; then
-    bounded=0
-    throttled=0
-  elif [ -n "$STALE_WAIT_DECLARATION" ]; then
-    bounded=0
+  else
+    captain_call_stale_bound "$key" "$task"
+    bound_rc=$?
+    case "$bound_rc" in
+      0) bounded=0; throttled=0 ;;
+      2) stale_skip_unobserved "$win"; return 0 ;;
+      *) [ -z "$STALE_WAIT_DECLARATION" ] || bounded=0 ;;
+    esac
   fi
   if [ "$throttled" -ne 0 ]; then
     fm_wake_append stale "$win" "stale: $win" || exit 1
@@ -1708,6 +1728,9 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # -nt comparison.
 # Status signatures include observable file and readability state, while turn-end
 # markers retain their size-and-mtime signature.
+# A file whose signature cannot be observed this poll (fm_wake_signal_sig fails,
+# the stat-helper failure fm-classify-lib.sh's status_observed_signature owns) is
+# skipped, never listed as changed: the next poll observes it again.
 # Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
@@ -1969,7 +1992,9 @@ heartbeat_scan_finds_actionable() {
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
-      sig=$(status_observed_signature "$f")
+      # An unobservable log is skipped for this scan, not reported: the failure
+      # is the scan's, and the next heartbeat reads the log again.
+      sig=$(status_observed_signature "$f") || continue
       marker=$(_hb_surfaced_path "$task")
       status_presentation_marker_reported_matches "$marker" "$sig" && continue
       FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"ERROR"$'\t'"${sig}"$'\n'
@@ -2492,6 +2517,13 @@ EOF
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    # The re-scan lists every file the first scan listed (no marker has advanced
+    # yet), so keep one line per file - its LAST observed signature, in
+    # first-seen order - before the loops below append a queue row per line.
+    # A failed dedup keeps the undeduplicated list rather than an empty one.
+    deduped=$(printf '%s\n' "$pending" | awk -F '\t' '
+      NF >= 3 { if (!($3 in order)) { order[$3] = ++n; name[n] = $3 } last[$3] = $0 }
+      END { for (i = 1; i <= n; i++) print last[name[i]] }') && [ -n "$deduped" ] && pending=$deduped
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
     # surfacing or absorbing the signal, but never wait on it: see
@@ -2693,7 +2725,7 @@ EOF
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            elif captain_call_stale_bound "$key" "$task"; then
+            elif { captain_call_stale_bound "$key" "$task"; bound_rc=$?; [ "$bound_rc" -eq 0 ]; }; then
               # The line is captain-relevant and stays so, but the backlog says
               # the captain already holds this work: further NEW pane hashes with
               # the same status-log state have nothing to add while they are
@@ -2705,6 +2737,10 @@ EOF
               rm -f "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+            elif [ "$bound_rc" -eq 2 ]; then
+              # An open call whose log could not be observed this poll: no
+              # marker moves, so the next poll classifies this same hash.
+              stale_skip_unobserved "$w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"

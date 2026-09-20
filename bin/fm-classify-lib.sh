@@ -24,6 +24,11 @@
 # observed state alarms once while every unclassified byte remains for recovery.
 # The reported signature includes path type, mode, symlink target, and observable
 # failure kind, so a readability change is a new state that triggers another read.
+# A stat, size, identity, or readlink helper that fails for a path which still
+# exists is a failed observation rather than a state: the signature read fails
+# with no output after one retry, and no marker writer records such a signature,
+# so one transient failure can neither wake the supervisor nor poison the
+# recorded state (status_observed_signature, status_observed_signature_unobservable).
 # A missing, malformed, identity-mismatched, or past-end classified position reads
 # from byte 0, preferring a bounded duplicate over a lost event.
 #
@@ -1380,6 +1385,11 @@ status_daemon_seen_marker_path() {  # <state> <task-id>
   printf '%s/.subsuper-seen-status-%s' "$1" "$(printf '%s' "$2" | tr ':/.' '___')"
 }
 
+# Format check shared by the marker parser and the writers. It deliberately
+# accepts an r1 signature that encodes a failed observation, because a marker
+# an older watcher persisted from one must still parse so its classified
+# position survives until the next successful observation replaces the
+# reported half; refusing failed observations is the writers' job.
 _status_presentation_signature_valid() {
   local value=$1 size ident encoded
   [ "$value" = unverifiable ] && return 0
@@ -1424,6 +1434,10 @@ status_presentation_marker_parse() {
 }
 
 _status_observed_path_state() {
+  if [ -n "${FM_STATUS_PATH_STATE_READER:-}" ]; then
+    "$FM_STATUS_PATH_STATE_READER" "$1"
+    return
+  fi
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     LC_ALL=C /usr/bin/stat -f '%HT:%p' "$1" 2>/dev/null
   else
@@ -1431,14 +1445,24 @@ _status_observed_path_state() {
   fi
 }
 
-status_observed_signature() {
-  local f=$1 size=${2-} ident=${3-} path_state link_target=- access kind encoded
+# One observation of <file>: the six fields the reported signature encodes, in
+# _STATUS_OBSERVED_FIELDS. Returns 0 when they describe a file state and 1 when
+# they describe a failed observation: readlink failed for a symlink, or the
+# stat, size, or identity helper failed for a path that still exists. The same
+# error tokens are a legitimate state for an absent path or a dangling symlink,
+# where the helpers cannot succeed, so those shapes are not failures.
+_STATUS_OBSERVED_FIELDS=()
+_status_observe_fields() {  # <file> [<size> <ident>]
+  local f=$1 size=${2-} ident=${3-} path_state link_target=- access kind exists=1 failed=0
+  _STATUS_OBSERVED_FIELDS=()
   path_state=$(_status_observed_path_state "$f") || path_state=stat-error
   if [ -L "$f" ]; then
-    link_target=$(readlink "$f" 2>/dev/null) || link_target=readlink-error
+    link_target=$(readlink "$f" 2>/dev/null) || { link_target=readlink-error; failed=1; }
     kind=symlink
+    [ -e "$f" ] || exists=0
   elif [ ! -e "$f" ]; then
     kind=absent
+    exists=0
   elif [ ! -f "$f" ]; then
     kind=nonregular
   elif [ -r "$f" ]; then
@@ -1456,10 +1480,67 @@ status_observed_signature() {
     [ -n "$ident" ] || ident=identity-error
   fi
   if [ -r "$f" ]; then access=readable; else access=unreadable; fi
-  encoded=$(printf '%s\0%s\0%s\0%s\0%s\0%s' \
-    "$size" "$ident" "$path_state" "$link_target" "$access" "$kind" \
+  if [ "$exists" -eq 1 ]; then
+    case "$path_state" in stat-error) failed=1 ;; esac
+    case "$size" in size-error) failed=1 ;; esac
+    case "$ident" in identity-error) failed=1 ;; esac
+  fi
+  _STATUS_OBSERVED_FIELDS=("$size" "$ident" "$path_state" "$link_target" "$access" "$kind")
+  [ "$failed" -eq 0 ]
+}
+
+# The reported-state signature of <file>, or no output and status 2 when the
+# file could not be observed: a helper that fails for a path that still exists
+# is a momentary inability to run the stat helpers, not a new file state, so
+# the observation is retried once and then abandoned for this poll rather than
+# encoded. A signature this function prints therefore never carries a failed
+# observation, and a caller that receives status 2 leaves every marker alone.
+status_observed_signature() {  # <file> [<size> <ident>]
+  local f=$1 encoded
+  if ! _status_observe_fields "$f" "${2-}" "${3-}"; then
+    _status_observe_fields "$f" "${2-}" "${3-}" || return 2
+  fi
+  encoded=$(printf '%s\0%s\0%s\0%s\0%s\0%s' "${_STATUS_OBSERVED_FIELDS[@]}" \
     | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
+  [ -n "$encoded" ] || return 1
   printf 'r1:%s' "$encoded"
+}
+
+# 0 when an r1 signature encodes a failed observation rather than a file state,
+# by the same rule _status_observe_fields applies: readlink-error anywhere, or a
+# stat, size, or identity error token for a kind that proves the path existed.
+# The encoded form cannot see whether a symlink's target existed, so for a
+# symlink only a readable access field, which requires a target, proves it. The
+# writers below refuse such a signature, so a marker is never poisoned by one
+# even though status_observed_signature itself no longer emits it.
+status_observed_signature_unobservable() {  # <signature>
+  local hex pair ch field='' fields=() i=0
+  case "$1" in r1:*) hex=${1#r1:} ;; *) return 1 ;; esac
+  case "$hex" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ $(( ${#hex} % 2 )) -eq 0 ] || return 1
+  while [ "$i" -lt "${#hex}" ]; do
+    pair=${hex:i:2}
+    if [ "$pair" = 00 ]; then
+      fields+=("$field")
+      field=''
+    else
+      printf -v ch '%b' "\\x$pair"
+      field="$field$ch"
+    fi
+    i=$((i + 2))
+  done
+  fields+=("$field")
+  [ "${#fields[@]}" -eq 6 ] || return 1
+  [ "${fields[3]}" != readlink-error ] || return 0
+  case "${fields[5]}" in
+    readable|unreadable|nonregular) ;;
+    symlink) [ "${fields[4]}" = readable ] || return 1 ;;
+    *) return 1 ;;
+  esac
+  case "${fields[0]}" in size-error) return 0 ;; esac
+  case "${fields[1]}" in identity-error) return 0 ;; esac
+  case "${fields[2]}" in stat-error) return 0 ;; esac
+  return 1
 }
 
 status_presentation_marker_reported_matches() {
@@ -1481,9 +1562,14 @@ status_presentation_marker_offset() {
   printf '%s' "$offset"
 }
 
+# The two marker writers. Each refuses a reported signature that encodes a
+# failed observation and leaves the existing marker untouched, so a transient
+# stat failure can never become the recorded state that the next successful
+# observation then differs from.
 status_presentation_marker_report() {
   local marker=$1 reported=$2 raw classified=-
   _status_presentation_signature_valid "$reported" || return 1
+  status_observed_signature_unobservable "$reported" && return 1
   if raw=$(cat "$marker" 2>/dev/null) && status_presentation_marker_parse "$raw"; then
     classified=$STATUS_PRESENTATION_CLASSIFIED
   fi
@@ -1496,6 +1582,7 @@ status_presentation_marker_commit() {
   current=$(_fm_open_decisions_file_ident "$file") || return 1
   [ -n "$ident" ] && [ "$ident" = "$current" ] || return 1
   reported=$(status_observed_signature "$file" "$endpoint" "$ident") || return 1
+  status_observed_signature_unobservable "$reported" && return 1
   classified="${endpoint}@${ident}"
   printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
 }

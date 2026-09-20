@@ -361,11 +361,14 @@ classify_signal() {  # <reason-after-colon> <state>
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
-      sig=$(status_observed_signature "$f")
+      # A queued wake is being handled, so the failure is still reported; only
+      # its signature, when the log could not be observed this poll, is left
+      # unrecorded so no marker is written from a failed observation.
+      sig=$(status_observed_signature "$f") || sig=''
       marker=$(_seen_status_path "$state" "$task")
-      status_presentation_marker_reported_matches "$marker" "$sig" && continue
+      [ -z "$sig" ] || ! status_presentation_marker_reported_matches "$marker" "$sig" || continue
       distilled="${distilled}$(basename "$f"): unreadable status span | "
-      [ -n "${FM_STATUS_SPAN_ENDPOINT_FILE:-}" ] \
+      [ -n "${FM_STATUS_SPAN_ENDPOINT_FILE:-}" ] && [ -n "$sig" ] \
         && printf 'ERROR\t%s\t%s\n' "$task" "$sig" >> "$FM_STATUS_SPAN_ENDPOINT_FILE"
       rel=1
       continue
@@ -1182,7 +1185,9 @@ housekeeping() {  # <state>
         "$(status_seen_offset "$state" "$task")")
       rc=$?
       if [ "$rc" -eq 2 ]; then
-        ident=$(status_observed_signature "$f")
+        # A log the scan could not observe is skipped for this scan, not
+        # escalated: the next catch-all scan reads it again.
+        ident=$(status_observed_signature "$f") || continue
         status_presentation_marker_reported_matches "$(_seen_status_path "$state" "$task")" "$ident" \
           && continue
         if escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"; then
@@ -1364,11 +1369,14 @@ handle_wake() {  # <reason> <state>
                     if [ -n "$span_record" ]; then endpoint=${span_record%%$'\t'*}; rest=${span_record#*$'\t'}; ident=${rest%%$'\t'*}; printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" > "$capture"; fi
                     ;;
                   *)
-                    sig=$(status_observed_signature "$state/$task.status")
+                    # A queued wake is being handled, so the failure is still
+                    # classified; a log that could not be observed this poll
+                    # records no signature, so no marker is written from it.
+                    sig=$(status_observed_signature "$state/$task.status") || sig=''
                     marker=$(_seen_status_path "$state" "$task")
-                    if status_presentation_marker_reported_matches "$marker" "$sig"; then
+                    if [ -n "$sig" ] && status_presentation_marker_reported_matches "$marker" "$sig"; then
                       span_failure_repeat=1
-                    else
+                    elif [ -n "$sig" ]; then
                       printf 'ERROR\t%s\t%s\n' "$task" "$sig" > "$capture"
                     fi
                     ;;
