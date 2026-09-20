@@ -93,6 +93,10 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+if [ -f "$SCRIPT_DIR/fm-discord-lib.sh" ]; then
+  # shellcheck source=bin/fm-discord-lib.sh
+  . "$SCRIPT_DIR/fm-discord-lib.sh"
+fi
 
 TMP_FILES=()
 cleanup_tmp_files() {
@@ -314,6 +318,12 @@ if [ -n "$IMAGE_PAYLOAD_FILE" ]; then
 else
   fmx_reply_payload_json "$REQ" "$CHUNKS" "$N" > "$PAYLOAD_FILE" || {
     echo "fm-x-reply: failed to build request payload" >&2; exit 1; }
+fi
+
+if command -v fm_discord_is_selfhosted_request >/dev/null 2>&1 \
+  && fm_discord_is_selfhosted_request "$REQ" "$STATE"; then
+  export FM_HOME FM_STATE_OVERRIDE="$STATE"
+  exec "$SCRIPT_DIR/fm-discord-reply.sh" "$REQ" "$PAYLOAD_FILE" "$ENDPOINT" "${IMAGE_PATH:-}"
 fi
 
 # Preview / dry-run: surface what we WOULD post and stop, without auth or network.

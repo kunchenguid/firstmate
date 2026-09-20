@@ -36,6 +36,10 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+if [ -f "$SCRIPT_DIR/fm-discord-lib.sh" ]; then
+  # shellcheck source=bin/fm-discord-lib.sh
+  . "$SCRIPT_DIR/fm-discord-lib.sh"
+fi
 
 usage() {
   echo "usage: fm-x-dismiss.sh <request_id>" >&2
@@ -62,6 +66,27 @@ command -v jq >/dev/null 2>&1 || { echo "fm-x-dismiss: jq not found" >&2; exit 1
 # a dismiss carries only {request_id}.
 PAYLOAD=$(jq -cn --arg rid "$REQ" '{request_id:$rid}') || {
   echo "fm-x-dismiss: failed to build request payload" >&2; exit 1; }
+
+if command -v fm_discord_is_selfhosted_request >/dev/null 2>&1 \
+  && fm_discord_is_selfhosted_request "$REQ" "$STATE"; then
+  if [ -n "$FMX_DRY" ]; then
+    outbox_dir="$STATE/x-outbox"
+    OUTREC=$(printf '%s' "$PAYLOAD" | jq -c '. + {endpoint:"dismiss"}') || {
+      echo "fm-x-dismiss: failed to build dry-run outbox record" >&2; exit 1; }
+    printf '%s\n' "$OUTREC" \
+      | fmx_private_artifact_publish_stdin "$outbox_dir" "$REQ.json" 600 || {
+      echo "fm-x-dismiss: cannot write dry-run outbox: $outbox_dir/$REQ.json" >&2
+      exit 1
+    }
+    fmx_context_registry_clear "$STATE" "$REQ"
+    printf 'fm-x-dismiss: DRY RUN - would dismiss self-hosted Discord request %s (recorded: state/x-outbox/%s.json)\n' "$REQ" "$REQ" >&2
+    printf '%s\n' "$REQ"
+    exit 0
+  fi
+  fmx_context_registry_clear "$STATE" "$REQ"
+  printf '%s\n' "$REQ"
+  exit 0
+fi
 
 # Preview / dry-run: surface what we WOULD post and stop, without auth or network.
 if [ -n "$FMX_DRY" ]; then
