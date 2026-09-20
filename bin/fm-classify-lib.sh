@@ -1949,6 +1949,10 @@ window_to_task() {
 # pre- and post-append size of an append-only log it just grew, so each new
 # start is at or after the last recorded end; a new range that begins exactly
 # where the last one ended extends that line instead of adding another.
+# status_home_appends_covers depends on that ascending order: it walks the
+# ledger once and ignores any range starting past the point it has reached, so
+# a ledger written out of order would refuse to prove coverage and fail toward
+# waking, never toward silence.
 # An identity mismatch (file rotated) discards the ledger. Teardown deletes it.
 # Not a pure status-file read: status_home_appends_record writes this sidecar.
 # That read-merge-write serializes through bin/fm-wake-lib.sh's fm_lock_*
