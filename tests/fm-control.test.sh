@@ -709,6 +709,20 @@ test_idle_agent_is_not_interrupted() {
   pass "fm-control exit: an idle agent goes straight to its exit command"
 }
 
+test_footer_busy_pi_on_tmux_refuses_exit() {
+  local dir out rc
+  dir=$(new_case footer-busy-pi-composer)
+  add_task "$dir" t1 pi
+  alive_as "$dir" pi
+  printf '────────────────────────\n\n────────────────────────\nworking Pi footer\n' > "$dir/fake/pane"
+  out=$(FM_BUSY_REGEX='working Pi footer' run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a footer-busy Pi on tmux cannot prove its composer empty"
+  assert_contains "$out" "composer state is 'unknown'" "the refusal should name the unproven composer"
+  [ -z "$(literals "$dir")" ] \
+    || fail "a footer-busy Pi on tmux may be blocked on a prompt and must receive no /quit, got: $(literals "$dir")"
+  pass "fm-control exit: a footer-busy Pi on tmux refuses instead of typing /quit"
+}
+
 test_interrupt_without_acknowledgement_preserves_busy_state() {
   local dir gen before after out rc
   dir=$(new_case unconfirmed)
@@ -913,6 +927,7 @@ test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
+test_footer_busy_pi_on_tmux_refuses_exit
 test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait
