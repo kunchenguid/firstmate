@@ -54,7 +54,15 @@ EOF
 classify_probabilities() {
   local probs_json=$1
   jq -r '
-    [ .[] ] as $vals |
+    to_entries |
+    map(
+      if .key == "substantial_change" then
+        .value = (1.0 - .value)
+      else
+        .
+      end
+    ) |
+    [ .[].value ] as $vals |
     if ($vals | length) == 0 then
       "review"
     elif any($vals[]; . <= 0.10) then
@@ -399,9 +407,9 @@ JSON
     "watcher_signal": "pr_merged"
   },
   "questions": {
-    "no_substantial_change": {
+    "substantial_change": {
       "type": "noul",
-      "instructions": "Is it true that no substantial state change occurred (like task completion, PR merge, or new outcome)?"
+      "instructions": "Houve mudança substancial de estado que justifique acordar o supervisor humano?"
     }
   }
 }
@@ -483,9 +491,8 @@ run_live() {
   for fix_id in $fixtures; do
     local fix_json
     fix_json=$(get_fixture "$fix_id")
-    local expected name req_payload
+    local expected req_payload
     expected=$(jq -r '.expected' <<<"$fix_json")
-    name=$(jq -r '.name' <<<"$fix_json")
     req_payload=$(jq -c --arg model "$MODEL" '{model: $model, state: .state, questions: .questions}' <<<"$fix_json")
 
     count=$((count + 1))
