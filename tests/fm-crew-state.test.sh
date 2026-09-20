@@ -2232,6 +2232,115 @@ test_dead_window_ignores_stale_status_log() {
   pass "dead window ignores stale status log"
 }
 
+# bin/fm-agent-memory-lib.sh integration, alive path: emit() appends the
+# recorded scope's live MemoryCurrent to the SAME line every other source
+# already renders, regardless of which branch produced it (here, the
+# authoritative run-step branch reused from test_active_run_is_authoritative).
+# An absent memory_scope= (every pre-feature/non-systemd meta) must add
+# nothing - the pass-through default path fm-spawn.sh guarantees.
+test_memory_current_appended_when_scope_recorded() {
+  reset_fakes
+  local d; d=$(new_case memory-current)
+  make_repo_on_branch "$d/wt" fm/feat-mem
+  make_fakebin "$d" >/dev/null
+  cat > "$d/fakebin/systemctl" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --user ] && [ "${2:-}" = show ]; then
+  for a in "$@"; do
+    case "$a" in
+      MemoryCurrent) printf '104857600\n'; exit 0 ;;
+    esac
+  done
+fi
+exit 1
+SH
+  chmod +x "$d/fakebin/systemctl"
+  fm_write_meta "$d/state/feat-mem.meta" "window=fm:fm-feat-mem" "worktree=$d/wt" "kind=ship" \
+    "memory_scope=fm-feat-mem-g1.scope" "memory_high=3G" "memory_max=6G" "memory_swap_max=2G"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-mem)"
+  local out; out=$(run_crew_state "$d" feat-mem)
+  assert_contains "$out" "state: working" "active run -> working, memory reporting must not change the state verdict"
+  assert_contains "$out" "memory: 100.0M" "a recorded memory scope's live MemoryCurrent is appended, human-formatted"
+  pass "a recorded memory scope's live usage is appended to the state line"
+
+  # Sibling: no memory_scope= recorded (the byte-identical default-path meta
+  # every pre-feature/non-systemd host still writes) adds no memory: detail.
+  local d2; d2=$(new_case memory-absent)
+  make_repo_on_branch "$d2/wt" fm/feat-nomem
+  make_fakebin "$d2" >/dev/null
+  fm_write_meta "$d2/state/feat-nomem.meta" "window=fm:fm-feat-nomem" "worktree=$d2/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-nomem)"
+  out=$(run_crew_state "$d2" feat-nomem)
+  assert_not_contains "$out" "memory:" "no recorded memory_scope= must add no memory: detail"
+  pass "an unrecorded memory scope adds no memory: detail"
+}
+
+# bin/fm-agent-memory-lib.sh integration, dead path: the "backend target gone"
+# detail names the per-worker MemoryMax as the kill cause when the recorded
+# scope's systemd Result is exactly oom-kill, and stays silent for every other
+# Result (still running, exited clean, or never wrapped at all).
+test_memory_gone_detail_names_oom_kill_cause() {
+  reset_fakes
+  local d; d=$(new_case memory-oom)
+  make_repo_on_branch "$d/wt" fm/feat-oom
+  make_fakebin "$d" >/dev/null
+  cat > "$d/fakebin/systemctl" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --user ] && [ "${2:-}" = show ]; then
+  for a in "$@"; do
+    case "$a" in
+      Result) printf 'oom-kill\n'; exit 0 ;;
+    esac
+  done
+fi
+exit 1
+SH
+  chmod +x "$d/fakebin/systemctl"
+  fm_write_meta "$d/state/feat-oom.meta" "window=fm:fm-feat-oom" "worktree=$d/wt" "kind=ship" \
+    "memory_scope=fm-feat-oom-g1.scope" "memory_max=6G"
+  printf 'done: old completion event\n' > "$d/state/feat-oom.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-oom)
+  assert_contains "$out" "backend target gone" "a gone window still reports positive death evidence"
+  assert_contains "$out" "killed by the per-worker memory limit: MemoryMax=6G" \
+    "a Result=oom-kill scope names the exact configured MemoryMax as the kill cause"
+  pass "a gone window's oom-kill scope names the per-worker MemoryMax as the cause"
+
+  # Sibling: the same gone window, but the scope's Result is not oom-kill (an
+  # ordinary clean exit) - the detail must stay silent, never guessing a cause.
+  local d2; d2=$(new_case memory-not-oom)
+  make_repo_on_branch "$d2/wt" fm/feat-notoom
+  make_fakebin "$d2" >/dev/null
+  cat > "$d2/fakebin/systemctl" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --user ] && [ "${2:-}" = show ]; then
+  for a in "$@"; do
+    case "$a" in
+      Result) printf 'success\n'; exit 0 ;;
+    esac
+  done
+fi
+exit 1
+SH
+  chmod +x "$d2/fakebin/systemctl"
+  fm_write_meta "$d2/state/feat-notoom.meta" "window=fm:fm-feat-notoom" "worktree=$d2/wt" "kind=ship" \
+    "memory_scope=fm-feat-notoom-g1.scope" "memory_max=6G"
+  printf 'done: old completion event\n' > "$d2/state/feat-notoom.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+  out=$(run_crew_state "$d2" feat-notoom)
+  assert_contains "$out" "backend target gone" "a gone window still reports positive death evidence"
+  assert_not_contains "$out" "killed by the per-worker memory limit" \
+    "a Result other than oom-kill must never be reported as a memory-limit kill"
+  pass "a gone window's non-oom-kill scope Result adds no memory-limit cause"
+}
+
 # Regression (2026-09 G7 stale-claim incident, tmux half): the default backend
 # reached the same false-death path as herdr. A tmux that cannot answer at all
 # - a trimmed PATH, or any non-definitive error - made every live crew report
@@ -4639,5 +4748,7 @@ test_competing_live_runs_report_unknown_with_both_ids
 test_newer_failed_run_is_not_hidden_by_older_live_run
 test_unverifiable_run_selection_reports_unknown
 test_legacy_conflicting_run_records_report_unknown
+test_memory_current_appended_when_scope_recorded
+test_memory_gone_detail_names_oom_kill_cause
 
 echo "all fm-crew-state tests passed"
