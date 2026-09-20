@@ -160,7 +160,7 @@ The launch commands mirrored `docs/arm-pretool-check.md`'s validation:
 ```sh
 claude -p "$PROMPT" --dangerously-skip-permissions --output-format text
 codex exec --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"
-OPENCODE_CONFIG_CONTENT='{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}' opencode run --standalone --print-logs --log-level INFO "$PROMPT"
+OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' opencode run --print-logs --log-level INFO "$PROMPT"
 pi -p -e .pi/extensions/fm-primary-turnend-guard.ts --no-context-files --no-session "$PROMPT"
 grok --trust -p "$PROMPT" --permission-mode bypassPermissions --output-format plain
 ```
