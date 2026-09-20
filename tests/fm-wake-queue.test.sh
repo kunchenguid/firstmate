@@ -2095,10 +2095,6 @@ test_malformed_presentation_lock_reports_acquire_failure() {
   pass "malformed presentation locks report acquire failure instead of contention"
 }
 
-# Drain-time historical annotation staleness: a turn-ended-only wake row must
-# not present an already-announced status line as a new update, while a status
-# file with unannounced bytes keeps its annotation and a direct status row is
-# always annotated. Driven through the real drain executable.
 # The owned-append ledger is wake-only: it must never withhold a captain-facing
 # turn-ended annotation. An in-flight watcher classification that commits after
 # this home's own close regresses the classified offset behind the owned bytes -
@@ -2142,6 +2138,10 @@ test_owned_growth_still_annotates_turn_ended() {
   pass "owned growth suppresses the wake without hiding the turn-ended annotation"
 }
 
+# Drain-time historical annotation staleness: a turn-ended-only wake row must
+# not present an already-announced status line as a new update, while a status
+# file with unannounced bytes keeps its annotation and a direct status row is
+# always annotated. Driven through the real drain executable.
 test_historical_annotation_skips_announced_status() {
   local dir state out err
   dir=$(make_case historical-annotation)
