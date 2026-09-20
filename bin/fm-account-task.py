@@ -168,6 +168,25 @@ def within(path, root):
     return path != root and root in path.parents
 
 
+def tmux_environment(raw):
+    try:
+        lines = raw.decode("utf-8", "strict").splitlines()
+    except UnicodeError:
+        raise Refusal("runtime-drift") from None
+    result = {}
+    seen = set()
+    for line in lines:
+        unset = line.startswith("-")
+        entry = line[1:] if unset else line
+        name, separator, value = entry.partition("=")
+        require(name and name not in seen and (not unset or not separator) and
+                (unset or bool(separator)), "runtime-drift")
+        seen.add(name)
+        if not unset:
+            result[name] = value
+    return result
+
+
 def safe_path(path, uid, private=False, owned=False, directory=None):
     """No symlink ancestry, foreign writable ancestor, or multiply linked file.
 
@@ -502,6 +521,10 @@ class Route:
         env = command([self.tool("tmux"), "-S", str(socket), "show-environment", "-g"],
                       self.env, self.home, output=True)
         require(hashlib.sha256(env).hexdigest() == runtime["environment_sha256"], "runtime-drift")
+        environment = tmux_environment(env)
+        require(environment.get("HOME") == self.b["account_home"] and
+                "TREEHOUSE_ROOT" not in environment and
+                "XDG_CONFIG_HOME" not in environment, "runtime-drift")
 
     def script(self, name, args, output=False):
         return command([str(self.root / "bin" / name), *args], self.env, self.home,

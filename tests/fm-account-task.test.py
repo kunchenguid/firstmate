@@ -58,7 +58,7 @@ args = sys.argv[1:]
 home = pathlib.Path(os.environ['FM_HOME'])
 if name == 'tmux':
     if args[-2:] == ['show-environment', '-g']:
-        print('NONSECRET=fixture')
+        sys.stdout.write((a / 'tmux-environment').read_text())
     elif 'display-message' in args:
         target = args[args.index('-t') + 1]
         if (a / 'runtime-drift').exists() or target != '=' + f['session'] + ':':
@@ -264,6 +264,9 @@ class RouteTest(unittest.TestCase):
         self.socket_path.chmod(0o600)
         self.fixture = dict(pid=os.getpid(), session='isolated-tools', socket=str(self.socket_path))
         write(self.a / 'fixture.json', json.dumps(self.fixture))
+        self.tmux_environment = self.a / 'tmux-environment'
+        runtime_environment = f'HOME={self.a}\nNONSECRET=fixture\n'
+        write(self.tmux_environment, runtime_environment)
         search = list(dict.fromkeys([str(self.tools), os.path.realpath('/usr/bin'), os.path.realpath('/bin')]))
         tools = {name: str(self.tools / name)
                  for name in ('bash', 'git', 'jq', 'pi', 'python3', 'tasks-axi', 'tmux', 'treehouse')}
@@ -274,7 +277,7 @@ class RouteTest(unittest.TestCase):
                       search_path=search, tools=tools, repositories={'demo':'demo'},
                       profile=dict(kind='scout', model='synthetic/model', effort='low'),
                       runtime=dict(socket=str(self.socket_path), session='isolated-tools', pid=os.getpid(),
-                                   environment_sha256=hashlib.sha256(b'NONSECRET=fixture\n').hexdigest()),
+                                   environment_sha256=hashlib.sha256(runtime_environment.encode()).hexdigest()),
                       guards={}, absent=[str(self.a / 'signal-canary')],
                       denied=[str(self.a / 'private-canary')], receipt='b'*64,
                       expires=int(time.time())+3600)
@@ -300,6 +303,12 @@ class RouteTest(unittest.TestCase):
             p = subprocess.run([PYTHON, '-I', str(self.script), 'digest', str(path)], capture_output=True)
             self.assertEqual(p.returncode, 0, p.stdout)
             self.b['guards'][str(path)] = p.stdout.decode().strip()
+        write(self.path, json.dumps(self.b))
+
+    def set_tmux_environment(self, values):
+        raw = ''.join(f'{name}={value}\n' for name, value in values)
+        write(self.tmux_environment, raw)
+        self.b['runtime']['environment_sha256'] = hashlib.sha256(raw.encode()).hexdigest()
         write(self.path, json.dumps(self.b))
 
     def request(self, verb='submit', payload=None):
@@ -458,6 +467,23 @@ class RouteTest(unittest.TestCase):
         write(override / 'config.toml', 'root = "/invented/override"\n')
         self.assertEqual(self.call(self.request())[1]['refused'], 'route-drift-disabled')
         self.assertEqual(self.calls(), [])
+
+    def test_tmux_environment_redirects_refuse_before_spawn(self):
+        cases = (
+            (('NONSECRET', 'fixture'),),
+            (('HOME', '/invented/wrong-home'), ('NONSECRET', 'fixture')),
+            (('HOME', str(self.a)), ('TREEHOUSE_ROOT', '/invented/override')),
+            (('HOME', str(self.a)), ('XDG_CONFIG_HOME', '/invented/config')),
+        )
+        for values in cases:
+            with self.subTest(values=values):
+                self.set_tmux_environment(values)
+                self.assertEqual(self.call(self.request())[1]['refused'], 'route-drift-disabled')
+                self.assertEqual(self.calls(), [])
+                ledger = self.home / 'state/account-route/ledger.json'
+                if ledger.exists():
+                    ledger.unlink()
+                self.sequence += 1
 
     def test_signal_and_private_canaries_refuse(self):
         write(self.a / 'signal-canary', 'invented')
