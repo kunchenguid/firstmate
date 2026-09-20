@@ -974,6 +974,24 @@ test_claude_secondmate_launch_omits_task_control_channel_authority() {
   pass "a persistent claude secondmate keeps its supervisor contract without a task-worker authority overlay"
 }
 
+test_claude_long_launch_is_delivered_intact() {
+  local rec id out status launch expected
+  id=profile-claude-long-launch-z24
+  rec=$(make_spawn_case profile-claude-long-launch claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "long Claude launch should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  expected=$(claude_expected_launch "$HOME_DIR" "$id" "--dangerously-skip-permissions")
+  [ "${#expected}" -gt 1024 ] \
+    || fail "Claude regression fixture is too short to cover the terminal line limit: ${#expected} bytes"
+  [ "$launch" = "$expected" ] \
+    || fail "long Claude launch was not delivered intact (${#launch}/${#expected} bytes)"
+  pass "fm-spawn: a Claude launch longer than 1024 bytes is delivered intact through the staging path"
+}
+
 test_claude_crewmate_launch_carries_the_attribution_policy() {
   local rec id out status launch
   id=profile-claude-attribution-z22
@@ -1461,6 +1479,7 @@ test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority
+test_claude_long_launch_is_delivered_intact
 test_claude_crewmate_launch_carries_the_attribution_policy
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
