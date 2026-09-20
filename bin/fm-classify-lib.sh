@@ -160,7 +160,7 @@ last_status_line() {  # <status-file> [<previous-event-var>]
 # A bare legacy free-text line counts as an event only when a captain token leads
 # it, so continuation prose that merely mentions one cannot hide a declaration.
 _fm_status_event_scan() {
-  local line last='' prev='' fallback='' verb legacy_re
+  local line last='' prev='' fallback='' verb legacy_re unstamped
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
@@ -170,7 +170,8 @@ _fm_status_event_scan() {
       "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}"|\
       "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}"|\
       "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}") prev=$last; last=$line ;;
-      *) _fm_classify_matches "$line" "$legacy_re" && { prev=$last; last=$line; } ;;
+      *) _fm_status_unstamped "$line" unstamped
+         _fm_classify_matches "$unstamped" "$legacy_re" && { prev=$last; last=$line; } ;;
     esac
   done
   printf '%s\n%s\n' "$prev" "${last:-$fallback}"
@@ -205,11 +206,12 @@ status_is_terminal_verb() {
 # (working, resolved, captain-held) and paused never match from free-text prose;
 # only lines without those leading verbs may still match free-text tokens for
 # legacy bare lines such as "merged" or "PR ready".
-# Regex matching ignores a well-formed optional numeric emission-time tag before
-# the first colon, so existing FM_CAPTAIN_RE overrides keep matching; other
+# Regex matching ignores any emission-time tag before the first colon - here and
+# in the shared event scan, the module's two FM_CAPTAIN_RE sites - so an override
+# keeps matching a stamped event however the worker spelled the stamp; other
 # metadata and note text remain intact, as do the stored and surfaced event bytes.
 status_is_captain_relevant() {
-  local line=$1 verb untimed
+  local line=$1 verb unstamped
   [ -n "$line" ] || return 1
   status_line_verb "$line" verb
   case "$verb" in
@@ -222,8 +224,8 @@ status_is_captain_relevant() {
       done|needs-decision|blocked|failed) return 0 ;;
     esac
   fi
-  _fm_status_untimed "$line" untimed
-  _fm_classify_matches "$untimed" "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
+  _fm_status_unstamped "$line" unstamped
+  _fm_classify_matches "$unstamped" "${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT}"
 }
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
@@ -347,6 +349,30 @@ _fm_status_untimed() {  # <status-line> <out-var> -> line without a time tag
     return 0
   fi
   printf -v "$2" '%s' "$1"
+}
+
+# Strip every time-tag-shaped run from the head, however malformed its value.
+# Captain-relevance asks a different question from emission time and dedup: a
+# tag is metadata a worker appended, so it must never decide whether a terminal
+# event reaches its supervisor, even when the worker left the brief's <epoch>
+# placeholder unsubstituted or wrote a value this module cannot read as a time.
+# Only the head is normalized, so an [at=...] run inside the note stays matchable
+# text. A tag holding the line's first colon is not a tag at all - it breaks the
+# head/note split itself - so it survives here as the ordinary bytes it is.
+_fm_status_unstamped() {  # <status-line> <out-var> -> line with head tags removed
+  local __fm_unstamped_head __fm_unstamped_rest __fm_unstamped_keep=''
+  case "$1" in
+    *:*) __fm_unstamped_head=${1%%:*}; __fm_unstamped_rest=:${1#*:} ;;
+    *) printf -v "$2" '%s' "$1"; return 0 ;;
+  esac
+  while :; do
+    case "$__fm_unstamped_head" in *\[at=*\]*) ;; *) break ;; esac
+    __fm_unstamped_keep=$__fm_unstamped_keep${__fm_unstamped_head%%\[at=*}
+    __fm_unstamped_keep=${__fm_unstamped_keep% }
+    __fm_unstamped_head=${__fm_unstamped_head#*\[at=}
+    __fm_unstamped_head=${__fm_unstamped_head#*\]}
+  done
+  printf -v "$2" '%s' "$__fm_unstamped_keep$__fm_unstamped_head$__fm_unstamped_rest"
 }
 
 # Retry deduplication ignores only a well-formed optional numeric time tag;

@@ -231,13 +231,17 @@ test_fixture_snapshot_json() {
       | has("age_seconds") and .age_seconds == $age
         and (has("emitted_at_epoch") | not)
     ' >/dev/null || fail "event age came from something other than the record: $line"
+    # parent_event age is the emission age; freshness is how old this snapshot's
+    # own observation of the file is, so the 2020 mtime must show up there and
+    # only there.
     printf '%s' "$out" | jq -e --argjson age "$expected_age" '
       .secondmate_current.records[] | select(.id == "secondmate-task")
       | .current.state == "unknown"
         and .parent_event.age_seconds == $age
         and (.parent_event | has("emitted_at_epoch") | not)
-        and .freshness.age_seconds == $age
-    ' >/dev/null || fail "fallback confused event age and current state: $line"
+        and (.freshness.age_seconds | type) == "number"
+        and .freshness.age_seconds > 100000000
+    ' >/dev/null || fail "fallback confused event age, observation freshness, and current state: $line"
     if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
       printf '$ touch -t 202001010000 %s\n' "$home/state/secondmate-task.status"
       printf '$ FM_HOME=%s FM_SNAPSHOT_NOW_EPOCH=%s bin/fm-fleet-snapshot.sh --json\n' "$home" "$observed"

@@ -654,8 +654,12 @@ test_captain_override_ignores_event_time() {
     done
   done
   FM_CAPTAIN_RE='^custom-verb: audit complete$'
-  for line in 'custom-verb: audit complete' 'custom-verb [at=1700000000]: audit complete'; do
+  for line in 'custom-verb: audit complete' 'custom-verb [at=1700000000]: audit complete' \
+    'custom-verb [at=<epoch>]: audit complete'; do
     status_is_captain_relevant "$line" || fail "timestamp broke custom verb override: $line"
+    printf '%s\n' 'working: started' "$line" > "$dir/state/task.status"
+    [ "$(last_status_line "$dir/state/task.status")" = "$line" ] \
+      || fail "event scan skipped the stamped custom-verb event: $line"
   done
   FM_CAPTAIN_RE="^done \\[corr=$CORR\\]: literal \\[at=1700000000\\]$"
   for line in "done [corr=$CORR]: literal [at=1700000000]" \
@@ -689,14 +693,26 @@ test_malformed_event_time_is_ordinary_bytes() {
       event=$(status_span_first_actionable "$dir/state/task.status" 0) \
         || fail "default vocabulary hid actionable status span: $line"
       [ "$event" = "$line" ] || fail "classification changed surfaced event bytes: $event"
+      # A tag the worker spelled wrong is still a tag, so it must not decide
+      # whether the supervisor sees a terminal event. The colon-bearing forms
+      # hold the line's own head/note separator, so they stay ordinary bytes.
+      case "$line" in
+        *'[at=17:00]'*) continue ;;
+      esac
       (
         FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'
-        status_is_captain_relevant "$line" && exit 1
+        status_is_captain_relevant "$line" || exit 1
         exit 0
-      ) || fail "override matched a malformed tag as a stripped time: $line"
+      ) || fail "override lost a terminal event to a malformed tag: $line"
+      printf '%s\n' "$line" > "$dir/state/scan.status"
+      (
+        FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'
+        event=$(last_status_line "$dir/state/scan.status")
+        [ "$event" = "$line" ] || exit 1
+      ) || fail "event scan lost a terminal event to a malformed tag: $line"
     done
   done
-  pass "malformed event times stay ordinary line bytes for every reader"
+  pass "malformed event times stay ordinary line bytes without hiding the event"
 }
 
 test_captain_override_ignores_event_time
