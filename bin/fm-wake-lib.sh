@@ -1347,6 +1347,49 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   rm -f "$marker" 2>/dev/null || true
 }
 
+# Reclaim only a positively owned, just-returned slot while the caller holds
+# Firstmate's project allocation lock. Treehouse destroy rechecks its own lease,
+# process, clean and merged predicates under its pool lock; never lift them.
+# A receipt lives outside the pool in durable task data. Persist intent before
+# deletion and the measured result afterward; any receipt failure is fatal.
+fm_treehouse_reclaim_returned_slot() {  # <project> <worktree> <task-id> <data-dir>
+  local project=$1 worktree=$2 id=$3 data=$4 receipt tmp before after outcome rc=0
+  fm_treehouse_pool_slot "$project" "$worktree" || return 0
+  fm_treehouse_slot_owner_state "$worktree" "$id"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 0
+  receipt="$data/$id/reclamation"
+  mkdir -p "$data/$id" || return 1
+  [ ! -L "$receipt" ] && [ ! -L "$data/$id" ] || return 1
+  [ ! -e "$receipt" ] || [ -f "$receipt" ] || return 1
+  before=$(du -sk "$worktree" 2>/dev/null | awk '{print $1}')
+  case "$before" in ''|*[!0-9]*) return 1 ;; esac
+  tmp="$receipt.tmp.${BASHPID:-$$}"
+  ( umask 077; set -C
+    printf 'task=%s\nworktree=%s\nstatus=pending\nbefore_kib=%s\n' \
+      "$id" "$worktree" "$before" > "$tmp"
+  ) || return 1
+  mv -f "$tmp" "$receipt" || return 1
+  if ( cd "$project" && treehouse destroy "$worktree" --yes ); then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ ! -e "$worktree" ] && [ ! -L "$worktree" ]; then
+    after=0
+    outcome=reclaimed
+  else
+    after=$(du -sk "$worktree" 2>/dev/null | awk '{print $1}')
+    case "$after" in ''|*[!0-9]*) return 1 ;; esac
+    outcome=preserved
+  fi
+  ( umask 077; set -C
+    printf 'task=%s\nworktree=%s\nstatus=%s\nbefore_kib=%s\nafter_kib=%s\ncommand_exit=%s\n' \
+      "$id" "$worktree" "$outcome" "$before" "$after" "$rc" > "$tmp"
+  ) || return 1
+  mv -f "$tmp" "$receipt" || return 1
+  echo "teardown: slot $outcome; measured ${before} KiB before, ${after} KiB after; receipt $receipt" >&2
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"

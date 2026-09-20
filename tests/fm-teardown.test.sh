@@ -3666,6 +3666,40 @@ EOF
   pass "the run abort and the leaked-process reap both complete before the destructive worktree return"
 }
 
+# A terminal teardown reaches exact-slot reclaim without a separate operator pass.
+test_terminal_pool_slot_reclaimed() {
+  local case_dir wt rc=0
+  case_dir=$(make_case terminal-reclaim)
+  mkdir -p "$case_dir/pool/1"
+  wt="$case_dir/pool/1/project"
+  git -C "$case_dir/project" worktree move "$case_dir/wt" "$wt"
+  printf '{}\n' > "$case_dir/pool/treehouse-state.json"
+  printf 'task=task-x1\nhome=%s\n' "$case_dir" > "$case_dir/pool/1/.fm-slot-owner"
+  write_meta "$case_dir" local-only ship
+  sed "s|worktree=$case_dir/wt|worktree=$wt|" "$case_dir/state/task-x1.meta" > "$case_dir/meta-new"
+  mv "$case_dir/meta-new" "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/treehouse" <<'SHIM'
+#!/usr/bin/env bash
+case "$1" in
+  return) exit 0 ;;
+  destroy)
+    [ "$#" = 3 ] && [ "$3" = --yes ] || exit 2
+    git worktree remove "$2"
+    ;;
+  *) exit 2 ;;
+esac
+SHIM
+  chmod +x "$case_dir/fakebin/treehouse"
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "terminal reclamation should complete"
+  assert_absent "$wt" "terminal reclamation left eligible slot"
+  assert_grep 'status=reclaimed' "$case_dir/data/task-x1/reclamation" "missing durable reclamation receipt"
+  assert_absent "$case_dir/state/task-x1.meta" "terminal reclamation left metadata"
+  pass 'terminal teardown automatically reclaims owned returned pool slot'
+}
+
+test_terminal_pool_slot_reclaimed
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator

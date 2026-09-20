@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# Returned, positively owned Treehouse slots are automatically reclaimed through
+# exact-path `treehouse destroy --yes` with no safety override flags, under the
+# existing project lock. Dirty, unmerged, leased and in-use slots are preserved.
+# data/<id>/reclamation records pending intent and measured before/after KiB;
+# receipt persistence failure aborts teardown, retaining task metadata.
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
 # clear volatile state, and transition this home's backlog item for ship and
@@ -3450,6 +3455,10 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # it here - and only after a return that succeeded - keeps a returned slot
   # unclaimed until its next holder claims it, and leaves the claim in place
   # whenever the return did not actually happen.
+  fm_treehouse_reclaim_returned_slot "$PROJ" "$WT" "$ID" "$DATA" || {
+    echo "error: could not persist worktree reclamation evidence; teardown aborted" >&2
+    exit 1
+  }
   fm_treehouse_slot_owner_release "$WT" "$ID"
 fi
 
