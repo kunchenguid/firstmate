@@ -363,7 +363,7 @@ fm_backend_herdr_workspace_label() {
     id=$(tr -d '[:space:]' < "$marker" 2>/dev/null)
     if [ -n "$id" ]; then
       printf '2ndmate-%s' "$id"
-      return "$close_failed"
+      return 0
     fi
   fi
   printf 'firstmate'

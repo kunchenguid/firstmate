@@ -410,6 +410,16 @@ report_child_ledger_locked() { # <id> <meta>
   fingerprint=$(sha256_text "$incarnation|$id|$state|ledger|$last")
   outcome_key="child-outcome-$id-$state-${fingerprint:0:8}"
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct upstream "$pr" || return 1
+  if ! reap_terminal_child_locked "$id" "$meta"; then
+    if [ -n "$RECORD_PENDING" ]; then
+      notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
+        "child terminal cleanup needs retry before parent report: child=$id state=$state"
+    else
+      publish_actionable "inactive-reconcile:$fingerprint" \
+        "child terminal cleanup needs retry before parent report: child=$id state=$state" || true
+    fi
+    return 1
+  fi
   [ -n "$RECORD_PENDING" ] || return 0
   last_status_line "$status" previous >/dev/null
   predecessor_head=$(sha256_text "$previous")
@@ -476,12 +486,13 @@ report_child() { # <id>
 }
 
 reap_terminal_child_locked() { # <id> <meta>
-  local id=$1 meta=$2 backend target pids pid
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
-  backend=$(clean_field "$(meta_field "$meta" backend)")
-  [ -n "$backend" ] || backend=tmux
-  target=$(clean_field "$(meta_field "$meta" window)")
-  [ -n "$target" ] || return 0
+  local id=$1 meta=$2 backend target pids pid tab_id expected_label
+  [ -f "$SCRIPT_DIR/fm-backend.sh" ] || return 1
+  # shellcheck source=bin/fm-backend.sh
+  . "$SCRIPT_DIR/fm-backend.sh"
+  fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1 || return 1
+  backend=$FM_BACKEND_VALIDATED_BACKEND
+  target=$FM_BACKEND_VALIDATED_TARGET
   if [ "$backend" = tmux ] && command -v tmux >/dev/null 2>&1; then
     pids=$(tmux list-panes -t "$target" -F '#{pane_pid}' 2>/dev/null || true)
     for pid in $pids; do
@@ -490,13 +501,19 @@ reap_terminal_child_locked() { # <id> <meta>
       fi
     done
   fi
-  if [ -f "$SCRIPT_DIR/fm-backend.sh" ]; then
-    # shellcheck source=bin/fm-backend.sh
-    . "$SCRIPT_DIR/fm-backend.sh"
-    fm_backend_kill "$backend" "$target" 2>/dev/null
-  elif [ "$backend" = tmux ] && command -v tmux >/dev/null 2>&1; then
-    tmux kill-window -t "$target" 2>/dev/null
-  fi
+  expected_label="fm-$id"
+  case "$backend" in
+    zellij)
+      tab_id=$(clean_field "$(meta_field "$meta" zellij_tab_id)")
+      fm_backend_kill "$backend" "$target" "$tab_id" "$expected_label" 2>/dev/null
+      ;;
+    cmux)
+      fm_backend_kill "$backend" "$target" '' "$expected_label" 2>/dev/null
+      ;;
+    *)
+      fm_backend_kill "$backend" "$target" 2>/dev/null
+      ;;
+  esac
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
@@ -546,6 +563,9 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
         queue_notice_once "$RECORD_PENDING" "inactive-reconcile:$fingerprint" \
           "inactive terminal cleanup needs retry before presentation: child=$id state=$state" || true
       fi
+    else
+      publish_actionable "inactive-reconcile:$fingerprint" \
+        "inactive terminal cleanup needs retry before delivery: child=$id state=$state" || true
     fi
     return 1
   fi
