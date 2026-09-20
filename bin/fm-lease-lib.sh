@@ -57,10 +57,10 @@
 #     record exists (bin/fm-afk-contract.sh validate; docs/pi-supervision-
 #     branch.md "Postures"), main is parked and its STANDING authority
 #     relocates to the branch for exactly the actions whose guarded script
-#     opts in with --away-relocated: the PR merge (its own grant-or-yolo,
-#     live-head-green, synchronous gate still decides), a fresh spawn of
-#     already-queued work (its own spend-cap gate still decides), and a
-#     decision answer (ask-user-authority's judgment still decides). The
+#     opts in with --away-relocated: a PR merge, a fresh spawn of queued work,
+#     and a decision answer. Each guarded script keeps its own mechanical gate;
+#     bin/fm-branch-prompt.sh "Postures" owns how the branch judges the
+#     captain's away words before invoking one. The
 #     relocation grants nothing beyond what main could do attended: it only
 #     changes which actor may reach the guarded script's own gate. An action
 #     that has no record-side gate of its own - landing local-only work - is
