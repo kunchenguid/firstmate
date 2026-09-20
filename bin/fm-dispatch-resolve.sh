@@ -253,7 +253,7 @@ record_actual_dispatch() {
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 no_rules() {
   local result
-  result=$(jq -cn --arg model "$TS_MODEL" '{status:"escalate", reason:"no rules to match", model:null, latency_ms:null, tokens:null, probabilities:null, confidence:null}')
+  result=$(jq -cn --arg model "$TS_MODEL" '{status:"escalate", reason:"no rules to match", model:null, latency_ms:null, tokens:null, probabilities:null, confidence:null}' 2>/dev/null)
   printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
   write_resolution_receipt "$result" >/dev/null 2>&1 || receipt_failed || true
   exit 0
@@ -293,7 +293,6 @@ fi
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"
 [ -r "$BRIEF" ] || die "brief file not readable: $BRIEF"
-command -v jq >/dev/null 2>&1 || die "jq required"
 BRIEF_SNAPSHOT=$(mktemp) || die "mktemp failed"
 cp "$BRIEF" "$BRIEF_SNAPSHOT" || die "could not snapshot brief file: $BRIEF"
 chmod 400 "$BRIEF_SNAPSHOT" || die "could not protect brief snapshot"
@@ -306,6 +305,7 @@ if [ "$MODE" = dispatch ]; then
 fi
 [ -z "$DISPATCH_HARNESS$DISPATCH_MODEL$DISPATCH_EFFORT" ] || die "dispatch profile flags need --record-dispatch"
 [ -e "$RULES_PATH" ] || [ -L "$RULES_PATH" ] || no_rules
+command -v jq >/dev/null 2>&1 || die "jq required"
 [ -r "$RULES_PATH" ] || die "rules file not readable: $RULES_PATH"
 RULES=$(mktemp) || die "mktemp failed"
 cp "$RULES_PATH" "$RULES" || die "could not snapshot rules file: $RULES_PATH"
@@ -400,9 +400,10 @@ done < <(jq -r '
 RULE_COUNT=$(jq -r '(.rules // []) | length' "$RULES")
 
 emit_error() {
-  local reason=$1 result
-  result=$(jq -cn --arg reason "$reason" --argjson latency "$LAT_MS" '
+  local reason=$1 result default_result
+  default_result=$(jq -cn --arg reason "$reason" --argjson latency "$LAT_MS" '
     {status:"error", reason:$reason, model:null, latency_ms:$latency, tokens:null, probabilities:null, confidence:null}')
+  result=$default_result
   if [ -n "$RESP_FILE" ] && [ -s "$RESP_FILE" ]; then
     result=$(jq -c --arg reason "$reason" --argjson latency "$LAT_MS" '
       {
@@ -413,8 +414,7 @@ emit_error() {
         tokens:(if (.usage | type) == "object" then .usage else null end),
         probabilities:(if (.answers.rule.probabilities | type) == "object" then .answers.rule.probabilities else null end),
         confidence:(if (.answers.rule.confidence | type) == "number" then .answers.rule.confidence else null end)
-      }' "$RESP_FILE" 2>/dev/null) || result=$(jq -cn --arg reason "$reason" --argjson latency "$LAT_MS" '
-        {status:"error", reason:$reason, model:null, latency_ms:$latency, tokens:null, probabilities:null, confidence:null}')
+      }' "$RESP_FILE" 2>/dev/null) || result=$default_result
   fi
   echo "dispatch-resolve: error ($reason)" >&2
   printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"

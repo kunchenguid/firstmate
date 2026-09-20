@@ -411,6 +411,25 @@ assert_not_contains "$out" '  profile:' "absent rules file emits no profile"
 assert_absent "$LOG/argv" "absent rules file never calls curl"
 assert_absent "$LOG/quota-axi.calls" "absent rules file never reads quota"
 
+# --- an absent rules file needs no jq -------------------------------------------
+NO_JQ_BIN="$TMP_ROOT/no-jq-bin"
+mkdir -p "$NO_JQ_BIN"
+for command_name in awk bash chmod cp date dirname mktemp rm sha256sum shasum; do
+  jq_free_command=$(command -v "$command_name") && ln -sf "$jq_free_command" "$NO_JQ_BIN/$command_name"
+done
+[ ! -e "$NO_JQ_BIN/jq" ] || fail "the jq-free PATH must not carry jq"
+reset_log
+out=$(PATH="$NO_JQ_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" "$TOOL" "$BRIEF" 2> "$TMP_ROOT/stderr")
+code=$?
+err=$(cat "$TMP_ROOT/stderr")
+expect_code 0 "$code" "absent rules with no jq still exits 0"
+assert_equals 'dispatch-resolve:
+  status: escalate
+  reason: no rules to match' "$out" "absent rules with no jq still prints the escalate block"
+assert_equals 'dispatch-resolve: no resolution receipt for this run' "$err" "absent rules with no jq lose the receipt and nothing else"
+assert_absent "$LOG/argv" "absent rules with no jq never calls curl"
+pass "an absent rules file returns control to firstmate without jq"
+
 DEFAULT_ONLY="$TMP_ROOT/default-only.json"
 EMPTY_RULES="$TMP_ROOT/empty-rules.json"
 printf '%s\n' '{"default":[{"harness":"claude","model":"opus"},{"harness":"cursor","model":"cursor-grok-4.6-high"}]}' > "$DEFAULT_ONLY"
