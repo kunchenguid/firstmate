@@ -4599,7 +4599,15 @@ fi
 # lands as an unfinished command line and no agent starts. Sourcing runs the
 # command in the pane shell exactly as if it had been typed.
 LAUNCH_FILE="$TASK_TMP/launch.sh"
-if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_FILE"); then
+LAUNCH_STAGE="$TASK_TMP/.launch.sh.$$.tmp"
+if [ -L "$LAUNCH_FILE" ] ||
+  { [ -e "$LAUNCH_FILE" ] && [ ! -f "$LAUNCH_FILE" ]; }; then
+  echo "error: task launch file $LAUNCH_FILE is not a regular file; refusing to replace it" >&2
+  exit 1
+fi
+if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
+  chmod 0600 "$LAUNCH_STAGE" && mv -f "$LAUNCH_STAGE" "$LAUNCH_FILE"); then
+  rm -f "$LAUNCH_STAGE"
   echo "error: could not stage the launch command at $LAUNCH_FILE" >&2
   exit 1
 fi

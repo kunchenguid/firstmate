@@ -345,6 +345,8 @@ test_kimi_spawn_refuses_shared_task_temp_root() {
   rm -rf "$task_tmp"
   mkdir "$task_tmp"
   chmod 755 "$task_tmp"
+  printf 'stale launch command\n' > "$task_tmp/launch.sh"
+  chmod 644 "$task_tmp/launch.sh"
   rec=$(make_spawn_case ownedtmp "$id")
   read_spawn_record "$rec"
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
@@ -352,8 +354,10 @@ test_kimi_spawn_refuses_shared_task_temp_root() {
   expect_code 0 "$rc" "kimi spawn should reuse an existing temp root it owns: $out"
   [ "$(path_mode "$task_tmp")" = 700 ] \
     || fail "kimi spawn did not tighten its reused task temp root: $(path_mode "$task_tmp")"
+  [ "$(path_mode "$task_tmp/launch.sh")" = 600 ] \
+    || fail "kimi spawn did not tighten a reused launch file: $(path_mode "$task_tmp/launch.sh")"
   rm -rf "$task_tmp"
-  pass "fm-spawn: a task temp root others can write is refused, and an owned one is tightened to 0700"
+  pass "fm-spawn: unsafe task roots are refused, owned roots are tightened, and reused launch files stay 0600"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
