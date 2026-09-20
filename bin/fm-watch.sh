@@ -1376,24 +1376,22 @@ handle_paused_stale() {  # <window> <task> <hash>
 # per PAUSE_RESURFACE_SECS so a forgotten parked task cannot rot invisibly - and
 # never the wedge ladder. The re-surface age is anchored on the marker's own
 # mtime (when the stop was recorded) rather than the status file or pane hash, so
-# a churny idle pane cannot reset the cadence. The scope is the marker's content
-# (the stop epoch), so a re-stop after a relaunch starts a fresh window instead
-# of inheriting the previous one's throttle. Uses its own .deliberate-stop-*-
+# a churny idle pane cannot reset the cadence. Each stop's marker mtime opens
+# its own window, so a re-stop is absorbed on first sight rather than waking at
+# once off the previous stop's throttle. Uses its own .deliberate-stop-*-
 # throttle rather than the .paused-* flag, because the .paused-* machinery is
 # cleared whenever the last status line stops declaring a wait - a deliberately
 # stopped worker's last line is routinely `done:`, not a wait declaration.
 handle_deliberate_stop_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key marker age scope
+  local win=$1 task=$2 h=$3 key marker age
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
   clear_write_tracking "$key"
   marker=$(fm_control_deliberate_stop_marker "$STATE" "$task")
   age=$(age_of "$marker")
-  scope="deliberate-stop:$(cat "$marker" 2>/dev/null || true)"
   resurface_absorbed "$win" "$STATE/.deliberate-stop-resurfaced-$key" "$age" \
-    "stale: $win (deliberately stopped ${age}s ago, rechecked on a long cadence not a wedge; relaunch the worker or clean up the finished task)" \
-    "$scope"
+    "stale: $win (deliberately stopped ${age}s ago, rechecked on a long cadence not a wedge; relaunch the worker or clean up the finished task)"
   triage_log "absorbed stale (deliberate stop, age ${age}s): $win"
 }
 

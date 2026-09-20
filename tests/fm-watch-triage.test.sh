@@ -2046,6 +2046,65 @@ test_deliberately_stopped_finished_task_is_parked_not_stale() {
   pass "a deliberately stopped finished task is parked on the bounded recheck cadence, never wedge-escalated"
 }
 
+# --- deliberate stop: a re-stop absorbs on first sight despite a stale throttle ---
+# Regression: the deliberate-stop absorb passed the marker's stop epoch as the
+# resurface "scope", and resurface_absorbed treats a scope change as an
+# unconditional re-surface. A task re-stopped after an earlier stop had recorded
+# this window's throttle therefore woke on first sight ("deliberately stopped 0s
+# ago") instead of absorbing. The marker's own mtime already opens each stop's
+# window, so the scope is gone and the first sight absorbs again, while the
+# bounded recheck still fires once the marker passes the cadence.
+test_restopped_deliberate_task_absorbs_before_the_recheck_cadence() {
+  local dir state fakebin out capture_file window key pane_hash sig pid now throttle
+  dir=$(make_case deliberate-stop-restop); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-restop"
+  printf 'finished, deliberately parked twice' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/restop.meta"
+  printf 'done: investigation finished\n' > "$state/restop.status"
+  sig=$(seen_sig "$state/restop.status"); printf '%s' "$sig" > "$state/.seen-restop_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, deliberately parked twice")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A prior stop recorded this window's re-surface throttle; the worker was then
+  # relaunched and stopped again, rewriting the marker with a fresh epoch.
+  now=$(date +%s)
+  throttle="$state/.deliberate-stop-resurfaced-$key"
+  printf 'deliberate-stop:%s' "$(( now - 1000 ))" > "$throttle"
+  set_mtime "$(( now - 1000 ))" "$throttle"
+  printf '%s\n' "$now" > "$state/restop.deliberate-stop"
+
+  # The fresh re-stop must be absorbed on first sight: no wake, no wedge timer.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a re-stopped task woke on first sight off the previous stop's throttle: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a re-stopped task printed a wake during its first-sight absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "a re-stopped task enqueued a wake during its first-sight absorb"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a re-stop absorb must not start the wedge timer"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional re-stop absorb watcher stop"
+
+  # Past the cadence the parked task still re-surfaces exactly once, so the scope
+  # removal did not silence the bounded recheck.
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/restop.deliberate-stop"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a re-stopped task did not re-surface past the recheck cadence"; }
+  grep -F "deliberately stopped" "$out" >/dev/null || fail "the re-stop recheck was not labeled a deliberate-stop recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a re-stopped task was mislabeled a possible wedge"
+  pass "a re-stopped deliberate task absorbs on first sight, then still re-surfaces on the bounded cadence"
+}
+
 # --- clearing the deliberate-stop marker returns the task to normal supervision ---
 # Relaunch and cleanup clear the marker (fm-spawn/fm-teardown), and the next stale
 # sighting of the now-marker-less task must take the ordinary path again: a
@@ -6092,6 +6151,7 @@ test_unreadable_status_reports_once_per_file_state
 test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
 test_deliberately_stopped_finished_task_is_parked_not_stale
+test_restopped_deliberate_task_absorbs_before_the_recheck_cadence
 test_deliberate_stop_marker_cleared_resumes_terminal_stale_surfacing
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
