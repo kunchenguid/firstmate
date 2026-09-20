@@ -5935,6 +5935,107 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+# kunchenguid/firstmate stall post-mortem, 2026-09-20: the one immediate due
+# recheck above fired and was handled, but nothing then advanced the child's
+# own status line past the stale `paused: ... until <T>` declaration, so every
+# later poll re-matched the same "declared time reached" branch and was
+# throttled by the FULL PAUSE_RESURFACE_SECS - exactly as if the wait were
+# still open-ended - instead of the much shorter cadence an ordinary stale pane
+# gets. This pins the fix: once the due recheck has fired, a repeat recheck on
+# the same unadvanced declaration holds STALE_ESCALATE_SECS, not
+# PAUSE_RESURFACE_SECS.
+test_paused_until_overdue_recheck_holds_the_short_staleness_cadence() {
+  local dir state key throttle
+  dir=$(paused_until_fixture until-overdue-short-cadence "$(( $(date +%s) - 30 ))" 60); state="$dir/state"
+  key=$(printf '%s' test:fm-until | tr '.:/' '___')
+  throttle="$state/.paused-resurfaced-$key"
+
+  # The first due recheck still fires at once - no regression on the case
+  # test_paused_until_that_passed_is_rechecked_before_the_cadence already pins.
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-until FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2>&1 &
+  UNTIL_PID=$!
+  wait_for_exit "$UNTIL_PID" 100 || { reap "$UNTIL_PID"; fail "the first due recheck did not fire: $(cat "$dir/watch.out")"; }
+  [ -e "$throttle" ] || fail "the due recheck recorded no re-surface throttle"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first due recheck"
+
+  # Shortly after (throttle age well under the short cadence, and nowhere near
+  # the long one either), the unadvanced declaration must still absorb.
+  set_mtime "$(( $(date +%s) - 5 ))" "$throttle"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-until FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2>&1 &
+  UNTIL_PID=$!
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "an unadvanced due declaration re-fired before its short cadence elapsed: $(cat "$dir/watch.out")"
+  fi
+  reap "$UNTIL_PID"
+
+  # Once the throttle's age clears the short cadence - while staying nowhere
+  # near the long pause cadence (999s here) - the same unadvanced declaration
+  # must recheck again. Before this fix, resurface_absorbed's throttle gate
+  # always used PAUSE_RESURFACE_SECS regardless of caller intent, so this next
+  # poll would have stayed silent for hundreds more seconds.
+  set_mtime "$(( $(date +%s) - 40 ))" "$throttle"
+  : > "$dir/watch.out"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-until FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_PAUSE_RESURFACE_SECS=999 FM_STALE_ESCALATE_SECS=30 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$dir/watch.out" 2>&1 &
+  UNTIL_PID=$!
+  wait_for_exit "$UNTIL_PID" 100 \
+    || { reap "$UNTIL_PID"; fail "an unadvanced due declaration past the short cadence stayed silent, riding the long pause cadence instead: $(cat "$dir/watch.out")"; }
+  grep -F 'stale: test:fm-until' "$dir/watch.out" >/dev/null \
+    || fail "the short-cadence recheck did not print a stale wake: $(cat "$dir/watch.out")"
+  grep -F 'declared clearing time has passed' "$dir/watch.out" >/dev/null \
+    || fail "the short-cadence recheck did not say the declared time passed: $(cat "$dir/watch.out")"
+  pass "an overdue declared-wait recheck holds the short staleness cadence, not the full pause cadence, once unadvanced"
+}
+
+# The captain-held and no-`until`/future-`until` branches never enter the `due`
+# case above (its declaration is never suffixed `:due` and cadence is never
+# lowered), so they must keep the full PAUSE_RESURFACE_SECS cadence exactly as
+# before. test_live_declared_wait_churn_honors_the_resurface_throttle already
+# pins this for captain-held churn under a long cadence, and
+# test_paused_until_wrong_year_is_bounded_by_the_cadence pins it for a
+# future-`until` past the cadence bound; this closes the loop on a `paused:`
+# with no `until` at all.
+test_paused_no_until_recheck_still_holds_the_full_pause_cadence() {
+  local dir state fakebin out capture_file statusf window key sig throttle
+  dir=$(make_case paused-no-until); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/parked.status"
+  window="test:fm-parked"
+  printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/parked.meta"
+  printf 'paused: waiting on the validation run to finish\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  throttle="$state/.paused-resurfaced-$key"
+  printf 'parked, elapsed 1s' > "$capture_file"
+  printf '%s' "$(hash_text 'parked, elapsed 1s')" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  FM_STALE_ESCALATE_SECS=1 parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
+    || fail "first sight of a no-until declared wait did not surface"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first surface"
+  [ -e "$throttle" ] || fail "the first surface recorded no re-surface throttle"
+
+  # Age the throttle well past the short staleness cadence but nowhere near
+  # PAUSE_RESURFACE_SECS (999, hardcoded by parked_watch_round): a no-until
+  # pause must still absorb here, because it never takes the shortened cadence.
+  set_mtime "$(( $(date +%s) - 40 ))" "$throttle"
+  FM_STALE_ESCALATE_SECS=1 parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
+    || fail "a no-until declared wait re-fired past the short staleness cadence instead of holding the full pause cadence: $(cat "$out")"
+  pass "a paused declaration with no until time keeps the full pause cadence, never the shortened due-recheck cadence"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
 # churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -6071,3 +6172,5 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
+test_paused_until_overdue_recheck_holds_the_short_staleness_cadence
+test_paused_no_until_recheck_still_holds_the_full_pause_cadence

@@ -301,7 +301,11 @@ PAUSE_RESURFACE_SECS=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT
 # A declared wait that names WHEN it clears (`paused: ... until <UTC ISO 8601>`,
 # status_paused_until in fm-classify-lib.sh) is condition-aware: it is not
 # rechecked before that time, and it is rechecked once as soon as that time
-# passes even when the flat cadence has not elapsed, then held to the cadence.
+# passes even when the flat cadence has not elapsed. Past that one recheck the
+# wait is no longer open-ended - it is overdue - so handle_paused_stale holds
+# it to STALE_ESCALATE_SECS instead of PAUSE_RESURFACE_SECS for as long as the
+# status line stays unadvanced, rather than the full cadence every other
+# declared-wait case above still uses.
 # Consecutive event-path failures (fm_backend_wait_transition returning 2 -
 # connect/subscribe failure) before the push fast-path is disabled for the rest
 # of this watcher process and the loop reverts to pure polling (report section
@@ -885,14 +889,18 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # Returns without waking while either the absorb or the throttle is inside the
 # window; wake() itself exits the cycle, exactly as it does inline. An optional
 # <min-age> replaces the cadence as the absorb-age gate for one call (0 lets a
-# declared `until` time that has just passed re-surface at once), while the
-# throttle keeps the cadence between repeats.
-resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age]
-  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS}
+# declared `until` time that has just passed re-surface at once), while an
+# optional <throttle-cadence> replaces PAUSE_RESURFACE_SECS as the throttle's own
+# gate between repeats (handle_paused_stale uses this once a declared `until` has
+# already had its one immediate recheck: STALE_ESCALATE_SECS from then on, not
+# another PAUSE_RESURFACE_SECS wait, because the declared wait itself is over).
+resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age] [throttle-cadence]
+  local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS} \
+    cadence=${7:-$PAUSE_RESURFACE_SECS}
   if [ -z "$scope" ] || [ ! -e "$throttle" ] \
     || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
     [ "$age" -ge "$min_age" ] || return 0
-    [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
+    [ "$(age_of "$throttle")" -ge "$cadence" ] || return 0   # 999999 when no prior re-surface
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
@@ -1314,7 +1322,7 @@ busy_turn_over_age() {  # <task>
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age cadence
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -1327,6 +1335,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( now - mtime ))
   last=$(last_status_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
+  cadence=$PAUSE_RESURFACE_SECS
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
   if status_is_captain_held "$last"; then
     if afk_record_present; then
@@ -1343,18 +1352,28 @@ handle_paused_stale() {  # <window> <task> <hash>
       detail="paused, declared time beyond recheck cadence"
       reason="paused ${age}s, awaiting external - the declared time is beyond the recheck cadence; confirm the wait still holds"
     else
-      # The declared time has passed: recheck now, once per declaration, then
-      # hold the cadence.
+      # The declared time has passed: recheck now, once per declaration. That
+      # one recheck is the whole point of `until` - past it, a wait with no
+      # further sign of life is no longer a legitimate open-ended external
+      # hold, it looks exactly like an ordinary stale/wedged pane. So once the
+      # immediate recheck has fired, hold STALE_ESCALATE_SECS instead of
+      # another PAUSE_RESURFACE_SECS: repeat rechecks while the status line
+      # stays unadvanced use the same short cadence an ordinary wedge suspect
+      # gets, not a multi-hour silence (kunchenguid/firstmate stall
+      # post-mortem, 2026-09-20: a task rode the full 4-hour cadence for
+      # hours past its own declared clearing time because nothing advanced
+      # its status line after the one confirmatory recheck).
       detail="paused, declared time reached"
-      reason="paused ${age}s, awaiting external - the declared clearing time has passed, rechecked on a long cadence not a wedge; confirm the wait cleared"
+      reason="paused ${age}s, awaiting external - the declared clearing time has passed; confirm the wait cleared or advance the status line, rechecked on a short cadence until then"
       declaration="$declaration:due"
       min_age=0
+      cadence=$STALE_ESCALATE_SECS
     fi
   else
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
   fi
-  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
+  resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age" "$cadence"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
