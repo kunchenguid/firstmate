@@ -19,7 +19,8 @@
 #    "output_tokens":<int|null>,"reasoning_tokens":<int|null>,
 #    "source":<claude-projects|codex-sessions|unavailable>}
 #
-# Wall clock: earliest status event or status-file birth -> status-file mtime.
+# Wall clock: persisted launch_epoch -> status-file mtime; legacy tasks use
+# the earliest status event or status-file birth as their start.
 # Without either start timestamp, metadata mtime is a best-effort legacy
 # fallback; metadata mtime also supplies the end when status is absent.
 # Turn estimate: working events recognized by fm-classify-lib.sh, including
@@ -130,13 +131,21 @@ iso_from_epoch() {  # <epoch>
 
 COLLECT_EPOCH=$(date +%s)
 END_EPOCH=$(file_mtime_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$META")
-START_EPOCH=$(file_birth_epoch "$STATUS" 2>/dev/null || true)
+LAUNCH_EPOCH=$(meta_get launch_epoch)
+case "$LAUNCH_EPOCH" in
+  ''|*[!0-9]*|0[0-9]*) LAUNCH_EPOCH= ;;
+esac
+if [ "${#LAUNCH_EPOCH}" -gt 12 ] || { [ -n "$LAUNCH_EPOCH" ] && [ "$LAUNCH_EPOCH" -gt "$COLLECT_EPOCH" ]; }; then
+  LAUNCH_EPOCH=
+fi
+START_EPOCH=$LAUNCH_EPOCH
+[ -n "$START_EPOCH" ] || START_EPOCH=$(file_birth_epoch "$STATUS" 2>/dev/null || true)
 TURNS=0
 if [ -f "$STATUS" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     status_line_verb "$line" verb
     [ "$verb" != working ] || TURNS=$((TURNS + 1))
-    if epoch=$(status_line_at_epoch "$line") && [ "$epoch" -le "$END_EPOCH" ]; then
+    if [ -z "$LAUNCH_EPOCH" ] && epoch=$(status_line_at_epoch "$line") && [ "$epoch" -le "$END_EPOCH" ]; then
       if [ -z "$START_EPOCH" ] || [ "$epoch" -lt "$START_EPOCH" ]; then
         START_EPOCH=$epoch
       fi

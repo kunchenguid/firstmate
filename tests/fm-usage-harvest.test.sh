@@ -574,6 +574,61 @@ claude_profile_case() (
   pass "Claude $mode profile resolves usage logs"
 )
 
+launch_epoch_case() {
+  local harness=$1 id="launch-$1" wt data home base encoded logdir out
+  wt="$TMP_ROOT/wt-$id"
+  data=$(harvest_case "$id" "$harness" "$wt" default default)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  base=$(date +%s)
+  printf 'launch_epoch=%s\n' "$((base - 100))" >> "$home/state/$id.meta"
+  printf 'working [at=%s]: setup finished\n' "$((base - 20))" > "$home/state/$id.status"
+  if [ "$harness" = claude ]; then
+    encoded=${wt//\//-}; encoded=${encoded//./-}
+    logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
+  else
+    logdir="$FM_USAGE_CODEX_DIR/$id"
+  fi
+  mkdir -p "$logdir"
+  jq -cn --arg harness "$harness" --arg cwd "$wt" --argjson base "$base" '
+    (if $harness == "codex" then {type:"session_meta",payload:{cwd:$cwd}} else empty end),
+    (([$base - 110, 999], [$base - 80, 12]) | . as [$at,$tokens] |
+      {timestamp:($at | todateiso8601)} +
+      if $harness == "claude" then
+        {type:"assistant",message:{id:($at|tostring),usage:{input_tokens:$tokens}}}
+      else
+        {type:"event_msg",payload:{type:"token_count",info:{last_token_usage:{input_tokens:$tokens}}}}
+      end)
+  ' > "$logdir/session.jsonl"
+  touch -m -r "$logdir/session.jsonl" "$home/state/$id.status"
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "$harness launch epoch harvest succeeds: $out"
+  local end
+  end=$(file_mtime_epoch "$home/state/$id.status")
+  jq -e --argjson start "$((base - 100))" --argjson end "$end" '
+    .source != "unavailable" and .input_tokens == 12
+    and (.spawned_at | fromdateiso8601) == $start and .wall_secs == ($end - $start)
+  ' "$data/usage-ledger.jsonl" >/dev/null || fail "$harness includes pre-status usage from launch"
+  pass "$harness launch epoch includes initial work and excludes pre-launch usage"
+}
+
+spawn_launch_epoch_case() (
+  . "$ROOT/tests/fixtures.sh"
+  local dir="$TMP_ROOT/spawn-epoch" fb before after out epoch
+  fb=$(fm_test_make_spawn_fakebin "$dir/fake")
+  fm_test_spawn_home "$dir/home" codex
+  fm_git_worktree "$dir/project" "$dir/wt" wt-launch-epoch
+  fm_test_spawn_brief "$dir/home" launch-epoch
+  before=$(date +%s)
+  out=$(fm_test_run_spawn "$dir/home" "$dir/wt" "$fb" launch-epoch "$dir/project" --mode no-mistakes --yolo off 2>&1)
+  expect_code 0 "$?" "spawn persists launch epoch: $out"
+  after=$(date +%s)
+  epoch=$(sed -n 's/^launch_epoch=//p' "$dir/home/state/launch-epoch.meta")
+  [ -n "$epoch" ] && [ "$epoch" -ge "$before" ] && [ "$epoch" -le "$after" ] \
+    || fail "spawn metadata must persist the launch epoch"
+  pass "spawn publishes launch epoch in task metadata"
+)
+
 claude_case
 claude_nobirth_case
 codex_case
@@ -591,3 +646,7 @@ done
 
 claude_profile_case alternate
 claude_profile_case override
+
+launch_epoch_case claude
+launch_epoch_case codex
+spawn_launch_epoch_case
