@@ -121,6 +121,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/backlog-operations/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/bearings/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -450,6 +454,10 @@
     },
     {
       "path": "docs/verification/dispatch-resolve.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/intake-classify.md",
       "audience": "maintainer-verification"
     },
     {
