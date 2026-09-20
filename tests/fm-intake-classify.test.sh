@@ -15,14 +15,30 @@ HOME_DIR="$TMP_ROOT/home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 LOG="$TMP_ROOT/log"
 REQUEST_FILE="$TMP_ROOT/request.md"
+SCOUT_REQUEST_FILE="$TMP_ROOT/scout-request.md"
+ANSWER_REQUEST_FILE="$TMP_ROOT/answer-request.md"
 RESPONSE="$TMP_ROOT/response.json"
 BASE_PATH=$PATH
+REAL_HEAD=$(command -v head)
+REAL_WC=$(command -v wc)
 mkdir -p "$HOME_DIR" "$LOG"
 
 cat > "$REQUEST_FILE" <<'MD'
 # Request
 
 Fix the off-by-one in the pager, whose cause and expected behavior are already stated.
+MD
+
+cat > "$SCOUT_REQUEST_FILE" <<'MD'
+# Request
+
+Investigate the intermittent pager skip and report the cause without changing code.
+MD
+
+cat > "$ANSWER_REQUEST_FILE" <<'MD'
+# Request
+
+What does the pager's follow flag do?
 MD
 
 cat > "$FAKEBIN/curl" <<'SH'
@@ -48,7 +64,34 @@ printf '%s' "${FAKE_CURL_HTTP:-200}"
 SH
 chmod +x "$FAKEBIN/curl"
 
+cat > "$FAKEBIN/head" <<'SH'
+#!/usr/bin/env bash
+if [ "${FAKE_HEAD_FAIL:-0}" = 1 ]; then
+  printf '%s' 'partial request'
+  exit 74
+fi
+exec "${REAL_HEAD:?}" "$@"
+SH
+chmod +x "$FAKEBIN/head"
+
+cat > "$FAKEBIN/wc" <<'SH'
+#!/usr/bin/env bash
+if [ "${FAKE_WC_FAIL:-0}" = 1 ]; then
+  printf '%s\n' '17'
+  exit 74
+fi
+exec "${REAL_WC:?}" "$@"
+SH
+chmod +x "$FAKEBIN/wc"
+
 write_response() {  # <deliverable> <deliverable-confidence> <intent-noul> <score> <score-confidence>
+  local ship=0.02 scout=0.02 answer_now=0.02 unclear=0.02
+  case "$1" in
+    ship) ship=0.94 ;;
+    scout) scout=0.94 ;;
+    answer_now) answer_now=0.94 ;;
+    unclear) unclear=0.94 ;;
+  esac
   cat > "$RESPONSE" <<JSON
 {
   "model": "jev-1.13.0",
@@ -57,7 +100,7 @@ write_response() {  # <deliverable> <deliverable-confidence> <intent-noul> <scor
       "type": "choice",
       "choice": "$1",
       "confidence": $2,
-      "probabilities": {"ship": 0.94, "scout": 0.03, "answer_now": 0.02, "unclear": 0.01}
+      "probabilities": {"ship": $ship, "scout": $scout, "answer_now": $answer_now, "unclear": $unclear}
     },
     "intent_clear": {"type": "noul", "noul": $3},
     "urgency": {"type": "score", "score": $4, "confidence": $5}
@@ -83,7 +126,7 @@ run() {
   printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
 }
 
-export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" CHILD_ENV_LOG="$LOG/child-env"
+export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" CHILD_ENV_LOG="$LOG/child-env" REAL_HEAD REAL_WC
 KEY='test-key-9f1c2d3e-never-on-argv'
 code='' out='' err=''
 
@@ -113,6 +156,7 @@ rm -f "$HOME_DIR/.env"
 argv=$(cat "$LOG/argv")
 body=$(cat "$LOG/body")
 assert_not_contains "$argv" "$KEY" "the key never appears on curl argv"
+assert_equals '-q' "$(head -n 1 "$LOG/argv")" "curl disables ambient configuration before every other option"
 assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the fixed endpoint is used"
 assert_contains "$argv" $'--max-time\n5' "the fixed timeout is used"
 assert_contains "$argv" '@/dev/fd/3' "curl reads the header from a file descriptor"
@@ -129,6 +173,24 @@ assert_contains "$(jq -r '.questions.urgency.criteria[0]' <<<"$body")" '0 routin
 assert_contains "$(jq -r '.questions.urgency.criteria[2]' <<<"$body")" '2 blocking' "urgency criteria explains blocking"
 pass "opted-in request uses all typed questions and keeps the key off argv and child environments"
 
+# --- tracing never exposes either key source -----------------------------------
+reset_log
+write_response ship 0.95 0.94 0 0.93
+TRACE_ENV_KEY='trace-environment-key-never-emitted'
+trace_output=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$TRACE_ENV_KEY" bash -x "$TOOL" "$REQUEST_FILE" 2>&1)
+trace_code=$?
+expect_code 0 "$trace_code" "traced environment-key invocation exits 0"
+assert_not_contains "$trace_output" "$TRACE_ENV_KEY" "shell tracing never emits the environment key"
+TRACE_FILE_KEY='trace-file-key-never-emitted'
+printf '%s\n' "export TYPESAFE_API_KEY=\"$TRACE_FILE_KEY\"" > "$HOME_DIR/.env"
+reset_log
+trace_output=$(env -u TYPESAFE_API_KEY PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" bash -x "$TOOL" "$REQUEST_FILE" 2>&1)
+trace_code=$?
+expect_code 0 "$trace_code" "traced file-key invocation exits 0"
+assert_not_contains "$trace_output" "$TRACE_FILE_KEY" "shell tracing never emits the file key"
+rm -f "$HOME_DIR/.env"
+pass "shell tracing is disabled before either key source is read"
+
 # --- clear classifications ------------------------------------------------------
 reset_log
 write_response ship 0.95 0.94 0 0.93
@@ -140,23 +202,30 @@ assert_contains "$out" '  deliverable: ship   confidence: 0.95' "ship recommenda
 assert_contains "$out" '  intent_clear: true   noul: 0.94' "authorization answer is printed"
 assert_contains "$out" '  urgency: routine   score: 0   confidence: 0.93' "routine urgency is printed"
 assert_contains "$out" '  request_truncated: false' "short request is not truncated"
-write_response answer_now 0.95 0.94 2 0.93
-TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
+write_response scout 0.95 0.05 1 0.93
+TYPESAFE_API_KEY=$KEY run code out err "$SCOUT_REQUEST_FILE"
+assert_contains "$out" '  status: clear' "high-confidence scout is clear without implementation authorization"
+assert_contains "$out" '  deliverable: scout' "scout remains a recommendation"
+assert_contains "$out" '  intent_clear: false   noul: 0.05' "scout preserves its low implementation authorization"
+write_response answer_now 0.95 0.05 2 0.93
+TYPESAFE_API_KEY=$KEY run code out err "$ANSWER_REQUEST_FILE"
+assert_contains "$out" '  status: clear' "high-confidence answer-now is clear without implementation authorization"
 assert_contains "$out" '  deliverable: answer_now' "answer-now remains a recommendation"
+assert_contains "$out" '  intent_clear: false   noul: 0.05' "answer-now preserves its low implementation authorization"
 assert_contains "$out" '  urgency: blocking   score: 2' "blocking urgency does not auto-spawn or change status"
-pass "concrete recommendations stay advisory with their urgency"
+pass "ship authorization gates only ship while all recommendations stay advisory"
 
 # --- ambiguous and escalate outcomes -------------------------------------------
 reset_log
-write_response scout 0.55 0.94 1 0.93
-TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
+write_response scout 0.55 0.05 1 0.93
+TYPESAFE_API_KEY=$KEY run code out err "$SCOUT_REQUEST_FILE"
 assert_contains "$out" '  status: ambiguous' "low confidence is ambiguous"
 assert_contains "$out" 'lowest answer confidence 0.55 below floor 0.6' "the confidence floor is named"
 write_response ship 0.95 0.05 1 0.93
 TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
 assert_contains "$out" '  status: escalate' "missing authorization escalates"
 assert_contains "$out" 'concrete implementation authorization is not clear' "authorization escalation is named"
-write_response unclear 0.95 0.94 1 0.93
+write_response unclear 0.95 0.05 1 0.93
 TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
 assert_contains "$out" '  status: ambiguous' "unclear deliverable is ambiguous"
 assert_contains "$out" 'deliverable recommendation is unclear' "unclear recommendation is named"
@@ -175,12 +244,38 @@ FAKE_CURL_HTTP=429 TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
 expect_code 0 "$code" "HTTP failure exits 0"
 assert_contains "$out" '  status: error' "HTTP failure is structured"
 assert_contains "$out" 'http 429' "HTTP status is named"
+reset_log
+write_response ship 0.95 0.94 1 0.93
+jq 'del(.answers.urgency.score) | .answers.urgency.value = 1 | .answers.urgency.answer = 2' "$RESPONSE" > "$RESPONSE.tmp"
+mv "$RESPONSE.tmp" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
+expect_code 0 "$code" "undocumented urgency fields exit 0"
+assert_contains "$out" '  status: error' "undocumented urgency fields are rejected"
+assert_contains "$out" 'response is not a typed intake answer' "the Score contract requires score"
 cat > "$RESPONSE" <<'JSON'
 {"answers":{"deliverable":{"choice":"ship"}}}
 JSON
 TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
 expect_code 0 "$code" "malformed response exits 0"
 assert_contains "$out" 'response is not a typed intake answer' "malformed response is structured"
+reset_log
+FAKE_HEAD_FAIL=1 TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
+expect_code 0 "$code" "request snapshot failure exits 0"
+assert_contains "$out" '  status: error' "request snapshot failure is structured"
+assert_contains "$out" 'request read failed' "request snapshot failure is named"
+assert_absent "$LOG/argv" "request snapshot failure makes no network call"
+reset_log
+FAKE_WC_FAIL=1 TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
+expect_code 0 "$code" "request measurement failure exits 0"
+assert_contains "$out" '  status: error' "request measurement failure is structured"
+assert_contains "$out" 'request measurement failed' "request measurement failure is named"
+assert_absent "$LOG/argv" "request measurement failure makes no network call"
+reset_log
+TYPESAFE_API_KEY=$KEY TMPDIR="$TMP_ROOT/missing-tmp" run code out err "$REQUEST_FILE"
+expect_code 0 "$code" "temporary file setup failure exits 0"
+assert_contains "$out" '  status: error' "temporary file setup failure is structured"
+assert_contains "$out" 'temporary file setup failed' "temporary file setup failure is named"
+assert_absent "$LOG/argv" "temporary file setup failure makes no network call"
 pass "bounded input and ordinary runtime failures never block intake"
 
 # --- usage errors stay actionable ------------------------------------------------

@@ -22,14 +22,14 @@
 #   intake-classify:
 #     status: clear | ambiguous | escalate | error
 #     model/latency_ms/tokens, deliverable and confidence, intent_clear and
-#     confidence, urgency and score, request truncation, and any reason
-#   clear     -> a concrete, authorized recommendation for firstmate to inspect
+#     NOUL score, urgency and score, request truncation, and any reason
+#   clear     -> a high-confidence recommendation; ship is also authorized
 #   ambiguous -> a low-confidence or unclear recommendation
-#   escalate  -> no concrete implementation authorization
-#   error     -> API, network, response, or rendering failure
+#   escalate  -> a ship recommendation without implementation authorization
+#   error     -> local runtime, API, network, response, or rendering failure
 #   Every runtime outcome exits 0 so intake is never blocked by this tool.
-#   Exit 2 only for a usage or configuration error (unreadable request or
-#   missing jq), which is actionable and never selected around.
+#   Exit 2 only for invalid argv, an initially unreadable request, or missing
+#   jq, which are actionable usage or configuration errors.
 #
 # Environment:
 #   TYPESAFE_API_KEY is the only classifier-specific environment setting.
@@ -37,6 +37,7 @@
 # Authority: docs/configuration.md "Typed intake classification" owns the
 # operator contract. This script owns flags and exact output. The classifier
 # never replaces firstmate judgment or auto-spawns work.
+set +x
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
@@ -97,12 +98,13 @@ fi
 [ -r "$REQUEST_FILE" ] || die "request file not readable: $REQUEST_FILE"
 command -v jq >/dev/null 2>&1 || die "jq required"
 
-REQUEST_SNAPSHOT=$(mktemp) || die "mktemp failed"
-RESP_FILE=$(mktemp) || { rm -f "$REQUEST_SNAPSHOT"; die "mktemp failed"; }
+REQUEST_SNAPSHOT=$(mktemp 2>/dev/null) || emit_error "temporary file setup failed"
+RESP_FILE=$(mktemp 2>/dev/null) || { rm -f "$REQUEST_SNAPSHOT"; emit_error "temporary file setup failed"; }
 trap 'rm -f "$REQUEST_SNAPSHOT" "$RESP_FILE"' EXIT
-head -c "$REQUEST_MAX_BYTES" "$REQUEST_FILE" > "$REQUEST_SNAPSHOT" || die "could not read request file: $REQUEST_FILE"
-REQUEST_BYTES=$(wc -c < "$REQUEST_FILE" | tr -d '[:space:]')
-case "$REQUEST_BYTES" in ''|*[!0-9]*) die "could not measure request file: $REQUEST_FILE" ;; esac
+head -c "$REQUEST_MAX_BYTES" "$REQUEST_FILE" > "$REQUEST_SNAPSHOT" || emit_error "request read failed"
+REQUEST_BYTES=$(wc -c < "$REQUEST_FILE") || emit_error "request measurement failed"
+REQUEST_BYTES=${REQUEST_BYTES//[[:space:]]/}
+case "$REQUEST_BYTES" in ''|*[!0-9]*) emit_error "request measurement failed" ;; esac
 if [ "$REQUEST_BYTES" -gt "$REQUEST_MAX_BYTES" ]; then REQUEST_TRUNCATED=true; else REQUEST_TRUNCATED=false; fi
 
 # ---- one System One request ----------------------------------------------------
@@ -139,7 +141,7 @@ REQUEST=$(jq -n --rawfile request "$REQUEST_SNAPSHOT" --arg project "$PROJECT" -
   }') || emit_error "request rendering failed"
 
 T0=$(fm_timing_now_ms)
-HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
+HTTP=$(printf '%s' "$REQUEST" | curl -q -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
   -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
   -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
   --data-binary @- 2>/dev/null) || HTTP=000
@@ -151,7 +153,7 @@ LAT_MS=$(( T1 - T0 ))
 jq -e '
   def confidence($a): $a.confidence;
   def intent_noul($a): $a.noul;
-  def urgency_score($a): $a.score // $a.value // $a.answer;
+  def urgency_score($a): $a.score;
   def confidence_ok($a): (confidence($a) | type) == "number" and confidence($a) >= 0 and confidence($a) <= 1;
   (.answers | type) == "object" and
   (.answers.deliverable | type) == "object" and
@@ -181,7 +183,7 @@ RESULT=$(jq -n --argjson floor "$CONFIDENCE_FLOOR" --argjson latency "$LAT_MS" -
   ($r.answers.intent_clear) as $intent |
   ($r.answers.urgency) as $urgency |
   def intent_noul: .noul;
-  def urgency_score: .score // .value // .answer;
+  def urgency_score: .score;
   def urgency_level($score):
     if $score < 0.5 then "routine"
     elif $score < 1.5 then "soon"
@@ -208,7 +210,7 @@ RESULT=$(jq -n --argjson floor "$CONFIDENCE_FLOOR" --argjson latency "$LAT_MS" -
   } |
   if $confidence < $floor then
     . + {status: "ambiguous", reason: "lowest answer confidence \($confidence) below floor \($floor)"}
-  elif .intent_clear != true then
+  elif .deliverable == "ship" and .intent_clear != true then
     . + {status: "escalate", reason: "concrete implementation authorization is not clear"}
   elif .deliverable == "unclear" then
     . + {status: "ambiguous", reason: "deliverable recommendation is unclear"}
