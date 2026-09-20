@@ -341,6 +341,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/project-local-material.json",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/process-event-extension/firstmate-extension.json",
       "audience": "operator-example"
     },
