@@ -220,14 +220,35 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` enables `jev.review_assist: true` for advisory pre-brief context in the review step only, sets `test.evidence.store_in_repo: true`, and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.
-The existing review remains the merge-gate decision point; Jev does not gate delivery.
+The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.
 Storing evidence in the repo publishes each run's test artifacts to the orphan `no-mistakes/evidence` branch and links them from the PR body, instead of keeping them on local disk under the no-mistakes home.
 That branch shares no history with code branches, so evidence never enters a pushed feature branch or the default branch; the worktree's `.no-mistakes/` stays local and CI rejects tracked entries under that path.
 The [`firstmate-coding-guidelines` skill](../.agents/skills/firstmate-coding-guidelines/SKILL.md#no-mistakes-test-configuration) owns why `commands.test` stays absent and targeted validation belongs to the evidence path.
 `commands.test` executes code, so no-mistakes honors it only from the default-branch copy of `.no-mistakes.yaml`; a pushed branch cannot change what the gate runs.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
 Portable shard evidence and coverage rules are in [fm-test-portable-shards.md](fm-test-portable-shards.md); [herdr-backend.md](herdr-backend.md#destructive-lab-safety) owns the real-Herdr lane's isolation boundary, and [runtime-backends.md](verification/runtime-backends.md#herdr) owns active evidence.
+
+## Jev review assist (optional, per-operator)
+
+no-mistakes v1.79.0+ can send each review turn's diff to TypeSafe's Jev model to rank which surrounding files are worth reading first; the ranked list only adds candidate paths to the review prompt, and the existing cold review remains the sole merge-gate decision point.
+`jev.review_assist` is **global-only**: it does not exist in, and cannot be set from, a repo's tracked `.no-mistakes.yaml` (verified in no-mistakes' own end-to-end tests - a pushed or default-branch repo config setting this key never contacts TypeSafe).
+An operator opts in locally, per machine, in their own `~/.no-mistakes/config.yaml`:
+
+```yaml
+jev:
+  review_assist: true
+```
+
+It also needs `TYPESAFE_API_KEY` set in the daemon's environment; without a key the step log says so and review proceeds without a pre-brief, exactly as when the setting is off.
+On every call failure, oversized reply, or missing key, no-mistakes falls back to the ordinary cold review with no pre-brief - this repo does not depend on Jev being reachable.
+
+**What is sent.** Per review turn, no-mistakes sends the diff of the files under review (never files matched by this repo's `ignore_patterns`, which are not "reviewable") plus up to 40 candidate file paths - paths only, never their content - ranked by name rarity and directory proximity. No project name, PR body, or brief text is part of this call.
+
+**Data boundary.** This repository's captain-private and gitignored paths (`.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`) are untracked, so they can never appear in a git diff and are never reachable by this or any other diff-based review path.
+The remaining operator responsibility is ordinary git hygiene: keep secrets out of tracked files, since no-mistakes has no Jev-specific secret redaction beyond the review step's existing findings pipeline.
+An operator who wants tighter control over what becomes "reviewable" (and therefore diff-eligible for a Jev call) can extend this repo's own `ignore_patterns` for paths that should never enter any review, Jev-assisted or not.
+
+**Audit.** The review step log already records whether a pre-brief was requested, whether it was used, and the reason for any fallback (`no-mistakes axi logs --step review --full`); no separate Jev-specific audit log exists in this repo, since the call itself happens inside the no-mistakes daemon process, outside firstmate's own scripts.
 
 ## Captain Preferences (data/captain.md / data/captain-shared.md)
 
