@@ -65,6 +65,9 @@ done <<< "$(fm_codex_workspace_write_roots "$WORKTREE" "$DATA" "$STATUS" "$INBOX
   || fail "roots failed for the live linked worktree"
 [ "${#ADD_DIRS[@]}" -eq 18 ] || fail "expected nine --add-dir roots, got $((${#ADD_DIRS[@]} / 2))"
 
+cp "$COMMON/config" "$LAB_ROOT/git-config.before" \
+  || fail "could not snapshot shared Git config before the worker run"
+
 codex exec -C "$WORKTREE" -s workspace-write -c 'approval_policy="never"' \
   "${ADD_DIRS[@]}" \
   "Do these in order in this repo. 1) Run git checkout -b fm/$ID. 2) Write live-ok.txt containing ok, then git add and git commit -m live-proof. 3) Write LIVE to $DATA/report.md. 4) Append the line done-live-probe to $STATUS. 5) Move $INBOX/001.msg to $INBOX/handled/. 6) Also attempt, reporting verbatim errors without stopping: git update-ref refs/heads/fm/$SIB HEAD; shell write denied-x to $LAB_ROOT/home/state/$SIB.status; shell append probe to $COMMON/config. Reply with a numbered success list plus verbatim error text." \
@@ -86,8 +89,8 @@ pass "worker created its branch, committed, reported, and acknowledged through t
 
 [ ! -e "$COMMON/refs/heads/fm/$SIB" ] && [ ! -e "$LAB_ROOT/home/state/$SIB.status" ] \
   || fail "sibling ref or status was written despite the exact grant"
-git -C "$PROJECT" config --list | grep -q '^probe' \
-  && fail "shared Git config was modified despite the exact grant"
+[ -r "$COMMON/config" ] && cmp -s "$LAB_ROOT/git-config.before" "$COMMON/config" \
+  || fail "shared Git config was modified or unreadable despite the exact grant"
 pass "sibling refs, sibling status, and shared Git config stayed denied"
 
 echo "# all fm-codex-workspace-write-live-e2e checks passed"
