@@ -1031,7 +1031,7 @@ new_world() {
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
     printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
     printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
-    printf 'config/claude-permission-mode\n'
+    printf 'config/claude-permission-mode\nconfig/claude-config-dir\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
@@ -1460,6 +1460,56 @@ test_claude_permission_mode_inheritance_present_and_absent() {
   expect_code 0 "$status" "claude-permission-mode absence push should succeed"
   [ -e "$w/sm/config/claude-permission-mode" ] && fail "claude-permission-mode not removed on primary absence"
   pass "B12c claude-permission-mode inheritance: present values and primary absence converge exactly"
+}
+
+# config/claude-config-dir reaches a Claude SECONDMATE launch too: the seat
+# prefix lands on the launch, and the home's trust registration goes to that
+# same store rather than the user HOME.
+test_spawn_secondmate_claude_config_dir() {
+  local w sm meta launchlog launch out status store
+  w="$TMP_ROOT/spawn-claude-cfgdir"
+  sm="$w/sm"
+  store="$w/seat"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config" "$store"
+  printf 'claude opus\n' > "$w/home/config/secondmate-harness"
+  printf '%s\n' "$store" > "$w/home/config/claude-config-dir"
+  make_seeded_home "$sm" sm
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "claude secondmate spawn under config/claude-config-dir should succeed"$'\n'"$out"
+
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = claude ] || fail "cfgdir: meta harness not claude"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$store' env -u" \
+    "cfgdir: secondmate launch did not carry the configured store"
+  assert_contains "$launch" "--model 'opus'" "cfgdir: secondmate launch lost its model pin"
+  [ -f "$store/.claude.json" ] || fail "cfgdir: secondmate home trust was not registered in the configured store"
+  [ ! -e "$w/home/user-home/.claude.json" ] || fail "cfgdir: secondmate home trust leaked into the default store"
+  pass "C2c spawn: config/claude-config-dir reaches a Claude secondmate launch and its trust registration"
+}
+
+# The seat is a captain-wide choice, so it inherits like
+# config/claude-permission-mode: present values converge exactly and primary absence mirrors.
+test_claude_config_dir_inheritance_present_and_absent() {
+  local w head out err status
+  w=$(new_world cfgdir-inherit)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+
+  printf '/opt/claude-seat\n' > "$w/home/config/claude-config-dir"
+  err="$w/cfgdir-inherit.err"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "claude-config-dir present push should succeed"
+  assert_contains "$out" "claude-config-dir: pushed" "present value should report pushed"
+  [ "$(cat "$w/sm/config/claude-config-dir")" = /opt/claude-seat ] || fail "claude-config-dir present value not pushed"
+
+  rm -f "$w/home/config/claude-config-dir"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "claude-config-dir absence push should succeed"
+  [ -e "$w/sm/config/claude-config-dir" ] && fail "claude-config-dir not removed on primary absence"
+  pass "B12d claude-config-dir inheritance: present values and primary absence converge exactly"
 }
 
 test_backend_inheritance_present_and_absent() {
@@ -2661,6 +2711,8 @@ test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
 test_spawn_secondmate_claude_permission_mode_auto
 test_claude_permission_mode_inheritance_present_and_absent
+test_spawn_secondmate_claude_config_dir
+test_claude_config_dir_inheritance_present_and_absent
 test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation

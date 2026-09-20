@@ -734,6 +734,59 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
 }
 
+# config/claude-config-dir is read at every relaunch, not only at first spawn:
+# a seat chosen after the task was dispatched reaches its next launch with no
+# restart, and a seat removed since falls back to the unprefixed default.
+test_same_harness_relaunch_reads_the_claude_config_dir_file() {
+  local dir out rc store
+  dir=$(new_case cfgdir rl-cfgdir)
+  add_ship_task "$dir" rl-cfgdir claude
+  store="$dir/seat"
+  mkdir -p "$dir/home/config" "$store"
+  printf '%s\n' "$store" > "$dir/home/config/claude-config-dir"
+  out=$(run_control "$dir" rl-cfgdir relaunch --note "seat chosen after dispatch"); rc=$?
+  expect_code 0 "$rc" "a relaunch under config/claude-config-dir should succeed"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$store' env -u" \
+    "the relaunch did not read the seat from config/claude-config-dir"
+  [ -f "$store/.claude.json" ] || fail "the relaunch registered trust somewhere other than the configured store"
+
+  rm -f "$dir/home/config/claude-config-dir"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" rl-cfgdir relaunch --note "seat removed again"); rc=$?
+  expect_code 0 "$rc" "a relaunch after removing the file should succeed"$'\n'"$out"
+  assert_not_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR=" \
+    "a removed config/claude-config-dir must not linger on the next relaunch"
+  pass "fm-control relaunch: config/claude-config-dir is re-read at every relaunch"
+}
+
+# A malformed file refuses the launch itself, like a malformed
+# config/claude-permission-mode: the launch owner refuses after the previous
+# agent has been stopped, so the relaunch fails closed with the prior record
+# kept and no launch command sent, rather than launching on a guessed store.
+test_relaunch_refuses_a_malformed_claude_config_dir_and_keeps_the_record() {
+  local dir out rc before
+  dir=$(new_case cfgdir-bad rl-cfgbad)
+  add_ship_task "$dir" rl-cfgbad claude
+  before=$(cat "$dir/home/state/rl-cfgbad.meta")
+  mkdir -p "$dir/home/config"
+  printf 'relative-seat\n' > "$dir/home/config/claude-config-dir"
+  out=$(run_control "$dir" rl-cfgbad relaunch --note "malformed seat"); rc=$?
+  expect_code 1 "$rc" "a malformed config/claude-config-dir must refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "config/claude-config-dir" "the refusal must name the file"
+  assert_contains "$out" "absolute path to an existing readable directory" "the refusal must name the accepted shape"
+  # The stop step delivers /exit as literal input, so the literal log is not
+  # empty; what must be absent is any claude launch on a store nobody chose.
+  assert_not_contains "$(cat "$dir/fake/literal")" "claude --dangerously-skip-permissions" \
+    "a refused relaunch sent a launch command"
+  assert_not_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR=" \
+    "a refused relaunch forwarded a store onto a launch"
+  [ "$(cat "$dir/home/state/rl-cfgbad.meta")" = "$before" ] \
+    || fail "a refused relaunch must keep the prior durable record"
+  [ "$(journal_field "$dir" rl-cfgbad rollback)" = "prior-record-kept" ] \
+    || fail "the journal should record that the prior record was kept"
+  pass "fm-control relaunch: a malformed config/claude-config-dir refuses the launch and keeps the prior record"
+}
+
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   local dir out rc id=rl-ultra
   dir=$(new_case native-ultra "$id")
@@ -2211,6 +2264,8 @@ test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
+test_same_harness_relaunch_reads_the_claude_config_dir_file
+test_relaunch_refuses_a_malformed_claude_config_dir_and_keeps_the_record
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused

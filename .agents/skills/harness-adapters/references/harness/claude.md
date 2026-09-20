@@ -13,6 +13,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
 | Permissions | `--dangerously-skip-permissions` by default, or `--permission-mode auto` when `config/claude-permission-mode` is `auto`; the `auto` shape verified on 2.1.269, and `../../../../../docs/configuration.md` "Claude permission mode" owns the file. |
+| Config store | `CLAUDE_CONFIG_DIR=<store>` prefixed onto the launch when `config/claude-config-dir` names a store, else when firstmate's own `CLAUDE_CONFIG_DIR` is set, else no prefix; the trust registration uses the same resolved store, and `../../../../../docs/configuration.md` "Claude config store" owns the file. |
 
 ## Workspace trust
 

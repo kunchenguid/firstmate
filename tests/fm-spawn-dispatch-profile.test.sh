@@ -1437,6 +1437,215 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+# config/claude-config-dir (bin/fm-spawn.sh header): the file selects the store
+# every claude launch and its trust registration use, beating firstmate's own
+# ambient CLAUDE_CONFIG_DIR; an absent file keeps the ambient fallback (covered
+# by test_claude_forwards_firstmate_config_dir_when_set) and absent both keeps
+# the unprefixed single-store launch (test_claude_omits_config_dir_prefix_when_unset).
+# Every malformed shape refuses before any endpoint or metadata exists.
+claude_trusted_paths() {  # <store-dir>
+  node -e 'const j=require("node:fs").existsSync(process.argv[1])?JSON.parse(require("node:fs").readFileSync(process.argv[1],"utf8")):{};for(const [k,v] of Object.entries(j.projects||{})){if(v&&v.hasTrustDialogAccepted===true)console.log(k);}' "$1/.claude.json"
+}
+
+assert_config_dir_refused() {  # <out> <status> <launch-log> <meta> <what>
+  local out=$1 status=$2 launchlog=$3 meta=$4 what=$5
+  expect_code 1 "$status" "$what must refuse the spawn"$'\n'"$out"
+  assert_contains "$out" "config/claude-config-dir" "$what: refusal must name the file"
+  assert_contains "$out" "absolute path to an existing readable directory" "$what: refusal must name the accepted shape"
+  [ ! -s "$launchlog" ] || fail "$what must launch nothing (got: $(cat "$launchlog"))"
+  assert_absent "$meta" "$what: refusal must happen before meta is written"
+}
+
+test_claude_config_dir_file_selects_the_store_and_its_trust() {
+  local rec id out status launch expected store
+  id=cfgdir-file-z24
+  rec=$(make_spawn_case cfgdir-file claude "$id")
+  read_case_record "$rec"
+  store="$CASE_DIR/seat"
+  mkdir -p "$store"
+  # Surrounding whitespace, blank lines, and # comments are tolerated around the one path.
+  printf '# the work seat\n\n  %s  \n' "$store" > "$HOME_DIR/config/claude-config-dir"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with config/claude-config-dir should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  expected="CLAUDE_CONFIG_DIR='$store' $(claude_expected_launch "$HOME_DIR" "$id" --dangerously-skip-permissions | sed 's/^export COMPACT_ADVISER_DISABLE=1; //')"
+  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; $expected" ] || fail "the file did not select the store while leaving the rest of the launch unchanged"$'\n'"expected: export COMPACT_ADVISER_DISABLE=1; $expected"$'\n'"actual:   $launch"
+  # Trust must land in the SAME store the worker will read, not the user HOME.
+  claude_trusted_paths "$store" | grep -Fqx "$WT_DIR" \
+    || fail "workspace trust was not registered in the configured store $store"
+  [ ! -e "$HOME_DIR/user-home/.claude.json" ] \
+    || fail "workspace trust leaked into the default store while the file named another"
+  pass "config/claude-config-dir selects the store for both the launch prefix and the trust registration"
+}
+
+test_claude_config_dir_file_wins_over_ambient_config_dir() {
+  local rec id out status launch store
+  id=cfgdir-precedence-z25
+  rec=$(make_spawn_case cfgdir-precedence claude "$id")
+  read_case_record "$rec"
+  store="$CASE_DIR/seat"
+  mkdir -p "$store" "$CASE_DIR/ambient"
+  printf '%s\n' "$store" > "$HOME_DIR/config/claude-config-dir"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/ambient" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with both file and ambient store should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$store' env -u" "the file must beat firstmate's ambient CLAUDE_CONFIG_DIR"
+  assert_not_contains "$launch" "$CASE_DIR/ambient" "the ambient store must not reach the launch when the file is present"
+  claude_trusted_paths "$store" | grep -Fqx "$WT_DIR" \
+    || fail "trust was not registered in the file's store"
+  [ ! -e "$CASE_DIR/ambient/.claude.json" ] \
+    || fail "trust was registered in the ambient store the launch will not read"
+  pass "config/claude-config-dir wins over firstmate's own CLAUDE_CONFIG_DIR for launch and trust alike"
+}
+
+test_claude_config_dir_reaches_scout_launch() {
+  local rec id out status launch store
+  id=cfgdir-scout-z26
+  rec=$(make_spawn_case cfgdir-scout claude "$id")
+  read_case_record "$rec"
+  store="$CASE_DIR/seat"
+  mkdir -p "$store"
+  printf '%s\n' "$store" > "$HOME_DIR/config/claude-config-dir"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "claude scout spawn with config/claude-config-dir should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$store' env -u" "scout launch did not carry the configured store"
+  pass "config/claude-config-dir reaches scout launches too"
+}
+
+test_claude_config_dir_relative_path_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=cfgdir-relative-z27
+  rec=$(make_spawn_case cfgdir-relative claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$HOME_DIR/.claude-work"
+  printf '.claude-work\n' > "$HOME_DIR/config/claude-config-dir"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  assert_config_dir_refused "$out" "$status" "$LAUNCH_LOG" "$HOME_DIR/state/$id.meta" "a relative config/claude-config-dir path"
+  assert_contains "$out" "'.claude-work', a relative path" "refusal must name the offending path and say it is relative"
+  pass "a relative config/claude-config-dir path refuses at spawn, before any endpoint or metadata"
+}
+
+test_claude_config_dir_missing_directory_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=cfgdir-missing-z28
+  rec=$(make_spawn_case cfgdir-missing claude "$id")
+  read_case_record "$rec"
+  printf '%s/no-such-seat\n' "$CASE_DIR" > "$HOME_DIR/config/claude-config-dir"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  assert_config_dir_refused "$out" "$status" "$LAUNCH_LOG" "$HOME_DIR/state/$id.meta" "a config/claude-config-dir naming a missing directory"
+  assert_contains "$out" "'$CASE_DIR/no-such-seat', which is not an existing directory" "refusal must name the missing path"
+  [ ! -e "$CASE_DIR/no-such-seat" ] || fail "the spawn must not create the missing store on the captain's behalf"
+  pass "a config/claude-config-dir naming a missing directory refuses without creating it"
+}
+
+test_claude_config_dir_non_directory_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=cfgdir-notdir-z29
+  rec=$(make_spawn_case cfgdir-notdir claude "$id")
+  read_case_record "$rec"
+  printf 'not a directory\n' > "$CASE_DIR/seat-file"
+  printf '%s/seat-file\n' "$CASE_DIR" > "$HOME_DIR/config/claude-config-dir"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  assert_config_dir_refused "$out" "$status" "$LAUNCH_LOG" "$HOME_DIR/state/$id.meta" "a config/claude-config-dir naming a regular file"
+  assert_contains "$out" "'$CASE_DIR/seat-file', which is not an existing directory" "refusal must name the non-directory path"
+  pass "a config/claude-config-dir naming a non-directory refuses at spawn"
+}
+
+test_claude_config_dir_unreadable_file_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=cfgdir-unreadable-z30
+  if [ "$(id -u)" = 0 ]; then
+    pass "an unreadable config/claude-config-dir refuses at spawn (skipped as root: mode bits do not bind)"
+    return 0
+  fi
+  rec=$(make_spawn_case cfgdir-unreadable claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/seat"
+  printf '%s/seat\n' "$CASE_DIR" > "$HOME_DIR/config/claude-config-dir"
+  chmod 000 "$HOME_DIR/config/claude-config-dir"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  chmod 600 "$HOME_DIR/config/claude-config-dir"
+  assert_config_dir_refused "$out" "$status" "$LAUNCH_LOG" "$HOME_DIR/state/$id.meta" "an unreadable config/claude-config-dir"
+  assert_contains "$out" "must be a readable regular file" "refusal must say the file itself is unreadable"
+  pass "an unreadable config/claude-config-dir refuses at spawn rather than launching on a guessed store"
+}
+
+test_claude_config_dir_multiple_lines_refuse_before_endpoint_or_metadata() {
+  local rec id out status
+  id=cfgdir-multi-z31
+  rec=$(make_spawn_case cfgdir-multi claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/seat-a" "$CASE_DIR/seat-b"
+  printf '%s/seat-a\n%s/seat-b\n' "$CASE_DIR" "$CASE_DIR" > "$HOME_DIR/config/claude-config-dir"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  assert_config_dir_refused "$out" "$status" "$LAUNCH_LOG" "$HOME_DIR/state/$id.meta" "a config/claude-config-dir with two paths"
+  assert_contains "$out" "holds 2 non-comment lines" "refusal must count the non-comment lines it found"
+  pass "a config/claude-config-dir with more than one non-comment line refuses rather than picking one"
+}
+
+test_claude_config_dir_empty_file_refuses_before_endpoint_or_metadata() {
+  local rec id out status
+  id=cfgdir-empty-z32
+  rec=$(make_spawn_case cfgdir-empty claude "$id")
+  read_case_record "$rec"
+  printf '# no seat chosen yet\n\n' > "$HOME_DIR/config/claude-config-dir"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  assert_config_dir_refused "$out" "$status" "$LAUNCH_LOG" "$HOME_DIR/state/$id.meta" "a config/claude-config-dir with no path"
+  assert_contains "$out" "holds 0 non-comment lines" "refusal must say no path was found"
+  pass "a config/claude-config-dir holding only comments refuses rather than silently falling back"
+}
+
+test_claude_config_dir_refuses_every_harness_from_that_home() {
+  local rec id out status
+  id=cfgdir-codex-refuse-z33
+  rec=$(make_spawn_case cfgdir-codex-refuse codex "$id")
+  read_case_record "$rec"
+  printf 'relative-seat\n' > "$HOME_DIR/config/claude-config-dir"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
+  status=$?
+  assert_config_dir_refused "$out" "$status" "$LAUNCH_LOG" "$HOME_DIR/state/$id.meta" "a malformed config/claude-config-dir under a codex spawn"
+  pass "a malformed config/claude-config-dir refuses every spawn from that home, like the permission-mode precedent"
+}
+
+test_non_claude_harness_ignores_claude_config_dir_file() {
+  local rec id out status launch store
+  id=cfgdir-codex-z34
+  rec=$(make_spawn_case cfgdir-codex codex "$id")
+  read_case_record "$rec"
+  store="$CASE_DIR/seat"
+  mkdir -p "$store"
+  printf '%s\n' "$store" > "$HOME_DIR/config/claude-config-dir"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex)
+  status=$?
+  expect_code 0 "$status" "codex spawn under a valid config/claude-config-dir should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex " "codex launch did not run codex"
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" "the claude store must not leak into a codex launch"
+  pass "config/claude-config-dir changes claude launches only"
+}
+
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
@@ -1479,6 +1688,17 @@ test_claude_permission_mode_auto_reaches_scout_launch
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir
+test_claude_config_dir_file_selects_the_store_and_its_trust
+test_claude_config_dir_file_wins_over_ambient_config_dir
+test_claude_config_dir_reaches_scout_launch
+test_claude_config_dir_relative_path_refuses_before_endpoint_or_metadata
+test_claude_config_dir_missing_directory_refuses_before_endpoint_or_metadata
+test_claude_config_dir_non_directory_refuses_before_endpoint_or_metadata
+test_claude_config_dir_unreadable_file_refuses_before_endpoint_or_metadata
+test_claude_config_dir_multiple_lines_refuse_before_endpoint_or_metadata
+test_claude_config_dir_empty_file_refuses_before_endpoint_or_metadata
+test_claude_config_dir_refuses_every_harness_from_that_home
+test_non_claude_harness_ignores_claude_config_dir_file
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_long_launch_is_delivered_intact

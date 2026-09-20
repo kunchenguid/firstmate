@@ -378,6 +378,20 @@ Any other value, or an unreadable file, refuses every spawn from that home, whic
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
 
+## Claude config store (config/claude-config-dir)
+
+The optional local, gitignored `config/claude-config-dir` holds one absolute path naming the Claude config store every Claude worker launch uses: crewmates, scouts, Claude secondmates, and control-plane relaunches alike.
+The store is the directory Claude Code reads its credentials, settings, and workspace trust from, the same directory `CLAUDE_CONFIG_DIR` selects for an interactive `claude`, so this file is how a fleet runs its workers on a different seat, and a different quota, from the one Firstmate itself is signed in to.
+`bin/fm-spawn.sh` resolves the store once per spawn or relaunch: the file when present, otherwise Firstmate's own ambient `CLAUDE_CONFIG_DIR`, otherwise unset, which keeps today's single-store default of a bare `claude` reading `~/.claude` with no environment prefix.
+The resolved value reaches both the `CLAUDE_CONFIG_DIR` assignment baked into the launch command and the `bin/fm-claude-trust.sh` child that pre-registers workspace trust, so trust always lands in the store the worker will read.
+Because it is a literal assignment in the launch text rather than an inherited variable, it survives a `config/launch-env-allowlist` filter without an allowlist entry.
+The path is the file's single whitespace-trimmed non-comment line; blank lines and lines beginning with `#` are allowed.
+It must be an absolute path to an existing readable directory.
+A relative path, a missing or non-directory target, an unreadable directory or file, an empty file, or more than one non-comment line refuses every spawn from that home, whichever harness it would launch, before any endpoint, worktree, or task record exists, and names the accepted shape; Firstmate never launches, or registers trust, on a store the captain did not choose.
+The file is read on every spawn and relaunch, so a change takes effect at the next launch without a restart.
+It is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract, so a secondmate's own Claude crewmates launch on the same seat.
+The seat path itself is captain-private and never belongs in a tracked file.
+
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.

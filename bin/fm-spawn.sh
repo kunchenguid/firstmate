@@ -288,6 +288,27 @@
 #   worktree, or record exists and names the accepted values. The file is read
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
+# Claude config store (config/claude-config-dir):
+#   One absolute path naming the Claude config store (the CLAUDE_CONFIG_DIR
+#   Claude Code reads its credentials, settings, and trust from) every claude
+#   launch (ship, scout, secondmate, and relaunch) uses, so a fleet can run its
+#   workers on a different seat from the one firstmate itself is signed in to.
+#   Resolution, once per spawn or relaunch: the file when present, else
+#   firstmate's own ambient CLAUDE_CONFIG_DIR, else unset, which is the
+#   single-store default (a bare `claude` reading ~/.claude) with no prefix.
+#   The resolved value reaches both the launch's CLAUDE_CONFIG_DIR assignment and
+#   the bin/fm-claude-trust.sh child that pre-registers workspace trust, so trust
+#   lands in the store the worker will read. The path is the file's one
+#   whitespace-trimmed non-comment line (blank lines and # comments are
+#   allowed) and must be an absolute path to an existing readable directory;
+#   a relative path, a missing or non-directory target, an unreadable
+#   directory or file, an empty file, or more than one non-comment line refuses
+#   the spawn before any endpoint, worktree, or record exists and names the
+#   accepted shape. The file is read on every spawn and relaunch, so a change
+#   reaches the next launch without a restart, and it is inherited into
+#   secondmate homes (bin/fm-config-inherit-lib.sh). The assignment is baked
+#   into the launch text, so it survives a config/launch-env-allowlist filter
+#   without an allowlist entry.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -498,6 +519,56 @@ case "$CLAUDE_PERMISSION_MODE" in
 auto) CLAUDE_PERM_FLAG='--permission-mode auto' ;;
 *) CLAUDE_PERM_FLAG='--dangerously-skip-permissions' ;;
 esac
+# config/claude-config-dir (header above): resolved once per spawn or
+# relaunch, before any mutation, so a malformed file refuses instead of
+# launching a worker, and registering its trust, on a store the captain did
+# not choose. The file wins over firstmate's own ambient CLAUDE_CONFIG_DIR;
+# an absent file keeps that ambient value, and neither means the single-store
+# default. CLAUDE_STORE is the one resolved value the launch prefix and the
+# fm-claude-trust.sh child both consume below.
+CLAUDE_CONFIG_DIR_FILE="$CONFIG/claude-config-dir"
+CLAUDE_CONFIG_DIR_SHAPE="one absolute path to an existing readable directory (the Claude config store), as the file's single non-comment line"
+if ! CLAUDE_CONFIG_DIR_PRESENT=$(fm_config_source_present "$CLAUDE_CONFIG_DIR_FILE"); then
+  exit 1
+fi
+CLAUDE_STORE=${CLAUDE_CONFIG_DIR:-}
+if [ "$CLAUDE_CONFIG_DIR_PRESENT" = 1 ]; then
+  if [ ! -f "$CLAUDE_CONFIG_DIR_FILE" ] || [ ! -r "$CLAUDE_CONFIG_DIR_FILE" ]; then
+    echo "error: config/claude-config-dir must be a readable regular file holding $CLAUDE_CONFIG_DIR_SHAPE" >&2
+    exit 1
+  fi
+  claude_store_lines=0
+  claude_store_line=
+  while IFS= read -r claude_store_raw || [ -n "$claude_store_raw" ]; do
+    claude_store_raw=${claude_store_raw#"${claude_store_raw%%[![:space:]]*}"}
+    claude_store_raw=${claude_store_raw%"${claude_store_raw##*[![:space:]]}"}
+    case "$claude_store_raw" in
+    '' | '#'*) continue ;;
+    esac
+    claude_store_lines=$((claude_store_lines + 1))
+    claude_store_line=$claude_store_raw
+  done <"$CLAUDE_CONFIG_DIR_FILE"
+  if [ "$claude_store_lines" -ne 1 ]; then
+    echo "error: config/claude-config-dir holds $claude_store_lines non-comment lines; the accepted shape is $CLAUDE_CONFIG_DIR_SHAPE" >&2
+    exit 1
+  fi
+  case "$claude_store_line" in
+  /*) ;;
+  *)
+    echo "error: config/claude-config-dir holds '$claude_store_line', a relative path; the accepted shape is $CLAUDE_CONFIG_DIR_SHAPE" >&2
+    exit 1
+    ;;
+  esac
+  if [ ! -d "$claude_store_line" ]; then
+    echo "error: config/claude-config-dir holds '$claude_store_line', which is not an existing directory; the accepted shape is $CLAUDE_CONFIG_DIR_SHAPE" >&2
+    exit 1
+  fi
+  if [ ! -r "$claude_store_line" ]; then
+    echo "error: config/claude-config-dir holds '$claude_store_line', a directory this user cannot read; the accepted shape is $CLAUDE_CONFIG_DIR_SHAPE" >&2
+    exit 1
+  fi
+  CLAUDE_STORE=$claude_store_line
+fi
 SUB_HOME_MARKER=".fm-secondmate-home"
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
@@ -3935,7 +4006,10 @@ claude*)
   else
     spawn_trust_args=("$WT" "$PROJ_ABS")
   fi
-  if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+  # The trust helper locates the store through CLAUDE_CONFIG_DIR, so hand it
+  # the same resolved value the launch prefix below carries; an empty value
+  # is the single-store default on both sides.
+  if ! CLAUDE_CONFIG_DIR="$CLAUDE_STORE" "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
     exit 1
   fi
@@ -4620,11 +4694,14 @@ esac
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+# Forward the store resolved above (config/claude-config-dir, else firstmate's
+# own CLAUDE_CONFIG_DIR) onto the claude launch as a literal assignment, so the
+# crewmate reads the credential/config store the captain chose - the same one
+# fm-claude-trust.sh just registered - and the assignment survives an env -i
+# launch filter. Only when set; an empty value is the single-store default and
+# needs no prefix.
+if [ "$HARNESS" = claude ] && [ -n "$CLAUDE_STORE" ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_STORE") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
