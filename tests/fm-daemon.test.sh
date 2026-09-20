@@ -276,6 +276,78 @@ test_daemon_unobservable_status_is_bounded_per_episode() {
   pass "the daemon bounds an unobservable status log to one escalation per failure episode"
 }
 
+# Interleaved failures are not consecutive ones. Every daemon path ends a
+# failure episode on a proven successful read, so blips separated by working
+# scans must never accumulate into an escalation claiming N consecutive failed
+# observations.
+test_catchall_success_ends_the_unobservable_episode() {
+  local dir state f
+  dir=$(make_supercase catchall-unobservable-reset); state="$dir/state"
+  f="$state/blip-r1.status"
+  printf 'working: routine progress\n' > "$f"
+  make_observe_readers "$dir"
+  (
+    scan_once() {
+      rm -f "$state/.subsuper-last-scan"
+      FM_UNOBSERVABLE_POLLS=3 FM_ESCALATE_BATCH_SECS=999 FM_STATE_OVERRIDE="$state" \
+        FM_STATUS_IDENTITY_READER="$dir/observe-identity" \
+        FM_STATUS_SIZE_READER="$dir/observe-size" \
+        FM_STATUS_PATH_STATE_READER="$dir/observe-path-state" \
+        housekeeping "$state"
+    }
+    : > "$dir/observe-fail"; scan_once
+    rm -f "$dir/observe-fail"; scan_once
+    : > "$dir/observe-fail"; scan_once
+    rm -f "$dir/observe-fail"; scan_once
+    : > "$dir/observe-fail"; scan_once
+    ! grep -q 'status log unobservable' "$state/.subsuper-escalations" 2>/dev/null \
+      || fail "isolated blips escalated as consecutive failures: $(cat "$state/.subsuper-escalations")"
+    # The bound still fires when the failures really are consecutive.
+    scan_once
+    scan_once
+    grep -F 'blip-r1.status: status log unobservable' "$state/.subsuper-escalations" >/dev/null \
+      || fail "three consecutive failures did not reach the bound: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+    exit 0
+  ) || exit 1
+  pass "a successful catch-all read ends the episode so only consecutive failures reach the bound"
+}
+
+# The wedge enrichment replaces the stale decision, but the capture's
+# UNOBSERVABLE row marks the episode reported as soon as that escalation is
+# appended. The delivered text must therefore still name the unobservable log,
+# or the episode's one report is burned for the daemon and for the watcher that
+# shares the sidecar.
+test_wedge_enriched_stale_keeps_the_unobservable_report() {
+  local dir state f rows
+  dir=$(make_supercase wedge-unobservable); state="$dir/state"
+  f="$state/wedge-r1.status"
+  printf 'working: retrying upload\n' > "$f"
+  make_observe_readers "$dir"
+  (
+    wedge_wake() {
+      FM_UNOBSERVABLE_POLLS=2 FM_ESCALATE_BATCH_SECS=999 \
+        FM_STATUS_IDENTITY_READER="$dir/observe-identity" \
+        FM_STATUS_SIZE_READER="$dir/observe-size" \
+        FM_STATUS_PATH_STATE_READER="$dir/observe-path-state" \
+        handle_wake "stale: sess:fm-wedge-r1 (idle 900s, possible wedge, escalation 2)" "$state"
+    }
+    : > "$dir/observe-fail"
+    wedge_wake
+    wedge_wake
+    grep -F 'wedge-r1.status: status log unobservable' "$state/.subsuper-escalations" >/dev/null \
+      || fail "the wedge enrichment swallowed the episode's one report: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+    grep -F 'idle 900s, possible wedge, escalation 2' "$state/.subsuper-escalations" >/dev/null \
+      || fail "the unobservable report dropped the enriched wedge reason: $(cat "$state/.subsuper-escalations")"
+    wedge_wake
+    wedge_wake
+    rows=$(grep -c 'status log unobservable' "$state/.subsuper-escalations" 2>/dev/null || true)
+    [ "$rows" = 1 ] \
+      || fail "the episode reported $rows times: $(cat "$state/.subsuper-escalations")"
+    exit 0
+  ) || exit 1
+  pass "an enriched wedge stale wake still delivers the unobservable episode report it marks reported"
+}
+
 test_stale_read_failure_surfaces_without_advancing_seen() {
   local dir state key out
   dir=$(make_supercase stale-unreadable); state="$dir/state"
@@ -2930,6 +3002,8 @@ test_recreated_status_rejects_captured_identity
 test_unverifiable_identity_surfaces_without_marker
 test_status_read_failure_surfaces_without_advancing_seen
 test_daemon_unobservable_status_is_bounded_per_episode
+test_catchall_success_ends_the_unobservable_episode
+test_wedge_enriched_stale_keeps_the_unobservable_report
 test_catchall_advances_routine_then_surfaces_append
 test_escalation_buffer_failure_retains_wake_and_position
 test_catchall_buffer_failure_preserves_position

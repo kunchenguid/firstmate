@@ -1208,6 +1208,7 @@ housekeeping() {  # <state>
       record=$(status_span_first_actionable_record "$f" \
         "$(status_seen_offset "$state" "$task")")
       rc=$?
+      [ "$rc" -eq 2 ] || status_observation_succeeded "$f"
       if [ "$rc" -eq 2 ]; then
         # A log the scan could not observe is skipped for this scan, not
         # escalated, under the bounded-skip rule fm-classify-lib.sh owns: the
@@ -1457,6 +1458,20 @@ handle_wake() {  # <reason> <state>
                          || decision="escalate|${reason#stale: }"
                        ;;
                    esac ;;
+              esac
+              # The bound's one report per failure episode must survive that
+              # override. The capture's UNOBSERVABLE row marks the episode
+              # reported as soon as this wake's escalation is appended, so the
+              # text that is actually delivered has to keep naming the log, or
+              # the episode is burned for this daemon and for the watcher that
+              # shares the sidecar.
+              case "$span_unobservable" in
+                escalate\|*)
+                  case "$decision" in
+                    *"${span_unobservable#escalate|}") : ;;
+                    *) decision="$decision | ${span_unobservable#escalate|}" ;;
+                  esac
+                  ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;

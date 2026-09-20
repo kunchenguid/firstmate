@@ -1453,8 +1453,10 @@ _status_observed_path_state() {
 # _STATUS_OBSERVED_FIELDS. Returns 0 when they describe a file state and 1 when
 # they describe a failed observation: readlink failed for a symlink, or the
 # stat, size, or identity helper failed for a path that still exists. The same
-# error tokens are a legitimate state for an absent path or a dangling symlink,
-# where the helpers cannot succeed, so those shapes are not failures.
+# error tokens are a legitimate state only for an absent path, where the helpers
+# cannot succeed. A symlink counts as existing even when its target does not,
+# because all three helpers stat the link itself rather than following it, so an
+# error token on a dangling link is a failed helper and not a state.
 _STATUS_OBSERVED_FIELDS=()
 _status_observe_fields() {  # <file> [<size> <ident>]
   local f=$1 size=${2-} ident=${3-} path_state link_target=- access kind exists=1 failed=0
@@ -1464,7 +1466,6 @@ _status_observe_fields() {  # <file> [<size> <ident>]
   if [ -L "$f" ]; then
     link_target=$(readlink "$f" 2>/dev/null) || { link_target=readlink-error; failed=1; }
     kind=symlink
-    [ -e "$f" ] || exists=0
   elif [ ! -e "$f" ]; then
     kind=absent
     exists=0
@@ -1621,10 +1622,12 @@ status_observation_succeeded() {  # <status-file>: a successful observation ends
 # 0 when an r1 signature encodes a failed observation rather than a file state,
 # by the same rule _status_observe_fields applies: readlink-error anywhere, or a
 # stat, size, or identity error token for a kind that proves the path existed.
-# The encoded form cannot see whether a symlink's target existed, so for a
-# symlink only a readable access field, which requires a target, proves it. The
-# writers below refuse such a signature, so a marker is never poisoned by one
-# even though status_observed_signature itself no longer emits it.
+# The size, identity, and path-state helpers all stat the link itself rather
+# than its target, so they succeed for a dangling link exactly as they do for a
+# live one: an error token on a symlink is always a failed observation, never a
+# state, and only an absent path can carry one legitimately. The writers below
+# refuse such a signature, so a marker is never poisoned by one even though
+# status_observed_signature itself no longer emits it.
 status_observed_signature_unobservable() {  # <signature>
   local hex pair ch field='' fields=() i=0
   case "$1" in r1:*) hex=${1#r1:} ;; *) return 1 ;; esac
@@ -1645,8 +1648,7 @@ status_observed_signature_unobservable() {  # <signature>
   [ "${#fields[@]}" -eq 6 ] || return 1
   [ "${fields[3]}" != readlink-error ] || return 0
   case "${fields[5]}" in
-    readable|unreadable|nonregular) ;;
-    symlink) [ "${fields[4]}" = readable ] || return 1 ;;
+    readable|unreadable|nonregular|symlink) ;;
     *) return 1 ;;
   esac
   case "${fields[0]}" in size-error) return 0 ;; esac

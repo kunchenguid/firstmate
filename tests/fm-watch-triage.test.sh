@@ -356,6 +356,29 @@ test_marker_writers_refuse_failed_observations() {
   gsig=$(status_observed_signature "$gone") || fail "a dangling status link lost its signature"
   status_presentation_marker_report "$dir/.seen-gone_status" "$gsig" \
     || fail "a dangling status link's signature was refused as a failed observation"
+  # The helpers stat the link itself, so a dangling link still yields real size,
+  # identity and path-state fields. An error token on a symlink therefore only
+  # ever means the helper failed, and the writers must refuse it.
+  for seam in FM_STATUS_SIZE_READER FM_STATUS_IDENTITY_READER FM_STATUS_PATH_STATE_READER; do
+    out=$(
+      export "$seam=$fail_reader"
+      bash -c '. "$1"; status_observed_signature "$2"' _ "$ROOT/bin/fm-classify-lib.sh" "$gone"
+    )
+    rc=$?
+    [ "$rc" -eq 2 ] && [ -z "$out" ] \
+      || fail "a failing $seam on a dangling link produced a signature (rc=$rc out=$out)"
+  done
+  before=$(cat "$dir/.seen-gone_status")
+  for failed_sig in \
+    "$(encode_status_signature size-error "$(_fm_open_decisions_file_ident "$gone")" "$(_status_observed_path_state "$gone")" "$dir/never-written" unreadable symlink)" \
+    "$(encode_status_signature "$(_fm_status_file_size "$gone")" identity-error "$(_status_observed_path_state "$gone")" "$dir/never-written" unreadable symlink)" \
+    "$(encode_status_signature "$(_fm_status_file_size "$gone")" "$(_fm_open_decisions_file_ident "$gone")" stat-error "$dir/never-written" unreadable symlink)" \
+    "$(encode_status_signature size-error identity-error stat-error - readable symlink)"; do
+    status_presentation_marker_report "$dir/.seen-gone_status" "$failed_sig" \
+      && fail "marker_report recorded a symlink signature carrying an error token"
+    [ "$(cat "$dir/.seen-gone_status")" = "$before" ] \
+      || fail "a refused symlink marker_report changed the marker"
+  done
   asig=$(status_observed_signature "$dir/absent.status") || fail "an absent status path lost its signature"
   [ -n "$asig" ] || fail "an absent status path produced an empty signature"
   pass "marker writers refuse failed observations while absent and dangling states keep their signatures"
