@@ -3046,6 +3046,8 @@ teardown_session_leftover() {
   TEARDOWN_SESSION_LEFTOVERS+="teardown: LEFTOVER $1 $2 $3"$'\n'
 }
 
+# The worktree reaper owns processes inside a returned worktree by cwd;
+# attribution governs only what is stopped by session name outside it.
 task_bridge_session() {
   local pid=$1 task_id=$2 command environment
   command=$(ps -ww -p "$pid" -o command= 2>/dev/null) || return 1

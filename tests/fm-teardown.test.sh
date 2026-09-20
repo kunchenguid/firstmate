@@ -3812,6 +3812,7 @@ test_task_bridge_attribution() {
     rc=0
     FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
     expect_code 0 "$rc" "$session bridge teardown"
+    [ ! -e "$case_dir/state/task-x1.meta" ] || fail "full teardown retained task metadata"
     [ ! -e "$case_dir/state/browser-stop.log" ] || fail "default/custom session invoked global stop"
     ! kill -0 "$own" 2>/dev/null || fail "attributed bridge survived"
     ! kill -0 "$child" 2>/dev/null || fail "bridge child outside worktree survived"
@@ -3835,7 +3836,8 @@ test_child_task_session_cleanup() {
   mkdir -p "$case_dir/parent-home"
   export FM_PROCEVENT_CLAIM_ROOT="$case_dir/claims"
   source=$(register_review_page "$home" child-a) || fail "register child review"
-  start_test_bridge "$case_dir" "$case_dir/child-a-wt" child-b child-a sibling
+  mkdir -p "$case_dir/sibling-wt"
+  start_test_bridge "$case_dir" "$case_dir/sibling-wt" sibling-task child-a sibling
   sibling=$BRIDGE_PID
   start_test_bridge "$case_dir" "$case_dir/child-a-wt" child-a default own yes
   own=$BRIDGE_PID; child=$BRIDGE_CHILD_PID
