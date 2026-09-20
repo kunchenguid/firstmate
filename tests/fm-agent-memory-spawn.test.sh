@@ -187,17 +187,25 @@ else
   read_case_record "$REC2"
   OUT2=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$CASE_ID" "$PROJ_DIR") \
     || fail "spawn failed on the available branch: $OUT2"
+  # fm-spawn.sh never types the composed LAUNCH string into the pane
+  # directly - it stages it into a private launch.<gen>.sh file and sends
+  # only `. '<that file>'`. Extract the staged file from the captured
+  # sourcing line and assert against its real content.
   LAUNCH2=$(tail -1 "$LAUNCH_LOG")
-  case "$LAUNCH2" in
+  LAUNCH_FILE2=$(printf '%s' "$LAUNCH2" | sed -n "s/^\. '\(.*\)'\$/\1/p")
+  [ -n "$LAUNCH_FILE2" ] || fail "captured pane input was not a '. <launch file>' sourcing line: $LAUNCH2"
+  [ -f "$LAUNCH_FILE2" ] || fail "staged launch file $LAUNCH_FILE2 (from $LAUNCH2) does not exist"
+  LAUNCH2_CONTENT=$(cat "$LAUNCH_FILE2")
+  case "$LAUNCH2_CONTENT" in
     "systemd-run --user --scope --slice='firstmate-agents.slice' --unit='fm-$CASE_ID-"*) ;;
-    *) fail "launch was not wrapped as expected on the available branch: $LAUNCH2" ;;
+    *) fail "launch was not wrapped as expected on the available branch: $LAUNCH2_CONTENT" ;;
   esac
   pass "the launch is wrapped in systemd-run --user --scope --slice=firstmate-agents.slice --unit=fm-<id>-<gen>.scope when systemd --user is available"
 
   META2="$HOME_DIR/state/$CASE_ID.meta"
   SCOPE=$(sed -n 's/^memory_scope=//p' "$META2")
   [ -n "$SCOPE" ] || fail "meta recorded no memory_scope= on the available branch"
-  case "$LAUNCH2" in *"--unit='$SCOPE' "*) ;; *) fail "recorded memory_scope=$SCOPE does not match the unit named in the launch: $LAUNCH2" ;; esac
+  case "$LAUNCH2_CONTENT" in *"--unit='$SCOPE' "*) ;; *) fail "recorded memory_scope=$SCOPE does not match the unit named in the launch: $LAUNCH2_CONTENT" ;; esac
   grep -q "^memory_high=$FM_AGENT_MEMORY_WORKER_HIGH_DEFAULT\$" "$META2" || fail "meta memory_high= did not record the default worker high"
   grep -q "^memory_max=$FM_AGENT_MEMORY_WORKER_MAX_DEFAULT\$" "$META2" || fail "meta memory_max= did not record the default worker max"
   grep -q "^memory_swap_max=$FM_AGENT_MEMORY_WORKER_SWAP_MAX_DEFAULT\$" "$META2" || fail "meta memory_swap_max= did not record the default worker swap max"
