@@ -512,7 +512,7 @@ The composer-classification record below observes the same gate from the other s
 ### Second config store, live spawn
 
 Verified 2026-09-20 on this machine, with two Claude crewmates running at once.
-A real ship spawn launched against a second config store, `/home/maxwell/.claude-enterprise`, and the store it actually used was read back from the launched process's own environment rather than inferred from the command text.
+A real ship spawn launched against a second config store, `<captain-home>/.claude-enterprise`, and the store it actually used was read back from the launched process's own environment rather than inferred from the command text.
 A crewmate running concurrently on the default store was read the same way for contrast, and the two processes reported different stores.
 That establishes the two halves this change relies on: the `CLAUDE_CONFIG_DIR` assignment baked into the launch command reaches the running worker, and the `bin/fm-claude-trust.sh` pre-registration lands in that same store, because the spawn produced no trust dialog.
 
