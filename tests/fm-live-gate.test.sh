@@ -199,6 +199,69 @@ EOF
   pass "all $checked live guards refuse together on FM_LIVE=0"
 }
 
+test_native_app_policy_capability_skips_non_windows_by_default() {
+  local platform_bin result rc tool
+  platform_bin="$TMP_ROOT/non-windows-bin"
+  mkdir -p "$platform_bin"
+  for tool in node codex; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$platform_bin/$tool"
+    chmod +x "$platform_bin/$tool"
+  done
+  printf '#!/usr/bin/env bash\nprintf "Linux\\n"\n' > "$platform_bin/uname"
+  chmod +x "$platform_bin/uname"
+
+  set +e
+  result=$(clean_env PATH="$platform_bin:/usr/bin:/bin" bash "$ROOT/tests/fm-native-owner-app-server-policy-live-e2e.test.sh" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "default native app-policy selection failed on an unsupported platform: $result"
+  assert_contains "$result" "skip: live: Windows required" "unsupported default selection must capability-skip"
+
+  set +e
+  result=$(clean_env PATH="$platform_bin:/usr/bin:/bin" FM_LIVE_NATIVE_APP_POLICY=1 bash "$ROOT/tests/fm-native-owner-app-server-policy-live-e2e.test.sh" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "forced native app-policy selection did not refuse an unsupported platform: $result"
+  assert_contains "$result" "was requested but native app-server policy tests require Windows" "forced platform refusal must name the unsupported capability"
+  assert_not_contains "$result" "skip:" "a forced unsupported-platform run must not report a skip"
+  pass "native app policy skips unsupported platforms unless explicitly forced"
+}
+
+test_native_receipts_capability_skips_non_windows_by_default() {
+  local platform_bin result rc tool
+  platform_bin="$TMP_ROOT/non-windows-receipts-bin"
+  mkdir -p "$platform_bin"
+  for tool in powershell.exe git node; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$platform_bin/$tool"
+    chmod +x "$platform_bin/$tool"
+  done
+  printf '#!/usr/bin/env bash\nprintf "Linux\\n"\n' > "$platform_bin/uname"
+  chmod +x "$platform_bin/uname"
+
+  set +e
+  result=$(clean_env PATH="$platform_bin:/usr/bin:/bin" bash "$ROOT/tests/fm-native-owner-receipt-live-e2e.test.sh" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "default native receipt selection failed on an unsupported platform: $result"
+  assert_contains "$result" "skip: live: Windows required" "unsupported default receipt selection must capability-skip"
+
+  set +e
+  result=$(clean_env PATH="$platform_bin:/usr/bin:/bin" FM_LIVE_NATIVE_RECEIPTS=1 bash "$ROOT/tests/fm-native-owner-receipt-live-e2e.test.sh" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "forced native receipt selection did not refuse an unsupported platform: $result"
+  assert_contains "$result" "was requested but native receipt tests require Windows" "forced receipt platform refusal must name the unsupported capability"
+  assert_not_contains "$result" "skip:" "a forced unsupported receipt run must not report a skip"
+
+  set +e
+  result=$(clean_env PATH="$platform_bin:/usr/bin:/bin" FM_LIVE=1 bash "$ROOT/tests/fm-native-owner-receipt-live-e2e.test.sh" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 1 ] || fail "family-forced native receipt selection did not refuse an unsupported platform: $result"
+  assert_not_contains "$result" "skip:" "FM_LIVE=1 must not turn an unsupported receipt run into a skip"
+  pass "native receipts skip unsupported platforms unless explicitly forced"
+}
+
 test_default_on_runs_when_the_tool_is_installed
 pass "a default-on guard runs wherever its tools are installed"
 test_default_on_skips_and_names_the_absent_tool
@@ -218,3 +281,5 @@ pass "any entry point of a multi-mode guard turns it on"
 test_gate_lets_a_guard_drive_the_real_fleet_scripts_under_a_gate_marker
 pass "the shared gate carries the gate-refusal bypass into every live guard"
 test_every_live_guard_is_wired_to_the_shared_gate
+test_native_app_policy_capability_skips_non_windows_by_default
+test_native_receipts_capability_skips_non_windows_by_default

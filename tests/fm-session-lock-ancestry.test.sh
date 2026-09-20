@@ -273,6 +273,450 @@ SH
   pass "session-lock: a live version-named session holding the lock is not mistaken for a stale owner"
 }
 
+# --- Cygwin / Git-for-Windows layer ------------------------------------------
+#
+# Both of this platform's departures are reproduced here rather than assumed, so
+# these run identically on Linux and macOS CI: its ps rejects -o outright, and
+# every shell it reports has its parent link severed at 1 because the real parent
+# is a Windows process Cygwin cannot see.
+
+# A fakebin whose ps behaves like Cygwin's and whose uname reports MINGW.
+# The Windows-side table is supplied per case through FM_TEST_WIN_TABLE, in the
+# same column order the real `ps -W` prints.
+cygwin_fakebin() {  # <dir>
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'MINGW64_NT-10.0-26200'
+SH
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+for a in "$@"; do
+  # Cygwin's ps has no -o option at all; it fails the whole invocation.
+  [ "$a" = "-o" ] && { echo "ps: unknown option -- o" >&2; exit 1; }
+done
+mode=p full=0 pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -W) mode=W; shift ;;
+    -f) full=1; shift ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ "$mode" = W ]; then
+  [ "${FM_TEST_WIN_QUERY_EXIT:-0}" = 0 ] || exit "$FM_TEST_WIN_QUERY_EXIT"
+  if [ -n "${FM_TEST_WIN_FAIL_ONCE_COUNTER:-}" ]; then
+    count=$(cat "$FM_TEST_WIN_FAIL_ONCE_COUNTER" 2>/dev/null || true)
+    count=${count:-0}
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FM_TEST_WIN_FAIL_ONCE_COUNTER"
+    [ "$count" -ne 1 ] || exit 7
+  fi
+  printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+  [ -n "${FM_TEST_WIN_TABLE:-}" ] && printf '%s\n' "$FM_TEST_WIN_TABLE"
+  exit 0
+fi
+# The Cygwin-side table. 700 is an MSYS-native harness; everything else is an
+# ordinary shell whose parent link is severed exactly as the real ps reports it.
+case "$pid" in
+  700) comm='/opt/claude/versions/2.1.220'; ppid=1 ;;
+  *)   comm='/usr/bin/bash'; ppid=${FM_TEST_CYG_PPID:-1} ;;
+esac
+if [ "$full" = 1 ]; then
+  printf '%s\n' '     UID     PID    PPID  TTY        STIME COMMAND'
+  printf 'u %s %s ? 00:00:00 %s\n' "$pid" "$ppid" "$comm"
+else
+  printf '%s\n' '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND'
+  printf '%s %s %s 9999 ? 0 00:00:00 %s\n' "$pid" "$ppid" "$pid" "$comm"
+fi
+SH
+  chmod +x "$fakebin/uname" "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
+# WINPID 7204 is the session harness. 4321 is an ordinary desktop process, and
+# 5150 is the path-shaped lookalike that must never read as a harness.
+WIN_TABLE='  4201508       0       0       7204  ?              0 22:24:48 C:\Users\u\.local\bin\claude.exe
+  4198625       0       0       4321  ?              0 22:24:48 C:\Windows\explorer.exe
+  4199454       0       0       5150  ?              0 22:24:48 C:\tools\claude-notes\helper.exe'
+
+test_windows_session_is_identified_from_its_published_pid() {
+  local dir fakebin got
+  dir="$TMP_ROOT/win-published"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+  printf 'win:7204\n' > "$dir/state/.lock"
+
+  got=$(FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the session was not identified at all on a severed Cygwin parent link"
+  [ "$got" = 'win:7204' ] || fail "expected the tagged Windows session pid win:7204, got '$got'"
+  FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_pid_alive win:7204' \
+    || fail "a live Windows-side session was classified as a dead lock owner"
+  FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_CLAUDE_PID=7204 lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the session holding the lock did not recognize itself as the owner"
+  pass "session-lock: a Windows session is identified from its published pid across the severed parent link"
+}
+
+test_windows_query_outcomes_reach_every_owner_gate() {
+  local dir fakebin case_dir counter out rc
+  dir="$TMP_ROOT/win-query-outcomes"
+  fakebin=$(cygwin_fakebin "$dir")
+
+  case_dir="$dir/present"
+  mkdir -p "$case_dir/state"
+  printf '%s\n' 'win:7204' > "$case_dir/state/.lock"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_WIN_TABLE="$WIN_TABLE" "$ROOT/bin/fm-lock.sh" status)
+  [ "$out" = 'lock: held by live harness pid win:7204' ] || fail "present Windows owner was not live: $out"
+  if PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_WIN_TABLE="$WIN_TABLE" "$ROOT/bin/fm-lock.sh" native-admission-predicate >/dev/null 2>&1; then
+    fail "native admission accepted a present Windows owner"
+  fi
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_CYG_PPID=700 FM_TEST_WIN_TABLE="$WIN_TABLE" "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "ordinary acquisition replaced a present Windows owner"
+  [ "$(cat "$case_dir/state/.lock")" = 'win:7204' ] || fail "present Windows owner changed during acquisition"
+
+  case_dir="$dir/absent"
+  mkdir -p "$case_dir/state"
+  printf '%s\n' 'win:7204' > "$case_dir/state/.lock"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_WIN_TABLE='' "$ROOT/bin/fm-lock.sh" status)
+  [ "$out" = 'lock: stale (pid win:7204 dead or not a harness)' ] || fail "absent Windows owner was not stale: $out"
+  PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_WIN_TABLE='' "$ROOT/bin/fm-lock.sh" native-admission-predicate >/dev/null \
+    || fail "native admission did not accept a proven-absent Windows owner"
+  PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_CYG_PPID=700 FM_TEST_WIN_TABLE='' "$ROOT/bin/fm-lock.sh" >/dev/null \
+    || fail "ordinary acquisition did not replace a proven-absent Windows owner"
+  [ "$(cat "$case_dir/state/.lock")" = 700 ] || fail "proven-absent Windows owner was not replaced by the current harness"
+
+  case_dir="$dir/failed"
+  mkdir -p "$case_dir/state"
+  printf '%s\n' 'win:7204' > "$case_dir/state/.lock"
+  rc=0
+  FM_TEST_WIN_QUERY_EXIT=7 lib_eval "$fakebin" 'fm_harness_pid_alive win:7204' >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || fail "failed Windows query did not remain unknown: $rc"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_WIN_QUERY_EXIT=7 "$ROOT/bin/fm-lock.sh" status)
+  [ "$out" = 'lock: held by owner with unconfirmed health (pid win:7204)' ] || fail "failed Windows query was not reported as unknown: $out"
+  if PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_WIN_QUERY_EXIT=7 "$ROOT/bin/fm-lock.sh" native-admission-predicate >/dev/null 2>&1; then
+    fail "native admission accepted an owner after a failed Windows query"
+  fi
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_CYG_PPID=700 FM_TEST_WIN_QUERY_EXIT=7 "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "ordinary acquisition replaced an owner after a failed Windows query"
+  [ "$(cat "$case_dir/state/.lock")" = 'win:7204' ] || fail "failed Windows query changed the recorded owner"
+
+  case_dir="$dir/fail-once"
+  counter="$case_dir/query-count"
+  mkdir -p "$case_dir/state"
+  printf '%s\n' 'win:7204' > "$case_dir/state/.lock"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_WIN_FAIL_ONCE_COUNTER="$counter" "$ROOT/bin/fm-lock.sh" status)
+  [ "$out" = 'lock: held by owner with unconfirmed health (pid win:7204)' ] \
+    || fail "transient Windows query failure was reclassified by status: $out"
+  [ "$(cat "$counter")" = 1 ] || fail "status queried one owner decision more than once"
+
+  rm -f "$counter"
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_WIN_FAIL_ONCE_COUNTER="$counter" "$ROOT/bin/fm-lock.sh" native-admission-predicate >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "native admission accepted an owner after a transient Windows query failure"
+  [ "$(cat "$counter")" = 1 ] || fail "native admission queried one owner decision more than once"
+
+  rm -f "$counter"
+  set +e
+  PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_CYG_PPID=700 FM_TEST_WIN_FAIL_ONCE_COUNTER="$counter" "$ROOT/bin/fm-lock.sh" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "ordinary acquisition replaced an owner after a transient Windows query failure"
+  [ "$(cat "$case_dir/state/.lock")" = 'win:7204' ] || fail "transient Windows query failure changed the recorded owner"
+  [ "$(cat "$counter")" = 1 ] || fail "ordinary acquisition queried one owner decision more than once"
+  pass "session-lock: Windows query presence, absence, and failure remain distinct through status and acquisition"
+}
+
+test_harness_detection_uses_shared_native_selection() {
+  local dir bindir fakebin home out shape
+  dir="$TMP_ROOT/native-harness-selection"
+  bindir="$dir/bin"
+  home="$dir/home"
+  mkdir -p "$bindir" "$home/state" "$home/config"
+  cp "$ROOT/bin/fm-harness.sh" "$ROOT/bin/fm-session-lock-lib.sh" \
+    "$ROOT/bin/fm-cursor-lib.sh" "$ROOT/bin/fm-gemini-lib.sh" "$bindir/"
+  fakebin=$(cygwin_fakebin "$dir/fake")
+  cat > "$fakebin/cygpath" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${@: -1}"
+SH
+  cat > "$bindir/fm-native-owner.exe" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = owner ] && [ "${2:-}" = harness ] || exit 2
+case "${FM_TEST_NATIVE_VERDICT:-}" in codex) printf '%s\n' codex ;; *) exit 2 ;; esac
+SH
+  chmod +x "$bindir/fm-harness.sh" "$bindir/fm-native-owner.exe" "$fakebin/cygpath"
+
+  out=$(env -u CLAUDECODE -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u FM_OMP_HARNESS \
+    -u FM_PI_HARNESS -u FM_STATE_OVERRIDE PATH="$fakebin:$PATH" FM_HOME="$home" \
+    PI_CODING_AGENT=true FM_TEST_NATIVE_VERDICT=codex "$bindir/fm-harness.sh")
+  [ "$out" = pi ] || fail "ordinary marker routing changed without a native record: $out"
+
+  printf '%s\n' 'native:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$home/state/.lock"
+  out=$(env -u CLAUDECODE -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u FM_OMP_HARNESS \
+    -u FM_PI_HARNESS -u FM_STATE_OVERRIDE PATH="$fakebin:$PATH" FM_HOME="$home" \
+    PI_CODING_AGENT=true "$bindir/fm-harness.sh")
+  [ "$out" = unknown ] || fail "native lock without authenticated proof fell through to a marker: $out"
+
+  rm "$home/state/.lock"
+  for shape in regular directory broken-link; do
+    case "$shape" in
+      regular) printf '%s\n' '{}' > "$home/owner-probe.json" ;;
+      directory) mkdir "$home/owner-probe.json" ;;
+      broken-link) ln -s "$home/missing-owner-probe" "$home/owner-probe.json" ;;
+    esac
+    out=$(env -u CLAUDECODE -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+      -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u FM_OMP_HARNESS \
+      -u FM_PI_HARNESS -u FM_STATE_OVERRIDE PATH="$fakebin:$PATH" FM_HOME="$home" \
+      PI_CODING_AGENT=true "$bindir/fm-harness.sh")
+    [ "$out" = unknown ] || fail "$shape native probe fell through to a marker: $out"
+    case "$shape" in directory) rmdir "$home/owner-probe.json" ;; *) rm "$home/owner-probe.json" ;; esac
+  done
+  printf '%s\n' '{}' > "$home/owner-probe.json"
+  out=$(env -u CLAUDECODE -u GROK_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u FM_OMP_HARNESS \
+    -u FM_PI_HARNESS -u FM_STATE_OVERRIDE PATH="$fakebin:$PATH" FM_HOME="$home" \
+    PI_CODING_AGENT=true FM_TEST_NATIVE_VERDICT=codex "$bindir/fm-harness.sh")
+  [ "$out" = codex ] || fail "authenticated native probe did not select Codex: $out"
+  pass "harness detection delegates durable native selection without marker fallback"
+}
+
+test_windows_published_pid_is_confirmed_before_it_is_trusted() {
+  local dir fakebin
+  dir="$TMP_ROOT/win-unconfirmed"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # A published pid is a claim. Each of these shapes must be discarded rather
+  # than bound: a process that is gone, one that is not a harness at all, and a
+  # path that merely contains the harness name inside a longer component.
+  for claimed in 9999 4321 5150; do
+    if FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_CLAUDE_PID="$claimed" lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
+      fail "published pid $claimed was bound as this session's harness without confirmation"
+    fi
+    if FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" "fm_harness_pid_alive win:$claimed"; then
+      fail "published pid $claimed passed the harness-liveness predicate"
+    fi
+  done
+  pass "session-lock: a published Windows pid is confirmed against the process table before it is trusted"
+}
+
+test_windows_pid_is_never_resolved_as_a_cygwin_pid() {
+  local dir fakebin
+  dir="$TMP_ROOT/win-namespace"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # 700 is a harness in the CYGWIN table and absent from the Windows one. The
+  # two namespaces overlap numerically, so resolving a tagged pid through the
+  # local table would bind a home to whatever unrelated process holds that
+  # number - which is exactly what the tag exists to prevent.
+  FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" 'fm_harness_pid_alive 700' \
+    || fail "fixture is vacuous: pid 700 must be a live harness in the Cygwin table"
+  if FM_TEST_WIN_TABLE="$WIN_TABLE" lib_eval "$fakebin" 'fm_harness_pid_alive win:700'; then
+    fail "a tagged Windows pid was resolved against the Cygwin process table"
+  fi
+  pass "session-lock: a tagged Windows pid is never resolved against the Cygwin process table"
+}
+
+test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock() {
+  local dir fakebin identity
+  dir="$TMP_ROOT/win-identity-gates"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # The identity a session writes into the lock is read back by gates spread
+  # across several scripts - startup-completion recording and its clear/compact
+  # validation, the deferred network sweeps, and the Stop auto-arm. Each one
+  # asks only "is this value a usable identity", and each answered that with its
+  # own numeric test, so introducing a second identity shape made every one of
+  # them silently read a valid holder as malformed. The visible cost was a
+  # completion record that was never written, which reads as "startup never
+  # finished" and repeats the whole sequence on every clear or compact. One
+  # predicate owns the question so a third shape can never split them again.
+  identity=$(FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_CLAUDE_PID=7204 lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "fixture is vacuous: no identity was published to gate on"
+  lib_eval "$fakebin" "fm_session_pid_valid '$identity'" \
+    || fail "the identity '$identity' this session publishes is rejected by the gates that read it back"
+
+  # A local pid stays equally valid: the Windows shape is additional, not a
+  # replacement, and the same predicate serves both platforms.
+  lib_eval "$fakebin" 'fm_session_pid_valid 700' \
+    || fail "an ordinary local pid was rejected as an invalid lock identity"
+
+  # Still fail closed on the shapes a torn or hand-edited lock produces, and on
+  # a bare tag carrying no pid at all.
+  for bad in '' 'win:' 'win:abc' 'win:123oops' 'win:1:2' 'abc' '70 0' '-1'; do
+    if lib_eval "$fakebin" "fm_session_pid_valid '$bad'"; then
+      fail "the malformed lock value '$bad' was accepted as a usable identity"
+    fi
+    case "$bad" in
+      win:*)
+        if lib_eval "$fakebin" "fm_win_untag_pid '$bad'"; then
+          fail "the malformed lock value '$bad' was reduced to a Windows pid"
+        fi
+        ;;
+    esac
+  done
+  pass "session-lock: a published identity is accepted by every gate that reads the lock"
+}
+
+test_native_admission_preserves_a_partially_numeric_windows_identity() {
+  local dir out rc
+  dir="$TMP_ROOT/win-partial-identity"
+  mkdir -p "$dir/state"
+  printf '%s\n' 'win:123oops' > "$dir/state/.lock"
+
+  set +e
+  out=$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-lock.sh" native-admission-predicate 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "native admission accepted a partially numeric Windows identity"
+  [ "$(cat "$dir/state/.lock")" = 'win:123oops' ] || fail "native admission changed an ambiguous Windows identity"
+  case "$out" in
+    *'session lock owner is unrecognized; native launch refused'*) ;;
+    *) fail "native admission did not identify the malformed owner: $out" ;;
+  esac
+  pass "session-lock: native admission preserves a partially numeric Windows identity"
+}
+
+test_ordinary_acquisition_preserves_malformed_windows_identities() {
+  local dir fakebin bad case_dir out rc index real_ln
+  dir="$TMP_ROOT/win-malformed-acquisition"
+  fakebin=$(cygwin_fakebin "$dir")
+  index=0
+
+  for bad in 'win:' 'win:abc' 'win:123oops' 'win:1:2'; do
+    index=$((index + 1))
+    case_dir="$dir/preclaim-$index"
+    mkdir -p "$case_dir/state"
+    printf '%s\n' "$bad" > "$case_dir/state/.lock"
+
+    set +e
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+      FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID=7204 "$ROOT/bin/fm-lock.sh" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "ordinary acquisition accepted malformed Windows identity '$bad'"
+    [ "$(cat "$case_dir/state/.lock")" = "$bad" ] \
+      || fail "ordinary acquisition changed malformed Windows identity '$bad'"
+    case "$out" in
+      *'session lock owner is unrecognized; operate read-only until resolved'*) ;;
+      *) fail "ordinary acquisition did not identify malformed owner '$bad': $out" ;;
+    esac
+  done
+
+  case_dir="$dir/locked-recheck"
+  mkdir -p "$case_dir/state"
+  real_ln=$(command -v ln)
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+target=
+for target in "$@"; do
+  :
+done
+if [ "$target" = "$FM_TEST_LOCK_STATE/.lock.acquire" ]; then
+  printf '%s\n' 'win:123oops' > "$FM_TEST_LOCK_STATE/.lock"
+fi
+exec "$FM_TEST_REAL_LN" "$@"
+SH
+  chmod +x "$fakebin/ln"
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_WIN_TABLE="$WIN_TABLE" CLAUDE_PID=7204 FM_TEST_REAL_LN="$real_ln" \
+    FM_TEST_LOCK_STATE="$case_dir/state" "$ROOT/bin/fm-lock.sh" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "locked acquisition recheck accepted a malformed Windows identity"
+  [ "$(cat "$case_dir/state/.lock")" = 'win:123oops' ] \
+    || fail "locked acquisition recheck changed a malformed Windows identity"
+  case "$out" in
+    *'session lock owner is unrecognized; operate read-only until resolved'*) ;;
+    *) fail "locked acquisition recheck did not identify the malformed owner: $out" ;;
+  esac
+  pass "session-lock: ordinary acquisition preserves malformed Windows identities at both checks"
+}
+
+test_status_distinguishes_malformed_windows_identities() {
+  local dir fakebin bad case_dir out index
+  dir="$TMP_ROOT/win-malformed-status"
+  fakebin=$(cygwin_fakebin "$dir")
+  index=0
+
+  for bad in 'win:' 'win:abc' 'win:123oops' 'win:1:2'; do
+    index=$((index + 1))
+    case_dir="$dir/malformed-$index"
+    mkdir -p "$case_dir/state"
+    printf '%s\n' "$bad" > "$case_dir/state/.lock"
+
+    out=$(PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+      FM_TEST_WIN_TABLE="$WIN_TABLE" "$ROOT/bin/fm-lock.sh" status)
+    [ "$out" = 'lock: held by unrecognized owner with unknown health' ] \
+      || fail "status classified malformed Windows identity '$bad' as known: $out"
+    [ "$(cat "$case_dir/state/.lock")" = "$bad" ] \
+      || fail "status changed malformed Windows identity '$bad'"
+  done
+
+  case_dir="$dir/live"
+  mkdir -p "$case_dir/state"
+  printf '%s\n' 'win:7204' > "$case_dir/state/.lock"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_WIN_TABLE="$WIN_TABLE" "$ROOT/bin/fm-lock.sh" status)
+  [ "$out" = 'lock: held by live harness pid win:7204' ] \
+    || fail "status lost a valid live Windows owner: $out"
+
+  case_dir="$dir/dead"
+  mkdir -p "$case_dir/state"
+  printf '%s\n' 'win:9999' > "$case_dir/state/.lock"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_TEST_WIN_TABLE="$WIN_TABLE" "$ROOT/bin/fm-lock.sh" status)
+  [ "$out" = 'lock: stale (pid win:9999 dead or not a harness)' ] \
+    || fail "status lost a valid dead Windows owner: $out"
+  pass "session-lock: status preserves malformed Windows identities without confusing them with valid owners"
+}
+
+test_cygwin_ps_without_o_still_resolves_a_local_harness() {
+  local dir fakebin got
+  dir="$TMP_ROOT/cygwin-local"
+  fakebin=$(cygwin_fakebin "$dir")
+  mkdir -p "$dir/state"
+
+  # An MSYS-native harness lives in the same process table as this shell, so it
+  # must resolve through the ordinary walk and stay an untagged pid. This is
+  # what proves the walk survives a ps with no -o option at all.
+  got=$(FM_TEST_CYG_PPID=700 FM_TEST_WIN_TABLE="$WIN_TABLE" FM_TEST_CLAUDE_PID=7204 \
+    lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "a harness in the local process table was not resolved when ps rejected -o"
+  [ "$got" = 700 ] || fail "expected the untagged local harness pid 700, got '$got'"
+  pass "session-lock: a harness in the local process table resolves untagged when ps has no -o option"
+}
+
 # A background Claude session's process table. The hook fires inside
 # `claude bg-spare` (710), whose parent is `claude bg-pty-host` (720). With the
 # transient daemon gone the pty-host is reparented to launchd, so the contiguous
@@ -567,6 +1011,159 @@ test_e2e_daemon_parented_version_named_session_keeps_its_lock() {
   pass "session-lock e2e: a version-named session under a harness-named daemon keeps its own lock"
 }
 
+test_native_state_contract() (
+  # shellcheck source=/dev/null
+  . "$LIB"
+  local answer rc identity=native:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa FM_HOME FM_STATE_OVERRIDE
+  # shellcheck disable=SC2329 # Mock invoked indirectly by fm_native_owner_state.
+  fm_native_owner_call() { return "$answer"; }
+  fm_session_pid_valid "$identity" || fail "valid native identity rejected"
+  if fm_session_pid_valid native:123; then fail "malformed native identity accepted"; fi
+  for answer in 0 1 2; do
+    rc=0; fm_native_owner_state "$identity" || rc=$?
+    [ "$rc" -eq "$answer" ] || fail "native three-state result collapsed"
+    rc=0; fm_harness_pid_alive "$identity" || rc=$?
+    if [ "$answer" -eq 0 ]; then
+      [ "$rc" -eq 0 ] || fail "proven-live native owner lost positive health"
+    else
+      [ "$rc" -ne 0 ] || fail "dead or unknown native owner reported positive health"
+    fi
+    rc=0; fm_harness_pid_excludes "$identity" || rc=$?
+    if [ "$answer" -eq 1 ]; then
+      [ "$rc" -ne 0 ] || fail "proven-dead owner retained occupancy"
+    else
+      [ "$rc" -eq 0 ] || fail "live or unknown owner lost exclusion"
+    fi
+  done
+  FM_HOME="$TMP_ROOT/native-selection"
+  FM_STATE_OVERRIDE="$FM_HOME/state"
+  mkdir -p "$FM_STATE_OVERRIDE"
+  if fm_native_owner_selected; then fail "ordinary home opted in without records"; fi
+  printf '%s\n' "$identity" > "$FM_STATE_OVERRIDE/.lock"
+  fm_native_owner_selected || fail "native lock lost routing without its binding"
+  pass "native identity routing preserves unknown exclusion without certifying health"
+)
+
+test_native_owns_uses_shared_dispatch() (
+  local dir fakebin state ambient args rc expected
+  dir="$TMP_ROOT/native-owns-dispatch"
+  fakebin="$dir/fakebin"
+  state="$dir/selected/state"
+  ambient="$dir/ambient/state"
+  mkdir -p "$fakebin" "$state" "$ambient"
+  printf '%s\n' '{}' > "$dir/selected/owner-probe.json"
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' MINGW64_NT-fixture
+SH
+  cat > "$fakebin/cygpath" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${@: -1}"
+SH
+  cat > "$dir/fm-native-owner.exe" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FM_TEST_NATIVE_ARGS"
+exit "$FM_TEST_NATIVE_EXIT"
+SH
+  chmod +x "$fakebin/uname" "$fakebin/cygpath" "$dir/fm-native-owner.exe"
+  # shellcheck source=/dev/null
+  . "$LIB"
+  # shellcheck disable=SC2034 # Test input consumed by fm_native_owner_call.
+  FM_NATIVE_OWNER_BIN="$dir/fm-native-owner.exe"
+  FM_HOME="$dir/ambient"
+  FM_STATE_OVERRIDE="$ambient"
+  args="$dir/arguments"
+  for expected in 0 2; do
+    rc=0
+    PATH="$fakebin:$PATH" FM_TEST_NATIVE_ARGS="$args" FM_TEST_NATIVE_EXIT="$expected" \
+      fm_session_lock_owned_by_self "$state" || rc=$?
+    [ "$rc" -eq "$expected" ] || fail "native owns changed verifier exit $expected to $rc"
+    [ "$(wc -l < "$args" | tr -d ' ')" -eq 3 ] && [ "$(sed -n '1p' "$args")" = owner ] \
+      && [ "$(sed -n '2p' "$args")" = owns ] && [ "$(sed -n '3p' "$args")" = "$state" ] \
+      || fail "native owns did not preserve the selected state override"
+  done
+  pass "native self-ownership delegates through the shared owner command"
+)
+
+test_native_status_and_acquisition_behavior() {
+  local dir bindir fakebin identity out rc
+  dir="$TMP_ROOT/native-status"
+  bindir="$dir/bin"
+  fakebin="$dir/fakebin"
+  identity=native:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  mkdir -p "$bindir" "$fakebin" "$dir/state"
+  cp "$ROOT/bin/fm-lock.sh" "$ROOT/bin/fm-session-lock-lib.sh" "$ROOT/bin/fm-cursor-lib.sh" "$ROOT/bin/fm-wake-lib.sh" "$bindir/"
+  cat > "$bindir/fm-native-owner.exe" <<'SH'
+#!/usr/bin/env bash
+case "${2:-}" in
+  alive) exit "${FM_TEST_NATIVE_STATE:?}" ;;
+  identity) printf '%s\n' 'native:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'; exit 0 ;;
+  *) exit 2 ;;
+esac
+SH
+  cat > "$fakebin/cygpath" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${@: -1}"
+SH
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *comm=*) printf '%s\n' codex ;;
+  *args=*) printf '%s\n' codex ;;
+  *ppid=*) printf '%s\n' 1 ;;
+  *) exit 1 ;;
+esac
+SH
+  cat > "$fakebin/uname" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' MINGW64_NT-fixture
+SH
+  chmod +x "$bindir/fm-native-owner.exe" "$bindir/fm-lock.sh" "$fakebin/cygpath" "$fakebin/ps" "$fakebin/uname"
+  printf '%s\n' "$identity" > "$dir/state/.lock"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_TEST_NATIVE_STATE=2 "$bindir/fm-lock.sh" status)
+  case "$out" in
+    *'held by native owner with unconfirmed health'*) ;;
+    *) fail "unknown native owner status was not distinguished: $out" ;;
+  esac
+  case "$out" in *'held by live harness'*) fail "unknown native owner status reported positive health" ;; esac
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_TEST_NATIVE_STATE=1 "$bindir/fm-lock.sh" status)
+  case "$out" in *"stale (native owner identity $identity dead or not a harness)"*) ;; *) fail "dead native owner status mislabeled its identity: $out" ;; esac
+  set +e
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_TEST_NATIVE_STATE=2 "$bindir/fm-lock.sh" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "unknown native owner did not exclude acquisition"
+  [ "$(cat "$dir/state/.lock")" = "$identity" ] || fail "unknown native owner was overwritten during acquisition"
+  case "$out" in *"native owner identity $identity"*) ;; *) fail "native exclusion mislabeled its owner identity: $out" ;; esac
+  case "$out" in *"pid $identity"*) fail "native exclusion labeled an opaque identity as a pid: $out" ;; esac
+  printf '%s\n' 'native:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' > "$dir/state/.lock"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_TEST_NATIVE_STATE=0 "$bindir/fm-lock.sh")
+  case "$out" in *'lock acquired: native owner identity native:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'*) ;; *) fail "native acquisition mislabeled its owner identity: $out" ;; esac
+  pass "native lock status distinguishes unknown health while acquisition remains excluded"
+}
+
+test_numeric_ancestry_interfaces_reject_native_identity() {
+  local identity=native:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa out rc
+  set +e
+  out=$("$ROOT/bin/fm-harness.sh" ancestry "$identity" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "ancestry accepted a native lock identity as a process id: $out"
+  case "$out" in *'ancestry takes a numeric pid'*) ;; *) fail "ancestry refusal did not preserve its numeric contract: $out" ;; esac
+
+  set +e
+  out=$("$ROOT/bin/fm-harness.sh" ancestry-descent 700 "$identity" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "ancestry-descent accepted a native lock identity as a process id: $out"
+  case "$out" in *'ancestry-descent takes numeric pids'*) ;; *) fail "ancestry-descent refusal did not preserve its numeric contract: $out" ;; esac
+  pass "numeric ancestry interfaces reject native lock identities"
+}
+
+test_native_state_contract
+test_native_owns_uses_shared_dispatch
+test_native_status_and_acquisition_behavior
+test_numeric_ancestry_interfaces_reject_native_identity
 # --- end-to-end layer: a background session whose helper chain is recycled ---
 #
 # The topology the four issue reports (#3902, #2314, #3398, #4066) recorded with
@@ -1096,6 +1693,16 @@ test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
+test_windows_session_is_identified_from_its_published_pid
+test_windows_query_outcomes_reach_every_owner_gate
+test_harness_detection_uses_shared_native_selection
+test_windows_published_pid_is_confirmed_before_it_is_trusted
+test_windows_pid_is_never_resolved_as_a_cygwin_pid
+test_a_published_identity_is_accepted_by_the_gates_that_read_the_lock
+test_native_admission_preserves_a_partially_numeric_windows_identity
+test_ordinary_acquisition_preserves_malformed_windows_identities
+test_status_distinguishes_malformed_windows_identities
+test_cygwin_ps_without_o_still_resolves_a_local_harness
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
 test_e2e_version_named_session_claims_the_home

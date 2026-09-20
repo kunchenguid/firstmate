@@ -203,19 +203,19 @@
 #             and a session that owns the lock is exactly the session that must
 #             handle and acknowledge them. Lock acquisition still runs, because
 #             ownership must be re-verified rather than assumed: fm-lock.sh
-#             already treats a lock owned through shared ancestry or a trusted
-#             same-session Claude id as its own, so the re-emit proceeds, while
-#             a lock another live session took meanwhile still produces the
-#             ordinary read-only path.
+#             already accepts authenticated native ownership, a member of the
+#             current session's verified identity set, or a trusted same-session
+#             Claude id, so the re-emit proceeds, while a lock another live
+#             session took meanwhile still produces the ordinary read-only path.
 #
 #   --source  The native session-open source, supplied only by
 #             fm-sessionstart-run.sh. A genuine `startup` that owns the active
 #             session lock records AGENTS.md's SHA-256 baseline only after the
-#             digest completion record is published, keyed to that lock's
-#             harness pid. No resume, clear, reset, compact, or other rebuild
+#             digest completion record is published, keyed to that lock's owner
+#             identity. No resume, clear, reset, compact, or other rebuild
 #             creates or replaces it. Pi and pi-signed compaction are the only
 #             supported stale-cache rebuild pair: a missing baseline, a baseline
-#             for another harness pid, or a changed hash causes the complete
+#             for another owner identity, or a changed hash causes the complete
 #             current AGENTS.md to print before the bulky digest. The baseline
 #             remains immutable so every later drifted compaction refreshes
 #             again, while an equal baseline emits no instruction refresh.
@@ -558,7 +558,7 @@ hash_file_sha256() {
 # The baseline describes instructions this true session started with, not the
 # most recently emitted instructions. It is intentionally immutable for this
 # lock owner: every later stale-context rebuild needs the current file again.
-write_agents_baseline() {  # <lock-pid> <agents-hash>
+write_agents_baseline() {  # <lock-owner> <agents-hash>
   local lock_pid=$1 agents_hash=$2 tmp
   [ -n "$lock_pid" ] && [ -n "$agents_hash" ] || return 1
   tmp=$(mktemp "$STATE/.session-start-agents-baseline.XXXXXX" 2>/dev/null) || return 1
@@ -570,7 +570,7 @@ write_agents_baseline() {  # <lock-pid> <agents-hash>
   return 1
 }
 
-agents_baseline_drifted() {  # <rebuilding-session-pid>
+agents_baseline_drifted() {  # <rebuilding-session-owner>
   local lock_pid=$1 baseline_pid baseline_hash current_hash
   [ -f "$AGENTS_BASELINE_FILE" ] && [ ! -L "$AGENTS_BASELINE_FILE" ] || return 0
   baseline_pid=$(sed -n '1p' "$AGENTS_BASELINE_FILE" 2>/dev/null || true)
@@ -584,7 +584,7 @@ agents_baseline_drifted() {  # <rebuilding-session-pid>
 # Only run-tier source pairs with both a stale native instruction cache and a
 # working Firstmate delivery path arrive here. Claude fresh-reads on reset, and
 # Codex has no tracked interactive reset delivery path.
-agents_refresh_required() {  # <rebuilding-session-pid>
+agents_refresh_required() {  # <rebuilding-session-owner>
   local lock_pid=$1
   case "$PRIMARY_HARNESS:$SESSION_SOURCE" in
     pi:compact|pi-signed:compact) ;;
@@ -593,7 +593,7 @@ agents_refresh_required() {  # <rebuilding-session-pid>
   agents_baseline_drifted "$lock_pid"
 }
 
-print_agents_refresh_if_required() {  # <rebuilding-session-pid>
+print_agents_refresh_if_required() {  # <rebuilding-session-owner>
   local lock_pid=$1
   agents_refresh_required "$lock_pid" || return 0
   section "CURRENT AGENTS.md - INSTRUCTION REFRESH"
@@ -997,9 +997,7 @@ EOF
 if [ "$READ_ONLY" -eq 0 ] && [ "$REEMIT" -eq 0 ]; then
   COMPLETION_RECORDED=0
   COMPLETION_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
-  case "$COMPLETION_PID" in
-    ''|*[!0-9]*) COMPLETION_PID= ;;
-  esac
+  fm_session_pid_valid "$COMPLETION_PID" || COMPLETION_PID=
   COMPLETION_TMP=$(mktemp "$STATE/.session-start-complete.XXXXXX" 2>/dev/null || true)
   if [ -n "$COMPLETION_PID" ] && [ -n "$COMPLETION_TMP" ] \
     && printf '%s\n' "$COMPLETION_PID" > "$COMPLETION_TMP" 2>/dev/null \

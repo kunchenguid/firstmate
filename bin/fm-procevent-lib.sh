@@ -1254,3 +1254,73 @@ fm_procevent_result_extension_load() {  # <result-path>
   fm_procevent_digest_valid "$FM_PROCEVENT_RESULT_EXTENSION_PACKAGE_DIGEST" || return 2
   fm_procevent_digest_valid "$FM_PROCEVENT_RESULT_EXTENSION_BINDING_DIGEST" || return 2
 }
+
+# shellcheck disable=SC2034 # Public result consumed by sourcing callers.
+FM_PROCEVENT_INBOX_ERROR=
+fm_procevent_inbox_has_only_handled_history() {  # <state>
+  local state=$1 inbox record name result id seq extension
+  inbox=$(fm_procevent_inbox_dir "$state")
+  FM_PROCEVENT_INBOX_ERROR=
+  if [ ! -e "$inbox" ] && [ ! -L "$inbox" ]; then
+    return 0
+  fi
+  if [ ! -d "$inbox" ] || [ -L "$inbox" ]; then
+    FM_PROCEVENT_INBOX_ERROR="process-event result inbox is malformed at $inbox"
+    return 1
+  fi
+  for record in "$inbox"/* "$inbox"/.[!.]* "$inbox"/..?*; do
+    if [ ! -e "$record" ] && [ ! -L "$record" ]; then
+      continue
+    fi
+    if [ ! -f "$record" ] || [ -L "$record" ]; then
+      FM_PROCEVENT_INBOX_ERROR="process-event result history is malformed at $record"
+      return 1
+    fi
+    name=${record##*/}
+    case "$name" in
+      *.result)
+        result=$record
+        id=$(fm_procevent_result_source_id "$result")
+        seq=$(fm_procevent_result_sequence "$result")
+        if ! fm_procevent_source_id_valid "$id"; then
+          FM_PROCEVENT_INBOX_ERROR="process-event result history is malformed at $result"
+          return 1
+        fi
+        case "$seq" in
+          ''|*[!0-9]*)
+            FM_PROCEVENT_INBOX_ERROR="process-event result history is malformed at $result"
+            return 1
+            ;;
+        esac
+        if ! fm_procevent_result_adapter "$result" >/dev/null; then
+          FM_PROCEVENT_INBOX_ERROR="process-event result history is malformed at $result"
+          return 1
+        fi
+        if ! fm_procevent_is_handled "$state" "$id" "$seq"; then
+          FM_PROCEVENT_INBOX_ERROR="unhandled process-event result is present at $result"
+          return 1
+        fi
+        extension=${result%.result}.extension
+        if [ -e "$extension" ] || [ -L "$extension" ]; then
+          if ! fm_procevent_result_extension_load "$result"; then
+            FM_PROCEVENT_INBOX_ERROR="process-event result history is malformed at $extension"
+            return 1
+          fi
+        fi
+        ;;
+      *.adapter|*.extension|*.handled)
+        result=${record%.*}.result
+        if [ ! -f "$result" ] || [ -L "$result" ]; then
+          FM_PROCEVENT_INBOX_ERROR="process-event result history is malformed at $record"
+          return 1
+        fi
+        ;;
+      *)
+        # shellcheck disable=SC2034 # Public result consumed by sourcing callers.
+        FM_PROCEVENT_INBOX_ERROR="process-event result history is malformed at $record"
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}

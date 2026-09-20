@@ -63,8 +63,11 @@ Coordinate any workflow rollback with its required-check names so a retired chec
   A local `config/backend` file explicitly overrides runtime auto-detection for new task endpoints and stays gitignored; spawn-supported values are `tmux`, `herdr` (which has its own required CI lane), and `zellij`, `orca`, and `cmux`, which remain experimental with no dedicated real-backend CI lane, while `codex-app` is documented only in `docs/codex-app-backend.md`.
   It does not make `data/` tracked.
 - Helper scripts in `bin/` are plain bash.
-  Each starts with a usage header comment; keep it accurate when you change behavior.
-  Test scripts and helpers in `tests/` are plain bash too.
+  The restricted experimental native Windows Codex launcher is the sole scoped exception: `bin/fm-native-codex.ps1` and the C# and JavaScript implementation under `bin/native-owner/` may use PowerShell, C#, and JavaScript.
+  Matching fixtures under `tests/fixtures/native-owner/` may use those languages too.
+  This exception does not extend to other helpers, other platforms, or future implementations.
+  Each Bash helper starts with a usage header comment; keep it accurate when you change behavior.
+  Test scripts and helpers in `tests/` are plain bash too, except for the matching native Windows fixtures above.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, pinned shellcheck version, pinned actionlint workflow lint, and the backend-purity check rejecting direct Beads CLI calls in core `bin/` scripts).
   CI uses its full canonical partitions; the no-mistakes pre-push gate uses its context-selected default.
   `docs/fm-test-portable-shards.md` owns partition verification and performance evidence.

@@ -13,3 +13,6 @@ __pycache__/
 config/
 
 .tools/
+# Local native candidate build; never distributed as a tracked executable.
+/bin/fm-native-owner.exe
+/bin/fm-native-owner.build

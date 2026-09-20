@@ -52,9 +52,13 @@
 #   Ancestry - the nearest harness process in this process's parent chain. This
 #              is the structural fact about who actually owns the process tree,
 #              so it is what settles a disagreement.
-# detect_own is the single owner of how the two combine; harness_marker and
-# harness_ancestry only report evidence. Record each newly verified env marker
-# in harness_marker, and each newly verified command name in harness_ancestry.
+#   Native owner - a launch-bound identity published by the experimental Windows
+#              launcher and authenticated through its native owner endpoint.
+#              When selected by its home record, it precedes marker and ancestry.
+# detect_own is the single owner of how the three combine; harness_marker and
+# harness_ancestry only report their evidence. Record each newly verified env
+# marker in harness_marker, and each newly verified command name in
+# harness_ancestry.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,8 +66,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
-# shellcheck source=bin/fm-cursor-lib.sh
-. "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-session-lock-lib.sh
+. "$SCRIPT_DIR/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
 
@@ -395,6 +399,14 @@ harness_family() {
 #     a harness-shaped path in some node process's arguments is weaker evidence
 #     than a harness publishing its own identity.
 detect_own() {
+  local native_harness
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*)
+    if fm_native_owner_selected; then
+      native_harness=$(fm_native_owner_call harness 2>/dev/null) || { echo unknown; return; }
+      case "$native_harness" in codex) echo codex ;; *) echo unknown ;; esac
+      return
+    fi ;;
+  esac
   local marker ancestry strength harness
   marker=$(harness_marker)
   ancestry=$(harness_ancestry)

@@ -107,6 +107,17 @@ test_predicate_source_needs_supervision() {
   pass "fm_supervision_unhealthy: source-only home needs supervision"
 }
 
+test_predicate_turn_end_does_not_expand_supervision() {
+  local state="$TMP_ROOT/pred-turn-end/state"
+  mkdir -p "$state"
+  printf 'preserve\n' > "$state/orphan.turn-ended"
+  if fm_supervision_needed "$state" 300; then
+    fail "a residual turn-end notification changed ordinary supervision arming"
+  fi
+  [ "$(cat "$state/orphan.turn-ended")" = preserve ] || fail "the supervision read changed the turn-end notification"
+  pass "fm_supervision_needed: residual turn-end state does not change ordinary arming"
+}
+
 # Register a custom check the way an operator does, through the real
 # bin/fm-check-register.sh, so these cases bind to the shipped registration
 # artifacts rather than to a hand-written imitation of them.
@@ -150,6 +161,26 @@ test_predicate_unregistered_check_needs_nothing() {
   fi
   [ "$FM_SUP_CHECKS" -eq 0 ] || fail "an unregistered check must not be counted, got $FM_SUP_CHECKS"
   pass "fm_supervision_needed: false for a check.sh with no registration binding"
+}
+
+test_predicate_pending_reply_does_not_expand_supervision() {
+  local state="$TMP_ROOT/pred-pending-reply/state"
+  mkdir -p "$state/pending-replies"
+  printf 'schema=fm-pending-reply.v1\n' > "$state/pending-replies/0123456789abcdef"
+  if fm_supervision_needed "$state" 300; then
+    fail "a pending secondmate reply changed ordinary supervision arming"
+  fi
+  pass "fm_supervision_needed: pending replies do not change ordinary arming"
+}
+
+test_predicate_reconcile_request_does_not_expand_supervision() {
+  local state="$TMP_ROOT/pred-reconcile-request/state"
+  mkdir -p "$state/reconcile-notify"
+  printf '{}\n' > "$state/reconcile-notify/request-fixture.json"
+  if fm_supervision_needed "$state" 300; then
+    fail "a reconcile request changed ordinary supervision arming"
+  fi
+  pass "fm_supervision_needed: reconcile requests do not change ordinary arming"
 }
 
 test_predicate_task_pr_poll_is_not_a_custom_check() {
@@ -2193,9 +2224,12 @@ test_predicate_healthy_fresh_beacon
 test_predicate_queue_pending_flag
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
+test_predicate_turn_end_does_not_expand_supervision
 test_predicate_registered_check_needs_supervision
 test_predicate_registered_check_survives_rebinding_drift
 test_predicate_unregistered_check_needs_nothing
+test_predicate_pending_reply_does_not_expand_supervision
+test_predicate_reconcile_request_does_not_expand_supervision
 test_predicate_task_pr_poll_is_not_a_custom_check
 test_predicate_relay_shim_is_not_a_custom_check
 test_hook_silent_when_no_work_in_flight

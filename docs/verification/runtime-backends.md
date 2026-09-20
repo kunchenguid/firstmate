@@ -6,9 +6,13 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Windows session-lock ownership
+
+The tagged Windows process bridge has portable deterministic coverage in `tests/fm-session-lock-ancestry.test.sh`, but Windows Claude ownership has not been verified.
+
 ## Harness detection precedence
 
-Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.
+`bin/fm-harness.sh` owns native-owner, marker, and ancestry precedence; the evidence below covers marker and ancestry only, not the experimental native candidate.
 A marker alone is not proof of ownership, because it is ordinary environment state that a child inherits and a terminal multiplexer can replay into an unrelated session.
 Verified on 2026-09-02 on Linux 7.1.12 with the portable regression, which builds every case from real renamed processes and no installed harness:
 

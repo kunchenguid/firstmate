@@ -105,6 +105,8 @@ init_changed_fixture_repo() {
     fm-daemon.test.sh \
     fm-harness-adapter-instructions-live-e2e.test.sh \
     fm-harness-adapter-references.test.sh \
+    fm-native-owner-app-server-policy-live-e2e.test.sh \
+    fm-native-owner-tool-gate.test.sh \
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
@@ -132,6 +134,8 @@ init_changed_fixture_repo() {
   : >"$repo/bin/fm-procevent-quota.sh"
   : >"$repo/bin/fm-quota-axi-lib.sh"
   : >"$repo/bin/fm-quota-choose.sh"
+  mkdir -p "$repo/bin/native-owner"
+  : >"$repo/bin/native-owner/app-server-policy.mjs"
   : >"$repo/bin/unmapped-source.sh"
   # A shared top-level test fixture read by two suites in different families,
   # beside a tests/ file nothing reads at all.
@@ -411,6 +415,15 @@ test_changed_dependency_selection_and_unmapped_failure() {
     "timeout library selects quota polling coverage"
   git -C "$repo" add bin/fm-timeout-lib.sh
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm timeout-lib-change
+
+  printf '\n' >>"$repo/bin/native-owner/app-server-policy.mjs"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-native-owner-tool-gate.test.sh" \
+    "native owner policy selects portable behavioral coverage"
+  assert_contains "$listed" "tests/fm-native-owner-app-server-policy-live-e2e.test.sh" \
+    "native owner policy selects the real app-server isolation guard"
+  git -C "$repo" add bin/native-owner/app-server-policy.mjs
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm native-owner-policy-change
 
   printf '\n' >>"$repo/src/unmapped.ts"
   set +e
