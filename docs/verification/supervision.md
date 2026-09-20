@@ -230,12 +230,29 @@ In this 2026-07-28 Codex 0.145.0 semantic-busy probe, Firstmate-written lifecycl
 Codex also exposes no `StopFailure` hook, so an API-error turn end would need separate coverage even after hook discovery works.
 The app-server protocol schema does define the required lifecycle (`turn/started`, plus a `turn/completed` status of `completed`, `interrupted`, `failed`, or `inProgress`), so the gate is a reachability problem rather than a protocol gap.
 
+### Inside-a-turn progress (2026-09-20)
+
+`state/<id>.progress` is the separate inside-a-turn activity marker the watcher's busy-age bound reads beside `turn-ended`, and it is not a semantic state edge.
+Pi has reported it from its native progress event since the redesign; Claude reports it from the `PreToolUse` and `PostToolUse` hooks `fm-spawn` writes.
+The Claude source needs live evidence because only the installed harness can show that it fires at all and that it fires *inside* an open turn, which is the only property the bound depends on.
+
+| Harness | Version verified | Progress source | Observed result |
+| --- | --- | --- | --- |
+| Claude | 2.1.236 (Claude Code) | Hooks `PreToolUse`, `PostToolUse` | A real `fm-spawn` wiring plus one real `claude -p` turn holding a single 25-second Bash call: `state/<id>.progress` existed while `state/<id>.turn-ended` still did not, the semantic record stayed `busy`, and `Stop` then touched `turn-ended` after it. A foreground `sleep` is refused by Claude Code itself, so the probe waits through `perl` instead; with `sleep` the run made no tool call at all. |
+
+Refresh command:
+
+```sh
+FM_CLAUDE_TOOL_PROGRESS_LIVE_E2E=1 tests/fm-claude-tool-progress-live-e2e.test.sh
+```
+
 Deterministic entry points:
 
 ```sh
 tests/fm-busy-state.test.sh
 tests/fm-busy-adapter-wiring.test.sh
 tests/fm-crew-state.test.sh
+tests/fm-watch-triage.test.sh
 ```
 
 ## Turn-end guard

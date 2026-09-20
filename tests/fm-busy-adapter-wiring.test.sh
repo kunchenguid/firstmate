@@ -234,6 +234,18 @@ run_claude_hook() {  # <settings.json> <hook-event>
   sh -c "$cmd"
 }
 
+file_mtime() {  # <path>
+  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"
+}
+
+# touch -t takes a local-time stamp, not an epoch, on both platforms.
+back_date() {  # <seconds-ago> <path>
+  local epoch stamp
+  epoch=$(( $(date +%s) - $1 ))
+  stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null) || stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S)
+  touch -t "$stamp" "$2"
+}
+
 test_claude_hooks_semantic_lifecycle() {
   local rec id=busy-cl-1 out state settings
   rec=$(make_spawn_case claude-lifecycle claude "$id")
@@ -270,6 +282,54 @@ test_claude_hooks_semantic_lifecycle() {
   out=$(classify claude "$id" "$state")
   [ "$out" = "idle claude-hook" ] || fail "SessionEnd must classify idle, got '$out'"
   pass "claude hooks open on UserPromptSubmit and close on Stop, StopFailure, and SessionEnd"
+}
+
+# Claude's only end-of-turn signal is Stop, and a crewmate working autonomously
+# ends no turn until the whole job is done, so the watcher's busy-age bound had
+# nothing to age against for hours of healthy work. PreToolUse and PostToolUse
+# carry the same inside-a-turn progress marker Pi's native progress event does:
+# a notification of observed activity, never a state edge and never a fabricated
+# completed turn.
+test_claude_tool_hooks_report_progress_inside_one_turn() {
+  local rec id=busy-cl-3 out state settings before after
+  rec=$(make_spawn_case claude-tool-progress claude "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "claude spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  settings="$WT_DIR/.claude/settings.local.json"
+  for ev in PreToolUse PostToolUse; do
+    jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
+    jq -e ".hooks[\"$ev\"][0].matcher" "$settings" >/dev/null \
+      || fail "$ev must carry an explicit all-tool matcher"
+  done
+
+  rm -f "$state/$id.progress" "$state/$id.turn-ended"
+  run_claude_hook "$settings" PreToolUse || fail "PreToolUse hook command failed"
+  [ -f "$state/$id.progress" ] || fail "PreToolUse did not report progress"
+  [ ! -e "$state/$id.turn-ended" ] || fail "PreToolUse fabricated a completed turn"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "PreToolUse changed semantic busy state: $out"
+
+  # A second boundary must move the marker forward, or a long turn's later tool
+  # calls would not keep the watcher's busy-age bound fresh.
+  back_date 600 "$state/$id.progress"
+  before=$(file_mtime "$state/$id.progress")
+  run_claude_hook "$settings" PostToolUse || fail "PostToolUse hook command failed"
+  after=$(file_mtime "$state/$id.progress")
+  [ "$after" -gt "$before" ] || fail "PostToolUse did not refresh the progress marker"
+  [ ! -e "$state/$id.turn-ended" ] || fail "PostToolUse fabricated a completed turn"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "PostToolUse changed semantic busy state: $out"
+
+  # A superseded incarnation must not keep its replacement's bound fresh, and
+  # must still exit 0 so a stale hook can never break Claude's own lifecycle.
+  rm -f "$state/$id.progress"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  run_claude_hook "$settings" PreToolUse \
+    || fail "a stale-gen progress hook must still exit 0"
+  assert_absent "$state/$id.progress" "a superseded incarnation refreshed the new one's progress"
+  pass "claude tool-boundary hooks report inside-a-turn progress without faking a turn or a state edge"
 }
 
 test_claude_hooks_stale_incarnation_harmless() {
@@ -428,6 +488,7 @@ test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring
 test_opencode_plugin_semantic_lifecycle
 test_claude_hooks_semantic_lifecycle
+test_claude_tool_hooks_report_progress_inside_one_turn
 test_claude_hooks_stale_incarnation_harmless
 test_gemini_hooks_semantic_lifecycle
 test_gemini_hooks_stale_incarnation_harmless

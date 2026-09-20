@@ -4081,6 +4081,22 @@ if [ "$KIND" != secondmate ]; then
     # the turn-ended NOTIFICATION touch for the watcher. Every
     # hook command tolerates a refused event (|| true) so a stale-gen writer
     # can never break Claude's own lifecycle.
+    #
+    # PreToolUse and PostToolUse refresh the separate inside-a-turn progress
+    # marker instead, exactly as Pi's extension does for its native progress
+    # event: they are a NOTIFICATION of observed activity, never a semantic
+    # state edge and never a fabricated completed turn. They exist because
+    # Stop is the only signal Claude gives that a turn ended, and a crewmate
+    # working autonomously ends no turn for as long as the work lasts - so
+    # the watcher's completed-turn age bound (FM_BUSY_TURN_MAX_SECS) used to
+    # cross while the worker was healthy and then re-escalate it as a possible
+    # wedge every FM_STALE_ESCALATE_SECS. Bracketing each tool call holds the
+    # marker's staleness to one tool call's own duration, whatever the agent
+    # does between calls, so the bound measures time with nothing running
+    # rather than time since the last turn boundary. Both are stdout-silent
+    # and always exit 0, so neither can deny a tool or feed the model text,
+    # and if a future Claude stops firing them the marker simply freezes and
+    # the bound reverts to today's completed-turn behavior.
     mkdir -p "$WT/.claude"
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
@@ -4088,8 +4104,9 @@ if [ "$KIND" != secondmate ]; then
     j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
+    j_progress=$(json_escape "$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") progress $(shell_quote "$STATE_REAL") $(shell_quote "$ID") --gen $(shell_quote "$BUSY_GEN") >/dev/null 2>&1 || true")
     cat >"$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"PreToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"$j_progress"}]}],"PostToolUse":[{"matcher":".*","hooks":[{"type":"command","command":"$j_progress"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
     exclude_path '.claude/settings.local.json'
     ;;

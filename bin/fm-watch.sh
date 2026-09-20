@@ -60,9 +60,11 @@
 #                          verdict escalates unchanged.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
-#                          only up to BUSY_TURN_MAX_SECS with no completed turn
-#                          (state/<id>.turn-ended, or the spawn record before any
-#                          turn completes). Past that bound, a declared external
+#                          only up to BUSY_TURN_MAX_SECS with nothing observable
+#                          running (busy_turn_quiet_age: the newer of
+#                          state/<id>.turn-ended and state/<id>.progress, or the
+#                          spawn record before either exists). Past that bound, a
+#                          declared external
 #                          wait or verified captain-held transfer uses the long
 #                          pause recheck cadence; under daemon-backed afk an
 #                          external wait is instead handed to the daemon as this
@@ -71,9 +73,11 @@
 #                          (busy_turn_bound_check owns that split);
 #                          every other pane goes through the same wedge timer,
 #                          the dead-record probe above included, and surfaces
-#                          with the identical "stale: ..." reason, escalation
+#                          with the same "stale: ..." reason, escalation
 #                          count, and demand-deep-inspection marker for a live
-#                          agent, for human inspection only - never an automatic
+#                          agent, plus a situation clause naming that nothing has
+#                          run inside the still-open turn, for human inspection
+#                          only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
 #   stale: <window> (unread firstmate instruction: ...)
@@ -267,8 +271,9 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
-# may go without a completed turn or explicit native-harness progress (the
-# marker-selection contract is in busy_turn_over_age below). Once this bound
+# may go with nothing observable running - no completed turn and no explicit
+# harness progress (the marker-selection contract is in busy_turn_quiet_age
+# below, and why it is not a bound on turn length). Once this bound
 # is crossed, busy_turn_over_age routes the pane through
 # busy_turn_bound_check, which hands a crossed bound to the same
 # STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
@@ -1243,8 +1248,18 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # runs last of the three, so the two cheaper deferrals keep the panes they
 # already own on their existing bounded cadences and only a pane that would
 # otherwise alarm pays for a backend read.
-wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
+#
+# The optional <situation> names WHICH silence this is, in the escalation's own
+# words, when the caller knows something the shared reason cannot say. It is
+# appended after the escalation count so the reason's stable "possible wedge,
+# escalation N" spine, and the demand-deep-inspection clause after it, are
+# unchanged. Only the busy-pane bound supplies one today: a pane whose harness
+# still reports an open turn with nothing running in it asks the supervisor for
+# a different thing than a pane that simply stopped rendering, and before this
+# the two arrived word for word identical - the 2026-09-20 case where four false
+# alarms and one real lost connection were indistinguishable.
+wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [situation]
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 situation=${7-} since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1270,9 +1285,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
-        reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
+        reason="stale: $win (idle ${age}s, possible wedge, escalation $n${situation:+, $situation})"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n${situation:+, $situation}, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone)"
         fi
         fm_wake_append stale "$win" "$reason" || exit 1
         rm -f "$since_file"
@@ -1283,18 +1298,36 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
-# busy_turn_over_age: 0 iff the last completed turn or explicit native-harness
-# progress is at least BUSY_TURN_MAX_SECS old. Progress is actual observed model
-# or tool activity, never a timer or a busy footer. It does not emit a wake or
-# change semantic busy state. Before either marker exists, age the spawn record.
-# The caller checks busy state and routes a crossed bound through inspection.
-busy_turn_over_age() {  # <task>
+# busy_turn_quiet_age: seconds since this task last showed anything observable -
+# the newer of its last completed turn (state/<id>.turn-ended) and explicit
+# harness progress (state/<id>.progress). Progress is actual observed model or
+# tool activity, never a timer or a busy footer. Before either marker exists,
+# age the spawn record.
+#
+# The distinction this reads is the whole point of the bound below. A completed
+# TURN is not a measure of activity: a crewmate working autonomously ends no turn
+# for as long as the work lasts, so a bound on turn age alarms on healthy work
+# and keeps alarming - the 2026-09-20 case of five consecutive possible-wedge
+# escalations against a crew that was updating one container plugin after
+# another, single commands of ten to twenty-five minutes, inside one unbroken
+# turn. Progress markers are refreshed at each tool-call boundary by every
+# adapter that reports one, so this age is time with NOTHING running, which is
+# what a wedge actually is. An adapter that reports no progress at all keeps the
+# completed-turn anchor it always had, so its behavior is unchanged.
+busy_turn_quiet_age() {  # <task>
   local task=$1 f progress
   f="$STATE/$task.turn-ended"
   [ -e "$f" ] || f="$STATE/$task.meta"
   progress="$STATE/$task.progress"
   if [ -f "$progress" ] && [ "$progress" -nt "$f" ]; then f="$progress"; fi
-  [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
+  age_of "$f"
+}
+
+# busy_turn_over_age: 0 iff busy_turn_quiet_age has reached BUSY_TURN_MAX_SECS.
+# It does not emit a wake or change semantic busy state. The caller checks busy
+# state and routes a crossed bound through inspection.
+busy_turn_over_age() {  # <task>
+  [ "$(busy_turn_quiet_age "$1")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -1364,12 +1397,17 @@ handle_paused_stale() {  # <window> <task> <hash>
 # 0 when the declared-pause cadence took the pane, 1 when the wedge timer did.
 #
 # A busy pane past BUSY_TURN_MAX_SECS is normally a wedge suspect because a hung
-# foreground call can hide behind a busy signature. A `paused:` declaration or
+# foreground call can hide behind a busy signature - the bound is on
+# busy_turn_quiet_age, so crossing it means nothing observable has run for the
+# whole bound, not merely that a long turn is still open. A `paused:` declaration or
 # verified captain-held transfer instead identifies that live foreground call as
 # the expected external wait. The caller has already confirmed liveness through
 # the busy verdict, so this exception does not suppress undeclared wedges or
 # alter the separate non-busy classification. handle_paused_stale keeps the
 # exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS.
+# An undeclared crossing escalates with the shared ladder, but carries its own
+# situation clause naming that gap, so the supervisor can tell it apart from a
+# pane that simply stopped rendering.
 # A pane that declared nothing falls through to the shared wedge timer, which,
 # in a home that armed config/wedge-defer-parked-gate, applies the same rule to
 # the one wait a busy pane cannot declare: a validation gate of its own awaiting
@@ -1423,7 +1461,8 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" "$h"
+  wedge_timer_check "$win" "$since_file" "busy (nothing running)" "$escalation_file" "$task" "$h" \
+    "the harness still reports an open turn but nothing has run in it for $(busy_turn_quiet_age "$task")s"
   return 1
 }
 

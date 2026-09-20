@@ -174,6 +174,13 @@ record_pi_busy() {  # <state-dir> <id>
     --source pi-ext --event agent-start
 }
 
+record_claude_busy() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+}
+
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
@@ -4348,6 +4355,78 @@ test_busy_pane_native_progress_resets_age() {
   pass "native progress resets busy age without a completed turn or notification"
 }
 
+# --- the 2026-09-20 case: a measuring worker versus a lost connection ---------
+# One crew produced five consecutive possible-wedge escalations, ending in
+# demand-deep-inspection, while it was healthily updating one container plugin
+# after another - single commands of ten to twenty-five minutes, all inside one
+# unbroken turn, so nothing ever completed a turn for the busy-age bound to age
+# against. The fourth escalation of that same afternoon was real: the machine
+# lost power and the worker lost its connection. Both arrived word for word
+# identical, which is what made the real one invisible.
+#
+# Both halves are asserted on the SAME fixture, because only the observed-
+# activity evidence differs: a tool boundary inside the bound must not alarm,
+# and nothing running for longer than the bound must still alarm - and must say
+# which silence it is.
+test_busy_turn_bound_ages_from_observed_activity_not_the_turn() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case busy-tool-activity-bound); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-plugin-update"
+  printf 'Running docker exec... (esc to interrupt)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=claude\n' "$window" > "$state/plugin-update.meta"
+  record_claude_busy "$state" plugin-update
+  printf 'working: updating plugins one by one\n' > "$state/plugin-update.status"
+  sig=$(seen_sig "$state/plugin-update.status"); printf '%s' "$sig" > "$state/.seen-plugin-update_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Running docker exec... (esc to interrupt)")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # No turn has ever completed: the crew has been inside one turn since spawn,
+  # hours ago, exactly as an autonomous crewmate works.
+  set_mtime "$(( $(date +%s) - 18000 ))" "$state/plugin-update.meta"
+
+  # Phase A: the longest single command the captain measured - twenty-five
+  # minutes - has just finished, so the last tool boundary is 1500s old, well
+  # inside the hour-long bound. No alarm, and no wedge timer left running.
+  touch "$state/plugin-update.progress"
+  set_mtime "$(( $(date +%s) - 1500 ))" "$state/plugin-update.progress"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=3600 FM_STALE_ESCALATE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a worker whose last tool call finished inside the bound was escalated: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a working measuring crew printed a wake reason: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a working measuring crew enqueued a wake"; }
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "a working measuring crew was put on the wedge timer"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A watcher stop"
+
+  # Phase B: same pane, same still-open turn, same busy verdict - but the
+  # connection is gone and nothing has run since. The bound must still fire, and
+  # the reason must name that silence instead of reading like any other quiet
+  # pane.
+  set_mtime "$(( $(date +%s) - 7200 ))" "$state/plugin-update.progress"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=3600 FM_STALE_ESCALATE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a worker that stopped running anything did not escalate: $(cat "$out")"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the stopped worker did not print a stale wake: $(cat "$out")"
+  grep -F "possible wedge, escalation 1" "$out" >/dev/null \
+    || fail "the stopped worker lost the shared escalation wording: $(cat "$out")"
+  grep -F "nothing has run in it" "$out" >/dev/null \
+    || fail "the escalation did not distinguish an open turn with nothing running: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the stopped-worker escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "nothing has run in it" >/dev/null \
+    || fail "the distinguishing clause did not reach the durable queue: $(cat "$drain_out")"
+  pass "the busy-turn bound ages from observed tool activity, so a measuring crew is silent while one that stopped running anything still escalates with its own wording"
+}
+
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
   local dir state fakebin out capture_file window key pane_hash sig pid n
   dir=$(make_case busy-turn-age-demand-inspect); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6014,6 +6093,7 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_native_progress_resets_age
+test_busy_turn_bound_ages_from_observed_activity_not_the_turn
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
