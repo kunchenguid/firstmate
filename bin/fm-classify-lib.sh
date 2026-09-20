@@ -544,16 +544,21 @@ _fm_decision_slug_ok() {  # <slug>
     *) return 0 ;;
   esac
 }
+# Both readers below locate the head/note separator on an unstamped copy, so a
+# worker-written stamp cannot move it: a readable time like [at=10:30] carries
+# colons that would otherwise end the head mid-tag and hand the caller a note
+# and a key sliced out of the timestamp. The line's own bytes are never altered.
 status_line_note() {  # <status-line> -> text after the first colon, trimmed
-  local n k
-  case "$1" in
-    *:*) n=${1#*:}; n=${n#"${n%%[![:space:]]*}"} ;;
-    *) printf '%s' "$1"; return 0 ;;
+  local n k unstamped
+  _fm_status_unstamped "$1" unstamped
+  case "$unstamped" in
+    *:*) n=${unstamped#*:}; n=${n#"${n%%[![:space:]]*}"} ;;
+    *) printf '%s' "$unstamped"; return 0 ;;
   esac
   # A note-head token that states this line's key (no before-colon token, valid
   # slug) is key metadata, not note text: strip it so both stated-key positions
   # yield the same note.
-  if ! _fm_key_before_colon "$1" && k=$(_fm_key_at_note_head "$1") \
+  if ! _fm_key_before_colon "$unstamped" && k=$(_fm_key_at_note_head "$unstamped") \
     && _fm_decision_slug_ok "$k"; then
     n=${n#"[key=$k]"}
     n=${n#"${n%%[![:space:]]*}"}
@@ -561,13 +566,14 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   printf '%s' "$n"
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local k
-  if _fm_key_before_colon "$1"; then
-    k=${1%%:*}
+  local k unstamped
+  _fm_status_unstamped "$1" unstamped
+  if _fm_key_before_colon "$unstamped"; then
+    k=${unstamped%%:*}
     k=${k#*\[key=}
     k=${k%%\]*}
   else
-    k=$(_fm_key_at_note_head "$1") || { printf 'default'; return 0; }
+    k=$(_fm_key_at_note_head "$unstamped") || { printf 'default'; return 0; }
   fi
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"

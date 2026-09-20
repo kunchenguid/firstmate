@@ -569,6 +569,16 @@ test_optional_event_time() {
     'done [at=1] [at=2]: ambiguous'; do
     if status_line_at_epoch "$line" >/dev/null; then fail "invented time for $line"; fi
   done
+  # A readable time a worker wrote instead of epoch seconds carries colons that
+  # must not move the head/note separator, in either metadata order.
+  for line in "needs-decision [key=api-shape] [at=10:30]: choose: A or B" \
+    "needs-decision [at=10:30] [key=api-shape]: choose: A or B" \
+    "needs-decision [key=api-shape] [at=2026-09-20T14:03:00Z]: choose: A or B"; do
+    [ "$(_fm_decision_key "$line")" = api-shape ] \
+      || fail "a colon-bearing time hid the decision key: [$(_fm_decision_key "$line")] from $line"
+    [ "$(status_line_note "$line")" = 'choose: A or B' ] \
+      || fail "a colon-bearing time garbled the note: [$(status_line_note "$line")] from $line"
+  done
   for line in "done [at=1700000000] [corr=$CORR]: finished" \
     "done [corr=$CORR] [at=1700000000]: finished" \
     "done[at=1700000000] [corr=$CORR]: finished"; do
@@ -688,6 +698,10 @@ test_malformed_event_time_is_ordinary_bytes() {
       "$verb [at=99999999999999999999]: audit complete"; do
       if status_line_at_epoch "$line" >/dev/null; then fail "invented time for $line"; fi
       [ "$(status_line_verb "$line")" = "$verb" ] || fail "malformed time changed verb: $line"
+      [ "$(status_line_note "$line")" = 'audit complete' ] \
+        || fail "malformed time garbled the note: [$(status_line_note "$line")] from $line"
+      [ "$(_fm_decision_key "$line")" = default ] \
+        || fail "malformed time invented a decision key: [$(_fm_decision_key "$line")] from $line"
       status_is_captain_relevant "$line" \
         || fail "default vocabulary lost an actionable event: $line"
       printf '%s\n' "$line" > "$dir/state/task.status"
