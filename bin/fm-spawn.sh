@@ -538,6 +538,9 @@ if [ "$CLAUDE_CONFIG_DIR_PRESENT" = 1 ]; then
     echo "error: config/claude-config-dir must be a readable regular file holding $CLAUDE_CONFIG_DIR_SHAPE" >&2
     exit 1
   fi
+  # Comment and blank-line tolerance is deliberate: this file is captain-facing and
+  # names an account, so a '# <account email>' line says which seat a bare path is;
+  # config/claude-permission-mode is one bare token by contrast and reads with a trim.
   claude_store_lines=0
   claude_store_line=
   while IFS= read -r claude_store_raw || [ -n "$claude_store_raw" ]; do

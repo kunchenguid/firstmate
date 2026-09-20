@@ -22,7 +22,9 @@ Claude gates a folder it has never seen behind an interactive workspace-trust di
 Every claude spawn therefore pre-registers the directory its pane starts in before launch, and the dialog does not appear: the task worktree for a ship or scout, and the home itself for a `--secondmate` spawn, in either seeded shape (a leased worktree or a standalone clone).
 
 A second, separate dialog - "Allow external CLAUDE.md file imports?" - renders whenever a loaded CLAUDE.md chain reaches outside the project tree, which a crewmate reading the default store does through the captain's own `~/.claude/CLAUDE.md` importing `~/.claude/RTK.md`.
-Which chain loads follows the resolved config store above, so a store named in `config/claude-config-dir` whose own CLAUDE.md imports nothing outside the project tree never reaches this dialog at all; `../../../../../docs/configuration.md` "Claude config store" owns that route and its alternative.
+Which chain loads follows the resolved config store above, and a store whose own CLAUDE.md imports nothing outside the project tree never reaches this dialog at all.
+That is a fact about the dialog, not a route to take: a store named in `config/claude-config-dir` must be given the user CLAUDE.md anyway, because user-level memory is per store and a worker launched without it silently loses the captain's global instructions, and the import dialog is then answered once interactively in each project root.
+`../../../../../docs/configuration.md` "Claude config store" owns that setup.
 `--setting-sources project,local` (the minimal worker tool surface) does not suppress it either, and it gates the pane exactly like the trust dialog: cursor on "No, disable external imports", no way to move the selection from firstmate's steering plane.
 
 `../../../bin/fm-claude-trust.sh` records `hasTrustDialogAccepted` for both the worktree and its primary checkout in `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json` for a ship or scout spawn; a secondmate spawn registers only its own home entry, since a secondmate home has no separate primary-checkout entry to carry import consent forward from.

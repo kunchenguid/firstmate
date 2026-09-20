@@ -391,7 +391,8 @@ A relative path, a missing or non-directory target, an unreadable directory or f
 The file is read on every spawn and relaunch, so a change takes effect at the next launch without a restart.
 This file is NOT inherited into secondmate homes.
 An absolute store path is meaningful only on the machine that holds it, so each home, including a secondmate home, names its own store in its own `config/claude-config-dir`.
-A home's own `config/claude-config-dir` governs the launches that home makes, so the primary's file selects the store for a secondmate agent the primary launches, while the secondmate home's own file governs only the crewmates that secondmate later spawns.
+A home's own `config/claude-config-dir` governs the launches that home makes, so the primary's file selects the store for a LOCAL secondmate agent the primary launches, while that secondmate home's own file governs only the crewmates the secondmate later spawns.
+A REMOTE secondmate launch is different: it runs `bin/fm-spawn.sh` on the remote host with `FM_CONFIG_OVERRIDE` pointing at that home's own config directory, so its store comes from the remote secondmate home's own `config/claude-config-dir` and never from the primary's, because an absolute store path is host-local and meaningless on another machine.
 The seat path itself is captain-private and never belongs in a tracked file.
 
 A store named here must already be interactively usable, because Firstmate points workers at it but never completes its one-time setup for them.
@@ -407,6 +408,11 @@ Trust still registers, the spawn still reports success, and the pane then sits o
 This consent is keyed per project checkout, not per store.
 Mirror the user `CLAUDE.md` into the named store anyway, and if the imports dialog then appears, open the named store once interactively in each project root and answer "Yes, allow" before dispatching workers there.
 A store failing any of these leaves the spawn reporting success either way: the setup and consent items park the pane on a dialog Firstmate's key plane cannot answer, and the memory and skills item shows no dialog at all and simply runs the worker without them.
+
+Quota limitation: the quota evidence that gates dispatch measures the store Firstmate's own environment resolves, not the store named here.
+`quota-axi` is invoked from Firstmate's own process environment with no store selection, and each harness maps to one provider row, so the claude row can read healthy while the crewmates' seat is empty and read exhausted while the crewmates' seat is full.
+Verified 2026-09-20: `quota-axi` cannot read a second store at all, reporting "Claude sign-in required" from that store's oauth file even though a headless `claude -p` against the same store answers, so a store-aware probe is not a small change.
+This is an accepted limitation of naming a second store; backlog item `quota-store-dimension` carries the real fix.
 
 ## Worker launch environment (config/launch-env-allowlist)
 
