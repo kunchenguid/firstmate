@@ -64,6 +64,7 @@ It proves the documented starter configuration resolves its Pi default through t
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
 It proves the request uses the fixed endpoint and model, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
+It proves an agreeing dispatch matches its chosen profile under the `{harness, model, effort}` projection while the whole objects differ, because `chosen_profile` keeps the declared `provider` the dispatch flags cannot carry.
 It proves `brief_path` is display only and recorded exactly as the caller spelled it, so the same brief resolved from two working directories can show two different-looking paths; `brief_sha256` is the field that identifies the brief and carries the dispatch join.
 `tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
 
@@ -97,14 +98,15 @@ The receipts lock is one per home, `state/.dispatch-receipts.lock`, not one per 
 The two paths therefore wait on it for different lengths, under separately named budgets.
 
 `RESOLVE_LOCK_ATTEMPTS` is 7, the smallest value that lost no record at three-way contention: 7 records of 300 at 5 attempts, 1 of 300 at 6, and none of 900 at 7.
-It is deliberately not raised, because the resolve path may not extend the resolver's process further to save a best-effort receipt; a contended resolve receipt is dropped instead, and that drop is silent on the resolve run by design, as the contended row above records.
+It is deliberately not raised, because the resolve path may not extend the resolver's process further to save a best-effort receipt; a contended resolve receipt is dropped instead, and the run names that drop on one fixed stderr line, as the contended row above records.
 
 `DISPATCH_LOCK_ATTEMPTS` is 21, the smallest value that lost no record with twelve simultaneous `--record-dispatch` runs against a 200-record home, which is the parallel intake AGENTS.md permits.
 That probe lost 187 records of 360 at 7 attempts, 132 of 360 at 10, 48 of 360 at 14, 10 of 720 at 19, 2 of 720 at 20, and none of 1,440 at 21 across two independent 60-trial runs.
 The join runs after the spawn and prints nothing to the resolver's stdout, so the longer wait cannot reach the resolve path's latency.
 
 Contention past either budget drops the record by design rather than waiting.
-A `--record-dispatch` run that cannot take the lock appends nothing, names itself on the stderr drop line, and still exits 0, so that loss is observable; a lost resolve receipt is observable one step later, when the join for that brief reports on stderr that no resolution receipt carries its content hash, so neither loss is swallowed.
+A `--record-dispatch` run that cannot take the lock appends nothing, names itself on the stderr drop line, and still exits 0, so that loss is observable; a resolve run that cannot write its receipt prints `dispatch-resolve: no resolution receipt for this run` on stderr whatever its outcome, and on `clear` the later join for that brief reports the missing resolution as well, so neither loss is swallowed.
+The suite drives both, on a `clear` run and on an `error` run, by making `state/dispatch-receipts.jsonl` a directory the append cannot use, and asserts the stdout block and exit 0 are identical to the same run with receipts working.
 The suite asserts that shape rather than a fixed append count - each concurrent run either appends its record or reports the drop, with no third outcome, and the file stays valid JSONL with no partial or interleaved line.
 
 The held-lock fixture is the contention case both the bound above and the contended row are measured under, and the suite holds the lock the same way in `tests/fm-dispatch-resolve.test.sh` ("a blocked receipt cannot delay the resolver block").

@@ -46,12 +46,13 @@
 #   On clear only, once fm-spawn has accepted the dispatched profile, a
 #   separate --record-dispatch run appends a second receipt joined to the
 #   latest resolution for the same brief content hash, and names on stderr
-#   why a join did not land. A resolve-path receipt failure is silent and
-#   changes neither resolver stdout nor exit status; it does cost the run's
-#   own process lifetime, bounded in docs/configuration.md, and a later join
-#   for the same brief names the missing resolution. The JSONL file is
-#   append-only and waits only briefly for the lock, so a contended resolve
-#   receipt is dropped rather than delaying the block already printed.
+#   why a join did not land. A resolve-path receipt that cannot be written
+#   prints one fixed stderr line, "dispatch-resolve: no resolution receipt
+#   for this run", on every outcome and changes neither resolver stdout nor
+#   exit status; it does cost the run's own process lifetime, bounded in
+#   docs/configuration.md. The JSONL file is append-only and waits only
+#   briefly for the lock, so a contended resolve receipt is dropped rather
+#   than delaying the block already printed.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
 #   existing unreadable rules file, malformed rules, or missing jq), which is
 #   actionable, never selected around.
@@ -207,8 +208,12 @@ join_failed() { # <reason>
   return 1
 }
 
+receipt_failed() {
+  printf 'dispatch-resolve: no resolution receipt for this run\n' >&2
+}
+
 record_actual_dispatch() {
-  local timestamp dispatch_id profile base record rc=0
+  local timestamp profile base record rc=0
   [ -n "$BRIEF_SHA256" ] || join_failed "the brief could not be hashed" || return 1
   profile=$(jq -cn --arg harness "$DISPATCH_HARNESS" --arg model "$DISPATCH_MODEL" --arg effort "$DISPATCH_EFFORT" '
     {harness: $harness}
@@ -216,8 +221,6 @@ record_actual_dispatch() {
     + (if $effort == "" then {} else {effort: $effort} end)' 2>/dev/null) ||
     join_failed "the dispatched profile could not be built" || return 1
   timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || join_failed "no timestamp" || return 1
-  dispatch_id=$(sha256_text "$timestamp|$$|$RANDOM|$BRIEF_SHA256|$profile") ||
-    join_failed "no sha256 available" || return 1
   receipt_lock_acquire "$DISPATCH_LOCK_ATTEMPTS" || join_failed "the receipts lock stayed busy" || return 1
   if [ ! -s "$RECEIPTS" ]; then
     receipt_lock_release || true
@@ -232,11 +235,10 @@ record_actual_dispatch() {
     join_failed "no resolution receipt carries this brief's current content hash; it may have been edited after the resolve"
     return 1
   fi
-  record=$(jq -c --arg timestamp "$timestamp" --arg dispatch_id "sha256:$dispatch_id" \
+  record=$(jq -c --arg timestamp "$timestamp" \
     --argjson profile "$profile" '
       . + {
         receipt_type: "dispatch",
-        dispatch_id: $dispatch_id,
         timestamp_utc: $timestamp,
         dispatched_profile: $profile
       }' 2>/dev/null <<<"$base") || record=''
@@ -253,7 +255,7 @@ no_rules() {
   local result
   result=$(jq -cn --arg model "$TS_MODEL" '{status:"escalate", reason:"no rules to match", model:null, latency_ms:null, tokens:null, probabilities:null, confidence:null}')
   printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
-  write_resolution_receipt "$result" >/dev/null 2>&1 || true
+  write_resolution_receipt "$result" >/dev/null 2>&1 || receipt_failed || true
   exit 0
 }
 usage() {
@@ -416,7 +418,7 @@ emit_error() {
   fi
   echo "dispatch-resolve: error ($reason)" >&2
   printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
-  write_resolution_receipt "$result" >/dev/null 2>&1 || true
+  write_resolution_receipt "$result" >/dev/null 2>&1 || receipt_failed || true
   exit 0
 }
 
@@ -616,5 +618,5 @@ TEXT=$(jq -r '
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 printf '%s\n' "$TEXT"
-write_resolution_receipt "$RESULT" >/dev/null 2>&1 || true
+write_resolution_receipt "$RESULT" >/dev/null 2>&1 || receipt_failed || true
 exit 0

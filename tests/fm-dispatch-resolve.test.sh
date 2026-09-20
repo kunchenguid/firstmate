@@ -59,7 +59,7 @@ cat > "$BASE_RULES" <<'JSON'
       "when": "A simple bug fix with a stated root cause.",
       "use": [
         { "harness": "claude", "model": "sonnet", "effort": "high" },
-        { "harness": "cursor", "model": "cursor-grok-4.6-medium" },
+        { "harness": "cursor", "model": "cursor-grok-4.6-medium", "provider": "cursor" },
         { "harness": "kimi", "model": "kimi-code/k3" }
       ]
     }
@@ -281,12 +281,21 @@ expect_code 0 "$code" "actual-dispatch receipt exits 0"
 assert_equals '' "$out" "actual-dispatch receipt writes no stdout"
 dispatch_receipt=$(jq -sc '[.[] | select(.receipt_type == "dispatch")] | last' "$RECEIPTS")
 assert_equals "$(jq -r .resolution_id <<<"$clear_receipt")" "$(jq -r .resolution_id <<<"$dispatch_receipt")" "dispatch receipt joins its resolution"
-assert_equals 'cursor' "$(jq -r .chosen_profile.harness <<<"$dispatch_receipt")" "dispatch receipt retains the resolver choice"
-assert_equals 'claude' "$(jq -r .dispatched_profile.harness <<<"$dispatch_receipt")" "dispatch receipt carries the actual harness"
-assert_equals 'sonnet' "$(jq -r .dispatched_profile.model <<<"$dispatch_receipt")" "dispatch receipt carries the actual model"
+assert_equals '{"harness":"cursor","model":"cursor-grok-4.6-medium","effort":null}' "$(jq -c '.chosen_profile | {harness, model, effort}' <<<"$dispatch_receipt")" "dispatch receipt retains the resolver choice"
+assert_equals '{"harness":"claude","model":"sonnet","effort":"high"}' "$(jq -c '.dispatched_profile | {harness, model, effort}' <<<"$dispatch_receipt")" "dispatch receipt carries the profile actually dispatched"
+assert_equals 'cursor' "$(jq -r .chosen_profile.provider <<<"$dispatch_receipt")" "chosen_profile keeps the declared provider the rules file carried"
+assert_equals 'false' "$(jq -r '(.chosen_profile | {harness, model, effort}) == (.dispatched_profile | {harness, model, effort})' <<<"$dispatch_receipt")" "a dispatch that overrode the resolver disagrees under the projection"
 head -c "$before_dispatch_bytes" "$RECEIPTS" > "$TMP_ROOT/receipt-prefix"
 cmp "$TMP_ROOT/receipts-before-dispatch" "$TMP_ROOT/receipt-prefix"
 pass "actual dispatch is separately recorded and joined without changing earlier rows"
+
+# --- agreement is the {harness, model, effort} projection, not the whole object -
+TYPESAFE_API_KEY=$KEY run code out err --record-dispatch "$BRIEF" --harness cursor --model cursor-grok-4.6-medium
+expect_code 0 "$code" "dispatching exactly what the resolver chose exits 0"
+agreeing_receipt=$(jq -sc '[.[] | select(.receipt_type == "dispatch")] | last' "$RECEIPTS")
+assert_equals "$(jq -c '.chosen_profile | {harness, model, effort}' <<<"$agreeing_receipt")" "$(jq -c '.dispatched_profile | {harness, model, effort}' <<<"$agreeing_receipt")" "a dispatch of the chosen profile agrees under the projection"
+assert_not_equals "$(jq -c .chosen_profile <<<"$agreeing_receipt")" "$(jq -c .dispatched_profile <<<"$agreeing_receipt")" "whole-object equality would read this agreeing dispatch as a disagreement"
+pass "chosen and dispatched profiles are compared by harness, model, and effort"
 
 # --- the dispatch join is by brief content, not by path spelling ---------------
 dispatch_count_before_spelling=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
@@ -732,9 +741,27 @@ expect_code 0 "$code" "receipt write failure leaves resolver exit 0"
 normalized_baseline=$(sed -E 's/latency_ms: [0-9]+/latency_ms: N/' <<<"$baseline_out")
 normalized_failure=$(sed -E 's/latency_ms: [0-9]+/latency_ms: N/' <<<"$out")
 assert_equals "$normalized_baseline" "$normalized_failure" "receipt write failure leaves stdout untouched"
-assert_equals "$baseline_err" "$err" "receipt write failure adds no stderr"
+assert_equals '' "$baseline_err" "a receipt that lands says nothing on stderr"
+assert_equals 'dispatch-resolve: no resolution receipt for this run' "$err" "receipt write failure names itself on exactly one stderr line"
 rmdir "$RECEIPTS"
 mv "$TMP_ROOT/receipts-before-failure" "$RECEIPTS"
+
+reset_log
+TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=429 run code baseline_out baseline_err "$BRIEF"
+assert_contains "$baseline_out" '  status: error' "the 429 baseline is a non-clear outcome"
+mv "$RECEIPTS" "$TMP_ROOT/receipts-before-failure"
+mkdir "$RECEIPTS"
+TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=429 run code out err "$BRIEF"
+expect_code 0 "$code" "a non-clear receipt failure leaves resolver exit 0"
+assert_equals "$(sed -E 's/[0-9]+ ms/N ms/g' <<<"$baseline_out")" "$(sed -E 's/[0-9]+ ms/N ms/g' <<<"$out")" "a non-clear receipt failure leaves stdout untouched"
+assert_equals '1' "$(grep -c 'no resolution receipt for this run' <<<"$err")" "a non-clear receipt failure names itself on exactly one stderr line"
+assert_contains "$err" 'dispatch-resolve: error (http 429' "the outcome's own stderr line is still there"
+assert_not_contains "$err" "$KEY" "the dropped-receipt line never carries the API key"
+assert_not_contains "$err" 'SECRET-WHY-TEXT' "the dropped-receipt line never carries rule rationale"
+rmdir "$RECEIPTS"
+mv "$TMP_ROOT/receipts-before-failure" "$RECEIPTS"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
 
 dispatch_count_before=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
 CONCURRENT_ERR="$TMP_ROOT/concurrent-stderr"
