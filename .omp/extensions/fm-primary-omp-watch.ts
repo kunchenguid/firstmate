@@ -27,7 +27,8 @@
 // rearm, or clear the arm child. An owning replacement session_start (or fresh
 // factory bind) arms its new generation without a model turn. A replacement
 // handoff carries actionable closes that were still pending delivery; its
-// durable state lives at state/extensions/omp-primary-watch/session-replacement-actionable.json.
+// durable state lives at state/extensions/omp-primary-watch/session-replacement-actionable.json,
+// which is absent whenever no actionable close is pending rather than ever holding an empty list.
 // Stale callbacks from a prior generation are no-ops against the active replacement.
 //
 // Delivery versus consumption (stated once here):
@@ -323,6 +324,19 @@ function writeReplacementHandoff(pending: PendingActionableClose[]): void {
   }
 }
 
+function persistOrClearReplacementHandoff(pending: PendingActionableClose[]): void {
+  if (pending.length > 0) {
+    writeReplacementHandoff(pending);
+    return;
+  }
+  replacementHandoff = null;
+  try {
+    unlinkSync(actionableHandoff);
+  } catch (error) {
+    if (nodeErrorCode(error) !== "ENOENT") throw error;
+  }
+}
+
 function persistReplacementHandoff(pending: PendingActionableClose[]): void {
   if (pending.length === 0) return;
   writeReplacementHandoff(pending);
@@ -346,7 +360,7 @@ function loadAndFilterReplacementHandoff(): PendingActionableClose[] {
     const pending = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
     const filtered = pending.filter((item) => isTaskAlive(item.message));
     if (filtered.length !== pending.length) {
-      writeReplacementHandoff(filtered);
+      persistOrClearReplacementHandoff(filtered);
     }
     replacementHandoff = filtered;
     return [...filtered];
@@ -406,12 +420,7 @@ function clearReplacementHandoff(pending: PendingActionableClose): void {
     const stored = validateReplacementHandoff(JSON.parse(readFileSync(actionableHandoff, "utf8")));
     const remaining = stored.filter((item) => item.token !== pending.token);
     if (remaining.length === stored.length) return;
-    if (remaining.length > 0) {
-      writeReplacementHandoff(remaining);
-    } else {
-      replacementHandoff = null;
-      unlinkSync(actionableHandoff);
-    }
+    persistOrClearReplacementHandoff(remaining);
   } catch (error) {
     if (nodeErrorCode(error) !== "ENOENT") throw error;
   }

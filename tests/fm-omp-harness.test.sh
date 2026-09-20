@@ -1008,20 +1008,20 @@ const pi = {
 const mod = await import(pathToFileURL(process.env.EXT).href);
 mod.default(pi);
 await tool.execute();
-await waitUntil(() => existsSync(handoff), "handoff file to be rewritten");
-const filtered = JSON.parse(readFileSync(handoff, "utf8"));
-if (filtered.pending.length !== 0) throw new Error(`stale records should be dropped, got ${JSON.stringify(filtered)}`);
+await waitUntil(() => !existsSync(handoff), "handoff file to be removed once every record is filtered to nothing");
 if (sent.length !== 0) throw new Error(`no follow-up should be sent for stale records, got ${JSON.stringify(sent)}`);
+const reload = await tool.execute();
+if (/FAILED/.test(reload.content[0].text)) throw new Error(`a second load after the handoff was fully filtered must not fail: ${reload.content[0].text}`);
+if (existsSync(handoff)) throw new Error("a second load must not resurrect the removed handoff file");
 writeFileSync(`${process.env.FM_HOME}/state/valid-task.meta`, "task_id=valid-task\n");
-const handoff2 = `${handoffDir}/session-replacement-actionable.json`;
-writeFileSync(handoff2, `${JSON.stringify({
+writeFileSync(handoff, `${JSON.stringify({
   version: 2,
   pending: [
     { version: 1, token: "1000-2000-3", message: "stale: valid-task:wake-c", predecessorArmPid: "3333" },
   ],
 })}\n`);
-await waitUntil(() => existsSync(handoff2), "second handoff to be processed");
-const filtered2 = JSON.parse(readFileSync(handoff2, "utf8"));
+await waitUntil(() => existsSync(handoff), "second handoff to be processed");
+const filtered2 = JSON.parse(readFileSync(handoff, "utf8"));
 if (filtered2.pending.length !== 1) throw new Error(`valid record should remain, got ${JSON.stringify(filtered2)}`);
 if (filtered2.pending[0].token !== "1000-2000-3") throw new Error(`wrong token: ${filtered2.pending[0].token}`);
 process.exit(0);
@@ -1030,7 +1030,7 @@ EOF
   status=$?
   expect_code 0 "$status" "omp watch extension stale record filter: $out"
   [ -z "$out" ] || fail "omp watch extension stale record test printed output: $out"
-  pass ".omp watch extension: stale replacement records without backing state or queue are dropped"
+  pass ".omp watch extension: stale replacement records are dropped, filtering to empty removes the handoff file, and a later load does not fail"
 }
 
 test_watch_extension_consumption_clears_handoff() {
