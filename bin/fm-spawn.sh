@@ -4974,6 +4974,16 @@ if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   echo "error: spawn of $ID was interrupted after launch delivery began; $SPAWN_PRESERVED_CLAIM" >&2
   exit "$SPAWN_DEFERRED_SIGNAL_STATUS"
 fi
+if [ "$RELAUNCH" -eq 1 ]; then
+  # All launch delivery and the relaunch record publication now succeeded, so
+  # the replacement supersedes the deliberately stopped incarnation. Clear its
+  # parked-task marker only at this commit point: an earlier launch failure
+  # leaves the stopped task parked rather than reviving the stale/wedge ladder.
+  fm_control_deliberate_stop_clear "$STATE_REAL" "$ID" || {
+    echo "error: replacement for $ID was launched, but its deliberate-stop marker could not be cleared" >&2
+    exit 1
+  }
+fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
 

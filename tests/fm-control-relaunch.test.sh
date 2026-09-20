@@ -387,6 +387,20 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
 }
 
+test_relaunch_clears_the_deliberate_stop_marker() {
+  local dir out rc
+  dir=$(new_case deliberate-stop-clear rl1)
+  add_ship_task "$dir" rl1 claude
+  # A prior deliberate stop left this marker (bin/fm-control-lib.sh owns it);
+  # the relaunch must clear it so the replacement is supervised normally again.
+  printf '%s\n' "$(date +%s)" > "$dir/home/state/rl1.deliberate-stop"
+  out=$(run_control "$dir" rl1 relaunch --note "resume after a deliberate stop"); rc=$?
+  expect_code 0 "$rc" "the relaunch should succeed"$'\n'"$out"
+  [ ! -e "$dir/home/state/rl1.deliberate-stop" ] \
+    || fail "a relaunch must clear the deliberate-stop marker so the replacement is supervised normally"
+  pass "fm-control relaunch: clears the durable deliberate-stop marker left by a prior stop"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -818,7 +832,9 @@ test_wiring_removal_failure_refuses_before_replacement_arm() {
     || fail "the transaction should record the partial launch failure"
   [ "$(journal_field "$dir" rl29 rollback)" = prior-record-kept ] \
     || fail "unpublished rollback should retain the live durable record"
-  pass "fm-control relaunch: wiring cleanup failure refuses replacement arming"
+  [ -e "$dir/home/state/rl29.deliberate-stop" ] \
+    || fail "an aborted relaunch must retain the parked deliberate-stop marker"
+  pass "fm-control relaunch: wiring cleanup failure refuses replacement arming and retains the parked stop"
 }
 
 test_turnend_auth_paths_are_owned_by_the_control_adapter() {
@@ -2198,6 +2214,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_relaunch_clears_the_deliberate_stop_marker
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

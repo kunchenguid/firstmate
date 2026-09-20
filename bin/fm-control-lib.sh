@@ -13,11 +13,13 @@
 # here rather than improvised per harness in agent prose.
 #
 # This file owns three capability tables plus their pure artifact-path tables,
-# and ONE named exception to that purity - fm_control_endpoint_absence_verdict,
-# the single owner of the per-backend endpoint-absence proof, which does run
-# backend reads. Everything else has no side effects, runs no backend command,
-# and reads no state, so sourcing this file is still free and the tables can be
-# read by a test as a pure contract:
+# and TWO named exceptions to that purity. fm_control_endpoint_absence_verdict
+# is the single owner of the per-backend endpoint-absence proof and does run
+# backend reads; the fm_control_deliberate_stop_* helpers own the durable
+# deliberate-stop marker and read or write exactly one per-task state file
+# (state/<id>.deliberate-stop) with no backend command. Everything else has no
+# side effects, runs no backend command, and reads no state, so sourcing this
+# file is still free and the tables can be read by a test as a pure contract:
 #
 #   1. Verb allowlist. There is no arbitrary-text and no generic raw-key entry
 #      point on the control plane; a caller either names an allowlisted verb or
@@ -347,4 +349,31 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
     kimi) printf '%s\n' "$HOME/.kimi-code/fm-turn-end.d/$token" ;;
     *) return 0 ;;
   esac
+}
+
+# The durable deliberate-stop marker: state/<id>.deliberate-stop. Written by
+# bin/fm-control.sh's exit verb (the stop path itself, never inferred later
+# from status prose), cleared by a relaunch (bin/fm-spawn.sh --relaunch) and by
+# teardown, and read by bin/fm-watch.sh. Presence means the task's worker was
+# deliberately stopped, so its idle endpoint is a parked task: the watcher gives
+# it the declared-pause treatment - a long bounded recheck cadence, never a
+# stale or wedge escalation - instead of treating it as a worker that stopped
+# responding on its own. The record body is the epoch second of the stop, so a
+# re-stop after a relaunch starts a fresh recheck window. A failed stop attempt
+# never writes it, so a refused or unattributed endpoint keeps escalating exactly
+# as it always did.
+fm_control_deliberate_stop_marker() {  # <state-dir> <id>
+  printf '%s/%s.deliberate-stop' "$1" "$2"
+}
+
+fm_control_deliberate_stop_record() {  # <state-dir> <id>
+  printf '%s\n' "$(date +%s)" > "$(fm_control_deliberate_stop_marker "$1" "$2")"
+}
+
+fm_control_deliberate_stop_clear() {  # <state-dir> <id>
+  rm -f -- "$(fm_control_deliberate_stop_marker "$1" "$2")"
+}
+
+fm_control_deliberate_stop_present() {  # <state-dir> <id> -> 0 when the marker exists
+  [ -e "$(fm_control_deliberate_stop_marker "$1" "$2")" ]
 }
