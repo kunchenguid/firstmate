@@ -1860,9 +1860,9 @@ launch_template() {
   # secondmate launch deliberately keeps hooks on.
   codex)
     if [ "$kind" = secondmate ]; then
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1926,11 +1926,10 @@ launch_template() {
   # launch command - it is a Stop-event hook installed below (global hook +
   # per-task pointer), so the template is identical for ship/scout/secondmate.
   grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-  # Cursor Agent CLI. --trust suppresses the workspace-trust prompt that
-  # would otherwise block every spawn, since each task gets a fresh worktree
-  # path cursor has never seen, and it is also what loads the project hooks.
-  # --auto-review --sandbox enabled replaces the former blanket --yolo bypass
-  # with a sandboxed, auto-reviewing autonomy posture. --workspace pins the
+  # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
+  # --yolo does NOT cover and which would otherwise block every spawn, since
+  # each task gets a fresh worktree path cursor has never seen. --yolo is the
+  # --force alias whose TUI label is "Run Everything". --workspace pins the
   # exact worktree. -w/--worktree is deliberately never passed: it allocates a
   # SECOND worktree under ~/.cursor/worktrees and would break firstmate's
   # isolation contract. The binary is resolved rather than named because
@@ -1939,7 +1938,7 @@ launch_template() {
   # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
   # only reads the environment. Cursor exposes no effort flag, so the shared
   # effort axis is deliberately omitted and stays in task metadata only.
-  cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --auto-review --sandbox enabled __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # gemini (Google Gemini CLI): a positional query starts the supervised
   # interactive session and auto-submits it, so the brief rides the launch
   # command exactly as it does for claude and grok (verified: a multi-line
