@@ -870,6 +870,37 @@ test_ship_and_scout_teach_validation_round_pause() {
   pass "fm-brief.sh: ship and scout scaffolds teach validation-round pauses"
 }
 
+# The graduated lab evidence conventions are fleet norm, so every scaffold that
+# tells a worker how to report must point at their single owner; the parser and
+# the state verbs stay untouched, so the assertion is the pointer line only.
+test_all_scaffolds_point_at_evidence_conventions() {
+  local home brief
+  home="$TMP_ROOT/evidence-conventions-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" sample-ship sample --mode no-mistakes >/dev/null 2>&1
+  brief="$home/data/sample-ship/brief.md"
+  assert_grep "Completion, verification, bug-verdict, and measurement claims in status lines, reports, and PR descriptions follow" "$brief" \
+    "ship brief did not grade status and PR claims with the evidence conventions"
+  assert_grep "$ROOT/.agents/skills/evidence-conventions/SKILL.md" "$brief" \
+    "ship brief did not point at the evidence-conventions skill owner"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$ROOT/bin/fm-brief.sh" sample-scout sample --scout >/dev/null 2>&1
+  brief="$home/data/sample-scout/brief.md"
+  assert_grep "Completion, verification, bug-verdict, and measurement claims in status lines and reports follow" "$brief" \
+    "scout brief did not grade status and report claims with the evidence conventions"
+  assert_grep "$ROOT/.agents/skills/evidence-conventions/SKILL.md" "$brief" \
+    "scout brief did not point at the evidence-conventions skill owner"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SECONDMATE_CHARTER='sample domain' \
+    "$ROOT/bin/fm-brief.sh" sample-charter --secondmate --no-projects >/dev/null 2>&1
+  brief="$home/data/sample-charter/brief.md"
+  assert_grep "Completion, verification, bug-verdict, and measurement claims in parent-channel lines and reports follow" "$brief" \
+    "secondmate charter did not grade parent-channel claims with the evidence conventions"
+  assert_grep "\`evidence-conventions\` in this home's \`.agents/skills/\`" "$brief" \
+    "secondmate charter did not point at its own evidence-conventions skill copy"
+  pass "fm-brief.sh: ship, scout, and charter scaffolds point at the evidence-conventions owner"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -995,6 +1026,7 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
+test_all_scaffolds_point_at_evidence_conventions
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
