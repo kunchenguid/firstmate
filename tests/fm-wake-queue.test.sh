@@ -2099,6 +2099,49 @@ test_malformed_presentation_lock_reports_acquire_failure() {
 # not present an already-announced status line as a new update, while a status
 # file with unannounced bytes keeps its annotation and a direct status row is
 # always annotated. Driven through the real drain executable.
+# The owned-append ledger is wake-only: it must never withhold a captain-facing
+# turn-ended annotation. An in-flight watcher classification that commits after
+# this home's own close regresses the classified offset behind the owned bytes -
+# exactly the state the wake scan treats as already owned - so the wake stays
+# suppressed while the historical annotation must still present the line.
+test_owned_growth_still_annotates_turn_ended() {
+  local dir state out err status pre_close ident
+  dir=$(make_case owned-historical)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  status="$state/scout.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  printf 'needs-decision [key=budget]: approve spend?\n' > "$status"
+  prime_status_seen "$state" "$status" || fail "could not prime the scout seen marker"
+  pre_close=$(wc -c < "$status" | tr -d '[:space:]')
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=budget]: answered: approved' \
+    || fail "the answerer close was not self-announced"
+  ident=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"; _fm_open_decisions_file_ident "$2"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$status") \
+    || fail "could not read the status identity"
+  run_wake_lib fm_wake_status_seen_commit "$state" "$status" "$pre_close" "$ident" \
+    || fail "could not replay the stale watcher classification"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "owned-only growth did not suppress the wake"
+
+  : > "$state/scout.turn-ended"
+  append_wake "$state" signal scout.turn-ended "signal: $state/scout.turn-ended" \
+    || fail "turn-ended wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "drain failed"
+  grep -F 'scout.status: resolved [key=budget]: answered: approved' "$out" >/dev/null \
+    || fail "owned growth hid this home's own close from the turn-ended annotation: $(cat "$out")"
+  pass "owned growth suppresses the wake without hiding the turn-ended annotation"
+}
+
 test_historical_annotation_skips_announced_status() {
   local dir state out err
   dir=$(make_case historical-annotation)
@@ -2161,6 +2204,7 @@ test_self_announced_append_guards
 test_separate_self_announced_answers_after_fold_are_owned
 test_unreadable_status_is_not_owned
 test_folded_worker_resolved_is_not_owned_lag
+test_owned_growth_still_annotates_turn_ended
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher

@@ -686,8 +686,10 @@ fi
 # very turn that answered the decisions, so they go through ONE guarded
 # self-announced append (bin/fm-wake-lib.sh). That records the appended byte
 # range so separate --resolve-key answers do not each wake this same session,
-# while any concurrent foreign status bytes, or a worker line an OPEN
-# DECISIONS fold read, still leave the watcher's wake path untouched.
+# including when this home already folded those bytes through OPEN DECISIONS
+# without a matching watcher seen marker; any concurrent foreign status bytes,
+# or a worker line the fold read but never listed, leave the watcher's wake
+# path untouched.
 fm_send_close_resolved_keys() { # <answer-text>
   local note=$1 k close_note append_rc still manual_close_cmd close_lines=() i=0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')

@@ -38,8 +38,8 @@
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
 # log every time. status_home_appends_record writes the per-task home-owned
-# append ledger (see "home-owned status-append ledger" below) so signal scans
-# and wake annotations can treat this home's own bookkeeping bytes as already owned.
+# append ledger (see "home-owned status-append ledger" below) so the wake scan
+# can treat this home's own bookkeeping bytes as already owned.
 # crew_worktree_written_since reads the task's meta file and walks a bounded slice
 # of its worktree instead of a status file, so callers run it only at the moment
 # they would otherwise escalate.
@@ -1741,14 +1741,17 @@ window_to_task() {
 # --- home-owned status-append ledger ----------------------------------------
 #
 # This home's bookkeeping closes (fm_wake_status_append_self_announced) record
-# the exact byte range they appended so signal scans and wake annotations treat
-# those bytes as already owned, while the drain's UNREAD STATUS section still
-# presents them. That is the multi-answer path: two distinct
+# the exact byte range they appended so the wake scan can tell this home's own
+# growth from a foreign write. That is the multi-answer path: two distinct
 # --resolve-key closes must not each force a captain-facing wake solely because
 # each one appended a status line, while a worker-authored line that is not in
 # this ledger still signals.
-# The ledger does not use lag verbs to hide a worker `resolved` line. Only
-# bytes this home itself recorded as owned are skipped.
+# fm_wake_signal_seen_current (bin/fm-wake-lib.sh) is the ONLY consumer. The
+# ledger decides whether growth wakes this home and nothing else: it never
+# removes a line from presentation, so the drain's signal annotation and its
+# UNREAD STATUS section both still print these bytes.
+# The ledger does not use lag verbs to hide a worker `resolved` line; only
+# bytes this home itself recorded as owned are ever treated as owned.
 #
 # Path: state/.<task>.home-appends
 # Format:
@@ -1893,8 +1896,6 @@ _fm_status_home_appends_merge_locked() {  # <status-file> <ledger-path> <start> 
 # reconciliation signal and never treated here as an open decision.
 # status_open_decisions remains the single owner of open/closed semantics,
 # including same-key reopening and reserved-key handling.
-# Bytes recorded in this home's owned-append ledger are not classified as
-# events: this home already wrote them as bookkeeping.
 # Every other captain-relevant event is terminal and always actionable.
 _fm_decision_origin_drop() {  # <origins> <key>
   local origin
@@ -1943,7 +1944,6 @@ _fm_status_open_decision_origins() {  # <status-file> [<kind>]
 status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
   local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file full_file prefix_file result
   local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
-  local LC_ALL=C
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2

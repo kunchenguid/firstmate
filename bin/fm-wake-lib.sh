@@ -2117,34 +2117,49 @@ fm_wake_signal_seen_size() {  # <state> <file>
   esac
 }
 
-# 0 when <file>'s current signature matches its recorded reported state, or
-# when the file is a readable regular file that grew past the watcher's
-# classified offset and every grown byte is in this home's owned-append ledger.
-# For a status file a reported match means the current
-# state was already reported, not that every byte was successfully classified;
-# the separate classified position owns that fact. Owned-only growth past the
-# classified offset is this home's own bookkeeping and is not a new signal.
-# A missing marker, an unreadable signature, or any other signature change
-# without owned growth is not a match, so uncertainty still reads as an
-# unreported state.
-fm_wake_signal_seen_current() {  # <state> <file>
-  local sig marker classified size
+# 0 when <file>'s current signature matches its recorded reported state.
+# For a status file this means the current state was already reported, not that
+# every byte was successfully classified; the separate classified position owns
+# that fact.
+# A missing marker or unreadable signature is not a match, so uncertainty reads
+# as an unreported state.
+# This predicate never consults the owned-append ledger, which is what makes it
+# the safe gate for a captain-facing surface: a line must never be withheld from
+# presentation merely because this home is the writer that appended it.
+fm_wake_signal_reported_current() {  # <state> <file>
+  local sig marker
   sig=$(fm_wake_signal_sig "$2") || return 1
   [ -n "$sig" ] || return 1
   marker=$(fm_wake_signal_seen_path "$1" "$2")
   case "$2" in
     *.status)
       _fm_wake_require_classify || return 1
-      status_presentation_marker_reported_matches "$marker" "$sig" && return 0
-      classified=$(fm_wake_signal_seen_size "$1" "$2")
-      size=$(_fm_status_file_size "$2") || return 1
-      size=${size//[[:space:]]/}
-      case "$classified:$size" in *[!0-9:]*) return 1 ;; esac
-      [ "$classified" -lt "$size" ] && [ -f "$2" ] && [ -r "$2" ] && [ ! -L "$2" ] || return 1
-      status_home_appends_covers "$2" "$classified" "$size"
+      status_presentation_marker_reported_matches "$marker" "$sig"
       ;;
     *) [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] ;;
   esac
+}
+
+# 0 when the state was already reported, or when the file is a readable regular
+# file that grew past the watcher's classified offset and every grown byte is in
+# this home's owned-append ledger. Owned-only growth past the classified offset
+# is this home's own bookkeeping and is not a new signal, so separate
+# --resolve-key answers do not each force a wake. Any other signature change
+# without owned growth is not a match, so uncertainty still reads as unreported.
+# This is the wake-scan predicate and answers only "should this wake the home?".
+# Presentation asks the different question and uses
+# fm_wake_signal_reported_current.
+fm_wake_signal_seen_current() {  # <state> <file>
+  local classified size
+  fm_wake_signal_reported_current "$1" "$2" && return 0
+  case "$2" in *.status) ;; *) return 1 ;; esac
+  _fm_wake_require_classify || return 1
+  classified=$(fm_wake_signal_seen_size "$1" "$2")
+  size=$(_fm_status_file_size "$2") || return 1
+  size=${size//[[:space:]]/}
+  case "$classified:$size" in *[!0-9:]*) return 1 ;; esac
+  [ "$classified" -lt "$size" ] && [ -f "$2" ] && [ -r "$2" ] && [ ! -L "$2" ] || return 1
+  status_home_appends_covers "$2" "$classified" "$size"
 }
 
 fm_wake_status_reported_commit() {  # <state> <status-file> <reported-signature>
@@ -2394,7 +2409,7 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
     # existing historical caveat. A direct status row is annotated for every
     # still-unread line since the last drain presentation; already-presented
     # bytes are not replayed.
-    if [ "$mode" = historical ] && fm_wake_signal_seen_current "$STATE" "$path"; then
+    if [ "$mode" = historical ] && fm_wake_signal_reported_current "$STATE" "$path"; then
       continue
     fi
     offset=$(fm_wake_status_cursor_offset "$path") || return 1
