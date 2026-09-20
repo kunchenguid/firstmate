@@ -139,7 +139,7 @@ REQUEST=$(jq -n --rawfile request "$REQUEST_SNAPSHOT" --arg project "$PROJECT" -
   }') || emit_error "request rendering failed"
 
 T0=$(fm_timing_now_ms)
-HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
+HTTP=$(printf '%s' "$REQUEST" | curl -q -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
   -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
   -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
   --data-binary @- 2>/dev/null) || HTTP=000
@@ -151,7 +151,7 @@ LAT_MS=$(( T1 - T0 ))
 jq -e '
   def confidence($a): $a.confidence;
   def intent_noul($a): $a.noul;
-  def urgency_score($a): $a.score // $a.value // $a.answer;
+  def urgency_score($a): $a.score;
   def confidence_ok($a): (confidence($a) | type) == "number" and confidence($a) >= 0 and confidence($a) <= 1;
   (.answers | type) == "object" and
   (.answers.deliverable | type) == "object" and
@@ -181,7 +181,7 @@ RESULT=$(jq -n --argjson floor "$CONFIDENCE_FLOOR" --argjson latency "$LAT_MS" -
   ($r.answers.intent_clear) as $intent |
   ($r.answers.urgency) as $urgency |
   def intent_noul: .noul;
-  def urgency_score: .score // .value // .answer;
+  def urgency_score: .score;
   def urgency_level($score):
     if $score < 0.5 then "routine"
     elif $score < 1.5 then "soon"

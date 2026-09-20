@@ -113,6 +113,7 @@ rm -f "$HOME_DIR/.env"
 argv=$(cat "$LOG/argv")
 body=$(cat "$LOG/body")
 assert_not_contains "$argv" "$KEY" "the key never appears on curl argv"
+assert_equals '-q' "$(head -n 1 "$LOG/argv")" "curl disables ambient configuration before every other option"
 assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the fixed endpoint is used"
 assert_contains "$argv" $'--max-time\n5' "the fixed timeout is used"
 assert_contains "$argv" '@/dev/fd/3' "curl reads the header from a file descriptor"
@@ -175,6 +176,14 @@ FAKE_CURL_HTTP=429 TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
 expect_code 0 "$code" "HTTP failure exits 0"
 assert_contains "$out" '  status: error' "HTTP failure is structured"
 assert_contains "$out" 'http 429' "HTTP status is named"
+reset_log
+write_response ship 0.95 0.94 1 0.93
+jq 'del(.answers.urgency.score) | .answers.urgency.value = 1 | .answers.urgency.answer = 2' "$RESPONSE" > "$RESPONSE.tmp"
+mv "$RESPONSE.tmp" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
+expect_code 0 "$code" "undocumented urgency fields exit 0"
+assert_contains "$out" '  status: error' "undocumented urgency fields are rejected"
+assert_contains "$out" 'response is not a typed intake answer' "the Score contract requires score"
 cat > "$RESPONSE" <<'JSON'
 {"answers":{"deliverable":{"choice":"ship"}}}
 JSON
