@@ -82,6 +82,76 @@ Initialization configures the local gate and does not vendor a no-mistakes skill
 Do not create a commit merely because initialization ran.
 If doctor reports an environment, authentication, or daemon problem, resolve that blocker before dispatching work and never restart the shared daemon from a project operation.
 
+## Fused Onboarding & Architecture Protocol
+
+Apply this ordered protocol to all future project creation, add, clone, registration, and initialization intake, and verify its completion before dispatching any implementation crewmate for a new project.
+Do not retroactively onboard established projects merely because they receive another task.
+A clone, registry entry, or successful no-mistakes initialization is not completion of this protocol.
+Resume incomplete onboarding from its recorded artifacts and decisions rather than repeating settled interviews.
+Tell the captain plainly that alignment takes a real session with them before implementation code is written; do not present this sequence as free setup or invent answers while they are unavailable.
+Keep unresolved choices on the configured backlog under the existing captain-hold contract and do not dispatch implementation while they remain open.
+
+Firstmate conducts the captain dialogue and delegates project investigation, design, and artifact writes under `AGENTS.md`'s existing role and project-write boundaries.
+Preparation workers may work in isolated copies on the documents and scaffolding below, but must not implement product behavior before this protocol is complete.
+For projects entering this protocol, select `no-mistakes` for PR delivery instead of the conditional or direct-PR defaults above; keep purely local projects `local-only` without inventing a remote or PR.
+Resolve any conflicting explicit delivery instruction with the captain rather than silently skipping the required review.
+
+### 1. Product Intent (PRD.md)
+
+Read available project documentation before asking questions and distinguish documented facts from choices requiring the captain's answer.
+Use `grilling` to interview the captain on product goals, target audience, core user journeys, and functional requirements until shared understanding is confirmed.
+Use `to-spec` to synthesize those interview answers into the requirements specification, not to conduct the interview: that skill explicitly performs synthesis without an interview.
+Keep its output in root `PRD.md` for this protocol rather than publishing to an unconfigured issue tracker, and commit it through the project's authorized preparation path.
+Do not claim a separate docs-grounded grilling variant exists; grounding comes from the preceding document read.
+
+### 2. Domain Dictionary (CONTEXT.md)
+
+Extract domain-specific terminology, acronyms, and jargon during the interview into root `CONTEXT.md`.
+Define each term concisely and explicitly, settle ambiguous meanings with the captain, and use the dictionary consistently in all subsequent artifacts and worker instructions.
+
+### 3. Refusal Criteria & Non-Goals (VISION.md)
+
+Mine available repository history and task briefs for prior boundaries, rejected directions, and non-goals; identify absent history rather than inventing it for a new repository.
+Stress-test non-goals with hard hypotheticals and obtain explicit answers about what the product strictly refuses to do.
+Commit root `VISION.md` as the binding vision boundary, distinguishing refusals from work merely deferred.
+Perform this procedure directly through the preparation work rather than invoking a nonexistent vision skill.
+
+### 4. Technical Architecture & Fast Context
+
+Create root `architecture.md` with the full technical design, tech stack, component boundaries, and database schemas.
+Create root `architecture-essentials.md` containing only critical architectural decisions and schema outlines for lightweight worker reference, pointing to the full design for detail.
+Keep both consistent with `PRD.md`, `CONTEXT.md`, and `VISION.md`; explicitly record when a database or another layer does not apply rather than adding one to satisfy a template.
+
+### 5. Hard-Questions Stress Test
+
+Use `grilling` for one bounded stress-test pass over the proposed requirements and architecture: what will break, what edge cases are missing, and what is overengineered?
+Resolve every identified edge case with an explicit accepted behavior or refusal, and update `PRD.md` and `architecture.md` with the answers before proceeding.
+Refresh `architecture-essentials.md` when a critical decision or schema changes.
+Do not silently assume answers, start an endless new design exercise, or advance while an answer is still missing.
+
+### 6. Unified AGENTS.md & Physical Scaffolding
+
+Have the preparation worker use `bin/fm-ensure-agents-md.sh` to establish one root `AGENTS.md` as the single source of truth for project agent rules, with `CLAUDE.md` importing `@AGENTS.md` rather than duplicating rules.
+Point other agent instruction files at that same owner, and retain its self-governance guidance.
+Reference the completed onboarding documents from `AGENTS.md` instead of copying them into the always-loaded rules.
+Create the complete agreed folder structure, database schemas and types, and empty or draft module shells on disk to establish spatial boundaries before implementation.
+For an existing repository newly added to the fleet, reconcile and preserve its existing structure and rules instead of overwriting them with a blank scaffold.
+Keep scaffolding within the accepted design, without product behavior or speculative modules, and commit the completed preparation artifacts.
+
+### 7. Backlog Slicing & TDD Implementation
+
+Use `to-tickets` for tracer-bullet vertical slices spanning database, API, UI, and tests wherever those layers apply, with independently verifiable outcomes and explicit blocking dependencies.
+Confirm the slice boundaries and public test seams with the captain before dispatch.
+Use its slicing method, not an assumed tasks-axi integration or its default per-ticket files and external tracker publication.
+Record the approved slices through the configured backlog backend contract in [`docs/configuration.md`](../../../docs/configuration.md#backlog-backend-taskstoml--configbacklog-backend); a manual home hand-edits its backlog file, while a tasks-axi home uses the existing home-scoped wrapper.
+Do not invent a per-project tasks-axi ticketing command or migrate the home's backlog backend for onboarding.
+Before the first implementation spawn, verify that steps 1 through 6 are committed and available on the implementation base, the approved slices are recorded, and no alignment decision remains open.
+Record those completion references with the backlog work so later dispatches can verify them without re-running the sequence.
+Only then dispatch implementation crewmates into isolated worktrees under the normal task lifecycle.
+Require `tdd` in their instructions for all guardrail and domain logic, with behavior tests at the agreed public seams and Red-Green-Refactor loops.
+For this protocol, explicitly require the refactor phase after green while preserving behavior, rather than inheriting `tdd`'s default deferral of refactoring to review.
+Pass every completed PR through no-mistakes adversarial review and green checks before presenting it for captain merge approval; onboarding grants no merge authority.
+
 ## Remove
 
 Project removal is destructive.

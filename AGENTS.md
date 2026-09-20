@@ -257,6 +257,7 @@ A restart must be a non-event because durable state and live backend inventory, 
 
 Load `project-management` before adding, creating, removing, or initializing a project.
 Cloning or registering a project is add intake and uses the same trigger.
+Before dispatching any implementation crewmate for a new project, load `project-management` and complete its mandatory Fused Onboarding & Architecture Protocol.
 That skill owns registry syntax, delivery-mode selection, outward-facing consent, clone and initialization procedure, safe rollback, and removal preflight.
 Project creation never authorizes an unmentioned remote, and project removal never bypasses that preflight or unlanded-work checks; hard rule 1's concrete captain-approved project operation exception remains available when its exact conditions are met.
 
