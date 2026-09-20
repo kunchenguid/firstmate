@@ -2574,6 +2574,12 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
+if [ -n "${FM_STATUS_FILE:-}" ]; then
+  # school-core: forward FM_STATUS_FILE and FM_REPORT_FILE to the pane.
+  # These are set in the env= dict (crew_dispatch.py:1007-1008) but may not
+  # propagate to the pane's environment. See crew_dispatch.py:946-954.
+  LAUNCH="FM_STATUS_FILE=${FM_STATUS_FILE} FM_REPORT_FILE=${FM_REPORT_FILE:-} $LAUNCH"
+fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
