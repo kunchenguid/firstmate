@@ -300,6 +300,67 @@ test_report_command() {
   assert_contains "DJI_20260914130000_0001_D" "$report_out" "report command prints cataloged clip"
 }
 
+# -----------------------------------------------------------------------------
+# Test 9: Free local headless CLI transcription
+# -----------------------------------------------------------------------------
+test_cli_transcription() {
+  local fixture_drive="$TMP_ROOT/drive-transcribe-test"
+  local cache_dir="$TMP_ROOT/cache-transcribe-test"
+  mkdir -p "$fixture_drive/DCIM/DJI_001"
+
+  ffmpeg -f lavfi -i testsrc=duration=1:size=320x180:rate=24 \
+         -f lavfi -i sine=frequency=300:duration=1 \
+         -c:v libx264 -c:a aac \
+         "$fixture_drive/DCIM/DJI_001/DJI_20260914140000_0001_D.MP4" -y >/dev/null 2>&1
+
+  local catalog_json
+  catalog_json=$("$OSMO_CMD" catalog \
+    --drive "$fixture_drive" \
+    --cache-dir "$cache_dir" \
+    --transcriber "echo This is transcribed dialogue from the clip" \
+    --json)
+
+  local status text source
+  status=$(echo "$catalog_json" | jq -r '.clips[0].transcription.status')
+  text=$(echo "$catalog_json" | jq -r '.clips[0].transcription.text')
+  source=$(echo "$catalog_json" | jq -r '.clips[0].transcription.source')
+
+  assert_eq "transcribed" "$status" "cli transcriber marks status transcribed"
+  assert_contains "This is transcribed dialogue" "$text" "cli transcriber captures output text"
+  assert_eq "cli_transcriber" "$source" "transcription source indicates cli_transcriber"
+}
+
+# -----------------------------------------------------------------------------
+# Test 10: Model approval requirement when no local model or CLI transcriber is provided
+# -----------------------------------------------------------------------------
+test_transcription_approval_required() {
+  local fixture_drive="$TMP_ROOT/drive-approval-test"
+  local cache_dir="$TMP_ROOT/cache-approval-test"
+  mkdir -p "$fixture_drive/DCIM/DJI_001"
+
+  ffmpeg -f lavfi -i testsrc=duration=1:size=320x180:rate=24 \
+         -f lavfi -i sine=frequency=300:duration=1 \
+         -c:v libx264 -c:a aac \
+         "$fixture_drive/DCIM/DJI_001/DJI_20260914140500_0001_D.MP4" -y >/dev/null 2>&1
+
+  local catalog_json
+  catalog_json=$("$OSMO_CMD" catalog \
+    --drive "$fixture_drive" \
+    --cache-dir "$cache_dir" \
+    --json)
+
+  local status tool footprint cmd
+  status=$(echo "$catalog_json" | jq -r '.clips[0].transcription.status')
+  tool=$(echo "$catalog_json" | jq -r '.clips[0].transcription.approval_request.tool')
+  footprint=$(echo "$catalog_json" | jq -r '.clips[0].transcription.approval_request.disk_footprint')
+  cmd=$(echo "$catalog_json" | jq -r '.clips[0].transcription.approval_request.install_command')
+
+  assert_eq "approval_required" "$status" "untranscribed clip requires approval before downloading model"
+  assert_contains "whisper" "$tool" "approval request specifies tool"
+  assert_contains "MB" "$footprint" "approval request specifies disk footprint"
+  assert_contains "whisper" "$cmd" "approval request specifies install/exec command"
+}
+
 # Run all test functions
 test_discover_missing_drive
 test_discover_empty_drive
@@ -309,5 +370,7 @@ test_catalog_e2e
 test_read_only_invariant
 test_incremental_caching
 test_report_command
+test_cli_transcription
+test_transcription_approval_required
 
 pass "all fm-osmo tests passed successfully"

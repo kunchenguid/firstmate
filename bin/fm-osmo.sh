@@ -44,7 +44,7 @@ Usage:
   fm-osmo.sh [discover] [--drive <path>] [--json]
   fm-osmo.sh scan       [--drive <path>] [--json]
   fm-osmo.sh catalog    [--drive <path>] [--cache-dir <dir>] [--output <file>]
-                        [--sample-count <N>] [--force] [--json]
+                        [--transcriber <cmd>] [--sample-count <N>] [--force] [--json]
   fm-osmo.sh report     [--cache-dir <dir>] [--json]
   fm-osmo.sh -h | --help
 
@@ -58,6 +58,7 @@ Options:
   --drive <path>       Osmo drive mount path (default: /Volumes/Osmo).
   --cache-dir <dir>    Local cache directory (default: ~/.firstmate/osmo-catalog-cache).
   --output <file>      Path to write Markdown report.
+  --transcriber <cmd>  Free fully local headless CLI transcriber command.
   --sample-count <N>   Number of visual frames to sample per clip (default: 5).
   --force              Force re-processing of cached clips.
   --json               Output JSON format.

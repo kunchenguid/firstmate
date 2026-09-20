@@ -16,6 +16,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -257,27 +258,150 @@ def find_superwhisper_transcript_for_clip(stem, recorded_at, sw_db_path=SUPERWHI
         conn = sqlite3.connect(f"file:{sw_db_path}?mode=ro", uri=True)
         cursor = conn.cursor()
 
-        # Query recording by stem name in promptContext or folderName
         query = (
-            "SELECT id, datetime, prompt, promptContext FROM recording "
-            "WHERE folderName LIKE ? OR promptContext LIKE ? ORDER BY datetime DESC LIMIT 1"
+            "SELECT r.id, r.datetime, COALESCE(fts.result, fts.rawResult, r.promptContext), r.promptContext "
+            "FROM recording r "
+            "LEFT JOIN recording_fts fts ON r.id = fts.recordingId "
+            "WHERE r.folderName LIKE ? OR r.promptContext LIKE ? ORDER BY r.datetime DESC LIMIT 1"
         )
         like_pattern = f"%{stem}%"
         cursor.execute(query, (like_pattern, like_pattern))
         row = cursor.fetchone()
         conn.close()
 
-        if row:
+        if row and row[2]:
             return {
                 "id": row[0],
                 "datetime": row[1],
-                "text": row[2] or "",
+                "text": str(row[2]).strip(),
                 "source": "superwhisper_db",
             }
     except Exception as e:
         log(f"Warning: Superwhisper SQLite lookup failed for {stem}: {e}")
 
     return None
+
+
+def run_headless_cli_transcriber(audio_path, output_dir, transcriber_cmd=None):
+    """Transcribe audio track using a free fully local headless CLI transcriber."""
+    if not audio_path or not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
+        return {
+            "status": "no_audio",
+            "text": None,
+            "source": None,
+        }
+
+    os.makedirs(output_dir, exist_ok=True)
+    out_transcript = os.path.join(output_dir, "transcript.txt")
+    stem = os.path.splitext(os.path.basename(audio_path))[0]
+
+    cmd_str = transcriber_cmd or os.environ.get("FM_OSMO_TRANSCRIBER")
+
+    if cmd_str:
+        try:
+            if "{input}" in cmd_str:
+                formatted_cmd = cmd_str.format(input=audio_path, output=out_transcript)
+                args = shlex.split(formatted_cmd)
+            elif "{audio}" in cmd_str:
+                formatted_cmd = cmd_str.format(audio=audio_path)
+                args = shlex.split(formatted_cmd)
+            else:
+                args = shlex.split(cmd_str) + [audio_path]
+
+            res = subprocess.run(args, capture_output=True, text=True, timeout=180)
+            text = None
+
+            if os.path.exists(out_transcript) and os.path.getsize(out_transcript) > 0:
+                with open(out_transcript, "r", encoding="utf-8") as f:
+                    text = f.read().strip()
+            elif res.returncode == 0 and res.stdout.strip():
+                text = res.stdout.strip()
+                with open(out_transcript, "w", encoding="utf-8") as f:
+                    f.write(text)
+
+            if res.returncode == 0 and text:
+                return {
+                    "status": "transcribed",
+                    "text": text,
+                    "source": "cli_transcriber",
+                    "command": cmd_str,
+                }
+            elif res.returncode != 0:
+                err_msg = res.stderr.strip() or res.stdout.strip() or f"exit code {res.returncode}"
+                return {
+                    "status": "transcription_failed",
+                    "text": None,
+                    "source": "cli_transcriber",
+                    "error": err_msg,
+                }
+        except Exception as e:
+            return {
+                "status": "transcription_failed",
+                "text": None,
+                "source": "cli_transcriber",
+                "error": str(e),
+            }
+
+    whisper_bin = shutil.which("whisper")
+    user_whisper = os.path.expanduser("~/Library/Python/3.9/bin/whisper")
+    if not whisper_bin and os.path.exists(user_whisper) and os.access(user_whisper, os.X_OK):
+        whisper_bin = user_whisper
+
+    model_override = os.environ.get("FM_OSMO_WHISPER_MODEL")
+    cache_whisper = os.path.expanduser("~/.cache/whisper")
+    cached_model_path = None
+    if model_override and os.path.exists(model_override):
+        cached_model_path = model_override
+    elif os.path.exists(cache_whisper):
+        candidates = [os.path.join(cache_whisper, f) for f in os.listdir(cache_whisper) if f.endswith(".pt")]
+        if candidates:
+            cached_model_path = sorted(candidates)[0]
+
+    if whisper_bin and cached_model_path:
+        try:
+            whisper_cmd = [
+                whisper_bin,
+                audio_path,
+                "--model", cached_model_path,
+                "--output_dir", output_dir,
+                "--output_format", "txt",
+            ]
+            res = subprocess.run(whisper_cmd, capture_output=True, text=True, timeout=180)
+            txt_file = os.path.join(output_dir, f"{stem}.txt")
+            text = None
+            if os.path.exists(txt_file) and os.path.getsize(txt_file) > 0:
+                with open(txt_file, "r", encoding="utf-8") as f:
+                    text = f.read().strip()
+            elif res.returncode == 0 and res.stdout.strip():
+                text = res.stdout.strip()
+
+            if res.returncode == 0 and text:
+                return {
+                    "status": "transcribed",
+                    "text": text,
+                    "source": "whisper_cli",
+                    "model": cached_model_path,
+                }
+        except Exception as e:
+            log(f"Whisper CLI execution failed: {e}")
+
+    return {
+        "status": "approval_required",
+        "text": None,
+        "source": None,
+        "note": (
+            "Free fully local headless CLI transcription requires approval prior to downloading a model. "
+            "No model checkpoint was found locally. To transcribe automatically, approve downloading an open-source model "
+            "or provide --transcriber <command>."
+        ),
+        "approval_request": {
+            "tool": "whisper (openai-whisper CLI)",
+            "model": "base.en",
+            "source": "https://openaipublic.azureedge.net/main/whisper/models/ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e/base.en.pt",
+            "disk_footprint": "142 MB",
+            "install_command": "python3 -m whisper --model base.en <audio_file>",
+        },
+    }
 
 
 # =============================================================================
@@ -590,7 +714,7 @@ def analyze_audio(video_path, audio_out_dir, total_duration):
 # 5. Classification (A-roll / B-roll / Mixed)
 # =============================================================================
 
-def classify_clip(visual_metrics, audio_metrics):
+def classify_clip(visual_metrics, audio_metrics, transcription=None):
     """Classify video clip as A-roll, B-roll, or Mixed based on audio/visual features."""
     sr = audio_metrics.get("speech_ratio", 0.0)
     has_audio = audio_metrics.get("has_audio", False)
@@ -599,8 +723,12 @@ def classify_clip(visual_metrics, audio_metrics):
     sample_count = visual_metrics.get("sample_count", 1) or 1
     scene_var = visual_metrics.get("scene_variance", 0.0)
 
+    has_transcript = bool(
+        transcription and transcription.get("text") and len(str(transcription.get("text")).strip().split()) >= 2
+    )
+
     # 1. High speech with prominent host face -> A-roll
-    if has_audio and sr >= 0.35 and (prominent or face_frames >= math.ceil(sample_count / 2)):
+    if has_audio and (sr >= 0.35 or has_transcript) and (prominent or face_frames >= math.ceil(sample_count / 2)):
         conf = min(0.98, 0.85 + (sr * 0.1) + (0.05 if prominent else 0.0))
         return {
             "category": "A-roll",
@@ -612,7 +740,7 @@ def classify_clip(visual_metrics, audio_metrics):
         }
 
     # 2. High speech without face -> Mixed or A-roll dialogue
-    if has_audio and sr >= 0.35:
+    if has_audio and (sr >= 0.35 or has_transcript):
         if scene_var > 0.25:
             return {
                 "category": "Mixed",
@@ -632,7 +760,7 @@ def classify_clip(visual_metrics, audio_metrics):
             }
 
     # 3. Low speech or no audio + no face -> B-roll
-    if (not has_audio or sr < 0.10) and face_frames == 0:
+    if (not has_audio or sr < 0.10) and not has_transcript and face_frames == 0:
         conf = 0.95 if not has_audio or sr < 0.05 else 0.90
         return {
             "category": "B-roll",
@@ -644,7 +772,7 @@ def classify_clip(visual_metrics, audio_metrics):
         }
 
     # 4. Low speech with incidental faces -> B-roll (street/crowd) or Mixed
-    if (not has_audio or sr < 0.10) and face_frames > 0:
+    if (not has_audio or sr < 0.10) and not has_transcript and face_frames > 0:
         if not prominent:
             return {
                 "category": "B-roll",
@@ -845,7 +973,7 @@ def generate_markdown_report(catalog_results, report_path=None):
 # 8. Main Workflow (Catalog / Scan / Discover)
 # =============================================================================
 
-def run_catalog(drive_path=None, cache_dir=None, output_path=None, sample_count=5, force=False):
+def run_catalog(drive_path=None, cache_dir=None, output_path=None, sample_count=5, force=False, transcriber=None):
     """Execute complete cataloging, pairing, sampling, classification, and report generation."""
     discovery = discover_osmo(drive_path)
     cache = OsmoCache(cache_dir)
@@ -916,24 +1044,30 @@ def run_catalog(drive_path=None, cache_dir=None, output_path=None, sample_count=
         clip_audio_dir = os.path.join(cache.audio_dir, stem)
         audio_metrics = analyze_audio(master_path, clip_audio_dir, dur)
 
-        # 4. Superwhisper transcript lookup / transcription status
-        transcript_info = find_superwhisper_transcript_for_clip(stem, clip["recorded_at"])
-        if transcript_info:
+        # 4. Transcription & Superwhisper transcript lookup
+        if not audio_metrics["has_audio"]:
             transcription = {
-                "status": "transcribed",
-                "text": transcript_info.get("text"),
-                "source": transcript_info.get("source"),
-            }
-        else:
-            transcription = {
-                "status": "ready_for_superwhisper" if audio_metrics["has_audio"] else "no_audio",
+                "status": "no_audio",
                 "text": None,
                 "source": None,
-                "limitation_note": sw_env["limitation_note"],
             }
+        else:
+            transcript_info = find_superwhisper_transcript_for_clip(stem, clip["recorded_at"])
+            if transcript_info and transcript_info.get("text"):
+                transcription = {
+                    "status": "transcribed",
+                    "text": transcript_info.get("text"),
+                    "source": transcript_info.get("source"),
+                }
+            else:
+                transcription = run_headless_cli_transcriber(
+                    audio_metrics["audio_extracted_path"],
+                    clip_audio_dir,
+                    transcriber_cmd=transcriber,
+                )
 
         # 5. Classification
-        classification = classify_clip(visual_metrics, audio_metrics)
+        classification = classify_clip(visual_metrics, audio_metrics, transcription=transcription)
 
         # Assemble clip record
         clip_record = {
@@ -1034,6 +1168,7 @@ def main():
     parser_cat.add_argument("--drive", help="Path to Osmo drive (default: /Volumes/Osmo)")
     parser_cat.add_argument("--cache-dir", help="Path to local cache directory outside device")
     parser_cat.add_argument("--output", help="Path to write Markdown report")
+    parser_cat.add_argument("--transcriber", help="Command or path for headless CLI transcriber")
     parser_cat.add_argument("--sample-count", type=int, default=5, help="Number of visual frames to sample (default: 5)")
     parser_cat.add_argument("--force", action="store_true", help="Force re-processing of cached clips")
     parser_cat.add_argument("--json", action="store_true", help="Output JSON format")
@@ -1085,6 +1220,7 @@ def main():
         out = getattr(args, "output", None)
         samples = getattr(args, "sample_count", 5)
         force = getattr(args, "force", False)
+        transcriber = getattr(args, "transcriber", None)
 
         res = run_catalog(
             drive_path=drive,
@@ -1092,6 +1228,7 @@ def main():
             output_path=out,
             sample_count=samples,
             force=force,
+            transcriber=transcriber,
         )
 
         if not res["success"]:

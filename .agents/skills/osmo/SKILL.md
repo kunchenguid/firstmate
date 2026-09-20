@@ -24,7 +24,7 @@ Supported subcommands:
 
 - `bin/fm-osmo.sh discover [--drive <path>] [--json]` - Check whether the Osmo drive is mounted at `/Volumes/Osmo` (or a custom path) and verify read-only access.
 - `bin/fm-osmo.sh scan [--drive <path>] [--json]` - Scan the DCIM directory and report master MP4 and proxy LRF clip pairs without extracting media.
-- `bin/fm-osmo.sh catalog [--drive <path>] [--cache-dir <dir>] [--output <file>] [--sample-count <N>] [--force] [--json]` - Run end-to-end sampling, audio analysis, classification, caching, and report compilation.
+- `bin/fm-osmo.sh catalog [--drive <path>] [--cache-dir <dir>] [--output <file>] [--transcriber <cmd>] [--sample-count <N>] [--force] [--json]` - Run end-to-end sampling, audio analysis, transcription, classification, caching, and report compilation.
 - `bin/fm-osmo.sh report [--cache-dir <dir>] [--json]` - Render the latest generated catalog report.
 
 ## Safety and read-only boundaries
@@ -45,16 +45,15 @@ Sampling and frame extraction prefer the LRF proxy when present because it decod
 Clips without an LRF proxy fall back automatically to the master MP4.
 Each clip record stores full provenance and file paths back to the source recordings.
 
-## Superwhisper integration and speech analysis
+## Headless CLI transcription, Superwhisper, and speech analysis
 
-Superwhisper on macOS is an interactive menu bar dictation tool without a headless batch CLI.
-The skill interfaces with Superwhisper while respecting this architectural limitation:
+Transcription and speech analysis run 100% locally with zero cloud processing, no paid APIs, and no GUI automation:
 
-1. It verifies the local presence and running state of `/Applications/superwhisper.app`.
-2. It extracts 16 kHz mono audio tracks to the local cache directory, priming them for Superwhisper dictation or import.
-3. It measures vocal activity locally using ffmpeg silence detection (`silencedetect`) and volume detection (`volumedetect`), calculating the exact speech ratio and silence duration for each clip.
-4. It checks Superwhisper's local SQLite database (`superwhisper.sqlite`) and local sidecar files for existing transcripts matching the clip stem or recording window.
-5. It documents the Superwhisper interface status and notes in the catalog report and metadata.
+1. **Free Local Headless CLI Transcriber**: The cataloger supports executing a fully local headless CLI transcriber (configurable via `--transcriber <cmd>` or `FM_OSMO_TRANSCRIBER`, or autodetected local `whisper` CLI).
+2. **Prior Approval Invariant**: The workflow strictly forbids downloading models or installing packages without prior user approval. If an audio clip requires transcription but no local model is downloaded, the clip record reports `approval_required` alongside the exact tool name, model identifier, download source, disk footprint, and execution command.
+3. **Superwhisper Integration**: Superwhisper on macOS is an interactive menu bar dictation tool without a headless batch CLI. The skill interfaces with Superwhisper by pairing existing transcripts from Superwhisper's SQLite database (`superwhisper.sqlite`) when available, and extracting 16 kHz mono audio tracks to the local cache directory outside the device.
+4. **Local Speech Metrics**: Vocal activity is measured locally using ffmpeg silence detection (`silencedetect`) and volume detection (`volumedetect`), calculating exact speech ratios and silence durations for each clip.
+5. **Transcripts and Provenance**: When transcripts are generated or paired, the text is cached and factored into clip classification alongside visual and acoustic features.
 
 ## Visual sampling and classification
 
