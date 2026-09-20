@@ -4530,7 +4530,11 @@ test_send_text_submit_never_idle_native_state_keeps_pending_without_a_transition
   dir="$TMP_ROOT/submit-cursor-no-transition"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   # The pane was ALREADY mid-turn before our Enter, so its busy footer is not
   # evidence about OUR message: the verdict must stay pending rather than
-  # borrowing someone else's turn as proof of our delivery.
+  # borrowing someone else's turn as proof of our delivery. The mid-turn row
+  # itself reads unknown (no bright cell survives the software-cursor strip),
+  # and that no-transition unknown must retry and exhaust to exactly pending,
+  # never unknown: fm-send maps unknown to text-not-submitted and discards the
+  # pending-reply expectation for a steer that very likely landed.
   printf '{"result":{"agent":{"agent_status":"blocked"}}}\n' > "$resp/2.out"
   herdr_cursor_midturn_plain > "$resp/3.out"
   herdr_cursor_midturn_ansi > "$resp/5.out"
@@ -4538,11 +4542,8 @@ test_send_text_submit_never_idle_native_state_keeps_pending_without_a_transition
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
-  case "$out" in
-    pending|unknown) ;;
-    *) fail "a pane already busy before our Enter must not confirm from that same busy footer, got '$out'" ;;
-  esac
-  pass "fm_backend_herdr_send_text_submit: an already-busy footer baseline is never accepted as proof that this Enter landed"
+  [ "$out" = pending ] || fail "a pane already busy before our Enter must not confirm from that same busy footer, and must exhaust to pending rather than unknown, got '$out'"
+  pass "fm_backend_herdr_send_text_submit: an already-busy footer baseline is never accepted as proof that this Enter landed, and the exhausted verdict stays pending"
 }
 
 # Regression for the submit-confirmation side of the 2026-07-07 incident:
