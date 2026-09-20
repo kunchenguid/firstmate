@@ -637,11 +637,10 @@ nm_daemon_probe_down() {
 # which is safe when it degrades a terminal record to unknown, but on a live
 # record it would drop a working crew back to a possibly-stale status log every
 # time the probe merely ran slow - the crew would flap between working and
-# failed on probe latency alone. 124 is the bounded call's own did-not-answer
-# code (both the timeout and perl arms of fm_nm_run_bounded use it), and proves
-# nothing about the daemon. The no-timeout-tool return of 1 cannot reach here:
-# without a timeout tool the `axi status` read above is empty too, so this whole
-# block is skipped.
+# failed on probe latency alone. 124 is fm_nm_run_bounded's portable
+# did-not-answer code, and proves nothing about the daemon. Invalid bounds and
+# other runner setup failures return 1 before no-mistakes runs; the configured
+# positive timeout keeps that setup path out of normal crew-state probes.
 nm_daemon_answered_down() {
   nm_daemon_probe
   [ "$NM_DAEMON_ANSWER" = down ]
