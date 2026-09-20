@@ -2186,6 +2186,61 @@ test_busy_deliberate_stop_is_rechecked_not_wedge_escalated() {
   pass "a deliberately stopped busy pane is parked on the bounded recheck cadence, never wedge-escalated"
 }
 
+# --- deliberate stop: a churning idle pane still gets the bounded recheck ---
+# The deliberate-stop marker was honored only on the stable-hash idle branch. An
+# idle parked pane whose display keeps ticking (a clock, a token counter) changes
+# hash every poll, so it never reaches that branch; the new-hash path must still
+# keep its bounded recheck alive, or the parked task rots invisibly in both
+# postures.
+test_churning_deliberate_stop_still_rechecked() {
+  local dir state fakebin out capture_file window key sig pid churn_pid i tmp
+  dir=$(make_case deliberate-stop-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-churn-parked"
+  printf 'finished, deliberately parked' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/churn-parked.meta"
+  printf 'done: investigation finished\n' > "$state/churn-parked.status"
+  sig=$(seen_sig "$state/churn-parked.status"); printf '%s' "$sig" > "$state/.seen-churn-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The previous poll recorded DIFFERENT pane content, and a background writer
+  # keeps rewriting it, so every poll is a new hash and the pane can never
+  # become a stable stale pane.
+  printf '%s' "$(hash_text 'an earlier tick')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  # Age the stop past the cadence so the recheck must fire on this very poll.
+  printf '%s\n' "$(date +%s)" > "$state/churn-parked.deliberate-stop"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/churn-parked.deliberate-stop"
+  tmp="$capture_file.tmp"
+  (
+    i=0
+    while :; do
+      i=$((i + 1))
+      printf 'finished, footer tick %s' "$i" > "$tmp"
+      mv -f "$tmp" "$capture_file"
+      sleep 0.1
+    done
+  ) &
+  churn_pid=$!
+  sleep 0.2
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_for_exit "$pid" 100; then
+    reap "$pid"; kill "$churn_pid" 2>/dev/null || true; wait "$churn_pid" 2>/dev/null || true
+    fail "a churning deliberately parked task was never rechecked (it rotted invisibly): $(cat "$out")"
+  fi
+  kill "$churn_pid" 2>/dev/null || true
+  wait "$churn_pid" 2>/dev/null || true
+  grep -F "deliberately stopped" "$out" >/dev/null || fail "the churning-pane recheck was not labeled a deliberate-stop recheck: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a churning deliberately parked task was mislabeled a possible wedge: $(cat "$out")"
+  [ -e "$state/.deliberate-stop-resurfaced-$key" ] || fail "the deliberate-stop re-surface throttle was not recorded for the churning pane"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a churning deliberate-stop recheck must not use the wedge timer"
+  pass "a churning deliberately parked task still gets the bounded recheck, never a wedge"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -6206,6 +6261,7 @@ test_deliberately_stopped_finished_task_is_parked_not_stale
 test_restopped_deliberate_task_absorbs_before_the_recheck_cadence
 test_deliberate_stop_marker_cleared_resumes_terminal_stale_surfacing
 test_busy_deliberate_stop_is_rechecked_not_wedge_escalated
+test_churning_deliberate_stop_still_rechecked
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
