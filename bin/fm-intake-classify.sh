@@ -37,6 +37,7 @@
 # Authority: docs/configuration.md "Typed intake classification" owns the
 # operator contract. This script owns flags and exact output. The classifier
 # never replaces firstmate judgment or auto-spawns work.
+set +x
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
@@ -97,8 +98,8 @@ fi
 [ -r "$REQUEST_FILE" ] || die "request file not readable: $REQUEST_FILE"
 command -v jq >/dev/null 2>&1 || die "jq required"
 
-REQUEST_SNAPSHOT=$(mktemp) || die "mktemp failed"
-RESP_FILE=$(mktemp) || { rm -f "$REQUEST_SNAPSHOT"; die "mktemp failed"; }
+REQUEST_SNAPSHOT=$(mktemp 2>/dev/null) || emit_error "temporary file setup failed"
+RESP_FILE=$(mktemp 2>/dev/null) || { rm -f "$REQUEST_SNAPSHOT"; emit_error "temporary file setup failed"; }
 trap 'rm -f "$REQUEST_SNAPSHOT" "$RESP_FILE"' EXIT
 head -c "$REQUEST_MAX_BYTES" "$REQUEST_FILE" > "$REQUEST_SNAPSHOT" || die "could not read request file: $REQUEST_FILE"
 REQUEST_BYTES=$(wc -c < "$REQUEST_FILE" | tr -d '[:space:]')

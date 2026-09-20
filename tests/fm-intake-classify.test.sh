@@ -151,6 +151,24 @@ assert_contains "$(jq -r '.questions.urgency.criteria[0]' <<<"$body")" '0 routin
 assert_contains "$(jq -r '.questions.urgency.criteria[2]' <<<"$body")" '2 blocking' "urgency criteria explains blocking"
 pass "opted-in request uses all typed questions and keeps the key off argv and child environments"
 
+# --- tracing never exposes either key source -----------------------------------
+reset_log
+write_response ship 0.95 0.94 0 0.93
+TRACE_ENV_KEY='trace-environment-key-never-emitted'
+trace_output=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$TRACE_ENV_KEY" bash -x "$TOOL" "$REQUEST_FILE" 2>&1)
+trace_code=$?
+expect_code 0 "$trace_code" "traced environment-key invocation exits 0"
+assert_not_contains "$trace_output" "$TRACE_ENV_KEY" "shell tracing never emits the environment key"
+TRACE_FILE_KEY='trace-file-key-never-emitted'
+printf '%s\n' "export TYPESAFE_API_KEY=\"$TRACE_FILE_KEY\"" > "$HOME_DIR/.env"
+reset_log
+trace_output=$(env -u TYPESAFE_API_KEY PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" bash -x "$TOOL" "$REQUEST_FILE" 2>&1)
+trace_code=$?
+expect_code 0 "$trace_code" "traced file-key invocation exits 0"
+assert_not_contains "$trace_output" "$TRACE_FILE_KEY" "shell tracing never emits the file key"
+rm -f "$HOME_DIR/.env"
+pass "shell tracing is disabled before either key source is read"
+
 # --- clear classifications ------------------------------------------------------
 reset_log
 write_response ship 0.95 0.94 0 0.93
@@ -218,6 +236,12 @@ JSON
 TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
 expect_code 0 "$code" "malformed response exits 0"
 assert_contains "$out" 'response is not a typed intake answer' "malformed response is structured"
+reset_log
+TYPESAFE_API_KEY=$KEY TMPDIR="$TMP_ROOT/missing-tmp" run code out err "$REQUEST_FILE"
+expect_code 0 "$code" "temporary file setup failure exits 0"
+assert_contains "$out" '  status: error' "temporary file setup failure is structured"
+assert_contains "$out" 'temporary file setup failed' "temporary file setup failure is named"
+assert_absent "$LOG/argv" "temporary file setup failure makes no network call"
 pass "bounded input and ordinary runtime failures never block intake"
 
 # --- usage errors stay actionable ------------------------------------------------
