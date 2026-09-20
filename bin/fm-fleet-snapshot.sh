@@ -1988,7 +1988,12 @@ contribution_tasks_json() {
 if [ "$OUTPUT_MODE" = contribution-input ]; then
   # Reuse the canonical backlog parser, without observing workers or other homes.
   contribution_tasks=$(contribution_tasks_json) || { echo "fm-fleet-snapshot: contribution task read failed" >&2; exit 1; }
-  jq -n --argjson backlog "$BACKLOG_JSON" --argjson tasks "$contribution_tasks" '{backlog:$backlog,tasks:$tasks}'
+  # Both documents travel on stdin: a whole backlog exceeds the kernel's
+  # single-argument limit long before it stops being a valid payload, and
+  # nothing here may be capped or sampled to fit.
+  printf '%s\n%s\n' "$BACKLOG_JSON" "$contribution_tasks" \
+    | jq -n '{backlog:input,tasks:input}' \
+    || { echo "fm-fleet-snapshot: contribution input assembly failed" >&2; exit 1; }
   exit 0
 fi
 prefetch_task_current_states || { echo "fm-fleet-snapshot: task observation failed" >&2; exit 1; }

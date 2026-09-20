@@ -1152,7 +1152,100 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+write_contribution_backlog() {  # <home> <rows>
+  local home=$1 rows=$2 i
+  {
+    printf '## In flight\n'
+    for ((i = 1; i <= rows; i++)); do
+      printf -- '- [ ] task-%04d - Contribution task %04d (repo: alpha) (kind: ship) (since 2026-07-07)\n' "$i" "$i"
+    done
+    printf '\n## Queued\n\n## Done\n'
+  } > "$home/data/backlog.md"
+}
+
+contribution_owner_meta() {  # <home>
+  fm_write_meta "$1/state/task-0001.meta" \
+    "window=firstmate:fm-task-0001" \
+    "worktree=$1/projects/alpha-worktree" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off" \
+    "pr=https://github.com/kunchenguid/firstmate/pull/9"
+}
+
+# The contributions poll consumes this payload whole. Handing the documents to
+# jq as command-line arguments died at the kernel's argument limit once the
+# backlog grew, so the poll read an empty payload and concluded nothing was
+# pending. Nothing here may be capped or sampled to fit.
+test_contribution_input_carries_a_whole_backlog() {
+  local home out backlog rows=400
+  home=$(make_home contribution-input-whole-backlog)
+  contribution_owner_meta "$home"
+  # Grow until the payload genuinely cannot travel as one argument, so the
+  # case cannot go vacuous on a platform with a larger limit.
+  while :; do
+    write_contribution_backlog "$home" "$rows"
+    out=$(FM_HOME="$home" "$SNAPSHOT" --contribution-input) \
+      || fail "contribution input failed on a $rows-row backlog"
+    [ -n "$out" ] \
+      || fail "contribution input printed nothing on a $rows-row backlog"
+    backlog=$(printf '%s' "$out" | jq -c '.backlog') \
+      || fail "contribution input was not valid JSON on a $rows-row backlog"
+    env true "$backlog" 2>/dev/null || break
+    [ "$rows" -lt 12800 ] \
+      || fail "could not build a backlog too large for a single command-line argument"
+    rows=$((rows * 2))
+  done
+  printf '%s' "$out" | jq -e --argjson rows "$rows" '
+    (.backlog.present == true)
+      and (.backlog.records | length) == $rows
+      and (.tasks | length) > 0
+      and (.tasks[0].id == "task-0001")
+      and (.tasks[0].pr.url == "https://github.com/kunchenguid/firstmate/pull/9")
+  ' >/dev/null \
+    || fail "whole backlog or owning tasks missing from contribution input: ${out:0:400}"
+  pass "contribution input carries a backlog too large for a command-line argument"
+}
+
+# Exiting 0 with empty output is what hid the transport failure: the poll
+# redirected the empty payload and read it as no owned contribution work.
+test_contribution_input_assembly_failure_is_fatal() {
+  local home fakebin out err rc=0
+  home=$(make_home contribution-input-assembly-failure)
+  write_contribution_backlog "$home" 3
+  contribution_owner_meta "$home"
+  fakebin=$(fm_fakebin "$home")
+  ln -sf "$(command -v jq)" "$fakebin/fm-test-real-jq" || fail 'could not stage the real jq'
+  # Fail only the step that assembles the {backlog,tasks} pair from a null
+  # input, whichever transport it uses; every other jq call runs for real.
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" -n "*)
+    case "$*" in
+      *backlog*tasks*) printf 'jq: contribution assembly refused\n' >&2; exit 9 ;;
+    esac
+    ;;
+esac
+exec fm-test-real-jq "$@"
+SH
+  chmod +x "$fakebin/jq"
+  err=$home/assembly.err
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --contribution-input 2>"$err") || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail 'a failed contribution input assembly still exited 0'
+  [ -z "$out" ] \
+    || fail "a failed contribution input assembly still printed a payload: $out"
+  assert_contains "$(cat "$err")" "fm-fleet-snapshot:" \
+    'a failed contribution input assembly should report the failure on stderr'
+  pass 'a failed contribution input assembly exits nonzero instead of printing nothing'
+}
+
 test_empty_fleet_json
+test_contribution_input_carries_a_whole_backlog
+test_contribution_input_assembly_failure_is_fatal
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
 test_undated_captain_hold_phrasing_and_aging
