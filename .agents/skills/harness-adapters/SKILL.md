@@ -99,11 +99,3 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
   }
 }
 ```
-
-## Codex task sandbox
-
-Codex crewmates and scouts launch under `-s workspace-write` with nine task-exact `--add-dir` roots: the shared object store, the task worktree's admin directory, the task report directory, status file, and instruction inbox, plus the exact `fm/<id>` branch ref and reflog transactions with their lock files.
-The flags are additive, so an operator's own writable roots survive, and a launch that cannot resolve them is refused rather than broadened.
-The grant paths are pre-created before launch because exact-file roots do not authorize creating parent directories.
-Secondmate launches carry no grant.
-`../../../bin/fm-spawn.sh` owns the composition and `../../../docs/verification/runtime-backends.md` owns the dated proof.

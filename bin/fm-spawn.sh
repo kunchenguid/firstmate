@@ -312,13 +312,9 @@
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
-# A codex crew/scout launch carries nine task-exact --add-dir roots
-# (bin/fm-codex-workspace-write-lib.sh): the shared object store, this
-# worktree's admin directory, the task report directory, status file, and
-# instruction inbox, plus the exact fm/<id> branch ref and reflog transactions.
-# The grant paths are pre-created before launch because exact-file roots do
-# not authorize creating parent directories, and a launch that cannot resolve
-# them is refused rather than broadened. Secondmate launches carry no grant.
+# Codex launches use workspace-write with approvals disabled. Crew/scout
+# launches add the grant owned by bin/fm-codex-workspace-write-lib.sh and
+# refuse preparation or resolution failures. Secondmates carry no grant.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.

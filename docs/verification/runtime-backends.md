@@ -1652,7 +1652,7 @@ The portable classifier regression is `tests/fm-backend-cmux.test.sh`.
 
 Measured 2026-09-20 against codex-cli 0.155.1 on macOS.
 An unmodified `-s workspace-write` launch confines model-command writes to the task worktree, so a real worker run failed with `fatal: cannot lock ref 'refs/heads/fm/<id>'` on branch creation and `operation not permitted` on a status append outside the worktree, while an ordinary in-worktree edit succeeded.
-The launch now carries nine task-exact repeatable `--add-dir` roots (bin/fm-codex-workspace-write-lib.sh): the shared object store, the task worktree's admin directory, the task report directory, status file, and instruction inbox, plus the exact `fm/<id>` branch ref and reflog transactions with their lock files.
+The run used the grant defined by [`fm-codex-workspace-write-lib.sh`](../../bin/fm-codex-workspace-write-lib.sh), composed by [`fm-spawn.sh`](../../bin/fm-spawn.sh).
 The enforced sandbox list printed by that run confirms the flags are additive alongside the workdir rather than replacing operator roots.
 A repeat run under the grant created the branch, committed a fixture, published the report and status, and acknowledged the inbox, while a sibling branch ref, a sibling status file, and the shared Git config stayed denied with verbatim seatbelt errors.
 Two vendor behaviors are pinned for future guard design: the workspace-write sandbox always allows `/tmp` and `$TMPDIR` writes, so a live denial proof must build its lab outside the temp root or every assertion is vacuous; and git operations print a benign `packed-refs.lock: Operation not permitted` error while still succeeding, because that file is deliberately not granted.
@@ -1777,6 +1777,9 @@ The same version rendered `Working` in one turn and `Running` in the next, so th
 This row is a delivery guard for submit acknowledgement only; recorded worker state comes from the transcript fold.
 
 ### Launch, lifecycle, and skills
+
+These observations used the former bypass launch posture.
+The current sandboxed automatic-review launch is owned by [`fm-spawn.sh`](../../bin/fm-spawn.sh); this record does not establish its external-write permissions.
 
 | Fact | Observed |
 | --- | --- |

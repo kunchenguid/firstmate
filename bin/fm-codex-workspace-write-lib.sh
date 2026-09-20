@@ -8,9 +8,9 @@
 # writes land in the owning Firstmate home, so an unmodified launch can create
 # neither the task branch nor the task outcome. fm-spawn composes these roots
 # as repeatable --add-dir flags, which add to an operator's own roots instead
-# of replacing them, and pre-creates the grant paths before launch. Only this
-# task's object store, worktree admin, report directory, status file, inbox
-# directory, and exact branch ref/reflog transactions are writable: never the
+# of replacing them, and pre-creates the grant paths before launch. The added
+# roots cover the shared object store and this task's worktree admin, report
+# directory, status file, inbox, and exact branch ref/reflog transactions: never the
 # home, the state or data roots, the whole common Git directory, a ref
 # namespace, sibling worktrees, or credentials.
 

@@ -47,7 +47,8 @@
 #     another machine, so its logs are not on this filesystem), an absent log
 #     tree, or no in-window match: token fields are null with source
 #     "unavailable".
-# A corrupt log line is skipped best-effort by the parser.
+# A parse error stops parsing that file; the caller continues best-effort.
+# Files are selected by modification time, not individual event timestamps.
 #
 # Idempotent: if the ledger already contains a line whose "task" is
 # <task-id>, the command exits 0 without appending.
