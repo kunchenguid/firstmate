@@ -126,7 +126,8 @@ test_workspace_trust_dialog_fails_the_spawn_and_closes_the_endpoint() {
   assert_not_contains "$out" "spawned $id" "a trust-dialog-blocked spawn still reported success"
   assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
     "a failed health gate left its launched endpoint running"
-  assert_grep 'failed: the workspace-trust dialog is showing' "$HOME_DIR/state/$id.status" \
+  assert_grep 'failed: the workspace-trust dialog is showing' \
+    <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
     "the failed health gate did not record the failure in the task status"
   pass "fm-spawn: a stuck workspace-trust dialog fails the spawn and closes the endpoint"
 }
