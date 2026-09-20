@@ -597,6 +597,37 @@ test_verb_allowlist_is_closed() {
   pass "fm-control: the verb list is closed - no raw keys, arbitrary text, or clear verb"
 }
 
+# The refusal above is where a supervisor DISCOVERS the verbs - the stuck-worker
+# path this plane exists to serve reaches it by guessing a name. So the listing
+# and the allowlist have to name the same set: a verb advertised and then
+# rejected is unusable, and a verb accepted but never advertised is invisible to
+# the operator who needs it most. Each probe runs in its own case dir because
+# some of these verbs really do act.
+test_advertised_verbs_are_exactly_the_accepted_verbs() {
+  local dir out advertised verb probe
+  dir=$(new_case verblist)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 restart)
+  advertised=$(printf '%s\n' "$out" | sed -n 's/^  \([a-z][a-z-]*\)$/\1/p')
+  [ -n "$advertised" ] || fail "the unknown-verb refusal advertised no verbs at all"
+  for verb in $advertised; do
+    dir=$(new_case "verblist-$verb")
+    add_task "$dir" t1 claude
+    alive_as "$dir" claude
+    probe=$(run_control "$dir" t1 "$verb")
+    case "$probe" in
+      *"is not a control verb"*)
+        fail "the refusal advertises '$verb', which the plane then rejects as unknown" ;;
+    esac
+  done
+  for verb in interrupt exit stop relaunch; do
+    printf '%s\n' "$advertised" | grep -qx "$verb" \
+      || fail "the plane accepts '$verb' but the refusal never advertises it"
+  done
+  pass "fm-control: the advertised verb listing and the accepted verb set are the same set"
+}
+
 test_resume_is_refused_with_its_reason() {
   local dir out rc
   dir=$(new_case resume)
@@ -905,6 +936,7 @@ test_record_bound_to_another_task_is_refused
 test_remote_secondmate_is_refused_by_placement
 test_interrupt_and_exit_lock_before_task_state_resolution
 test_verb_allowlist_is_closed
+test_advertised_verbs_are_exactly_the_accepted_verbs
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent

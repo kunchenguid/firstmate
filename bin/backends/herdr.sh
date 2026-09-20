@@ -3070,6 +3070,52 @@ fm_backend_herdr_capture_ansi() {  # <target> <lines>
   printf '%s' "$out" | tail -n "$lines"
 }
 
+# fm_backend_herdr_composer_no_content_observed: the non-typing stop path's
+# gate for a herdr pane. One capture feeds both the verdict and the observation
+# test, so the two can never disagree about different bytes.
+# fm_composer_no_content_observed owns what the answer means.
+fm_backend_herdr_composer_no_content_observed() {  # <target>
+  _fm_backend_herdr_composer_read "$1" || return 1
+  fm_composer_no_content_observed \
+    "$FM_BACKEND_HERDR_COMPOSER_VERDICT" "$FM_BACKEND_HERDR_COMPOSER_CAPTURE"
+}
+
+# fm_backend_herdr_agent_process: the pid of the process in the FOREGROUND of
+# <target>'s pane, which is the agent when one is running there.
+#
+# Read from the same `pane process-info` surface the idle-shell proof above
+# uses, and held to the same standard: the response must be process info for
+# the EXACT pane asked about, and the foreground process group's leader must
+# appear in that pane's foreground process list under its own pid. A group id
+# with no matching foreground process is exactly the ambiguity this refuses on.
+#
+# Whether the leader is an agent or a bare shell is NOT decided here - a pane
+# may hold the agent as the shell's foreground job or run it directly - so that
+# question is answered by the caller's not-a-shell proof
+# (fm_backend_process_is_shell), which reads the process itself rather than
+# inferring from its relationship to the pane.
+fm_backend_herdr_agent_process() {  # <target> -> pid
+  local target=$1 info foreground_pgid leader
+  fm_backend_herdr_parse_target "$target" || return 1
+  info=$(fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info \
+    --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null) || return 1
+  printf '%s' "$info" | jq -e --arg pane "$FM_BACKEND_HERDR_PANE" '
+    .result.type == "pane_process_info"
+    and .result.process_info.pane_id == $pane
+  ' >/dev/null 2>&1 || return 1
+  foreground_pgid=$(printf '%s' "$info" | jq -er \
+    '.result.process_info.foreground_process_group_id | select(type == "number" and . > 1) | floor' 2>/dev/null) || return 1
+  leader=$(printf '%s' "$info" | jq -er --argjson pgid "$foreground_pgid" '
+    .result.process_info.foreground_processes
+    | select(type == "array")
+    | map(select(.pid == $pgid))
+    | if length == 1 then .[0].pid | floor else empty end
+  ' 2>/dev/null) || return 1
+  case "$leader" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$leader" -gt 1 ] || return 1
+  printf '%s' "$leader"
+}
+
 # --- herdr composer capture and capability primitives -----------------------
 #
 # These functions are the ONLY herdr-specific composer knowledge left: the
@@ -3105,15 +3151,27 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # pair below every other candidate), preserving this adapter's original
 # consult-only-when-needed behavior.
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
+  _fm_backend_herdr_composer_read "$1" || { printf 'unknown'; return 0; }
+  printf '%s' "$FM_BACKEND_HERDR_COMPOSER_VERDICT"
+}
+
+# _fm_backend_herdr_composer_read: capture <target> ONCE and classify those
+# exact bytes, publishing both through FM_BACKEND_HERDR_COMPOSER_CAPTURE and
+# FM_BACKEND_HERDR_COMPOSER_VERDICT. Returns 1 when the pane cannot be read at
+# all. Every herdr consumer of a composer verdict goes through here, so the
+# capture ladder and the capability descriptors have exactly one definition and
+# the stop gate can never read a different pane than the verdict it is given.
+_fm_backend_herdr_composer_read() {  # <target>
   local target=$1 cap caps verdict identity
-  fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  FM_BACKEND_HERDR_COMPOSER_CAPTURE=
+  FM_BACKEND_HERDR_COMPOSER_VERDICT=unknown
+  fm_backend_herdr_parse_target "$target" || return 1
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   elif cap=$(fm_backend_herdr_capture "$target" "$FM_COMPOSER_CAPTURE_LINES"); then
     caps=$(printf 'styled=0\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
   else
-    printf 'unknown'
-    return 0
+    return 1
   fi
   verdict=$(fm_composer_classify_screen "$caps" "$cap")
   if [ "$verdict" = need-identity ]; then
@@ -3123,7 +3181,8 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
     verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
   fi
-  printf '%s' "$verdict"
+  FM_BACKEND_HERDR_COMPOSER_CAPTURE=$cap
+  FM_BACKEND_HERDR_COMPOSER_VERDICT=$verdict
 }
 
 # fm_backend_herdr_rendered_busy_state: busy|idle|unknown from the pane's

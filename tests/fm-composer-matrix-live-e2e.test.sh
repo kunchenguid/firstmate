@@ -9,6 +9,9 @@
 # the stub. This guard launches every INSTALLED verified harness idle in an
 # isolated tmux server and requires the real fm_tmux_composer_state to reach
 # `empty`, failing loudly with the harness name and version. It also proves:
+#   - the same real pane read CURSORLESS (no cursor row), the path herdr,
+#     zellij, cmux and orca take, which is a different verdict path over
+#     identical bytes and where opencode 1.18.31 regressed;
 #   - the strict blank-row posture live: a plain shell pane with a blank
 #     cursor row must classify unknown and defer injection;
 #   - the zellij false-positive regression live (when zellij is installed): a
@@ -110,8 +113,58 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
   else
     CHECKED=$((CHECKED + 1))
     pass "$name ($version): real idle composer classifies empty"
+    check_harness_idle_empty_cursorless "$name" "$version" "$win"
   fi
   tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+}
+
+# The SAME real pane, read the way every CURSORLESS backend reads it: herdr,
+# zellij, cmux and orca supply no cursor row, so shape selection falls to
+# _fm_composer_select_cursorless instead of the cursor anchor tmux provides.
+# That path is a different verdict path over identical bytes, and it is where
+# opencode 1.18.31 regressed: it draws a keybind/status bar BELOW its `╹▀…`
+# composer floor and, at a wide pane, a context sidebar on the composer's own
+# rows, so every cursorless read returned `unknown` and no opencode worker on
+# herdr could be stopped through bin/fm-control.sh at all - idle or wedged.
+# The cursor path stayed green throughout, which is exactly why it had to be
+# checked separately here.
+# Harnesses whose CURSORLESS read is ESTABLISHED empty against a real idle pane
+# (recorded in docs/verification/runtime-backends.md). A harness outside this
+# list is reported with the verdict it actually produced instead of being
+# asserted, so a known gap stays visible evidence rather than either a silent
+# pass or a failure about a shape this guard does not yet cover. Add a harness
+# here only once a real run has shown it empty.
+cursorless_established() {  # <name>
+  case "$1" in claude | opencode) return 0 ;; esac
+  return 1
+}
+
+check_harness_idle_empty_cursorless() {  # <name> <version> <window>
+  local name=$1 version=$2 win=$3 cap verdict caps
+  caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+  # The WHOLE pane, deliberately, not its last FM_COMPOSER_CAPTURE_LINES rows.
+  # This guard is about the classifier's shape handling, and a harness that
+  # centres its composer on a splash screen (opencode does) leaves the composer
+  # outside a bottom-anchored window entirely - a capture-window question, not a
+  # classification one. Reading the full pane keeps this assertion about the
+  # thing it names.
+  cap=$(tmux -L "$SOCKET" capture-pane -p -e -t "$SESSION:$win" 2>/dev/null)
+  verdict=$(fm_composer_classify_screen "$caps" "$cap")
+  # Adapters answer the identity sentinel by probing once; there is no native
+  # probe behind a tmux pane, which is exactly the `probe-absent` case.
+  [ "$verdict" != need-identity ] || verdict=$(fm_composer_classify_screen "$caps" "$cap" '' probe-absent)
+  if [ "$verdict" = empty ]; then
+    CHECKED=$((CHECKED + 1))
+    pass "$name ($version): real idle composer classifies empty cursorless too"
+  elif ! cursorless_established "$name"; then
+    note "$name ($version): cursorless read is $verdict, not established empty; not asserted here"
+  else
+    printf '# %s cursorless pane tail at failure:\n' "$name" >&2
+    printf '%s\n' "$cap" | fm_composer_strip_ansi | grep '[^[:space:]]' | tail -8 | sed 's/^/#   /' >&2
+    FAILED=1
+    printf 'not ok - %s (%s): idle composer classifies %s cursorless (herdr/zellij/cmux/orca path), expected empty\n' \
+      "$name" "$version" "${verdict:-unreadable}" >&2
+  fi
 }
 
 # --- 1. Every installed verified harness must reach a proven-empty composer --

@@ -836,3 +836,225 @@ test_queued_enter_verdict_does_not_convert_other_states() {
 test_queued_enter_verdict_busy_pending_is_empty
 test_queued_enter_verdict_idle_pending_stays_pending
 test_queued_enter_verdict_does_not_convert_other_states
+
+# --- opencode 1.18.31: furniture below the floor, sidebar beside it ----------
+# Captured live on 2026-09-20 against real opencode 1.18.31 (see
+# docs/verification/runtime-backends.md). opencode draws a status/hint bar
+# BELOW its composer's `╹▀…` floor, and once a session has history at a wide
+# pane it draws a context sidebar on the composer's OWN rows. Each defeated the
+# cursorless read on its own: the bar discarded the whole left-bar selection
+# (`unknown`), and the sidebar read as typed text (`pending`). Together they
+# meant no opencode worker on a cursorless backend - herdr, zellij, cmux, orca -
+# could be stopped through bin/fm-control.sh at all, idle or wedged.
+
+test_count_and_clip_columns_are_locale_independent() {
+  local out
+  out=$(printf '%s\n' '  ┃  Build · x' | fm_composer_count_columns)
+  [ "$out" = 14 ] || fail "count_columns must count characters, not bytes, got '$out'"
+  out=$(printf '%s\n' '  ┃  Build · x' | LC_ALL=C fm_composer_count_columns)
+  [ "$out" = 14 ] || fail "count_columns under LC_ALL=C must agree, got '$out'"
+  out=$(printf '%s\n' "${ESC}[38;2;1;2;3mab${ESC}[0m" | fm_composer_count_columns)
+  [ "$out" = 2 ] || fail "ANSI sequences occupy no columns, got '$out'"
+  # A clip that lands in whitespace separates a panel...
+  out=$(printf '%s\n' 'abc     xyz' | fm_composer_clip_columns 5)
+  [ "$out" = 'abc  ' ] || fail "a clip landing in whitespace must cut, got '$out'"
+  # ...but a clip that would SPLIT a run returns the row whole, because deleting
+  # part of what the composer holds is the one error that can manufacture a
+  # false `empty` and let a caller type onto existing text.
+  out=$(printf '%s\n' 'abcdefgh' | fm_composer_clip_columns 5)
+  [ "$out" = 'abcdefgh' ] || fail "a clip splitting text must return the row whole, got '$out'"
+  out=$(printf '%s\n' '  ┃  Build · x' | fm_composer_clip_columns 7)
+  [ "$out" = '  ┃  Build · x' ] || fail "clip must not split a word, got '$out'"
+  # A bound landing ON a multibyte glyph is a split too, counted in characters.
+  out=$(printf '%s\n' '  ┃  Build · x' | fm_composer_clip_columns 2)
+  [ "$out" = '  ┃  Build · x' ] || fail "clip must not split at a multibyte glyph, got '$out'"
+  # ...and a bound landing in whitespace passes earlier multibyte glyphs intact.
+  out=$(printf '%s\n' '  ┃  Build · x' | fm_composer_clip_columns 4)
+  [ "$out" = '  ┃ ' ] || fail "clip must keep multibyte glyphs intact, got '$out'"
+  pass "fm_composer_count_columns/clip_columns: character-exact, ANSI-transparent, never split a run"
+}
+
+test_matrix_opencode_below_floor_and_sidebar() {
+  local bar floor idle wedged typed narrow mismatched blanking hidden past beside pad extracted typed_beside
+  # Geometry, in columns, mirroring the live capture: the floor is the
+  # composer's own width (63), composer text sits well inside it, and the
+  # sidebar starts at column 70 - beyond the floor's right edge, across a gap.
+  oc_row() {  # <left-bar content> [sidebar]
+    local content=$1 side=${2:-} cols
+    cols=$(printf '%s\n' "$content" | fm_composer_count_columns)
+    while [ "$cols" -lt 69 ]; do content="$content "; cols=$((cols + 1)); done
+    [ -n "$side" ] || { printf '%s' "$1"; return 0; }
+    printf '%s%s' "$content" "$side"
+  }
+  pad='                                                            ' # 60
+  floor="  ╹${pad// /▀}"
+  bar='             tab agents  ctrl+p commands'
+
+  # 1. The reported failure, idle: every row empty, a hint bar below the floor.
+  idle=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
+    '  ┃' \
+    "$(oc_row '  ┃  Ask anything… "Fix a TODO in the codebase"' '/home/u/app:main')" \
+    '  ┃' \
+    "$(oc_row '  ┃  Build · Big Pickle OpenCode Zen' '0 tokens')" \
+    "$floor" "$bar")
+  assert_screen "opencode idle below-floor bar on herdr"     empty "$CAPS_STYLED"      "$idle"
+  assert_screen "opencode idle below-floor bar on zellij"    empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "opencode idle below-floor bar on cmux/orca" empty "$CAPS_PLAIN"       "$idle"
+
+  # 2. The wedged worker the incident was reported for: a spinner/status line
+  # below the floor while the composer itself holds nothing.
+  wedged=$(printf '%s\n%s\n%s\n%s\n%s' \
+    '  ┃' '  ┃' \
+    "$(oc_row '  ┃  Build · Big Pickle OpenCode Zen' '/home/u/app:main')" \
+    "$floor" \
+    '   ⬝⬝⬝⬝ Cannot connect to API… [retrying in 16s attempt #4]        esc interrupt    • OpenCode 1.18.31')
+  assert_screen "opencode wedged below-floor status on herdr"     empty "$CAPS_STYLED"      "$wedged"
+  assert_screen "opencode wedged below-floor status on cmux/orca" empty "$CAPS_PLAIN"       "$wedged"
+
+  # 3. THE GUARD. Real typed text still refuses, with the same furniture and
+  # sidebar present. This is what must fail if the fix is ever loosened into
+  # "probably empty": typing onto existing text is the concatenation hazard the
+  # refusal exists to prevent.
+  typed=$(printf '%s\n%s\n%s\n%s\n%s' \
+    '  ┃' \
+    "$(oc_row '  ┃  refactor the parser please' '/home/u/app:main')" \
+    "$(oc_row '  ┃  Build · Big Pickle OpenCode Zen' '0 tokens')" \
+    "$floor" "$bar")
+  assert_screen "opencode typed text still refuses on herdr"  pending "$CAPS_STYLED" "$typed"
+  assert_screen "opencode typed text still refuses on zellij" pending "$CAPS_STYLED_NOID" "$typed"
+  # Without styling a left-bar row carrying text degrades to unknown, never empty.
+  assert_screen "opencode typed text on cmux/orca stays unproven" unknown "$CAPS_PLAIN" "$typed"
+
+  # 4. THE OTHER GUARD. A floor too narrow to be this composer's border is a
+  # mismatched or stale shape, so contiguous activity below it still discards
+  # the selection. Without this the below-floor allowance would swallow the
+  # cursorless staleness rule whole.
+  narrow=$(printf '%s\n%s\n%s\n%s' \
+    '  ┃' '  ┃  Build · Big Pickle OpenCode Zen' '  ╹▀▀▀' 'Working on request...')
+  assert_screen "opencode narrow floor above activity stays unknown" unknown "$CAPS_STYLED" "$narrow"
+
+  # 5. THE CLIP'S OWN GUARD, on the CURSOR-ANCHORED path. The clip is where
+  # bytes are deleted, and the cursor path reaches the left-bar classifier
+  # without passing through the cursorless selector, so the floor's credibility
+  # has to be established at the clip itself. Here the floor is drawn narrower
+  # than the composer it closes: the footer row's text runs straight across the
+  # bound (so the floor cannot be this composer's border), while the draft row
+  # happens to have a space at that column and would be cut away to nothing.
+  # Trusting that floor would report a composer visibly holding a draft as
+  # `empty`, and do_exit would then type the exit command onto it.
+  mismatched=$(printf '%s\n%s\n%s\n%s' \
+    '  ┃' '  ┃   the draft' '  ┃  Build · Big Pickle OpenCode Zen' '  ╹▀▀')
+  assert_screen "opencode mismatched floor keeps the draft on tmux" pending "$CAPS_TMUX" "$mismatched" 1
+  assert_screen "opencode mismatched floor keeps the draft cursorless" pending "$CAPS_STYLED" "$mismatched"
+  # 6. THE CLIP MUST NOT BLANK A ROW THAT HOLDS TEXT. A bound whose span covers
+  # only the left bar and the gap after it cuts cleanly - no run is split, so
+  # the fit test alone is satisfied - and deletes the draft that starts past
+  # that gap. A floor whose span blanks every row it covers is not describing
+  # this composer, so the bound is refused and the rows are read whole.
+  blanking=$(printf '%s\n%s\n%s' \
+    ' ┃' ' ┃   hidden draft' ' ╹▀▀')
+  assert_screen "opencode floor that blanks its own rows keeps the draft cursorless" \
+    pending "$CAPS_STYLED" "$blanking"
+  assert_screen "opencode floor that blanks its own rows keeps the draft on tmux" \
+    pending "$CAPS_TMUX" "$blanking" 1
+
+  # 7. A ROW BLANKED WHILE ANOTHER ROW SUPPLIES THE IN-BOUND PROOF. The bound
+  # clears the footer, so the composer-wide "something is inside the bound"
+  # test is satisfied by that row alone, and it still cuts cleanly in the gap
+  # before the draft and deletes it. Nothing on this screen shows the
+  # composer's own text and a panel side by side, so nothing explains the
+  # deleted run as anything but the composer's own input.
+  hidden=$(printf '%s\n%s\n%s\n%s' \
+    '  ┃' "  ┃$(printf '%*s' 14 '')draft text here" '  ┃  Build · x' \
+    '     ╹▀▀▀▀▀▀▀▀▀▀')
+  assert_screen "opencode bound that deletes a row keeps the draft" \
+    pending "$CAPS_STYLED" "$hidden"
+  assert_screen "opencode bound that deletes a row keeps the draft on tmux" \
+    pending "$CAPS_TMUX" "$hidden" 1
+
+  # 8. THE SAME SHAPE AT THE COMPOSER'S OWN INDENT, which is the reviewer's
+  # reproduction: the footer sits inside the bound and supplies the in-bound
+  # proof, while the draft row's entire content lies past it and clips away.
+  past=$(printf '%s\n%s\n%s' \
+    " ┃$(printf '%*s' 15 '')the draft" ' ┃ Build · x' ' ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀')
+  assert_screen "opencode draft entirely past the bound is never empty" \
+    pending "$CAPS_STYLED" "$past"
+  assert_screen "opencode draft entirely past the bound is never empty on tmux" \
+    pending "$CAPS_TMUX" "$past" 0
+
+  # 9. AND THE CASE THAT MUST NOT REGRESS WITH IT. A real sidebar runs beside
+  # the composer's BLANK rows too, so those rows carry panel text and nothing
+  # else, and clipping them to blank is correct. What licenses it is the rows
+  # that show the composer's own text and the panel side by side: refusing
+  # every bound that empties a row would read this idle pane as `unknown` and
+  # leave opencode-on-herdr exactly as unstoppable as before.
+  beside=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
+    "$(oc_row '  ┃' 'session: fix the parser')" \
+    "$(oc_row '  ┃  Ask anything… "Fix a TODO in the codebase"' '/home/u/app:main')" \
+    "$(oc_row '  ┃' '1.2k tokens')" \
+    "$(oc_row '  ┃  Build · Big Pickle OpenCode Zen' '0 tokens')" \
+    "$floor" "$bar")
+  assert_screen "opencode idle with the sidebar beside its blank rows" \
+    empty "$CAPS_STYLED" "$beside"
+  assert_screen "opencode idle with the sidebar beside its blank rows on cmux/orca" \
+    empty "$CAPS_PLAIN" "$beside"
+
+  # 10. ONE SELECTION, ONE SET OF BYTES. The classifier and the extractor read
+  # the same selected rows, so a bound proven for one must bound the other -
+  # otherwise this pane classifies `empty` while extraction hands its caller the
+  # sidebar text. zellij's delivery check compares `before` + the typed text
+  # against what it reads afterwards, so a `before` carrying panel text can
+  # never match, and the steer is typed and then reported failed: an unsent
+  # draft left in the composer, which is what makes `exit`, `relaunch` and
+  # `stop` all refuse afterwards.
+  extracted=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$beside") \
+    || fail "extraction must succeed on an idle composer beside a sidebar"
+  [ -z "$extracted" ] \
+    || fail "extraction must not hand back the sidebar the bound excludes, got '$extracted'"
+  typed_beside=$(printf '%s\n%s\n%s\n%s\n%s\n%s' \
+    "$(oc_row '  ┃' 'session: fix the parser')" \
+    "$(oc_row '  ┃  please rerun the gate' '/home/u/app:main')" \
+    "$(oc_row '  ┃' '1.2k tokens')" \
+    "$(oc_row '  ┃  Build · Big Pickle OpenCode Zen' '0 tokens')" \
+    "$floor" "$bar")
+  extracted=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$typed_beside") \
+    || fail "extraction must succeed on a typed composer beside a sidebar"
+  [ "$extracted" = 'please rerun the gate' ] \
+    || fail "extraction must return exactly what was typed, got '$extracted'"
+  unset -f oc_row
+  pass "matrix: opencode's below-floor furniture and side panel are bounded, and typed text still refuses"
+}
+
+test_count_and_clip_columns_are_locale_independent
+test_matrix_opencode_below_floor_and_sidebar
+
+# --- the stop gate's own question: was anything OBSERVED? --------------------
+# fm_composer_no_content_observed is the only thing standing between
+# bin/fm-control.sh `stop` and a SIGTERM, so it answers about OBSERVATION, not
+# about the verdict. These cases pin both directions of that.
+test_no_content_observed_requires_a_readable_capture() {
+  local blank
+  # A pane whose composer is scrolled out of the captured window still carries
+  # transcript rows: nothing composer-shaped was observed, so the gate opens.
+  fm_composer_no_content_observed unknown \
+    "$(printf 'building index\nwrote 12 files\n')" \
+    || fail "a readable capture with no composer shape must read as no content observed"
+  # A capture that came back with nothing readable did not fail, but it is an
+  # unreadable pane - not a pane proven to hold nothing - and must refuse.
+  for blank in '' '   ' "$(printf '\n\n\n')" "$(printf '  \n\t\n')" "$NBSP"; do
+    ! fm_composer_no_content_observed unknown "$blank" \
+      || fail "an unreadable (blank) capture must not read as no content observed"
+    ! fm_composer_no_content_observed empty "$blank" \
+      || fail "an unreadable (blank) capture must refuse even when the verdict says empty"
+  done
+  # A composer that was read and proven to hold nothing is the other yes.
+  fm_composer_no_content_observed empty "$(printf 'transcript\n❯\n')" \
+    || fail "a composer proven empty must read as no content observed"
+  # A composer shape that was SEEN but not proven empty must refuse, whatever
+  # the verdict degraded to.
+  ! fm_composer_no_content_observed unknown "$(printf '  ┃\n  ┃  a draft\n  ╹▀▀▀\n')" \
+    || fail "an observed left-bar composer must refuse regardless of the verdict"
+  pass "fm_composer_no_content_observed: only a readable capture with no shape, or a proven-empty composer, opens the gate"
+}
+
+test_no_content_observed_requires_a_readable_capture

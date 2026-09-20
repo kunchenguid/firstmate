@@ -15,7 +15,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 `bin/fm-control-lib.sh` is the single executable owner of three capability tables, which have no side effects, so they can be read as a contract:
 
-- The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
+- The **verb allowlist**: `interrupt`, `exit`, `stop`, `relaunch`.
   There is no arbitrary-text and no generic raw-key entry point.
   A caller either names an allowlisted verb or is refused.
 - **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
@@ -34,6 +34,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr can supply one: proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
+| `stop` | Stop the agent without typing anything, by signalling the agent process, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone, and the endpoint's and worktree's fates are each reported as what could be established about them - see [the three endpoint outcomes](#stop-the-non-typing-path). Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) `exit` uses before any signal: proven gone reports `endpoint-gone`, a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back is signalled as usual, and an absence that cannot be proven - every tmux `missing` - refuses. |
 | `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
@@ -47,8 +48,62 @@ The clear is refused before anything is sent when the recorded backend cannot de
 
 `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
 
+### `stop`, the non-typing path
+
+`exit` types, so it must refuse whenever the composer is not proven empty.
+That refusal is correct, and it leaves one gap: a worker whose screen cannot be classified is unreachable by every typing verb, which is how a wedged agent stays running with no supported way to stop it.
+`stop` closes that gap by signalling the agent process instead, so nothing is typed and nothing can concatenate onto existing text.
+
+What replaces the composer guard is a proof of process identity.
+Every one of these must hold before any signal is sent, and a failure refuses while naming the proof that failed:
+
+- the pid is the **foreground process of this task's own recorded endpoint**, which is the binding made when the task was spawned, not a search for a matching process;
+- it is not that pane's shell, so the pane really is running an agent;
+- its working directory is the task's recorded worktree; and
+- it is neither the controlling process nor any ancestor of it.
+
+A process **group** is never signalled, and neither is a negative pid; only a single proven pid is.
+
+A signal also destroys whatever the composer is holding, so `stop` additionally requires the classifier to establish positively that **no content was observed**: either the composer was read and proven empty, or the capture contains no composer shape at all.
+Any state where something was observed and its emptiness was not proven refuses, including a verdict that degraded to `unknown` after content had already been seen.
+This is deliberately not "the verdict is neither `empty` nor `pending`", because that test would admit exactly the states where a draft was seen and then lost its proof.
+There is no flag that overrides this, and no operator confirmation that substitutes for it.
+
+The guarantee is therefore bounded, and stated here as exactly what the code checks: `stop` never signals while composer content is visible to the classifier, and it never signals a process it has not tied to this task's endpoint and worktree.
+It cannot make a promise about text the capture never showed it - a composer scrolled outside the captured window is a pane where nothing was observed, and that is the case this verb exists to serve.
+
+SIGTERM is the only signal sent.
+SIGKILL would deny the harness its chance to flush, so an agent that has not stopped within the wait is reported unconfirmed rather than escalated to a stronger signal.
+
+The endpoint postcondition is established, not sampled, and it reports three different facts as three different results.
+A terminal whose window *was* the agent tears that window down after the process exits, so a single read taken the moment the agent state settles can still see a window that is already going away.
+`stop` therefore reads the endpoint on every poll across a settle window (`FM_CONTROL_STOP_SETTLE`, 2s) before concluding anything:
+
+| Result | `endpoint-state=` | What it means, and nothing more |
+| --- | --- | --- |
+| `stopped` | `preserved` | The endpoint was there and held no agent on every read across the window. The promise was kept. |
+| `stopped-endpoint-gone` | `did-not-survive` | The endpoint's absence was **proven**, by the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) `exit` and `relaunch` use. Only Herdr can supply that proof. |
+| `stopped-endpoint-unverified` | `unestablished` | Neither could be shown. The endpoint may be exactly where it was left. |
+
+The third result is the ordinary one on tmux, not an error: a task record carries no socket identity for its endpoint, so a window that is simply not on the server this seat addresses cannot be told from a destroyed one.
+"I could not check" is never reported as "I checked and it is gone", because a spurious `gone` sends the next supervisor hunting for work that is sitting safely where it was left.
+
+The worktree postcondition is reported the same way, as `worktree-state=`.
+
+What it asserts is that **the entry set and its statuses were preserved**, and nothing more.
+It compares `HEAD` plus the `git status --porcelain --untracked-files=all` **text** - not a count or any other summary derived from it, because a shutdown that deletes one untracked file and writes another leaves every such summary identical while the work is gone - and requires every entry present before to still be present after with the same status letters.
+A pure addition passes: `stop` sends SIGTERM precisely so the harness gets its chance to flush, so a transcript, a crash file, or a build artifact written on the way out destroys nothing and reports `entries-preserved`.
+An entry that vanished or changed status reports `CHANGED` and fails the verb; a worktree that could not be read at all reports `unverified`, never `entries-preserved`.
+
+`entries-preserved` is **not a content guarantee**, and the token says so deliberately.
+An entry that was already dirty keeps the same status letters when its contents change, so a tracked file the agent had modified and that is truncated or rewritten mid-flush as the signal lands reads ` M <path>` on both sides and compares equal.
+Proving content survival would mean hashing every dirty path on every stop; this check does not do that and does not claim it.
+The verb signals a process and never touches the worktree itself.
+
+`stop`'s own outcome keys are `endpoint-state=` and `worktree-state=` so they cannot be confused with the `endpoint=` address and `worktree=` path every verb's result line carries.
+
 **Teardown and discard are not verbs and will not become verbs.**
-`exit` stops an agent and preserves everything else.
+`exit` and `stop` stop an agent and preserve everything else.
 Removing a worktree, closing an endpoint, or discarding work stays with [`bin/fm-teardown.sh`](../bin/fm-teardown.sh), which owns the landed-work test.
 
 **`resume` is not a verb.**
@@ -152,7 +207,9 @@ The worktree and the task's records are unaffected either way.
   Muse is a crewmate and scout adapter only, so relaunching a secondmate onto it refuses while its agent is still up rather than leaving that secondmate with no agent when the launch owner refuses.
 - A backend that cannot deliver the harness's interrupt key, or the composer clear that key needs, is refused rather than sent a different key.
   Orca's terminal API exposes only an interrupt and an Enter, so it can deliver neither Escape nor Ctrl+U.
-- `exit` and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux and herdr - because without one the "the agent stopped" postcondition cannot be proven.
+- `stop` requires a backend that can name a pane's foreground process from process facts - tmux and herdr - and refuses on any other rather than guessing at a pid.
+  Its content gate and every identity proof above are fail-closed boundaries in their own right: a capture that cannot be read is not a pane proven to hold nothing, and refuses.
+- `exit`, `stop`, and `relaunch` require a backend with a recovery-grade agent-state classifier - tmux and herdr - because without one the "the agent stopped" postcondition cannot be proven.
   zellij, orca, and cmux are refused rather than reported as successful blind.
 - An ambiguous or unreadable endpoint state refuses.
   Only a positively classified state acts.
@@ -179,5 +236,6 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 ## Verification
 
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
+- `tests/fm-control-stop.test.sh` - the non-typing path against real processes on a real private tmux server: the foreground-agent pid proof and each refusal that replaces the composer guard, the content gate that leaves an observed draft and its agent untouched, the three endpoint outcomes, the worktree entry-set postcondition and the content claim it deliberately does not make, and the idempotent already-stopped case.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, rollback after a failed launch, and the endpoint-absence proof both verbs share - the Herdr reclaim of a destroyed endpoint, and tmux refusing one it cannot prove absent.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.

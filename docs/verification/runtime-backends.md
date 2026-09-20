@@ -594,6 +594,111 @@ All six installed harnesses' real idle composers reached a proven `empty` (Claud
 The strict blank-row posture held live (a blank shell row deferred injection), and a zellij pane changing for reasons unrelated to submission never confirmed a delivery, replacing the retired content-diff heuristic's false positive.
 Kimi was not installed on the verification machine; its bordered shape is pinned by the portable byte-capture regressions in `tests/fm-composer-lib.test.sh`, which also carry the other five adapters' capability profiles for every harness under both a UTF-8 locale and `LC_ALL=C`.
 This guard is the refresh command after an upgrade to any matrix-covered harness; rerun it and update the versions above rather than trusting this table across releases.
+OpenCode's 1.14.46 result in that run is superseded by the 1.18.31 findings recorded below.
+### opencode 1.18.31: furniture below the composer floor, and a panel beside it
+
+On 2026-09-20 every cursorless composer read of opencode 1.18.31 returned `unknown`, idle or busy, so `bin/fm-control.sh exit` and `relaunch` refused for every opencode worker on herdr, zellij, cmux, and orca - the refusal was correct and the verdict was wrong.
+The cause was established from the real rendered pane rather than inferred, and it is two independent defects.
+
+opencode draws a status/hint bar BELOW its composer's `╹▀…` floor: `tab agents  ctrl+p commands` when idle, a spinner and status line while busy.
+The cursorless selection requires the row below the composer to be blank or an edge row, so that bar discarded the whole left-bar selection and the verdict fell through to `unknown`.
+At a wide pane opencode also draws its context sidebar on the composer's OWN rows, which read as typed text and made the verdict `pending` instead - this one reaches the cursor-anchored tmux path too, so a wedged opencode worker on tmux was equally unstoppable.
+A bottom-anchored 20-row capture additionally clips the composer's leading blank row on herdr, leaving the idle placeholder on the selection's first row where position alone reads it as typed input.
+
+Measured on the live pane, the floor spans columns 2-155 while composer text sits at columns 5-30 and the sidebar at columns 160-191, so the floor's own rendered width bounds the composer in both axes and is the anchor the fix uses.
+The clipped leading blank row is a capture-window property and is fixed there rather than with a second placeholder rule: on this harness that row is clipped at 20 captured rows and present from 22 up, and the single position rule then classifies the real idle capture `empty` at 22, 24, 26, 30, and 40, so `FM_COMPOSER_CAPTURE_LINES` defaults to 32 with headroom for the furniture observed above the composer (a status row wrapping to two lines, the startup Tip row).
+That bound is not universal and is not claimed to be: opencode centres its composer vertically on the splash screen only, so a tall enough pane at splash can still leave the composer outside any fixed window, and the verdict is then `unknown` - which is correct, and is the case `stop` exists for.
+A worker with conversation history, which is what the incident reported, is bottom-anchored roughly 8 rows from the pane bottom and is well inside the window either way.
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+tests/fm-composer-lib.test.sh
+```
+
+Captured on Linux on 2026-09-20 by running `bin/fm-herdr-lab.sh` against real opencode 1.18.31 on this branch's code, in an isolated Herdr lab session torn down afterwards with the live `default` session untouched:
+
+```text
+composer state : empty
+agent state : alive
+resolved agent pid : 3192796 (opencode)
+no-content-observed : yes
+stopped pid=3192796 comm=opencode signal=TERM endpoint-state=preserved worktree-state=entries-preserved lt1 harness=opencode backend=herdr endpoint=fm-lab-fmstopu-3192513-9215:w1:p1 worktree=/tmp/claude-1000/-home-bemsas--treehouse-firstmate-7bab20-1-firstmate/2f10cd25-3a8c-4465-ab88-b0e6f0f48bf5/scratchpad/lw9
+PASS agent process gone
+PASS herdr pane preserved
+```
+
+Typed text still refuses on every path (`pending`), a floor too narrow to be its composer's own border still refuses contiguous activity below it - on the cursor-anchored read as well as the cursorless one, because the width clip is where bytes are deleted - and a composer whose leading blank row is outside the capture keeps the strict position rule rather than gaining a cheaper verdict.
+A floor is accepted as the composer's bound only when no row's text runs across it, when at least one row still carries content inside it, and - when the clip would DELETE a row's entire content - when some other row shows the composer's own text and further content past the bound SIDE BY SIDE.
+That last condition is what separates the two shapes a fit test alone cannot tell apart, and it is the one the reviewer's reproduction exposed: ` ┃`+15 spaces+`the draft` over ` ┃ Build · x` under a 16-column floor cuts cleanly in the gap, so nothing overflows, the footer row alone satisfies the in-bound test, and the draft is erased - classifying `empty` a capture that visibly holds it.
+The side-by-side condition refuses that bound (nothing on the screen shows a panel at all) while leaving the sidebar case intact, where a real panel runs beside the composer's blank rows and those rows carry panel text and nothing else.
+Measured on this worktree against the classifier itself, with the condition in place: reviewer reproduction `pending`, real herdr idle `empty`, the same idle with the sidebar also beside its blank rows `empty`, wedged-with-sidebar `empty`, typed draft `pending`, auth-failure screen `empty`.
+Refusing every bound that empties a row - the simpler rule - was measured too and reads that idle pane `unknown`, which would leave opencode-on-herdr exactly as unstoppable as before; that is why the proof is required rather than the blanking alone.
+The reproduction was not produced by a real opencode render, so it is recorded as an uncovered shape rather than an observed regression; it gets the careful treatment because its consequence is a visible draft read as `empty`, which `exit` would type onto and `stop` would signal away.
+The residual is stated plainly: a composer whose every row really is blank inside the bound also falls back to reading rows whole and refuses, which is the safe direction, and opencode does not render that shape because its `Build · …` footer is drawn inside the composer.
+
+The bound applies to BOTH readers of a selection, not just the classifier.
+`fm_composer_extract_selected_content` clips each selected row to the same proven bound `fm_composer_classify_screen` uses, so one selection cannot yield two different sets of bytes.
+That matters because zellij's delivery check (`fm_backend_zellij_composer_observed_append`) compares the composer's content before a steer plus the typed text against what it reads afterwards: an unclipped `before` carrying sidebar text can never match, so the steer would be typed and then reported `send-failed`, leaving an unsent draft that makes `exit` and `relaunch` refuse as `pending` and `stop` refuse at its content gate.
+Measured on the sidebar fixture: with the extractor unbounded it returns `session: fix the parser Ask anything… "Fix a TODO in the codebase" /home/u/app:main 1.2k tokens` for a pane the classifier calls `empty`; bounded, it returns nothing for that pane and exactly `please rerun the gate` once that text is typed, and the simulated delivery check confirms rather than fails.
+The live guard's cursorless assertion reads the WHOLE pane, because opencode centres its composer on a splash screen and a bottom-anchored window can miss it entirely - that is a capture-window property, not a classification one.
+claude 2.1.277 and opencode 1.18.31 are the harnesses whose cursorless read is established `empty`; kimi 2.0.2 still classifies `unknown` cursorless because it draws its own footer rows below its `╰───╯` composer border, which is the same defect class in the box shape and is not addressed here.
+codex 0.155.1, pi 0.85.1, and muse 1.3.0 could not be verified in that run because an untrusted worktree parks them on a trust dialog, which the strict classifier correctly refuses; grok 1.0.34 read `pending-unproven`.
+
+### The non-typing stop path
+
+`bin/fm-control.sh <task-id> stop` signals the agent process instead of typing, for the worker whose screen cannot be classified at all.
+Verified on 2026-09-20 against real processes on a real private tmux server and, end to end, against real opencode 1.18.31 in the isolated Herdr lab above.
+
+```sh
+tests/fm-control-stop.test.sh
+```
+
+```text
+ok - fm-control stop: the resolved pid is the pane's foreground agent, not its shell
+ok - fm-control stop: an agent outside the recorded worktree refuses and is left running
+ok - fm-control stop: the agent stops while its endpoint, shell, and uncommitted work survive
+ok - fm-control stop: an already-stopped task is idempotent and never signals the shell
+ok - fm-control stop: an agent that exited on its own stops pinging busy, not just reports already-stopped
+ok - fm-control stop: an observed draft refuses, and neither the draft nor the agent is touched
+ok - fm-control stop: a worktree that loses its single dirty file is reported CHANGED, never preserved
+ok - fm-control stop: a window that WAS the agent reports its fate unestablished, never preserved or proven gone
+ok - fm-control stop: a worktree whose uncommitted contents were traded is CHANGED, though its entry count is not
+ok - fm-control stop: a file the harness flushed on its way out is not a destroyed worktree
+ok - fm-control stop: a file lost inside an untracked directory is CHANGED, not a collapsed summary
+ok - fm-control stop: an entry whose status changed is CHANGED, though the path is still there
+ok - fm-control stop: a preserved entry set is reported as exactly that, not as intact contents
+ok - fm-control stop: a clean worktree that only gained a flushed file keeps its entry set
+ok - fm-control stop: a worktree recorded through a symlink is still the agent's own worktree
+ok - fm-control stop: a worktree that could not be read is reported unverified, never preserved
+ok - fm-control stop: a backend that cannot identify the agent process refuses rather than guessing
+ok - fm-control stop: real-process identity, signal, postconditions, and refusals
+```
+
+tmux creates a task window with no command and types the launch line into the shell, so the agent is the shell's foreground job and the window survives the agent.
+Removing the content gate makes the draft case signal the agent away silently, which is what that case pins.
+
+The endpoint postcondition reads the recovery-grade agent-state classifier, repeatedly, across `FM_CONTROL_STOP_SETTLE` (2s), rather than the cheap pane-presence read.
+Measured on 2026-09-20 against a real private tmux server: after the window holding a directly-launched agent is gone, `tmux display-message -p -t '<session>:<window>' '#{pane_id}'` still exits 0 and answers for the session's CURRENT window, so that read cannot tell a preserved endpoint from a destroyed one and reported `endpoint=preserved` for a window that no longer existed.
+`fm_backend_agent_state` classified the same endpoint `missing` from its exact session inventory throughout.
+That `missing`, however, is not proof of destruction on tmux, and the verb does not report it as one: a task record carries no socket identity for its endpoint, so absence is routed through the control plane's single absence owner (`fm_control_endpoint_absence_verdict`), which returns `unproven` for tmux and can return a proven `gone` only for Herdr.
+The direct-launch case above stages the destroyed-window shape - the stand-in agent is `exec`ed as the pane's own command, so the window dies with it - and requires `stopped-endpoint-unverified` with `endpoint-state=unestablished`: neither the `preserved` a loose read would have claimed, nor a `gone` this backend cannot prove.
+The other cases keep covering the real fleet shape, where `bin/backends/tmux.sh` creates the window with no command and the shell genuinely outlives the agent.
+
+The worktree postcondition asserts that the entry set and its statuses were preserved, and nothing more: it compares `HEAD` plus the `git status --porcelain --untracked-files=all` text, never a summary derived from it, and requires every entry present before to still be present after with the same status letters.
+`--untracked-files=all` is load-bearing rather than incidental: git's default untracked mode collapses a whole untracked directory to one `dir/` entry, so a worker drafting into a not-yet-added `notes/` could lose a file inside it while both fingerprints still read `?? notes/` - the same collapsing proxy the postcondition refuses everywhere else, arriving through the porcelain text itself.
+Verified against a real repo: with `notes/plan.md` and `notes/draft.md` untracked, the default mode prints `?? notes/` both before and after `rm notes/draft.md`, while `-uall` prints the two files and then one.
+Ignored paths stay excluded either way, and `worktree_brief` bounds what a refusal quotes, so the longer listing cannot bury the sentence.
+The cases above stage all three shapes: an agent that trades one untracked file for another leaves every count identical while the work is gone; an agent that leaves its worktree unreadable gives a constant that compares equal to itself; and an agent that only ADDS a file on its way out has destroyed nothing.
+The first two require the verb to refuse - `worktree-state=CHANGED` and `worktree-state=unverified` - while the third must report `worktree-state=entries-preserved`, because this verb sends SIGTERM precisely so the harness gets its chance to flush and a postcondition that failed on that flush would turn the design into a reported failed stop.
+The token claims what a porcelain read proves and no more: the entry set and its status letters were preserved.
+It is not a content guarantee, and a further case pins that boundary honestly - a tracked file the agent had already modified, truncated to zero bytes during shutdown, keeps its ` M <path>` entry on both sides, so the verb completes and reports `entries-preserved` over contents that are gone.
+Proving content survival would mean hashing every dirty path on every stop; this check does not do that and the wording no longer implies it.
+Each of those exits retires the task's busy wiring first, and so does every early return for an agent already established not running - the `already-stopped` and `endpoint-gone` cases, which is how a worker that exhausted its authentication retries and exited on its own stops pinging busy rather than merely being reported already stopped: the agent is already proven dead or missing by then, so a record that outlived it would leave the task classifying `busy` with no agent behind it.
+
+`stop`'s own outcome keys are `endpoint-state=` and `worktree-state=`, distinct from the `endpoint=` address and `worktree=` path the shared result line carries, so one line never uses a key for two meanings.
+
+The not-a-shell proof classifies through `fm_agent_process_classify_name`, the fleet's single owner of process-name identity, rather than a list of its own; `tests/fm-backend.test.sh` stages a real process for each of the ten shells that owner recognizes and requires every one to be proven a shell, so a host whose pane shell is `ash`, `mksh`, `tcsh`, or `csh` is protected exactly as `bash` and `zsh` are.
+
 The 2026-08-23 steering-inbox doorbell run observed grok 1.0.5's idle composer classifying `unknown` (and sometimes pending-family), never `empty`.
 Issue #3436's recorded idle capture reproduced the cause on 2026-09-14: Grok 1.0.5 renders the titled bottom border three columns wider than its aligned top and content rows, so the cursorless Herdr profile rejected the otherwise complete box as ambiguous.
 The classifier now accepts only that exact three-column overhang (`FM_COMPOSER_GROK_TITLE_OVERHANG` in `bin/fm-composer-lib.sh`) carrying a typed `Grok <model> (<effort>)` title; the portable regressions feed the real capture through both the shared Herdr capability profile and `fm_backend_herdr_composer_state`, and prove idle is `empty`, typed content is `pending`, and an unrecognized oversized title remains `unknown`.

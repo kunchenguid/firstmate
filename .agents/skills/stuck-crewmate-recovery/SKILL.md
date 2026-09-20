@@ -14,7 +14,8 @@ metadata:
 
 Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
 
-Interrupt, stop, and relaunch a worker through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which resolves the recorded runtime itself, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](../../../docs/agent-control.md)).
+Interrupt, stop, and relaunch a worker through `bin/fm-control.sh <task-id> interrupt|exit|stop|relaunch`, which resolves the recorded runtime itself, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](../../../docs/agent-control.md)).
+`exit` and `relaunch` type the harness's exit command, so both refuse whenever the worker's composer is not proven empty; `stop` signals the agent process and types nothing, which is what makes it the verb for a worker whose composer cannot be read at all.
 That plane covers workers running in this home; a remotely placed secondmate is refused by name and reconciled through `secondmate-provisioning` instead.
 Load `harness-adapters` before a resume command or a harness-specific skill invocation, and whenever the adapter's own quirks matter.
 The target window's harness is recorded as `harness=` in `state/<id>.meta`.
@@ -76,4 +77,7 @@ Escalate in order:
    Genuine wedging means looping, unresponsive, repeating the same obstacle, or truly dead.
    A low context reading is not wedging; modern harnesses auto-compact and keep going.
    The worktree and commits persist, so relaunch is cheap.
-5. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.
+5. If that relaunch refuses because the crewmate's composer cannot be read - an unclassifiable pane, which `relaunch` will not type its exit command onto - stop the agent with `FM_HOME=<this-firstmate-home> bin/fm-control.sh <task-id> stop`, which signals the agent process instead of typing.
+   Reach for it only after relaunch has refused: relaunch is the better outcome whenever it can work, because it carries the brief and a progress note into a replacement, while `stop` only ends the agent and leaves the worktree, its commits, and its uncommitted changes for a later spawn.
+   `stop` refuses in turn when the classifier saw composer content it could not prove empty, or when the pid cannot be tied to this task's own endpoint and worktree; do not work around either refusal.
+6. If a second relaunch fails too, write `failed` to the backlog and tell the captain the plain failure, preserved work, and consequence using `AGENTS.md` section 9; do not mention metadata, harness, window, or worktree unless the path itself is needed for action.

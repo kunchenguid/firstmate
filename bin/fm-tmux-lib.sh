@@ -138,10 +138,18 @@ EOF
 # it (a pi separator pair under the cursor), so the common read never pays
 # for the process probe.
 fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
-  local target=$1 cy pane verdict identity
+  local target=$1 cy pane
   cy=$(fm_tmux_composer_cursor_row "$target") || { printf 'unknown'; return 0; }
   case "$cy" in ''|*[!0-9]*) printf 'unknown'; return 0 ;; esac
   pane=$(fm_tmux_composer_capture "$target") || { printf 'unknown'; return 0; }
+  _fm_tmux_composer_verdict "$target" "$cy" "$pane"
+}
+
+# _fm_tmux_composer_verdict: the verdict for ONE already-taken capture. Every
+# caller reads the pane once and classifies those exact bytes here, so no two
+# reads of the same pane can disagree about what was on it.
+_fm_tmux_composer_verdict() {  # <target> <cursor-row> <pane> -> verdict
+  local target=$1 cy=$2 pane=$3 verdict identity
   verdict=$(fm_composer_classify_screen "$(fm_tmux_composer_caps)" "$pane" "$cy")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_tmux_composer_identity "$target") || [ -z "$identity" ]; then
@@ -288,4 +296,52 @@ fm_tmux_submit_core() {  # <target> <text> <retries> <enter-sleep> <settle>
   tmux send-keys -t "$target" -l "$text" 2>/dev/null || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_tmux_submit_enter_core "$target" "$retries" "$sleep_s" "$baseline_idle"
+}
+
+# fm_tmux_agent_process: the pid of the process in the FOREGROUND of <target>'s
+# terminal, which is the agent when one is running in that pane.
+#
+# The resolution is a kernel fact, not a rendered one: tmux reports the pane's
+# own process, and that process's TPGID is the terminal's foreground process
+# GROUP. Its leader is the process the terminal is currently giving input to,
+# so that is the pid printed here.
+#
+# The leader is the agent in BOTH launch shapes, which is why this does not
+# require it to differ from the pane process: fm-spawn may run the agent as the
+# pane command itself (verified live - tmux then reports pane_pid == tpgid ==
+# the agent), or a shell may sit in the pane with the agent as its foreground
+# job (tpgid is then the agent's own group). Deciding "is this an agent or a
+# bare shell" from the pid's relationship to the pane would get the first shape
+# exactly backwards, so that question is answered where it belongs, by the
+# caller's not-a-shell proof (fm_backend_process_is_shell).
+#
+# Deliberately NOT derived from `#{pane_current_command}`: that is a name, and a
+# name cannot be signalled. The group id is never returned AS a group either -
+# it is used only to name its leader, printed as a plain positive pid.
+fm_tmux_agent_process() {  # <target> -> pid
+  local target=$1 pane_pid tpgid
+  [ -n "$target" ] || return 1
+  pane_pid=$(tmux display-message -p -t "$target" '#{pane_pid}' 2>/dev/null) || return 1
+  case "$pane_pid" in ''|*[!0-9]*) return 1 ;; esac
+  tpgid=$(ps -p "$pane_pid" -o tpgid= 2>/dev/null) || return 1
+  tpgid=$(printf '%s' "$tpgid" | tr -d '[:space:]')
+  case "$tpgid" in ''|*[!0-9]*) return 1 ;; esac
+  # A pane with no foreground process group reports -1, which `ps` prints
+  # without a sign here only because the case above already rejected it.
+  [ "$tpgid" -gt 1 ] || return 1
+  fm_backend_process_alive "$tpgid" || return 1
+  printf '%s' "$tpgid"
+}
+
+# fm_tmux_composer_no_content_observed: the non-typing stop path's gate for a
+# tmux pane. One capture feeds both the verdict and the observation test, so
+# the two can never disagree about different bytes.
+# fm_composer_no_content_observed owns what the answer means.
+fm_tmux_composer_no_content_observed() {  # <target>
+  local target=$1 cy pane verdict
+  cy=$(fm_tmux_composer_cursor_row "$target") || return 1
+  case "$cy" in ''|*[!0-9]*) return 1 ;; esac
+  pane=$(fm_tmux_composer_capture "$target") || return 1
+  verdict=$(_fm_tmux_composer_verdict "$target" "$cy" "$pane")
+  fm_composer_no_content_observed "$verdict" "$pane"
 }
