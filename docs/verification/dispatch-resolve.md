@@ -91,6 +91,8 @@ One `jq -cn` to build the record dominates the idle figure; the retry budget dom
 
 The lock retry budget is 7 attempts because that is the smallest value that loses no record at the concurrency an intake actually produces, which is one resolve and one post-spawn join per brief.
 Three concurrent `--record-dispatch` runs against a seeded receipts file lost 7 records of 300 at 5 attempts and 1 of 300 at 6 attempts, and none of 900 at 7.
+Contention beyond that budget drops the record by design rather than waiting: a join that cannot take the lock appends nothing, names itself on the stderr drop line, and still exits 0, so the loss is observable rather than silent.
+The suite asserts that shape rather than a fixed append count - each concurrent run either appends its record or reports the drop, with no third outcome, and the file stays valid JSONL with no partial or interleaved line.
 
 ```console
 $ bash receipt-cost.sh   # the harness below, saved to a scratch file and run from the repository root

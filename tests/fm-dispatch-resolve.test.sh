@@ -316,6 +316,14 @@ TYPESAFE_API_KEY=$KEY run code out err --record-dispatch "$BRIEF" --harness clau
 assert_equals '' "$err" "a join that lands stays silent"
 pass "a dispatch join that does not land is distinguishable from one that agrees"
 
+# --- the resolve invocation form, reused verbatim for the join -----------------
+project_join_before=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
+TYPESAFE_API_KEY=$KEY run code out err --record-dispatch "$BRIEF" --project demo-project --harness claude --model sonnet
+expect_code 0 "$code" "--project alongside --record-dispatch is accepted"
+assert_equals '' "$err" "--project alongside --record-dispatch reports no failure"
+assert_equals "$((project_join_before + 1))" "$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")" "--project alongside --record-dispatch records the dispatch"
+pass "the documented resolve invocation form still joins when reused after the spawn"
+
 # --- a blocked receipt cannot delay the resolver block ------------------------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
@@ -723,15 +731,21 @@ rmdir "$RECEIPTS"
 mv "$TMP_ROOT/receipts-before-failure" "$RECEIPTS"
 
 dispatch_count_before=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
+CONCURRENT_ERR="$TMP_ROOT/concurrent-stderr"
+: > "$CONCURRENT_ERR"
 for _ in 1 2 3; do
   PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" \
     "$TOOL" --record-dispatch "$BRIEF" --harness claude --model sonnet --effort high \
-    >/dev/null 2>&1 &
+    >/dev/null 2>>"$CONCURRENT_ERR" &
 done
 wait
 dispatch_count_after=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
-assert_equals "$((dispatch_count_before + 3))" "$dispatch_count_after" "concurrent dispatch receipt appends lose no records"
+concurrent_appended=$((dispatch_count_after - dispatch_count_before))
+concurrent_dropped=$(grep -c 'no dispatch receipt' "$CONCURRENT_ERR")
+assert_equals '3' "$((concurrent_appended + concurrent_dropped))" "each concurrent run either appends its dispatch record or says it dropped one"
+assert_equals '' "$(grep -v 'no dispatch receipt' "$CONCURRENT_ERR")" "a concurrent run has no third outcome to report"
 jq -e -s 'all(.[]; type == "object")' "$RECEIPTS" >/dev/null || fail "concurrent receipt appends remain valid JSONL"
+assert_equals "$(wc -l < "$RECEIPTS")" "$(jq -s 'length' "$RECEIPTS")" "concurrent appends leave no partial or interleaved line"
 
 mv "$RECEIPTS" "$TMP_ROOT/receipts-before-bound"
 dd if=/dev/zero of="$RECEIPTS" bs=1048500 count=1 2>/dev/null

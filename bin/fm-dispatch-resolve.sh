@@ -308,7 +308,6 @@ BRIEF_SHA256=$(sha256_file "$BRIEF_SNAPSHOT") || BRIEF_SHA256=''
 
 if [ "$MODE" = dispatch ]; then
   [ -n "$DISPATCH_HARNESS" ] || die "--record-dispatch needs --harness"
-  [ -z "$PROJECT" ] || die "--project is not valid with --record-dispatch"
   record_actual_dispatch >/dev/null || true
   exit 0
 fi
