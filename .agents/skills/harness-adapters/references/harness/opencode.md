@@ -13,7 +13,7 @@ Earlier interactive behavior was verified across V1 versions 1.15.7 through 1.18
 | Skill invocation | No separate verified form beyond normal slash-command behavior; use natural language when the exact command is uncertain. |
 | Resume | Relaunch with `--continue` to resume the most recent session for the current directory, then send the next instruction after the TUI is ready because `--prompt` does not auto-submit alongside `--continue`. |
 | Launch flag | `--standalone`, required for every Firstmate launch on 2.x: the default launch attaches to the shared `opencode serve --service` daemon, which hosts plugins with its own environment and PID and ignores `OPENCODE_CONFIG_CONTENT` after it starts. |
-| Model flag | `--model <provider/model>`. |
+| Model selection | The `model` key in the per-launch `OPENCODE_CONFIG_CONTENT`; the full TUI command has no `--model` flag. |
 | Effort flag | None; V2 puts a variant in the model reference after `#` instead of using a separate effort flag. |
 | Model discovery | Run `opencode models [provider]` to list available provider/model identifiers. |
 | Trust dialog | None. |

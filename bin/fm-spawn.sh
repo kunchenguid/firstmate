@@ -310,6 +310,7 @@
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __OPENCODECONFIG__ quoted per-launch OpenCode configuration
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -1865,7 +1866,7 @@ launch_template() {
       printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
-  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}'\'' opencode --standalone __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT=__OPENCODECONFIG__ opencode --standalone --prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE__'
     if [ "$kind" = secondmate ]; then
@@ -2315,10 +2316,19 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)
+  claude | codex | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
+}
+
+opencode_config_content() {
+  local model=$1
+  if [ -n "$model" ] && [ "$model" != default ]; then
+    jq -cn --arg model "$model" '{permissions:[{action:"*",resource:"*",effect:"allow"}],model:$model}'
+  else
+    jq -cn '{permissions:[{action:"*",resource:"*",effect:"allow"}]}'
+  fi
 }
 
 effort_flag_for_harness() {
@@ -2394,9 +2404,9 @@ effort_flag_for_harness() {
     # --config-override, but that flag is single-value (see
     # rovo_config_override_flag below) so it is built there, merged with the
     # mandatory allowedExternalPaths grant, rather than here.
-    # opencode's interactive `opencode --prompt` launch has a verified --model
-    # flag but no separate effort flag. V2 encodes variants in the model
-    # reference after `#`, so fm-spawn does not pass an effort option.
+    # opencode's full interactive launch has no --model or effort flag. Its
+    # per-launch configuration carries the model, including a V2 variant after
+    # `#`, so fm-spawn does not pass either option.
     # kimi provider catalogs expose supported and default effort values, but a
     # launch flag and mapping have not been live-verified; the requested axis
     # stays in task metadata but never reaches the launch command. Cursor encodes
@@ -4603,6 +4613,10 @@ MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
+if [ "$HARNESS" = opencode ]; then
+  OPENCODE_CONFIG=$(opencode_config_content "$MODEL") || exit 1
+  LAUNCH=${LAUNCH//__OPENCODECONFIG__/$(shell_quote "$OPENCODE_CONFIG")}
+fi
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
 if [ "$HARNESS" = rovo ]; then
   ROVOCONFIGOVERRIDE=$(rovo_config_override_flag "$EFFORT" "$DATA" "$STATE" "$ID") || {

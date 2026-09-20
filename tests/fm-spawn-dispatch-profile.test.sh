@@ -47,7 +47,13 @@ if [ "${1:-}" = --list-models ]; then
 fi
 exit 0
 SH
-  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent"
+  cat > "$fakebin/opencode" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "${OPENCODE_CONFIG_CONTENT:?}" > "${FM_TEST_OPENCODE_CONFIG_LOG:?}"
+printf '%s\n' "$@" > "${FM_TEST_OPENCODE_ARGS_LOG:?}"
+SH
+  chmod +x "$fakebin/timeout" "$fakebin/cursor-agent" "$fakebin/opencode"
   make_spawn_pi_probe "$fakebin" pi
   make_spawn_pi_probe "$fakebin" pi-signed
   printf '%s\n' "$fakebin"
@@ -623,7 +629,7 @@ test_cursor_failed_catalog_probe_does_not_block_spawn() {
 }
 
 test_opencode_threads_model_and_ignores_effort_axis() {
-  local rec id out status launch
+  local rec id out status launch config_log args_log
   id=profile-opencode-z7
   rec=$(make_spawn_case profile-opencode opencode "$id")
   read_case_record "$rec"
@@ -633,12 +639,23 @@ test_opencode_threads_model_and_ignores_effort_axis() {
   expect_code 0 "$status" "opencode spawn with model and ignored effort should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" opencode anthropic/claude-sonnet-4-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "opencode --standalone --model 'anthropic/claude-sonnet-4-5' --prompt" \
-    "opencode launch did not thread model"
+  config_log="$CASE_DIR/opencode-config.json"
+  args_log="$CASE_DIR/opencode-args"
+  FM_TEST_OPENCODE_CONFIG_LOG="$config_log" FM_TEST_OPENCODE_ARGS_LOG="$args_log" \
+    PATH="$FAKEBIN_DIR:$PATH" bash -c "$launch"
+  status=$?
+  expect_code 0 "$status" "generated opencode launch should execute"
+  jq -e --arg model anthropic/claude-sonnet-4-5 \
+    '.model == $model and .permissions == [{"action":"*","resource":"*","effect":"allow"}]' \
+    "$config_log" >/dev/null \
+    || fail "opencode launch configuration did not carry the model and permissions"
+  assert_grep '--standalone' "$args_log" "opencode launch did not use a private server"
+  assert_grep '--prompt' "$args_log" "opencode launch did not pass the brief prompt"
+  assert_no_grep '--model' "$args_log" "opencode full TUI launch passed an unsupported model flag"
   assert_not_contains "$launch" "--effort" "opencode launch must not pass unsupported --effort"
   assert_not_contains "$launch" "--variant" "opencode launch must not pass the removed V1 --variant flag"
   assert_not_contains "$launch" "--thinking" "opencode launch must not pass pi thinking flag"
-  pass "opencode receives --model and omits the unsupported effort axis"
+  pass "opencode receives its model through config and omits unsupported flags"
 }
 
 test_native_effort_validator_keeps_axes_separate() {
