@@ -1794,21 +1794,6 @@ $rest
 EOF
 }
 
-_fm_offset_in_home_append_ranges() {  # <ranges-text> <offset>
-  local ranges=$1 offset=$2 start end
-  case "$offset" in ''|*[!0-9]*) return 1 ;; esac
-  while IFS=$(printf '\t') read -r start end; do
-    [ -n "$start" ] || continue
-    case "$start:$end" in *[!0-9:]*) continue ;; esac
-    if [ "$offset" -ge "$start" ] && [ "$offset" -lt "$end" ]; then
-      return 0
-    fi
-  done <<EOF
-$ranges
-EOF
-  return 1
-}
-
 status_home_appends_covers() {  # <status-file> <start> <end>
   local start=$2 end=$3 range_start range_end
   case "$start:$end" in *[!0-9:]*) return 1 ;; esac
@@ -1958,7 +1943,6 @@ _fm_status_open_decision_origins() {  # <status-file> [<kind>]
 status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
   local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file full_file prefix_file result
   local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
-  local pos line_start owned_ranges
   local LC_ALL=C
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
@@ -1986,14 +1970,9 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
     rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2;
   }
   [ "$cur_ident" = "$ident" ] || { rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2; }
-  owned_ranges=$(status_home_appends_ranges "$f")
-  pos=$start
   while IFS= read -r line || [ -n "$line" ]; do
-    line_start=$pos
-    pos=$((pos + ${#line} + 1))
     line_number=$((line_number + 1))
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
-    [ -z "$owned_ranges" ] || ! _fm_offset_in_home_append_ranges "$owned_ranges" "$line_start" || continue
     if status_is_captain_held "$line"; then
       # A transfer closes the status-log decision and remains non-actionable to
       # stale classification. The side-band marker lets signal routing surface

@@ -1569,15 +1569,16 @@ test_interruption_before_and_after_raw_commit() {
 # The guarded self-announced status append (fm_wake_status_append_self_announced)
 # and the seen-signature gate it shares with the watcher's signal scan. Both
 # directions of the dedup contract are pinned through the real library
-# functions: a fully announced file plus the home's own bookkeeping close stays
+# functions: a file this home already knows (seen marker or OPEN DECISIONS
+# fold) plus the home's own bookkeeping close stays
 # announced (no wake), while ANY unannounced byte - a pending foreign line, a
-# missing marker, a later different note - reads as wake-worthy. An OPEN
-# DECISIONS fold is no substitute for the watcher's classified offset.
+# missing cursor, a later different note - reads as wake-worthy.
 test_self_announced_append_guards() {
-  local dir state status rc=0
+  local dir state status folded rc=0
   dir=$(make_case self-announced-append)
   state="$dir/state"
   status="$state/t.status"
+  folded="$state/folded.status"
 
   run_wake_lib() {
     FM_STATE_OVERRIDE="$state" bash -c '
@@ -1632,6 +1633,26 @@ test_self_announced_append_guards() {
     || fail "a multibyte self-announced close was not suppressed (rc=$?)"
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
     || fail "multibyte byte accounting broke the self-announce guard"
+
+  # Issue 4767: a drain that folded OPEN DECISIONS has already presented those
+  # bytes to this home even when the watcher has not written a matching seen
+  # marker. The bookkeeping close must stay quiet; a later worker line must not.
+  printf 'needs-decision [key=k3]: pick one\n' > "$folded"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$folded" \
+    && fail "an unfolded file without a seen marker read as announced"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    status_open_decisions_incremental "$2" >/dev/null
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$folded" \
+    || fail "could not fold the open decision"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$folded" \
+    'resolved [key=k3]: answered: folded close' \
+    || fail "a close after an OPEN DECISIONS fold was not self-announced (rc=$?)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$folded" \
+    || fail "the folded close left unannounced bytes behind"
+  printf 'blocked: worker still needs help\n' >> "$folded"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$folded" \
+    && fail "a later worker line after a folded close was swallowed"
 
   pass "self-announced appends suppress only their own bytes and fail toward waking"
 }
@@ -1769,46 +1790,6 @@ test_folded_worker_resolved_is_not_owned_lag() {
     && fail "a worker resolved in the folded span was treated as already owned"
 
   pass "a worker resolved in fold lag still wakes after this home's close"
-}
-
-test_owned_appends_are_not_replayed_as_unread() {
-  local dir state status out rc
-  dir=$(make_case owned-unread)
-  state="$dir/state"
-  status="$state/t.status"
-
-  run_wake_lib() {
-    FM_STATE_OVERRIDE="$state" bash -c '
-      . "$1"; shift; "$@"
-    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
-  }
-
-  {
-    printf 'needs-decision [key=k1]: first\n'
-    printf 'needs-decision [key=k2]: second\n'
-  } > "$status"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \
-    || fail "the OPEN DECISIONS fold drain failed"
-  rc=0
-  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
-    'resolved [key=k1]: answered: first' || rc=$?
-  [ "$rc" -le 1 ] || fail "the first owned close was not appended (rc=$rc)"
-  rc=0
-  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
-    'resolved [key=k2]: answered: second' || rc=$?
-  [ "$rc" -le 1 ] || fail "the second owned close was not appended (rc=$rc)"
-  printf 'blocked: need staging credentials\n' >> "$status"
-  append_wake "$state" signal t.status "signal: $status" \
-    || fail "could not queue the later worker signal"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$dir/drain.out" 2>"$dir/drain.err" \
-    || fail "drain after the worker line failed"
-  out=$(cat "$dir/drain.out")
-  printf '%s' "$out" | grep -F 'blocked: need staging credentials' >/dev/null \
-    || fail "the later worker line was not annotated: $out"
-  if printf '%s' "$out" | grep -E 'resolved \[key=k[12]\]' >/dev/null; then
-    fail "an owned bookkeeping close was replayed as unread: $out"
-  fi
-  pass "owned append ranges are not replayed as unread on a later real wake"
 }
 
 # A trap that fires inside a lock's critical section abandons the holding
@@ -2180,7 +2161,6 @@ test_self_announced_append_guards
 test_separate_self_announced_answers_after_fold_are_owned
 test_unreadable_status_is_not_owned
 test_folded_worker_resolved_is_not_owned_lag
-test_owned_appends_are_not_replayed_as_unread
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher

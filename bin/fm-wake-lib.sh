@@ -2171,29 +2171,39 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 # lines THIS home's own machinery writes as bookkeeping it has already presented
 # in the very turn or tick that writes them (answerer-closes resolved lines, a
 # pending-reply escalation close, captain-held transfers). Such a close must
-# not wake the session that wrote it. This appends one command's lines
+# not wake the session that wrote it, so this appends one command's lines
 # together, records the exact appended byte range in the home-owned append
 # ledger (bin/fm-classify-lib.sh), and then advances the watcher's seen marker
-# across those bytes only when the watcher's classified offset equals the
-# pre-append size (every earlier byte was already classified) and the
-# post-append size equals the pre-append size plus exactly the appended bytes
-# (no foreign write interleaved).
-# On ANY other condition - missing file, pending foreign bytes, an interleaved
-# writer, an unreadable size or identity - the lines are still appended and the
-# owned range is still recorded when growth is proven, but the marker is left
-# alone so the watcher surfaces the unclassified foreign bytes. An OPEN
-# DECISIONS fold is no substitute: any actor's drain folds, so a worker line
-# only the fold read must still wake.
+# across the appended bytes and no byte this home has not already read. The
+# advance is provenance-gated and fails toward waking:
+#   - the marker advances only when this home already read every pre-append
+#     byte, the post-append size equals that size plus exactly the appended
+#     bytes (no foreign write interleaved), AND the watcher's own span
+#     classifier finds no actionable event from its classified offset through
+#     the post-append end (classifying after the append keeps the just-closed
+#     decisions from counting as live);
+#   - "already read" means the watcher's classified seen offset equals the
+#     pre-append size, or the OPEN DECISIONS fold cursor does and every
+#     non-blank line the watcher has not classified yet is a keyed
+#     needs-decision or blocked line, which OPEN DECISIONS listed as open. The
+#     fold reads bytes it never prints, so a worker's `failed:`, `paused:`,
+#     `working:`, `resolved` or verb-less line there must still wake, and so
+#     must a captain-held line, which raises the watcher's needs-decision
+#     side-band;
+#   - on ANY other condition - a missing file, pending foreign bytes, an
+#     interleaved writer, an unreadable size or identity - the lines are still
+#     appended and the owned range is still recorded when growth is proven, but
+#     the marker is left alone, so the watcher surfaces the file normally.
 # Later signal scans treat owned ranges as already owned even when the watcher
 # has not caught up, so separate --resolve-key answers do not each force a
-# captain-facing wake. A later different line from any other writer grows the
+# captain-facing wake. A later, different line from any other writer grows the
 # size past the owned ranges and wakes as before: task identity alone can never
 # suppress new content.
 # Returns 0 appended and self-announced, 1 appended but left for the watcher
 # (the safe direction), 2 the append itself failed.
 fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
   local state=$1 file=$2 line appended=0 pre_size='' pre_ident='' post_size post_ident
-  local classified
+  local classified folded lag span_rc=0
   local LC_ALL=C
   shift 2
   _fm_wake_require_classify || return 1
@@ -2211,7 +2221,24 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
   [ "$post_size" -eq $((pre_size + appended)) ] || return 1
   status_home_appends_record "$file" "$pre_size" "$post_size" || return 1
   classified=$(fm_wake_signal_seen_size "$state" "$file")
-  [ "$classified" = "$pre_size" ] || return 1
+  if [ "$classified" != "$pre_size" ]; then
+    folded=$(status_open_decisions_cursor_offset "$file") || folded=0
+    [ "$folded" = "$pre_size" ] && [ "$classified" -lt "$pre_size" ] || return 1
+    lag=$(_fm_status_read_span "$file" "$classified" "$((pre_size - classified))") || return 1
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in *[![:space:]]*) ;; *) continue ;; esac
+      case "$(status_line_verb "$line")" in
+        needs-decision|blocked) ;;
+        *) return 1 ;;
+      esac
+      _fm_key_before_colon "$line" || _fm_key_at_note_head "$line" >/dev/null || return 1
+      _fm_decision_key "$line" >/dev/null || return 1
+    done <<EOF
+$lag
+EOF
+  fi
+  status_span_first_actionable_record "$file" "$classified" >/dev/null || span_rc=$?
+  [ "$span_rc" -eq 1 ] || return 1
   fm_wake_status_seen_commit "$state" "$file" "$post_size" "$post_ident" || return 1
   return 0
 }
@@ -2272,11 +2299,10 @@ fm_wake_status_cursor_offset() {  # <validated-status-path> -> already-presented
 
 # O_NOFOLLOW read of every still-unread status byte. min-offset is the
 # already-presented cursor from classify-lib. Lines whose bytes begin before
-# that offset are not replayed, nor are lines this home recorded as its own
-# bookkeeping appends. Prints nothing and returns 1 when no unread non-blank
-# line exists.
+# that offset are not replayed. Prints nothing and returns 1 when no unread
+# non-blank line exists.
 fm_wake_unread_events() {  # <validated-status-path> <unused-tail-byte-cap> <min-offset> [<end-offset>]
-  local path=$1 min_offset=$3 end_offset=${4:-} result size chunk chunk_start owned
+  local path=$1 min_offset=$3 end_offset=${4:-} result size chunk chunk_start
   local LC_ALL=C
   FM_WAKE_EVENT_LINE=
   FM_WAKE_UNREAD_LINES=
@@ -2307,31 +2333,12 @@ fm_wake_unread_events() {  # <validated-status-path> <unused-tail-byte-cap> <min
   [ -n "$chunk" ] || return 1
   [ "$min_offset" -lt "$size" ] || return 1
   chunk_start=$min_offset
-  owned=
-  if command -v status_home_appends_ranges >/dev/null 2>&1; then
-    owned=$(status_home_appends_ranges "$path") || owned=
-  fi
-  FM_WAKE_UNREAD_LINES=$(printf '%s' "$chunk" | LC_ALL=C awk -v start="$chunk_start" -v min="$min_offset" -v owned="$owned" '
-    BEGIN {
-      pos = start + 0
-      n = split(owned, rows, "\n")
-      for (i = 1; i <= n; i++) {
-        split(rows[i], p, "\t")
-        if (p[1] ~ /^[0-9]+$/ && p[2] ~ /^[0-9]+$/) {
-          nr++
-          os[nr] = p[1] + 0
-          oe[nr] = p[2] + 0
-        }
-      }
-    }
-    function is_owned(off, i) {
-      for (i = 1; i <= nr; i++) if (off >= os[i] && off < oe[i]) return 1
-      return 0
-    }
+  FM_WAKE_UNREAD_LINES=$(printf '%s' "$chunk" | LC_ALL=C awk -v start="$chunk_start" -v min="$min_offset" '
+    BEGIN { pos = start + 0 }
     {
       line_start = pos
       pos += length($0) + 1
-      if ($0 ~ /[^[:space:]]/ && line_start >= min && !is_owned(line_start)) print $0
+      if ($0 ~ /[^[:space:]]/ && line_start >= min) print $0
     }
   ') || return 1
   [ -n "$FM_WAKE_UNREAD_LINES" ] || return 1

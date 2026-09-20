@@ -187,43 +187,58 @@ test_answer_close_is_self_announced() {
   pass "fm-send --resolve-key: the close never re-wakes its own home, later lines still do"
 }
 
-# Two distinct --resolve-key answers to decisions the watcher already
-# classified must each stay quiet, even when neither answer advances the seen
-# marker: the answers are this home's owned ranges. A later worker line on the
-# same task still wakes.
+# Two distinct --resolve-key answers must each stay quiet even when the seen
+# marker does NOT cover them. An in-flight watcher classification that lands
+# after the first answer regresses the classified offset behind that answer's
+# bytes, so the marker no longer vouches for them; only the home-appends ledger
+# does. Without the ledger the second scan re-wakes this home over its own
+# close. A later worker line on the same task still wakes.
 test_separate_resolve_key_answers_do_not_rewake() {
-  local dir fb log home rc
+  local dir fb log home rc status pre_answer ident
   dir="$TMP_ROOT/separate-answers"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"
   home=$(setup_home separate-answers)
+  status="$home/state/t7.status"
   fm_write_meta "$home/state/t7.meta" "window=sess:fm-t7" "kind=ship"
   {
     printf 'needs-decision [key=budget]: approve spend?\n'
     printf 'needs-decision [key=vendor]: pick a vendor\n'
-  } > "$home/state/t7.status"
+  } > "$status"
   FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"; fm_wake_status_mark_current "$2" "$3"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t7.status" \
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$status" \
     || fail "could not prime the announced baseline"
+  pre_answer=$(wc -c < "$status" | tr -d '[:space:]')
 
   run_send "$fb" "$home" "$log" t7 --resolve-key budget "approved"; rc=$?
   expect_code 0 "$rc" "the first answer should succeed"
+
+  # A watcher classification captured before the answer commits afterwards and
+  # rewinds the classified offset behind the answer's bytes.
+  ident=$(FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; _fm_open_decisions_file_ident "$2"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$status") \
+    || fail "could not read the status identity"
+  FM_STATE_OVERRIDE="$home/state" bash -c '
+    . "$1"; fm_wake_status_seen_commit "$2" "$3" "$4" "$5"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$status" "$pre_answer" "$ident" \
+    || fail "could not replay the stale watcher classification"
   FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"; fm_wake_signal_seen_current "$2" "$3"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t7.status" \
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$status" \
     || fail "the first --resolve-key answer was left to re-wake this home"
 
   run_send "$fb" "$home" "$log" t7 --resolve-key vendor "acme"; rc=$?
   expect_code 0 "$rc" "the second answer should succeed"
   FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"; fm_wake_signal_seen_current "$2" "$3"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t7.status" \
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$status" \
     || fail "the second --resolve-key answer was left to re-wake this home"
 
-  printf 'blocked: need staging credentials\n' >> "$home/state/t7.status"
+  printf 'blocked: need staging credentials\n' >> "$status"
   if FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"; fm_wake_signal_seen_current "$2" "$3"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t7.status"; then
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$status"; then
     fail "a later worker line after two answers was swallowed"
   fi
   pass "fm-send --resolve-key: separate answers do not each re-wake; later lines still do"
@@ -409,12 +424,9 @@ test_multiple_keys_close_together() {
   pass "fm-send --resolve-key: one answer closes each named key and only those"
 }
 
-# A session-start drain may list both decisions (folding them without a
-# watcher seen marker) and one answer still closes both. The fold is no
-# substitute for classification, so the worker's decision bytes stay
-# wake-worthy; the closes themselves succeed and drop those keys from OPEN
-# DECISIONS. Owned answer ranges keep later scans from treating the closes as
-# extra signals once the watcher has classified the span.
+# Issue 4767: the session-start drain listed both decisions (folding them
+# without a watcher seen marker), and one answer closes both. The closes are
+# this home's own bookkeeping, so the watcher must not wake it to reread them.
 test_multiple_keys_close_after_fold_is_self_announced() {
   local dir fb log home rc out
   dir="$TMP_ROOT/multi-fold"; mkdir -p "$dir"
@@ -432,16 +444,15 @@ test_multiple_keys_close_after_fold_is_self_announced() {
   run_send "$fb" "$home" "$log" t7 --resolve-key budget --resolve-key vendor \
     "approve spend, pick acme"; rc=$?
   expect_code 0 "$rc" "an answer resolving two folded keys should succeed"
-  if FM_STATE_OVERRIDE="$home/state" bash -c '
+  FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"; fm_wake_signal_seen_current "$2" "$3"
-  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t7.status"; then
-    fail "folding then answering swallowed the unclassified worker decisions"
-  fi
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$home/state" "$home/state/t7.status" \
+    || fail "one answer's two closes after an OPEN DECISIONS drain were left to re-wake this home"
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
     fail "an answered folded key is still open: $out"
   fi
-  pass "fm-send --resolve-key: one answer closes folded keys without swallowing the worker decisions"
+  pass "fm-send --resolve-key: one answer's closes after a drain fold never wake this home"
 }
 
 test_local_secondmate_answer_marked_and_closed() {
