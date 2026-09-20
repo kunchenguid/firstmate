@@ -232,7 +232,13 @@ while [ "$#" -gt 0 ]; do
 done
 case "$fmt" in
   %W) printf '0\n' ;;
-  %Y) /usr/bin/stat -f %m -- "$file" 2>/dev/null || /usr/bin/stat -c %Y -- "$file" ;;
+  %Y)
+    # GNU stat may print filesystem data before rejecting the BSD probe.
+    # Discard that failed output before returning the native mtime.
+    t=$(/usr/bin/stat -f %m -- "$file" 2>/dev/null) \
+      || t=$(/usr/bin/stat -c %Y -- "$file") || exit 1
+    printf '%s\n' "$t"
+    ;;
   *) exit 1 ;;
 esac
 SH
