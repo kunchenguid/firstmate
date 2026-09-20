@@ -242,7 +242,7 @@ else
   PROJECT_CLONES_BODY=$(printf '%s\n' "$SECONDMATE_PROJECTS" | tr ' ' '\n' | sed 's/^/- /')
   PROJECT_CLONES_NOTE="The projects above are local clones for work you supervise; they are not an exclusive ownership claim."
 fi
-PROSE_LINE=$(fm_prose_skills_line ".agents/skills")
+PROSE_LINE=$(fm_prose_skills_line ".agents/skills" "this home's ")
 cat > "$BRIEF" <<EOF
 You are a persistent second mate managed by the main firstmate. Work on your own; do not wait for a human.
 

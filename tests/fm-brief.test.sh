@@ -895,7 +895,9 @@ test_scout_and_secondmate_load_decision_hold_policy() {
 # brief. A ship or scout brief runs on the generating host and takes that
 # checkout's absolute path; a charter is published verbatim into a remote home
 # (bin/fm-remote-home-seed.sh rewrites only the status path), so it must carry
-# no path from the generating checkout at all.
+# no path from the generating checkout at all, and must name the base its
+# relative paths resolve against, the way the charter's other cross-file
+# references do.
 test_briefs_reference_fleet_prose_skills() {
   local home kind brief
   home="$TMP_ROOT/prose-skills-home"
@@ -919,8 +921,8 @@ test_briefs_reference_fleet_prose_skills() {
     "$ROOT/bin/fm-brief.sh" prose-mate --secondmate --no-projects >/dev/null 2>&1 \
     || fail "secondmate scaffold failed"
   brief="$home/data/prose-mate/brief.md"
-  assert_grep '`.agents/skills/i-have-adhd/SKILL.md`' "$brief" \
-    "secondmate charter does not reference the i-have-adhd prose skill host-locally"
+  assert_grep "this home's \`.agents/skills/i-have-adhd/SKILL.md\`" "$brief" \
+    "secondmate charter does not reach the i-have-adhd prose skill from a base it names"
   assert_grep '`.agents/skills/no-ai-slop/SKILL.md`' "$brief" \
     "secondmate charter does not reference the no-ai-slop prose skill host-locally"
   assert_grep "eval.md" "$brief" "secondmate charter does not name the no-ai-slop self-check"
