@@ -107,8 +107,9 @@
 #                          joined with `;` when more than one surfaces in a cycle
 #   check: status log unobservable: <file>, <n> consecutive failed observations, stat helpers failing
 #                          the log's stat helpers kept failing for FM_UNOBSERVABLE_POLLS
-#                          consecutive observations while the bash builtin file
-#                          tests still passed; queued once per failure episode
+#                          observations at least FM_UNOBSERVABLE_MIN_GAP seconds
+#                          apart while the bash builtin file tests still passed;
+#                          queued once per failure episode
 #                          (bin/fm-classify-lib.sh owns the bound)
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
@@ -1559,7 +1560,6 @@ task_captain_call_open() {  # <task>
 stale_wait_declaration() {  # <task> -> 0 with the declaration, 1 when the log could not be observed this poll
   local sig
   sig=$(fm_wake_signal_sig "$STATE/$1.status") || return 1
-  status_observation_succeeded "$STATE/$1.status"
   printf 'declared:%s' "$sig"
 }
 
@@ -1586,7 +1586,6 @@ stale_skip_unobserved() {  # <window> <task>
 captain_call_declaration() {  # <task> <call-identity> -> 1 when the log could not be observed this poll
   local sig
   sig=$(fm_wake_signal_sig "$STATE/$1.status") || return 1
-  status_observation_succeeded "$STATE/$1.status"
   printf 'captain-hold:%s:%s' "$2" "$sig"
 }
 
@@ -1743,10 +1742,10 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # A file whose signature cannot be observed this poll (fm_wake_signal_sig fails,
 # the stat-helper failure fm-classify-lib.sh's status_observed_signature owns) is
 # skipped, never listed as changed: the next poll observes it again. The skip is
-# bounded by that library's status_observation_skipped: it counts the skip once
-# per poll in the log's sidecar (this cycle's WATCH_CYCLE token is what makes the
-# grace-period rescan and the stale paths share one count), and the one skip per
-# failure episode that reaches the bound is printed as an
+# bounded by that library's status_observation_skipped: it counts the skip in
+# the log's sidecar at most once per FM_UNOBSERVABLE_MIN_GAP seconds, so the
+# grace-period rescan and the stale paths share one count with this scan, and the
+# one skip per failure episode that reaches the bound is printed as an
 # "UNOBSERVABLE\t<file>\t<count>" line for the caller to report.
 # Each file is observed exactly once per poll and that signature is what the
 # marker is compared against.
@@ -1763,7 +1762,7 @@ scan_signals() {
     if ! sig=$(fm_wake_signal_sig "$f"); then
       case "$f" in
         *.status)
-          status_observation_skipped "$f" "$WATCH_CYCLE" \
+          status_observation_skipped "$f" \
             && printf 'UNOBSERVABLE\t%s\t%s\n' "$f" "$STATUS_UNOBSERVABLE_COUNT"
           ;;
       esac
@@ -1773,7 +1772,6 @@ scan_signals() {
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
     case "$f" in
       *.status)
-        status_observation_succeeded "$f"
         fm_wake_signal_seen_matches "$STATE" "$f" "$sig" && continue
         ;;
       *) [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue ;;
@@ -1809,7 +1807,7 @@ unobservable_reason() {  # <status-file> <count>
 # The same report from a path that skipped the log in-process rather than
 # through scan_signals. 0 when a row was queued, so the caller wakes.
 unobservable_report() {  # <status-file>
-  status_observation_skipped "$1" "$WATCH_CYCLE" || return 1
+  status_observation_skipped "$1" || return 1
   UNOBSERVABLE_REASON=$(unobservable_reason "$1" "$STATUS_UNOBSERVABLE_COUNT")
   fm_wake_append check "unobservable:${1##*/}" "$UNOBSERVABLE_REASON" || exit 1
   status_observation_reported "$1"
@@ -2061,7 +2059,6 @@ heartbeat_scan_finds_actionable() {
       # again. Only a persistent failure reaching the bound queues its one check
       # row (unobservable_report), and the heartbeat then wakes for it.
       sig=$(status_observed_signature "$f") || { unobservable_report "$f" && found=0; continue; }
-      status_observation_succeeded "$f"
       marker=$(_hb_surfaced_path "$task")
       status_presentation_marker_reported_matches "$marker" "$sig" && continue
       FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"ERROR"$'\t'"${sig}"$'\n'
@@ -2312,11 +2309,6 @@ trap 'exit 1' HUP INT TERM
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
 WATCHER_PID=${BASHPID:-$$}
-# This poll's identity, for the one-count-per-cycle rule of the bounded-skip
-# counter (bin/fm-classify-lib.sh). The pid is part of it because the daemon
-# restarts this watcher on every wake, so a bare counter would restart at the
-# same token a previous watcher already stored and silently lose that count.
-WATCH_CYCLE=
 printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
 printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
@@ -2388,11 +2380,7 @@ resurface_after_downtime() {
   wake "check: rearm-resurface"
 }
 
-WATCH_CYCLE_N=0
 while :; do
-  WATCH_CYCLE_N=$((WATCH_CYCLE_N + 1))
-  WATCH_CYCLE="w$WATCHER_PID:$WATCH_CYCLE_N"
-
   # Self-eviction: if the singleton lock no longer names this process, a second
   # watcher has taken over (e.g. a transient duplicate from a racy arm). Stand
   # down so the rightful singleton continues alone. The EXIT trap's release

@@ -1501,11 +1501,14 @@ _status_observe_fields() {  # <file> [<size> <ident>]
 # the observation is retried once and then abandoned for this poll rather than
 # encoded. A signature this function prints therefore never carries a failed
 # observation, and a caller that receives status 2 leaves every marker alone.
+# A successful observation here is the one predicate that ends a bounded-skip
+# episode, so no caller has to end it separately after reading a signature.
 status_observed_signature() {  # <file> [<size> <ident>]
   local f=$1 encoded
   if ! _status_observe_fields "$f" "${2-}" "${3-}"; then
     _status_observe_fields "$f" "${2-}" "${3-}" || return 2
   fi
+  status_observation_succeeded "$f"
   encoded=$(printf '%s\0%s\0%s\0%s\0%s\0%s' "${_STATUS_OBSERVED_FIELDS[@]}" \
     | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
   [ -n "$encoded" ] || return 1
@@ -1517,7 +1520,8 @@ status_observed_signature() {  # <file> [<size> <ident>]
 # paths, and the daemon's catch-all scan). A momentary failure is skipped
 # silently, but a persistent one must not blind every supervisor surface, so
 # each consecutive failed observation of one status file is counted in a private
-# sidecar beside it (state/.unobservable-<task>: "<count>\t<reported>\t<cycle>",
+# sidecar beside it (state/.unobservable-<task>:
+# "<count>\t<last-failure-epoch>\t<reported>",
 # written only here, a documented exception to the pure-read rule like the
 # cursor), a successful observation empties the sidecar, and the count reaching
 # FM_UNOBSERVABLE_POLLS (default 3, the consecutive-error budget shape of
@@ -1533,31 +1537,59 @@ status_observed_signature() {  # <file> [<size> <ident>]
 # episode owed rather than burning it, and after the flag is set the episode
 # stays silent until the file is observable again and a new one starts.
 #
-# The count is per supervisor cycle, not per call: several sites observe the same
-# log within one poll (the signal scan, its grace-period rescan, the heartbeat
-# backstop, the stale declared-wait paths), so each caller passes that cycle's
-# token and a repeat observation inside the same cycle neither advances the count
-# nor reports. A call with no token counts every call, which the pure unit test
-# uses.
+# The count measures elapsed supervision time, not calls: the watcher's signal
+# scan, its grace-period rescan, the heartbeat backstop, the stale declared-wait
+# paths and the daemon's wake handling and catch-all scan all share this one
+# sidecar, and several of them observe the same log within one window. A failed
+# observation advances the count only when at least FM_UNOBSERVABLE_MIN_GAP
+# seconds (default 20) have passed since the last one that did, so three drained
+# wake rows in one second, or three observers running at once, count once. A gap
+# of 0 counts every call, which the pure unit tests use.
+#
+# One predicate opens and ends an episode: the same three-helper observation the
+# signature is built from. status_observed_signature ends the episode itself when
+# it succeeds, so a caller that proved less than that - a span read, which needs
+# only identity and size - must never claim the reset, or a failure confined to
+# the path-state helper would leave the count oscillating and the bound would
+# never fire. status_observation_check is that predicate for a caller that needs
+# the reset without the signature.
 #
 # Everything here is a bash builtin - parameter expansion for the path, `read`
 # and a redirection for the sidecar - because the failure class this bound exists
 # to escalate is fork/exec pressure that kills the stat helpers while builtins
 # still work. A counter built from dirname/basename/cat/mv would go inert in
 # exactly the episode it must report. A torn write self-heals through the count
-# guard below, so the write needs no temp-and-rename.
+# guard below, so the write needs no temp-and-rename. The clock is read the same
+# way: EPOCHSECONDS, then printf's %(%s)T, and only a shell older than both (the
+# stock macOS bash 3.2) falls back to forking date - off the healthy path, which
+# never reads the clock at all. A clock that cannot be read at all leaves the gap
+# unproven, and an unproven gap counts, so a degraded host stays loud.
 FM_UNOBSERVABLE_POLLS=${FM_UNOBSERVABLE_POLLS:-3}
+FM_UNOBSERVABLE_MIN_GAP=${FM_UNOBSERVABLE_MIN_GAP:-20}
 STATUS_UNOBSERVABLE_COUNT=0
 _STATUS_UNOBSERVABLE_MARKER=
 _STATUS_UNOBSERVABLE_N=0
+_STATUS_UNOBSERVABLE_EPOCH=
 _STATUS_UNOBSERVABLE_REPORTED=0
-_STATUS_UNOBSERVABLE_CYCLE=
+_STATUS_UNOBSERVABLE_NOW=
 
 _status_unobservable_marker() {  # <status-file> -> sets _STATUS_UNOBSERVABLE_MARKER
   local f=$1 dir base
   case "$f" in */*) dir=${f%/*} ;; *) dir=. ;; esac
   base=${f##*/}
   _STATUS_UNOBSERVABLE_MARKER="$dir/.unobservable-${base%.status}"
+}
+
+_status_unobservable_now() {  # -> _STATUS_UNOBSERVABLE_NOW, empty when no clock answers
+  local t=${EPOCHSECONDS:-}
+  if [ -z "$t" ]; then
+    printf -v t '%(%s)T' -1 2>/dev/null || t=''
+  fi
+  case "$t" in
+    ''|*[!0-9]*) t=$(date +%s 2>/dev/null) || t='' ;;
+  esac
+  case "$t" in ''|*[!0-9]*) t='' ;; esac
+  _STATUS_UNOBSERVABLE_NOW=$t
 }
 
 _status_unobservable_read() {  # <status-file> -> sets the marker path and the three sidecar fields
@@ -1567,56 +1599,75 @@ _status_unobservable_read() {  # <status-file> -> sets the marker path and the t
     IFS= read -r raw < "$_STATUS_UNOBSERVABLE_MARKER" || :
   fi
   _STATUS_UNOBSERVABLE_N=$raw
+  _STATUS_UNOBSERVABLE_EPOCH=''
   _STATUS_UNOBSERVABLE_REPORTED=0
-  _STATUS_UNOBSERVABLE_CYCLE=''
   case "$raw" in
     *$'\t'*) _STATUS_UNOBSERVABLE_N=${raw%%$'\t'*}; rest=${raw#*$'\t'} ;;
   esac
   case "$rest" in
     *$'\t'*)
-      _STATUS_UNOBSERVABLE_REPORTED=${rest%%$'\t'*}
-      _STATUS_UNOBSERVABLE_CYCLE=${rest#*$'\t'}
+      _STATUS_UNOBSERVABLE_EPOCH=${rest%%$'\t'*}
+      _STATUS_UNOBSERVABLE_REPORTED=${rest#*$'\t'}
       ;;
-    *) _STATUS_UNOBSERVABLE_REPORTED=$rest ;;
+    *) _STATUS_UNOBSERVABLE_EPOCH=$rest ;;
   esac
   case "$_STATUS_UNOBSERVABLE_N" in ''|*[!0-9]*) _STATUS_UNOBSERVABLE_N=0 ;; esac
+  case "$_STATUS_UNOBSERVABLE_EPOCH" in *[!0-9]*) _STATUS_UNOBSERVABLE_EPOCH='' ;; esac
   [ "$_STATUS_UNOBSERVABLE_REPORTED" = 1 ] || _STATUS_UNOBSERVABLE_REPORTED=0
 }
 
-_status_unobservable_write() {  # <count> <reported> <cycle>, into the marker just read
+_status_unobservable_write() {  # <count> <epoch> <reported>, into the marker just read
   { printf '%s\t%s\t%s' "$1" "$2" "$3" > "$_STATUS_UNOBSERVABLE_MARKER"; } 2>/dev/null || :
 }
 
-status_observation_skipped() {  # <status-file> [<cycle>] -> 0 while this episode still owes its report
-  local cycle=${2-} count reported bound
+_status_unobservable_owed() {  # <count> <reported> -> 0 when this episode still owes its report
+  local bound=$FM_UNOBSERVABLE_POLLS
+  case "$bound" in ''|*[!0-9]*|0) bound=3 ;; esac
+  [ "$2" -eq 0 ] && [ "$1" -ge "$bound" ]
+}
+
+status_observation_skipped() {  # <status-file> -> 0 while this episode still owes its report
+  local count reported last now gap
   _status_unobservable_read "$1"
   count=$_STATUS_UNOBSERVABLE_N
   reported=$_STATUS_UNOBSERVABLE_REPORTED
-  if [ -n "$cycle" ] && [ "$cycle" = "$_STATUS_UNOBSERVABLE_CYCLE" ] && [ "$count" -gt 0 ]; then
+  last=$_STATUS_UNOBSERVABLE_EPOCH
+  gap=$FM_UNOBSERVABLE_MIN_GAP
+  case "$gap" in ''|*[!0-9]*) gap=20 ;; esac
+  _status_unobservable_now
+  now=$_STATUS_UNOBSERVABLE_NOW
+  if [ "$count" -gt 0 ] && [ -n "$now" ] && [ -n "$last" ] \
+    && [ "$now" -ge "$last" ] && [ $((now - last)) -lt "$gap" ]; then
     STATUS_UNOBSERVABLE_COUNT=$count
-    return 1
+    _status_unobservable_owed "$count" "$reported"
+    return
   fi
-  bound=$FM_UNOBSERVABLE_POLLS
-  case "$bound" in ''|*[!0-9]*|0) bound=3 ;; esac
   count=$((count + 1))
   STATUS_UNOBSERVABLE_COUNT=$count
-  _status_unobservable_write "$count" "$reported" "$cycle"
-  [ "$reported" -eq 0 ] && [ "$count" -ge "$bound" ]
+  _status_unobservable_write "$count" "${now:-$last}" "$reported"
+  _status_unobservable_owed "$count" "$reported"
 }
 
 status_observation_reported() {  # <status-file>: the episode's report is durably queued
   _status_unobservable_read "$1"
   [ "$_STATUS_UNOBSERVABLE_N" -gt 0 ] || return 0
-  _status_unobservable_write "$_STATUS_UNOBSERVABLE_N" 1 "$_STATUS_UNOBSERVABLE_CYCLE"
+  _status_unobservable_write "$_STATUS_UNOBSERVABLE_N" "$_STATUS_UNOBSERVABLE_EPOCH" 1
   return 0
 }
 
-status_observation_succeeded() {  # <status-file>: a successful observation ends the episode
+status_observation_succeeded() {  # <status-file>: a proven observation ends the episode
   _status_unobservable_marker "$1"
   if [ -s "$_STATUS_UNOBSERVABLE_MARKER" ]; then
     { : > "$_STATUS_UNOBSERVABLE_MARKER"; } 2>/dev/null || :
   fi
   return 0
+}
+
+# The episode-ending predicate for a caller that proved less than a signature.
+# 0 when the same three helpers the signature is built from all answer.
+status_observation_check() {  # <status-file>
+  _status_observe_fields "$1" || return 1
+  status_observation_succeeded "$1"
 }
 
 # 0 when an r1 signature encodes a failed observation rather than a file state,

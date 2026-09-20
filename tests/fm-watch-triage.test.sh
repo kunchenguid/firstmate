@@ -384,57 +384,118 @@ test_marker_writers_refuse_failed_observations() {
   pass "marker writers refuse failed observations while absent and dangling states keep their signatures"
 }
 
-# The bounded-skip counter fm-classify-lib.sh owns: consecutive skips of one
+# The bounded-skip counter fm-classify-lib.sh owns: failed observations of one
 # status file report exactly once when they reach the bound, later skips of the
-# same episode stay silent, and a successful observation ends the episode so the
-# next failure reports once again. The count is per supervisor cycle: several
-# skips passed one cycle token advance it once, so the bound stays a count of
-# polls however many sites observe the same log within one poll. The episode is
-# owed until a caller confirms the durable enqueue with
-# status_observation_reported, so a report that could not be queued is retried
-# rather than burned.
+# same episode stay silent, and a proven observation ends the episode so the
+# next failure reports once again. The count measures elapsed time rather than
+# calls: a failure inside FM_UNOBSERVABLE_MIN_GAP seconds of the last counted
+# one does not advance it, so however many observers or wakes look at one log in
+# a single window, the window counts once. The episode is owed until a caller
+# confirms the durable enqueue with status_observation_reported, so a report
+# that could not be queued is retried rather than burned.
 test_unobservable_bound_counts_consecutive_skips() {
   local dir f
   dir="$TMP_ROOT/unobservable-bound"; mkdir -p "$dir"
   f="$dir/task.status"
   printf 'working: x\n' > "$f"
   (
-    export FM_UNOBSERVABLE_POLLS=3
-    status_observation_skipped "$f" && fail "the first skip reported before the bound"
-    status_observation_skipped "$f" && fail "the second skip reported before the bound"
-    status_observation_skipped "$f" || fail "the third skip did not report at the bound"
+    skipped() { FM_UNOBSERVABLE_POLLS=3 FM_UNOBSERVABLE_MIN_GAP=0 status_observation_skipped "$1"; }
+    skipped "$f" && fail "the first skip reported before the bound"
+    skipped "$f" && fail "the second skip reported before the bound"
+    skipped "$f" || fail "the third skip did not report at the bound"
     [ "$STATUS_UNOBSERVABLE_COUNT" = 3 ] || fail "the count at the bound was $STATUS_UNOBSERVABLE_COUNT"
     # The report was not confirmed, so the episode is still owed.
-    status_observation_skipped "$f" || fail "an unconfirmed report was not owed on the next skip"
-    status_observation_skipped "$f" || fail "an unconfirmed report was not still owed"
+    skipped "$f" || fail "an unconfirmed report was not owed on the next skip"
+    skipped "$f" || fail "an unconfirmed report was not still owed"
     status_observation_reported "$f"
-    status_observation_skipped "$f" && fail "a skip after the confirmed report reported the episode again"
-    status_observation_skipped "$f" && fail "a later skip reported the same episode again"
+    skipped "$f" && fail "a skip after the confirmed report reported the episode again"
+    skipped "$f" && fail "a later skip reported the same episode again"
     status_observation_succeeded "$f"
-    [ ! -s "$dir/.unobservable-task" ] || fail "a successful observation left an episode in the sidecar"
-    status_observation_skipped "$f" && fail "a new episode reported on its first skip"
-    status_observation_skipped "$f" && fail "a new episode reported on its second skip"
-    status_observation_skipped "$f" || fail "a new episode did not report at the bound"
+    [ ! -s "$dir/.unobservable-task" ] || fail "a proven observation left an episode in the sidecar"
+    skipped "$f" && fail "a new episode reported on its first skip"
+    skipped "$f" && fail "a new episode reported on its second skip"
+    skipped "$f" || fail "a new episode did not report at the bound"
     status_observation_reported "$f"
-    status_observation_skipped "$f" && fail "the new episode reported twice"
-    # The same failure observed several times inside one cycle counts once.
-    status_observation_succeeded "$f"
-    status_observation_skipped "$f" poll-1 && fail "the first skip of cycle 1 reported before the bound"
-    [ "$STATUS_UNOBSERVABLE_COUNT" = 1 ] || fail "cycle 1 counted $STATUS_UNOBSERVABLE_COUNT"
-    status_observation_skipped "$f" poll-1 && fail "a second skip in cycle 1 reported"
-    [ "$STATUS_UNOBSERVABLE_COUNT" = 1 ] || fail "a second skip in cycle 1 advanced the count to $STATUS_UNOBSERVABLE_COUNT"
-    status_observation_skipped "$f" poll-1 && fail "a third skip in cycle 1 reported"
-    [ "$STATUS_UNOBSERVABLE_COUNT" = 1 ] || fail "a third skip in cycle 1 advanced the count to $STATUS_UNOBSERVABLE_COUNT"
-    status_observation_skipped "$f" poll-2 && fail "the first skip of cycle 2 reported before the bound"
-    status_observation_skipped "$f" poll-2 && fail "a second skip in cycle 2 reported"
-    status_observation_skipped "$f" poll-3 || fail "the third cycle did not report at the bound"
-    [ "$STATUS_UNOBSERVABLE_COUNT" = 3 ] || fail "the count at the bound was $STATUS_UNOBSERVABLE_COUNT"
-    status_observation_skipped "$f" poll-3 && fail "a repeat skip in the reporting cycle reported again"
-    status_observation_reported "$f"
-    status_observation_skipped "$f" poll-4 && fail "a later cycle reported the same episode again"
+    skipped "$f" && fail "the new episode reported twice"
     exit 0
   ) || exit 1
-  pass "the unobservable bound reports the third consecutive skip once per episode and counts once per cycle"
+  pass "the unobservable bound reports the third failed observation once per episode"
+}
+
+# The gap rule is what makes the bound a count of supervision windows rather
+# than of calls: the watcher's scan, its grace rescan, the stale paths and every
+# drained daemon wake row can all observe one log inside a second, and that must
+# stay one count. Driven through the library exactly as the callers use it.
+test_unobservable_count_is_bounded_by_elapsed_time() {
+  local dir f
+  dir="$TMP_ROOT/unobservable-gap"; mkdir -p "$dir"
+  f="$dir/task.status"
+  printf 'working: x\n' > "$f"
+  (
+    skipped() { FM_UNOBSERVABLE_POLLS=3 FM_UNOBSERVABLE_MIN_GAP=3600 status_observation_skipped "$1"; }
+    # Three observers inside one window: the first counts, the rest do not.
+    skipped "$f" && fail "the first failure reported before the bound"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 1 ] || fail "the first failure counted $STATUS_UNOBSERVABLE_COUNT"
+    skipped "$f" && fail "a second observer in the same window reported"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 1 ] || fail "a second observer advanced the count to $STATUS_UNOBSERVABLE_COUNT"
+    skipped "$f" && fail "a third observer in the same window reported"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 1 ] || fail "a third observer advanced the count to $STATUS_UNOBSERVABLE_COUNT"
+    # Backdating the recorded failure is what a later window looks like to the
+    # counter, and the sidecar is this library's own documented state file.
+    _status_unobservable_marker "$f"
+    printf '1\t1\t0' > "$_STATUS_UNOBSERVABLE_MARKER"
+    skipped "$f" && fail "the second window reported before the bound"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 2 ] || fail "the second window counted $STATUS_UNOBSERVABLE_COUNT"
+    skipped "$f" && fail "a repeat inside the second window reported"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 2 ] || fail "a repeat in the second window counted $STATUS_UNOBSERVABLE_COUNT"
+    printf '2\t1\t0' > "$_STATUS_UNOBSERVABLE_MARKER"
+    skipped "$f" || fail "the third window did not report at the bound"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 3 ] || fail "the third window counted $STATUS_UNOBSERVABLE_COUNT"
+    exit 0
+  ) || exit 1
+  pass "failed observations inside one gap window count once, so the bound counts windows"
+}
+
+# Opening and ending an episode use the same three-helper predicate. A failure
+# confined to the path-state helper keeps the signature unobservable, so it must
+# not be ended by a caller that only proved identity and size - that is what
+# used to leave the count oscillating and the watcher permanently blind.
+test_unobservable_episode_ends_only_on_a_full_observation() {
+  local dir f
+  dir=$(make_case unobservable-predicate)
+  f="$dir/task.status"
+  printf 'working: x\n' > "$f"
+  make_observe_readers "$dir"
+  (
+    skipped() {
+      FM_UNOBSERVABLE_POLLS=3 FM_UNOBSERVABLE_MIN_GAP=0 \
+        FM_STATUS_PATH_STATE_READER="$dir/observe-path-state" status_observation_skipped "$1"
+    }
+    observe() { FM_STATUS_PATH_STATE_READER="$dir/observe-path-state" "$@"; }
+    : > "$dir/observe-fail"
+    skipped "$f" && fail "the first failure reported before the bound"
+    # The span read needs only identity and size, so it still succeeds here.
+    observe status_span_first_actionable_record "$f" 0 >/dev/null
+    [ "$?" -ne 2 ] || fail "fixture: the span read should still succeed on a path-state failure"
+    observe status_observation_check "$f" && fail "a path-state failure passed the episode-ending predicate"
+    [ -s "$dir/.unobservable-task" ] || fail "a path-state failure ended the episode anyway"
+    skipped "$f" && fail "the second failure reported before the bound"
+    skipped "$f" || fail "the count did not continue to the bound"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 3 ] || fail "the count reached $STATUS_UNOBSERVABLE_COUNT"
+    # All three helpers answering is what ends it, and reading a signature is
+    # itself that proof.
+    rm -f "$dir/observe-fail"
+    observe status_observation_check "$f" || fail "a full observation failed the episode-ending predicate"
+    [ ! -s "$dir/.unobservable-task" ] || fail "a full observation did not end the episode"
+    : > "$dir/observe-fail"
+    skipped "$f" && fail "the new episode reported on its first failure"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 1 ] || fail "the new episode started at $STATUS_UNOBSERVABLE_COUNT"
+    rm -f "$dir/observe-fail"
+    observe status_observed_signature "$f" >/dev/null || fail "a readable log lost its signature"
+    [ ! -s "$dir/.unobservable-task" ] || fail "reading a signature did not end the episode"
+    exit 0
+  ) || exit 1
+  pass "only a full three-helper observation ends a bounded-skip episode"
 }
 
 test_stale_is_terminal_classifier() {
@@ -1670,7 +1731,7 @@ test_unobservable_status_signature_is_skipped_and_never_recorded() {
   # The failure lasts one poll cycle, under the bound of three consecutive
   # observations, so it is the transient case: no wake of any kind, no marker
   # byte changes, and the episode ends with the first successful observation.
-  FM_UNOBSERVABLE_POLLS=3 watch_bg_observed "$state" "$fakebin" "$out" "$dir"
+  FM_UNOBSERVABLE_POLLS=3 FM_UNOBSERVABLE_MIN_GAP=0 watch_bg_observed "$state" "$fakebin" "$out" "$dir"
   pid=$!
   wait_poll_cycle "$state" "$pid" \
     || { reap "$pid"; fail "watcher exited on a status log whose signature could not be observed: $(cat "$out")"; }
@@ -1713,7 +1774,7 @@ test_persistent_unobservable_status_reports_once_per_episode() {
   make_observe_readers "$dir"
   : > "$dir/observe-fail"
   export FM_FAKE_CREW_STATE='state: unknown · source: none · fake default'
-  FM_UNOBSERVABLE_POLLS=2 watch_bg_observed "$state" "$fakebin" "$out" "$dir"
+  FM_UNOBSERVABLE_POLLS=2 FM_UNOBSERVABLE_MIN_GAP=0 watch_bg_observed "$state" "$fakebin" "$out" "$dir"
   pid=$!
   wait_for_exit "$pid" 150 || fail "watcher never reported a persistently unobservable status log: $(cat "$out")"
   grep -F "check: status log unobservable: $status_file" "$out" >/dev/null \
@@ -1729,7 +1790,7 @@ test_persistent_unobservable_status_reports_once_per_episode() {
   # more is queued. The handled row is acknowledged and the next round is armed
   # as the successor a supervision turn arms (parked_watch_round below).
   ack_stopped_cycle "$state" || fail "the check row could not be drained and acknowledged"
-  FM_UNOBSERVABLE_POLLS=2 FM_WATCH_HANDLING_SUCCESSOR=1 watch_bg_observed "$state" "$fakebin" "$out" "$dir"
+  FM_UNOBSERVABLE_POLLS=2 FM_UNOBSERVABLE_MIN_GAP=0 FM_WATCH_HANDLING_SUCCESSOR=1 watch_bg_observed "$state" "$fakebin" "$out" "$dir"
   pid=$!
   if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
     reap "$pid"; fail "the same failure episode was reported again: $(cat "$out")"
@@ -6279,6 +6340,8 @@ test_status_span_respects_decision_closure
 test_malformed_seen_signature_reads_the_whole_log
 test_marker_writers_refuse_failed_observations
 test_unobservable_bound_counts_consecutive_skips
+test_unobservable_count_is_bounded_by_elapsed_time
+test_unobservable_episode_ends_only_on_a_full_observation
 test_stale_is_terminal_classifier
 test_classifier_primitives
 test_crew_is_provably_working_classifier

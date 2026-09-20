@@ -227,7 +227,7 @@ test_daemon_unobservable_status_is_bounded_per_episode() {
   make_observe_readers "$dir"
   (
     observed_wake() {
-      FM_UNOBSERVABLE_POLLS=3 FM_ESCALATE_BATCH_SECS=999 \
+      FM_UNOBSERVABLE_POLLS=3 FM_UNOBSERVABLE_MIN_GAP=0 FM_ESCALATE_BATCH_SECS=999 \
         FM_STATUS_IDENTITY_READER="$dir/observe-identity" \
         FM_STATUS_SIZE_READER="$dir/observe-size" \
         FM_STATUS_PATH_STATE_READER="$dir/observe-path-state" \
@@ -289,7 +289,7 @@ test_catchall_success_ends_the_unobservable_episode() {
   (
     scan_once() {
       rm -f "$state/.subsuper-last-scan"
-      FM_UNOBSERVABLE_POLLS=3 FM_ESCALATE_BATCH_SECS=999 FM_STATE_OVERRIDE="$state" \
+      FM_UNOBSERVABLE_POLLS=3 FM_UNOBSERVABLE_MIN_GAP=0 FM_ESCALATE_BATCH_SECS=999 FM_STATE_OVERRIDE="$state" \
         FM_STATUS_IDENTITY_READER="$dir/observe-identity" \
         FM_STATUS_SIZE_READER="$dir/observe-size" \
         FM_STATUS_PATH_STATE_READER="$dir/observe-path-state" \
@@ -325,7 +325,7 @@ test_wedge_enriched_stale_keeps_the_unobservable_report() {
   make_observe_readers "$dir"
   (
     wedge_wake() {
-      FM_UNOBSERVABLE_POLLS=2 FM_ESCALATE_BATCH_SECS=999 \
+      FM_UNOBSERVABLE_POLLS=2 FM_UNOBSERVABLE_MIN_GAP=0 FM_ESCALATE_BATCH_SECS=999 \
         FM_STATUS_IDENTITY_READER="$dir/observe-identity" \
         FM_STATUS_SIZE_READER="$dir/observe-size" \
         FM_STATUS_PATH_STATE_READER="$dir/observe-path-state" \
@@ -409,7 +409,7 @@ test_unverifiable_identity_surfaces_without_marker() {
   (
     unverifiable_wake() {
       FM_STATUS_IDENTITY_READER="$reader" FM_ESCALATE_BATCH_SECS=999 \
-        FM_UNOBSERVABLE_POLLS=2 \
+        FM_UNOBSERVABLE_POLLS=2 FM_UNOBSERVABLE_MIN_GAP=0 \
         handle_wake "signal: $state/unknown-r5.status" "$state"
     }
     unverifiable_wake
