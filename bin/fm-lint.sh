@@ -136,7 +136,7 @@ fm_lint_resolve_mem_mechanism() {
   [ -z "$FM_LINT_MEM_MECHANISM" ] || return 0
   if [ "$(uname -s)" = Linux ] && command -v systemd-run >/dev/null 2>&1 \
     && systemctl --user show-environment >/dev/null 2>&1 \
-    && systemd-run --user --scope --quiet -p MemoryMax=64M -p MemorySwapMax=0 \
+    && timeout 5 systemd-run --user --scope --quiet -p MemoryMax=64M -p MemorySwapMax=0 \
       -- true >/dev/null 2>&1
   then
     FM_LINT_MEM_MECHANISM=systemd
