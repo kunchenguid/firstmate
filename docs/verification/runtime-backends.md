@@ -653,6 +653,35 @@ FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
 On 2026-09-20 that guard could not reach its new arm for either installed harness, and the same failures reproduce on the unmodified library: bare `claude` 2.1.236 opens the session picker rather than a session, and the guard's mid-budget Escape then quits it, while codex-cli 0.147.0 parks on a hooks-trust modal the guard correctly refuses to confirm.
 The Herdr captures above are therefore this entry's live evidence, and the guard's claude arm owes a separate repair before it can refresh it.
 
+### 2026-09-20 Muse 1.3 composer and stale Pi identity
+
+On Linux x86_64 with Muse Code 1.3.0-R3401.1, a captured idle Muse composer classified `pending` when the same screen was paired with stale native identity `pi/done`, and `empty` with `muse/idle`.
+The portable `test_matrix_muse_stale_pi_identity` regression in `tests/fm-composer-lib.test.sh` retains the captured ANSI composer tail with the transcript omitted and workspace label sanitized.
+It now reports `empty` with the stale idle/done Pi identity only when the single glyph row and adjacent structured Muse model/effort footer disambiguate the shape; actual text remains pending, unknown footer layouts preserve protection, and working/blocked Pi is not overridden.
+The same suite covers the Muse 1.3 titled opening rule and rotating hint rows from upstream PR #4946; this records local verification, not that PR's merge state.
+
+Refresh the portable composer and original-record recovery evidence with:
+
+```sh
+bin/fm-test-run.sh tests/fm-composer-lib.test.sh tests/fm-task-inbox.test.sh
+bin/fm-test-run.sh tests/fm-composer-ghost.test.sh
+```
+
+Observed: two targeted suites passed (34.4s and 53.0s), and the ghost suite passed (6.5s).
+The inbox regression proves that the existing ring helper can reuse an escalated original record without another enqueue or resetting its retry budget, with pending-input/dead-endpoint refusal and acknowledgement-based retirement.
+It does not prove a live worker started validation.
+
+The current installed-harness guard was also run from an isolated fresh checkout in a restricted filesystem environment, with no model prompts submitted:
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 bin/fm-test-run.sh tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+It exited 1 after 322.1s: Kimi 0.38.0 and the strict blank-shell posture passed; Claude 2.1.278 and Grok 1.0.34 remained at workspace trust prompts; Codex 0.154.0, OpenCode 1.18.30, Pi 0.85.1 and Muse 1.3.0-R3401.1 never exposed a readable composer and their failure capture tails were empty.
+Zellij was absent.
+No trust prompt was accepted, and these startup failures do not establish a composer regression or a successful current Muse startup.
+A full live refresh remains required in a host context where the installed harnesses can start; the captured-screen and portable proofs must not be reported as a fleet-wide live pass.
+
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr
 
 Verified on 2026-09-15 on macOS arm64 (Darwin 25.5.0) against codex-cli 0.154.0 (model gpt-6-astra, fast mode) running as a Codex second mate inside a Herdr pane, read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`).
