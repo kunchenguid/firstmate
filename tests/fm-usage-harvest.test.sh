@@ -235,7 +235,13 @@ while [ "$#" -gt 0 ]; do
 done
 case "$fmt" in
   %W) printf '0\n' ;;
-  %Y) /usr/bin/stat -f %m -- "$file" 2>/dev/null || /usr/bin/stat -c %Y -- "$file" ;;
+  %Y)
+    # GNU stat can print filesystem data before rejecting BSD's -f format.
+    # Publish only the successful timestamp, as the real harvester does.
+    t=$(/usr/bin/stat -f %m -- "$file" 2>/dev/null) \
+      || t=$(/usr/bin/stat -c %Y -- "$file") || exit 1
+    printf '%s\n' "$t"
+    ;;
   *) exit 1 ;;
 esac
 SH
@@ -268,6 +274,10 @@ JSON
 
   fb="$TMP_ROOT/nobirth-fakebin"
   nobirth_stat_bin "$fb"
+  [ "$("$fb/stat" -c %W -- "$state/$id.status")" = 0 ] \
+    || fail "birthless stat fixture must report no birth time"
+  [ "$("$fb/stat" -c %Y -- "$state/$id.status")" = "$base" ] \
+    || fail "birthless stat fixture must return only the mtime epoch"
   cat > "$fb/date" <<'PYDATE'
 #!/usr/bin/env python3
 import os
