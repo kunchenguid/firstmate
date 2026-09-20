@@ -137,7 +137,7 @@ test_answer_send_closes_open_decision() {
   grep -qF "go with REST" "$home/state/t1.inbox/001.msg" \
     || fail "the answer text should reach the worker's durable inbox record"
   assert_contains "$(cat "$log")" "Firstmate instruction waiting" "the doorbell should be rung for the answer"
-  status_event_recorded "$home/state/t1.status" 'resolved [key=api-shape]: answered: go with REST' \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t1.status" | grep -qF 'resolved [key=api-shape]: answered: go with REST' \
     || fail "fm-send did not append the closing resolved line:"$'\n'"$(cat "$home/state/t1.status")"
   # The drain folded the worker's `working:` line but never listed it, so the
   # close must leave the file for the watcher instead of marking it seen.
@@ -173,7 +173,7 @@ test_answer_close_is_self_announced() {
 
   run_send "$fb" "$home" "$log" t9 --resolve-key port-choice "use 9090"; rc=$?
   expect_code 0 "$rc" "the answer send should succeed"
-  status_event_recorded "$home/state/t9.status" 'resolved [key=port-choice]: answered: use 9090' \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t9.status" | grep -qF 'resolved [key=port-choice]: answered: use 9090' \
     || fail "the closing resolved line is missing"
   FM_STATE_OVERRIDE="$home/state" bash -c '
     . "$1"; fm_wake_signal_seen_current "$2" "$3"
@@ -208,7 +208,7 @@ test_colon_first_key_position_is_answerable() {
 
   run_send "$fb" "$home" "$log" t8 --resolve-key seam-max-bound "cap it at 4"; rc=$?
   expect_code 0 "$rc" "answering a colon-first stated key should succeed, not refuse as unknown"
-  status_event_recorded "$home/state/t8.status" 'resolved [key=seam-max-bound]: answered: cap it at 4' \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t8.status" | grep -qF 'resolved [key=seam-max-bound]: answered: cap it at 4' \
     || fail "the closing resolved line is missing:"$'\n'"$(cat "$home/state/t8.status")"
 
   out=$(drain_out "$home")
@@ -310,7 +310,7 @@ test_failed_ring_still_closes_at_enqueue() {
   expect_code 0 "$rc" "a failed doorbell must not fail the durably enqueued answer"
   grep -qF 'token is in the vault now' "$home/state/t5.inbox/001.msg" \
     || fail "the answer must be durably recorded despite the failed ring"
-  status_event_recorded "$home/state/t5.status" 'resolved [key=creds]: answered: token is in the vault now' \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t5.status" | grep -qF 'resolved [key=creds]: answered: token is in the vault now' \
     || fail "the enqueued answer must close the decision at answer time: $(cat "$home/state/t5.status")"
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F '[key=creds]' >/dev/null; then
@@ -472,7 +472,7 @@ test_remote_secondmate_answer_closes_locally() {
   expect_code 0 "$rc" "a remote secondmate answer send should succeed"
   assert_grep 'fm-remote-entrypoint.sh' "$ssh_log" \
     "the answer message should cross the remote transport"
-  status_event_recorded "$home/state/rsm.status" 'resolved [key=upgrade-window]: answered: the weekend, freeze Friday' \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/rsm.status" | grep -qF 'resolved [key=upgrade-window]: answered: the weekend, freeze Friday' \
     || fail "the remote answer did not close the local ledger: $(cat "$home/state/rsm.status")"
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
@@ -507,7 +507,7 @@ test_remote_reply_corr_tag_does_not_block_resolve_key() {
     FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" FM_FAKE_SSH_RC=0 \
     "$SEND" rsm --resolve-key loan-installment-cadence-amount "monthly" >/dev/null 2>&1; rc=$?
   expect_code 0 "$rc" "answering a corr-tagged remote decision should succeed, not refuse as unknown"
-  status_event_recorded "$home/state/rsm.status" 'resolved [key=loan-installment-cadence-amount]: answered: monthly' \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/rsm.status" | grep -qF 'resolved [key=loan-installment-cadence-amount]: answered: monthly' \
     || fail "the closing resolved line is missing:"$'\n'"$(cat "$home/state/rsm.status")"
 
   out=$(drain_out "$home")
@@ -794,7 +794,7 @@ test_decision_answer_partition_relocates_under_the_record() {
   # ordinary lease guard alone.
   FM_SUPERVISION_ACTOR=branch run_send "$fb" "$home" "$log" t1 --resolve-key token "refreshed the token; resume"; rc=$?
   expect_code 0 "$rc" "an attended branch resolving a blocker is ordinary steering"
-  grep -qF 'resolved [key=token]: answered: refreshed the token; resume' "$home/state/t1.status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t1.status" | grep -qF 'resolved [key=token]: answered: refreshed the token; resume' \
     || fail "the branch's blocker answer did not close the key:"$'\n'"$(cat "$home/state/t1.status")"
   grep -qF "refreshed the token; resume" "$home/state/t1.inbox/001.msg" \
     || fail "the branch's blocker answer did not reach the worker's inbox"
@@ -806,7 +806,7 @@ test_decision_answer_partition_relocates_under_the_record() {
     FM_SUPERVISION_ACTOR=branch "$SEND" t1 --resolve-key api-shape "go with REST" 2>&1); rc=$?
   expect_code 0 "$rc" "under the away-posture record the branch's decision answer must be sent: $out"
   assert_contains "$out" "main is parked" "the relocation did not announce itself"
-  grep -qF 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t1.status" | grep -qF 'resolved [key=api-shape]: answered: go with REST' \
     || fail "the relocated answer did not close the decision:"$'\n'"$(cat "$home/state/t1.status")"
   grep -qF "go with REST" "$home/state/t1.inbox/002.msg" \
     || fail "the relocated answer did not reach the worker's inbox"
@@ -820,7 +820,7 @@ test_decision_answer_partition_relocates_under_the_record() {
   printf 'needs-decision [key=db]: postgres or sqlite\n' >> "$home/state/t1.status"
   run_send "$fb" "$home" "$log" t1 --resolve-key db "postgres"; rc=$?
   expect_code 0 "$rc" "main answering a decision attended is unaffected by the partition"
-  grep -qF 'resolved [key=db]: answered: postgres' "$home/state/t1.status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/t1.status" | grep -qF 'resolved [key=db]: answered: postgres' \
     || fail "main's attended decision answer did not close the key"
   pass "fm-send --resolve-key: a decision answer refuses the attended branch before sending, a blocked: key stays steering, and the away-posture record relocates the answer"
 }

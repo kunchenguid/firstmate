@@ -331,13 +331,15 @@ status_stamp_line() {  # <new-status-line> -> line (without newline)
   fi
 }
 
-# Strip the one well-formed time tag _fm_status_at_epoch accepts. Every other
-# [at=...] byte run - malformed, duplicate, or outside the canonical bounds - is
-# ordinary line bytes, never a time tag, so relevance, retry dedup, key, and note
-# all read the same line. Relevance and retry matching share this normalization:
-# it reads the grammar from that one parser rather than a second spelling of it,
-# and a sweep that normalizes a line at a time never pays a fork for the match it
-# prepares.
+# Strip the one well-formed time tag _fm_status_at_epoch accepts, for the two
+# readers that ask what a stamp MEANS: emission time and retry-dedup identity.
+# Every other [at=...] byte run - malformed, duplicate, or outside the canonical
+# bounds - is ordinary line bytes here, never a time tag, so a retry of it stays
+# a distinct event. Captain-relevance asks a different question and owns a more
+# tolerant rule in _fm_status_unstamped below; do not route a relevance-adjacent
+# reader through this one. It reads the grammar from that single parser rather
+# than a second spelling of it, and a sweep that normalizes a line at a time
+# never pays a fork for the match it prepares.
 _fm_status_untimed() {  # <status-line> <out-var> -> line without a time tag
   local __fm_untimed_epoch __fm_untimed_head __fm_untimed_tag __fm_untimed_before
   if _fm_status_at_epoch "$1" __fm_untimed_epoch; then
@@ -351,33 +353,32 @@ _fm_status_untimed() {  # <status-line> <out-var> -> line without a time tag
   printf -v "$2" '%s' "$1"
 }
 
-# Strip every time-tag-shaped run from the head, however malformed its value.
-# Captain-relevance asks a different question from emission time and dedup: a
-# tag is metadata a worker appended, so it must never decide whether a terminal
-# event reaches its supervisor, even when the worker left the brief's <epoch>
-# placeholder unsubstituted or wrote a value this module cannot read as a time.
-# Only the head is normalized, so an [at=...] run inside the note stays matchable
-# text. A tag holding the line's first colon is not a tag at all - it breaks the
-# head/note split itself - so it survives here as the ordinary bytes it is.
-_fm_status_unstamped() {  # <status-line> <out-var> -> line with head tags removed
-  local __fm_unstamped_head __fm_unstamped_rest __fm_unstamped_keep=''
-  case "$1" in
-    *:*) __fm_unstamped_head=${1%%:*}; __fm_unstamped_rest=:${1#*:} ;;
-    *) printf -v "$2" '%s' "$1"; return 0 ;;
-  esac
+# Strip every time-tag-shaped run a worker could have written as the stamp,
+# however malformed its value. Captain-relevance asks a different question from
+# emission time and dedup: a tag is metadata a worker appended, so it must never
+# decide whether a terminal event reaches its supervisor - not when the worker
+# left the brief's <epoch> placeholder unsubstituted, and not when they wrote a
+# readable time whose colons swallow the head/note separator.
+# A run is the stamp only while nothing before it holds a colon; once one does,
+# the head has ended and every later [at=...] is note text the override may
+# legitimately match on, so scanning stops there. The caller's own bytes are
+# untouched: this writes a throwaway copy used for matching only.
+_fm_status_unstamped() {  # <status-line> <out-var> -> line with its stamp removed
+  local __fm_unstamped_rest=$1 __fm_unstamped_keep='' __fm_unstamped_before
   while :; do
-    case "$__fm_unstamped_head" in *\[at=*\]*) ;; *) break ;; esac
-    __fm_unstamped_keep=$__fm_unstamped_keep${__fm_unstamped_head%%\[at=*}
-    __fm_unstamped_keep=${__fm_unstamped_keep% }
-    __fm_unstamped_head=${__fm_unstamped_head#*\[at=}
-    __fm_unstamped_head=${__fm_unstamped_head#*\]}
+    case "$__fm_unstamped_rest" in *\[at=*\]*) ;; *) break ;; esac
+    __fm_unstamped_before=${__fm_unstamped_rest%%\[at=*}
+    case "$__fm_unstamped_before" in *:*) break ;; esac
+    __fm_unstamped_keep=$__fm_unstamped_keep${__fm_unstamped_before% }
+    __fm_unstamped_rest=${__fm_unstamped_rest#*\[at=}
+    __fm_unstamped_rest=${__fm_unstamped_rest#*\]}
   done
-  printf -v "$2" '%s' "$__fm_unstamped_keep$__fm_unstamped_head$__fm_unstamped_rest"
+  printf -v "$2" '%s' "$__fm_unstamped_keep$__fm_unstamped_rest"
 }
 
 # Retry deduplication ignores only a well-formed optional numeric time tag;
 # all other bytes, including correlation metadata, still identify the event.
-# Both sides normalize through the one helper above, so a stamped retry of an
+# Both sides normalize through _fm_status_untimed, so a stamped retry of an
 # already-recorded event can never read as a new one.
 status_event_recorded() {  # <status-file> <new-status-line>
   local wanted line untimed

@@ -680,6 +680,7 @@ test_malformed_event_time_is_ordinary_bytes() {
   for verb in 'done' needs-decision blocked failed; do
     for line in "$verb [at=]: audit complete" "$verb [at=bad]: audit complete" \
       "$verb [at=17:00]: audit complete" "$verb [at=bad] [at=17:00]: audit complete" \
+      "$verb [at=2026-09-20T14:03:00Z]: audit complete" "$verb [at=10:30]: audit complete" \
       "$verb [at=\$(date +%s)]: audit complete" \
       "$verb [at=<epoch>]: audit complete" \
       "$verb [at=1] [at=2]: audit complete" \
@@ -694,11 +695,8 @@ test_malformed_event_time_is_ordinary_bytes() {
         || fail "default vocabulary hid actionable status span: $line"
       [ "$event" = "$line" ] || fail "classification changed surfaced event bytes: $event"
       # A tag the worker spelled wrong is still a tag, so it must not decide
-      # whether the supervisor sees a terminal event. The colon-bearing forms
-      # hold the line's own head/note separator, so they stay ordinary bytes.
-      case "$line" in
-        *'[at=17:00]'*) continue ;;
-      esac
+      # whether the supervisor sees a terminal event - including a readable
+      # timestamp whose colons would otherwise swallow the head/note separator.
       (
         FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'
         status_is_captain_relevant "$line" || exit 1
