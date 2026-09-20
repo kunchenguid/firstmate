@@ -389,8 +389,17 @@ The path is the file's single whitespace-trimmed non-comment line; blank lines a
 It must be an absolute path to an existing readable directory.
 A relative path, a missing or non-directory target, an unreadable directory or file, an empty file, or more than one non-comment line refuses every spawn from that home, whichever harness it would launch, before any endpoint, worktree, or task record exists, and names the accepted shape; Firstmate never launches, or registers trust, on a store the captain did not choose.
 The file is read on every spawn and relaunch, so a change takes effect at the next launch without a restart.
-It is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract, so a secondmate's own Claude crewmates launch on the same seat.
+This file is NOT inherited into secondmate homes.
+An absolute store path is meaningful only on the machine that holds it, so each home, including a secondmate home, names its own store in its own `config/claude-config-dir`.
 The seat path itself is captain-private and never belongs in a tracked file.
+
+A store named here must already be interactively usable, because Firstmate points workers at it but never completes its one-time setup for them.
+It must be signed in: `CLAUDE_CONFIG_DIR=<dir> claude -p 'hi'` answers.
+Its first-run setup must already be completed in that store's `.claude.json` (`hasCompletedOnboarding`, `lastOnboardingVersion`, `theme`), or the first worker sits on the theme and login-method wizard and cannot be steered past it.
+It must hold a `settings.json` carrying the permission posture the fleet launches with (`permissions.defaultMode` `bypassPermissions` and `skipDangerousModePermissionPrompt` true for the default bypass posture).
+Its auto-mode default nudge must already be answered (`hasSeenAutoDefaultNudge`, `hasSeenAutoModeEntryWarning`), or a worker parks on an unanswerable "make auto mode your default?" dialog.
+Workspace trust needs no action: `bin/fm-claude-trust.sh` pre-registers it into the named store on every spawn, so trust is not part of this precondition.
+A store failing any of these leaves the spawn reporting success while the pane sits on a dialog Firstmate's key plane cannot answer.
 
 ## Worker launch environment (config/launch-env-allowlist)
 

@@ -305,10 +305,11 @@
 #   directory or file, an empty file, or more than one non-comment line refuses
 #   the spawn before any endpoint, worktree, or record exists and names the
 #   accepted shape. The file is read on every spawn and relaunch, so a change
-#   reaches the next launch without a restart, and it is inherited into
-#   secondmate homes (bin/fm-config-inherit-lib.sh). The assignment is baked
-#   into the launch text, so it survives a config/launch-env-allowlist filter
-#   without an allowlist entry.
+#   reaches the next launch without a restart. It is NOT inherited into
+#   secondmate homes: an absolute store path is meaningful only on the machine
+#   that holds it, so each home, including a secondmate home, names its own
+#   store. The assignment is baked into the launch text, so it survives a
+#   config/launch-env-allowlist filter without an allowlist entry.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -4700,9 +4701,13 @@ esac
 # fm-claude-trust.sh just registered - and the assignment survives an env -i
 # launch filter. Only when set; an empty value is the single-store default and
 # needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "$CLAUDE_STORE" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_STORE") $LAUNCH"
-fi
+case "$HARNESS" in
+claude*)
+  if [ -n "$CLAUDE_STORE" ]; then
+    LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_STORE") $LAUNCH"
+  fi
+  ;;
+esac
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")

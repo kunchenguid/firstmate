@@ -1628,6 +1628,35 @@ test_claude_config_dir_refuses_every_harness_from_that_home() {
   pass "a malformed config/claude-config-dir refuses every spawn from that home, like the permission-mode precedent"
 }
 
+# A raw launch command records the command's basename as the harness, so a
+# claude-family wrapper reaches the `claude*` trust arm. Store selection must
+# match that same family rule: registering trust into the captain's seat and
+# then launching on a different one is the exact failure this file prevents.
+test_claude_family_raw_launch_carries_the_configured_store() {
+  local rec id out status launch store
+  id=cfgdir-raw-family-z35
+  rec=$(make_spawn_case cfgdir-raw-family claude "$id")
+  read_case_record "$rec"
+  store="$CASE_DIR/seat"
+  mkdir -p "$store"
+  printf '%s\n' "$store" > "$HOME_DIR/config/claude-config-dir"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "claude-enterprise --flag")
+  status=$?
+  expect_code 0 "$status" "a claude-family raw launch under config/claude-config-dir should succeed"$'\n'"$out"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude-enterprise default default
+  launch=$(cat "$LAUNCH_LOG")
+  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; CLAUDE_CONFIG_DIR='$store' claude-enterprise --flag" ] \
+    || fail "a claude-family raw launch did not carry the configured store"$'\n'"actual: $launch"
+  # Trust went to the configured store, so the launch must spend that same one.
+  claude_trusted_paths "$store" | grep -Fqx "$WT_DIR" \
+    || fail "trust was not registered in the configured store for a claude-family raw launch"
+  [ ! -e "$HOME_DIR/user-home/.claude.json" ] \
+    || fail "a claude-family raw launch registered trust in the default store"
+  pass "a claude-family raw launch command selects the store its trust registration used"
+}
+
 test_non_claude_harness_ignores_claude_config_dir_file() {
   local rec id out status launch store
   id=cfgdir-codex-z34
@@ -1698,6 +1727,7 @@ test_claude_config_dir_unreadable_file_refuses_before_endpoint_or_metadata
 test_claude_config_dir_multiple_lines_refuse_before_endpoint_or_metadata
 test_claude_config_dir_empty_file_refuses_before_endpoint_or_metadata
 test_claude_config_dir_refuses_every_harness_from_that_home
+test_claude_family_raw_launch_carries_the_configured_store
 test_non_claude_harness_ignores_claude_config_dir_file
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority

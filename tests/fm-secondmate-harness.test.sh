@@ -1490,26 +1490,31 @@ test_spawn_secondmate_claude_config_dir() {
   pass "C2c spawn: config/claude-config-dir reaches a Claude secondmate launch and its trust registration"
 }
 
-# The seat is a captain-wide choice, so it inherits like
-# config/claude-permission-mode: present values converge exactly and primary absence mirrors.
-test_claude_config_dir_inheritance_present_and_absent() {
+# The seat is a host-local absolute path, so unlike config/claude-permission-mode
+# it is NOT inherited: convergence never carries the primary's seat into a
+# secondmate home, and it never disturbs the seat that home names for itself.
+test_claude_config_dir_is_not_inherited() {
   local w head out err status
   w=$(new_world cfgdir-inherit)
   head=$(git -C "$w/main" rev-parse HEAD)
   add_sm_worktree "$w" sm "$head"
 
   printf '/opt/claude-seat\n' > "$w/home/config/claude-config-dir"
+  mkdir -p "$w/sm/config"
+  printf '/srv/sm-own-seat\n' > "$w/sm/config/claude-config-dir"
   err="$w/cfgdir-inherit.err"
   out=$(run_config_push "$w" 2>"$err"); status=$?
-  expect_code 0 "$status" "claude-config-dir present push should succeed"
-  assert_contains "$out" "claude-config-dir: pushed" "present value should report pushed"
-  [ "$(cat "$w/sm/config/claude-config-dir")" = /opt/claude-seat ] || fail "claude-config-dir present value not pushed"
+  expect_code 0 "$status" "a push with a primary claude-config-dir should succeed"
+  assert_not_contains "$out" "claude-config-dir" "the host-local seat file must take no part in convergence"
+  [ "$(cat "$w/sm/config/claude-config-dir")" = /srv/sm-own-seat ] \
+    || fail "convergence overwrote the secondmate home's own seat"
 
   rm -f "$w/home/config/claude-config-dir"
   out=$(run_config_push "$w" 2>"$err"); status=$?
-  expect_code 0 "$status" "claude-config-dir absence push should succeed"
-  [ -e "$w/sm/config/claude-config-dir" ] && fail "claude-config-dir not removed on primary absence"
-  pass "B12d claude-config-dir inheritance: present values and primary absence converge exactly"
+  expect_code 0 "$status" "a push with no primary claude-config-dir should succeed"
+  [ "$(cat "$w/sm/config/claude-config-dir")" = /srv/sm-own-seat ] \
+    || fail "primary absence removed the secondmate home's own seat"
+  pass "B12d claude-config-dir is host-local: never pushed into a secondmate home, and a home's own seat survives convergence"
 }
 
 test_backend_inheritance_present_and_absent() {
@@ -2712,7 +2717,7 @@ test_backend_inheritance_present_and_absent
 test_spawn_secondmate_claude_permission_mode_auto
 test_claude_permission_mode_inheritance_present_and_absent
 test_spawn_secondmate_claude_config_dir
-test_claude_config_dir_inheritance_present_and_absent
+test_claude_config_dir_is_not_inherited
 test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation
