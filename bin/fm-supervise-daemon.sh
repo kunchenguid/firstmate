@@ -1186,8 +1186,15 @@ housekeeping() {  # <state>
       rc=$?
       if [ "$rc" -eq 2 ]; then
         # A log the scan could not observe is skipped for this scan, not
-        # escalated: the next catch-all scan reads it again.
-        ident=$(status_observed_signature "$f") || continue
+        # escalated, under the bounded-skip rule fm-classify-lib.sh owns: the
+        # next catch-all scan reads it again, and only a persistent failure is
+        # escalated, once per episode, when its consecutive skips reach the bound.
+        ident=$(status_observed_signature "$f") || {
+          status_observation_skipped "$f" \
+            && escalate_add "$state" "$(basename "$f"): status log unobservable, $STATUS_UNOBSERVABLE_COUNT consecutive failed observations, stat helpers failing"
+          continue
+        }
+        status_observation_succeeded "$f"
         status_presentation_marker_reported_matches "$(_seen_status_path "$state" "$task")" "$ident" \
           && continue
         if escalate_add "$state" "$(basename "$f"): unreadable status span (catch-all scan)"; then

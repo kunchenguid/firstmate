@@ -29,6 +29,9 @@
 # with no output after one retry, and no marker writer records such a signature,
 # so one transient failure can neither wake the supervisor nor poison the
 # recorded state (status_observed_signature, status_observed_signature_unobservable).
+# The skip is bounded: consecutive failed observations of one file are counted
+# in its sidecar and reported once per episode when they reach
+# FM_UNOBSERVABLE_POLLS, so a persistent failure stays loud (status_observation_skipped).
 # A missing, malformed, identity-mismatched, or past-end classified position reads
 # from byte 0, preferring a bounded duplicate over a lost event.
 #
@@ -1456,6 +1459,7 @@ _status_observe_fields() {  # <file> [<size> <ident>]
   local f=$1 size=${2-} ident=${3-} path_state link_target=- access kind exists=1 failed=0
   _STATUS_OBSERVED_FIELDS=()
   path_state=$(_status_observed_path_state "$f") || path_state=stat-error
+  [ -n "$path_state" ] || path_state=stat-error
   if [ -L "$f" ]; then
     link_target=$(readlink "$f" 2>/dev/null) || { link_target=readlink-error; failed=1; }
     kind=symlink
@@ -1504,6 +1508,63 @@ status_observed_signature() {  # <file> [<size> <ident>]
     | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
   [ -n "$encoded" ] || return 1
   printf 'r1:%s' "$encoded"
+}
+
+# Bounded skip: the one rule every path that skips an unobservable status log
+# applies (the watcher's signal scan, heartbeat backstop, and stale declared-wait
+# paths, and the daemon's catch-all scan). A momentary failure is skipped
+# silently, but a persistent one must not blind every supervisor surface, so
+# each consecutive failed observation of one status file is counted in a private
+# sidecar beside it (state/.unobservable-<task>: "<count>\t<reported>", written
+# only here, a documented exception to the pure-read rule like the cursor), a
+# successful observation clears the sidecar, and the count reaching
+# FM_UNOBSERVABLE_POLLS (default 3, the consecutive-error budget shape of
+# bin/fm-procevent-when.sh's --error-budget) makes status_observation_skipped
+# return 0 exactly once per failure episode so the caller reports it. After that
+# it returns 1 until the file is observable again and a new episode starts. The
+# error tokens are never a throttle key; only this counter is. A sidecar that
+# cannot be written still returns the due report, so an unwritable state dir is
+# loud rather than silent.
+FM_UNOBSERVABLE_POLLS=${FM_UNOBSERVABLE_POLLS:-3}
+STATUS_UNOBSERVABLE_COUNT=0
+
+_status_unobservable_marker() {  # <status-file>
+  local f=$1 dir base
+  dir=$(dirname "$f")
+  base=$(basename "$f")
+  printf '%s/.unobservable-%s' "$dir" "${base%.status}"
+}
+
+status_observation_skipped() {  # <status-file> -> 0 when this skip is the episode's one report
+  local f=$1 marker raw count reported bound due=1 tmp
+  marker=$(_status_unobservable_marker "$f")
+  raw=$(cat "$marker" 2>/dev/null) || raw=''
+  case "$raw" in
+    *$'\t'*) count=${raw%%$'\t'*}; reported=${raw#*$'\t'} ;;
+    *) count=$raw; reported=0 ;;
+  esac
+  case "$count" in ''|*[!0-9]*) count=0 ;; esac
+  [ "$reported" = 1 ] || reported=0
+  bound=$FM_UNOBSERVABLE_POLLS
+  case "$bound" in ''|*[!0-9]*|0) bound=3 ;; esac
+  count=$((count + 1))
+  STATUS_UNOBSERVABLE_COUNT=$count
+  if [ "$reported" -eq 0 ] && [ "$count" -ge "$bound" ]; then
+    reported=1
+    due=0
+  fi
+  tmp="$marker.tmp.$$"
+  if printf '%s\t%s' "$count" "$reported" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$marker" 2>/dev/null || rm -f "$tmp"
+  fi
+  return "$due"
+}
+
+status_observation_succeeded() {  # <status-file>: a successful observation ends the episode
+  local marker
+  marker=$(_status_unobservable_marker "$1")
+  [ ! -e "$marker" ] || rm -f "$marker"
+  return 0
 }
 
 # 0 when an r1 signature encodes a failed observation rather than a file state,
@@ -1607,7 +1668,8 @@ status_retire_presentation_task() {  # <state> <task-id>
     && [ ! -L "$state/.$task.open-decisions-cursor" ] \
     && [ ! -e "$signal_marker" ] && [ ! -L "$signal_marker" ] \
     && [ ! -e "$heartbeat_marker" ] && [ ! -L "$heartbeat_marker" ] \
-    && [ ! -e "$daemon_marker" ] && [ ! -L "$daemon_marker" ]; then
+    && [ ! -e "$daemon_marker" ] && [ ! -L "$daemon_marker" ] \
+    && [ ! -e "$state/.unobservable-$task" ] && [ ! -L "$state/.unobservable-$task" ]; then
     if [ ! -e "$manifest" ] && [ ! -L "$manifest" ]; then
       return 0
     fi
@@ -1654,7 +1716,8 @@ EOF
   fi
   if [ "$rc" -eq 0 ]; then
     rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" \
-      "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
+      "$signal_marker" "$heartbeat_marker" "$daemon_marker" \
+      "$state/.unobservable-$task" || rc=1
   fi
   fm_lock_release "$lock" || rc=1
   return "$rc"

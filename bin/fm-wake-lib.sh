@@ -2120,6 +2120,23 @@ fm_wake_signal_seen_size() {  # <state> <file>
   esac
 }
 
+# 0 when an already-observed <signature> of <file> matches its recorded reported
+# state. A caller that holds the signature of this poll compares that one, so
+# the file is observed exactly once per poll and a second observation failing
+# on its own can never make an unchanged file read as changed.
+fm_wake_signal_seen_matches() {  # <state> <file> <signature>
+  local marker
+  [ -n "$3" ] || return 1
+  marker=$(fm_wake_signal_seen_path "$1" "$2")
+  case "$2" in
+    *.status)
+      _fm_wake_require_classify || return 1
+      status_presentation_marker_reported_matches "$marker" "$3"
+      ;;
+    *) [ "$(cat "$marker" 2>/dev/null)" = "$3" ] ;;
+  esac
+}
+
 # 0 when <file>'s current signature matches its recorded reported state.
 # For a status file this means the current state was already reported, not that
 # every byte was successfully classified; the separate classified position owns
@@ -2127,17 +2144,9 @@ fm_wake_signal_seen_size() {  # <state> <file>
 # A missing marker or unreadable signature is not a match, so uncertainty reads
 # as an unreported state.
 fm_wake_signal_seen_current() {  # <state> <file>
-  local sig marker
+  local sig
   sig=$(fm_wake_signal_sig "$2") || return 1
-  [ -n "$sig" ] || return 1
-  marker=$(fm_wake_signal_seen_path "$1" "$2")
-  case "$2" in
-    *.status)
-      _fm_wake_require_classify || return 1
-      status_presentation_marker_reported_matches "$marker" "$sig"
-      ;;
-    *) [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] ;;
-  esac
+  fm_wake_signal_seen_matches "$1" "$2" "$sig"
 }
 
 fm_wake_status_reported_commit() {  # <state> <status-file> <reported-signature>

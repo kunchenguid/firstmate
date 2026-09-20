@@ -105,6 +105,11 @@
 #                          source owned closes that episode); the queued
 #                          payload names what to check. These three kinds are
 #                          joined with `;` when more than one surfaces in a cycle
+#   check: status log unobservable: <file>, <n> consecutive failed observations, stat helpers failing
+#                          the log's stat helpers kept failing for FM_UNOBSERVABLE_POLLS
+#                          consecutive observations while the bash builtin file
+#                          tests still passed; queued once per failure episode
+#                          (bin/fm-classify-lib.sh owns the bound)
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
@@ -1319,7 +1324,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   statusf="$STATE/$task.status"
   # The declaration is read before any marker moves: a log that cannot be
   # observed this poll leaves the whole sighting for the next poll to classify.
-  declaration=$(stale_wait_declaration "$task") || { stale_skip_unobserved "$win"; return 0; }
+  declaration=$(stale_wait_declaration "$task") || { stale_skip_unobserved "$win" "$task"; return 0; }
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
   rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
@@ -1407,7 +1412,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
       # pause tracking stays unwritten here, exactly as the idle away-mode handoff
       # leaves it, because the daemon owns that bookkeeping.
       key=$(window_key "$win")
-      declared=$(stale_wait_declaration "$task") || { stale_skip_unobserved "$win"; return 0; }
+      declared=$(stale_wait_declaration "$task") || { stale_skip_unobserved "$win" "$task"; return 0; }
       rm -f "$since_file" "$escalation_file"
       clear_write_tracking "$key"
       if captain_held_silenced "$(last_status_line "$statusf")"; then
@@ -1554,14 +1559,20 @@ task_captain_call_open() {  # <task>
 stale_wait_declaration() {  # <task> -> 0 with the declaration, 1 when the log could not be observed this poll
   local sig
   sig=$(fm_wake_signal_sig "$STATE/$1.status") || return 1
+  status_observation_succeeded "$STATE/$1.status"
   printf 'declared:%s' "$sig"
 }
 
 # A status log whose signature could not be observed this poll is not a new
 # declaration: every caller leaves its markers alone, so the same sighting is
-# classified again by the next poll instead of alarming on the failure.
-stale_skip_unobserved() {  # <window>
+# classified again by the next poll instead of alarming on the failure. The
+# skip counts toward the log's bounded-skip episode, and the one skip that
+# reaches the bound wakes with its check row (unobservable_report).
+stale_skip_unobserved() {  # <window> <task>
   triage_log "skipped stale (status signature unobservable this poll): $1"
+  if unobservable_report "$STATE/$2.status"; then
+    wake "$UNOBSERVABLE_REASON"
+  fi
 }
 
 # The same scope for a captain call, carrying the CALL's own lifecycle identity
@@ -1575,6 +1586,7 @@ stale_skip_unobserved() {  # <window>
 captain_call_declaration() {  # <task> <call-identity> -> 1 when the log could not be observed this poll
   local sig
   sig=$(fm_wake_signal_sig "$STATE/$1.status") || return 1
+  status_observation_succeeded "$STATE/$1.status"
   printf 'captain-hold:%s:%s' "$2" "$sig"
 }
 
@@ -1652,7 +1664,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   if status_is_paused "$last"; then
     declared=0
     bounded=0
-    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task") || { stale_skip_unobserved "$win"; return 0; }
+    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task") || { stale_skip_unobserved "$win" "$task"; return 0; }
     if until=$(status_paused_until "$last"); then
       now=$(date +%s)
       if [ "$now" -lt "$until" ]; then
@@ -1667,7 +1679,7 @@ surface_nonterminal_stale() {  # <window> <hash>
   elif status_is_captain_held "$last"; then
     declared=0
     bounded=0
-    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task") || { stale_skip_unobserved "$win"; return 0; }
+    STALE_WAIT_DECLARATION=$(stale_wait_declaration "$task") || { stale_skip_unobserved "$win" "$task"; return 0; }
     if captain_held_silenced "$last"; then
       throttled=0
     else
@@ -1678,7 +1690,7 @@ surface_nonterminal_stale() {  # <window> <hash>
     bound_rc=$?
     case "$bound_rc" in
       0) bounded=0; throttled=0 ;;
-      2) stale_skip_unobserved "$win"; return 0 ;;
+      2) stale_skip_unobserved "$win" "$task"; return 0 ;;
       *) [ -z "$STALE_WAIT_DECLARATION" ] || bounded=0 ;;
     esac
   fi
@@ -1730,8 +1742,14 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # markers retain their size-and-mtime signature.
 # A file whose signature cannot be observed this poll (fm_wake_signal_sig fails,
 # the stat-helper failure fm-classify-lib.sh's status_observed_signature owns) is
-# skipped, never listed as changed: the next poll observes it again.
-# Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
+# skipped, never listed as changed: the next poll observes it again. The skip is
+# bounded by that library's status_observation_skipped: it counts the skip in
+# the log's sidecar, and the one skip per failure episode that reaches the bound
+# is printed as an "UNOBSERVABLE\t<file>\t<count>" line for the caller to report.
+# Each file is observed exactly once per poll and that signature is what the
+# marker is compared against.
+# Prints one "<seen-file>\t<sig>\t<file>" line per changed file; the sidecar
+# bookkeeping above is its only write.
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
 scan_signals() {
@@ -1740,17 +1758,59 @@ scan_signals() {
     if [ ! -e "$f" ]; then
       case "$f" in *.status) [ -L "$f" ] || continue ;; *) continue ;; esac
     fi
-    sig=$(fm_wake_signal_sig "$f") || continue
+    if ! sig=$(fm_wake_signal_sig "$f"); then
+      case "$f" in
+        *.status)
+          status_observation_skipped "$f" \
+            && printf 'UNOBSERVABLE\t%s\t%s\n' "$f" "$STATUS_UNOBSERVABLE_COUNT"
+          ;;
+      esac
+      continue
+    fi
     [ -n "$sig" ] || continue
     sf=$(fm_wake_signal_seen_path "$STATE" "$f")
     case "$f" in
-      *.status) fm_wake_signal_seen_current "$STATE" "$f" && continue ;;
+      *.status)
+        status_observation_succeeded "$f"
+        fm_wake_signal_seen_matches "$STATE" "$f" "$sig" && continue
+        ;;
       *) [ "$sig" = "$(cat "$sf" 2>/dev/null)" ] && continue ;;
     esac
     printf '%s\t%s\t%s\n' "$sf" "$sig" "$f"
   done
   return 0
 }
+
+# Queue the one check wake a status log earns when its consecutive failed
+# observations reach the bound: one row per "UNOBSERVABLE" line a scan printed,
+# appended durably before the signal path runs so a signal wake that exits
+# first still presents it. Prints the joined reason for the caller to wake with
+# when nothing else does; empty when no line crossed the bound.
+unobservable_enqueue() {  # <scan-output>
+  local tag f count reason all=''
+  while IFS=$(printf '\t') read -r tag f count; do
+    [ "$tag" = UNOBSERVABLE ] || continue
+    reason=$(unobservable_reason "$f" "$count")
+    fm_wake_append check "unobservable:$(basename "$f")" "$reason" || return 1
+    all="${all:+$all; }$reason"
+  done <<EOF
+$1
+EOF
+  printf '%s' "$all"
+}
+
+unobservable_reason() {  # <status-file> <count>
+  printf 'check: status log unobservable: %s, %s consecutive failed observations, stat helpers failing' "$1" "$2"
+}
+
+# The same report from a path that skipped the log in-process rather than
+# through scan_signals. 0 when a row was queued, so the caller wakes.
+unobservable_report() {  # <status-file>
+  status_observation_skipped "$1" || return 1
+  UNOBSERVABLE_REASON=$(unobservable_reason "$1" "$STATUS_UNOBSERVABLE_COUNT")
+  fm_wake_append check "unobservable:$(basename "$1")" "$UNOBSERVABLE_REASON" || exit 1
+}
+UNOBSERVABLE_REASON=
 
 # Deliver a durably queued process-event result to firstmate. Publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
@@ -1992,9 +2052,12 @@ heartbeat_scan_finds_actionable() {
     rc=$?
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
-      # An unobservable log is skipped for this scan, not reported: the failure
-      # is the scan's, and the next heartbeat reads the log again.
-      sig=$(status_observed_signature "$f") || continue
+      # An unobservable log is skipped for this scan, not reported as a status
+      # event: the failure is the scan's, and the next heartbeat reads the log
+      # again. Only a persistent failure reaching the bound queues its one check
+      # row (unobservable_report), and the heartbeat then wakes for it.
+      sig=$(status_observed_signature "$f") || { unobservable_report "$f" && found=0; continue; }
+      status_observation_succeeded "$f"
       marker=$(_hb_surfaced_path "$task")
       status_presentation_marker_reported_matches "$marker" "$sig" && continue
       FM_HEARTBEAT_SURFACE_ENDPOINTS="${FM_HEARTBEAT_SURFACE_ENDPOINTS}${f}"$'\t'"ERROR"$'\t'"${sig}"$'\n'
@@ -2513,10 +2576,19 @@ EOF
   # hook land seconds apart, and reporting them as separate actionable wakes
   # costs a full firstmate turn each. The re-scan also picks up a newer
   # signature for an already-pending file (last write wins below).
+  # A status log whose consecutive failed observations just reached the bound is
+  # queued as its own check wake here, before the signal path can exit, and the
+  # cycle wakes for it below when no signal does.
   pending=$(scan_signals)
+  unobservable_reason=$(unobservable_enqueue "$pending") || exit 1
+  pending=$(printf '%s\n' "$pending" | grep -v "^UNOBSERVABLE$(printf '\t')" || true)
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
-    pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    rescan=$(scan_signals)
+    rescan_reason=$(unobservable_enqueue "$rescan") || exit 1
+    [ -z "$rescan_reason" ] || unobservable_reason="${unobservable_reason:+$unobservable_reason; }$rescan_reason"
+    rescan=$(printf '%s\n' "$rescan" | grep -v "^UNOBSERVABLE$(printf '\t')" || true)
+    pending=$(printf '%s\n%s' "$pending" "$rescan")
     # The re-scan lists every file the first scan listed (no marker has advanced
     # yet), so keep one line per file - its LAST observed signature, in
     # first-seen order - before the loops below append a queue row per line.
@@ -2639,6 +2711,7 @@ EOF
       triage_log "absorbed benign $reason"
     fi
   fi
+  [ -z "$unobservable_reason" ] || wake "$unobservable_reason"
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
@@ -2740,7 +2813,7 @@ EOF
             elif [ "$bound_rc" -eq 2 ]; then
               # An open call whose log could not be observed this poll: no
               # marker moves, so the next poll classifies this same hash.
-              stale_skip_unobserved "$w"
+              stale_skip_unobserved "$w" "$task"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"
