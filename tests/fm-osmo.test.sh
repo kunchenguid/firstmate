@@ -388,6 +388,64 @@ test_transcription_approval_required() {
   assert_contains "whisper" "$cmd" "approval request specifies install/exec command"
 }
 
+# -----------------------------------------------------------------------------
+# Test 11: Re-evaluation of cached incomplete transcription when transcriber supplied
+# -----------------------------------------------------------------------------
+test_transcription_cache_reevaluation() {
+  local fixture_drive="$TMP_ROOT/drive-reeval-test"
+  local cache_dir="$TMP_ROOT/cache-reeval-test"
+  mkdir -p "$fixture_drive/DCIM/DJI_001"
+
+  ffmpeg -f lavfi -i testsrc=duration=1:size=320x180:rate=24 \
+         -f lavfi -i sine=frequency=300:duration=1 \
+         -c:v libx264 -c:a aac \
+         "$fixture_drive/DCIM/DJI_001/DJI_20260914141000_0001_D.MP4" -y >/dev/null 2>&1
+
+  # 1. First run without transcriber: approval_required, from_cache=false
+  local run1_json
+  run1_json=$("$OSMO_CMD" catalog --drive "$fixture_drive" --cache-dir "$cache_dir" --json)
+  local status1 from_cache1
+  status1=$(echo "$run1_json" | jq -r '.clips[0].transcription.status')
+  from_cache1=$(echo "$run1_json" | jq -r '.clips[0].from_cache')
+  assert_eq "approval_required" "$status1" "first run records approval_required"
+  assert_eq "false" "$from_cache1" "first run processes from source"
+
+  # 2. Second run without transcriber: reuses cache, from_cache=true
+  local run2_json
+  run2_json=$("$OSMO_CMD" catalog --drive "$fixture_drive" --cache-dir "$cache_dir" --json)
+  local status2 from_cache2
+  status2=$(echo "$run2_json" | jq -r '.clips[0].transcription.status')
+  from_cache2=$(echo "$run2_json" | jq -r '.clips[0].from_cache')
+  assert_eq "approval_required" "$status2" "second run preserves approval_required"
+  assert_eq "true" "$from_cache2" "second run without transcriber reuses cache"
+
+  # 3. Third run WITH transcriber: re-evaluates transcription, from_cache=false
+  local run3_json
+  run3_json=$("$OSMO_CMD" catalog \
+    --drive "$fixture_drive" \
+    --cache-dir "$cache_dir" \
+    --transcriber "echo newly transcribed words here" \
+    --json)
+  local status3 text3 from_cache3
+  status3=$(echo "$run3_json" | jq -r '.clips[0].transcription.status')
+  text3=$(echo "$run3_json" | jq -r '.clips[0].transcription.text')
+  from_cache3=$(echo "$run3_json" | jq -r '.clips[0].from_cache')
+  assert_eq "transcribed" "$status3" "transcriber invocation re-evaluates cached incomplete transcription"
+  assert_contains "newly transcribed words" "$text3" "transcriber captures text on re-evaluated clip"
+  assert_eq "false" "$from_cache3" "re-evaluated clip marks from_cache=false"
+
+  # 4. Fourth run WITH transcriber: already transcribed, from_cache=true
+  local run4_json
+  run4_json=$("$OSMO_CMD" catalog \
+    --drive "$fixture_drive" \
+    --cache-dir "$cache_dir" \
+    --transcriber "echo newly transcribed words here" \
+    --json)
+  local from_cache4
+  from_cache4=$(echo "$run4_json" | jq -r '.clips[0].from_cache')
+  assert_eq "true" "$from_cache4" "subsequent run with completed transcription reuses cache"
+}
+
 # Run all test functions
 test_discover_missing_drive
 test_discover_empty_drive
@@ -399,5 +457,6 @@ test_incremental_caching
 test_report_command
 test_cli_transcription
 test_transcription_approval_required
+test_transcription_cache_reevaluation
 
 pass "all fm-osmo tests passed successfully"

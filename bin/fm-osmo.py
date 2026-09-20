@@ -851,7 +851,7 @@ class OsmoCache:
     def get_clip(self, stem):
         return self.data.get("clips", {}).get(stem)
 
-    def is_cached_and_valid(self, pair_info):
+    def is_cached_and_valid(self, pair_info, transcriber=None):
         stem = pair_info["stem"]
         cached = self.get_clip(stem)
         if not cached:
@@ -871,6 +871,21 @@ class OsmoCache:
         frames = cached.get("visual_metrics", {}).get("sampled_frames", [])
         if not frames or not all(os.path.exists(f) for f in frames):
             return False
+
+        t_status = cached.get("transcription", {}).get("status")
+        if t_status not in ("transcribed", "no_audio"):
+            cmd_str = transcriber or os.environ.get("FM_OSMO_TRANSCRIBER")
+            if cmd_str:
+                return False
+            model_override = os.environ.get("FM_OSMO_WHISPER_MODEL")
+            cache_whisper = os.path.expanduser("~/.cache/whisper")
+            if (model_override and os.path.exists(model_override)) or (
+                os.path.exists(cache_whisper)
+                and any(f.endswith(".pt") for f in os.listdir(cache_whisper))
+            ):
+                return False
+            if find_superwhisper_transcript_for_clip(stem, pair_info.get("recorded_at")):
+                return False
 
         return True
 
@@ -1021,7 +1036,7 @@ def run_catalog(drive_path=None, cache_dir=None, output_path=None, sample_count=
             paired_cnt += 1
 
         # Check if already processed in cache and unchanged
-        if not force and cache.is_cached_and_valid(clip):
+        if not force and cache.is_cached_and_valid(clip, transcriber=transcriber):
             cached_entry = cache.get_clip(stem)
             cached_entry["from_cache"] = True
             cataloged_clips.append(cached_entry)
@@ -1043,22 +1058,45 @@ def run_catalog(drive_path=None, cache_dir=None, output_path=None, sample_count=
         # Process new or modified clip
         master_path = clip["mp4_path"] or clip["lrf_path"]
         proxy_path = clip["lrf_path"] or clip["mp4_path"]
-
-        # 1. Metadata via ffprobe
-        meta = get_clip_metadata_ffprobe(master_path)
-        dur = meta["duration_seconds"]
-
-        # 2. Visual sampling (prefer proxy LRF for speed)
         clip_frames_dir = os.path.join(cache.frames_dir, stem)
-        frame_paths = extract_sample_frames(proxy_path, clip_frames_dir, dur, sample_count=sample_count)
-        visual_metrics = compute_visual_metrics(frame_paths)
-
-        # 3. Audio analysis & speech detection
         clip_audio_dir = os.path.join(cache.audio_dir, stem)
-        audio_metrics = analyze_audio(master_path, clip_audio_dir, dur)
+
+        cached_entry = cache.get_clip(stem)
+        can_reuse_media = (
+            not force
+            and cached_entry is not None
+            and cached_entry.get("mp4_size") == clip.get("mp4_size")
+            and cached_entry.get("mp4_mtime") == clip.get("mp4_mtime")
+            and cached_entry.get("lrf_size") == clip.get("lrf_size")
+            and cached_entry.get("lrf_mtime") == clip.get("lrf_mtime")
+            and cached_entry.get("visual_metrics", {}).get("sampled_frames")
+            and all(os.path.exists(f) for f in cached_entry["visual_metrics"]["sampled_frames"])
+            and cached_entry.get("audio_metrics", {}).get("audio_extracted_path")
+            and os.path.exists(cached_entry["audio_metrics"]["audio_extracted_path"])
+        )
+
+        if can_reuse_media:
+            dur = cached_entry.get("duration_seconds", 0.0)
+            resolution = cached_entry.get("resolution", "Unknown")
+            fps = cached_entry.get("fps", 0.0)
+            visual_metrics = cached_entry.get("visual_metrics", {})
+            audio_metrics = cached_entry.get("audio_metrics", {})
+        else:
+            # 1. Metadata via ffprobe
+            meta = get_clip_metadata_ffprobe(master_path)
+            dur = meta["duration_seconds"]
+            resolution = f"{meta['width']}x{meta['height']}" if meta['width'] else "Unknown"
+            fps = meta["fps"]
+
+            # 2. Visual sampling (prefer proxy LRF for speed)
+            frame_paths = extract_sample_frames(proxy_path, clip_frames_dir, dur, sample_count=sample_count)
+            visual_metrics = compute_visual_metrics(frame_paths)
+
+            # 3. Audio analysis & speech detection
+            audio_metrics = analyze_audio(master_path, clip_audio_dir, dur)
 
         # 4. Transcription & Superwhisper transcript lookup
-        if not audio_metrics["has_audio"]:
+        if not audio_metrics.get("has_audio"):
             transcription = {
                 "status": "no_audio",
                 "text": None,
@@ -1094,8 +1132,8 @@ def run_catalog(drive_path=None, cache_dir=None, output_path=None, sample_count=
             "lrf_mtime": clip["lrf_mtime"],
             "recorded_at": clip["recorded_at"],
             "duration_seconds": dur,
-            "resolution": f"{meta['width']}x{meta['height']}" if meta['width'] else "Unknown",
-            "fps": meta["fps"],
+            "resolution": resolution,
+            "fps": fps,
             "visual_metrics": visual_metrics,
             "audio_metrics": audio_metrics,
             "transcription": transcription,
