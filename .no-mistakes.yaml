@@ -36,5 +36,12 @@ commands:
 # Publish each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR.
 # The evidence is not committed to the feature or default branch.
 test:
+  instructions: |
+    Run live Herdr scenarios only through bin/fm-herdr-lab.sh with a named non-default fm-lab-* session, following that helper's prepare, provision, run, and teardown contract exactly.
+    Never touch the live default Herdr session or fleet panes.
+    Prefer a throwaway lab for spawn, long-launch, and Claude-path proofs, and tear it down in the same evidence turn.
+    Do not mutate the operator primary checkout, real fleet FM_HOME state, or production credentials, and keep git changes otherwise inside the run worktree.
+    Read docs/herdr-backend.md and the bin/fm-herdr-lab.sh header as the owners of Herdr lab mechanics rather than reproducing that manual here.
+    Ship or scout briefs that will drive Herdr lifecycle still require --herdr-lab at scaffold time; these Test-agent instructions are not a substitute for that brief flag.
   evidence:
     store_in_repo: true

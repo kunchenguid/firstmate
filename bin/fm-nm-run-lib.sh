@@ -3,11 +3,14 @@
 #
 # ONE owner for the no-mistakes run-attribution primitives used by
 # fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
-# (pre-teardown run abort, see its "Fix 1" header comment). Both bind a run
-# by strict branch-and-head identity first, and both then recognize a provable
+# (pre-teardown run abort, see its "Fix 1" header comment). Crew-state binds
+# an EXECUTING run (pending, running, fixing or ci) on the task's branch
+# regardless of head (fm_nm_run_is_executing); every other run still needs
+# strict branch-and-head identity. Both callers then recognize a provable
 # pipeline-owned continuation through fm_nm_runs_status_for_worktree below:
-# crew-state for an ACTIVE run, so a fix round never reads as an older failed
-# run, and teardown for a run PARKED at a gate, so cleanup concludes it
+# crew-state for an ACTIVE run - parked, or executing with the daemon answered
+# down - so a fix round never reads as an older
+# failed run, and teardown for a run PARKED at a gate, so cleanup concludes it
 # instead of orphaning it. Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
@@ -76,9 +79,11 @@ fm_nm_resolve_commit() {  # <worktree> <sha-ish>
 #     (local work advanced outside the run, or the branch tip was rewritten)
 # A run head whose object this copy does not have cannot be proven here and is
 # rejected; fm_nm_runs_status_for_worktree below owns the one ledger-anchored
-# recognition for that case, and fm_nm_run_is_pipeline_owned_active below
-# carries the custody exemption: a live run whose pipeline currently owns the
-# branch binds without head equality.
+# recognition for that case, fm_nm_run_is_executing below is the current-state
+# exemption for a live run on this branch regardless of head, and
+# fm_nm_run_is_pipeline_owned_active below carries the custody exemption: ANY
+# active run - executing or parked - whose pipeline currently owns the branch
+# binds without head equality.
 #
 # This predicate binds one run at a time, and MORE THAN ONE recorded run can
 # bind to the same worktree at once: a run that died at the worktree's exact
@@ -125,9 +130,10 @@ fm_nm_run_status_class() {  # <status_word>
 # live run must not hide a newer failure. If the newest is live and another
 # same-branch live run exists, neither has exclusive authority: report all
 # candidate ids as unknown. A newer live row can replace cancelled history,
-# but the caller must fetch its full status BY ID and prove branch/head or
-# active pipeline custody before using its steps. Never reuse another run's
-# gate detail. This is a read-only selection, not teardown authorization.
+# but the caller must fetch its full status BY ID and prove branch/head,
+# executing status, or active pipeline custody before using its steps.
+# Never reuse another run's gate detail.
+# This is a read-only selection, not teardown authorization.
 #
 # Prints selected|id|status|candidate-ids, unknown|reason, absent (no row
 # for this branch), or unavailable (CLI has no overview table). Malformed or
@@ -307,6 +313,57 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   fm_nm_run_is_active "$1"
 }
 
+# The gate evidence in an `axi status` TOON, as ONE set of patterns. Both
+# readers must agree exactly: fm_nm_run_is_parked below decides whether a run
+# keeps the strict head rule, and fm-crew-state.sh's nm_gate_step_row /
+# nm_gate_status / nm_has_gate render the `parked at <gate>` detail from the
+# same evidence. If a new parked marker is added to one reader only, an
+# unverified run's gate detail reaches the crew report.
+FM_NM_GATE_LINE_RE='^[[:space:]]*gate:[[:space:]]*'
+FM_NM_AWAITING_AGENT_RE='^[[:space:]]*awaiting_agent:'
+FM_NM_GATE_SCALAR_RE='^[[:space:]]*(status|state):[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*$'
+FM_NM_GATE_ROW_RE='^[[:space:]]*[^,]+,[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*,'
+
+# 0 if the run in captured `axi status` TOON $1 carries any of those PARKED
+# markers. The top-level `status:` word alone does NOT decide this: the CLI
+# leaves it at `running` while a run waits at a gate, so the word and the gate
+# markers routinely disagree.
+fm_nm_run_is_parked() {  # <toon-output>
+  printf '%s\n' "$1" | grep -Eq \
+    "$FM_NM_GATE_LINE_RE|$FM_NM_AWAITING_AGENT_RE|$FM_NM_GATE_SCALAR_RE|$FM_NM_GATE_ROW_RE"
+}
+
+# 0 if the run in captured `axi status` TOON $1 is EXECUTING: in flight and
+# actively working (pending, running, fixing, or ci), not parked at a gate.
+# Read-only current-state reporting (fm-crew-state.sh) treats an executing run
+# on the task's own branch as authoritative REGARDLESS of head: the pipeline
+# rebases the branch and commits fix rounds in its own checkout, so a live run's
+# head routinely differs from the task worktree's local head, and falling back
+# to an older run that matches the local head reads a working crew as failed.
+# A run parked at a gate keeps the strict head rule, and no destructive caller
+# uses this predicate: teardown stays on fm_nm_head_matches_worktree and the
+# ledger rule below.
+# This predicate reads the RECORD only; it cannot tell a live run from one whose
+# daemon died still saying `running`. The head-free route through it is the
+# caller's to license, and fm-crew-state.sh pairs it with an explicit
+# daemon-down probe for exactly that reason.
+# All four accepted words reach here on BOTH surfaces. The overview table
+# fm_nm_select_run validates carries a narrower column
+# (pending|running|completed|failed|cancelled, :196), but that column is not
+# what this predicate reads: the selected-run route re-reads the run by id and
+# passes that DETAIL object, whose own vocabulary check admits `fixing` and `ci`
+# as live, and the legacy bare-status route passes the same detail shape.
+# Dropping them would report a fix round or a ci wait as idle, which is the
+# misreport this predicate exists to prevent.
+fm_nm_run_is_executing() {  # <toon-output>
+  fm_nm_run_is_active "$1" || return 1
+  fm_nm_run_is_parked "$1" && return 1
+  case "$(fm_nm_strip_quotes "$(fm_nm_field "$1" status)")" in
+    pending|running|fixing|ci) return 0 ;;
+  esac
+  return 1
+}
+
 # ONE owner for attribution from the pipeline's own runs ledger, replacing a
 # per-row scan-and-skip. The ledger is the real top-level `no-mistakes runs
 # --limit N` listing (plain text, no run id, no quoting, newest-first, columns
@@ -332,6 +389,11 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
 #     ancestor, a terminal unresolvable row) prints nothing, so branch-name
 #     coincidence, arbitrary remote state, and other tasks' runs never match.
 # An older live row never displaces a newer terminal result.
+# There is no branch-name-only acceptance here: a live row whose head this copy
+# cannot tie to the worktree is not this worktree's run just because the branch
+# name matches. The one live bind is the EXECUTING record on the `axi status`
+# route (fm_nm_run_is_executing above), which the caller pairs with its own
+# liveness evidence.
 # Read-only: git reads resolve objects in place; custody never changes.
 fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head]
   local wt=$1 branch=$2 list=$3 expected_head=${4:-}

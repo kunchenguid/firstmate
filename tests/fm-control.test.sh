@@ -634,15 +634,23 @@ test_already_stopped_exit_is_idempotent() {
   pass "fm-control exit: an already-stopped agent is idempotent success with no bytes sent"
 }
 
-test_missing_endpoint_refuses() {
+test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop() {
   local dir out rc
   dir=$(new_case gone)
   add_task "$dir" t1 claude
   : > "$dir/fake/windows"
   out=$(run_control "$dir" t1 exit); rc=$?
-  expect_code 1 "$rc" "a missing endpoint should refuse"
-  assert_contains "$out" "recorded endpoint is gone" "the refusal should name the missing endpoint"
-  pass "fm-control exit: a vanished endpoint refuses instead of silently succeeding"
+  # `missing` on tmux is not a finding about the endpoint. A task record carries
+  # no socket identity for it, and any inventory describes only the tmux server
+  # this process addresses, so a window that is merely on a server this seat
+  # cannot reach is indistinguishable from one that was destroyed. exit refuses
+  # rather than claim a stop it cannot see, and sends nothing to an address it
+  # cannot trust. Reclaim of a destroyed endpoint is Herdr-only
+  # (docs/agent-control.md "Reclaiming a task whose endpoint is gone").
+  expect_code 1 "$rc" "a tmux endpoint whose absence cannot be proven must refuse"
+  assert_not_contains "$out" "endpoint-gone" "exit must not report a stop it could not prove"
+  [ -z "$(literals "$dir")" ] || fail "nothing may be sent into an endpoint exit cannot trust"
+  pass "fm-control exit: an unprovable tmux endpoint refuses instead of claiming the agent stopped"
 }
 
 test_interrupt_refuses_when_no_agent_runs() {
@@ -900,7 +908,7 @@ test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent
-test_missing_endpoint_refuses
+test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop
 test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command

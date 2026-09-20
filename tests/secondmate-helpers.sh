@@ -26,8 +26,25 @@ make_fake_tmux() {
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
-  has-session|new-session|new-window|send-keys|kill-window)
+  has-session|new-session|new-window|kill-window)
     printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    exit 0
+    ;;
+  send-keys)
+    printf '%s\n' "$*" >> "$FM_FAKE_TMUX_LOG"
+    prev=
+    for arg in "$@"; do
+      if [ "$prev" = -l ]; then
+        case "$arg" in
+          ". '"*"'")
+            staged=${arg#". '"}
+            staged=${staged%"'"}
+            [ ! -f "$staged" ] || printf 'staged-launch %s\n' "$(cat "$staged")" >> "$FM_FAKE_TMUX_LOG"
+            ;;
+        esac
+      fi
+      prev=$arg
+    done
     exit 0
     ;;
   list-windows)
