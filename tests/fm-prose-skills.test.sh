@@ -2,9 +2,10 @@
 # Behavior tests for the fleet prose skills graduated from fleet-lab DEC-001
 # (pavani06/fleet-lab experiments/prose-skills, merged 2026-09-20).
 #
-# Two contracts only: the MIT attribution the vendored copies owe upstream
-# (an explicit license text contract, not a proxy for behavior), and the line
-# fm_prose_skills_line emits into every generated brief.
+# One contract: the MIT attribution the vendored copies owe upstream, an
+# explicit license text contract rather than a proxy for behavior. That the
+# generated briefs carry the prose line is covered end to end in
+# tests/fm-brief.test.sh against the real generated artifacts.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -33,17 +34,4 @@ test_prose_skill_attribution_survives() {
   pass "prose-skills: upstream credits, commits, and DEC-001 provenance survive"
 }
 
-test_prose_skill_owner_line_names_both_skills() {
-  local line
-  line=$(. "$ROOT/bin/fm-dod-lib.sh" && FM_ROOT="$ROOT" fm_prose_skills_line)
-  printf '%s\n' "$line" | grep -q 'i-have-adhd/SKILL.md' \
-    || fail "fm_prose_skills_line stopped naming the i-have-adhd skill"
-  printf '%s\n' "$line" | grep -q 'no-ai-slop/SKILL.md' \
-    || fail "fm_prose_skills_line stopped naming the no-ai-slop skill"
-  printf '%s\n' "$line" | grep -q 'reports' \
-    || fail "fm_prose_skills_line scopes itself out of the report, the deliverable a scout and a secondmate produce"
-  pass "prose-skills: fm_prose_skills_line points at both skills and covers the report"
-}
-
 test_prose_skill_attribution_survives
-test_prose_skill_owner_line_names_both_skills

@@ -225,6 +225,18 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/i-have-adhd/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/no-ai-slop/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/no-ai-slop/eval.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
       "audience": "agent-runtime"
     },

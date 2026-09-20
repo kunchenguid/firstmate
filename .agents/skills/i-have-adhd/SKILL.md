@@ -24,10 +24,19 @@ Adaptation (fleet-lab experiment DEC-001, 2026-09-20):
     the pre-send check are the asset and are unchanged.
 Graduation (firstmate DEC-001 adoption, 2026-09-20):
   - Copied from pavani06/fleet-lab experiments/prose-skills/skills after the
-    experiment was approved; body byte-identical to that adaptation.
+    experiment was approved.
   - `user-invocable: false` and `metadata.internal: true` added for the
     firstmate internal skill format; description reworded from the chat toggle
     ("stop adhd mode") to brief-activation semantics.
+  - Body adapted (no longer byte-identical to that adaptation): an
+    `Autonomous use` section was added ahead of `Persistence` because the
+    upstream body assumes a human reader who can toggle the mode, while every
+    reader of this copy is an autonomous worker whose brief forbids waiting
+    for one. The section maps activation onto the brief, moves rule 5's
+    restatement out of the sparse status-file contract into the deliverable
+    itself, and names the reader each deliverable shape answers to. Nothing
+    else changed: the 10 rules, the "When to break the rules" section and
+    the pre-send check are the asset and remain as retrieved from the source.
   - Loaded by generated ship, scout, and secondmate-charter briefs at their
     output-shaping points; see AGENTS.md section 11.
 -->
@@ -35,6 +44,15 @@ Graduation (firstmate DEC-001 adoption, 2026-09-20):
 # i-have-adhd
 
 The reader has ADHD. Output is not just brief. It is shaped so an ADHD brain can act on it.
+
+## Autonomous use
+
+A fleet worker has no human in the loop, so read this skill as activated by its brief for the whole session and apply it this way:
+
+1. Nobody will say "stop adhd mode". The skill stays on for the session the brief activated it in, and the brief and the harness outrank it wherever they conflict.
+2. Rules 1 to 4 and 6 to 10 shape the deliverable's prose: the report, the PR body, the commit message, the reply. Write it, then run the pre-send check on your own text as a self-pass before sending it.
+3. Rule 5's restatement lives inside that deliverable, never in the status file: a status append is a sparse supervisor-actionable event under the brief's reporting contract, not a per-step progress line. Where the harness provides a checklist or plan tool, it does the restating.
+4. Where a rule says "the reader", the brief names them: the report's reader is the supervisor who ordered it, a PR body's reader is the reviewer, a status line's reader is firstmate and the captain. Resolve wording questions from the brief and the work itself; never open a needs-decision escalation over wording.
 
 ## Persistence
 
