@@ -19,6 +19,8 @@
 # The run command rejects caller-supplied --session flags, any leading option
 # before the subcommand, all session lifecycle operations, and every server
 # operation.
+# A wrapper that shadows `herdr` on PATH must restore PATH before invoking
+# this helper; a re-entrant run fails closed instead of recursing.
 # Session stop is available only through guarded stop or teardown, and session
 # delete is available only through teardown.
 # Both paths perform a fresh refuse-default check immediately before each
@@ -61,7 +63,10 @@ fm_herdr_lab_tripwire_path() { # <session>
 fm_herdr_lab_raw() { # <session> <herdr arguments...>
   local name=$1
   shift
-  HERDR_SESSION="$name" herdr "$@" --session "$name"
+  # FM_HERDR_LAB_ACTIVE marks the helper's own herdr invocation. A wrapper
+  # that shadows herdr on PATH without restoring it re-enters run with this
+  # marker set, and fm_herdr_lab_cli refuses that call instead of recursing.
+  FM_HERDR_LAB_ACTIVE=1 HERDR_SESSION="$name" herdr "$@" --session "$name"
 }
 
 fm_herdr_lab_session_list() { # <session>
@@ -133,6 +138,10 @@ fm_herdr_lab_refuse_if_default() { # <session>
 fm_herdr_lab_cli() { # <session> <herdr arguments...>
   local name=$1 arg
   shift
+  if [ -n "${FM_HERDR_LAB_ACTIVE:-}" ]; then
+    fm_herdr_lab_error "refusing re-entrant run: herdr resolved back into the lab wrapper instead of the real client (the wrapper must restore PATH before invoking the helper)"
+    return 1
+  fi
   fm_herdr_lab_validate_name "$name" || return 1
   [ "$#" -gt 0 ] || { fm_herdr_lab_error "run requires Herdr arguments"; return 1; }
   case "$1" in

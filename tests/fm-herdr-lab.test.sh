@@ -498,7 +498,26 @@ test_viewer_launcher_refuses_unsafe_arguments() {
   pass "fm-herdr-lab: the viewer launcher refuses unsafe sessions and pidfiles"
 }
 
+test_reentrant_run_fails_closed() {
+  local name="fm-lab-reentrant-$$" status=0 err before after
+  : > "$FAKE_LOG"
+  # A wrapper that shadows herdr on PATH without restoring it re-enters run
+  # with the helper's own invocation marker set. That call must refuse before
+  # reaching Herdr again instead of recursing into the wrapper.
+  err=$(FM_HERDR_LAB_ACTIVE=1 run_with_fake fm_herdr_lab_cli "$name" status --json 2>&1) || status=$?
+  expect_code 1 "$status" "re-entrant run must be refused"
+  assert_contains "$err" "re-entrant" "re-entrant refusal must name the cause"
+  before=$(wc -l < "$FAKE_LOG" | tr -d ' ')
+  [ "$before" -eq 0 ] || fail "re-entrant run reached Herdr instead of refusing first"
+  # Without the marker the same call passes through to Herdr.
+  run_with_fake fm_herdr_lab_cli "$name" status --json >/dev/null || fail "ordinary run was refused"
+  after=$(wc -l < "$FAKE_LOG" | tr -d ' ')
+  [ "$after" -ge 1 ] || fail "ordinary run did not reach Herdr"
+  pass "fm-herdr-lab: re-entrant run refuses before recursing into a shadowing wrapper"
+}
+
 test_refuses_unsafe_names
+test_reentrant_run_fails_closed
 test_provision_run_and_guarded_teardown
 test_missing_tripwire_blocks_destruction
 test_changed_default_trips_after_teardown
