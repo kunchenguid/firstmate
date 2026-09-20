@@ -3199,8 +3199,10 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # mid-turn, and after - so the idle-baseline path above is structurally
 # unreachable for it). That harness always lands in the composer branch, and
 # cursor's mid-turn composer row renders its own placeholder beside a
-# right-aligned `ctrl+c to stop`, so the content verdict is `pending` on a
-# composer that holds no user text at all and every steer reported delivery
+# right-aligned `ctrl+c to stop`, so the content verdict on a composer that
+# holds no user text at all is never `empty` (`unknown` since the shared
+# stripper learned the software cursor cell; `pending` before, when that cell
+# survived as one bright letter) and every steer reported delivery
 # unconfirmed on a message that had actually landed.
 # The escape is the SAME semantic signal the idle-baseline path uses, read from
 # the pane's verified busy footer instead of native agent-state, and it is the
@@ -3289,11 +3291,17 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     else
       sleep "$sleep_s"
       verdict=$(fm_backend_herdr_composer_state "$target")
-      if [ "$verdict" = pending ] && [ "$raw_status" != working ] \
-        && [ "$footer_baseline" = idle ] \
-        && [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then
-        verdict=busy
-      fi
+      # The transition is the proof; the composer verdict only has to be
+      # something other than a cleared composer (cursor's mid-turn row reads
+      # unknown or, on older strips, pending).
+      case "$verdict" in pending|unknown)
+        if [ "$raw_status" != working ] \
+          && [ "$footer_baseline" = idle ] \
+          && [ "$(fm_backend_herdr_rendered_busy_state "$target")" = busy ]; then
+          verdict=busy
+        fi
+        ;;
+      esac
       case "$verdict" in
         busy) printf 'empty'; return 0 ;;
         empty) printf 'empty'; return 0 ;;

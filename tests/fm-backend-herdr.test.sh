@@ -4030,6 +4030,56 @@ test_composer_state_claude_dim_ghost_row_with_real_text_is_pending() {
   pass "fm_backend_herdr_composer_state: real typed text on the same claude prompt row still reads pending"
 }
 
+# THE AWAY-MODE WEDGE OF issue #4912 (supervisor on Herdr, escalations left
+# undelivered for 8 to 17 hours at a stretch). The daemon logged
+# `inject deferred: supervisor composer not confirmed-empty (state=pending)`
+# every 15 seconds against a genuinely idle primary claude pane. The shape,
+# captured byte-for-byte from a real idle Claude Code 2.1.278 composer drawing
+# its SOFTWARE cursor: `❯` U+00A0, the cursor cell on the suggestion ghost's
+# first character in REVERSE VIDEO (SGR 7), then the rest of the ghost dim
+# (SGR 0;2), between the composer's two rules, with the 256-colour permission
+# footer below. The cursor cell is neither dim nor dark, so the pre-fix strip
+# kept one bright `R` and the row read pending. This test drives the exact
+# adapter path: the rule pair looks like a pi separator pair, so the shared
+# classifier asks for identity, the adapter probes `agent get` (call 2), the
+# identity answers claude, and the bare `❯` row is judged - empty.
+test_composer_state_claude_software_cursor_on_suggestion_ghost_is_empty() {
+  local dir log resp fb out rule
+  dir="$TMP_ROOT/composer-claude-sw-cursor-ghost"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  rule=$(printf '\xe2\x94\x80%.0s' $(seq 1 24))
+  {
+    printf '\xe2\x97\x8f READY\n\n'
+    printf '\033[38;5;246m\xe2\x9c\xbb\033[39m \033[38;5;246mCrunched for 1s \xc2\xb7 done 7:33 AM\033[39m\n\n'
+    printf '\033[38;5;244m%s\n' "$rule"
+    printf '\033[39m\xe2\x9d\xaf\xc2\xa0\033[7mR\033[0;2m\033[39m\033[49meply with exactly the word GO and nothing else.\033[0m\033[39m\033[49m\n'
+    printf '\033[38;5;244m%s\n' "$rule"
+    printf '\033[39m  \033[38;5;211m\xe2\x8f\xb5\xe2\x8f\xb5\033[39m \033[38;5;211mbypass\033[39m \033[38;5;211mpermissions\033[39m \033[38;5;211mon\033[38;5;246m (shift+tab\033[39m \033[38;5;246mto\033[39m \033[38;5;246mcycle)\033[39m \033[38;5;246m\xc2\xb7\033[39m \033[38;5;246m\xe2\x86\x90\033[39m \033[38;5;246mfor\033[39m \033[38;5;246magents\n'
+  } > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:wJ:p1' "$ROOT" )
+  [ "$out" = empty ] || fail "the issue #4912 wedge shape - claude's software cursor on its suggestion ghost after a bare '❯' - must read empty through the herdr adapter, got '$out'"
+  grep -q $'\x1f''agent'$'\x1f''get'$'\x1f''wJ:p1' "$log" \
+    || fail "the adapter must have resolved the rule-bounded composer through its identity probe"
+  # The same row with typed text under the cursor (bright tail) stays pending
+  # through the same path, so the fix never weakens real-input protection.
+  dir="$TMP_ROOT/composer-claude-sw-cursor-typed"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  {
+    printf '\xe2\x97\x8f READY\n\n'
+    printf '\033[38;5;244m%s\n' "$rule"
+    printf '\033[39m\xe2\x9d\xaf\xc2\xa0\033[7m/\033[0m\033[39m\033[49mno-mi\n'
+    printf '\033[38;5;244m%s\n' "$rule"
+    printf '\033[39m  \033[38;5;211m\xe2\x8f\xb5\xe2\x8f\xb5 bypass permissions on\033[38;5;246m (shift+tab to cycle)\n'
+  } > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:wJ:p1' "$ROOT" )
+  [ "$out" = pending ] || fail "half-typed input with the software cursor on its first character must still read pending through the herdr adapter, got '$out'"
+  pass "fm_backend_herdr_composer_state: claude's software cursor on its suggestion ghost (the issue #4912 wedge shape) reads empty; typed text under the cursor stays pending"
+}
+
 # grok's TRUECOLOR placeholder gap (harness-adapters "Known gap"), now covered by
 # the same owner. grok renders its composer inside a bordered box whose border
 # and placeholder/hint text use a dark, muted truecolor foreground (verified live
@@ -4413,20 +4463,22 @@ herdr_cursor_midturn_ansi() {
 }
 
 # Non-vacuity anchor for the two submit tests below: the real mid-turn capture
-# genuinely reads `pending`, so the confirmation those tests assert can only be
+# never reads `empty`, so the confirmation those tests assert can only be
 # coming from the rendered-footer transition and never from a softened composer
-# verdict. The composer verdict is deliberately NOT relaxed - a right-aligned
-# status token on the composer row is content the shared classifier must keep
-# treating as content for every other caller.
-test_composer_state_cursor_midturn_row_reads_pending() {
+# verdict. Every cell on that row is de-emphasised once the software cursor
+# cell is recognised (it used to survive as one bright letter and read
+# `pending`), so there is no positive container proof and the verdict is
+# `unknown`; the right-aligned status token still keeps the row from ever
+# proving empty for every other caller, including the away-mode guard.
+test_composer_state_cursor_midturn_row_never_reads_empty() {
   local dir log resp fb out
   dir="$TMP_ROOT/composer-cursor-midturn"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   herdr_cursor_midturn_ansi > "$resp/1.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
-  [ "$out" = pending ] || fail "cursor's mid-turn composer row carries a busy token and must stay 'pending' as composer CONTENT, got '$out'"
-  pass "fm_backend_herdr_composer_state: cursor's mid-turn placeholder-plus-busy-token row reads pending (why delivery needs a separate signal)"
+  [ "$out" = unknown ] || fail "cursor's mid-turn composer row carries a busy token beside its placeholder and must read 'unknown' (never empty), got '$out'"
+  pass "fm_backend_herdr_composer_state: cursor's mid-turn placeholder-plus-busy-token row reads unknown, never empty (why delivery needs a separate signal)"
 }
 
 test_rendered_busy_state_reads_the_cursor_busy_token() {
@@ -4486,7 +4538,10 @@ test_send_text_submit_never_idle_native_state_keeps_pending_without_a_transition
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "hello captain" 2 0.01 0.01' "$ROOT" )
-  [ "$out" = pending ] || fail "a pane already busy before our Enter must not confirm from that same busy footer, got '$out'"
+  case "$out" in
+    pending|unknown) ;;
+    *) fail "a pane already busy before our Enter must not confirm from that same busy footer, got '$out'" ;;
+  esac
   pass "fm_backend_herdr_send_text_submit: an already-busy footer baseline is never accepted as proof that this Enter landed"
 }
 
@@ -5359,6 +5414,7 @@ test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
 test_composer_state_claude_dim_prompt_suggestion_ghost_is_empty
 test_composer_state_claude_dim_ghost_row_with_real_text_is_pending
+test_composer_state_claude_software_cursor_on_suggestion_ghost_is_empty
 test_composer_state_grok_dark_truecolor_placeholder_is_empty
 test_composer_state_grok_bright_truecolor_real_text_is_pending
 test_composer_state_codex_bare_prompt_glyph_is_empty
@@ -5380,7 +5436,7 @@ test_send_text_submit_preexisting_working_does_not_confirm_failed_enter
 test_send_text_submit_idle_baseline_does_not_confirm_failed_enter
 test_send_text_submit_idle_native_empty_composer_confirms_delivery
 test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued
-test_composer_state_cursor_midturn_row_reads_pending
+test_composer_state_cursor_midturn_row_never_reads_empty
 test_rendered_busy_state_reads_the_cursor_busy_token
 test_send_text_submit_confirms_never_idle_native_state_via_footer_transition
 test_send_text_submit_never_idle_native_state_keeps_pending_without_a_transition

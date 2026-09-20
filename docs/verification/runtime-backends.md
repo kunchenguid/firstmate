@@ -640,6 +640,62 @@ tests/fm-composer-codex-idle-live-e2e.test.sh
 The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
 The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
 
+### 2026-09-19 Claude Code 2.1.278 software cursor on the prompt-suggestion ghost
+
+Verified on 2026-09-19 on Linux x86_64 (Claude Code 2.1.278, tmux 3.3a, isolated private socket) for issue #4912: the away-mode injector on a Herdr-backed Linux primary logged `inject deferred: supervisor composer not confirmed-empty (state=pending ...)` every 15 seconds against a genuinely idle claude composer, for 8 to 17 hours at a stretch, while the busy verdict still flipped correctly the moment the primary took a turn.
+
+The idle composer was captured styled from a real pane after two short turns had produced a prompt suggestion, with claude launched under `DISABLE_GROWTHBOOK=1` so that its `tengu_native_cursor` rollout is off and it draws its own cursor (the same rendering its accessibility mode and fullscreen renderer select); the launching shell's `CLAUDE_*` variables were removed and `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=true` was set, because a firstmate-launched worker inherits `=false` while a hand-launched primary does not:
+
+```sh
+tmux -L fm-repro capture-pane -e -p -t rep:cl -S -200 | tail -n 20 > idle-swcursor-ghost.ansi
+sed -n 17p idle-swcursor-ghost.ansi | od -c | head -3
+```
+
+```text
+0000000 033   [   3   9   m 342 235 257 302 240 033   [   7   m   R 033
+0000020   [   0   ;   2   m 033   [   3   9   m 033   [   4   9   m   e
+0000040   p   l   y       w   i   t   h       e   x   a   c   t   l   y
+```
+
+The observed row is `❯` U+00A0, then the cursor cell `R` in reverse video (SGR 7), then `eply with exactly the word GO and nothing else.` dim (SGR 0;2): claude's software cursor sits on the first character of the suggestion ghost, and that one cell is neither dim nor a dark foreground.
+The row above and below it are the composer's rules and the row below those is the 256-colour permission footer, so the bare composer is bounded and the footer never enters the verdict.
+Fed to the shared classifier with Herdr's exact descriptor (`styled=1`, `cursor=0`, `identity=1`, `rows=20`) and Herdr's identity answer for the pane, the same capture read `pending` on main at 65a3bac6 and `empty` after the fix, and the ghost-stripped row went from `❯ R` to `❯`:
+
+```sh
+bash -c '. bin/fm-composer-lib.sh
+  caps=$(printf "styled=1\ncursor=0\nidentity=1\nrows=20")
+  fm_composer_classify_screen "$caps" "$(cat idle-swcursor-ghost.ansi)" "" "$(printf "claude\tidle")"'
+```
+
+```text
+pending
+empty
+```
+
+The same capture read `pending` under the Zellij styled profile and under tmux's cursor-anchored profile before the fix, and `empty` after.
+The suggestion ghost itself is still SGR 2 on this build, so the earlier dim-ghost regression (2026-07-10) was not the cause; the cell under the software cursor was.
+Claude Code's `paste again to expand` footer, the hypothesis on file, was also captured on this build: it is a 256-colour (`38;5;246`) row that replaces the permission footer for eight seconds after a large paste, below the composer's bottom rule, and it never reached the verdict.
+Two typed rows were captured from the same pane as the negatives: `/no-mi` with the cursor cell at the end and, after Home, on the `/`; both read `pending` before and after the fix.
+`fm_composer_strip_ghost` now holds back a reverse-video run until the next visible cell decides it: de-emphasised means the cursor is parked on the placeholder it hid and the cell is dropped; bright or end of row means typed text under the cursor and the cell is kept.
+`test_matrix_claude_software_cursor_on_suggestion_ghost` in `tests/fm-composer-lib.test.sh` carries the capture byte-for-byte under every profile with the bright-tail divergence and both typed negatives, `test_composer_state_claude_software_cursor_on_suggestion_ghost_is_empty` in `tests/fm-backend-herdr.test.sh` drives it through the Herdr adapter including the identity probe, and `tests/fm-composer-ghost.test.sh` pins the stripper rule's edges.
+The same rule retires the cursor-agent remnant branch: its dim `→` plus reverse-video `P` now strips to nothing and reads `empty` through the emptied-row placeholder proof, while its mid-turn row (placeholder plus a dim `ctrl+c to stop`) reads `unknown` rather than `pending`, so the Herdr submit core accepts its rendered-footer transition on either non-empty verdict.
+
+The capture is a tmux styled read; the incident pane was read through `herdr pane read --format ansi`, which is known to preserve SGR 2 (2026-07-10) and whose serialisation of SGR 7 was not re-verified here because no Herdr lab was available on the verification host.
+The token-free live guard below launches claude with `DISABLE_GROWTHBOOK=1` in an isolated tmux server and requires the software cursor to be drawn and the idle composer to read `empty` through both the cursor-anchored and cursorless styled reads; the suggestion-plus-cursor shape needs two submitted prompts and stays a manual refresh with the commands above:
+
+```sh
+FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh
+```
+
+Observed on 2026-09-19 with only claude installed (the guard's first claude line is its plain idle check, the second is the software-cursor arm):
+
+```text
+ok - claude (2.1.278 (Claude Code)): real idle composer classifies empty
+ok - claude (2.1.278 (Claude Code)): idle composer with the software cursor drawn reads empty on the tmux and cursorless styled reads
+ok - strict posture live: a blank shell row classifies unknown and injection defers
+ok - live composer-matrix guard verified 3 live surface(s)
+```
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
@@ -1722,6 +1778,7 @@ ESC[48;2;21;21;21m ESC[2m→ ESC[0;7mESC[48;2;21;21;21mPESC[0;2mESC[48;2;21;21;2
 The glyph and the placeholder tail are dim (SGR 2), but the cell under the terminal cursor is reverse video (SGR 0;7).
 Reverse video is neither dim nor a dark foreground, so ghost stripping leaves a lone `P` and an idle composer read `pending` before the fix.
 After teaching the shared classifier the glyph, both placeholders, and the plain-row remnant rule, the same captures read `empty` on the styled cursorless backends, while real typed text - including text typed to exactly match the placeholder - still read `pending`.
+Since 2026-09-19 the ghost stripper drops that reverse-video cursor cell itself whenever de-emphasised text follows it, so the row strips to nothing and reads `empty` because its plain body is exactly a known placeholder; the plain-row remnant rule is retired, and the mid-turn row (placeholder beside a dim busy token) reads `unknown` rather than `pending` (see the [2026-09-19 entry](#2026-09-19-claude-code-21278-software-cursor-on-the-prompt-suggestion-ghost)).
 An unstyled capture has no ghost-strip proof and correctly stays `unknown`.
 
 #### tmux composer verdict, corrected 2026-08-13

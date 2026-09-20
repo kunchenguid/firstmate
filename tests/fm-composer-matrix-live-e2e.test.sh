@@ -123,6 +123,73 @@ for h in claude codex opencode pi grok kimi muse; do
   fi
 done
 
+# --- 1b. claude's SOFTWARE cursor (issue #4912) ------------------------------
+# When claude is not driving the terminal's native cursor it draws its own as
+# a reverse-video cell, and on an empty composer that cell covers the first
+# character of the prompt-suggestion ghost, which is how an idle primary read
+# `pending` for hours on end. Launching under DISABLE_GROWTHBOOK=1 turns the
+# tengu_native_cursor rollout off, so the software cursor is drawn without a
+# prompt (the inverse blank cell); the suggestion-plus-cursor shape itself
+# needs two submitted prompts and stays the manual refresh recorded in
+# docs/verification/runtime-backends.md. This arm requires the cursor cell to
+# be present in the styled capture (else it reports that the build drew no
+# software cursor and counts nothing), and the idle composer to read `empty`
+# through both the cursor-anchored tmux read and the cursorless styled read
+# Herdr and Zellij use.
+if command -v claude >/dev/null 2>&1; then
+  version=$(harness_version claude)
+  win=hx-claude-swcursor
+  tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" \
+    -- env DISABLE_GROWTHBOOK=1 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude \
+    || fail "claude ($version): could not launch the software-cursor arm"
+  i=0; verdict=''; dismissed=0
+  budget=${FM_COMPOSER_MATRIX_LIVE_POLLS:-45}
+  while [ "$i" -lt "$budget" ]; do
+    verdict=$(fm_tmux_composer_state "$SESSION:$win")
+    [ "$verdict" = empty ] && break
+    i=$((i + 1))
+    if [ "$dismissed" -eq 0 ] && [ "$i" -ge $((budget / 3)) ]; then
+      startup_screen=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null || true)
+      if ! printf '%s\n' "$startup_screen" | grep -qi 'trust'; then
+        tmux -L "$SOCKET" send-keys -t "$SESSION:$win" Escape 2>/dev/null || true
+      fi
+      dismissed=1
+    fi
+    sleep 1
+  done
+  # A fresh session draws its composer near the top of an otherwise blank pane
+  # (no alternate screen), so the cursorless profile's 20-row tail is taken
+  # from the last non-blank row down, as a bottom-anchored capture would be.
+  styled=$(tmux -L "$SOCKET" capture-pane -e -p -t "$SESSION:$win" 2>/dev/null \
+    | LC_ALL=C awk '{ line[NR] = $0; plain = $0; gsub(/\033\[[0-9;:?]*[A-Za-z]/, "", plain); if (plain ~ /[^ \t]/) last = NR }
+                    END { for (i = 1; i <= last; i++) print line[i] }' \
+    | tail -n 20)
+  cy=$(tmux -L "$SOCKET" display-message -p -t "$SESSION:$win" '#{cursor_y}' 2>/dev/null)
+  cursor_row=$(tmux -L "$SOCKET" capture-pane -e -p -t "$SESSION:$win" -S "$cy" -E "$cy" 2>/dev/null)
+  if ! printf '%s' "$cursor_row" | grep -q "$(printf '\033')\\[7m"; then
+    note "claude ($version): drew no reverse-video software cursor under DISABLE_GROWTHBOOK=1; software-cursor arm not exercised"
+  elif [ "$verdict" != empty ]; then
+    FAILED=1
+    printf 'not ok - claude (%s): idle composer with the software cursor never classified empty on tmux (last verdict: %s)\n' \
+      "$version" "${verdict:-unreadable}" >&2
+  else
+    cursorless=$(fm_composer_classify_screen "$(printf 'styled=1\ncursor=0\nidentity=1\nrows=20')" "$styled")
+    [ "$cursorless" = need-identity ] \
+      && cursorless=$(fm_composer_classify_screen "$(printf 'styled=1\ncursor=0\nidentity=1\nrows=20')" "$styled" '' "$(printf 'claude\tidle')")
+    if [ "$cursorless" = empty ]; then
+      CHECKED=$((CHECKED + 1))
+      pass "claude ($version): idle composer with the software cursor drawn reads empty on the tmux and cursorless styled reads"
+    else
+      FAILED=1
+      printf 'not ok - claude (%s): idle composer with the software cursor read %s on the cursorless styled read (the Herdr/Zellij path)\n' \
+        "$version" "${cursorless:-unreadable}" >&2
+    fi
+  fi
+  tmux -L "$SOCKET" kill-window -t "$SESSION:$win" 2>/dev/null || true
+else
+  note "harness absent, not verified here: claude (software-cursor arm not exercised)"
+fi
+
 # --- 2. The strict blank-row posture, live ----------------------------------
 # A plain shell pane parked on a blank line between two rules (the audit's
 # sleep-pane counterexample): the permissive rule read this empty; strict must

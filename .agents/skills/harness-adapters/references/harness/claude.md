@@ -48,6 +48,7 @@ The spawn scopes `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` to every Claude wo
 CLI `--prompt-suggestions` affects print or SDK mode only and did not suppress interactive ghost text on v2.1.186.
 
 As defense in depth, `fm_composer_strip_ghost` in `../../../bin/fm-composer-lib.sh` removes SGR-2 runs before pending classification on styled tmux, Herdr, and Zellij readers.
+When claude is not driving the terminal's native cursor (the `tengu_native_cursor` rollout off, `DISABLE_GROWTHBOOK`, accessibility mode, or its fullscreen renderer), it draws a reverse-video software cursor over the ghost's first character; the same stripper drops that cell when de-emphasised text follows it, which is what stopped an idle primary reading `pending` for hours and deferring every away-mode escalation (issue #4912; verified on 2.1.278, `../../../../../docs/verification/runtime-backends.md`).
 `../../../docs/herdr-backend.md` under "Composer and injection safety" owns dark-TRUECOLOR tradeoffs and `../../../docs/verification/runtime-backends.md` owns captures.
 Styled capture stays internal to the boolean detector; `fm-peek` and model-facing captures remain plain, without escapes.
 

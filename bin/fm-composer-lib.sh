@@ -94,6 +94,20 @@
 # content": it drops every de-emphasized run - dim/faint (SGR 2) AND a
 # dark/muted TRUECOLOR foreground - and keeps only normal-intensity,
 # normally-coloured text.
+# It also drops the one cell a harness's SOFTWARE CURSOR draws on top of a
+# placeholder (issue #4912): claude draws its cursor as a
+# reverse-video cell (SGR 7) when it is not using the terminal's native
+# cursor, and on an empty composer that cell covers the FIRST character of the
+# prompt-suggestion ghost, which is then neither dim nor dark and used to
+# survive the strip as one bright letter - enough to read a genuinely idle
+# supervisor composer as `pending` and defer every away-mode escalation for
+# hours (the same shape read a lone `P` off cursor-agent's placeholder). A
+# reverse-video cell is held back until the
+# next visible cell decides: de-emphasised means the cursor sits on the
+# placeholder it hid and the cell is dropped; bright, or end of row, means
+# typed text under the cursor and the cell is kept. Typed input elsewhere on
+# the row is never touched, so a half-typed line stays `pending` whatever the
+# cursor covers.
 # Ghost stripping is a STYLE test, so it cannot see furniture a harness draws
 # at normal intensity: codex-cli 0.154.0 animates a braille "starfield" around
 # its idle composer in greys on both sides of the ghost luminance ceiling, so
@@ -205,6 +219,11 @@ fm_composer_normalize_trim_var() {  # <varname>
 #     no fleet harness uses it for ghost text, so it is kept (real text wins:
 #     under-stripping merely defers, which the max-defer alarm surfaces, while
 #     over-stripping would inject over real input).
+#   - a reverse-video run (SGR 7) that is immediately followed by a
+#     de-emphasised run: the software cursor parked on a placeholder's first
+#     character (see GHOST/PLACEHOLDER TEXT above). A reverse-video run
+#     followed by bright text or by the end of the row is typed text under the
+#     cursor and is kept. A reset (SGR 0) or SGR 27 ends the reverse-video run.
 # Raising FM_COMPOSER_GHOST_LUMA_MAX is not free: muse draws its `⟩` prompt glyph
 # in truecolor 38;2;90;160;255, luminance ~149.9 (verified, muse 0.1.0-R708.1),
 # the tightest margin over the 128 default in the fleet. Above ~150 that glyph is
@@ -248,7 +267,8 @@ fm_composer_strip_ghost() {
       return ((299*r + 587*g + 114*b) / 1000 < lumamax) ? 1 : 0
     }
     {
-      line = $0; out = ""; dim = 0; darkfg = 0; n = length(line); i = 1
+      line = $0; out = ""; dim = 0; darkfg = 0; inverse = 0; held = ""
+      n = length(line); i = 1
       while (i <= n) {
         c = substr(line, i, 1)
         if (c == "\033") {            # ESC: consume a CSI ... final-byte sequence
@@ -271,8 +291,10 @@ fm_composer_strip_ghost() {
                 } else if (code == "48" || code == "58") {
                   p = skip_color_payload(a, p, k)
                 } else if (code == "2") dim = 1
-                else if (code == "0") { dim = 0; darkfg = 0 }
+                else if (code == "0") { dim = 0; darkfg = 0; inverse = 0 }
                 else if (code == "22") dim = 0
+                else if (code == "7") inverse = 1
+                else if (code == "27") inverse = 0
                 else if (code == "39") darkfg = 0
                 else if (code + 0 >= 30 && code + 0 <= 37) darkfg = 0
                 else if (code + 0 >= 90 && code + 0 <= 97) darkfg = 0
@@ -282,10 +304,18 @@ fm_composer_strip_ghost() {
           }
           i = i + 1; continue          # lone/other ESC: drop the ESC byte only
         }
-        if (dim == 0 && darkfg == 0) out = out c   # keep only non-de-emphasised bytes
+        if (dim == 0 && darkfg == 0) {
+          # A reverse-video cell is the terminal cursor. Hold it back until the
+          # next visible cell says whether it sits on typed text (bright) or on
+          # a placeholder (de-emphasised): only the latter is dropped.
+          if (inverse) { held = held c }
+          else { out = out held c; held = "" }
+        } else if (held != "") {
+          held = ""                     # cursor parked on the placeholder it hid
+        }
         i++
       }
-      print out
+      print out held                    # a trailing cursor cell is typed text or blank
     }
   '
 }
@@ -588,7 +618,10 @@ fm_composer_idle_matches() {
 #   [plain_content] the UNSTRIPPED plain row, consulted when ghost stripping
 #              emptied an unbordered row: muse's `⟩` sits at luminance ~150,
 #              close enough to the ghost threshold that a raised threshold
-#              strips it, and the plain row is what keeps that pane readable.
+#              strips it, and the plain row is what keeps that pane readable;
+#              and cursor-agent draws its glyph AND placeholder de-emphasised,
+#              so a styled row that strips to nothing over a plain body that
+#              is exactly a known idle placeholder is read as empty.
 # Content and plain_content are normalized and re-trimmed on entry, so the
 # verdict never depends on which whitespace alphabet the calling adapter
 # trimmed with.
@@ -602,6 +635,19 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     if _fm_composer_is_prompt_glyph "$plain_content" "$FM_COMPOSER_AGENT_PROMPT_GLYPHS"; then
       printf 'empty'; return 0
+    fi
+    # Every cell was de-emphasised, including the glyph (cursor-agent draws its
+    # `→` dim too). With styling proving that, a plain body that is exactly a
+    # known idle placeholder is an empty composer; anything else stays unknown.
+    if [ "$styled" = 1 ]; then
+      local plain_body=$plain_content plain_glyph=''
+      if fm_composer_leading_prompt_glyph_var plain_glyph "$plain_body"; then
+        plain_body=${plain_body#*"$plain_glyph"}
+      fi
+      fm_composer_normalize_trim_var plain_body
+      if fm_composer_idle_matches "$plain_body" "$idle_re" "$idle_case"; then
+        printf 'empty'; return 0
+      fi
     fi
     printf 'unknown'; return 0
   fi
@@ -620,34 +666,6 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
   fm_composer_normalize_trim_var content
   [ -n "$content" ] || { printf 'empty'; return 0; }
   fm_composer_idle_matches "$content" "$idle_re" "$idle_case" && idle_collision=1
-  # Ghost stripping can leave a REMNANT of an idle placeholder rather than
-  # emptying it, because a terminal draws the cell under its cursor in reverse
-  # video (SGR 7) - neither dim/faint nor a dark foreground, so that one
-  # character survives a stripper built for the other two. cursor-agent renders
-  # exactly this shape: a dim `Plan, search, build anything` whose first
-  # character is reverse-video, leaving a lone `P` (verified live on
-  # cursor-agent 2026.08.11-e8db854). Judging that remnant on its own reads
-  # `pending` on a genuinely idle pane.
-  # The plain row is the styling-independent signal, so consult it here. This
-  # stays safe in the false-EMPTY direction because it demands the remnant be a
-  # PROPER, strictly shorter substring of a plain row that matches a full
-  # anchored placeholder: real typed text is uniformly bright, so stripping
-  # leaves it EQUAL to the plain row and it falls through to `pending` below.
-  # Typing a strict substring of a placeholder is equally safe - the plain row
-  # is then that substring, which the anchored placeholder pattern cannot match.
-  if [ "$idle_collision" != 1 ] && [ "$styled" = 1 ] && [ -n "$plain_content" ]; then
-    local plain_body=$plain_content plain_glyph=''
-    if fm_composer_leading_prompt_glyph_var plain_glyph "$plain_body"; then
-      plain_body=${plain_body#*"$plain_glyph"}
-    fi
-    fm_composer_normalize_trim_var plain_body
-    if [ "${#content}" -lt "${#plain_body}" ] \
-       && fm_composer_idle_matches "$plain_body" "$idle_re" "$idle_case"; then
-      case "$plain_body" in
-        *"$content"*) printf 'empty'; return 0 ;;
-      esac
-    fi
-  fi
   if [ "$idle_collision" = 1 ]; then
     if [ "$placeholder_position" = 1 ] && [ "$bordered" = 1 ] && [ "$styled" != 1 ]; then
       printf 'empty'; return 0

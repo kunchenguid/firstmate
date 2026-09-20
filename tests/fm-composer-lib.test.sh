@@ -225,23 +225,33 @@ test_matrix_muse_truecolor_glyph_survives_signal_loss() {
 test_matrix_cursor_reverse_video_placeholder_remnant() {
   # Real idle cursor-agent (2026.08.11-e8db854), captured byte-for-byte from a
   # live pane: the `→ ` glyph and the placeholder tail are dim (SGR 2), but the
-  # cell under the terminal cursor is REVERSE VIDEO (SGR 0;7). Reverse video is
-  # neither dim nor a dark foreground, so the ghost stripper keeps that one
-  # character and an idle composer reduces to a lone `P`.
-  local row screen plain out stripped
+  # cell under the software cursor is REVERSE VIDEO (SGR 0;7). Reverse video is
+  # neither dim nor a dark foreground, so a stripper built for those two kept
+  # that one character and an idle composer reduced to a lone `P`. The cursor
+  # cell is now dropped by the stripper itself because a de-emphasised run
+  # follows it (the same rule that fixes claude's suggestion ghost below), and
+  # the row then reads empty through the emptied-row placeholder proof.
+  local row screen plain out stripped bright
   row="${ESC}[48;2;21;21;21m ${ESC}[2m→ ${ESC}[0;7m${ESC}[48;2;21;21;21mP"
   row="${row}${ESC}[0;2m${ESC}[48;2;21;21;21mlan, search, build anything${ESC}[0m"
   screen=$'transcript\n\n'"$row"
   plain=$'transcript\n\n  → Plan, search, build anything'
 
-  # NON-VACUOUSNESS: prove the remnant really survives stripping. If the ghost
-  # stripper ever learned SGR 7, `stripped` would be empty and the verdict below
-  # would come from the empty-content path instead, silently retiring the
-  # plain-row branch this case exists to cover.
+  # NON-VACUOUSNESS: the cursor cell is dropped only because dim text follows
+  # it. The same row with a BRIGHT tail (what typed text looks like) keeps the
+  # cell and the tail, so the dim tail is the load-bearing signal, not SGR 7.
   stripped=$(printf '%s' "$row" | fm_composer_strip_ghost)
   fm_composer_normalize_trim_var stripped
-  [ "$stripped" = P ] \
-    || fail "cursor's reverse-video remnant must survive ghost stripping as 'P', got '$stripped'"
+  [ -z "$stripped" ] \
+    || fail "cursor's reverse-video cursor cell on a dim placeholder must strip away, got '$stripped'"
+  bright="${ESC}[48;2;21;21;21m ${ESC}[2m→ ${ESC}[0;7m${ESC}[48;2;21;21;21mP"
+  bright="${bright}${ESC}[0m${ESC}[48;2;21;21;21mlan, search, build anything${ESC}[0m"
+  stripped=$(printf '%s' "$bright" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var stripped
+  [ "$stripped" = 'Plan, search, build anything' ] \
+    || fail "a reverse-video cell followed by bright text is typed text and must be kept, got '$stripped'"
+  assert_screen "cursor typed text under the cursor stays pending" pending \
+    "$CAPS_STYLED" $'transcript\n\n'"$bright"
 
   assert_screen "cursor idle on herdr" empty "$CAPS_STYLED" "$screen"
   assert_screen "cursor idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
@@ -263,6 +273,75 @@ test_matrix_cursor_reverse_video_placeholder_remnant() {
   [ "$out" != empty ] \
     || fail "an unstyled cursor row matching the placeholder must not read empty, got '$out'"
   pass "matrix: cursor's reverse-video placeholder remnant reads empty; real typed text stays pending"
+}
+
+test_matrix_claude_software_cursor_on_suggestion_ghost() {
+  # THE AWAY-MODE WEDGE (issue #4912, supervisor on Herdr): a genuinely idle
+  # claude composer read `pending` for 8 to 17 hours at a stretch, so no
+  # away-mode escalation was ever delivered. Captured byte-for-byte from a
+  # real idle Claude Code 2.1.278 pane
+  # (tmux `capture-pane -e`) drawing its SOFTWARE cursor - the rendering claude
+  # uses whenever it is not driving the terminal's native cursor - over the
+  # first character of its prompt-suggestion ghost: `❯` U+00A0, then the
+  # cursor cell `R` in REVERSE VIDEO (SGR 7), then the rest of the suggestion
+  # dim (SGR 0;2). The `R` was neither dim nor dark, so it survived the ghost
+  # strip as one bright letter and the idle composer classified `pending`
+  # under every styled profile. The bottom rule bounds the bare composer, so
+  # the 256-colour footer below never entered the verdict.
+  local rule composer footer screen plain cy out stripped bright
+  rule="${ESC}[38;5;244m$(printf '─%.0s' $(seq 1 140))"
+  composer="${ESC}[39m❯${NBSP}${ESC}[7mR${ESC}[0;2m${ESC}[39m${ESC}[49meply with exactly the word GO and nothing else.${ESC}[0m${ESC}[39m${ESC}[49m"
+  footer="${ESC}[39m  ${ESC}[38;5;211m⏵⏵${ESC}[39m ${ESC}[38;5;211mbypass${ESC}[39m ${ESC}[38;5;211mpermissions${ESC}[39m ${ESC}[38;5;211mon${ESC}[38;5;246m (shift+tab${ESC}[39m ${ESC}[38;5;246mto${ESC}[39m ${ESC}[38;5;246mcycle)${ESC}[39m ${ESC}[38;5;246m·${ESC}[39m ${ESC}[38;5;246m←${ESC}[39m ${ESC}[38;5;246mfor${ESC}[39m ${ESC}[38;5;246magents"
+  screen=$'● READY\n\n'"${ESC}[38;5;246m✻${ESC}[39m ${ESC}[38;5;246mCrunched for 1s · done 7:33 AM${ESC}[39m"$'\n\n'"$rule"$'\n'"$composer"$'\n'"$rule"$'\n'"$footer"$'\n'
+  cy=5
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+
+  # NON-VACUOUSNESS: the cursor cell really is the only bright cell, and it is
+  # dropped because the suggestion continues dim behind it.
+  stripped=$(printf '%s\n' "$composer" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var stripped
+  [ "$stripped" = '❯' ] \
+    || fail "claude's software-cursor cell on the suggestion ghost must strip away, got '$stripped'"
+
+  # The incident profile: Herdr's cursorless styled read. The rule pair around
+  # the composer looks like a pi separator pair, so the adapter's lazy identity
+  # probe runs first and answers claude; probe-absent takes the same bare path.
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen")
+  [ "$out" = need-identity ] \
+    || fail "herdr's first pass must ask for identity on the rule-bounded claude composer, got '$out'"
+  assert_screen "claude idle software cursor on herdr (claude idle)" empty "$CAPS_STYLED" "$screen" '' $'claude\tidle'
+  assert_screen "claude idle software cursor on herdr (probe absent)" empty "$CAPS_STYLED" "$screen" '' probe-absent
+  assert_screen "claude idle software cursor on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "claude idle software cursor on tmux" empty "$CAPS_TMUX" "$screen" "$cy" probe-absent
+  # A plain capture cannot see the styling proof: unknown, never pending.
+  assert_screen "claude idle software cursor on cmux/orca" unknown "$CAPS_PLAIN" "$plain"
+
+  # DIVERGENCE: the same row with the tail BRIGHT is typed text with the
+  # cursor parked on its first character, and must stay pending everywhere the
+  # styled read can prove it.
+  bright="${ESC}[39m❯${NBSP}${ESC}[7mR${ESC}[0m${ESC}[39m${ESC}[49meply with exactly the word GO and nothing else.${ESC}[0m"
+  screen=$'● READY\n\n'"$rule"$'\n'"$bright"$'\n'"$rule"$'\n'"$footer"$'\n'
+  assert_screen "claude typed text under the cursor on herdr" pending "$CAPS_STYLED" "$screen" '' $'claude\tidle'
+  assert_screen "claude typed text under the cursor on tmux" pending "$CAPS_TMUX" "$screen" 3 probe-absent
+
+  # Real half-typed human input, captured from the same pane: `/no-mi` with
+  # the software cursor at the end (an inverse blank cell) and, after Home,
+  # on the first character. Both must be refused as pending.
+  local typed_end typed_home
+  typed_end="${ESC}[39m❯${NBSP}/no-mi${ESC}[7m ${ESC}[0m${ESC}[39m${ESC}[49m"
+  typed_home="${ESC}[39m❯${NBSP}${ESC}[7m/${ESC}[0m${ESC}[39m${ESC}[49mno-mi"
+  screen=$'● READY\n\n'"$rule"$'\n'"$typed_end"$'\n'"$rule"$'\n'"$footer"$'\n'
+  assert_screen "claude half-typed input, cursor at end, on herdr" pending "$CAPS_STYLED" "$screen" '' $'claude\tidle'
+  assert_screen "claude half-typed input, cursor at end, on tmux" pending "$CAPS_TMUX" "$screen" 3 probe-absent
+  screen=$'● READY\n\n'"$rule"$'\n'"$typed_home"$'\n'"$rule"$'\n'"$footer"$'\n'
+  assert_screen "claude half-typed input, cursor at start, on herdr" pending "$CAPS_STYLED" "$screen" '' $'claude\tidle'
+  assert_screen "claude half-typed input, cursor at start, on tmux" pending "$CAPS_TMUX" "$screen" 3 probe-absent
+
+  # An idle composer with no suggestion draws the cursor as an inverse blank
+  # cell, which is whitespace either way and still reads empty.
+  screen=$'● READY\n\n'"$rule"$'\n'"${ESC}[39m❯${NBSP}${ESC}[7m ${ESC}[0m${ESC}[39m${ESC}[49m"$'\n'"$rule"$'\n'"$footer"$'\n'
+  assert_screen "claude idle software cursor without a suggestion on herdr" empty "$CAPS_STYLED" "$screen" '' $'claude\tidle'
+  pass "matrix: claude's software cursor on its suggestion ghost reads empty; typed text under the cursor stays pending (issue #4912)"
 }
 
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
@@ -786,6 +865,7 @@ test_matrix_claude_bare_nbsp_row
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
+test_matrix_claude_software_cursor_on_suggestion_ghost
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture

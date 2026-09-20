@@ -154,6 +154,50 @@ test_strip_ghost_drops_dark_truecolor_ghost() {
   pass "fm_tmux_strip_ghost drops a dark/muted truecolor foreground (grok placeholder)"
 }
 
+# --- The software cursor parked on a placeholder --------------------------------
+
+# claude draws a reverse-video (SGR 7) cursor cell whenever it is not driving
+# the terminal's native cursor, and on an empty composer that cell sits on the
+# first character of its prompt-suggestion ghost (the away-mode wedge shape of
+# issue #4912; the same shape left cursor-agent's lone `P`). The
+# cell is dropped only when a de-emphasised run follows it; under the cursor
+# of typed text it is kept, and typed text elsewhere on the row is never touched.
+test_strip_ghost_drops_cursor_cell_on_placeholder_only() {
+  local out glyph
+  glyph=$(printf '\xe2\x9d\xaf')
+  # The real 2.1.278 row: bright cursor cell `R`, then the suggestion dim.
+  out=$(printf '\033[39m\xe2\x9d\xaf\xc2\xa0\033[7mR\033[0;2m\033[39m\033[49meply with exactly the word GO\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '%s\xc2\xa0' "$glyph")" ] \
+    || fail "cursor cell on a dim suggestion ghost not dropped: '$out'"
+  # SGR 27 ending the cell, then dim: still the placeholder shape.
+  out=$(printf '\xe2\x9d\xaf \033[7mw\033[27m\033[2mhat next?\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '%s ' "$glyph")" ] || fail "SGR 27 cursor cell before dim text not dropped: '$out'"
+  # A dark-truecolor tail (grok's placeholder style) counts as de-emphasised too.
+  out=$(printf '\xe2\x9d\xaf \033[7mT\033[27m\033[38;2;50;47;70mype a message...\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '%s ' "$glyph")" ] || fail "cursor cell before a dark-truecolor tail not dropped: '$out'"
+  # Typed text with the cursor moved onto its first character: bright follows,
+  # so the cell is typed text and everything stays.
+  out=$(printf '\033[39m\xe2\x9d\xaf\xc2\xa0\033[7m/\033[0m\033[39m\033[49mno-mi\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '%s\xc2\xa0/no-mi' "$glyph")" ] \
+    || fail "cursor cell on typed text was dropped: '$out'"
+  # Cursor mid-word and at the end of typed text (an inverse blank cell).
+  out=$(printf 'he\033[7ml\033[27mlo\n' | fm_tmux_strip_ghost)
+  [ "$out" = "hello" ] || fail "mid-word cursor cell was dropped: '$out'"
+  out=$(printf '\xe2\x9d\xaf /no-mi\033[7m \033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '%s /no-mi ' "$glyph")" ] || fail "trailing cursor cell changed typed text: '$out'"
+  # A single typed character under the cursor with nothing after it is kept.
+  out=$(printf '\xe2\x9d\xaf \033[7my\033[27m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '%s y' "$glyph")" ] || fail "lone typed character under the cursor was dropped: '$out'"
+  # Typed text BEFORE a cursor cell that sits on a dim run: the cell goes, the
+  # typed text stays, so the row still reads as pending input.
+  out=$(printf '\xe2\x9d\xaf h\033[7me\033[27m\033[2mlp\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '%s h' "$glyph")" ] || fail "typed text before a cursor cell on ghost text was lost: '$out'"
+  # A dim cursor cell (SGR 2;7) was already ghost; unchanged.
+  out=$(printf '\xe2\x9d\xaf \033[2;7mg\033[27mhost\033[0m\n' | fm_tmux_strip_ghost)
+  [ "$out" = "$(printf '%s ' "$glyph")" ] || fail "dim cursor cell leaked: '$out'"
+  pass "fm_tmux_strip_ghost drops the software cursor cell only when it sits on a placeholder"
+}
+
 # --- muse's composer sits closest to the ghost threshold ---------------------
 
 # These are muse 0.1.0-R708.1's real captured composer rows. Its prompt glyph
@@ -686,6 +730,7 @@ test_strip_ghost_handles_combined_and_boundary_codes
 test_strip_ghost_keeps_colored_text_with_2_payloads
 test_strip_ghost_drops_dark_truecolor_ghost
 test_strip_ghost_keeps_muse_composer_colors
+test_strip_ghost_drops_cursor_cell_on_placeholder_only
 test_dim_ghost_only_composer_is_not_pending
 test_dim_ghost_inside_bordered_composer_is_not_pending
 test_normal_text_still_pending

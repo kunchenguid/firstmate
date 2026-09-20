@@ -240,11 +240,11 @@ A fully unreadable target stops retrying and reports unknown.
 blocked is not treated as a queued-Enter busy signal, so a Cursor pane that reports blocked in every state does not receive that conversion.
 
 Some harnesses never present a legibly idle native baseline at all, so the composer fallback is their only path.
-Herdr reports a Cursor pane `blocked` in every state, and Cursor's mid-turn composer renders its placeholder beside a right-aligned busy token, which is composer content and therefore `pending` on a composer that holds no user text.
+Herdr reports a Cursor pane `blocked` in every state, and Cursor's mid-turn composer renders its placeholder beside a right-aligned busy token, so a composer that holds no user text never proves `empty` there (it reads `unknown`, and read `pending` while its cursor cell still survived the ghost strip).
 That fallback alone reported every delivered steer as unconfirmed, so it is paired with a rendered-footer transition: the pane's verified busy footer is read once before the first Enter, and an idle-to-busy transition across that Enter confirms the submit.
 It is the same semantic signal the native path uses and the same one the tmux submit core reads.
 A pane already mid-turn cannot borrow a rendered-footer transition as proof of this delivery; after retries, only proven pending text plus native `working` can establish that its Enter was accepted and queued.
-The composer verdict itself is deliberately unchanged: a right-aligned status token on the composer row stays content for every other caller, including the away-mode pre-injection guard.
+The composer verdict itself is deliberately not softened: a right-aligned status token on the composer row keeps that row from proving empty for every other caller, including the away-mode pre-injection guard, and the transition proof is accepted on either non-empty verdict.
 The poll density bounds the residual possibility of an extremely fast complete turn; a missed native transition falls through to the composer verdict rather than reporting a false swallow.
 
 `pane read --lines N` can return empty output when N is below the viewport height.
@@ -264,7 +264,8 @@ A working Pi, pending middle row, missing identity, incomplete separator pair, o
 Identity stays a lazy second read, consulted only when a separator pair could change the verdict.
 
 ANSI capture preserves de-emphasized placeholder style.
-`bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
+`bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs, dark truecolor placeholders, and the reverse-video software-cursor cell a harness parks on a placeholder's first character, while retaining bright typed input.
+The cursor cell rule closed the away-mode wedge of issue #4912, where an idle claude primary's prompt-suggestion ghost read `pending` through this adapter for hours because that one cell survived the strip ([verification](verification/runtime-backends.md#2026-09-19-claude-code-21278-software-cursor-on-the-prompt-suggestion-ghost)).
 If the ANSI capture ever fails, the plain fallback declares itself unstyled and the classifier degrades a glyph row carrying trailing text to `unknown` instead of misreading ghost suggestions as typed input, which safely defers injection and eventually raises the wedge alarm.
 
 A bare shell prompt is never an empty agent composer.
