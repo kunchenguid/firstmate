@@ -25,7 +25,7 @@ QUOTA="$TMP_ROOT/quota.json"
 RECEIPTS="$HOME_DIR/state/dispatch-receipts.jsonl"
 BASE_PATH=$PATH
 mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
-for command_name in bash chmod cp dirname jq mktemp rm; do
+for command_name in bash basename chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
 done
 
@@ -289,6 +289,30 @@ assert_equals 'sonnet' "$(jq -r .dispatched_profile.model <<<"$dispatch_receipt"
 head -c "$before_dispatch_bytes" "$RECEIPTS" > "$TMP_ROOT/receipt-prefix"
 cmp "$TMP_ROOT/receipts-before-dispatch" "$TMP_ROOT/receipt-prefix"
 pass "actual dispatch is separately recorded and joined without changing earlier rows"
+
+# --- the dispatch join is by brief content, not by path spelling ---------------
+dispatch_count_before_spelling=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
+RELATIVE_BRIEF=$(basename "$BRIEF")
+(cd "$TMP_ROOT" && PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" \
+  "$TOOL" --record-dispatch "./$RELATIVE_BRIEF" --harness claude >/dev/null 2>&1)
+spelling_receipt=$(jq -sc '[.[] | select(.receipt_type == "dispatch")] | last' "$RECEIPTS")
+assert_equals "$((dispatch_count_before_spelling + 1))" "$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")" "a differently spelled brief path still joins its resolution"
+assert_equals "$(jq -r .resolution_id <<<"$clear_receipt")" "$(jq -r .resolution_id <<<"$spelling_receipt")" "the join is the brief content hash"
+assert_equals "$(jq -r .brief_path <<<"$clear_receipt")" "$(jq -r .brief_path <<<"$spelling_receipt")" "brief_path is recorded resolved, so both spellings agree"
+pass "the dispatch join survives any spelling of the same brief path"
+
+# --- a lock left by a dead owner does not stall receipts forever ---------------
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+DEAD_PID=$(bash -c 'echo $$')
+while kill -0 "$DEAD_PID" 2>/dev/null; do DEAD_PID=$((DEAD_PID + 1)); done
+ln -s "$DEAD_PID" "$HOME_DIR/state/.dispatch-receipts.lock"
+stalled_before=$(jq -s 'length' "$RECEIPTS")
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "a stale lock leaves the resolver exit 0"
+assert_equals "$((stalled_before + 1))" "$(jq -s 'length' "$RECEIPTS")" "a lock owned by a dead process is broken and the receipt is written"
+assert_equals 'absent' "$([ -L "$HOME_DIR/state/.dispatch-receipts.lock" ] && echo present || echo absent)" "the resolver releases the lock it recovered"
+pass "receipt writes recover from a lock whose owner died"
 
 # --- rules are snapshotted and line output is injection-safe -------------------
 MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
@@ -563,22 +587,18 @@ assert_contains "$out" '  status: error' "quota-axi failure is an error outcome"
 assert_contains "$out" '  reason: quota-axi --json failed' "quota-axi failure is named"
 pass "quota evidence comes from one quota-axi --json read, and its failure is an error outcome"
 
-# --- answering-model drift is a distinct escalation ----------------------------
+# --- the answering model is recorded, never an acceptance gate -----------------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
 jq '.model = "jev-1.14.0"' "$RESPONSE" > "$TMP_ROOT/drift-response.json"
 mv "$TMP_ROOT/drift-response.json" "$RESPONSE"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-expect_code 0 "$code" "model drift exits 0"
-assert_contains "$out" '  status: escalate' "model drift escalates"
-assert_contains "$out" '  reason: model drift: requested jev-1.13.0 but response answered with jev-1.14.0' "model drift is distinct and names both model ids"
-assert_not_contains "$out" '  status: clear' "model drift never clears"
-assert_not_contains "$out" '  profile:' "model drift never selects a profile"
-assert_absent "$LOG/quota-axi.calls" "model drift falls back before quota ranking"
+expect_code 0 "$code" "an unexpected answering model exits 0"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "an unexpected answering model does not disable selection"
 drift_receipt=$(jq -sc '[.[] | select(.receipt_type == "resolution")] | last' "$RECEIPTS")
-assert_equals 'escalate' "$(jq -r .status <<<"$drift_receipt")" "model drift writes an escalation receipt"
-assert_equals 'jev-1.14.0' "$(jq -r .answering_model <<<"$drift_receipt")" "drift receipt preserves the unexpected answering model"
-pass "pinned-model drift is distinct, non-authorizing, and non-blocking"
+assert_equals 'jev-1.13.0' "$(jq -r .requested_model <<<"$drift_receipt")" "the receipt still carries the pinned requested model"
+assert_equals 'jev-1.14.0' "$(jq -r .answering_model <<<"$drift_receipt")" "the receipt carries the answering model that actually replied"
+pass "answering-model drift is observable in the receipt without gating dispatch"
 
 # --- API and response failures are error outcomes, exit 0 ----------------------
 reset_log

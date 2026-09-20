@@ -44,7 +44,7 @@
 #   A keyed run also appends one best-effort resolution receipt to
 #   $FM_HOME/state/dispatch-receipts.jsonl. After fm-spawn accepts the actual
 #   profile, --record-dispatch appends a second receipt joined to the latest
-#   resolution for the same brief path and content hash. Receipt failures are
+#   resolution for the same brief content hash. Receipt failures are
 #   silent and never change resolver stdout or exit status. The JSONL file is
 #   append-only and stops accepting records at its fixed 1 MiB bound.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
@@ -87,7 +87,7 @@ RECEIPTS="$FM_HOME/state/dispatch-receipts.jsonl"
 RECEIPT_LOCK="$FM_HOME/state/.dispatch-receipts.lock"
 
 RULES='' BRIEF_SNAPSHOT='' RESP_FILE='' RESP_HEADERS='' QUOTA=''
-RULES_SHA256='' BRIEF_SHA256='' RESOLVER_SHA256='' REQUEST_ID=''
+RULES_SHA256='' BRIEF_SHA256='' RESOLVER_SHA256='' REQUEST_ID='' BRIEF_ABS=''
 LAT_MS=null RECEIPT_LOCK_HELD=0
 
 # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
@@ -98,39 +98,51 @@ cleanup() {
   [ -z "$RESP_HEADERS" ] || rm -f -- "$RESP_HEADERS"
   [ -z "$QUOTA" ] || rm -f -- "$QUOTA"
   if [ "$RECEIPT_LOCK_HELD" -eq 1 ]; then
-    rmdir "$RECEIPT_LOCK" 2>/dev/null || true
+    rm -f -- "$RECEIPT_LOCK" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
 
+abs_path() { # <path>
+  local dir base
+  dir=$(dirname -- "$1") || return 1
+  base=$(basename -- "$1") || return 1
+  (cd "$dir" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$base") || printf '%s\n' "$1"
+}
+
 sha256_file() { # <path>
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
+  if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
   else
     return 1
   fi
 }
 
 sha256_text() { # <text>
-  if command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$1" | shasum -a 256 2>/dev/null | awk '{print $1}'
-  elif command -v sha256sum >/dev/null 2>&1; then
+  if command -v sha256sum >/dev/null 2>&1; then
     printf '%s' "$1" | sha256sum 2>/dev/null | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 2>/dev/null | awk '{print $1}'
   else
     return 1
   fi
 }
 
 receipt_lock_acquire() {
-  local attempt=0
+  local attempt=0 owner
   mkdir -p "$FM_HOME/state" 2>/dev/null || return 1
-  while [ "$attempt" -lt 100 ]; do
-    if mkdir "$RECEIPT_LOCK" 2>/dev/null; then
+  while [ "$attempt" -lt 600 ]; do
+    if ln -s "$$" "$RECEIPT_LOCK" 2>/dev/null; then
       RECEIPT_LOCK_HELD=1
       return 0
     fi
+    owner=$(readlink "$RECEIPT_LOCK" 2>/dev/null) || owner=''
+    case "$owner" in
+      ''|*[!0-9]*) : ;;
+      *) kill -0 "$owner" 2>/dev/null || rm -f -- "$RECEIPT_LOCK" 2>/dev/null || true ;;
+    esac
     attempt=$((attempt + 1))
     sleep 0.005
   done
@@ -139,7 +151,7 @@ receipt_lock_acquire() {
 
 receipt_lock_release() {
   [ "$RECEIPT_LOCK_HELD" -eq 1 ] || return 0
-  rmdir "$RECEIPT_LOCK" 2>/dev/null || return 1
+  rm -f -- "$RECEIPT_LOCK" 2>/dev/null || return 1
   RECEIPT_LOCK_HELD=0
 }
 
@@ -172,7 +184,7 @@ write_resolution_receipt() { # <result-json>
   resolution_id=$(sha256_text "$timestamp|$$|$RANDOM|$BRIEF_SHA256|$REQUEST_ID") || return 1
   record=$(jq -cn \
     --arg timestamp "$timestamp" --arg resolution_id "sha256:$resolution_id" \
-    --arg brief_path "$BRIEF" --arg brief_sha "$BRIEF_SHA256" \
+    --arg brief_path "$BRIEF_ABS" --arg brief_sha "$BRIEF_SHA256" \
     --arg rules_sha "$RULES_SHA256" --arg resolver_sha "$RESOLVER_SHA256" \
     --arg requested_model "$TS_MODEL" --arg request_id "$REQUEST_ID" \
     --argjson result "$result" '
@@ -211,8 +223,8 @@ record_actual_dispatch() {
     receipt_lock_release || true
     return 1
   fi
-  base=$(jq -sc --arg brief_path "$BRIEF" --arg brief_sha "$BRIEF_SHA256" '
-    [.[] | select(.receipt_type == "resolution" and .brief_path == $brief_path and .brief_sha256 == $brief_sha)]
+  base=$(jq -sc --arg brief_sha "$BRIEF_SHA256" '
+    [.[] | select(.receipt_type == "resolution" and .brief_sha256 == $brief_sha)]
     | last // empty' "$RECEIPTS" 2>/dev/null) || base=''
   if [ -z "$base" ]; then
     receipt_lock_release || true
@@ -279,6 +291,7 @@ command -v jq >/dev/null 2>&1 || die "jq required"
 BRIEF_SNAPSHOT=$(mktemp) || die "mktemp failed"
 cp "$BRIEF" "$BRIEF_SNAPSHOT" || die "could not snapshot brief file: $BRIEF"
 chmod 400 "$BRIEF_SNAPSHOT" || die "could not protect brief snapshot"
+BRIEF_ABS=$(abs_path "$BRIEF") || BRIEF_ABS=$BRIEF
 BRIEF_SHA256=$(sha256_file "$BRIEF_SNAPSHOT") || BRIEF_SHA256=''
 RESOLVER_SHA256=$(sha256_file "$SCRIPT_DIR/fm-dispatch-resolve.sh") || RESOLVER_SHA256=''
 
@@ -460,39 +473,13 @@ jq -e --slurpfile rules "$RULES" '
        (.usage.output_tokens | type) == "number"))' \
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
 
-ANSWERING_MODEL=$(jq -r 'if (.model | type) == "string" then .model else empty end' "$RESP_FILE")
-if [ "$ANSWERING_MODEL" != "$TS_MODEL" ]; then
-  RESULT=$(jq -cn --arg requested "$TS_MODEL" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" \
-    --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" '
-    ($resp[0]) as $r | ($rules[0]) as $cfg | ($r.answers.rule) as $a |
-    ($a.choice) as $choice |
-    (if ($choice | test("^rule_[1-9][0-9]*$"))
-     then ($choice | ltrimstr("rule_") | tonumber)
-     else null end) as $rule_number |
-    (if $choice == "default" then null
-     elif $rule_number != null and $rule_number <= (($cfg.rules // []) | length) then $cfg.rules[$rule_number - 1]
-     else null end) as $rule |
-    {
-      model: (if ($r.model | type) == "string" then $r.model else null end),
-      latency_ms: $lat,
-      tokens: ($r.usage // null),
-      rule: $choice,
-      rule_when: (if $rule == null then $none_criterion else $rule.when end | .[0:60]),
-      confidence: $a.confidence,
-      probabilities: $a.probabilities,
-      status: "escalate",
-      reason: ("model drift: requested " + $requested + " but response answered with " +
-        (if ($r.model | type) == "string" then $r.model else "a missing or non-string model id" end)),
-      candidates: []
-    }') || emit_error "model drift result rendering failed"
-else
-  # ---- quota evidence: one quota-axi --json snapshot ---------------------------
-  command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
-  quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
-  fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
+# ---- quota evidence: one quota-axi --json snapshot -----------------------------
+command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
+quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
+fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 
-  # ---- resolution: declared gates + quota evidence + argmax, all in jq ----------
-  RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
+# ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
+RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
   --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" '
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
@@ -606,7 +593,6 @@ else
       end
     end
   end') || emit_error "resolution failed"
-fi
 
 TEXT=$(jq -r '
   def flat: tostring | gsub("[\t\r\n]"; " ");
