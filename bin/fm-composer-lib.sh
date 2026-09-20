@@ -1739,13 +1739,23 @@ fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
   fi
 }
 
-_fm_composer_classify_pi_rows() {  # <screen> <styled>
-  local screen=$1 styled=$2 row raw content
+_fm_composer_classify_pi_rows() {  # <screen> <styled> [agent]
+  local screen=$1 styled=$2 agent=${3:-} row raw content
   row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
   while [ "$row" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     fm_composer_normalize_trim_var content
+    if [ "$agent" = agy ]; then
+      local glyph=''
+      if _fm_composer_is_prompt_glyph "$content" "$FM_COMPOSER_AGENT_PROMPT_GLYPHS" \
+        || _fm_composer_is_prompt_glyph "$content" "$FM_COMPOSER_SHELL_PROMPT_GLYPHS"; then
+        content=''
+      elif fm_composer_leading_prompt_glyph_var glyph "$content"; then
+        content=${content#*"$glyph"}
+        fm_composer_normalize_trim_var content
+      fi
+    fi
     if [ -n "$content" ]; then
       printf 'pending'
       return 0
@@ -1770,18 +1780,21 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
     return 0
   fi
   agent=${identity%%$'\t'*}
-  if [ "$agent" = pi ]; then
-    _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
-  else
-    _fm_composer_classify_bare_row "$screen" "$styled" "$row"
-  fi
+  case "$agent" in
+    pi|agy)
+      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+      ;;
+    *)
+      _fm_composer_classify_bare_row "$screen" "$styled" "$row"
+      ;;
+  esac
 }
 
 # The pi separated-shape verdict: identity + structure conjunction (herdr's
 # rule, now fleet-wide). A missing identity capability keeps the shape
 # unknown; an unfetched identity on an identity-capable backend asks the
 # adapter to probe (lazily) and re-call. Proven input remains pending for every
-# live pi state, while only an idle/done pi proves an empty composer. A blocked
+# live pi/agy state, while only an idle/done agent proves an empty composer. A blocked
 # pi is parked on an interactive prompt waiting for a human keystroke: its menu
 # is drawn above the separator pair, so the composer region looks free while the
 # keys would answer the prompt instead of composing (issue #2797). Structure
@@ -1802,11 +1815,18 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   agent=${identity%%$'\t'*}
   agent_status=${identity#*$'\t'}
-  if [ "$agent" != pi ] || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
+  case "$agent" in
+    pi|agy) ;;
+    *)
+      printf 'unknown'
+      return 0
+      ;;
+  esac
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
     printf 'unknown'
     return 0
   fi
-  state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
+  state=$(_fm_composer_classify_pi_rows "$screen" "$styled" "$agent")
   if [ "$state" = pending ]; then
     printf 'pending'
     return 0

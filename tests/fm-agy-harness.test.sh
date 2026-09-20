@@ -122,7 +122,17 @@ test_agy_claims_no_inherited_launcher_marker() {
   local fakebin out
   # AGENT=1 was observed on a live agy TUI as inherited launcher state, so it
   # must never promote to an agy identity the way GEMINI_CLI does for gemini.
-  out=$(AGENT=1 "$HARNESS")
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-agent-marker")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' bash; exit 0 ;;
+  *"args="*) printf '%s\n' bash; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(AGENT=1 PATH="$fakebin:$PATH" "$HARNESS")
   [ "$out" != agy ] \
     || fail "an inherited AGENT=1 must never claim the agy identity, got '$out'"
   # Drive the hazard the other way: agy does not clear an inherited CLAUDECODE,
@@ -887,6 +897,93 @@ test_agy_spawn_arms_no_busy_wiring() {
   pass "fm-spawn: agy arms no busy wiring and writes no sidecar"
 }
 
+test_agy_busy_classify_herdr_native() {
+  local state out
+  state="$TMP_ROOT/busy-classify-state"
+  mkdir -p "$state"
+
+  fm_backend_busy_state() {
+    local backend=$1 target=$2
+    [ "$backend" = herdr ] || return 1
+    case "$target" in
+      herdr-working:*) printf 'busy' ;;
+      herdr-idle:*) printf 'idle' ;;
+      *) printf 'unknown' ;;
+    esac
+  }
+
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-busy-lib.sh"
+
+  # 1. agy harness on herdr: busy -> busy herdr-native
+  out=$(fm_busy_classify herdr herdr-working:p1 agy t1 "$state")
+  [ "$out" = "busy herdr-native" ] || fail "agy on herdr working should classify 'busy herdr-native', got '$out'"
+
+  # 2. agy harness on herdr: idle -> idle herdr-native
+  out=$(fm_busy_classify herdr herdr-idle:p1 agy t1 "$state")
+  [ "$out" = "idle herdr-native" ] || fail "agy on herdr idle should classify 'idle herdr-native', got '$out'"
+
+  # 3. other harness (claude) on herdr: idle -> unknown missing (preserves hook-dependent contract)
+  out=$(fm_busy_classify herdr herdr-idle:p1 claude t1 "$state")
+  [ "$out" = "unknown missing" ] || fail "claude on herdr idle without record should classify 'unknown missing', got '$out'"
+
+  pass "bin/fm-busy-lib.sh: agy on herdr maps native idle to 'idle herdr-native'"
+}
+
+test_agy_exit_submits_retried_enter() {
+  command -v jq >/dev/null 2>&1 || { pass "agy exit test skipped without jq"; return; }
+  local dir resp log fb out
+  dir="$TMP_ROOT/agy-herdr-exit"
+  resp="$dir/resp"
+  log="$dir/log"
+  mkdir -p "$resp"
+  : > "$log"
+
+  # 2: agent get (pre-Enter baseline) -> agent=agy, agent_status=idle
+  printf '{"result":{"agent":{"agent":"agy","agent_status":"idle"}}}\n' > "$resp/2.out"
+  # 4: agent get (post-Enter #1) -> idle (autocomplete menu opened)
+  printf '{"result":{"agent":{"agent":"agy","agent_status":"idle"}}}\n' > "$resp/4.out"
+  # 5: pane capture (composer check after Enter #1) -> shows agy prompt with /exit selected
+  printf 'transcript\n────────────────────────\n> /exit\n────────────────────────\n' > "$resp/5.out"
+  # 6: agent get (composer identity) -> agy idle
+  printf '{"result":{"agent":{"agent":"agy","agent_status":"idle"}}}\n' > "$resp/6.out"
+  # 8: agent get (post-Enter #2) -> working
+  printf '{"result":{"agent":{"agent":"agy","agent_status":"working"}}}\n' > "$resp/8.out"
+
+  fb="$dir/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'EOF'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_HERDR_LOG:?}"
+RESP="${FM_HERDR_RESPONSES:?}"
+COUNT_FILE="$RESP/.count"
+next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
+{
+  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+  exit 0
+fi
+n=$next
+echo "$n" > "$COUNT_FILE"
+if [ -f "$RESP/$n.exit" ]; then
+  exit "$(cat "$RESP/$n.exit")"
+fi
+[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
+exit 0
+EOF
+  chmod +x "$fb/herdr"
+
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/exit" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "send_text_submit should report empty after second Enter submits /exit, got '$out'"
+  pass "bin/backends/herdr.sh: agy /exit with autocomplete popup triggers second Enter retry"
+}
+
 test_agy_ancestry_detects_the_native_command_name
 test_agy_ancestry_rejects_unrelated_mentions
 test_agy_claims_no_inherited_launcher_marker
@@ -917,3 +1014,5 @@ test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
 test_agy_spawn_arms_no_busy_wiring
+test_agy_busy_classify_herdr_native
+test_agy_exit_submits_retried_enter

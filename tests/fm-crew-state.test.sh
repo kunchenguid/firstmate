@@ -2150,6 +2150,38 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle() {
   pass "an idle record with idle agent_status stays not-busy (no regression for a human-blocked agent)"
 }
 
+test_herdr_agy_agent_status_working_and_idle_status_log() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr agy agent_status skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-agy-status)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-agy
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-agy.meta" "window=default:w1:p5" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=agy"
+  printf 'done: completed task\n' > "$d/state/feat-herdr-agy.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+
+  # 1. Native working outranks status-log done
+  FM_FAKE_HERDR_AGENT_STATUS=working
+  FM_FAKE_HERDR_BUSY=1
+  local out_busy; out_busy=$(run_crew_state "$d" feat-herdr-agy)
+  assert_contains "$out_busy" "state: working" "herdr working agent_status outranks status-log done"
+  assert_contains "$out_busy" "source: pane" "working agent_status sources from pane"
+  assert_contains "$out_busy" "harness busy (herdr-native)" "working agent_status details herdr-native"
+
+  # 2. Native idle falls through to status-log done
+  FM_FAKE_HERDR_AGENT_STATUS=idle
+  FM_FAKE_HERDR_BUSY=0
+  local out_idle; out_idle=$(run_crew_state "$d" feat-herdr-agy)
+  assert_contains "$out_idle" "state: done" "herdr idle agent_status falls through to status-log done"
+  assert_contains "$out_idle" "source: status-log" "idle agent_status sources from status-log"
+  assert_contains "$out_idle" "completed task" "idle agent_status reports status note"
+
+  pass "herdr agy: native working outranks status log while native idle falls through to status-log completion"
+}
+
 # (g) no run + idle pane -> the status-log verb, as-is
 test_no_run_idle_pane_uses_log() {
   reset_fakes
@@ -4883,6 +4915,7 @@ test_no_run_herdr_alive_with_failed_read_stays_live
 test_no_run_herdr_husk_dead_still_reads_gone
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
+test_herdr_agy_agent_status_working_and_idle_status_log
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused

@@ -929,13 +929,22 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   # No record at all. A native herdr busy verdict is semantic enough to trust
   # for BUSY (streaming means a turn is running); native idle is narrower
   # than turn state (a long foreground tool call reads idle) and stays
-  # unknown here.
+  # unknown here, except for agy whose native herdr agent_status is tracked
+  # as an interactive worker and allows the status-log fallback on idle.
   if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
     native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
     if [ "$native" = busy ]; then
       printf 'busy herdr-native'
       return 0
     fi
+    case "$harness" in
+      agy*)
+        if [ "$native" = idle ]; then
+          printf 'idle herdr-native'
+          return 0
+        fi
+        ;;
+    esac
   fi
   case "$harness" in
     muse*)
