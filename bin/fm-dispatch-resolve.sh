@@ -54,8 +54,8 @@
 #   briefly for the lock, so a contended resolve receipt is dropped rather
 #   than delaying the block already printed.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
-#   existing unreadable rules file, malformed rules, or missing jq), which is
-#   actionable, never selected around.
+#   existing unreadable rules file, malformed rules, or missing jq once a rules
+#   file exists to match against), which is actionable, never selected around.
 #
 # Environment:
 #   TYPESAFE_API_KEY is the only resolver-specific environment setting.
@@ -157,6 +157,8 @@ receipt_lock_release() {
 
 receipt_append_locked() { # <one-line-json>
   local record=$1
+  # Tested before -e, which dereferences: a dangling symlink is invisible to the
+  # checks below and would have the append create its target outside state/.
   [ ! -L "$RECEIPTS" ] || return 1
   if [ -e "$RECEIPTS" ]; then
     [ -f "$RECEIPTS" ] || return 1

@@ -107,6 +107,7 @@ The join runs after the spawn and prints nothing to the resolver's stdout, so th
 Contention past either budget drops the record by design rather than waiting.
 A `--record-dispatch` run that cannot take the lock appends nothing, names itself on the stderr drop line, and still exits 0, so that loss is observable; a resolve run that cannot write its receipt prints `dispatch-resolve: no resolution receipt for this run` on stderr whatever its outcome, and on `clear` the later join for that brief reports the missing resolution as well, so neither loss is swallowed.
 The suite drives both, on a `clear` run and on an `error` run, by making `state/dispatch-receipts.jsonl` a directory the append cannot use, and asserts the stdout block and exit 0 are identical to the same run with receipts working.
+It drives the same refusal with a dangling symlink at that path, asserting the resolver leaves the link's target uncreated and still prints its block and exits 0.
 The suite asserts that shape rather than a fixed append count - each concurrent run either appends its record or reports the drop, with no third outcome, and the file stays valid JSONL with no partial or interleaved line.
 
 The held-lock fixture is the contention case both the bound above and the contended row are measured under, and the suite holds the lock the same way in `tests/fm-dispatch-resolve.test.sh` ("a blocked receipt cannot delay the resolver block").
