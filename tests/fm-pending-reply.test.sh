@@ -708,12 +708,12 @@ test_delivery_confirmation_serializes_with_reconciliation() {
     entered="$home/mark-delivered.entered"
     release="$home/mark-delivered.release"
     fm_pending_reply_mark_delivered() {
-      local pending_state=$1 pending_corr=$2 epoch=$3 pending_rec phase
+      local pending_state=$1 pending_corr=$2 pending_epoch=$3 pending_rec phase
       printf '%s\n' "${BASHPID:-$$}" >> "$calls"
       : > "$entered"
       while [ ! -e "$release" ]; do /bin/sleep 0.01; done
       pending_rec=$(fm_pending_reply_path "$pending_state" "$pending_corr")
-      fm_pending_reply_set "$pending_rec" delivered_epoch "$epoch" || return 1
+      fm_pending_reply_set "$pending_rec" delivered_epoch "$pending_epoch" || return 1
       phase=$(fm_pending_reply_get "$pending_rec" phase)
       [ "$phase" != delivery_unknown ] \
         || fm_pending_reply_set "$pending_rec" phase awaiting_report
