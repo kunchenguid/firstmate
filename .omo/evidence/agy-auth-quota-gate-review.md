@@ -1,0 +1,28 @@
+# Gate review: AGY auth/quota semantics
+
+- recommendation: APPROVE
+- blockers: []
+- originalIntent: Preserve AGY `auth_required` as eligible-but-unranked uncertainty, expose the exact authentication cause, fabricate no usable quota, and never emit an AGY dispatch profile; permit valid known sub-scopes beneath top-level `unknown`; keep tests behavioral rather than deletion/prose/implementation-only checks.
+- desiredOutcome: Typed resolution cannot dispatch AGY while authentication is required, worker-side quota choice rejects it, quota watches terminate as an error with the source cause, and valid known availability rows under top-level `unknown` remain usable.
+- userOutcomeReview: PASS. Static call-path review found no reachable sequence that violates the stated outcome. `fm-dispatch-resolve.sh` removes auth-required AGY from the rankable set; `fm-quota-choose.sh` rejects AGY before quota evaluation; `fm-procevent-quota.sh` returns terminal error details. Known sub-scopes under top-level unknown remain schema-validated and consumable.
+- checkedArtifacts:
+  - `bin/fm-dispatch-resolve.sh:276-395`
+  - `bin/fm-quota-choose.sh:320-390`
+  - `bin/fm-quota-axi-lib.sh:45-92`
+  - `bin/fm-procevent-quota.sh:110-185,219-256`
+  - `tests/fm-dispatch-resolve.test.sh:302-363`
+  - `tests/fm-procevent-quota.test.sh:220-239`
+  - `tests/fm-quota-choose.test.sh:280-321`
+  - `.agents/skills/quota-array-dispatch/SKILL.md`
+  - `AGENTS.md:113-138`
+  - commit history `1bb72cc5f88014c86e3d03244efa0bb26c22d001..9dd1473248d12481f6b560a5cee0dc6fa9e7175e`
+- skillPerspective:
+  - remove-ai-slops: No deletion-only, requested-removal, tautological, or implementation-mirroring blocker found in the focused tests. Assertions target public CLI outcomes and safety properties. Some exact CLI rendering assertions are contract-sensitive but are not prompt/prose pins and do not violate the stated criterion.
+  - programming: Boundary validation remains centralized in `fm_quota_json_valid`; malformed known rows under top-level unknown remain rejected; no new abstraction or duplicated normalization creates a criterion failure.
+- reportCoverageGap: No separate executor code-review report or manual-QA matrix was present under `.no-mistakes` or `.omo/evidence`; direct artifact review supplied the required coverage.
+- exactEvidenceGaps:
+  - Tests were not executed because the assignment explicitly prohibited running tests.
+  - No runtime producer snapshot was supplied; review is static against committed fixtures and call paths.
+  - No ulw-loop plan exists, so this report uses the documented fallback evidence path.
+- notes:
+  - `fm-procevent-quota.sh` treats provider-level unknown/empty quota as healthy-and-continue polling. This is pre-existing and explicitly covered by the current test contract; it is not a blocker for the requested AGY auth-required semantics.

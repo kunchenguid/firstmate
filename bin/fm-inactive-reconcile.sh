@@ -416,6 +416,7 @@ report_child_ledger_locked() { # <id> <meta>
   local id=$1 meta=$2 status last previous state note pr mode yolo data incarnation fingerprint predecessor_head outcome_key line
   status="$STATE/$id.status"
   last=$(child_terminal_ledger_line "$status") || return 0
+  reap_terminal_child_locked "$id" "$meta" || true
   state=$(status_line_verb "$last")
   pr=$(pr_for_task "$meta" "$last")
   incarnation=$(meta_incarnation "$meta")

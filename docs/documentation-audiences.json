@@ -277,6 +277,26 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": ".omo/evidence/agy-auth-quota-gate-review.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": ".omo/evidence/agy-auth-required-gate-review.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": ".omo/evidence/agy-auth-required-quota-gate-review.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": ".omo/evidence/dedicated-simplification-gate-review.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": ".omo/evidence/firstmate-agy-auth-required-gate-review.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },

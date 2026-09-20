@@ -1184,59 +1184,18 @@ That one diagnostic names the list line number at most and never prints the list
 **Missing or invalid rules**
 
 An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
-
-**Checks performed after the answer**
-
-After the answer, code applies all remaining checks and ranking:
-
-- The confidence floor and the matched rule's `approval` and `floor`.
-- Each candidate's `provider` and `floor`.
-- Every applicable account-wide and model/product row from one `quota-axi --json` snapshot.
-- The numeric `spendPriority` argmax over candidates, using each candidate's limiting row.
-
-The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and schema 6 and implements the [account-matching contract](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).
-
-- An expanded provider with no matching account row leaves the candidate eligible but unranked.
-- Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
-
-**Confidence and fallback rules**
-
-- A rule that declares `min_confidence` is checked against that rule's own probability, whether it is the picked option or a runner-up, so a runner-up never needs weaker support than it would as the pick.
-- A picked rule without `min_confidence`, and the neutral option, keep the global 0.6 floor on the answer's confidence exactly as before, so a file with no declared floors behaves as it did.
-
-When the picked rule declares its own floor but its probability falls below it, the tool checks the other options:
-
-1. Find the most probable other option that clears its own floor: the rule's `min_confidence`, or 0.6 otherwise.
-2. Print a `fallback:` line naming both floors and resolve that rule as though it had been picked.
-
-No qualifying option, or two equally probable qualifying options, produces `ambiguous`.
-
-**Candidate eligibility and evidence**
-
-- Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
-- Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
-- On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
-
-**Outcomes and exit status**
-
-| Result | Meaning |
-| --- | --- |
-| `clear` | A `profile:` line ready for `fm-spawn.sh`. |
-| `ambiguous` | Confidence below the floor with no runner-up taken. |
-| `escalate` | An approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie. |
-| `error` | API, network, malformed response metadata, rendering, or quota-axi failure. |
-
-Every result above exits 0.
-
-- Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
-- Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
-- Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
-
-**Firstmate retains the dispatch decision**
-
+Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, and the numeric `spendPriority` argmax over candidates using each candidate's limiting row.
+Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
+An AGY provider whose `state.status` is `auth_required` is the exception: its candidate stays eligible but unranked even when a known `effectiveAvailability` sub-scope exists, and the output exposes the exact `state.error` without a quota scope, percentage, or AGY `profile:` line.
+Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
+Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
+On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
+The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor), `escalate` (an approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
+Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
+Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
+Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
-By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
-
+By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates generally; the AGY `auth_required` exception above is enforced before ranking and dispatch output.
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
 **Key handling and fixed settings**
@@ -1884,71 +1843,9 @@ Before arming any Lavish source, open its artifact with `lavish-axi` so the save
 That adapter, and only that adapter, retries the one exact transient response a cut-short listener returns while its marks remain available (`error: Lavish Editor poll response was interrupted` with `code: SERVER_ERROR`), up to 12 times with poll starts at least 5 seconds apart, so an internal retry never reaches the runner as a captured result.
 This start-to-start governor is a no-op after a normally blocking poll but caps an immediately returning poll under the shipped defaults independently of the owner lease and registration launch pacing.
 
-Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 1 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
-An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so retire the source, then arm it again to adopt this retry policy.
+The quota adapter (`bin/fm-procevent-quota.sh`) polls `quota-axi --json` until the tracked provider falls below its threshold, reaches `exhausted_now`, or polling fails. An AGY provider with `state.status: auth_required` is a terminal `error` outcome even when a known quota sub-scope is present, and its detail carries the exact `state.error` without treating that quota as usable.
 
-### Crew-hosted Lavish review boards
-
-**Arm and confirm a listener**
-
-A live task that hosts a Lavish board owns its listener, so firstmate must never arm that board.
-After opening the artifact as required above, the worker arms it with `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and never runs `lavish-axi poll` itself.
-
-`arm` prints `armed` only after the process-event owner confirms this registration generation's listener is running, and otherwise returns nonzero without that line.
-
-- The confirmation is the same live claim or launch-stamp evidence `reconcile` already uses, bounded by `FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS`, and a failed confirmation retires a source that never started unless `retire` refuses because something may still own it, in which case the registration stays for `reconcile` or a human.
-- An earlier registration's listener that releases the board inside the confirm window lets the new registration start, and `arm` then reports `armed` as usual.
-- When a live listener from an earlier registration of the same board still holds it when the window ends, `arm` exits zero with `still-listening` instead of `armed`, because that earlier listener keeps serving the board and the new registration takes effect only after the source is retired and armed again.
-- The arm is refused unless that task id has valid, identity-matching endpoint metadata, because a board whose owner has no endpoint would collect feedback nobody can be told about.
-
-**Acknowledge a round by re-arming**
-
-The registration persists as one task-owned source record, while each captured nonterminal round remains open until the worker re-arms and the existing handled marker acknowledges that round.
-Re-arm acknowledges that round and registers the next listener: the board is armed once while no record exists, and a further arm by the same owner is refused unless an unacknowledged nonterminal round is waiting, so an open round is never replaced before its owner acknowledges it.
-
-**Post an agent reply**
-
-Re-arm never acquires, releases, or hands off the source claim.
-It may carry `--agent-reply-file <path>`.
-With lavish-axi 0.1.80 or newer, the reply is posted through `lavish-axi reply` under the source lock only after the arm passes its endpoint, ownership, and pending-round checks, and the server's acceptance is awaited before the listener is registered or armed.
-An arm refused for endpoint, ownership, or pending-round eligibility never posts the reply, and a failed or timed-out reply stops the arm before it registers a listener or acknowledges the round, so the worker cannot hand the board back as ready and can retry the same arm.
-If Lavish accepts the reply but the local registration then fails, retrying the arm posts that reply again; this rare duplicate is a known, benign limitation.
-
-Older compatible Lavish versions keep the prior behavior: the reply is staged into the listener and sent through `poll --agent-reply`, which cannot confirm acceptance before its long-poll returns.
-That compatibility path does not provide the synchronous handoff guarantee: a crash after the listener consumes its staged reply but before its poll posts it can lose that round's reply.
-Only a version probe that confirms an older compatible release selects that path.
-When `lavish-axi` is missing, its version cannot be read, or it is below the board floor, a reply-carrying arm fails without posting or registering a new listener; the worker's original reply file remains available for retry.
-The Lavish version floors and feature probe are owned by `bin/fm-bootstrap.sh`.
-
-**Deliver feedback to the worker**
-
-- The captured result is stored with immutable task-owner routing evidence and delivered directly to that task's steering inbox, without a firstmate `check` wake for the captain's words.
-- The doorbell rings only when that idempotent write creates a fresh inbox record; filing the note into `handled/` is the worker's own acknowledgement of the delivery, so a later reconcile never moves an already-filed note back into the active inbox or re-rings its owner, and re-delivery of a note still open in the inbox is left to the steering inbox's own re-ring ladder.
-- A task-owned source with an unhandled capture is not relaunched, so delivery failure cannot consume a round and start another poll.
-- That record is the only ownership evidence there is, so while any captured round of it is unacknowledged every retirement path refuses - the runner's own terminal retirement and an explicit `retire` alike - and the refusal names the acknowledgement that releases it.
-
-**Conclude a terminal round**
-
-- A terminal result, including `session_ended`, an empty End, or missing, is delivered to the owner with an explicit stop-and-conclude instruction and is never auto-rearmed.
-- That round keeps the board with its owner: the source record is not retired while the terminal capture is unacknowledged, so no second armer can take the board, and acknowledging it with `bin/fm-procevent.sh handled <source-id> <sequence>` is what concludes and retires it.
-- That conclude retains the registration it is retiring, removes it, then records the acknowledgement and restores the registration if that record cannot be written, so a failed conclude never leaves the round open with its owner gone.
-- An interruption between those two durable steps leaves the board unregistered with its terminal round still open, which nothing relaunches and the same `handled` call finishes.
-- It concludes only a round that is still open, so a repeated acknowledgement of an already-closed round reports `already-handled` and never touches whatever registration holds the board by then.
-
-**Ownership and recovery**
-
-- A second armer is refused with the current owner named, and the source list derives `listening`, `round-open`, or `dead` from the claim and handled captures without a second ownership record.
-- If the hosting worker cannot be recovered, relaunch a worker to re-host first; guarded firstmate adoption is an explicit last resort only after the old claim is proved dead.
-- The cross-home gap between worker rounds remains an accepted residual until lavish-axi's exclusive listener lands.
-- The interim crew instruction emitted by `bin/fm-brief.sh` points workers at this arm-and-acknowledge contract.
-
-**Register deterministic condition and action watches**
-
-The `when` adapter (`bin/fm-procevent-when.sh`) registers a deterministic condition and action once.
-Its blocking child polls the condition without waking firstmate.
-A stable true fires the action at most once.
-One terminal outcome is then durably captured and published as a wake, which remains eligible for re-announcement until handled.
-
+The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action at most once before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs, and that binding is reloaded from disk immediately before each fire rather than trusted from when polling started.
 A repo update that fast-forwards an in-repo action's bytes in place would otherwise desync every already-armed watch's trust binding with no tampering involved; `bin/fm-procevent-when.sh rebind-all` re-hashes and republishes the binding for every registered watch whose action lives under `FM_ROOT`, including one already polling, so it keeps firing across such an update instead of being refused on its next fire.
 

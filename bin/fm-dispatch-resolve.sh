@@ -359,6 +359,8 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   def rows($p; $lane): (prov($p; $lane) | .quotaSemantics.effectiveAvailability // []);
   def bare($m): ($m | split("/") | last);
   def provider_of($c): ($c.provider // $pmap[$c.harness] // null);
+  def auth_required($p):
+    $p == "agy" and (prov($p).state.status // "") == "auth_required";
   def measured($p):
     (prov($p) != null and
      ((["known", "partial"] | index(prov($p).quotaSemantics.status)) != null or
@@ -374,8 +376,9 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     )];
   def floor_state($f; $p; $lane):
     if $f == null then "none"
-    elif prov($p; $lane) == null or (measured($p; $lane) | not) then "unknown"
-    else [rows($p; $lane)[] | select(.scope == $f.scope)] as $matches
+    elif auth_required($p) then "unknown"
+    elif prov($p) == null or (measured($p) | not) then "unknown"
+    else [rows($p)[] | select(.scope == $f.scope)] as $matches
       | if ($matches | length) == 0 or any($matches[]; .status != "known") then "unknown"
         elif any($matches[]; .effectivePercentRemaining < $f.min_percent) then "below"
         else "ok"
@@ -383,14 +386,17 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     end;
   def evidence($rows):
     $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), spendPriority: (.selection.spendPriority // null)});
+  def uncertainty($p):
+    if (prov($p).state.status // "") == "auth_required" then
+      "auth_required: " + ((prov($p).state.error // "authentication required") | tostring)
+    else null
+    end;
   def evaluate($c):
     (provider_of($c)) as $p | (lane_of($c)) as $lane |
     if $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
-    elif prov($p; $lane) == null then
-      {profile: $c, provider: $p, eligible: true, unranked: true,
-       reason: (if any($q.providers[]; .provider == $p)
-                then "provider \($p) has no quota row for account \(if $lane == "" then "default" else $lane end)"
-                else "provider \($p) not in the quota snapshot" end)}
+    elif prov($p) == null then {profile: $c, provider: $p, eligible: true, unranked: true, reason: "provider \($p) not in the quota snapshot"}
+    elif ($p == "agy" and (prov($p).state.status // "") == "auth_required") then
+      {profile: $c, provider: $p, eligible: true, unranked: true, unknown: true, uncertainty: uncertainty($p), reason: "provider \($p) unmeasured (\(prov($p).quotaSemantics.status))"}
     else
       (applicable($p; $lane; ($c.model // ""))) as $rows |
       (evidence($rows)) as $bounds |
@@ -409,7 +415,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
         {profile: $c, provider: $p, bounds: $bounds, scope: ($floor_row.scope // $c.floor.scope), pct: ($floor_row.effectivePercentRemaining // null), runway: ($floor_row.runway.status // null), eligible: false, reason: "profile floor \($c.floor.scope) below \($c.floor.min_percent)%"}
       elif (measured($p; $lane) | not) then
         ($rows | first) as $row |
-        {profile: $c, provider: $p, bounds: $bounds, scope: ($row.scope // null), pct: ($row.effectivePercentRemaining // null), runway: ($row.runway.status // null), eligible: true, unranked: true, unknown: true, reason: "provider \($p) unmeasured (\(prov($p; $lane).quotaSemantics.status))"}
+        {profile: $c, provider: $p, bounds: $bounds, scope: ($row.scope // null), pct: ($row.effectivePercentRemaining // null), runway: ($row.runway.status // null), eligible: true, unranked: true, unknown: true, uncertainty: uncertainty($p), reason: "provider \($p) unmeasured (\(prov($p).quotaSemantics.status))"}
       elif ($rows | length) == 0 then
         {profile: $c, provider: $p, bounds: $bounds, eligible: true, unranked: true, unknown: true, reason: "no applicable quota row for provider \($p)"}
       elif $profile_floor_state == "unknown" then
@@ -516,7 +522,10 @@ TEXT=$(jq -r '
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
-      + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
+      + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat)"
+          + (if .uncertainty then " [\(.uncertainty | flat)]" else "" end)
+          + ": disclosed uncertainty"
+        elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
   (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
