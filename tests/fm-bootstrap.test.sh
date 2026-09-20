@@ -1104,6 +1104,47 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
 
+# A pool slot an aborted spawn deliberately kept leased has no task record and
+# no other reader, so the record bin/fm-wake-lib.sh writes is the only thing
+# left that names it. Session start has to turn it into one actionable line.
+test_retained_treehouse_lease_surfaces_at_session_start() {
+  local case_dir fakebin out slot marker
+  case_dir="$TMP_ROOT/retained-lease"
+  mkdir -p "$case_dir/home/config" "$case_dir/home/state" "$case_dir/pool/7/repo"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  slot="$case_dir/pool/7/repo"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a home with no retained pool slot should be silent, got: $out"
+
+  ( # shellcheck source=bin/fm-wake-lib.sh disable=SC1091
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_treehouse_lease_retained_write "$case_dir/home/state" task-x1 fm-task-x1 "$slot" \
+      'herdr pane w1:p2 survived its refused close during an aborted spawn' ) \
+    || fail "the retained-lease record could not be written"
+  marker="$case_dir/home/state/.treehouse-lease-retained/task-x1.7.retained"
+  [ -f "$marker" ] || fail "the retained-lease record was not written where session start looks"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$out" | grep -F "TREEHOUSE_LEASE: pool slot $slot is still leased to fm-task-x1 for task task-x1" >/dev/null \
+    || fail "session start did not surface the retained pool slot, got: $out"
+  printf '%s\n' "$out" | grep -F 'herdr pane w1:p2 survived its refused close' >/dev/null \
+    || fail "the retained-slot line does not say why the slot was kept, got: $out"
+  printf '%s\n' "$out" | grep -F "treehouse return --if-lease-holder fm-task-x1 $slot" >/dev/null \
+    || fail "the retained-slot line does not carry the reclaim command, got: $out"
+  printf '%s\n' "$out" | grep -F "rm $marker" >/dev/null \
+    || fail "the retained-slot line does not name the record to remove after reclaiming, got: $out"
+
+  rm -f "$marker"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "a reclaimed slot should stop being reported, got: $out"
+  pass "session start surfaces a retained Treehouse pool slot with its reclaim steps"
+}
+
 test_crew_dispatch_validation() {
   local label body expect mode case_dir fakebin out child_env n
   n=0
@@ -1260,4 +1301,5 @@ test_network_sweeps_recheck_lock_ownership
 test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
+test_retained_treehouse_lease_surfaces_at_session_start
 test_crew_dispatch_validation

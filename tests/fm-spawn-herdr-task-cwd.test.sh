@@ -151,6 +151,7 @@ case "${1:-}" in
     ' "$LEASES"
     ;;
   return)
+    [ "${FM_FAKE_TREEHOUSE_RETURN_FAIL:-0}" = 1 ] && exit 1
     awk -F'\t' -v p="${!#}" -v h="$holder" '$1 != p || (h != "" && $2 != h)' "$LEASES" > "$LEASES.tmp"
     mv "$LEASES.tmp" "$LEASES"
     ;;
@@ -238,6 +239,31 @@ test_aborted_spawn_returns_its_lease() {
   pass "an aborted Herdr spawn returns the worktree it leased"
 }
 
+# A slot the abort could not hand back stays leased to this id with no task
+# record naming it, so nothing would ever find it again. The durable record is
+# what bin/fm-bootstrap.sh turns into a session-start line.
+test_retained_lease_is_recorded_for_session_start() {
+  local id=herdr-cwd-e5 out status marker
+  make_case retained-lease-record "$id"
+  mkdir -p "$CASE_DIR/user-home" "$CASE_DIR/elsewhere"
+  out=$(FM_FAKE_FOREGROUND_CWD="$CASE_DIR/elsewhere" FM_FAKE_TREEHOUSE_RETURN_FAIL=1 run_herdr_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn should refuse a pane that never reports its leased worktree"$'\n'"$out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "aborted spawn published a task record"
+  marker="$HOME_DIR/state/.treehouse-lease-retained/$id.$(basename "$(dirname "$WT_DIR")").retained"
+  [ -f "$marker" ] \
+    || fail "an abort that could not return its leased slot recorded nothing under state/.treehouse-lease-retained/"
+  [ "$(sed -n 's/^worktree=//p' "$marker")" = "$WT_DIR" ] \
+    || fail "the retained-slot record does not name the leased worktree: $(cat "$marker")"
+  [ "$(sed -n 's/^holder=//p' "$marker")" = "fm-$id" ] \
+    || fail "the retained-slot record does not name the lease holder: $(cat "$marker")"
+  [ "$(sed -n 's/^task=//p' "$marker")" = "$id" ] \
+    || fail "the retained-slot record does not name the task: $(cat "$marker")"
+  [ -n "$(sed -n 's/^reason=//p' "$marker")" ] \
+    || fail "the retained-slot record does not say why the slot was kept: $(cat "$marker")"
+  pass "an abort that keeps its Treehouse lease records the slot for a deliberate reclaim"
+}
+
 # No worktree, no pane: a failed lease refuses before Herdr creates anything.
 test_failed_lease_creates_no_pane() {
   local id=herdr-cwd-c3 out status
@@ -287,6 +313,7 @@ test_recorded_worktree_is_reused_with_its_work() {
 
 test_task_pane_is_created_in_its_worktree
 test_aborted_spawn_returns_its_lease
+test_retained_lease_is_recorded_for_session_start
 test_failed_lease_creates_no_pane
 test_recorded_worktree_is_reused_with_its_work
 # all fm-spawn-herdr-task-cwd tests passed

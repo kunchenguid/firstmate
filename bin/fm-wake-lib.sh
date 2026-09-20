@@ -1348,6 +1348,52 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   rm -f "$marker" 2>/dev/null || true
 }
 
+# Retained-lease record: a Treehouse pool slot this home left durably leased.
+#
+# A spawn that aborts while its task pane survives keeps the lease on purpose -
+# nothing may force-return a slot whose pane can still hold an agent or its
+# unlanded work - and so does an abort whose return itself failed. Neither case
+# published a task record, so teardown never runs for that id and no other
+# reader can name the slot afterwards; the stderr warning dies with the
+# terminal. This record is what outlives both: one file per retained slot,
+# naming the slot, its lease holder, the task, and why it was kept.
+# bin/fm-bootstrap.sh reads <state>/.treehouse-lease-retained/ at session start
+# and prints one actionable line per record. Reclaiming a slot stays a
+# deliberate human step; nothing here releases anything.
+fm_treehouse_lease_retained_marker_path() {  # <state-dir> <task-id> <worktree>
+  local state=$1 id=$2 worktree=$3 slot
+  case "$id" in *[!A-Za-z0-9._-]*|''|.|..) return 1 ;; esac
+  slot=${worktree%/}
+  slot=${slot%/*}
+  slot=${slot##*/}
+  case "$slot" in *[!A-Za-z0-9._-]*|''|.|..) return 1 ;; esac
+  printf '%s/.treehouse-lease-retained/%s.%s.retained\n' "$state" "$id" "$slot"
+}
+
+fm_treehouse_lease_retained_write() {  # <state-dir> <task-id> <holder> <worktree> <reason>
+  local state=$1 id=$2 holder=$3 worktree=$4 reason=$5 marker parent tmp
+  case "$holder$worktree$reason" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  [ -n "$holder" ] && [ -n "$worktree" ] && [ -n "$reason" ] || return 1
+  marker=$(fm_treehouse_lease_retained_marker_path "$state" "$id" "$worktree") || return 1
+  parent=${marker%/*}
+  if [ -e "$parent" ] || [ -L "$parent" ]; then
+    [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  else
+    mkdir -p "$parent" || return 1
+  fi
+  [ ! -L "$marker" ] || return 1
+  tmp=$(umask 077; mktemp "$parent/.retained.XXXXXX" 2>/dev/null) || return 1
+  {
+    printf 'task=%s\n' "$id"
+    printf 'holder=%s\n' "$holder"
+    printf 'worktree=%s\n' "$worktree"
+    printf 'reason=%s\n' "$reason"
+    printf 'recorded_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
+}
+
 fm_failure_episode_reset() {
   local state=$1 mode=${2:-acquire} lock current pid acquired=0 path
   lock="$state/.turnend-claude-blocks.lock"

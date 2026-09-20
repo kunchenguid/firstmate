@@ -85,7 +85,10 @@
 #   worktree rather than the project checkout; a spawn whose id already holds
 #   such a lease takes that same slot again instead of a second one, a spawn
 #   that aborts with no record naming its slot returns the lease, and teardown
-#   returns it afterwards.
+#   returns it afterwards. An abort that must KEEP the lease - its task pane
+#   survived the cleanup close, or the return failed - records the slot under
+#   state/.treehouse-lease-retained/ so session start can surface it for a
+#   deliberate human reclaim.
 #   Auto-detected herdr stays silent like tmux; auto-detected cmux
 #   prints a loud stderr notice; zellij and orca are never auto-detected.
 #   codex-app is not a known backend yet; docs/codex-app-backend.md owns that
@@ -1141,6 +1144,15 @@ spawn_worktree_leased_to_task() {  # <worktree>
 # shell now lives in the leased worktree, so returning that worktree would end
 # the pane the refusal deliberately kept - and orphan the quarantined journal
 # that bin/fm-herdr-session-cleanup.sh retires from the live workspace.
+# A slot this abort leaves leased is nobody's to find afterwards: no record was
+# published, so teardown never runs for this id. The durable record outlives
+# the warning above it, and bin/fm-bootstrap.sh turns it into one actionable
+# session-start line.
+spawn_record_retained_lease() {  # <reason>
+  fm_treehouse_lease_retained_write "$STATE" "$ID" "$W" "$WT" "$1" ||
+    echo "warning: could not record task $ID's retained Treehouse slot $WT, so no session start will surface it; release it by hand with 'treehouse return --if-lease-holder $W $WT'" >&2
+}
+
 spawn_abort_task_pane_survives() {
   [ -n "${HERDR_PROJECTION_ABORT_SESSION:-}" ] && [ -n "${HERDR_PROJECTION_ABORT_TASK_PANE:-}" ] || return 1
   declare -F fm_backend_herdr_pane_presence_state >/dev/null 2>&1 || return 1
@@ -1286,8 +1298,10 @@ spawn_abort_cleanup() {
     SPAWN_SLOT_LEASED=0
     if spawn_abort_task_pane_survives; then
       echo "warning: herdr pane $HERDR_PROJECTION_ABORT_TASK_PANE for $ID survived its refused close, so task $ID's leased Treehouse worktree $WT is left leased rather than returned under that pane's own shell; close the pane, then release it with 'treehouse return --if-lease-holder $W $WT'" >&2
+      spawn_record_retained_lease "herdr pane $HERDR_PROJECTION_ABORT_TASK_PANE survived its refused close during an aborted spawn"
     elif ! (cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$W" "$WT") >/dev/null 2>&1; then
       echo "warning: could not return task $ID's leased Treehouse worktree $WT after the aborted spawn; release it with 'treehouse return --if-lease-holder $W $WT'" >&2
+      spawn_record_retained_lease "the return of this slot failed during an aborted spawn"
     fi
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
