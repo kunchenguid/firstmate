@@ -1319,19 +1319,23 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
   if [ "$styled" = 1 ]; then printf 'pending'; else printf 'unknown'; fi
 }
 
-# OpenCode 1.18.31 (absent on 1.18.4) renders the pane's working directory and git branch as a
-# right-aligned "<cwd>:<branch>" indicator inside the composer's bottom rows:
-# the string wraps over up to three rail-width fragments on the rows
-# immediately above the mode/model footer row, and its final fragment is
-# drawn at the right end of the footer row itself (verified live on
-# 1.18.31, tmux backend, 2026-09-18; dated evidence in
-# docs/verification/runtime-backends.md). The fragments are drawn in a grey
-# whose luminance sits exactly on the ghost-luma ceiling (RGB 128,128,128),
-# so they survive fm_composer_strip_ghost and an idle 1.18.31 pane used to
-# answer `pending`, which skipped the steering doorbell, the watcher's
-# re-ring ladder, and /exit typing for every such worker. The recognition is
-# structural, never a match on one machine's paths, and position-gated, so a
-# wrong call can only defer, never inject (_fm_composer_leftbar_cwd_start).
+# OpenCode renders the pane's working directory and git branch as a right-aligned
+# "<cwd>:<branch>" indicator inside the composer's bottom rows, present since
+# 1.18.0 (upstream anomalyco/opencode#36457, merged 2026-07-11) and drawn
+# whenever the pane has an active session and no higher-priority footer hint;
+# observed live on 1.18.31, tmux backend, 2026-09-18 (dated evidence in
+# docs/verification/runtime-backends.md). The string wraps over up to three
+# rail-width fragments on the rows immediately above the mode/model footer
+# row, and its final fragment is drawn at the right end of the footer row
+# itself. The fragments are drawn in a grey whose luminance sits exactly on
+# the ghost-luma ceiling (RGB 128,128,128), so they survive
+# fm_composer_strip_ghost and an idle 1.18.31 pane used to answer `pending`,
+# which skipped the steering doorbell, the watcher's re-ring ladder, and
+# /exit typing for every such worker. The recognition is structural, never a
+# match on one machine's paths, and position-gated, so a wrong call defers
+# except the documented residual: a lone whitespace-free "~/..." token typed
+# so far right that its text starts beyond the region's midpoint
+# (_fm_composer_leftbar_cwd_start).
 
 # _fm_composer_leftbar_cwd_start: the first row of that furniture run inside
 # a leftbar composer region (<first-row>..<last-row>), or -1 when the region
@@ -1346,9 +1350,10 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 #     opencode-1.18.31-idle-short-cwd.ansi), so the walk tolerates no gap;
 #   - every run row's content is a single whitespace-free token that does
 #     NOT start at the composer's left edge: its gap after the bar exceeds
-#     half the row, so real typed text - which starts at the left edge - is
-#     still typed text, and a path-shaped string a user typed there is
-#     typed text too (position, not shape alone, decides);
+#     half the REGION's width (the widest trimmed plain row across the
+#     region), so real typed text - which starts at the left edge, inside
+#     the left half - is still typed text, and a path-shaped string a user
+#     typed there is typed text too (position, not shape alone, decides);
 #   - the run's TOPMOST fragment itself begins with "~/", so the fragments
 #     concatenate to a home-abbreviated path, optionally followed by
 #     ":<branch>" (each fragment is a single whitespace-free token).
@@ -1363,8 +1368,10 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 #     row is already furniture by the footer regex.
 # Anything else - a left-edge token, a multi-word row, a fragment that is
 # not part of such a path - ends the walk and leaves the rows to the
-# ordinary verdict, so a wrong call can only ever defer (pending), never
-# read a real composer empty. A fragment with no "~/" start (a bare tail
+# ordinary verdict, so a wrong call defers (pending) unless the composer's
+# only content is a lone whitespace-free token that starts in the right
+# half of the region; that residual is accepted and pinned by test. A
+# fragment with no "~/" start (a bare tail
 # continuation, or a rail whose string is too long for the composer's
 # visible rows) fails the check by construction, deferring instead.
 # The tests operate on the plain row (fm_composer_strip_ansi), so the
@@ -1372,7 +1379,7 @@ _fm_composer_classify_bare_wrap() {  # <screen> <styled> <glyph-row> <cursor-row
 # FM_COMPOSER_GHOST_LUMA_MAX.
 _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
   local screen=$1 first=$2 last=$3
-  local plain row raw rest frag indent len top_frag='' start=-1
+  local plain row raw rest frag indent len width=0 top_frag='' start=-1
   local footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   # The footer row is the region's LAST row (the same rule the classification
@@ -1383,6 +1390,20 @@ _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
   case "$rest" in '┃'*) rest=${rest#┃} ;; *) rest= ;; esac
   fm_composer_normalize_trim_var rest
   fm_composer_idle_matches "$rest" "$footer_re" sensitive || return 1
+  # The region's width: the widest trimmed plain row across first..last. The
+  # furniture is right-aligned and the widest rows reach the pane's right
+  # edge in the live captures, so this tracks the composer's real width; a
+  # short token typed into an otherwise empty composer must not clear a
+  # position gate measured against its own short row.
+  row=$first
+  while [ "$row" -le "$last" ]; do
+    raw=$(_fm_composer_screen_row "$row" "$plain")
+    rest=$raw
+    fm_composer_normalize_trim_var rest
+    len=${#rest}
+    if [ "$len" -gt "$width" ]; then width=$len; fi
+    row=$((row + 1))
+  done
   row=$((last - 1))
   while [ "$row" -ge "$first" ]; do
     raw=$(_fm_composer_screen_row "$row" "$plain")
@@ -1401,10 +1422,12 @@ _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
     [ -n "$frag" ] || break
     case "$frag" in *[[:space:]]*) break ;; esac
     # Position, not shape alone: typed input starts at the composer's left
-    # edge, so a fragment whose gap after the bar is not more than half the
-    # row is typed text and ends the run.
-    len=${#rest}
-    [ $((indent * 2)) -gt "$len" ] || break
+    # edge, so a fragment whose gap after the bar does not exceed half the
+    # region's width is typed text and ends the run. The width is the
+    # region's, not this row's own length: a short space-prefixed token
+    # typed into an otherwise empty composer must not clear a gate measured
+    # against its own short row.
+    [ $((indent * 2)) -gt "$width" ] || break
     top_frag=$frag
     start=$row
     row=$((row - 1))
@@ -1427,8 +1450,9 @@ _fm_composer_leftbar_cwd_start() {  # <screen> <first-row> <last-row>
 
 # _fm_composer_classify_leftbar: opencode's left-bar composer. Blank rows and
 # the idle hint read empty; the run's LAST row may be the mode/model footer
-# (composer furniture, never typed text), and OpenCode 1.18.31's (absent on 1.18.4) right-aligned
-# cwd:branch furniture (the rows immediately above that footer, recognised by
+# (composer furniture, never typed text), and the right-aligned
+# cwd:branch furniture OpenCode draws there since 1.18.0 (the rows
+# immediately above that footer, recognised by
 # _fm_composer_leftbar_cwd_start) is composer furniture too. Real content is
 # pending when styling can prove it real, unknown otherwise.
 _fm_composer_classify_leftbar() {  # <screen> <styled> <first-row> <last-row>

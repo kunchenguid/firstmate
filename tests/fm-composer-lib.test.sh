@@ -686,6 +686,9 @@ test_matrix_opencode_leftbar_signals() {
   # RGB 128 styling. RGB 128 is deliberately outside the ghost threshold, so
   # the placeholder spelling is the independent empty signal. The completed-
   # turn row above the active composer also pins the incident's idle layout.
+  # The capture omits the directory footer this task recognises: no cwd:branch
+  # rail is drawn in it (the capture predates an active session or the
+  # sanitisation removed the rail).
   captured_idle=$'  ▣ Build · Big Pickle · 3.4s\n\n  ┃\n  ┃  '"${ESC}[38;2;128;128;128mAsk anything… \"Fix a TODO in the codebase\"${ESC}[38;2;255;255;255m"$'\n  ┃\n  ┃  Build · Big Pickle OpenCode Zen\n  ╹▀▀▀▀▀▀▀▀'
   assert_screen "opencode 1.18.30 completed-turn idle hint on tmux" empty "$CAPS_TMUX" "$captured_idle" 3
   captured_pending=$'  ▣ Build · Big Pickle · 3.4s\n\n  ┃\n  ┃  '"${ESC}[38;2;255;255;255mReply with OK.${ESC}[38;2;255;255;255m"$'\n  ┃\n  ┃  Build · Big Pickle OpenCode Zen\n  ╹▀▀▀▀▀▀▀▀'
@@ -720,7 +723,7 @@ test_matrix_opencode_leftbar_cwd_furniture() {
   # classifier used to read them as unsent typed text: every idle 1.18.31 pane
   # answered `pending`, which skipped the steering doorbell, the watcher's
   # re-ring ladder, and fm-control.sh's typed /exit.
-  local screen composer fixture typed typed_row strip start expected_fragment diverge
+  local screen composer fixture typed typed_row strip start expected_fragment diverge out typed_composer
   fixture="$ROOT/tests/fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-cwd.ansi"
   screen=$(<"$fixture")
   # Cursor 14 = the real #{cursor_y} (64) minus the 50 rows above the tail:
@@ -759,6 +762,14 @@ test_matrix_opencode_leftbar_cwd_furniture() {
   assert_screen "opencode 1.18.31 typed above cwd furniture on tmux" pending "$CAPS_TMUX" "$typed" 0
   typed="  ${ESC}[38;2;92;156;245m┃${ESC}[38;2;255;255;255m${ESC}[48;2;30;30;30m  ${ESC}[38;2;238;238;238m/usr/local/bin/some/tool${ESC}[0m"$'\n'"$(tail -n 4 <<< "$composer")"
   assert_screen "opencode left-edge typed path above cwd furniture on tmux" pending "$CAPS_TMUX" "$typed" 0
+  # The extraction change is asserted on the cropped composer too: the same
+  # selector that classifies the cwd furniture must scope extracted user
+  # content to the typed row above the rail, excluding the furniture run and
+  # the footer.
+  typed_composer="${typed_row}"$'\n'"$(tail -n 4 <<< "$composer")"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$typed_composer")
+  [ "$out" = 'Reply with OK.' ] \
+    || fail "cropped-composer extraction must scope user content to the typed row above the rail, got '$out'"
 
   # A composer holding only "/" - the first keystroke of a slash command -
   # must never read empty. Its single character trivially clears the position
@@ -792,6 +803,30 @@ test_matrix_opencode_leftbar_cwd_furniture() {
   assert_screen "opencode typed lone tilde above outside-HOME rail stays typed on herdr" pending "$CAPS_STYLED" "$diverge"
   [ -z "$(_fm_composer_leftbar_cwd_start "$diverge" 1 3)" ] \
     || fail "a typed lone '~' must not assemble '~/' across the typed-row boundary"
+
+  # The position gate measures the gap against the REGION's width (the widest
+  # trimmed plain row across first..last), never against the gated row's own
+  # length: a short, space-prefixed home path typed into an otherwise empty
+  # composer must not clear a position gate its own short row sets.
+  diverge=$'transcript line\n  ┃    ~/a\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode space-prefixed short home path stays typed on tmux" pending "$CAPS_TMUX" "$diverge" 1
+  assert_screen "opencode space-prefixed short home path stays typed on herdr" pending "$CAPS_STYLED" "$diverge"
+  assert_screen "opencode space-prefixed short home path defers unstyled" unknown "$CAPS_PLAIN" "$diverge"
+
+  # Accepted residual, pinned so it cannot drift silently: a lone whitespace-free
+  # "~/..." token whose text starts beyond the region's midpoint still clears the
+  # region-width gate and reads empty. Every misfire except this right-half
+  # residual defers; tightening the gate further is a deliberate classifier
+  # change, not a drift.
+  long_gap=$(printf '%0.s ' $(seq 1 200))
+  diverge=$'transcript line\n  ┃'"$long_gap"$'~/notes.md\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode right-half lone tilde-slash token is the accepted residual on tmux" empty "$CAPS_TMUX" "$diverge" 1
+  assert_screen "opencode right-half lone tilde-slash token is the accepted residual on herdr" empty "$CAPS_STYLED" "$diverge"
+  # A left-edge typed row above such a token rescues the verdict: the walk
+  # breaks on the left-edge row and the token's rows keep their ordinary
+  # content verdict.
+  diverge=$'transcript line\n  ┃  reply to the captain\n  ┃'"$long_gap"$'~/notes.md\n  ┃  Build · gpt-oss-120b Internal OVHcloud'
+  assert_screen "opencode right-half token under a left-edge row stays typed on tmux" pending "$CAPS_TMUX" "$diverge" 1
 
   # A second live pane, same day and version, whose cwd:branch is SHORTER than
   # the rail (fixtures/opencode-1.18.31-cwd/opencode-1.18.31-idle-short-cwd.ansi,
