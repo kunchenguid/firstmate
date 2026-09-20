@@ -398,7 +398,13 @@ It must be signed in: `CLAUDE_CONFIG_DIR=<dir> claude -p 'hi'` answers.
 Its first-run setup must already be completed in that store's `.claude.json` (`hasCompletedOnboarding`, `lastOnboardingVersion`, `theme`), or the first worker sits on the theme and login-method wizard and cannot be steered past it.
 It must hold a `settings.json` carrying the permission posture the fleet launches with (`permissions.defaultMode` `bypassPermissions` and `skipDangerousModePermissionPrompt` true for the default bypass posture).
 Its auto-mode default nudge must already be answered (`hasSeenAutoDefaultNudge`, `hasSeenAutoModeEntryWarning`), or a worker parks on an unanswerable "make auto mode your default?" dialog.
-Workspace trust needs no action: `bin/fm-claude-trust.sh` pre-registers it into the named store on every spawn, so trust is not part of this precondition.
+Workspace trust itself genuinely needs no action: `bin/fm-claude-trust.sh` registers it into the named store on every spawn.
+The separate "Allow external CLAUDE.md file imports?" consent is NOT carried into a freshly named store.
+That helper gates the two import flags on the target store's project entry already holding `hasClaudeMdExternalIncludesApproved===true`, and a store with no project entry counts as not-consent.
+Trust still registers, the spawn still reports success, and the pane then sits on the imports dialog with its cursor on "No, disable", which Firstmate's key plane cannot answer.
+This consent is keyed per project checkout, not per store.
+Preferred route: do not give the named store a `CLAUDE.md` that imports outside the project tree, because no import chain means no dialog; this is what the live second store does, verified 2026-09-20.
+Otherwise: open the named store once interactively in each project root and answer "Yes, allow" before dispatching workers there.
 A store failing any of these leaves the spawn reporting success while the pane sits on a dialog Firstmate's key plane cannot answer.
 
 ## Worker launch environment (config/launch-env-allowlist)
