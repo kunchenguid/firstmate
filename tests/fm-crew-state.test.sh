@@ -2298,7 +2298,7 @@ test_dead_window_still_reports_active_run_step() {
   pass "closed pane still reports an active run-step"
 }
 
-test_no_timeout_uses_perl_bound() {
+test_no_timeout_uses_portable_bound() {
   reset_fakes
   local d toolbin out start elapsed calls_file calls
   d=$(new_case no-timeout)
@@ -2324,10 +2324,99 @@ SH
   elapsed=$((SECONDS - start))
   assert_contains "$out" "state: working" "timed-out no-mistakes falls back to pane"
   assert_contains "$out" "source: pane" "timed-out no-mistakes -> pane source"
-  [ "$elapsed" -lt 5 ] || fail "perl timeout did not bound no-mistakes calls (elapsed ${elapsed}s)"
+  [ "$elapsed" -lt 5 ] || fail "portable timeout did not bound no-mistakes calls (elapsed ${elapsed}s)"
   calls=$(awk 'END { print NR + 0 }' "$calls_file" 2>/dev/null || echo 0)
   [ "$calls" -eq 1 ] || fail "empty no-mistakes status triggered extra lookups ($calls calls)"
-  pass "no timeout command uses perl bound"
+  pass "no ambient timeout command still uses the portable bound"
+}
+
+# The shared run library is also used by teardown, whose callers need the exact
+# command result rather than the read-only query wrapper's deliberate fail-open.
+# Exercise that public library boundary directly: cwd and argv remain data,
+# ordinary statuses survive, and a missing ambient timeout cannot become success.
+test_nm_run_bounded_preserves_execution_contract() {
+  reset_fakes
+  local d toolbin driver work out status=0 calls
+  d=$(new_case nm-run-contract)
+  toolbin=$(make_no_timeout_toolbin "$d")
+  work="$d/work dir"
+  mkdir -p "$work" "$d/fakebin"
+  calls="$d/calls"
+  cat > "$d/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+printf 'cwd=<%s> argc=<%s>' "$PWD" "$#"
+for arg in "$@"; do printf ' arg=<%s>' "$arg"; done
+printf '\n'
+printf 'stderr-marker\n' >&2
+printf 'called\n' >> "$FM_FAKE_NM_CALLS"
+case "${1:-}" in
+  fail) exit 37 ;;
+  hang) while :; do :; done ;;
+esac
+SH
+  chmod +x "$d/fakebin/no-mistakes"
+  driver="$d/driver.sh"
+  cat > "$driver" <<'SH'
+#!/usr/bin/env bash
+SCRIPT_DIR=caller-owned
+. "$1"
+[ "$SCRIPT_DIR" = caller-owned ] || exit 98
+shift
+case "${FM_NM_TEST_ENTRY:-bounded}" in
+  bounded) fm_nm_run_bounded "$@" ;;
+  checked) fm_nm_run_checked "$@" ;;
+  query) fm_nm_run "$@" ;;
+esac
+SH
+  chmod +x "$driver"
+
+  out=$(FM_FAKE_NM_CALLS="$calls" PATH="$d/fakebin:$toolbin" \
+    "$driver" "$ROOT/bin/fm-nm-run-lib.sh" "$work" 2 ok "argument with spaces" 2>&1) || status=$?
+  expect_code 0 "$status" "bounded no-mistakes success status"
+  assert_contains "$out" "cwd=<$work>" "bounded no-mistakes cwd with spaces"
+  assert_contains "$out" "argc=<2> arg=<ok> arg=<argument with spaces>" "bounded no-mistakes argv quoting"
+  assert_contains "$out" "stderr-marker" "bounded no-mistakes stderr preservation"
+
+  status=0
+  FM_FAKE_NM_CALLS="$calls" PATH="$d/fakebin:$toolbin" \
+    "$driver" "$ROOT/bin/fm-nm-run-lib.sh" "$work" 2 fail >/dev/null 2>&1 || status=$?
+  expect_code 37 "$status" "bounded no-mistakes ordinary failure status"
+
+  status=0
+  out=$(FM_NM_TEST_ENTRY=checked FM_FAKE_NM_CALLS="$calls" PATH="$d/fakebin:$toolbin" \
+    "$driver" "$ROOT/bin/fm-nm-run-lib.sh" "$work" 2 fail 2>&1) || status=$?
+  expect_code 37 "$status" "checked no-mistakes ordinary failure status"
+  assert_not_contains "$out" "stderr-marker" "checked no-mistakes stderr suppression"
+  assert_contains "$out" "cwd=<$work>" "checked no-mistakes stdout preservation"
+
+  status=0
+  out=$(FM_NM_TEST_ENTRY=query FM_FAKE_NM_CALLS="$calls" PATH="$d/fakebin:$toolbin" \
+    "$driver" "$ROOT/bin/fm-nm-run-lib.sh" "$work" 2 fail 2>&1) || status=$?
+  expect_code 0 "$status" "read-only no-mistakes fail-open query"
+  assert_not_contains "$out" "stderr-marker" "read-only no-mistakes stderr suppression"
+  assert_contains "$out" "cwd=<$work>" "read-only no-mistakes stdout preservation"
+
+  status=0
+  FM_FAKE_NM_CALLS="$calls" PATH="$d/fakebin:$toolbin" \
+    "$driver" "$ROOT/bin/fm-nm-run-lib.sh" "$d/missing dir" 2 ok >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "bounded no-mistakes missing cwd status"
+
+  : > "$calls"
+  status=0
+  FM_FAKE_NM_CALLS="$calls" PATH="$d/fakebin:$toolbin" \
+    "$driver" "$ROOT/bin/fm-nm-run-lib.sh" "$work" 0 ok >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "bounded no-mistakes rejects zero timeout"
+  status=0
+  FM_FAKE_NM_CALLS="$calls" PATH="$d/fakebin:$toolbin" \
+    "$driver" "$ROOT/bin/fm-nm-run-lib.sh" "$work" nope ok >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "bounded no-mistakes rejects non-integer timeout"
+  [ ! -s "$calls" ] || fail "invalid timeout invoked no-mistakes"
+
+  status=0
+  FM_FAKE_NM_CALLS="$calls" PATH="$d/fakebin:$toolbin" \
+    "$driver" "$ROOT/bin/fm-nm-run-lib.sh" "$work" 1 hang >/dev/null 2>&1 || status=$?
+  expect_code 124 "$status" "bounded no-mistakes without ambient timeout"
+  pass "bounded no-mistakes preserves cwd, argv, output, statuses, and portable timeout failure"
 }
 
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
@@ -4555,7 +4644,8 @@ test_dead_window_ignores_stale_status_log
 test_no_run_tmux_unreadable_reads_unreachable_not_gone
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
-test_no_timeout_uses_perl_bound
+test_no_timeout_uses_portable_bound
+test_nm_run_bounded_preserves_execution_contract
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_remote_alive_with_log_uses_status_log
