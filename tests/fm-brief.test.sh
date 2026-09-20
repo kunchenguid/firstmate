@@ -889,6 +889,37 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
+# Every ship mode and the scout scaffold point workers at the fleet prose
+# skills where they shape reader-facing prose; a secondmate charter does not,
+# because its audience is a supervisor whose crews receive the line through
+# their own briefs.
+test_briefs_reference_fleet_prose_skills() {
+  local home kind brief
+  home="$TMP_ROOT/prose-skills-home"
+  mkdir -p "$home/data"
+  for kind in no-mistakes direct-PR local-only scout; do
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$kind" alpha --scout >/dev/null 2>&1 \
+        || fail "scout scaffold failed"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$kind" alpha --mode "$kind" >/dev/null 2>&1 \
+        || fail "$kind scaffold failed"
+    fi
+    brief="$home/data/$kind/brief.md"
+    assert_grep "$ROOT/.agents/skills/i-have-adhd/SKILL.md" "$brief" \
+      "$kind brief does not reference the i-have-adhd prose skill"
+    assert_grep "$ROOT/.agents/skills/no-ai-slop/SKILL.md" "$brief" \
+      "$kind brief does not reference the no-ai-slop prose skill"
+    assert_grep "eval.md" "$brief" "$kind brief does not name the no-ai-slop self-check"
+  done
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
+    "$ROOT/bin/fm-brief.sh" prose-mate --secondmate --no-projects >/dev/null 2>&1 \
+    || fail "secondmate scaffold failed"
+  assert_no_grep "fleet prose skills" "$home/data/prose-mate/brief.md" \
+    "secondmate charter grew a ship/scout output-shaping reference"
+  pass "fm-brief: ship and scout scaffolds reference the fleet prose skills, charters do not"
+}
+
 # A scout brief offers the Lavish review loop only when bootstrap confirms the
 # supported lavish-axi floor at scaffold time; a missing or older build gets a
 # text-report instruction instead, so a scout never drives a below-floor Lavish.
@@ -996,5 +1027,6 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
+test_briefs_reference_fleet_prose_skills
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor

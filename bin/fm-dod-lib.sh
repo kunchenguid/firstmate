@@ -38,6 +38,11 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
+# fm_prose_skills_line owns the one-line reference to the fleet prose skills
+# that generated briefs carry where they shape reader-facing prose: every ship
+# mode block below and the scout Definition of done in bin/fm-brief.sh. The
+# two referenced skills own the writing rules; this line and AGENTS.md
+# section 11 only point at them and never restate their content.
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -240,14 +245,20 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+fm_prose_skills_line() {
+  printf '%s\n' "Reader-facing prose you author (commit messages, PR title and body, status and reply lines) follows the fleet prose skills: read \`$FM_ROOT/.agents/skills/i-have-adhd/SKILL.md\` and \`$FM_ROOT/.agents/skills/no-ai-slop/SKILL.md\` (with its \`eval.md\` self-check) before writing any of it."
+}
+
 fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+  local mode=$1 id=$2 prose_line
+  prose_line=$(fm_prose_skills_line) || return 1
   case "$mode" in
     direct-PR)
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
+$prose_line
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
@@ -258,6 +269,7 @@ EOF
 # Definition of done
 Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
+$prose_line
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done [at=<epoch>]: ready in branch fm/$id\` to the status file and stop.
@@ -269,6 +281,7 @@ EOF
 # Definition of done
 Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
+$prose_line
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
 
