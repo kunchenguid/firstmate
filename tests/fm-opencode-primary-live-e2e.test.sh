@@ -232,7 +232,7 @@ run_native_ahoy_regressions() {
       OPENCODE_DB="$first_db" FM_HOME="$first_home" \
         OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
         OPENCODE_CONFIG_CONTENT='{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}' \
-        opencode run --format json --auto "/ahoy"
+        opencode run --standalone --format json --auto "/ahoy"
   ) >/dev/null || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode native first-message Ahoy exited $status"
   session_id=$(sqlite3 "$first_db" 'select id from session order by time_created desc limit 1;')
@@ -252,7 +252,7 @@ run_native_ahoy_regressions() {
   [ "$session_count" = 1 ] || fail "OpenCode native first-message Ahoy left the original session"
 
   "$TMUX" -L "$SOCKET" new-session -d -s "$native_session" -c "$AHOY_PROJECT" \
-    "env OPENCODE_DB='$later_db' FM_HOME='$later_home' OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_CONFIG_CONTENT='{\"permissions\":[{\"action\":\"*\",\"resource\":\"*\",\"effect\":\"allow\"}]}' opencode --auto"
+    "env OPENCODE_DB='$later_db' FM_HOME='$later_home' OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_CONFIG_CONTENT='{\"permissions\":[{\"action\":\"*\",\"resource\":\"*\",\"effect\":\"allow\"}]}' opencode --standalone --auto"
   i=0
   while [ "$i" -lt 120 ]; do
     "$TMUX" -L "$SOCKET" capture-pane -p -t "$native_session" 2>/dev/null | grep -Fq "$OPENCODE_VERSION" && break
@@ -276,7 +276,7 @@ run_native_ahoy_regressions() {
       OPENCODE_DB="$later_db" FM_HOME="$later_home" \
         OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
         OPENCODE_CONFIG_CONTENT='{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}' \
-        opencode run --format json --auto --session "$session_id" "/ahoy"
+        opencode run --standalone --format json --auto --session "$session_id" "/ahoy"
   ) >/dev/null || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode native later-message Ahoy exited $status"
   assistant_text=$(sqlite3 -json "$later_db" \
@@ -307,7 +307,7 @@ printf 'project=fixture\n' > "$HOME_DIR/state/opencode-e2e.meta"
 # shellcheck disable=SC2016 # The model, not this test shell, expands FM_HOME.
 PROMPT='Use the terminal to run `printf ready > "$FM_HOME/state/opencode-model-initial"`, then respond briefly. If a later watcher wake arrives, run bin/fm-wake-drain.sh, then run `printf handled > "$FM_HOME/state/opencode-model-handled"`. Never run or request any watcher arm command.'
 "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -c "$PROJECT" \
-  "env OPENCODE_CONFIG_CONTENT='{\"permissions\":[{\"action\":\"*\",\"resource\":\"*\",\"effect\":\"allow\"}]}' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; opencode --auto; rc=\$?; printf \"OPENCODE_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
+  "env OPENCODE_CONFIG_CONTENT='{\"permissions\":[{\"action\":\"*\",\"resource\":\"*\",\"effect\":\"allow\"}]}' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; opencode --standalone --auto; rc=\$?; printf \"OPENCODE_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
 
 # Send the initial prompt through the ready composer so this exercises the same
 # persistent TUI path as a primary session.

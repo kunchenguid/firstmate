@@ -1,4 +1,5 @@
 Mode: OpenCode TUI plugin background wake.
+Launch OpenCode with `--standalone`; the plugin runs inside the server process, and only a private server inherits this session's environment, PID chain, and session lock.
 
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.

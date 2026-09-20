@@ -12,6 +12,7 @@ Earlier interactive behavior was verified across V1 versions 1.15.7 through 1.18
 | Interrupt | Double Escape; it is known to be flaky while a long shell command runs, so use `../../../bin/fm-control.sh <task-id> relaunch` for a wedged pane. |
 | Skill invocation | No separate verified form beyond normal slash-command behavior; use natural language when the exact command is uncertain. |
 | Resume | Relaunch with `--continue` to resume the most recent session for the current directory, then send the next instruction after the TUI is ready because `--prompt` does not auto-submit alongside `--continue`. |
+| Launch flag | `--standalone`, required for every Firstmate launch on 2.x: the default launch attaches to the shared `opencode serve --service` daemon, which hosts plugins with its own environment and PID and ignores `OPENCODE_CONFIG_CONTENT` after it starts. |
 | Model flag | `--model <provider/model>`. |
 | Effort flag | None; V2 puts a variant in the model reference after `#` instead of using a separate effort flag. |
 | Model discovery | Run `opencode models [provider]` to list available provider/model identifiers. |
@@ -41,5 +42,6 @@ The interactive follow-up was verified on V1; the V2 live rerun remains pending.
 `opencode run` can exit before displaying a queued follow-up, so the adapter steps aside in headless mode.
 On native Windows, the operational-input adapter runs its Bash helper through `bash`; macOS and Linux invoke it directly.
 
+OpenCode 2.x hosts plugins in the server process, so a primary or crewmate launch must pass `--standalone`; a plugin hosted by the shared background service reads the daemon environment, walks the daemon PID for lock ownership, and shares one process-wide coordinator across every project it serves.
 The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher supervision, wakes it with `ctx.session.prompt`, and coordinates with the guard before a blind-turn follow-up.
 The PreToolUse-equivalent watcher-arm seatbelt blocks by throwing from the V2 `execute.before` tool hook.
