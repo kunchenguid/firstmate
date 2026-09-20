@@ -169,7 +169,9 @@ SH
   cat > "$fakebin/chrome-devtools-axi" <<'SH'
 #!/usr/bin/env bash
 printf '%s %s\n' "$CHROME_DEVTOOLS_AXI_SESSION" "$*" >> "$FM_STATE_OVERRIDE/browser-stop.log"
-exit "${FM_FAKE_BROWSER_STOP_RC:-0}"
+[ "${FM_FAKE_BROWSER_STOP_RC:-0}" = 0 ] || exit "$FM_FAKE_BROWSER_STOP_RC"
+[ -z "${FM_FAKE_BRIDGE_PID:-}" ] || kill -TERM "$FM_FAKE_BRIDGE_PID"
+exit 0
 SH
   chmod +x "$fakebin/chrome-devtools-axi"
   chmod +x "$fakebin/treehouse" "$fakebin/tmux" "$fakebin/gh-axi" "$fakebin/gh" "$fakebin/no-mistakes"
@@ -3687,48 +3689,180 @@ register_review_page() {
   printf '%s\n' "$source_id"
 }
 
+SESSION_TEST_PIDS=()
+cleanup_session_test_processes() {
+  local pid
+  for pid in "${SESSION_TEST_PIDS[@]:-}"; do
+    [ -z "$pid" ] || kill -KILL "$pid" 2>/dev/null || true
+  done
+  fm_test_cleanup
+}
+trap cleanup_session_test_processes EXIT
+
+start_test_bridge() {
+  local case_dir=$1 cwd=$2 task=$3 session=$4 label=$5 child=${6:-no} attempt
+  cat > "$case_dir/fakebin/chrome-devtools-axi-bridge.py" <<'PYTHON'
+import os, subprocess, sys, time
+if sys.argv[2] == "yes":
+    child = subprocess.Popen(["sleep", "300"], cwd=sys.argv[3])
+    with open(sys.argv[1] + ".child", "w") as f:
+        f.write(str(child.pid))
+with open(sys.argv[1], "w") as f:
+    f.write(str(os.getpid()))
+time.sleep(300)
+PYTHON
+  (
+    cd "$cwd" || exit 1
+    if [ "$session" = unset ]; then
+      unset CHROME_DEVTOOLS_AXI_SESSION
+    else
+      export CHROME_DEVTOOLS_AXI_SESSION="$session"
+    fi
+    export FM_TASK_ID="$task"
+    exec python3 "$case_dir/fakebin/chrome-devtools-axi-bridge.py" \
+      "$case_dir/$label.ready" "$child" "$case_dir"
+  ) >/dev/null 2>&1 &
+  BRIDGE_PID=$!
+  SESSION_TEST_PIDS+=("$BRIDGE_PID")
+  for ((attempt=0; attempt<50; attempt++)); do
+    [ ! -f "$case_dir/$label.ready" ] || break
+    sleep 0.1
+  done
+  [ -f "$case_dir/$label.ready" ] || fail "bridge never became ready"
+  if [ "$child" = yes ]; then
+    BRIDGE_CHILD_PID=$(cat "$case_dir/$label.ready.child")
+    SESSION_TEST_PIDS+=("$BRIDGE_CHILD_PID")
+  fi
+}
+
 test_task_session_cleanup() {
-  local scenario case_dir own other sibling rc
-  for scenario in allowed refused browser-failed; do
+  local scenario case_dir own other sibling rc bridge
+  for scenario in allowed refused browser-failed poller-failed absent; do
     case_dir=$(make_case "session-$scenario")
     write_meta "$case_dir" local-only ship
+    export FM_PROCEVENT_CLAIM_ROOT="$case_dir/claims"
     own=$(register_review_page "$case_dir" task-x1) || fail "register own review"
     other=$(register_review_page "$case_dir" other-task) || fail "register other review"
     sibling=$(register_review_page "$case_dir" task-x10) || fail "register prefix sibling review"
+    bridge=
+    if [ "$scenario" != absent ]; then
+      start_test_bridge "$case_dir" "$case_dir/wt" task-x1 task-x1 own
+      bridge=$BRIDGE_PID
+    fi
     if [ "$scenario" = refused ]; then
       printf 'unlanded\n' > "$case_dir/wt/dirty.txt"
     fi
-    export FM_FAKE_BROWSER_STOP_RC=0
+    if [ "$scenario" = poller-failed ]; then
+      printf 'unavailable\n' > "$case_dir/claims-blocked"
+      export FM_PROCEVENT_CLAIM_ROOT="$case_dir/claims-blocked"
+    fi
+    export FM_FAKE_BROWSER_STOP_RC=0 FM_FAKE_BRIDGE_PID="$bridge"
     [ "$scenario" != browser-failed ] || export FM_FAKE_BROWSER_STOP_RC=1
     rc=0
-    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-    unset FM_FAKE_BROWSER_STOP_RC
+    FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    unset FM_FAKE_BROWSER_STOP_RC FM_FAKE_BRIDGE_PID
     if [ "$scenario" = refused ]; then
       [ "$rc" -ne 0 ] || fail "dirty worktree teardown succeeded"
       [ ! -e "$case_dir/state/browser-stop.log" ] || fail "refusal stopped a browser"
       [ -f "$case_dir/state/procevent/$own.source" ] || fail "refusal retired own poller"
+      kill -0 "$bridge" 2>/dev/null || fail "refusal killed the bridge"
+      kill -TERM "$bridge"
+      wait "$bridge" 2>/dev/null || true
     else
       expect_code 0 "$rc" "$scenario auxiliary cleanup must not fail teardown"
-      [ "$(cat "$case_dir/state/browser-stop.log")" = 'task-x1 stop' ] \
-        || fail "browser cleanup did not target exactly task-x1 once"
-      [ ! -e "$case_dir/state/procevent/$own.source" ] || fail "own poller survived teardown"
-      [ ! -e "$case_dir/state/task-x1.meta" ] || fail "cleanup left task metadata"
-      # The adapter's retirement remains idempotent once teardown has retired it.
-      FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" \
-        "$ROOT/bin/fm-procevent-lavish.sh" retire "$case_dir/data/task-x1/review page.html" \
-        >/dev/null || fail "repeated review retirement failed"
-      if [ "$scenario" = browser-failed ]; then
-        grep -q 'warning: browser session cleanup failed for task-x1' "$case_dir/stderr" \
-          || fail "browser cleanup failure was not reported"
+      if [ "$scenario" = absent ]; then
+        [ ! -e "$case_dir/state/browser-stop.log" ] || fail "unattributed session was stopped"
+      else
+        [ "$(cat "$case_dir/state/browser-stop.log")" = 'task-x1 stop' ] \
+          || fail "browser cleanup did not target exactly task-x1 once"
       fi
+      [ ! -e "$case_dir/state/task-x1.meta" ] || fail "cleanup left task metadata"
+      if [ "$scenario" = poller-failed ]; then
+        [ -f "$case_dir/state/procevent/$own.source" ] || fail "failed retirement lost registration"
+        [ "$(tail -n 1 "$case_dir/stdout")" = "teardown: LEFTOVER poller task-x1 $case_dir/data/task-x1/review page.html" ] \
+          || fail "poller failure was not the final stdout line"
+      else
+        [ ! -e "$case_dir/state/procevent/$own.source" ] || fail "own poller survived teardown"
+      fi
+      if [ "$scenario" = browser-failed ]; then
+        [ "$(tail -n 1 "$case_dir/stdout")" = "teardown: LEFTOVER browser task-x1 session=task-x1 bridge=$bridge" ] \
+          || fail "browser failure was not the final stdout line"
+      fi
+      [ -z "$bridge" ] || wait "$bridge" 2>/dev/null || true
     fi
     [ -f "$case_dir/state/procevent/$other.source" ] || fail "other task poller was retired"
     [ -f "$case_dir/state/procevent/$sibling.source" ] || fail "task prefix sibling poller was retired"
+    unset FM_PROCEVENT_CLAIM_ROOT
   done
-  pass "task session cleanup is scoped, best effort, and skipped on refusal"
+  pass "task session cleanup attributes browsers and reports leftovers without retaining task records"
+}
+
+test_task_bridge_attribution() {
+  local session case_dir own child sibling same_id rc
+  for session in unset default custom; do
+    case_dir=$(make_case "bridge-$session")
+    write_meta "$case_dir" local-only ship
+    mkdir -p "$case_dir/other-home/wt" "$case_dir/wt-sibling"
+    start_test_bridge "$case_dir" "$case_dir/other-home/wt" task-x1 task-x1 same-id
+    same_id=$BRIDGE_PID
+    start_test_bridge "$case_dir" "$case_dir/wt-sibling" sibling-task task-x1 sibling
+    sibling=$BRIDGE_PID
+    start_test_bridge "$case_dir" "$case_dir/wt" task-x1 "$session" own yes
+    own=$BRIDGE_PID; child=$BRIDGE_CHILD_PID
+    rc=0
+    FM_HOME="$case_dir" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+    expect_code 0 "$rc" "$session bridge teardown"
+    [ ! -e "$case_dir/state/browser-stop.log" ] || fail "default/custom session invoked global stop"
+    ! kill -0 "$own" 2>/dev/null || fail "attributed bridge survived"
+    ! kill -0 "$child" 2>/dev/null || fail "bridge child outside worktree survived"
+    kill -0 "$sibling" 2>/dev/null || fail "sibling task bridge was killed"
+    kill -0 "$same_id" 2>/dev/null || fail "same-named task in another home was killed"
+    kill -TERM "$sibling" "$same_id"
+    wait "$sibling" 2>/dev/null || true
+    wait "$same_id" 2>/dev/null || true
+    wait "$own" 2>/dev/null || true
+  done
+  pass "default and custom bridge trees stop while sibling and other-home bridges survive"
+}
+
+test_child_task_session_cleanup() {
+  local case_dir home own child sibling source rc
+  case_dir=$(make_case child-sessions)
+  write_meta "$case_dir" local-only secondmate
+  configure_secondmate_with_tmux_children "$case_dir"
+  home="$case_dir/secondmate-home"
+  cp -R "$ROOT/bin" "$home/bin"
+  mkdir -p "$case_dir/parent-home"
+  export FM_PROCEVENT_CLAIM_ROOT="$case_dir/claims"
+  source=$(register_review_page "$home" child-a) || fail "register child review"
+  start_test_bridge "$case_dir" "$case_dir/child-a-wt" child-b child-a sibling
+  sibling=$BRIDGE_PID
+  start_test_bridge "$case_dir" "$case_dir/child-a-wt" child-a default own yes
+  own=$BRIDGE_PID; child=$BRIDGE_CHILD_PID
+  rc=0
+  FM_HOME="$case_dir/parent-home" FM_ROOT_OVERRIDE="$case_dir/parent-home" \
+    FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/config" PATH="$case_dir/fakebin:$PATH" \
+    "$TEARDOWN" task-x1 --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -eq 0 ] || cat "$case_dir/stderr" >&2
+  expect_code 0 "$rc" "forced child session cleanup"
+  ! kill -0 "$own" 2>/dev/null || fail "child task bridge survived"
+  ! kill -0 "$child" 2>/dev/null || fail "child task Chrome survived"
+  kill -0 "$sibling" 2>/dev/null || fail "sibling task bridge was killed"
+  [ ! -e "$home/state/procevent/$source.source" ] || fail "child poller survived"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "secondmate metadata survived"
+  [ ! -e "$case_dir/state/browser-stop.log" ] || fail "unattributed child session was stopped"
+  kill -TERM "$sibling"
+  wait "$sibling" 2>/dev/null || true
+  wait "$own" 2>/dev/null || true
+  unset FM_PROCEVENT_CLAIM_ROOT
+  pass "forced secondmate cleanup retires child task browsers and pollers"
 }
 
 test_task_session_cleanup
+test_task_bridge_attribution
+test_child_task_session_cleanup
+[ "${1:-}" != --sessions-only ] || exit 0
 
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
