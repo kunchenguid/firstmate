@@ -817,6 +817,21 @@ fm_backend_kill() {  # <backend> <target>
     cmux) fm_backend_cmux_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
   esac
+  fm_backend_endpoint_confirmed_gone "$backend" "$@" && return 0
+  return 1
+}
+
+fm_backend_endpoint_confirmed_gone() {
+  local backend=$1
+  shift
+  case "$backend" in
+    tmux) fm_backend_tmux_endpoint_confirmed_gone "$@" ;;
+    herdr) fm_backend_herdr_endpoint_confirmed_gone "$@" ;;
+    zellij) fm_backend_zellij_endpoint_confirmed_gone "$@" ;;
+    orca) fm_backend_orca_endpoint_confirmed_gone "$@" ;;
+    cmux) fm_backend_cmux_endpoint_confirmed_gone "$@" ;;
+    *) return 1 ;;
+  esac
 }
 
 fm_backend_remove_worktree() {  # <backend> <worktree-id>

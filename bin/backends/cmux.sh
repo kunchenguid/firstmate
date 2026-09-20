@@ -632,6 +632,29 @@ fm_backend_cmux_kill() {  # <target> [unused] [expected-label]
   fm_backend_cmux_cli close-workspace --workspace "$wsid" >/dev/null 2>&1 || true
 }
 
+fm_backend_cmux_endpoint_confirmed_gone() {
+  local target=$1 expected_label=${3:-} workspaces panes workspace_count surface_count expected_title
+  fm_backend_cmux_parse_target "$target" || return 1
+  workspaces=$(fm_backend_cmux_cli workspace list --json --id-format uuids 2>/dev/null) || return 1
+  if [ -n "$expected_label" ]; then
+    expected_title=$(fm_backend_cmux_scoped_title "$expected_label")
+    workspace_count=$(printf '%s' "$workspaces" | jq -er --arg title "$expected_title" \
+      '[.workspaces[]? | select(.title == $title)] | length' 2>/dev/null) || return 1
+    [ "$workspace_count" -eq 0 ] || return 1
+    workspace_count=$(printf '%s' "$workspaces" | jq -er --arg w "$FM_BACKEND_CMUX_WORKSPACE" \
+      '[.workspaces[]? | select(.id == $w)] | length' 2>/dev/null) || return 1
+    [ "$workspace_count" -eq 0 ] && return 0
+    return 1
+  fi
+  workspace_count=$(printf '%s' "$workspaces" | jq -er --arg w "$FM_BACKEND_CMUX_WORKSPACE" \
+    '[.workspaces[]? | select(.id == $w)] | length' 2>/dev/null) || return 1
+  [ "$workspace_count" -eq 0 ] && return 0
+  panes=$(fm_backend_cmux_cli list-panes --workspace "$FM_BACKEND_CMUX_WORKSPACE" --json --id-format uuids 2>/dev/null) || return 1
+  surface_count=$(printf '%s' "$panes" | jq -er --arg s "$FM_BACKEND_CMUX_SURFACE" \
+    '[.panes[]? | select(.surface_ids // [] | index($s))] | length' 2>/dev/null) || return 1
+  [ "$surface_count" -eq 0 ]
+}
+
 # fm_backend_cmux_list_live: recovery/orphan discovery. Lists every workspace
 # whose title is scoped to this firstmate home, by TITLE - never by trusting a
 # stored uuid, since workspace ids do NOT survive an app relaunch (finding #5).

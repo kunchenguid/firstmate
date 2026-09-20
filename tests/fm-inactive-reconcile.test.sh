@@ -39,7 +39,13 @@ SH
 case "${1:-}" in
   display-message) printf '%%1\n' ;;
   capture-pane) printf 'idle\n> \n' ;;
-  kill-window) [ -z "${FM_TMUX_KILL_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TMUX_KILL_LOG" ;;
+  kill-window)
+    if [ "${FM_TMUX_CLOSE_FAIL:-0}" = 1 ]; then exit 1; fi
+    [ -z "${FM_TMUX_KILL_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TMUX_KILL_LOG"
+    ;;
+  list-windows)
+    if [ "${FM_TMUX_CLOSE_FAIL:-0}" = 1 ]; then printf 'fm-dead-child\n'; fi
+    ;;
 esac
 SH
   local tool
@@ -903,6 +909,21 @@ test_inactive_terminal_child_endpoint_is_reaped() {
   pass "inactive terminal child endpoint is reaped"
 }
 
+test_failed_reap_retains_actionable_obligation() {
+  local out
+  make_world reaper-fail; write_child "$MAIN" dead-child 'done: finished'
+  if out=$(FM_TMUX_CLOSE_FAIL=1 FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup); then
+    fail "reconciliation reported success after endpoint cleanup failed"
+  fi
+  [ "$(wake_count "$MAIN" 'inactive-reconcile:')" = 1 ] \
+    || fail "cleanup failure did not queue one actionable notice: $out"
+  [ "$(outcome_count "$MAIN" pending)" = 1 ] \
+    || fail "cleanup failure did not retain a pending outcome receipt"
+  [ "$(wake_count "$MAIN" 'inactive-outcome:')" = 0 ] \
+    || fail "terminal presentation was queued before cleanup succeeded"
+  pass "failed terminal cleanup remains pending and actionable"
+}
+
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
 test_secondmate_multiline_terminal_outcome_is_delivered_once
@@ -936,5 +957,6 @@ test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
 test_reconciliation_sets_no_forge_mode_for_state_read
 test_inactive_terminal_child_endpoint_is_reaped
+test_failed_reap_retains_actionable_obligation
 
 echo "all inactive reconciliation tests passed"

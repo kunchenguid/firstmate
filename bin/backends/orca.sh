@@ -294,5 +294,9 @@ fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sl
 # "Endpoint close").
 fm_backend_orca_kill() {  # <terminal-id>
   fm_backend_orca_tool_check || return 1
-  orca terminal close --terminal "$1" --json >/dev/null 2>&1 || true
+  orca terminal close --terminal "$1" --json >/dev/null 2>&1
+}
+
+fm_backend_orca_endpoint_confirmed_gone() {
+  return 1
 }

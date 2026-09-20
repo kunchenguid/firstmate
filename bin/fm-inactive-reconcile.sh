@@ -493,9 +493,9 @@ reap_terminal_child_locked() { # <id> <meta>
   if [ -f "$SCRIPT_DIR/fm-backend.sh" ]; then
     # shellcheck source=bin/fm-backend.sh
     . "$SCRIPT_DIR/fm-backend.sh"
-    fm_backend_kill "$backend" "$target" 2>/dev/null || true
+    fm_backend_kill "$backend" "$target" 2>/dev/null
   elif [ "$backend" = tmux ] && command -v tmux >/dev/null 2>&1; then
-    tmux kill-window -t "$target" 2>/dev/null || true
+    tmux kill-window -t "$target" 2>/dev/null
   fi
 }
 
@@ -537,8 +537,19 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     outcome_key="inactive-outcome-main-$id-$state"
   fi
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" "$(sha256_text "$last")" || return 1
+  if ! reap_terminal_child_locked "$id" "$meta"; then
+    if [ -n "$RECORD_PENDING" ]; then
+      if [ -n "$self" ]; then
+        notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
+          "inactive terminal cleanup needs retry before parent report: child=$id state=$state"
+      else
+        queue_notice_once "$RECORD_PENDING" "inactive-reconcile:$fingerprint" \
+          "inactive terminal cleanup needs retry before presentation: child=$id state=$state" || true
+      fi
+    fi
+    return 1
+  fi
   if [ -z "$RECORD_PENDING" ]; then
-    reap_terminal_child_locked "$id" "$meta" || true
     return 0
   fi
   if [ -n "$self" ]; then
@@ -548,14 +559,12 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
       notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
         "inactive terminal outcome needs parent report: child=$id state=$state"
     fi
-    reap_terminal_child_locked "$id" "$meta" || true
     return 0
   fi
   record_phase_set "$RECORD_PENDING" presentation || return 1
   payload="inactive terminal outcome awaiting captain presentation: child=$id state=$state"
   [ -z "$pr" ] || payload="$payload pr=$pr"
   queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
-  reap_terminal_child_locked "$id" "$meta" || true
 }
 
 reconcile_direct_child() { # <id> <meta> <secondmate-id-or-empty> <timeout>
