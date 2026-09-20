@@ -506,7 +506,7 @@ export async function createWatchArmHandler(ctx, generation = ++activeGeneration
 
   const handleEvent = async (event) => {
     if (!generationIsActive(generation)) return;
-    if (event.type !== "session.idle" && (event.type !== "session.status" || event.data.status?.type !== "idle")) return;
+    if (event.type !== "session.execution.succeeded" && event.type !== "session.execution.failed") return;
     const sessionID = event.data.sessionID;
     if (!sessionID) return;
     void ensureArm(paths, sessionID, ctx, "", false, generation);

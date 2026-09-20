@@ -93,7 +93,7 @@ The extension encodes an unencoded digest or fallback as `session-start` operati
 It streams the hook to completion and retains at most 512 KiB for message delivery; this approved containment keeps the prefix and appends a loud `PI SESSION-START DELIVERY TRUNCATED` marker with direct-inspection guidance whenever the digest is incomplete.
 
 The OpenCode nudge runs only on `session.created`.
-The watcher-arm and turn-end plugins run later on `session.idle`, and the guard lets the watcher coordinator act first, so the plugins do not race for one lifecycle event.
+The watcher-arm and turn-end plugins run later on `session.execution` completion, and the guard lets the watcher coordinator act first, so the plugins do not race for one lifecycle event.
 
 Grok's guaranteed-loading alternative is a global token-guarded hook like the pattern used by `bin/fm-spawn.sh`.
 That alternative expands trust and writes outside this repository, so Firstmate never installs it or grants folder trust automatically.

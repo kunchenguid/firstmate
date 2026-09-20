@@ -4139,25 +4139,16 @@ export const createBusyStateHandler = () => {
   let activeSession = null;
   return async (event) => {
     const data = event.data;
-    if (event.type === "session.status") {
-      const sessionID = data.sessionID;
-      const statusType = data.status && data.status.type;
-      if (statusType === "busy" || statusType === "retry") {
-        if (activeSession === null) activeSession = sessionID;
-        if (sessionID === activeSession) await busyEvent("busy", "session-" + statusType);
-        return;
-      }
-      if (statusType === "idle" && sessionID === activeSession) {
-        activeSession = null;
-        await busyEvent("idle", "session-status-idle");
-      }
+    const sessionID = data.sessionID;
+    if (event.type === "session.execution.started") {
+      if (activeSession === null) activeSession = sessionID;
+      if (sessionID === activeSession) await busyEvent("busy", "session-execution-started");
       return;
     }
-    if (event.type === "session.idle") {
-      if (data.sessionID === activeSession) {
-        activeSession = null;
-        await busyEvent("idle", "session-idle");
-      }
+    if (event.type === "session.execution.succeeded" || event.type === "session.execution.failed") {
+      if (sessionID !== activeSession) return;
+      activeSession = null;
+      await busyEvent("idle", "session-execution-ended");
       await new Promise((resolve) => {
         execFile("touch", ["$TURNEND"], () => resolve());
       });

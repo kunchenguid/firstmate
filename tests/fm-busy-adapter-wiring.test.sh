@@ -183,12 +183,12 @@ await cleanup();
 EOF
 }
 
-oc_status() {  # <sessionID> <type>
-  printf '{"type":"session.status","data":{"sessionID":"%s","status":{"type":"%s"}}}' "$1" "$2"
+oc_started() {  # <sessionID>
+  printf '{"type":"session.execution.started","data":{"sessionID":"%s"}}' "$1"
 }
 
-oc_idle() {  # <sessionID>
-  printf '{"type":"session.idle","data":{"sessionID":"%s"}}' "$1"
+oc_ended() {  # <sessionID> [succeeded|failed]
+  printf '{"type":"session.execution.%s","data":{"sessionID":"%s"}}' "${2:-succeeded}" "$1"
 }
 
 test_opencode_plugin_semantic_lifecycle() {
@@ -204,39 +204,41 @@ test_opencode_plugin_semantic_lifecycle() {
   out=$(classify opencode "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "seed after spawn must be 'busy fm-spawn', got '$out'"
 
-  out=$(drive_oc_plugin "$plugin" "$(oc_status ses_main busy)") || fail "busy drive failed: $out"
+  out=$(drive_oc_plugin "$plugin" "$(oc_started ses_main)") || fail "busy drive failed: $out"
   out=$(classify opencode "$id" "$state")
-  [ "$out" = "busy opencode-plugin" ] || fail "session busy must classify 'busy opencode-plugin', got '$out'"
+  [ "$out" = "busy opencode-plugin" ] || fail "execution start must classify 'busy opencode-plugin', got '$out'"
 
   out=$(drive_oc_plugin "$plugin" \
-    "$(oc_status ses_main busy)" \
-    "$(oc_status ses_child busy)" \
-    "$(oc_status ses_child idle)") || fail "child-session drive failed: $out"
+    "$(oc_started ses_main)" \
+    "$(oc_started ses_child)" \
+    "$(oc_ended ses_child)") || fail "child-session drive failed: $out"
   out=$(classify opencode "$id" "$state")
-  [ "$out" = "busy opencode-plugin" ] || fail "a child session's idle must not clear the worker, got '$out'"
-
-  out=$(drive_oc_plugin "$plugin" \
-    "$(oc_status ses_main retry)" \
-    "$(oc_status ses_main idle)") || fail "retry/idle drive failed: $out"
-  out=$(classify opencode "$id" "$state")
-  [ "$out" = "idle opencode-plugin" ] || fail "the latched session's idle must classify idle, got '$out'"
+  [ "$out" = "busy opencode-plugin" ] || fail "a child session's completion must not clear the worker, got '$out'"
 
   rm -f "$state/$id.turn-ended"
   out=$(drive_oc_plugin "$plugin" \
-    "$(oc_status ses_main busy)" \
-    "$(oc_idle ses_main)") || fail "session.idle drive failed: $out"
-  [ -f "$state/$id.turn-ended" ] || fail "session.idle no longer touches the notification marker"
+    "$(oc_started ses_main)" \
+    "$(oc_ended ses_main)") || fail "execution-succeeded drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "a completed turn must touch the notification marker"
   out=$(classify opencode "$id" "$state")
-  [ "$out" = "idle opencode-plugin" ] || fail "session.idle for the latched session must classify idle, got '$out'"
+  [ "$out" = "idle opencode-plugin" ] || fail "the latched session's completion must classify idle, got '$out'"
 
   rm -f "$state/$id.turn-ended"
   out=$(drive_oc_plugin "$plugin" \
-    "$(oc_status ses2 busy)" \
-    "$(oc_idle ses_other)") || fail "other-session idle drive failed: $out"
-  [ -f "$state/$id.turn-ended" ] || fail "the marker touch must stay a notification for every session.idle"
+    "$(oc_started ses_main)" \
+    "$(oc_ended ses_main failed)") || fail "execution-failed drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "a failed turn must also touch the notification marker"
   out=$(classify opencode "$id" "$state")
-  [ "$out" = "busy opencode-plugin" ] || fail "another session's idle must not clear the latched busy, got '$out'"
-  pass "opencode plugin classifies from session.status, scoped to the latched worker session"
+  [ "$out" = "idle opencode-plugin" ] || fail "a failed turn must still classify idle, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_plugin "$plugin" \
+    "$(oc_started ses2)" \
+    "$(oc_ended ses_other)") || fail "other-session drive failed: $out"
+  [ ! -f "$state/$id.turn-ended" ] || fail "an unlatched session's completion must not touch the marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy opencode-plugin" ] || fail "another session's completion must not clear the latched busy, got '$out'"
+  pass "opencode plugin classifies from the session.execution lifecycle, scoped to the latched worker session"
 }
 
 run_claude_hook() {  # <settings.json> <hook-event>

@@ -3222,7 +3222,7 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const ctx = { location: { project: { directory: process.env.WORKTREE } }, session: { prompt: async () => {} } };
 const handleEvent = await mod.createWatchArmHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await handleEvent({ type: "session.status", data: { sessionID: "session-test", status: { type: "idle" } } });
+await handleEvent({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -3268,7 +3268,7 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const ctx = { location: { project: { directory: process.env.WORKTREE } }, session: { prompt: async () => {} } };
 const handleEvent = await mod.createWatchArmHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await handleEvent({ type: "session.idle", data: { sessionID: "session-test" } });
+await handleEvent({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -3312,7 +3312,7 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const ctx = { location: { project: { directory: process.env.WORKTREE } }, session: { prompt: async () => {} } };
 const handleEvent = await mod.createWatchArmHandler(ctx);
-const event = { type: "session.idle", data: { sessionID: "session-test" } };
+const event = { type: "session.execution.succeeded", data: { sessionID: "session-test" } };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
 await handleEvent(event);
 // The hook starts its attempt without awaiting it, and the plugin answers a
@@ -3442,7 +3442,7 @@ const ctx = {
   },
 };
 const handleEvent = await mod.createWatchArmHandler(ctx);
-const event = { type: "session.idle", data: { sessionID: "session-test" } };
+const event = { type: "session.execution.succeeded", data: { sessionID: "session-test" } };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await handleEvent(event);
 for (let i = 0; i < 250; i += 1) {
@@ -3528,7 +3528,7 @@ const ctx = {
 };
 const handleEvent = await mod.createWatchArmHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await handleEvent({ type: "session.idle", data: { sessionID: "session-test" } });
+await handleEvent({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 500; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
     ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
@@ -3602,7 +3602,7 @@ const ctx = {
 };
 const handleEvent = await mod.createWatchArmHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await handleEvent({ type: "session.idle", data: { sessionID: "session-test" } });
+await handleEvent({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 // Three unready successors each cost the full readiness budget, so wait well
 // past their sum. The wait ends as soon as the wake lands.
 for (let i = 0; i < 1500 && !prompt; i += 1) {
@@ -3675,7 +3675,7 @@ const ctx = {
 };
 const handleEvent = await mod.createWatchArmHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await handleEvent({ type: "session.idle", data: { sessionID: "session-test" } });
+await handleEvent({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 500 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -3758,7 +3758,7 @@ async function waitFor(predicate, message) {
 }
 const handleEvent = await mod.createWatchArmHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await handleEvent({ type: "session.idle", data: { sessionID: "session-test" } });
+await handleEvent({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 await waitFor(
   () => existsSync(process.env.FM_UNRETIRED_READY_FILE),
   "unretired successor did not enter its retirement wait",
@@ -3829,7 +3829,7 @@ const ctx = {
 };
 const handleEvent = await mod.createWatchArmHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await handleEvent({ type: "session.idle", data: { sessionID: "session-test" } });
+await handleEvent({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250; i += 1) {
   const rows = existsSync(process.env.FM_ARM_LOG)
     ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
@@ -3882,7 +3882,7 @@ const ctx = {
 };
 const handleEvent = await mod.createWatchArmHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await handleEvent({ type: "session.idle", data: { sessionID: "session-test" } });
+await handleEvent({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250 && !prompt; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -3935,7 +3935,7 @@ const ctx = {
 const handleEvent = await mod.createWatchArmHandler(ctx);
 const lock = `${process.env.FM_HOME}/state/.lock`;
 writeFileSync(lock, `${process.pid}\n`);
-const eventPromise = handleEvent({ type: "session.idle", data: { sessionID: "session-test" } });
+const eventPromise = handleEvent({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
@@ -4003,7 +4003,7 @@ const ctx = {
 await armMod.createWatchArmHandler(ctx);
 const handleGuardEvent = await guardMod.createTurnendGuardHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await handleGuardEvent({ type: "session.idle", data: { sessionID: "session-test" } });
+await handleGuardEvent({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -4069,7 +4069,7 @@ const ctx = {
 await armMod.createWatchArmHandler(ctx);
 const handleGuardEvent = await guardMod.createTurnendGuardHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
-await handleGuardEvent({ type: "session.idle", data: { sessionID: "session-test" } });
+await handleGuardEvent({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250 && !existsSync(process.env.FM_GUARD_LOG); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -4137,7 +4137,7 @@ const ctx = {
 };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const cleanup = await mod.default.setup(ctx);
-deliver({ type: "session.idle", data: { sessionID: "session-test" } });
+deliver({ type: "session.execution.succeeded", data: { sessionID: "session-test" } });
 for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_PID_FILE); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
@@ -4216,7 +4216,7 @@ const ctx = {
   session: { prompt: async ({ sessionID }) => { prompts.push(sessionID); } },
 };
 const cleanup = await mod.default.setup(ctx);
-const idle = (sessionID) => ({ type: "session.idle", data: { sessionID } });
+const idle = (sessionID) => ({ type: "session.execution.succeeded", data: { sessionID } });
 push(idle("session-a"));
 push(idle("session-b"));
 push(idle("session-a"));

@@ -7,7 +7,7 @@ Earlier interactive behavior was verified across V1 versions 1.15.7 through 1.18
 
 | Fact | Value |
 |---|---|
-| Busy state | The Firstmate-owned plugin's semantic `session.status`: `busy` and `retry` are active, `idle` is inactive, latched to the worker's own session. |
+| Busy state | The Firstmate-owned plugin's `session.execution` lifecycle: `started` is active, `succeeded` and `failed` are inactive, latched to the worker's own session. |
 | Exit command | `/exit`. |
 | Interrupt | Double Escape; it is known to be flaky while a long shell command runs, so use `../../../bin/fm-control.sh <task-id> relaunch` for a wedged pane. |
 | Skill invocation | No separate verified form beyond normal slash-command behavior; use natural language when the exact command is uncertain. |
@@ -36,9 +36,10 @@ The live Herdr guard is `FM_HERDR_SUBMIT_CONFIRM_LIVE=1 ../../../tests/fm-herdr-
 ## Primary integration
 
 V2 plugin loading and deterministic primary-adapter behavior were verified on 2026-09-20 with OpenCode 2.0.10.
-`.opencode/plugins/fm-primary-turnend-guard.js` uses the V2 plugin definition and subscribes to `session.idle`.
+`.opencode/plugins/fm-primary-turnend-guard.js` uses the V2 plugin definition and subscribes to `session.execution.succeeded` and `session.execution.failed`.
+OpenCode 2.x publishes no `session.idle` or `session.status` event; a plugin-boundary probe of a full turn on 2.0.11 observed the execution lifecycle instead, so those events are the turn boundary.
 The primary adapter treats the event as passive and uses `ctx.session.prompt` to force one follow-up turn when `../../../bin/fm-turnend-guard.sh` returns 2.
-The interactive follow-up was verified on V1; the V2 live rerun remains pending.
+The interactive follow-up was verified on V1; the V2 live rerun remains pending, so the follow-up delivery itself is V1-only evidence.
 `opencode run` can exit before displaying a queued follow-up, so the adapter steps aside in headless mode.
 On native Windows, the operational-input adapter runs its Bash helper through `bash`; macOS and Linux invoke it directly.
 
