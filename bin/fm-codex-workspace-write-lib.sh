@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Narrow Codex workspace-write grants for linked task worktrees.
 #
-# Codex launches under -s workspace-write, which confines model-command writes
-# to the task worktree. A linked worktree keeps its branch refs, objects, and
+# Codex launches under -s workspace-write; the task worktree grant alone does
+# not cover linked Git metadata. A linked worktree keeps its refs, objects, and
 # index outside that root (the shared common Git directory and the
 # per-worktree admin directory), and the brief's status and instruction-inbox
-# writes land in the owning Firstmate home, so an unmodified launch can create
-# neither the task branch nor the task outcome. fm-spawn composes these roots
+# writes land in the owning Firstmate home, so those operations need additional
+# grants when the paths are outside existing writable roots. fm-spawn composes these roots
 # as repeatable --add-dir flags, which add to an operator's own roots instead
 # of replacing them, and pre-creates the grant paths before launch. The added
 # roots cover the shared object store and this task's worktree admin, report
