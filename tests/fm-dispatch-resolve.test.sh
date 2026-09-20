@@ -267,10 +267,8 @@ assert_equals '0.96' "$(jq -r .probabilities.rule_4 <<<"$clear_receipt")" "recei
 assert_equals 'cursor' "$(jq -r .chosen_profile.harness <<<"$clear_receipt")" "receipt carries the chosen profile"
 brief_hash=$(test_sha256 "$BRIEF")
 rules_hash=$(test_sha256 "$BASE_RULES")
-resolver_hash=$(test_sha256 "$TOOL")
 assert_equals "$brief_hash" "$(jq -r .brief_sha256 <<<"$clear_receipt")" "brief hash matches an independent computation"
 assert_equals "$rules_hash" "$(jq -r .rules_sha256 <<<"$clear_receipt")" "rules snapshot hash matches an independent computation"
-assert_equals "$resolver_hash" "$(jq -r .resolver_script_sha256 <<<"$clear_receipt")" "resolver hash matches an independent computation"
 assert_not_contains "$(cat "$RECEIPTS")" "$KEY" "receipts never contain the API key"
 assert_not_contains "$(cat "$RECEIPTS")" 'SECRET-WHY-TEXT' "receipts never contain rule rationale text"
 pass "clear: pinned request plus content-bound, secret-free resolution receipt"
@@ -300,6 +298,46 @@ assert_equals "$((dispatch_count_before_spelling + 1))" "$(jq -s '[.[] | select(
 assert_equals "$(jq -r .resolution_id <<<"$clear_receipt")" "$(jq -r .resolution_id <<<"$spelling_receipt")" "the join is the brief content hash"
 assert_equals "$(jq -r .brief_path <<<"$clear_receipt")" "$(jq -r .brief_path <<<"$spelling_receipt")" "brief_path is recorded resolved, so both spellings agree"
 pass "the dispatch join survives any spelling of the same brief path"
+
+# --- a join that does not land says so, once, on stderr -----------------------
+EDITED_BRIEF="$TMP_ROOT/edited-brief.md"
+printf '# Task\nA brief that was never resolved.\n' > "$EDITED_BRIEF"
+dispatch_count_before_miss=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
+TYPESAFE_API_KEY=$KEY run code out err --record-dispatch "$EDITED_BRIEF" --harness claude
+expect_code 0 "$code" "a failed join still exits 0"
+assert_equals '' "$out" "a failed join writes no stdout"
+assert_contains "$err" 'dispatch-resolve: no dispatch receipt' "a failed join names itself on stderr"
+assert_contains "$err" "content hash" "a failed join names why it did not land"
+assert_equals '1' "$(grep -c 'no dispatch receipt' <<<"$err")" "a failed join reports exactly one line"
+assert_not_contains "$err" "$KEY" "the failed-join line never carries the API key"
+assert_not_contains "$err" 'SECRET-WHY-TEXT' "the failed-join line never carries rule rationale"
+assert_equals "$dispatch_count_before_miss" "$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")" "a failed join appends nothing"
+TYPESAFE_API_KEY=$KEY run code out err --record-dispatch "$BRIEF" --harness claude
+assert_equals '' "$err" "a join that lands stays silent"
+pass "a dispatch join that does not land is distinguishable from one that agrees"
+
+# --- a blocked receipt cannot delay the resolver block ------------------------
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+ln -s "$$" "$HOME_DIR/state/.dispatch-receipts.lock"
+blocked_before=$(jq -s 'length' "$RECEIPTS")
+ORDERING_OUT="$TMP_ROOT/ordering-stdout"
+: > "$ORDERING_OUT"
+PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" \
+  "$TOOL" "$BRIEF" > "$ORDERING_OUT" 2>/dev/null &
+resolver_pid=$!
+stdout_arrived=no
+while kill -0 "$resolver_pid" 2>/dev/null; do
+  if [ -s "$ORDERING_OUT" ]; then stdout_arrived=yes; break; fi
+  sleep 0.01
+done
+wait "$resolver_pid"
+expect_code 0 "$?" "a receipt blocked behind a live lock exits 0"
+assert_equals 'yes' "$stdout_arrived" "the resolver block is readable while the receipt path is still blocked on the lock"
+assert_contains "$(cat "$ORDERING_OUT")" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the blocked run still prints its whole block"
+assert_equals "$blocked_before" "$(jq -s 'length' "$RECEIPTS")" "a receipt that never gets the lock is dropped, not retried into the output path"
+rm -f "$HOME_DIR/state/.dispatch-receipts.lock"
+pass "the receipt path is behind the resolver block it must never delay"
 
 # --- a lock left by a dead owner does not stall receipts forever ---------------
 reset_log

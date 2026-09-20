@@ -514,8 +514,9 @@ By accepted design, a `clear` result does not enforce catalog/authentication, re
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
 Every keyed outcome also appends one resolution receipt to the home's gitignored `state/dispatch-receipts.jsonl`, holding the brief and rules content hashes, the answering model id, the request id, usage, the full probabilities, the confidence, and the chosen profile, and never the key or any rule `why`.
-After passing the profile line to `fm-spawn`, firstmate reruns the script with `--record-dispatch` and the profile it actually dispatched, which appends a dispatch receipt joined by brief content hash to that brief's latest resolution, so chosen-versus-dispatched disagreement is inspectable.
-Receipt writes are best-effort: a failure is silent and never changes the resolver's stdout or exit status, and the append-only file stops accepting records at a fixed 1 MiB.
+On `clear` only, after passing the profile line to `fm-spawn`, firstmate reruns the script with `--record-dispatch` for the profile it actually dispatched, which appends a dispatch receipt joined by brief content hash to that brief's latest resolution, so chosen-versus-dispatched disagreement is inspectable; no other outcome records a dispatch.
+Resolve-path receipt writes are best-effort and silent: a failure never changes the resolver's stdout, exit status, or latency, because every receipt is written after its block is printed.
+A `--record-dispatch` run that cannot land its join instead names the reason on one stderr line and still exits 0, so an absent dispatch receipt is never mistaken for an agreeing one; the append-only file stops accepting records at a fixed 1 MiB.
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.

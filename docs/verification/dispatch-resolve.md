@@ -71,3 +71,70 @@ $ bash tests/fm-dispatch-resolve.test.sh | tail -1
 ```
 
 A live run needs a key and is not part of the suite; rerun the table above by pointing the tool at a brief with the key injected for that one command.
+
+## What the receipt path costs
+
+Measured 2026-09-20 on Linux 6.8 x86_64 with bash 5.2, jq 1.7, and GNU coreutils `sha256sum`, against the fake `curl` and `quota-axi` above, so every figure is the tool's own work rather than the network.
+The harness below separates the moment the resolver's first stdout byte is readable from the moment its process exits; everything between the two is the receipt, because each receipt write now follows its own `printf`.
+
+| Measure | Result |
+| --- | --- |
+| Resolve run, receipts idle: first stdout byte | 182 to 227 ms |
+| Resolve run, receipts idle: receipt work after the block | 51 to 70 ms |
+| Resolve run, lock held by a live owner: receipt work after the block, then dropped | 616 to 694 ms |
+| Brief and rules content hashes, taken before the block | 3 to 8 ms |
+| A `--record-dispatch` join run, end to end | 96 to 104 ms |
+
+The receipt costs tens of milliseconds of the resolver's own process lifetime, not a few, and a contended lock costs most of a second before the record is dropped.
+Neither figure reaches stdout: the block is complete and readable at the first number in every case, and exit status is 0 throughout.
+One `jq -cn` to build the record dominates the idle figure; the full retry budget dominates the contended one.
+
+The lock retry budget is 40 attempts because that is the smallest value that loses no record.
+Twelve concurrent `--record-dispatch` runs against a seeded receipts file lost one record of 180 at 25 attempts, and none of 480 at 30, 40, or 50.
+
+```console
+$ bash receipt-cost.sh   # the harness below, saved to a scratch file and run from the repository root
+idle:      stdout 182 ms, exit 233 ms, receipt 51 ms after the block
+locked:    stdout 172 ms, exit 788 ms, receipt 616 ms after the block, then dropped
+hashes:    3 ms before the block
+join run:  104 ms end to end
+```
+
+The harness, run from the repository root:
+
+```sh
+H=$(mktemp -d); mkdir -p "$H/state" "$H/config" "$H/fakebin"
+printf '# Task\nFix the off-by-one in the pager.\n' > "$H/brief.md"
+printf '{"rules":[{"when":"A simple bug fix.","use":{"harness":"cursor","model":"cursor-grok-4.6-medium"}}]}\n' > "$H/config/crew-dispatch.json"
+cat > "$H/fakebin/curl" <<'EOF'
+#!/usr/bin/env bash
+out=''; hdr=''
+while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2;; -D) hdr=$2; shift 2;; *) shift;; esac; done
+cat > /dev/null
+printf 'x-typesafe-request-id: bench\r\n' > "$hdr"
+printf '{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.9,"probabilities":{"rule_1":0.97,"default":0.03}}},"usage":{"input_tokens":812,"output_tokens":60}}' > "$out"
+printf '200'
+EOF
+cat > "$H/fakebin/quota-axi" <<'EOF'
+#!/usr/bin/env bash
+printf '{"schemaVersion":5,"providers":[{"provider":"cursor","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":80,"runway":{"status":"ok"},"selection":{"spendPriority":10}}]}}]}'
+EOF
+chmod +x "$H/fakebin/curl" "$H/fakebin/quota-axi"
+export PATH="$H/fakebin:$PATH" FM_HOME="$H" TYPESAFE_API_KEY=bench-key
+split() { # prints "<ms to the first stdout byte> <ms to exit>"
+  local t0 a b pid; : > "$H/out"; t0=$(date +%s%N)
+  bin/fm-dispatch-resolve.sh "$H/brief.md" > "$H/out" 2>/dev/null & pid=$!
+  a=0; while kill -0 "$pid" 2>/dev/null; do [ -s "$H/out" ] && { a=$(date +%s%N); break; }; done
+  [ "$a" -ne 0 ] || a=$(date +%s%N); wait "$pid"; b=$(date +%s%N)
+  echo "$(( (a-t0)/1000000 )) $(( (b-t0)/1000000 ))"
+}
+s=0; e=0; for _ in $(seq 20); do read -r x y < <(split); s=$((s+x)); e=$((e+y)); done
+echo "idle:      stdout $((s/20)) ms, exit $((e/20)) ms, receipt $(( (e-s)/20 )) ms after the block"
+ln -s $$ "$H/state/.dispatch-receipts.lock"; read -r x y < <(split); rm -f "$H/state/.dispatch-receipts.lock"
+echo "locked:    stdout $x ms, exit $y ms, receipt $((y-x)) ms after the block, then dropped"
+t0=$(date +%s%N); for _ in $(seq 20); do sha256sum "$H/brief.md" "$H/config/crew-dispatch.json" >/dev/null; done
+echo "hashes:    $(( ($(date +%s%N)-t0)/1000000/20 )) ms before the block"
+t0=$(date +%s%N); for _ in $(seq 20); do bin/fm-dispatch-resolve.sh --record-dispatch "$H/brief.md" --harness cursor >/dev/null 2>&1; done
+echo "join run:  $(( ($(date +%s%N)-t0)/1000000/20 )) ms end to end"
+rm -rf "$H"
+```

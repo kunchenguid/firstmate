@@ -41,11 +41,13 @@
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
-#   A keyed run also appends one best-effort resolution receipt to
-#   $FM_HOME/state/dispatch-receipts.jsonl. After fm-spawn accepts the actual
-#   profile, --record-dispatch appends a second receipt joined to the latest
-#   resolution for the same brief content hash. Receipt failures are
-#   silent and never change resolver stdout or exit status. The JSONL file is
+#   A keyed run appends one best-effort resolution receipt to
+#   $FM_HOME/state/dispatch-receipts.jsonl after the block above is printed.
+#   On clear only, once fm-spawn has accepted the dispatched profile, a
+#   separate --record-dispatch run appends a second receipt joined to the
+#   latest resolution for the same brief content hash, and names on stderr
+#   why a join did not land. A resolve-path receipt failure is silent and
+#   never changes resolver stdout, exit status, or latency. The JSONL file is
 #   append-only and stops accepting records at its fixed 1 MiB bound.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
 #   existing unreadable rules file, malformed rules, or missing jq), which is
@@ -87,7 +89,7 @@ RECEIPTS="$FM_HOME/state/dispatch-receipts.jsonl"
 RECEIPT_LOCK="$FM_HOME/state/.dispatch-receipts.lock"
 
 RULES='' BRIEF_SNAPSHOT='' RESP_FILE='' RESP_HEADERS='' QUOTA=''
-RULES_SHA256='' BRIEF_SHA256='' RESOLVER_SHA256='' REQUEST_ID='' BRIEF_ABS=''
+RULES_SHA256='' BRIEF_SHA256='' REQUEST_ID='' BRIEF_ABS=''
 LAT_MS=null RECEIPT_LOCK_HELD=0
 
 # shellcheck disable=SC2317,SC2329 # Invoked by the EXIT trap.
@@ -133,7 +135,7 @@ sha256_text() { # <text>
 receipt_lock_acquire() {
   local attempt=0 owner
   mkdir -p "$FM_HOME/state" 2>/dev/null || return 1
-  while [ "$attempt" -lt 600 ]; do
+  while [ "$attempt" -lt 40 ]; do
     if ln -s "$$" "$RECEIPT_LOCK" 2>/dev/null; then
       RECEIPT_LOCK_HELD=1
       return 0
@@ -166,7 +168,7 @@ receipt_append_locked() { # <one-line-json>
     case "$current_bytes" in ''|*[!0-9]*) return 1 ;; esac
   fi
   [ $((current_bytes + record_bytes)) -le "$RECEIPT_MAX_BYTES" ] || return 1
-  (umask 077; printf '%s\n' "$record" >> "$RECEIPTS")
+  (umask 077; printf '%s\n' "$record" >> "$RECEIPTS") 2>/dev/null
 }
 
 receipt_append() { # <one-line-json>
@@ -179,13 +181,13 @@ receipt_append() { # <one-line-json>
 
 write_resolution_receipt() { # <result-json>
   local result=$1 timestamp resolution_id record
-  [ -n "$BRIEF_SHA256" ] && [ -n "$RESOLVER_SHA256" ] || return 1
+  [ -n "$BRIEF_SHA256" ] || return 1
   timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || return 1
   resolution_id=$(sha256_text "$timestamp|$$|$RANDOM|$BRIEF_SHA256|$REQUEST_ID") || return 1
   record=$(jq -cn \
     --arg timestamp "$timestamp" --arg resolution_id "sha256:$resolution_id" \
     --arg brief_path "$BRIEF_ABS" --arg brief_sha "$BRIEF_SHA256" \
-    --arg rules_sha "$RULES_SHA256" --arg resolver_sha "$RESOLVER_SHA256" \
+    --arg rules_sha "$RULES_SHA256" \
     --arg requested_model "$TS_MODEL" --arg request_id "$REQUEST_ID" \
     --argjson result "$result" '
       {
@@ -195,7 +197,6 @@ write_resolution_receipt() { # <result-json>
         brief_path: $brief_path,
         brief_sha256: $brief_sha,
         rules_sha256: (if $rules_sha == "" then null else $rules_sha end),
-        resolver_script_sha256: $resolver_sha,
         requested_model: $requested_model,
         answering_model: ($result.model // null),
         request_id: (if $request_id == "" then null else $request_id end),
@@ -209,18 +210,26 @@ write_resolution_receipt() { # <result-json>
   receipt_append "$record"
 }
 
+join_failed() { # <reason>
+  printf 'dispatch-resolve: no dispatch receipt (%s)\n' "$1" >&2
+  return 1
+}
+
 record_actual_dispatch() {
   local timestamp dispatch_id profile base record rc=0
-  [ -n "$BRIEF_SHA256" ] && [ -n "$RESOLVER_SHA256" ] || return 1
+  [ -n "$BRIEF_SHA256" ] || join_failed "the brief could not be hashed" || return 1
   profile=$(jq -cn --arg harness "$DISPATCH_HARNESS" --arg model "$DISPATCH_MODEL" --arg effort "$DISPATCH_EFFORT" '
     {harness: $harness}
     + (if $model == "" then {} else {model: $model} end)
-    + (if $effort == "" then {} else {effort: $effort} end)') || return 1
-  timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || return 1
-  dispatch_id=$(sha256_text "$timestamp|$$|$RANDOM|$BRIEF_SHA256|$profile") || return 1
-  receipt_lock_acquire || return 1
+    + (if $effort == "" then {} else {effort: $effort} end)' 2>/dev/null) ||
+    join_failed "the dispatched profile could not be built" || return 1
+  timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || join_failed "no timestamp" || return 1
+  dispatch_id=$(sha256_text "$timestamp|$$|$RANDOM|$BRIEF_SHA256|$profile") ||
+    join_failed "no sha256 available" || return 1
+  receipt_lock_acquire || join_failed "the receipts lock stayed busy" || return 1
   if [ ! -s "$RECEIPTS" ]; then
     receipt_lock_release || true
+    join_failed "this home has no resolution receipts yet"
     return 1
   fi
   base=$(jq -sc --arg brief_sha "$BRIEF_SHA256" '
@@ -228,18 +237,21 @@ record_actual_dispatch() {
     | last // empty' "$RECEIPTS" 2>/dev/null) || base=''
   if [ -z "$base" ]; then
     receipt_lock_release || true
+    join_failed "no resolution receipt carries this brief's current content hash; it may have been edited after the resolve"
     return 1
   fi
   record=$(jq -c --arg timestamp "$timestamp" --arg dispatch_id "sha256:$dispatch_id" \
-    --arg resolver_sha "$RESOLVER_SHA256" --argjson profile "$profile" '
+    --argjson profile "$profile" '
       . + {
         receipt_type: "dispatch",
         dispatch_id: $dispatch_id,
         timestamp_utc: $timestamp,
-        resolver_script_sha256: $resolver_sha,
         dispatched_profile: $profile
-      }' <<<"$base") || record=''
-  if [ -z "$record" ] || ! receipt_append_locked "$record"; then rc=1; fi
+      }' 2>/dev/null <<<"$base") || record=''
+  if [ -z "$record" ] || ! receipt_append_locked "$record"; then
+    join_failed "the receipt could not be appended; the file may be full, replaced, or unwritable"
+    rc=1
+  fi
   receipt_lock_release || rc=1
   return "$rc"
 }
@@ -248,8 +260,8 @@ die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 no_rules() {
   local result
   result=$(jq -cn --arg model "$TS_MODEL" '{status:"escalate", reason:"no rules to match", model:null, latency_ms:null, tokens:null, probabilities:null, confidence:null}')
-  write_resolution_receipt "$result" >/dev/null 2>&1 || true
   printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
+  write_resolution_receipt "$result" >/dev/null 2>&1 || true
   exit 0
 }
 usage() {
@@ -293,12 +305,11 @@ cp "$BRIEF" "$BRIEF_SNAPSHOT" || die "could not snapshot brief file: $BRIEF"
 chmod 400 "$BRIEF_SNAPSHOT" || die "could not protect brief snapshot"
 BRIEF_ABS=$(abs_path "$BRIEF") || BRIEF_ABS=$BRIEF
 BRIEF_SHA256=$(sha256_file "$BRIEF_SNAPSHOT") || BRIEF_SHA256=''
-RESOLVER_SHA256=$(sha256_file "$SCRIPT_DIR/fm-dispatch-resolve.sh") || RESOLVER_SHA256=''
 
 if [ "$MODE" = dispatch ]; then
   [ -n "$DISPATCH_HARNESS" ] || die "--record-dispatch needs --harness"
   [ -z "$PROJECT" ] || die "--project is not valid with --record-dispatch"
-  record_actual_dispatch >/dev/null 2>&1 || true
+  record_actual_dispatch >/dev/null || true
   exit 0
 fi
 [ -z "$DISPATCH_HARNESS$DISPATCH_MODEL$DISPATCH_EFFORT" ] || die "dispatch profile flags need --record-dispatch"
@@ -413,9 +424,9 @@ emit_error() {
       }' "$RESP_FILE" 2>/dev/null) || result=$(jq -cn --arg reason "$reason" --argjson latency "$LAT_MS" '
         {status:"error", reason:$reason, model:null, latency_ms:$latency, tokens:null, probabilities:null, confidence:null}')
   fi
-  write_resolution_receipt "$result" >/dev/null 2>&1 || true
   echo "dispatch-resolve: error ($reason)" >&2
   printf 'dispatch-resolve:\n  status: error\n  reason: %s\n' "$reason"
+  write_resolution_receipt "$result" >/dev/null 2>&1 || true
   exit 0
 }
 
@@ -614,6 +625,6 @@ TEXT=$(jq -r '
   (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
-write_resolution_receipt "$RESULT" >/dev/null 2>&1 || true
 printf '%s\n' "$TEXT"
+write_resolution_receipt "$RESULT" >/dev/null 2>&1 || true
 exit 0
