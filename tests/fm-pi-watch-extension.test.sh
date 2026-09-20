@@ -3219,7 +3219,7 @@ import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const ctx = { location: { directory: process.env.WORKTREE }, session: { prompt: async () => {} } };
+const ctx = { location: { project: { directory: process.env.WORKTREE } }, session: { prompt: async () => {} } };
 const handleEvent = await mod.createWatchArmHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await handleEvent({ type: "session.idle", data: { sessionID: "session-test" } });
@@ -3265,7 +3265,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const ctx = { location: { directory: process.env.WORKTREE }, session: { prompt: async () => {} } };
+const ctx = { location: { project: { directory: process.env.WORKTREE } }, session: { prompt: async () => {} } };
 const handleEvent = await mod.createWatchArmHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await handleEvent({ type: "session.idle", data: { sessionID: "session-test" } });
@@ -3310,7 +3310,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const ctx = { location: { directory: process.env.WORKTREE }, session: { prompt: async () => {} } };
+const ctx = { location: { project: { directory: process.env.WORKTREE } }, session: { prompt: async () => {} } };
 const handleEvent = await mod.createWatchArmHandler(ctx);
 const event = { type: "session.idle", data: { sessionID: "session-test" } };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
@@ -3368,7 +3368,7 @@ import { existsSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-const ctx = { location: { directory: process.env.WORKTREE }, session: { prompt: async () => {} } };
+const ctx = { location: { project: { directory: process.env.WORKTREE } }, session: { prompt: async () => {} } };
 await mod.createWatchArmHandler(ctx);
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const status = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", ctx);
@@ -3430,7 +3430,7 @@ const promptBlocked = new Promise((resolve) => {
   releasePrompt = resolve;
 });
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   session: {
     prompt: async () => {
       rowsAtPrompt = existsSync(process.env.FM_ARM_LOG)
@@ -3519,7 +3519,7 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const prompts = [];
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   session: {
     prompt: async (request) => {
       prompts.push(request.text);
@@ -3590,7 +3590,7 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
 let rowsAtPrompt = 0;
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   session: {
     prompt: async (request) => {
       prompt += request.text;
@@ -3663,7 +3663,7 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
 let rowsAtPrompt = 0;
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   session: {
     prompt: async (request) => {
       prompt += request.text;
@@ -3739,7 +3739,7 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 const prompts = [];
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   session: {
     prompt: async (request) => {
       prompts.push(request.text);
@@ -3820,7 +3820,7 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompts = 0;
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   session: {
     prompt: async () => {
       prompts += 1;
@@ -3873,7 +3873,7 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   session: {
     prompt: async (request) => {
       prompt += request.text;
@@ -3925,7 +3925,7 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let prompt = "";
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   session: {
     prompt: async (request) => {
       prompt += request.text;
@@ -3993,7 +3993,7 @@ const armMod = await import(pathToFileURL(process.env.ARM_PLUGIN).href);
 const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
 let promptBody = "";
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   session: {
     prompt: async (request) => {
       promptBody = request.text;
@@ -4059,7 +4059,7 @@ const armMod = await import(pathToFileURL(process.env.ARM_PLUGIN).href);
 const guardMod = await import(pathToFileURL(process.env.GUARD_PLUGIN).href);
 let promptBody = "";
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   session: {
     prompt: async (request) => {
       promptBody = request.text;
@@ -4123,7 +4123,7 @@ import { pathToFileURL } from "node:url";
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 let deliver;
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   event: {
     subscribe: ({ signal }) => (async function* () {
       const event = await new Promise((resolve) => {
@@ -4211,7 +4211,7 @@ const iterator = {
 };
 const prompts = [];
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   event: { subscribe: () => iterator },
   session: { prompt: async ({ sessionID }) => { prompts.push(sessionID); } },
 };
@@ -4263,7 +4263,7 @@ const pretool = await import(pathToFileURL(process.env.PRETOOL_PLUGIN).href);
 const cd = await import(pathToFileURL(process.env.CD_PLUGIN).href);
 const hooks = [];
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   tool: {
     hook: async (name, handler) => {
       hooks.push({ name, handler });

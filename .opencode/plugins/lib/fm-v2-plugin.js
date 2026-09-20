@@ -18,7 +18,7 @@ export function subscribeToEvents(ctx, handleEvent) {
 }
 
 export function pluginRoot(ctx) {
-  const directory = ctx.location.project?.directory ?? ctx.location.directory;
+  const directory = ctx.location.project.directory;
   try {
     return realpathSync(directory);
   } catch {

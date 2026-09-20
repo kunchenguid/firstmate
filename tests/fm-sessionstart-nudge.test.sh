@@ -177,7 +177,7 @@ import { pathToFileURL } from "node:url";
 
 const prompts = [];
 const ctx = {
-  location: { directory: process.env.WORKTREE },
+  location: { project: { directory: process.env.WORKTREE } },
   session: {
     prompt: async (request) => {
       prompts.push(request.text);
