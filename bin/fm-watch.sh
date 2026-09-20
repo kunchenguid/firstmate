@@ -2058,6 +2058,41 @@ reconcile_requests_detached() {
 
 PR_POLL_CONTROL_LOCK=
 PR_POLL_PUBLISH_LOCK=
+SIGNAL_PUBLISH_LOCKS=()
+
+signal_publish_release() {
+  local lock rc=0
+  for lock in ${SIGNAL_PUBLISH_LOCKS[@]+"${SIGNAL_PUBLISH_LOCKS[@]}"}; do
+    fm_lock_release "$lock" || rc=1
+  done
+  SIGNAL_PUBLISH_LOCKS=()
+  return "$rc"
+}
+
+signal_publish_filter() {
+  local sf sig f task lock held acquired filtered=''
+  while IFS=$(printf '\t') read -r sf sig f; do
+    [ -n "$sf" ] || continue
+    if [[ "$f" == *.turn-ended ]]; then
+      task=${f##*/}
+      task=${task%.*}
+      lock=$(fm_meta_lock_path "$STATE/$task.meta") || return 1
+      acquired=0
+      for held in ${SIGNAL_PUBLISH_LOCKS[@]+"${SIGNAL_PUBLISH_LOCKS[@]}"}; do
+        [ "$held" != "$lock" ] || acquired=1
+      done
+      if [ "$acquired" -eq 0 ]; then
+        fm_lock_try_acquire "$lock" || continue
+        SIGNAL_PUBLISH_LOCKS+=("$lock")
+      fi
+      [ -e "$f" ] || [ -L "$f" ] || continue
+    fi
+    filtered="${filtered}${sf}"$'\t'"${sig}"$'\t'"${f}"$'\n'
+  done <<EOF
+$pending
+EOF
+  pending=$filtered
+}
 
 pr_poll_control_release() {
   [ -z "$PR_POLL_CONTROL_LOCK" ] || fm_lock_release "$PR_POLL_CONTROL_LOCK" || return 1
@@ -2071,6 +2106,7 @@ pr_poll_publish_release() {
 
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
+  signal_publish_release || cleanup_status=1
   pr_poll_publish_release || cleanup_status=1
   pr_poll_control_release || cleanup_status=1
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
@@ -2380,6 +2416,9 @@ EOF
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
     pending=$(printf '%s\n%s' "$pending" "$(scan_signals)")
+    signal_publish_filter || exit 1
+  fi
+  if [ -n "$pending" ]; then
     # The final coalesced signal set is the watcher-carried status-change
     # trigger for this home's published summary. Start it before either
     # surfacing or absorbing the signal, but never wait on it: see
@@ -2495,6 +2534,7 @@ EOF
       triage_log "absorbed benign $reason"
     fi
   fi
+  signal_publish_release || exit 1
 
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
