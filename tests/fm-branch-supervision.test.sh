@@ -869,12 +869,13 @@ test_away_record_relocates_main_owned_actions_to_the_branch() {
   FM_HOME="$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null || fail "away confirm failed"
 
   # Under the record the partition passes and the merge script reaches its
-  # OWN gate (no task record here), never the partition refusal.
+  # OWN gate (task-x has no record and no away-merge grant here), never the
+  # partition refusal.
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-pr-merge.sh" task-x https://github.com/o/r/pull/1 2>&1)
   status=$?
   [ "$status" -ne 6 ] || fail "branch fm-pr-merge still hit the partition under the record: $out"
   assert_contains "$out" "main is parked" "the relocation did not announce itself"
-  assert_contains "$out" "task metadata is unavailable" "the merge did not reach its own gate under the record"
+  assert_contains "$out" "task task-x's yolo posture cannot be read because its task record no longer exists" "the merge did not reach its own gate under the record"
 
   # Local-only landing is never relocated: it has no record-side gate.
   out=$(FM_HOME="$home" FM_SUPERVISION_ACTOR=branch "$ROOT/bin/fm-merge-local.sh" task-x 2>&1)

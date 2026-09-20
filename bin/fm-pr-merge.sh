@@ -6,6 +6,34 @@
 # request is addressed through glab by the project URL rebuilt from the parsed
 # host and path, so any instance works and no host is hardcoded.
 #
+# A task's own record (state/<task-id>.meta) is used when present but is not
+# required: cleanup can remove it while a pushed PR is still open, and a merge
+# for that task must still be possible without recreating it by hand. When it
+# is absent outright, every genuinely merge-deciding proof still runs exactly
+# as it does for a live task - the pull request's live state, the captain-hold
+# read, and the away-posture authority read all come from the forge, the
+# backlog, and state/.afk-contract rather than from the task record - and only
+# the record-bound bookkeeping this task can no longer own (re-arming its own
+# merge poll, persisting merge authority against its own record) is skipped. A
+# record that EXISTS but is unsafe (a symlink, or not a regular file) still
+# refuses outright, same as always: that is not the clean already-torn-down
+# case.
+#
+# Losing the record also loses the recorded pr= that binds a task to its pull
+# request, so a record-absent merge running under away authority - a named merge
+# grant or a standing yolo posture - additionally requires the live head branch
+# the forge reports to be exactly fm/<task-id>, the task's canonical branch that
+# bin/fm-merge-local.sh already owns without the record. That refusal is
+# accumulated with the other pre-merge conditions, before the forge command runs,
+# and never applies to an attended merge or to a task whose record is present.
+# Because fm/<task-id> is a convention rather than an enforced fact, a torn-down
+# task whose pull request was pushed from another branch is refused here by
+# design; the refusal names the way through, which is an attended merge by a
+# present operator, never a recreated task record.
+# The yolo posture has no such stand-in: bin/fm-spawn.sh writes yolo= only into
+# the task record, so a torn-down task simply has no readable yolo authority and
+# its ungranted away merge is refused naming that missing fact, with no bypass.
+#
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
 # A GitHub merge is refused unless every pre-merge condition holds, each read
@@ -85,7 +113,8 @@
 # docs/captain-hold-lifecycle.md owns the separate merge-to-cleanup residual.
 # A failed forge command releases the lock after it returns. A successful one
 # retains the lock until the accepted merge authority is persisted against the
-# still-matching task metadata.
+# still-matching task metadata, or, for a torn-down task with no metadata to
+# persist against, until that is confirmed to be nothing to do.
 #
 # Extra args must not include --repo or -R in any form, including a bundled
 # short-option cluster such as -yR, because the repository comes only from the
@@ -323,15 +352,31 @@ META="$STATE/$ID.meta"
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "PR merge (fm-pr-merge)" --away-relocated
 
-if [ ! -f "$META" ] || [ -L "$META" ]; then
-  echo "error: task metadata is unavailable" >&2
-  exit 1
+# A task record is not required: a torn-down task (cleanup already removed
+# state/<id>.meta once its work was safely on a remote, while its pull request
+# was still open) merges the same pull request the same way a live task's
+# record would, from the forge's own live state plus the away-posture and
+# captain-hold reads below, neither of which needs the task record either. Only
+# a record that EXISTS in an unsafe form (a symlink, or a non-regular file)
+# still refuses outright, because that is not the clean "already torn down"
+# case and nothing here can tell what it means.
+TASK_RECORD_PRESENT=false
+if [ -e "$META" ] || [ -L "$META" ]; then
+  if [ -f "$META" ] && [ ! -L "$META" ]; then
+    TASK_RECORD_PRESENT=true
+  else
+    echo "error: task metadata is unavailable" >&2
+    exit 1
+  fi
 fi
-if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
-  echo "error: PR merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
-  exit 1
+MERGE_EXPECTED_SPAWN_GEN=
+if [ "$TASK_RECORD_PRESENT" = true ]; then
+  if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
+    echo "error: PR merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    exit 1
+  fi
+  MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
 fi
-MERGE_EXPECTED_SPAWN_GEN=$FM_BACKLOG_META_SPAWN_GEN
 
 MERGE_CONTROL_LOCK=
 MERGE_META_LOCK=
@@ -343,12 +388,22 @@ merge_control_cleanup() {
 trap merge_control_cleanup EXIT
 MERGE_CONTROL_LOCK="$STATE/.control-$ID.lock"
 fm_lock_acquire_wait "$MERGE_CONTROL_LOCK"
-if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
-  echo "error: task $ID changed while waiting to merge; refusing: $FM_BACKLOG_TRANSITION_ERROR" >&2
-  exit 1
-fi
-if [ "$FM_BACKLOG_META_SPAWN_GEN" != "$MERGE_EXPECTED_SPAWN_GEN" ]; then
-  echo "error: task $ID changed incarnation while waiting to merge; refusing" >&2
+# The record's presence or absence must be the same now as it was before the
+# wait, exactly as its incarnation must be unchanged for a task that has one:
+# teardown and a spawn both take this same lock, so either one racing this
+# wait is "the task changed while waiting to merge", not a state this run may
+# act on.
+if [ "$TASK_RECORD_PRESENT" = true ]; then
+  if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
+    echo "error: task $ID changed while waiting to merge; refusing: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    exit 1
+  fi
+  if [ "$FM_BACKLOG_META_SPAWN_GEN" != "$MERGE_EXPECTED_SPAWN_GEN" ]; then
+    echo "error: task $ID changed incarnation while waiting to merge; refusing" >&2
+    exit 1
+  fi
+elif [ -e "$META" ] || [ -L "$META" ]; then
+  echo "error: task $ID changed while waiting to merge; refusing: a task record appeared after merging began without one" >&2
   exit 1
 fi
 
@@ -381,9 +436,38 @@ fi
 # The recorded head is read before bin/fm-pr-check.sh rewrites the metadata,
 # because that script re-records pr= and drops a pr_head= it cannot resolve.
 RECORDED_HEAD=
-if [ "$PROVIDER" = gitlab ]; then
+if [ "$PROVIDER" = gitlab ] && [ "$TASK_RECORD_PRESENT" = true ]; then
   RECORDED_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
 fi
+
+# A task with a record carries its own PR identity in it, and require_recorded_pr_identity
+# binds the merge to that recorded pr=. A torn-down task has no record and so no
+# recorded identity, which would otherwise let an away authority - a named merge
+# grant or a standing yolo posture - reach the forge for any pull request at all.
+# The task's canonical branch fm/<task-id>, which bin/fm-merge-local.sh already
+# owns without reading the task record, is the only binding left: the live head
+# branch the forge reports must be exactly that branch. Sets
+# FM_PR_AWAY_BRANCH_REFUSAL to the refusal lines for the live verify to accumulate,
+# empty when the merge is not this case (a record is present, or the away-posture
+# record is absent, so an attended merge is never affected) or the branch matches.
+#
+# fm/<task-id> is a convention, not an enforced fact, so this refuses a torn-down
+# task whose pull request was pushed from some other branch. That residual is
+# accepted rather than papered over: nothing durable survives teardown to bind
+# that pull request to that task id, and while nobody is present to vouch for the
+# pairing there is nothing to merge on. The way through is an attended merge by a
+# present operator, which the refusal names, and never recreating the record.
+FM_PR_AWAY_BRANCH_REFUSAL=
+away_branch_refusal() {  # <live-head-branch>
+  local head_branch=${1-}
+  FM_PR_AWAY_BRANCH_REFUSAL=
+  [ "$TASK_RECORD_PRESENT" != true ] || return 0
+  [ "$FM_PR_AWAY_POSTURE" = true ] || return 0
+  [ "$head_branch" = "fm/$ID" ] && return 0
+  FM_PR_AWAY_BRANCH_REFUSAL="  - task $ID has no task record, so nothing recorded binds this pull request to it; its canonical branch fm/$ID is the only binding left, and the live head branch is \"${head_branch:-unreadable}\"
+  - an away merge cannot prove this pull request is task $ID's work, so merge it attended instead, with an operator present to vouch for that pairing; do not recreate the task record
+"
+}
 
 # Pre-merge conditions for a GitLab merge request, read from one live view of
 # the merge request. Sets FM_PR_MERGE_HEAD to the verified head on success and
@@ -395,6 +479,7 @@ gitlab_verify_mergeable() {
   local total=0 named=0 refusals=''
   local state='' detail='' conflicts='' discussions=''
   local live_head='' pipeline_sha='' pipeline_status='' async_configured=''
+  local head_branch=''
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
   # instance is taken from the parsed URL by both signals and never from the
@@ -415,6 +500,7 @@ gitlab_verify_mergeable() {
         "conflicts=" + (.has_conflicts | tostring),
         "discussions=" + (.blocking_discussions_resolved | tostring),
         "head=" + ((.sha // "") | tostring),
+        "head_branch=" + ((.source_branch // "") | tostring),
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring),
         "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end)
@@ -431,6 +517,7 @@ gitlab_verify_mergeable() {
       detail=*) detail=${line#detail=} ;;
       conflicts=*) conflicts=${line#conflicts=} ;;
       discussions=*) discussions=${line#discussions=} ;;
+      head_branch=*) head_branch=${line#head_branch=} ;;
       head=*) live_head=${line#head=} ;;
       pipeline_sha=*) pipeline_sha=${line#pipeline_sha=} ;;
       pipeline_status=*) pipeline_status=${line#pipeline_status=} ;;
@@ -444,7 +531,7 @@ FIELDS
   # Every field named exactly once and no unnamed line: a value carrying a
   # newline would split into a line no name matches, so it is refused here
   # rather than silently truncated into a value a check could accept.
-  if [ "$named" -ne 8 ] || [ "$total" -ne 8 ]; then
+  if [ "$named" -ne 9 ] || [ "$total" -ne 9 ]; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
   fi
@@ -478,6 +565,8 @@ FIELDS
   [ "$pipeline_sha" = "$live_head" ] \
     || refusals="$refusals  - the head pipeline ran at \"${pipeline_sha:-none}\", not at the current head $live_head
 "
+  away_branch_refusal "$head_branch"
+  refusals="$refusals$FM_PR_AWAY_BRANCH_REFUSAL"
 
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
@@ -574,8 +663,9 @@ github_verify_mergeable() {
   local json fields line red name covered
   local total=0 named=0 refusals=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
+  local head_branch=''
 
-  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
+  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,headRefName,baseRefName,statusCheckRollup 2>/dev/null) \
     || [ -z "$json" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
@@ -587,6 +677,7 @@ github_verify_mergeable() {
         "mergeable=" + ((.mergeable // "") | tostring),
         "merge_state=" + ((.mergeStateStatus // "") | tostring),
         "head=" + ((.headRefOid // "") | tostring),
+        "head_branch=" + ((.headRefName // "") | tostring),
         "base=" + ((.baseRefName // "") | tostring)
       else
         error("pull request payload is not an object")
@@ -601,6 +692,7 @@ github_verify_mergeable() {
       draft=*) draft=${line#draft=} ;;
       mergeable=*) mergeable=${line#mergeable=} ;;
       merge_state=*) merge_state=${line#merge_state=} ;;
+      head_branch=*) head_branch=${line#head_branch=} ;;
       head=*) live_head=${line#head=} ;;
       base=*) base=${line#base=} ;;
       *) continue ;;
@@ -609,7 +701,7 @@ github_verify_mergeable() {
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 6 ] || [ "$total" -ne 6 ] || [ -z "$base" ]; then
+  if [ "$named" -ne 7 ] || [ "$total" -ne 7 ] || [ -z "$base" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
   fi
@@ -639,6 +731,8 @@ FIELDS
   [ "$merge_state" != DIRTY ] \
     || refusals="$refusals  - mergeStateStatus is DIRTY (conflicts)
 "
+  away_branch_refusal "$head_branch"
+  refusals="$refusals$FM_PR_AWAY_BRANCH_REFUSAL"
 
   uncovered=''
   while IFS= read -r name; do
@@ -863,6 +957,14 @@ METHODS
 }
 
 record_pr_metadata() {
+  # A torn-down task has no record to update and no future teardown of its own
+  # left to arm a merge poll for; the live verify and merge below prove the
+  # outcome directly instead.
+  if [ "$TASK_RECORD_PRESENT" != true ]; then
+    printf 'notice: task %s has no task record; verifying and merging %s directly, with no poll armed\n' \
+      "$ID" "$URL" >&2
+    return 0
+  fi
   if ! "$SCRIPT_DIR/fm-pr-check.sh" "$ID" "$URL"; then
     return 1
   fi
@@ -906,6 +1008,18 @@ require_away_merge_grant() {
       ;;
     grants-unreadable)
       echo "error: PR merge refused - the away-posture record's grants could not be read; nothing was merged" >&2
+      ;;
+    not-granted)
+      # A task's yolo posture lives only in its own record (bin/fm-spawn.sh is
+      # its only writer) and nothing else in state records it, so a torn-down
+      # task's yolo authority is not unreadable-and-assumed-absent, it is simply
+      # gone. Naming that missing fact keeps the operator from reading this as a
+      # plain captain hold and hand-recreating the record to get past it.
+      if [ "$TASK_RECORD_PRESENT" != true ]; then
+        echo "error: PR merge refused - task $ID's yolo posture cannot be read because its task record no longer exists, and no away merge grant names it; grant $ID in the away-posture record rather than recreating that record" >&2
+      else
+        echo "error: task $ID is held for the captain return" >&2
+      fi
       ;;
     *)
       echo "error: task $ID is held for the captain return" >&2
@@ -951,6 +1065,14 @@ require_current_away_authority() {
 
 persist_accepted_merge_authority() {
   local status=0
+  # A torn-down task has no record for the authority to be bound to and no
+  # supervision loop left reading for it; the merge already landed, so this is
+  # nothing to fail the run over.
+  if [ "$TASK_RECORD_PRESENT" != true ]; then
+    printf 'notice: task %s has no task record; the merge authority for %s is not persisted\n' \
+      "$ID" "$URL" >&2
+    return 0
+  fi
   MERGE_META_LOCK=$(fm_meta_lock_path "$META") || return 1
   fm_lock_acquire_wait "$MERGE_META_LOCK" || return 1
   fm_merge_authority_persist "$STATE" "$ID" "$META" \
@@ -991,6 +1113,7 @@ refuse_github_queue_while_away() {
 
 require_recorded_pr_identity() {
   local existing
+  [ "$TASK_RECORD_PRESENT" = true ] || return 0
   existing=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
   [ -n "$existing" ] || return 0
   [ "$existing" = "$URL" ] && return 0
