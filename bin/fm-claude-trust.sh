@@ -236,10 +236,12 @@ case ${CLAUDE_CONFIG_DIR:-} in
   '' | /*) ;;
   *) refuse "CLAUDE_CONFIG_DIR '$CLAUDE_CONFIG_DIR' is a relative path, so the store the worker reads cannot be guaranteed to be the one written here; set it to an absolute path" ;;
 esac
-# fm-spawn forwards a set CLAUDE_CONFIG_DIR onto the launch without requiring it
-# to exist, because claude creates its own store directory. Create it here for
-# the same reason, and refuse only when it genuinely cannot be written, since a
-# store this cannot reach means the worker meets the dialog after all.
+# A store reached through fm-spawn's ambient CLAUDE_CONFIG_DIR leg is forwarded
+# onto the launch without being required to exist, because claude creates its
+# own store directory; only its config/claude-config-dir leg demands an
+# existing readable directory. Create it here for that same reason, and refuse
+# only when it genuinely cannot be written, since a store this cannot reach
+# means the worker meets the dialog after all.
 CONFIG_DIR_REAL=$(real_dir "$CONFIG_DIR") || true
 if [ -z "$CONFIG_DIR_REAL" ]; then
   mkdir -p "$CONFIG_DIR" 2>/dev/null || true
