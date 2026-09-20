@@ -462,6 +462,29 @@ test_matrix_muse_idle_hint_row_is_furniture() {
   pass "matrix: a row that is nothing but an idle hint bounds the wrap region; real wrapped input still reads pending"
 }
 
+test_matrix_muse_stale_pi_identity() {
+  # Composer tail captured from Muse 1.3 on 2026-09-20; transcript omitted.
+  # The native identity still said pi/done after the harness changed to Muse.
+  local rule glyph footer screen typed
+  rule="${ESC}[0m${ESC}[2m${ESC}[38;2;103;108;116m────────────────────────────────────────────${ESC}[0m"
+  glyph="${ESC}[0m${ESC}[38;2;90;160;255m❯ ${ESC}[0m"
+  footer="${ESC}[0m${ESC}[38;2;103;108;116m  ${ESC}[0m${ESC}[38;2;90;160;255mmuse-spark-1.3${ESC}[0m${ESC}[38;2;138;144;152m · ${ESC}[0m${ESC}[38;2;90;160;255mxhigh${ESC}[0m${ESC}[38;2;138;144;152m · project · ${ESC}[0m${ESC}[38;2;243;139;168mYOLO${ESC}[0m"
+  screen="$rule"$'\n'"$glyph"$'\n'"$rule"$'\n'"$footer"
+  assert_screen "Muse footer contradicts stale Pi identity" empty "$CAPS_STYLED" "$screen" '' $'pi\tdone'
+  assert_screen "Muse stale Pi with cursor" empty "$CAPS_TMUX" "$screen" 1 $'pi\tidle'
+  typed="$rule"$'\n'"$glyph"'validate this work'$'\n'"$rule"$'\n'"$footer"
+  assert_screen "Muse actual pending survives stale identity" pending "$CAPS_STYLED" "$typed" '' $'pi\tdone'
+  assert_screen "Muse footer alone cannot prove a blank composer" unknown "$CAPS_STYLED" \
+    "$rule"$'\n\n'"$rule"$'\n'"$footer" '' $'muse\tidle'
+  assert_screen "blocked native identity stays conservative" pending "$CAPS_STYLED" "$screen" '' $'pi\tblocked'
+  assert_screen "dead shell below stale Muse UI" unknown "$CAPS_STYLED" "$screen"$'\n$ ' '' $'pi\tdone'
+  assert_screen "model mention without footer cannot override Pi" pending "$CAPS_STYLED" \
+    "$rule"$'\n'"$glyph"$'\n'"$rule"$'\nmuse-spark-1.3' '' $'pi\tdone'
+  assert_screen "unknown footer layout preserves Pi protection" pending "$CAPS_STYLED" \
+    "${screen/xhigh/unrecognized}" '' $'pi\tdone'
+  pass "matrix: structural Muse footer resolves stale Pi overlap without losing pending input"
+}
+
 test_matrix_cursor_reverse_video_placeholder_remnant() {
   # Real idle cursor-agent (2026.08.11-e8db854), captured byte-for-byte from a
   # live pane: the `→ ` glyph and the placeholder tail are dim (SGR 2), but the
@@ -1029,6 +1052,7 @@ test_composer_footer_zone_is_shape_independent
 test_composer_footer_zone_refuses_rather_than_allows
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
+test_matrix_muse_stale_pi_identity
 test_matrix_muse_13_titled_rule_composer
 test_matrix_muse_idle_hint_row_is_furniture
 test_matrix_cursor_reverse_video_placeholder_remnant
