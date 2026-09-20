@@ -36,6 +36,7 @@ Real harness credential tests remain opt-in rather than part of default CI.
 ## Client selection
 
 Each operation routed through the adapter's session-scoped CLI helper starts with the first `herdr` on `PATH` unless that session has already selected another client.
+When no `herdr` resolves on `PATH` at all, the helper falls back to `HERDR_BIN_PATH` if that environment variable is set, so a container that exports it for an off-`PATH` install still works.
 A host can carry more than one client, such as a self-updated copy in `~/.local/bin` beside a package-managed one, and a client older than the running server can receive error code `protocol_mismatch` on operational commands.
 On that refusal the adapter reads `status --json --session <name>` from each distinct `herdr` on `PATH` in order, adopts the first one the running server reports compatible, and retries the command on it once.
 The choice is reused only for later calls to the same session in that process; another session starts with the `PATH` default, and a later mismatch forces selection again so a changed server can return to that default.
