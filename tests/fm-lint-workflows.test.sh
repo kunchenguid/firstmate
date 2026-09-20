@@ -158,9 +158,8 @@ jobs:
       - name: Compatibility pointers must stay intact
         run: |
           set -eu
-          cmp -s CLAUDE.md - <<'EOF' || exit 1
-<!-- Points Claude at AGENTS.md via import; edit AGENTS.md, not this file. -->
-@AGENTS.md
+          cmp -s expected.txt - <<'EOF' || exit 1
+this line sits at column 0 inside a run: | block
 EOF
           echo ok
 YAML

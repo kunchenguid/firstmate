@@ -39,6 +39,7 @@ SH
 case "${1:-}" in
   display-message) printf '%%1\n' ;;
   capture-pane) printf 'idle\n> \n' ;;
+  kill-window) [ -z "${FM_TMUX_KILL_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TMUX_KILL_LOG" ;;
 esac
 SH
   local tool
@@ -101,7 +102,7 @@ run_reconcile() { # <home> [--startup]
   PATH="$WORLD/fakebin:$PATH" FM_ROOT_OVERRIDE="$WORLD/root" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" FM_CONFIG_OVERRIDE="$home/config" \
     FM_INACTIVE_RECONCILE_SECS=60 FM_INACTIVE_CREW_STATE_BIN="$WORLD/fakebin/fm-crew-state.sh" \
-    FM_FORGE_LOG="$WORLD/forge.log" "$RECON" scan ${option:+"$option"}
+    FM_FORGE_LOG="$WORLD/forge.log" FM_TMUX_KILL_LOG="${FM_TMUX_KILL_LOG:-}" "$RECON" scan ${option:+"$option"}
 }
 
 # The teardown-side entry point: deliver one child's terminal ledger line for a
@@ -894,6 +895,14 @@ SH
   pass "reconciliation state reads set no-forge mode"
 }
 
+test_inactive_terminal_child_endpoint_is_reaped() {
+  local kill_log="$WORLD/tmux_kill.log"
+  make_world reaper; write_child "$MAIN" dead-child 'done: finished'
+  FM_TMUX_KILL_LOG="$kill_log" FM_FAKE_CREW_STATE='done' run_reconcile "$MAIN" --startup
+  grep -q 'firstmate:=fm-dead-child' "$kill_log" 2>/dev/null || fail "terminal child endpoint was not reaped"
+  pass "inactive terminal child endpoint is reaped"
+}
+
 test_main_direct_terminal_presentation_receipt
 test_local_secondmate_delivers_terminal_ledger_line
 test_secondmate_multiline_terminal_outcome_is_delivered_once
@@ -926,5 +935,6 @@ test_notice_recovery_does_not_duplicate_wake
 test_missing_parent_binding_names_itself
 test_reconciliation_never_calls_forge
 test_reconciliation_sets_no_forge_mode_for_state_read
+test_inactive_terminal_child_endpoint_is_reaped
 
 echo "all inactive reconciliation tests passed"

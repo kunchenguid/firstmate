@@ -149,6 +149,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/firstmate-layout/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/firstmate-orca/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -253,6 +257,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/specialist-tools/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/task-steering/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -262,10 +274,6 @@
     },
     {
       "path": "AGENTS.md",
-      "audience": "agent-runtime"
-    },
-    {
-      "path": "CLAUDE.md",
       "audience": "agent-runtime"
     },
     {

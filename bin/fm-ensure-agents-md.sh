@@ -6,7 +6,10 @@
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
 # file present (unless it is already the canonical pointer), converts a correct
 # CLAUDE.md -> AGENTS.md symlink into the pointer file, and refuses to clobber
-# distinct real files or wrong symlinks.
+# distinct real files or wrong symlinks. Never writes a brand-new CLAUDE.md
+# pointer for a fresh project (neither file existed, or AGENTS.md existed with
+# no CLAUDE.md); Claude Code reads AGENTS.md natively fleet-wide. Existing
+# pointers and symlink conversions are left alone.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and existing AGENTS.md files lacking both the exact
@@ -209,11 +212,10 @@ if [ -e "$AGENTS" ]; then
   fi
   if [ ! -e "$CLAUDE" ]; then
     ensure_maintenance_section
-    install_claude_pointer
     if [ "$MAINT_INJECTED" -eq 1 ]; then
-      echo "updated: added ## Maintaining this file to AGENTS.md and wrote CLAUDE.md @AGENTS.md pointer in $DIR"
+      echo "updated: added ## Maintaining this file to AGENTS.md in $DIR"
     else
-      echo "wrote: CLAUDE.md @AGENTS.md pointer in $DIR"
+      echo "unchanged: AGENTS.md in $DIR"
     fi
     exit 0
   fi
@@ -254,8 +256,7 @@ if [ -e "$CLAUDE" ]; then
     fi
     mv "$CLAUDE" "$AGENTS"
     ensure_maintenance_section
-    install_claude_pointer
-    echo "promoted: moved CLAUDE.md to AGENTS.md and wrote CLAUDE.md @AGENTS.md pointer in $DIR"
+    echo "promoted: moved CLAUDE.md to AGENTS.md in $DIR"
     exit 0
   fi
   echo "conflict: CLAUDE.md exists in $DIR but is not a regular file or symlink" >&2
@@ -263,5 +264,4 @@ if [ -e "$CLAUDE" ]; then
 fi
 
 write_skeleton
-install_claude_pointer
-echo "created: AGENTS.md and CLAUDE.md @AGENTS.md pointer in $DIR"
+echo "created: AGENTS.md in $DIR"
