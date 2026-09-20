@@ -231,7 +231,15 @@ while [ "$#" -gt 0 ]; do
 done
 case "$fmt" in
   %W) printf '0\n' ;;
-  %Y) /usr/bin/stat -f %m -- "$file" 2>/dev/null || /usr/bin/stat -c %Y -- "$file" ;;
+  %Y)
+    # GNU stat -f can emit filesystem data before failing on BSD's %m.
+    # Select the host dialect so that output cannot pollute the epoch.
+    if [ "$(uname)" = Darwin ]; then
+      /usr/bin/stat -f %m -- "$file"
+    else
+      /usr/bin/stat -c %Y -- "$file"
+    fi
+    ;;
   *) exit 1 ;;
 esac
 SH
