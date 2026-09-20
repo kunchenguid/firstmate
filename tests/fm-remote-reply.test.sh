@@ -445,7 +445,7 @@ cmp -s "$REMOTE/data/remote-secondmates/nested/data/reply/report.md" \
   || fail "a nested remote report this mate holds was not relayed"
 assert_grep 'nested report=data/remote-secondmates/ios/data/remote-secondmates/nested/data/reply/report.md foreign report=data/remote-secondmates/other/data/reply/report.md' "$PARENT/state/ios.status" \
   "the nested pointer was not rewritten or the undeliverable foreign pointer was changed"
-assert_grep 'note: remote document did not transfer for ios: data/remote-secondmates/other/data/reply/report.md - ' "$PARENT/state/ios.status" \
+assert_grep 'note: remote document did not transfer for ios: data/remote-secondmates/other/data/reply/report.md - ' <(sed -E 's/ \[at=[0-9]+\]//' "$PARENT/state/ios.status") \
   "an undeliverable foreign pointer left no note"
 assert_no_document_decision "an undeliverable foreign pointer raised a document decision"
 mirrored_cursor_is_current "an undeliverable foreign pointer prevented the cursor from advancing"
@@ -481,8 +481,10 @@ pass "the reported incident raises no standing decision and still delivers the r
 # A structured offer the reader cannot deliver fails open with its own reason.
 # Offered again twice in one delta, the unchanged note is not repeated.
 mirror_lines 'reply [corr=4444444444444444]: dispatched a scout report=data/reply/never-written.md'
-assert_grep 'note: remote document did not transfer for ios: data/reply/never-written.md - file is not a non-symlink regular file' "$PARENT/state/ios.status" \
+assert_grep 'note: remote document did not transfer for ios: data/reply/never-written.md - file is not a non-symlink regular file' <(sed -E 's/ \[at=[0-9]+\]//' "$PARENT/state/ios.status") \
   "an undeliverable structured offer left no note carrying the reader's reason"
+status_line_at_epoch "$(grep -E '^note( \[at=[0-9]+\])?: remote document did not transfer for ios: data/reply/never-written\.md' "$PARENT/state/ios.status")" >/dev/null \
+  || fail "new remote document note has unknown emission time"
 assert_grep 'dispatched a scout report=data/reply/never-written.md' "$PARENT/state/ios.status" \
   "an undeliverable offer's line was not mirrored with its own pointer intact"
 assert_no_document_decision "an undeliverable structured offer raised a document decision"
@@ -490,7 +492,7 @@ mirrored_cursor_is_current "an undeliverable structured offer held the cursor ba
 mirror_lines \
   'reply [corr=4444444444444444]: still writing report=data/reply/never-written.md' \
   'reply [corr=4444444444444444]: same, report=data/reply/never-written.md'
-[ "$(grep -cF 'note: remote document did not transfer for ios: data/reply/never-written.md' "$PARENT/state/ios.status")" -eq 1 ] \
+[ "$(sed -E 's/ \[at=[0-9]+\]//' "$PARENT/state/ios.status" | grep -cF 'note: remote document did not transfer for ios: data/reply/never-written.md')" -eq 1 ] \
   || fail "re-offering the same undeliverable document repeated its note"
 assert_no_document_decision "re-offering an undeliverable document raised a document decision"
 pass "an undeliverable structured offer fails open with one note and never a decision"
@@ -499,7 +501,7 @@ pass "an undeliverable structured offer fails open with one note and never a dec
 # reader bounds document size, and that refusal is visible by its own reason.
 head -c 300000 /dev/zero | tr '\0' 'x' > "$REMOTE/data/reply/big.md"
 mirror_lines 'done [key=big-report]: oversize deliverable report=data/reply/big.md'
-assert_grep 'note: remote document did not transfer for ios: data/reply/big.md - file exceeds max-bytes' "$PARENT/state/ios.status" \
+assert_grep 'note: remote document did not transfer for ios: data/reply/big.md - file exceeds max-bytes' <(sed -E 's/ \[at=[0-9]+\]//' "$PARENT/state/ios.status") \
   "an oversize document's refusal did not surface with its reason"
 assert_absent "$PARENT/data/remote-secondmates/ios/data/reply/big.md" \
   "a refused oversize document was stored locally anyway"

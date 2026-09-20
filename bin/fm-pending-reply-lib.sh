@@ -1098,19 +1098,18 @@ fm_pending_reply_escalation_payload() {  # <record-path> <kind>
 # that exact escalation remains open. If an unrelated decision has since taken
 # over that key, the close is withheld so the unrelated decision is not cleared.
 fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
-  local status_file=$1 rec=$2 corr=$3 line found='' kind payload own_key key note
+  local status_file=$1 rec=$2 corr=$3 line found='' kind payload own_key untimed
   [ -f "$status_file" ] || return 0
   [ "$(fm_pending_reply_get "$rec" corr_id)" = "$corr" ] || return 0
   own_key=$(fm_pending_reply_escalation_key "$corr")
   while IFS= read -r line || [ -n "$line" ]; do
     [ "$(status_line_verb "$line")" = blocked ] || continue
-    key=$(_fm_decision_key "$line") || continue
-    [ "$key" = "$own_key" ] || [ "$key" = default ] || continue
-    note=$(status_line_note "$line")
+    _fm_status_untimed "$line" untimed
     for kind in missed delivery-unknown recovery-delivery; do
       payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || continue
-      case "$note" in
-        "$payload"|"$payload "*) found=$line; break ;;
+      case "$untimed" in
+        "blocked [key=$own_key]: $payload"|"blocked: $payload") found=$line; break ;;
+        "blocked [key=$own_key]: $payload "*|"blocked: $payload "*) found=$line; break ;;
       esac
     done
   done < "$status_file"
