@@ -1663,7 +1663,7 @@ const contract = (args) => {
     env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
   });
   if (result.status !== 0) throw new Error(`fm-afk-contract.sh ${args.join(" ")} failed: ${result.stderr}`);
-  return (result.stdout || "").trim();
+  return result.stdout || "";
 };
 const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
 const unprocessedSeqs = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
@@ -1714,7 +1714,7 @@ if (pending.options.triggerTurn !== true || pending.options.deliverAs !== "follo
 if (!pending.message.content.includes(`[seq ${seq1}]`)) {
   throw new Error(`the first queued request lost seq ${seq1}: ${pending.message.content}`);
 }
-contract(["propose", "--words", "merge task-d when green, then cut the prerelease"]);
+contract(["propose", "--words", "merge task-d when green, then cut the prerelease\n\n"]);
 contract(["confirm"]);
 const processingMsg = { role: "custom", customType: pending.message.customType, content: pending.message.content, display: false };
 let aborted = false;
@@ -1806,10 +1806,10 @@ const awayPrompt = globalThis.__fmPrompts[1];
 const head = "FIRSTMATE SUPERVISION WAKE: signal: away wake\n\nHandle this per your operating procedure and finish with fm_branch_report.\n\nPOSTURE: AWAY. ";
 if (!awayPrompt.startsWith(head)) throw new Error(`the away wake lost its shape or its tail: ${awayPrompt}`);
 const readback = contract(["readback"]);
-if (!readback.includes("    merge task-d when green, then cut the prerelease")) throw new Error(`the read-back lost the captain's words: ${readback}`);
+if (!readback.endsWith("    merge task-d when green, then cut the prerelease\n    \n")) throw new Error(`the read-back lost the captain's words or their trailing blank line: ${JSON.stringify(readback)}`);
 if (!awayPrompt.includes("act on them by your own judgment")) throw new Error(`the away tail lost the words-execution rule: ${awayPrompt}`);
 if (awayPrompt.includes("does not execute them")) throw new Error(`the away tail still calls the words inert: ${awayPrompt}`);
-if (!awayPrompt.endsWith(`The record, verbatim:\n${readback}`)) throw new Error(`the tail does not end with the record's read-back verbatim: ${awayPrompt}`);
+if (!awayPrompt.endsWith(`The record, verbatim:\n${readback}`)) throw new Error(`the tail does not end with the record's read-back verbatim, trailing whitespace included: ${JSON.stringify(awayPrompt)}`);
 const snapshot = readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim().split("\n").join(",");
 if (snapshot !== "1,2,3") throw new Error(`the away wake claimed rows ${snapshot}, not every row`);
 const fleet = await report.execute("c2", { task: "fleet", verdict: "captain", summary: "per your away instructions: merged task-d's PR once green" }, undefined, undefined, {});
@@ -1873,7 +1873,7 @@ const contract = (args) => {
     env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
   });
   if (result.status !== 0) throw new Error(`fm-afk-contract.sh ${args.join(" ")} failed: ${result.stderr}`);
-  return (result.stdout || "").trim();
+  return result.stdout || "";
 };
 
 await fire("session_start", {});
@@ -1940,7 +1940,7 @@ const contract = (args) => {
     env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
   });
   if (result.status !== 0) throw new Error(`fm-afk-contract.sh ${args.join(" ")} failed: ${result.stderr}`);
-  return (result.stdout || "").trim();
+  return result.stdout || "";
 };
 
 await fire("session_start", {}, defaultSessionCtx);

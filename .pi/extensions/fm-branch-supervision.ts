@@ -1437,7 +1437,8 @@ ${context.command}
 
   // The away posture at the tail of a wake: the record's own read-back (the
   // captain's words verbatim, the spend cap, expected return, and reach line)
-  // plus the standing rule for acting under it. Read per wake so the byte-stable prefix never
+  // carried byte-for-byte, trailing blank lines included, plus the standing
+  // rule for acting under it. Read per wake so the byte-stable prefix never
   // carries posture; a read-back that cannot be rendered still names the
   // posture, because the record's presence is the fact the guarded scripts
   // enforce either way.
@@ -1445,7 +1446,7 @@ ${context.command}
     let readback = "";
     try {
       const rendered = await runCommandAsync("bash", [afkContractScript, "readback"], { cwd: fmRoot, env: scriptEnv });
-      if (rendered.status === 0) readback = (rendered.stdout || "").trim();
+      if (rendered.status === 0) readback = rendered.stdout || "";
     } catch {
       readback = "";
     }
