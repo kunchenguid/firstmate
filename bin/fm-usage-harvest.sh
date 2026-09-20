@@ -19,11 +19,9 @@
 #    "output_tokens":<int|null>,"reasoning_tokens":<int|null>,
 #    "source":<claude-projects|codex-sessions|unavailable>}
 #
-# Wall clock: status-file birth epoch -> status-file mtime epoch; the meta
-# file's mtime is the fallback end when the status file is absent, and a
-# missing birth timestamp falls back to the meta-file mtime (the spawn-time
-# marker, portable where birth time is unavailable) and then the status mtime
-# as the start.
+# Wall clock: immutable meta task_started_epoch -> status-file mtime epoch.
+# Legacy records fall back to status birth, meta mtime, then status mtime.
+# The meta mtime is the fallback end when the status file is absent.
 # Turn estimate: count of "^working:" lines in the status file.
 #
 # Per-request usage sources:
@@ -48,7 +46,9 @@
 #     tree, or no in-window match: token fields are null with source
 #     "unavailable".
 # A parse error stops parsing that file; the caller continues best-effort.
-# Usage events are selected by timestamp within the inclusive task window.
+# Sessions must contain a timestamp in the task window; their usage from
+# task start through the final logged event is included, including the tail
+# after the last status write. Teardown harvests after stopping the worker.
 #
 # Idempotent: if the ledger already contains a line whose "task" is
 # <task-id>, the command exits 0 without appending.
@@ -130,7 +130,10 @@ iso_from_epoch() {  # <epoch>
 }
 
 END_EPOCH=$(file_mtime_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$META")
-START_EPOCH=$(file_birth_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$META" 2>/dev/null || file_mtime_epoch "$STATUS" 2>/dev/null || printf '%s' "$END_EPOCH")
+START_EPOCH=$(meta_get task_started_epoch)
+case "$START_EPOCH" in
+  ''|*[!0-9]*) START_EPOCH=$(file_birth_epoch "$STATUS" 2>/dev/null || file_mtime_epoch "$META" 2>/dev/null || file_mtime_epoch "$STATUS" 2>/dev/null || printf '%s' "$END_EPOCH") ;;
+esac
 WALL=$((END_EPOCH - START_EPOCH))
 [ "$WALL" -ge 0 ] || WALL=0
 TURNS=$(grep -c '^working:' "$STATUS" 2>/dev/null || true)
@@ -158,9 +161,12 @@ matched_files() {
 }
 
 EVENT_WINDOW='
+  def event_epoch:
+    try (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) catch null;
+  def since_start:
+    event_epoch as $t | $t != null and $t >= $start;
   def in_window:
-    (try (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) catch null) as $t
-    | $t != null and $t >= $start and $t <= $end;
+    since_start and (event_epoch <= $end);
 '
 
 IT=null; CT=null; OT=null; RT=null
@@ -176,8 +182,9 @@ case "$HARNESS" in
         # .message.id so every request is counted exactly once.
         while IFS= read -r f; do
           row=$(jq -cn --argjson start "$START_EPOCH" --argjson end "$END_EPOCH" "$EVENT_WINDOW"'
-            reduce inputs as $l ({seen:{},n:0,m:null,it:0,ct:0,ot:0,rt:0};
-              if ($l | in_window) and $l.type == "assistant" and ($l.message.usage // null) != null then
+            reduce inputs as $l ({matched:false,seen:{},n:0,m:null,it:0,ct:0,ot:0,rt:0};
+              .matched = (.matched or ($l | in_window))
+              | if ($l | since_start) and $l.type == "assistant" and ($l.message.usage // null) != null then
                 ($l.message.id // "no-id") as $id
                 | if .seen[$id] then . else
                     .seen[$id] = 1 | .n += 1
@@ -188,10 +195,10 @@ case "$HARNESS" in
                     | .rt += ($l.message.usage.output_tokens_details.thinking_tokens // 0)
                     | (if .m == null then .m = ($l.message.model // null) else . end)
                   end
-              elif ($l | in_window) and $l.type == "assistant" and ($l.message.model // null) != null and .m == null then
+              elif ($l | since_start) and $l.type == "assistant" and ($l.message.model // null) != null and .m == null then
                 .m = $l.message.model
               else . end)
-            | select(.n > 0)' "$f" 2>/dev/null || true)
+            | select(.matched and .n > 0)' "$f" 2>/dev/null || true)
           [ -n "$row" ] || continue
           SRC=claude-projects
           m=$(jq -r '.m // empty' <<<"$row")
@@ -218,12 +225,13 @@ FMINNER
         found=0
         while IFS= read -r f; do
           row=$(jq -cn --argjson start "$START_EPOCH" --argjson end "$END_EPOCH" "$EVENT_WINDOW"'
-            reduce inputs as $l ({cwd:null,n:0,m:null,it:0,ct:0,ot:0,rt:0};
-              if $l.type == "session_meta" then
+            reduce inputs as $l ({matched:false,cwd:null,n:0,m:null,it:0,ct:0,ot:0,rt:0};
+              .matched = (.matched or ($l | in_window))
+              | if $l.type == "session_meta" then
                 .cwd = ($l.payload.cwd // .cwd)
-              elif ($l | in_window) and $l.type == "turn_context" and ($l.payload.model // null) != null then
+              elif ($l | since_start) and $l.type == "turn_context" and ($l.payload.model // null) != null then
                 .m = $l.payload.model
-              elif ($l | in_window) and $l.type == "event_msg" and $l.payload.type == "token_count"
+              elif ($l | since_start) and $l.type == "event_msg" and $l.payload.type == "token_count"
                    and ($l.payload.info.last_token_usage // null) != null then
                 .n += 1 | .it += ($l.payload.info.last_token_usage.input_tokens // 0)
                 | .ct += (($l.payload.info.last_token_usage.cached_input_tokens // 0)
@@ -231,7 +239,7 @@ FMINNER
                 | .ot += ($l.payload.info.last_token_usage.output_tokens // 0)
                 | .rt += ($l.payload.info.last_token_usage.reasoning_output_tokens // 0)
               else . end)
-            | select(.n > 0)' "$f" 2>/dev/null || true)
+            | select(.matched and .n > 0)' "$f" 2>/dev/null || true)
           [ -n "$row" ] || continue
           cwd=$(jq -r '.cwd // empty' <<<"$row")
           m=$(jq -r '.m // empty' <<<"$row")

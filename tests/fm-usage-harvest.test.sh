@@ -274,12 +274,13 @@ claude_nobirth_case() {
 {"type":"assistant","message":{"id":"msgN","model":"claude-test","usage":{"input_tokens":12,"output_tokens":8}}}
 JSON
 
-  # Pin an explicit window: status finishes at T, meta was spawned 100s earlier,
-  # and the session log lands mid-window. Without the meta-mtime start fallback
-  # the birthless window collapses to [T, T] and drops the earlier log.
   base=$(file_mtime_epoch "$state/$id.status")
   fm_touch_epoch "$base" "$state/$id.status"
-  fm_touch_epoch "$((base - 100))" "$state/$id.meta"
+  printf 'task_started_epoch=%s\n' "$((base - 100))" >> "$state/$id.meta"
+  cp "$state/$id.meta" "$state/$id.meta.rewrite"
+  printf 'pr=123\n' >> "$state/$id.meta.rewrite"
+  mv "$state/$id.meta.rewrite" "$state/$id.meta"
+  fm_touch_epoch "$base" "$state/$id.meta"
   fm_touch_epoch "$((base - 50))" "$logdir/session.jsonl"
 
   fb="$TMP_ROOT/nobirth-fakebin"
@@ -290,10 +291,10 @@ JSON
   ledger="$data/usage-ledger.jsonl"
   row=$(cat "$ledger")
   assert_contains "$row" '"source":"claude-projects"' \
-    "birthless harvest still finds the in-window log via the meta-mtime start"
+    "birthless harvest uses the immutable start despite a metadata rewrite"
   assert_contains "$row" '"input_tokens":12' "birthless harvest sums the in-window usage"
   assert_contains "$row" '"wall_secs":100' \
-    "birthless window spans meta -> status instead of collapsing to zero"
+    "persisted task start survives metadata replacement without birth time"
   pass "claude harvest: window survives a host without usable birth time"
 }
 
@@ -478,11 +479,11 @@ late_log_case() {
   "$HARVEST" "$id" >/dev/null 2>&1 || fail "late log harvest failed"
   [ "$model" != null ] || model=metadata-model
   jq -e --arg model "$model" '
-    .model == $model and .input_tokens == 17 and .cached_input_tokens == 3
-    and .output_tokens == 7 and .reasoning_tokens == 2
+    .model == $model and .input_tokens == 34 and .cached_input_tokens == 6
+    and .output_tokens == 14 and .reasoning_tokens == 4
     and .source != "unavailable"' "$data/usage-ledger.jsonl" >/dev/null \
     || fail "late log window or nullable model corrupted usage: $(cat "$data/usage-ledger.jsonl")"
-  pass "$harness: late writes retain in-window usage and model=$model"
+  pass "$harness: late writes include final response usage and model=$model"
 }
 
 late_log_case claude null

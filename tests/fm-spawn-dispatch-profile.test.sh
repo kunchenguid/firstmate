@@ -130,6 +130,11 @@ test_no_profile_keeps_claude_profile_defaults() {
   expect_code 0 "$status" "claude spawn without profile flags should succeed"
   assert_contains "$out" "spawned $id harness=claude" "spawn did not report claude"
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  local started
+  started=$(awk -F= '$1 == "task_started_epoch" {print $2}' "$HOME_DIR/state/$id.meta")
+  [[ "$started" =~ ^[0-9]+$ ]] && [ "$started" -le "$(date +%s)" ] && [ "$started" -gt 1000000000 ] \
+    || fail "spawn did not persist a valid task start timestamp"
+
 
   launch=$(cat "$LAUNCH_LOG")
   expected="export COMPACT_ADVISER_DISABLE=1; env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md')\""
