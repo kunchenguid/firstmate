@@ -152,6 +152,16 @@ cat "${QUOTA_AXI_FIXTURE:?}"
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
+# The spend ledger is a public-dependency boundary: the stub answers
+# "unavailable" so these cases assert quota/gate behavior unchanged, and the
+# effort/cost-aware cases override FM_SPEND_LEDGER with a fixture answer.
+LEDGER_STUB="$TMP_ROOT/fm-spend-ledger.py"
+cat > "$LEDGER_STUB" <<'SH'
+#!/usr/bin/env bash
+printf '{"status":"unavailable"}\n'
+SH
+chmod +x "$LEDGER_STUB"
+
 RESPONSE="$TMP_ROOT/response.json"
 export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" QUOTA_AXI_CALLS="$LOG/quota-axi.calls" QUOTA_AXI_FIXTURE="$QUOTA" CHILD_ENV_LOG="$LOG/child-env"
 
@@ -165,7 +175,7 @@ reset_log() {
 run() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
-  _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" FM_SPEND_LEDGER="${FM_SPEND_LEDGER:-$LEDGER_STUB}" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
   _code=$?
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
@@ -175,7 +185,7 @@ run() {
 run_without_curl() {
   local __exit=$1 __out=$2 __err=$3 _out _code
   shift 3
-  _out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+  _out=$(PATH="$NO_CURL_BIN" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" FM_SPEND_LEDGER="$LEDGER_STUB" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
   _code=$?
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
@@ -224,8 +234,8 @@ assert_contains "$out" 'dispatch-resolve:' "TOON block header"
 assert_contains "$out" '  status: clear' "clear status"
 assert_contains "$out" '  rule: rule_4 (A simple bug fix with a stated root cause.)   confidence: 0.9' "rule and confidence line"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "argmax picks the highest spendPriority"
-assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  -> eligible' "every candidate is accounted for"
-assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "unmeasured provider stays listed as eligible and unranked"
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  effort=high(high ceiling)  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  pred=unknown  -> eligible' "every candidate is accounted for"
+assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  pred=unknown  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "unmeasured provider stays listed as eligible and unranked"
 assert_contains "$out" '  note: 1 eligible candidate(s) unranked (kimi)' "clear results flag eligible unranked candidates once"
 assert_not_contains "$out" '--effort' "cursor profile without effort emits no --effort"
 argv=$(cat "$LOG/argv")
@@ -239,7 +249,7 @@ body=$(cat "$LOG/body")
 assert_equals 'jev-latest' "$(jq -r .model <<<"$body")" "default model is jev-latest"
 assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides in the state"
 assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "the whole brief rides in the state"
-assert_equals '["rule"]' "$(jq -c '.questions | keys' <<<"$body")" "only the rule Choice is asked"
+assert_equals '["effort","rule"]' "$(jq -c '.questions | keys' <<<"$body")" "the rule and effort Choices are asked"
 assert_equals '["default","rule_1","rule_2","rule_3","rule_4"]' "$(jq -c '.questions.rule.criteria | keys' <<<"$body")" "one option per rule plus default"
 assert_equals 'No listed rule applies to this task.' "$(jq -r '.questions.rule.criteria.default' <<<"$body")" "the fixed generic none criterion is the default option"
 assert_equals 'A simple bug fix with a stated root cause.' "$(jq -r '.questions.rule.criteria.rule_4' <<<"$body")" "rule when text is the option verbatim"
@@ -309,7 +319,7 @@ cat > "$RESPONSE" <<'JSON'
 JSON
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_contains "$out" 'candidate: agy:-  provider=agy  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible' "agy uses its resolver-only authoritative quota provider"
+assert_contains "$out" 'candidate: agy:-  provider=agy  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  pred=unknown  -> eligible' "agy uses its resolver-only authoritative quota provider"
 assert_contains "$out" "  profile: --harness 'agy'" "provider-less agy rule resolves"
 
 GEMINI_RULE="$TMP_ROOT/gemini-rule.json"
@@ -317,7 +327,7 @@ printf '%s\n' '{"rules":[{"when":"Gemini work.","use":{"harness":"gemini","model
 cp "$GEMINI_RULE" "$RULES"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_contains "$out" 'candidate: gemini:gemini-3.8-flash-high  provider=google  scope=all_models  remaining=72%  spendPriority=0.3  runway=through_reset  -> eligible' "Gemini resolves through its explicit provider"
+assert_contains "$out" 'candidate: gemini:gemini-3.8-flash-high  provider=google  scope=all_models  remaining=72%  spendPriority=0.3  runway=through_reset  pred=unknown  -> eligible' "Gemini resolves through its explicit provider"
 assert_contains "$out" "  profile: --harness 'gemini' --model 'gemini-3.8-flash-high'" "Gemini is a typed verified dispatch harness"
 
 cp "$ROOT/docs/examples/crew-dispatch.json" "$RULES"
@@ -339,8 +349,8 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "ambiguous exits 0"
 assert_contains "$out" '  status: ambiguous' "below the floor is ambiguous"
 assert_contains "$out" '  reason: confidence 0.41 below floor 0.6' "ambiguous names the floor"
-assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  -> eligible' "ambiguous preserves matched candidate evidence"
-assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "ambiguous preserves eligible unranked candidate evidence"
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  effort=high(high ceiling)  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  pred=unknown  -> eligible' "ambiguous preserves matched candidate evidence"
+assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  pred=unknown  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "ambiguous preserves eligible unranked candidate evidence"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
 pass "ambiguous: confidence below the fixed floor hands the decision back"
 
@@ -351,7 +361,7 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "escalate exits 0"
 assert_contains "$out" '  status: escalate' "approval-gated rule escalates"
 assert_contains "$out" "  reason: rule requires the captain's explicit approval before dispatch" "escalate names the approval gate"
-assert_contains "$out" 'candidate: claude:fable  provider=claude  scope=model:fable  remaining=15%  spendPriority=-0.79  runway=projected_exhaustion  bounds=all_models:79%/projected_exhaustion,model:fable:15%/projected_exhaustion  -> eligible' "approval escalation preserves matched candidate evidence"
+assert_contains "$out" 'candidate: claude:fable  provider=claude  effort=xhigh(xhigh ceiling)  scope=model:fable  remaining=15%  spendPriority=-0.79  runway=projected_exhaustion  pred=unknown  bounds=all_models:79%/projected_exhaustion,model:fable:15%/projected_exhaustion  -> eligible' "approval escalation preserves matched candidate evidence"
 assert_not_contains "$out" '  profile:' "escalate emits no profile line"
 pass "escalate: a rule declared approval: captain never yields a profile"
 
@@ -398,7 +408,7 @@ MISSING_PROFILE_FLOOR_RULES="$TMP_ROOT/missing-profile-floor-rules.json"
 jq '.rules[1].use[1].floor.scope = "model:missing"' "$BASE_RULES" > "$MISSING_PROFILE_FLOOR_RULES"
 cp "$MISSING_PROFILE_FLOOR_RULES" "$RULES"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
-assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=model:missing  remaining=-%  spendPriority=-  runway=-  -> eligible, unranked: profile floor model:missing is unverifiable: not rankable: disclosed uncertainty' "a missing profile floor remains eligible but unranked"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=model:missing  remaining=-%  spendPriority=-  runway=-  pred=unknown  -> eligible, unranked: profile floor model:missing is unverifiable: not rankable: disclosed uncertainty' "a missing profile floor remains eligible but unranked"
 assert_not_contains "$out" 'profile floor model:missing below' "missing profile evidence is not described as a shortfall"
 assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol'" "another candidate may clear without misrepresenting missing floor evidence"
 cp "$BASE_RULES" "$RULES"
@@ -410,7 +420,7 @@ NONNUMERIC="$TMP_ROOT/nonnumeric-spend-priority.json"
 jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models") | .selection.spendPriority) = "high"' "$QUOTA" > "$NONNUMERIC"
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NONNUMERIC" run code out err "$BRIEF"
-assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=-  runway=through_reset  -> eligible, unranked: spendPriority missing or non-numeric at all_models: not rankable: disclosed uncertainty' "a nonnumeric spendPriority remains eligible but unranked"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=-  runway=through_reset  pred=unknown  -> eligible, unranked: spendPriority missing or non-numeric at all_models: not rankable: disclosed uncertainty' "a nonnumeric spendPriority remains eligible but unranked"
 assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "numeric evidence wins without mixed-type ordering"
 pass "nonnumeric spendPriority evidence is never ranked"
 
@@ -420,7 +430,7 @@ PARTIAL="$TMP_ROOT/partial.json"
 jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.status) = "partial"' "$QUOTA" > "$PARTIAL"
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PARTIAL" run code out err "$BRIEF"
-assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=0.7597  runway=through_reset  -> eligible' "a known row from a partial provider remains rankable"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=0.7597  runway=through_reset  pred=unknown  -> eligible' "a known row from a partial provider remains rankable"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "partial provider evidence can win the argmax"
 
 PARTIAL_UNKNOWN="$TMP_ROOT/partial-unknown.json"
@@ -428,7 +438,7 @@ jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics) |= (.status
   {"scope":"model:cursor-grok-4.6-medium","status":"unknown","runway":{"status":"unknown"}}
 ])' "$QUOTA" > "$PARTIAL_UNKNOWN"
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$PARTIAL_UNKNOWN" run code out err "$BRIEF"
-assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=model:cursor-grok-4.6-medium  remaining=-%  spendPriority=-  runway=-  bounds=all_models:91%/through_reset,model:cursor-grok-4.6-medium:-%/unknown  -> eligible, unranked: quota row model:cursor-grok-4.6-medium unknown: not rankable: disclosed uncertainty' "an unknown exact-model row preserves partial known evidence without ranking"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=model:cursor-grok-4.6-medium  remaining=-%  spendPriority=-  runway=-  pred=unknown  bounds=all_models:91%/through_reset,model:cursor-grok-4.6-medium:-%/unknown  -> eligible, unranked: quota row model:cursor-grok-4.6-medium unknown: not rankable: disclosed uncertainty' "an unknown exact-model row preserves partial known evidence without ranking"
 assert_contains "$out" '  note: 2 eligible candidate(s) unranked (cursor, kimi)' "clear result lists every provider with unranked uncertainty"
 assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "another measured candidate can clear"
 
@@ -454,7 +464,7 @@ jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAva
   {"scope":"model:other","status":"known","effectivePercentRemaining":91,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.8}}
 ]' "$QUOTA" > "$NO_APPLICABLE"
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$NO_APPLICABLE" run code out err "$BRIEF"
-assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  -> eligible, unranked: no applicable quota row for provider cursor: disclosed uncertainty' "a candidate without an applicable row remains eligible but unranked"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  pred=unknown  -> eligible, unranked: no applicable quota row for provider cursor: disclosed uncertainty' "a candidate without an applicable row remains eligible but unranked"
 assert_contains "$out" '  note: 2 eligible candidate(s) unranked (cursor, kimi)' "no-applicable-row uncertainty appears in the clear-result note"
 pass "partial and missing quota evidence remain eligible but unranked"
 
@@ -466,13 +476,13 @@ jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAva
 ]' "$QUOTA" > "$BOUNDED"
 write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$BOUNDED" run code out err "$BRIEF"
-assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627' "the limiting provider-wide row drives ranking"
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  effort=high(high ceiling)  scope=all_models  remaining=79%  spendPriority=-0.4627' "the limiting provider-wide row drives ranking"
 assert_contains "$out" 'bounds=all_models:79%/projected_exhaustion,model:sonnet:99%/through_reset' "all applicable quota bounds are disclosed"
 
 EXHAUSTED_WIDE="$TMP_ROOT/exhausted-wide.json"
 jq '(.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models")) |= (.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")' "$BOUNDED" > "$EXHAUSTED_WIDE"
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$EXHAUSTED_WIDE" run code out err "$BRIEF"
-assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=0%' "the exhausted account-wide bound is the candidate evidence"
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  effort=high(high ceiling)  scope=all_models  remaining=0%' "the exhausted account-wide bound is the candidate evidence"
 assert_contains "$out" '-> not eligible: runway exhausted_now at all_models' "a healthy exact row cannot bypass an exhausted account-wide bound"
 pass "provider-wide and exact quota rows combine into one limiting candidate"
 
@@ -743,7 +753,7 @@ reset_log
 rm -f "$HOME_DIR/state/jev-dispatch-shadow.jsonl"
 TYPESAFE_API_KEY=$KEY FM_JEV_DISPATCH_EXTRA=1 FM_JEV_DISPATCH_SHADOW=1 run code out err "$BRIEF" --project pager
 body=$(cat "$LOG/body")
-assert_equals '["deliverable","home","rule"]' "$(jq -c '.questions | keys' <<<"$body")" "extra asks home and deliverable beside rule"
+assert_equals '["deliverable","effort","home","rule"]' "$(jq -c '.questions | keys' <<<"$body")" "extra asks home and deliverable beside rule and effort"
 assert_equals 'Brand and agency work' "$(jq -r '.questions.home.criteria.agency' <<<"$body")" "home criteria use secondmates.md scope when readable"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "extra questions do not change the profile line"
 assert_not_contains "$out" 'agency' "extra home pick is not auto-routed on stdout"
@@ -753,5 +763,169 @@ assert_contains "$line" '"deliverable":"scout"' "shadow logs the extra deliverab
 rm -f "$HOME_DIR/data/secondmates.md" "$HOME_DIR/state/jev-dispatch-shadow.jsonl"
 write_response "$RESPONSE" rule_4 0.9
 pass "extra questions are log-only"
+
+# --- effort classifier: dynamic class, ceiling, max guard, fallback -----------
+
+# write_response_effort <path> <choice> <confidence> <effort-choice>: a canned
+# response carrying the second typed effort answer.
+write_response_effort() {
+  cat > "$1" <<JSON
+{ "model": "jev-1.13.0",
+  "answers": {
+    "rule": { "type": "choice", "choice": "$2", "confidence": $3,
+      "probabilities": { "rule_1": 0.01, "rule_2": 0.01, "rule_3": 0.01, "rule_4": 0.96, "default": 0.01 } },
+    "effort": { "type": "choice", "choice": "$4", "confidence": 0.9,
+      "probabilities": { "low": 0.05, "medium": 0.05, "high": 0.05, "xhigh": 0.05, "max": 0.8 } }
+  },
+  "usage": { "input_tokens": 812, "output_tokens": 60 } }
+JSON
+}
+
+# A lower assessed class wins: rule_4's claude profile declares high, Jev
+# assesses low, and the emitted effort is the assessed class. Cursor gets a
+# lower spendPriority so the effort-capable lane wins the argmax.
+reset_log
+LOW_CURSOR="$TMP_ROOT/low-cursor-quota.json"
+write_quota "$LOW_CURSOR" -0.9
+write_response_effort "$RESPONSE" rule_4 0.9 low
+jq '.answers.effort.probabilities = {"low":0.8,"medium":0.05,"high":0.05,"xhigh":0.05,"max":0.05}' "$RESPONSE" > "$TMP_ROOT/r.json" && mv "$TMP_ROOT/r.json" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$LOW_CURSOR" run code out err "$BRIEF"
+assert_contains "$out" '  effort: low (jev confidence=0.9)' "effort line names the assessed class"
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  effort=low(high ceiling)' "declared effort is the ceiling, not the emitted class"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'low'" "the assessed class is emitted on the profile line"
+pass "effort classifier: a lower assessed class replaces the declared ceiling value"
+
+# An assessed class above the declared ceiling refuses the candidate - the
+# ceiling is a hard bound, never silently upgraded.
+reset_log
+write_response_effort "$RESPONSE" rule_4 0.9 max
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "assessed max over declared ceilings escalates"
+assert_contains "$out" 'not eligible: assessed effort max exceeds declared ceiling high' "ceiling breach is named per candidate"
+assert_not_contains "$out" '  profile:' "ceiling breach emits no profile"
+pass "effort classifier: declared effort is a ceiling that max cannot cross"
+
+# max is reachable only through an explicit declaration: a rule declaring max
+# lets an assessed max through; nothing else emits max.
+MAX_RULE="$TMP_ROOT/max-rule.json"
+printf '%s\n' '{"rules":[{"when":"The hardest work.","use":{"harness":"claude","model":"opus","effort":"max"}}]}' > "$MAX_RULE"
+cp "$MAX_RULE" "$RULES"
+cat > "$RESPONSE" <<'JSON'
+{ "model": "jev-1.13.0",
+  "answers": {
+    "rule": { "type": "choice", "choice": "rule_1", "confidence": 0.95,
+      "probabilities": { "rule_1": 0.95, "default": 0.05 } },
+    "effort": { "type": "choice", "choice": "max", "confidence": 0.9,
+      "probabilities": { "low": 0.05, "medium": 0.05, "high": 0.05, "xhigh": 0.05, "max": 0.8 } }
+  },
+  "usage": { "input_tokens": 100, "output_tokens": 60 } }
+JSON
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "declared max admits an assessed max"
+assert_contains "$out" "  profile: --harness 'claude' --model 'opus' --effort 'max'" "declared max emits max"
+cp "$BASE_RULES" "$RULES"
+
+# A harness that cannot supply the assessed class fails fit: the profile has
+# no declared effort (xhigh ceiling), agy tops out at high, so an assessed
+# xhigh refuses it even though the ceiling would allow the class.
+AGY_FIT_RULE="$TMP_ROOT/agy-fit-rule.json"
+printf '%s\n' '{"rules":[{"when":"Deep work.","use":{"harness":"agy"}},{"when":"Other.","use":{"harness":"cursor","model":"cursor-grok-4.6-medium"}}]}' > "$AGY_FIT_RULE"
+cp "$AGY_FIT_RULE" "$RULES"
+cat > "$RESPONSE" <<'JSON'
+{ "model": "jev-1.13.0",
+  "answers": {
+    "rule": { "type": "choice", "choice": "rule_1", "confidence": 0.95,
+      "probabilities": { "rule_1": 0.95, "rule_2": 0.04, "default": 0.01 } },
+    "effort": { "type": "choice", "choice": "xhigh", "confidence": 0.9,
+      "probabilities": { "low": 0.05, "medium": 0.05, "high": 0.05, "xhigh": 0.8, "max": 0.05 } }
+  },
+  "usage": { "input_tokens": 100, "output_tokens": 60 } }
+JSON
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" 'not eligible: harness agy cannot supply assessed effort xhigh' "unsupported assessed class fails fit before quota"
+cp "$BASE_RULES" "$RULES"
+
+# A malformed effort answer falls back to the declared effort and says so;
+# the rule question alone still drives a normal clear result.
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+jq '.answers.effort = {"type":"choice","choice":"ludicrous","confidence":0.9,"probabilities":{"ludicrous":1.0}}' "$RESPONSE" > "$TMP_ROOT/r.json" && mv "$TMP_ROOT/r.json" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "malformed effort answer does not break resolution"
+assert_contains "$out" 'declared fallback (classifier malformed)' "the fallback is disclosed"
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  effort=high(high ceiling)' "declared effort stands when the classifier is malformed"
+pass "effort classifier: ceiling, harness fit, and the declared fallback are all enforced"
+
+# --- cost-aware ranking: predicted burn against headroom and runway -----------
+
+# A ledger stub answering a real prediction document: cursor burns 200k tokens
+# on a 91%-remaining window calibrated at 1000 tokens per point (~200% needed -
+# refused), claude burns 30k (~30% of 79% - fits), kimi unmeasured.
+LEDGER_DATA="$TMP_ROOT/fm-spend-ledger-data.py"
+cat > "$LEDGER_DATA" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"status":"ok","providers":{"cursor":{"tokensPerPoint":1000,"percentConsumed":9,"windowKind":"weekly"},"claude":{"tokensPerPoint":1000,"percentConsumed":21,"windowKind":"weekly"}},"median":{"claude":{"high":{"tokens":30000,"seconds":300,"tasks":4},"all":{"tokens":30000,"seconds":300,"tasks":4}},"cursor":{"all":{"tokens":200000,"seconds":500,"tasks":2}}},"anyProvider":{"all":{"tokens":60000,"seconds":300,"tasks":9}}}'
+SH
+chmod +x "$LEDGER_DATA"
+
+reset_log
+write_response_effort "$RESPONSE" rule_4 0.9 high
+jq '.answers.effort.probabilities = {"low":0.05,"medium":0.05,"high":0.8,"xhigh":0.05,"max":0.05}' "$RESPONSE" > "$TMP_ROOT/r.json" && mv "$TMP_ROOT/r.json" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY FM_SPEND_LEDGER="$LEDGER_DATA" run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "cost gates leave a fitting candidate clear"
+assert_contains "$out" 'not eligible: predicted burn ~200k tokens (~200%) exceeds remaining 91%' "cursor is refused with its predicted burn named"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "the fitting candidate wins over the higher spendPriority"
+pass "cost-aware ranking: predicted burn refuses a candidate that cannot fit"
+
+# When every measured candidate's predicted burn exceeds its headroom the
+# escalate reason names the predicted burn.
+BURN_ALL="$TMP_ROOT/burn-all.json"
+cat > "$BURN_ALL" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"status":"ok","providers":{"cursor":{"tokensPerPoint":1000},"claude":{"tokensPerPoint":1000}},"median":{"claude":{"all":{"tokens":300000,"seconds":300,"tasks":4}},"cursor":{"all":{"tokens":200000,"seconds":500,"tasks":2}}},"anyProvider":{"all":{"tokens":250000,"seconds":300,"tasks":9}}}'
+SH
+chmod +x "$BURN_ALL"
+reset_log
+write_response_effort "$RESPONSE" rule_4 0.9 high
+jq '.answers.effort.probabilities = {"low":0.05,"medium":0.05,"high":0.8,"xhigh":0.05,"max":0.05}' "$RESPONSE" > "$TMP_ROOT/r.json" && mv "$TMP_ROOT/r.json" "$RESPONSE"
+TYPESAFE_API_KEY=$KEY FM_SPEND_LEDGER="$BURN_ALL" run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "all refused escalates"
+assert_contains "$out" 'predicted burn ~' "the escalate reason names the predicted burn"
+pass "cost-aware ranking: an all-refused escalate names the predicted burn"
+
+# Runway: a candidate whose usable runway is shorter than the predicted
+# duration is refused with the prediction named. Cursor's token burn fits
+# (30k at 1000/point = 30% of 91%) so the runway gate is what fires.
+LEDGER_RUNWAY="$TMP_ROOT/fm-spend-ledger-runway.py"
+cat > "$LEDGER_RUNWAY" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' '{"status":"ok","providers":{"cursor":{"tokensPerPoint":1000},"claude":{"tokensPerPoint":1000}},"median":{"claude":{"high":{"tokens":30000,"seconds":300,"tasks":4},"all":{"tokens":30000,"seconds":300,"tasks":4}},"cursor":{"all":{"tokens":30000,"seconds":500,"tasks":2}}},"anyProvider":{"all":{"tokens":30000,"seconds":300,"tasks":9}}}'
+SH
+chmod +x "$LEDGER_RUNWAY"
+RUNWAY_QUOTA="$TMP_ROOT/runway-quota.json"
+jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models") | .runway) = {"status":"projected_exhaustion","usableRunwaySeconds":60}' "$QUOTA" > "$RUNWAY_QUOTA"
+reset_log
+TYPESAFE_API_KEY=$KEY FM_SPEND_LEDGER="$LEDGER_RUNWAY" QUOTA_AXI_FIXTURE="$RUNWAY_QUOTA" run code out err "$BRIEF"
+assert_contains "$out" 'not eligible: predicted duration ~500s exceeds usable runway 60s' "short runway refuses with the predicted duration named"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "the runway-fitting candidate still resolves"
+pass "cost-aware ranking: a runway shorter than predicted duration refuses the candidate"
+
+# A failing or absent ledger never fabricates a limit: candidates keep their
+# quota-driven ranking with pred=unknown disclosed.
+BROKEN_LEDGER="$TMP_ROOT/fm-spend-ledger-broken.py"
+cat > "$BROKEN_LEDGER" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$BROKEN_LEDGER"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY FM_SPEND_LEDGER="$BROKEN_LEDGER" run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a failing ledger does not block resolution"
+assert_contains "$out" 'pred=unknown' "missing prediction evidence is disclosed, not fabricated"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "quota ranking stands when prediction is unavailable"
+pass "cost-aware ranking: absent ledger evidence stays disclosed and never blocks"
 
 printf '# all fm-dispatch-resolve tests passed\n'

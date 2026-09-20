@@ -21,23 +21,40 @@
 #   the whole brief or a compact intent summary as state, and a Choice
 #   question whose options are every rule's `when` from
 #   config/crew-dispatch.json plus one fixed generic none option. Jev returns
-#   the matched rule, a probability per option, and a confidence. Everything
-#   after that is jq: the confidence floor, the rule's declared `approval`
-#   and `floor`, each profile's declared `provider` and `floor`, the quota
-#   rows from ONE quota-axi --json snapshot, and the spendPriority argmax over
-#   the eligible candidates. The model never sees quota, catalogs, approvals,
-#   `why`, or `use`. With no rules, it returns a non-clear result so
-#   firstmate keeps using the existing intake.
+#   the matched rule, a probability per option, and a confidence. The same
+#   response carries a second typed Choice classifying the reasoning effort
+#   the brief itself needs (low|medium|high|xhigh|max). Everything after that
+#   is jq: the confidence floor, the rule's declared `approval` and `floor`,
+#   each profile's declared `provider` and `floor`, the quota rows from ONE
+#   quota-axi --json snapshot, the spend ledger's predicted burn for the
+#   assessed class (bin/fm-spend-ledger.py predict), and the spendPriority
+#   argmax over the eligible candidates. The model never sees quota,
+#   catalogs, approvals, `why`, or `use`. With no rules, it returns a
+#   non-clear result so firstmate keeps using the existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
+#
+# Effort is dynamic, not static: a profile's declared `effort` is the ceiling
+#   Jev may not exceed (xhigh when undeclared, so max always needs an explicit
+#   declaration), and the emitted --effort is the assessed class. A missing or
+#   malformed effort answer falls back to the declared effort and says so.
+#   A candidate that cannot supply the assessed class fails fit before quota
+#   gates; one whose predicted burn exceeds the tightest applicable remaining
+#   percent or usable runway is refused with the prediction named in the
+#   reason. Missing ledger evidence never fabricates a limit: the candidate
+#   keeps today's rank and its line shows pred=unknown.
+#   FM_SPEND_LEDGER overrides the ledger path (tests).
 #
 # Output (stdout, TOON-style block):
 #   dispatch-resolve:
 #     status: clear | ambiguous | escalate | error
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
-#     reason: <why the status is not clear>
-#     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
-#     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
+#     effort: <assessed class> (jev confidence=.. | declared | declared fallback (classifier <why>))
+#     reason: <why the status is not clear; an all-refused escalate names the predicted burn>
+#     candidate: <harness>:<model> provider=.. effort=<class>(<ceiling> ceiling) scope=.. remaining=..%
+#       spendPriority=.. runway=.. pred=~<tokens>tok/<seconds>s | pred=unknown
+#       -> eligible | eligible, unranked: <reason> | not eligible: <reason>
+#     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only; effort is the assessed class)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
@@ -361,6 +378,17 @@ QUESTIONS=$(jq -nc --arg none_criterion "$DEFAULT_WHEN" --argjson extra "$EXTRA"
       type: "choice",
       instructions: "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule'"'"'s own matching condition; pick `default` when no rule'"'"'s condition is met, including when a rule'"'"'s own exemption text excludes this task.",
       criteria: ($criteria + {default: $none_criterion})
+    },
+    effort: {
+      type: "choice",
+      instructions: "What reasoning effort does `task` itself need? Judge the work'"'"'s intrinsic difficulty from task.brief, independently of any dispatch rule. `max` is reserved: choose it only when the task text itself explicitly demands maximum effort; otherwise never.",
+      criteria: {
+        low: "Trivial mechanical work: a rote rename, formatting sweep, targeted typo fix, or single-file gathering.",
+        medium: "Contained work needing ordinary care: a small feature, a narrow bug fix, or a bounded question.",
+        high: "Big or ambiguous multi-file work: a feature across several files, a risky refactor, or many moving parts.",
+        xhigh: "Deep-deliberation work: safety-critical, subtle, or highly ambiguous tasks where mistakes are costly.",
+        max: "Maximum effort. Choose only when the task text itself explicitly demands maximum effort; otherwise never."
+      }
     }
   } + (if $extra == 1 then {
     home: {
@@ -414,19 +442,70 @@ jq -e --slurpfile rules "$RULES" '
        (.usage.output_tokens | type) == "number"))' \
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
 
+# The effort answer is a second typed Choice in the same response. It is
+# validated separately and softly: a missing or malformed effort answer falls
+# back to the rule's declared effort with the fallback disclosed in the
+# output, while a well-formed answer becomes the assessed reasoning class.
+EFFORT_JSON=$(jq -c '
+  (["low","medium","high","xhigh","max"]) as $classes |
+  (.answers.effort // null) as $a |
+  if $a == null then {choice: null, source: "absent"}
+  elif (($a.choice | type) == "string") and ($classes | index($a.choice) != null) and
+       (($a.confidence | type) == "number") and ($a.confidence >= 0) and ($a.confidence <= 1) and
+       (($a.probabilities | type) == "object") and (($a.probabilities | keys | sort) == ($classes | sort)) and
+       (all($a.probabilities[]; type == "number" and . >= 0 and . <= 1)) and
+       (($a.probabilities | [.[]] | add) >= 0.99) and (($a.probabilities | [.[]] | add) <= 1.01)
+    then {choice: $a.choice, confidence: $a.confidence, source: "jev"}
+    else {choice: null, source: "malformed"}
+    end' "$RESP_FILE" 2>/dev/null) || EFFORT_JSON='{"choice":null,"source":"malformed"}'
+
 # ---- quota evidence: one quota-axi --json snapshot -----------------------------
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
 quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
 fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 
+# ---- spend prediction: one ledger pass over the same quota snapshot ----------
+# bin/fm-spend-ledger.py owns the measurement; absent or unreadable output
+# leaves every burn gate inert and shows pred=unknown on the candidate lines.
+PREDICT_FILE=$(mktemp) || { rm -f "$RULES" "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
+trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$PREDICT_FILE"' EXIT
+SPEND_LEDGER=${FM_SPEND_LEDGER:-$SCRIPT_DIR/fm-spend-ledger.py}
+if [ -x "$SPEND_LEDGER" ]; then
+  FM_HOME="$FM_HOME" "$SPEND_LEDGER" predict --quota "$QUOTA" > "$PREDICT_FILE" 2>/dev/null \
+    || printf '{"status":"unavailable"}\n' > "$PREDICT_FILE"
+else
+  printf '{"status":"unavailable"}\n' > "$PREDICT_FILE"
+fi
+jq -e 'type == "object"' "$PREDICT_FILE" >/dev/null 2>&1 \
+  || printf '{"status":"unavailable"}\n' > "$PREDICT_FILE"
+
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
-RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
-  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" '
+RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" --argjson effort "$EFFORT_JSON" \
+  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" --slurpfile predict "$PREDICT_FILE" '
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
+  ($predict[0] // {status:"unavailable"}) as $pd | ($effort.choice) as $jev_effort |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def prov($p): ([$q.providers[] | select(.provider == $p)] | first) // null;
   def rows($p): (prov($p) | .quotaSemantics.effectiveAvailability // []);
   def bare($m): ($m | split("/") | last);
+  def effort_rank($e): (["low","medium","high","xhigh","max","ultra"] | index($e));
+  def effort_ok($h; $m; $e):
+    if $e == null then true
+    elif ($e | type) != "string" then false
+    elif $e == "ultra" then (($h == "pi" or $h == "pi-signed") and (($m | type) == "string") and ($m | startswith("codex-native/")) and ($m | length) > 13)
+    elif $h == "claude" then (["low","medium","high","xhigh","max"] | index($e)) != null
+    elif $h == "codex" then ((["low","medium","high","xhigh"] | index($e)) != null or ($e == "max" and $m == "gpt-5.6-luna"))
+    elif $h == "grok" or $h == "agy" then (["low","medium","high"] | index($e)) != null
+    elif $h == "pi" or $h == "pi-signed" or $h == "omp" or $h == "muse" then (["low","medium","high","xhigh","max"] | index($e)) != null
+    elif $h == "rovo" then (["low","medium","high","max"] | index($e)) != null
+    elif $h == "opencode" or $h == "kimi" or $h == "cursor" then false
+    else true end;
+  def fmt_tokens($t): if $t >= 1000000 then "\(($t / 100000) | round / 10)M" elif $t >= 1000 then "\(($t / 100) | round / 10)k" else "\($t)" end;
+  def median_burn($p; $e):
+    if $p == null then null
+    elif $e == null then (($pd.median[$p].all // $pd.anyProvider.all) // null)
+    else (($pd.median[$p][$e] // $pd.median[$p].all // $pd.anyProvider[$e] // $pd.anyProvider.all) // null)
+    end;
   def provider_of($c): ($c.provider // $pmap[$c.harness] // null);
   def measured($p):
     (prov($p) != null and (["known", "partial"] | index(prov($p).quotaSemantics.status)) != null);
@@ -446,7 +525,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
         end
     end;
   def evidence($rows):
-    $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), spendPriority: (.selection.spendPriority // null)});
+    $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), runwaySeconds: (.runway.usableRunwaySeconds // null), spendPriority: (.selection.spendPriority // null)});
   def evaluate($c):
     (provider_of($c)) as $p |
     if $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
@@ -487,6 +566,65 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
          spendPriority: $limiting.selection.spendPriority, runway: $limiting.runway.status, eligible: true, reason: "ok"}
       end
     end;
+  # The declared effort is a ceiling, not a floor: the assessed class
+  # may be lower, never higher. An undeclared ceiling is xhigh - max and ultra
+  # therefore always need an explicit declaration. A candidate that cannot
+  # supply the assessed class fails fit before any quota evidence is read.
+  def resolve_effort($c):
+    ($c.effort // null) as $declared |
+    (if $declared == null then "xhigh" else $declared end) as $ceiling |
+    if $jev_effort == null then {effort: $declared, ceiling: $ceiling, source: "declared", ok: true}
+    elif (effort_rank($jev_effort) <= effort_rank($ceiling)) then {effort: $jev_effort, ceiling: $ceiling, source: "jev", ok: true}
+    else {effort: $jev_effort, ceiling: $ceiling, source: "jev", ok: false,
+          reason: "assessed effort \($jev_effort) exceeds declared ceiling \($ceiling)"}
+    end;
+  # Burn gates bind only where the ledger produced evidence: a median burn for
+  # this provider/effort ladder, a calibrated tokens-per-point for the current
+  # provider window, and finite quota bounds. Missing evidence stays
+  # disclosed (pred=unknown) and never fabricates a limit.
+  def burn_gate($ev):
+    if ($ev.eligible != true) then $ev
+    else
+      (median_burn($ev.provider; $ev.effort)) as $med |
+      if $med == null or ($med.tokens | type) != "number" then $ev + {pred: null}
+      else
+        ($med.tokens) as $pt | ($med.seconds // null) as $ps |
+        (if $ev.provider == null then null else ($pd.providers[$ev.provider].tokensPerPoint // null) end) as $tpp |
+        (if $tpp != null then $pt / $tpp else null end) as $pred_pct |
+        ([($ev.bounds // [])[] | select((.pct | type) == "number")] ) as $b |
+        (if ($b | length) > 0 then ($b | min_by(.pct)) else null end) as $limit |
+        ([($ev.bounds // [])[] | select((.runwaySeconds | type) == "number") | .runwaySeconds] | if length > 0 then min else null end) as $min_runway |
+        ($ev + {pred: {tokens: $pt, seconds: $ps, pct: $pred_pct}}) as $evp |
+        if $pred_pct != null and $limit != null and $pred_pct > $limit.pct then
+          $evp + {eligible: false,
+                  reason: "predicted burn ~\(fmt_tokens($pt)) tokens (~\($pred_pct | round)%) exceeds remaining \($limit.pct)% at \($limit.scope)"}
+        elif $ps != null and $min_runway != null and $ps > $min_runway then
+          ($evp.bounds // [] | map(select((.runwaySeconds | type) == "number")) | min_by(.runwaySeconds)) as $lr |
+          $evp + {eligible: false,
+                  reason: "predicted duration ~\(($ps | round))s exceeds usable runway \(($min_runway | round))s at \($lr.scope)"}
+        else $evp
+        end
+      end
+    end;
+  def assess($c):
+    (resolve_effort($c)) as $er |
+    if ($er.ok | not) then
+      {profile: $c, eligible: false, effort: $er.effort, ceiling: $er.ceiling, effort_source: $er.source,
+       reason: $er.reason}
+    elif $er.effort != null and (effort_ok($c.harness; $c.model; $er.effort) | not) then
+      if (effort_ok($c.harness; $c.model; "low") | not) then
+        # The harness carries no effort knob at all (cursor, kimi, opencode):
+        # the assessed class is disclosed on the line but cannot gate, and
+        # the emitted profile stays effort-free exactly as today.
+        (evaluate($c) + {effort: $er.effort, ceiling: $er.ceiling, effort_source: $er.source,
+                         effort_emit: false, effort_note: "effort unenforceable on \($c.harness)"}) | burn_gate(.)
+      else
+        {profile: $c, eligible: false, effort: $er.effort, ceiling: $er.ceiling, effort_source: $er.source,
+         reason: "harness \($c.harness) cannot supply assessed effort \($er.effort)"}
+      end
+    else
+      (evaluate($c) + {effort: $er.effort, ceiling: $er.ceiling, effort_source: $er.source}) | burn_gate(.)
+    end;
   ($a.choice) as $choice |
   (if ($choice | test("^rule_[1-9][0-9]*$"))
    then ($choice | ltrimstr("rule_") | tonumber)
@@ -510,19 +648,25 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     model: $r.model, latency_ms: $lat, tokens: ($r.usage // null),
     rule: $choice,
     rule_when: (if $rule == null then $none_criterion else $rule.when end | .[0:60]),
-    confidence: $a.confidence, probabilities: $a.probabilities
+    confidence: $a.confidence, probabilities: $a.probabilities,
+    effort: {choice: $jev_effort, confidence: $effort.confidence, source: $effort.source}
   } as $ev |
   if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
   elif $a.confidence < ($floor | tonumber) then
-    $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(evaluate(.)))}
+    $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(assess(.)))}
   elif $sel.escalate then
-    $ev + {status: "escalate", reason: $sel.escalate, candidates: ($answer_use | map(evaluate(.)))}
+    $ev + {status: "escalate", reason: $sel.escalate, candidates: ($answer_use | map(assess(.)))}
   elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}
   else
-    ($sel.use | map(evaluate(.))) as $cands |
+    ($sel.use | map(assess(.))) as $cands |
     ([$cands[] | select(.eligible and ((.unranked // false) | not))]) as $elig |
     ([$cands[] | select(.unranked)]) as $unranked |
-    if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
+    ([$cands[] | select(.pred != null) | .pred.tokens] | if length > 0 then min else null end) as $min_pred |
+    if ($elig | length) == 0 then
+      $ev + {status: "escalate",
+             reason: ("no rankable eligible candidate" +
+               (if $min_pred != null then " (predicted burn ~\(fmt_tokens($min_pred)) tokens at \($jev_effort // "declared") effort)" else "" end)),
+             note: $sel.note, candidates: $cands}
     else
       ($elig | max_by(.spendPriority)) as $best |
       ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
@@ -544,17 +688,23 @@ TEXT=$(jq -r '
   "  model: \(show(.model))   latency_ms: \(show(.latency_ms))   tokens: \(show(.tokens.input_tokens))/\(show(.tokens.output_tokens))",
   "  rule: \(.rule | flat) (\(.rule_when | flat))   confidence: \(.confidence | flat)",
   "  probabilities: \([.probabilities | to_entries[] | "\(.key | flat)=\(.value | flat)"] | join(" "))",
+  "  effort: \(show(.effort.choice)) (\(if .effort.source == "jev" then "jev confidence=\(show(.effort.confidence))" elif .effort.source == "declared" then "declared" else "declared fallback (classifier \(.effort.source))" end))",
   (if .reason then "  reason: \(.reason | flat)" else empty end),
   (if .note then "  note: \(.note | flat)" else empty end),
   (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
   (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
+      + (if .effort then "  effort=\(.effort | flat)" + (if .ceiling then "(\(.ceiling | flat) ceiling)" else "" end) + (if .effort_note then " [\(.effort_note | flat)]" else "" end) else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
+      + (if .pred then "  pred=~\(.pred.tokens | flat)tok/\(show(.pred.seconds))s" elif has("pred") then "  pred=unknown" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
       + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
   (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
-      + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
+      + (if .chosen.effort_emit == false then
+           (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end)
+         elif .chosen.effort then " --effort \(.chosen.effort | shell_arg)"
+         elif .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 if fm_dispatch_shadow_on; then
   SHADOW_PATH="$FM_HOME/state/jev-dispatch-shadow.jsonl"
   SHADOW=$(jq -nc --argjson result "$RESULT" --arg route "${FM_JEV_LAST_ROUTE:-}" \

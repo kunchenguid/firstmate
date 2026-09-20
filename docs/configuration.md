@@ -529,7 +529,7 @@ bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON blo
 ```
 
 Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.
-When on and at least one rule exists, the tool sends the project name plus either the whole brief or a compact 400-800 character intent summary as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, approvals, or credentials.
+When on and at least one rule exists, the tool sends the project name plus either the whole brief or a compact 400-800 character intent summary as state and asks the rule Choice whose options are every rule's `when` plus the fixed neutral option for no matching rule, together with the effort Choice; the model never sees quota, catalogs, `why`, `use`, approvals, or credentials.
 The HTTP call goes through [`bin/fm-jev-lib.sh`](../bin/fm-jev-lib.sh): TypeSafe `/v1/systemone` when a TypeSafe key is present, or OpenRouter `/api/alpha/decisions` when `OPENROUTER_API_KEY` is set and `TYPESAFE_API_KEY` is not, or when `JEV_ROUTE=openrouter`.
 This section is the single owner of the Jev HTTP override names: each is read from the process environment first, else from `$FM_HOME/.env` via `fmx_env_get`, and the environment wins.
 `JEV_ROUTE` is `openrouter` or `typesafe`.
@@ -547,7 +547,11 @@ Presence of gitignored `config/jev-dispatch-shadow`, or `FM_JEV_DISPATCH_SHADOW=
 `FM_JEV_DISPATCH_SHADOW=0` turns that log off even when the config flag is present.
 A captain pin, `yolo` posture, and selected delivery mode still win over any `clear` profile.
 An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
-Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, and the numeric `spendPriority` argmax over candidates using each candidate's limiting row.
+Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, the spend ledger's predicted burn for the assessed effort class (`bin/fm-spend-ledger.py predict`), and the numeric `spendPriority` argmax over candidates using each candidate's limiting row.
+The same Jev response carries a second typed Choice classifying the reasoning effort the brief itself needs (`low|medium|high|xhigh|max`); a profile's declared `effort` is the ceiling that assessment may not exceed, the undeclared ceiling is `xhigh` so `max` always needs an explicit declaration, and a missing or malformed effort answer falls back to the declared effort with the fallback disclosed on the `effort:` line.
+A candidate on an effort-capable harness that cannot supply the assessed class is refused before quota gates; a harness without an effort knob keeps the class as a disclosed, unenforced note and emits no `--effort` flag for it.
+A candidate whose predicted burn exceeds its tightest applicable remaining percent (calibrated through the window's observed `tokensPerPoint`) is refused with the prediction named in the reason, and so is one whose predicted duration exceeds the window's usable runway seconds; an all-refused `escalate` names the predicted burn.
+Missing or unreadable ledger evidence never fabricates a limit: the candidate keeps its rank and its line shows `pred=unknown`.
 Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
 Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
 Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
@@ -557,7 +561,7 @@ Response probabilities must contain exactly every offered choice, use numeric va
 Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
 Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
-By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
+By accepted design, a `clear` result does not enforce catalog/authentication gates; reasoning-class ceilings and completion-runway gates are enforced above.
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` and `OPENROUTER_API_KEY` before launching child processes, so the secret is absent from child environments.
@@ -1191,6 +1195,27 @@ The voice handover depends on `note`, so it keeps working in a home that has con
 Each account, model and voice file above is read as its first line that is not blank and not a `#` comment, so a comment above the value is fine.
 The two read files are parsed differently: `config/voice-read-scope` must hold the bare word and nothing but blank space around it, so a comment header there refuses instead of being skipped, while every line of `config/voice-read-deny` that is not blank and not a `#` comment is one more substring.
 `FM_VOICE_RELAY` and `FM_VOICE_PYTHON` belong to the laptop rather than to a home, so they have no config file: `bin/fm-voice-client.py` requires the relay path as a flag or that variable and carries no default path.
+
+## Spend ceilings (config/spend-ceilings.json)
+
+`config/spend-ceilings.json` is an optional local, gitignored file that bounds token spend per task and per fleet window; absent or empty means no ceilings and nothing is armed.
+The measurement is `bin/fm-spend-ledger.py`, which rebuilds per-task totals from the workers' own Pi session logs (including nested subagent transcripts) into `state/<id>.spend`, plus fleet-level `state/spend-rollup.json` and `state/spend-model.json`.
+The enforcement is the `spend` process-event adapter (`bin/fm-procevent-spend.sh`), armed best-effort at every ship/scout spawn: an unconfigured or malformed file arms nothing and never fails a launch.
+
+```json
+{
+  "pollIntervalSeconds": 120,
+  "taskCeilingTokens": 50000000,
+  "fleetWindow": { "hours": 168, "ceilingTokens": 400000000, "family": "codex" }
+}
+```
+
+- `taskCeilingTokens` (positive integer, optional): each spawned Pi or pi-signed ship or scout gets a `spend-task-<id>` source polling the task's ledger total; a crossed ceiling captures a terminal result whose autohandle delivers `fm-control.sh <id> exit`, records `state/<id>.spend-stop` keyed on the task's `spawn_gen` (a relaunched incarnation is governed again), and reports through a `state/<id>.status` line that wakes firstmate. A failed stop is recorded and left unhandled so the ordinary check wake still carries the crossing. Other harnesses are unmeasured by the ledger and are not armed.
+- `fleetWindow` (object, optional): one shared `spend-fleet` source fires once per window when fleet spend in the trailing `hours` (default 168) reaches `ceilingTokens`; `family` (optional) scopes the sum to one ledger family such as `codex`, `deepseek`, or `grok`, absent means all lanes. The capture is report-only - it stays unhandled so the check wake reaches firstmate - and `state/spend-fleet-fired.json` suppresses a re-fire inside the same window.
+- `pollIntervalSeconds` (positive number, optional): poll cadence for both sources, default 120.
+
+A task source retires itself quietly when the task record disappears (`gone`) or the current incarnation already has a stop marker (`stopped`); five consecutive unreadable ledger answers end the watch with an `error` capture instead of polling forever.
+An empty or partial task total is unknown spend, not zero, so the poller keeps waiting rather than treating it as under-ceiling.
 
 ## Environment variables
 

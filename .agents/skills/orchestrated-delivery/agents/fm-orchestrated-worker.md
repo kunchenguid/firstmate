@@ -2,7 +2,6 @@
 name: fm-orchestrated-worker
 description: Implement the orchestrator's accepted change and return revision-bound evidence.
 model: openai-codex/gpt-5.6-luna
-thinking: max
 tools: read, write, edit, bash, grep, find, ls
 session-mode: standalone
 system-prompt: append

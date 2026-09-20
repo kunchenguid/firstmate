@@ -2,7 +2,6 @@
 name: fm-orchestrated-tester
 description: Exercise the accepted behavior and regressions against a stable implementation.
 model: openai-codex/gpt-5.6-luna
-thinking: max
 tools: read, bash, grep, find, ls
 session-mode: standalone
 system-prompt: append

@@ -2,7 +2,6 @@
 name: fm-orchestrated-reviewer
 description: Independently review accepted criteria, diff, and test evidence in a fresh context.
 model: openai-codex/gpt-6-astra
-thinking: xhigh
 tools: read, bash, grep, find, ls
 session-mode: standalone
 system-prompt: append

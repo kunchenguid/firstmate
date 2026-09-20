@@ -19,9 +19,9 @@ config = tmp / "custom config"
 project = tmp / "arbitrary-project"
 project.mkdir()
 env = {**os.environ, "HOME": str(home), "PI_CODING_AGENT_DIR": str(config)}
-roles = {"worker": ("gpt-5.6-luna", "max"), "explorer": ("gpt-5.6-luna", "max"),
-         "researcher": ("gpt-5.6-luna", "high"), "tester": ("gpt-5.6-luna", "max"),
-         "reviewer": ("gpt-6-astra", "xhigh"), "integrator": ("gpt-6-astra", "xhigh")}
+roles = {"worker": "gpt-5.6-luna", "explorer": "gpt-5.6-luna",
+         "researcher": "gpt-5.6-luna", "tester": "gpt-5.6-luna",
+         "reviewer": "gpt-6-astra", "integrator": "gpt-6-astra"}
 
 
 def run(*args, script=installer, environ=env, ok=True):
@@ -40,12 +40,12 @@ assert not config.exists(), "read-only check created state"
 run()
 assert not (project / ".pi").exists(), "provisioning added project resources"
 assert not (config / "trust.json").exists(), "provisioning changed trust"
-for role, (model, thinking) in roles.items():
+for role, model in roles.items():
     text = path(role).read_text()
     front = dict(line.split(": ", 1) for line in text.split("---\n")[1].splitlines())
     assert front["name"] == f"fm-orchestrated-{role}"
     assert front["model"] == f"openai-codex/{model}"
-    assert front["thinking"] == thinking
+    assert "thinking" not in front
     assert front["session-mode"] == "standalone"
     assert front["auto-exit"] == "true"
     assert "subagent_agents" not in front

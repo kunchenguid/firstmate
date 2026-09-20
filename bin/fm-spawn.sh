@@ -4858,6 +4858,14 @@ fi
 fm_lock_release "$SPAWN_META_LOCK"
 SPAWN_META_LOCK_HELD=0
 
+# Spend ceilings are opt-in governance (config/spend-ceilings.json). Arming is
+# best-effort: a missing config or an unavailable ledger must never fail a
+# launch, and a registration that already exists is left alone.
+if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-spend.sh" arm --task "$ID" >/dev/null 2>&1 || true
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent-spend.sh" arm --fleet >/dev/null 2>&1 || true
+fi
+
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"

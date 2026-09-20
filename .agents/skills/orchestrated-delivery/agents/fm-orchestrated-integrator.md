@@ -2,7 +2,6 @@
 name: fm-orchestrated-integrator
 description: Verify the actual joined or landed result without acquiring landing authority.
 model: openai-codex/gpt-6-astra
-thinking: xhigh
 tools: read, bash, grep, find, ls
 session-mode: standalone
 system-prompt: append

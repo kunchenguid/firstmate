@@ -141,7 +141,9 @@ Refresh the credentialed proof with an external temporary fixture parent:
 FM_PI_ROLE_AGENTS_LIVE=1 TMPDIR="$fixture_parent" nix shell nixpkgs#tmux -c bin/fm-test-run.sh tests/fm-pi-role-agents-live-e2e.test.sh
 ```
 
-Observed proof output:
+Current roster definitions declare no `thinking`.
+A refresh now inherits the fixture parent effort through a per-call `model` suffix rather than printing per-role thinking pins.
+The 2026-09-10 live run proved six-role discovery and execution on tmux with the per-role thinking pins that run recorded:
 
 ```text
 ok - pi tester: openai-codex/gpt-5.6-luna thinking=max global standalone live
@@ -155,7 +157,7 @@ absent: pi-signed
 ok - roster live proof passed for 1 installed Pi-family harness(es)
 ```
 
-A real Astra orchestrator in an unrelated git worktree discovered the globally provisioned roles and spawned each through the installed package without per-call model overrides.
+A real Astra orchestrator in an unrelated git worktree discovered the globally provisioned roles and spawned each through the installed package.
 The guard checks discovery, launch snapshots, actual assistant model identities, thinking-level session events, and shell-tool session metadata for every completed child.
 Each session was standalone, with no inherited parent-session pointer or parent-context canary; no trust decision or project resource was written, and no trust acknowledgement was sent.
 `tests/fm-pi-role-agents.test.sh` covers provisioning, upgrades, conflicts, and concurrent installs; `tests/fm-spawn-dispatch-profile.test.sh` executes both Pi-family emitted launch commands with fake executables and proves provisioning precedes launch in the worker's actual config directory.

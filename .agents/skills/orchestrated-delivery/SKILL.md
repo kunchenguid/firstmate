@@ -14,7 +14,7 @@ metadata:
 
 Use orchestration only when the task is genuinely complex or risky, or the captain explicitly requested it.
 Ordinary delegated work stays with one worker rather than acquiring this pipeline by default.
-Firstmate launches one ordinary orchestrator crewmate through `bin/fm-spawn.sh`, using harness `pi`, model `openai-codex/gpt-6-astra`, and effort `xhigh`.
+Firstmate launches one ordinary orchestrator crewmate through `bin/fm-spawn.sh`, using harness `pi`, model `openai-codex/gpt-6-astra`, and this task's assessed effort.
 The orchestrator receives the task brief and owns planning, role selection, handoffs, and the whole pipeline.
 Dispatch prerequisites remain owned by [AGENTS.md section 4](../../../AGENTS.md#4-harness-and-runtime-dispatch) and [harness-adapters](../harness-adapters/SKILL.md).
 Firstmate supervises only the orchestrator endpoint and never tracks individual sub-agents.
@@ -30,7 +30,8 @@ Firstmate supervises only the orchestrator endpoint and never tracks individual 
 | Reviewer | [`fm-orchestrated-reviewer`](agents/fm-orchestrated-reviewer.md) | Independently assess correctness and scope in a fresh context. |
 | Integrator | [`fm-orchestrated-integrator`](agents/fm-orchestrated-integrator.md) | Verify the final joined or landed result against the accepted criteria. |
 
-Each linked definition owns its exact model, reasoning effort, tool allowlist, and fresh-session mode.
+Each linked definition owns its exact model, tool allowlist, and fresh-session mode.
+Effort is this task's assessed class, not a per-role pin.
 Use these role definitions, not the package's generic `worker`, `scout`, or `researcher` profiles.
 
 The orchestrator records the selected roles and the concrete coverage reason for each before spawning them.
@@ -47,22 +48,24 @@ Check `pi list`, the loaded tool schema, and the installed package's README and 
 The installed fork requires tmux, an orchestrator running inside it, and a saved Pi session; a Pi crewmate does not gain usable sub-agents merely by being on Pi.
 Keep the orchestrator as the ordinary Firstmate-launched crewmate; the role definitions grant no further spawning.
 Use `subagents_list` for discovery, never to poll running children.
-Verify the selected definitions resolve as global and match their linked source files, including `thinking` and `session-mode`; report a project override or incompatible installed package to firstmate rather than dispatching a different roster.
+Verify the selected definitions resolve as global and match their linked source files, including `session-mode`; report a project override or incompatible installed package to firstmate rather than dispatching a different roster.
 
 Every Pi-family launch through `fm-spawn` provisions the namespaced definitions into the same global agent directory that the new process reads, through [`bin/fm-pi-role-agents.py`](../../../bin/fm-pi-role-agents.py).
 That script's help owns the directory resolution, conflict checks, and update mechanics.
 Global discovery reaches arbitrary project worktrees without adding project-local resources, changing project trust, or requiring a trust dialog for these definitions.
 Existing project resources retain Pi's normal trust behavior; this provisioning does not approve them.
 The sub-agent package itself and tmux must already be installed.
-The package reads effort from each definition's `thinking` field and appends it to the model at launch, so no per-call effort override or prompt instruction is needed.
+These definitions do not declare `thinking`.
+The package appends thinking to the model at launch, so pass `model` as `<that definition's model>:<task effort>` and keep the definition's model pin.
+Read the class from this crewmate's `effort=` metadata; use it only when it is one of `low`, `medium`, `high`, `xhigh`, or `max`, otherwise omit the suffix rather than inventing `max`.
 Keep the roster pins intact; a changed installed package still requires checking the effective loadout rather than assuming its behavior.
 [Runtime verification](../../../docs/verification/runtime-backends.md#orchestrated-pi-role-definitions) records the live six-role proof and its refresh command.
 
 ## Spawn and carry the handoff
 
 After the support check passes, call `subagent` with the table's `agent` definition, a unique role-specific `name`, the absolute task-worktree `cwd`, and a self-contained `task`.
-For example, the Worker call shape is `subagent({agent: "fm-orchestrated-worker", name: "worker-implementation", cwd: taskWorktree, task: handoff})`.
-Omit the per-call `model` override so the definition supplies both roster pins.
+For example, the Worker call shape is `subagent({agent: "fm-orchestrated-worker", name: "worker-implementation", cwd: taskWorktree, model: "openai-codex/gpt-5.6-luna:<task-effort>", task: handoff})`.
+The `model` argument carries that role's pinned model plus this task's effort; it is not a model substitution.
 The `name` labels a role and does not select its definition.
 Create the Reviewer with `fm-orchestrated-reviewer` and a fresh name on every review, never by resuming an earlier session; its definition selects `standalone`.
 The Reviewer must never be the agent that implemented the change under review.
