@@ -320,8 +320,7 @@ poll() {
     fi
     observed=0
     observe "$url" || observed=$?
-    # An observation the budget cut short is unmeasured, not unavailable: keep
-    # every owner's prior record so the URL is observed first next poll.
+    # Apply the header's unmeasured-read policy before error or wake handling.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
     # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
