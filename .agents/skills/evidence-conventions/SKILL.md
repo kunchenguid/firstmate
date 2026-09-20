@@ -17,7 +17,7 @@ The conventions govern claims, not mechanisms: they grade what an agent asserts,
 
 ## Evidence states
 
-Every claim that work is complete, in a status line, report, PR description, or agent handoff, carries exactly one of these labels:
+Every claim that work is complete, in the free-text part of a status line, a report, a PR description, or an agent handoff, carries exactly one of these labels:
 
 | Label | Meaning | Who writes it |
 |---|---|---|
@@ -27,12 +27,13 @@ Every claim that work is complete, in a status line, report, PR description, or 
 
 Rules:
 
-- Fail-closed: a completion claim without a label is treated as `not run`.
+- Fail-closed: a completion claim written in free text without a label is treated as `not run`.
 - `verified` without cited evidence is label abuse; the honest label is `reported done`.
 - The labels are literal lowercase, with a space inside `reported done` and `not run`, so they stay greppable.
 
 In a Firstmate status line the label lives in the free-text part after the state verb, and the state verb itself (`working`, `done`, `blocked`, and the rest) stays exactly as `bin/fm-classify-lib.sh` defines it.
-A brief scaffold's `done [at=<epoch>]: PR {url} checks green` gate is a `verified`-class claim: the pipeline's green CI is the cited evidence.
+Fixed-shape gate lines are the exception: a scaffold that dictates a line byte-for-byte, such as the definition-of-done gate `done [at=<epoch>]: PR {url} checks green`, is written exactly as the scaffold spells it, because anchored scrapes read those lines to recover the delivery and any inserted label text breaks the match.
+Never add a label inside such a line, and never read its missing label as `not run`: the gate already is a `verified`-class claim, with the pipeline's green CI as the cited evidence.
 
 ## Bug verdicts
 
