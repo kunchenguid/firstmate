@@ -2,7 +2,7 @@
 # Lavish adapter for the generic process-to-event runner.
 #
 # Usage:
-#   fm-procevent-lavish.sh arm <artifact.html>
+#   fm-procevent-lavish.sh arm <artifact.html> [--for <task-id>] [--agent-reply-file <path>]
 #   fm-procevent-lavish.sh classify <result-file>
 #   fm-procevent-lavish.sh terminal <result-file>
 #   fm-procevent-lavish.sh silent <result-file>
@@ -11,7 +11,7 @@
 #   fm-procevent-lavish.sh read <result-file>
 #   fm-procevent-lavish.sh source-id <artifact.html>
 #   fm-procevent-lavish.sh retire <artifact.html>
-#   fm-procevent-lavish.sh poll <artifact.html>
+#   fm-procevent-lavish.sh poll <artifact.html> [--agent-reply-file <path>]
 #
 # classify   Print the lifecycle state a handler should act on: feedback, ended,
 #            waiting, disconnected, missing, or unknown.
@@ -34,7 +34,8 @@
 # poll       The registered listener command `arm` publishes, not a command to
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
-#            transient interruption described below.
+#            transient interruption described below. A task-owned arm consumes
+#            its staged reply once and later retries poll without that reply.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -196,22 +197,50 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local artifact=${1-} id real
+  local artifact='' task='' reply_file='' id real
+  local -a listener=()
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --for)
+        [ "$#" -ge 2 ] || usage
+        task=$2
+        shift 2
+        ;;
+      --agent-reply-file)
+        [ "$#" -ge 2 ] || usage
+        reply_file=$2
+        shift 2
+        ;;
+      --*) usage ;;
+      *)
+        [ -z "$artifact" ] || usage
+        artifact=$1
+        shift
+        ;;
+    esac
+  done
   [ -n "$artifact" ] || usage
-  [ "$#" -eq 1 ] || usage
+  [ -z "$reply_file" ] || [ -n "$task" ] || usage
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   poll_retry_delay >/dev/null
   id=$(cmd_source_id "$artifact") || exit 1
   real=$(perl -MCwd=realpath -e '$p = realpath($ARGV[0]); defined($p) or exit 1; print "$p\n"' "$artifact" 2>/dev/null) \
     || die "cannot resolve the artifact path: $artifact"
-  # This adapter's own listener command, which runs the plain blocking form with
-  # no --timeout-ms so completion is a server event, and absorbs only the exact
-  # transient interruption. Registering raw poll output is what let that
-  # interruption reach the runner as a captured result.
-  "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" \
-    -- "$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real" || exit 1
+  listener=("$SCRIPT_DIR/fm-procevent-lavish.sh" poll "$real")
+  [ -z "$reply_file" ] || listener+=(--agent-reply-file "$reply_file")
+  if [ -n "$task" ]; then
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register-task lavish "$id" "$task" "$real" -- \
+      "${listener[@]}" || exit 1
+  else
+    # This adapter's own listener command, which runs the plain blocking form
+    # with no --timeout-ms so completion is a server event, and absorbs only
+    # the exact transient interruption.
+    FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" register lavish "$id" \
+      -- "${listener[@]}" || exit 1
+  fi
   printf 'armed: %s\n' "$id"
   printf 'artifact: %s\n' "$real"
+  [ -z "$task" ] || printf 'owner-task: %s\n' "$task"
 }
 
 cmd_retire() {
@@ -313,13 +342,27 @@ poll_iteration_floor_wait() {
 
 cmd_poll() {
   local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
-  local pipeline_status original_host_present=0 original_host=
+  local pipeline_status original_host_present=0 original_host='' reply_file='' posted_reply=''
   [ -n "$artifact" ] || usage
   if [ "${LAVISH_AXI_HOST+x}" = x ]; then
     original_host_present=1
     original_host=$LAVISH_AXI_HOST
   fi
-  [ "$#" -eq 1 ] || usage
+  if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
+    reply_file=$3
+    posted_reply="$reply_file.posted"
+    if [ -f "$reply_file" ] && [ ! -L "$reply_file" ]; then
+      mv -f -- "$reply_file" "$posted_reply" \
+        || die "cannot consume agent reply file: $reply_file"
+      reply_file=$posted_reply
+    elif [ -f "$posted_reply" ] && [ ! -L "$posted_reply" ]; then
+      reply_file=''
+    else
+      die "agent reply file does not exist: $reply_file"
+    fi
+  elif [ "$#" -ne 1 ]; then
+    usage
+  fi
   command -v lavish-axi >/dev/null 2>&1 || die "lavish-axi is not installed"
   delay=$(poll_retry_delay) || exit 1
   response=$(mktemp "${TMPDIR:-/tmp}/fm-lavish-poll.XXXXXX") || die "cannot stage the poll response"
@@ -338,7 +381,11 @@ cmd_poll() {
   while :; do
     iteration_started=$(poll_iteration_started) || die "cannot start the poll rate governor"
     apply_configured_lavish_host "$original_host_present" "$original_host"
-    lavish-axi poll "$artifact" | poll_response_filter "$response"
+    if [ -n "$reply_file" ]; then
+      lavish-axi poll "$artifact" --agent-reply-file "$reply_file" | poll_response_filter "$response"
+    else
+      lavish-axi poll "$artifact" | poll_response_filter "$response"
+    fi
     pipeline_status=("${PIPESTATUS[@]}")
     rc=${pipeline_status[0]}
     filter_rc=${pipeline_status[1]}

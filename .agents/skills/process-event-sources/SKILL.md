@@ -33,6 +33,7 @@ For a Lavish review artifact firstmate owns:
 bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
 
+A worker-owned board uses `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and re-arms with its reply after each round; the existing handled marker is the acknowledgement.
 Never arm a board that a live task hosts; follow the crew-hosted Lavish board contract in [`docs/configuration.md`](../../../docs/configuration.md#crew-hosted-lavish-review-boards).
 
 Registering a source is not the same fact as listening to it: arming records the source, and a separate runner still has to pick it up.
@@ -111,7 +112,7 @@ Two rules the commands cannot enforce for you:
   Consume a Lavish capture with `bin/fm-procevent-lavish.sh read <result-file>` rather than grepping the raw file: that command reports declared and presented item counts plus a completeness verdict, enumerates every captured queued item while retaining supplied element identity, and surfaces a `tag=message` freeform message as its own field, labeling it as session-ending only when the session ended.
   `answers` remains the keyed-choice extractor and never treats freeform prose as a decision key.
   A `feedback` result can still be the last one a review ever produces, so never assume another wake is coming just because the state is not `ended`.
-The crew-hosted recovery ordering and interim polling rule are owned by the [crew-hosted Lavish board contract](../../../docs/configuration.md#crew-hosted-lavish-review-boards); `bin/fm-brief.sh` emits its interim instruction at the point of use.
+The crew-hosted recovery ordering and arm-and-acknowledge rule are owned by the [crew-hosted Lavish board contract](../../../docs/configuration.md#crew-hosted-lavish-review-boards); `bin/fm-brief.sh` emits its instruction at the point of use.
 : A routine no-op an adapter positively identifies never becomes a wake at all - it is recorded as handled and stays silent, so you never see it. For Lavish that is an ended session carrying nothing, or `browser_disconnected` (classified `disconnected`): a closed review window that still has an open session. A board close carrying a real answer, and every other result, still wakes you unchanged. Never read the absence of a wake as proof a review is still open; ask the source, not the queue.
 : A Lavish wake whose source id matches `bin/fm-procevent-lavish.sh source-id "$(bin/fm-bearings-board.sh path)"` is a bearings board result; load the `bearings` skill's board-wake handling regardless of which answer kinds the result contains.
 : A `when` wake carries the watch's one terminal captured outcome and may be re-announced until handled: `bin/fm-procevent-when.sh classify <result-file>` returns `fired` (relay the success and its output); `action-failed` (relay the captured error and decide recovery); `condition-error`, `never-true`, or `rejected` (the watch stopped safely without acting - report why and decide whether to re-arm); or `ambiguous` (the action was claimed but its outcome was never captured - verify its effect manually before anything else). Every `when` outcome is terminal and the action is never retried automatically, so after handling and the generic acknowledgement above, run `bin/fm-procevent-when.sh retire <name>` to clean the watch's private records before any re-arm.

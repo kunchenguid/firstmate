@@ -5,6 +5,7 @@
 #
 # Usage:
 #   fm-procevent.sh register <adapter> <source-id> -- <argv>...
+#   fm-procevent.sh register-task <adapter> <source-id> <task-id> <artifact> -- <argv>...
 #   fm-procevent.sh register-extension <adapter> <source-id> --config-ref <reference>
 #   fm-procevent.sh start <source-id>
 #   fm-procevent.sh reconcile
@@ -23,6 +24,10 @@
 #            executed directly, so there is no shell surface and no argument
 #            splitting. Built-in adapters register sources; nothing here parses
 #            user text.
+# register-task
+#            Record a worker-owned built-in source. Its one source record
+#            persists across rounds, and re-registration by the same task
+#            acknowledges captured rounds without touching the source claim.
 # register-extension
 #            Resolve an explicitly enabled home-local process-event-adapter/1
 #            binding, verify its package and handshake, and record the source
@@ -215,6 +220,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-procevent-lib.sh
 . "$SCRIPT_DIR/fm-procevent-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
@@ -367,6 +376,12 @@ adapter_self_announcing() {  # <adapter>
 }
 
 source_file()  { printf '%s/%s.source\n' "$REG" "$1"; }
+source_field() {  # <source-id> <field>
+  sed -n "s/^$2=//p" "$(source_file "$1")" | head -1
+}
+source_kind() { source_field "$1" kind; }
+source_owner_task() { source_field "$1" owner_task; }
+source_artifact() { source_field "$1" artifact; }
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
 stranded_file() { printf '%s/.%s.stranded\n' "$REG" "$1"; }
@@ -475,6 +490,11 @@ cmd_register() {
   [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
   state_root_bind create || die "cannot safely prepare the process-event state root"
   fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+  if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
+    owner_task=$(source_owner_task "$id")
+    fm_procevent_source_lock_release "$id"
+    die "cannot arm task-owned Lavish source $id owned by task $owner_task; steer that task to re-arm its board"
+  fi
   if ! extension_registration_replacement_safe_locked "$id"; then
     fm_procevent_source_lock_release "$id"
     die "cannot replace extension registration while its prior runner remains active: $id"
@@ -486,6 +506,93 @@ cmd_register() {
   fm_procevent_source_lock_release "$id"
   owner_lease_refresh
   printf 'registered: %s (%s)\n' "$id" "$adapter"
+}
+
+cmd_register_task() {
+  local adapter=${1-} id=${2-} task=${3-} artifact=${4-} sep=${5-} result pending pending_adapter
+  local reply_source='' reply_dest reply_tmp arg i
+  local -a argv=()
+  shift 5 2>/dev/null || usage
+  [ "$adapter" = lavish ] || die "register-task is reserved for the Lavish adapter"
+  fm_procevent_adapter_valid "$adapter" || die "adapter name must be lowercase alphanumeric or dash: $adapter"
+  fm_procevent_source_id_valid "$id" || die "source id must be path-safe and at most 64 characters: $id"
+  fm_pr_task_id_valid "$task" || die "task id is invalid: $task"
+  [ -n "$artifact" ] || die "task-owned registration needs an artifact"
+  case "$artifact" in *$'\n'*) die "artifact paths cannot contain newlines" ;; esac
+  [ "$sep" = -- ] || usage
+  [ "$#" -ge 1 ] || die "register-task needs at least one argv element after --"
+  argv=("$@")
+  for arg in "${argv[@]}"; do
+    case "$arg" in *$'\n'*) die "argv elements cannot contain newlines" ;; esac
+  done
+  [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
+  state_root_bind create || die "cannot safely prepare the process-event state root"
+  (umask 077; mkdir -p "$REG") || die "cannot prepare the process-event registry"
+  fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
+  while IFS= read -r pending; do
+    [ -n "$pending" ] || continue
+    pending_adapter=$(fm_procevent_result_adapter "$pending" 2>/dev/null || true)
+    if [ -n "$pending_adapter" ] && adapter_result_is_terminal "$pending_adapter" "$pending"; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot re-arm terminal Lavish result $pending; stop and conclude the review"
+    fi
+  done < <(fm_procevent_pending "$STATE" | awk -v id="$id" 'index($0, "/" id ".") { print }')
+  if [ -e "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
+    if [ "$(source_kind "$id" 2>/dev/null || true)" != task-owned ]; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot task-own firstmate-registered source $id; firstmate is the holder"
+    fi
+    if [ "$(source_owner_task "$id")" != "$task" ]; then
+      reply_source=$(source_owner_task "$id")
+      fm_procevent_source_lock_release "$id"
+      die "cannot replace task-owned source $id owned by task $reply_source; steer that task to re-arm its board"
+    fi
+  fi
+  reply_dest="$REG/$id.reply"
+  rm -f -- "$reply_dest"
+  i=0
+  while [ "$i" -lt "${#argv[@]}" ]; do
+    if [ "${argv[$i]}" = --agent-reply-file ]; then
+      [ "$((i + 1))" -lt "${#argv[@]}" ] || { fm_procevent_source_lock_release "$id"; usage; }
+      reply_source=${argv[$((i + 1))]}
+      argv[i + 1]=$reply_dest
+      i=$((i + 2))
+    else
+      i=$((i + 1))
+    fi
+  done
+  if [ -n "$reply_source" ]; then
+    [ -f "$reply_source" ] && [ ! -L "$reply_source" ] || {
+      fm_procevent_source_lock_release "$id"
+      die "agent reply file does not exist: $reply_source"
+    }
+    reply_tmp=$(umask 077; mktemp "$REG/.reply.XXXXXX") || {
+      fm_procevent_source_lock_release "$id"
+      die "cannot stage agent reply"
+    }
+    if ! cat -- "$reply_source" > "$reply_tmp" || ! chmod 0600 "$reply_tmp" || ! mv -f -- "$reply_tmp" "$reply_dest"; then
+      rm -f -- "$reply_tmp"
+      fm_procevent_source_lock_release "$id"
+      die "cannot persist agent reply"
+    fi
+  fi
+  if ! fm_procevent_task_registration_publish_locked "$STATE" "$adapter" "$id" "$task" "$artifact" "${argv[@]}"; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot publish task-owned registration"
+  fi
+  # Re-arm is the worker's acknowledgement of every open nonterminal round.
+  # It deliberately does not inspect, acquire, release, or replace the claim.
+  while IFS= read -r pending; do
+    [ -n "$pending" ] || continue
+    result=$pending
+    fm_procevent_mark_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$result")" >/dev/null 2>&1 || {
+      fm_procevent_source_lock_release "$id"
+      die "cannot acknowledge captured round: $result"
+    }
+  done < <(fm_procevent_pending "$STATE" | awk -v id="$id" 'index($0, "/" id ".") { print }')
+  fm_procevent_source_lock_release "$id"
+  owner_lease_refresh
+  printf 'registered: %s (%s, task=%s)\n' "$id" "$adapter" "$task"
 }
 
 new_extension_registration_token() {
@@ -560,6 +667,12 @@ cmd_register_extension() {
     extension_lifecycle_lock_release
     die "cannot lock the source"
   fi
+  if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
+    owner_task=$(source_owner_task "$id")
+    fm_procevent_source_lock_release "$id"
+    extension_lifecycle_lock_release
+    die "cannot replace task-owned source $id owned by task $owner_task; steer that task to re-arm its board"
+  fi
   if ! extension_registration_replacement_safe_locked "$id"; then
     fm_procevent_source_lock_release "$id"
     extension_lifecycle_lock_release
@@ -586,15 +699,50 @@ cmd_register_extension() {
 # publication, so a result stays eligible for re-announcement across restarts
 # and drains until `fm_procevent_mark_handled` records it.
 publish_result() {  # <result-file>
-  local result=$1 id seq adapter line status=1
+  local result=$1 id seq adapter line status=1 owner_task='' message='' record=''
+  local ring_backend ring_target ring_meta
   id=$(fm_procevent_result_source_id "$result")
   seq=$(fm_procevent_result_sequence "$result")
   fm_procevent_source_id_valid "$id" || return 1
   adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null || true)
   [ -n "$adapter" ] || return 1
   line=$(fm_procevent_event_line "$adapter" "$id" "$seq") || return 1
+  owner_task=$(fm_procevent_result_owner_task "$result" 2>/dev/null || true)
   fm_procevent_source_lock_acquire "$id" || return 1
   if ! fm_procevent_is_handled "$STATE" "$id" "$seq"; then
+    if [ -n "$owner_task" ]; then
+      if adapter_result_is_terminal "$adapter" "$result"; then
+        message="Lavish review result $id sequence $seq is terminal at $result. Read it, stop and conclude the review, and do not re-arm the board."
+      else
+        export FM_PROCEVENT_CAPTURE_SOURCE_LOCK_HELD=1
+        if adapter_result_is_silent "$adapter" "$result"; then
+          unset FM_PROCEVENT_CAPTURE_SOURCE_LOCK_HELD
+          fm_procevent_mark_handled "$STATE" "$id" "$seq"
+          case "$?" in
+            0|1)
+              fm_procevent_source_lock_release "$id"
+              return 1
+              ;;
+          esac
+        fi
+        unset FM_PROCEVENT_CAPTURE_SOURCE_LOCK_HELD
+        message="Lavish review feedback is captured for task $owner_task at $result. Read it with bin/fm-procevent-lavish.sh read $result, apply the round, and re-arm the board with the reply."
+      fi
+      record=$(fm_task_inbox_write_idempotent "$STATE" "$owner_task" "$message" 2>/dev/null || true)
+      [ -n "$record" ] && status=0
+      fm_procevent_source_lock_release "$id"
+      if [ "$status" -eq 0 ]; then
+        ring_meta="$STATE/$owner_task.meta"
+        if [ -f "$ring_meta" ] && [ ! -L "$ring_meta" ]; then
+          ring_backend=$(fm_backend_of_meta "$ring_meta" 2>/dev/null || true)
+          ring_target=$(fm_backend_target_of_meta "$ring_meta" 2>/dev/null || true)
+          if [ -n "$ring_backend" ] && [ -n "$ring_target" ]; then
+            fm_task_inbox_ring "$ring_backend" "$ring_target" "$record" "$owner_task" >/dev/null 2>&1 || true
+          fi
+        fi
+      fi
+      return "$status"
+    fi
     # A result its own adapter declares a routine no-op is recorded as handled
     # and never announced, so it neither wakes a handler now nor comes back on
     # a later reconcile's re-announcement. Recording it is what makes that
@@ -721,7 +869,7 @@ cmd_start_public() {
 }
 
 cmd_start() {
-  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0
+  local id=${1-} adapter out rc claimed bound_rc published_capture=0 handled_capture=0 self_announcing=0 task_owner='' task_pending
   local extension_owner=0 extension_load_state extension_sequence='' extension_request_id=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   require_runner_group
@@ -737,6 +885,15 @@ cmd_start() {
   if ! fm_procevent_adapter_valid "$adapter"; then
     fm_procevent_source_lock_release "$id"
     die "registration names an invalid adapter"
+  fi
+  if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
+    task_owner=$(source_owner_task "$id" 2>/dev/null || true)
+    task_pending=$(fm_procevent_pending "$STATE" | awk -v id="$id" 'index($0, "/" id ".") { print; exit }')
+    if [ -n "$task_pending" ]; then
+      fm_procevent_source_lock_release "$id"
+      printf 'round-open: %s\n' "$id"
+      exit 0
+    fi
   fi
   fm_procevent_extension_registration_load_locked "$STATE" "$id"
   extension_load_state=$?
@@ -996,8 +1153,13 @@ EOF
   if [ "$extension_owner" -eq 1 ]; then
     :
   else
-    durable=$(fm_procevent_capture "$STATE" "$id" "$adapter" "$out") \
-      || { rm -f -- "$out"; die "cannot durably capture the result"; }
+    if [ -n "$task_owner" ]; then
+      durable=$(fm_procevent_capture "$STATE" "$id" "$adapter" "$out" "$task_owner") \
+        || { rm -f -- "$out"; die "cannot durably capture the result"; }
+    else
+      durable=$(fm_procevent_capture "$STATE" "$id" "$adapter" "$out") \
+        || { rm -f -- "$out"; die "cannot durably capture the result"; }
+    fi
   fi
   [ "$extension_owner" -eq 1 ] || rm -f -- "$out"
   STAGED_OUTPUT=
@@ -1313,7 +1475,7 @@ stranded_leaderless_detail() {  # <source-id>
 }
 
 cmd_reconcile() {
-  local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state
+  local rec id published started=0 stopped=0 uncertain=0 failed=0 claim owner pid token identity claim_state stop_state task_pending
   local launch_identity launch_stamp launch_mark unconfirmed entry
   local -a launched=()
   # Rejected before anything is launched, and by name. A window this command
@@ -1375,6 +1537,13 @@ cmd_reconcile() {
       if [ -f "$(source_file "$id")" ] && [ ! -L "$(source_file "$id")" ]; then
         fm_procevent_claim_state_locked "$id"
         claim_state=$?
+        if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
+          task_pending=$(fm_procevent_pending "$STATE" | awk -v id="$id" 'index($0, "/" id ".") { print; exit }')
+          if [ -n "$task_pending" ]; then
+            fm_procevent_source_lock_release "$id"
+            continue
+          fi
+        fi
         if [ "$claim_state" -eq 1 ] && fm_procevent_claim_undisplaceable_locked "$id"; then
           # A stale claim whose process group still has members, which can mean
           # the dead runner's polling child is still on the source's session
@@ -1907,7 +2076,7 @@ cmd_sweep_home() {
 }
 
 cmd_list() {
-  local rec id adapter owner pending claim_state
+  local rec id adapter owner pending claim_state kind task
   owner_lease_refresh
   if ! fm_procevent_any_registered "$STATE"; then
     printf 'no sources registered\n'
@@ -1918,6 +2087,8 @@ cmd_list() {
     [ -e "$rec" ] || continue
     id=${rec##*/}; id=${id%.source}
     adapter=$(read_adapter "$id" 2>/dev/null || echo '?')
+    kind=$(source_kind "$id" 2>/dev/null || true)
+    task=$(source_owner_task "$id" 2>/dev/null || true)
     fm_procevent_source_lock_acquire "$id" || continue
     fm_procevent_claim_state_locked "$id"
     claim_state=$?
@@ -1939,6 +2110,15 @@ cmd_list() {
     esac
     fm_procevent_source_lock_release "$id"
     pending=$(fm_procevent_pending "$STATE" | grep -c "/$id\." || true)
+    if [ "$kind" = task-owned ] && [ -n "$task" ]; then
+      if [ "$pending" -gt 0 ]; then
+        owner="task:$task/round-open"
+      elif [ "$owner" = live ]; then
+        owner="task:$task/listening"
+      else
+        owner="task:$task/dead"
+      fi
+    fi
     printf '%-28s %-12s %-10s %s\n' "$id" "$adapter" "$owner" "$pending"
   done
 }
@@ -2042,6 +2222,7 @@ unset FM_PROCEVENT_CAPTURE_PINNED_INBOX FM_PROCEVENT_CAPTURE_ABSOLUTE_INBOX \
 
 case "${1-}" in
   register)           shift; cmd_register "$@" ;;
+  register-task)      shift; cmd_register_task "$@" ;;
   register-extension) shift; cmd_register_extension "$@" ;;
   start)              shift; cmd_start_public "$@" ;;
   _start)             shift; cmd_start "$@" ;;

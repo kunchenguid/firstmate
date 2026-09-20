@@ -878,8 +878,16 @@ An already-armed Lavish source keeps its registered listener command until it is
 ### Crew-hosted Lavish review boards
 
 A live task that hosts a Lavish board owns its listener, so firstmate must never arm that board.
+The worker arms it with `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and never runs `lavish-axi poll` itself.
+The registration persists as one task-owned source record, while each captured round remains open until the worker re-arms and the existing handled marker acknowledges that round.
+Re-arm never acquires, releases, or hands off the source claim, and it may carry `--agent-reply-file <path>` whose contents are copied into private state and posted at most once.
+The captured result is stored with immutable task-owner routing evidence and delivered directly to that task's steering inbox, without a firstmate `check` wake for the captain's words.
+A task-owned source with an unhandled capture is not relaunched, so delivery failure cannot consume a round and start another poll.
+A terminal result, including `session_ended`, an empty End, or missing, is delivered to the owner with an explicit stop-and-conclude instruction and is never auto-rearmed.
+A second armer is refused with the current owner named, and the source list derives `listening`, `round-open`, or `dead` from the claim and handled captures without a second ownership record.
 If the hosting worker cannot be recovered, relaunch a worker to re-host first; guarded firstmate adoption is an explicit last resort only after the old claim is proved dead.
-The interim crew instruction emitted by `bin/fm-brief.sh` follows the board tool rule: poll in the foreground or through a harness-native tracked background job, never with bare `&`, `nohup`, `disown`, or redirected fire-and-forget polling, post a keyed `needs-decision` carrying the live board URL, and stop at `session_ended`.
+The cross-home gap between worker rounds remains an accepted residual until lavish-axi's exclusive listener lands.
+The interim crew instruction emitted by `bin/fm-brief.sh` points workers at this arm-and-acknowledge contract.
 
 The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action at most once before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs, and that binding is reloaded from disk immediately before each fire rather than trusted from when polling started.

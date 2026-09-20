@@ -706,6 +706,103 @@ assert_absent "$HEMPTY/state/procevent/$quiet_id.source" \
   "an empty board close still retires its ended source"
 pass "an empty board close is captured and recorded handled without ever waking the captain"
 
+# --- end-user-aligned regression: worker-owned rounds stay open until re-arm -
+# One worker-owned board runs three rounds: feedback reaches only the worker's
+# inbox, each re-arm acknowledges the prior capture and posts its reply once,
+# and a terminal session ends without another automatic poll.
+HMULTI="$TMP_ROOT/hmulti"; new_home "$HMULTI"
+MULTI_BIN=$(fm_fakebin "$TMP_ROOT/lavish-multi-stub")
+MULTI_ROOT="$TMP_ROOT/lavish-multi-root"
+mkdir -p "$MULTI_ROOT"
+export MULTI_ROOT
+cat > "$MULTI_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+n=$(cat "$MULTI_ROOT/count" 2>/dev/null || echo 0)
+n=$((n + 1))
+printf '%s\n' "$n" > "$MULTI_ROOT/count"
+if [ "${1-}" = poll ] && [ "${3-}" = --agent-reply-file ]; then
+  printf 'poll%s reply: ' "$n" >> "$MULTI_ROOT/replies"
+  cat "$4" >> "$MULTI_ROOT/replies"
+fi
+while [ ! -e "$MULTI_ROOT/trigger$n" ]; do sleep 0.02; done
+case "$n" in
+  1|2)
+    printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","round %s","","message",""\n' "$n"
+    ;;
+  3)
+    printf 'session:\n  status: ended\n  session_ended: true\n'
+    ;;
+esac
+SH
+chmod +x "$MULTI_BIN/lavish-axi"
+printf 'reply one\n' > "$MULTI_ROOT/reply1"
+printf 'reply two\n' > "$MULTI_ROOT/reply2"
+printf 'reply three\n' > "$MULTI_ROOT/reply3"
+MULTI_ART="$MULTI_ROOT/board.html"
+printf '<h1>multi-round</h1>\n' > "$MULTI_ART"
+multi_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$MULTI_ART")
+fm_test_track_procevent_home "$HMULTI"
+PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" --for worker-1 \
+  --agent-reply-file "$MULTI_ROOT/reply1" >/dev/null
+if PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" >/dev/null 2>"$MULTI_ROOT/firstmate-arm.err"; then
+  fail "firstmate arm replaced a worker-owned board"
+fi
+assert_contains "$(cat "$MULTI_ROOT/firstmate-arm.err")" "owned by task worker-1" \
+  "second armer refusal did not name the worker owner"
+list_out=$(FM_HOME="$HMULTI" "$ROOT/bin/fm-procevent.sh" list)
+assert_contains "$list_out" "task:worker-1/dead" \
+  "the source list did not expose the worker-owned board state"
+PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
+  pe "$HMULTI" start "$multi_id" > "$MULTI_ROOT/run1" 2>&1 &
+MULTI_RUN=$!
+for _ in $(seq 1 100); do [ "$(cat "$MULTI_ROOT/count" 2>/dev/null || true)" = 1 ] && break; sleep 0.02; done
+touch "$MULTI_ROOT/trigger1"
+for _ in $(seq 1 100); do [ -f "$HMULTI/state/worker-1.inbox/001.msg" ] && break; sleep 0.02; done
+[ -f "$HMULTI/state/worker-1.inbox/001.msg" ] \
+  || fail "worker-owned feedback did not reach the worker inbox"
+[ -z "$(wake_payloads "$HMULTI")" ] \
+  || fail "worker-owned feedback woke firstmate: $(wake_payloads "$HMULTI")"
+PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" --for worker-1 \
+  --agent-reply-file "$MULTI_ROOT/reply2" >/dev/null
+wait "$MULTI_RUN" || true
+for _ in $(seq 1 100); do
+  PATH="$MULTI_BIN:$PATH" pe "$HMULTI" reconcile >/dev/null 2>&1 || true
+  [ "$(cat "$MULTI_ROOT/count" 2>/dev/null || true)" = 2 ] && break
+  sleep 0.03
+done
+touch "$MULTI_ROOT/trigger2"
+for _ in $(seq 1 100); do [ -f "$HMULTI/state/worker-1.inbox/002.msg" ] && break; sleep 0.02; done
+[ -f "$HMULTI/state/worker-1.inbox/002.msg" ] \
+  || fail "the next worker-owned feedback did not reach the worker inbox"
+PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" --for worker-1 \
+  --agent-reply-file "$MULTI_ROOT/reply3" >/dev/null
+for _ in $(seq 1 100); do
+  PATH="$MULTI_BIN:$PATH" pe "$HMULTI" reconcile >/dev/null 2>&1 || true
+  [ "$(cat "$MULTI_ROOT/count" 2>/dev/null || true)" = 3 ] && break
+  sleep 0.03
+done
+touch "$MULTI_ROOT/trigger3"
+for _ in $(seq 1 100); do [ -f "$HMULTI/state/worker-1.inbox/003.msg" ] && break; sleep 0.02; done
+for _ in $(seq 1 100); do [ ! -e "$HMULTI/state/procevent/$multi_id.source" ] && break; sleep 0.02; done
+[ ! -e "$HMULTI/state/procevent/$multi_id.source" ] \
+  || fail "session_ended worker-owned board was automatically re-armed"
+[ -f "$HMULTI/state/procevent-inbox/$multi_id.1.handled" ] \
+  || fail "first worker-owned round was not acknowledged by re-arm"
+[ -f "$HMULTI/state/procevent-inbox/$multi_id.2.handled" ] \
+  || fail "second worker-owned round was not acknowledged by re-arm"
+assert_contains "$(cat "$HMULTI/state/worker-1.inbox/003.msg" 2>/dev/null || true)" \
+  "do not re-arm" "terminal worker-owned result instructed the worker to stop"
+[ "$(grep -c '^poll[123] reply:' "$MULTI_ROOT/replies" 2>/dev/null || true)" = 3 ] \
+  || fail "worker replies were not posted once per round"
+[ -z "$(wake_payloads "$HMULTI")" ] \
+  || fail "worker-owned rounds produced a firstmate wake: $(wake_payloads "$HMULTI")"
+pass "worker-owned Lavish rounds deliver to the worker, acknowledge on re-arm, and stop at session end"
+
 # The other half of the same contract, on the same real path: a close that
 # carries what the captain actually said must still reach him. Same runner, same
 # adapter, one different response shape.
