@@ -387,6 +387,7 @@ cmd_poll() {
       lavish-axi poll "$artifact" | poll_response_filter "$response"
     fi
     pipeline_status=("${PIPESTATUS[@]}")
+    reply_file=''
     rc=${pipeline_status[0]}
     filter_rc=${pipeline_status[1]}
     case "$filter_rc" in

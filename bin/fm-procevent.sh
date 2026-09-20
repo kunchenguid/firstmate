@@ -546,7 +546,6 @@ cmd_register_task() {
     fi
   fi
   reply_dest="$REG/$id.reply"
-  rm -f -- "$reply_dest"
   i=0
   while [ "$i" -lt "${#argv[@]}" ]; do
     if [ "${argv[$i]}" = --agent-reply-file ]; then
@@ -734,7 +733,7 @@ publish_result() {  # <result-file>
           ring_backend=$(fm_backend_of_meta "$ring_meta" 2>/dev/null || true)
           ring_target=$(fm_backend_target_of_meta "$ring_meta" 2>/dev/null || true)
           if [ -n "$ring_backend" ] && [ -n "$ring_target" ]; then
-            fm_task_inbox_ring "$ring_backend" "$ring_target" "$record" "$owner_task" >/dev/null 2>&1 || true
+            fm_task_inbox_ring "$ring_backend" "$ring_target" "$record" "fm-$owner_task" >/dev/null 2>&1 || true
           fi
         fi
       fi

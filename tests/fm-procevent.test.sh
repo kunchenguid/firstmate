@@ -849,6 +849,9 @@ cat > "$LAVISH_SCRIPTED_BIN/lavish-axi" <<'SH'
 n=$(cat "$LAVISH_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$LAVISH_COUNT"
+if [ -n "${LAVISH_REPLY_LOG-}" ] && [ "${1-}" = poll ] && [ "${3-}" = --agent-reply-file ]; then
+  cat "$4" >> "$LAVISH_REPLY_LOG"
+fi
 read -r -a plan <<< "$LAVISH_SCRIPT"
 i=$((n - 1))
 [ "$i" -ge "${#plan[@]}" ] && i=$((${#plan[@]} - 1))
@@ -915,6 +918,32 @@ assert_contains "$(wake_payloads "$HRETRY")" "procevent lavish $retry_id 1" \
 assert_grep 'ship it' "$(first_result "$HRETRY" "$retry_id")" \
   "the announced result is the captain's feedback, not the interruption"
 pass "a transient Lavish poll interruption is retried quietly and never announced"
+
+# --- end-user-aligned regression: a retried poll does not resubmit the reply ---
+# The worker hands its round reply to the adapter once. When the first poll of
+# that round comes back as the transient interruption, the adapter's own quiet
+# retries must keep polling WITHOUT the reply, or the board receives the same
+# worker message once per retry.
+HREPLY="$TMP_ROOT/hreply"; new_home "$HREPLY"
+REPLY_ART="$TMP_ROOT/reply-retry-board.html"
+printf '<h1>reply retry</h1>\n' > "$REPLY_ART"
+reply_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REPLY_ART")
+fm_test_track_procevent_home "$HREPLY"
+printf 'applied round one\n' > "$TMP_ROOT/reply-retry.txt"
+LAVISH_REPLY_LOG="$TMP_ROOT/reply-retry-log"; export LAVISH_REPLY_LOG
+LAVISH_COUNT="$TMP_ROOT/reply-retry-count"; LAVISH_SCRIPT="interrupt interrupt feedback"
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" FM_HOME="$HREPLY" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REPLY_ART" --for worker-9 \
+  --agent-reply-file "$TMP_ROOT/reply-retry.txt" >/dev/null
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HREPLY" start "$reply_id" >/dev/null
+[ "$(cat "$LAVISH_COUNT")" = 3 ] \
+  || fail "the reply-carrying listener was polled $(cat "$LAVISH_COUNT") times, not the two quiet retries plus the delivering poll"
+[ "$(grep -c 'applied round one' "$LAVISH_REPLY_LOG" 2>/dev/null || true)" = 1 ] \
+  || fail "the staged worker reply reached the board $(grep -c 'applied round one' "$LAVISH_REPLY_LOG" 2>/dev/null || true) times across the adapter's internal retries"
+[ -f "$HREPLY/state/worker-9.inbox/001.msg" ] \
+  || fail "the round that delivered after quiet retries did not reach the worker inbox"
+unset LAVISH_REPLY_LOG
+pass "a staged worker reply is handed to the board once across quiet poll retries"
 
 # Exhaustion is news: after the bounded retries the same exact response is
 # captured and announced normally rather than being swallowed forever.
