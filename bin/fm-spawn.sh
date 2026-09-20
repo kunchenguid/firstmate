@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--fallback <chain>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--fallback <chain>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -28,7 +28,7 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--fallback <chain>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -149,12 +149,27 @@
 #   markers (omp publishes none of its own), sets the Firstmate-owned
 #   FM_OMP_HARNESS=omp detection marker, suppresses the first-run provider
 #   wizard with OMP_SKIP_SETUP=1, forces --auto-approve, pins the working
-#   directory with --cwd, and passes the tracked worker posture overlay
-#   .omp/fm-worker-overlay.yml through --config. That overlay pins composer
-#   shape, plan mode off, prewalk off, and the non-interactive usage-reserve
-#   policy for the one session only (--auto-approve alone owns approval); the
-#   captain's own ~/.omp/agent/config.yml (model roles, providers, theme) is
-#   never written.
+#   directory with --cwd, and passes a worker posture overlay through --config.
+#   That overlay pins composer shape, plan mode off, prewalk off, and the
+#   retry posture for the one session only (--auto-approve alone owns
+#   approval); the captain's own ~/.omp/agent/config.yml (model roles,
+#   providers, fallback chains, theme) is never written. A secondmate carries
+#   the tracked .omp/fm-worker-overlay.yml template as is. A crewmate or scout
+#   carries state/<id>.omp-overlay.yml, that template with its retry: block
+#   replaced per task (omp_worker_overlay_write below): usageReservePolicy is
+#   fail-closed, and model fallback is either OFF, so a dead provider stops the
+#   worker and returns the decision to firstmate instead of hopping onto one of
+#   the captain's own chains, or bound to --fallback <chain>, a comma-separated
+#   list of <provider>/<id>:<thinking> selectors (thinking one of off, minimal,
+#   low, medium, high, xhigh, max; distinct models; never the primary) that
+#   firstmate passes from the approved dispatch tier. The chain needs --model
+#   <provider>/<id> to key it, is refused on every other harness and on
+#   --secondmate, is recorded as fallback= in the meta beside model_actual=
+#   (the model the work actually runs on, model= at launch), and a --relaunch
+#   regenerates the overlay from the recorded chain unless a new --fallback is
+#   given. The per-task extension turns omp's retry_fallback_applied event
+#   into a `note: model fallback` status line and a model_actual= rewrite
+#   through fm-busy-event.sh model-fallback.
 #   A model written as <provider>/<id> is validated against `omp models --json`
 #   only when that provider appears in the listing; a provider absent from the
 #   listing (an extension-registered provider such as claude-bridge, which omp
@@ -280,7 +295,9 @@
 #     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (omp busy-state and
 #                  turn-end extension, written by this script; outside the worktree so
 #                  omp's cwd-only auto-discovery cannot load it a second time)
-#     __OMPWORKERCFG__ absolute path to the tracked .omp/fm-worker-overlay.yml posture overlay
+#     __OMPWORKERCFG__ absolute path to the omp posture overlay: the tracked
+#                  .omp/fm-worker-overlay.yml for a secondmate, state/<task-id>.omp-overlay.yml
+#                  (written by this script, cleaned by teardown) for a crewmate or scout
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
@@ -527,6 +544,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+FALLBACK=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -534,6 +552,7 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+FALLBACK_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -573,6 +592,10 @@ for a in "$@"; do
     traceparent)
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
+      ;;
+    fallback)
+      FALLBACK=$a
+      FALLBACK_SET=1
       ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
@@ -626,6 +649,11 @@ for a in "$@"; do
   --traceparent=*)
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
+    ;;
+  --fallback) want_value=fallback ;;
+  --fallback=*)
+    FALLBACK=${a#--fallback=}
+    FALLBACK_SET=1
     ;;
   *) POS+=("$a") ;;
   esac
@@ -682,6 +710,51 @@ case "$EFFORT" in
   exit 1
   ;;
 esac
+# --fallback is the omp worker's own retry fallback chain (the other candidates
+# of the approved dispatch tier), validated here as a shape and bound to the
+# omp harness once the harness is resolved below. Each entry is one
+# <provider>/<model>:<thinking> selector in omp's own fallbackChains form.
+[ "$FALLBACK_SET" -eq 0 ] || [ -n "$FALLBACK" ] || {
+  echo "error: --fallback requires a non-empty value" >&2
+  exit 1
+}
+fallback_spec_valid() { # <spec> [primary-model]
+  local spec=$1 primary=${2:-} entry model thinking rest seen=
+  local -a entries
+  [ -n "$spec" ] || return 1
+  IFS=, read -r -a entries <<<"$spec"
+  [ "${#entries[@]}" -gt 0 ] || return 1
+  for entry in "${entries[@]}"; do
+    case "$entry" in
+    '' | *[[:space:]\"\'\\]*) return 1 ;;
+    esac
+    model=${entry%%:*}
+    thinking=${entry#*:}
+    [ "$model" != "$entry" ] || return 1
+    case "$thinking" in *:*) return 1 ;; esac
+    rest=${model#*/}
+    [ "$rest" != "$model" ] || return 1
+    case "$rest" in '' | */*) return 1 ;; esac
+    [ -n "${model%%/*}" ] || return 1
+    case "$thinking" in
+    off | minimal | low | medium | high | xhigh | max) ;;
+    *) return 1 ;;
+    esac
+    # Each model keys its own chain in the overlay, so a repeat (or the
+    # primary itself) would be a duplicate YAML key omp rejects at startup.
+    [ "$model" != "$primary" ] || return 1
+    case ",$seen," in *",$model,"*) return 1 ;; esac
+    seen="$seen,$model"
+  done
+}
+if [ -n "$FALLBACK" ] && ! fallback_spec_valid "$FALLBACK"; then
+  echo "error: --fallback must be a comma-separated list of distinct <provider>/<model>:<thinking> entries, each with exactly one / and one :, thinking one of off, minimal, low, medium, high, xhigh, max" >&2
+  exit 1
+fi
+[ "$FALLBACK_SET" -eq 0 ] || [ "$KIND" != secondmate ] || {
+  echo "error: --fallback applies to crewmate and scout omp spawns only; a secondmate keeps the tracked posture overlay" >&2
+  exit 1
+}
 
 # --relaunch reuses an existing task's endpoint, worktree, project, and kind,
 # so every axis this block resolves for a fresh spawn instead comes from that
@@ -1587,6 +1660,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
+  # The chain travels with the task record like model and effort: a relaunch
+  # regenerates the per-task overlay from it unless the caller passes a new one.
+  if [ "$FALLBACK_SET" -eq 0 ]; then
+    FALLBACK=$(fm_meta_get "$RELAUNCH_META" fallback)
+    if [ -n "$FALLBACK" ] && ! fallback_spec_valid "$FALLBACK"; then
+      echo "error: task $ID records an invalid fallback= chain '$FALLBACK'; pass --fallback to replace it" >&2
+      exit 1
+    fi
+  fi
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
   '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)
@@ -1665,6 +1747,56 @@ omp_model_validate() { # <omp-bin> <model>
   fi
   echo "error: omp model '$model' is not listed by 'omp models --json' although provider '$provider' is; choose a listed <provider>/<id> or omit --model" >&2
   return 1
+}
+
+# Per-task omp posture overlay. Copies the tracked template with its top-level
+# `retry:` block removed (an overlay is strict YAML, so the block cannot simply
+# be appended twice), then writes the task's own retry block: model fallback
+# stays inside the approved dispatch tier or is off entirely, and the usage
+# reserve policy is fail-closed either way. omp's fallbackChains schema (omp
+# 18.2.6, `omp config list`): a record keyed by role or <provider>/<id>, each
+# value an ordered list of `<provider>/<id>[:<thinking>]` selectors. The
+# primary key gets the whole chain; every member gets the remainder after it,
+# and the last member an empty list, so a member's own lookup can never reach
+# a chain from the captain's global config once the tier is exhausted.
+omp_worker_overlay_write() { # <template> <out> <model> <fallback-spec>
+  local template=$1 out=$2 model=$3 spec=$4 tmp i j
+  local -a entries
+  tmp="$out.tmp.${BASHPID:-$$}"
+  {
+    awk '
+      /^retry:/ { skip = 1; next }
+      skip && /^[A-Za-z_]/ { skip = 0 }
+      !skip
+    ' "$template"
+    printf '%s\n' 'retry:' \
+      '  # Written per task by bin/fm-spawn.sh (its header owns why), replacing' \
+      '  # the retry: block of the tracked template.' \
+      '  usageReservePolicy: fail-closed'
+    if [ -z "$spec" ]; then
+      printf '%s\n' '  modelFallback: false'
+    else
+      IFS=, read -r -a entries <<<"$spec"
+      printf '%s\n' '  modelFallback: true' '  fallbackChains:'
+      printf '    "%s":\n' "$model"
+      for i in "${!entries[@]}"; do
+        printf '      - "%s"\n' "${entries[$i]}"
+      done
+      for i in "${!entries[@]}"; do
+        j=$((i + 1))
+        if [ "$j" -ge "${#entries[@]}" ]; then
+          printf '    "%s": []\n' "${entries[$i]%%:*}"
+          continue
+        fi
+        printf '    "%s":\n' "${entries[$i]%%:*}"
+        while [ "$j" -lt "${#entries[@]}" ]; do
+          printf '      - "%s"\n' "${entries[$j]}"
+          j=$((j + 1))
+        done
+      done
+    fi
+  } >"$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$out" || { rm -f "$tmp"; return 1; }
 }
 
 # agy pre-launch model validation. `agy models` (agy 1.2.0) prints one model per
@@ -2101,6 +2233,30 @@ if [ "$EFFORT" = ultra ]; then
 fi
 if [ "$HARNESS" = omp ]; then
   omp_model_validate "$OMP_BIN" "$MODEL" || exit 1
+  # omp keys a fallback chain by the exact <provider>/<id> it is launched on,
+  # so a chain without such a primary has nothing to attach to.
+  if [ -n "$FALLBACK" ]; then
+    case "$MODEL" in
+    '' | default | */*/* | */ | /*) MODEL_KEYED=0 ;;
+    */*) MODEL_KEYED=1 ;;
+    *) MODEL_KEYED=0 ;;
+    esac
+    [ "$MODEL_KEYED" = 1 ] || {
+      echo "error: --fallback needs --model <provider>/<id> as the chain's primary; '${MODEL:-default}' cannot key an omp fallback chain" >&2
+      exit 1
+    }
+    fallback_spec_valid "$FALLBACK" "$MODEL" || {
+      echo "error: --fallback must not repeat the primary model '$MODEL'" >&2
+      exit 1
+    }
+  fi
+elif [ "$FALLBACK_SET" -eq 1 ]; then
+  echo "error: --fallback is an omp retry chain; harness '$HARNESS' has no built-in fallback chain (it fails and returns the decision to firstmate)" >&2
+  exit 1
+else
+  # A relaunch onto another harness leaves the omp chain behind with the omp
+  # overlay it belonged to.
+  FALLBACK=
 fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
@@ -4029,6 +4185,11 @@ EOF
     # has no trust gate, yet its cwd-only extension auto-discovery would load a
     # worktree-resident copy a SECOND time next to the explicit -e (verified,
     # omp 18.1.11). Lives in state/, cleaned by teardown.
+    # The retry_fallback_applied handler records where the work actually runs:
+    # omp emits it with the raw selectors {from, to, role} whenever its retry
+    # engine switches model (omp://non-compaction-retry-policy.md), and
+    # fm-busy-event.sh model-fallback turns that into the status note and the
+    # meta's model_actual= under the same incarnation gen as every other event.
     cat >"$STATE/$ID.omp-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification for omp (Oh My
 // Pi); written by fm-spawn under the contract owned by bin/fm-busy-lib.sh.
@@ -4042,13 +4203,21 @@ EOF
 // because session_stop is awaited before the session settles, so gating on it
 // would leave every completed turn recorded busy. "turn_end" fires at every
 // inner turn boundary and stays a wake NOTIFICATION touch for the watcher,
-// never current-state truth.
+// never current-state truth. "retry_fallback_applied" records a model switch
+// made by omp's retry engine (status note + meta model_actual=).
 import { execFile } from "node:child_process";
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
       "apply", "$STATE_REAL", "$ID", state,
       "--gen", "$BUSY_GEN", "--source", "omp-ext", "--event", event,
+    ], () => resolve());
+  });
+const modelFallback = (from: string, to: string, role: string) =>
+  new Promise<void>((resolve) => {
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+      "model-fallback", "$STATE_REAL", "$ID",
+      "--gen", "$BUSY_GEN", "--from", from, "--to", to, "--role", role,
     ], () => resolve());
   });
 export default function (pi: any) {
@@ -4058,8 +4227,25 @@ export default function (pi: any) {
     return busyEvent("idle", "agent-end");
   });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  pi.on("retry_fallback_applied", (event: any) => {
+    if (!event || typeof event.to !== "string" || event.to === "") return;
+    return modelFallback(String(event.from ?? ""), event.to, String(event.role ?? ""));
+  });
 }
 EOF
+    # The per-task posture overlay: the tracked template minus its retry:
+    # block, plus a retry: block that keeps omp's model fallback inside this
+    # task's approved dispatch tier. With no --fallback, model fallback is off
+    # and a dead provider stops the worker instead of hopping onto one of the
+    # captain's own ~/.omp/agent/config.yml chains; with one, the chain is
+    # keyed by the primary model and then hop by hop by each member, the last
+    # with an empty chain, so omp's per-model lookup never reaches a captain
+    # chain after the tier is exhausted (omp://settings.md "Retry and fallback").
+    omp_worker_overlay_write "$OMP_WORKER_CFG" "$STATE/$ID.omp-overlay.yml" "$MODEL" "$FALLBACK" || {
+      echo "error: could not write the per-task omp overlay at $STATE/$ID.omp-overlay.yml" >&2
+      exit 1
+    }
+    OMP_WORKER_CFG="$STATE/$ID.omp-overlay.yml"
     ;;
   codex*)
     # Semantic busy-state source negotiation (bin/fm-busy-lib.sh owns the
@@ -4252,7 +4438,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort fallback model_actual busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4270,6 +4456,13 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # An omp worker starts on model=; its extension rewrites model_actual= when
+  # omp's retry engine switches within the fallback= chain (fm-busy-event.sh
+  # model-fallback). A secondmate keeps the tracked overlay and records neither.
+  if [ "$HARNESS" = omp ] && [ "$KIND" != secondmate ]; then
+    [ -z "$FALLBACK" ] || echo "fallback=$FALLBACK"
+    echo "model_actual=${MODEL:-default}"
+  fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.

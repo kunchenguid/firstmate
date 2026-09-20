@@ -1,9 +1,12 @@
-# Firstmate worker posture for omp (Oh My Pi), passed as `--config` on every
-# Firstmate-launched omp session (crewmate, scout, and secondmate alike) by
-# bin/fm-spawn.sh, whose header owns why the launch carries it. It is the omp
-# analogue of the Pi adapter's `--tui-mode regular` pin: a per-launch overlay,
-# never a write to the captain's own ~/.omp/agent/config.yml, which stays
-# exactly as the captain set it (model roles, theme, providers, compaction).
+# Firstmate worker posture for omp (Oh My Pi). A secondmate launch passes this
+# file as `--config` as is; for a crewmate or scout, bin/fm-spawn.sh treats it
+# as a TEMPLATE and writes state/<id>.omp-overlay.yml, this file with its
+# `retry:` block replaced by the task's own (model fallback off, or bound to
+# the approved dispatch tier's chain, usage reserve fail-closed either way);
+# fm-spawn's header owns why the launch carries it. It is the omp analogue of
+# the Pi adapter's `--tui-mode regular` pin: a per-launch overlay, never a
+# write to the captain's own ~/.omp/agent/config.yml, which stays exactly as
+# the captain set it (model roles, theme, providers, compaction, chains).
 # Each key below pins one setting whose captain-facing value would park an
 # unattended worker on an interactive prompt, change its pinned model under it,
 # or make its composer unreadable to bin/fm-composer-lib.sh. Verified against

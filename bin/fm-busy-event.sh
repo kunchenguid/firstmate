@@ -35,6 +35,17 @@
 #       an old task from retiring a newly armed incarnation. A missing sidecar
 #       is already retired, so any orphan record is removed idempotently.
 #
+#   model-fallback <state-dir> <id> --gen G --from F --to T [--role R]
+#       Record that the harness's own retry engine moved the incarnation to
+#       another model (omp's retry_fallback_applied event; the per-task
+#       extension written by bin/fm-spawn.sh is the caller). Under the same
+#       gen check as apply, so a retired incarnation cannot rewrite its
+#       replacement's record, it appends one `note: model fallback F -> T
+#       (...)` line to state/<id>.status and rewrites model_actual= in
+#       state/<id>.meta to T without its :thinking suffix, under the task's
+#       meta lock through the same staged publish every other meta writer
+#       uses. The busy record itself is untouched.
+#
 # Exit codes: 0 applied; 1 refused (stale gen, unarmed task, lock timeout,
 # invalid input); 2 usage. Adapter hook command lines append `|| true` so a
 # refusal never breaks the harness's own lifecycle.
@@ -47,6 +58,7 @@ usage:
   fm-busy-event.sh apply <state-dir> <id> <busy|idle|unknown> (--gen G | --current-gen) --source S --event E
   fm-busy-event.sh progress <state-dir> <id> --gen G
   fm-busy-event.sh retire <state-dir> <id> (--gen G | --current-gen)
+  fm-busy-event.sh model-fallback <state-dir> <id> --gen G --from F --to T [--role R]
 See the header comment for the full contract.
 EOF
   exit 2
@@ -58,7 +70,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CMD=${1:-}
 case "$CMD" in
-  arm|apply|progress|retire) shift ;;
+  arm|apply|progress|retire|model-fallback) shift ;;
   *) usage ;;
 esac
 
@@ -74,6 +86,9 @@ GEN=
 USE_CURRENT_GEN=0
 SOURCE=
 EVENT=
+FB_FROM=
+FB_TO=
+FB_ROLE=
 if [ "$CMD" = apply ]; then
   NEW_STATE=${1:-}
   case "$NEW_STATE" in busy|idle|unknown) shift ;; *) usage ;; esac
@@ -89,6 +104,9 @@ while [ $# -gt 0 ]; do
     --current-gen) USE_CURRENT_GEN=1; shift ;;
     --source) SOURCE=${2:-}; shift 2 || usage ;;
     --event) EVENT=${2:-}; shift 2 || usage ;;
+    --from) FB_FROM=${2:-}; shift 2 || usage ;;
+    --to) FB_TO=${2:-}; shift 2 || usage ;;
+    --role) FB_ROLE=${2:-}; shift 2 || usage ;;
     *) usage ;;
   esac
 done
@@ -96,6 +114,10 @@ if [ "$CMD" = apply ] || [ "$CMD" = arm ]; then
   case "$NEW_STATE" in busy|idle|unknown) : ;; *) usage ;; esac
   fm_busy_token_valid "$SOURCE" || { echo "error: invalid --source" >&2; exit 1; }
   fm_busy_token_valid "$EVENT" || { echo "error: invalid --event" >&2; exit 1; }
+fi
+if [ "$CMD" = model-fallback ]; then
+  [ -n "$FB_TO" ] && [ "$USE_CURRENT_GEN" = 0 ] || usage
+  case "$FB_FROM$FB_TO$FB_ROLE" in *[[:cntrl:]]*) echo "error: invalid model selector" >&2; exit 1 ;; esac
 fi
 
 [ "$CMD" != progress ] || [ "$USE_CURRENT_GEN" = 0 ] || usage
@@ -216,6 +238,43 @@ if [ "$CMD" = retire ]; then
   }
   lock_release
   umask "$old_umask"
+  exit 0
+fi
+if [ "$CMD" = model-fallback ]; then
+  # The gen check above is the whole busy-record involvement: release its lock
+  # before taking the meta lock, since teardown holds the meta lock while it
+  # retires the busy record under this one.
+  lock_release
+  umask "$old_umask"
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  # shellcheck source=bin/fm-backlog-transition-lib.sh
+  . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+  META="$STATE/$ID.meta"
+  META_LOCK=$(fm_meta_lock_path "$META") || exit 1
+  fm_lock_acquire_wait "$META_LOCK"
+  if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
+    fm_lock_release "$META_LOCK"
+    echo "error: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    exit 1
+  fi
+  reason="omp retry fallback"
+  [ -z "$FB_ROLE" ] || reason="$reason, chain $FB_ROLE"
+  printf 'note: model fallback %s -> %s (%s)\n' "${FB_FROM:-unknown}" "$FB_TO" "$reason" >>"$STATE/$ID.status" || {
+    fm_lock_release "$META_LOCK"
+    echo "error: status append failed for $ID" >&2
+    exit 1
+  }
+  META_TMP="$STATE/.$ID.meta.fallback.${BASHPID:-$$}"
+  if ! { grep -v '^model_actual=' "$META" || true; } >"$META_TMP" \
+    || ! printf 'model_actual=%s\n' "${FB_TO%%:*}" >>"$META_TMP" \
+    || ! fm_backlog_atomic_transition publish "$META_TMP" "$META" "task record" "$STATE"; then
+    rm -f "$META_TMP"
+    fm_lock_release "$META_LOCK"
+    echo "error: model_actual rewrite failed for $ID${FM_BACKLOG_TRANSITION_ERROR:+ ($FM_BACKLOG_TRANSITION_ERROR)}" >&2
+    exit 1
+  fi
+  fm_lock_release "$META_LOCK"
   exit 0
 fi
 if [ "$CMD" = progress ]; then

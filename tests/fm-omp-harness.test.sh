@@ -18,9 +18,11 @@
 #   2. FM_OMP_HARNESS=omp is a precedence override that needs a real omp
 #      ancestor: it beats an inherited CLAUDECODE under omp and is inert when it
 #      leaks into a worker whose ancestry holds no omp.
-#   3. Every omp launch clears foreign markers, carries the tracked posture
-#      overlay, --auto-approve, --cwd, and (for a crewmate) one -e pointing at
-#      state/<id>.omp-ext.ts; a secondmate launch names no -e at all.
+#   3. Every omp launch clears foreign markers, carries a posture overlay
+#      (the tracked template for a secondmate, state/<id>.omp-overlay.yml with
+#      the task's own retry block for a crewmate), --auto-approve, --cwd, and
+#      (for a crewmate) one -e pointing at state/<id>.omp-ext.ts; a secondmate
+#      launch names no -e at all.
 #   4. A <provider>/<id> model is validated only when `omp models --json` lists
 #      that provider; an unlisted provider passes through with a notice.
 #   5. Busy state: agent_start is busy, agent_end with willContinue stays busy,
@@ -260,11 +262,25 @@ test_spawn_launch_line_and_worker_wiring() {
   assert_grep "model=openai-codex/gpt-6-astra" "$state/$id.meta" "meta missing the pinned model"
   assert_grep "effort=medium" "$state/$id.meta" "meta missing the pinned effort"
   assert_present "$state/$id.omp-ext.ts" "omp spawn did not write the per-task extension"
+  assert_present "$state/$id.omp-overlay.yml" "omp spawn did not write the per-task overlay"
+  assert_grep "model_actual=openai-codex/gpt-6-astra" "$state/$id.meta" "meta must start model_actual= on the launched model"
+  if grep -q '^fallback=' "$state/$id.meta"; then
+    fail "a spawn without --fallback must record no fallback= chain"
+  fi
+  # The template's posture keys survive; only its retry: block is replaced.
+  assert_grep "shape: borderless" "$state/$id.omp-overlay.yml" "per-task overlay lost the template's composer shape"
+  assert_grep "defaultOnStartup: false" "$state/$id.omp-overlay.yml" "per-task overlay lost the template's plan-mode pin"
+  assert_grep "usageReservePolicy: fail-closed" "$state/$id.omp-overlay.yml" "per-task overlay must pin the fail-closed usage reserve policy"
+  assert_grep "modelFallback: false" "$state/$id.omp-overlay.yml" "a worker without a chain must have model fallback off"
+  if grep -q 'usageReservePolicy: auto' "$state/$id.omp-overlay.yml"; then
+    fail "the template's retry block leaked into the per-task overlay (duplicate retry: key)"
+  fi
+  [ "$(grep -c '^retry:' "$state/$id.omp-overlay.yml")" = 1 ] || fail "per-task overlay must carry exactly one top-level retry: key"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 '$FAKEBIN_DIR/omp'" \
     "omp launch did not clear foreign markers and establish its own at the launch boundary"
-  assert_contains "$launch" "--config '$ROOT/.omp/fm-worker-overlay.yml' --auto-approve --cwd '$WT_DIR'" \
-    "omp launch did not carry the tracked posture overlay, --auto-approve, and the pinned working directory"
+  assert_contains "$launch" "--config '$state/$id.omp-overlay.yml' --auto-approve --cwd '$WT_DIR'" \
+    "omp launch did not carry the per-task posture overlay, --auto-approve, and the pinned working directory"
   assert_contains "$launch" "--model 'openai-codex/gpt-6-astra' --thinking 'medium' -e '$state/$id.omp-ext.ts'" \
     "omp launch did not pass the model, thinking level, and the state-resident worker extension"
   assert_contains "$launch" "encode launch-brief < '$HOME_DIR/data/$id/launch-brief.md'" "omp launch lost the canonical typed launch-brief envelope"
@@ -304,6 +320,56 @@ test_spawn_model_validation_scoped_to_listed_providers() {
   status=$?
   expect_code 0 "$status" "a bare fuzzy pattern is omp's own matcher's job: $out"
   pass "fm-spawn: omp model validation is scoped to providers the listing can prove"
+}
+
+test_spawn_fallback_chain_writes_tier_overlay() {
+  local rec id=omp-fallback-q6 out status launch state overlay chain
+  chain='xai-oauth/grok-4.6:high,openai-codex/gpt-6-astra:medium'
+  rec=$(make_spawn_case fallback omp "$id")
+  read_case_record "$rec"
+  # Shape refusals happen before any endpoint or record exists.
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp --model anthropic/claude-fable-5-1 --fallback 'xai-oauth/grok-4.6:turbo')
+  expect_code 1 $? "an unknown thinking level must refuse the spawn"
+  assert_contains "$out" "--fallback must be a comma-separated list" "refusal did not name the chain shape"
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --fallback "$chain")
+  expect_code 1 $? "a chain on a non-omp harness must refuse the spawn"
+  assert_contains "$out" "harness 'claude' has no built-in fallback chain" "refusal did not name the harness"
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp --model astra --fallback "$chain")
+  expect_code 1 $? "a chain needs a <provider>/<id> primary to key it"
+  assert_contains "$out" "cannot key an omp fallback chain" "refusal did not name the missing primary key"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn must publish no record"
+
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp --model anthropic/claude-fable-5-1 --effort high --fallback "$chain")
+  status=$?
+  expect_code 0 "$status" "omp spawn with a fallback chain should succeed: $out"
+  state="$HOME_DIR/state"
+  overlay="$state/$id.omp-overlay.yml"
+  assert_present "$overlay" "omp spawn did not write the per-task overlay"
+  assert_grep "fallback=$chain" "$state/$id.meta" "meta must record the fallback= chain verbatim"
+  assert_grep "model_actual=anthropic/claude-fable-5-1" "$state/$id.meta" "meta must start model_actual= on the launched model"
+  assert_grep "modelFallback: true" "$overlay" "a worker with a chain must have model fallback on"
+  assert_grep "usageReservePolicy: fail-closed" "$overlay" "per-task overlay must pin the fail-closed usage reserve policy"
+  # omp's fallbackChains schema: the primary <provider>/<id> key lists the whole
+  # chain in order, each member the remainder after it, and the last member an
+  # empty chain so no lookup ever leaves the tier.
+  out=$(OVERLAY="$overlay" node -e '
+    const fs = require("node:fs");
+    const text = fs.readFileSync(process.env.OVERLAY, "utf8");
+    const lines = text.split("\n");
+    const at = (needle) => lines.findIndex((l) => l === needle);
+    const p = at("    \"anthropic/claude-fable-5-1\":");
+    if (p < 0) throw new Error("primary key missing");
+    if (lines[p + 1] !== "      - \"xai-oauth/grok-4.6:high\"" || lines[p + 2] !== "      - \"openai-codex/gpt-6-astra:medium\"") throw new Error("primary chain order wrong: " + lines.slice(p, p + 3).join("|"));
+    const m = at("    \"xai-oauth/grok-4.6\":");
+    if (m < 0 || lines[m + 1] !== "      - \"openai-codex/gpt-6-astra:medium\"") throw new Error("member chain missing its remainder");
+    if (at("    \"openai-codex/gpt-6-astra\": []") < 0) throw new Error("last member must end the chain with an empty list");
+    if (!/^retry:\n(  .*\n)*  fallbackChains:\n/m.test(text)) throw new Error("fallbackChains must sit under the retry: block");
+    console.log("ok");
+  ') || fail "per-task overlay chain shape: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "--config '$overlay' --auto-approve" "omp launch did not pass the per-task overlay through --config"
+  assert_contains "$launch" "--model 'anthropic/claude-fable-5-1' --thinking 'high'" "omp launch lost the primary model and effort"
+  pass "fm-spawn: --fallback writes the dispatch tier's chain into the per-task omp overlay and records it in the meta"
 }
 
 test_secondmate_launch_relies_on_discovery() {
@@ -393,6 +459,8 @@ switch (process.env.MODE) {
   case "end-continuing": await handlers["agent_end"]({ type: "agent_end", willContinue: true }, ctx); break;
   case "end-final": await handlers["agent_end"]({ type: "agent_end" }, ctx); break;
   case "turn-end": await handlers["turn_end"]({ type: "turn_end", turnIndex: 0 }, ctx); break;
+  case "fallback": await handlers["retry_fallback_applied"]({ type: "retry_fallback_applied", from: "anthropic/claude-fable-5-1", to: "openai-codex/gpt-6-astra:medium", role: "anthropic/claude-fable-5-1" }, ctx); break;
+  case "fallback-empty": await handlers["retry_fallback_applied"]({ type: "retry_fallback_applied" }, ctx); break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }
 if (process.env.MODE === "turn-end") {
@@ -441,6 +509,44 @@ test_busy_extension_lifecycle() {
   pass "omp extension: agent_start busy, willContinue stays busy, plain agent_end idle, turn_end a notification"
 }
 
+test_busy_extension_records_model_fallback() {
+  local rec id=omp-fallback-ext-q7 out state ext meta status_file
+  rec=$(make_spawn_case fallback-ext omp "$id")
+  read_case_record "$rec"
+  out=$(run_scout_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness omp --model anthropic/claude-fable-5-1 --fallback 'openai-codex/gpt-6-astra:medium')
+  expect_code 0 $? "omp spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.omp-ext.ts"
+  meta="$state/$id.meta"
+  status_file="$state/$id.status"
+  out=$(drive_omp_ext "$ext" handlers) || fail "handler listing failed: $out"
+  case " $out " in
+    *" retry_fallback_applied "*) ;;
+    *) fail "the omp extension must register retry_fallback_applied, got '$out'" ;;
+  esac
+  : > "$status_file"
+
+  out=$(drive_omp_ext "$ext" fallback-empty) || fail "empty fallback drive failed: $out"
+  [ ! -s "$status_file" ] || fail "an event without a target model must record nothing"
+  assert_grep "model_actual=anthropic/claude-fable-5-1" "$meta" "an event without a target model must leave model_actual= alone"
+
+  out=$(drive_omp_ext "$ext" fallback) || fail "fallback drive failed: $out"
+  grep -qxF -- "note: model fallback anthropic/claude-fable-5-1 -> openai-codex/gpt-6-astra:medium (omp retry fallback, chain anthropic/claude-fable-5-1)" "$status_file" \
+    || fail "the fallback event must append one note: status line naming both models: $(cat "$status_file")"
+  [ "$(wc -l < "$status_file" | tr -d ' ')" = 1 ] || fail "exactly one status line per fallback event"
+  grep -qxF -- "model_actual=openai-codex/gpt-6-astra" "$meta" || fail "model_actual= must move to the fallback model without its thinking suffix"
+  [ "$(grep -c '^model_actual=' "$meta")" = 1 ] || fail "the meta must keep exactly one model_actual= line"
+  grep -qxF -- "model=anthropic/claude-fable-5-1" "$meta" || fail "model= (the launched primary) must be untouched"
+  grep -qxF -- "fallback=openai-codex/gpt-6-astra:medium" "$meta" || fail "fallback= must survive the rewrite"
+  [ "$(fm_busy_classify tmux fake:w omp "$id" "$state")" = "busy fm-spawn" ] || fail "a fallback event must not change busy state"
+
+  # A retired incarnation's extension must not rewrite its replacement's record.
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null || fail "re-arm failed"
+  out=$(drive_omp_ext "$ext" fallback) || fail "stale fallback drive failed: $out"
+  [ "$(wc -l < "$status_file" | tr -d ' ')" = 1 ] || fail "a stale-gen fallback event must be rejected, not recorded"
+  pass "omp extension: retry_fallback_applied appends the model fallback note and moves model_actual= under the incarnation gen"
+}
+
 # --- 4. Control, composer, supervision model -----------------------------------
 
 test_control_composer_and_model_tables() {
@@ -448,7 +554,7 @@ test_control_composer_and_model_tables() {
   [ "$(fm_control_interrupt_key omp)" = Escape ] || fail "omp interrupt key must be Escape"
   [ "$(fm_control_interrupt_repeat omp)" = 1 ] || fail "omp interrupts on a single press"
   [ -z "$(fm_control_interrupt_clear_key omp)" ] || fail "omp leaves its composer empty and needs no clear key"
-  [ "$(fm_control_harness_wiring_paths omp /wt /st id1)" = "/st/id1.omp-ext.ts" ] || fail "omp wiring path must be the state-resident extension"
+  [ "$(fm_control_harness_wiring_paths omp /wt /st id1)" = "/st/id1.omp-ext.ts"$'\n'"/st/id1.omp-overlay.yml" ] || fail "omp wiring paths must be the state-resident extension and per-task overlay"
   printf 'Working…\n' | fm_busy_lines_match omp || fail "omp busy regex must match the TUI ellipsis form"
   printf 'Working...\n' | fm_busy_lines_match omp && fail "omp busy regex must not match the three-dot form no supervised pane renders"
   printf ' ⠧ 11s  · gpt-6-astra\n' | fm_busy_lines_match omp || fail "omp busy regex must match the braille spinner plus elapsed cell"
@@ -1114,9 +1220,11 @@ test_detection_through_startup_wrappers
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers
+test_spawn_fallback_chain_writes_tier_overlay
 test_secondmate_launch_relies_on_discovery
 test_secondmate_config_pinned_model_is_validated
 test_busy_extension_lifecycle
+test_busy_extension_records_model_fallback
 test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation

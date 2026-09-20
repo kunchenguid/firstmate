@@ -446,7 +446,7 @@ finish_busy_incarnation() {
       "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" idle --current-gen \
         --source fm-control --event exit >/dev/null 2>&1 || return 1
     fi
-    rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.omp-ext.ts"
+    rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.omp-overlay.yml"
     return
   fi
   if [ -f "$STATE/$ID.busy-gen" ]; then
