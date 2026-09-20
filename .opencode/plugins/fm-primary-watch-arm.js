@@ -229,19 +229,34 @@ function confirmHandlingDeliveryWithRetry(paths, recovery) {
 }
 
 async function deliverActionableWake(paths, client, sessionID, message, recovery) {
-  if (recovery) {
+  for (let attempt = 0; recovery; attempt += 1) {
     const confirmed = confirmHandlingDeliveryWithRetry(paths, recovery);
-    if (!confirmed.ok) {
-      if (recovery.watcherPid) {
-        try {
-          process.kill(Number(recovery.watcherPid), 0);
-        } catch {
-          await retireArm(child);
-        }
-      }
-      await sendPrompt(paths, client, sessionID, wakePrompt(`${message}\n\n${confirmed.detail}`));
-      return;
+    if (confirmed.ok) break;
+    message = `${message}\n\n${confirmed.detail}`;
+    let watcherAlive = false;
+    try {
+      process.kill(Number(recovery.watcherPid), 0);
+      watcherAlive = true;
+    } catch {}
+    if (child && watcherAlive) break;
+    const failedChild = child;
+    const predecessor = String(failedChild?.pid ?? "");
+    if (!(await retireArm(failedChild))) {
+      message += `\nwatcher: FAILED - OpenCode could not retire the successor after delivery confirmation failure within ${ARM_RETIRE_TIMEOUT_MS}ms`;
+      break;
     }
+    if (pendingClose?.kind !== "actionable" && pendingClose?.predecessor === predecessor) pendingClose = null;
+    if (attempt === 1) {
+      setArmStatus("failed");
+      message += "\nwatcher: FAILED - OpenCode exhausted the successor retry after delivery confirmation failure";
+      break;
+    }
+    const restoration = await restoreAfterActionableClose(paths, sessionID, client, predecessor);
+    if (restoration.failure) {
+      message += `\n\n${restoration.failure}`;
+      break;
+    }
+    recovery = restoration.recovery;
   }
   await sendPrompt(paths, client, sessionID, wakePrompt(message));
 }

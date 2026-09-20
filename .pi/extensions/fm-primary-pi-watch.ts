@@ -659,15 +659,31 @@ export default function (pi: ExtensionAPI) {
     recovery?: { generation: string; watcherPid: string },
   ): Promise<boolean> {
     if (!generationIsLive(owner)) return false;
-    if (recovery) {
+    for (let attempt = 0; recovery; attempt += 1) {
       const confirmed = confirmHandlingDeliveryWithRetry(owner, recovery);
-      if (!confirmed.ok) {
-        const watcherPid = recovery.watcherPid;
-        if (!pidAlive(watcherPid)) {
-          await retireArm(owner.child);
-        }
-        return await sendWake(owner, `${message}\n\n${confirmed.detail}`, pending);
+      if (confirmed.ok) break;
+      repairFailed = true;
+      message = `${message}\n\n${confirmed.detail}`;
+      if (owner.child && pidAlive(recovery.watcherPid)) break;
+      const failedChild = owner.child;
+      const predecessor = String(failedChild?.pid ?? "");
+      if (!(await retireArm(failedChild))) {
+        message += `\nwatcher: FAILED - Pi extension could not retire the successor after delivery confirmation failure within ${armRetireTimeoutMs}ms`;
+        break;
       }
+      if (!generationIsLive(owner)) return false;
+      if (owner.deferredClose?.predecessorArmPid === predecessor) owner.deferredClose = null;
+      if (attempt === 1) {
+        message += "\nwatcher: FAILED - Pi extension exhausted the successor retry after delivery confirmation failure";
+        break;
+      }
+      const restoration = await restoreAfterActionableClose(owner, predecessor);
+      if (!generationIsLive(owner)) return false;
+      if (restoration.failure) {
+        message += `\n\n${restoration.failure}`;
+        break;
+      }
+      recovery = restoration.recovery;
     }
     if (!repairFailed) {
       const branchDelivery = offerWakeToBranch(message);

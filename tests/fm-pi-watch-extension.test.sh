@@ -4239,47 +4239,52 @@ EOF
   pass "Pi churned successor wake is delivered with one live successor"
 }
 
-test_pi_rejected_confirmation_with_dead_successor_still_proves_successor() {
-  local repo home plugin log stop out status
-  repo="$TMP_ROOT/pi-rejected-dead-root"
-  home="$TMP_ROOT/pi-rejected-dead-home"
-  log="$TMP_ROOT/pi-rejected-dead.log"
-  stop="$TMP_ROOT/pi-rejected-dead.stop"
-  mkdir -p "$repo/bin" "$home/state" "$home/config"
-  install_pi_watch_extension_fixture "$repo"
-  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
-  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+test_rejected_confirmation_dead_successor() {
+  local adapter mode repo home plugin log stop out status
+  for adapter in pi opencode; do
+    for mode in recovery exhaustion; do
+      repo="$TMP_ROOT/$adapter-rejected-$mode-root"
+      home="$TMP_ROOT/$adapter-rejected-$mode-home"
+      log="$TMP_ROOT/$adapter-rejected-$mode.log"
+      stop="$TMP_ROOT/$adapter-rejected-$mode.stop"
+      mkdir -p "$repo/bin" "$home/state" "$home/config"
+      if [ "$adapter" = pi ]; then
+        install_pi_watch_extension_fixture "$repo"
+        plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+      else
+        git init -q "$repo"
+        : > "$repo/AGENTS.md"
+        : > "$home/state/task.meta"
+        plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+      fi
+      cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --handling-delivered ]; then exit 1; fi
 printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
 count=$(grep -c '^arm=' "$FM_ARM_LOG")
-if [ "$count" -le 2 ]; then
-  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$$"
-  printf 'signal: rejected-churn-%s\n' "$$"
+if [ "$count" -eq 1 ]; then
+  printf 'signal: rejected-original\n'
   exit 0
 fi
-printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$$" "$$"
+watcher=$$
+if [ "$count" -eq 2 ] || [ "$FM_FAILURE_MODE" = exhaustion ]; then
+  sleep 30 &
+  watcher=$!
+  kill "$watcher"
+  wait "$watcher" 2>/dev/null || true
+fi
 trap 'exit 0' TERM INT
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=gen-%s\n' "$watcher" "$$"
 while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
 SH
-  chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+      chmod +x "$repo/bin/fm-watch-arm.sh"
+      out=$(PLUGIN="$plugin" FM_ADAPTER="$adapter" FM_FAILURE_MODE="$mode" WORKTREE="$repo" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-let tool = null;
 const prompts = [];
-const pi = {
-  on() {},
-  registerCommand() {},
-  registerTool(candidate) {
-    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
-  },
-  sendUserMessage: async (message) => {
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    prompts.push(message);
-  },
-};
+const rows = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean) : [];
 function pidAlive(pid) {
   try {
     process.kill(Number(pid), 0);
@@ -4288,35 +4293,57 @@ function pidAlive(pid) {
     return false;
   }
 }
+const liveArms = () => rows().map((line) => line.match(/^arm=(\d+)$/)?.[1]).filter(Boolean).filter(pidAlive);
+let rowsAtPrompt = 0;
+let liveAtPrompt = 0;
+const receive = async (message) => {
+  rowsAtPrompt = rows().length;
+  liveAtPrompt = liveArms().length;
+  prompts.push(message);
+};
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
-mod.default(pi);
-await tool.execute("tool-call-rejected", {}, undefined, undefined, {});
-for (let i = 0; i < 500 && prompts.length < 2; i += 1) {
+if (process.env.FM_ADAPTER === "pi") {
+  let tool;
+  mod.default({
+    on() {}, registerCommand() {},
+    registerTool(candidate) { if (candidate.name === "fm_watch_arm_pi") tool = candidate; },
+    sendUserMessage: receive,
+  });
+  await tool.execute("tool-call-rejected", {}, undefined, undefined, {});
+} else {
+  const hooks = await mod.FmPrimaryWatchArm({
+    client: { session: { promptAsync: async (request) => receive(request.body.parts[0].text) } },
+    directory: process.env.WORKTREE, worktree: process.env.WORKTREE,
+  });
+  await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+}
+for (let i = 0; i < 500 && prompts.length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
-if (prompts.length !== 2) throw new Error(`wake after rejected confirmation was lost: ${prompts.length} prompts`);
-if (!prompts[0].includes("rejected-churn")) throw new Error(`first wake missing: ${prompts[0]}`);
-if (!prompts[1].includes("rejected-churn")) throw new Error(`churned wake missing: ${prompts[1]}`);
-if (!prompts.every((prompt) => prompt.includes("handling delivery confirmation was rejected"))) {
-  throw new Error(`rejected confirmation was not typed on every wake: ${prompts.join(" | ")}`);
+if (prompts.length !== 1) throw new Error(`expected one original wake: ${prompts.length}`);
+if (!prompts[0].includes("rejected-original")) throw new Error(`original wake missing: ${prompts[0]}`);
+if (!prompts[0].includes("handling delivery confirmation was rejected")) throw new Error(`confirmation failure missing: ${prompts[0]}`);
+if (rowsAtPrompt !== 3) throw new Error(`delivery settled before successor retry: ${rowsAtPrompt} arms`);
+const expectedLive = process.env.FM_FAILURE_MODE === "recovery" ? 1 : 0;
+if (liveAtPrompt !== expectedLive) throw new Error(`unexpected live arms at delivery: ${liveAtPrompt}`);
+if (expectedLive === 0 && !prompts[0].includes("exhausted the successor retry")) {
+  throw new Error(`explicit exhaustion missing: ${prompts[0]}`);
 }
 await new Promise((resolve) => setTimeout(resolve, 300));
-const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter(Boolean);
-if (rows.length !== 3) throw new Error(`rejected confirmation did not converge on one successor: ${rows.join(" | ")}`);
-const live = rows
-  .map((line) => (line.match(/^arm=(\d+)$/) || [])[1])
-  .filter(Boolean)
-  .filter(pidAlive);
-if (live.length !== 1) throw new Error(`expected exactly one live successor, got ${live.join(",") || "(none)"}`);
+if (rows().length !== 3 || liveArms().length !== expectedLive || prompts.length !== 1) {
+  throw new Error(`delivery did not stay settled: ${rows().join(" | ")}, ${prompts.length} prompts`);
+}
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
 EOF
 )
-  status=$?
-  expect_code 0 "$status" "Pi must keep a live successor after a rejected confirmation with a dead successor"
-  [ -z "$out" ] || fail "Pi rejected-confirmation test printed output: $out"
-  pass "Pi rejected confirmation with dead successor still proves a successor"
+      status=$?
+      expect_code 0 "$status" "$adapter must settle a dead successor through bounded $mode without another actionable wake"
+      [ -z "$out" ] || fail "$adapter rejected-confirmation $mode test printed output: $out"
+      pass "$adapter rejected confirmation handles dead successor with $mode"
+    done
+  done
 }
 
 test_pi_repair_during_restoration_is_noop_without_duplicate() {
@@ -4628,7 +4655,7 @@ test_pi_late_retiring_actionable_reaches_replacement
 test_pi_replacement_tokens_are_process_unique
 test_pi_replacement_persistence_failure_stops_arm_child
 test_pi_churned_successor_wake_is_delivered_with_live_successor
-test_pi_rejected_confirmation_with_dead_successor_still_proves_successor
+test_rejected_confirmation_dead_successor
 test_pi_repair_during_restoration_is_noop_without_duplicate
 test_pi_close_during_session_replacement_rearms_clean
 test_pi_process_exit_cleanup_listener_lifecycle
