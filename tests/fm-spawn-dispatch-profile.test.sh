@@ -1266,6 +1266,28 @@ test_launch_environment_inaccessible_config_refuses
 test_launch_environment_inherited_by_secondmate
 test_launch_environment_inheritance_preserves_on_source_errors
 
+test_missing_project_ship_spawn_refuses_with_actionable_error() {
+  local case_dir home fakebin launchlog id out status
+  id=missing-project-pos-z1
+  case_dir="$TMP_ROOT/missing-project"
+  home="$case_dir/home"
+  launchlog="$case_dir/launch.log"
+  mkdir -p "$case_dir"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+  fm_test_spawn_home "$home" pi
+
+  out=$(run_spawn "$home" "$case_dir" "$fakebin" "$launchlog" \
+    "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 1 "$status" "a ship spawn without a project should refuse"
+  assert_contains "$out" "error: ship spawn requires a project directory positional argument (<project-dir>)" \
+    "missing-project refusal should name the required project directory argument"
+  assert_not_contains "$out" "unbound variable" \
+    "missing-project refusal should not expose a shell unbound-variable error"
+  [ ! -s "$launchlog" ] || fail "missing-project refusal must not launch a worker"
+  pass "fm-spawn: missing ship project reports an actionable argument error"
+}
+
 test_worker_launch_delivers_role_scope() {
   local rec id out launch kind prompt envelope encoded brief_kind brief content first_line role_line task_line inbox
   for brief_kind in heading legacy scaffold; do
@@ -1437,6 +1459,7 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+test_missing_project_ship_spawn_refuses_with_actionable_error
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
