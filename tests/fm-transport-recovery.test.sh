@@ -77,6 +77,13 @@ try {
   const noAuth=await fixture({noAuth:true}); await noAuth.fail(); await noAuth.fail(); await noAuth.emit('agent_settled');
   await noAuth.emit('before_agent_start'); await noAuth.fail(); await noAuth.fail(); await noAuth.emit('agent_settled');
   assert.equal(noAuth.switches.length,1,'failed auth consumes bounded switch budget');
+  let finishAuth;
+  const hung=await fixture({duringAuth:()=>new Promise(resolve=>{finishAuth=resolve;})});
+  await hung.fail(); await hung.fail(); await hung.emit('agent_settled');
+  assert.equal(hung.entries.at(-1).result,'switch-timeout');
+  assert.equal(hung.switches[0].signal.aborted,true);
+  finishAuth(); await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(hung.ctx.model.provider,'cliproxyapi','late auth cannot mutate after timeout');
   const bounded=await fixture({config:{mode:'diagnostics'}});
   for(let i=0;i<100;i++){await bounded.emit('before_agent_start');await bounded.fail();await bounded.fail();await bounded.emit('agent_settled');}
   assert.equal(bounded.entries.length,32,'bounded metadata entries');

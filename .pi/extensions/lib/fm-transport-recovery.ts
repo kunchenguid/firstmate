@@ -9,7 +9,7 @@ type GuardedAPI = ExtensionAPI & {
   }) => Promise<boolean>;
 };
 
-// Owned by the primary watch extension: no timer, provider registration, replay,
+// Owned by the primary watch extension: no supervision timer, provider registration, replay,
 // queue acknowledgement, branch model change, or second session is introduced.
 export function installTransportRecovery(pi: ExtensionAPI, configPath: string, ownsLock: () => boolean): void {
   let generation = 0;
@@ -85,23 +85,35 @@ export function installTransportRecovery(pi: ExtensionAPI, configPath: string, o
     }
     const owner = generation;
     const sessionId = ctx.sessionManager.getSessionId();
-    const signal = controller.signal;
+    const switchController = controller;
+    const signal = switchController.signal;
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
     used = true; // One auth/switch attempt per session, including failed auth.
     try {
-      const switched = await guarded.setModelIfCurrent(target, {
+      const transition = guarded.setModelIfCurrent(target, {
         expectedSessionId: sessionId, expectedProvider: muse.provider,
         expectedModelId: muse.id, signal, thinkingLevel: "high",
         isCurrent: () => owner === generation && ownsLock() && config().mode === "muse-to-gemini" && config().exactGeminiIdentityVerified === true,
       });
+      const switched = await Promise.race([transition, new Promise<false>((resolve) => {
+        deadline = setTimeout(() => {
+          timedOut = true;
+          switchController.abort();
+          resolve(false);
+        }, 10_000);
+      })]);
       // A successful model_select intentionally invalidates the generation.
       // No follow-up or replay is sent: the next stock wake uses the new model.
       if (switched) {
         if (ctx.sessionManager.getSessionId() === sessionId && ctx.model?.provider === gemini.provider && ctx.model.id === gemini.id && ownsLock()) report("switched-for-next-stock-wake");
         return;
       }
-      if (owner === generation) report("guard-rejected-or-no-auth");
+      if (owner === generation) report(timedOut ? "switch-timeout" : "guard-rejected-or-no-auth");
     } catch {
       if (owner === generation) report("switch-failed");
+    } finally {
+      clearTimeout(deadline);
     }
   });
 }
