@@ -1764,6 +1764,9 @@ window_to_task() {
 # Ranges are half-open [start, end), merged when adjacent or overlapping.
 # An identity mismatch (file rotated) discards the ledger. Teardown deletes it.
 # Not a pure status-file read: status_home_appends_record writes this sidecar.
+# That read-merge-write serializes through bin/fm-wake-lib.sh's fm_lock_*
+# helpers, exactly as status_retire_presentation_task above does, so a caller
+# that touches this ledger must have sourced that library first.
 
 status_home_appends_path() {  # <status-file>
   local f=$1 dir base
