@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # Tear down a finished task: return the treehouse worktree, release the Orca
 # worktree, or retire a secondmate home; kill the recorded runtime endpoint,
-# stop chrome-devtools-axi bridges attributed by FM_TASK_ID and worktree cwd,
-# and retire Lavish pollers under the owning home's data/<task-id>/ before
-# worktree removal (best effort, with final stdout LEFTOVER lines on failure),
+# clean up auxiliary sessions (scope and failure reporting below),
 # clear volatile state, and transition this home's backlog item for ship and
 # scout tasks before reporting success (a secondmate teardown transitions none,
 # since secondmates are not backlog items), then refresh/prune the project's
@@ -15,6 +13,29 @@
 # the one site where --force overrides it, and bin/fm-backend.sh's
 # fm_backend_kill owns what each backend can prove about its own close - an
 # already-exited endpoint is not a failure and stays silent.
+# Auxiliary session cleanup is best effort and does not veto task-record removal.
+# A live chrome-devtools-axi bridge must carry FM_TASK_ID equal to the task id
+# and have its cwd under the task's recorded worktree before session cleanup
+# may stop it; a matching session name alone is insufficient because task ids
+# repeat across homes. If CHROME_DEVTOOLS_AXI_SESSION equals that id, cleanup
+# invokes the CLI's stop for that session. For any other name, including an
+# unset/default session, it terminates the attributed bridge and its descendants
+# directly, without issuing a global default-session stop. The separate cwd
+# reaper's boundary is described at task_bridge_session below.
+# Lavish cleanup retires registrations in the owning home's state/procevent
+# whose adapter is lavish and whose argv invokes fm-procevent-lavish.sh poll
+# with an artifact resolving beneath that home's data/<task-id>/ (or the
+# configured data root). It retires the poller, not the Lavish review session.
+# Ship/scout cleanup runs after run conclusion and before cwd reaping and
+# worktree return; a reassigned slot skips browser attribution but still permits
+# poller retirement. Secondmate cleanup also applies this helper to each child
+# before removing its worktree or records, and to the secondmate itself before
+# home removal. No launch-time browser session naming is imposed here.
+# Each failed browser-stop or poller-retirement attempt appends one final stdout
+# line: teardown: LEFTOVER <browser|poller> <task-id> <detail>.
+# Poller-retirement failure leaves its registration for reconciliation while
+# the owning home remains; it does not prevent otherwise successful teardown.
+# tests/fm-teardown.test.sh --sessions-only covers these cleanup boundaries.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
