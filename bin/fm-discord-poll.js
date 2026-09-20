@@ -142,7 +142,6 @@ async function main() {
 
 				// Check if mentioned or DM
 				const isDM = !msg.guild_id;
-				if (isDM && !allowDms) continue;
 				const isMentioned = Array.isArray(msg.mentions) && msg.mentions.some((m) => m.id === botId);
 				const contentHasBotMention = msg.content && (msg.content.includes(`<@${botId}>`) || msg.content.includes(`<@!${botId}>`));
 

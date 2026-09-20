@@ -25,7 +25,7 @@ test_poll_no_token_is_hard_noop() {
 }
 
 test_ingestion_payload_shape_and_wake() {
-  local home inbox_file ctx_file wake_out wake_next platform source port server_pid cursor_file
+  local home inbox_file ctx_file wake_out wake_next wake_third platform source port server_pid cursor_file dm_cursor_file
   home="$TMP_ROOT/ingestion-test"
   mkdir -p "$home/state"
   chmod 700 "$home/state"
@@ -65,12 +65,18 @@ test_ingestion_payload_shape_and_wake() {
   FM_DISCORD_ALLOWED_CHANNELS="1000000000000000001,2000000000000000001,1551134713727426570" \
   FM_DISCORD_EXCLUDES="1551134713727426570" FM_DISCORD_ALLOW_DMS=false \
   FM_DISCORD_API_BASE="http://127.0.0.1:$port" "$ROOT/bin/fm-discord-poll.sh" > "$home/wake-next.log"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DISCORD_BOT_TOKEN="fake-test-token" \
+  FM_DISCORD_ALLOWED_CHANNELS="1000000000000000001,2000000000000000001,1551134713727426570" \
+  FM_DISCORD_EXCLUDES="1551134713727426570" FM_DISCORD_ALLOW_DMS=false \
+  FM_DISCORD_API_BASE="http://127.0.0.1:$port" "$ROOT/bin/fm-discord-poll.sh" > "$home/wake-third.log"
   kill "$server_pid" 2>/dev/null || true
   wait "$server_pid" 2>/dev/null || true
 
   assert_equals "x-mention discord-sh-1352000000000000099" "$wake_out" "wake line emitted"
   wake_next=$(cat "$home/wake-next.log")
   assert_equals "x-mention discord-sh-1352000000000000102" "$wake_next" "one wake per poll"
+  wake_third=$(cat "$home/wake-third.log")
+  assert_equals "" "$wake_third" "disabled DM produces no wake"
 
   inbox_file="$home/state/x-inbox/discord-sh-1352000000000000099.json"
   ctx_file="$home/state/x-context/discord-sh-1352000000000000099.json"
@@ -85,6 +91,8 @@ test_ingestion_payload_shape_and_wake() {
   assert_absent "$home/state/x-inbox/discord-sh-1352000000000000101.json" "excluded collision channel is ignored"
   cursor_file="$home/state/x-discord/1000000000000000001.json"
   assert_equals "1352000000000000102" "$(jq -r '.message_id' "$cursor_file")" "channel cursor advances durably"
+  dm_cursor_file="$home/state/x-discord/2000000000000000001.json"
+  assert_equals "1352000000000000100" "$(jq -r '.message_id' "$dm_cursor_file")" "disabled DM advances cursor"
 
   pass "self-hosted Discord ingestion writes x-inbox payload shape and fires x-mention wake"
 }
@@ -142,7 +150,7 @@ test_reply_rejects_untrusted_context_link() {
 }
 
 test_bootstrap_activation() {
-  local home out shim cadence
+  local home out shim cadence failed_home failed_target failed_out
   home="$TMP_ROOT/bootstrap-test"
   mkdir -p "$home/state" "$home/config"
   chmod 700 "$home/state" "$home/config"
@@ -160,6 +168,18 @@ test_bootstrap_activation() {
   cadence="$home/config/discord-mode.env"
   assert_present "$shim" "token -> shim written"
   assert_present "$cadence" "token -> cadence written"
+
+  failed_home="$TMP_ROOT/bootstrap-failure-test"
+  mkdir -p "$failed_home/state" "$failed_home/config"
+  chmod 700 "$failed_home/state" "$failed_home/config"
+  printf 'FM_DISCORD_BOT_TOKEN=fake-token\n' > "$failed_home/.env"
+  failed_target="$failed_home/cadence-target"
+  printf 'sentinel\n' > "$failed_target"
+  ln -s "$failed_target" "$failed_home/config/discord-mode.env"
+  failed_out=$(PATH="$BASE_PATH" FM_HOME="$failed_home" FM_STATE_OVERRIDE="$failed_home/state" FM_CONFIG_OVERRIDE="$failed_home/config" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  printf '%s\n' "$failed_out" | grep -q 'FM_DISCORD: self-hosted Discord mode inactive - failed to publish cadence' \
+    || fail "bootstrap must report inactive when cadence publication fails"
 
   pass "fm-bootstrap handles FM_DISCORD_BOT_TOKEN activation and artifact generation"
 }
