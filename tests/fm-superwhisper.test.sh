@@ -367,9 +367,59 @@ EOF
   pass "Pi CLI -ne halts extension discovery while preserving explicit -e extensions"
 }
 
+test_teardown_cleans_stale_cwd_marker() {
+  local case_dir home proj wt fakebin id sw_test_dir cwd_hash marker
+  id=test-teardown-sw-cleanup
+  case_dir="$TMP_ROOT/$id"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  sw_test_dir="$case_dir/sw-state"
+  mkdir -p "$sw_test_dir"
+  fakebin=$(fm_test_make_spawn_fakebin "$case_dir/fake")
+  cat > "$fakebin/treehouse" <<'SH'
+#!/bin/sh
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+  fm_test_spawn_home "$home" codex
+  fm_test_spawn_brief "$home" "$id"
+  fm_git_worktree "$proj" "$wt" "wt-$id"
+
+  fm_write_meta "$home/state/$id.meta" \
+    "window=firstmate:fm-$id" \
+    "endpoint_task_id=$id" \
+    "worktree=$wt" \
+    "project=$proj" \
+    "kind=ship" \
+    "mode=local-only" \
+    "spawn_gen=teardown-test-$id"
+
+  touch "$home/state/$id.turn-ended"
+  touch "$home/state/$id.status"
+  touch "$home/state/.last-watcher-beat"
+
+  cwd_hash=$(hash_path "$wt")
+  marker="$sw_test_dir/disabled-$cwd_hash"
+  touch "$marker"
+  [ -f "$marker" ] || fail "failed to seed stale marker"
+
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    SUPERWHISPER_AGENT_STATE_DIR="$sw_test_dir" \
+    PATH="$fakebin:$BASE_PATH" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force >/dev/null 2>&1 || true
+
+  [ ! -f "$marker" ] || fail "teardown failed to remove stale cwd marker: $marker"
+
+  pass "fm-teardown cleans up stale Superwhisper cwd disabled marker"
+}
+
 test_pi_worker_launches_with_no_extensions_and_preserves_explicit_hooks
 test_codex_worker_and_secondmate_launches_set_cwd_disabled_marker
 test_codex_agent_hook_respects_cwd_disabled_marker_when_present
 test_non_owner_pi_session_silences_superwhisper_via_session_marker
 test_owner_primary_pi_session_leaves_superwhisper_enabled
 test_pi_cli_no_extensions_isolates_discovery_and_preserves_explicit_extension
+test_teardown_cleans_stale_cwd_marker
