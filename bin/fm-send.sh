@@ -515,6 +515,11 @@ while :; do
     FIRE_AND_FORGET_ID=${1#--fire-and-forget=}
     shift
     ;;
+  --key) break ;;
+  --*)
+    echo "error: unknown flag '$1'; fm-send accepts --resolve-key, --fire-and-forget, and --key. Nothing was sent." >&2
+    exit 1
+    ;;
   *) break ;;
   esac
 done
@@ -770,6 +775,24 @@ if [ "${1:-}" = "--key" ]; then
     exit 1
     ;;
   esac
+  # The option loop breaks at --key without consuming what follows it, and this
+  # path reads only the key, so a trailing argument would be discarded in
+  # silence while the key was still delivered and the exit code still reported
+  # success. Refuse it instead. --fire-and-forget is named on the way through
+  # because FIRE_AND_FORGET_ID is only set when the flag precedes --key, so the
+  # check above cannot see this ordering.
+  if [ "$#" -gt 2 ]; then
+    for key_extra in "${@:3}"; do
+      case "$key_extra" in
+      --fire-and-forget | --fire-and-forget=*)
+        echo "error: --fire-and-forget cannot accompany --key" >&2
+        exit 1
+        ;;
+      esac
+    done
+    echo "error: unexpected argument '$3' after '--key $2'; --key takes exactly one key and nothing else. Nothing was sent." >&2
+    exit 1
+  fi
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
   if [ "$TARGET_BACKEND" = remote ]; then

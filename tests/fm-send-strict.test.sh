@@ -231,6 +231,145 @@ test_key_send_exit_status_follows_delivery() {
   pass "fm-send --key: exit status follows delivery, and an undelivered key never reports success"
 }
 
+# fm-send's option loop used to end in an unconditional `*) break ;;`, so any
+# token it did not recognise - including one obviously shaped as a flag - fell
+# out of the loop and became the positional message text. A steer invoked with a
+# flag that does not exist was durably written into a live worker's steering
+# inbox as the literal flag string while fm-send exited 0: the worker was
+# mis-steered, and the caller got a success code and no diagnostic. That is the
+# one silent, durable, worker-reaching failure mode on this script, so the
+# absence of the record is asserted here and not just the exit code - the whole
+# point of the defect is that the exit code lied.
+test_unknown_flag_is_refused_before_anything_is_recorded() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/unknown-flag"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home unknownflag); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  # The stub reports fm-lane-ok as a live window, so a send that got past the
+  # refusal really would ring: the empty-log assertion below is not vacuous.
+  fm_write_meta "$home/state/lane-uf.meta" "window=sess:fm-lane-ok" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-uf --not-a-real-flag some text >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unrecognised flag was accepted instead of refused"
+  assert_contains "$(cat "$err")" "unknown flag '--not-a-real-flag'" \
+    "the refusal should name the offending token"
+  assert_contains "$(cat "$err")" "--resolve-key, --fire-and-forget, and --key" \
+    "the refusal should name the flags fm-send actually accepts"
+  [ ! -e "$home/state/lane-uf.inbox" ] \
+    || fail "the refused flag still created a steering record"$'\n'"$(ls -R "$home/state/lane-uf.inbox")"
+  [ ! -s "$log" ] || fail "the refused flag still rang the doorbell"$'\n'"$(cat "$log")"
+  pass "fm-send strict: an unrecognised flag is refused, not delivered as the message body"
+}
+
+# The refusal is an allowlist, not a pattern. --key is a real, supported flag
+# that is parsed AFTER the option loop, so it must keep falling through the loop
+# untouched; a blanket "starts with -- and matched no case arm, therefore refuse"
+# rule would break it. Its two existing cross-checks are asserted here alongside,
+# so a future tightening of the loop cannot swallow them silently.
+test_key_flag_still_falls_through_the_allowlist() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/key-allowlist"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home keyallow); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-ka.meta" "window=sess:fm-lane-ka" "kind=ship"
+  printf 'needs-decision [key=k]: choose\n' > "$home/state/lane-ka.status"
+  fm_write_meta "$home/state/sm-ka.meta" "window=sess:fm-sm-ka" "kind=secondmate"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-ka --key Enter >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "--key must still reach the key plane, not be refused as unknown"
+  assert_no_grep 'unknown flag' "$err" "--key was refused by the unrecognised-flag allowlist"
+  assert_contains "$(cat "$log")" "target=sess:fm-lane-ka literal=0 arg=Enter" "--key should still deliver its key"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-ka --resolve-key k --key Enter >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "--resolve-key with --key should still refuse"
+  assert_contains "$(cat "$err")" "--resolve-key cannot accompany --key" \
+    "the --resolve-key/--key cross-check should keep its exact error"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" sm-ka --fire-and-forget 0123456789abcdef --key Enter >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "--fire-and-forget with --key should still refuse"
+  assert_contains "$(cat "$err")" "--fire-and-forget cannot accompany --key" \
+    "the --fire-and-forget/--key cross-check should keep its exact error"
+  pass "fm-send strict: --key stays in the allowlist and its cross-checks keep their errors"
+}
+
+# A message whose text legitimately begins with a single dash must remain
+# sendable. Only a --<token> is refused, so a single-dash word is still plain
+# text and needs no ceremony.
+test_leading_dash_messages_still_send() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/leading-dash"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home leadingdash); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  # fm-lane-ok is the stub's live window, so the doorbell really rings here.
+  fm_write_meta "$home/state/lane-ld.meta" "window=sess:fm-lane-ok" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-ld "-1 means failure" >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a single-dash message should still send"
+  grep -qF -- '-1 means failure' "$home/state/lane-ld.inbox/001.msg" \
+    || fail "the single-dash message was not recorded verbatim"
+  pass "fm-send strict: a single-dash message is still text, not a flag"
+}
+
+# The option loop breaks at --key without consuming anything after it, and the
+# key path reads only the key itself, so every remaining argument used to be
+# discarded in silence while the key was still delivered and the command still
+# exited 0. That is the same silent-delivery shape this script's unknown-flag
+# refusal exists to remove, so the key path must refuse a trailing argument
+# rather than drop it. The absence of the keystroke is asserted, not just the
+# exit code, because the defect was that delivery happened anyway.
+test_trailing_arguments_after_key_are_refused() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/key-trailing"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home keytrailing); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/lane-kt.meta" "window=sess:fm-lane-kt" "kind=ship"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-kt --key Enter --not-a-real-flag >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a trailing argument after --key was accepted instead of refused"
+  assert_contains "$(cat "$err")" "--not-a-real-flag" \
+    "the refusal should name the discarded argument"
+  assert_no_grep 'literal=0 arg=Enter' "$log" \
+    "the key was still delivered despite the trailing argument being refused"
+
+  # A trailing plain word is the same defect without the flag shape.
+  : > "$log"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" lane-kt --key Enter stray >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a trailing word after --key was accepted instead of refused"
+  assert_no_grep 'literal=0 arg=Enter' "$log" \
+    "the key was still delivered despite a trailing word being refused"
+  pass "fm-send strict: --key refuses a trailing argument instead of silently discarding it"
+}
+
+# The --fire-and-forget/--key incompatibility used to hold only when the flag
+# came first, because FIRE_AND_FORGET_ID is set by the option loop and the loop
+# breaks at --key. Reversing the order bypassed both that check and the
+# --resolve-key glob beside it. The guard must hold on either ordering.
+test_fire_and_forget_with_key_is_refused_in_either_order() {
+  local dir fb home err log rc
+  dir="$TMP_ROOT/key-faf-order"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); home=$(setup_home keyfaforder); err="$dir/send.err"; log="$dir/tmux.log"; : > "$log"
+  fm_write_meta "$home/state/sm-fo.meta" "window=sess:fm-sm-fo" "kind=secondmate"
+
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" sm-fo --fire-and-forget 0123456789abcdef --key Enter >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "--fire-and-forget before --key should be refused"
+  assert_contains "$(cat "$err")" "--fire-and-forget cannot accompany --key" \
+    "the flag-first ordering should keep its exact error"
+
+  : > "$log"
+  PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" sm-fo --key Enter --fire-and-forget 0123456789abcdef >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "--fire-and-forget after --key should be refused too"
+  assert_contains "$(cat "$err")" "--fire-and-forget cannot accompany --key" \
+    "the key-first ordering should give the same incompatibility error"
+  assert_no_grep 'literal=0 arg=Enter' "$log" \
+    "the key was still delivered despite the incompatible flag being refused"
+  pass "fm-send strict: --fire-and-forget and --key are incompatible in either order"
+}
+
 test_exact_lane_id_send_still_works
 test_key_send_exit_status_follows_delivery
 test_unset_fm_home_fails
@@ -239,3 +378,8 @@ test_prefixless_herdr_pane_id_fails
 test_unmatched_single_colon_target_must_exist
 test_fm_prefixed_herdr_session_is_an_explicit_target
 test_healthy_fm_id_send_still_works
+test_unknown_flag_is_refused_before_anything_is_recorded
+test_key_flag_still_falls_through_the_allowlist
+test_leading_dash_messages_still_send
+test_trailing_arguments_after_key_are_refused
+test_fire_and_forget_with_key_is_refused_in_either_order
