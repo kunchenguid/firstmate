@@ -339,6 +339,56 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag() {
   pass "fm_backend_herdr_cli: sets HERDR_SESSION AND appends a trailing --session flag on every call"
 }
 
+# --- fm_backend_herdr_bin: env-var precedence and PATH fallback --------------
+#
+# A container can export HERDR_BIN_PATH pointing at herdr's real install
+# location while PATH itself omits that directory (confirmed live during a
+# container-recreation recovery, where every herdr call through the bare-name
+# assumption failed "command not found" and fm_backend_herdr_pane_presence_state
+# misread that as an ambiguous pane state instead of a missing tool).
+# fm_backend_herdr_bin must fall back to HERDR_BIN_PATH in exactly that case,
+# without disturbing FM_BACKEND_HERDR_BIN's top precedence or today's
+# bare-`herdr`-on-PATH behavior.
+
+test_bin_prefers_fm_backend_herdr_bin_override_over_everything() {
+  local out
+  out=$(FM_BACKEND_HERDR_BIN=/opt/override/herdr HERDR_BIN_PATH=/opt/other/herdr PATH="/usr/bin:/bin" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_bin' "$ROOT")
+  [ "$out" = /opt/override/herdr ] \
+    || fail "FM_BACKEND_HERDR_BIN must win even when HERDR_BIN_PATH is also set, got: $out"
+  pass "fm_backend_herdr_bin: FM_BACKEND_HERDR_BIN still wins when set"
+}
+
+test_bin_falls_back_to_herdr_bin_path_when_herdr_is_off_path() {
+  local dir out
+  dir="$TMP_ROOT/bin-fallback-off-path"; mkdir -p "$dir/offpath"
+  cat > "$dir/offpath/herdr" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/offpath/herdr"
+  out=$(HERDR_BIN_PATH="$dir/offpath/herdr" PATH="/usr/bin:/bin" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_bin' "$ROOT")
+  [ "$out" = "$dir/offpath/herdr" ] \
+    || fail "HERDR_BIN_PATH should be used when herdr is not resolvable on PATH, got: $out"
+  pass "fm_backend_herdr_bin: falls back to HERDR_BIN_PATH when herdr is not on PATH"
+}
+
+test_bin_ignores_herdr_bin_path_when_herdr_already_on_path() {
+  local dir out
+  dir="$TMP_ROOT/bin-fallback-on-path"; mkdir -p "$dir/onpath"
+  cat > "$dir/onpath/herdr" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$dir/onpath/herdr"
+  out=$(HERDR_BIN_PATH=/opt/unused/herdr PATH="$dir/onpath:/usr/bin:/bin" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_bin' "$ROOT")
+  [ "$out" = herdr ] \
+    || fail "the bare-herdr-on-PATH behavior must be unaffected when herdr already resolves, got: $out"
+  pass "fm_backend_herdr_bin: bare herdr-on-PATH behavior is unaffected when neither override is needed"
+}
+
 # --- client selection: a stale client shadowing a compatible one -------------
 #
 # Two herdr clients on PATH is a real host shape (a self-updated ~/.local/bin
@@ -5213,6 +5263,9 @@ test_workspace_label_secondmate_marker_trims_whitespace
 test_workspace_label_empty_marker_falls_back_to_primary
 test_workspace_label_different_secondmates_get_different_labels
 test_cli_helper_sets_env_and_appends_trailing_session_flag
+test_bin_prefers_fm_backend_herdr_bin_override_over_everything
+test_bin_falls_back_to_herdr_bin_path_when_herdr_is_off_path
+test_bin_ignores_herdr_bin_path_when_herdr_already_on_path
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_recovery_grade_read_widens_only_at_its_own_boundary
 test_stale_registration_over_a_shell_only_pane_is_agent_free

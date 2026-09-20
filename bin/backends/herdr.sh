@@ -443,8 +443,26 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
 # PATH-first client. An unknown verdict (status supplies neither
 # .server.compatible nor both client and server protocols) always keeps the
 # PATH-first client.
+#
+# Below both of those, a container can export HERDR_BIN_PATH pointing at an
+# install outside PATH (verified live during a container-recreation recovery:
+# the binary was present and HERDR_BIN_PATH correctly named it, but PATH
+# itself did not include its directory). Without this fallback every herdr
+# call silently fails "command not found", which
+# fm_backend_herdr_pane_presence_state then misreads as an ambiguous pane
+# state rather than a missing tool. FM_BACKEND_HERDR_BIN keeps top precedence
+# unchanged, and a herdr already resolvable on PATH keeps today's bare-name
+# behavior untouched.
 fm_backend_herdr_bin() {
-  printf '%s' "${FM_BACKEND_HERDR_BIN:-herdr}"
+  if [ -n "${FM_BACKEND_HERDR_BIN:-}" ]; then
+    printf '%s' "$FM_BACKEND_HERDR_BIN"
+    return 0
+  fi
+  if [ -n "${HERDR_BIN_PATH:-}" ] && ! command -v herdr >/dev/null 2>&1; then
+    printf '%s' "$HERDR_BIN_PATH"
+    return 0
+  fi
+  printf '%s' herdr
 }
 
 # fm_backend_herdr_client_candidates: every distinct executable named herdr on
