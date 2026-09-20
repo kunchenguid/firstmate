@@ -401,6 +401,31 @@ test_relaunch_clears_the_deliberate_stop_marker() {
   pass "fm-control relaunch: clears the durable deliberate-stop marker left by a prior stop"
 }
 
+test_relaunch_clears_the_deliberate_stop_marker_when_the_backlog_commit_fails() {
+  local dir out rc=0
+  command -v tasks-axi >/dev/null 2>&1 || {
+    pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  dir=$(new_case deliberate-stop-clear-backlog rl77)
+  add_ship_task "$dir" rl77 claude
+  seed_backlog "$dir" rl77 queued
+  break_tasks_axi_start "$dir"
+  printf '%s\n' "$(date +%s)" > "$dir/home/state/rl77.deliberate-stop"
+
+  out=$(run_control "$dir" rl77 relaunch --note "resume after a deliberate stop") || rc=$?
+
+  # The replacement is delivered before the deferred backlog commit, so even
+  # though that commit fails and the relaunch reports failure, the running
+  # replacement must not stay classified as a deliberately parked task.
+  expect_code 1 "$rc" "a failed backlog commit should fail the relaunch"$'\n'"$out"
+  assert_grep "encode launch-brief" "$dir/fake/literal" \
+    "the replacement should have been delivered before the backlog commit failed"
+  [ ! -e "$dir/home/state/rl77.deliberate-stop" ] \
+    || fail "a delivered relaunch must clear the deliberate-stop marker even when the backlog commit fails"
+  pass "fm-control relaunch: a failed post-launch backlog commit still clears the deliberate-stop marker"
+}
+
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
   local dir out rc
   dir=$(new_case pending-exit rl43)
@@ -2215,6 +2240,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_clears_the_deliberate_stop_marker
+test_relaunch_clears_the_deliberate_stop_marker_when_the_backlog_commit_fails
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
