@@ -31,7 +31,21 @@ make_herdr_cwd_fakebin() {  # <dir> -> echoes fakebin dir
 set -u
 STATE="${FM_FAKE_HERDR_STATE:?}"
 printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
-[ -f "$STATE" ] || printf '{"next":1,"workspaces":[],"panes":[]}\n' > "$STATE"
+if [ ! -f "$STATE" ]; then
+  # A projected spawn is placed under the launcher home's own workspace, so the
+  # captain's workspace is seeded here (focused, with its active tab) exactly as
+  # a live session presents it. Absent, the session is empty and the ordinary
+  # flat layout applies.
+  if [ -n "${FM_FAKE_HERDR_PARENT_LABEL:-}" ]; then
+    jq -n --arg l "$FM_FAKE_HERDR_PARENT_LABEL" \
+      '{next:1,
+        workspaces:[{workspace_id:"w0", label:$l, focused:true, active_tab_id:"w0:t0"}],
+        panes:[{pane_id:"w0:p0", tab_id:"w0:t0", workspace_id:"w0", label:"captain", cwd:"/", foreground_cwd:"/"}]}' \
+      > "$STATE"
+  else
+    printf '{"next":1,"workspaces":[],"panes":[]}\n' > "$STATE"
+  fi
+fi
 save() { local tmp="$STATE.tmp.$$"; cat > "$tmp" && mv "$tmp" "$STATE"; }
 args=("$@")
 ws=""; label=""; cwd=""
@@ -54,12 +68,18 @@ case "${1:-} ${2:-}" in
   "status --json")
     printf '{"client":{"version":"0.9.0","protocol":16},"server":{"running":true,"version":"0.9.0","protocol":16}}\n'
     ;;
+  "session list")
+    # The named session's socket identity, which the projection path hashes
+    # into its focus-order lock path. One fake server per case.
+    printf '{"sessions":[{"name":"%s","running":true,"socket_path":"%s"}]}\n' \
+      "${HERDR_SESSION:-default}" "$STATE.sock"
+    ;;
   "workspace list")
     jq '{result:{workspaces:.workspaces}}' "$STATE"
     ;;
   "workspace create")
     n=$(jq -r '.next' "$STATE"); wsid="w$n"
-    jq --arg w "$wsid" --arg l "$label" '.workspaces += [{workspace_id:$w, label:$l}] | .next += 1' "$STATE" | save
+    jq --arg w "$wsid" --arg l "$label" '.workspaces += [{workspace_id:$w, label:$l, focused:false, active_tab_id:null}] | .next += 1' "$STATE" | save
     read -r tab pane <<EOF
 $(new_pane "$wsid" 1 "$cwd")
 EOF
@@ -67,7 +87,24 @@ EOF
       "$wsid" "$label" "$tab" "$pane"
     ;;
   "tab list")
-    jq --arg w "$ws" '{result:{tabs:[.panes[]|select(.workspace_id==$w)|{tab_id, label, workspace_id}]}}' "$STATE"
+    jq --arg w "$ws" '
+      ([.workspaces[]|select(.workspace_id==$w)|.active_tab_id]|first) as $a
+      | {result:{tabs:[.panes[]|select(.workspace_id==$w)
+        |{tab_id, label, workspace_id, focused:(.tab_id == $a)}]}}' "$STATE"
+    ;;
+  "tab get")
+    jq -e --arg t "${3:-}" 'any(.panes[]; .tab_id==$t)' "$STATE" >/dev/null || {
+      printf '{"error":{"code":"tab_not_found","message":"tab %s not found"}}\n' "${3:-}"
+      exit 1
+    }
+    jq --arg t "${3:-}" '{result:{tab:([.panes[]|select(.tab_id==$t)|{tab_id, label, workspace_id}]|first)}}' "$STATE"
+    ;;
+  "tab focus")
+    jq --arg t "${3:-}" '
+      ([.panes[]|select(.tab_id==$t)|.workspace_id]|first) as $w
+      | .workspaces |= map(if .workspace_id == $w
+          then (.focused = true | .active_tab_id = $t)
+          else .focused = false end)' "$STATE" | save
     ;;
   "tab create")
     read -r tab pane <<EOF
@@ -94,6 +131,11 @@ EOF
     # Launch delivery, which runs AFTER the task record is published: failing
     # it is how a case reaches the abort path with a record already written.
     [ "${FM_FAKE_HERDR_SEND_FAIL:-0}" = 1 ] && exit 1
+    ;;
+  "pane send-keys")
+    # The Enter that submits the staged launch command: failing it is how a
+    # case reaches the abort path with the pane and its agent already live.
+    [ "${FM_FAKE_HERDR_SENDKEY_FAIL:-0}" = 1 ] && exit 1
     ;;
   "pane close")
     jq --arg p "${3:-}" '.panes |= [.[]|select(.pane_id != $p)]' "$STATE" | save
@@ -183,18 +225,63 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# A backlog this home owns, plus the one tasks-axi build the dispatch path
+# probes for. `start` is the In-flight commit fm-spawn.sh runs AFTER launch
+# delivery; failing it rolls the just-published task record back, which is what
+# puts an abort on the leased-slot branch with the pane already live.
+make_backlog_fixture() {  # <home>
+  local home=$1
+  printf '%s\n' '# Backlog' '' '## In flight' '' '## Queued' '' '## Done' \
+    > "$home/data/backlog.md"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+EOF
+  cat > "$FAKEBIN_DIR/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+fail_commit() {
+  [ "${FM_FAKE_TASKS_AXI_START_FAIL:-0}" = 1 ] || return 0
+  printf 'error: the backlog row could not be moved\n' >&2
+  printf 'code: UNKNOWN\n' >&2
+  exit 1
+}
+case "${1:-}" in
+  --version) printf '0.2.5\n' ;;
+  update)
+    [ "${2:-}" = --help ] && { printf '%s\n' '--archive-body'; exit 0; }
+    fail_commit
+    ;;
+  mv)
+    [ "${2:-}" = --help ] && { printf '%s\n' 'usage: tasks-axi mv [<id>...]'; exit 0; }
+    fail_commit
+    ;;
+  show) printf 'task:\n  state: queued\n  held: no\n  blocked: no\n' ;;
+  start) fail_commit ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/tasks-axi"
+}
+
 # make_case <name> <id> -> sets HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR CASE_DIR
 make_case() {
-  local name=$1 id=$2
+  local name=$1 id=$2 presentation=${3:-off}
   CASE_DIR="$TMP_ROOT/$name"
   HOME_DIR="$CASE_DIR/home"
   PROJ_DIR="$CASE_DIR/project"
   WT_DIR="$CASE_DIR/wt"
   FAKEBIN_DIR=$(make_herdr_cwd_fakebin "$CASE_DIR/fake")
+  FM_FAKE_HERDR_PARENT_LABEL=
+  export FM_FAKE_HERDR_PARENT_LABEL
   mkdir -p "$HOME_DIR/data" "$HOME_DIR/projects" "$HOME_DIR/state" "$HOME_DIR/config"
-  # The ordinary flat layout: presentation spaces are a separate projection
-  # whose own task tab takes the same cwd argument.
-  printf 'off\n' > "$HOME_DIR/config/herdr-presentation-spaces"
+  # The ordinary flat layout by default: presentation spaces are a separate
+  # projection whose own task tab takes the same cwd argument. A projected case
+  # opts in and needs the captain's own workspace to project underneath.
+  printf '%s\n' "$presentation" > "$HOME_DIR/config/herdr-presentation-spaces"
+  [ "$presentation" != on ] || FM_FAKE_HERDR_PARENT_LABEL=firstmate
   fm_git_worktree "$PROJ_DIR" "$WT_DIR" "wt-$name"
   fm_test_spawn_brief "$HOME_DIR" "$id"
   touch "$HOME_DIR/state/.last-watcher-beat"
@@ -356,7 +443,46 @@ test_aborted_reuse_keeps_its_worktree_and_work() {
   pass "an aborted respawn keeps the worktree it reused, with its unlanded work"
 }
 
+# The projected corridor's post-delivery abort. Presentation spaces are on, so
+# the task pane lives in a disposable one-task workspace whose own shell - and
+# now the launched agent - run in the leased worktree. Launch delivery has
+# already happened, so this abort attempts no close at all; the pane is still
+# there. `treehouse return --force` terminates every process whose cwd is under
+# the slot, so returning it here would kill that agent, destroy its work, take
+# the projected workspace down with it, and strand the projection journal.
+# The slot must stay leased, and the retained record must say plainly that no
+# close was attempted rather than blaming a refusal that never ran.
+test_aborted_projected_spawn_keeps_its_live_pane() {
+  local id=herdr-cwd-g7 out status marker pane
+  make_case projected-abort-after-launch "$id" on
+  mkdir -p "$CASE_DIR/user-home"
+  make_backlog_fixture "$HOME_DIR"
+  out=$(FM_FAKE_TASKS_AXI_START_FAIL=1 run_herdr_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn whose In-flight commit fails should not report success"$'\n'"$out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the rolled-back spawn left a task record"$'\n'"$out"
+  pane=$(jq -r --arg l "fm-$id" '.panes[]|select(.label==$l)|.pane_id' "$CASE_DIR/herdr-state.json")
+  [ -n "$pane" ] \
+    || fail "the aborted spawn destroyed the projected task pane its agent is running in"$'\n'"$out"
+  [ "$(pane_field "$pane" cwd)" = "$WT_DIR" ] \
+    || fail "the projected task pane was created in '$(pane_field "$pane" cwd)', not its worktree '$WT_DIR'"
+  if grep -q -- "return --force --if-lease-holder fm-$id $WT_DIR" "$CASE_DIR/treehouse.log"; then
+    fail "the abort force-returned a slot whose projected pane and agent are still live"$'\n'"$out"
+  fi
+  [ -f "$HOME_DIR/state/$id.herdr-presentation" ] \
+    || fail "the abort removed the projection journal the session sweeper retires"$'\n'"$out"
+  marker="$HOME_DIR/state/.treehouse-lease-retained/$id.$(basename "$(dirname "$WT_DIR")").retained"
+  [ -f "$marker" ] \
+    || fail "the retained slot was not recorded, so no session start would surface it"$'\n'"$out"
+  assert_contains "$(sed -n 's/^reason=//p' "$marker")" "$pane" \
+    "the retained-slot reason does not name the pane that kept the slot"
+  assert_contains "$(sed -n 's/^reason=//p' "$marker")" "attempted no close" \
+    "the retained-slot reason blames a refused close this abort never attempted"
+  pass "an aborted projected spawn keeps the slot its live task pane runs in"
+}
+
 test_task_pane_is_created_in_its_worktree
+test_aborted_projected_spawn_keeps_its_live_pane
 test_aborted_spawn_returns_its_lease
 test_aborted_reuse_keeps_its_worktree_and_work
 test_retained_lease_is_recorded_for_session_start

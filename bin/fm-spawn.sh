@@ -1179,6 +1179,7 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  local herdr_close_attempted=0 herdr_pane_state=
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -1212,6 +1213,7 @@ spawn_abort_cleanup() {
   fi
   if [ "$HERDR_PROJECTION_ABORT_CLEANUP" = 1 ]; then
     HERDR_PROJECTION_ABORT_CLEANUP=0
+    herdr_close_attempted=1
     fm_backend_herdr_projection_cleanup_exact \
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
@@ -1307,8 +1309,13 @@ spawn_abort_cleanup() {
       echo "warning: task $ID's leased Treehouse worktree $WT was reused from this task's own earlier lease and may hold that work, so the aborted spawn leaves it leased rather than returning it; inspect it, then release it with 'treehouse return --if-lease-holder $W $WT'" >&2
       spawn_record_retained_lease "the aborted spawn reused this task's existing lease and left the work in the slot untouched"
     elif spawn_abort_task_pane_survives; then
-      echo "warning: herdr pane $HERDR_PROJECTION_ABORT_TASK_PANE for $ID survived its refused close, so task $ID's leased Treehouse worktree $WT is left leased rather than returned under that pane's own shell; close the pane, then release it with 'treehouse return --if-lease-holder $W $WT'" >&2
-      spawn_record_retained_lease "herdr pane $HERDR_PROJECTION_ABORT_TASK_PANE survived its refused close during an aborted spawn"
+      if [ "$herdr_close_attempted" = 1 ]; then
+        herdr_pane_state="survived its refused close during an aborted spawn"
+      else
+        herdr_pane_state="is still present after an aborted spawn that attempted no close"
+      fi
+      echo "warning: herdr pane $HERDR_PROJECTION_ABORT_TASK_PANE for $ID $herdr_pane_state, so task $ID's leased Treehouse worktree $WT is left leased rather than returned under that pane's own shell; close the pane, then release it with 'treehouse return --if-lease-holder $W $WT'" >&2
+      spawn_record_retained_lease "herdr pane $HERDR_PROJECTION_ABORT_TASK_PANE $herdr_pane_state"
     elif ! (cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$W" "$WT") >/dev/null 2>&1; then
       echo "warning: could not return task $ID's leased Treehouse worktree $WT after the aborted spawn; release it with 'treehouse return --if-lease-holder $W $WT'" >&2
       spawn_record_retained_lease "the return of this slot failed during an aborted spawn"
@@ -4954,11 +4961,10 @@ spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
-  # The abort endpoint identity goes with the cleanup it describes. A later
-  # abort attempts no close at all, so leaving these set made the retained-lease
-  # record and its startup line report a refused close that never ran.
-  HERDR_PROJECTION_ABORT_SESSION=
-  HERDR_PROJECTION_ABORT_TASK_PANE=
+  # The endpoint identity outlives the cleanup it once described: a later abort
+  # attempts no close, but the pane it names is live and holds the launched
+  # agent in the leased worktree, so the abort must still read it as present
+  # and keep the slot. Only the recorded reason distinguishes the two cases.
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
