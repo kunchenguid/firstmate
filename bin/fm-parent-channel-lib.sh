@@ -40,10 +40,9 @@
 # The parent watcher classifies lines there exactly as it classifies any
 # crewmate's status stream, so a captain-relevant line becomes a parent wake.
 #
-# Lines follow the charter's "<state> [key=<slug>]: <note>" shape and are
-# appended at most once by exact content, so a retried publication cannot
-# duplicate a delivered event. An existing destination must be a regular,
-# non-symlinked file; a missing one is created with its directory.
+# Line syntax and retry equivalence are owned by fm-classify-lib.sh.
+# An existing destination must be a regular, non-symlinked file; a missing one
+# is created with its directory.
 #
 # Return codes, shared by every entry point that resolves the channel:
 #   0  resolved, or appended / already present
@@ -59,6 +58,8 @@
 _FM_PARENT_CHANNEL_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=bin/fm-secondmate-parent-lib.sh
 . "$_FM_PARENT_CHANNEL_LIB_DIR/fm-secondmate-parent-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$_FM_PARENT_CHANNEL_LIB_DIR/fm-classify-lib.sh"
 
 # shellcheck disable=SC2034 # Output globals read by sourcing callers.
 FM_PARENT_CHANNEL_ID=
@@ -128,7 +129,8 @@ fm_parent_channel_clean_note() {  # <text>
   printf '%s' "$1" | LC_ALL=C tr '\t\r\n' '   ' | cut -c1-1200
 }
 
-# Append <line> to <path> unless that exact line is already there.
+# Append <line> once, using fm-classify-lib.sh's retry contract. Time-insensitive:
+# the caller declaring a new event is the one that stamps it.
 fm_parent_channel_append_once() {  # <path> <line>
   local path=$1 line=$2
   if [ -e "$path" ] || [ -L "$path" ]; then
@@ -136,7 +138,7 @@ fm_parent_channel_append_once() {  # <path> <line>
   else
     mkdir -p "$(dirname "$path")" || return 1
   fi
-  if grep -Fqx -- "$line" "$path" 2>/dev/null; then
+  if status_event_recorded "$path" "$line"; then
     return 0
   fi
   printf '%s\n' "$line" >> "$path"
@@ -147,5 +149,5 @@ fm_parent_channel_report() {  # <home> <state> <line>
   local home=$1 state=$2 line=$3 destination rc=0
   destination=$(fm_parent_channel_destination "$home" "$state") || rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
-  fm_parent_channel_append_once "$destination" "$line" || return 4
+  fm_parent_channel_append_once "$destination" "$(status_stamp_line "$line")" || return 4
 }

@@ -1605,7 +1605,7 @@ test_self_announced_append_guards() {
   run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
     'resolved [key=k1]: answered: closed by this home' \
     || fail "self-announced append on an announced file was not suppressed (rc=$?)"
-  grep -Fq 'resolved [key=k1]: answered: closed by this home' "$status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$status" | grep -Fq 'resolved [key=k1]: answered: closed by this home' \
     || fail "the suppressed close was not appended"
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
     || fail "the self-announced close left unannounced bytes behind"
@@ -1621,7 +1621,7 @@ test_self_announced_append_guards() {
   run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
     'resolved [key=k1]: answered: second close' || rc=$?
   [ "$rc" -eq 1 ] || fail "a close over pending foreign bytes did not fail toward waking (rc=$rc)"
-  grep -Fq 'resolved [key=k1]: answered: second close' "$status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$status" | grep -Fq 'resolved [key=k1]: answered: second close' \
     || fail "the fail-toward-waking close was not appended"
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
     && fail "a close over pending foreign bytes swallowed the pending wake"
@@ -2133,7 +2133,7 @@ test_owned_growth_still_annotates_turn_ended() {
   append_wake "$state" signal scout.turn-ended "signal: $state/scout.turn-ended" \
     || fail "turn-ended wake append failed"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "drain failed"
-  grep -F 'scout.status: resolved [key=budget]: answered: approved' "$out" >/dev/null \
+  sed -E 's/ \[at=[0-9]+\]//' "$out" | grep -F 'scout.status: resolved [key=budget]: answered: approved' >/dev/null \
     || fail "owned growth hid this home's own close from the turn-ended annotation: $(cat "$out")"
   pass "owned growth suppresses the wake without hiding the turn-ended annotation"
 }
