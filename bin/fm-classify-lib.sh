@@ -404,9 +404,11 @@ status_is_paused() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
 
-# 0 if a status line's leading verb is the verified captain-held transfer verb.
+# 0 if a status line's leading verb is the captain-held verb, in either shape the
+# hold command writes (above): its own declaration of a hold on the held lane's
+# log, or a verified transfer of a still-open decision to the backlog.
 # The same pure verb read as status_is_paused, and the discriminator a supervisor
-# needs once a declared wait has already been recognized: the two declarations get
+# needs once a declared wait has already been recognized: a pause and a hold get
 # the same bounded cadence, but they block on DIFFERENT humans, so a recheck that
 # names an external dependency for a hold points the captain away from the fact
 # that they are the one who can clear it.
@@ -417,8 +419,8 @@ status_is_captain_held() {  # <status-line>
   [ "$verb" = "${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}" ]
 }
 
-# 0 if a status line declares either an external-wait pause or a verified
-# captain-held transfer.
+# 0 if a status line declares either an external-wait pause or a captain-held
+# line in either shape above.
 # Both declarations can intentionally leave a crew's endpoint idle, so both
 # supervisors give them one cadence: the away-mode daemon defers the wedge and
 # ages a pause marker instead, and the watcher applies its bounded pause cadence

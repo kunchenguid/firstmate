@@ -2964,6 +2964,12 @@ EOF
     [ -z "$task" ] || inbox_steer_check "$w" "$task"
     key=$(window_key "$w")
     last=$(status_declared_wait_line "$STATE/$task.status")
+    # A lane whose declaration is gone gives up its pause bookkeeping. Which half
+    # goes depends on WHO lifted it: a worker append is new evidence about the
+    # pane, so the stale suppressor and wedge timer reset with the pause state,
+    # but a hold this home settled itself changed nothing the pane shows
+    # (docs/captain-hold-lifecycle.md), and dropping the suppressor there would
+    # re-surface the unchanged hash the watcher already alarmed on.
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       if status_hold_settled "$STATE/$task.status"; then
         clear_pause_state "$key"
