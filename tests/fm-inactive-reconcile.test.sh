@@ -217,7 +217,8 @@ SH
       run_report "$MATE" child
       key=$(reported_outcome_key "$MATE" child "$terminal") \
         || fail "$terminal with trailing prose arriving $timing state read was not owned by the ledger"
-      grep -Fq "$terminal [key=$key]: child child $terminal: validation finished" "$MAIN/state/mate.status" \
+      sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" \
+        | grep -Fq "$terminal [key=$key]: child child $terminal: validation finished" \
         || fail "$terminal with trailing prose arriving $timing state read was lost: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
       [ "$(wc -l < "$MAIN/state/mate.status" | tr -d ' ')" = 1 ] \
         || fail "$terminal with trailing prose arriving $timing state read was delivered twice"
@@ -237,7 +238,8 @@ test_secondmate_unterminated_prose_reports_run_outcome() {
   printf 'Still going' >> "$MATE/state/child.status"
   age "$MATE/state/child.status"
   FM_FAKE_CREW_STATE='failed' run_reconcile "$MATE" --startup
-  grep -Fq "failed [key=inactive-outcome-mate-child-failed]: inactive terminal child=child" "$MAIN/state/mate.status" \
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" \
+    | grep -Fq "failed [key=inactive-outcome-mate-child-failed]: inactive terminal child=child" \
     || fail "an unterminated prose line withheld a proven failure: $(cat "$MAIN/state/mate.status" 2>/dev/null)"
   [ "$(outcome_count "$MATE" reported)" = 1 ] || fail "the fallback report did not retain its receipt"
   age "$MATE/state/child.status"
