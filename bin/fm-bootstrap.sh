@@ -22,7 +22,23 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "CLAUDE_PRIMARY_AUTO_MODE: this primary session is Claude Code in
+#                 auto permission mode with no opt-in allow rules for firstmate's
+#                 sanctioned landings/pulls/stash; see docs/configuration.md 'Claude
+#                 permission mode for the primary session' for the copy-pasteable
+#                 rule pack".
+#          CLAUDE_PRIMARY_AUTO_MODE fires only when bin/fm-harness.sh's own harness
+#          detection reads claude AND its claude-permission-mode subcommand
+#          CONFIRMS auto (never on an undetermined mode - see that script's header)
+#          AND state/.claude-primary-auto-mode-notified is absent AND FM_ROOT's
+#          .claude/settings.local.json does not already contain the sentinel
+#          "bin/fm-merge-local.sh" allow-rule string. It is a one-shot nudge, not a
+#          recurring warning: once printed with the fleet lock actually held, it
+#          writes that marker so it never prints again regardless of whether the
+#          operator adds the rules or dismisses it; a lock-refused read-only run
+#          prints the same line every time instead of writing the marker, exactly
+#          like TANGLE's read-only wording above.
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
 #          a purely local fast-forward with no origin fetch; a remote route hands
@@ -1526,6 +1542,46 @@ detect_local_config() {
   fi
   detect_code_root_backlog_fork
   detect_home_summary_publication
+  detect_claude_primary_permission
+}
+
+# True when FM_ROOT's own local, gitignored .claude/settings.local.json already
+# carries the documented allow-rule pack's anchor entry (a Bash(bin/fm-merge-
+# local.sh...) rule). A shallow grep for one sentinel string, not a full rule-set
+# audit: good enough to stop nagging once the operator has started adopting the
+# pack, without demanding every rule from docs/configuration.md be present
+# byte-for-byte.
+claude_primary_allow_rules_present() {
+  local f="$FM_ROOT/.claude/settings.local.json"
+  [ -f "$f" ] && [ -r "$f" ] || return 1
+  LC_ALL=C grep -qF 'bin/fm-merge-local.sh' "$f" 2>/dev/null
+}
+
+# Detect: the PRIMARY session itself is Claude Code, its own CONFIRMED
+# permission mode (bin/fm-harness.sh claude-permission-mode - never a guessed
+# one) is "auto", and the opt-in allow-rule pack for firstmate's sanctioned
+# landings/pulls/stash is not yet present (docs/configuration.md "Claude
+# permission mode for the primary session"). Silent whenever the mode cannot
+# be confirmed, exactly as that subcommand's own contract requires.
+#
+# One-shot, not a recurring warning: printed once with the fleet lock actually
+# held, after which state/.claude-primary-auto-mode-notified suppresses it for
+# good, regardless of whether the operator ever adds the rules or just chooses
+# to keep auto mode as-is. A lock-refused read-only run prints the line every
+# time instead of writing that marker - the same convention TANGLE's read-only
+# wording above follows, since a read-only session must not durably mutate
+# this home's state.
+detect_claude_primary_permission() {
+  local marker="$STATE/.claude-primary-auto-mode-notified" mode
+  [ -f "$marker" ] && return 0
+  [ "$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null)" = claude ] || return 0
+  mode=$("$SCRIPT_DIR/fm-harness.sh" claude-permission-mode 2>/dev/null || true)
+  [ "$mode" = auto ] || return 0
+  claude_primary_allow_rules_present && return 0
+  echo "CLAUDE_PRIMARY_AUTO_MODE: this primary session is Claude Code in auto permission mode with no opt-in allow rules for firstmate's sanctioned landings/pulls/stash; see docs/configuration.md \"Claude permission mode for the primary session\" for the copy-pasteable rule pack"
+  if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] || [ "${FM_BOOTSTRAP_LOCKED:-0}" = 1 ]; then
+    : > "$marker" 2>/dev/null || true
+  fi
 }
 
 # Shadow-backlog check. When this home's data directory is not the code root's,

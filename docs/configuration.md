@@ -368,6 +368,62 @@ Any other value, or an unreadable file, refuses every spawn from that home, whic
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
 
+## Claude permission mode for the primary session
+
+`config/claude-permission-mode` above governs Claude **worker** launches only.
+The primary session itself is started directly by the operator, outside `fm-spawn.sh`, so nothing in firstmate sets or reads its permission mode, and nothing detected when that mode would block the primary's own sanctioned work until the diagnostic below.
+Claude Code's own `--permission-mode` accepts `acceptEdits`, `auto`, `bypassPermissions`, `manual`, `dontAsk`, and `plan` (`claude --help`, verified on 2.1.276); the primary can run under any of them, and this section is about `auto` specifically, because Pro/Max/Team plans now start new sessions in `auto` by default.
+In `auto` mode a classifier model reviews each shell command instead of prompting the operator, and it repeatedly denies operations firstmate's own contract already owns and that the operator explicitly asked for in the same turn, because the classifier judges the command text and transcript on their own terms and has no way to see firstmate's own recorded authority (a captain-held merge approval, a task's recorded fast-forward-only landing, an already-verified clean tree).
+Denials also look inconsistent turn to turn - the same operation can be allowed once and denied later in the same session - because the classifier is a probabilistic reviewer, not a deterministic rule.
+
+Observed denials, one session, primary on Claude Code `auto`, workers launched separately under `config/claude-permission-mode`:
+
+- `bin/fm-merge-local.sh <task>` for a `local-only +yolo` project, denied "Merge Without Review" even though the standing merge authority is recorded in the home.
+- `git merge --ff-only fm/<task>` inside `projects/<repo>` after the operator said "merge it", denied "Modify Shared Resources".
+- A fast-forward pull from `projects/<repo>` into the operator's own checkout, denied "Modify Shared Resources".
+- A path-scoped `git stash push -- <named generated file>` before that pull, denied "Irreversible Local Destruction".
+- Adding the Bash allow rules the operator asked for, denied "Self-Modification" - the primary cannot fix its own posture even when asked to.
+
+A fast-forward deploy push (for example `git push origin staging:preprod` on an explicit "deploy to preprod" request) hits the same wall and is a real firstmate-sanctioned operation, but it is deliberately **out of scope** for the rule pack below: a push to a deploy target is a home-local shorthand the operator defines, not a fixed shape firstmate can name narrowly and safely in a shared, published rule pack, so it is left for the operator to allow by hand if they choose.
+
+### Why an opt-in `permissions.allow` rule, not an `autoMode` classifier rule
+
+Claude Code evaluates each action through a fixed decision order: matching `allow`/`ask`/`deny` rules from `permissions` settings resolve first (with a short list of exceptions - writes to protected paths, and `rm`/`rmdir` on a critical path - that still route to the classifier even when an allow rule matches), then working-directory reads and edits, and only then does everything else reach the classifier (`claude-code-docs`, "How the classifier evaluates actions").
+A narrow `permissions.allow` Bash rule for one of firstmate's exact sanctioned commands therefore resolves before the classifier ever runs, deterministically, which is what removes the inconsistency above; entering `auto` mode drops a few especially broad allow shapes (`Bash(*)`, wildcarded interpreters like `Bash(python*)`, package-manager run commands), but a narrow rule like the ones below is not one of them and stays in effect.
+`claude auto-mode config`/`claude auto-mode defaults` print the SEPARATE `autoMode` classifier configuration (its own `allow`/`soft_deny`/`hard_deny`/`environment` categories) - do not add firstmate's rules there: setting `autoMode.allow` in a settings file **replaces** Claude Code's entire shipped default allow-category list for that file rather than extending it, so a small custom list would silently drop unrelated built-in classifier exceptions the operator never meant to touch.
+`permissions.allow` has no such replacement trap: each rule is independent, and the pack below adds narrow rules without touching anything else.
+
+### The opt-in rule pack
+
+Firstmate never writes these rules into any settings file itself - proposing them here and having the operator add config edits is exactly the "Self-Modification" pattern the classifier correctly blocks, so only the operator pastes them.
+Paste the block below into the **firstmate repository's own** local, gitignored `.claude/settings.local.json` (never the tracked `.claude/settings.json`, which every clone of this repo shares), creating the file if it does not exist yet; these rules only make sense where `bin/fm-merge-local.sh` and `projects/` actually live, which is this checkout.
+Fill in the two bracketed placeholders in the pull rule with your own literal, absolute paths, and add one stash rule per exact generated file you pre-approve - do not turn either into a wildcard, because a wildcard ahead of the pull's remote path or the stash's filename is exactly the kind of open-ended allow rule this pack exists to avoid.
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(bin/fm-merge-local.sh:*)",
+      "Bash(git merge --ff-only *)",
+      "Bash(git -C [ABSOLUTE PATH TO YOUR OPERATOR CHECKOUT] pull --ff-only [ABSOLUTE PATH TO THIS FIRSTMATE HOME]/projects/[REPO] *)",
+      "Bash(git stash push -- [EXACT GENERATED FILE PATH])"
+    ]
+  }
+}
+```
+
+- The first rule covers the guarded local landing script itself (`bin/fm-merge-local.sh <task-id>`); it needs no customization.
+- The second rule covers a fast-forward-only merge Claude runs inside `projects/<repo>`; Bash rules match command text only, not the working directory, so this rule allows an ff-only merge wherever Claude runs one, not only inside `projects/`, and stays safe because `--ff-only` refuses anything but a clean fast-forward.
+  If the merge instead arrives as one compound command such as `cd projects/<repo> && git merge --ff-only fm/<task>`, each half must qualify on its own; the `cd` half already does, with no rule needed, because Claude Code treats a `cd` into a path under the working directory as read-only.
+- The third rule covers a fast-forward-only pull from this home's `projects/<repo>` clone into your own checkout; only the trailing branch/ref argument is wildcarded, so the operator checkout path and the `projects/<repo>` source path stay fully literal - putting the wildcard any earlier (for example ahead of `pull`) would let a compound command smuggle extra git flags in before it, the same class of risk Claude Code's own docs warn about for a wildcard placed before a subcommand.
+- The fourth rule is a template: add one exact copy per generated file you want firstmate's home-local stash exception to cover, with the literal path and no wildcard, so it can never match an unintended target.
+
+### The one-shot bootstrap nudge
+
+When the primary harness is Claude Code, its permission mode is CONFIRMED `auto` (never a guessed one - an undetermined mode stays silent), and the rule pack above is not yet present in this checkout's `.claude/settings.local.json`, session start prints one `CLAUDE_PRIMARY_AUTO_MODE:` line the first time it runs with the fleet lock held, then never again (`state/.claude-primary-auto-mode-notified`), whether or not the operator acts on it.
+Detection reads the nearest `claude` process's own command line for `--permission-mode`/`--dangerously-skip-permissions`, or - when neither flag is present - the user-level `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json` for `permissions.defaultMode`, because Claude Code documents that a project's `.claude/settings.json` or `.claude/settings.local.json` cannot set `auto` or `bypassPermissions` as a session's starting mode (a project or local file naming any other `defaultMode` still outranks it, so that case stays silent); either way it never guesses, and an account default applied with zero configuration anywhere firstmate can read is a case it cannot see and stays silent about.
+This diagnostic never changes any permission posture on its own - it only tells the operator what it found; `bin/fm-harness.sh claude-permission-mode` is its detection contract.
+
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
