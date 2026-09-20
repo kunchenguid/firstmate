@@ -102,10 +102,15 @@ grok --trust
 **Pi**
 
 ```sh
-pi
+./fm
 # or, when the signed wrapper is installed
 FM_PI_HARNESS=pi-signed pi-signed
 ```
+
+From this checkout, `./fm` starts the primary Firstmate in Pi with the `openai-codex/gpt-5.6-sol` model and low thinking by default.
+The launcher disables ambient extension and skill discovery, explicitly loads this checkout's top-level `.pi/extensions/fm-*.ts` files and `.agents/skills`, and forwards every caller argument.
+Explicit `--model` and `--thinking` arguments override the defaults, while normal Pi settings, context files, and theme behavior remain enabled.
+To invoke it from another directory, put the repository directory on `PATH` and run `fm`.
 
 **Oh My Pi**
 
@@ -118,7 +123,7 @@ FM_OMP_HARNESS=omp omp
 Start `omp` with this checkout as its working directory: it auto-discovers the tracked `.omp/extensions/*.ts` files with no trust dialog, and naming them with `-e` as well would load each twice.
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
-For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.
+For plain Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load; `./fm` names its Firstmate extensions explicitly.
 The `/calm` toggle on Pi, and on Claude Code behind its default-off early-access function-hooks flag, hides supported transcript chrome, including canonically classified Firstmate operational user rows, and uses a Calm-only animated working boat during active runs while preserving all model context and session data.
 Those Calm-hidden operational inputs remain ordinary user-role messages with unchanged delivery, ordering, authority, persistence, and exports.
 The preference persists for the effective Firstmate home, and toggling it off restores ordinary rendering.

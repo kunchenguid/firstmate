@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Launch the Firstmate primary Pi from this checkout.
+#
+# Pi's documented discovery switches are disabled, then this checkout's
+# top-level Firstmate extensions and internal skills are named explicitly.
+# Keep the primary's normal settings, context files, and theme discovery.
+# Explicit --model and --thinking arguments remain caller-owned.
+set -eu
+set -o pipefail
+
+SCRIPT_PATH=${BASH_SOURCE[0]}
+case "$SCRIPT_PATH" in
+  */*) SCRIPT_DIR=${SCRIPT_PATH%/*} ;;
+  *) SCRIPT_DIR=. ;;
+esac
+SCRIPT_DIR=$(CDPATH='' cd "$SCRIPT_DIR" && pwd -P)
+cd "$SCRIPT_DIR"
+
+PI_BIN=$(command -v pi 2>/dev/null || true)
+if [ -z "$PI_BIN" ]; then
+  printf '%s\n' 'fm: pi executable not found on PATH' >&2
+  exit 127
+fi
+
+shopt -s nullglob
+extensions=("$SCRIPT_DIR"/.pi/extensions/fm-*.ts)
+pi_args=(--no-extensions --no-skills --skill "$SCRIPT_DIR/.agents/skills")
+
+caller_has_model=0
+caller_has_thinking=0
+for arg in "$@"; do
+  [ "$arg" = -- ] && break
+  case "$arg" in
+    --model|--model=*) caller_has_model=1 ;;
+    --thinking|--thinking=*) caller_has_thinking=1 ;;
+  esac
+done
+[ "$caller_has_model" -eq 1 ] || pi_args+=(--model openai-codex/gpt-5.6-sol)
+[ "$caller_has_thinking" -eq 1 ] || pi_args+=(--thinking low)
+
+for extension in "${extensions[@]}"; do
+  [ -f "$extension" ] || continue
+  pi_args+=(-e "$extension")
+done
+
+exec "$PI_BIN" "${pi_args[@]}" "$@"
