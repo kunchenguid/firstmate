@@ -545,7 +545,7 @@ Its state contains the project name and at most the first 32,768 bytes of the re
 The one request asks three parallel questions: Choice `deliverable` (`ship`, `scout`, `answer_now`, or `unclear`), NOUL `intent_clear` (whether a concrete implementation change is already authorized), and Score `urgency` (routine, soon, or blocking under the criteria sent with the question).
 The tool keeps the bearer key in a non-exported variable and passes it to curl only through a file-descriptor header, never argv, output, or a child environment.
 Its named confidence floor is 0.6, matching typed dispatch resolution.
-`clear` means a high-confidence concrete recommendation with a NOUL authorization score at or above that floor, `ambiguous` means a low-confidence answer or `unclear` deliverable, `escalate` means implementation authorization is not clear, and `error` covers API, network, response, and rendering failures.
+`clear` means a high-confidence concrete recommendation, with a `ship` recommendation additionally requiring a NOUL authorization score at or above that floor; `ambiguous` means a low-confidence answer or `unclear` deliverable, `escalate` means a high-confidence `ship` recommendation lacks implementation authorization, and `error` covers API, network, response, and rendering failures.
 Every runtime outcome exits 0, while only a missing request file, unreadable request file, unknown flag, or missing `jq` exits 2.
 This is advisory only: it never spawns, chooses harness/model/effort, replaces firstmate judgment, or blocks intake on failure.
 `docs/verification/intake-classify.md` records the current live API observation and the fake-curl regression command.

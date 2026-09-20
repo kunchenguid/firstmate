@@ -15,6 +15,8 @@ HOME_DIR="$TMP_ROOT/home"
 FAKEBIN=$(fm_fakebin "$TMP_ROOT")
 LOG="$TMP_ROOT/log"
 REQUEST_FILE="$TMP_ROOT/request.md"
+SCOUT_REQUEST_FILE="$TMP_ROOT/scout-request.md"
+ANSWER_REQUEST_FILE="$TMP_ROOT/answer-request.md"
 RESPONSE="$TMP_ROOT/response.json"
 BASE_PATH=$PATH
 mkdir -p "$HOME_DIR" "$LOG"
@@ -23,6 +25,18 @@ cat > "$REQUEST_FILE" <<'MD'
 # Request
 
 Fix the off-by-one in the pager, whose cause and expected behavior are already stated.
+MD
+
+cat > "$SCOUT_REQUEST_FILE" <<'MD'
+# Request
+
+Investigate the intermittent pager skip and report the cause without changing code.
+MD
+
+cat > "$ANSWER_REQUEST_FILE" <<'MD'
+# Request
+
+What does the pager's follow flag do?
 MD
 
 cat > "$FAKEBIN/curl" <<'SH'
@@ -49,6 +63,13 @@ SH
 chmod +x "$FAKEBIN/curl"
 
 write_response() {  # <deliverable> <deliverable-confidence> <intent-noul> <score> <score-confidence>
+  local ship=0.02 scout=0.02 answer_now=0.02 unclear=0.02
+  case "$1" in
+    ship) ship=0.94 ;;
+    scout) scout=0.94 ;;
+    answer_now) answer_now=0.94 ;;
+    unclear) unclear=0.94 ;;
+  esac
   cat > "$RESPONSE" <<JSON
 {
   "model": "jev-1.13.0",
@@ -57,7 +78,7 @@ write_response() {  # <deliverable> <deliverable-confidence> <intent-noul> <scor
       "type": "choice",
       "choice": "$1",
       "confidence": $2,
-      "probabilities": {"ship": 0.94, "scout": 0.03, "answer_now": 0.02, "unclear": 0.01}
+      "probabilities": {"ship": $ship, "scout": $scout, "answer_now": $answer_now, "unclear": $unclear}
     },
     "intent_clear": {"type": "noul", "noul": $3},
     "urgency": {"type": "score", "score": $4, "confidence": $5}
@@ -141,23 +162,30 @@ assert_contains "$out" '  deliverable: ship   confidence: 0.95' "ship recommenda
 assert_contains "$out" '  intent_clear: true   noul: 0.94' "authorization answer is printed"
 assert_contains "$out" '  urgency: routine   score: 0   confidence: 0.93' "routine urgency is printed"
 assert_contains "$out" '  request_truncated: false' "short request is not truncated"
-write_response answer_now 0.95 0.94 2 0.93
-TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
+write_response scout 0.95 0.05 1 0.93
+TYPESAFE_API_KEY=$KEY run code out err "$SCOUT_REQUEST_FILE"
+assert_contains "$out" '  status: clear' "high-confidence scout is clear without implementation authorization"
+assert_contains "$out" '  deliverable: scout' "scout remains a recommendation"
+assert_contains "$out" '  intent_clear: false   noul: 0.05' "scout preserves its low implementation authorization"
+write_response answer_now 0.95 0.05 2 0.93
+TYPESAFE_API_KEY=$KEY run code out err "$ANSWER_REQUEST_FILE"
+assert_contains "$out" '  status: clear' "high-confidence answer-now is clear without implementation authorization"
 assert_contains "$out" '  deliverable: answer_now' "answer-now remains a recommendation"
+assert_contains "$out" '  intent_clear: false   noul: 0.05' "answer-now preserves its low implementation authorization"
 assert_contains "$out" '  urgency: blocking   score: 2' "blocking urgency does not auto-spawn or change status"
-pass "concrete recommendations stay advisory with their urgency"
+pass "ship authorization gates only ship while all recommendations stay advisory"
 
 # --- ambiguous and escalate outcomes -------------------------------------------
 reset_log
-write_response scout 0.55 0.94 1 0.93
-TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
+write_response scout 0.55 0.05 1 0.93
+TYPESAFE_API_KEY=$KEY run code out err "$SCOUT_REQUEST_FILE"
 assert_contains "$out" '  status: ambiguous' "low confidence is ambiguous"
 assert_contains "$out" 'lowest answer confidence 0.55 below floor 0.6' "the confidence floor is named"
 write_response ship 0.95 0.05 1 0.93
 TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
 assert_contains "$out" '  status: escalate' "missing authorization escalates"
 assert_contains "$out" 'concrete implementation authorization is not clear' "authorization escalation is named"
-write_response unclear 0.95 0.94 1 0.93
+write_response unclear 0.95 0.05 1 0.93
 TYPESAFE_API_KEY=$KEY run code out err "$REQUEST_FILE"
 assert_contains "$out" '  status: ambiguous' "unclear deliverable is ambiguous"
 assert_contains "$out" 'deliverable recommendation is unclear' "unclear recommendation is named"

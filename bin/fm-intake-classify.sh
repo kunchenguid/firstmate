@@ -23,9 +23,9 @@
 #     status: clear | ambiguous | escalate | error
 #     model/latency_ms/tokens, deliverable and confidence, intent_clear and
 #     confidence, urgency and score, request truncation, and any reason
-#   clear     -> a concrete, authorized recommendation for firstmate to inspect
+#   clear     -> a high-confidence recommendation; ship is also authorized
 #   ambiguous -> a low-confidence or unclear recommendation
-#   escalate  -> no concrete implementation authorization
+#   escalate  -> a ship recommendation without implementation authorization
 #   error     -> API, network, response, or rendering failure
 #   Every runtime outcome exits 0 so intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable request or
@@ -208,7 +208,7 @@ RESULT=$(jq -n --argjson floor "$CONFIDENCE_FLOOR" --argjson latency "$LAT_MS" -
   } |
   if $confidence < $floor then
     . + {status: "ambiguous", reason: "lowest answer confidence \($confidence) below floor \($floor)"}
-  elif .intent_clear != true then
+  elif .deliverable == "ship" and .intent_clear != true then
     . + {status: "escalate", reason: "concrete implementation authorization is not clear"}
   elif .deliverable == "unclear" then
     . + {status: "ambiguous", reason: "deliverable recommendation is unclear"}
