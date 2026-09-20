@@ -67,14 +67,14 @@
 # absent stops the merge before any state is recorded.
 #
 # Before either forge merge, the task's existing per-task control lock
-# serializes the captain-hold check through the forge command. A still-held or
-# unreadable row refuses before that command, so a captain approval must be
-# recorded as an `answer --release` before this entrypoint is invoked. While
-# state/.afk-contract exists, a merge for this task also proceeds only if its
-# meta yolo=on or its id is in that record's merge-grant list; otherwise it is
-# held for the captain return. An unreadable record refuses rather than being
-# skipped. Neither posture releases a captain hold, and the grant lapses when
-# the record is archived.
+# serializes the shared authority read through the forge command. That read
+# (bin/fm-merge-authority-lib.sh owns it) refuses a captain-held task, an
+# unreadable hold, and an unreadable away record before that command, so a
+# captain approval must be recorded as an `answer --release` before this
+# entrypoint is invoked. While state/.afk-contract exists, a merge for this task
+# also proceeds only if its meta yolo=on or its id is in that record's
+# merge-grant list; otherwise it is held for the captain return. Neither posture
+# releases a captain hold, and the grant lapses when the record is archived.
 # The authority read and synchronous forge command share the away record's
 # cross-subsystem lock, which bin/fm-afk-contract.sh owns, closing the common
 # live-owner TOCTOU; failure to take it refuses before the forge call. Async and
@@ -872,28 +872,12 @@ record_pr_metadata() {
   }
 }
 
-require_released_captain_hold() {
-  local hold_status=0
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" --distinguish-absent || hold_status=$?
-  case "$hold_status" in
-    0)
-      echo "error: task $ID is still held for the captain; release it before merging" >&2
-      return 1
-      ;;
-    1|3) return 0 ;;
-    *)
-      echo "error: could not determine whether task $ID is still held for the captain; refusing to merge" >&2
-      return 1
-      ;;
-  esac
-}
-
 FM_PR_MERGE_AUTHORITY=
 # The gate on top of the shared authority read. bin/fm-merge-authority-lib.sh
-# owns what the away-posture record and the task's recorded yolo posture say;
-# this function owns what a merge run may do about it, so the answer the merge
-# poll later tags its ledger row with is the same answer gated here.
+# owns what the away-posture record, the task's recorded yolo posture, and a
+# captain hold say; this function owns what a merge run may do about it, so the
+# answer the merge poll later tags its ledger row with is the same answer gated
+# here.
 require_away_merge_grant() {
   FM_PR_MERGE_AUTHORITY=
   if fm_merge_authority_resolve "$FM_HOME" "$STATE" "$META" "$ID"; then
@@ -906,6 +890,12 @@ require_away_merge_grant() {
       ;;
     grants-unreadable)
       echo "error: PR merge refused - the away-posture record's grants could not be read; nothing was merged" >&2
+      ;;
+    captain-hold)
+      echo "error: task $ID is still held for the captain; release it before merging" >&2
+      ;;
+    hold-unreadable)
+      echo "error: could not determine whether task $ID is still held for the captain; refusing to merge" >&2
       ;;
     *)
       echo "error: task $ID is held for the captain return" >&2
@@ -1134,7 +1124,6 @@ require_current_away_authority || away_status=$?
 [ "$away_status" -eq 0 ] || exit "$away_status"
 require_recorded_pr_identity || exit 1
 record_pr_metadata || exit 1
-require_released_captain_hold || exit 1
 
 # Accepted confused-agent-grade limitation, as in bin/fm-lease-lib.sh, not an
 # oversight: if this lock-owning shell dies while its gh or glab child lives,

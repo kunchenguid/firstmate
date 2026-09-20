@@ -27,6 +27,13 @@
 # so it cannot interleave with that consumption transaction, and removes any
 # remaining record.
 #
+# A captain hold is the standing authority's revocation, owned here rather than
+# duplicated at each merge gate. fm_merge_authority_resolve reads it first, so a
+# held task resolves to captain-hold (or hold-unreadable when the hold cannot be
+# read) whatever its recorded yolo posture or away grants say, and
+# bin/fm-pr-merge.sh and bin/fm-merge-local.sh share one predicate for it. The
+# hold's own record lives in the backlog and is owned by bin/fm-captain-hold.sh.
+#
 # Sourced by those scripts and by tests. No side effects on source beyond its
 # sourced libraries.
 
@@ -43,12 +50,39 @@ FM_MERGE_AUTHORITY_REASON=
 # shellcheck disable=SC2034 # Public results consumed by sourcing callers.
 FM_MERGE_AUTHORITY_RECORD_IDENTITY=
 
+# The one owner of "is this task's standing merge authority revoked by a captain
+# hold?". Exit 0 held, 1 not held, 3 absent from the backlog (also not held),
+# 2 when the hold cannot be determined. bin/fm-captain-hold.sh owns the record.
+fm_merge_authority_captain_hold() {  # <home> <state> <task-id>
+  local home=$1 state=$2 id=$3 status=0
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    "$_FM_MERGE_AUTHORITY_LIB_DIR/fm-captain-hold.sh" open "$id" --distinguish-absent >/dev/null \
+    || status=$?
+  return "$status"
+}
+
 fm_merge_authority_resolve() {  # <home> <state> <meta> <task-id>
   local home=${1-} state=${2-} meta=${3-} id=${4-}
-  local yolo='' grants grant
+  local yolo='' grants grant hold_status=0
   FM_MERGE_AUTHORITY=
   FM_MERGE_AUTHORITY_REASON='invalid'
   [ -n "$home" ] && [ -n "$state" ] && [ -n "$meta" ] && [ -n "$id" ] || return 1
+
+  # A captain hold revokes the standing authority first, before the away
+  # posture is even consulted, so a held task can never resolve to yolo or
+  # away-grant and a recorded hold cannot disagree with the merge path.
+  fm_merge_authority_captain_hold "$home" "$state" "$id" || hold_status=$?
+  case "$hold_status" in
+    0)
+      FM_MERGE_AUTHORITY_REASON='captain-hold'
+      return 1
+      ;;
+    1|3) ;;
+    *)
+      FM_MERGE_AUTHORITY_REASON='hold-unreadable'
+      return 1
+      ;;
+  esac
 
   if ! fm_afk_contract_present "$state"; then
     FM_MERGE_AUTHORITY='attended'

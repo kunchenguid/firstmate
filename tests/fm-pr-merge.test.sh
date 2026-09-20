@@ -3218,3 +3218,79 @@ test_away_record_cannot_change_between_the_authority_read_and_the_merge
 test_a_grant_revoked_before_the_merge_refuses_it
 test_merge_refuses_when_the_away_record_cannot_be_locked
 test_allow_red_refused_on_gitlab
+
+# A task held for the captain in this home's backlog. The gate reads the hold as
+# the revocation of standing merge authority, so a held yolo=on task must never
+# merge and must never resolve to the yolo authority.
+write_captain_hold_row() {  # <case_dir> <task-id> [<reason>]
+  local case_dir=$1 id=$2 reason=${3:-held for the captain}
+  printf '%s\n' '## In flight' '' \
+    "- [ ] $id - Held task (repo: firstmate) (kind: ship) (hold: $reason) (hold-kind: captain)" '' \
+    '## Queued' '' '## Done' > "$case_dir/home/data/backlog.md"
+}
+
+# A task's standing merge authority is decided at intake, but a captain hold is
+# the revocation that outranks it. Whatever the recorded yolo posture says, a
+# task firstmate has held for the captain's decision must refuse the merge and
+# must never reach the forge.
+test_yolo_does_not_override_a_captain_hold() {
+  local case_dir rc
+  case_dir=$(make_case yolo-held)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 7171717171717171717171717171717171717171
+  : > "$case_dir/gh.log"
+  : > "$case_dir/gh-axi.log"
+  printf '\nyolo=on\n' >> "$case_dir/state/task-x1.meta"
+  write_captain_hold_row "$case_dir" task-x1
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/71 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "yolo-held: a captain hold must refuse the merge"
+  assert_grep 'still held for the captain' "$case_dir/stderr" \
+    "yolo-held: the refusal did not name the captain hold"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "yolo-held: gh pr merge ran despite the captain hold"
+  pass "a captain hold revokes standing yolo merge authority"
+}
+
+# The recorded authority must agree with the hold everywhere it is read, not
+# only at the merge command. Under an away posture a held yolo=on task resolves
+# to no authority at all, while an identical unheld task beside it still
+# resolves to the yolo posture the record grants.
+test_held_authority_is_not_resolved_as_yolo() {
+  local case_dir out
+  case_dir=$(make_case held-authority-not-yolo)
+  printf '\npr=https://github.com/example/repo/pull/72\n' >> "$case_dir/state/task-x1.meta"
+  fm_write_meta "$case_dir/state/task-x2.meta" \
+    "window=fm-task-x2" \
+    "worktree=$case_dir/wt2" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "yolo=on" \
+    "pr=https://github.com/example/repo/pull/73"
+  printf '\nyolo=on\n' >> "$case_dir/state/task-x1.meta"
+  write_captain_hold_row "$case_dir" task-x1
+  write_away_record "$case_dir"
+
+  out=$(FM_ROOT_OVERRIDE="$ROOT" \
+    FM_HOME="$case_dir/home" \
+    FM_STATE_OVERRIDE="$case_dir/state" \
+    FM_DATA_OVERRIDE="$case_dir/home/data" \
+    FM_CONFIG_OVERRIDE="$case_dir/home/config" \
+    "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input 2>/dev/null) \
+    || fail "held-authority: the contribution view could not be built"
+
+  printf '%s' "$out" | jq -e '[.tasks[] | select(.id=="task-x1")][0].merge_authority != "yolo"' >/dev/null \
+    || fail "held-authority: a held task still resolved to the yolo merge authority"
+  printf '%s' "$out" | jq -e '[.tasks[] | select(.id=="task-x2")][0].merge_authority == "yolo"' >/dev/null \
+    || fail "held-authority: an unheld task beside the held one lost its own yolo resolution"
+  pass "a captain hold is the authority's revocation, not a bypassed flag"
+}
+
+test_yolo_does_not_override_a_captain_hold
+test_held_authority_is_not_resolved_as_yolo

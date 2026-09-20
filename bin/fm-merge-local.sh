@@ -10,7 +10,9 @@
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
 # The task's existing per-task control lock serializes the captain-hold check
-# through that fast-forward. A still-held or unreadable row refuses before the
+# through that fast-forward. The hold predicate is shared with the PR merge gate
+# through bin/fm-merge-authority-lib.sh, so a recorded hold revokes standing
+# authority in one place; a still-held or unreadable row refuses before the
 # merge, so a captain approval must be recorded as an `answer --release` before
 # this entrypoint is invoked. The lock ends when the fast-forward returns;
 # docs/captain-hold-lifecycle.md owns the accepted merge-to-cleanup residual.
@@ -25,6 +27,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+# shellcheck source=bin/fm-merge-authority-lib.sh
+. "$SCRIPT_DIR/fm-merge-authority-lib.sh"
 if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
   echo "error: invalid local merge request" >&2
   exit 2
@@ -116,8 +120,7 @@ fi
 
 before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 hold_status=0
-FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-  "$SCRIPT_DIR/fm-captain-hold.sh" open "$ID" --distinguish-absent || hold_status=$?
+fm_merge_authority_captain_hold "$FM_HOME" "$STATE" "$ID" || hold_status=$?
 case "$hold_status" in
   0)
     echo "error: task $ID is still held for the captain; release it before merging" >&2
