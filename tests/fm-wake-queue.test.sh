@@ -373,7 +373,43 @@ EOF
     || fail "declared external-wait rows fed the secondmate wake-loop escalation"
   ! grep -F 'secondmate wake-loop stalled' "$dir/watch-first.out" "$dir/watch-second.out" >/dev/null \
     || fail "a declared external wait was mislabeled as a stalled wake loop"
-  pass "declared external-wait pause rows do not feed secondmate wake-loop escalation"
+
+  # The half written while liveness is fail-open is deliberately outside this
+  # exclusion. The rows above speak for a lane whose agent is CONFIRMED gone, so
+  # nothing there can drain the mate's queue and the row's own bounded cadence
+  # re-rings it; a lane whose agent is merely not confirmed gone may still be
+  # draining, so its recheck is ordinary evidence. bin/fm-watch.sh's
+  # declared_wait_recheck_reason keeps the not-confirmed-gone clause that holds
+  # that wording out of this class, and without this direction the exclusion could
+  # be widened to every parked lane in the mate's home - a silently larger blind
+  # spot - with every assertion above still passing.
+  dir=$(make_case secondmate-live-declared-pause-queue)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state" "$dir/fakebin"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nhome=%s\n' "$sub" > "$state/mate.meta"
+  cp "$fakebin/date" "$dir/fakebin/date"
+  fakebin="$dir/fakebin"
+  printf '100\t7\tstale\tfleet:w2:p4\tstale: fleet:w2:p4 (paused 3613s, awaiting external - the agent is not confirmed gone, declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds)\n' \
+    > "$sub/state/.wake-queue"
+  printf '1000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-live-first.out" 2> "$dir/watch-live-first.err" || true
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "the first observation of a live parked lane's recheck alerted before any no-progress interval"
+  printf '5000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-live-second.out" 2> "$dir/watch-live-second.err" || true
+  grep -F 'secondmate wake-loop stalled' "$dir/watch-live-second.out" >/dev/null \
+    || fail "a live parked lane's recheck was excluded from stall evidence like a dead lane's: $(cat "$dir/watch-live-second.out")"
+  pass "declared external-wait pause rows do not feed secondmate wake-loop escalation, while a live parked lane's recheck still does"
 }
 
 # A retired mate reprovisioned under the same task id gets a fresh home, so its

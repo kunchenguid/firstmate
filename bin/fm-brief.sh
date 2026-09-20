@@ -394,7 +394,12 @@ The report is the only thing that survives, so anything worth keeping must be in
    known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
    treating it as a possible wedge. When you know when the wait clears, say so in the line with
-   \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) and firstmate rechecks at that time instead.
+   \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) and firstmate rechecks at that time instead. Past that time
+   the long cadence holds only while something other than your pane still shows work - an active
+   run attributed to you, tool progress, or files appearing in your worktree - and the recheck
+   says your estimate slipped. A lane that is quiet past its own declared time is treated as MORE
+   suspicious than one that never named a time and is escalated with the declaration named, so
+   name a time you can beat and append a fresh \`$PAUSED_VERB:\` line when it slips.
    Use \`blocked:\` when you are stuck and need help.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
