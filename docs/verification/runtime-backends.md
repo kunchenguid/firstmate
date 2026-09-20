@@ -155,6 +155,33 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
 This is runtime-adapter evidence only.
 It does not claim that a live cross-account route, destination account, authentication source, or worker has been installed or qualified.
 
+### Restricted route executable fingerprint
+
+The account-task fingerprint boundary was verified on 2026-09-20 on macOS 26.5.2 arm64 against the official Node v24.18.0 Darwin-arm64 executable from the checksum-pinned `node-v24.18.0-darwin-arm64.tar.xz` archive.
+The executable was 120,965,360 bytes with SHA-256 `ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a`.
+The regression proved that an exact 128 MiB single file and an exact 256 MiB multi-file guard are accepted, one byte beyond either bound is refused, a byte change changes the fingerprint, and the official executable is fingerprinted through the same public command.
+
+```sh
+FM_ACCOUNT_TASK_OFFICIAL_NODE=/absolute/path/to/node-v24.18.0-darwin-arm64/bin/node \
+  bin/fm-test-run.sh tests/fm-account-task.test.sh
+```
+
+Observed bounded output:
+
+```text
+........................
+----------------------------------------------------------------------
+Ran 24 tests in 44.466s
+
+OK
+ok - restricted account-task protocol, identity, replay, control and rollback
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=44770
+```
+
+The portable suite always exercises both allocation boundaries with invented sparse files.
+The exact official-artifact case requires `FM_ACCOUNT_TASK_OFFICIAL_NODE` so network-free CI never downloads a runtime executable.
+This evidence proves only bounded fingerprint compatibility and does not qualify a live route, account, credential, or worker.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.

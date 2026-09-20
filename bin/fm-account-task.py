@@ -43,8 +43,10 @@ ship is no-mistakes, yolo off. No raw command, secondmate, automatic restart,
 merge, delete, discard, service lifecycle or generic file read is exposed.
 Runtime Firstmate surfaces, home config, repo .git/config and every required
 mutable executable must be pinned guards. System utilities and the remaining
-import/history/auth/OS isolation facts belong to the attended receipt. Any pinned
-source or dependency change invalidates admission.
+import/history/auth/OS isolation facts belong to the attended receipt. Guard
+fingerprints allow at most 20,000 entries, 128 MiB per regular file and 256 MiB
+of regular-file bytes in total. Any pinned source or dependency change
+invalidates admission.
 
 Ledger: home/state/account-route/{lock,ledger.json}; private owner-only files.
 The ledger pins the ENTIRE installed binding. Once disabled/drifted it cannot be
@@ -222,7 +224,7 @@ def fingerprint(path, uid, owned=False):
             for child in sorted(entry.iterdir()):
                 walk(child, name + "/" + child.name)
         else:
-            raw = read_file(entry, uid, 64 * 1024 * 1024)
+            raw = read_file(entry, uid, 128 * 1024 * 1024)
             total += len(raw)
             require(total <= 256 * 1024 * 1024, "guard-too-large")
             h.update(b"file\0" + hashlib.sha256(raw).digest())

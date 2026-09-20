@@ -132,6 +132,94 @@ def canon(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode()
 
 
+class FingerprintLimitTest(unittest.TestCase):
+    LIMIT = 128 * 1024 * 1024
+    OFFICIAL_NODE_SIZE = 120965360
+    OFFICIAL_NODE_SHA256 = 'ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a'
+
+    def setUp(self):
+        scratch = ROOT / '.no-mistakes'
+        scratch.mkdir(exist_ok=True)
+        self.temp = tempfile.TemporaryDirectory(prefix='account-fingerprint-test-', dir=scratch)
+        self.a = Path(self.temp.name).resolve()
+        self.a.chmod(0o700)
+        self.script = ROOT / 'bin/fm-account-task.py'
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def sparse(self, name, size):
+        path = self.a / name
+        with path.open('wb') as stream:
+            stream.truncate(size)
+        path.chmod(0o600)
+        return path
+
+    def fingerprint(self, path):
+        return subprocess.run([PYTHON, '-I', str(self.script), 'digest', str(path)],
+                              capture_output=True)
+
+    def test_exact_file_and_total_fingerprint_bounds(self):
+        exact = self.sparse('exact-file', self.LIMIT)
+        accepted = self.fingerprint(exact)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout)
+        with exact.open('r+b') as stream:
+            stream.seek(self.LIMIT - 1)
+            stream.write(b'x')
+        changed = self.fingerprint(exact)
+        self.assertEqual(changed.returncode, 0, changed.stdout)
+        self.assertNotEqual(changed.stdout, accepted.stdout)
+
+        oversized = self.sparse('oversized-file', self.LIMIT + 1)
+        refused = self.fingerprint(oversized)
+        self.assertEqual(refused.returncode, 78, refused.stdout)
+        self.assertEqual(json.loads(refused.stdout)['refused'], 'unsafe-file')
+
+        tree = self.a / 'total-bound'
+        tree.mkdir(mode=0o700)
+        for name in ('one', 'two'):
+            path = tree / name
+            with path.open('wb') as stream:
+                stream.truncate(self.LIMIT)
+            path.chmod(0o600)
+        at_total = self.fingerprint(tree)
+        self.assertEqual(at_total.returncode, 0, at_total.stdout)
+        write(tree / 'three', 'x')
+        over_total = self.fingerprint(tree)
+        self.assertEqual(over_total.returncode, 78, over_total.stdout)
+        self.assertEqual(json.loads(over_total.stdout)['refused'], 'guard-too-large')
+
+    @unittest.skipUnless(os.environ.get('FM_ACCOUNT_TASK_OFFICIAL_NODE'),
+                         'FM_ACCOUNT_TASK_OFFICIAL_NODE is not set')
+    def test_official_node_v24180_darwin_arm64_artifact(self):
+        node = Path(os.environ['FM_ACCOUNT_TASK_OFFICIAL_NODE']).resolve()
+        self.assertEqual(node.stat().st_size, self.OFFICIAL_NODE_SIZE)
+        node_hash = hashlib.sha256()
+        with node.open('rb') as stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    break
+                node_hash.update(chunk)
+        self.assertEqual(node_hash.hexdigest(), self.OFFICIAL_NODE_SHA256)
+        version = subprocess.run([str(node), '--version'], capture_output=True, check=True)
+        self.assertEqual(version.stdout, b'v24.18.0\n')
+        accepted = self.fingerprint(node)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout)
+
+        changed = self.a / 'node-mutated'
+        shutil.copyfile(node, changed)
+        changed.chmod(0o700)
+        with changed.open('r+b') as stream:
+            stream.seek(self.OFFICIAL_NODE_SIZE - 1)
+            original = stream.read(1)
+            stream.seek(self.OFFICIAL_NODE_SIZE - 1)
+            stream.write(bytes([original[0] ^ 1]))
+        mutated = self.fingerprint(changed)
+        self.assertEqual(mutated.returncode, 0, mutated.stdout)
+        self.assertNotEqual(mutated.stdout, accepted.stdout)
+
+
 class RouteTest(unittest.TestCase):
     def setUp(self):
         scratch = ROOT / '.no-mistakes'
