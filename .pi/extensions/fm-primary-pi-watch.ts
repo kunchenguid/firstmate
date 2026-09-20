@@ -51,6 +51,7 @@ import {
   calmTranscriptClassIsVisible,
   FIRSTMATE_CALM_PRESENTATION_EVENT,
 } from "./lib/fm-calm-visibility.ts";
+import { installTransportRecovery } from "./lib/fm-transport-recovery.ts";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.ts";
 
 type ArmResult = {
@@ -504,6 +505,7 @@ const cleanupOnProcessExit = () => {
 process.once("exit", cleanupOnProcessExit);
 
 export default function (pi: ExtensionAPI) {
+  installTransportRecovery(pi, `${config}/transport-recovery.json`, () => lockOwnership() === "owned");
   let generation = createGeneration();
   activateGeneration(generation);
 

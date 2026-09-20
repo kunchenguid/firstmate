@@ -1256,3 +1256,21 @@ Only after those retries exhaust does it remove the lock, and only when it is pr
 A live lock, a missing `lsof`, any failed check, or any other fetch failure keeps today's behavior.
 Every wait, retry, and removal is printed to stderr, and a successful recovery also prints one `recovered:` summary line to stdout so a session-start refresh - which discards fleet-sync stderr and relays only stdout - still surfaces it.
 The shared staleness proof lives in `bin/fm-lock-lib.sh`, which both `fm-teardown.sh` and `fm-fleet-sync.sh` use.
+
+## Pi transport recovery
+
+The primary Pi watch extension reads optional, home-local `config/transport-recovery.json`; absent or malformed configuration leaves recovery disabled.
+`{"mode":"diagnostics"}` records at most 32 privacy-safe `fm-transport-recovery` session entries per session activation, outside model context.
+Entries contain only fixed route names, result codes, attempt counts, a safe-run flag, and request byte counts.
+
+`{"mode":"muse-to-gemini","exactGeminiIdentityVerified":true}` additionally permits one session-only transition from `cliproxyapi/muse-spark-1.3` to subscription-backed `antigravity/gemini-3.8-flash` at `high` effort after at least two confirmed terminal pre-stream transport failures in one run and after Pi's own automatic retries and queued continuations fully settle.
+Enable this only after proving the installed Gemini provider preserves the requested identity without silently mapping to another model and that subscription auth is available.
+The target must be registered and within the session's model scope, the home lock must be owned, and Pi must expose the guarded `setModelIfCurrent` API that checks session, source model, cancellation, and intervening mutations again after authentication.
+Older Pi versions fail closed; ordinary `setModel` is not a safe substitute because authentication can yield before it changes the session model.
+
+The provider must mark the final failure with `terminal:true`, `eventsEmitted:false`, and `phase:before_message_stream_start` in a `provider_transport_failure` diagnostic.
+An earlier WebSocket failure followed by successful SSE or an unclassified SSE/auth failure is insufficient.
+Any streamed content, tool execution, cancellation, unknown phase, user input, model selection, or session replacement disqualifies the affected run.
+The switch does not resend prompts, execute tools, acknowledge durable instructions, or change the supervision branch model; the next ordinary stock wake uses Gemini.
+Metered GLM is a manual third-line decision and is never selected automatically by this policy.
+Refresh offline lifecycle proof with `bash tests/fm-transport-recovery.test.sh` and the guarded Pi API's faux-provider tests before considering live activation.
