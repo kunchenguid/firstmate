@@ -135,7 +135,7 @@ sha256_text() { # <text>
 receipt_lock_acquire() {
   local attempt=0 owner
   mkdir -p "$FM_HOME/state" 2>/dev/null || return 1
-  while [ "$attempt" -lt 40 ]; do
+  while [ "$attempt" -lt 7 ]; do
     if ln -s "$$" "$RECEIPT_LOCK" 2>/dev/null; then
       RECEIPT_LOCK_HELD=1
       return 0

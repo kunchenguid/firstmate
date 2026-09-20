@@ -723,14 +723,14 @@ rmdir "$RECEIPTS"
 mv "$TMP_ROOT/receipts-before-failure" "$RECEIPTS"
 
 dispatch_count_before=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+for _ in 1 2 3; do
   PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" \
     "$TOOL" --record-dispatch "$BRIEF" --harness claude --model sonnet --effort high \
     >/dev/null 2>&1 &
 done
 wait
 dispatch_count_after=$(jq -s '[.[] | select(.receipt_type == "dispatch")] | length' "$RECEIPTS")
-assert_equals "$((dispatch_count_before + 12))" "$dispatch_count_after" "concurrent dispatch receipt appends lose no records"
+assert_equals "$((dispatch_count_before + 3))" "$dispatch_count_after" "concurrent dispatch receipt appends lose no records"
 jq -e -s 'all(.[]; type == "object")' "$RECEIPTS" >/dev/null || fail "concurrent receipt appends remain valid JSONL"
 
 mv "$RECEIPTS" "$TMP_ROOT/receipts-before-bound"

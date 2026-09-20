@@ -79,25 +79,25 @@ The harness below separates the moment the resolver's first stdout byte is reada
 
 | Measure | Result |
 | --- | --- |
-| Resolve run, receipts idle: first stdout byte | 182 to 227 ms |
-| Resolve run, receipts idle: receipt work after the block | 51 to 70 ms |
-| Resolve run, lock held by a live owner: receipt work after the block, then dropped | 616 to 694 ms |
-| Brief and rules content hashes, taken before the block | 3 to 8 ms |
-| A `--record-dispatch` join run, end to end | 96 to 104 ms |
+| Resolve run, receipts idle: first stdout byte | 173 to 184 ms |
+| Resolve run, receipts idle: receipt work after the block | 49 to 50 ms |
+| Resolve run, lock held by a live owner: receipt work after the block, then dropped | 132 to 138 ms |
+| Brief and rules content hashes, taken before the block | 3 ms |
+| A `--record-dispatch` join run, end to end | 88 to 90 ms |
 
-The receipt costs tens of milliseconds of the resolver's own process lifetime, not a few, and a contended lock costs most of a second before the record is dropped.
+The receipt costs tens of milliseconds of the resolver's own process lifetime, not a few.
 Neither figure reaches stdout: the block is complete and readable at the first number in every case, and exit status is 0 throughout.
-One `jq -cn` to build the record dominates the idle figure; the full retry budget dominates the contended one.
+One `jq -cn` to build the record dominates the idle figure; the retry budget dominates the contended one.
 
-The lock retry budget is 40 attempts because that is the smallest value that loses no record.
-Twelve concurrent `--record-dispatch` runs against a seeded receipts file lost one record of 180 at 25 attempts, and none of 480 at 30, 40, or 50.
+The lock retry budget is 7 attempts because that is the smallest value that loses no record at the concurrency an intake actually produces, which is one resolve and one post-spawn join per brief.
+Three concurrent `--record-dispatch` runs against a seeded receipts file lost 7 records of 300 at 5 attempts and 1 of 300 at 6 attempts, and none of 900 at 7.
 
 ```console
 $ bash receipt-cost.sh   # the harness below, saved to a scratch file and run from the repository root
-idle:      stdout 182 ms, exit 233 ms, receipt 51 ms after the block
-locked:    stdout 172 ms, exit 788 ms, receipt 616 ms after the block, then dropped
+idle:      stdout 173 ms, exit 222 ms, receipt 49 ms after the block
+locked:    stdout 184 ms, exit 316 ms, receipt 132 ms after the block, then dropped
 hashes:    3 ms before the block
-join run:  104 ms end to end
+join run:  90 ms end to end
 ```
 
 The harness, run from the repository root:
