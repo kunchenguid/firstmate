@@ -90,6 +90,8 @@ Ordinary workers are created as tabs directly in that exact workspace. New spawn
 
 Herdr 0.9.0/protocol 22 does not provide verified workspace-scoped Agents filtering or a native FirstMate-home ownership relationship. Agents-view grouping must therefore remain cosmetic; FirstMate uses the durable binding and exact endpoint metadata instead.
 
+`tests/fm-herdr-home-binding.test.sh` covers the binding snapshot's field validation, first-claim and adoption paths, and refusal of stale, missing, contradictory, or ambiguous ownership.
+
 ## Legacy presentation spaces
 
 Legacy presentation journals and cleanup remain readable for existing tasks, but new spawns no longer create disposable one-task workspaces.
