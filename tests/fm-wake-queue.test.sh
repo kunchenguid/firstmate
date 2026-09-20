@@ -1661,10 +1661,12 @@ test_self_announced_append_guards() {
 # own byte ranges, so the watcher's span classification never reports the
 # answers. The fold alone does not mark the worker's decisions seen, because
 # any actor's drain folds: a folded decision this home has not answered still
-# classifies as a new signal. Once the watcher has classified the span, the
-# owned answers stay quiet and a later worker line wakes.
+# classifies as a new signal. Once the watcher has classified the worker's
+# decisions and nothing beyond them, only the owned-append ledger can vouch
+# for the two answers sitting past that offset, and a later worker line past
+# the recorded ranges still wakes.
 test_separate_self_announced_answers_after_fold_are_owned() {
-  local dir state status rc events
+  local dir state status rc events pre_answer ident
   dir=$(make_case multi-answer-owned)
   state="$dir/state"
   status="$state/t.status"
@@ -1685,6 +1687,7 @@ test_separate_self_announced_answers_after_fold_are_owned() {
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
     && fail "a fold alone marked unclassified worker decisions as seen"
 
+  pre_answer=$(wc -c < "$status" | tr -d '[:space:]')
   rc=0
   run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
     'resolved [key=k1]: answered: REST' || rc=$?
@@ -1701,10 +1704,14 @@ test_separate_self_announced_answers_after_fold_are_owned() {
   [ "$events" = 'needs-decision [key=k3]: pick a database' ] \
     || fail "the span classification reported more than the unanswered decision: $events"
 
-  run_wake_lib fm_wake_status_mark_current "$state" "$status" \
-    || fail "could not record the watcher classifying the decisions"
+  ident=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"; _fm_open_decisions_file_ident "$2"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$status") \
+    || fail "could not read the status identity"
+  run_wake_lib fm_wake_status_seen_commit "$state" "$status" "$pre_answer" "$ident" \
+    || fail "could not record the watcher classifying the worker's decisions"
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
-    || fail "the owned answers were left to re-wake this home"
+    || fail "the owned answers past the classified offset were left to re-wake this home"
 
   printf 'blocked [key=creds]: need staging credentials\n' >> "$status"
   run_wake_lib fm_wake_signal_seen_current "$state" "$status" \

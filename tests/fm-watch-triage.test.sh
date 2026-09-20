@@ -1630,9 +1630,12 @@ test_folded_worker_decision_without_home_append_still_wakes() {
 
 # Two distinct --resolve-key answers to decisions the watcher never classified
 # leave the marker alone, since a fold is no proof the watcher's owner saw them.
-# That costs one wake for the worker's decisions, not one per answer: the
-# answers are this home's owned ranges. Once the watcher surfaced the
-# decisions, the owned answers stay quiet and the next real note still wakes.
+# That costs one wake for the worker's decisions, not one per answer, because
+# both answers ride inside the same surfaced span; the watcher's own commit
+# then covers them, so the next cycle is quiet and the next real note still
+# wakes. The ledger's separate job - vouching for owned bytes the watcher has
+# NOT classified - is pinned at library level by
+# test_separate_self_announced_answers_after_fold_are_owned.
 test_separate_self_announced_answers_after_fold_wake_once() {
   local dir state fakebin out status_file pid rc answer
   dir=$(make_case multi-answer-fold); state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"
