@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Contract: parsed .no-mistakes.yaml must leave commands.test absent or empty
+# Contract: parsed .no-mistakes.yaml must leave the commands.test key absent
 # and must define a non-empty test.instructions value under the test key.
 set -u
 
@@ -14,12 +14,11 @@ test_nm_has_no_deterministic_test_command() {
   local val
   val=$(ruby -ryaml -e '
 doc = YAML.load_file(ARGV[0]) || {}
-cmds = doc["commands"] || {}
-val = cmds.is_a?(Hash) ? cmds["test"] : nil
-puts (val.nil? || val == false || val == "") ? "" : val.inspect
+cmds = doc["commands"]
+puts (cmds.is_a?(Hash) && cmds.key?("test")) ? cmds["test"].inspect : ""
 ' "$NM") || fail "failed to parse .no-mistakes.yaml as YAML"
   if [ -n "$val" ]; then
-    fail "commands.test must be absent or empty so Test stays intent-targeted; got: $val"
+    fail "commands.test must be absent so Test stays intent-targeted; got: $val"
   fi
   pass "no-mistakes does not configure commands.test"
 }
