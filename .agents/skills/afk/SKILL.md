@@ -2,7 +2,7 @@
 name: afk
 description: >-
   Enter the away posture when the captain invokes /afk, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It reads the captain's away words back as a mandate, writes the durable away-posture record after their go, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (on Pi the supervision branch takes every safe actionable wake with main parked; the daemon still delivers batched digests on the other harnesses for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes.
+  It records the captain's away words verbatim as the whole mandate, reads them back in plain sentences, writes the durable away-posture record after their go, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (on Pi the supervision branch acts on the words by its own judgment and takes every safe actionable wake with main parked; the daemon still delivers batched digests on the other harnesses for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes.
 user-invocable: true
 metadata:
   internal: true
@@ -11,33 +11,26 @@ metadata:
 # afk
 
 Away mode is a POSTURE of the one supervision session, not a second architecture.
-Being away changes exactly two things: how the captain is informed, and what happens at a captain-owned decision point (hold for return, or later a pre-answered clause).
+Being away changes exactly two things: how the captain is informed, and what happens at a captain-owned decision point (hold for return, or the answer the captain's away words already gave).
 It never changes the authority set.
 The posture is a file, `state/.afk-contract`, written only by `bin/fm-afk-contract.sh` after the captain confirms a read-back; nothing infers the posture from chat.
 Hold-for-return is the default and the only reach profile this release records: there is no phone channel, and the entry announcement says so aloud every time.
 
 ## Entering: `/afk [words]`
 
-1. **Translate the captain's words into mandate clauses.**
-   The words are recorded verbatim; the clauses are your reading of them as explicit fields `bin/fm-afk-contract.sh` records: an action from its fixed verb list, the object in the captain's words, and the stated precondition in the captain's words, plus an optional stop.
-   Read `bin/fm-afk-contract.sh --help` for the field flags, verb list, and coarse best-effort never-set flag rather than memorizing them.
-   No static parser reads the object or precondition text, by the captain's mandate: you supply the fields, the script records them verbatim, checks structural presence and the verb list, and may flag obvious never-set concepts without treating that best-effort scan as authoritative.
-   A flagged clause is still recorded, never refused, and the read-back and return brief show the flag; the flag can miss spellings, including joined compounds such as `oneTimeCode`, never fires on unrelated names such as `ping-service`, and authoritative never-set, forbidden-action, and precondition judgment belongs to the supervision session at execution time in phase 4.
-   Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.
-   Write only clauses the words actually support; a wish with no object or no stated precondition is not a clause.
-   Plain `/afk` with no words has no clauses.
+1. **Record the captain's words, verbatim.**
+   The words are the whole mandate: `bin/fm-afk-contract.sh` records them exactly as given, with no clause fields, verbs, ids, or merge-grant list, and by the captain's mandate no parser, tokenizer, classifier, or grammar reads them anywhere.
+   Read `bin/fm-afk-contract.sh --help` for the flags rather than memorizing them.
+   Plain `/afk` with no words is a valid entry with no mandate.
 2. **Propose and read back.**
-   Run `bin/fm-afk-launch.sh propose --words-file <path> [--action <verb> --object <text> --when <text> [--stop <text>]]... [--expected-return <UTC ISO 8601>] [--spend <n>] [--grant <task-id>]...` (or `--words <text>`), and relay its read-back to the captain in `AGENTS.md` section 9 language: the accepted clauses as a numbered list, every refused clause with the part it is missing, the expected return, the spend cap, any merge-when-green task ids, and the one-sentence reach announcement.
-   When the captain names task ids that may merge while green, pass `--grant <id>` for each named id.
-   Never infer task ids from clause prose, object text, or the away words.
-   Red-check exceptions stay in the words or clause `when` text and are not executed.
-   A refused clause does not fail the proposal; the captain can restate it or leave it refused.
-   Exit 3 only means a clause was refused; the proposal stands.
+   Run `bin/fm-afk-launch.sh propose --words-file <path> [--expected-return <UTC ISO 8601>] [--spend <n>]` (or `--words <text>`); it writes the proposal and prints the record's read-back.
+   Then relay your own plain-sentence restatement of the words to the captain in `AGENTS.md` section 9 language - what you read them as asking for, sentence by sentence, never a numbered field list - beside the expected return, the spend cap, and the one-sentence reach announcement, so the captain can catch a misreading before saying go.
+   Say plainly which sentence, if any, you could not act on while away (a red merge, a discard, anything on the never-set, local-only landing), so the captain can restate it or accept that it waits for their return.
 3. **Confirm on the captain's go.**
    Run `bin/fm-afk-launch.sh confirm`; it promotes the proposal into the record and prints the entry announcement.
-   Relay that announcement verbatim in spirit: hold-for-return only, no phone channel, anything that needs the captain waits for their return, N clauses recorded and M refused, recorded clauses are held for the return brief and are not executed by this release, and forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text because no recorded clause is authority by itself.
-   With no words, run `propose` and `confirm` back to back; the announcement is the same.
-   Re-invoking `/afk` while already away with no new words is a refresh and leaves the standing record untouched; new words replace the mandate after the same read-back, preserve the original session entry, and archive the superseded mandate for the return brief.
+   Relay that announcement verbatim in spirit: hold-for-return only, no phone channel, your instructions are recorded and the away session will carry them out where it can, anything it is unsure of, or that needs you, waits for your return, and destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say.
+   With no words, run `propose` and `confirm` back to back; the announcement says no instructions were recorded.
+   Re-invoking `/afk` while already away with no new words is a refresh and leaves the standing record untouched; new words replace the mandate after the same read-back, preserve the original session entry, and archive the superseded words for the return brief.
 4. **Per harness, after the record exists:**
    - **Pi and pi-signed**: stop here.
      The away daemon is no longer launched on Pi; the ordinary supervision session (`docs/pi-supervision-branch.md`) keeps running with the record present, and `bin/fm-afk-launch.sh start` refuses on these harnesses.
@@ -58,10 +51,11 @@ Hold-for-return is the default and the only reach profile this release records: 
 
 - The record exists, so the watcher never rechecks an item held for the captain, in either supervision shape; the return brief lists it instead.
   Declared external waits keep their condition-aware, hours-long recheck cadence (`bin/fm-watch.sh`, `bin/fm-classify-lib.sh`).
-- Recorded clauses are not executed by this release.
-  Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, no recorded clause is authority by itself, and merge authority plus ask-user findings keep exactly the rules they have when attended (`AGENTS.md` section 7 and `ask-user-authority`); anything that needs the captain holds for their return.
-- On Pi, main is parked and the supervision branch handles every safe actionable wake under main's standing authority plus the record's merge grants, through the same guarded scripts main would use: a granted or `yolo` task merges only green at its live head, already-queued work whose blockers cleared dispatches within the spend cap, and only a finding `ask-user-authority` lets firstmate decide is answered.
-  Anything else holds for the return, local-only landing always waits for the captain, and only a wake the branch declines (including a broken branch or unsafe scan) or a watcher failure wakes main (`docs/pi-supervision-branch.md` "Postures").
+- The away session acts on the captain's words.
+  It reads them at the tail of every wake, decides by its own judgment whether the event in front of it is the moment they name, acts on them only through the guarded scripts under standing authority, never by analogy, holds with verdict captain on doubt, and opens every outcome summary for an action taken under the words with "per your away instructions:" (`bin/fm-branch-prompt.sh` "Postures" owns the execution rules).
+  Destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say, and ask-user findings keep the `ask-user-authority` policy unless the words pre-answer the exact decision; anything else that needs the captain holds for their return.
+- On Pi, main is parked and the supervision branch handles every safe actionable wake under main's standing authority, through the same guarded scripts main would use: any pull request green at its live head may merge (which one the words meant is the branch's reading), queued work whose blockers cleared - already queued, or filed by the branch because the words explicitly call for it - dispatches within the spend cap, and a decision is answered with the captain's own pre-stated answer or under `ask-user-authority`.
+  Anything else holds for the return, a red merge never proceeds while away, local-only landing always waits for the captain, and only a wake the branch declines (including a broken branch or unsafe scan) or a watcher failure wakes main (`docs/pi-supervision-branch.md` "Postures").
 - The session-start digest reports the posture under its AFK subsection, so a restart re-enters the posture from the record, not from memory.
 
 ## How to exit: the return
@@ -71,9 +65,9 @@ No `/back` is needed. The first genuine message is the return signal:
 - A message **without** the current operational prefix or a legacy bare marker, and **not** starting with `/afk` -> the captain is back.
   Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
   That script owns the correct-ordered daemon shutdown where a daemon ran, the archive of the posture record, durable wake presentation and post-handling acknowledgement, escalation and wedge evidence, the return brief, and the return-catch-up gate.
-  Relay the return brief in section 9 language and in its own order: supervisor health across the away window first (any gap leads), then every clause and that it was recorded only, then what is waiting on the captain, then what was tried and failed or could not be fixed, then what was handled, then cost.
+  Relay the return brief in section 9 language and in its own order: supervisor health across the away window first (any gap leads), then the captain's instructions verbatim with the away session's account of every action it took under them, then what is waiting on the captain, then what was tried and failed or could not be fixed, then what was handled, then cost.
   The gate keeps every open `blocked:` event until that blocker's own resolution is proven: remediate each immediately through the normal lifecycle, or explicitly reclassify it with a durable reason and close its decision key with `resolved [key=...]`, then run `bin/fm-afk-return.sh check`.
-  Captain-verdict outcomes are listed under "waiting on you", but do not exempt open blockers because per-blocker provenance is deferred to phase 4.
+  Captain-verdict outcomes are listed under "waiting on you", but do not exempt open blockers: per-blocker provenance is deferred with no owner, and the gate fails safe by keeping every open blocker.
   Once the record is archived, resume full per-wake responsiveness through the emitted primary-harness supervision protocol while blocker handling proceeds, so the gate never creates a blind wait.
   A Bearings request may be answered while the gate is open, and the digest surfaces the catch-up state as a Charted Next `(return-catchup)` warning row naming what still holds it.
   Acting on the fleet - dispatching, steering, merging, or any other ordinary captain work - still waits until the check exits successfully.
@@ -88,14 +82,13 @@ When the captain wants this same token-saving supervision while staying present 
 afk changes how the captain is informed and what happens at a captain-owned decision point, **not who approves what**.
 "Away" never means "approves more" or "approves less."
 A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a needs-decision finding keeps the `ask-user-authority` policy; anything requiring the captain still waits for the captain's explicit word.
-While the away-posture record exists, a merge proceeds only when that task's recorded yolo posture is on or its id is in the record's merge-grant list; otherwise it is held for the captain's return.
-A merge grant never releases a captain hold, and it expires when the away record is archived.
+While the away-posture record exists, any pull request green at its live head may merge under away authority; which one the captain's words meant is the away session's reading, and a merge the words do not call for holds for the return.
+Away authority never releases a captain hold, and it expires when the away record is archived.
 `--allow-red` remains attended-only and is refused while the record exists.
 A merge under away authority must be synchronous; `fm-pr-merge.sh` refuses auto-merge and any GitHub queue state that cannot prove an immediate merge while the record exists.
 The same gates bind whichever actor performs the action: on Pi the parked main's standing authority relocates to the supervision branch, which meets exactly these rules, and the spend cap recorded at entry is enforced by `fm-spawn.sh` for both actors while the record exists.
-A mandate clause is the captain's explicit instruction given before leaving, recorded with its named object and condition; a clause is never inferred, never applied by analogy, and expires at return.
-Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself.
-This release records clauses and does not execute them.
+The captain's away words are their explicit instruction given before leaving, recorded verbatim and acted on by the away session's judgment at the moment an event makes them relevant; the words cover nothing they do not say, are never applied by analogy, and die at archive.
+Destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say.
 
 ## The daemon, where it still runs
 

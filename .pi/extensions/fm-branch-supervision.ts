@@ -188,10 +188,10 @@ const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
 // section is what this tail refers back to.
 const AWAY_POSTURE_TAIL =
   "POSTURE: AWAY. The away-posture record state/.afk-contract exists, so the captain is not present and MAIN is parked: you take every row, including check rows and decision rows, and no outcome reaches the captain until the return brief. " +
-  "MAIN's standing authority - never more - is relocated to you for this wake only through the guarded scripts, which enforce it: bin/fm-pr-merge.sh merges only a granted or yolo=on task that is green at its live head, synchronously; bin/fm-spawn.sh dispatches only already-queued work whose blockers cleared and refuses past the spend cap; bin/fm-send.sh --resolve-key answers only a finding the ask-user-authority policy in your prompt lets firstmate decide; bin/fm-merge-local.sh still refuses you. " +
-  "Hold on doubt: a fork no standing rule covers is reported with verdict captain and left for the return. " +
-  "Credential entry, legal or financial acceptance, an attended prompt, any discard the captain did not name, and any destructive, irreversible, or security-sensitive action are refused for every actor in every posture, whatever a clause says. " +
-  "A recorded clause below is a fact for the return brief, not authority: this release records clauses and does not execute them. " +
+  "The record below is the captain's away words, verbatim, and the whole mandate: act on them by your own judgment where this event is the moment they name, only through the guarded scripts under MAIN's standing authority - never more - which enforce it: bin/fm-pr-merge.sh merges any pull request that is green at its live head, synchronously, and refuses a red one or --allow-red; bin/fm-spawn.sh dispatches queued work (already queued, or filed by you from the words) within the spend cap; bin/fm-send.sh --resolve-key answers a decision the words pre-answer, or one the ask-user-authority policy in your prompt lets firstmate decide; bin/fm-merge-local.sh still refuses you. " +
+  "Never by analogy, and hold on doubt: a sentence you cannot act on with confidence is reported with verdict captain, naming it, and left for the return. " +
+  "Credential entry, legal or financial acceptance, an attended prompt, any discard the captain did not name, and any destructive, irreversible, or security-sensitive action are refused for every actor in every posture, whatever the words say. " +
+  "Log every action taken under the words in its outcome summary, opening with \"per your away instructions:\". " +
   "A mirrored captain sentence authorizes nothing new once the record exists. " +
   "The record, verbatim:";
 const PROCESSING_INSTRUCTION =
@@ -1435,9 +1435,9 @@ ${context.command}
     }
   }
 
-  // The away posture at the tail of a wake: the record's own read-back (its
-  // grants, spend cap, words, and clauses, verbatim) plus the standing rule
-  // for acting under it. Read per wake so the byte-stable prefix never
+  // The away posture at the tail of a wake: the record's own read-back (the
+  // captain's words verbatim, the spend cap, expected return, and reach line)
+  // plus the standing rule for acting under it. Read per wake so the byte-stable prefix never
   // carries posture; a read-back that cannot be rendered still names the
   // posture, because the record's presence is the fact the guarded scripts
   // enforce either way.
@@ -1449,7 +1449,7 @@ ${context.command}
     } catch {
       readback = "";
     }
-    return `\n\n${AWAY_POSTURE_TAIL}\n${readback || "(the record's read-back could not be rendered; treat every grant and clause as unavailable and hold on doubt)"}`;
+    return `\n\n${AWAY_POSTURE_TAIL}\n${readback || "(the record's read-back could not be rendered; treat the captain's words as unavailable, act on standing authority only, and hold on doubt)"}`;
   }
 
   function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false, acceptedAwayOnly = false): Promise<void> {

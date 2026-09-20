@@ -2218,18 +2218,19 @@ test_merged_poll_row_carries_the_merge_authority() {
   local dir state url expected posture
   url=https://github.com/o/r/pull/1
 
-  for posture in yolo grant; do
+  # Both a yolo=on task and an ordinary one merge under the record's away
+  # authority; the words model retired the per-task grant and the yolo tag.
+  for posture in yolo words; do
     dir=$(make_case "queued-merge-authority-$posture")
     state="$dir/home/state"
     write_task_meta "$dir" task-a
     if [ "$posture" = yolo ]; then
       printf 'yolo=on\n' >> "$state/task-a.meta"
       write_away_record "$dir"
-      expected=yolo
     else
-      write_away_record "$dir" --grant task-a
-      expected=away-grant
+      write_away_record "$dir" --words 'merge task-a when green'
     fi
+    expected=away
     run_check_entry "$dir" task-a "$url" >/dev/null 2> "$dir/seed.err" \
       || fail "$posture: could not arm the merge poll"
     queue_merge "$dir" "$url"
@@ -2241,7 +2242,7 @@ test_merged_poll_row_carries_the_merge_authority() {
       || fail "$posture: published merge left its authority record behind"
   done
 
-  pass "queued merges retain yolo and away-grant after captain return"
+  pass "queued merges retain their away authority after captain return"
 }
 
 test_merged_poll_row_names_no_authority_when_no_record_grants_one() {
@@ -2367,7 +2368,7 @@ test_teardown_cannot_race_authority_consumption() {
   rc=0
   wait "$watcher_pid" || rc=$?
   [ "$rc" -eq 0 ] || fail "teardown race: watcher failed with $rc: $(cat "$dir/watch.err")"
-  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url yolo" ] \
+  [ "$(merged_ledger_row "$state" task-a)" = "check: merge landed: task-a $url away" ] \
     || fail "teardown race: concurrent cleanup downgraded the merge authority"
   pass "teardown cannot race merged-poll authority consumption"
 }

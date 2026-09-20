@@ -88,7 +88,7 @@ def projected($input; $saved; $now; $max_age):
        elif $verdict != null and $verdict.actor == "captain" then
          {actor:"fleet",reason:"record the unresolved arbitration as a captain hold"}
        elif $o.review_decision == "REVIEW_REQUIRED" then {actor:"maintainer",reason:"review required"}
-       elif $o.can_merge == true and ($merge_authority == "yolo" or $merge_authority == "away-grant") then
+       elif $o.can_merge == true and $merge_authority == "away" then
          {actor:"fleet",reason:"checks green; merge is authorized by delivery posture"}
        elif $o.can_merge == true then {actor:"captain",reason:"checks green; merge approval needed"}
        else {actor:"maintainer",reason:"delivery awaits the maintainer"} end) as $action
