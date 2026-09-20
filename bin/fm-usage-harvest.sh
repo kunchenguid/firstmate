@@ -146,6 +146,7 @@ TURNS=0
 if [ -f "$STATUS" ]; then
   while IFS= read -r line || [ -n "$line" ]; do
     status_line_verb "$line" verb
+    # shellcheck disable=SC2154 # status_line_verb assigns verb via printf -v.
     [ "$verb" != working ] || TURNS=$((TURNS + 1))
     if [ -z "$LAUNCH_EPOCH" ] && epoch=$(status_line_at_epoch "$line") && [ "$epoch" -le "$END_EPOCH" ]; then
       if [ -z "$START_EPOCH" ] || [ "$epoch" -lt "$START_EPOCH" ]; then
@@ -198,6 +199,7 @@ matched_files() {  # <dir> <maxdepth-or-empty> : print in-window *.jsonl paths
     -newer "$REFDIR/start" -print 2>/dev/null) || true
 }
 
+# shellcheck disable=SC2016 # jq expands these variables, not the shell.
 USAGE_WINDOW_FILTER='
   def in_window:
     (if .timestamp == null then $mtime

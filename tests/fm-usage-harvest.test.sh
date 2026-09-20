@@ -559,6 +559,7 @@ claude_profile_case() (
   export CLAUDE_CONFIG_DIR="$profile"
   unset FM_USAGE_CLAUDE_DIR
   if [ "$mode" = override ]; then
+    # shellcheck disable=SC2030 # This override is intentionally confined to this case's subshell.
     export FM_USAGE_CLAUDE_DIR="$override"
     logdir="$override/$encoded"
   else
@@ -585,6 +586,7 @@ launch_epoch_case() {
   printf 'working [at=%s]: setup finished\n' "$((base - 20))" > "$home/state/$id.status"
   if [ "$harness" = claude ]; then
     encoded=${wt//\//-}; encoded=${encoded//./-}
+    # shellcheck disable=SC2031 # export_harvest_env resets the directory for this case.
     logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
   else
     logdir="$FM_USAGE_CODEX_DIR/$id"
