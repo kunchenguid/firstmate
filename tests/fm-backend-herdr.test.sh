@@ -389,6 +389,18 @@ SH
   pass "fm_backend_herdr_bin: bare herdr-on-PATH behavior is unaffected when neither override is needed"
 }
 
+test_cli_helper_uses_herdr_bin_path_fallback_on_first_call() {
+  local dir log resp fb
+  dir="$TMP_ROOT/cli-helper-bin-path-fallback"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="/usr/bin:/bin" HERDR_BIN_PATH="$fb/herdr" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_cli fmtest workspace list' "$ROOT"
+  expect_code 0 $? "fm_backend_herdr_cli should succeed on its very first call for a session when herdr is off PATH but HERDR_BIN_PATH names it"
+  assert_contains "$(cat "$log")" $'\x1f''workspace'$'\x1f''list'$'\x1f''--session'$'\x1f''fmtest' \
+    "fm_backend_herdr_cli's first call for a session must consult HERDR_BIN_PATH rather than the bare 'herdr' literal"
+  pass "fm_backend_herdr_cli: falls back to HERDR_BIN_PATH on the very first call for a session, before any client has been selected"
+}
+
 # --- client selection: a stale client shadowing a compatible one -------------
 #
 # Two herdr clients on PATH is a real host shape (a self-updated ~/.local/bin
@@ -5266,6 +5278,7 @@ test_cli_helper_sets_env_and_appends_trailing_session_flag
 test_bin_prefers_fm_backend_herdr_bin_override_over_everything
 test_bin_falls_back_to_herdr_bin_path_when_herdr_is_off_path
 test_bin_ignores_herdr_bin_path_when_herdr_already_on_path
+test_cli_helper_uses_herdr_bin_path_fallback_on_first_call
 test_agent_state_bypasses_a_stale_client_shadowing_a_compatible_one
 test_recovery_grade_read_widens_only_at_its_own_boundary
 test_stale_registration_over_a_shell_only_pane_is_agent_free

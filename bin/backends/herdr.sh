@@ -389,6 +389,8 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
   shift
   if [ "${FM_BACKEND_HERDR_CLIENT_SESSION:-}" = "$session" ]; then
     client_bin=$(fm_backend_herdr_bin)
+  elif [ -n "${HERDR_BIN_PATH:-}" ] && ! command -v herdr >/dev/null 2>&1; then
+    client_bin=$HERDR_BIN_PATH
   fi
   # stderr is buffered (stdout streams untouched) so a protocol_mismatch
   # refusal can be recognized and retried once on a compatible client; see
@@ -420,7 +422,8 @@ fm_backend_herdr_cli() {  # <session> <herdr-subcommand-and-args...>
 # --- client selection --------------------------------------------------------
 #
 # Every operation routed through fm_backend_herdr_cli starts with the first
-# `herdr` on PATH, or the client already selected for that exact session. A
+# `herdr` on PATH (or HERDR_BIN_PATH, see below, when none is on PATH), or the
+# client already selected for that exact session. A
 # host can carry more than one herdr client (a self-updated copy in
 # ~/.local/bin next to a package-managed one), and the two PATH orders
 # Firstmate runs under (an interactive login shell, and the fixed remote-job
