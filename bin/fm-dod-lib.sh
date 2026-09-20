@@ -38,6 +38,12 @@
 # conflicting role is superseded rather than duplicated.
 # fm_ship_rule_one owns the mode-specific first ship safety rule shared by an
 # ordinary ship brief and the durable contract written during scout promotion.
+# FM_COMMENT_DOCS_RULE owns the comment/docs accident-test rule for code-bearing
+# work: a ship brief renders it as a rule, and scout promotion renders it as the
+# added rule a report-only scout brief never carried.
+
+# shellcheck disable=SC2034 # Read by the sourcing brief and promotion generators.
+FM_COMMENT_DOCS_RULE='Rename or restructure before adding a comment; add one only where its absence would cause a mistake. Docs must never restate a fact a machine-readable file already declares.'
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
