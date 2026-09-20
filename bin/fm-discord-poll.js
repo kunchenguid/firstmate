@@ -17,6 +17,7 @@ const fmHome = process.env.FM_HOME || process.env.FM_ROOT || ".";
 const stateDir = process.env.FM_STATE_OVERRIDE || join(fmHome, "state");
 const inboxDir = join(stateDir, "x-inbox");
 const contextDir = join(stateDir, "x-context");
+const cursorDir = join(stateDir, "x-discord");
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const xLib = join(scriptDir, "fm-x-lib.sh");
 const apiBase = (process.env.FM_DISCORD_API_BASE || "https://discord.com/api/v10").replace(/\/$/, "");
@@ -44,6 +45,46 @@ function publishPrivate(dir, base, content, mode) {
 		{ input: content, stdio: ["pipe", "ignore", "ignore"] },
 	);
 	if (result.status !== 0) throw new Error(`private artifact publication failed for ${dir}/${base}`);
+}
+
+function readPrivate(dir, base) {
+	const result = spawnSync(
+		"bash",
+		["-c", '. "$1"; fmx_private_artifact_file_valid "$2" "$3" 600 || exit 1; cat -- "$2/$3"', "fm-discord-read", xLib, dir, base],
+		{ encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+	);
+	return result.status === 0 ? result.stdout : "";
+}
+
+function claimOffer(requestId) {
+	const result = spawnSync(
+		"bash",
+		["-c", '. "$1"; fmx_offer_registry_claim "$2" "$3"', "fm-discord-offer", xLib, stateDir, requestId],
+		{ stdio: ["ignore", "ignore", "ignore"] },
+	);
+	if (result.status === 1) return false;
+	if (result.status !== 0) throw new Error(`offer publication failed for ${requestId}`);
+	return true;
+}
+
+function readCursor(channelId) {
+	const record = readPrivate(cursorDir, `${channelId}.json`);
+	if (!record) return "";
+	try {
+		const messageId = JSON.parse(record).message_id;
+		return /^\d+$/.test(String(messageId)) ? String(messageId) : "";
+	} catch (_err) {
+		return "";
+	}
+}
+
+function writeCursor(channelId, messageId) {
+	publishPrivate(
+		cursorDir,
+		`${channelId}.json`,
+		JSON.stringify({ channel_id: channelId, message_id: messageId, recorded_at: Math.floor(Date.now() / 1000) }),
+		600,
+	);
 }
 
 async function main() {
@@ -83,13 +124,21 @@ async function main() {
 		// 3. Poll each target channel
 		for (const chId of targetChannels) {
 			if (excludeIds.includes(chId)) continue;
-			const msgsRes = await fetch(`${apiBase}/channels/${chId}/messages?limit=10`, { headers: apiHeaders });
+			const query = new URLSearchParams({ limit: "10" });
+			const cursor = readCursor(chId);
+			if (cursor) query.set("after", cursor);
+			const msgsRes = await fetch(`${apiBase}/channels/${chId}/messages?${query}`, { headers: apiHeaders });
 			if (!msgsRes.ok) continue;
 			const msgs = await msgsRes.json();
 			if (!Array.isArray(msgs)) continue;
+			msgs.sort((left, right) => (BigInt(left.id) < BigInt(right.id) ? -1 : 1));
 
 			for (const msg of msgs) {
-				if (msg.author?.bot) continue;
+				if (!/^\d+$/.test(String(msg.id))) continue;
+				if (msg.author?.bot) {
+					writeCursor(chId, String(msg.id));
+					continue;
+				}
 
 				// Check if mentioned or DM
 				const isDM = !msg.guild_id;
@@ -98,20 +147,22 @@ async function main() {
 				const contentHasBotMention = msg.content && (msg.content.includes(`<@${botId}>`) || msg.content.includes(`<@!${botId}>`));
 
 				if (!isDM && !isMentioned && !contentHasBotMention) {
+					writeCursor(chId, String(msg.id));
+					continue;
+				}
+				if (isDM && !allowDms) {
+					writeCursor(chId, String(msg.id));
 					continue;
 				}
 
 				const reqId = `discord-sh-${msg.id}`;
-				const offeredFile = join(contextDir, `${reqId}.offered.json`);
-				if (existsSync(offeredFile)) {
-					continue;
-				}
 
 				// Clean text
 				let text = msg.content || "";
 				text = text.replace(new RegExp(`<@!?${botId}>`, "g"), "").trim();
 
 				if (!text && (!msg.attachments || msg.attachments.length === 0)) {
+					writeCursor(chId, String(msg.id));
 					continue;
 				}
 
@@ -156,9 +207,14 @@ async function main() {
 
 				publishPrivate(inboxDir, `${reqId}.json`, JSON.stringify(payload, null, 2), 600);
 				publishPrivate(contextDir, `${reqId}.json`, JSON.stringify(contextRecord, null, 2), 600);
-				publishPrivate(contextDir, `${reqId}.offered.json`, JSON.stringify({ request_id: reqId, recorded_at: Math.floor(Date.now() / 1000) }), 600);
+				if (!claimOffer(reqId)) {
+					writeCursor(chId, String(msg.id));
+					continue;
+				}
 
+				writeCursor(chId, String(msg.id));
 				console.log(`x-mention ${reqId}`);
+				return;
 			}
 		}
 	} catch (_err) {

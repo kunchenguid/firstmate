@@ -38,6 +38,15 @@ function publishPrivate(dir, base, content, mode) {
 	if (result.status !== 0) throw new Error(`private artifact publication failed for ${dir}/${base}`);
 }
 
+function readPrivate(dir, base) {
+	const result = spawnSync(
+		"bash",
+		["-c", '. "$1"; fmx_private_artifact_file_valid "$2" "$3" 600 || exit 1; cat -- "$2/$3"', "fm-discord-read", xLib, dir, base],
+		{ encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+	);
+	return result.status === 0 ? result.stdout : "";
+}
+
 async function main() {
 	let reqPayload = {};
 	try {
@@ -51,13 +60,15 @@ async function main() {
 	let messageId = reqPayload.message_id;
 
 	if (!channelId || !messageId) {
-		const contextFile = join(contextDir, `${reqId}.json`);
-		if (existsSync(contextFile)) {
+		const contextRecord = readPrivate(contextDir, `${reqId}.json`);
+		if (contextRecord) {
 			try {
-				const ctx = JSON.parse(readFileSync(contextFile, "utf8"));
+				const ctx = JSON.parse(contextRecord);
 				channelId = channelId || ctx.channel_id;
 				messageId = messageId || ctx.message_id;
-			} catch (_) {}
+			} catch (_err) {
+				process.exit(1);
+			}
 		}
 	}
 

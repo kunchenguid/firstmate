@@ -25,7 +25,7 @@ test_poll_no_token_is_hard_noop() {
 }
 
 test_ingestion_payload_shape_and_wake() {
-  local home inbox_file ctx_file wake_out platform source port server_pid
+  local home inbox_file ctx_file wake_out wake_next platform source port server_pid cursor_file
   home="$TMP_ROOT/ingestion-test"
   mkdir -p "$home/state"
   chmod 700 "$home/state"
@@ -33,14 +33,21 @@ test_ingestion_payload_shape_and_wake() {
   node -e '
     const http = require("node:http");
     const messages = {
-      "1000000000000000001": [{ id: "1352000000000000099", channel_id: "1000000000000000001", guild_id: "1000000000000000000", author: { username: "captain" }, content: "<@999> add login fix to backlog", mentions: [{ id: "999" }] }],
+      "1000000000000000001": [
+        { id: "1352000000000000102", channel_id: "1000000000000000001", guild_id: "1000000000000000000", author: { username: "captain" }, content: "<@999> second request", mentions: [{ id: "999" }] },
+        { id: "1352000000000000099", channel_id: "1000000000000000001", guild_id: "1000000000000000000", author: { username: "captain" }, content: "<@999> add login fix to backlog", mentions: [{ id: "999" }] }
+      ],
       "2000000000000000001": [{ id: "1352000000000000100", channel_id: "2000000000000000001", author: { username: "captain" }, content: "<@999> private request", mentions: [{ id: "999" }] }],
       "1551134713727426570": [{ id: "1352000000000000101", channel_id: "1551134713727426570", guild_id: "1000000000000000000", author: { username: "captain" }, content: "<@999> collision request", mentions: [{ id: "999" }] }]
     };
     http.createServer((req, res) => {
       let body = { id: "999" };
       const match = req.url.match(/^\/channels\/([^/]+)\/messages/);
-      if (match) body = messages[match[1]] || [];
+      if (match) {
+        body = messages[match[1]] || [];
+        const after = new URL(req.url, "http://localhost").searchParams.get("after");
+        if (after) body = body.filter((message) => BigInt(message.id) > BigInt(after));
+      }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(body));
     }).listen(0, "127.0.0.1", function () { console.log(this.address().port); });
@@ -53,11 +60,17 @@ test_ingestion_payload_shape_and_wake() {
   FM_DISCORD_ALLOWED_CHANNELS="1000000000000000001,2000000000000000001,1551134713727426570" \
   FM_DISCORD_EXCLUDES="1551134713727426570" FM_DISCORD_ALLOW_DMS=false \
   FM_DISCORD_API_BASE="http://127.0.0.1:$port" "$ROOT/bin/fm-discord-poll.sh" > "$home/wake.log"
+  wake_out=$(cat "$home/wake.log")
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DISCORD_BOT_TOKEN="fake-test-token" \
+  FM_DISCORD_ALLOWED_CHANNELS="1000000000000000001,2000000000000000001,1551134713727426570" \
+  FM_DISCORD_EXCLUDES="1551134713727426570" FM_DISCORD_ALLOW_DMS=false \
+  FM_DISCORD_API_BASE="http://127.0.0.1:$port" "$ROOT/bin/fm-discord-poll.sh" > "$home/wake-next.log"
   kill "$server_pid" 2>/dev/null || true
   wait "$server_pid" 2>/dev/null || true
 
-  wake_out=$(cat "$home/wake.log")
   assert_equals "x-mention discord-sh-1352000000000000099" "$wake_out" "wake line emitted"
+  wake_next=$(cat "$home/wake-next.log")
+  assert_equals "x-mention discord-sh-1352000000000000102" "$wake_next" "one wake per poll"
 
   inbox_file="$home/state/x-inbox/discord-sh-1352000000000000099.json"
   ctx_file="$home/state/x-context/discord-sh-1352000000000000099.json"
@@ -70,6 +83,8 @@ test_ingestion_payload_shape_and_wake() {
   assert_equals "discord-selfhosted" "$source" "inbox source"
   assert_absent "$home/state/x-inbox/discord-sh-1352000000000000100.json" "DM is ignored when disabled"
   assert_absent "$home/state/x-inbox/discord-sh-1352000000000000101.json" "excluded collision channel is ignored"
+  cursor_file="$home/state/x-discord/1000000000000000001.json"
+  assert_equals "1352000000000000102" "$(jq -r '.message_id' "$cursor_file")" "channel cursor advances durably"
 
   pass "self-hosted Discord ingestion writes x-inbox payload shape and fires x-mention wake"
 }
@@ -103,6 +118,29 @@ test_reply_dry_run_routing() {
   pass "fm-x-reply routes self-hosted Discord requests to self-hosted reply adapter"
 }
 
+test_reply_rejects_untrusted_context_link() {
+  local home req_id target payload_file out reply_stderr
+  home="$TMP_ROOT/reply-identity-test"
+  mkdir -p "$home/state/x-context"
+  chmod 700 "$home/state" "$home/state/x-context"
+  req_id="discord-sh-1352000000000000110"
+  target="$home/untrusted.json"
+  payload_file="$home/payload.json"
+  reply_stderr="$home/reply.err"
+  printf '{"channel_id":"private-channel","message_id":"private-message"}' > "$target"
+  ln -s "$target" "$home/state/x-context/$req_id.json"
+  printf '{"request_id":"%s","text":"preview"}' "$req_id" > "$payload_file"
+  printf 'FMX_DRY_RUN=1\n' > "$home/.env"
+
+  out=$(PATH="$BASE_PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FMX_DRY_RUN=1 \
+    "$ROOT/bin/fm-discord-reply.js" "$req_id" "$payload_file" 2>"$reply_stderr")
+  assert_equals "$req_id" "$out" "untrusted context still completes dry run"
+  assert_present "$home/state/x-outbox/$req_id.json" "dry run outbox exists"
+  grep -q 'dry-run-channel' "$reply_stderr" || fail "untrusted context must not supply channel identity"
+
+  pass "self-hosted reply rejects symlinked context identity"
+}
+
 test_bootstrap_activation() {
   local home out shim cadence
   home="$TMP_ROOT/bootstrap-test"
@@ -129,4 +167,5 @@ test_bootstrap_activation() {
 test_poll_no_token_is_hard_noop
 test_ingestion_payload_shape_and_wake
 test_reply_dry_run_routing
+test_reply_rejects_untrusted_context_link
 test_bootstrap_activation

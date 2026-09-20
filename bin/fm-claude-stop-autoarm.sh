@@ -248,6 +248,7 @@ trap 'handle_autoarm_signal INT' INT
 # 30s cadence (fm-bootstrap.sh x_mode_setup contract).
 # shellcheck source=/dev/null
 [ -f "$CONFIG/x-mode.env" ] && . "$CONFIG/x-mode.env"
+[ -f "$CONFIG/discord-mode.env" ] && . "$CONFIG/discord-mode.env"
 
 # --- foreground the real arm wrapper ------------------------------------------
 # NO shell &: this hook process tree is the harness-owned lifecycle. The arm
