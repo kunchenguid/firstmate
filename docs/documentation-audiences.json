@@ -225,6 +225,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/osmo/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
       "audience": "agent-runtime"
     },
