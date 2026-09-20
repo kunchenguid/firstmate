@@ -57,6 +57,15 @@ export_harvest_env() {  # <home-data>
   export FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_USAGE_CLAUDE_DIR FM_USAGE_CODEX_DIR
 }
 
+timestamp_logs() {
+  local f
+  while IFS= read -r f; do
+    jq --argjson epoch "$(file_mtime_epoch "$f")" \
+      '.timestamp //= ($epoch | todateiso8601)' "$f" > "$f.tmp"
+    mv "$f.tmp" "$f"
+  done < <(find "$FM_USAGE_CLAUDE_DIR" "$FM_USAGE_CODEX_DIR" -name '*.jsonl' -type f 2>/dev/null)
+}
+
 # A retired remote home no longer contains its nested task record. Refusing
 # that harvest must not recreate the home through lock-library initialization.
 missing_home_case() {
@@ -96,7 +105,7 @@ claude_case() {
 {"type":"user","message":{"role":"user"}}
 {"type":"assistant","message":{"id":"msgC"}}
 JSON
-  # A request logged outside the task window (future mtime) must be excluded,
+  # A request timestamp outside the task window must be excluded,
   # as must a session in a differently encoded sibling directory.
   cat > "$logdir/session-future.jsonl" <<'JSON'
 {"type":"assistant","message":{"id":"msgX","model":"claude-test","usage":{"input_tokens":999,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":999}}}
@@ -110,6 +119,7 @@ JSON
   # session log, or the log correctly falls outside birth -> end.
   touch -m -r "$logdir/session-a.jsonl" "$state/$id.status"
 
+  timestamp_logs
   out=$("$HARVEST" "$id" 2>&1)
   expect_code 0 "$?" "claude harvest should succeed"$'\n'"$out"
   ledger="$data/usage-ledger.jsonl"
@@ -137,6 +147,7 @@ JSON
     "claude wall seconds equals status birth -> last-mtime window"
 
   # Idempotency: a second harvest must not append a duplicate row.
+  timestamp_logs
   out=$("$HARVEST" "$id" 2>&1)
   expect_code 0 "$?" "second claude harvest should exit 0"$'\n'"$out"
   [ "$(wc -l < "$ledger" | tr -d ' ')" = 1 ] \
@@ -176,6 +187,7 @@ JSON
     "$d1/rollout-future.jsonl"
   touch -m -r "$d1/rollout-match.jsonl" "$home/state/$id.status"
 
+  timestamp_logs
   out=$("$HARVEST" "$id" 2>&1)
   expect_code 0 "$?" "codex harvest should succeed"$'\n'"$out"
   ledger="$home/data/usage-ledger.jsonl"
@@ -199,6 +211,7 @@ cursor_case() {
   data=$(harvest_case "$id" cursor "$wt" cursor-grok-4.5-high "")
   home=$(dirname "$data")
   export_harvest_env "$home"
+  timestamp_logs
   out=$("$HARVEST" "$id" 2>&1)
   expect_code 0 "$?" "cursor harvest should succeed"$'\n'"$out"
   ledger="$home/data/usage-ledger.jsonl"
@@ -271,6 +284,7 @@ JSON
 
   fb="$TMP_ROOT/nobirth-fakebin"
   nobirth_stat_bin "$fb"
+  timestamp_logs
   out=$(PATH="$fb:$PATH" "$HARVEST" "$id" 2>&1)
   expect_code 0 "$?" "birthless claude harvest should succeed"$'\n'"$out"
   ledger="$data/usage-ledger.jsonl"
@@ -305,6 +319,7 @@ remote_case() {
 JSON
   touch -m -r "$d1/rollout-localmatch.jsonl" "$home/state/$id.status"
 
+  timestamp_logs
   out=$("$HARVEST" "$id" 2>&1)
   expect_code 0 "$?" "remote harvest should succeed"$'\n'"$out"
   ledger="$home/data/usage-ledger.jsonl"
@@ -417,6 +432,7 @@ SH
   printf 'working: scouting\n' > "$state/$id.status"
   # The ledger path being a directory forces every append to fail.
   mkdir -p "$data/usage-ledger.jsonl"
+  timestamp_logs
   out=$(PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_USAGE_CLAUDE_DIR="$TMP_ROOT/td-fake-claude" FM_USAGE_CODEX_DIR="$TMP_ROOT/td-fake-codex" \
@@ -428,6 +444,51 @@ SH
     "teardown completes after a harvest failure"
   pass "teardown integration: harvest failure is non-fatal"
 }
+
+late_log_case() {
+  local harness=$1 id="late-$1-$2" model=$2 wt="$TMP_ROOT/wt-late-$1-$2"
+  local data home end logdir logfile encoded
+  data=$(harvest_case "$id" "$harness" "$wt" metadata-model high)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  end=$(file_mtime_epoch "$home/state/$id.status")
+  encoded=${wt//\//-}
+  encoded=${encoded//./-}
+  if [ "$harness" = claude ]; then
+    logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
+  else
+    logdir="$FM_USAGE_CODEX_DIR/late-$id"
+  fi
+  mkdir -p "$logdir"
+  logfile="$logdir/session.jsonl"
+  jq -nc --arg harness "$harness" --arg wt "$wt" --arg model "$model" --argjson end "$end" '
+    (if $model == "null" then null else $model end) as $m
+    | if $harness == "codex" then
+        {type:"session_meta",payload:{cwd:$wt}},
+        {timestamp:($end|todateiso8601),type:"turn_context",payload:{model:$m}}
+      else empty end,
+      ([$end - 100, $end, $end + 10][] as $t
+       | {timestamp:($t | todateiso8601)} +
+         (if $harness == "claude" then
+            {type:"assistant",message:{id:($t|tostring),model:$m,usage:{input_tokens:17,cache_read_input_tokens:3,output_tokens:7,output_tokens_details:{thinking_tokens:2}}}}
+          else
+            {type:"event_msg",payload:{type:"token_count",info:{last_token_usage:{input_tokens:17,cached_input_tokens:3,output_tokens:7,reasoning_output_tokens:2}}}}
+          end))' > "$logfile"
+  fm_touch_epoch "$((end + 20))" "$logfile"
+  "$HARVEST" "$id" >/dev/null 2>&1 || fail "late log harvest failed"
+  [ "$model" != null ] || model=metadata-model
+  jq -e --arg model "$model" '
+    .model == $model and .input_tokens == 17 and .cached_input_tokens == 3
+    and .output_tokens == 7 and .reasoning_tokens == 2
+    and .source != "unavailable"' "$data/usage-ledger.jsonl" >/dev/null \
+    || fail "late log window or nullable model corrupted usage: $(cat "$data/usage-ledger.jsonl")"
+  pass "$harness: late writes retain in-window usage and model=$model"
+}
+
+late_log_case claude null
+late_log_case codex null
+late_log_case claude log-model
+late_log_case codex log-model
 
 claude_case
 claude_nobirth_case
