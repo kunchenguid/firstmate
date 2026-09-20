@@ -146,13 +146,13 @@ harvest_cleanup() {
 }
 trap harvest_cleanup EXIT
 epoch_to_touch() {  # <epoch>
-  date -r "$1" +%Y%m%d%H%M.%S 2>/dev/null || date -u -d "@$1" +%Y%m%d%H%M.%S
+  date -r "$1" -u +%Y%m%d%H%M.%S 2>/dev/null || date -u -d "@$1" +%Y%m%d%H%M.%S
 }
 # find -newer compares sub-second mtimes, so the refs only narrow to
 # [START-1, END+1]; the per-file epoch filter below then applies the true
 # inclusive whole-second window [START_EPOCH, END_EPOCH].
-touch -t "$(epoch_to_touch "$((START_EPOCH - 1))")" "$REFDIR/start"
-touch -t "$(epoch_to_touch "$((END_EPOCH + 1))")" "$REFDIR/end"
+TZ=UTC touch -t "$(epoch_to_touch "$((START_EPOCH - 1))")" "$REFDIR/start"
+TZ=UTC touch -t "$(epoch_to_touch "$((END_EPOCH + 1))")" "$REFDIR/end"
 
 LEDGER="$DATA/usage-ledger.jsonl"
 
@@ -181,17 +181,17 @@ case "$HARNESS" in
       encoded=${encoded//./-}
       files=$(matched_files "$CLAUDE_DIR/$encoded" 1)
       if [ -n "$files" ]; then
-        SRC=claude-projects
         IT=0; CT=0; OT=0; RT=0
         # One entry per content block repeats one request's usage; dedupe on
         # .message.id so every request is counted exactly once.
         while IFS= read -r f; do
-          row=$(jq -rn '
-            reduce inputs as $l ({seen:{},m:null,it:0,ct:0,ot:0,rt:0};
+          row=$(jq -Rrn '
+            reduce (inputs | fromjson? | select(type == "object")) as $l ({seen:{},m:null,n:0,it:0,ct:0,ot:0,rt:0};
               if $l.type == "assistant" and ($l.message.usage // null) != null then
                 ($l.message.id // "no-id") as $id
                 | if .seen[$id] then . else
                     .seen[$id] = 1
+                    | .n += 1
                     | .it += ($l.message.usage.input_tokens // 0)
                     | .ct += (($l.message.usage.cache_read_input_tokens // 0)
                               + ($l.message.usage.cache_creation_input_tokens // 0))
@@ -202,9 +202,12 @@ case "$HARNESS" in
               elif $l.type == "assistant" and ($l.message.model // null) != null and .m == null then
                 .m = $l.message.model
               else . end)
-            | [.m, .it, .ct, .ot, .rt] | @tsv' "$f" 2>/dev/null || true)
+            | select(.n > 0)
+            | [("v" + (.m // "")), .it, .ct, .ot, .rt] | @tsv' "$f" 2>/dev/null || true)
           [ -n "$row" ] || continue
+          SRC=claude-projects
           IFS=$'\t' read -r m it ct ot rt <<<"$row"
+          m=${m#v}
           [ -n "$m" ] && [ -z "$MODEL_LOG" ] && MODEL_LOG=$m
           IT=$((IT + ${it:-0}))
           CT=$((CT + ${ct:-0}))
@@ -223,23 +226,27 @@ FMINNER
         IT=0; CT=0; OT=0; RT=0
         found=0
         while IFS= read -r f; do
-          row=$(jq -rn '
-            reduce inputs as $l ({cwd:null,m:null,it:0,ct:0,ot:0,rt:0};
+          row=$(jq -Rrn '
+            reduce (inputs | fromjson? | select(type == "object")) as $l ({cwd:null,m:null,n:0,it:0,ct:0,ot:0,rt:0};
               if $l.type == "session_meta" then
                 .cwd = ($l.payload.cwd // .cwd)
               elif $l.type == "turn_context" and ($l.payload.model // null) != null then
                 .m = $l.payload.model
               elif $l.type == "event_msg" and $l.payload.type == "token_count"
                    and ($l.payload.info.last_token_usage // null) != null then
-                .it += ($l.payload.info.last_token_usage.input_tokens // 0)
+                .n += 1
+                | .it += ($l.payload.info.last_token_usage.input_tokens // 0)
                 | .ct += (($l.payload.info.last_token_usage.cached_input_tokens // 0)
                           + ($l.payload.info.last_token_usage.cache_write_input_tokens // 0))
                 | .ot += ($l.payload.info.last_token_usage.output_tokens // 0)
                 | .rt += ($l.payload.info.last_token_usage.reasoning_output_tokens // 0)
               else . end)
-            | [.cwd, .m, .it, .ct, .ot, .rt] | @tsv' "$f" 2>/dev/null || true)
+            | select(.n > 0)
+            | [("v" + (.cwd // "")), ("v" + (.m // "")), .it, .ct, .ot, .rt] | @tsv' "$f" 2>/dev/null || true)
           [ -n "$row" ] || continue
           IFS=$'\t' read -r cwd m it ct ot rt <<<"$row"
+          cwd=${cwd#v}
+          m=${m#v}
           [ "$cwd" = "$WORKTREE" ] || continue
           found=1
           SRC=codex-sessions

@@ -252,7 +252,23 @@ JSON
 
   fb="$TMP_ROOT/nobirth-fakebin"
   nobirth_stat_bin "$fb"
-  out=$(PATH="$fb:$PATH" "$HARVEST" "$id" 2>&1)
+  cat > "$fb/date" <<'PYDATE'
+#!/usr/bin/env python3
+import os
+import sys
+import time
+args = sys.argv[1:]
+if "-r" in args:
+    sys.exit(1)
+if "-d" in args:
+    epoch = int(args[args.index("-d") + 1].removeprefix("@"))
+    fmt = next(arg[1:] for arg in args if arg.startswith("+"))
+    print(time.strftime(fmt, time.gmtime(epoch) if "-u" in args else time.localtime(epoch)))
+else:
+    os.execv("/bin/date", ["date"] + args)
+PYDATE
+  chmod +x "$fb/date"
+  out=$(TZ=America/Toronto PATH="$fb:$PATH" "$HARVEST" "$id" 2>&1)
   expect_code 0 "$?" "birthless claude harvest should succeed"$'\n'"$out"
   ledger="$data/usage-ledger.jsonl"
   row=$(cat "$ledger")
@@ -410,6 +426,58 @@ SH
   pass "teardown integration: harvest failure is non-fatal"
 }
 
+usage_recovery_case() {
+  local harness=$1 mode=$2 id="recovery-$1-$2"
+  local wt="$TMP_ROOT/wt-$id" data home logdir encoded log out source
+  data=$(harvest_case "$id" "$harness" "$wt" fallback-model)
+  home=$(dirname "$data")
+  export_harvest_env "$home"
+  if [ "$harness" = claude ]; then
+    encoded=${wt//\//-}
+    encoded=${encoded//./-}
+    logdir="$FM_USAGE_CLAUDE_DIR/$encoded"
+    source=claude-projects
+  else
+    logdir="$FM_USAGE_CODEX_DIR/$id"
+    source=codex-sessions
+  fi
+  mkdir -p "$logdir"
+  log="$logdir/session.jsonl"
+  printf '%s\n' '{broken' > "$log"
+  if [ "$harness" = codex ]; then
+    jq -cn --arg cwd "$wt" '{type:"session_meta",payload:{cwd:$cwd}}' >> "$log"
+  fi
+  if [ "$mode" != unavailable ]; then
+    if [ "$harness" = claude ]; then
+      printf '%s\n' '{"type":"assistant","message":{"id":"one","usage":{"input_tokens":12,"cache_read_input_tokens":3,"cache_creation_input_tokens":4,"output_tokens":8,"output_tokens_details":{"thinking_tokens":2}}}}' >> "$log"
+    else
+      printf '%s\n' '{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":12,"cached_input_tokens":3,"cache_write_input_tokens":4,"output_tokens":8,"reasoning_output_tokens":2}}}}' >> "$log"
+    fi
+    printf '%s\n' '{broken middle' >> "$log"
+    if [ "$harness" = claude ]; then
+      printf '%s\n' '{"type":"assistant","message":{"id":"two","usage":{"input_tokens":5,"output_tokens":6}}}' >> "$log"
+    else
+      printf '%s\n' '{"type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":5,"output_tokens":6}}}}' >> "$log"
+    fi
+  else
+    printf '%s\n' '{"type":"assistant","message":{"model":"unused-model"}}' >> "$log"
+  fi
+  printf '%s\n' '{broken tail' >> "$log"
+  touch -m -r "$log" "$home/state/$id.status"
+  out=$("$HARVEST" "$id" 2>&1)
+  expect_code 0 "$?" "$harness $mode harvest succeeds: $out"
+  if [ "$mode" = unavailable ]; then
+    jq -e '.source == "unavailable" and .model == "fallback-model"
+      and ([.input_tokens,.cached_input_tokens,.output_tokens,.reasoning_tokens] == [null,null,null,null])' \
+      "$data/usage-ledger.jsonl" >/dev/null || fail "$harness missing usage must be unavailable"
+  else
+    jq -e --arg source "$source" '.source == $source and .model == "fallback-model"
+      and ([.input_tokens,.cached_input_tokens,.output_tokens,.reasoning_tokens] == [17,7,14,2])' \
+      "$data/usage-ledger.jsonl" >/dev/null || fail "$harness preserves valid usage and absent model fields"
+  fi
+  pass "$harness $mode: malformed lines and missing models"
+}
+
 claude_case
 claude_nobirth_case
 codex_case
@@ -419,3 +487,7 @@ race_case
 lock_bound_case
 report_case
 teardown_case
+for harness in claude codex; do
+  usage_recovery_case "$harness" recovered
+  usage_recovery_case "$harness" unavailable
+done
