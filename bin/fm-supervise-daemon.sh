@@ -516,12 +516,23 @@ stale_marker_remove() {  # <window> <state>
 # PAUSE_RESURFACE_SECS (much longer than a wedge) and re-surfaces the wait once
 # per window. Recording is create-if-absent so the timestamp is stable across a
 # churny pane (many distinct stale hashes map to one marker), keeping the cadence
-# hash-immune.
+# hash-immune. A deliberately stopped task's wait was declared by the stop
+# itself, so its first window is anchored on the durable stop marker's mtime
+# rather than on when this daemon first observed it.
 pause_marker_record() {  # <window> <state> - create if absent
-  local win=$1 state=$2 key marker
-  key=$(_stale_key "$(window_to_task "$win" "$state")")
+  local win=$1 state=$2 key marker task stop_epoch
+  task=$(window_to_task "$win" "$state")
+  key=$(_stale_key "$task")
   marker="$state/.subsuper-paused-$key"
-  [ -e "$marker" ] || _now > "$marker"
+  [ -e "$marker" ] && return 0
+  stop_epoch=
+  if fm_control_deliberate_stop_present "$state" "$task"; then
+    stop_epoch=$(_stat_file_mtime "$(fm_control_deliberate_stop_marker "$state" "$task")")
+  fi
+  case "$stop_epoch" in
+    ''|*[!0-9]*) _now > "$marker" ;;
+    *) printf '%s\n' "$stop_epoch" > "$marker" ;;
+  esac
 }
 
 pause_marker_remove() {  # <window> <state>
