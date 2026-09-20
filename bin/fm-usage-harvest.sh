@@ -6,7 +6,7 @@
 # Reads state/<task-id>.meta (harness=, model=, effort=, worktree=; the
 # backend window= line is intentionally not consumed because the ledger has no
 # window field) plus the task's state/<task-id>.status timestamps for the task
-# window, then sums the worker's own session-log usage into exactly one JSON
+# window, then sums matching session-log usage into exactly one JSON
 # line appended to data/usage-ledger.jsonl. data/usage-ledger.jsonl is
 # gitignored runtime data.
 #
@@ -47,7 +47,9 @@
 #     another machine, so its logs are not on this filesystem), an absent log
 #     tree, or no in-window match: token fields are null with source
 #     "unavailable".
-# A corrupt log line is skipped best-effort by the parser.
+# Log selection uses each file's mtime within the task window; all matching
+# file entries are summed, without filtering individual event timestamps.
+# A corrupt log line aborts parsing of that file; its usage is omitted.
 #
 # Idempotent: if the ledger already contains a line whose "task" is
 # <task-id>, the command exits 0 without appending.

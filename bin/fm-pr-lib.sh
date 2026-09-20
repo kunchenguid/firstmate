@@ -23,6 +23,11 @@
 # registration, then the runnable name last, so a scan cannot execute or reject
 # a partially bound poll. Failure after unpublishing revokes the remaining dest
 # names. Re-arming after a PR head change uses the same transaction.
+# The watcher acquires the task control lock, then the publication lock before
+# capturing or authenticating a scan result, and skips a runnable name removed
+# while it waited. It releases the publication lock before the forge call but
+# retains the control lock for the validated PR check and its result handling.
+# tests/fm-pr-check-security.test.sh's publication mode covers this boundary.
 
 FM_PR_PROVIDER=
 FM_PR_URL=
