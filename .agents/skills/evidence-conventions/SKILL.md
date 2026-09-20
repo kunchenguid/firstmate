@@ -36,28 +36,16 @@ A brief scaffold's `done [at=<epoch>]: PR {url} checks green` gate is a `verifie
 
 ## Bug verdicts
 
-Every debug or fix report ends with exactly one nominal verdict:
+Every debug or fix report ends with exactly one nominal verdict: `verified`, `partial`, or `failed`.
+The token `verified` belongs to the evidence states above; the bug verdicts are derived from them, never redefined:
 
-| Verdict | Meaning |
-|---|---|
-| `verified` | the fix was exercised against the scenario that reproduced the bug, with cited evidence (command + raw output) |
-| `partial` | the fix resolves part of the scenario; the residue is named and evidenced |
-| `failed` | the fix does not resolve the bug, or the verification was not executed |
+- `verified` - the fix was exercised against the scenario that reproduced the bug, and its verification evidence carries the evidence state `verified` (command + raw output recorded).
+- `partial` - the fix resolves part of the scenario; the residue is named and its evidence cited.
+- `failed` - the fix does not resolve the bug, or its verification is missing or `not run`.
 
-Fail-closed rule: missing verification means `failed`.
+Fail-closed rule, coherent with the evidence states: missing or `not run` verification means `failed`.
 There is no "presumably fixed": a fix without recorded verification is reported as `failed`, never as a success.
-
-Per-bug artifact format:
-
-```markdown
-### Bug: <short title>
-- Symptom: <what broke, where>
-- Hypothesis: <investigated root cause>
-- Fix: <what changed, with file:line>
-- Verification: <command executed + cited raw output>
-- Verdict: `verified` | `partial` | `failed`
-- Residue: <what stays open if partial or failed; `none` if verified>
-```
+`diagnostic-reasoning` owns the structure of a diagnostic report; this verdict labeling applies on top of that structure.
 
 ## Measurement honesty
 
@@ -71,9 +59,4 @@ Fail-closed: a number without its citation does not enter decisions, reports, or
 
 A wrong number is retracted, never erased: the original stays in place annotated with a dated retraction, the corrected number arrives with its own command + raw output, and git history is never rewritten to hide a measurement.
 
-## Companion tooling: lab config validator
-
-Origin: pavani06/fleet-lab DEC-007, `experiments/config-validator/validate.py`, with schema and usage in that lab's `docs/conventions/config-key-validation.md`.
-Given a YAML or JSON config, it rejects the load when a top-level key is outside its `KNOWN_KEYS` schema, naming the unknown field and, when one exists, the probable field by edit distance, and exits 1 with that name on stderr.
-The schema it validates is the lab's experiment-config schema, not Firstmate's, so it is documented here as a port reference for fleet tooling and is not a dependency of any Firstmate path.
-Porting or extending it is ordinary follow-up work; this graduation only records that the tool exists, what it does, and where it came from.
+Lab config validator reference: pavani06/fleet-lab DEC-007 ships `experiments/config-validator/validate.py`, which rejects a YAML or JSON config on an unknown top-level key, naming the field and its probable match; schema and usage live in that lab's `docs/conventions/config-key-validation.md`, and the tool validates the lab's schema only, so it is not a dependency of any Firstmate path.
