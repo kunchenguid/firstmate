@@ -987,6 +987,8 @@ test_claude_long_launch_is_delivered_intact() {
   expected=$(claude_expected_launch "$HOME_DIR" "$id" "--dangerously-skip-permissions")
   [ "${#expected}" -gt 1024 ] \
     || fail "Claude regression fixture is too short to cover the terminal line limit: ${#expected} bytes"
+  [ "${#launch}" -gt 1024 ] \
+    || fail "long Claude launch was truncated to ${#launch} bytes; staging must deliver the full command"
   [ "$launch" = "$expected" ] \
     || fail "long Claude launch was not delivered intact (${#launch}/${#expected} bytes)"
   pass "fm-spawn: a Claude launch longer than 1024 bytes is delivered intact through the staging path"

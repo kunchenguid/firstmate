@@ -3563,6 +3563,22 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 # Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+teardown_launch_home_token() {
+  local home=$1 root hash
+  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print substr($1,1,8)}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | sha256sum | awk '{print substr($1,1,8)}')
+  else
+    hash=$(printf '%s' "$root" | cksum | awk '{printf "%08x", $1}')
+  fi
+  printf '%s' "$hash"
+}
+LAUNCH_HOME_TOKEN=$(teardown_launch_home_token "$FM_HOME")
+if [ -n "$LAUNCH_HOME_TOKEN" ]; then
+  rm -rf "/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
+fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1

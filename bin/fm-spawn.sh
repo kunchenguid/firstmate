@@ -3791,10 +3791,11 @@ esac
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
 # later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
 # targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-# The root is private (0700) because it holds the staged launch command, and its
-# path is predictable under a shared /tmp: a root that already exists is reused
-# only as a real directory owned by this user and writable by nobody else, then
-# tightened, so no other local user can plant or swap a file in it.
+# The root is private (0700) because its path is predictable under a shared
+# /tmp: a root that already exists is reused only as a real directory owned by
+# this user and writable by nobody else, then tightened, so no other local user
+# can plant or swap a file in it. The staged launch command lives in a sibling
+# directory namespaced by home identity, not in this shared per-id root.
 TASK_TMP="/tmp/fm-$ID"
 if ! (umask 077 && mkdir "$TASK_TMP") 2>/dev/null; then
   if [ -L "$TASK_TMP" ] || [ ! -d "$TASK_TMP" ] || [ ! -O "$TASK_TMP" ] ||
@@ -4597,9 +4598,37 @@ fi
 # and while it is busy the typed bytes wait in the terminal line buffer, which
 # silently truncates input past about 1,024 bytes on macOS. A long launch then
 # lands as an unfinished command line and no agent starts. Sourcing runs the
-# command in the pane shell exactly as if it had been typed.
-LAUNCH_FILE="$TASK_TMP/launch.sh"
-LAUNCH_STAGE="$TASK_TMP/.launch.sh.$$.tmp"
+# command in the pane shell exactly as if it had been typed. The directory is
+# namespaced by this home's identity so the same task id in another Firstmate
+# home cannot share /tmp/fm-<id>/launch.sh.
+spawn_launch_home_token() {
+  local home=$1 root hash
+  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print substr($1,1,8)}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | sha256sum | awk '{print substr($1,1,8)}')
+  else
+    hash=$(printf '%s' "$root" | cksum | awk '{printf "%08x", $1}')
+  fi
+  printf '%s' "$hash"
+}
+LAUNCH_HOME_TOKEN=$(spawn_launch_home_token "$FM_HOME")
+if [ -z "$LAUNCH_HOME_TOKEN" ]; then
+  echo "error: could not derive a home identity for the staged launch file" >&2
+  exit 1
+fi
+LAUNCH_DIR="/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
+if ! (umask 077 && mkdir "$LAUNCH_DIR") 2>/dev/null; then
+  if [ -L "$LAUNCH_DIR" ] || [ ! -d "$LAUNCH_DIR" ] || [ ! -O "$LAUNCH_DIR" ] ||
+    [ -n "$(find "$LAUNCH_DIR" -prune \( -perm -g=w -o -perm -o=w \) -print 2>/dev/null)" ] ||
+    ! chmod 700 "$LAUNCH_DIR"; then
+    echo "error: task launch directory $LAUNCH_DIR already exists and is not a private directory owned by this user; refusing to stage the launch command there; inspect and remove it, then retry" >&2
+    exit 1
+  fi
+fi
+LAUNCH_FILE="$LAUNCH_DIR/launch.sh"
+LAUNCH_STAGE="$LAUNCH_DIR/.launch.sh.$$.tmp"
 if [ -L "$LAUNCH_FILE" ] ||
   { [ -e "$LAUNCH_FILE" ] && [ ! -f "$LAUNCH_FILE" ]; }; then
   echo "error: task launch file $LAUNCH_FILE is not a regular file; refusing to replace it" >&2

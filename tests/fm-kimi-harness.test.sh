@@ -17,6 +17,7 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
 KIMI_RUNTIME_TASK_TMP=
+KIMI_RUNTIME_LAUNCH_DIR=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
@@ -24,6 +25,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 cleanup_kimi_harness() {
   [ -z "$KIMI_RUNTIME_TASK_TMP" ] || rm -rf "$KIMI_RUNTIME_TASK_TMP"
+  [ -z "$KIMI_RUNTIME_LAUNCH_DIR" ] || rm -rf "$KIMI_RUNTIME_LAUNCH_DIR"
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_kimi_harness EXIT
@@ -274,13 +276,17 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp
+  local id rec out rc launch pointer brief_real meta task_tmp launch_dir launch_file
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
   rm -rf "$task_tmp"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
+  launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
+  launch_file="$launch_dir/launch.sh"
+  KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
+  rm -rf "$launch_dir"
   out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model kimi-code/k3 --effort high)
@@ -306,9 +312,13 @@ test_kimi_launch_then_send_is_verified() {
   assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
   [ "$(path_mode "$task_tmp")" = 700 ] \
     || fail "kimi spawn left its task temp root readable by others: $(path_mode "$task_tmp")"
-  [ "$(path_mode "$task_tmp/launch.sh")" = 600 ] \
-    || fail "kimi spawn staged its launch command without mode 0600: $(path_mode "$task_tmp/launch.sh")"
-  grep -qF -- "-l . '$task_tmp/launch.sh'" "$CASE_DIR/tmux-calls.log" \
+  [ "$launch_file" != "$task_tmp/launch.sh" ] \
+    || fail "kimi spawn staged its launch command at the shared per-id path"
+  [ "$(path_mode "$launch_dir")" = 700 ] \
+    || fail "kimi spawn left its launch directory readable by others: $(path_mode "$launch_dir")"
+  [ "$(path_mode "$launch_file")" = 600 ] \
+    || fail "kimi spawn staged its launch command without mode 0600: $(path_mode "$launch_file")"
+  grep -qF -- "-l . '$launch_file'" "$CASE_DIR/tmux-calls.log" \
     || fail "kimi spawn did not type a short line sourcing its staged launch command"
   assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not export its Go temp directory into the pane"
@@ -325,8 +335,21 @@ path_mode() {
   stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
 }
 
+kimi_launch_dir() {
+  local id=$1 home=$2 root hash
+  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print substr($1,1,8)}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | sha256sum | awk '{print substr($1,1,8)}')
+  else
+    hash=$(printf '%s' "$root" | cksum | awk '{printf "%08x", $1}')
+  fi
+  printf '/tmp/fm-%s+%s' "$id" "$hash"
+}
+
 test_kimi_spawn_refuses_shared_task_temp_root() {
-  local id rec out rc task_tmp
+  local id rec out rc task_tmp launch_dir launch_file
   id="kimi-sharedtmp-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -335,28 +358,47 @@ test_kimi_spawn_refuses_shared_task_temp_root() {
   chmod 777 "$task_tmp"
   rec=$(make_spawn_case sharedtmp "$id")
   read_spawn_record "$rec"
+  launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
+  launch_file="$launch_dir/launch.sh"
+  KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
+  rm -rf "$launch_dir"
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
   [ "$rc" -ne 0 ] || fail "kimi spawn accepted a world-writable task temp root"
   assert_contains "$out" "is not a private directory owned by this user" \
     "kimi spawn did not name the unsafe task temp root"
   assert_absent "$task_tmp/launch.sh" "kimi spawn staged its launch command in a shared directory"
+  assert_absent "$launch_file" "kimi spawn staged a namespaced launch file after refusing the shared temp root"
   [ ! -s "$CASE_DIR/launch.log" ] || fail "kimi spawn launched despite an unsafe task temp root"
   rm -rf "$task_tmp"
   mkdir "$task_tmp"
   chmod 755 "$task_tmp"
-  printf 'stale launch command\n' > "$task_tmp/launch.sh"
-  chmod 644 "$task_tmp/launch.sh"
   rec=$(make_spawn_case ownedtmp "$id")
   read_spawn_record "$rec"
+  launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
+  launch_file="$launch_dir/launch.sh"
+  KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
+  rm -rf "$launch_dir"
+  mkdir "$launch_dir"
+  chmod 755 "$launch_dir"
+  printf 'stale launch command\n' > "$launch_file"
+  chmod 644 "$launch_file"
+  printf 'stale shared launch command\n' > "$task_tmp/launch.sh"
+  chmod 644 "$task_tmp/launch.sh"
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
   expect_code 0 "$rc" "kimi spawn should reuse an existing temp root it owns: $out"
   [ "$(path_mode "$task_tmp")" = 700 ] \
     || fail "kimi spawn did not tighten its reused task temp root: $(path_mode "$task_tmp")"
-  [ "$(path_mode "$task_tmp/launch.sh")" = 600 ] \
-    || fail "kimi spawn did not tighten a reused launch file: $(path_mode "$task_tmp/launch.sh")"
-  rm -rf "$task_tmp"
+  [ "$(path_mode "$launch_dir")" = 700 ] \
+    || fail "kimi spawn did not tighten its reused launch directory: $(path_mode "$launch_dir")"
+  [ "$(path_mode "$launch_file")" = 600 ] \
+    || fail "kimi spawn did not tighten a reused launch file: $(path_mode "$launch_file")"
+  [ "$(path_mode "$task_tmp/launch.sh")" = 644 ] \
+    || fail "kimi spawn reused the shared per-id launch file"
+  grep -qF -- "-l . '$launch_file'" "$CASE_DIR/tmux-calls.log" \
+    || fail "kimi spawn did not type a short line sourcing its namespaced launch command"
+  rm -rf "$task_tmp" "$launch_dir"
   pass "fm-spawn: unsafe task roots are refused, owned roots are tightened, and reused launch files stay 0600"
 }
 
@@ -560,14 +602,19 @@ test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation() {
 }
 
 test_kimi_teardown_removes_pointer_and_registry_token() {
-  local id rec out rc token
+  local id rec out rc token launch_dir foreign_dir
   id=kimi-teardown-z8
   rec=$(make_spawn_case teardown "$id")
   read_spawn_record "$rec"
+  launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
+  KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
+  foreign_dir="/tmp/fm-$id+zzzzzzzz"
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
   expect_code 0 "$rc" "Kimi spawn should succeed before teardown"
   token=$(sed -n 's/^token=//p' "$WT_DIR/.fm-kimi-turnend")
+  mkdir -p "$foreign_dir"
+  printf 'other home\n' > "$foreign_dir/launch.sh"
 
   HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
@@ -577,6 +624,12 @@ test_kimi_teardown_removes_pointer_and_registry_token() {
   assert_absent "$WT_DIR/.fm-kimi-turnend" "Kimi token pointer survived teardown"
   assert_absent "$HOME_DIR/.kimi-code/fm-turn-end.d/$token" "Kimi registry token survived teardown"
   assert_absent "$HOME_DIR/state/$id.kimi-turnend-token" "Kimi token state survived teardown"
+  assert_absent "$launch_dir" "Kimi staged launch directory survived teardown"
+  if [ ! -f "$foreign_dir/launch.sh" ]; then
+    rm -rf "$foreign_dir"
+    fail "teardown removed another home's staged launch directory"
+  fi
+  rm -rf "$foreign_dir"
   pass "fm-teardown: Kimi task pointer and registry token are removed"
 }
 
