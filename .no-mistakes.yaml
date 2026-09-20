@@ -37,7 +37,6 @@ commands:
 # The evidence is not committed to the feature or default branch.
 test:
   instructions: |
-    Keep unit and harness tests primary for pure logic, and use live Herdr only for scenarios those tests cannot prove, such as a long Claude launch on real Herdr.
     Run live Herdr scenarios only through bin/fm-herdr-lab.sh with a named non-default fm-lab-* session, following that helper's prepare, provision, run, and teardown contract exactly.
     Never touch the live default Herdr session or fleet panes.
     Prefer a throwaway lab for spawn, long-launch, and Claude-path proofs, and tear it down in the same evidence turn.
