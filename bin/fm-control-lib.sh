@@ -358,8 +358,9 @@ fm_control_harness_turnend_auth_path() {  # <harness> <token>
 # deliberately stopped, so its idle endpoint is a parked task: the watcher gives
 # it the declared-pause treatment - a long bounded recheck cadence, never a
 # stale or wedge escalation - instead of treating it as a worker that stopped
-# responding on its own. The record body is the epoch second of the stop, so a
-# re-stop after a relaunch starts a fresh recheck window. A failed stop attempt
+# responding on its own. The file's mtime, refreshed by each stop so a re-stop
+# after a relaunch starts a fresh recheck window, opens that cadence; the body
+# records the stop's epoch second. A failed stop attempt
 # never writes it, so a refused or unattributed endpoint keeps escalating exactly
 # as it always did.
 fm_control_deliberate_stop_marker() {  # <state-dir> <id>

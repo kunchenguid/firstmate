@@ -2134,6 +2134,58 @@ test_deliberate_stop_marker_cleared_resumes_terminal_stale_surfacing() {
   pass "clearing the deliberate-stop marker returns the finished task to ordinary terminal-stale supervision"
 }
 
+# --- deliberate stop + busy pane: the busy-turn bound must park, not wedge ---
+# The deliberate-stop marker was honored on the idle stale path but not on the
+# busy-turn path: a stopped worker whose pane still rendered a recognized busy
+# signature, with no completed turn past BUSY_TURN_MAX_SECS, went to
+# wedge_timer_check and escalated as a possible wedge - contradicting the
+# daemon's "parked whether idle or busy" contract. This fixture pins that the
+# busy-turn bound routes it to the same bounded recheck the idle path uses.
+test_busy_deliberate_stop_is_rechecked_not_wedge_escalated() {
+  local dir state fakebin out capture_file window key sig pid
+  dir=$(make_case busy-deliberate-stop); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-parked-busy"
+  printf 'Working... (7200.4s)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/parked-busy.meta"
+  record_pi_busy "$state" parked-busy
+  printf 'done: investigation finished\n' > "$state/parked-busy.status"
+  sig=$(seen_sig "$state/parked-busy.status"); printf '%s' "$sig" > "$state/.seen-parked-busy_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # No completed turn: age the spawn record itself, past the busy-turn bound.
+  touch -t 200001010000 "$state/parked-busy.meta"
+  printf '%s\n' "$(date +%s)" > "$state/parked-busy.deliberate-stop"
+
+  # Phase A: past the bound, the deliberately stopped busy pane is absorbed on
+  # the long cadence and never starts a wedge.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a deliberately stopped busy pane was escalated: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a deliberately stopped busy pane printed a wake reason: $(cat "$out")"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a deliberately stopped busy pane started the wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a deliberately stopped busy pane incremented the escalation counter"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional busy deliberate-stop phase-A stop"
+
+  # Phase B: age the stop past the cadence; the parked task re-surfaces once as a
+  # deliberate-stop recheck - never a possible wedge.
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/parked-busy.deliberate-stop"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a deliberately stopped busy pane did not re-surface past the cadence"; }
+  grep -F "deliberately stopped" "$out" >/dev/null || fail "the busy-turn recheck was not labeled a deliberate-stop recheck: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a deliberately stopped busy pane was mislabeled a possible wedge: $(cat "$out")"
+  [ -e "$state/.deliberate-stop-resurfaced-$key" ] || fail "the deliberate-stop re-surface throttle was not recorded"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a deliberately stopped busy pane used the wedge timer"
+  pass "a deliberately stopped busy pane is parked on the bounded recheck cadence, never wedge-escalated"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -6153,6 +6205,7 @@ test_terminal_stale_surfaced
 test_deliberately_stopped_finished_task_is_parked_not_stale
 test_restopped_deliberate_task_absorbs_before_the_recheck_cadence
 test_deliberate_stop_marker_cleared_resumes_terminal_stale_surfacing
+test_busy_deliberate_stop_is_rechecked_not_wedge_escalated
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

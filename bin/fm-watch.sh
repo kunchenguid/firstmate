@@ -67,8 +67,9 @@
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
 #                          turn completes). Past that bound, a declared external
-#                          wait or verified captain-held transfer uses the long
-#                          pause recheck cadence; under daemon-backed afk an
+#                          wait or verified captain-held transfer, or a worker the
+#                          control plane deliberately stopped, uses the long pause
+#                          recheck cadence; under daemon-backed afk an
 #                          external wait is instead handed to the daemon as this
 #                          plain reason once per declaration, while captain-held
 #                          work stays silent until return
@@ -285,7 +286,8 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # non-busy stale - so it escalates via the existing stale reason, escalation
 # counter, and demand-deep-inspection marker for human inspection only, never an
 # automatic interrupt, signal, or restart - unless the crew declared the wait
-# itself, which takes the long pause cadence instead. Set generously above
+# itself or was deliberately stopped by the control plane, either of which takes
+# the long pause cadence instead. Set generously above
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
@@ -1403,10 +1405,12 @@ handle_deliberate_stop_stale() {  # <window> <task> <hash>
 # A busy pane past BUSY_TURN_MAX_SECS is normally a wedge suspect because a hung
 # foreground call can hide behind a busy signature. A `paused:` declaration or
 # verified captain-held transfer instead identifies that live foreground call as
-# the expected external wait. The caller has already confirmed liveness through
-# the busy verdict, so this exception does not suppress undeclared wedges or
-# alter the separate non-busy classification. handle_paused_stale keeps the
-# exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS.
+# the expected external wait, and a worker firstmate deliberately stopped
+# (state/<id>.deliberate-stop) is parked the same way whether its pane reads idle
+# or busy. The caller has already confirmed liveness through the busy verdict, so
+# this exception does not suppress undeclared wedges or alter the separate
+# non-busy classification. handle_paused_stale and handle_deliberate_stop_stale
+# keep the exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS.
 # A pane that declared nothing falls through to the shared wedge timer, which,
 # in a home that armed config/wedge-defer-parked-gate, applies the same rule to
 # the one wait a busy pane cannot declare: a validation gate of its own awaiting
@@ -1420,6 +1424,14 @@ handle_deliberate_stop_stale() {  # <window> <task> <hash>
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 key statusf declared
   statusf="$STATE/$task.status"
+  if fm_control_deliberate_stop_present "$STATE" "$task"; then
+    # A deliberately stopped worker is parked whether its pane reads idle or busy:
+    # the same bounded recheck the idle path gives it, never the busy-turn wedge
+    # ladder. Handled in both postures, mirroring that path's branch before the
+    # afk gate.
+    handle_deliberate_stop_stale "$win" "$task" "$h"
+    return 0
+  fi
   if status_is_paused_or_captain_held "$(last_status_line "$statusf")"; then
     if afk_present; then
       # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
