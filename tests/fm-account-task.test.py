@@ -59,6 +59,8 @@ home = pathlib.Path(os.environ['FM_HOME'])
 if name == 'tmux':
     if args[-2:] == ['show-environment', '-g']:
         sys.stdout.write((a / 'tmux-environment').read_text())
+    elif args[-3:] == ['show-environment', '-t', '=' + f['session']]:
+        sys.stdout.write((a / 'tmux-session-environment').read_text())
     elif 'display-message' in args:
         target = args[args.index('-t') + 1]
         if (a / 'runtime-drift').exists() or target != '=' + f['session'] + ':':
@@ -265,8 +267,10 @@ class RouteTest(unittest.TestCase):
         self.fixture = dict(pid=os.getpid(), session='isolated-tools', socket=str(self.socket_path))
         write(self.a / 'fixture.json', json.dumps(self.fixture))
         self.tmux_environment = self.a / 'tmux-environment'
+        self.tmux_session_environment = self.a / 'tmux-session-environment'
         runtime_environment = f'HOME={self.a}\nNONSECRET=fixture\n'
         write(self.tmux_environment, runtime_environment)
+        write(self.tmux_session_environment, runtime_environment)
         search = list(dict.fromkeys([str(self.tools), os.path.realpath('/usr/bin'), os.path.realpath('/bin')]))
         tools = {name: str(self.tools / name)
                  for name in ('bash', 'git', 'jq', 'pi', 'python3', 'tasks-axi', 'tmux', 'treehouse')}
@@ -308,6 +312,7 @@ class RouteTest(unittest.TestCase):
     def set_tmux_environment(self, values):
         raw = ''.join(f'{name}={value}\n' for name, value in values)
         write(self.tmux_environment, raw)
+        write(self.tmux_session_environment, raw)
         self.b['runtime']['environment_sha256'] = hashlib.sha256(raw.encode()).hexdigest()
         write(self.path, json.dumps(self.b))
 
@@ -484,6 +489,12 @@ class RouteTest(unittest.TestCase):
                 if ledger.exists():
                     ledger.unlink()
                 self.sequence += 1
+
+    def test_tmux_session_environment_drift_refuses_before_spawn(self):
+        write(self.tmux_session_environment,
+              f'HOME=/invented/wrong-home\nNONSECRET=fixture\n')
+        self.assertEqual(self.call(self.request())[1]['refused'], 'route-drift-disabled')
+        self.assertEqual(self.calls(), [])
 
     def test_signal_and_private_canaries_refuse(self):
         write(self.a / 'signal-canary', 'invented')

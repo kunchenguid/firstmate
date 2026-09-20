@@ -518,10 +518,14 @@ class Route:
                           "=" + runtime["session"] + ":", "#{pid}\t#{session_name}\t#{socket_path}"],
                          self.env, self.home, output=True).decode().strip()
         require(server == f'{runtime["pid"]}\t{runtime["session"]}\t{socket}', "runtime-drift")
-        env = command([self.tool("tmux"), "-S", str(socket), "show-environment", "-g"],
-                      self.env, self.home, output=True)
-        require(hashlib.sha256(env).hexdigest() == runtime["environment_sha256"], "runtime-drift")
-        environment = tmux_environment(env)
+        global_env = command([self.tool("tmux"), "-S", str(socket), "show-environment", "-g"],
+                             self.env, self.home, output=True)
+        session_env = command([self.tool("tmux"), "-S", str(socket), "show-environment", "-t",
+                               "=" + runtime["session"]], self.env, self.home, output=True)
+        require(global_env == session_env and
+                hashlib.sha256(global_env).hexdigest() == runtime["environment_sha256"],
+                "runtime-drift")
+        environment = tmux_environment(global_env)
         require(environment.get("HOME") == self.b["account_home"] and
                 "TREEHOUSE_ROOT" not in environment and
                 "XDG_CONFIG_HOME" not in environment, "runtime-drift")
