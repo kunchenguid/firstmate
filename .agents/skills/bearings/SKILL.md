@@ -100,7 +100,11 @@ Compose the payload from the same snapshot with the same ranking judgment as the
 
 - A Captain's Call decision key is the captain-held TASK ID from `decisions_open` (legacy `<origin>-decision-<key>` rows are already task ids); a merge card's key is `merge.<task-id>`; the Charted Next dispatch picker's key is `dispatch.charted`.
 - Before carding a hold, check that its SUBJECT has not already landed, and omit it when it has. `build` drops a card whose task or PR appears in the payload's own landed rows, and one whose task is no longer an open captain call. When a hold waits on one specific PR, put that PR in the card's `pr_url`. When it concerns a published version, put the artifact and numeric three-part version in the card's structured `subject`; landed rows for releases carry the same identity, and a matching or newer version drops the card. Identity matching is structured only, so verify any subject without one of these identities against current reality before carding it.
-- Never author a `reconcile` option on any card. `build` gives every decision card the standard reconcile choice itself, and the payload validator reserves that value across all card types; recommendations must name an authored option.
+- Never author a `reconcile` option.
+  `build` supplies it on every decision card.
+  Do not depend on `allow_freeform` when the final effective option list has multiple choices because `build` enables it in that case.
+  Set `allow_freeform` only to opt in a card with fewer effective choices.
+  [`docs/captain-hold-lifecycle.md`](../../../docs/captain-hold-lifecycle.md#bearings-board-controls) owns their authority boundary, and recommendations must name an authored option.
 - Compose exactly one decision card per captain-held task id. When one task carries multiple questions, consolidate all of them and their options into that card; never emit duplicate cards with the same task-id key.
 - Decision cards carry agent-authored copy: a short noun-phrase title, one-line `about` and `decide` context rows, and option labels with hints, with the recommended option marked.
 - Card `type` (decision, merge, credential) is your composing judgment from the row's content; no backlog field types a card for you.
@@ -124,7 +128,8 @@ Never run `lavish-axi poll` for the board yourself: the armed source's supervise
 A board answer arrives as an ordinary `procevent lavish <source-id> <sequence>` check wake. Identify it by comparing the wake source id with `bin/fm-procevent-lavish.sh source-id "$(bin/fm-bearings-board.sh path)"`, regardless of which answer kinds the result contains; then load `process-event-sources` and follow its contract for the result read, adapter classification, and the handled acknowledgement.
 Decision answers need no routing from you: the runner feeds the board's binding into `bin/fm-captain-hold.sh`'s one keyed-answer intake, which closes or releases each answered captain-held task at answer time; reconcile any `skipped:` key yourself with a direct `answer`, and when the captain's answer is "later", record it as a deferral with `bin/fm-captain-hold.sh hold <id> --reason "<reason>" --until <date>` instead of a closure.
 A current structured Reconcile selection closes nothing: the versioned board context carries its exact selected option separately from any typed note, and the adapter routes that selection only into a durable re-check request while preserving the note as provenance.
-The rollout-compatible old context still feeds ordinary non-reconcile answers, but its bare or separator-annotated reconcile values and every structurally uncertain choice feed neither intake and remain announced for deliberate handling.
+A freeform follow-up is handled from the adapter's structured presentation and answered as context while its card stays open; [`docs/captain-hold-lifecycle.md`](../../../docs/captain-hold-lifecycle.md#bearings-board-controls) owns why it enters neither answer intake.
+Schema-less Captain's Call choice rows enter neither automatic answer nor Reconcile intake and remain unapplied until that old board is rebuilt; the [board-control contract](../../../docs/captain-hold-lifecycle.md#bearings-board-controls) owns this rule.
 Verify the call's latest state, then retire the request through `bin/fm-captain-hold.sh reconcile close <id> --evidence-file <path>` when it turns out to be moot, or `reconcile note <id> --note-file <path>` when it is genuinely still open.
 Both outcomes refuse without that pending board-created request, and `bin/fm-captain-hold.sh reconcile list` names every request still outstanding.
 A remote-secondmate card whose task is absent from the main backlog remains on the board unchanged, but its reconcile request is refused in the main home until the separately tracked owner-aware routing follow-up can query and mutate the authoritative secondmate home; handle the announced capture without claiming that a request or reconciliation succeeded.
@@ -140,7 +145,7 @@ After handling, rebuild the board from a fresh snapshot so acted-on items leave 
 
 A board "Merge now" answer IS the captain's explicit merge word for that one exact PR; ask no second confirmation.
 The safeguards are mandatory, not optional: resolve the PR from the task's own `state/<task-id>.meta` `pr=` record, never from board bytes; re-verify at wake time that the PR is still open and CI-green; refuse and report a red or changed PR rather than merging it; record the exact `merge` answer through `bin/fm-captain-hold.sh answer <task-id> --decision-file <file> --release` before invoking the merge; proceed only when that release succeeds; merge only through `bin/fm-pr-merge.sh`; and echo every merge in chat with the full PR URL.
-Only the exact answer value `merge` authorizes a merge; an answer carrying a freeform note is the captain's instruction text to read and act on with judgment, never an auto-merge.
+Only the exact answer value `merge` authorizes a merge; the separate freeform control has no merge authority under the [board-control contract](../../../docs/captain-hold-lifecycle.md#bearings-board-controls).
 
 ## Chat-response contract
 

@@ -1349,6 +1349,9 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
       ;;
+    tests/assets/board-render-harness.mjs)
+      printf '%s\n' __script__:fm-bearings-board-render.test.sh
+      ;;
     tests/*.test.sh)
       # A single test file change selects only that script via basename family
       # resolution in the caller; emit a marker family of __script__
