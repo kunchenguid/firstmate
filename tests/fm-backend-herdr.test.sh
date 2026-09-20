@@ -4440,8 +4440,10 @@ test_send_text_submit_idle_native_pending_plus_rendered_busy_is_queued() {
 # so the idle-baseline native path is structurally unreachable and every typed
 # send lands in the composer branch. Cursor's mid-turn composer row renders its own
 # `Add a follow-up` placeholder beside a right-aligned `ctrl+c to stop`, so the
-# content verdict is `pending` on a composer holding no user text, and every
-# typed steer reported delivery unconfirmed on a message that had actually landed.
+# content verdict on a composer holding no user text never proves empty
+# (unknown since the stripper learned the software cursor cell; pending
+# before), and every typed steer reported delivery unconfirmed on a message
+# that had actually landed.
 # The bytes below are the real captures from that pane.
 
 # The idle capture: no busy token anywhere, which is the pre-Enter baseline.

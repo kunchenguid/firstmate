@@ -236,7 +236,7 @@ On an idle or done native baseline, submit confirmation first waits for `working
 If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer is delivery, and proven pending text retries Enter.
 After the retry budget, `fm_composer_queued_enter_verdict` treats proven pending text plus a generating busy signal as a queued delivered Enter, and keeps an idle pending composer as a genuine swallow.
 On an already active or unreadable baseline, the adapter falls back to conservative composer clearance, with a pre-Enter rendered-footer transition when that baseline is unavailable.
-A fully unreadable target stops retrying and reports unknown.
+A fully unreadable target stops retrying: it reports unknown on an idle native baseline and pending on an active or unreadable one, so a steer that very likely landed is never reported as text-not-submitted.
 blocked is not treated as a queued-Enter busy signal, so a Cursor pane that reports blocked in every state does not receive that conversion.
 
 Some harnesses never present a legibly idle native baseline at all, so the composer fallback is their only path.
