@@ -4605,19 +4605,25 @@ spawn_launch_home_token() {
   local home=$1 root hash
   root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
   if command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print substr($1,1,8)}')
+    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
   elif command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | sha256sum | awk '{print substr($1,1,8)}')
+    hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
   else
-    hash=$(printf '%s' "$root" | cksum | awk '{printf "%08x", $1}')
+    return 1
   fi
+  case "$hash" in
+    *[!0-9a-fA-F]*|'') return 1 ;;
+  esac
   printf '%s' "$hash"
 }
-LAUNCH_HOME_TOKEN=$(spawn_launch_home_token "$FM_HOME")
+LAUNCH_HOME_TOKEN=$(spawn_launch_home_token "$FM_HOME") || LAUNCH_HOME_TOKEN=
 if [ -z "$LAUNCH_HOME_TOKEN" ]; then
   echo "error: could not derive a home identity for the staged launch file" >&2
   exit 1
 fi
+case "$SPAWN_GEN" in
+  *[!A-Za-z0-9.]*|'') echo "error: spawn incarnation token is not a usable launch-file nonce" >&2; exit 1 ;;
+esac
 LAUNCH_DIR="/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
 if ! (umask 077 && mkdir "$LAUNCH_DIR") 2>/dev/null; then
   if [ -L "$LAUNCH_DIR" ] || [ ! -d "$LAUNCH_DIR" ] || [ ! -O "$LAUNCH_DIR" ] ||
@@ -4627,11 +4633,10 @@ if ! (umask 077 && mkdir "$LAUNCH_DIR") 2>/dev/null; then
     exit 1
   fi
 fi
-LAUNCH_FILE="$LAUNCH_DIR/launch.sh"
-LAUNCH_STAGE="$LAUNCH_DIR/.launch.sh.$$.tmp"
-if [ -L "$LAUNCH_FILE" ] ||
-  { [ -e "$LAUNCH_FILE" ] && [ ! -f "$LAUNCH_FILE" ]; }; then
-  echo "error: task launch file $LAUNCH_FILE is not a regular file; refusing to replace it" >&2
+LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
+LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
+if [ -e "$LAUNCH_FILE" ] || [ -L "$LAUNCH_FILE" ]; then
+  echo "error: task launch file $LAUNCH_FILE already exists; refusing to replace it" >&2
   exit 1
 fi
 if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&

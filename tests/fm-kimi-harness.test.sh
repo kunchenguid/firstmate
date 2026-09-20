@@ -276,7 +276,7 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp launch_dir launch_file
+  local id rec out rc launch pointer brief_real meta task_tmp launch_dir launch_file launch_base
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -284,7 +284,6 @@ test_kimi_launch_then_send_is_verified() {
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
   launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
-  launch_file="$launch_dir/launch.sh"
   KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
   rm -rf "$launch_dir"
   out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
@@ -312,6 +311,14 @@ test_kimi_launch_then_send_is_verified() {
   assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
   [ "$(path_mode "$task_tmp")" = 700 ] \
     || fail "kimi spawn left its task temp root readable by others: $(path_mode "$task_tmp")"
+  launch_file=$(kimi_typed_launch_file "$CASE_DIR/tmux-calls.log")
+  launch_base=$(basename "$launch_file")
+  case "$launch_file" in
+    "$launch_dir"/launch.*) ;;
+    *) fail "kimi spawn typed a launch path outside its home namespace: $launch_file" ;;
+  esac
+  [ "$launch_base" != launch.sh ] \
+    || fail "kimi spawn reused a mutable launch.sh name"
   [ "$launch_file" != "$task_tmp/launch.sh" ] \
     || fail "kimi spawn staged its launch command at the shared per-id path"
   [ "$(path_mode "$launch_dir")" = 700 ] \
@@ -339,17 +346,26 @@ kimi_launch_dir() {
   local id=$1 home=$2 root hash
   root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
   if command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print substr($1,1,8)}')
+    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
   elif command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | sha256sum | awk '{print substr($1,1,8)}')
+    hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
   else
-    hash=$(printf '%s' "$root" | cksum | awk '{printf "%08x", $1}')
+    fail "test needs shasum or sha256sum"
   fi
   printf '/tmp/fm-%s+%s' "$id" "$hash"
 }
 
+kimi_typed_launch_file() {
+  local log=$1 src
+  src=$(grep -o "\. '/tmp/fm-[^']*'" "$log" | tail -1)
+  src=${src#". '"}
+  src=${src%"'"}
+  [ -n "$src" ] || fail "spawn did not type a staged launch source line"
+  printf '%s' "$src"
+}
+
 test_kimi_spawn_refuses_shared_task_temp_root() {
-  local id rec out rc task_tmp launch_dir launch_file
+  local id rec out rc task_tmp launch_dir launch_file stale_file
   id="kimi-sharedtmp-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -359,7 +375,6 @@ test_kimi_spawn_refuses_shared_task_temp_root() {
   rec=$(make_spawn_case sharedtmp "$id")
   read_spawn_record "$rec"
   launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
-  launch_file="$launch_dir/launch.sh"
   KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
   rm -rf "$launch_dir"
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
@@ -368,7 +383,7 @@ test_kimi_spawn_refuses_shared_task_temp_root() {
   assert_contains "$out" "is not a private directory owned by this user" \
     "kimi spawn did not name the unsafe task temp root"
   assert_absent "$task_tmp/launch.sh" "kimi spawn staged its launch command in a shared directory"
-  assert_absent "$launch_file" "kimi spawn staged a namespaced launch file after refusing the shared temp root"
+  assert_absent "$launch_dir" "kimi spawn staged a namespaced launch directory after refusing the shared temp root"
   [ ! -s "$CASE_DIR/launch.log" ] || fail "kimi spawn launched despite an unsafe task temp root"
   rm -rf "$task_tmp"
   mkdir "$task_tmp"
@@ -376,30 +391,39 @@ test_kimi_spawn_refuses_shared_task_temp_root() {
   rec=$(make_spawn_case ownedtmp "$id")
   read_spawn_record "$rec"
   launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
-  launch_file="$launch_dir/launch.sh"
   KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
   rm -rf "$launch_dir"
   mkdir "$launch_dir"
   chmod 755 "$launch_dir"
-  printf 'stale launch command\n' > "$launch_file"
-  chmod 644 "$launch_file"
+  stale_file="$launch_dir/launch.sh"
+  printf 'stale launch command\n' > "$stale_file"
+  chmod 644 "$stale_file"
   printf 'stale shared launch command\n' > "$task_tmp/launch.sh"
   chmod 644 "$task_tmp/launch.sh"
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
   expect_code 0 "$rc" "kimi spawn should reuse an existing temp root it owns: $out"
+  launch_file=$(kimi_typed_launch_file "$CASE_DIR/tmux-calls.log")
   [ "$(path_mode "$task_tmp")" = 700 ] \
     || fail "kimi spawn did not tighten its reused task temp root: $(path_mode "$task_tmp")"
   [ "$(path_mode "$launch_dir")" = 700 ] \
     || fail "kimi spawn did not tighten its reused launch directory: $(path_mode "$launch_dir")"
+  case "$launch_file" in
+    "$launch_dir"/launch.*) ;;
+    *) fail "kimi spawn typed a launch path outside its home namespace: $launch_file" ;;
+  esac
+  [ "$launch_file" != "$stale_file" ] \
+    || fail "kimi spawn rebound a pre-existing launch.sh instead of writing a new nonce file"
   [ "$(path_mode "$launch_file")" = 600 ] \
-    || fail "kimi spawn did not tighten a reused launch file: $(path_mode "$launch_file")"
+    || fail "kimi spawn staged its launch command without mode 0600: $(path_mode "$launch_file")"
+  [ "$(path_mode "$stale_file")" = 644 ] \
+    || fail "kimi spawn overwrote a pre-existing launch.sh"
   [ "$(path_mode "$task_tmp/launch.sh")" = 644 ] \
     || fail "kimi spawn reused the shared per-id launch file"
   grep -qF -- "-l . '$launch_file'" "$CASE_DIR/tmux-calls.log" \
     || fail "kimi spawn did not type a short line sourcing its namespaced launch command"
   rm -rf "$task_tmp" "$launch_dir"
-  pass "fm-spawn: unsafe task roots are refused, owned roots are tightened, and reused launch files stay 0600"
+  pass "fm-spawn: unsafe task roots are refused, owned roots are tightened, and launch files stay unique and 0600"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
