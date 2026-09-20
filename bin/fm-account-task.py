@@ -442,7 +442,7 @@ class Route:
         if any(item.get("result") is None for item in self.ledger["operations"].values()):
             self.disable()
         self.env = dict(HOME=b["account_home"], USER=b["user"], LOGNAME=b["user"],
-                        PATH=":".join(b["search_path"]), FM_HOME=b["home"],
+                        PATH=":".join(b["search_path"]), HISTFILE="/dev/null", FM_HOME=b["home"],
                         FM_ROOT_OVERRIDE=b["code_root"], LANG="C.UTF-8", TERM="xterm-256color",
                         COMPACT_ADVISER_DISABLE="1",
                         FM_ACCOUNT_TASK_SESSION=b["runtime"]["session"],

@@ -284,9 +284,12 @@
 #   that already-qualified absolute root. A mismatch refuses before metadata or
 #   the harness launch and never falls back to another root. A successful fresh
 #   launch records `account_task_commit=<spawn_gen>` immediately before the final
-#   backlog transition. Recovery requires both durable facts, so a crash on either
-#   side of that boundary cannot turn a provisional launch into an active task.
-#   Ordinary spawns do not set it and remain unchanged.
+#   backlog transition. For a Pi task, the generated per-task extension also
+#   replaces only the Bash tool so its shell and descendants receive the exact
+#   receiver-fixed FM_HOME, PATH, and HISTFILE after Pi's own environment setup.
+#   Recovery requires both durable facts, so a crash on either side of that
+#   boundary cannot turn a provisional launch into an active task. Ordinary
+#   spawns do not set the marker and keep the standard Pi Bash tool unchanged.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -4193,9 +4196,20 @@ EOF
     # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
     # loaded from inside the project (verified live), but an explicit -e path
     # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
+    account_task_pi_import=
+    account_task_pi_enabled=0
+    if [ -n "${FM_ACCOUNT_TASK_WORKSPACE_ROOT:-}" ]; then
+      if [ "${HISTFILE:-}" != /dev/null ]; then
+        echo "error: restricted account-task Pi launch requires receiver-fixed HISTFILE=/dev/null" >&2
+        exit 1
+      fi
+      account_task_pi_import='import { createBashTool } from "@earendil-works/pi-coding-agent";'
+      account_task_pi_enabled=1
+    fi
     cat >"$STATE/$ID.pi-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+$account_task_pi_import
 // Semantic state: "agent_start" -> busy when a low-level agent run begins;
 // "agent_settled" -> idle only when ctx.isIdle() confirms Pi will not
 // continue automatically - auto-retries, auto-compaction retries, tool
@@ -4213,6 +4227,33 @@ const busyEvent = (state: string, event: string) =>
     ], () => resolve());
   });
 export default function (pi: any) {
+
+EOF
+    if [ "$account_task_pi_enabled" = 1 ]; then
+      cat >>"$STATE/$ID.pi-ext.ts" <<EOF
+  // The restricted receiver validates these fixed route values before spawn.
+  // Pi adds its own agent-bin prefix to Bash-tool PATH, so an ordinary process
+  // environment is insufficient: override only these three values after Pi's
+  // session metadata injection and preserve every other tool environment key.
+  const accountBashTool = createBashTool(process.cwd(), {
+    spawnHook: (context) => ({
+      ...context,
+      env: {
+        ...context.env,
+        FM_HOME: "$(json_escape "$FM_HOME")",
+        PATH: "$(json_escape "$PATH")",
+        HISTFILE: "$(json_escape "$HISTFILE")",
+      },
+    }),
+  });
+  pi.registerTool({
+    ...accountBashTool,
+    execute: async (id, params, signal, onUpdate, _ctx) =>
+      accountBashTool.execute(id, params, signal, onUpdate),
+  });
+EOF
+    fi
+    cat >>"$STATE/$ID.pi-ext.ts" <<EOF
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
   pi.on("agent_settled", (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;

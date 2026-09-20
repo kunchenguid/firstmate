@@ -182,6 +182,33 @@ The portable suite always exercises both allocation boundaries with invented spa
 The exact official-artifact case requires `FM_ACCOUNT_TASK_OFFICIAL_NODE` so network-free CI never downloads a runtime executable.
 This evidence proves only bounded fingerprint compatibility and does not qualify a live route, account, credential, or worker.
 
+### Restricted Pi Bash environment pin
+
+The account-task Pi Bash override was verified on 2026-09-20 with Node v24.18.0 against the `createBashTool` and `spawnHook` contract documented by Pi 0.85.0.
+The generated extension executed against an invented shell-tool host that first supplied wrong `FM_HOME` and `HISTFILE` values and prepended an invented account-global agent directory to `PATH`.
+The tool launched a child shell and proved that the extension replaced those three values with the receiver-fixed `FM_HOME`, `PATH`, and `HISTFILE=/dev/null` while preserving Pi's injected session identifier.
+The ordinary generated Pi lifecycle extension continued to execute without registering a Bash replacement.
+
+```sh
+bin/fm-test-run.sh tests/fm-busy-adapter-wiring.test.sh
+bin/fm-test-run.sh tests/fm-account-task.test.sh
+```
+
+Observed bounded output:
+
+```text
+ok - restricted account-task Pi Bash and its descendants receive exact route values while ordinary Pi wiring stays unchanged
+all fm-busy-adapter-wiring tests passed
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+Ran 31 tests in 63.686s
+OK (skipped=1)
+ok - restricted account-task protocol, identity, replay, control and rollback
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+```
+
+This fixture exercises generated extension execution and receiver environment construction without starting Pi, installing a route, crossing accounts, or qualifying an account, credential, provider, or worker.
+An attended live qualification remains required by [`docs/account-task-route.md`](../account-task-route.md).
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.

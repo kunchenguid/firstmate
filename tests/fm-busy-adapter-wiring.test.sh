@@ -79,6 +79,74 @@ if (["turn-end", "progress"].includes(process.env.MODE)) {
 EOF
 }
 
+install_account_pi_package_stub() {  # <home>
+  local package=$1/node_modules/@earendil-works/pi-coding-agent
+  mkdir -p "$package"
+  cat > "$package/package.json" <<'JSON'
+{"name":"@earendil-works/pi-coding-agent","type":"module","exports":"./index.js"}
+JSON
+  cat > "$package/index.js" <<'JS'
+import { spawn } from "node:child_process";
+
+export function createBashTool(cwd, options) {
+  return {
+    name: "bash",
+    label: "synthetic bash",
+    description: "synthetic bash",
+    parameters: { type: "object" },
+    execute: async (_id, params) => new Promise((resolve, reject) => {
+      const initial = {
+        command: String(params.command ?? ""),
+        cwd,
+        env: {
+          ...process.env,
+          FM_HOME: "/invented/wrong-home",
+          PATH: `/invented/account-global-agent-bin:${process.env.PATH ?? ""}`,
+          HISTFILE: "/invented/wrong-history",
+          PI_SESSION_ID: "synthetic-session",
+        },
+      };
+      const context = options.spawnHook ? options.spawnHook(initial) : initial;
+      const child = spawn("/bin/sh", ["-c", context.command], {
+        cwd: context.cwd,
+        env: context.env,
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.on("error", reject);
+      child.on("close", (code) => resolve({
+        content: [{ type: "text", text: stdout + stderr }],
+        details: { code },
+      }));
+    }),
+  };
+}
+JS
+}
+
+drive_account_pi_bash() {  # <ext-path>
+  EXT_PATH="$1" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+const tools = [];
+mod.default({
+  registerTool: (tool) => { tools.push(tool); },
+  on: () => {},
+  events: { on: () => {} },
+});
+if (tools.length !== 1 || tools[0].name !== "bash") {
+  throw new Error(`expected one account-task Bash override, got ${tools.map((tool) => tool.name).join(",")}`);
+}
+const result = await tools[0].execute("synthetic-call", {
+  command: "/bin/sh -c 'printf \"%s\\n\" \"$FM_HOME\" \"$PATH\" \"$HISTFILE\" \"$PI_SESSION_ID\"'",
+});
+if (result.details?.code !== 0) throw new Error(`account Bash failed: ${JSON.stringify(result)}`);
+process.stdout.write(result.content[0].text);
+EOF
+}
+
 test_pi_extension_semantic_lifecycle() {
   local rec id=busy-pi-1 out state ext
   rec=$(make_spawn_case pi-lifecycle pi "$id")
@@ -119,6 +187,31 @@ test_pi_extension_semantic_lifecycle() {
   out=$(classify pi "$id" "$state")
   [ "$out" = "idle pi-ext" ] || fail "the final settle must classify idle, got '$out'"
   pass "pi extension reports agent_start busy, settles idle only via ctx.isIdle(), and keeps turn_end a notification"
+}
+
+test_account_task_pi_bash_pins_receiver_environment() {
+  local rec id=busy-pi-account out ext expected_path line1 line2 line3 line4
+  rec=$(make_spawn_case pi-account-task pi "$id")
+  read_case_record "$rec"
+  install_account_pi_package_stub "$HOME_DIR"
+  expected_path="$FAKEBIN_DIR:$PATH"
+
+  out=$(HISTFILE=/dev/null FM_ACCOUNT_TASK_WORKSPACE_ROOT="$CASE_DIR" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "restricted account-task Pi spawn should succeed: $out"
+  ext="$HOME_DIR/state/$id.pi-ext.ts"
+  assert_present "$ext" "restricted account-task Pi spawn did not write its extension"
+
+  out=$(drive_account_pi_bash "$ext") || fail "restricted account-task Bash drive failed: $out"
+  line1=$(printf '%s\n' "$out" | sed -n '1p')
+  line2=$(printf '%s\n' "$out" | sed -n '2p')
+  line3=$(printf '%s\n' "$out" | sed -n '3p')
+  line4=$(printf '%s\n' "$out" | sed -n '4p')
+  [ "$line1" = "$HOME_DIR" ] || fail "account-task Bash did not pin FM_HOME: $out"
+  [ "$line2" = "$expected_path" ] || fail "account-task Bash did not replace Pi's prepended PATH: $out"
+  [ "$line3" = /dev/null ] || fail "account-task Bash did not pin HISTFILE=/dev/null: $out"
+  [ "$line4" = synthetic-session ] || fail "account-task Bash dropped Pi's session environment: $out"
+  pass "restricted account-task Pi Bash and its descendants receive exact route values while ordinary Pi wiring stays unchanged"
 }
 
 test_pi_extension_serializes_settle_before_next_start() {
@@ -423,6 +516,7 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 }
 
 test_pi_extension_semantic_lifecycle
+test_account_task_pi_bash_pins_receiver_environment
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring

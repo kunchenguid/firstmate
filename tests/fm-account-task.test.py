@@ -77,6 +77,7 @@ if name == 'pi':
 with (a / 'calls.jsonl').open('a') as log:
     log.write(json.dumps({'name':name, 'args':args, 'uid':os.getuid(),
                          'home':os.environ.get('HOME'), 'fm_home':os.environ.get('FM_HOME'),
+                         'path':os.environ.get('PATH'), 'histfile':os.environ.get('HISTFILE'),
                          'secret':os.environ.get('SYNTHETIC_SECRET'),
                          'agent':os.environ.get('SSH_AUTH_SOCK'),
                          'node':os.environ.get('NODE_OPTIONS'),
@@ -365,6 +366,8 @@ class RouteTest(unittest.TestCase):
             self.assertEqual(row['uid'], os.getuid())
             self.assertEqual(row['home'], str(self.a))
             self.assertEqual(row['fm_home'], str(self.home))
+            self.assertEqual(row['path'], ':'.join(self.b['search_path']))
+            self.assertEqual(row['histfile'], '/dev/null')
             for key in ('secret', 'agent', 'node', 'bash', 'parent'):
                 self.assertIsNone(row[key])
             self.assertEqual(row['workspace'], str(self.a / 'workspaces'))

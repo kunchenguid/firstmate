@@ -38,6 +38,7 @@ The binding's additional absence list is where an attended qualification pins Si
 The denial list must name existing non-secret canaries that the destination account cannot read, so a missing path cannot pass as a permission denial.
 
 The worker launch uses an empty `config/launch-env-allowlist` and a receiver-constructed environment.
+For an account-task Pi worker, the generated per-task extension replaces only the Bash tool and pins `FM_HOME`, `PATH`, and `HISTFILE=/dev/null` from those receiver-fixed values after Pi adds its own shell-tool environment; ordinary Pi workers keep the standard Bash tool.
 That environment filtering is not an operating-system sandbox.
 Workers within this dedicated destination account remain mutually trusted, and the attended receipt must cover account-local imports, shell/history behavior, open descriptors, package custody, auth sources, operating-system permissions, and every shared service the selected delivery path could reach.
 
@@ -97,6 +98,7 @@ They do not replace an installed cross-account receipt.
 Before enabling a route, an attended invented-data qualification must prove all of the following from the actual destination receiver and worker:
 
 - the expected account name and UID, account home, operational home, project, task copy, records, socket, server, session, and tool process all belong to the destination account;
+- the Pi Bash tool and a child process both receive the exact route `FM_HOME` and `PATH`, receive `HISTFILE=/dev/null`, and retain Pi's session environment without an account-global executable prefix;
 - personal and private denial canaries remain unreadable, every declared absent Signal, Relay, private-home, extension, package, auth, and session path remains absent, and no parent descriptor or forwarded agent enters the launch;
 - one disconnect before and after acceptance produces one task generation and one sealed result;
 - a sibling destination task, a control endpoint in another account, personal sessions, Signal owners, and shared daemons remain unchanged during steer, checkpoint, stop, drift, and rollback cases;
