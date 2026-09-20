@@ -1177,7 +1177,11 @@ housekeeping() {  # <state>
   #     read decides relevance, and the classified-through offset is the dedup.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local event record rest endpoint ident rc
+    local event record rest endpoint ident rc scan_cycle
+    # This scan's cycle token for the bounded-skip counter: one count per
+    # catch-all scan per log, never one per observation within it.
+    FM_CATCHALL_SCAN_N=$((${FM_CATCHALL_SCAN_N:-0} + 1))
+    scan_cycle="d$$:$FM_CATCHALL_SCAN_N"
     for f in "$state"/*.status; do
       [ -e "$f" ] || [ -L "$f" ] || continue
       task=$(basename "$f"); task="${task%.status}"
@@ -1190,8 +1194,8 @@ housekeeping() {  # <state>
         # next catch-all scan reads it again, and only a persistent failure is
         # escalated, once per episode, when its consecutive skips reach the bound.
         ident=$(status_observed_signature "$f") || {
-          status_observation_skipped "$f" \
-            && escalate_add "$state" "$(basename "$f"): status log unobservable, $STATUS_UNOBSERVABLE_COUNT consecutive failed observations, stat helpers failing"
+          status_observation_skipped "$f" "$scan_cycle" \
+            && escalate_add "$state" "${f##*/}: status log unobservable, $STATUS_UNOBSERVABLE_COUNT consecutive failed observations, stat helpers failing"
           continue
         }
         status_observation_succeeded "$f"

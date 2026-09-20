@@ -391,7 +391,9 @@ test_marker_writers_refuse_failed_observations() {
 # The bounded-skip counter fm-classify-lib.sh owns: consecutive skips of one
 # status file report exactly once when they reach the bound, later skips of the
 # same episode stay silent, and a successful observation ends the episode so the
-# next failure reports once again.
+# next failure reports once again. The count is per supervisor cycle: several
+# skips passed one cycle token advance it once, so the bound stays a count of
+# polls however many sites observe the same log within one poll.
 test_unobservable_bound_counts_consecutive_skips() {
   local dir f
   dir="$TMP_ROOT/unobservable-bound"; mkdir -p "$dir"
@@ -406,13 +408,27 @@ test_unobservable_bound_counts_consecutive_skips() {
     status_observation_skipped "$f" && fail "a fourth skip reported the same episode again"
     status_observation_skipped "$f" && fail "a fifth skip reported the same episode again"
     status_observation_succeeded "$f"
-    [ ! -e "$dir/.unobservable-task" ] || fail "a successful observation left the sidecar behind"
+    [ ! -s "$dir/.unobservable-task" ] || fail "a successful observation left an episode in the sidecar"
     status_observation_skipped "$f" && fail "a new episode reported on its first skip"
     status_observation_skipped "$f" && fail "a new episode reported on its second skip"
     status_observation_skipped "$f" || fail "a new episode did not report at the bound"
+    # The same failure observed several times inside one cycle counts once.
+    status_observation_succeeded "$f"
+    status_observation_skipped "$f" poll-1 && fail "the first skip of cycle 1 reported before the bound"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 1 ] || fail "cycle 1 counted $STATUS_UNOBSERVABLE_COUNT"
+    status_observation_skipped "$f" poll-1 && fail "a second skip in cycle 1 reported"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 1 ] || fail "a second skip in cycle 1 advanced the count to $STATUS_UNOBSERVABLE_COUNT"
+    status_observation_skipped "$f" poll-1 && fail "a third skip in cycle 1 reported"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 1 ] || fail "a third skip in cycle 1 advanced the count to $STATUS_UNOBSERVABLE_COUNT"
+    status_observation_skipped "$f" poll-2 && fail "the first skip of cycle 2 reported before the bound"
+    status_observation_skipped "$f" poll-2 && fail "a second skip in cycle 2 reported"
+    status_observation_skipped "$f" poll-3 || fail "the third cycle did not report at the bound"
+    [ "$STATUS_UNOBSERVABLE_COUNT" = 3 ] || fail "the count at the bound was $STATUS_UNOBSERVABLE_COUNT"
+    status_observation_skipped "$f" poll-3 && fail "a repeat skip in the reporting cycle reported again"
+    status_observation_skipped "$f" poll-4 && fail "a later cycle reported the same episode again"
     exit 0
   ) || exit 1
-  pass "the unobservable bound reports the third consecutive skip once per episode and resets on success"
+  pass "the unobservable bound reports the third consecutive skip once per episode and counts once per cycle"
 }
 
 test_stale_is_terminal_classifier() {
@@ -1663,7 +1679,7 @@ test_unobservable_status_signature_is_skipped_and_never_recorded() {
     || { reap "$pid"; fail "a failed observation was recorded into the seen marker: $(cat "$marker")"; }
   [ ! -e "$state/.hb-surfaced-task" ] \
     || { reap "$pid"; fail "a failed observation was recorded into the heartbeat marker"; }
-  [ ! -e "$state/.unobservable-task" ] \
+  [ ! -s "$state/.unobservable-task" ] \
     || { reap "$pid"; fail "a successful observation did not end the failure episode"; }
   # The scan is not blind: a real event through the same recovered readers surfaces.
   printf 'blocked: a real event after recovery\n' >> "$status_file"
@@ -1702,7 +1718,7 @@ test_persistent_unobservable_status_reports_once_per_episode() {
   [ "$(queue_rows_for "$state" signal task.status)" = 0 ] \
     || fail "a persistent failed observation was queued as a signal: $(cat "$state/.wake-queue")"
   [ "$(cat "$marker")" = "$before" ] || fail "the report changed the seen marker: $(cat "$marker")"
-  [ -e "$state/.unobservable-task" ] || fail "the episode sidecar was not recorded"
+  [ -s "$state/.unobservable-task" ] || fail "the episode sidecar was not recorded"
   # Still failing on later polls: the episode is already reported, so nothing
   # more is queued. The handled row is acknowledged and the next round is armed
   # as the successor a supervision turn arms (parked_watch_round below).
@@ -1720,7 +1736,7 @@ test_persistent_unobservable_status_reports_once_per_episode() {
   if ! wait_poll_cycle "$state" "$pid" || ! wait_poll_cycle "$state" "$pid"; then
     reap "$pid"; fail "watcher exited on an unchanged log after its helpers recovered: $(cat "$out")"
   fi
-  [ ! -e "$state/.unobservable-task" ] || { reap "$pid"; fail "a successful observation did not clear the episode sidecar"; }
+  [ ! -s "$state/.unobservable-task" ] || { reap "$pid"; fail "a successful observation did not clear the episode sidecar"; }
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "recovery of an unchanged log queued a wake: $(cat "$state/.wake-queue")"; }
   : > "$dir/observe-fail"
   wait_for_exit "$pid" 150 || fail "a new failure episode was not reported: $(cat "$out")"

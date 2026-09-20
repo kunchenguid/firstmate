@@ -30,8 +30,9 @@
 # so one transient failure can neither wake the supervisor nor poison the
 # recorded state (status_observed_signature, status_observed_signature_unobservable).
 # The skip is bounded: consecutive failed observations of one file are counted
-# in its sidecar and reported once per episode when they reach
-# FM_UNOBSERVABLE_POLLS, so a persistent failure stays loud (status_observation_skipped).
+# in its sidecar, once per supervisor cycle however many sites observe it, and
+# reported once per episode when they reach FM_UNOBSERVABLE_POLLS, so a
+# persistent failure stays loud (status_observation_skipped).
 # A missing, malformed, identity-mismatched, or past-end classified position reads
 # from byte 0, preferring a bounded duplicate over a lost event.
 #
@@ -1515,36 +1516,61 @@ status_observed_signature() {  # <file> [<size> <ident>]
 # paths, and the daemon's catch-all scan). A momentary failure is skipped
 # silently, but a persistent one must not blind every supervisor surface, so
 # each consecutive failed observation of one status file is counted in a private
-# sidecar beside it (state/.unobservable-<task>: "<count>\t<reported>", written
-# only here, a documented exception to the pure-read rule like the cursor), a
-# successful observation clears the sidecar, and the count reaching
+# sidecar beside it (state/.unobservable-<task>: "<count>\t<reported>\t<cycle>",
+# written only here, a documented exception to the pure-read rule like the
+# cursor), a successful observation empties the sidecar, and the count reaching
 # FM_UNOBSERVABLE_POLLS (default 3, the consecutive-error budget shape of
 # bin/fm-procevent-when.sh's --error-budget) makes status_observation_skipped
 # return 0 exactly once per failure episode so the caller reports it. After that
 # it returns 1 until the file is observable again and a new episode starts. The
-# error tokens are never a throttle key; only this counter is. A sidecar that
-# cannot be written still returns the due report, so an unwritable state dir is
-# loud rather than silent.
+# error tokens are never a throttle key; only this counter is. An absent and an
+# empty sidecar both mean "no episode in progress".
+#
+# The count is per supervisor cycle, not per call: several sites observe the same
+# log within one poll (the signal scan, its grace-period rescan, the heartbeat
+# backstop, the stale declared-wait paths), so each caller passes that cycle's
+# token and a repeat observation inside the same cycle neither advances the count
+# nor reports. A call with no token counts every call, which the pure unit test
+# uses.
+#
+# Everything here is a bash builtin - parameter expansion for the path, `read`
+# and a redirection for the sidecar - because the failure class this bound exists
+# to escalate is fork/exec pressure that kills the stat helpers while builtins
+# still work. A counter built from dirname/basename/cat/mv would go inert in
+# exactly the episode it must report. A torn write self-heals through the count
+# guard below, so the write needs no temp-and-rename.
 FM_UNOBSERVABLE_POLLS=${FM_UNOBSERVABLE_POLLS:-3}
 STATUS_UNOBSERVABLE_COUNT=0
+_STATUS_UNOBSERVABLE_MARKER=
 
-_status_unobservable_marker() {  # <status-file>
+_status_unobservable_marker() {  # <status-file> -> sets _STATUS_UNOBSERVABLE_MARKER
   local f=$1 dir base
-  dir=$(dirname "$f")
-  base=$(basename "$f")
-  printf '%s/.unobservable-%s' "$dir" "${base%.status}"
+  case "$f" in */*) dir=${f%/*} ;; *) dir=. ;; esac
+  base=${f##*/}
+  _STATUS_UNOBSERVABLE_MARKER="$dir/.unobservable-${base%.status}"
 }
 
-status_observation_skipped() {  # <status-file> -> 0 when this skip is the episode's one report
-  local f=$1 marker raw count reported bound due=1 tmp
-  marker=$(_status_unobservable_marker "$f")
-  raw=$(cat "$marker" 2>/dev/null) || raw=''
+status_observation_skipped() {  # <status-file> [<cycle>] -> 0 when this skip is the episode's one report
+  local f=$1 cycle=${2-} marker raw='' rest='' count reported stored bound due=1
+  _status_unobservable_marker "$f"
+  marker=$_STATUS_UNOBSERVABLE_MARKER
+  if [ -r "$marker" ]; then
+    IFS= read -r raw < "$marker" || :
+  fi
+  count=$raw; reported=0; stored=''
   case "$raw" in
-    *$'\t'*) count=${raw%%$'\t'*}; reported=${raw#*$'\t'} ;;
-    *) count=$raw; reported=0 ;;
+    *$'\t'*) count=${raw%%$'\t'*}; rest=${raw#*$'\t'} ;;
+  esac
+  case "$rest" in
+    *$'\t'*) reported=${rest%%$'\t'*}; stored=${rest#*$'\t'} ;;
+    *) reported=$rest ;;
   esac
   case "$count" in ''|*[!0-9]*) count=0 ;; esac
   [ "$reported" = 1 ] || reported=0
+  if [ -n "$cycle" ] && [ "$cycle" = "$stored" ] && [ "$count" -gt 0 ]; then
+    STATUS_UNOBSERVABLE_COUNT=$count
+    return 1
+  fi
   bound=$FM_UNOBSERVABLE_POLLS
   case "$bound" in ''|*[!0-9]*|0) bound=3 ;; esac
   count=$((count + 1))
@@ -1553,17 +1579,15 @@ status_observation_skipped() {  # <status-file> -> 0 when this skip is the episo
     reported=1
     due=0
   fi
-  tmp="$marker.tmp.$$"
-  if printf '%s\t%s' "$count" "$reported" > "$tmp" 2>/dev/null; then
-    mv -f "$tmp" "$marker" 2>/dev/null || rm -f "$tmp"
-  fi
+  { printf '%s\t%s\t%s' "$count" "$reported" "$cycle" > "$marker"; } 2>/dev/null || :
   return "$due"
 }
 
 status_observation_succeeded() {  # <status-file>: a successful observation ends the episode
-  local marker
-  marker=$(_status_unobservable_marker "$1")
-  [ ! -e "$marker" ] || rm -f "$marker"
+  _status_unobservable_marker "$1"
+  if [ -s "$_STATUS_UNOBSERVABLE_MARKER" ]; then
+    { : > "$_STATUS_UNOBSERVABLE_MARKER"; } 2>/dev/null || :
+  fi
   return 0
 }
 
