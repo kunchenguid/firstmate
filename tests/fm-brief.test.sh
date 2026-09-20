@@ -907,9 +907,13 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
     # rule 4's echo: substitute each one's named placeholders and read the stamp
     # back. Extracting by "append" as well as by the stamp means dropping a stamp
     # from any instruction fails here rather than shrinking the set.
+    # The idle-compact declared-state phrase is a fixed prefix bin/fm-idle-compact.sh
+    # matches literally (see its own fm_idle_compact_declared_paused contract), not a
+    # worker-stamped signal read back through status_line_at_epoch, so it is exempt here.
     templates=$(grep -o -e "append \`[^\`]*: [^\`]*\`" \
       -e "\`[^\`]*\[at=<epoch>\][^\`]*\`" "$brief" \
-      | sed 's/^append //' | tr -d '`' | sort -u)
+      | sed 's/^append //' | tr -d '`' | sort -u \
+      | grep -v -F 'paused: awaiting compaction before validation')
     signals=0
     while IFS= read -r template; do
       [ -n "$template" ] || continue
