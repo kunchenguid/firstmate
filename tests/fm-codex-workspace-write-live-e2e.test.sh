@@ -89,8 +89,9 @@ pass "worker created its branch, committed, reported, and acknowledged through t
 
 [ ! -e "$COMMON/refs/heads/fm/$SIB" ] && [ ! -e "$LAB_ROOT/home/state/$SIB.status" ] \
   || fail "sibling ref or status was written despite the exact grant"
-[ -r "$COMMON/config" ] && cmp -s "$LAB_ROOT/git-config.before" "$COMMON/config" \
-  || fail "shared Git config was modified or unreadable despite the exact grant"
+if [ ! -r "$COMMON/config" ] || ! cmp -s "$LAB_ROOT/git-config.before" "$COMMON/config"; then
+  fail "shared Git config was modified or unreadable despite the exact grant"
+fi
 pass "sibling refs, sibling status, and shared Git config stayed denied"
 
 echo "# all fm-codex-workspace-write-live-e2e checks passed"
