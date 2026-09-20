@@ -32,7 +32,7 @@ The observed `scout` answer and low implementation-authorization score are compa
 
 ## Offline regression
 
-`tests/fm-intake-classify.test.sh` uses fake curl to prove the exact off gate, `.env` precedence, one bounded typed request, secret containment, status composition, and non-blocking runtime failures.
+`tests/fm-intake-classify.test.sh` uses fake curl and failing local-command fixtures to prove the exact off gate, `.env` precedence, one bounded typed request, shell-trace and process-boundary secret containment, status composition, and non-blocking runtime setup and request-I/O failures.
 
 ```console
 $ bash tests/fm-intake-classify.test.sh | tail -1

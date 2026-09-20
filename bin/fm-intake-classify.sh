@@ -22,14 +22,14 @@
 #   intake-classify:
 #     status: clear | ambiguous | escalate | error
 #     model/latency_ms/tokens, deliverable and confidence, intent_clear and
-#     confidence, urgency and score, request truncation, and any reason
+#     NOUL score, urgency and score, request truncation, and any reason
 #   clear     -> a high-confidence recommendation; ship is also authorized
 #   ambiguous -> a low-confidence or unclear recommendation
 #   escalate  -> a ship recommendation without implementation authorization
-#   error     -> API, network, response, or rendering failure
+#   error     -> local runtime, API, network, response, or rendering failure
 #   Every runtime outcome exits 0 so intake is never blocked by this tool.
-#   Exit 2 only for a usage or configuration error (unreadable request or
-#   missing jq), which is actionable and never selected around.
+#   Exit 2 only for invalid argv, an initially unreadable request, or missing
+#   jq, which are actionable usage or configuration errors.
 #
 # Environment:
 #   TYPESAFE_API_KEY is the only classifier-specific environment setting.
