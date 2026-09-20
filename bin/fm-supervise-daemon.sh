@@ -49,7 +49,10 @@
 #     fm-classify-lib.sh's combined predicate - instead gets its own longer
 #     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, whether its pane
 #     reads idle or busy; only a status append that stops declaring the wait
-#     ends that routing. A captain-held transfer is not rechecked at all while
+#     ends that routing. A worker the control plane deliberately stopped
+#     (state/<id>.deliberate-stop, written by bin/fm-control.sh's exit verb) is
+#     parked the same way, whatever its last status line says. A captain-held
+#     transfer is not rechecked at all while
 #     the away-posture record (state/.afk-contract) exists: nobody is there to
 #     answer it, and the return brief lists it.
 #     Crewmates are autonomous, so a delayed stale response does not stall a
@@ -181,6 +184,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # for the captain is never rechecked (the watcher applies the same rule).
 # shellcheck source=bin/fm-afk-contract.sh
 . "$FM_DAEMON_DIR/fm-afk-contract.sh"
+# The durable deliberate-stop marker (state/<id>.deliberate-stop), owned by
+# bin/fm-control-lib.sh. The daemon reads only its presence so a deliberately
+# parked task takes the declared-pause cadence instead of the wedge ladder, in
+# both classify_stale and the housekeeping stale recheck.
+# shellcheck source=bin/fm-control-lib.sh
+. "$FM_DAEMON_DIR/fm-control-lib.sh"
 
 # Supervisor-pane discovery (FM_SUPERVISOR_TARGET_DEFAULT,
 # FM_SUPERVISOR_BACKEND_DEFAULT, discover_supervisor_target,
@@ -432,6 +441,14 @@ classify_stale() {  # <window> <state> [<span-record> <span-status>]
     # reuses the status line already read, no fm-crew-state.sh call, mirroring the
     # daemon's existing status-log classification.
     printf 'pause|paused (awaiting external), rechecked on a long cadence: %s' "$last"
+    return
+  fi
+  if fm_control_deliberate_stop_present "$state" "$task"; then
+    # Firstmate stopped this worker on purpose and its task record stayed open,
+    # so an idle endpoint is a parked task, not a wedge suspect: the same long
+    # recheck cadence as a declared pause, regardless of whether the last status
+    # line is a non-terminal leftover or a finished `done:`.
+    printf 'pause|deliberately stopped (parked task, rechecked on a long cadence): %s' "$task"
     return
   fi
   if [ -n "$last" ] && status_is_captain_relevant "$last"; then
@@ -1067,6 +1084,12 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
+    if fm_control_deliberate_stop_present "$state" "$task"; then
+      # A deliberately parked task never wedge-escalates: drop any stale marker
+      # left over from before the stop. The watcher owns the bounded recheck.
+      rm -f "$marker"
+      continue
+    fi
     if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
