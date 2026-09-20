@@ -18,21 +18,40 @@ License: MIT (preserved; see Attribution at the end of this file).
 Adaptation (fleet-lab experiment DEC-001, 2026-09-20):
   - Frontmatter kept as-is (name + description are already the OpenCode skill
     keys); `license: MIT` added.
-  - Body unchanged: editing principles, word lists, pattern taxonomy and the
-    workflow are the asset and are byte-preserved from the source.
+  - Body unchanged at this stage: editing principles, word lists, pattern
+    taxonomy and the workflow are the asset and were byte-preserved from the
+    source. See the graduation note below for the one section added later.
 Graduation (firstmate DEC-001 adoption, 2026-09-20):
   - Copied from pavani06/fleet-lab experiments/prose-skills/skills after the
-    experiment was approved; body byte-identical to that adaptation.
+    experiment was approved.
   - `user-invocable: false` and `metadata.internal: true` added for the
     firstmate internal skill format; description reworded from chat-request
     semantics to fleet-deliverable semantics.
-  - Loaded by generated ship and scout briefs at their output-shaping points;
-    see AGENTS.md section 11.
+  - Body adapted (no longer byte-preserved): an `Autonomous use` section was
+    added ahead of `Two jobs` because the upstream body is written for a
+    chat editor with a human in the loop, while every reader of this copy is
+    an autonomous worker whose brief forbids waiting for one. The section
+    maps "the user" onto the task, turns the Edit job into a self-pass over
+    the worker's own text, retires the draft and audience questions, and
+    subordinates the skill to the brief. Nothing else in the body changed:
+    the editing principles, word lists, pattern taxonomy, and workflow are
+    the asset and remain as retrieved from the source.
+  - Loaded by generated ship, scout, and secondmate-charter briefs at their
+    output-shaping points; see AGENTS.md section 11.
 -->
 
 # No AI slop
 
 You are a sharp human editor. Preserve the user's point and personal voice while making the writing clearer and more alive. Remove AI patterns without turning distinctive writing into generic polished prose.
+
+## Autonomous use
+
+A fleet worker has no human in the loop, so read "the user" below as the task itself and apply the skill this way:
+
+1. There is no draft to wait for. Write the report, PR body, commit message, or reply first, then run the Edit job on your own text as a self-pass before sending it.
+2. Never ask who the reader is or where the piece will be published. The brief names both: the report's reader is the supervisor who ordered it, a PR body's reader is the reviewer, a status line's reader is firstmate and the captain.
+3. Wherever a rule below says to ask - for the core point, a missing source, an unclear claim - resolve it from the brief and the work you just did. If you genuinely cannot, drop the claim rather than inventing it; do not open a needs-decision escalation over wording.
+4. The brief and the harness outrank this skill. When a rule fights a required format, a delivery contract, or a fixed template, the constraint wins and the rest of the rules still apply to the prose inside it.
 
 ## Two jobs
 
@@ -127,5 +146,6 @@ Often-empty phrases: it's worth noting, it's important to note, at the end of th
 
 - Source: [petergyang/no-ai-slop](https://github.com/petergyang/no-ai-slop), `skills/no-ai-slop/SKILL.md` at commit `000650b156983f5159695b441477f4e63b25dc85`, retrieved 2026-09-20.
 - Original author: Peter Yang. MIT License.
-- This adaptation for the OpenCode skill format was produced by the fleet-lab DEC-001 experiment (2026-09-20). Frontmatter kept, `license` added, body byte-preserved.
+- This adaptation for the OpenCode skill format was produced by the fleet-lab DEC-001 experiment (2026-09-20). Frontmatter kept, `license` added, body byte-preserved at that point.
+- The firstmate graduation (2026-09-20) added the `Autonomous use` section for fleet workers with no human in the loop; the editing principles, word lists, pattern taxonomy, and workflow are unchanged from the source. See the adaptation note at the top of this file for the exact deltas.
 - Upstream license: https://github.com/petergyang/no-ai-slop/blob/main/LICENSE

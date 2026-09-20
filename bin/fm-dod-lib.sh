@@ -40,9 +40,10 @@
 # ordinary ship brief and the durable contract written during scout promotion.
 # fm_prose_skills_line owns the one-line reference to the fleet prose skills
 # that generated briefs carry where they shape reader-facing prose: every ship
-# mode block below and the scout Definition of done in bin/fm-brief.sh. The
-# two referenced skills own the writing rules; this line and AGENTS.md
-# section 11 only point at them and never restate their content.
+# mode block below, the scout Definition of done, and the secondmate charter
+# in bin/fm-brief.sh. The two referenced skills own the writing rules; this
+# line and AGENTS.md section 11 only point at them and never restate their
+# content.
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -246,7 +247,7 @@ EOF
 }
 
 fm_prose_skills_line() {
-  printf '%s\n' "Reader-facing prose you author (commit messages, PR title and body, status and reply lines) follows the fleet prose skills: read \`$FM_ROOT/.agents/skills/i-have-adhd/SKILL.md\` and \`$FM_ROOT/.agents/skills/no-ai-slop/SKILL.md\` (with its \`eval.md\` self-check) before writing any of it."
+  printf '%s\n' "Reader-facing prose you author (reports and other delivered docs, commit messages, PR title and body, status and reply lines) follows the fleet prose skills: read \`$FM_ROOT/.agents/skills/i-have-adhd/SKILL.md\` and \`$FM_ROOT/.agents/skills/no-ai-slop/SKILL.md\` (with its \`eval.md\` self-check) before writing any of it."
 }
 
 fm_dod_block() {  # <mode> <task-id>

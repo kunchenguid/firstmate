@@ -889,10 +889,10 @@ test_scout_and_secondmate_load_decision_hold_policy() {
   pass "fm-brief.sh: investigation and visual-review completions load the shared decision policy"
 }
 
-# Every ship mode and the scout scaffold point workers at the fleet prose
-# skills where they shape reader-facing prose; a secondmate charter does not,
-# because its audience is a supervisor whose crews receive the line through
-# their own briefs.
+# Every generated brief points its agent at the fleet prose skills where it
+# shapes reader-facing prose, including the secondmate charter: a secondmate's
+# docs and parent-channel lines reach the captain directly, not through a crew
+# brief.
 test_briefs_reference_fleet_prose_skills() {
   local home kind brief
   home="$TMP_ROOT/prose-skills-home"
@@ -915,9 +915,13 @@ test_briefs_reference_fleet_prose_skills() {
   FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
     "$ROOT/bin/fm-brief.sh" prose-mate --secondmate --no-projects >/dev/null 2>&1 \
     || fail "secondmate scaffold failed"
-  assert_no_grep "fleet prose skills" "$home/data/prose-mate/brief.md" \
-    "secondmate charter grew a ship/scout output-shaping reference"
-  pass "fm-brief: ship and scout scaffolds reference the fleet prose skills, charters do not"
+  brief="$home/data/prose-mate/brief.md"
+  assert_grep "$ROOT/.agents/skills/i-have-adhd/SKILL.md" "$brief" \
+    "secondmate charter does not reference the i-have-adhd prose skill"
+  assert_grep "$ROOT/.agents/skills/no-ai-slop/SKILL.md" "$brief" \
+    "secondmate charter does not reference the no-ai-slop prose skill"
+  assert_grep "eval.md" "$brief" "secondmate charter does not name the no-ai-slop self-check"
+  pass "fm-brief: ship, scout, and charter scaffolds reference the fleet prose skills"
 }
 
 # A scout brief offers the Lavish review loop only when bootstrap confirms the

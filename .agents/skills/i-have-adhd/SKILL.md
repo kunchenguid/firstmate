@@ -28,8 +28,8 @@ Graduation (firstmate DEC-001 adoption, 2026-09-20):
   - `user-invocable: false` and `metadata.internal: true` added for the
     firstmate internal skill format; description reworded from the chat toggle
     ("stop adhd mode") to brief-activation semantics.
-  - Loaded by generated ship and scout briefs at their output-shaping points;
-    see AGENTS.md section 11.
+  - Loaded by generated ship, scout, and secondmate-charter briefs at their
+    output-shaping points; see AGENTS.md section 11.
 -->
 
 # i-have-adhd

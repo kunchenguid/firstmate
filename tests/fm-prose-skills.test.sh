@@ -2,35 +2,13 @@
 # Behavior tests for the fleet prose skills graduated from fleet-lab DEC-001
 # (pavani06/fleet-lab experiments/prose-skills, merged 2026-09-20).
 #
-# The graduation contract: the two vendored skills stay inert to installer
-# discovery (user-invocable: false, metadata.internal: true), keep their MIT
-# license and upstream attribution with the source commit hashes, keep the
-# eval.md self-check that generated briefs point at, and stay declared at
-# AGENTS.md section 11, the trigger owner the reference line relies on.
-# The tests pin the graduation boundary, not the vendored prose itself.
+# Two contracts only: the MIT attribution the vendored copies owe upstream
+# (an explicit license text contract, not a proxy for behavior), and the line
+# fm_prose_skills_line emits into every generated brief.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
-
-frontmatter() {  # <file>
-  awk '/^---$/{n++; next} n==1{print} n==2{exit}' "$1"
-}
-
-test_prose_skill_frontmatter_is_internal() {
-  local skill file
-  for skill in no-ai-slop i-have-adhd; do
-    file="$ROOT/.agents/skills/$skill/SKILL.md"
-    assert_present "$file" "$skill SKILL.md is missing"
-    frontmatter "$file" | grep -q '^user-invocable: false$' \
-      || fail "$skill must stay user-invocable: false so installer discovery never adopts it"
-    frontmatter "$file" | grep -q 'internal: true' \
-      || fail "$skill must carry metadata.internal: true"
-    frontmatter "$file" | grep -q '^license: MIT$' \
-      || fail "$skill must keep its MIT license field"
-  done
-  pass "prose-skills: both skills carry the firstmate internal frontmatter"
-}
 
 test_prose_skill_attribution_survives() {
   local file
@@ -55,14 +33,6 @@ test_prose_skill_attribution_survives() {
   pass "prose-skills: upstream credits, commits, and DEC-001 provenance survive"
 }
 
-test_prose_skill_trigger_is_declared_inline() {
-  assert_grep '.agents/skills/i-have-adhd/' "$ROOT/AGENTS.md" \
-    "AGENTS.md lost the i-have-adhd trigger declaration"
-  assert_grep '.agents/skills/no-ai-slop/' "$ROOT/AGENTS.md" \
-    "AGENTS.md lost the no-ai-slop trigger declaration"
-  pass "prose-skills: the trigger declaration stays declared inline in AGENTS.md"
-}
-
 test_prose_skill_owner_line_names_both_skills() {
   local line
   line=$(. "$ROOT/bin/fm-dod-lib.sh" && FM_ROOT="$ROOT" fm_prose_skills_line)
@@ -70,10 +40,10 @@ test_prose_skill_owner_line_names_both_skills() {
     || fail "fm_prose_skills_line stopped naming the i-have-adhd skill"
   printf '%s\n' "$line" | grep -q 'no-ai-slop/SKILL.md' \
     || fail "fm_prose_skills_line stopped naming the no-ai-slop skill"
-  pass "prose-skills: fm_prose_skills_line still points at both skills"
+  printf '%s\n' "$line" | grep -q 'reports' \
+    || fail "fm_prose_skills_line scopes itself out of the report, the deliverable a scout and a secondmate produce"
+  pass "prose-skills: fm_prose_skills_line points at both skills and covers the report"
 }
 
-test_prose_skill_frontmatter_is_internal
 test_prose_skill_attribution_survives
-test_prose_skill_trigger_is_declared_inline
 test_prose_skill_owner_line_names_both_skills

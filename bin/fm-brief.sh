@@ -114,6 +114,7 @@ resolve_directory_input() {
 }
 
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+PROSE_LINE=$(fm_prose_skills_line)
 FM_HOME=$(resolve_directory_input FM_HOME "${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}") || exit 1
 if [ -n "${FM_DATA_OVERRIDE:-}" ]; then
   DATA=$(resolve_directory_input FM_DATA_OVERRIDE "$FM_DATA_OVERRIDE") || exit 1
@@ -268,6 +269,7 @@ Nobody reads this chat: the captain and the main firstmate see only what is appe
 That file is your parent channel, and in this home it IS the captain: every sentence you would say to the captain, and every outcome the local AGENTS.md tells a firstmate to bring to the captain, is one appended line there, never chat.
 Your own machinery publishes the durable facts about your crew's work for you (\`bin/fm-parent-channel-lib.sh\`): a child's terminal done or failed line with its note and PR on every supervision poll, a PR-ready line when you register a PR, a task you hold for the captain and its answer, a merge, and a child's final line at cleanup all reach the parent channel from the scripts that record them, whether or not you append anything.
 What only you can append is judgement: the answer to a marked request below, a recommendation or caveat on a delivered outcome, a blocker or failure of your own, and anything else you would otherwise say to the captain.
+$PROSE_LINE
 
 # Requests from the main firstmate
 You are a firstmate in your own home, so an incoming message reaches you in your own chat.
@@ -369,7 +371,6 @@ if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
 else
   LAVISH_LINE='Lavish is unavailable (lavish-axi is missing or below its supported version floor), so deliver your findings as a text report without Lavish, even for a visual deliverable.'
 fi
-PROSE_LINE=$(fm_prose_skills_line)
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
 
