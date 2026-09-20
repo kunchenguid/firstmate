@@ -9,11 +9,14 @@
 # since the previous poll. Every other no-verb wake surfaces, so a crew
 # that finishes (or stops and waits) is never silently swallowed. A declared wait,
 # either a paused: external wait or a verified captain-held transfer, is the
-# separate idle absorb case and re-surfaces only on its long bounded cadence,
+# separate idle absorb case and re-surfaces on its long bounded cadence,
 # although its initial no-verb status signal still surfaces in normal mode.
 # That cadence is hours long and condition-aware: a paused: line naming
 # `until <UTC ISO 8601>` is rechecked when that time passes, but a declared time
-# beyond FM_PAUSE_RESURFACE_SECS cannot extend the ordinary recheck cadence, and
+# beyond FM_PAUSE_RESURFACE_SECS cannot extend the ordinary recheck cadence; once
+# that one recheck has fired, repeat rechecks hold to the much shorter
+# STALE_ESCALATE_SECS instead for as long as the status line stays unadvanced
+# past the stale declaration (handle_paused_stale below), and
 # while the away-posture record (state/.afk-contract) exists an
 # item held for the captain is never rechecked at all, in either posture.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
@@ -1307,7 +1310,10 @@ busy_turn_over_age() {  # <task>
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and re-surface it once every
-# PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
+# PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly - except an
+# until time that is already overdue and unadvanced, which re-surfaces on the
+# much shorter STALE_ESCALATE_SECS instead (see the `cadence` local below).
+# Called on any
 # stale poll once pause_state_class permits the bounded cadence, so it must be
 # cheap: it NEVER re-reads crew state. The re-surface age is anchored on the
 # status file mtime, not a per-hash marker, so a churny idle pane (a ticking
