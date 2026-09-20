@@ -394,11 +394,16 @@ test_return_brief_composes_from_record_store_and_held_set() {
   outcome_in "$dir" append --task other --verdict routine \
     --summary 'resent the steer; worker resumed' --wake 'stale: synthetic:fm-other' >/dev/null \
     || fail "could not seed the routine outcome row"
+  # A near miss recorded first: it opens with the marker's words but not the
+  # marker, so it is no action taken under them and the account must skip it.
+  outcome_in "$dir" append --task held-note --verdict routine \
+    --summary 'per your away instructions were unclear, so I held for your return' --wake 'signal: held-note.status' >/dev/null \
+    || fail "could not seed the near-miss outcome row"
   # Two actions taken under the words, one routine and one escalated, each
   # opening its summary with the marker the branch prompt requires; the account
   # lists both and nothing else.
   outcome_in "$dir" append --task fix-windows --verdict routine \
-    --summary 'Per your away instructions: merged the windows fix PR once checks went green' --wake 'check: fix-windows merge poll' >/dev/null \
+    --summary 'per your away instructions: merged the windows fix PR once checks went green' --wake 'check: fix-windows merge poll' >/dev/null \
     || fail "could not seed the words-action outcome row"
   outcome_in "$dir" append --task prerelease --verdict captain \
     --summary 'per your away instructions: filed and dispatched the prerelease cut; it needs your review' --wake 'signal: prerelease.status' >/dev/null \
@@ -425,8 +430,9 @@ test_return_brief_composes_from_record_store_and_held_set() {
   [ "$health_line" -lt "$words_line" ] && [ "$words_line" -lt "$waiting_line" ] && [ "$waiting_line" -lt "$failed_line" ] \
     || fail "the brief sections are out of order (health $health_line, instructions $words_line, waiting $waiting_line, failed $failed_line)"
   assert_contains "$out" $'  your words at entry:\n    merge the windows fix when green, then cut a prerelease\n    if the install deadlocks abort the competing run\n' "the captain's verbatim words were not carried into the brief"
-  assert_contains "$out" $'  the away session acted on them:\n    - fix-windows: Per your away instructions: merged the windows fix PR once checks went green\n    - prerelease: per your away instructions: filed and dispatched the prerelease cut; it needs your review\n' "the session's account of actions under the words was not listed"
+  assert_contains "$out" $'  the away session acted on them:\n    - fix-windows: per your away instructions: merged the windows fix PR once checks went green\n    - prerelease: per your away instructions: filed and dispatched the prerelease cut; it needs your review\nWaiting on you:\n' "the session's account listed something other than exactly the two actions taken under the words"
   assert_not_contains "$out" $'acted on them:\n    - other:' "an outcome that did not cite the words was listed as an action under them"
+  assert_not_contains "$out" $'acted on them:\n    - held-note:' "a summary opening with the marker's words but no colon was listed as an action under them"
   assert_not_contains "$out" 'not executed' "the brief still calls the words inert"
   assert_not_contains "$out" 'clause' "the brief still speaks of clauses"
   assert_contains "$out" 'fix-windows,queued,task' "the held backlog item was not listed under waiting on you"
@@ -436,9 +442,9 @@ test_return_brief_composes_from_record_store_and_held_set() {
   assert_contains "$out" 'fix-windows [key=token] still blocked, firstmate remediates before ordinary work' "the blocker sharing a task with a captain outcome was exempted"
   assert_contains "$out" 'other [key=dep] still blocked, firstmate remediates before ordinary work' "the unreached blocker was not listed as could-not-fix"
   assert_contains "$out" 'dead: failed: the reproduction never compiled' "the failed task was not listed"
-  assert_contains "$out" '2 routine outcome(s) recorded' "the routine outcome count was not reported"
+  assert_contains "$out" '3 routine outcome(s) recorded' "the routine outcome count was not reported"
   assert_contains "$out" 'other: resent the steer; worker resumed' "the routine outcome was not listed"
-  assert_contains "$out" 'Cost: 4 supervision outcome(s) recorded (2 routine, 2 captain); 3 task(s) live at return.' "the cost line is wrong"
+  assert_contains "$out" 'Cost: 5 supervision outcome(s) recorded (3 routine, 2 captain); 3 task(s) live at return.' "the cost line is wrong"
   assert_contains "$out" 'firstmate-actionable blocker: other [key=dep]' "the unreached blocker did not gate"
   assert_contains "$out" 'firstmate-actionable blocker: fix-windows [key=token]' "a captain outcome incorrectly exempted an open blocker"
   grep -F "$(printf 'contract\t')" "$gate" >/dev/null || fail "the gate did not retain the posture-record window"
@@ -450,7 +456,7 @@ test_return_brief_composes_from_record_store_and_held_set() {
   printf 'resolved [key=token]: the token was refreshed\n' >> "$dir/home/state/fix-windows.status"
   second=$(run_return "$dir" check) || fail "the remediated return did not clear: $second"
   assert_contains "$second" $'  your words at entry:\n    merge the windows fix when green, then cut a prerelease' "check did not re-render the words from the archived record"
-  assert_contains "$second" 'fix-windows: Per your away instructions: merged the windows fix PR' "check did not re-render the session account"
+  assert_contains "$second" 'fix-windows: per your away instructions: merged the windows fix PR' "check did not re-render the session account"
   assert_contains "$second" 'supervision ran through the away window with no detected gap' "check lost the health snapshot taken at begin"
   assert_contains "$second" 'catch-up clear' "check did not clear the gate"
   [ ! -e "$gate" ] || fail "the cleared check left the gate behind"

@@ -18,7 +18,7 @@
 # first, then the captain's away instructions - their words verbatim, including
 # superseded in-session mandates - followed by the away session's account of
 # every action it took under them (each outcome-store row from the window whose
-# summary opens with the "per your away instructions" marker the branch prompt
+# summary opens with the "per your away instructions:" marker the branch prompt
 # in bin/fm-branch-prompt.sh requires), then what is waiting on the captain,
 # then what was tried and failed or could not be fixed, then what the away
 # session handled, then cost. The health snapshot is taken BEFORE the daemon
@@ -368,9 +368,9 @@ strip_axi_help() {
 }
 
 # The branch prompt (bin/fm-branch-prompt.sh "Postures") requires every action
-# taken under the captain's words to open its outcome summary with this marker;
-# the brief's account is every store row from the window that carries it.
-AWAY_ACTION_MARKER='per your away instructions'
+# taken under the captain's words to open its outcome summary with this marker
+# exactly; the brief's account is every store row from the window that carries it.
+AWAY_ACTION_MARKER='per your away instructions:'
 
 MANDATE_COUNT=0
 HELD_READ_FAILED=0
@@ -393,7 +393,7 @@ render_words_record() {  # <record> [superseded-time]
 render_words_account() {  # the away session's account of what it did under the words
   local rows
   rows=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' -v marker="$AWAY_ACTION_MARKER" '
-    tolower(substr($5, 1, length(marker))) == marker { printf "    - %s: %s\n", $2, $5 }')
+    substr($5, 1, length(marker)) == marker { printf "    - %s: %s\n", $2, $5 }')
   if [ -n "$rows" ]; then
     printf '  the away session acted on them:\n%s\n' "$rows"
   else
