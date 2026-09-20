@@ -104,8 +104,8 @@ CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
-# shellcheck source=bin/fm-dod-lib.sh
-. "$SCRIPT_DIR/fm-dod-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 FM_INACTIVE_RECONCILE_SECS=${FM_INACTIVE_RECONCILE_SECS:-900}
 case "$FM_INACTIVE_RECONCILE_SECS" in
@@ -497,27 +497,19 @@ report_child() { # <id>
 }
 
 reap_terminal_child_locked() { # <id> <meta>
-  local id=$1 meta=$2 backend target pids pid
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
-  backend=$(clean_field "$(meta_field "$meta" backend)")
-  [ -n "$backend" ] || backend=tmux
-  target=$(clean_field "$(meta_field "$meta" window)")
-  [ -n "$target" ] || return 0
+  local id=$1 meta=$2 backend endpoint pids pid
+  fm_backend_validate_task_endpoint "$meta" "$id" >/dev/null 2>&1 || return 0
+  backend=$FM_BACKEND_VALIDATED_BACKEND
+  endpoint=$FM_BACKEND_VALIDATED_TARGET
   if [ "$backend" = tmux ] && command -v tmux >/dev/null 2>&1; then
-    pids=$(tmux list-panes -t "$target" -F '#{pane_pid}' 2>/dev/null || true)
+    pids=$(tmux list-panes -t "$endpoint" -F '#{pane_pid}' 2>/dev/null || true)
     for pid in $pids; do
       if [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; then
         kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
       fi
     done
   fi
-  if [ -f "$SCRIPT_DIR/fm-backend.sh" ]; then
-    # shellcheck source=bin/fm-backend.sh
-    . "$SCRIPT_DIR/fm-backend.sh"
-    fm_backend_kill "$backend" "$target" 2>/dev/null || true
-  elif [ "$backend" = tmux ] && command -v tmux >/dev/null 2>&1; then
-    tmux kill-window -t "$target" 2>/dev/null || true
-  fi
+  fm_backend_kill "$backend" "$endpoint" 2>/dev/null || true
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
@@ -549,7 +541,7 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
     'state: failed '*) state='failed' ;;
     *) return 0 ;;
   esac
-  pr=$(pr_for_task "$meta" "$status")
+  pr=$(pr_for_task "$meta" "$last")
   incarnation=$(meta_incarnation "$meta")
   # The receipt identity binds structured fields only: a persistent child that
   # keeps appending routine prose after one terminal outcome must not mint a

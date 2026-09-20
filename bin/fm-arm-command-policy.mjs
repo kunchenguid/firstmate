@@ -870,7 +870,9 @@ function analyzeProgram(command, context, depth = 0) {
 function xModePathAllowed(value, home) {
   if (value === "config/x-mode.env" || value === "./config/x-mode.env") return true;
   if (!path.isAbsolute(value)) return false;
-  return path.normalize(value) === path.join(path.normalize(home), "config/x-mode.env");
+  const normalized = path.normalize(value);
+  if (home && normalized === path.join(path.normalize(home), "config/x-mode.env")) return true;
+  return false;
 }
 
 function ordinaryWordsOnly(tokens) {

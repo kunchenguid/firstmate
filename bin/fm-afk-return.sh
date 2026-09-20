@@ -652,40 +652,18 @@ EOF
   done
   [ "$count" -gt 0 ] || printf '  (nothing)\n'
 
-  # 5. landed, cleanup due: finished work whose task record is still live.
-  # Listing it keeps a landed task that remains live past the return from being
-  # overlooked. The cleanup itself is ordinary fleet work and waits for the gate.
-  printf 'Landed, cleanup due:\n'
-  count=0
-  while IFS="$(printf '\t')" read -r task url; do
-    [ -n "$task" ] || continue
-    count=$((count + 1))
-    printf '  - %s: %s is merged and the worker is still up; close it with bin/fm-teardown.sh %s once catch-up clears\n' "$task" "$url" "$task"
-  done <<EOF
-$(scan_landed_awaiting_cleanup)
-EOF
-  [ "$count" -gt 0 ] || printf '  (nothing)\n'
-
-  # 6. handled while away. Every outcome the away session recorded in the
-  # store during the window counts as handled. On Pi the supervision branch,
-  # and on a home that runs it the supervision host (docs/supervision-host.md), took
-  # every safe actionable wake it could while main was parked; wakes it
+  # 5. handled while away. Every outcome the away session recorded in the
+  # store during the window counts as handled. On Pi the supervision branch
+  # took every safe actionable wake it could while main was parked; wakes it
   # declined still fell back to main. The captain rows are listed above.
   printf 'Handled while away:\n'
   routine=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { n++ } END { print n + 0 }')
   routine_visible=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" && $6 != "true" { n++ } END { print n + 0 }')
   captain=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { n++ } END { print n + 0 }')
-  visible_outcomes=$((routine_visible + captain))
   printf '  %s outcome(s) handled by the away session (%s routine, %s escalated above)\n' "$((routine + captain))" "$routine" "$captain"
-  if [ "$drained" -eq 1 ] && [ "$visible_outcomes" -gt 0 ] && [ "$drain_ok" -eq 1 ]; then
-    printf '  the drain'"'"'s BRANCH OUTCOMES section presents the visible outcomes: each task'"'"'s captain outcomes on one line until you acknowledge them, visible routine notes once, past its limit as a count\n'
-  elif [ "$drained" -eq 1 ] && [ "$visible_outcomes" -gt 0 ]; then
-    printf '  visible outcomes %s\n' "$pointer"
-  elif [ "$routine_visible" -gt 0 ]; then
-    printf '  %s routine outcome(s) recorded; the latest visible:\n' "$routine"
-    printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" && $6 != "true" { printf "    - %s: %s\n", $2, $5 }' | tail -5
-  elif [ "$routine" -gt 0 ]; then
-    printf '  %s routine outcome(s) recorded; none were visible.\n' "$routine"
+  if [ "$routine" -gt 0 ]; then
+    printf '  %s routine outcome(s) recorded; the latest:\n' "$routine"
+    printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { printf "    - %s: %s\n", $2, $5 }' | tail -5
   else
     printf '  (no routine outcomes recorded in the store for this window)\n'
   fi

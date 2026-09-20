@@ -13,6 +13,7 @@ set -u
 
 CHECK="$ROOT/bin/fm-arm-pretool-check.sh"
 POLICY="$ROOT/bin/fm-arm-command-policy.mjs"
+ACTIVE_HOME=${FM_HOME:-$ROOT}
 
 # --- full cross-harness acceptance matrix ----------------------------------
 
@@ -38,7 +39,7 @@ matrix_case A09 allow "export FM_HOME='$ROOT'; bin/fm-watch-checkpoint.sh --seco
 matrix_case A10 allow 'source config/x-mode.env; bin/fm-watch-checkpoint.sh --seconds 180'
 matrix_case A11 allow "source 'config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
 matrix_case A12 allow "source './config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
-matrix_case A13 allow "source '$ROOT/config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
+matrix_case A13 allow "source '$ACTIVE_HOME/config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180"
 matrix_case A14 allow "[ -f 'config/x-mode.env' ] && source 'config/x-mode.env'; exec bin/fm-watch-arm.sh"
 matrix_case A15 allow "cd $ROOT && exec bin/fm-watch-arm.sh"
 matrix_case A16 allow "export FM_HOME=$ROOT && bin/fm-watch-checkpoint.sh --seconds 180"
@@ -246,6 +247,17 @@ test_direct_policy_contract() {
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"
   assert_policy direct-heredoc-watcher $'deny\twatcher-redirection' "$heredoc_watcher"
+}
+
+test_absolute_x_mode_path_stays_in_active_home() {
+  local output
+  output=$(node "$POLICY" --root "$ROOT" --home "$ROOT/.active-home" --command "source '$ROOT/config/x-mode.env'; bin/fm-watch-checkpoint.sh --seconds 180") \
+    || fail "absolute x-mode boundary invocation failed"
+  case "$output" in
+    $'deny\twatcher-bundled\t'*) : ;;
+    *) fail "code-root x-mode path must be denied outside active home, got: $output" ;;
+  esac
+  pass "absolute x-mode paths outside active home are denied"
 }
 
 # --- CLI parsing -------------------------------------------------------------
@@ -465,6 +477,7 @@ test_shellcheck_clean() {
 
 test_full_acceptance_matrix
 test_direct_policy_contract
+test_absolute_x_mode_path_stays_in_active_home
 test_command_equals_form
 test_background_flag_accepted_and_non_gating
 test_unknown_flag_errors

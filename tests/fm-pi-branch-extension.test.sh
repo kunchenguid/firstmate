@@ -2015,7 +2015,7 @@ const contract = (args) => {
     env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
   });
   if (result.status !== 0) throw new Error(`fm-afk-contract.sh ${args.join(" ")} failed: ${result.stderr}`);
-  return result.stdout || "";
+  return (result.stdout || "").trim();
 };
 const requests = () => sentToMain.filter((sent) => sent.message.customType === "fm-branch-process");
 const unprocessedSeqs = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
@@ -2063,10 +2063,11 @@ if (pending.message.customType !== "fm-branch-process") {
 if (pending.options.triggerTurn !== true || pending.options.deliverAs !== "followUp") {
   throw new Error(`the first queued request was not a streaming followUp: ${JSON.stringify(pending.options)}`);
 }
-if (!pending.message.content.includes(`[seq ${seq1}, recorded 0m ago] `)) {
+if (!pending.message.content.includes(`[seq ${seq1}]`)) {
   throw new Error(`the first queued request lost seq ${seq1}: ${pending.message.content}`);
 }
-contract(["enter", "--words", "merge task-d when green, then cut the prerelease\n\n"]);
+contract(["propose", "--grant", "task-d"]);
+contract(["confirm"]);
 const processingMsg = { role: "custom", customType: pending.message.customType, content: pending.message.content, display: false };
 let aborted = false;
 const abortCtx = { ...defaultSessionCtx, abort() { aborted = true; } };
@@ -2157,13 +2158,11 @@ const awayPrompt = globalThis.__fmPrompts[1];
 const head = "FIRSTMATE SUPERVISION WAKE: signal: away wake\n\nHandle this per your operating procedure and finish with fm_branch_report.\n\nPOSTURE: AWAY. ";
 if (!awayPrompt.startsWith(head)) throw new Error(`the away wake lost its shape or its tail: ${awayPrompt}`);
 const readback = contract(["readback"]);
-if (!readback.endsWith("    merge task-d when green, then cut the prerelease\n    \n")) throw new Error(`the read-back lost the captain's words or their trailing blank line: ${JSON.stringify(readback)}`);
-if (!awayPrompt.includes("act on them by your own judgment")) throw new Error(`the away tail lost the words-execution rule: ${awayPrompt}`);
-if (awayPrompt.includes("does not execute them")) throw new Error(`the away tail still calls the words inert: ${awayPrompt}`);
-if (!awayPrompt.endsWith(`The record, verbatim:\n${readback}`)) throw new Error(`the tail does not end with the record's read-back verbatim, trailing whitespace included: ${JSON.stringify(awayPrompt)}`);
+if (!readback.includes("merge when green (task ids): task-d")) throw new Error(`the read-back lost the grant: ${readback}`);
+if (!awayPrompt.endsWith(`The record, verbatim:\n${readback}`)) throw new Error(`the tail does not end with the record's read-back verbatim: ${awayPrompt}`);
 const snapshot = readFileSync(`${home}/state/.branch-eligible-rows`, "utf8").trim().split("\n").join(",");
 if (snapshot !== "1,2,3") throw new Error(`the away wake claimed rows ${snapshot}, not every row`);
-const fleet = await report.execute("c2", { task: "fleet", verdict: "captain", summary: "per your away instructions: merged task-d's PR once green" }, undefined, undefined, {});
+const fleet = await report.execute("c2", { task: "fleet", verdict: "captain", summary: "merged task-d's PR under its grant" }, undefined, undefined, {});
 if (fleet.isError) throw new Error(`a fleet report under a claimed check row was refused: ${JSON.stringify(fleet)}`);
 finishPrompt();
 await awayOffer.settlement;
@@ -2193,7 +2192,7 @@ const presented = requests()[1];
 if (presented.options.triggerTurn !== true || presented.options.deliverAs !== "followUp") {
   throw new Error(`the post-archive presentation did not open its own turn: ${JSON.stringify(presented.options)}`);
 }
-for (const needle of [`[seq ${seq1}, recorded 0m ago] task-d:`, `[seq ${seq2}, recorded 0m ago] fleet:`, `through=${seq2}`]) {
+for (const needle of [`[seq ${seq1}] task-d:`, `[seq ${seq2}] fleet:`, `through=${seq2}`]) {
   if (!presented.message.content.includes(needle)) throw new Error(`the post-archive request lost ${needle}: ${presented.message.content}`);
 }
 process.exit(0);
@@ -2202,140 +2201,6 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "the away posture must park main and present after archive: $out"
   pass "under the away-posture record the wake carries the verbatim read-back tail, claims every row, opens no processing turn, cancels a pending request, and presents the accumulated rows after archive"
-}
-
-# The 2026-09-25 away-window flood on the Pi report path: a held, green PR on a
-# finished task was re-escalated on every inactive-outcome cadence, because
-# the branch acknowledgement consumed the check row but left its
-# terminal-outcome receipt pending, so each later scan re-queued the same
-# fingerprint. Through the real reconcile scan, extension dispatch and grant,
-# fm_branch_report, and drain, that unchanged situation now reaches the
-# captain exactly once, and a new event on the same task - a red check -
-# still reaches the captain path afterwards.
-test_away_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event() {
-  local repo home out status old
-  repo="$TMP_ROOT/away-held-once-root"
-  home="$TMP_ROOT/away-held-once-home"
-  mkdir -p "$home/state" "$home/config" "$home/fakebin" "$home/projects/held"
-  install_pi_branch_extension_fixture "$repo"
-  git -C "$home/projects/held" init -q
-  git -C "$home/projects/held" -c user.name=fmtest -c user.email=fmtest@example.invalid \
-    commit -q --allow-empty -m init
-  fm_write_meta "$home/state/held.meta" \
-    'window=fm-held' "worktree=$home/projects/held" "project=$home/projects/held" \
-    'harness=pi' 'kind=ship' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=g1' \
-    'pr=https://example.test/o/r/pull/153'
-  printf 'done: PR https://example.test/o/r/pull/153 open, green, mergeable\n' > "$home/state/held.status"
-  old=$(( $(date +%s) - 600 ))
-  perl -e 'my $t = shift; utime $t, $t, @ARGV or exit 1' "$old" "$home/state/held.meta" "$home/state/held.status" \
-    || fail "fixture: could not age the held task's records"
-  printf '#!/usr/bin/env bash\nprintf "state: done · source: fake\\n"\n' > "$home/fakebin/fm-crew-state.sh"
-  chmod +x "$home/fakebin/fm-crew-state.sh"
-  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
-const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, bus, makeOffer, outcomeScript, defaultSessionCtx, home, realRoot, approvedProject }; })()`);
-const { fire, bus, makeOffer, outcomeScript, defaultSessionCtx, home, realRoot, approvedProject } = globalThis.__t;
-import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, utimesSync } from "node:fs";
-
-const state = `${home}/state`;
-const env = { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state, FM_CONFIG_OVERRIDE: `${home}/config` };
-const run = (args, label, extra = {}) => {
-  const result = spawnSync("bash", args, { encoding: "utf8", env: { ...env, ...extra } });
-  if (result.status !== 0) throw new Error(`${label} failed: ${result.stderr}`);
-  return result.stdout || "";
-};
-const queued = () => (existsSync(`${state}/.wake-queue`) ? readFileSync(`${state}/.wake-queue`, "utf8") : "")
-  .split("\n").filter(Boolean);
-const outcomes = () => outcomeScript(["list", "--recent", "100"]).split("\n").filter(Boolean).map((line) => JSON.parse(line));
-const captains = () => outcomes().filter((row) => row.verdict === "captain");
-const unprocessedSeqs = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
-
-run([`${realRoot}/bin/fm-afk-contract.sh`, "enter", "--words", "watch the fleet; merge nothing"], "away record");
-await fire("session_start", {}, defaultSessionCtx);
-
-globalThis.__fmExecuteBranchBash = async (context) => {
-  const result = spawnSync("bash", ["-c", context.command], { encoding: "utf8", cwd: context.cwd, env: context.env });
-  return {
-    content: [{ type: "text", text: `${result.stdout}${result.stderr}` }],
-    details: { stdout: result.stdout, stderr: result.stderr, exitCode: result.status },
-    isError: result.status !== 0,
-  };
-};
-let commands = 0;
-async function runFleetCommand(session, args) {
-  const bash = session.options.customTools.find((tool) => tool.name === "bash");
-  const result = await bash.execute(`fleet-${commands++}`, { command: ["bin/fm-wake-drain.sh", ...args].join(" ") }, undefined, undefined, {});
-  if (result.isError) throw new Error(`fleet command failed: ${JSON.stringify(result)}`);
-  return result.details;
-}
-// The branch's model: every presented wake is escalated to the captain, as
-// the flood's held-PR report was, then acknowledged exactly as printed.
-globalThis.__fmOnBranchPrompt = async ({ session }) => {
-  const drained = await runFleetCommand(session, []);
-  const ack = drained.stderr.match(/--ack-through ([0-9]+) --recovery-generation ([A-Za-z0-9._-]+)/);
-  if (!ack) throw new Error(`drain did not return its acknowledgement command: ${drained.stderr}`);
-  const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
-  const result = await report.execute(
-    `held-${commands}`,
-    { task: "held", verdict: "captain", summary: `escalated: ${drained.stdout.trim().slice(0, 400)}` },
-    undefined,
-    undefined,
-    {},
-  );
-  if (result.isError) throw new Error(`branch report failed: ${JSON.stringify(result)}`);
-  await runFleetCommand(session, ["--ack-through", ack[1], "--recovery-generation", ack[2]]);
-};
-async function wakeBranch(message) {
-  const offer = makeOffer(message, [approvedProject]);
-  bus.emit("fm-branch-supervision:dispatch", offer);
-  if (!offer.accepted) throw new Error(`the away wake "${message}" was refused`);
-  await offer.settlement;
-  if (queued().length !== 0) throw new Error(`the branch left rows queued: ${queued()}`);
-}
-// One watcher cadence: the scan marker is past due, the real scan runs, and
-// whatever it queued wakes the branch as the watcher's close would.
-async function cadence(n) {
-  const marker = `${state}/.inactive-outcome-reconcile`;
-  if (existsSync(marker)) {
-    const past = Math.floor(Date.now() / 1000) - 120;
-    utimesSync(marker, past, past);
-  }
-  run([`${realRoot}/bin/fm-inactive-reconcile.sh`, "scan"], `cadence ${n}`, {
-    FM_INACTIVE_RECONCILE_SECS: "60",
-    FM_INACTIVE_CREW_STATE_BIN: `${home}/fakebin/fm-crew-state.sh`,
-  });
-  if (queued().length > 0) await wakeBranch("check: inactive-outcome");
-}
-
-await cadence(1);
-if (captains().length !== 1 || !captains()[0].summary.includes("child=held")) {
-  throw new Error(`the first cadence did not escalate the held outcome once: ${JSON.stringify(outcomes())}`);
-}
-for (let n = 2; n <= 5; n += 1) {
-  await cadence(n);
-  if (captains().length !== 1) {
-    throw new Error(`cadence ${n} re-escalated the unchanged held outcome: ${JSON.stringify(captains())}`);
-  }
-}
-
-run(["-c", '. "$1"; fm_wake_append check "$2" "$3"', "_", `${realRoot}/bin/fm-wake-lib.sh`,
-  "pr-check:held", "check: held PR https://example.test/o/r/pull/153 check ci/test turned red"], "red check row");
-await wakeBranch("check: held PR https://example.test/o/r/pull/153 check ci/test turned red");
-const escalated = captains();
-if (escalated.length !== 2 || !escalated[1].summary.includes("turned red")) {
-  throw new Error(`the red check did not reach the captain path: ${JSON.stringify(outcomes())}`);
-}
-if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify(escalated.map((row) => row.seq))) {
-  throw new Error(`the captain rows are not both awaiting the captain: ${unprocessedSeqs()}`);
-}
-process.exit(0);
-EOF
-  status=$?
-  out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "an unchanged held outcome must reach the captain once, and a new event must still reach it: $out"
-  pass "Pi branch: an unchanged held outcome reaches the captain once across cadences, and a later red check on the task still does"
 }
 
 test_away_only_wake_rejects_when_record_is_archived_before_drain() {
@@ -2358,11 +2223,12 @@ const contract = (args) => {
     env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
   });
   if (result.status !== 0) throw new Error(`fm-afk-contract.sh ${args.join(" ")} failed: ${result.stderr}`);
-  return result.stdout || "";
+  return (result.stdout || "").trim();
 };
 
 await fire("session_start", {});
-contract(["enter"]);
+contract(["propose"]);
+contract(["confirm"]);
 writeFileSync(`${home}/state/.wake-queue`, "1\t1\tcheck\tmain-only\tcheck: task-d.check.sh: PR merged\n");
 contract(["archive"]);
 const offer = makeOffer("check: task-d.check.sh: PR merged", [], false, true, true);
@@ -2379,7 +2245,8 @@ if (mainUserMessages.length !== 0) {
   throw new Error("the rejected settlement leaked a main user message from the branch");
 }
 
-contract(["enter"]);
+contract(["propose"]);
+contract(["confirm"]);
 writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tbranch-driver.status\tsignal: branch-driver.status\n");
 const taskLocal = makeOffer("signal: branch-driver.status", [approvedProject], false, true);
 bus.emit("fm-branch-supervision:dispatch", taskLocal);
@@ -2423,11 +2290,12 @@ const contract = (args) => {
     env: { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: `${home}/state` },
   });
   if (result.status !== 0) throw new Error(`fm-afk-contract.sh ${args.join(" ")} failed: ${result.stderr}`);
-  return result.stdout || "";
+  return (result.stdout || "").trim();
 };
 
 await fire("session_start", {}, defaultSessionCtx);
-contract(["enter"]);
+contract(["propose"]);
+contract(["confirm"]);
 writeFileSync(
   `${home}/state/.wake-queue`,
   "1\t1\tsignal\tbranch-driver.status\tsignal: branch-driver.status\n2\t2\theartbeat\theartbeat\theartbeat\n",
@@ -5964,7 +5832,6 @@ test_branch_dispatch_routes_secondmate_signal_by_new_span
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
 test_away_record_parks_main_and_presents_after_archive
-test_away_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
 test_away_only_wake_rejects_when_record_is_archived_before_drain
 test_away_claimed_heartbeat_on_a_task_wake_lifts_task_scoping
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under

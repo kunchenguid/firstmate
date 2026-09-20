@@ -74,7 +74,11 @@ A re-emit (`--reemit`) reprints the digest for a process that already has the he
 
 ### Change from the previous nudge matcher
 
-This routing deliberately inverts the previous nudge matcher, which fired on `startup|resume|clear` and excluded `compact`.
+Current harness ownership of the lock and its matching `state/.session-start-complete` record together are the idempotency interlock for the whole scheme.
+The full digest clears that completion record after acquiring the lock and republishes the lock owner's pid only after every stage completes, so `clear` or `compact` cannot skip startup sweeps after a truncated run.
+`bin/fm-lock.sh` treats a lock owned through either the shared ancestry verdict or a trusted same-session Claude id as this session's own, so a proven `clear` or `compact` re-emit re-verifies ownership and proceeds, while a lock another live session took meanwhile still produces the ordinary read-only digest.
+On a run-tier harness only `resume`, `reload`, and `fork` are routed to the nudge wrapper, whose separate ancestry-only check normally stays silent when this process already holds the lock.
+After a background Claude helper-chain recycle breaks that ancestry, the wrapper may emit a redundant nudge even though the shared same-session verdict still owns the lock; the requested session start remains idempotent.
 
 - Compaction is covered where a tracked adapter delivers that source, because a compacted session has lost exactly the digest it needs.
 - Resume is excluded from the run because it restores that digest instead of losing it.
@@ -209,6 +213,7 @@ It does this in its own separate, hard-coded loop, independent of two other owne
 - The shared sixteen-hop ancestry walk in `bin/fm-session-lock-lib.sh` that `bin/fm-lock.sh` uses for anchor selection and ownership.
 - Pi's `lockOwnership()`.
 
+Before printing, the nudge wrapper reads `state/.lock` and walks at most eight parents from its own pid in its own separate, hard-coded loop, independent of the shared sixteen-hop ancestry walk in `bin/fm-session-lock-lib.sh` that `bin/fm-lock.sh` uses for anchor selection and ownership, and independent of Pi's `lockOwnership()`.
 If the lock names a live pid in that ancestry, session start already ran in this harness session and the wrapper stays silent.
 
 ### Exit codes
