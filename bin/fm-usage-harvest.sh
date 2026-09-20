@@ -3,8 +3,9 @@
 #
 # Usage: fm-usage-harvest.sh <task-id>
 #
-# Reads state/<task-id>.meta (harness=, model=, effort=, worktree=; the
-# backend window= line is intentionally not consumed because the ledger has no
+# Reads state/<task-id>.meta (harness=, model=, effort=, worktree=,
+# launch_epoch=, remote_host=; the backend window= line is intentionally not
+# consumed because the ledger has no
 # window field) plus the task's state/<task-id>.status timestamps for the task
 # window, then sums the worker's own session-log usage into exactly one JSON
 # line appended to data/usage-ledger.jsonl. data/usage-ledger.jsonl is
@@ -45,7 +46,7 @@
 #     output_tokens, reasoning_output_tokens); summing those deltas equals the
 #     final cumulative total. cached_input_tokens folds cached + cache_write
 #     (subsets of input_tokens); the model comes from the turn_context.
-#   harness=cursor, a task with a recorded remote_host (its worker ran on
+#   Any other harness, a task with a recorded remote_host (its worker ran on
 #     another machine, so its logs are not on this filesystem), an absent log
 #     tree, or no in-window match: token fields are null with source
 #     "unavailable".
@@ -58,10 +59,11 @@
 #   FM_ROOT_OVERRIDE, FM_HOME, FM_STATE_OVERRIDE, FM_DATA_OVERRIDE  as usual
 #   FM_USAGE_CLAUDE_DIR   default ${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects
 #   FM_USAGE_CODEX_DIR    default $HOME/.codex/sessions
+#   FM_USAGE_LEDGER_LOCK_WAIT  maximum lock wait in seconds, default 30
 #
 # Exit status: 0 on a successful or already-present harvest, 1 on a missing
-# task record, missing jq, or an unwritable ledger. Callers that must not
-# block (teardown) own their own guard.
+# task record, missing jq, an unwritable ledger, or a lock wait timeout.
+# Callers that must not block (teardown) own their own guard.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

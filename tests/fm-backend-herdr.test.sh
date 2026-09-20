@@ -4551,7 +4551,7 @@ test_composer_state_guard_still_refuses_real_pending_text_after_submit_confirmat
 # transition is the only positive proof. The fixture below reconstructs that
 # idle window preserving the classification-relevant structure (glyph and
 # placeholder colors, no dim flag on the placeholder, lone separator below);
-# the live guard proves the same verdict against the real bytes.
+# the live guard separately requires native confirmation without composer reads.
 
 # The idle window: dim titled rule, bright-glyph composer row with a dark
 # non-dim placeholder, lone dim separator rule, status footer.

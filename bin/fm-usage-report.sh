@@ -8,7 +8,9 @@
 # consumes it). With no argument the ledger resolves from the operational
 # home exactly as the harvester does.
 #
-# Output is aligned plain text; unavailable token fields render as "-".
+# Output is aligned plain text; unavailable token fields render as "-" in
+# per-task rows. Per-model totals exclude source=unavailable rows and sum
+# missing numeric fields as zero.
 # Exit status: 0 including when the ledger is absent or empty.
 set -eu
 
