@@ -359,17 +359,30 @@ classify_signal() {  # <reason-after-colon> <state>
     record=$(status_span_first_actionable_record "$f" \
       "$(status_seen_offset "$state" "$task")")
     rc=$?
+    [ "$rc" -eq 2 ] || status_observation_succeeded "$f"
     [ "$rc" -eq 1 ] && [ -z "$record" ] && continue
     if [ "$rc" -eq 2 ]; then
-      # A queued wake is being handled, so the failure is still reported; only
-      # its signature, when the log could not be observed this poll, is left
-      # unrecorded so no marker is written from a failed observation.
-      sig=$(status_observed_signature "$f") || sig=''
+      # A queued wake is being handled, so a readable-but-unclassifiable span is
+      # still reported and bounded by its recorded signature. A log the stat
+      # helpers could not observe records no signature at all, so it is bounded
+      # by the shared counter fm-classify-lib.sh owns instead: below the bound
+      # this handling stays silent and writes nothing, and the one handling that
+      # reaches the bound escalates once per failure episode.
+      if ! sig=$(status_observed_signature "$f"); then
+        if status_observation_skipped "$f" "${FM_DAEMON_WAKE_CYCLE:-}"; then
+          distilled="${distilled}${f##*/}: status log unobservable, $STATUS_UNOBSERVABLE_COUNT consecutive failed observations, stat helpers failing | "
+          [ -z "${FM_STATUS_SPAN_ENDPOINT_FILE:-}" ] \
+            || printf 'UNOBSERVABLE\t%s\n' "$f" >> "$FM_STATUS_SPAN_ENDPOINT_FILE"
+          rel=1
+        fi
+        continue
+      fi
+      status_observation_succeeded "$f"
       marker=$(_seen_status_path "$state" "$task")
-      [ -z "$sig" ] || ! status_presentation_marker_reported_matches "$marker" "$sig" || continue
+      status_presentation_marker_reported_matches "$marker" "$sig" && continue
       distilled="${distilled}$(basename "$f"): unreadable status span | "
-      [ -n "${FM_STATUS_SPAN_ENDPOINT_FILE:-}" ] && [ -n "$sig" ] \
-        && printf 'ERROR\t%s\t%s\n' "$task" "$sig" >> "$FM_STATUS_SPAN_ENDPOINT_FILE"
+      [ -z "${FM_STATUS_SPAN_ENDPOINT_FILE:-}" ] \
+        || printf 'ERROR\t%s\t%s\n' "$task" "$sig" >> "$FM_STATUS_SPAN_ENDPOINT_FILE"
       rel=1
       continue
     fi
@@ -600,11 +613,18 @@ mark_status_seen() {  # <state> <task> <captured-end-offset> <captured-identity>
 # observed file signature.
 # Recording that signature bounds the report while leaving its classification
 # position unchanged, so readable recovery resumes from the last proven byte.
+# An UNOBSERVABLE row names a status log the stat helpers could not observe,
+# which has no signature to record: it closes that log's bounded-skip episode
+# instead, and only here, after the escalation was durably appended.
 mark_escalated_seen() {  # <state> <captured-endpoint-file>
   local state=$1 capture=$2 task endpoint ident rc=0
   [ -f "$capture" ] || return 1
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
+    if [ "$task" = UNOBSERVABLE ]; then
+      status_observation_reported "$endpoint" || rc=1
+      continue
+    fi
     if [ "$task" = ERROR ]; then
       status_presentation_marker_report "$(_seen_status_path "$state" "$endpoint")" "$ident" || rc=1
       continue
@@ -1355,7 +1375,11 @@ is_wake_reason() {  # <reason>
 handle_wake() {  # <reason> <state>
   local reason=$1 state=$2 decision action distilled task last stale_detail
   local capture="$state/.subsuper-classified-end.$$" span_record='' span_rc='' endpoint ident rest sig marker
-  local kind="" arg="" classification_failed=0 span_failure_repeat=0
+  local kind="" arg="" classification_failed=0 span_failure_repeat=0 span_unobservable=''
+  # This handling's cycle token for the bounded-skip counter: one count per wake
+  # handled per log, however many sites observe it while classifying this wake.
+  FM_DAEMON_WAKE_N=$((${FM_DAEMON_WAKE_N:-0} + 1))
+  FM_DAEMON_WAKE_CYCLE="h$$:$FM_DAEMON_WAKE_N"
   : > "$capture" || return 1
   if should_force_self "$reason"; then
     log "wake force-self (FM_INJECT_SKIP): $reason"
@@ -1379,18 +1403,27 @@ handle_wake() {  # <reason> <state>
                 span_rc=$?
                 case "$span_rc" in
                   0|1)
+                    status_observation_succeeded "$state/$task.status"
                     if [ -n "$span_record" ]; then endpoint=${span_record%%$'\t'*}; rest=${span_record#*$'\t'}; ident=${rest%%$'\t'*}; printf '%s\t%s\t%s\n' "$task" "$endpoint" "$ident" > "$capture"; fi
                     ;;
                   *)
-                    # A queued wake is being handled, so the failure is still
-                    # classified; a log that could not be observed this poll
-                    # records no signature, so no marker is written from it.
-                    sig=$(status_observed_signature "$state/$task.status") || sig=''
-                    marker=$(_seen_status_path "$state" "$task")
-                    if [ -n "$sig" ] && status_presentation_marker_reported_matches "$marker" "$sig"; then
-                      span_failure_repeat=1
-                    elif [ -n "$sig" ]; then
-                      printf 'ERROR\t%s\t%s\n' "$task" "$sig" > "$capture"
+                    # Same split as classify_signal: a readable-but-unclassifiable
+                    # span is bounded by its recorded signature, while a log the
+                    # stat helpers could not observe has no signature to record
+                    # and is bounded by the shared counter instead.
+                    if sig=$(status_observed_signature "$state/$task.status"); then
+                      status_observation_succeeded "$state/$task.status"
+                      marker=$(_seen_status_path "$state" "$task")
+                      if status_presentation_marker_reported_matches "$marker" "$sig"; then
+                        span_failure_repeat=1
+                      else
+                        printf 'ERROR\t%s\t%s\n' "$task" "$sig" > "$capture"
+                      fi
+                    elif status_observation_skipped "$state/$task.status" "${FM_DAEMON_WAKE_CYCLE:-}"; then
+                      span_unobservable="escalate|$task.status: status log unobservable, $STATUS_UNOBSERVABLE_COUNT consecutive failed observations, stat helpers failing"
+                      printf 'UNOBSERVABLE\t%s\n' "$state/$task.status" > "$capture"
+                    else
+                      span_unobservable="self|status log unobservable for $task, $STATUS_UNOBSERVABLE_COUNT consecutive failed observations, below the report bound"
                     fi
                     ;;
                 esac
@@ -1398,7 +1431,9 @@ handle_wake() {  # <reason> <state>
                 span_rc=2
                 printf 'ERROR\t%s\n' "$arg" > "$capture"
               fi
-              if [ "$span_failure_repeat" -eq 1 ]; then
+              if [ -n "$span_unobservable" ]; then
+                decision="$span_unobservable"
+              elif [ "$span_failure_repeat" -eq 1 ]; then
                 decision="self|unreadable status span already reported for $task"
               else
                 decision=$(classify_stale "$arg" "$state" "$span_record" "$span_rc")

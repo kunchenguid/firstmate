@@ -1720,7 +1720,7 @@ status_retire_presentation_task() {  # <state> <task-id>
     && [ ! -e "$signal_marker" ] && [ ! -L "$signal_marker" ] \
     && [ ! -e "$heartbeat_marker" ] && [ ! -L "$heartbeat_marker" ] \
     && [ ! -e "$daemon_marker" ] && [ ! -L "$daemon_marker" ] \
-    && [ ! -e "$state/.unobservable-$task" ] && [ ! -L "$state/.unobservable-$task" ]; then
+    && [ ! -s "$state/.unobservable-$task" ] && [ ! -L "$state/.unobservable-$task" ]; then
     if [ ! -e "$manifest" ] && [ ! -L "$manifest" ]; then
       return 0
     fi

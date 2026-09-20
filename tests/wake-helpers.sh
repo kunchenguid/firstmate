@@ -159,6 +159,33 @@ ack_drain_err() {  # <state> <stderr-file>
     --ack-through "$sequence" --recovery-generation "$generation"
 }
 
+# Install the three status-observation readers the classifier exposes as seams
+# (FM_STATUS_IDENTITY_READER, FM_STATUS_SIZE_READER, FM_STATUS_PATH_STATE_READER)
+# into <dir>/observe-{identity,size,path-state}. While <dir>/observe-fail exists
+# every reader fails, reproducing the poll in which every forked stat helper
+# failed at once while the bash builtin file tests still passed; without it each
+# reader defers to the real helper, so its output is byte-identical to a
+# reader-less observation. Every call appends its name to <dir>/observe-calls.
+make_observe_readers() {  # <dir>
+  local dir=$1 name fn var
+  for name in identity size path-state; do
+    case "$name" in
+      identity) fn=_fm_open_decisions_file_ident; var=FM_STATUS_IDENTITY_READER ;;
+      size) fn=_fm_status_file_size; var=FM_STATUS_SIZE_READER ;;
+      path-state) fn=_status_observed_path_state; var=FM_STATUS_PATH_STATE_READER ;;
+    esac
+    cat > "$dir/observe-$name" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "$name" >> "$dir/observe-calls"
+[ -e "$dir/observe-fail" ] && exit 1
+unset $var
+. "$ROOT/bin/fm-classify-lib.sh"
+$fn "\$1"
+EOF
+    chmod +x "$dir/observe-$name"
+  done
+}
+
 make_supercase() {
   local name=$1 dir fakebin
   dir="$TMP_ROOT/$name"
