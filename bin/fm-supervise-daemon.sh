@@ -551,6 +551,12 @@ reconcile_pause_tracking() {  # <window> <state> <last-status-line>
   if status_is_paused_or_captain_held "$last"; then
     stale_marker_remove "$win" "$state"
     pause_marker_record "$win" "$state"
+  elif fm_control_deliberate_stop_present "$state" "$task"; then
+    # A deliberately parked task takes the same bounded pause cadence, but its
+    # last status line is routinely `done:` rather than a wait declaration, so
+    # the declaration test above cannot be the only one that keeps it parked.
+    stale_marker_remove "$win" "$state"
+    pause_marker_record "$win" "$state"
   elif [ -e "$marker" ] || [ -e "$state/.paused-$watcher_key" ]; then
     clear_pause_tracking "$win" "$state"
   fi
@@ -1037,7 +1043,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason deliberate
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1086,7 +1092,7 @@ housekeeping() {  # <state>
     last=$(last_status_line "$state/$task.status")
     if fm_control_deliberate_stop_present "$state" "$task"; then
       # A deliberately parked task never wedge-escalates: drop any stale marker
-      # left over from before the stop. The watcher owns the bounded recheck.
+      # left over from before the stop. Its bounded recheck is the pause loop's.
       rm -f "$marker"
       continue
     fi
@@ -1110,11 +1116,15 @@ housekeeping() {  # <state>
   # status_is_paused_or_captain_held owns which declarations qualify), so it is
   # rechecked on a much longer cadence than a wedge (PAUSE_RESURFACE_SECS) and never
   # escalated as one - but it MUST re-surface, so neither a forgotten pause nor a
-  # forgotten captain hold can rot invisibly. Past the window: gone -> drop; still
-  # declaring the wait -> escalate a recheck digest and reset the marker so the window
+  # forgotten captain hold can rot invisibly. A task the control plane deliberately
+  # stopped (state/<id>.deliberate-stop) is parked the same way, whatever its last
+  # status line says, because the watcher hands that bounded recheck to the away-mode
+  # daemon and it would otherwise be swallowed here. Past the window: gone -> drop;
+  # still parked -> escalate a recheck digest and reset the marker so the window
   # repeats. The digest names WHICH human the wait is on, because the captain is the
-  # one reading it: an external dependency for a paused: declaration, and the captain
-  # themself for a verified hold transfer.
+  # one reading it: an external dependency for a paused: declaration, the captain
+  # themself for a verified hold transfer, and firstmate for a deliberately stopped
+  # task.
   # Pane busy state does NOT end the wait. A declared wait can legitimately hold a
   # pane busy - a worker parked on a long foreground call it keeps live for as long
   # as the wait lasts - so reading busy as "the crew resumed" retires the window of
@@ -1131,7 +1141,12 @@ housekeeping() {  # <state>
     fi
     task=$(window_to_task "$win" "$state")
     last=$(last_status_line "$state/$task.status")
-    if [ -z "$last" ] || ! status_is_paused_or_captain_held "$last"; then
+    deliberate=0
+    if [ -n "$last" ] && status_is_paused_or_captain_held "$last"; then
+      :
+    elif fm_control_deliberate_stop_present "$state" "$task"; then
+      deliberate=1
+    else
       reconcile_pause_tracking "$win" "$state" "$last"
       continue
     fi
@@ -1141,15 +1156,19 @@ housekeeping() {  # <state>
     due="$state/.subsuper-pause-until-due-$key"
     until=
     bounded_until=0
-    if status_is_captain_held "$last" && fm_afk_contract_present "$state"; then
-      continue
-    fi
-    if until=$(status_paused_until "$last"); then
-      if [ "$now" -lt "$until" ] && [ "$age" -lt "$pause_secs" ]; then
+    if [ "$deliberate" -eq 0 ]; then
+      if status_is_captain_held "$last" && fm_afk_contract_present "$state"; then
         continue
-      elif [ "$now" -lt "$until" ]; then
-        bounded_until=1
-      elif [ "$(cat "$due" 2>/dev/null || true)" = "$until" ]; then
+      fi
+      if until=$(status_paused_until "$last"); then
+        if [ "$now" -lt "$until" ] && [ "$age" -lt "$pause_secs" ]; then
+          continue
+        elif [ "$now" -lt "$until" ]; then
+          bounded_until=1
+        elif [ "$(cat "$due" 2>/dev/null || true)" = "$until" ]; then
+          [ "$age" -ge "$pause_secs" ] || continue
+        fi
+      else
         [ "$age" -ge "$pause_secs" ] || continue
       fi
     else
@@ -1166,7 +1185,11 @@ housekeeping() {  # <state>
       2) rm -f "$marker" ;;
       *)
         last=$(last_status_line "$state/$task.status")
-        if [ -n "$last" ] && status_is_captain_held "$last"; then
+        if [ "$deliberate" -eq 1 ]; then
+          if escalate_add "$state" "deliberately stopped ${age}s (parked task, recheck whether to relaunch the worker or clean up the finished task): $win"; then
+            _now > "$marker"
+          fi
+        elif [ -n "$last" ] && status_is_captain_held "$last"; then
           if escalate_add "$state" "captain-held ${age}s (awaiting the captain, answer the held decision or release the hold): $win"; then
             _now > "$marker"
           fi

@@ -163,7 +163,7 @@ Classify each wake this way:
   With no unreported actionable event, the wake self-handles, and the current declaration outranks an enriched possible-wedge reason so it never escalates on the `FM_STALE_ESCALATE_SECS` cadence.
   If a declared external wait is still declared past `FM_PAUSE_RESURFACE_SECS` (default four hours), housekeeping sends one recheck and resets the pause window; a captain-held transfer is never rechecked while the posture record exists.
   The window ages against the crew's own latest status line, so only a status append that stops declaring the wait ends this routing and restores wedge detection.
-  A `stale` whose task carries the durable deliberate-stop marker (`state/<id>.deliberate-stop`, written by `bin/fm-control.sh exit`) self-handles the same way and is never wedge-escalated, whatever its last status line says; the watcher owns that bounded recheck so it holds in every supervision shape.
+  A `stale` whose task carries the durable deliberate-stop marker (`state/<id>.deliberate-stop`, written by `bin/fm-control.sh exit`) self-handles the same way and is never wedge-escalated, whatever its last status line says; its bounded recheck is the same `FM_PAUSE_RESURFACE_SECS` pause window, re-surfaced by the watcher while it triages and by housekeeping in away mode.
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
