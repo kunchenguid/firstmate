@@ -570,7 +570,8 @@ test_optional_event_time() {
     if status_line_at_epoch "$line" >/dev/null; then fail "invented time for $line"; fi
   done
   for line in "done [at=1700000000] [corr=$CORR]: finished" \
-    "done [corr=$CORR] [at=1700000000]: finished"; do
+    "done [corr=$CORR] [at=1700000000]: finished" \
+    "done[at=1700000000] [corr=$CORR]: finished"; do
     [ "$(status_line_at_epoch "$line")" = 1700000000 ] || fail "metadata order changed time"
   done
   dir=$(make_case event-time)
@@ -609,7 +610,8 @@ test_optional_event_time() {
   done
   # A well-formed numeric tag still strips, in either metadata order.
   for line in "done [at=1700000000] [corr=$CORR2]: stamped" \
-    "done [corr=$CORR2] [at=1700000000]: stamped"; do
+    "done [corr=$CORR2] [at=1700000000]: stamped" \
+    "done[at=1700000000] [corr=$CORR2]: stamped"; do
     printf '%s\n' "$line" > "$dir/state/timed.status"
     fm_parent_channel_append_once "$dir/state/timed.status" "done [corr=$CORR2]: stamped" \
       || fail "numeric time retry failed"
@@ -629,7 +631,8 @@ test_captain_override_ignores_event_time() {
   local FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:'
   dir=$(make_case captain-override-time)
   for verb in 'done' needs-decision blocked failed; do
-    for line in "$verb: audit complete" "$verb [at=1700000000]: audit complete"; do
+    for line in "$verb: audit complete" "$verb [at=1700000000]: audit complete" \
+      "${verb}[at=1700000000]: audit complete"; do
       status_is_captain_relevant "$line" || fail "override missed actionable event: $line"
       printf '%s\n' "$line" > "$dir/state/task.status"
       event=$(status_span_first_actionable "$dir/state/task.status" 0) \

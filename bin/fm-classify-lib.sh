@@ -337,18 +337,14 @@ status_stamp_line() {  # <new-status-line> -> line (without newline)
 # and a sweep that normalizes a line at a time never pays a fork for the match it
 # prepares.
 _fm_status_untimed() {  # <status-line> <out-var> -> line without a time tag
-  local __fm_untimed_epoch __fm_untimed_head __fm_untimed_tag
+  local __fm_untimed_epoch __fm_untimed_head __fm_untimed_tag __fm_untimed_before
   if _fm_status_at_epoch "$1" __fm_untimed_epoch; then
     __fm_untimed_head=${1%%:*}
-    __fm_untimed_tag=" [at=$__fm_untimed_epoch]"
-    case "$__fm_untimed_head" in
-      *"$__fm_untimed_tag"*)
-        printf -v "$2" '%s%s:%s' \
-          "${__fm_untimed_head%%"$__fm_untimed_tag"*}" \
-          "${__fm_untimed_head#*"$__fm_untimed_tag"}" "${1#*:}"
-        return 0
-        ;;
-    esac
+    __fm_untimed_tag="[at=$__fm_untimed_epoch]"
+    __fm_untimed_before=${__fm_untimed_head%%"$__fm_untimed_tag"*}
+    printf -v "$2" '%s%s:%s' "${__fm_untimed_before% }" \
+      "${__fm_untimed_head#*"$__fm_untimed_tag"}" "${1#*:}"
+    return 0
   fi
   printf -v "$2" '%s' "$1"
 }
