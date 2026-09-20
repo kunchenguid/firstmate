@@ -391,6 +391,7 @@ A relative path, a missing or non-directory target, an unreadable directory or f
 The file is read on every spawn and relaunch, so a change takes effect at the next launch without a restart.
 This file is NOT inherited into secondmate homes.
 An absolute store path is meaningful only on the machine that holds it, so each home, including a secondmate home, names its own store in its own `config/claude-config-dir`.
+A home's own `config/claude-config-dir` governs the launches that home makes, so the primary's file selects the store for a secondmate agent the primary launches, while the secondmate home's own file governs only the crewmates that secondmate later spawns.
 The seat path itself is captain-private and never belongs in a tracked file.
 
 A store named here must already be interactively usable, because Firstmate points workers at it but never completes its one-time setup for them.
@@ -398,14 +399,14 @@ It must be signed in: `CLAUDE_CONFIG_DIR=<dir> claude -p 'hi'` answers.
 Its first-run setup must already be completed in that store's `.claude.json` (`hasCompletedOnboarding`, `lastOnboardingVersion`, `theme`), or the first worker sits on the theme and login-method wizard and cannot be steered past it.
 It must hold a `settings.json` carrying the permission posture the fleet launches with (`permissions.defaultMode` `bypassPermissions` and `skipDangerousModePermissionPrompt` true for the default bypass posture).
 Its auto-mode default nudge must already be answered (`hasSeenAutoDefaultNudge`, `hasSeenAutoModeEntryWarning`), or a worker parks on an unanswerable "make auto mode your default?" dialog.
+User-level memory and user-level skills are per store and do not carry over, because a worker reads both from its config store, so a store named here must be given the user `CLAUDE.md` and the user `skills` directory or every worker launched from it silently loses them.
 Workspace trust itself genuinely needs no action: `bin/fm-claude-trust.sh` registers it into the named store on every spawn.
 The separate "Allow external CLAUDE.md file imports?" consent is NOT carried into a freshly named store.
 That helper gates the two import flags on the target store's project entry already holding `hasClaudeMdExternalIncludesApproved===true`, and a store with no project entry counts as not-consent.
 Trust still registers, the spawn still reports success, and the pane then sits on the imports dialog with its cursor on "No, disable", which Firstmate's key plane cannot answer.
 This consent is keyed per project checkout, not per store.
-Preferred route: do not give the named store a `CLAUDE.md` that imports outside the project tree, because no import chain means no dialog; this is what the live second store does, verified 2026-09-20.
-Otherwise: open the named store once interactively in each project root and answer "Yes, allow" before dispatching workers there.
-A store failing any of these leaves the spawn reporting success while the pane sits on a dialog Firstmate's key plane cannot answer.
+Mirror the user `CLAUDE.md` into the named store anyway, and if the imports dialog then appears, open the named store once interactively in each project root and answer "Yes, allow" before dispatching workers there.
+A store failing any of these leaves the spawn reporting success either way: the setup and consent items park the pane on a dialog Firstmate's key plane cannot answer, and the memory and skills item shows no dialog at all and simply runs the worker without them.
 
 ## Worker launch environment (config/launch-env-allowlist)
 
