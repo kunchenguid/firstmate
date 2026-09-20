@@ -199,7 +199,8 @@ test_self_announced_pending_reply_close_still_surfaces() {
 
   run_pending_reply fm_pending_reply_try_resolve "$state" "$corr" \
     || fail "the delayed reply did not resolve the pending-reply record"
-  grep -F "resolved [key=pending-reply-$corr]: pending-reply-resolved:" "$status" >/dev/null \
+  sed -E 's/ \[at=[0-9]+\]//' "$status" \
+    | grep -F "resolved [key=pending-reply-$corr]: pending-reply-resolved:" >/dev/null \
     || fail "the resolve did not append the escalation close: $(cat "$status")"
   [ -s "$state/.task6.home-appends" ] \
     || fail "the escalation close did not go through the self-announced append"
@@ -207,7 +208,8 @@ test_self_announced_pending_reply_close_still_surfaces() {
     || fail "the self-announced escalation close was left to re-wake this home"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain after the escalation close failed"
-  grep -F "task6 resolved [key=pending-reply-$corr]: pending-reply-resolved: task=task6 pending-reply-id=$corr" "$out" >/dev/null \
+  sed -E 's/ \[at=[0-9]+\]//' "$out" \
+    | grep -F "task6 resolved [key=pending-reply-$corr]: pending-reply-resolved: task=task6 pending-reply-id=$corr" >/dev/null \
     || fail "the self-announced pending-reply resolution was hidden from UNREAD STATUS: $(cat "$out")"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "second drain after the escalation close failed"
