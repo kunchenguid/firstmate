@@ -640,6 +640,30 @@ tests/fm-composer-codex-idle-live-e2e.test.sh
 The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
 The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
 
+### 2026-09-20 agy identity-gated composer, and the exit path's empty proof
+
+agy draws its composer as a bare `>` row above a full-width `─` rule; the dead-shell rule read that `unknown`, which made `bin/fm-control.sh exit` unable to type `/quit` into a wedged or quota-dead agy worker (issue fm-agy-exit-composer-gap).
+The shared classifier (`bin/fm-composer-lib.sh`) now learns the agy shape, gated on a live agy identity exactly like pi's separated pair: a live agy identity (tmux foreground process, herdr `agent get`) reads the row `empty` when nothing follows the glyph and `pending` when styled text does, while `probe-absent` and any non-agy identity keep the `unknown` dead-shell verdict.
+`tests/fm-composer-lib.test.sh` pins the byte-capture matrix (live identity, `probe-absent`, non-agy identity, typed pending, plain `styled=0` degradation, an unanchored transcript quote, the trust-dialog option, and the pane-floor fallback), and `tests/fm-control.test.sh` drives a real `exit` and a real pending-refusal through a live-agy tmux pane.
+
+The live half was verified on 2026-09-20 against real `agy 1.2.7` on `tmux 3.4`, Linux x64, through the agy live guard:
+
+```sh
+FM_AGY_SIGNALS_LIVE=1 FM_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
+```
+
+Observed output (the guard also answered the workspace-trust dialog and did a real steer/interrupt/exit cycle):
+
+```text
+ok - the real agy busy footer matches fm_busy_agy_tail_busy in flight
+ok - the real agy worker processed its launch prompt
+ok - the shared classifier reads the real agy composer empty only with a live agy identity
+ok - a single Escape cancels the real agy turn
+ok - /quit stops the real agy process
+```
+
+The identity-gated assertion reuses the settled idle capture, so it is token-free and runs whenever the opt-in guard runs; its `probe-absent` companion is the negative that keeps the dead-shell rule honest for every non-agy pane.
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).

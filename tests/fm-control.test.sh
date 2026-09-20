@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp agy"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -53,6 +53,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    agy) printf '/quit\tEscape\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
@@ -235,6 +236,45 @@ test_exit_types_each_harness_verified_command() {
     assert_contains "$out" "stopped t1 harness=$harness" "exit should report the stop for $harness"
   done
   pass "fm-control exit: every verified harness gets its own verified exit command"
+}
+
+# agy's composer draws a bare shell-prompt `>` row, which the shared classifier
+# reads as `unknown` under the dead-shell rule, so `exit` needs a live-agy
+# identity to prove the composer empty. Without that proof a wedged or
+# quota-dead agy worker can never be stopped through the control plane (issue
+# fm-agy-exit-composer-gap), while pending text must still refuse.
+agy_pane() {  # <case-dir> <composer-text>
+  printf 'Add 12345 and 67890. Reply with exactly the sum and nothing else\n%s\n──────────────────────────────────────────────────\n? for shortcuts                     Gemini 3.8 Flash · low\n' \
+    "$2" > "$1/fake/pane"
+}
+
+test_agy_bare_composer_exit_uses_live_identity() {
+  local dir out rc
+  dir=$(new_case agy-exit-empty)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  agy_pane "$dir" '>'
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit on a live idle agy worker should succeed"$'\n'"$out"
+  [ "$(literals "$dir")" = /quit ] \
+    || fail "agy exit should type /quit, got: $(literals "$dir")"
+  assert_contains "$out" "stopped t1 harness=agy" "agy exit should report the stop"
+  pass "fm-control exit: agy's bare shell-glyph composer reads empty with a live agy identity"
+}
+
+test_agy_bare_composer_exit_refuses_pending_text() {
+  local dir out rc
+  dir=$(new_case agy-exit-pending)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  agy_pane "$dir" '> half typed captain text'
+  out=$(run_control "$dir" t1 exit); rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "exit must refuse an agy composer holding pending text, got rc=$rc"$'\n'"$out"
+  [ -z "$(literals "$dir")" ] \
+    || fail "exit must type nothing into a pending agy composer, got: $(literals "$dir")"
+  assert_contains "$out" "pending text" "the refusal should name the pending composer"
+  pass "fm-control exit: agy's pending composer still refuses, so existing text is never concatenated onto"
 }
 
 test_interrupt_sends_each_harness_verified_key() {
@@ -888,6 +928,8 @@ test_fm_send_still_marks_the_same_secondmate_task() {
 }
 
 test_exit_types_each_harness_verified_command
+test_agy_bare_composer_exit_uses_live_identity
+test_agy_bare_composer_exit_refuses_pending_text
 test_interrupt_sends_each_harness_verified_key
 test_opencode_interrupts_twice_and_others_once
 test_unverified_harness_is_refused

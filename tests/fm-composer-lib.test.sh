@@ -485,6 +485,43 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+test_matrix_agy_shell_glyph_row_needs_identity() {
+  # Real idle agy: a bare `>` composer row pinned above a full-width `─` rule
+  # and its status row. agy's composer glyph IS the shell glyph `>`, so the
+  # dead-shell rule reads it `unknown` on shape alone; only a live agy identity
+  # proves the row is agy's empty composer (the exit/relaunch path's missing
+  # empty proof, issue fm-agy-exit-composer-gap).
+  local screen typed quote dialog floor agy_idle none
+  agy_idle=$(printf 'agy\tidle'); none=$(printf 'zsh\t')
+  screen=$'Add 12345 and 67890. Reply with exactly the sum and nothing else\n>\n──────────────────────────────────────────────────────────────────────────────\n? for shortcuts                                                  Gemini 3.8 Flash · low'
+  assert_screen "agy idle on tmux" empty "$CAPS_TMUX" "$screen" 1 "$agy_idle"
+  assert_screen "agy idle on herdr" empty "$CAPS_STYLED" "$screen" '' "$agy_idle"
+  # Identity-capable but unfetched: the adapter is asked to probe lazily.
+  [ "$(fm_composer_classify_screen "$CAPS_STYLED" "$screen")" = need-identity ] \
+    || fail "an identity-capable profile should request the lazy identity probe for agy's shell-glyph row"
+  # No identity capability (cmux/orca/zellij): the bare `>` stays a dead shell.
+  assert_screen "agy row without identity capability" unknown "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "agy row on plain backend" unknown "$CAPS_PLAIN" "$screen"
+  # A dead shell left behind by an exited agy is not a composer.
+  assert_screen "absent identity cannot prove agy's row" unknown "$CAPS_TMUX" "$screen" 1 probe-absent
+  assert_screen "non-agy identity cannot prove agy's row" unknown "$CAPS_TMUX" "$screen" 1 "$none"
+  # Styled typed text is pending; a plain capture degrades to unknown.
+  typed=$'transcript\n> half typed captain text\n────────────────────────\n? for shortcuts'
+  assert_screen "agy typed on tmux" pending "$CAPS_TMUX" "$typed" 1 "$agy_idle"
+  assert_screen "agy typed on plain backend" unknown "$CAPS_PLAIN" "$typed"
+  # A `>` transcript quote with no rule beneath it is not a composer container.
+  quote=$'hello\n> this is quoted output\nmore transcript here\n status line'
+  assert_screen "unanchored agy quote" unknown "$CAPS_TMUX" "$quote" 1 "$agy_idle"
+  # The trust dialog's `> Yes, I trust this folder` option is not a composer.
+  dialog=$'> Yes, I trust this folder\n  No, exit'
+  assert_screen "agy trust dialog option" unknown "$CAPS_TMUX" "$dialog" 0 "$agy_idle"
+  # A capture truncated at the composer floor is still identity-gated.
+  floor=$'transcript\n>'
+  assert_screen "agy composer at the pane floor" empty "$CAPS_TMUX" "$floor" 1 "$agy_idle"
+  assert_screen "agy floor row without identity" unknown "$CAPS_TMUX" "$floor" 1 probe-absent
+  pass "matrix: agy's bare shell-glyph composer is empty only with a live agy identity; shape alone stays unknown"
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -790,6 +827,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
+test_matrix_agy_shell_glyph_row_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

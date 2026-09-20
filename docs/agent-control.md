@@ -46,6 +46,7 @@ muse is the one verified adapter that restores the cancelled prompt back into it
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
+That `empty` can come from an identity-gated shape: agy's composer is a bare `>` row, so the shared classifier proves it empty only with a live agy identity and keeps `unknown` (never empty) for a bare shell or any other harness, which is what lets `exit` stop a wedged agy worker without ever exiting a pane on an ambiguous read alone.
 
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.

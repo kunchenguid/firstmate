@@ -73,6 +73,14 @@
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
+#   agy-shell  - agy: a bare shell-prompt `>` row pinned directly above a
+#                full-width `─` rule. The SHELL glyph makes it `unknown` under
+#                the dead-shell rule below, so it is provable only with a live
+#                agy identity (the same identity-gated contract as pi's
+#                separated shape). This is the exit/relaunch path's positive
+#                empty proof for agy: without it `bin/fm-control.sh exit` can
+#                never type `/quit` into a wedged or quota-dead agy worker
+#                (issue fm-agy-exit-composer-gap).
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -662,6 +670,10 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
 # --- The screen classifier ---------------------------------------------------
 #
 # fm_composer_classify_screen <caps> <screen> [cursor_row] [identity]
+# resolves the base verdict below and then, when that verdict is `unknown`,
+# asks the identity-gated agy refinement (see its section near the bottom).
+# The base verdict alone is _fm_composer_classify_screen_base, with the same
+# contract and parameters:
 #   <caps>       newline-separated key=value capability facts (see header).
 #   <screen>     the captured screen: ANSI-preserving when styled=1, plain
 #                otherwise.
@@ -1363,7 +1375,7 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
-fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
+_fm_composer_classify_screen_base() {  # <caps> <screen> [cursor_row] [identity]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
   local styled=0 cursor=0 has_identity=0 kv plain
   while IFS= read -r kv; do
@@ -1468,6 +1480,116 @@ EOF
         "$FM_COMPOSER_SELECTED_FIRST" "$FM_COMPOSER_SELECTED_LAST"
       ;;
   esac
+}
+
+# --- The agy (Antigravity CLI) identity-proven composer shape ----------------
+#
+# agy draws its composer as a bare shell-prompt `>` row pinned directly above a
+# full-width `─` rule (verified live, agy 1.2.0; byte-level capture in
+# docs/verification/agy.md "Composer"). The dead-shell rule above cannot call
+# that row `empty` on SHAPE alone, because a bare `>` is also exactly what a
+# pane shows once its agent has exited to a login shell - so agy is provable
+# only by IDENTITY, exactly like pi's separated shape. The refinement runs only
+# when the base verdict is already `unknown`, so a pane read positively some
+# other way never pays for it:
+#
+#   - no identity result yet -> need-identity (the adapter probes lazily);
+#   - probe-absent / non-agy -> the base `unknown` stands (a dead shell, or a
+#     different harness whose bottom row merely looks like a `>` prompt);
+#   - a live agy + a `>` row -> `empty` when nothing follows the glyph, and
+#     `pending` when styled text does (a plain capture degrades to `unknown`,
+#     the same styled=0 posture every other shape uses).
+#
+# This is the exit/relaunch path's missing positive proof, not a relaxing of the
+# dead-shell safety rule: bin/fm-control.sh types its exit command only on a
+# proven-empty composer, and agy's permanent base `unknown` is what made a
+# wedged or quota-dead agy worker un-stoppable through the control plane.
+
+# _fm_composer_agy_composer_row: locate agy's composer row in <plain-screen>.
+# The row is the BOTTOM-most row whose trimmed content opens with the agy
+# composer glyph `>`, anchored as a genuine composer container: the first
+# non-blank row below it is a structural rule (agy draws a full-width `─` rule
+# between the composer and its status row), or there is no row below it.
+# Anything else - a `>` transcript quote, or the trust dialog's
+# `> Yes, I trust this folder` option - is rejected so the base `unknown`
+# stands. Sets FM_COMPOSER_AGY_ROW.
+_fm_composer_agy_composer_row() {  # <plain-screen>
+  local plain=$1 row=0 line trimmed best=-1 total
+  FM_COMPOSER_AGY_ROW=-1
+  while IFS= read -r line; do
+    trimmed=$line
+    fm_composer_normalize_trim_var trimmed
+    case "$trimmed" in
+      '>'*) best=$row ;;
+    esac
+    row=$((row + 1))
+  done <<EOF
+$plain
+EOF
+  total=$row
+  [ "$best" -ge 0 ] || return 1
+  row=$((best + 1))
+  while [ "$row" -lt "$total" ]; do
+    trimmed=$(_fm_composer_screen_row "$row" "$plain")
+    fm_composer_normalize_trim_var trimmed
+    if [ -n "$trimmed" ]; then
+      fm_composer_row_has_edge "$trimmed" || return 1
+      break
+    fi
+    row=$((row + 1))
+  done
+  FM_COMPOSER_AGY_ROW=$best
+  return 0
+}
+
+# _fm_composer_agy_verdict: the identity-gated agy verdict for a pane whose base
+# classification is `unknown`.
+_fm_composer_agy_verdict() {  # <screen> <styled> <identity>
+  local screen=$1 styled=$2 identity=$3 plain raw content
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  _fm_composer_agy_composer_row "$plain" || { printf 'unknown'; return 0; }
+  if [ -z "$identity" ]; then
+    printf 'need-identity'
+    return 0
+  fi
+  if [ "$identity" = probe-absent ]; then
+    printf 'unknown'
+    return 0
+  fi
+  [ "${identity%%$'\t'*}" = agy ] || { printf 'unknown'; return 0; }
+  raw=$(_fm_composer_screen_row "$FM_COMPOSER_AGY_ROW" "$screen")
+  content=$(_fm_composer_row_content "$raw" "$styled")
+  case "$content" in
+    '>'*) content=${content#>} ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  fm_composer_normalize_trim_var content
+  if [ -z "$content" ]; then
+    printf 'empty'
+    return 0
+  fi
+  if [ "$styled" = 1 ]; then printf 'pending'; else printf 'unknown'; fi
+}
+
+fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
+  local caps=$1 screen=$2 cy=${3:-} identity=${4:-}
+  local verdict has_identity=0 styled=0 kv
+  verdict=$(_fm_composer_classify_screen_base "$caps" "$screen" "$cy" "$identity")
+  if [ "$verdict" = unknown ]; then
+    while IFS= read -r kv; do
+      case "$kv" in
+        identity=1) has_identity=1 ;;
+        styled=1) styled=1 ;;
+      esac
+    done <<EOF
+$caps
+EOF
+    if [ "$has_identity" = 1 ]; then
+      _fm_composer_agy_verdict "$screen" "$styled" "$identity"
+      return 0
+    fi
+  fi
+  printf '%s' "$verdict"
 }
 
 # fm_composer_submit_retry_core: the ONE verify-and-retry-Enter submit loop
