@@ -189,6 +189,64 @@ test_matrix_claude_bare_nbsp_row() {
   pass "matrix: claude's ❯+NBSP row reads empty on every profile in both locales (#1988)"
 }
 
+test_matrix_claude_arrow_statusline_footer() {
+  # Real claude 2.x on herdr (captured live 2026-09-20, herdr 0.8.0): the
+  # composer is a bare `❯`+U+00A0 row between two solid rules, and the harness
+  # draws a user statusLine plus its permission-mode hint directly BELOW the
+  # closing rule. That statusLine opened with `→`, which is Cursor's own agent
+  # prompt glyph, so the bottom-most-candidate rule selected the statusLine as
+  # a bare composer, swallowed the hint row beneath it as wrapped input, and
+  # every steer to a claude worker was refused with a `pending` verdict on a
+  # visibly empty composer. A pair that closed over a bare agent-glyph row is
+  # a proven composer container, so its contiguous non-blank footer rows are
+  # furniture and cannot outrank the composer they sit under.
+  local pair footer screen typed residue claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  pair=$'transcript line\n────────────────────────\n❯'"$NBSP"$'\n────────────────────────'
+  footer=$'\n  → repo git:(fm/branch)× | Opus 5 | ctx 15%\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  screen="$pair$footer"
+  assert_screen "claude idle under an arrow statusline on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "claude idle under an arrow statusline on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "claude idle under an arrow statusline on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  # The protection this must NOT remove: real unsubmitted text in that same
+  # composer, under that same statusline, still refuses.
+  typed=$'transcript line\n────────────────────────\n❯ fix the login bug\n────────────────────────'"$footer"
+  assert_screen "claude typed under an arrow statusline" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  # The live second defect: a stray SGR mouse report left in the composer by
+  # a click in the pane is real pending content, not furniture.
+  residue=$'transcript line\n────────────────────────\n❯ <65;77;27M\n────────────────────────'"$footer"
+  assert_screen "stray mouse report in the composer" pending "$CAPS_STYLED" "$residue" '' "$claude_idle"
+  pass "matrix: claude's arrow statusline is footer furniture, not a composer holding text"
+}
+
+test_composer_footer_demotion_needs_a_proven_pair() {
+  # The demotion is bounded in three directions, and each bound is a case
+  # where a lower glyph row IS the live composer.
+  local screen out claude_idle pi_idle
+  claude_idle=$(printf 'claude\tidle'); pi_idle=$(printf 'pi\tidle')
+  # 1. Contiguity: a blank row ends the footer zone, so a composer redrawn
+  #    below an old rule pair still wins.
+  screen=$'────────────────────────\n❯ old draft\n────────────────────────\n  → repo git:(main)\n\n→'
+  assert_screen "blank row reopens lower candidates" empty "$CAPS_STYLED_NOID" "$screen"
+  # 2. Proof: a pair that closed over NO agent-glyph row proves no composer,
+  #    so nothing below it is demoted. pi's own blank pair is exactly that.
+  screen=$'────────────────────────\n\n────────────────────────\n→'
+  assert_screen "an unproven pair demotes nothing" empty "$CAPS_STYLED_NOID" "$screen"
+  # 3. No pair at all: Cursor draws its `→` composer between half-block rules,
+  #    which are not separator rules, so its footer rows change nothing.
+  screen=$' ▄▄▄▄▄▄▄▄\n  →\n ▀▀▀▀▀▀▀▀\n  Cursor Grok 4.5 High · 6.7%   Run Everything\n  ~/wt · 64cdd3a'
+  assert_screen "cursor keeps its own bare composer" empty "$CAPS_STYLED_NOID" "$screen"
+  # A later pair WITHOUT a glyph row must reopen candidates the earlier proven
+  # pair had closed, so the zone cannot leak down a screen.
+  screen=$'────────────────────────\n❯'"$NBSP"$'\n────────────────────────\n  → repo git:(main)\n────────────────────────\n────────────────────────\n→'
+  assert_screen "a later unproven pair reopens candidates" empty "$CAPS_STYLED_NOID" "$screen"
+  # And the strict posture is untouched: a footer row alone proves nothing.
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" $'transcript\n  → repo git:(main) | Opus 5')
+  [ "$out" != empty ] \
+    || fail "an unanchored statusline row must never prove an empty composer, got '$out'"
+  pass "fm_composer_classify_screen: footer demotion needs a contiguous, glyph-proven pair"
+}
+
 test_matrix_codex_dim_hint_row() {
   # Real idle codex: bold `›`, reset, then an SGR-2 dim hint. Styled captures
   # strip the ghost and prove empty; plain captures must defer as unknown -
@@ -783,6 +841,8 @@ test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
+test_matrix_claude_arrow_statusline_footer
+test_composer_footer_demotion_needs_a_proven_pair
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant

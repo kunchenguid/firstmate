@@ -73,6 +73,27 @@
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
 #                strict rule's unidentifiable blank row.
+#                A separated pair that closes over a bare AGENT-GLYPH row is a
+#                different, self-proving thing: real claude 2.x draws exactly
+#                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
+#                pair carries the shape and no identity is needed.
+#
+# THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
+# harness draws its own furniture BELOW the composer - a user statusLine, a
+# permission-mode hint - and the cursorless "bottom-most shape wins" rule
+# looks exactly there. `→` (U+2192) is Cursor's prompt glyph but ordinary text
+# everywhere else, so a statusLine opening with `→` was selected as a bare
+# composer, swallowed the hint row under it as wrapped input, and answered
+# `pending` on a visibly empty pane; `fm_task_inbox_ring` defers on exactly
+# that verdict, so every steer to a claude worker on herdr was skipped
+# (measured live 2026-09-20, claude 2.1.236 on herdr 0.8.0, three of five
+# panes). A separator pair that CLOSED over a bare agent-glyph row is a proven
+# composer container, so the contiguous non-blank rows below its closing rule
+# are that composer's footer and are not composer candidates. The demotion is
+# bounded by all three of its own preconditions - a blank row ends the zone, a
+# pair that closed over no glyph row proves nothing and demotes nothing, and a
+# shape with no separator pair at all (Cursor's half-block rules) is
+# untouched - so a live composer redrawn below stale rules still wins.
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
@@ -720,7 +741,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
   FM_COMPOSER_SCAN_PI_OPEN=-1
   FM_COMPOSER_SCAN_PI_CLOSE=-1
   FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=-1
-  local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max
+  local leftbar_start=-1 pi_open=-1 pi_lines=0 pi_max composer_footer=0 footer_zone_open=0
   pi_max=$FM_COMPOSER_PI_MAX_LINES
   case "$pi_max" in ''|*[!0-9]*|0) pi_max=8 ;; esac
   while IFS= read -r line; do
@@ -741,9 +762,12 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
       '┗'*'┛') kind=bottom; family=heavy ;;
       '+'*'+') kind=ascii; family=ascii ;;
     esac
+    composer_footer=0
     # Pi separator rows: a solid `─` rule at least 8 columns wide. A separator
     # closes the preceding candidate and immediately opens the next, so an
     # earlier transcript rule can never outrank the live bottom composer pair.
+    # Closing a pair over a bare agent-glyph row also opens that composer's
+    # footer zone; see THE COMPOSER FOOTER ZONE in this file's header.
     if _fm_composer_pi_separator_row "$trimmed"; then
       FM_COMPOSER_SCAN_PI_LAST_SEPARATOR=$row
       if [ "$pi_open" -ge 0 ]; then
@@ -755,11 +779,28 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         else
           FM_COMPOSER_SCAN_PI_PAIR_VALID=0
         fi
+        # A pair that CLOSED over a bare agent-glyph row is a proven composer
+        # container, so every contiguous non-blank row below its closing rule
+        # is that composer's own footer furniture. Recomputed on every close,
+        # so a later pair without a glyph row ends the zone.
+        if [ "$FM_COMPOSER_SCAN_BARE_ROW" -gt "$pi_open" ] \
+           && [ "$FM_COMPOSER_SCAN_BARE_ROW" -lt "$row" ]; then
+          footer_zone_open=1
+        else
+          footer_zone_open=0
+        fi
       fi
       pi_open=$row
       pi_lines=0
-    elif [ "$pi_open" -ge 0 ]; then
-      pi_lines=$((pi_lines + 1))
+    else
+      if [ "$pi_open" -ge 0 ]; then
+        pi_lines=$((pi_lines + 1))
+      fi
+      if [ -z "$trimmed" ]; then
+        footer_zone_open=0
+      else
+        composer_footer=$footer_zone_open
+      fi
     fi
     # Left-bar rows (opencode): a heavy left bar `┃` opening the row with no
     # closing side border. A `┃…┃` row is a bordered box row, not a left bar.
@@ -777,7 +818,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
     # lower shell prompts as staleness evidence for cursorless selection.
     if [ "$top" -lt 0 ] && fm_composer_leading_shell_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_SHELL_ROW=$row
-    elif fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
+    elif [ "$composer_footer" != 1 ] && fm_composer_leading_agent_glyph_var glyph "$trimmed"; then
       FM_COMPOSER_SCAN_BARE_ROW=$row
     fi
     # Cursor safety: a cursor sitting on a structural edge row is never an
