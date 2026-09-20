@@ -535,6 +535,21 @@ The resolver sends the key to `curl` only as a header read from a file descripto
 The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
+## Typed intake classification (.env TYPESAFE_API_KEY)
+
+`bin/fm-intake-classify.sh <request-file> [--project <name>]` provides an opt-in System One recommendation before firstmate decides whether to ship work, scout it, or answer now.
+It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment or the effective home's gitignored `.env` contains it, with the environment taking precedence through `bin/fm-env-lib.sh`.
+Off prints exactly `intake-classify: off` on stderr, prints nothing on stdout, exits 0, and makes no network call.
+When on, the tool sends one POST to `https://api.typesafe.ai/v1/systemone`, fixed at model `jev-latest` and a five-second timeout.
+Its state contains the project name and at most the first 32,768 bytes of the request file, with `request_truncated: true` in output when that bound was applied.
+The one request asks three parallel questions: Choice `deliverable` (`ship`, `scout`, `answer_now`, or `unclear`), NOUL `intent_clear` (whether a concrete implementation change is already authorized), and Score `urgency` (routine, soon, or blocking under the criteria sent with the question).
+The tool keeps the bearer key in a non-exported variable and passes it to curl only through a file-descriptor header, never argv, output, or a child environment.
+Its named confidence floor is 0.6, matching typed dispatch resolution.
+`clear` means a high-confidence concrete recommendation with a NOUL authorization score at or above that floor, `ambiguous` means a low-confidence answer or `unclear` deliverable, `escalate` means implementation authorization is not clear, and `error` covers API, network, response, and rendering failures.
+Every runtime outcome exits 0, while only a missing request file, unreadable request file, unknown flag, or missing `jq` exits 2.
+This is advisory only: it never spawns, chooses harness/model/effort, replaces firstmate judgment, or blocks intake on failure.
+`docs/verification/intake-classify.md` records the current live API observation and the fake-curl regression command.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -1125,7 +1140,7 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+TYPESAFE_API_KEY=       # typed dispatch resolution and intake classification opt-in, from the environment or .env; absent leaves both tools off (docs/configuration.md "Typed intake classification")
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
