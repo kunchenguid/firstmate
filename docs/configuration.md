@@ -494,7 +494,7 @@ Rules come only from the effective home's `config/crew-dispatch.json`; `FM_CONFI
 
 ```sh
 bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON block on stdout
-bin/fm-dispatch-resolve.sh --record-dispatch data/<id>/brief.md --harness <name>   # after the spawn
+bin/fm-dispatch-resolve.sh --record-dispatch data/<id>/brief.md --harness <name> [--model <name>] [--effort <level>]   # after the spawn
 ```
 
 Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.
@@ -519,6 +519,7 @@ Read that disagreement by projecting both `chosen_profile` and `dispatched_profi
 Resolve-path receipt writes are best-effort but never silent: a failure changes neither the resolver's stdout nor its exit status, because every receipt is written after its block is printed, and on every outcome, clear or not, the run prints the one fixed line `dispatch-resolve: no resolution receipt for this run` on stderr, which carries nothing from the receipt, the brief, the model's answer, or the key.
 On `clear` the same loss is additionally detectable later, when the `--record-dispatch` run for that brief reports on stderr that no resolution receipt carries its content hash; the other outcomes record no dispatch, so the stderr line is the whole of their visibility.
 It does cost the resolver's own process lifetime after the block, and that cost is bounded rather than incidental: receipt work stays at or under a 100 ms median on an idle home and at or under 200 ms under the held-lock fixture, both measured in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
+Those two figures are the accepted governing bound for the receipt path, adopted in place of any looser few-milliseconds reading, so a run that exceeds them is a regression to fix here rather than a cost to renegotiate.
 A `--record-dispatch` run that cannot land its join instead names the reason on one stderr line and still exits 0, so an absent dispatch receipt is never mistaken for an agreeing one; the file is append-only and unbounded, and the home's `state/` directory is gitignored.
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.

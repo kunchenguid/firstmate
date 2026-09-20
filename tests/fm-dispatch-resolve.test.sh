@@ -286,7 +286,7 @@ assert_equals '{"harness":"claude","model":"sonnet","effort":"high"}' "$(jq -c '
 assert_equals 'cursor' "$(jq -r .chosen_profile.provider <<<"$dispatch_receipt")" "chosen_profile keeps the declared provider the rules file carried"
 assert_equals 'false' "$(jq -r '(.chosen_profile | {harness, model, effort}) == (.dispatched_profile | {harness, model, effort})' <<<"$dispatch_receipt")" "a dispatch that overrode the resolver disagrees under the projection"
 head -c "$before_dispatch_bytes" "$RECEIPTS" > "$TMP_ROOT/receipt-prefix"
-cmp "$TMP_ROOT/receipts-before-dispatch" "$TMP_ROOT/receipt-prefix"
+cmp "$TMP_ROOT/receipts-before-dispatch" "$TMP_ROOT/receipt-prefix" || fail "the dispatch join left earlier receipt rows unchanged"
 pass "actual dispatch is separately recorded and joined without changing earlier rows"
 
 # --- agreement is the {harness, model, effort} projection, not the whole object -
