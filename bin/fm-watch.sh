@@ -1708,6 +1708,10 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # -nt comparison.
 # Status signatures include observable file and readability state, while turn-end
 # markers retain their size-and-mtime signature.
+# A status file is asked the wider wake question instead, so it also stays quiet
+# when the only bytes it grew past the classified offset are this home's own
+# bookkeeping appends; fm_wake_signal_seen_current (bin/fm-wake-lib.sh) owns that
+# rule and every other signature change still reads as unreported.
 # Pure read: prints one "<seen-file>\t<sig>\t<file>" line per changed file.
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
