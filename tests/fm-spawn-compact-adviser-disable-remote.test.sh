@@ -120,7 +120,12 @@ remote_pane_payload() {  # <verb>
   sed -n "s/^pane $1 [^ ]* \\(.*\\) --session [^ ]*\$/\\1/p" "$HERDR_LOG"
 }
 remote_launch_command() {
-  remote_pane_payload send-text | grep 'encode launch-brief' | tail -1
+  local source_line staged
+  source_line=$(remote_pane_payload send-text | grep "^\. '.*'\$" | tail -1)
+  staged=${source_line#". '"}
+  staged=${staged%"'"}
+  [ -n "$staged" ] && [ -f "$staged" ] || return 1
+  cat "$staged"
 }
 remote_pane_exports() {
   remote_pane_payload run | grep '^export '
