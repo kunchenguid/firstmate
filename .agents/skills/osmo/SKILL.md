@@ -3,7 +3,7 @@ name: osmo
 description: >-
   Catalog, transcribe, and classify video clips from a connected DJI Osmo Pocket drive.
   Use when the captain invokes /osmo or asks to catalog, transcribe, pair, or classify Osmo Pocket footage.
-  Discovers /Volumes/Osmo strictly read-only, pairs master MP4 and low-resolution proxy LRF files, primes audio for Superwhisper, samples visuals locally with ffmpeg and Apple Vision, classifies clips into A-roll, B-roll, or mixed, caches results deterministically outside the device, and generates a local Markdown report.
+  Discovers /Volumes/Osmo strictly read-only, pairs master MP4 and low-resolution proxy LRF files, transcribes audio via local headless CLI or Superwhisper, samples visuals locally with ffmpeg and Apple Vision, classifies clips into A-roll, B-roll, or mixed, caches results deterministically outside the device, and generates a local Markdown report.
 user-invocable: true
 metadata:
   internal: true
@@ -50,8 +50,10 @@ Each clip record stores full provenance and file paths back to the source record
 Transcription and speech analysis run 100% locally with zero cloud processing, no paid APIs, and no GUI automation:
 
 1. **Free Local Headless CLI Transcriber**: The cataloger supports executing a fully local headless CLI transcriber (configurable via `--transcriber <cmd>` or `FM_OSMO_TRANSCRIBER`, or autodetected local `whisper` CLI).
-2. **Prior Approval Invariant**: The workflow strictly forbids downloading models or installing packages without prior user approval. If an audio clip requires transcription but no local model is downloaded, the clip record reports `approval_required` alongside the exact tool name, model identifier, download source, disk footprint, and execution command.
-3. **Superwhisper Integration**: Superwhisper on macOS is an interactive menu bar dictation tool without a headless batch CLI. The skill interfaces with Superwhisper by pairing existing transcripts from Superwhisper's SQLite database (`superwhisper.sqlite`) when available, and extracting 16 kHz mono audio tracks to the local cache directory outside the device.
+2. **Prior Approval Invariant**: The workflow strictly forbids downloading models or installing packages without prior user approval.
+   If an audio clip requires transcription but no local model is downloaded, the clip record reports `approval_required` alongside the exact tool name, model identifier, download source, disk footprint, and execution command.
+3. **Superwhisper Integration**: Superwhisper on macOS is an interactive menu bar dictation tool without a headless batch CLI.
+   The skill interfaces with Superwhisper by pairing existing transcripts from Superwhisper's SQLite database (`superwhisper.sqlite`) when available, and extracting 16 kHz mono audio tracks to the local cache directory outside the device.
 4. **Local Speech Metrics**: Vocal activity is measured locally using ffmpeg silence detection (`silencedetect`) and volume detection (`volumedetect`), calculating exact speech ratios and silence durations for each clip.
 5. **Transcripts and Provenance**: When transcripts are generated or paired, the text is cached and factored into clip classification alongside visual and acoustic features.
 
@@ -72,5 +74,6 @@ If Apple Vision is unavailable, the classifier falls back to visual complexity, 
 Processed clips are cached deterministically in `catalog-cache.json` under the cache directory.
 Clips are fingerprinted by file size and modification timestamp.
 Subsequent catalog runs check the cache and immediately reuse existing frame extractions, audio measurements, and classifications for unchanged files.
+When clips have incomplete transcription status, providing a transcriber command or local model re-evaluates transcription while reusing already extracted frames and audio.
 Passing `--force` forces re-sampling and re-classification of all clips.
 The latest report is always linked at `<cache_dir>/latest-report.md` for immediate review.

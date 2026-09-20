@@ -189,7 +189,7 @@ Claude and grok use the slash form shown here; codex uses the same names with `$
 | `/bearings`        | Generate a concise four-section chat digest from bounded fleet state, including registered remote-home ledgers and measured follow-up for owned contributions; use `/bearings file` to also replace today's dated report in `data/`, and add `include PRs` for live GitHub enrichment |
 | `/updatefirstmate` | Guardedly update the running firstmate and its secondmates - fast-forward, or reconcile a redundant post-squash-merge divergence - then persist and restart every live mate successfully left on the target commit - including already-current homes - with an honest re-read nudge only when restart cannot be proven |
 | `/stow`            | Sweep the session for uncaptured durable knowledge, persist the open work records this session knows are unfiled or now wrong, curate tiered startup memory with decay and cold archival, enforce each home's budget or surface the required decision, cascade to registered second mates, and report what is safe to reset |
-| `/osmo`            | Discover connected DJI Osmo Pocket storage read-only, pair master MP4 and proxy LRF clips, sample video visuals locally, analyze speech metrics and interface with Superwhisper, classify footage into A-roll, B-roll, or mixed, cache results incrementally outside the device, and produce a local Markdown report |
+| `/osmo`            | Discover connected DJI Osmo Pocket storage read-only, pair master MP4 and proxy LRF clips, sample video visuals locally, transcribe audio via local headless CLI or Superwhisper, classify footage into A-roll, B-roll, or mixed, cache results incrementally outside the device, and produce a local Markdown report |
 
 Bearings invocation examples:
 

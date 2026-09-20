@@ -3,9 +3,9 @@
 
 Discovers the Osmo drive strictly read-only, pairs MP4 master and LRF proxy files,
 samples video visuals locally using ffmpeg and macOS Apple Vision (or PIL),
-analyzes audio speech/silence metrics locally, interfaces with Superwhisper,
-classifies clips into A-roll, B-roll, or mixed, caches results deterministically
-outside the device, and generates a comprehensive local Markdown report.
+analyzes audio speech/silence metrics locally, transcribes via local headless CLI
+or Superwhisper, classifies clips into A-roll, B-roll, or mixed, caches results
+deterministically outside the device, and generates a comprehensive local Markdown report.
 
 Free and 100% local: no paid APIs, no cloud uploads, zero external network calls.
 """
@@ -872,6 +872,7 @@ class OsmoCache:
         if not frames or not all(os.path.exists(f) for f in frames):
             return False
 
+        # Incomplete transcriptions must be re-evaluated when a transcriber or model is available
         t_status = cached.get("transcription", {}).get("status")
         if t_status not in ("transcribed", "no_audio"):
             cmd_str = transcriber or os.environ.get("FM_OSMO_TRANSCRIBER")

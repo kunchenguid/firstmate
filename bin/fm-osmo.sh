@@ -2,8 +2,8 @@
 # fm-osmo.sh - DJI Osmo Pocket video clip cataloging, pairing, sampling, and classification.
 #
 # Discovers the connected DJI Osmo Pocket drive strictly read-only, pairs master
-# MP4 and low-resolution proxy LRF files, extracts audio tracks for Superwhisper
-# transcription, samples frames locally, classifies clips as A-roll, B-roll, or
+# MP4 and low-resolution proxy LRF files, transcribes audio via local headless CLI
+# or Superwhisper, samples frames locally, classifies clips as A-roll, B-roll, or
 # mixed, caches derived analysis deterministically outside the device, and
 # generates a local Markdown report.
 #
@@ -25,6 +25,7 @@
 #   --cache-dir <path>   Local directory for derived caches and reports
 #                        (default: ~/.firstmate/osmo-catalog-cache).
 #   --output <path>      Custom path to write Markdown report.
+#   --transcriber <cmd>  Free fully local headless CLI transcriber command.
 #   --sample-count <N>   Number of visual frames to sample per clip (default: 5).
 #   --force              Force re-processing of cached clips.
 #   --json               Output structured JSON instead of human-readable text.
@@ -33,6 +34,8 @@
 # Environment variables:
 #   FM_OSMO_DRIVE        Default drive mount point override.
 #   FM_OSMO_CACHE_DIR    Default local cache directory override.
+#   FM_OSMO_TRANSCRIBER  Default local headless CLI transcriber command override.
+#   FM_OSMO_WHISPER_MODEL Local whisper model checkpoint path override.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
