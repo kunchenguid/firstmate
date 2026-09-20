@@ -765,6 +765,18 @@ assert_equals 'dispatch-resolve: no resolution receipt for this run' "$err" "rec
 rmdir "$RECEIPTS"
 mv "$TMP_ROOT/receipts-before-failure" "$RECEIPTS"
 
+DANGLING_TARGET="$TMP_ROOT/receipts-symlink-target"
+mv "$RECEIPTS" "$TMP_ROOT/receipts-before-failure"
+ln -s "$DANGLING_TARGET" "$RECEIPTS"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "a dangling receipts symlink leaves resolver exit 0"
+assert_equals "$normalized_baseline" "$(sed -E 's/latency_ms: [0-9]+/latency_ms: N/' <<<"$out")" "a dangling receipts symlink leaves stdout untouched"
+assert_equals 'dispatch-resolve: no resolution receipt for this run' "$err" "a dangling receipts symlink names itself on exactly one stderr line"
+assert_absent "$DANGLING_TARGET" "a dangling receipts symlink is never followed to create its target"
+rm -f "$RECEIPTS"
+mv "$TMP_ROOT/receipts-before-failure" "$RECEIPTS"
+pass "a receipts path that is a symlink is refused rather than followed"
+
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=429 run code baseline_out baseline_err "$BRIEF"
 assert_contains "$baseline_out" '  status: error' "the 429 baseline is a non-clear outcome"

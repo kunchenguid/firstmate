@@ -157,8 +157,9 @@ receipt_lock_release() {
 
 receipt_append_locked() { # <one-line-json>
   local record=$1
+  [ ! -L "$RECEIPTS" ] || return 1
   if [ -e "$RECEIPTS" ]; then
-    [ -f "$RECEIPTS" ] && [ ! -L "$RECEIPTS" ] || return 1
+    [ -f "$RECEIPTS" ] || return 1
   fi
   (umask 077; printf '%s\n' "$record" >> "$RECEIPTS") 2>/dev/null
 }
@@ -253,7 +254,7 @@ record_actual_dispatch() {
 die() { printf 'error: %s\n' "$1" >&2; exit 2; }
 no_rules() {
   local result
-  result=$(jq -cn --arg model "$TS_MODEL" '{status:"escalate", reason:"no rules to match", model:null, latency_ms:null, tokens:null, probabilities:null, confidence:null}' 2>/dev/null)
+  result=$(jq -cn '{status:"escalate", reason:"no rules to match", model:null, latency_ms:null, tokens:null, probabilities:null, confidence:null}' 2>/dev/null)
   printf 'dispatch-resolve:\n  status: escalate\n  reason: no rules to match\n'
   write_resolution_receipt "$result" >/dev/null 2>&1 || receipt_failed || true
   exit 0
