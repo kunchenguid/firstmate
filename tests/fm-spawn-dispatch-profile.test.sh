@@ -346,7 +346,7 @@ test_active_dispatch_profile_allows_explicit_harness() {
   assert_contains "$out" "spawned $id harness=codex" "spawn did not report explicit codex harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "--model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -s workspace-write -a never" \
     "explicit harness launch did not thread model and effort"
   pass "active crew-dispatch profile allows an explicit resolved harness"
 }
@@ -416,8 +416,11 @@ test_codex_threads_model_and_effort() {
   expect_code 0 "$status" "codex spawn with profile flags should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "--model 'gpt-5' -c 'model_reasoning_effort=\"high\"' -s workspace-write -a never" \
     "codex launch did not thread model and reasoning effort config"
+  assert_contains "$launch" "--add-dir" "codex launch omitted the task-exact writable-root grant"
+  assert_contains "$launch" "refs/heads/fm/$id" "codex launch omitted the task branch ref grant"
+  assert_not_contains "$launch" "__CODEXADDROOTS__" "codex launch left the grant placeholder unsubstituted"
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
@@ -448,7 +451,7 @@ test_codex_omits_max_effort_for_unsupported_model() {
   expect_code 0 "$status" "codex spawn with an unsupported model max effort should omit the effort flag"
   assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
+  assert_contains "$launch" "--model 'gpt-5' -s workspace-write -a never" \
     "codex launch did not preserve the model flag when max effort was omitted"
   assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported model max reasoning effort"
   pass "codex omits max for models without the catalog capability"
@@ -564,7 +567,7 @@ test_cursor_threads_model_workspace_and_omits_effort_axis() {
   expect_code 0 "$status" "cursor spawn with a model-qualified reasoning class should succeed"
   assert_meta_profile "$HOME_DIR/state/$id.meta" cursor cursor-grok-4.5-high high
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "--trust --yolo --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
+  assert_contains "$launch" "--trust --auto-review --sandbox enabled --model 'cursor-grok-4.5-high' --workspace '$WT_DIR'" \
     "cursor launch did not carry trust, autonomy, model, and exact workspace flags"
   # The executable is RESOLVED, never named: `cursor` is not the CLI, so a
   # literal `cursor agent` command cannot run on a machine that has only the
