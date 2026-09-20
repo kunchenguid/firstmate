@@ -3062,6 +3062,9 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
     [ "$wakes" -eq 1 ] || fail "[$name] replacement declared wait produced $wakes first wakes instead of one"
     [ "$bare" -eq 1 ] || fail "[$name] replacement declared wait changed the wake identity: $(cat "$state/.wake-queue")"
     ack_stopped_cycle "$state" || fail "[$name] could not acknowledge the replacement wait's first surface"
+    # Measure only this absorb round. A leftover first-sight row after ack would
+    # otherwise look like a re-alarm, which is what CI reported for paused-pipeline-churn.
+    : > "$state/.wake-queue"
 
     printf 'replacement wait, elapsed 2s' > "$capture_file"
     parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" absorb \
