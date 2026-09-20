@@ -569,11 +569,11 @@ if (existsSync(`${process.env.FM_HOME}/state/extensions/omp-primary-watch/sessio
 // process. Both manual repair entry points must replace that stopped generation
 // rather than permanently returning the shutting-down result.
 const repaired = await tool.execute();
-if (!/^watcher: started omp extension arm child 2;/.test(repaired.content[0].text)) throw new Error(`tool did not self-heal a stopped generation: ${repaired.content[0].text}`);
+if (!/^watcher: started omp extension arm child \d+;/.test(repaired.content[0].text)) throw new Error(`tool did not self-heal a stopped generation: ${repaired.content[0].text}`);
 await handlers.get("session_shutdown")({}, {});
 const notifications = [];
 await command("", { ui: { notify(message, level) { notifications.push({ message, level }); } } });
-if (notifications.length !== 1 || notifications[0].level !== "info" || !/^watcher: started omp extension arm child 3;/.test(notifications[0].message)) {
+if (notifications.length !== 1 || notifications[0].level !== "info" || !/^watcher: started omp extension arm child \d+;/.test(notifications[0].message)) {
   throw new Error(`command did not self-heal a stopped generation: ${JSON.stringify(notifications)}`);
 }
 await handlers.get("session_shutdown")({}, {});

@@ -399,7 +399,7 @@ function classifyClose(stdout: string, stderr: string, code: number | null, sign
   };
 }
 
-function createGeneration(previous?: SessionGeneration): SessionGeneration {
+function createGeneration(): SessionGeneration {
   return {
     id: ++nextGenerationId,
     stopping: false,
@@ -409,7 +409,7 @@ function createGeneration(previous?: SessionGeneration): SessionGeneration {
     cleanupTimer: null,
     retryFailures: 0,
     restoring: false,
-    seq: previous ? previous.seq : 0,
+    seq: 0,
     pendingActionables: [],
     cleanupFailure: "",
     unconsumedWakes: new Map(),
@@ -812,7 +812,7 @@ export default function (pi: ExtensionAPI) {
     let failure = "";
     for (let attempt = 0; attempt <= retryLimit; attempt += 1) {
       if (!generationIsLive(owner)) return { failure: "" };
-      const replacement = startArm(owner, predecessorArmPid, { continuation: true });
+      const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
       if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
         return { failure: "", recovery: armRecovery.get(successorChild) };
@@ -851,7 +851,7 @@ export default function (pi: ExtensionAPI) {
     const timer = setTimeout(() => {
       if (owner.retryTimer === timer) owner.retryTimer = null;
       if (!generationIsLive(owner)) return;
-      const result = startArm(owner, predecessorArmPid, { continuation: true });
+      const result = startArm(owner, predecessorArmPid);
       if (!result.ok) {
         surfaceFailure(owner, `watcher: FAILED - omp extension could not launch a continuity retry\n${result.message}`);
       }
@@ -860,7 +860,7 @@ export default function (pi: ExtensionAPI) {
     owner.retryTimer = timer;
   }
 
-  function startArm(owner: SessionGeneration, predecessorArmPid = "", options: { continuation?: boolean } = {}): ArmResult {
+  function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
     if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
     const ownership = lockOwnership();
     if (ownership === "other") return { ok: false, message: "watcher: read-only - session lock is held by another firstmate session" };
@@ -883,11 +883,7 @@ export default function (pi: ExtensionAPI) {
         message: `watcher: unchanged - omp extension already owns a scheduled continuity retry; no manual re-arm needed; ${repairOnlyHint}`,
       };
     }
-    // An automatic continuity restart (actionable-close successor, retry) keeps
-    // the arm-child number of the cycle it is continuing; only an explicit
-    // arm (manual tool/command, session start, or replacement handoff) counts
-    // as a new arm child toward the number surfaced to the caller.
-    const id = options.continuation ? owner.seq || 1 : ++owner.seq;
+    const id = ++owner.seq;
     const env = {
       ...process.env,
       FM_HOME: fmHome,
@@ -1033,7 +1029,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on?.("session_start", async () => {
-    if (generation.stopping) generation = createGeneration(generation);
+    if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
     markLoaded();
     if (lockOwnership() !== "owned") return;
@@ -1050,7 +1046,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand?.("fm-watch-arm-omp", {
     description: "Arm firstmate watcher supervision through the omp extension instead of foreground bash.",
     handler: async (_args, ctx) => {
-      if (generation.stopping) generation = createGeneration(generation);
+      if (generation.stopping) generation = createGeneration();
       activateGeneration(generation);
       const result = activateOwnedWatch(generation);
       ctx?.ui?.notify?.(result.message, result.ok ? "info" : "warning");
@@ -1067,7 +1063,7 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: Type.Object({}),
     execute: async () => {
-      if (generation.stopping) generation = createGeneration(generation);
+      if (generation.stopping) generation = createGeneration();
       activateGeneration(generation);
       const result = activateOwnedWatch(generation);
       return {
