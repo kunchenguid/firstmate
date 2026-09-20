@@ -86,7 +86,10 @@
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
+# collision itself, whichever record is stale. A duplicate-record cleanup still
+# refuses by default; the explicit --correct-stale-association path below is the
+# only supported way to stage a correction for one positively proven stale
+# association.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -162,6 +165,7 @@
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+#        fm-teardown.sh <task-id> --correct-stale-association
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
@@ -175,6 +179,16 @@
 #   an abandoned attempt left behind never counts as a published incarnation:
 #   the record still reads as a legacy record, so the endpoint gate runs again
 #   and the retry still needs --legacy-record.
+#   --correct-stale-association is a record-only repair for one positively
+#   reassigned Treehouse pool slot. It requires the slot claim and exactly one
+#   matching current-owner record to agree under the project lock, archives the
+#   stale task record at state/<task-id>.stale-association.before, and writes a
+#   private correction record without touching the slot, endpoint, current-owner
+#   record, copy, reports, or backlog. It refuses unknown, unreadable, or
+#   contradictory ownership evidence and cannot be combined with either other
+#   option. Rerun ordinary teardown without this flag after the correction; that
+#   cleanup rechecks the same evidence, leaves the reassigned slot untouched, and
+#   removes the correction record only with the stale task record.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -304,11 +318,13 @@ fi
 ID=$1
 FORCE=
 LEGACY_RECORD_GIVEN=0
+STALE_ASSOCIATION_CORRECTION_GIVEN=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
+    --correct-stale-association) STALE_ASSOCIATION_CORRECTION_GIVEN=1 ;;
     *)
       echo "error: invalid teardown request" >&2
       exit 2
@@ -316,6 +332,11 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+if [ "$STALE_ASSOCIATION_CORRECTION_GIVEN" = 1 ] \
+  && { [ "$FORCE" = --force ] || [ "$LEGACY_RECORD_GIVEN" = 1 ]; }; then
+  echo "error: --correct-stale-association cannot be combined with --force or --legacy-record" >&2
+  exit 2
+fi
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -336,6 +357,11 @@ if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
   exit "$FM_LEASE_REFUSE_EXIT"
 fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
+if [ "$STALE_ASSOCIATION_CORRECTION_GIVEN" = 1 ] \
+  && [ "$(fm_lease_actor)" = branch ]; then
+  echo "error: stale-association correction must be run by the primary supervision actor" >&2
+  exit "$FM_LEASE_REFUSE_EXIT"
+fi
 
 META="$STATE/$ID.meta"
 TREEHOUSE_PROJECT_LOCK=
@@ -367,6 +393,16 @@ CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
+STALE_ASSOCIATION_MARKER="$STATE/$ID.stale-association"
+STALE_ASSOCIATION_BACKUP="$STATE/$ID.stale-association.before"
+STALE_ASSOCIATION_ACTIVE=0
+STALE_ASSOCIATION_OWNER_CONTROL_LOCK=
+STALE_ASSOCIATION_OWNER_CONTROL_LOCK_HELD=0
+STALE_ASSOCIATION_OWNER_META_LOCK=
+STALE_ASSOCIATION_OWNER_META_LOCK_HELD=0
+STALE_ASSOCIATION_OWNER_ID=
+STALE_ASSOCIATION_OWNER_HOME=
+STALE_ASSOCIATION_SLOT=
 DESCENDANT_LOCK_PATHS=()
 DESCENDANT_TASK_STATES=()
 DESCENDANT_TASK_IDS=()
@@ -397,6 +433,14 @@ teardown_release_locks() {
   if [ "$META_LOCK_HELD" = 1 ]; then
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
+  fi
+  if [ "$STALE_ASSOCIATION_OWNER_META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$STALE_ASSOCIATION_OWNER_META_LOCK" || true
+    STALE_ASSOCIATION_OWNER_META_LOCK_HELD=0
+  fi
+  if [ "$STALE_ASSOCIATION_OWNER_CONTROL_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$STALE_ASSOCIATION_OWNER_CONTROL_LOCK" || true
+    STALE_ASSOCIATION_OWNER_CONTROL_LOCK_HELD=0
   fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CONTROL_LOCK" || true
@@ -433,6 +477,11 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+if [ "$STALE_ASSOCIATION_CORRECTION_GIVEN" = 1 ] \
+  && [ "$TEARDOWN_META_KIND" = secondmate ]; then
+  echo "error: --correct-stale-association applies only to a task's Treehouse pool slot, not a secondmate home" >&2
+  exit 2
+fi
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_LEGACY_PENDING=0
@@ -2203,9 +2252,17 @@ collect_local_firstmate_states() {
   done
 }
 
-require_exclusive_worktree_slot_record() {
-  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
+TREEHOUSE_SLOT_COLLISION_COUNT=0
+TREEHOUSE_SLOT_COLLISION_ID=
+TREEHOUSE_SLOT_COLLISION_META=
+TREEHOUSE_SLOT_COLLISION_FIELD=
+find_worktree_slot_collisions() {
+  local record_meta=$1 record_state=$2 worktree=$3
   local slot state_dir other other_id field other_path other_slot
+  TREEHOUSE_SLOT_COLLISION_COUNT=0
+  TREEHOUSE_SLOT_COLLISION_ID=
+  TREEHOUSE_SLOT_COLLISION_META=
+  TREEHOUSE_SLOT_COLLISION_FIELD=
   slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
@@ -2218,13 +2275,28 @@ require_exclusive_worktree_slot_record() {
         [ -n "$other_path" ] || continue
         other_slot=$(canonical_existing_dir "$other_path") || continue
         [ "$other_slot" = "$slot" ] || continue
-        echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
-        echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
-        echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
-        return 1
+        TREEHOUSE_SLOT_COLLISION_COUNT=$((TREEHOUSE_SLOT_COLLISION_COUNT + 1))
+        if [ "$TREEHOUSE_SLOT_COLLISION_COUNT" -eq 1 ]; then
+          TREEHOUSE_SLOT_COLLISION_ID=$other_id
+          TREEHOUSE_SLOT_COLLISION_META=$other
+          TREEHOUSE_SLOT_COLLISION_FIELD=$field
+        fi
       done
     done
   done
+}
+
+require_exclusive_worktree_slot_record() {
+  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
+  local slot
+  slot=$(canonical_existing_dir "$worktree") || return 0
+  find_worktree_slot_collisions "$record_meta" "$record_state" "$slot" || return 1
+  [ "$TREEHOUSE_SLOT_COLLISION_COUNT" -eq 0 ] || {
+    echo "REFUSED: task $record_id's recorded worktree $slot is also task $TREEHOUSE_SLOT_COLLISION_ID's recorded $TREEHOUSE_SLOT_COLLISION_FIELD." >&2
+    echo "Returning that pool slot would kill $TREEHOUSE_SLOT_COLLISION_ID's processes and reset its copy, so nothing was changed - not even with --force." >&2
+    echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $TREEHOUSE_SLOT_COLLISION_ID), then re-run teardown." >&2
+    return 1
+  }
 }
 
 require_exclusive_task_worktree_slot() {
@@ -2297,6 +2369,328 @@ require_owned_task_worktree_slot() {
 
 teardown_owns_worktree() {
   [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
+}
+
+STALE_ASSOCIATION_MARKER_SCHEMA=fm-teardown-stale-association.v1
+STALE_ASSOCIATION_MARKER_TASK_ID=
+STALE_ASSOCIATION_MARKER_SLOT=
+STALE_ASSOCIATION_MARKER_OWNER_ID=
+STALE_ASSOCIATION_MARKER_OWNER_HOME=
+STALE_ASSOCIATION_MARKER_BACKUP=
+stale_association_owner_locks_release() {
+  if [ "$STALE_ASSOCIATION_OWNER_META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$STALE_ASSOCIATION_OWNER_META_LOCK" || true
+    STALE_ASSOCIATION_OWNER_META_LOCK_HELD=0
+  fi
+  if [ "$STALE_ASSOCIATION_OWNER_CONTROL_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$STALE_ASSOCIATION_OWNER_CONTROL_LOCK" || true
+    STALE_ASSOCIATION_OWNER_CONTROL_LOCK_HELD=0
+  fi
+}
+
+stale_association_marker_read() {  # <marker>
+  local marker=$1 line schema='' task_id='' slot='' owner_id='' owner_home='' backup=''
+  local schema_count=0 task_count=0 slot_count=0 owner_count=0 home_count=0 backup_count=0
+  local state_device
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  [ "$(fm_pr_file_mode "$marker")" = 600 ] || return 1
+  state_device=$(fm_pr_file_device "$STATE") || return 1
+  [ "$(fm_pr_file_device "$marker")" = "$state_device" ] || return 1
+  [ "$(fm_pr_file_link_count "$marker")" = 1 ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      schema=*) schema=${line#*=}; schema_count=$((schema_count + 1)) ;;
+      task_id=*) task_id=${line#*=}; task_count=$((task_count + 1)) ;;
+      slot=*) slot=${line#*=}; slot_count=$((slot_count + 1)) ;;
+      owner_id=*) owner_id=${line#*=}; owner_count=$((owner_count + 1)) ;;
+      owner_home=*) owner_home=${line#*=}; home_count=$((home_count + 1)) ;;
+      backup=*) backup=${line#*=}; backup_count=$((backup_count + 1)) ;;
+      *) return 1 ;;
+    esac
+  done < "$marker" || return 1
+  [ "$schema_count" -eq 1 ] && [ "$schema" = "$STALE_ASSOCIATION_MARKER_SCHEMA" ] \
+    || return 1
+  [ "$task_count" -eq 1 ] && [ "$task_id" = "$ID" ] \
+    || return 1
+  [ "$slot_count" -eq 1 ] && [ -n "$slot" ] \
+    || return 1
+  [ "$owner_count" -eq 1 ] && [ -n "$owner_id" ] \
+    || return 1
+  [ "$home_count" -eq 1 ] && [ -n "$owner_home" ] \
+    || return 1
+  [ "$backup_count" -eq 1 ] && [ -n "$backup" ] \
+    || return 1
+  fm_task_id_path_safe "$task_id" || return 1
+  fm_task_id_path_safe "$owner_id" || return 1
+  case "$slot$owner_home$backup" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  STALE_ASSOCIATION_MARKER_TASK_ID=$task_id
+  STALE_ASSOCIATION_MARKER_SLOT=$slot
+  STALE_ASSOCIATION_MARKER_OWNER_ID=$owner_id
+  STALE_ASSOCIATION_MARKER_OWNER_HOME=$owner_home
+  STALE_ASSOCIATION_MARKER_BACKUP=$backup
+}
+
+stale_association_validate_owner() {  # <marker-present: 0|1>
+  local marker_present=$1 slot owner_id owner_home owner_home_real fm_home_real
+  local owner_meta owner_kind owner_worktree owner_slot
+  local marker_backup
+  slot=$(teardown_live_slot_path) || {
+    echo "REFUSED: stale-association correction requires a live Treehouse pool slot; nothing was changed" >&2
+    return 1
+  }
+  [ -n "$slot" ] || {
+    echo "REFUSED: stale-association correction found no recorded Treehouse pool slot; nothing was changed" >&2
+    return 1
+  }
+  fm_treehouse_slot_owner_state "$slot" "$ID"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = other ] || {
+    echo "REFUSED: stale-association correction requires a readable owner claim naming another task; nothing was changed" >&2
+    return 1
+  }
+  owner_id=$FM_TREEHOUSE_SLOT_OWNER_ID
+  owner_home=$FM_TREEHOUSE_SLOT_OWNER_HOME
+  fm_task_id_path_safe "$owner_id" || {
+    echo "REFUSED: stale-association correction found an invalid current-owner task id; nothing was changed" >&2
+    return 1
+  }
+  [ -n "$owner_home" ] || {
+    echo "REFUSED: stale-association correction found a current-owner claim without a home; nothing was changed" >&2
+    return 1
+  }
+  fm_home_real=$(canonical_existing_dir "$FM_HOME") || {
+    echo "REFUSED: stale-association correction could not resolve this Firstmate home; nothing was changed" >&2
+    return 1
+  }
+  owner_home_real=$(canonical_existing_dir "$owner_home") || {
+    echo "REFUSED: stale-association correction could not resolve the current-owner home; nothing was changed" >&2
+    return 1
+  }
+  [ "$owner_home_real" = "$fm_home_real" ] || {
+    echo "REFUSED: stale-association correction will not cross a Firstmate home boundary; nothing was changed" >&2
+    return 1
+  }
+
+  find_worktree_slot_collisions "$META" "$STATE" "$slot" || return 1
+  [ "$TREEHOUSE_SLOT_COLLISION_COUNT" -eq 1 ] \
+    || {
+      echo "REFUSED: stale-association correction requires exactly one other record for the claimed slot; nothing was changed" >&2
+      return 1
+    }
+  [ "$TREEHOUSE_SLOT_COLLISION_ID" = "$owner_id" ] \
+    && [ "$TREEHOUSE_SLOT_COLLISION_META" = "$STATE/$owner_id.meta" ] \
+    && [ "$TREEHOUSE_SLOT_COLLISION_FIELD" = worktree ] || {
+      echo "REFUSED: stale-association correction found contradictory current-owner records; nothing was changed" >&2
+      return 1
+    }
+  owner_meta="$STATE/$owner_id.meta"
+  [ -f "$owner_meta" ] && [ ! -L "$owner_meta" ] || {
+    echo "REFUSED: stale-association correction could not read the current-owner record; nothing was changed" >&2
+    return 1
+  }
+  owner_kind=$(fm_meta_get "$owner_meta" kind)
+  [ -n "$owner_kind" ] || owner_kind=ship
+  case "$owner_kind" in
+    ship|scout) ;;
+    *)
+      echo "REFUSED: stale-association correction will not reinterpret a non-task current-owner record; nothing was changed" >&2
+      return 1
+      ;;
+  esac
+  fm_backend_validate_task_endpoint "$owner_meta" "$owner_id" >/dev/null || {
+    echo "REFUSED: stale-association correction could not validate the current-owner endpoint record; nothing was changed" >&2
+    return 1
+  }
+  owner_worktree=$(fm_meta_get "$owner_meta" worktree)
+  owner_slot=$(canonical_existing_dir "$owner_worktree") || {
+    echo "REFUSED: stale-association correction could not resolve the current-owner copy; nothing was changed" >&2
+    return 1
+  }
+  [ "$owner_slot" = "$slot" ] || {
+    echo "REFUSED: stale-association correction found a current-owner record that no longer names the claimed slot; nothing was changed" >&2
+    return 1
+  }
+
+  if [ "$marker_present" = 1 ]; then
+    [ "$STALE_ASSOCIATION_MARKER_SLOT" = "$slot" ] \
+      && [ "$STALE_ASSOCIATION_MARKER_OWNER_ID" = "$owner_id" ] || {
+        echo "REFUSED: stale-association correction record no longer matches the claimed owner; nothing was changed" >&2
+        return 1
+      }
+    marker_backup=$STALE_ASSOCIATION_MARKER_BACKUP
+    [ "$STALE_ASSOCIATION_MARKER_TASK_ID" = "$ID" ] \
+      && [ "$marker_backup" = "$STALE_ASSOCIATION_BACKUP" ] || {
+        echo "REFUSED: stale-association correction record names an unexpected task or backup; nothing was changed" >&2
+        return 1
+      }
+    [ "$(canonical_existing_dir "$STALE_ASSOCIATION_MARKER_OWNER_HOME" 2>/dev/null || true)" = "$owner_home_real" ] || {
+      echo "REFUSED: stale-association correction record names an unexpected owner home; nothing was changed" >&2
+      return 1
+    }
+  fi
+
+  STALE_ASSOCIATION_OWNER_CONTROL_LOCK="$STATE/.control-$owner_id.lock"
+  fm_lock_try_acquire "$STALE_ASSOCIATION_OWNER_CONTROL_LOCK" || {
+    echo "REFUSED: the current owner is performing another lifecycle action; stale-association correction changed nothing" >&2
+    STALE_ASSOCIATION_OWNER_CONTROL_LOCK=
+    return 1
+  }
+  STALE_ASSOCIATION_OWNER_CONTROL_LOCK_HELD=1
+  STALE_ASSOCIATION_OWNER_META_LOCK=$(fm_meta_lock_path "$owner_meta") || {
+    echo "REFUSED: current-owner record lock could not be resolved; stale-association correction changed nothing" >&2
+    return 1
+  }
+  fm_lock_try_acquire "$STALE_ASSOCIATION_OWNER_META_LOCK" || {
+    echo "REFUSED: the current-owner record is changing; stale-association correction changed nothing" >&2
+    return 1
+  }
+  STALE_ASSOCIATION_OWNER_META_LOCK_HELD=1
+
+  fm_treehouse_slot_owner_state "$slot" "$ID"
+  [ "$FM_TREEHOUSE_SLOT_OWNER" = other ] \
+    && [ "$FM_TREEHOUSE_SLOT_OWNER_ID" = "$owner_id" ] \
+    && [ "$(canonical_existing_dir "$FM_TREEHOUSE_SLOT_OWNER_HOME" 2>/dev/null || true)" = "$owner_home_real" ] || {
+      echo "REFUSED: current-owner claim changed during stale-association correction; nothing was changed" >&2
+      return 1
+    }
+  find_worktree_slot_collisions "$META" "$STATE" "$slot" || return 1
+  [ "$TREEHOUSE_SLOT_COLLISION_COUNT" -eq 1 ] \
+    && [ "$TREEHOUSE_SLOT_COLLISION_ID" = "$owner_id" ] \
+    && [ "$TREEHOUSE_SLOT_COLLISION_META" = "$owner_meta" ] \
+    && [ "$TREEHOUSE_SLOT_COLLISION_FIELD" = worktree ] || {
+      echo "REFUSED: current-owner records changed during stale-association correction; nothing was changed" >&2
+      return 1
+    }
+  fm_backend_validate_task_endpoint "$owner_meta" "$owner_id" >/dev/null || {
+    echo "REFUSED: current-owner endpoint record changed during stale-association correction; nothing was changed" >&2
+    return 1
+  }
+  [ "$(canonical_existing_dir "$(fm_meta_get "$owner_meta" worktree)" 2>/dev/null || true)" = "$slot" ] || {
+    echo "REFUSED: current-owner copy changed during stale-association correction; nothing was changed" >&2
+    return 1
+  }
+
+  STALE_ASSOCIATION_SLOT=$slot
+  STALE_ASSOCIATION_OWNER_ID=$owner_id
+  STALE_ASSOCIATION_OWNER_HOME=$owner_home_real
+}
+
+stale_association_prepare_backup() {
+  local tmp state_device
+  state_device=$(fm_pr_file_device "$STATE") || {
+    echo "REFUSED: stale-association backup device could not be read; nothing was changed" >&2
+    return 1
+  }
+  if [ -e "$STALE_ASSOCIATION_BACKUP" ] || [ -L "$STALE_ASSOCIATION_BACKUP" ]; then
+    fm_pr_private_file_valid "$STALE_ASSOCIATION_BACKUP" 600 "$state_device" || {
+      echo "REFUSED: stale-association backup is unsafe at $STALE_ASSOCIATION_BACKUP; nothing was changed" >&2
+      return 1
+    }
+  else
+    fm_backlog_record_parent_authorized "$STALE_ASSOCIATION_BACKUP" \
+      "stale-association backup" "$STATE" || return 1
+    tmp="$STATE/.$ID.stale-association.before.${BASHPID:-$$}"
+    [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || {
+      echo "REFUSED: stale-association backup staging path already exists; nothing was changed" >&2
+      return 1
+    }
+    if ! cp -p -- "$META" "$tmp" || ! chmod 600 "$tmp" \
+      || ! mv -f -- "$tmp" "$STALE_ASSOCIATION_BACKUP"; then
+      rm -f -- "$tmp"
+      echo "REFUSED: could not preserve the prior task record at $STALE_ASSOCIATION_BACKUP; nothing was changed" >&2
+      return 1
+    fi
+    fm_pr_private_file_valid "$STALE_ASSOCIATION_BACKUP" 600 "$state_device" || {
+      echo "REFUSED: preserved stale-association backup could not be verified; nothing was changed" >&2
+      return 1
+    }
+  fi
+  cmp -s "$META" "$STALE_ASSOCIATION_BACKUP" || {
+    echo "REFUSED: stale-association backup does not match the current task record; nothing was changed" >&2
+    return 1
+  }
+}
+
+stale_association_backup_matches_record() {
+  local state_device
+  state_device=$(fm_pr_file_device "$STATE") || return 1
+  fm_pr_private_file_valid "$STALE_ASSOCIATION_BACKUP" 600 "$state_device" \
+    && cmp -s "$META" "$STALE_ASSOCIATION_BACKUP"
+}
+
+stale_association_marker_write() {
+  local tmp="$STATE/.$ID.stale-association.${BASHPID:-$$}"
+  [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || {
+    echo "REFUSED: stale-association marker staging path already exists; nothing was changed" >&2
+    return 1
+  }
+  {
+    printf 'schema=%s\n' "$STALE_ASSOCIATION_MARKER_SCHEMA"
+    printf 'task_id=%s\n' "$ID"
+    printf 'slot=%s\n' "$STALE_ASSOCIATION_SLOT"
+    printf 'owner_id=%s\n' "$STALE_ASSOCIATION_OWNER_ID"
+    printf 'owner_home=%s\n' "$STALE_ASSOCIATION_OWNER_HOME"
+    printf 'backup=%s\n' "$STALE_ASSOCIATION_BACKUP"
+  } > "$tmp" || {
+    rm -f -- "$tmp"
+    echo "REFUSED: could not stage the stale-association correction; nothing was changed" >&2
+    return 1
+  }
+  chmod 600 "$tmp" || {
+    rm -f -- "$tmp"
+    echo "REFUSED: could not protect the stale-association correction; nothing was changed" >&2
+    return 1
+  }
+  if ! fm_backlog_atomic_transition publish "$tmp" "$STALE_ASSOCIATION_MARKER" \
+      "stale-association correction record" "$STATE"; then
+    rm -f -- "$tmp"
+    echo "REFUSED: could not publish the stale-association correction; nothing was changed" >&2
+    return 1
+  fi
+  stale_association_marker_read "$STALE_ASSOCIATION_MARKER" || {
+    echo "REFUSED: published stale-association correction could not be verified; rerun the correction before cleanup" >&2
+    return 1
+  }
+}
+
+stale_association_activate_for_cleanup() {
+  [ -e "$STALE_ASSOCIATION_MARKER" ] || [ -L "$STALE_ASSOCIATION_MARKER" ] || return 0
+  stale_association_marker_read "$STALE_ASSOCIATION_MARKER" || {
+    echo "REFUSED: stale-association correction record is unreadable at $STALE_ASSOCIATION_MARKER; nothing was changed" >&2
+    return 1
+  }
+  stale_association_validate_owner 1 || return 1
+  stale_association_backup_matches_record || {
+    echo "REFUSED: stale-association correction backup is missing, unsafe, or no longer matches the task record; nothing was changed" >&2
+    return 1
+  }
+  STALE_ASSOCIATION_ACTIVE=1
+  TEARDOWN_SLOT_REASSIGNED=1
+  TEARDOWN_SLOT_REASSIGNED_TO=$STALE_ASSOCIATION_OWNER_ID
+  TEARDOWN_SLOT_REASSIGNED_HOME=$STALE_ASSOCIATION_OWNER_HOME
+  stale_association_owner_locks_release
+}
+
+correct_stale_association() {
+  if [ -e "$STALE_ASSOCIATION_MARKER" ] || [ -L "$STALE_ASSOCIATION_MARKER" ]; then
+    stale_association_marker_read "$STALE_ASSOCIATION_MARKER" || {
+      echo "REFUSED: stale-association correction record is unreadable at $STALE_ASSOCIATION_MARKER; nothing was changed" >&2
+      return 1
+    }
+    stale_association_validate_owner 1 || return 1
+    stale_association_backup_matches_record || {
+      echo "REFUSED: stale-association correction backup is missing, unsafe, or no longer matches the task record; nothing was changed" >&2
+      return 1
+    }
+    stale_association_owner_locks_release
+    echo "stale-association correction already recorded for task $ID; prior record remains at $STALE_ASSOCIATION_BACKUP, and the current owner and pool slot were untouched" >&2
+    return 0
+  fi
+  stale_association_validate_owner 0 || return 1
+  stale_association_prepare_backup || return 1
+  stale_association_marker_write || return 1
+  stale_association_owner_locks_release
+  echo "stale-association correction recorded for task $ID; prior record preserved at $STALE_ASSOCIATION_BACKUP, and the current owner and pool slot were untouched" >&2
+  echo "Rerun bin/fm-teardown.sh $ID without --correct-stale-association to clean only the stale task" >&2
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -3163,8 +3557,16 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
-require_owned_task_worktree_slot || exit 1
+if [ "$STALE_ASSOCIATION_CORRECTION_GIVEN" = 1 ]; then
+  correct_stale_association || exit 1
+  exit 0
+fi
+if [ -e "$STALE_ASSOCIATION_MARKER" ] || [ -L "$STALE_ASSOCIATION_MARKER" ]; then
+  stale_association_activate_for_cleanup || exit 1
+else
+  require_exclusive_task_worktree_slot || exit 1
+  require_owned_task_worktree_slot || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
@@ -3578,6 +3980,13 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.
 rm -rf "$STATE/$ID.inbox"
+if [ "$STALE_ASSOCIATION_ACTIVE" = 1 ]; then
+  fm_backlog_record_remove "$STALE_ASSOCIATION_MARKER" \
+    "stale-association correction record" "$STATE" || {
+      echo "error: stale-association correction record could not be retired; retaining the task record for retry" >&2
+      exit 1
+    }
+fi
 # The record is gone, so the backlog must not still show this task in flight
 # when teardown reports success. Still under this task's meta lock, so a steer
 # racing the same id stays serialized exactly as it was before. A captain-held
