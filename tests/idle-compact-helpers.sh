@@ -68,7 +68,9 @@ write_crew_state_stub() {  # <dir> <line>
 # to record calls to a log file, decoupling the state machine from
 # bin/fm-send.sh's own real delivery mechanics (separately owned/tested).
 stub_always_safe() {
+  # shellcheck disable=SC2329  # invoked indirectly by the state-machine functions under test
   fm_busy_classify() { printf 'idle claude-hook'; }
+  # shellcheck disable=SC2329  # invoked indirectly by the state-machine functions under test
   fm_backend_composer_state() { printf 'empty'; }
 }
 
