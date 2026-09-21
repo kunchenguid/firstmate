@@ -45,6 +45,7 @@ TRANSCRIPT="$LAB/claude.out"
 CLAUDE_PID=
 cleanup() {
   [ -z "$CLAUDE_PID" ] || kill "$CLAUDE_PID" 2>/dev/null || true
+  fm_test_cleanup
 }
 trap cleanup EXIT
 

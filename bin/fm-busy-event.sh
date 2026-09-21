@@ -24,10 +24,12 @@
 #       armed right now.
 #
 #   progress <state-dir> <id> --gen G
-#       Refresh state/<id>.progress for observed native-harness activity under
-#       the incarnation lock. This neither changes busy state nor emits a
-#       turn-ended notification. Arm and retire clear the marker, and an old
-#       incarnation can never refresh its replacement's progress.
+#       Refresh state/<id>.progress for observed harness activity inside one
+#       turn, reported by every adapter that reports one (a Pi native progress
+#       event, a Claude tool-call boundary), under the incarnation lock. This
+#       neither changes busy state nor emits a turn-ended notification. Arm and
+#       retire clear the marker, and an old incarnation can never refresh its
+#       replacement's progress.
 #
 #   retire <state-dir> <id> (--gen G | --current-gen)
 #       Remove one incarnation's sidecar and record while holding the same
