@@ -279,6 +279,50 @@ test_composer_footer_zone_is_shape_independent() {
   pass "fm_composer_classify_screen: the footer zone holds for boxes, not only separator pairs"
 }
 
+test_composer_footer_zone_refuses_rather_than_allows() {
+  # The footer-zone demotion is ASYMMETRIC: `empty` is the only verdict that
+  # authorizes fm-send to type into the pane, so the rule may move a verdict
+  # toward refusing but never toward `empty`. Every screen below classified
+  # `pending` before the footer zone existed and must never read `empty`.
+  local screen out
+  # 1. Draft loss. A row leading with the SAME glyph the envelope was proven by
+  #    is a live composer, not furniture, and must keep winning - otherwise the
+  #    doorbell types over a draft the worker can see.
+  screen=$'────────────────────────\n❯'"$NBSP"$'\n────────────────────────\n❯ my typed draft'
+  assert_screen "separated: a live draft below the pair keeps winning" pending "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'my typed draft' ] \
+    || fail "the live draft must be the extracted composer content, got '$out'"
+  screen=$'╭────────────────────────╮\n│ ❯'"$NBSP"$'                     │\n╰────────────────────────╯\n❯ my typed draft'
+  assert_screen "boxed: a live draft below the box keeps winning" pending "$CAPS_STYLED_NOID" "$screen"
+  # 2. Working agent. Unclaimed activity below a proven envelope is not
+  #    furniture in EITHER row order, even when one of the rows leads with a
+  #    foreign agent glyph, so the envelope above it stays stale.
+  for screen in \
+    $'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\nWorking on request...\n→ ran npm test (3 failures)' \
+    $'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\n→ ran npm test (3 failures)\nWorking on request...' \
+    $'────────────────────────\n❯'"$NBSP"$'\n────────────────────────\nWorking on request...\n→ ran npm test (3 failures)' \
+    $'────────────────────────\n❯'"$NBSP"$'\n────────────────────────\n→ ran npm test (3 failures)\nWorking on request...'
+  do
+    out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" != empty ] \
+      || fail "a working agent below a proven envelope must never read empty, got '$out'"
+    out=$(LC_ALL=C fm_composer_classify_screen "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" != empty ] \
+      || fail "a working agent below a proven envelope must never read empty under LC_ALL=C, got '$out'"
+  done
+  # 3. The other direction, which the demotion must not invert either: a pair
+  #    holding a QUOTED prompt in the transcript above a live, visibly empty
+  #    composer row reads empty, and the quoted text is never composer content.
+  screen=$'────────────────────────\ntranscript one\ntranscript two\n❯ some quoted prompt in the transcript\n────────────────────────\n❯'"$NBSP"
+  assert_screen "a quoted prompt above a live empty row stays empty" empty "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  case "$out" in
+    *'some quoted prompt'*) fail "a quoted transcript prompt must never be composer content, got '$out'" ;;
+  esac
+  pass "fm_composer_classify_screen: the footer zone only ever refuses, never allows"
+}
+
 test_matrix_codex_dim_hint_row() {
   # Real idle codex: bold `›`, reset, then an SGR-2 dim hint. Styled captures
   # strip the ghost and prove empty; plain captures must defer as unknown -
@@ -876,6 +920,7 @@ test_matrix_claude_bare_nbsp_row
 test_matrix_claude_arrow_statusline_footer
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
+test_composer_footer_zone_refuses_rather_than_allows
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
