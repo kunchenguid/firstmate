@@ -867,7 +867,7 @@ fm_backend_agent_status_raw() {  # <backend> <target> <expected-agent>
       status=${identity#*$'\t'}
       [ "$agent" = "$expected" ] && [ -n "$status" ] || return 0
       [ "$(fm_backend_herdr_pane_process_state \
-        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = agent ] || return 0
+        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" "$expected")" = agent ] || return 0
       printf '%s' "$status"
       ;;
   esac

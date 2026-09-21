@@ -916,6 +916,9 @@ case "$*" in
       live)
         printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_processes":[{"pid":424243,"name":"agy","argv":["agy"],"argv0":"agy","cmdline":"agy"}]}}}\n' "${FM_TEST_SHELL_PID:?}"
         ;;
+      foreign)
+        printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_processes":[{"pid":424243,"name":"claude","argv":["claude"],"argv0":"claude","cmdline":"claude"}]}}}\n' "${FM_TEST_SHELL_PID:?}"
+        ;;
       stale)
         printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_processes":[{"pid":%s,"name":"bash","argv":["bash"],"argv0":"bash","cmdline":"bash"}]}}}\n' "${FM_TEST_SHELL_PID:?}" "${FM_TEST_SHELL_PID:?}"
         ;;
@@ -935,7 +938,10 @@ EOF
   [ "$out" = blocked ] || fail "raw herdr status boundary should preserve identity- and process-verified blocked, got '$out'"
   out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=claude FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=live FM_TEST_SHELL_PID=$$ \
     fm_backend_agent_status_raw herdr default:w1:p2 agy)
-  [ -z "$out" ] || fail "idle status from a foreign agent must be rejected, got '$out'"
+  [ -z "$out" ] || fail "idle status registered to a foreign agent must be rejected, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=agy FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=foreign FM_TEST_SHELL_PID=$$ \
+    fm_backend_agent_status_raw herdr default:w1:p2 agy)
+  [ -z "$out" ] || fail "stale agy registration over a foreign agent process must be rejected, got '$out'"
   out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=agy FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=stale FM_TEST_SHELL_PID=$$ \
     fm_backend_agent_status_raw herdr default:w1:p2 agy)
   [ -z "$out" ] || fail "stale idle registration over a shell-only pane must be rejected, got '$out'"

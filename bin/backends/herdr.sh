@@ -2114,10 +2114,10 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 # Pi, `zsh` for a shell), `.argv0` the argv[0] basename (`pi`), and `.argv` /
 # `.cmdline` the full command line, so Pi is identified by argv[0] exactly as
 # the tmux probe identifies it from `ps`.
-fm_backend_herdr_pane_process_state() {  # <session> <pane_id>
-  local attempt=0 max_attempts=${FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS:-10} verdict
+fm_backend_herdr_pane_process_state() {  # <session> <pane_id> [expected-agent]
+  local attempt=0 max_attempts=${FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS:-10} verdict expected=${3-}
   while :; do
-    verdict=$(fm_backend_herdr_pane_process_state_sample "$1" "$2")
+    verdict=$(fm_backend_herdr_pane_process_state_sample "$1" "$2" "$expected")
     [ "$verdict" = other ] || break
     attempt=$((attempt + 1))
     [ "$attempt" -lt "$max_attempts" ] || break
@@ -2129,9 +2129,9 @@ fm_backend_herdr_pane_process_state() {  # <session> <pane_id>
 # fm_backend_herdr_pane_process_state_sample: one instantaneous observation
 # for fm_backend_herdr_pane_process_state, which owns the verdict contract and
 # the settle retry.
-fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 info shell_pid count i pid name argv0 args verdict
-  local others=0 ps_bin rows
+fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id> [expected-agent]
+  local session=$1 pane_id=$2 expected=${3-} info shell_pid count i pid name argv0 args verdict
+  local others=0 foreign_agents=0 ps_bin rows
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) \
     || { printf 'unreadable'; return 0; }
   printf '%s' "$info" | jq -e --arg pane "$pane_id" '
@@ -2158,7 +2158,13 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
       | $p.cmdline // (($p.argv // []) | join(" ")) // empty' 2>/dev/null)
     verdict=$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")
     case "$verdict" in
-      agent) printf 'agent'; return 0 ;;
+      agent)
+        if [ -z "$expected" ] || fm_agent_process_matches_expected "$expected" "$name" "$argv0" "$args" "$pid"; then
+          printf 'agent'
+          return 0
+        fi
+        foreign_agents=$((foreign_agents + 1))
+        ;;
       shell) ;;
       *) others=$((others + 1)) ;;
     esac
@@ -2182,8 +2188,11 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
     args=${args#"${args%%[![:space:]]*}"}
     argv0=${args%%[[:space:]]*}
     if [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ]; then
-      printf 'agent'
-      return 0
+      if [ -z "$expected" ] || fm_agent_process_matches_expected "$expected" "$name" "$argv0" "$args" "$pid"; then
+        printf 'agent'
+        return 0
+      fi
+      foreign_agents=$((foreign_agents + 1))
     fi
   done <<EOF
 $(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
@@ -2207,7 +2216,11 @@ $(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
     }
   }')
 EOF
-  printf 'shell'
+  if [ "$foreign_agents" -gt 0 ]; then
+    printf 'foreign-agent'
+  else
+    printf 'shell'
+  fi
 }
 
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of

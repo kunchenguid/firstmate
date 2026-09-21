@@ -2184,11 +2184,11 @@ test_herdr_agy_agent_status_working_and_idle_status_log() {
   assert_contains "$out_idle" "source: status-log" "idle agent_status sources from status-log"
   assert_contains "$out_idle" "completed task" "idle agent_status reports status note"
 
-  FM_FAKE_HERDR_AGENT=claude
+  FM_FAKE_HERDR_AGENT=agy
   FM_FAKE_HERDR_PROCESS=agent
   local out_foreign; out_foreign=$(run_crew_state "$d" feat-herdr-agy)
-  assert_contains "$out_foreign" "state: unknown" "foreign idle agent must not inherit agy's completed state"
-  assert_not_contains "$out_foreign" "source: status-log" "foreign idle agent must not unlock agy's status log"
+  assert_contains "$out_foreign" "state: unknown" "foreign live process under a stale agy registration must not inherit agy's completed state"
+  assert_not_contains "$out_foreign" "source: status-log" "foreign live process under a stale agy registration must not unlock agy's status log"
 
   pass "herdr agy: only identity-matched native idle permits status-log completion"
 }
