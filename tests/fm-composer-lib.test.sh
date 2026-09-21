@@ -247,6 +247,38 @@ test_composer_footer_demotion_needs_a_proven_pair() {
   pass "fm_composer_classify_screen: footer demotion needs a contiguous, glyph-proven pair"
 }
 
+test_composer_footer_zone_is_shape_independent() {
+  # The same captain-facing failure on the BORDERED composer: claude 2.x
+  # renders its composer inside a rounded box on a wide pane, and this home's
+  # statusLine (opening with `→`, Cursor's prompt glyph) plus the permission
+  # hint still land on the two contiguous rows below the closing border. The
+  # footer-zone invariant is a property of an envelope proven by a glyph row
+  # inside it, not of the pi separator pair, so it must hold here too.
+  local box footer screen out claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  box=$'transcript line\n╭───────────────────────────╮\n│ ❯'"$NBSP"$'                        │\n╰───────────────────────────╯'
+  footer=$'\n → repo git:(fm/branch)× | Opus 5 | ctx 15%\n ⏵⏵ bypass permissions on'
+  screen="$box$footer"
+  assert_screen "boxed claude idle under an arrow statusline on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "boxed claude idle under an arrow statusline on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "boxed claude idle under an arrow statusline on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  case "$out" in
+    *'repo git:'*|*'bypass permissions'*)
+      fail "the statusline footer must never be extracted as composer content, got '$out'" ;;
+  esac
+  # The protection this must NOT remove: real unsubmitted text inside that same
+  # bordered composer, under that same footer, still refuses.
+  screen=$'transcript line\n╭───────────────────────────╮\n│ ❯ half-typed draft        │\n╰───────────────────────────╯'"$footer"
+  assert_screen "boxed claude typed under an arrow statusline" pending "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  # The deliberate counterexample, pinned as such: codex's startup banner has
+  # no glyph row inside it, so it proves no composer, opens no footer zone, and
+  # the live bare row contiguously below it keeps winning.
+  screen=$'╭────────────────────────╮\n│ permissions: YOLO mode │\n╰────────────────────────╯\n❯'"$NBSP"
+  assert_screen "unproven banner still yields to the bare row below it" empty "$CAPS_PLAIN" "$screen"
+  pass "fm_composer_classify_screen: the footer zone holds for boxes, not only separator pairs"
+}
+
 test_matrix_codex_dim_hint_row() {
   # Real idle codex: bold `›`, reset, then an SGR-2 dim hint. Styled captures
   # strip the ghost and prove empty; plain captures must defer as unknown -
@@ -843,6 +875,7 @@ test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_claude_arrow_statusline_footer
 test_composer_footer_demotion_needs_a_proven_pair
+test_composer_footer_zone_is_shape_independent
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
