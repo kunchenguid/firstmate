@@ -660,10 +660,9 @@ run_watcher_bounded() {
 }
 
 test_rejected_metacharacter_bytes_are_inert() {
-  local dir family rc before after
+  local dir family rc before after number=99
   dir=$(make_case rejected-metacharacters)
   write_task_meta "$dir"
-  write_poll_meta "$dir/home/state" safe-check https://github.com/o/r/pull/99
   families=(
     'https://github.com/o$/r/pull/1'
     'https://github.com/o(/r/pull/1'
@@ -679,7 +678,11 @@ test_rejected_metacharacter_bytes_are_inert() {
     [ "$rc" -ne 0 ] || fail "rejected metacharacter byte was accepted"
     [ ! -e "$dir/home/state/task-a.check.sh" ] || fail "rejected input left a runnable task check"
     [ ! -e "$dir/home/state/task-a.pr-poll" ] || fail "rejected input left a sidecar"
-    fm_pr_poll_prepare "$dir/home/state" safe-check github https://github.com/o/r/pull/99 github.com o/r 99 "$POLL" \
+    # Every cycle must wake on its own authenticated poll rather than exit some
+    # other way: a repeat of an already-notified merge is absorbed instead of
+    # woken on, and an unacknowledged cycle spends the next arm on recovery.
+    write_poll_meta "$dir/home/state" safe-check "https://github.com/o/r/pull/$number"
+    fm_pr_poll_prepare "$dir/home/state" safe-check github "https://github.com/o/r/pull/$number" github.com o/r "$number" "$POLL" \
       || fail "could not prepare bounded watcher poll"
     fm_pr_poll_publish_prepared || fail "could not publish bounded watcher poll"
 
@@ -687,8 +690,14 @@ test_rejected_metacharacter_bytes_are_inert() {
     FM_TEST_GH_STATE=MERGED run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err"
     rc=$?
     set -e
-    [ "$rc" -eq 0 ] || fail "bounded watcher did not complete through the authenticated poll"
+    [ "$rc" -eq 0 ] || fail "bounded watcher did not complete through the authenticated poll: $(cat "$dir/watch.err")"
+    case "$(cat "$dir/watch.out")" in
+      check:*safe-check.check.sh:*merged) ;;
+      *) fail "bounded watcher completed without waking on the authenticated poll: $(cat "$dir/watch.out")" ;;
+    esac
+    ack_watcher_cycle "$dir/home/state" || fail "bounded watcher cycle acknowledgement failed"
     rm -f "$dir/home/state/.last-check"
+    number=$((number + 1))
   done
 
   FM_TEST_GH_STATE=OPEN run_check_entry "$dir" task-a https://github.com/o/r/pull/1 >/dev/null 2>/dev/null \
