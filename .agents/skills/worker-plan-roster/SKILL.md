@@ -24,7 +24,7 @@ This skill is the single owner of the worker roster presented immediately before
 7. List every planned worker, including coordinating, implementation, investigation, review, and validation roles, one row each.
 8. Give each row the worker's bounded task in a short phrase, its launch-effective model, and its launch-effective effort.
 9. Launch the approved roster with those exact values, and re-resolve any omitted-axis default immediately before launch.
-10. Launch nothing until the captain approves; a changed value or a default that can no longer be verified needs a fresh roster and fresh approval.
+10. Launch nothing until the captain approves; any change to the worker set, task, model, or effort, or a default that can no longer be verified, needs a fresh roster and fresh approval.
 
 ## Shape
 
