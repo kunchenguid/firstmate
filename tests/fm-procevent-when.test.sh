@@ -779,17 +779,33 @@ for _ in $(seq 1 150); do
   sleep 0.1
 done
 pe "$H" reconcile >/dev/null 2>&1
-sleep 0.3
+# The prior fire left the needs-edge marker behind (bin/fm-procevent-when.sh's
+# edge_file), and the fresh runner reconcile just launched only clears it once
+# its own first poll actually observes the trigger absent. A fixed sleep here
+# assumed that poll would land inside the sleep - forking, sourcing the
+# adapter's libraries and reaching that first poll under a loaded shared
+# runner can take longer than any fixed budget survives, and a trigger
+# recreated before that first poll leaves the marker set forever: the watch
+# is then correctly, permanently waiting for an edge that already passed it
+# by, which is what actually made this the one assertion in this file to
+# flake under a loaded shared runner (twice, on two different shards) while
+# never failing locally. Waiting on the marker itself removes the timing
+# assumption; reconcile is retried on the same cadence as the marker check
+# because a launch it starts is only confirmed within
+# FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS (default 3s), and under load that
+# confirmation can lose the race too.
+EDGE_MARKER="$H/state/when/when-repeat.needs-edge"
+tick=0
+for _ in $(seq 1 150); do
+  [ -e "$EDGE_MARKER" ] || break
+  tick=$((tick + 1))
+  [ $(( tick % 10 )) -eq 0 ] && pe "$H" reconcile >/dev/null 2>&1
+  sleep 0.1
+done
+[ -e "$EDGE_MARKER" ] && fail "the repeat watch's fresh runner never observed the condition go false"
 : > "$REPEAT_TRIG"
-# 300 tries (30s), double the file's other wait budgets: this loop spawns a
-# `pe reconcile` process every iteration on top of the polling runner it is
-# waiting on, so it is measurably more contention-sensitive under a loaded
-# shared CI runner than a passive wait_for_result/wait_for_file check - it
-# has been the only assertion in this file to flake there (twice, on two
-# different shards), while never failing locally.
-for _ in $(seq 1 300); do
+for _ in $(seq 1 150); do
   [ "$(count_lines "$REPEATLOG")" -ge 2 ] && break
-  pe "$H" reconcile >/dev/null 2>&1
   sleep 0.1
 done
 [ "$(count_lines "$REPEATLOG")" -ge 2 ] || fail "the repeat watch never rang a second time"
