@@ -422,8 +422,8 @@
 #   secondmate reads this launching home's file; pins are never inherited.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
 # Claude config store (claude_config_dir= in state/<id>.meta):
-#   A claude launch records the CLAUDE_CONFIG_DIR store it launched on, and
-#   every relaunch or secondmate respawn of that task reuses the record instead
+#   A claude launch records the CLAUDE_CONFIG_DIR store it launched on (the
+#   marker 'default' when none was set), and every relaunch or secondmate respawn of that task reuses the record instead
 #   of the invoking process's ambient CLAUDE_CONFIG_DIR, so automatic recovery
 #   keeps the task on the account it was launched with. FM_CLAUDE_CONFIG_DIR=<dir>
 #   on the call is the only way to change it; it launches with and records the
@@ -2739,16 +2739,21 @@ elif [ "$KIND" = secondmate ] && [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.
   SPAWN_CLAUDE_STORE_META="$STATE/$ID.meta"
 fi
 # A Claude worker account pin replaces the store outright: the task records
-# the pinned root, and neither the record nor FM_CLAUDE_CONFIG_DIR applies.
+# the pinned root (or the 'default' marker for the ordinary Claude account),
+# and neither the record nor FM_CLAUDE_CONFIG_DIR applies.
 if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
-  SPAWN_CLAUDE_STORE=$WORKER_ACCOUNT_ROOT
+  SPAWN_CLAUDE_STORE=${WORKER_ACCOUNT_ROOT:-default}
 else
   fm_claude_store_resolve "$HARNESS" "$SPAWN_CLAUDE_STORE_META" || {
     echo "error: $FM_CLAUDE_STORE_ERROR" >&2
     exit 1
   }
   SPAWN_CLAUDE_STORE=$FM_CLAUDE_STORE
-  if [ "$HARNESS" = claude ] && [ -n "$SPAWN_CLAUDE_STORE" ]; then
+  if [ "$HARNESS" = claude ] && [ "$SPAWN_CLAUDE_STORE" = default ]; then
+    # Unset so bin/fm-claude-trust.sh registers trust in the default store the
+    # launch below uses.
+    unset CLAUDE_CONFIG_DIR
+  elif [ "$HARNESS" = claude ] && [ -n "$SPAWN_CLAUDE_STORE" ]; then
     # Exported so bin/fm-claude-trust.sh registers trust in the same store the
     # launch below forwards.
     export CLAUDE_CONFIG_DIR="$SPAWN_CLAUDE_STORE"
@@ -5764,8 +5769,8 @@ esac
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
 # Forward the task's resolved store onto the claude launch: the durable record
 # or deliberate override when there is one, otherwise firstmate's own store
-# (bin/fm-claude-store-lib.sh owns that choice). Only when set; an unset value
-# is the single-store default and needs no prefix.
+# (bin/fm-claude-store-lib.sh owns that choice). The 'default' marker removes
+# any inherited value so the launch stays on Claude's own default store.
 # A home's worker account pin replaces that forwarding: the launch names the
 # pinned root (or unsets the variable for the ordinary Claude account) and
 # sheds the environment credentials Claude ranks above the root's login.
@@ -5782,6 +5787,8 @@ if [ -n "$WORKER_ACCOUNT" ]; then
     LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     ;;
   esac
+elif [ "$HARNESS" = claude ] && [ "$SPAWN_CLAUDE_STORE" = default ]; then
+  LAUNCH="env -u CLAUDE_CONFIG_DIR $LAUNCH"
 elif [ "$HARNESS" = claude ] && [ -n "$SPAWN_CLAUDE_STORE" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$SPAWN_CLAUDE_STORE") $LAUNCH"
 fi

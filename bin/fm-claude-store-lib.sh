@@ -18,11 +18,13 @@
 #   2. Otherwise a non-empty claude_config_dir= in the task's existing
 #      state/<id>.meta wins, and the ambient CLAUDE_CONFIG_DIR is ignored for
 #      this task. A recorded directory that no longer exists refuses the launch
-#      rather than silently falling back to another store.
+#      rather than silently falling back to another store. The recorded marker
+#      value 'default' means Claude's own default store: the launch removes
+#      CLAUDE_CONFIG_DIR from its environment instead of adopting the ambient one.
 #   3. Otherwise (a first spawn, or a task recorded without a store) the ambient
 #      CLAUDE_CONFIG_DIR is used and recorded exactly as it was forwarded before
-#      this contract existed. An unset or empty ambient value records nothing
-#      and launches on Claude's own default store.
+#      this contract existed. An unset or empty ambient value records the
+#      'default' marker.
 # For a non-claude launch the store is not used: no override is applied and an
 # existing record is carried forward unchanged, so switching a task back to
 # claude later still lands on its recorded account.
@@ -37,22 +39,19 @@
 # Usage: . bin/fm-claude-store-lib.sh
 #   fm_claude_store_resolve <harness> [<existing-meta-file>]
 #     On success returns 0 and sets FM_CLAUDE_STORE to the store to launch with
-#     and record (possibly empty). On refusal returns 1 and sets
+#     and record: a directory, the 'default' marker, or empty for a non-claude
+#     launch with no record. On refusal returns 1 and sets
 #     FM_CLAUDE_STORE_ERROR to a one-line reason.
 
 FM_CLAUDE_STORE=
 FM_CLAUDE_STORE_ERROR=
 
-# Echoes the last claude_config_dir= value in <meta>, or nothing.
+# Echoes the last claude_config_dir= value in <meta>, or nothing. Needs
+# fm_meta_get from bin/fm-backend.sh, which every caller sources first.
 fm_claude_store_recorded() {
-  local meta=$1 line value=''
-  [ -n "$meta" ] && [ -f "$meta" ] || return 0
-  while IFS= read -r line || [ -n "$line" ]; do
-    case "$line" in
-    claude_config_dir=*) value=${line#*=} ;;
-    esac
-  done <"$meta" 2>/dev/null || true
-  printf '%s' "$value"
+  local meta=$1
+  [ -n "$meta" ] || return 0
+  fm_meta_get "$meta" claude_config_dir
 }
 
 # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
@@ -81,6 +80,10 @@ fm_claude_store_resolve() {
     FM_CLAUDE_STORE=$override
     return 0
   fi
+  if [ "$recorded" = default ]; then
+    FM_CLAUDE_STORE=default
+    return 0
+  fi
   if [ -n "$recorded" ]; then
     [ -d "$recorded" ] || {
       FM_CLAUDE_STORE_ERROR="the task's recorded Claude config store '$recorded' (claude_config_dir= in $meta) no longer exists; refusing rather than launching on a different account - restore that directory or relaunch with FM_CLAUDE_CONFIG_DIR=<store> to choose one deliberately"
@@ -89,8 +92,6 @@ fm_claude_store_resolve() {
     FM_CLAUDE_STORE=$recorded
     return 0
   fi
-  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-    FM_CLAUDE_STORE=$CLAUDE_CONFIG_DIR
-  fi
+  FM_CLAUDE_STORE=${CLAUDE_CONFIG_DIR:-default}
   return 0
 }

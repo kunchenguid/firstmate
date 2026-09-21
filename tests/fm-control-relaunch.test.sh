@@ -2713,6 +2713,46 @@ test_secondmate_relaunch_and_respawn_reuse_the_recorded_claude_store() {
   pass "secondmate: relaunch and liveness respawn keep the recorded Claude store, and a vanished one refuses"
 }
 
+test_default_recorded_claude_store_stays_default_on_recovery() {
+  local dir out rc
+  dir=$(new_case store-default cs7)
+  add_claude_secondmate "$dir" cs7
+  mkdir -p "$dir/store-work"
+  printf 'claude_config_dir=default\n' >> "$dir/home/state/cs7.meta"
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-work" \
+    run_control "$dir" cs7 relaunch); rc=$?
+  expect_code 0 "$rc" "a relaunch of a default-store secondmate should succeed"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" "env -u CLAUDE_CONFIG_DIR " \
+    "a default-store relaunch must strip CLAUDE_CONFIG_DIR from the launch"
+  assert_no_grep "store-work" "$dir/fake/literal" "a default-store relaunch adopted the relauncher's store"
+  [ "$(meta_field "$dir" cs7 claude_config_dir)" = default ] \
+    || fail "a default-store relaunch must keep the default marker, got '$(meta_field "$dir" cs7 claude_config_dir)'"
+
+  : > "$dir/fake/literal"
+  printf 'zsh' > "$dir/fake/command"
+  : > "$dir/fake/windows"
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-work" \
+    run_spawn "$dir" cs7 --secondmate); rc=$?
+  expect_code 0 "$rc" "a liveness respawn of a default-store secondmate should succeed"$'\n'"$out"
+  assert_contains "$(cat "$dir/fake/literal")" "env -u CLAUDE_CONFIG_DIR " \
+    "a default-store respawn must strip CLAUDE_CONFIG_DIR from the launch"
+  assert_no_grep "store-work" "$dir/fake/literal" "a default-store respawn adopted the relauncher's store"
+  [ "$(meta_field "$dir" cs7 claude_config_dir)" = default ] \
+    || fail "a default-store respawn must keep the default marker"
+
+  : > "$dir/fake/literal"
+  printf 'zsh' > "$dir/fake/command"
+  : > "$dir/fake/windows"
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-work" \
+    FM_TEST_CLAUDE_CONFIG_OVERRIDE="$dir/store-work" \
+    run_spawn "$dir" cs7 --secondmate); rc=$?
+  expect_code 0 "$rc" "an override should replace the default marker"$'\n'"$out"
+  launched_with_store "$dir" "$dir/store-work" "an overridden default-store respawn"
+  [ "$(meta_field "$dir" cs7 claude_config_dir)" = "$dir/store-work" ] \
+    || fail "the override must replace the default marker"
+  pass "secondmate: a recorded default Claude store survives relaunch and respawn under another ambient store"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -2794,3 +2834,4 @@ test_relaunch_override_replaces_the_recorded_claude_store
 test_missing_recorded_claude_store_refuses_before_stopping_the_agent
 test_harness_switch_carries_the_recorded_claude_store
 test_secondmate_relaunch_and_respawn_reuse_the_recorded_claude_store
+test_default_recorded_claude_store_stays_default_on_recovery
