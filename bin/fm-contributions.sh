@@ -32,12 +32,14 @@
 #
 # poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
-# 1..25). Each gh call is bounded by the remaining budget and five seconds.
+# 1..25). Each gh call gets the larger of five seconds and half the remaining
+# budget (rounded down), capped at that remaining budget.
 # Oldest observations go first, so a large corpus progresses across polls.
 # Each distinct URL is observed once per poll and applied to every owner. A
 # final observation applies to every owner without another forge read. When
-# the budget runs out mid-observation, the poll ends with that URL's records
-# untouched; only a genuine forge failure or head change records an error.
+# the budget runs out mid-observation or a per-call timer expires, the poll
+# ends silently with that URL's records untouched. A genuine forge failure or
+# head change records an error immediately.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
@@ -176,15 +178,16 @@ write_record() { # task record-json-file
 }
 
 forge() {
-  local remaining bounded=0 rc=0
+  local remaining bound rc=0
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; return 1; }
-  if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+  bound=$((remaining / 2))
+  [ "$bound" -ge 5 ] || bound=5
+  [ "$bound" -lt "$remaining" ] || bound=$remaining
+  fm_run_timed "$bound" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$TMP/forge.err" || rc=$?
-  # A read killed at the budget's own deadline is budget exhaustion too.
-  [ "$rc" -ne 124 ] || [ "$bounded" -eq 0 ] || BUDGET_EXHAUSTED=1
+  [ "$rc" -ne 124 ] || BUDGET_EXHAUSTED=1
   return "$rc"
 }
 
@@ -317,8 +320,7 @@ poll() {
     fi
     observed=0
     observe "$url" || observed=$?
-    # An observation the budget cut short is unmeasured, not unavailable: keep
-    # every owner's prior record so the URL is observed first next poll.
+    # Apply the header's unmeasured-read policy before error or wake handling.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
     # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \

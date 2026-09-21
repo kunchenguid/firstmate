@@ -557,12 +557,17 @@ set -eu
 printf '%s\n' "$*" >> "$FORGE/calls"
 fault=$(cat "$FORGE/fault" 2>/dev/null || true)
 case "$fault:$*" in
+  spend:'api repos/o/r/pulls/8')
+    printf '%s\n' "$(( $(cat "$FORGE/clock") + 8 ))" > "$FORGE/clock" ;;
+  spend:'api repos/o/r/issues/8/comments?'*)
+    printf '%s\n' "$(( $(cat "$FORGE/clock") + 5 ))" > "$FORGE/clock" ;;
   exhaust:'api repos/o/r/issues/8/comments?'*)
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock" ;;
   fail-late:'api repos/o/r/pulls/8/reviews?'*)
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock"
     printf 'HTTP 502\n' >&2; exit 1 ;;
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
+  timeout:'api repos/o/r/pulls/8/reviews?'*) exit 124 ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
@@ -757,6 +762,92 @@ test_failure_wakes_once_per_episode() {
   pass 'a repeated read failure on an open PR records its error but wakes once per episode'
 }
 
+test_per_call_timeout_keeps_prior_records() {
+  local home out count task phase
+  home=$(new_home timeout-unmeasured)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf -- '- [ ] duplicate - Filed https://github.com/o/r/pull/8 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  /bin/date +%s > "$home/forge/clock"
+  rm "$home/data/delivery/contributions.json"
+  for phase in unseen healthy failed recovered; do
+    if [ "$phase" != unseen ]; then
+      if [ "$phase" = failed ]; then printf 'fail\n' > "$home/forge/fault"; else : > "$home/forge/fault"; fi
+      out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail "$phase poll failed"
+      if [ "$phase" = failed ]; then
+        [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
+          || fail "genuine failure after timeouts did not wake exactly once: $out"
+      else
+        [ -z "$out" ] || fail "$phase poll printed: $out"
+      fi
+      for task in delivery duplicate; do
+        jq -e '.records[0] | has("timeout_count") | not' "$home/data/$task/contributions.json" >/dev/null \
+          || fail "$phase poll persisted a timeout counter for $task"
+        cp "$home/data/$task/contributions.json" "$home/prior-$task.json"
+      done
+    fi
+    printf 'timeout\n' > "$home/forge/fault"
+    : > "$home/forge/calls"
+    for count in 1 2 3 4; do
+      out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T09:00:00Z "$ROOT/bin/fm-contributions.sh" poll) \
+        || fail "$phase timeout poll $count failed"
+      [ -z "$out" ] || fail "$phase timeout $count printed a wake: $out"
+      for task in delivery duplicate; do
+        if [ "$phase" = unseen ]; then
+          [ ! -e "$home/data/$task/contributions.json" ] || fail "timeout created an unseen owner's record: $task"
+        else
+          cmp -s "$home/prior-$task.json" "$home/data/$task/contributions.json" \
+            || fail "$phase timeout $count rewrote owner $task"
+        fi
+      done
+    done
+    [ "$(grep -cFx 'api repos/o/r/pulls/8/reviews?per_page=100 --paginate --slurp' "$home/forge/calls")" = 4 ] \
+      || fail "$phase timeouts did not retry one shared read each poll"
+    [ ! -s "$home/state/.wake-queue" ] || fail "$phase timeout enqueued a contribution event"
+    if [ "$phase" = failed ]; then
+      printf 'fail\n' > "$home/forge/fault"
+      out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail 'repeated genuine failure failed'
+      [ -z "$out" ] || fail "timeouts restarted the genuine failure episode: $out"
+    fi
+  done
+  pass 'all per-call timeouts preserve every owner record and stay silent across recovery'
+}
+
+test_per_call_bound() {
+  local home budget expected out
+  home=$(new_home call-bound)
+  forge_home "$home"
+  wrap_forge "$home"
+  # Observe the public timeout invocation without waiting on wall-clock sleeps.
+  cat > "$home/fakebin/timeout" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$3" >> "$FORGE/bounds"
+shift 3
+"$@"
+SH
+  chmod +x "$home/fakebin/timeout"
+  /bin/date +%s > "$home/forge/clock"
+  for budget in 1 6 20 25; do
+    case "$budget" in 1) expected=1 ;; 6) expected=5 ;; 20) expected=10 ;; 25) expected=12 ;; esac
+    : > "$home/forge/bounds"
+    out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET="$budget" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail "poll failed for budget $budget"
+    [ -z "$out" ] || fail "bound poll printed: $out"
+    [ "$(head -n 1 "$home/forge/bounds")" = "$expected" ] || fail "wrong first-call bound for budget $budget"
+    awk -v expected="$expected" '$0 != expected { exit 1 }' "$home/forge/bounds" \
+      || fail 'call bound exceeded frozen remaining budget'
+  done
+  : > "$home/forge/bounds"
+  printf 'spend\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'poll with decreasing remaining budget failed'
+  [ -z "$out" ] || fail "decreasing budget printed: $out"
+  printf '10\n6\n5\n5\n5\n5\n5\n5\n' > "$home/expected-bounds"
+  cmp -s "$home/expected-bounds" "$home/forge/bounds" || fail 'bounds did not shrink with the remaining budget'
+  pass 'per-call bounds widen to half the remaining budget with a capped five-second floor'
+}
+
 test_late_owner_keeps_failure_episode_suppressed() {
   local home out line='contributions: observation unavailable for https://github.com/o/r/pull/8'
   local error='forge observation unavailable or changed during read' task
@@ -791,7 +882,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_failure_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_per_call_timeout_keeps_prior_records test_per_call_bound test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_failure_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
