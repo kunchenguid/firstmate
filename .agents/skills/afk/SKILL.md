@@ -166,8 +166,7 @@ Classify each wake this way:
 - `check` -> always escalate. Check scripts print only when firstmate should wake.
 - `stale` with a terminal status or bare legacy captain-relevant line -> escalate.
   Nonterminal progress remains transient even when its prose contains a legacy free-text token or its seen-status marker already matches, so record a marker and self-handle.
-  If the pane is still idle past `FM_STALE_ESCALATE_SECS` (default 240s), housekeeping escalates it as a possible wedge.
-  This bounds wedge-detection latency to the threshold plus a tick: a delay, never a loss.
+  Housekeeping and enriched possible-wedge wakes follow the shared health-evidence and recheck contract in [`docs/architecture.md`](../../../docs/architecture.md#event-driven-supervision).
   Healthy crewmates are autonomous and do not wait on firstmate mid-task.
 - `heartbeat` -> self-handle.
   The daemon runs its own cheap bash fleet scan every `FM_HEARTBEAT_SCAN_SECS` (default 300s) as the catch-all for captain-relevant events still unread by the per-wake classifier.
