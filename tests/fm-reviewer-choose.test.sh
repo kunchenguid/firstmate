@@ -23,7 +23,8 @@ trap cleanup EXIT
 mkdir -p "$FAKEBIN"
 
 # Codex exhausted (the ticket's usage-limits case), Claude healthy after reset,
-# Pi healthy. Grok is absent: unmodeled quota, ineligible under the chooser.
+# Pi healthy, Cursor present but unmeasurable (its vendor exposes no window).
+# Grok is absent: unmodeled quota.
 cat > "$FIXTURE" <<'JSON'
 {
   "generatedAt": "2030-01-01T00:00:00Z",
@@ -72,6 +73,14 @@ cat > "$FIXTURE" <<'JSON'
             "runway": { "status": "through_reset" }
           }
         ]
+      }
+    },
+    {
+      "provider": "cursor",
+      "windows": [],
+      "quotaSemantics": {
+        "status": "unknown",
+        "effectiveAvailability": []
       }
     }
   ]
@@ -254,11 +263,53 @@ grep -Eq '^reviewer-choose [0-9]+ selected pi xai/grok-4-fast unmeasured pi:xai/
   || fail "unmeasured record: got '$(cat "$UNMEASURED_RECORD")'"
 ok "unmeasured quota defers a candidate without aborting selection"
 
-# 8. Snapshots arrive on stdin as well as by file.
-out=$(call_choose --author grok:grok-4 --candidate claude:claude-opus-5 < "$FIXTURE")
-[ "$out" = "reviewer: claude claude-opus-5" ] \
-  || fail "stdin snapshot: expected selection, got '$out'"
-ok "stdin snapshot resolves the same reviewer"
+# 7d. A mapped provider whose row exposes no measurable scope is unmeasured,
+# never reported as exhausted: it defers, stays eligible, and its park-free
+# selection says truthfully that the provider could not be measured.
+out=$(call_choose --author grok:grok-4 --snapshot "$FIXTURE" \
+  --candidate codex:gpt-6 --candidate cursor:cursor-grok-4.5-high --candidate claude:claude-opus-5)
+expected="skipped: codex:gpt-6 quota-ineligible
+deferred: cursor:cursor-grok-4.5-high quota-unmeasured (provider cursor exposes no measured quota for cursor-grok-4.5-high)
+reviewer: claude claude-opus-5"
+[ "$out" = "$expected" ] || fail "unmeasurable provider: expected '$expected', got '$out'"
+out=$(call_choose --author grok:grok-4 --snapshot "$FIXTURE" \
+  --candidate codex:gpt-6 --candidate cursor:cursor-grok-4.5-high); rc=$?
+[ "$rc" -eq 0 ] || fail "unmeasurable provider: expected exit 0, got $rc with '$out'"
+expected="skipped: codex:gpt-6 quota-ineligible
+deferred: cursor:cursor-grok-4.5-high quota-unmeasured (provider cursor exposes no measured quota for cursor-grok-4.5-high)
+unmeasured: cursor:cursor-grok-4.5-high provider cursor exposes no measured quota for cursor-grok-4.5-high
+reviewer: cursor cursor-grok-4.5-high"
+[ "$out" = "$expected" ] || fail "unmeasurable provider fallback: expected '$expected', got '$out'"
+if printf '%s\n' "$out" | grep -Eq '^(skipped: cursor|park:)'; then
+  fail "unmeasurable provider was reported as exhausted or parked: '$out'"
+fi
+ok "an unmeasurable provider row is disclosed, never called exhausted"
+
+# 7e. A bare-harness profile (crew-dispatch `use` with no model) is legitimate
+# input: it resolves to the harness default model, is measured on the
+# provider-wide scopes, and never aborts the selection.
+out=$(call_choose --author grok:grok-4 --snapshot "$FIXTURE" \
+  --candidate codex --candidate claude); rc=$?
+[ "$rc" -eq 0 ] || fail "bare harness: expected exit 0, got $rc with '$out'"
+expected="skipped: codex quota-ineligible
+reviewer: claude default"
+[ "$out" = "$expected" ] || fail "bare harness: expected '$expected', got '$out'"
+out=$(call_choose --author claude:claude-opus-5 --snapshot "$FIXTURE" \
+  --candidate claude --candidate pi:openai-codex/gpt-6-astra@pi)
+expected="skipped: claude author
+reviewer: pi openai-codex/gpt-6-astra"
+[ "$out" = "$expected" ] || fail "bare harness author: expected '$expected', got '$out'"
+if out=$(call_choose --author grok:grok-4 --snapshot "$FIXTURE" \
+  --candidate codex --candidate claude: 2>/dev/null); then
+  fail "empty model after colon unexpectedly succeeded with '$out'"
+fi
+ok "a bare-harness profile resolves instead of aborting"
+
+# 8. The snapshot is read only from --snapshot; stdin is not a spelling.
+if out=$(call_choose --author grok:grok-4 --candidate claude:claude-opus-5 < "$FIXTURE" 2>/dev/null); then
+  fail "stdin snapshot unexpectedly succeeded with '$out'"
+fi
+ok "a missing --snapshot is a usage error even with stdin"
 
 # 9. Usage errors exit 2, never a park.
 if call_choose --snapshot "$FIXTURE" --candidate claude:claude-opus-5 >/dev/null 2>&1; then

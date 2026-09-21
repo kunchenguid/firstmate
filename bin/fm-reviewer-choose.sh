@@ -2,12 +2,12 @@
 # Resolve one quota-aware reviewer from an ordered candidate list with failover.
 #
 # Usage:
-#   fm-reviewer-choose.sh --author <harness:model> [--snapshot <path>]
-#     --candidate <harness:model[@provider]>... [--needs-approval <harness:model>]...
-#     [--approved <harness:model>]... [--record <path>]
+#   fm-reviewer-choose.sh --author <harness:model> --snapshot <path>
+#     --candidate <harness[:model][@provider]>... [--needs-approval <harness[:model]>]...
+#     [--approved <harness[:model]>]... [--record <path>]
 #
 # Reads one already-captured quota-axi default TOON or JSON snapshot from the
-# provided file, or from stdin when --snapshot is omitted. Candidates are given
+# required --snapshot file; there is no stdin spelling. Candidates are given
 # in preference order with --candidate only; bare positional arguments are
 # rejected as unknown options. The ordered list comes from review
 # configuration (the matching crew-dispatch review rule, in its listed order),
@@ -15,11 +15,15 @@
 # names the harness:model that produced the head under review and is required:
 # a reviewer must be non-author.
 #
-# A candidate is <harness>:<model> with an optional @<provider> suffix carrying
-# the explicit quota-axi provider family the review configuration established
-# for that profile (the crew-dispatch `provider` field). Without the suffix the
-# candidate's quota is read from its harness's primary provider family, exactly
-# as bin/fm-quota-choose.sh does.
+# A candidate is <harness>[:<model>] with an optional @<provider> suffix
+# carrying the explicit quota-axi provider family the review configuration
+# established for that profile (the crew-dispatch `provider` field). Without
+# the suffix the candidate's quota is read from its harness's primary provider
+# family, exactly as bin/fm-quota-choose.sh does. A bare harness is a
+# legitimate crew-dispatch profile with no `model`: it resolves to that
+# harness's own default model exactly as bin/fm-quota-choose.sh resolves it,
+# is measured on the provider-wide scopes only, and is printed and recorded as
+# "<harness> default" so the caller pins the harness alone.
 #
 # For each candidate in order, three gates apply. The non-author gate compares
 # underlying model identity rather than spelling: the model token with any
@@ -28,7 +32,9 @@
 # are the same author, as are codex:codex_bengalfox and
 # codex:model:codex_bengalfox. The rule fails closed: two spellings that may
 # denote the same underlying model are treated as the same identity and the
-# candidate is skipped as the author. The approval gate skips a candidate
+# candidate is skipped as the author, and a bare-harness candidate whose
+# default model is unknown is the author whenever its harness is the author's
+# harness. The approval gate skips a candidate
 # listed in --needs-approval unless it is also listed in --approved, both
 # matched on the exact harness:model pin, so a reviewer that needs an explicit
 # captain decision is never selected silently. The quota gate probes
@@ -41,11 +47,15 @@
 # never to the harness's primary family, so pi:anthropic/claude-sonnet-5@claude
 # is measured against the claude row and not the pi row.
 #
-# Quota the helper cannot measure is disclosed uncertainty, not a veto: a
-# supported harness with no quota-axi provider mapping (gemini, rovo, agy, or
-# an omp model outside its mapped prefixes) or a declared provider no mapped
-# harness measures keeps the candidate eligible but defers it behind every
-# measured-eligible candidate. Such a candidate prints
+# Quota the helper cannot measure is disclosed uncertainty, not a veto, and
+# is never reported as exhaustion: a supported harness with no quota-axi
+# provider mapping (gemini, rovo, agy, or an omp model outside its mapped
+# prefixes), a declared provider no mapped harness measures, or a mapped
+# provider whose row exposes no measurable applicable scope in the snapshot
+# (quotaSemantics unknown with no window, as cursor reports) keeps the
+# candidate eligible but defers it behind every measured-eligible candidate.
+# quota-ineligible is reserved for measured evidence: an exhausted_now runway
+# or a known zero effective percent remaining. Such a candidate prints
 # "deferred: <candidate> quota-unmeasured (<why>)" in listed order and is
 # selected only when no measured candidate passes every gate, with one
 # "unmeasured: <candidate> <why>" line before the reviewer line so the
@@ -56,10 +66,10 @@
 # "skipped: <candidate> <reason>" with reason author, needs-approval, or
 # quota-ineligible, in listed order. A selection then prints
 # "reviewer: <harness> <model>" and exits 0. When no candidate passes every
-# gate, the same skipped lines print followed by one truthful
-# "park: no eligible reviewer (...)" line naming each candidate and its reason,
-# and the script exits 1: park only when nothing is eligible or unexhausted,
-# never a silent retry in place. Usage and snapshot errors print "error: ..."
+# gate and no unmeasured candidate remains, the same skipped lines print
+# followed by one truthful "park: no eligible reviewer (...)" line naming
+# each candidate and its reason, and the script exits 1: park only when
+# nothing is eligible or unexhausted, never a silent retry in place. Usage and snapshot errors print "error: ..."
 # on stderr and exit 2; a rejected snapshot aborts as an error and is never
 # reported as a park.
 #
@@ -141,6 +151,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$AUTHOR" ] || die "--author <harness:model> is required"
+[ -n "$SNAPSHOT_SOURCE" ] || die "--snapshot <path> is required"
 [ "${#CANDIDATES[@]}" -gt 0 ] || die "no candidates supplied"
 
 # pin_of <candidate> prints the harness:model part; provider_of prints the
@@ -153,18 +164,23 @@ provider_of() {
   esac
 }
 
-# A pin is <harness>:<model> with an explicit model: a reviewer pin names
-# both, so unlike bin/fm-quota-choose.sh a bare harness is rejected. Reject
-# empty parts and characters that cannot form a safe token, using the same
-# token alphabet as that helper. A declared provider must match the
-# crew-dispatch provider id pattern.
+# A pin is <harness>[:<model>]: a bare harness is a profile with no model,
+# as bin/fm-quota-choose.sh accepts it, while "harness:" with an empty model
+# is malformed. Reject empty parts and characters that cannot form a safe
+# token, using the same token alphabet as that helper. The author must name
+# its model. A declared provider must match the crew-dispatch provider id
+# pattern.
 valid_pin() {
   case "$1" in
-    ''|:*|*[!A-Za-z0-9._/:-]*) return 1 ;;
+    ''|:*|*:|*[!A-Za-z0-9._/:-]*) return 1 ;;
   esac
-  [ "${1%%:*}" != "$1" ] || return 1
-  [ -n "${1#*:}" ] || return 1
   return 0
+}
+pin_model() {
+  case "$1" in
+    *:*) printf '%s\n' "${1#*:}" ;;
+    *) printf '\n' ;;
+  esac
 }
 valid_provider() {
   case "$1" in
@@ -173,7 +189,7 @@ valid_provider() {
   return 0
 }
 
-valid_pin "$AUTHOR" || die "invalid author: $AUTHOR"
+valid_pin "$AUTHOR" && [ -n "$(pin_model "$AUTHOR")" ] || die "invalid author: $AUTHOR"
 for c in "${CANDIDATES[@]}"; do
   case "$c" in
     *@*@*) die "invalid candidate: $c" ;;
@@ -190,25 +206,16 @@ for c in "$AUTHOR" "${CANDIDATES[@]}" "${NEEDS_APPROVAL[@]}" "${APPROVED[@]}"; d
   fm_control_harness_supported "${pin%%:*}" || die "unknown harness: ${pin%%:*}"
 done
 
-# Materialize the snapshot once so single-candidate probes below all read the
-# same quota state without consuming stdin more than once.
-SNAPSHOT_FILE=
-if [ -n "$SNAPSHOT_SOURCE" ]; then
-  [ -f "$SNAPSHOT_SOURCE" ] && [ ! -L "$SNAPSHOT_SOURCE" ] || die "snapshot is not a regular file: $SNAPSHOT_SOURCE"
-  SNAPSHOT_FILE=$SNAPSHOT_SOURCE
-else
-  [ ! -t 0 ] || die "quota snapshot is required on stdin or with --snapshot"
-  SNAPSHOT_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-reviewer-choose.XXXXXX") || die "could not create temporary snapshot file"
-  trap 'rm -f "$SNAPSHOT_FILE"' EXIT INT TERM
-  cat > "$SNAPSHOT_FILE" || die "cannot read quota snapshot from stdin"
-fi
-[ -s "$SNAPSHOT_FILE" ] || die "empty quota snapshot"
+[ -f "$SNAPSHOT_SOURCE" ] && [ ! -L "$SNAPSHOT_SOURCE" ] || die "snapshot is not a regular file: $SNAPSHOT_SOURCE"
+[ -s "$SNAPSHOT_SOURCE" ] || die "empty quota snapshot"
+QUOTA_JSON=$(fm_quota_snapshot_json < "$SNAPSHOT_SOURCE") || die "quota snapshot rejected: $QUOTA_JSON"
 
 # model_identity <harness:model> prints the underlying-model comparison key
 # used by the non-author gate: the model with a leading "model:" scope prefix
 # and any vendor path prefix removed, lowercased, harness dropped.
 model_identity() {
-  local rest=${1#*:}
+  local rest
+  rest=$(pin_model "$1")
   rest=${rest#model:}
   rest=${rest##*/}
   printf '%s\n' "$rest" | tr '[:upper:]' '[:lower:]'
@@ -217,12 +224,26 @@ model_identity() {
 # pin_key <harness:model> prints the approval comparison key: the exact pin
 # with only a leading "model:" scope prefix removed.
 pin_key() {
-  local harness=${1%%:*} rest=${1#*:}
+  local harness=${1%%:*} rest
+  rest=$(pin_model "$1")
   rest=${rest#model:}
   printf '%s:%s\n' "$harness" "$rest"
 }
 
 AUTHOR_IDENTITY=$(model_identity "$AUTHOR")
+AUTHOR_HARNESS=${AUTHOR%%:*}
+
+# is_author <harness:model or harness> fails closed: a candidate with an
+# unknown default model is the author whenever it runs on the author's harness.
+is_author() {
+  local model
+  model=$(pin_model "$1")
+  if [ -z "$model" ]; then
+    [ "${1%%:*}" = "$AUTHOR_HARNESS" ]
+  else
+    [ "$(model_identity "$1")" = "$AUTHOR_IDENTITY" ]
+  fi
+}
 
 in_list() {  # <pin key> <entries...>
   local want=$1
@@ -248,14 +269,15 @@ probe_harness_for_provider() {
   return 1
 }
 
-# probe_target <candidate> prints the harness:model the chooser is probed with,
-# or prints a reason on failure when the candidate's quota is unmeasurable.
+# probe_target <candidate> prints the harness[:model] the chooser is probed
+# with, or prints a reason on failure when the candidate's quota is
+# unmeasurable before any probe.
 probe_target() {
   local pin provider harness model family probe_harness
   pin=$(pin_of "$1")
   provider=$(provider_of "$1")
   harness=${pin%%:*}
-  model=${pin#*:}
+  model=$(pin_model "$pin")
   if [ -z "$provider" ]; then
     if fm_quota_provider_for_harness "$harness" "$model" >/dev/null; then
       printf '%s\n' "$pin"
@@ -273,7 +295,11 @@ probe_target() {
     return 0
   fi
   if probe_harness=$(probe_harness_for_provider "$provider"); then
-    printf '%s:%s\n' "$probe_harness" "${model##*/}"
+    if [ -n "$model" ]; then
+      printf '%s:%s\n' "$probe_harness" "${model##*/}"
+    else
+      printf '%s\n' "$probe_harness"
+    fi
     return 0
   fi
   printf 'provider %s has no quota-axi provider mapping\n' "$provider"
@@ -282,42 +308,58 @@ probe_target() {
 
 [ -x "$CHOOSE" ] || die "quota chooser not executable: $CHOOSE"
 
+# unmeasured_reason <probe target> prints why a failed chooser probe carries
+# no measured evidence, or nothing when the probe failed on measured
+# exhaustion. It applies the same provider/scope rule the chooser applied.
+unmeasured_reason() {
+  local harness=${1%%:*} model provider scope_model status
+  model=$(pin_model "$1")
+  provider=$(fm_quota_provider_for_harness "$harness" "$model") || return 0
+  scope_model=${model:-default}
+  [ "$harness" != omp ] || scope_model=${model#*/}
+  status=$(printf '%s\n' "$QUOTA_JSON" \
+    | fm_quota_effective_for_provider_model "$provider" "$scope_model" \
+    | jq -r 'if (.runway.status // "") == "exhausted_now" then "exhausted" else (.status // "unknown") end')
+  [ "$status" = unknown ] || return 0
+  printf 'provider %s exposes no measured quota for %s\n' "$provider" "$scope_model"
+}
+
 SKIPPED=()
 SKIP_REASONS=()
 DEFERRED=()
 DEFERRED_WHY=()
-probe_err=
 selected=
 
 for c in "${CANDIDATES[@]}"; do
   pin=$(pin_of "$c")
   key=$(pin_key "$pin")
   reason=
-  if [ "$(model_identity "$pin")" = "$AUTHOR_IDENTITY" ]; then
+  why=
+  if is_author "$pin"; then
     reason=author
   elif in_list "$key" "${NEEDS_APPROVAL[@]}" && ! in_list "$key" "${APPROVED[@]}"; then
     reason=needs-approval
   elif ! target=$(probe_target "$c"); then
-    DEFERRED+=("$c")
-    DEFERRED_WHY+=("$target")
-    printf 'deferred: %s quota-unmeasured (%s)\n' "$c" "$target"
-    continue
+    why=$target
+  elif probe_out=$("$CHOOSE" --snapshot "$SNAPSHOT_SOURCE" --candidate "$target" 2>&1); then
+    selected="${pin%%:*} $(pin_model "$pin")"
+    selected=${selected% }
+    [ -n "$(pin_model "$pin")" ] || selected="$selected default"
+    break
   else
-    probe_err_file=$(mktemp "${TMPDIR:-/tmp}/fm-reviewer-choose-probe.XXXXXX") || die "could not create temporary probe file"
-    if "$CHOOSE" --snapshot "$SNAPSHOT_FILE" --candidate "$target" >/dev/null 2>"$probe_err_file"; then
-      rm -f "$probe_err_file"
-      selected="${pin%%:*} ${pin#*:}"
-      break
-    else
-      rc=$?
-      probe_err=$(cat -- "$probe_err_file")
-      rm -f "$probe_err_file"
-      if [ "$rc" -eq 2 ]; then
-        printf 'error: quota snapshot rejected for %s: %s\n' "$c" "$probe_err" >&2
-        exit 2
-      fi
-      reason=quota-ineligible
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+      printf 'error: quota snapshot rejected for %s: %s\n' "$c" "$probe_out" >&2
+      exit 2
     fi
+    why=$(unmeasured_reason "$target")
+    [ -n "$why" ] || reason=quota-ineligible
+  fi
+  if [ -n "$why" ]; then
+    DEFERRED+=("$c")
+    DEFERRED_WHY+=("$why")
+    printf 'deferred: %s quota-unmeasured (%s)\n' "$c" "$why"
+    continue
   fi
   SKIPPED+=("$c")
   SKIP_REASONS+=("$reason")
@@ -338,7 +380,9 @@ unmeasured=
 if [ -z "$selected" ] && [ "${#DEFERRED[@]}" -gt 0 ]; then
   unmeasured=${DEFERRED[0]}
   pin=$(pin_of "$unmeasured")
-  selected="${pin%%:*} ${pin#*:}"
+  selected="${pin%%:*} $(pin_model "$pin")"
+  selected=${selected% }
+  [ -n "$(pin_model "$pin")" ] || selected="$selected default"
   printf 'unmeasured: %s %s\n' "$unmeasured" "${DEFERRED_WHY[0]}"
 fi
 
