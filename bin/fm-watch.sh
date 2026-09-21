@@ -6,7 +6,10 @@
 # is absorbed only when the crew shows it is still working through an actively
 # running no-mistakes step or a backend busy signal. A home that opts in with
 # config/turnend-churn-absorb lets a bare turn-end also use bounded pane churn
-# since the previous poll. Every other no-verb wake surfaces, so a crew
+# since the previous poll. A repeated bare turn-end whose task status has not
+# changed since that turn-end last surfaced is coalesced by default
+# (signal_turnend_nochange_coalesced) until TURNEND_CHURN_ABSORB_SECS or a new
+# status event. Every other no-verb wake surfaces, so a crew
 # that finishes (or stops and waits) is never silently swallowed. A declared wait,
 # either a paused: external wait or a verified captain-held transfer, is the
 # separate idle absorb case and re-surfaces only on its long bounded cadence,
@@ -241,6 +244,8 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 TURNEND_CHURN_ABSORB_SECS=${FM_TURNEND_CHURN_ABSORB_SECS:-900}  # longest a task's
                                       # bare turn-ends may be deferred on pane-churn
                                       # evidence alone (signal_turnend_panes_churned)
+                                      # or on no-change coalescing
+                                      # (signal_turnend_nochange_coalesced)
 # Busy state is decided by the semantic contract in bin/fm-busy-lib.sh, which
 # is the single owner of per-harness sources, source attribution, and the one
 # remaining rendered-text fallback (Grok only).
@@ -703,6 +708,69 @@ signal_turnend_panes_churned() {  # <file> ...
       done
       return 1
     fi
+  done
+  return 0
+}
+
+# signal_turnend_nochange_coalesced: 0 (benign/absorb) when EVERY file in a
+# bare turn-end "signal:" wake repeats an already-surfaced no-change turn-end:
+# each task's status-log signature still matches the one recorded when that
+# task's turn-end last surfaced, and that surfacing is younger than
+# TURNEND_CHURN_ABSORB_SECS. 1 otherwise (surface): the first sight, a changed
+# status signature, an elapsed bound (bounded periodic liveness), a batch that
+# is not bare turn-ends, a secondmate task, an unreadable signature, and either
+# away posture.
+#
+# This is the default-on coalescing for harnesses whose every inner turn
+# boundary touches state/<id>.turn-ended (Pi/omp turn_end fires per LLM
+# response plus its tool calls): without it each boundary surfaces a wake and
+# invokes the supervision model, which finds no status change and renders a
+# no-change note every POLL+SIGNAL_GRACE. The first idle turn-end still surfaces
+# (the swallowed-finish fix), a new status append still surfaces (the batch is
+# no longer bare, or the signature moved), and the bound still re-surfaces, so
+# supervision is coalesced, never disabled. The stale pane backbone keeps its
+# own classification untouched, so a genuinely stopped worker behind an
+# absorbed repeat still surfaces through ordinary staleness.
+# Marker: $STATE/.turnend-nochange-<task> holding "<status-sig> <epoch>".
+# Pure decision: the caller records the marker on its surface path, so a wake
+# that another absorb class (provably-working, pane churn) also absorbs does
+# not consume the coalescing budget.
+signal_turnend_nochange_coalesced() {  # <file> ...
+  local f base task sig marker recorded recorded_sig recorded_at now age
+  [ "$#" -gt 0 ] || return 1
+  afk_present && return 1
+  afk_record_present && return 1
+  case "$TURNEND_CHURN_ABSORB_SECS" in ''|*[!0-9]*|0) return 1 ;; esac
+  for f in "$@"; do
+    base=${f##*/}
+    case "$base" in
+      *.turn-ended) task=${base%.turn-ended} ;;
+      *) return 1 ;;
+    esac
+    [ -n "$task" ] || return 1
+    case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    if [ "$(grep '^kind=' "$STATE/$task.meta" 2>/dev/null | tail -1 | cut -d= -f2-)" = secondmate ]; then
+      return 1
+    fi
+    if [ -e "$STATE/$task.status" ] || [ -L "$STATE/$task.status" ]; then
+      sig=$(fm_wake_signal_sig "$STATE/$task.status") || return 1
+    else
+      sig="absent"
+    fi
+    [ -n "$sig" ] || return 1
+    marker="$STATE/.turnend-nochange-$task"
+    recorded=$(cat "$marker" 2>/dev/null) || return 1
+    case "$recorded" in *" "*) ;; *) return 1 ;; esac
+    recorded_sig=${recorded%% *}
+    recorded_at=${recorded#* }
+    [ -n "$recorded_sig" ] || return 1
+    case "$recorded_at" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$recorded_sig" = "$sig" ] || return 1
+    now=$(date +%s)
+    case "$now" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$now" -ge "$recorded_at" ] || return 1
+    age=$((now - recorded_at))
+    [ "$age" -lt "$TURNEND_CHURN_ABSORB_SECS" ] || return 1
   done
   return 0
 }
@@ -2522,13 +2590,13 @@ EOF
     # (signal_turnend_panes_churned) - the only proof available to a harness whose
     # busy state has no verified semantic source, bounded so it cannot defer that
     # task's turn-ends forever. Absorb stays evidence-driven: with neither proof the
-    # wake surfaces exactly as before.
-    # Actionable -> enqueue, advance .seen-* markers, exit. Benign (a no-verb wake
-    # whose crew is still executing) in always-on mode -> advance the markers so it
-    # will not re-fire, log, and keep blocking without enqueuing. Both evidence
+    # wake surfaces exactly as before. The no-change coalescing check runs first:
+    # it is file reads only, so a repeated bare turn-end absorbs without paying
+    # the costlier current-state read or pane capture below. Both evidence
     # checks are costly (a bounded no-mistakes call, then a pane capture), so the ||
     # ordering evaluates them ONLY for a non-afk signal with no captain-relevant
-    # status span, and the capture only once the authoritative verdict comes up short.
+    # status span that no-change coalescing did not already absorb, and the
+    # capture only once the authoritative verdict comes up short.
     FM_SIGNAL_SURFACE_ENDPOINTS=''
     FM_SIGNAL_NEEDS_DECISION_FILES=''
     # shellcheck disable=SC2086  # $files is a space-separated status-path list (ids carry no spaces)
@@ -2546,7 +2614,7 @@ EOF
     # bin/fm-supervise-daemon.sh).
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
-      || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
+      || { ! signal_turnend_nochange_coalesced $files && ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
       while IFS=$(printf '\t') read -r sf sig f; do
         [ -n "$sf" ] || continue
         file_reason="$reason"
@@ -2579,6 +2647,33 @@ EOF
       done <<EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
+      # Default-on bare turn-end coalescing bookkeeping
+      # (signal_turnend_nochange_coalesced): a surfaced turn-end records its
+      # task's current status signature, so repeats with no status change
+      # absorb until the bound. Best-effort: a failed record only means the
+      # next repeat surfaces again. Skipped under either away posture, where
+      # the daemon/branch owns triage and markers must not cross postures.
+      if ! afk_present && ! afk_record_present; then
+        while IFS=$(printf '\t') read -r sf sig f; do
+          [ -n "$sf" ] || continue
+          case "$f" in *.turn-ended) ;; *) continue ;; esac
+          nc_task=${f##*/}; nc_task=${nc_task%.turn-ended}
+          case "$nc_task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+          if [ "$(grep '^kind=' "$STATE/$nc_task.meta" 2>/dev/null | tail -1 | cut -d= -f2-)" = secondmate ]; then
+            continue
+          fi
+          if [ -e "$STATE/$nc_task.status" ] || [ -L "$STATE/$nc_task.status" ]; then
+            nc_sig=$(fm_wake_signal_sig "$STATE/$nc_task.status") || continue
+          else
+            nc_sig="absent"
+          fi
+          [ -n "$nc_sig" ] || continue
+          printf '%s %s' "$nc_sig" "$(date +%s)" > "$STATE/.turnend-nochange-$nc_task" \
+            || triage_log "turn-end no-change marker unwritable for $nc_task"
+        done <<EOF
+$pending
+EOF
+      fi
       wake "$reason"
     else
       while IFS=$(printf '\t') read -r sf sig f; do

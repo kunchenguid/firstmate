@@ -759,6 +759,165 @@ test_turn_ended_not_working_surfaced() {
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
 }
 
+# --- repeated bare turn-ends with unchanged status: default-on coalescing -----
+# Harnesses that touch state/<id>.turn-ended on every inner turn boundary (Pi's
+# turn_end fires per LLM response plus its tool calls) surfaced one wake per
+# turn, and each wake invoked the supervision model for a no-change review that
+# rendered a visible note - about one every POLL+SIGNAL_GRACE. The first idle
+# turn-end still surfaces (the swallowed-finish fix above); a repeat with the
+# same task status absorbs in bash with no wake, no current-state read, and no
+# model invocation, until a new status event or the bound re-surfaces it.
+
+test_turn_ended_repeat_nochange_absorbed() {
+  local dir state fakebin out out2 drain_out pid marker reads
+  dir=$(make_case turn-ended-nochange-repeat); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; out2="$dir/watch2.out"; drain_out="$dir/drain.out"
+  printf 'working: compiling step 2\n' > "$state/task.status"
+  prime_status_seen "$state" "$state/task.status"
+  : > "$state/task.turn-ended"
+  # No running pipeline, no busy pane: the crew is idle between turns, so the
+  # first turn-end surfaces exactly as the swallowed-finish fix requires.
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  export FM_FAKE_CREW_STATE_LOG="$dir/crew-reads.log"
+  : > "$FM_FAKE_CREW_STATE_LOG"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface the first idle turn-end"
+  grep -F "signal: $state/task.turn-ended" "$out" >/dev/null || fail "watcher did not print the first turn-end signal"
+  marker="$state/.turnend-nochange-task"
+  [ -s "$marker" ] || { reap "$pid"; fail "surfaced turn-end did not record its no-change marker"; }
+  ack_stopped_cycle "$state" || { reap "$pid"; fail "drain acknowledgement after the first turn-end failed"; }
+  # The next inner turn boundary touches the marker again with no new status:
+  # the repeat must absorb without a wake and without another current-state
+  # read (the read is the costly half of triage; the model invocation behind a
+  # wake is the costly whole).
+  : > "$FM_FAKE_CREW_STATE_LOG"
+  : > "$state/task.turn-ended"
+  watch_bg "$state" "$fakebin" "$out2"
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "absorbed benign signal:" \
+    || { reap "$pid"; fail "a repeated turn-end with unchanged status was not coalesced: $(cat "$out2")"; }
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for a repeated no-change turn-end (should absorb)"
+  fi
+  [ ! -s "$out2" ] || fail "coalesced turn-end printed a wake reason: $(cat "$out2")"
+  [ ! -s "$state/.wake-queue" ] || fail "coalesced turn-end enqueued a durable wake record"
+  reads=$(wc -l < "$FM_FAKE_CREW_STATE_LOG")
+  [ "$reads" -eq 0 ] || { reap "$pid"; fail "coalesced turn-end spent $reads current-state reads before absorbing"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE FM_FAKE_CREW_STATE_LOG
+  pass "a repeated bare turn-end with unchanged status absorbs with no wake and no current-state read"
+}
+
+test_turn_ended_nochange_status_change_surfaces() {
+  local dir state fakebin out out2 drain_out pid
+  dir=$(make_case turn-ended-nochange-status); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; out2="$dir/watch2.out"; drain_out="$dir/drain.out"
+  printf 'working: compiling step 2\n' > "$state/task.status"
+  prime_status_seen "$state" "$state/task.status"
+  : > "$state/task.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface the first idle turn-end"
+  ack_stopped_cycle "$state" || { reap "$pid"; fail "drain acknowledgement after the first turn-end failed"; }
+  # A genuine authored append during the suppression window is content the
+  # supervisor may need to read: the next turn-end carries a changed status
+  # signature and must surface rather than ride the coalescing.
+  printf 'working: compiling step 3\n' >> "$state/task.status"
+  : > "$state/task.turn-ended"
+  watch_bg "$state" "$fakebin" "$out2"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "watcher did not surface a turn-end with changed status during suppression"; }
+  grep -F "signal:" "$out2" >/dev/null || { reap "$pid"; fail "changed-status turn-end did not print its signal wake"; }
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || { reap "$pid"; fail "drain after the changed-status turn-end failed"; }
+  grep "$(printf '\tsignal\t')" "$drain_out" >/dev/null || { reap "$pid"; fail "changed-status turn-end was not queued"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a turn-end with changed status during suppression still surfaces"
+}
+
+test_turn_ended_nochange_bound_resurfaces() {
+  local dir state fakebin out out2 drain_out pid marker sig
+  dir=$(make_case turn-ended-nochange-bound); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; out2="$dir/watch2.out"; drain_out="$dir/drain.out"
+  printf 'working: compiling step 2\n' > "$state/task.status"
+  prime_status_seen "$state" "$state/task.status"
+  : > "$state/task.turn-ended"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface the first idle turn-end"
+  ack_stopped_cycle "$state" || { reap "$pid"; fail "drain acknowledgement after the first turn-end failed"; }
+  # Age the coalescing marker past the bound: bounded periodic liveness means
+  # the next repeat re-surfaces instead of absorbing forever.
+  marker="$state/.turnend-nochange-task"
+  [ -s "$marker" ] || { reap "$pid"; fail "surfaced turn-end did not record its no-change marker"; }
+  sig=$(cat "$marker"); sig=${sig%% *}
+  printf '%s 1' "$sig" > "$marker"
+  : > "$state/task.turn-ended"
+  watch_bg "$state" "$fakebin" "$out2"
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "watcher did not re-surface a no-change turn-end past its bound"; }
+  grep -F "signal: $state/task.turn-ended" "$out2" >/dev/null || { reap "$pid"; fail "aged turn-end did not print its signal wake"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a no-change turn-end past its coalescing bound re-surfaces"
+}
+
+test_turn_ended_nochange_classifier() {
+  local dir state fakebin sig
+  dir=$(make_case turn-ended-nochange-classify); state="$dir/state"; fakebin="$dir/fakebin"
+  FM_STATE_OVERRIDE="$state"
+  FM_CONFIG_OVERRIDE="$(churn_config "$dir" off)"
+  FM_HOME="$dir"
+  FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE FM_HOME FM_CREW_STATE_BIN
+  # shellcheck disable=SC1090 # $WATCH is the repo's own watcher under test
+  . "$WATCH"
+  printf 'working: compiling step 2\n' > "$state/task.status"
+  sig=$(fm_wake_signal_sig "$state/task.status")
+  [ -n "$sig" ] || fail "could not read the status signature"
+  # No marker yet: first sight surfaces.
+  ! signal_turnend_nochange_coalesced "$state/task.turn-ended" \
+    || fail "a turn-end with no recorded surfacing was treated as coalescible"
+  # A fresh matching marker absorbs.
+  printf '%s %s' "$sig" "$(date +%s)" > "$state/.turnend-nochange-task"
+  signal_turnend_nochange_coalesced "$state/task.turn-ended" \
+    || fail "a repeated turn-end with unchanged status was not coalescible"
+  # A changed status signature surfaces.
+  printf 'working: compiling step 3\n' >> "$state/task.status"
+  ! signal_turnend_nochange_coalesced "$state/task.turn-ended" \
+    || fail "a turn-end with changed status was treated as coalescible"
+  printf 'working: compiling step 2\n' > "$state/task.status"
+  # An ancient marker surfaces (bounded liveness).
+  printf '%s 1' "$sig" > "$state/.turnend-nochange-task"
+  ! signal_turnend_nochange_coalesced "$state/task.turn-ended" \
+    || fail "a turn-end past its coalescing bound was treated as coalescible"
+  printf '%s %s' "$sig" "$(date +%s)" > "$state/.turnend-nochange-task"
+  # A malformed marker surfaces rather than absorbing on garbage.
+  printf 'bogus' > "$state/.turnend-nochange-task"
+  ! signal_turnend_nochange_coalesced "$state/task.turn-ended" \
+    || fail "a malformed no-change marker was treated as coalescible"
+  printf '%s %s' "$sig" "$(date +%s)" > "$state/.turnend-nochange-task"
+  # A batch carrying a status file is never bare and never coalesced.
+  ! signal_turnend_nochange_coalesced "$state/task.status" "$state/task.turn-ended" \
+    || fail "a status-bearing batch was treated as coalescible"
+  # A secondmate's bare turn-end keeps its own routing and never coalesces.
+  printf 'kind=secondmate\n' > "$state/sm.meta"
+  printf '%s %s' "absent" "$(date +%s)" > "$state/.turnend-nochange-sm"
+  : > "$state/sm.turn-ended"
+  ! signal_turnend_nochange_coalesced "$state/sm.turn-ended" \
+    || fail "a secondmate turn-end was treated as coalescible"
+  # Either away posture surfaces: the daemon/branch owns triage there.
+  : > "$state/.afk"
+  ! signal_turnend_nochange_coalesced "$state/task.turn-ended" \
+    || fail "a turn-end under the away flag was treated as coalescible"
+  rm -f "$state/.afk"
+  unset FM_STATE_OVERRIDE FM_CONFIG_OVERRIDE FM_HOME FM_CREW_STATE_BIN
+  pass "signal_turnend_nochange_coalesced absorbs only fresh matching repeats of bare turn-ends"
+}
+
 # --- bare turn-end, unverifiable harness: pane churn is the third proof --------
 # A harness whose semantic busy state has no verified source (codex) can never
 # report working, so the two proofs above are unreachable for it and EVERY worker
@@ -5960,6 +6119,10 @@ test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
+test_turn_ended_repeat_nochange_absorbed
+test_turn_ended_nochange_status_change_surfaces
+test_turn_ended_nochange_bound_resurfaces
+test_turn_ended_nochange_classifier
 test_turn_ended_churning_pane_absorbed
 test_turn_ended_churn_resets_prior_stale_classification
 test_turn_ended_churn_resets_wedge_state_before_stale_poll

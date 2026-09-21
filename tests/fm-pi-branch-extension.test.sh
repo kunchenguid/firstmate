@@ -1566,6 +1566,26 @@ if (taskRoutineMerge.message.display !== true) throw new Error("a task-scoped ro
 if (!taskRoutineMerge.message.content.startsWith("⛵ task-9: worker healthy, no action needed")) {
   throw new Error(`task-scoped routine note changed: ${taskRoutineMerge.message.content}`);
 }
+// A task-local wake handled with no change and no action reports silent and
+// stays out of the captain's transcript exactly like a no-change heartbeat.
+await heartbeatReport.execute(
+  "task-nochange",
+  { task: "task-9", verdict: "routine", summary: "turn ended, nothing changed", silent: true },
+  undefined,
+  undefined,
+  {},
+);
+const taskSilentMerge = sentToMain[sentToMain.length - 1];
+if (taskSilentMerge.message.display !== false) throw new Error("a silent task-scoped no-change outcome must not render");
+if (taskSilentMerge.options.triggerTurn) throw new Error("a silent task-scoped no-change outcome must not open a main turn");
+const storedTaskSilent = readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8")
+  .trim()
+  .split("\n")
+  .map((line) => JSON.parse(line))
+  .find((row) => row.task === "task-9" && row.summary === "turn ended, nothing changed");
+if (!storedTaskSilent || storedTaskSilent.verdict !== "routine" || storedTaskSilent.silent !== true) {
+  throw new Error("the silent task-scoped no-change disposition was not stored durably");
+}
 await heartbeatReport.execute(
   "heartbeat-finding",
   { task: "fleet", verdict: "captain", summary: "task-2 has been stuck for an hour" },
