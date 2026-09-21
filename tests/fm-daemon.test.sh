@@ -1332,6 +1332,23 @@ test_daemon_delivered_pr_health_keeps_wait_cadence() {
     [ "$(wc -l < "$state/.subsuper-escalations" | tr -d '[:space:]')" -eq 1 ] \
       || fail "a due daemon delivery recheck did not surface once"
     grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null && fail "a due delivery recheck was labeled a wedge"
+    : > "$state/.subsuper-escalations"
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing)'
+    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
+    housekeeping "$state"
+    [ ! -s "$state/.subsuper-escalations" ] || fail "a live post-delivery auto-fix raised an alert"
+    FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at fix_review: 1 finding(s) · run: rerun'
+    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
+    housekeeping "$state"
+    grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null \
+      || fail "a parked rerun hid behind the old delivery in daemon housekeeping"
+    grep -F 'awaiting maintainer' "$state/.subsuper-escalations" >/dev/null \
+      && fail "the daemon reported a worker-owned gate as an external wait"
+    : > "$state/.subsuper-escalations"
+    handle_wake "$reason" "$state"
+    grep -F 'possible wedge, escalation 3' "$state/.subsuper-escalations" >/dev/null \
+      || fail "the daemon absorbed an enriched wedge behind a parked rerun's old delivery"
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks passed'
     . "$ROOT/bin/fm-pr-lib.sh"
     fm_pr_poll_merge_mark_notified "$state" held-merge github github.com example/repo 7 \
       || fail "could not record the fixture's merge notification"
@@ -1341,7 +1358,7 @@ test_daemon_delivered_pr_health_keeps_wait_cadence() {
     grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null \
       || fail "a reported merge kept suppressing the daemon wedge timer"
   ) || fail "daemon delivered-PR health regression failed"
-  pass "daemon delivery evidence bounds rechecks across green CI and expires after a reported merge"
+  pass "daemon delivery waits survive green CI, yield to a parked rerun, and expire after a reported merge"
 }
 
 test_housekeeping_persistent_stale_escalates() {

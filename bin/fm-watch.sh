@@ -1661,9 +1661,13 @@ captain_call_stale_bound() {  # <window-key> <task>
 # starts its own window and its first sight still alarms.
 # Sets STALE_WAIT_DECLARATION and returns as captain_call_stale_bound does.
 delivered_pr_stale_bound() {  # <window-key> <task>
-  local key=$1 task=$2
+  local key=$1 task=$2 evidence
   STALE_WAIT_DECLARATION=
-  STALE_WAIT_DECLARATION=$(crew_delivered_pr_wait "$task" "$STATE") || return 1
+  evidence=$(crew_readable_health "$task" "$STATE") || return 1
+  case "$evidence" in
+    delivered-pr:*) STALE_WAIT_DECLARATION=$evidence ;;
+    *) return 1 ;;
+  esac
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 

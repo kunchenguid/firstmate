@@ -3778,6 +3778,76 @@ test_stale_churn_without_a_captain_call_still_alarms() {
 # absorbed, and the window re-surfaces it. A later blocker on the same armed
 # delivery keeps alarming on every hash, while a live run-step stays absorbed.
 
+test_delivered_pr_rerun_parked_overrides_old_delivery() {
+  local dir state out capture key pane_hash verdict evidence
+  local window=test:fm-held-merge
+  local parked='state: parked · source: run-step · parked at fix_review: 1 finding(s) · run: rerun'
+  dir=$(make_case delivered-rerun-parked); state="$dir/state"
+  out="$dir/watch.out"; capture="$dir/pane.txt"; key=$(hold_key)
+  mkdir -p "$dir/config"
+  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/held-merge.meta"
+  printf 'done: PR https://github.com/example/repo/pull/7 checks green\n' > "$state/held-merge.status"
+  printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
+  arm_delivered_pr "$dir" || fail "could not arm the rerun delivery fixture"
+  printf 'delivered\n' > "$capture"
+  pane_hash=$(hash_text "$(cat "$capture")")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  FM_HOME="$dir" wedge_threshold_round "$state" "$dir/fakebin" "$out" "$capture" "$window" \
+    'state: done · source: run-step · checks passed' exit \
+    || fail "the initial delivery did not surface"
+  [ -s "$state/.paused-resurfaced-$key" ] || fail "the initial delivery did not record its wait cadence"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the initial delivery"
+
+  : > "$out"
+  printf 'CI rerun\n' > "$capture"
+  pane_hash=$(hash_text "$(cat "$capture")")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  FM_TEST_STALE_ESCALATE=999 FM_HOME="$dir" wedge_threshold_round \
+    "$state" "$dir/fakebin" "$out" "$capture" "$window" \
+    'state: working · source: run-step · validating (running)' absorb \
+    || fail "a live rerun after delivery raised a stale alert"
+  [ ! -s "$out" ] || fail "a live rerun printed a wake"
+  [ -s "$state/.stale-since-$key" ] || fail "the rerun did not start its stale timer"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the live rerun watcher stop"
+
+  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
+  FM_TEST_STALE_ESCALATE=240 FM_HOME="$dir" wedge_threshold_round \
+    "$state" "$dir/fakebin" "$out" "$capture" "$window" "$parked" exit \
+    || fail "a worker-owned parked gate remained hidden behind the old delivery"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "a rerun parked on the unchanged pane did not wedge-escalate: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the parked rerun escalation"
+
+  : > "$out"
+  printf 'parked gate, elapsed 1s\n' > "$capture"
+  printf '%s' "$(hash_text "$(cat "$capture")")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  FM_HOME="$dir" wedge_threshold_round "$state" "$dir/fakebin" "$out" "$capture" "$window" "$parked" exit \
+    || fail "a new pane hash bypassed current-run precedence and absorbed the parked gate"
+  [ "$(hold_stale_wakes "$state")" -eq 1 ] || fail "the parked new hash did not queue one stale alert"
+  grep -F 'awaiting maintainer' "$out" >/dev/null && fail "a parked new hash claimed an external wait"
+
+  for verdict in "$parked" \
+    'state: parked · source: run-step · parked at awaiting_approval' \
+    'state: failed · source: run-step · run failed' \
+    'state: failed · source: run-step · run cancelled' \
+    'state: unknown · source: run-step · run state unavailable'; do
+    if evidence=$(FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE="$verdict" \
+      crew_readable_health held-merge "$state"); then
+      fail "current run evidence admitted a stale delivery proxy: $verdict -> $evidence"
+    fi
+  done
+  for verdict in 'state: working · source: run-step · validating (running)' \
+    'state: working · source: run-step · validating (fixing)'; do
+    evidence=$(FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE="$verdict" \
+      crew_readable_health held-merge "$state") || fail "a live rerun lost its work evidence"
+    [ "$evidence" = run-step ] || fail "a live rerun was misclassified as a delivered-PR wait"
+  done
+  pass "a delivered PR that reruns and parks escalates on existing timers and new hashes; current run evidence wins"
+}
+
 test_delivered_pr_awaiting_maintainer_bounds_stale_churn() {
   local dir state out capture throttle wakes key pane_hash pid
   command -v tasks-axi >/dev/null 2>&1 \
@@ -6291,6 +6361,7 @@ test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_delivered_pr_awaiting_maintainer_bounds_stale_churn
+test_delivered_pr_rerun_parked_overrides_old_delivery
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
 test_secondmate_paused_resurfaces_in_normal_mode

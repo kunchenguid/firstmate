@@ -19,7 +19,10 @@ A secondmate reaches the stale path only for a wait declared in its status line,
 Reaching that case would require consulting the backlog for windows the secondmate gate deliberately skips, putting backlog reads on the ordinary poll hot path this design preserves.
 `crew_readable_health` in `bin/fm-classify-lib.sh` owns the health predicate used at every watcher and daemon wedge boundary, including already-running timers and enriched wedge handoffs.
 It re-reads the existing crew-state verdict: `working` from `run-step` restarts the existing stale timer without a wedge alarm or escalation count.
-Otherwise it checks the authenticated delivered-PR wait described above through `crew_delivered_pr_wait`; that evidence keeps the timer rechecking while the existing `.paused-resurfaced-*` throttle limits maintainer-wait reminders to `FM_PAUSE_RESURFACE_SECS`, even when CI finishes without changing the pane.
+Readable current run-step evidence takes precedence over the delivery record: only the reader's finished `done` verdict permits delivery-wait fallback; parked, failed, cancelled, and other non-finished run verdicts cannot use an old `done:` line and merge watch to claim an external wait.
+Running and fixing steps retain their live `working` protection, without claiming a delivered-PR wait.
+With a finished run or no readable current run evidence, the predicate checks the authenticated delivered-PR wait described above; that evidence keeps the timer rechecking while the existing `.paused-resurfaced-*` throttle limits maintainer-wait reminders to `FM_PAUSE_RESURFACE_SECS`, even when CI finishes without changing the pane.
+New-hash delivery checks use this same predicate, so they cannot bypass current-run precedence.
 Both supervisors use the same delivery identity and status signature for that throttle.
 There is no new liveness source, classification, bound, or state file: when neither proof reads healthy, the existing wedge checks resume at the next threshold, while an indeterminate first sight still surfaces immediately.
 Repeated wedge escalations on the same unchanged pane add an escalation count to the wake reason and, at `FM_WEDGE_DEMAND_INSPECT_COUNT`, a `demand-deep-inspection` marker.
