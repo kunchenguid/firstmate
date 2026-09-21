@@ -80,7 +80,14 @@ export FM_HOME FM_STATE_OVERRIDE="$STATE"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
+COMMAND=${1:-}
 fail() { printf 'fm-contributions: %s\n' "$*" >&2; exit 1; }
+input_fail() {
+  if [ "$COMMAND" = poll ]; then
+    printf 'contributions: %s\n' "$*"
+  fi
+  fail "$*"
+}
 usage() { sed -n '2,/^set -eu$/s/^# \{0,1\}//p' "$0"; }
 case "${1:-}" in -h|--help) usage; exit 0 ;; esac
 command -v jq >/dev/null 2>&1 || fail 'jq is required to measure contribution coverage'
@@ -130,14 +137,19 @@ read_saved() {
   jq -s . "$TMP/saved.jsonl" > "$TMP/saved.json"
 }
 
+validate_input() {
+  [ -f "$1" ] && [ -r "$1" ] || input_fail 'contribution snapshot unavailable'
+  [ -s "$1" ] || input_fail 'contribution snapshot was empty'
+  jq -e -s 'length == 1 and (.[0] | type == "object" and (.backlog | type == "object") and (.tasks | type == "array"))' \
+    "$1" >/dev/null \
+    || input_fail 'contribution snapshot was invalid'
+}
+
 get_input() {
   if ! "$SCRIPT_DIR/fm-fleet-snapshot.sh" --contribution-input > "$TMP/input.json"; then
-    fail 'contribution snapshot unavailable'
+    input_fail 'contribution snapshot unavailable'
   fi
-  [ -s "$TMP/input.json" ] || fail 'contribution snapshot was empty'
-  jq -e -s 'length == 1 and (.[0] | type == "object" and (.backlog | type == "object") and (.tasks | type == "array"))' \
-    "$TMP/input.json" >/dev/null \
-    || fail 'contribution snapshot was invalid'
+  validate_input "$TMP/input.json"
 }
 
 project() {
@@ -421,6 +433,7 @@ arm() {
 case "${1:-}" in
   snapshot)
     [ "$#" -ge 2 ] && [ "$#" -le 3 ] || fail 'snapshot needs canonical input'
+    validate_input "$2"
     read_saved
     project "$2" "${3:-}"
     ;;
