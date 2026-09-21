@@ -27,13 +27,22 @@ While supervision is still needed and away mode remains inactive, an actionable 
 ## Actionable wake ordering
 
 After an actionable Pi, omp, or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.
-It confirms the handling handoff against that successor before scheduling the follow-up, retries once against the current generation and successor, and treats a failed confirmation as a restoration failure: it classifies the error, retires a successor that is no longer alive, and surfaces exactly one typed message.
+It confirms the handling handoff against that successor before scheduling the follow-up and retries a rejected confirmation once against the current generation and successor.
+Pi and OpenCode retain a live successor after rejected confirmation; if it has died, they confirm retirement and attempt one further bounded restoration before delivering the wake with the accumulated typed failure details.
+Pi routes that failure-bearing wake to main even if the replacement succeeds.
+omp retires a dead successor and delivers the confirmation failure without that additional restoration attempt.
 A failed confirmation is never swallowed.
 It waits at most one readiness timeout per attempt, then sends TERM and waits a bounded retirement confirmation before the next lock-verified exponential retry.
 If the unready arm does not retire within that bound, the adapter keeps ownership, starts no overlapping retry, and delivers the typed fallback immediately.
 When that retained arm later closes, its actual close is classified as a new supervised event without replaying the earlier fallback.
 After the configured retry bound is exhausted, it delivers the original wake with a typed continuity-restoration failure even if every successor arm hung without reporting readiness.
 This is deliberate Option B ordering: the fleet is protected before the model handles the wake whenever restoration succeeds, but the model is never left blind when it does not.
+OpenCode merges closes that arrive during restoration or wake delivery into one pending slot, with actionable closes taking priority over failures.
+After delivery settles, an actionable slot takes the restore-then-deliver path; a failure-only slot schedules a retry only when no child, retry, or restoration already owns continuity.
+Merged notifications point to the durable queue, where `bin/fm-wake-drain.sh` handles the queued rows.
+In OpenCode, a close from an arm the in-flight restoration already retired is owned by that restoration and never re-enters the slot, while a close that arrives after restoration settles follows the normal path even when its arm was retired earlier.
+Pi retains each actionable close in its existing queue, carries pending wakes across session replacement, and defers a verified successor failure until the active delivery settles.
+A Pi or OpenCode repair call that lands mid-restoration reports the in-flight restoration and starts nothing.
 
 Claude's Stop hook starts the successor arm at the next Stop after the handling turn, rather than before notification as Pi, omp, and OpenCode do.
 The durable wake queue preserves actionable events during the residual active-turn window, and the bounded turn-end guard enforces recovery at Stop when no watcher is live and no open generation claim is still deciding, so a finished, hung, or identity-mismatched claim cannot suppress it ([`turnend-guard.md`](turnend-guard.md#harness-integrations) owns that boundary).
@@ -116,6 +125,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 
 `tests/fm-pi-watch-extension.test.sh` checks Pi's first-cycle-or-explicit-repair tool metadata and ownership-based redundant-call no-ops, then simulates actionable and empty child closes against the actual Pi and OpenCode close handlers, blocks prompt delivery to prove the successor launches first, verifies single-flight behavior, changes the session lock before close to prove ownership is rechecked, and hangs each successor arm to prove bounded fallback delivery includes the typed restoration failure.
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, `/fork`, and reload, same-instance shutdown-plus-start, automatic re-arm before any model turn, a fresh extension-module rebind carrying all in-flight actionable closes exactly once, stale prior-generation callbacks, repeated transitions with exactly one live cycle, disappearance of the shutting-down refusal after a valid replacement activates, and terminal quit still refusing late rearm.
+The same suite churns a second actionable close into a slow delivery to prove the merged wake still lands with exactly one live successor, rejects every handling confirmation while the successor dies to prove continuity still converges, kills the successor mid-delivery to prove a repair call is a duplicate-free no-op, replaces the session mid-restoration to prove the dead generation stays silent while the replacement arms cleanly, and mirrors the churn case against the actual OpenCode plugin.
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
