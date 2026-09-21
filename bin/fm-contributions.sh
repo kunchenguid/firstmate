@@ -41,8 +41,9 @@
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. A read that crosses its
 # own five-second slice while budget still remains is slow and unmeasured too:
-# its records stay untouched and it is observed first on the next poll, never
-# reported as an unreachable forge. Each distinct URL is observed once per poll
+# its records stay untouched and it yields to URLs that have not recently been
+# slow, never reported as an unreachable forge. Each distinct URL is observed
+# once per poll
 # and applied to every owner. A final observation applies to every owner without
 # another forge read. When the budget runs out mid-observation, the poll ends
 # with that URL's records untouched; only a genuine forge failure or head change
@@ -332,18 +333,56 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
   done
 }
 
+read_slow() {
+  local file="$STATE/.contributions-slow.json"
+  if [ -f "$file" ] && [ ! -L "$file" ] \
+    && jq -e 'type == "object" and all(.[]; type == "number")' "$file" >/dev/null 2>&1; then
+    cp "$file" "$TMP/slow.json"
+  else
+    printf '{}\n' > "$TMP/slow.json"
+  fi
+}
+
+mark_slow() { # url
+  jq --arg url "$1" '.[$url] = ((.[$url] // 0) + 1)' "$TMP/slow.json" > "$TMP/slow.next.json"
+  mv -- "$TMP/slow.next.json" "$TMP/slow.json"
+}
+
+clear_slow() { # url
+  jq --arg url "$1" 'del(.[$url])' "$TMP/slow.json" > "$TMP/slow.next.json"
+  mv -- "$TMP/slow.next.json" "$TMP/slow.json"
+}
+
+write_slow() { # keep only URLs still owned, so the slow cursor cannot grow forever
+  local device staged
+  cut -f1 "$TMP/known.tsv" | sort -u > "$TMP/known-urls"
+  jq -R -s 'split("\n") | map(select(length > 0))' "$TMP/known-urls" > "$TMP/known-urls.json"
+  device=$(fm_pr_file_device "$STATE")
+  fm_pr_regular_destination_on_device_or_absent "$STATE/.contributions-slow.json" "$device" || fail 'unsafe slow-attempt destination'
+  staged=$(umask 077; mktemp "$STATE/.contributions-slow.XXXXXX")
+  jq --slurpfile known "$TMP/known-urls.json" \
+    'with_entries(select(.key as $k | ($known[0] | index($k))))' "$TMP/slow.json" > "$staged"
+  chmod 600 "$staged"
+  fm_pr_regular_destination_on_device_or_absent "$STATE/.contributions-slow.json" "$device" || fail 'slow-attempt destination changed'
+  mv -f -- "$staged" "$STATE/.contributions-slow.json"
+}
+
 poll() {
   local task url old kind error observed
   local -a row
   acquire
   get_input
   read_saved
+  read_slow
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
-  # One line per distinct URL: the URL, then every owning task.
-  jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .checked_at] | first // "")})
-    | group_by(.url) | map({url:.[0].url,at:(map(.at) | min),tasks:(map(.task) | unique)})
-    | sort_by(.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
+  # One line per distinct URL: the URL, then every owning task. URLs whose read
+  # was slow most recently sort behind URLs that have not been slow, so a
+  # persistently slow read cannot pin the head of the queue.
+  jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" \
+    --slurpfile slow "$TMP/slow.json" '
+    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .checked_at] | first // ""),slow:($slow[0][$k.url] // 0)})
+    | group_by(.url) | map({url:.[0].url,at:(map(.at) | min),slow:(map(.slow) | max),tasks:(map(.task) | unique)})
+    | sort_by(.slow,.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
   OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
   BUDGET_EXHAUSTED=0
@@ -364,12 +403,14 @@ poll() {
     # every owner's prior record so the URL is observed first next poll.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
     # A read that crossed its own five-second slice while budget remained is
-    # slow, not an unreachable forge: keep every owner's prior record so the URL
-    # is observed first next poll, and never wake for it.
+    # slow, not an unreachable forge: keep every owner's prior record, push the
+    # URL behind URLs that have not been slow, and never wake for it.
     if [ "$observed" -ne 0 ] && [ ! -e "$TMP/forge-unavailable" ] \
       && [ -e "$TMP/forge-slow" ]; then
+      mark_slow "$url"
       continue
     fi
+    clear_slow "$url"
     # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
       'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
@@ -401,6 +442,7 @@ poll() {
       publish_pending "$task" "$url" "$TMP/row.json"
     done
   done < "$TMP/known.tsv"
+  write_slow
 }
 
 arm() {
