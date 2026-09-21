@@ -401,8 +401,9 @@ test_recorded_worktree_is_reused_with_its_work() {
   recorded_wt=$(sed -n 's/^worktree=//p' "$HOME_DIR/state/$id.meta")
   [ "$(cd "$recorded_wt" && pwd -P)" = "$(cd "$WT_DIR" && pwd -P)" ] \
     || fail "respawn record names worktree '$recorded_wt', expected the worktree it already held, '$WT_DIR'"
-  [ -f "$WT_DIR/work.txt" ] && grep -q 'edited by the worker' "$WT_DIR/README.md" \
-    || fail "the respawn discarded the unlanded work in the task's own worktree"
+  if ! { [ -f "$WT_DIR/work.txt" ] && grep -q 'edited by the worker' "$WT_DIR/README.md"; }; then
+    fail "the respawn discarded the unlanded work in the task's own worktree"
+  fi
   leases=$(grep -c -- '--lease --lease-holder' "$CASE_DIR/treehouse.log" || true)
   [ "$leases" = 1 ] \
     || fail "the respawn leased a second pool slot ($leases leases) instead of reusing the one $id already held"
@@ -431,8 +432,9 @@ test_aborted_reuse_keeps_its_worktree_and_work() {
   out=$(FM_FAKE_HERDR_SEND_FAIL=1 run_herdr_spawn "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "a respawn whose launch delivery fails should not report success"$'\n'"$out"
-  [ -f "$WT_DIR/work.txt" ] && grep -q 'edited by the worker' "$WT_DIR/README.md" \
-    || fail "the aborted respawn discarded the unlanded work in the worktree it had only reused"
+  if ! { [ -f "$WT_DIR/work.txt" ] && grep -q 'edited by the worker' "$WT_DIR/README.md"; }; then
+    fail "the aborted respawn discarded the unlanded work in the worktree it had only reused"
+  fi
   if grep -q -- "return --force --if-lease-holder fm-$id $WT_DIR" "$CASE_DIR/treehouse.log"; then
     fail "the aborted respawn force-returned the slot it reused; teardown owns that slot's return"
   fi
