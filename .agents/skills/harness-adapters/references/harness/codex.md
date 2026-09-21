@@ -40,7 +40,7 @@ This is why `$no-mistakes` reaches a Codex worker instead of being consumed by t
 
 ## Primary integration
 
-The primary integration was verified on 2026-07-08 with codex-cli 0.142.1.
+[`docs/verification/supervision.md`](../../../../../docs/verification/supervision.md#turn-end-guard) owns the current primary-integration verification evidence.
 The firstmate primary's `.codex/hooks.json` registers a Stop hook that pipes Codex's payload to `../../../bin/fm-turnend-guard-codex.sh`.
 That adapter invokes the shared predicate, translates its exit 2 and stderr into an exit-0 JSON `systemMessage`, and therefore preserves the completed assistant answer while surfacing the supervision warning in the UI or event stream.
 It passes every other result through unchanged.
