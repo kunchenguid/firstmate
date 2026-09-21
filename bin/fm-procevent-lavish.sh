@@ -48,6 +48,8 @@
 #            record and never announce; any other exit publishes the wake. This
 #            is the generic no-op contract bin/fm-procevent.sh calls, and the
 #            only place Lavish's notion of "nothing was said" is decided.
+#            Task-owned terminal rounds bypass generic silence so their owner
+#            receives the stop-and-conclude instruction.
 #
 # AN EMPTY BOARD CLOSE IS NOT NEWS, and that is what `silent` exists to say.
 # Closing a review surface that carried nothing is the single most common Lavish

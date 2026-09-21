@@ -27,7 +27,8 @@
 # register-task
 #            Record a worker-owned built-in source. Its one source record
 #            persists across rounds, and re-registration by the same task
-#            acknowledges captured rounds without touching the source claim.
+#            acknowledges nonterminal captured rounds without touching the
+#            source claim. Terminal rounds are concluded with `handled`.
 # register-extension
 #            Resolve an explicitly enabled home-local process-event-adapter/1
 #            binding, verify its package and handshake, and record the source
@@ -44,13 +45,16 @@
 #            the claim. It blocks for as long as the source blocks and is meant
 #            to run as a supervised background process, never in a conversational
 #            turn. After publishing, it asks the source's own adapter whether the
-#            captured result ends the source and retires the registration when it
-#            says so, so a source that has ended stops being restarted.
+#            captured result ends the source and normally retires the registration
+#            when it says so, so a source that has ended stops being restarted.
+#            A task-owned source instead keeps its terminal round open and
+#            registered until its owner concludes it with `handled`.
 # reconcile  Idempotent liveness entry the watcher calls on its ordinary cycle:
 #            republish every durably captured result with no handled
 #            acknowledgement yet - regardless of any earlier publication - and
-#            start a runner for any registered source that has no live owner.
-#            This is liveness repair only - it never discovers results by
+#            start a runner for any registered source that has no live owner and
+#            no open task-owned round. This is liveness repair only - it never
+#            discovers results by
 #            polling the source, because the child blocks on the source itself.
 #            A start is REPORTED only once it is confirmed: starting a runner is
 #            detached and its errors reach no caller, so a source that cannot
@@ -125,8 +129,10 @@
 # the immutable captured adapter owner - the built-in `silent` command or the
 # bound extension operation - and treats exit 0 as the only silence verdict: the
 # result is recorded handled and never announced, so it neither wakes a handler
-# now nor returns on a later reconcile. A missing command, an error, or any other
-# exit publishes the wake exactly as before, so an adapter with no notion of a
+# now nor returns on a later reconcile. Task-owned terminal rounds bypass this
+# generic silence path and go to their owner's steering inbox so the owner can
+# conclude the board. A missing command, an error, or any other exit publishes
+# the wake exactly as before, so an adapter with no notion of a
 # no-op needs no change and an unknown or degraded result always reaches its
 # handler. This runner still inspects nothing and still names no adapter-specific
 # condition. For built-ins, silence remains independent of the keyed-answer feed
