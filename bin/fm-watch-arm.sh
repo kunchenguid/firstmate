@@ -35,8 +35,11 @@
 # It NEVER reports started/attached/healthy off a stale beacon or a dead/reused pid: a
 # stale-beacon or dead-pid holder either self-heals (the fresh child steals the
 # dead lock per the singleton self-eviction/steal path and is confirmed) or this
-# returns the FAILED line. On started it waits the child and propagates the wake
-# reason; on attached it stays live across identity-matched successors. A cycle
+# returns the FAILED line. On started it continuously rechecks the same health
+# predicate while waiting for its child, and propagates the wake reason; a lost
+# lock identity or stale beacon retires only that child and returns typed failure
+# so the harness continuity owner can recover without waiting for another turn.
+# On attached it stays live across identity-matched successors. A cycle
 # that ends with no reason line and no healthy successor is resolved against the
 # watcher's identity-bound delivery record: a matching record reports that wake
 # and exits 0, and only a cycle that delivered nothing is the typed nonzero
@@ -77,7 +80,7 @@ case "${OSTYPE:-}" in
   *) ARM_CONFIRM_DEFAULT=10 ;;
 esac
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
-# Poll interval while attached to an existing healthy watcher.
+# Health-check interval while following either an owned or attached watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
 CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
@@ -448,21 +451,46 @@ fi
 # wake exit propagates out so the harness re-notifies firstmate.
 child=
 child_out=
-cleanup_child() {
-  if [ -n "$child" ] && fm_pid_alive "$child"; then
+# A stopped or wedged child cannot service TERM promptly. Bound retirement,
+# including signal cleanup, without ever signalling an attached/foreign holder.
+# Check the captured process identity before each signal to reject PID reuse.
+owned_child_alive() {
+  [ -n "$child" ] && fm_pid_alive "$child" \
+    && [ "$(fm_pid_identity "$child" 2>/dev/null)" = "$cycle_watcher_identity" ]
+}
+stop_owned_child() {
+  local i=0
+  if owned_child_alive; then
     kill -TERM "$child" 2>/dev/null || true
+    # CONT lets a stopped shell run its pending TERM trap and release its lock.
+    owned_child_alive && kill -CONT "$child" 2>/dev/null || true
+    while owned_child_alive && [ "$i" -lt 50 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    owned_child_alive && kill -KILL "$child" 2>/dev/null || true
+    i=0
+    while owned_child_alive && [ "$i" -lt 10 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
   fi
+  [ -z "$child" ] || ! fm_pid_alive "$child"
+}
+cleanup_child() {
+  local rc=0
+  stop_owned_child || rc=1
   if [ -n "$child_out" ]; then
     rm -f "$child_out" 2>/dev/null || true
   fi
+  return "$rc"
 }
 
 # shellcheck disable=SC2329 # Invoked indirectly by the signal traps below.
 handle_arm_signal() {
   local signal=$1 rc=$2
   trap - HUP TERM INT
-  if [ -n "$child" ] && fm_pid_alive "$child"; then
-    kill -TERM "$child" 2>/dev/null || true
+  if stop_owned_child && [ -n "$child" ]; then
     wait "$child" 2>/dev/null || true
   fi
   cycle_log_append "$rc" "$signal" arm-interrupted none
@@ -551,8 +579,7 @@ while :; do
     if [ "$HEALTHY_PID" = "$child" ]; then
       cycle_refresh_lock_before
       if ! handling_generation=$(handling_successor_generation); then
-        cleanup_child
-        wait "$child" 2>/dev/null || true
+        cleanup_child && wait "$child" 2>/dev/null || true
         cycle_log_append 1 none handling-handoff-failed none
         echo "watcher: FAILED - established successor could not inspect handling state"
         exit 1
@@ -563,6 +590,27 @@ while :; do
       else
         echo "watcher: started pid=$child (beacon fresh)"
       fi
+      while fm_pid_alive "$child"; do
+        if ! healthy_watcher; then
+          # A normal close can release the lock between the liveness and
+          # health reads. Its terminal reason/exit still belongs to the
+          # ordinary close path, not to health-loss recovery.
+          if ! fm_pid_alive "$child"; then
+            break
+          fi
+          if watch_output_has_wake "$child_out" && [ "$(fm_path_age "$BEAT")" -lt "$GRACE" ]; then
+            sleep "$ATTACH_POLL"
+            continue
+          fi
+          stop_owned_child && wait "$child" 2>/dev/null || true
+          cycle_log_append 1 none watcher-unhealthy none
+          print_watch_output "$child_out"
+          cleanup_child
+          echo "watcher: FAILED - owned watcher lost its lock identity or fresh beacon"
+          exit 1
+        fi
+        sleep "$ATTACH_POLL"
+      done
       wait "$child"
       rc=$?
       owned_child_finished "$rc"
@@ -587,9 +635,11 @@ done
 
 trap - HUP TERM INT
 print_watch_output "$child_out"
-cleanup_child
-wait "$child" 2>/dev/null
-rc=$?
+rc=1
+if cleanup_child; then
+  wait "$child" 2>/dev/null
+  rc=$?
+fi
 cycle_log_append "$rc" "$(cycle_signal_name "$rc")" confirmation-timeout none
 echo "watcher: FAILED - no live watcher with a fresh beacon"
 exit 1

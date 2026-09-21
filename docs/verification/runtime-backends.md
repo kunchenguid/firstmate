@@ -6,6 +6,37 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
+## Owned watcher health after readiness
+
+Verified on 2026-09-21 with Pi 0.86.0, Bash 5.3.9 and Linux 6.18.33.2-microsoft-standard-WSL2:
+
+```sh
+FM_PI_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-pi-primary-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - Pi 0.86.0 replaces a post-readiness stale watcher without a model re-arm
+ok - Pi 0.86.0 live E2E covered the Calm working ship, Ahoy first/later messages, legacy transcripts, near misses, and watcher continuity
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=196024
+```
+
+The live test suspends only its isolated watcher's recorded PID after readiness and ages its beacon, then requires a classified health-loss exit linked to a verified successor before any model repair call.
+`tests/fm-watcher-lock.test.sh` independently exercises the five-task turn-end guard against absent, healthy and live-but-stale watchers with real processes and no installed harness.
+The shared arm change adds no vendor-output classifier or backend-specific lifecycle operation.
+Pi/Pi-signed, omp and OpenCode retain their extension/plugin close handlers; Claude and Cursor retain their Stop-owned close handlers; Grok retains background completion; Codex retains foreground checkpoints.
+Portable compatibility checks passed with:
+
+```sh
+bin/fm-test-run.sh tests/fm-pr-check-security.test.sh tests/fm-turnend-guard.test.sh tests/fm-watch-arm.test.sh tests/fm-watch-recovery-loop.test.sh tests/fm-pi-watch-extension.test.sh
+bin/fm-test-run.sh tests/fm-claude-stop-autoarm.test.sh tests/fm-cursor-primary.test.sh tests/fm-omp-harness.test.sh tests/fm-watch-checkpoint.test.sh tests/fm-grok-harness.test.sh tests/fm-pr-check-security.test.sh
+```
+
+Only Pi was exercised live for this health-loss scenario; the other harness results above are portable integration coverage, not renewed vendor verification.
+The tmux, Herdr, zellij, Orca and cmux endpoint implementations are unchanged because both health verification and PR-artifact quarantine operate on home-local process/file identities before backend dispatch.
+[`watcher-continuity.md`](../watcher-continuity.md#arm-layer-cycle-contract) owns the current continuity contract.
+
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

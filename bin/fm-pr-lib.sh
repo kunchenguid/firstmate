@@ -1186,6 +1186,66 @@ fm_pr_poll_retirement_recover_one() {
     && [ ! -e "$receipt" ] && [ ! -L "$receipt" ]
 }
 
+# Preserve, never execute or authenticate, rejected PR artifacts on persistent
+# secondmates. Their metadata survives child tasks and can lose/supersede pr=;
+# unlike ship tasks they have no terminal teardown to remove orphan polls.
+# Called by the watcher (fm-wake-lib loaded) before receipt recovery. Valid
+# polls, remount-only drift, valid retirement receipts and custom checks keep
+# their existing owners. Only fixed poll paths move; metadata stays untouched.
+# Control -> metadata -> publication locks serialize the proof and renames with
+# task retirement, PR registration and metadata replacement. A durable rejection
+# is queued BEFORE moving anything, so interruption cannot silently lose it.
+# Returns 0 with a notification on quarantine, 1 for no action/refused safety
+# proof, 2 for a failed quarantine. Partial moves retry from remaining sidecars.
+fm_pr_poll_quarantine_stale_secondmate() (
+  local state=$1 id=$2 template=$3 meta device suffix file quarantine reason lock
+  local locks=()
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  meta="$state/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+  [ "$(grep '^kind=' "$meta")" = kind=secondmate ] || return 1
+  # Do not reinterpret a registered custom check or a check-only unknown file.
+  [ ! -e "$state/$id.check-trust" ] && [ ! -L "$state/$id.check-trust" ] || return 1
+  [ -e "$state/$id.pr-poll" ] || [ -e "$state/$id.pr-poll-registration" ] \
+    || [ -e "$state/$id.pr-poll-retirement" ] || return 1
+  trap 'if [ "${#locks[@]}" -gt 0 ]; then for lock in "${locks[@]}"; do fm_lock_release "$lock"; done; fi' EXIT
+  trap 'exit 2' HUP INT TERM
+  for lock in "$state/.control-$id.lock" "$(fm_meta_lock_path "$meta")" "$state/.pr-poll-publish-$id.lock"; do
+    fm_lock_try_acquire "$lock" || return 1
+    locks+=("$lock")
+  done
+  device=$(fm_pr_file_device "$state") || return 1
+  fm_pr_regular_destination_on_device_or_absent "$meta" "$device" || return 1
+  [ -f "$meta" ] && [ "$(grep '^kind=' "$meta")" = kind=secondmate ] || return 1
+  [ ! -e "$state/$id.check-trust" ] && [ ! -L "$state/$id.check-trust" ] || return 1
+  fm_pr_poll_artifacts_valid "$state" "$id" "$template" && return 1
+  fm_pr_poll_registration_device_shifted "$state" "$id" "$template" && return 1
+  fm_pr_poll_retirement_state_valid "$state" "$id" && return 1
+  # Refuse links, directories and foreign devices as a set, before any move.
+  # The private quarantine directory is evidence, not a new execution source.
+  for suffix in check.sh pr-poll-registration pr-poll pr-poll-retirement; do
+    fm_pr_regular_destination_on_device_or_absent "$state/$id.$suffix" "$device" || return 1
+  done
+  [ -e "$state/$id.pr-poll" ] || [ -e "$state/$id.pr-poll-registration" ] \
+    || [ -e "$state/$id.pr-poll-retirement" ] || return 1
+  quarantine=$(umask 077; mktemp -d "$state/.rejected-pr-poll-$id.XXXXXX") || return 2
+  reason="check: rejected stale secondmate PR poll $id; quarantine destination $quarantine; inspect artifacts and re-register the owning task's PR if still needed"
+  if ! fm_wake_append check "stale-secondmate-pr-poll-$id" "$reason"; then
+    rmdir "$quarantine" 2>/dev/null || true
+    return 2
+  fi
+  # Remove the runnable name first. Never mint merge evidence, delete task
+  # records, or consult a forge to guess whether this stale PR was landed.
+  for suffix in check.sh pr-poll-registration pr-poll pr-poll-retirement; do
+    file="$state/$id.$suffix"
+    [ -e "$file" ] || continue
+    fm_pr_regular_destination_on_device_or_absent "$file" "$device" \
+      && mv -- "$file" "$quarantine/" || return 2
+  done
+  printf '%s\n' "$reason"
+)
+
 fm_pr_poll_retirement_recover_all() {
   local state=$1 template=$2 receipt id
   FM_PR_POLL_RETIREMENT_REJECTED=

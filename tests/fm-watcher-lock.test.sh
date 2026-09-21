@@ -1162,6 +1162,63 @@ test_msys_pid_identity_uses_proc() {
   pass "MSYS process identity uses compatible /proc fields"
 }
 
+test_owned_arm_detects_lost_health() {
+  local dir state fakebin armout armpid watcher_pid i rc
+  dir=$(make_case owned-arm-health)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$dir/bin"
+  : > "$dir/AGENTS.md"
+  git -C "$dir" init -q
+  for i in 1 2 3 4 5; do : > "$state/task$i.meta"; done
+  printf '{"stop_hook_active":false}' | FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-turnend-guard.sh" > "$dir/guard.out" 2> "$dir/guard.err"
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "five unsupervised tasks did not block turn end"
+  grep -qF '5 task(s) in flight' "$dir/guard.err" || fail "missing five-task guard evidence"
+  # Empty metadata establishes the real guard need without asking the watcher
+  # to inspect any backend endpoint. No live fleet state is used.
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 \
+    FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" 2> "$dir/arm.err" &
+  armpid=$!
+  for i in $(seq 1 100); do
+    grep -qF 'watcher: started pid=' "$armout" && break
+    sleep 0.1
+  done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$watcher_pid" "$armout" || fail "owned health watcher did not start"
+  printf '{"stop_hook_active":false}' | FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-turnend-guard.sh" >/dev/null 2> "$dir/healthy.err" \
+    || fail "healthy watcher did not permit turn end"
+  kill -STOP "$watcher_pid" || fail "could not stop fixture watcher"
+  touch -t 200001010000 "$state/.last-watcher-beat"
+  printf '{"stop_hook_active":false}' | FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-turnend-guard.sh" >/dev/null 2> "$dir/stale.err"
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "stale live watcher did not block turn end"
+  # A readiness check at launch is insufficient. No manual CONT/TERM should
+  # be needed to make the arm report failure to the owning continuity adapter.
+  for i in $(seq 1 160); do
+    is_live_non_zombie "$armpid" || break
+    sleep 0.1
+  done
+  if is_live_non_zombie "$armpid"; then
+    kill -CONT "$watcher_pid" 2>/dev/null || true
+    kill -TERM "$watcher_pid" "$armpid" 2>/dev/null || true
+    wait "$armpid" 2>/dev/null || true
+    fail "owned arm remained alive with an unhealthy watcher after readiness"
+  fi
+  wait "$armpid"; rc=$?
+  [ "$rc" -ne 0 ] || fail "loss of watcher health returned success"
+  grep -qF 'watcher: FAILED' "$armout" || fail "health loss was not a typed failure"
+  ! is_live_non_zombie "$watcher_pid" || fail "failed arm left its stopped watcher alive"
+  grep -q 'reason=watcher-unhealthy' "$state/.watch-cycle-exits.log" || fail "health loss was not recorded"
+  pass "five-task turn-end block stays strict and the owned arm detects post-readiness health loss"
+}
+
+test_owned_arm_detects_lost_health
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant

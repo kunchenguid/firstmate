@@ -7,7 +7,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fm_live_gate opt-in FM_PI_LIVE_E2E pi tmux
+fm_live_gate opt-in FM_PI_LIVE_E2E pi tmux jq
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 unset NO_MISTAKES_GATE
@@ -118,8 +118,9 @@ run_ahoy_case() {
   local label=$1 preceding=$2 expected=$3 out status=0
   out=$(
     cd "$PROJECT" &&
-      pi --print --approve --no-session --no-context-files --no-extensions \
-        --no-skills --skill .agents/skills --tools read \
+      FM_HOME="$LAB/ahoy-$label-home" FM_ROOT_OVERRIDE="$PROJECT" \
+        pi --print --approve --no-session --no-context-files --no-extensions \
+        --no-skills --skill .agents/skills --tools read,bash \
         --model openai-codex/gpt-5.6-sol --thinking low \
         "$preceding" "/ahoy"
   ) || status=$?
@@ -137,6 +138,10 @@ run_ahoy_case() {
 }
 
 run_ahoy_transcript_regressions() {
+  # A legacy startup instruction is still executable input. Give it an inert
+  # startup endpoint and bash instead of testing refusal for a missing tool.
+  cp "$PROJECT/bin/fm-session-start.sh" "$LAB/session-start.saved"
+  printf '#!/usr/bin/env bash\nprintf "SESSION_START_DONE\\n"\n' > "$PROJECT/bin/fm-session-start.sh"
   mkdir -p "$PROJECT/.agents/skills/ahoy" "$PROJECT/.agents/skills/bearings"
   cp "$ROOT/.agents/skills/ahoy/SKILL.md" "$PROJECT/.agents/skills/ahoy/SKILL.md"
   # shellcheck disable=SC2016 # Backticks are literal prompt markup.
@@ -157,6 +162,7 @@ run_ahoy_transcript_regressions() {
   run_ahoy_case startup-near-miss "$START_NEAR_MISS" boundary
   run_ahoy_case quoted-current "$QUOTED_CURRENT" boundary
   run_ahoy_case ascii-only "$ASCII_ONLY" boundary
+  cp "$LAB/session-start.saved" "$PROJECT/bin/fm-session-start.sh"
 }
 
 run_native_ahoy_regressions() {
@@ -227,11 +233,12 @@ run_native_ahoy_regressions() {
 
   later_out=$(
     cd "$AHOY_PROJECT" &&
-      FM_HOME="$later_home" pi --print --approve --no-session --no-context-files --no-extensions \
+      FM_HOME="$later_home" pi --mode json --approve --no-session --no-context-files --no-extensions \
         -e .pi/extensions/fm-primary-turnend-guard.ts \
         --no-skills --skill .agents/skills \
         --model openai-codex/gpt-5.6-sol --thinking low \
-        "Respond exactly PRIOR_BOUNDARY_ACK." "/ahoy"
+        "Respond exactly PRIOR_BOUNDARY_ACK." "/ahoy" \
+        | jq -r 'select(.type == "message_end" and .message.role == "assistant") | .message.content[]? | select(.type == "text") | .text'
   )
   printf '%s\n' "$later_out" | grep -Fq "PRIOR_BOUNDARY_ACK" \
     || fail "Pi native later-message setup did not preserve the genuine captain boundary: $later_out"
@@ -305,8 +312,20 @@ send_prompt "/calm"
 sleep 0.2
 
 : > "$HOME_DIR/state/pi-e2e.meta"
-send_prompt "Start supervision with fm_watch_arm_pi and never use bash to arm supervision. After the watcher wake arrives, run bin/fm-wake-drain.sh and reply exactly HANDLED."
-wait_for_text "watcher: started Pi extension arm child 1" || fail "Pi did not render the initial watcher tool result"
+send_prompt "Supervision is already active through the extension. Do not re-arm it with a tool or bash. Reply exactly READY. After a watcher wake arrives, run bin/fm-wake-drain.sh and reply exactly HANDLED."
+# Owning session_start can already have armed the first cycle. Prove live
+# supervision rather than requiring a redundant model call's old result text.
+i=0
+while [ "$i" -lt 120 ]; do
+  FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" bash -c \
+    '. "$1"; fm_watcher_healthy "$2" "$3" 300 "$4"' _ \
+    "$PROJECT/bin/fm-wake-lib.sh" "$HOME_DIR/state" "$PROJECT/bin/fm-watch.sh" "$HOME_DIR" && break
+  sleep 0.5
+  i=$((i + 1))
+done
+[ "$i" -lt 120 ] || fail "Pi did not establish a healthy initial watcher"
+wait_for_exact_line "READY" 120 || fail "Pi did not settle before the watcher stimulus"
+initial_arm_tool_count=$(capture | grep -Ec 'watcher: (started|unchanged|not armed|read-only)' || true)
 
 printf 'done: pi live e2e watcher fire\n' > "$HOME_DIR/state/pi-e2e.status"
 i=0
@@ -327,13 +346,37 @@ if printf '%s\n' "$pane" | grep -Fq "$foreground_arm"; then
   fail "Pi used a foreground bash watcher arm"
 fi
 arm_tool_result_count=$(printf '%s\n' "$pane" | grep -Ec 'watcher: (started|unchanged|not armed|read-only)' || true)
-[ "$arm_tool_result_count" -eq 1 ] || fail "Pi model re-armed from memory instead of the extension (tool-result count $arm_tool_result_count)"
+[ "$arm_tool_result_count" -eq "$initial_arm_tool_count" ] \
+  || fail "Pi model re-armed after the watcher stimulus instead of relying on the extension"
 
 pid_file=$(find "$HOME_DIR/state" -maxdepth 3 -type f -name pid | head -1)
 [ -n "$pid_file" ] || fail "re-armed watcher pid was not recorded"
 watcher_pid=$(sed -n '1p' "$pid_file")
 arm_pid=$(ps -p "$watcher_pid" -o ppid= | tr -d ' ')
 [ -n "$arm_pid" ] || fail "re-armed watcher parent was not live"
+
+# A real Pi session must recover a watcher that loses health after readiness,
+# without another model tool call or turn-end prompt to trigger the repair.
+lab_pid_is_safe "$watcher_pid" || fail "unowned watcher in live health fixture"
+kill -STOP "$watcher_pid" || fail "could not suspend the fixture watcher"
+touch -t 200001010000 "$HOME_DIR/state/.last-watcher-beat"
+i=0
+while [ "$i" -lt 120 ]; do
+  grep -Eq "watcher_pid=$watcher_pid.*reason=watcher-unhealthy.*successor=started:[0-9]+" \
+    "$HOME_DIR/state/.watch-cycle-exits.log" 2>/dev/null && break
+  sleep 0.5
+  i=$((i + 1))
+done
+grep -Eq "watcher_pid=$watcher_pid.*reason=watcher-unhealthy.*successor=started:[0-9]+" \
+  "$HOME_DIR/state/.watch-cycle-exits.log" \
+  || fail "Pi did not automatically replace its live-but-stale watcher"
+wait_pid_dead "$watcher_pid" || fail "Pi retained the unhealthy watcher"
+after_health_tool_count=$(capture | grep -Ec 'watcher: (started|unchanged|not armed|read-only)' || true)
+[ "$after_health_tool_count" -eq "$arm_tool_result_count" ] \
+  || fail "Pi needed a model arm call to recover post-readiness health"
+watcher_pid=$(sed -n '1p' "$HOME_DIR/state/.watch.lock/pid")
+arm_pid=$(ps -p "$watcher_pid" -o ppid= | tr -d ' ')
+printf 'ok - Pi %s replaces a post-readiness stale watcher without a model re-arm\n' "$PI_VERSION"
 
 "$TMUX" -L "$SOCKET" send-keys -t "$SESSION" -l '/quit'
 sleep 1

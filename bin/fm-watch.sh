@@ -107,6 +107,9 @@
 #                          joined with `;` when more than one surfaces in a cycle
 #   check: rejected unauthenticated state checks: <paths>
 #                          unsafe state checks were refused without execution
+#   check: rejected stale secondmate PR poll <id>; quarantine destination <path>; ...
+#                          invalid persistent-secondmate poll artifacts preserved
+#                          by bin/fm-pr-lib.sh instead of repeatedly rejected
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
@@ -2229,6 +2232,26 @@ printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 
+# Persistent secondmates do not have ship-task teardown. Preserve rejected
+# orphan/stale PR artifacts once instead of waking on the same unauthenticated
+# check forever. The PR library owns proof, serialization and durable notice.
+quarantine_stale_secondmate_pr_polls() {
+  local artifact id notice rc
+  for artifact in "$STATE"/*.pr-poll "$STATE"/*.pr-poll-registration "$STATE"/*.pr-poll-retirement; do
+    [ -e "$artifact" ] || continue
+    id=${artifact##*/}
+    id=${id%.pr-poll*}
+    rc=0
+    notice=$(fm_pr_poll_quarantine_stale_secondmate "$STATE" "$id" "$SCRIPT_DIR/fm-pr-poll.sh") || rc=$?
+    case "$rc" in
+      0) wake "$notice" ;;
+      1) ;; # Not eligible, still owned, or unsafe: ordinary authentication decides.
+      *) echo "watcher: FAILED - could not preserve rejected PR poll for $id"; exit 1 ;;
+    esac
+  done
+}
+quarantine_stale_secondmate_pr_polls
+
 # A merged poll may have queued its terminal wake and then lost the process
 # between receipt publication and fixed-path removal.
 # Finish only identity-bound retirement receipts before any check can run.
@@ -2367,6 +2390,7 @@ while :; do
   # never run until the fleet went quiet. Checks are due only every
   # CHECK_INTERVAL, so most cycles skip this block and fall straight through.
   if [ "$(age_of "$STATE/.last-check")" -ge "$CHECK_INTERVAL" ]; then
+    quarantine_stale_secondmate_pr_polls
     rejected_checks=
     contribution_check_output=
     for c in "$STATE"/*.check.sh; do

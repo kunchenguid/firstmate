@@ -22,9 +22,8 @@ REAL_CP=$(command -v cp)
 REAL_MV=$(command -v mv)
 REAL_STAT=$(command -v stat)
 REAL_CHMOD=$(command -v chmod)
-# The merge path reads a merge request's JSON with the real jq, and BASE_PATH is
-# deliberately restricted, so a case that needs jq exposes this one rather than
-# depending on the host keeping jq in one of those four directories.
+# Merge paths read forge JSON with real jq. Expose it in every restricted-PATH
+# fixture rather than depending on the host's installation directory.
 REAL_JQ=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 
 ack_watcher_cycle() {  # <state>
@@ -211,6 +210,7 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  ln -s "$REAL_JQ" "$fakebin/jq"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
@@ -1829,6 +1829,126 @@ test_different_merged_pr_for_same_task_is_not_absorbed() {
   pass "a different merged PR for the same task gets its own first notification"
 }
 
+test_orphan_secondmate_poll_is_quarantined_once() {
+  local dir state before out rc suffix quarantine
+  dir=$(make_case orphan-secondmate-poll)
+  state="$dir/home/state"
+  fm_write_meta "$state/analytics.meta" 'kind=secondmate' 'mode=secondmate'
+  before=$(shasum -a 256 "$state/analytics.meta")
+  printf '#!/usr/bin/env bash\nprintf executed > "%s"\n' "$dir/executed" > "$state/analytics.check.sh"
+  chmod 600 "$state/analytics.check.sh"
+  printf 'orphan poll data\n' > "$state/analytics.pr-poll"
+  printf 'orphan registration\n' > "$state/analytics.pr-poll-registration"
+  chmod 600 "$state/analytics.pr-poll" "$state/analytics.pr-poll-registration"
+  # This is not merge retirement: the orphan is unauthenticated, has no pr=
+  # identity, and its check bytes must never execute or acquire fresh trust.
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/first.out" 2> "$dir/first.err"
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "orphan watcher failed: $(cat "$dir/first.err")"
+  out=$(cat "$dir/first.out")
+  case "$out" in *'rejected stale secondmate PR poll analytics'*) ;; *) fail "orphan was not quarantined: $out" ;; esac
+  [ ! -e "$dir/executed" ] || fail "orphan check executed"
+  assert_poll_absent "$state" analytics
+  quarantine=$(find "$state" -type d -name '.rejected-pr-poll-analytics.*' | head -1)
+  [ -n "$quarantine" ] || fail "quarantine evidence missing"
+  for suffix in check.sh pr-poll pr-poll-registration; do
+    [ -f "$quarantine/analytics.$suffix" ] || fail "quarantine lost $suffix"
+  done
+  [ "$(shasum -a 256 "$state/analytics.meta")" = "$before" ] || fail "quarantine changed persistent metadata"
+  ack_watcher_cycle "$state" || fail "could not acknowledge quarantine notification"
+  add_stop_custom_check "$dir"
+  rm -f "$state/.last-check"
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/second.out" 2> "$dir/second.err" \
+    || fail "second orphan watcher cycle failed"
+  grep -qF 'z-stop.check.sh: stop-cycle' "$dir/second.out" || fail "orphan rejection recurred"
+  [ "$(find "$state" -type d -name '.rejected-pr-poll-analytics.*' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "repeat cycle created another quarantine"
+  pass "orphan persistent-secondmate polls are preserved once without execution or recurring rejection"
+}
+
+test_secondmate_quarantine_queue_failure() {
+  local dir state before rc=0
+  dir=$(make_case quarantine-queue-failure)
+  state="$dir/home/state"
+  fm_write_meta "$state/domain.meta" 'kind=secondmate'
+  printf '#!/usr/bin/env bash\nexit 99\n' > "$state/domain.check.sh"
+  printf 'orphan\n' > "$state/domain.pr-poll"
+  before=$(poll_artifact_snapshot "$state" domain)
+  mkdir "$state/.wake-queue"
+  run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" || rc=$?
+  [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] || fail "quarantine ignored the failed durable notification"
+  [ "$(poll_artifact_snapshot "$state" domain)" = "$before" ] || fail "queue failure disabled an orphan silently"
+  ! find "$state" -name '.rejected-pr-poll-domain.*' | grep -q . || fail "failed notification left an empty quarantine"
+  pass "quarantine refuses to disable poll artifacts without a durable notification"
+}
+
+test_secondmate_quarantine_safety_boundaries() {
+  local dir state variant before out url=https://github.com/o/r/pull/9
+  for variant in valid stale-template orphan-receipt partial ship symlink hardlink custom busy; do
+    dir=$(make_case "quarantine-$variant")
+    state="$dir/home/state"
+    fm_write_meta "$state/domain.meta" 'kind=secondmate' 'mode=secondmate' "pr=$url"
+    seed_canonical_poll "$dir" domain "$url"
+    case "$variant" in
+      valid) ;; # A legitimate open persistent poll keeps its identity.
+      stale-template) printf '\n# obsolete template\n' >> "$state/domain.check.sh" ;;
+      orphan-receipt)
+        fm_write_meta "$state/domain.meta" 'kind=secondmate'
+        printf 'invalid old receipt\n' > "$state/domain.pr-poll-retirement"
+        chmod 600 "$state/domain.pr-poll-retirement"
+        ;;
+      partial)
+        fm_write_meta "$state/domain.meta" 'kind=secondmate'
+        rm "$state/domain.check.sh" # Prior interrupted check-first quarantine.
+        ;;
+      ship) fm_write_meta "$state/domain.meta" 'kind=ship' ;;
+      symlink|hardlink)
+        fm_write_meta "$state/domain.meta" 'kind=secondmate'
+        mv "$state/domain.pr-poll" "$dir/external"
+        if [ "$variant" = symlink ]; then
+          ln -s "$dir/external" "$state/domain.pr-poll"
+        else
+          ln "$dir/external" "$state/domain.pr-poll"
+        fi
+        ;;
+      custom)
+        printf '#!/usr/bin/env bash\necho custom-owned\n' > "$state/domain.check.sh"
+        chmod 700 "$state/domain.check.sh"
+        FM_HOME="$dir/home" "$REGISTER" domain >/dev/null || fail "custom fixture registration failed"
+        ;;
+      busy)
+        fm_write_meta "$state/domain.meta" 'kind=secondmate'
+        # A live holder must defer cleanup, not stall the beacon waiting on
+        # another publication. The held-lock format also accepts a directory.
+        mkdir "$state/.pr-poll-publish-domain.lock"
+        printf '%s\n' "$$" > "$state/.pr-poll-publish-domain.lock/pid"
+        ;;
+    esac
+    before=$(poll_artifact_snapshot "$state" domain)
+    case "$variant" in valid|partial) add_stop_custom_check "$dir" ;; esac
+    run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" \
+      || fail "$variant quarantine watcher failed: $(cat "$dir/watch.err")"
+    out=$(cat "$dir/watch.out")
+    case "$variant" in
+      stale-template|orphan-receipt|partial)
+        case "$out" in *'rejected stale secondmate PR poll domain'*) ;; *) fail "$variant was not preserved: $out" ;; esac
+        assert_poll_absent "$state" domain
+        ! grep -q ' state ' "$dir/gh.log" || fail "$variant queried stale PR data"
+        ;;
+      *)
+        [ "$(poll_artifact_snapshot "$state" domain)" = "$before" ] || fail "$variant poll was changed by quarantine"
+        ! find "$state" -name '.rejected-pr-poll-domain.*' | grep -q . || fail "$variant was quarantined"
+        case "$variant" in
+          valid) grep -qF 'stop-cycle' "$dir/watch.out" || fail "valid open poll did not stay silent" ;;
+          custom) grep -qF 'custom-owned' "$dir/watch.out" || fail "custom check lost its owner" ;;
+          *) grep -qF 'rejected unauthenticated state checks' "$dir/watch.out" || fail "$variant did not retain authentication rejection" ;;
+        esac
+        ;;
+    esac
+  done
+  pass "secondmate quarantine preserves valid/custom/ship/unsafe/busy owners and recovers stale receipts and partial moves"
+}
+
 test_persistent_secondmate_retirement_is_poll_only() {
   local dir state meta_before status_before registry_before endpoint_before rc
   dir=$(make_case merged-retirement-secondmate)
@@ -2795,6 +2915,9 @@ SH
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_orphan_secondmate_poll_is_quarantined_once
+test_secondmate_quarantine_safety_boundaries
+test_secondmate_quarantine_queue_failure
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
