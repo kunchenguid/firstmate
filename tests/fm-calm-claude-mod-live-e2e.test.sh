@@ -50,8 +50,9 @@ SAIL='◿│◣'
 cleanup() {
   local i=0
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
-  # Claude's debug logger may still be flushing into the lab for a moment.
-  while [ "$i" -lt 20 ] && pgrep -f "debug-file '$LAB/" >/dev/null 2>&1; do
+  # Claude's debug logger may still be flushing into the lab for a moment, and would
+  # recreate it after removal. Its argv carries the path unquoted.
+  while [ "$i" -lt 20 ] && pgrep -f "debug-file $LAB/" >/dev/null 2>&1; do
     sleep 0.25
     i=$((i + 1))
   done
@@ -96,6 +97,39 @@ send() {
 
 enter() {
   tmux -L "$SOCKET" send-keys -t "$SESSION" Enter
+}
+
+# The composer's rows: the text between the last two horizontal rules on screen.
+composer_text() {  # <screen text>
+  printf '%s\n' "$1" | awk 'index($0, "────────────────────") == 1 { seg++; next }
+    { text[seg] = text[seg] $0 "\n" } END { if (seg > 0) printf "%s", text[seg - 1] }'
+}
+
+# Type <text> and submit it. Claude Code can take an Enter that lands inside the typed
+# burst as a composer newline, so Enter is sent once the text has rendered and resent
+# every 0.5 s while the composer still holds it.
+submit() {  # <text>
+  local head=${1:0:40} i=0
+  send "$1"
+  while [ "$i" -lt 40 ]; do
+    case "$(composer_text "$(screen)")" in
+      *"$head"*) break ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  enter
+  i=0
+  while [ "$i" -lt 20 ]; do
+    sleep 0.5
+    case "$(composer_text "$(screen)")" in
+      *"$head"*) enter ;;
+      *) return 0 ;;
+    esac
+    i=$((i + 1))
+  done
+  printf '%s\n' "$(screen)" >&2
+  fail "Claude Code $CLAUDE_VERSION never submitted: $head"
 }
 
 # Whether the screen is a startup dialog rather than the session: the folder-trust
@@ -188,6 +222,15 @@ transcript_user_rows() {  # <text>
   return 0
 }
 
+# Whether <screen text> draws a row Calm hides: a tool row in its expanded or collapsed
+# form, or one of the operational probes.
+hidden_row_drawn() {  # <screen text>
+  case "$1" in
+    *'Bash('*|*'shell command'*|*'probe.status changed'*|*'AWAY_PROBE_ROW'*) return 0 ;;
+  esac
+  return 1
+}
+
 hull_column() {  # <screen text>
   printf '%s\n' "$1" | awk -v hull="$HULL" 'index($0, hull) { print index($0, hull); exit }'
 }
@@ -242,8 +285,7 @@ fi
 if command_listed calm; then
   fail "Claude Code $CLAUDE_VERSION lists /calm although the flag is unset"
 fi
-send "$PROMPT"
-enter
+submit "$PROMPT"
 # Sample every frame until the turn settles: the boat must never appear, and the
 # stock working row must have been seen, or the flag-off case proved nothing.
 saw_working=0
@@ -301,8 +343,7 @@ if grep -E '\[(WARN|ERROR)\].*firstmate-calm' "$DEBUG_LOG_ON" | grep -v 'declare
   fail "Claude Code $CLAUDE_VERSION loaded the Calm mod with a warning or error"
 fi
 command_listed calm || fail "Claude Code $CLAUDE_VERSION does not list /calm with the flag on"
-send "$PROMPT"
-enter
+submit "$PROMPT"
 wait_screen "$HULL" 'the working ship during a real turn' 200
 boat_one=$(screen)
 case "$boat_one" in
@@ -403,8 +444,7 @@ case "$away_row" in
 esac
 
 # /calm off: rows restore, the preference persists off, no Calm output row.
-send '/calm'
-enter
+submit '/calm'
 wait_screen 'shell command' 'the restored tool row after /calm off' 200
 [ "$(cat "$FM_HOME_DIR/config/calm")" = off ] || fail "/calm did not persist off"
 restored=$(screen)
@@ -444,24 +484,18 @@ case "$restored" in
 esac
 
 # /calm on: rows hide again, the preference persists on.
-send '/calm'
-enter
+submit '/calm'
 i=0
 while [ "$i" -lt 200 ]; do
   hidden_again=$(screen)
-  case "$hidden_again" in
-    *'Bash('*|*'probe.status changed'*|*'AWAY_PROBE_ROW'*) ;;
-    *) break ;;
-  esac
+  hidden_row_drawn "$hidden_again" || break
   sleep 0.1
   i=$((i + 1))
 done
-case "$hidden_again" in
-  *'Bash('*|*'probe.status changed'*|*'AWAY_PROBE_ROW'*)
-    printf '%s\n' "$hidden_again" >&2
-    fail "/calm on did not hide the rows again"
-    ;;
-esac
+if hidden_row_drawn "$hidden_again"; then
+  printf '%s\n' "$hidden_again" >&2
+  fail "/calm on did not hide the rows again"
+fi
 [ "$(cat "$FM_HOME_DIR/config/calm")" = on ] || fail "/calm did not persist on"
 case "$hidden_again" in
   *'gamma'*|*'OPERATIONAL_PROCESSED'*) : ;;
@@ -475,14 +509,26 @@ pass "Claude Code $CLAUDE_VERSION with the flag on: the mod auto-loads from .cla
 # --- 3. Resume: the restored transcript keeps the hidden rows hidden ---------------
 launch "$DEBUG_LOG_RESUME" 1 --continue
 wait_screen 'gamma' 'the resumed transcript' 400
-sleep 1
-resumed=$(screen)
-case "$resumed" in
-  *'Bash('*|*'probe.status changed'*|*'AWAY_PROBE_ROW'*)
-    printf '%s\n' "$resumed" >&2
-    fail "the resumed transcript drew a row Calm hides"
-    ;;
-esac
+# Claude Code can paint the restored transcript before it loads the hooks module, so
+# the rows are judged once the module has loaded and its redraw has settled.
+i=0
+while [ "$i" -lt 100 ] && ! grep -Eq "$CALM_LOADED_RE" "$DEBUG_LOG_RESUME"; do
+  sleep 0.1
+  i=$((i + 1))
+done
+grep -Eq "$CALM_LOADED_RE" "$DEBUG_LOG_RESUME" \
+  || fail "Claude Code $CLAUDE_VERSION did not load the Calm hooks module on resume"
+i=0
+while [ "$i" -lt 50 ]; do
+  resumed=$(screen)
+  hidden_row_drawn "$resumed" || break
+  sleep 0.1
+  i=$((i + 1))
+done
+if hidden_row_drawn "$resumed"; then
+  printf '%s\n' "$resumed" >&2
+  fail "the resumed transcript drew a row Calm hides"
+fi
 [ "$(cat "$FM_HOME_DIR/config/calm")" = on ] || fail "resume changed the persisted choice"
 send '/exit'
 enter
