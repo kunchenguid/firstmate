@@ -15,12 +15,14 @@
 # (bin/fm-afk-contract.sh), the supervision outcome store
 # (bin/fm-branch-outcome.sh), the held set in the backlog (tasks-axi), and the
 # status logs. Its order is fixed: supervisor health across the away window
-# first, then every mandate clause the captain recorded, including superseded
-# in-session read-backs (this release records clauses and does not execute them,
-# and the brief says so), then what is
-# waiting on the captain, then what was tried and failed or could not be fixed,
-# then what the away session handled, then cost. The health snapshot is taken
-# BEFORE the daemon shutdown so the shutdown itself cannot read as a gap.
+# first, then the captain's away instructions - their words verbatim, including
+# superseded in-session mandates - followed by the away session's account of
+# every action it took under them (each outcome-store row from the window whose
+# summary opens with the "per your away instructions:" marker the branch prompt
+# in bin/fm-branch-prompt.sh requires), then what is waiting on the captain,
+# then what was tried and failed or could not be fixed, then what the away
+# session handled, then cost. The health snapshot is taken BEFORE the daemon
+# shutdown so the shutdown itself cannot read as a gap.
 #
 # THE GATE. `blocked:` is the crewmate protocol's firstmate-actionable verb. A
 # live task's open blocked event must be remediated and closed with
@@ -29,11 +31,12 @@
 # `needs-decision:` is deliberately not part of this blocker gate. The gate
 # keeps every open blocker until that blocker's own resolution is proven.
 # Captain-verdict outcomes are listed under "waiting on you", but cannot exempt
-# a blocker because decision-key provenance is deferred to phase 4
-# (fm-afk-clauses-execute-r1). Away-window attribution uses second-resolution
-# epochs; a durable sequence boundary and archive-chain identity are deferred to
-# that phase as well. Replacement records carry the original entry boundary and
-# superseded mandates are included as the phase-1 fail-safe.
+# a blocker: per-blocker decision-key provenance is deferred, with no owner,
+# because the gate fails safe by keeping every open blocker. Away-window
+# attribution uses second-resolution epochs; a durable sequence boundary and
+# archive-chain identity are likewise deferred with no owner. Replacement
+# records carry the original entry boundary and superseded mandates are
+# included so the brief shows every instruction the window ran under.
 #
 # The durable state/.afk-return-catchup file is written BEFORE daemon shutdown,
 # so a crash between stopping, wake presentation, and blocker handling fails
@@ -364,48 +367,41 @@ strip_axi_help() {
   awk '/^help\[/ { skip = 1; next } skip && /^  / { next } { skip = 0; print }'
 }
 
+# The branch prompt (bin/fm-branch-prompt.sh "Postures") requires every action
+# taken under the captain's words to open its outcome summary with this marker
+# exactly; the brief's account is every store row from the window that carries it.
+AWAY_ACTION_MARKER='per your away instructions:'
+
 MANDATE_COUNT=0
 HELD_READ_FAILED=0
 HELD_READ_PATH=
-render_mandate_record() {  # <record> [superseded-time]
-  local record=$1 superseded=${2:-} id action object when stop text missing suffix="" words flag
-  [ -z "$superseded" ] || suffix=" - superseded at $superseded"
-  while IFS="$(printf '\t')" read -r id action object when stop; do
-    [ -n "$id" ] || continue
+render_words_record() {  # <record> [superseded-time]
+  local record=$1 superseded=${2:-} words
+  if ! words=$("$CONTRACT" words --path "$record"; rc=$?; printf x; exit "$rc"); then
     MANDATE_COUNT=$((MANDATE_COUNT + 1))
-    printf '  - %s. %s ' "$id" "$action"
-    fm_afk_contract_unescape "$object"
-    printf ' when '
-    fm_afk_contract_unescape "$when"
-    if [ "$stop" != - ]; then
-      printf ' stop '
-      fm_afk_contract_unescape "$stop"
-    fi
-    flag=$("$CONTRACT" flags --path "$record" | awk -F '\t' -v id="$id" '$1 == id { print $2 }')
-    [ -z "$flag" ] || printf " - flagged: names '%s', a never-set concept that is never pre-authorizable" "$flag"
-    printf '%s - recorded, not executed by this release\n' "$suffix"
-  done <<EOF
-$("$CONTRACT" clauses --path "$record")
-EOF
-  while IFS="$(printf '\t')" read -r id text missing; do
-    [ -n "$id" ] || continue
-    MANDATE_COUNT=$((MANDATE_COUNT + 1))
-    printf '  - %s. "' "$id"
-    fm_afk_contract_unescape "$text"
-    printf '"%s - refused at entry: missing %s\n' "$suffix" "$missing"
-  done <<EOF
-$("$CONTRACT" refused --path "$record")
-EOF
-  words=$("$CONTRACT" words --path "$record"; printf x)
+    printf '  your words are unreadable in %s; catch-up stays gated until the record is restored\n' "$record"
+    return 1
+  fi
   words=${words%x}
-  if [ -n "$words" ]; then
-    if [ -n "$superseded" ]; then
-      printf '  your words superseded at %s:\n' "$superseded"
-    else
-      printf '  your words at entry:\n'
-    fi
-    printf '%s' "$words" | sed 's/^/    /'
-    case "$words" in *$'\n') ;; *) printf '\n' ;; esac
+  [ -n "$words" ] || return 0
+  MANDATE_COUNT=$((MANDATE_COUNT + 1))
+  if [ -n "$superseded" ]; then
+    printf '  your words superseded at %s:\n' "$superseded"
+  else
+    printf '  your words at entry:\n'
+  fi
+  printf '%s' "$words" | sed 's/^/    /'
+  case "$words" in *$'\n') ;; *) printf '\n' ;; esac
+}
+
+render_words_account() {  # the away session's account of what it did under the words
+  local rows
+  rows=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' -v marker="$AWAY_ACTION_MARKER" '
+    substr($5, 1, length(marker)) == marker { printf "    - %s: %s\n", $2, $5 }')
+  if [ -n "$rows" ]; then
+    printf '  the away session acted on them:\n%s\n' "$rows"
+  else
+    printf '  the away session took no action under them.\n'
   fi
 }
 
@@ -423,8 +419,8 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
   printf 'Supervisor health:\n'
   awk -F '\t' '$1 == "evidence" && ($2 == "health" || ($2 == "lifecycle" && ($3 ~ /^outcome store unreadable/ || $3 ~ /^status file unreadable:/ || $3 ~ /^away-posture record (unreadable|missing):/ || $3 ~ /^archived away-posture record/ || $3 ~ /^superseded away-posture record/))) { print "  - " $3 }' "$evidence"
 
-  # 2. the mandate.
-  printf 'Mandate clauses:\n'
+  # 2. the captain's instructions, verbatim, then the session's account.
+  printf 'Your instructions:\n'
   record=""
   MANDATE_COUNT=0
   [ -z "$since" ] || record=$("$CONTRACT" archived "$since" 2>/dev/null || true)
@@ -436,10 +432,11 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
       stamp=${stamp%%-*}
       stamp=${stamp%.afk-contract}
       case "$stamp" in ''|*[!0-9]*) superseded_at=unknown ;; *) superseded_at=$(epoch_to_iso "$stamp") ;; esac
-      render_mandate_record "$superseded" "$superseded_at"
+      render_words_record "$superseded" "$superseded_at"
     done
-    render_mandate_record "$record"
-    [ "$MANDATE_COUNT" -gt 0 ] || printf '  (none recorded)\n'
+    render_words_record "$record"
+    [ "$MANDATE_COUNT" -gt 0 ] || printf '  (no away instructions recorded)\n'
+    render_words_account
   else
     printf '  (no away-posture record for this window; legacy away flag only)\n'
   fi
@@ -505,10 +502,14 @@ EOF
   done
   [ "$count" -gt 0 ] || printf '  (nothing)\n'
 
-  # 5. handled while away.
+  # 5. handled while away. Every outcome the away session recorded in the
+  # store during the window counts as handled. On Pi the supervision branch
+  # took every safe actionable wake it could while main was parked; wakes it
+  # declined still fell back to main. The captain rows are listed above.
   printf 'Handled while away:\n'
   routine=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { n++ } END { print n + 0 }')
   captain=$(printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "captain" { n++ } END { print n + 0 }')
+  printf '  %s outcome(s) handled by the away session (%s routine, %s escalated above)\n' "$((routine + captain))" "$routine" "$captain"
   if [ "$routine" -gt 0 ]; then
     printf '  %s routine outcome(s) recorded; the latest:\n' "$routine"
     printf '%s\n' "$STORE_ROWS" | awk -F '\t' '$3 == "routine" { printf "    - %s: %s\n", $2, $5 }' | tail -5

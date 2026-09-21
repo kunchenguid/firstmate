@@ -339,7 +339,7 @@ test_away_yolo_is_fleet_work() {
   with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
     || fail 'could not register away delivery'
   printf 'yolo=on\n' >> "$home/state/delivery.meta"
-  with_home "$home" "$ROOT/bin/fm-afk-contract.sh" propose --grant delivery >/dev/null \
+  with_home "$home" "$ROOT/bin/fm-afk-contract.sh" propose --words 'merge the delivery PR when green' >/dev/null \
     || fail 'could not propose away posture'
   with_home "$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null \
     || fail 'could not confirm away posture'
@@ -364,7 +364,7 @@ test_away_yolo_cross_home_is_fleet_work() {
   with_home "$child" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
     || fail 'could not register child away delivery'
   printf 'yolo=on\n' >> "$child/state/delivery.meta"
-  with_home "$child" "$ROOT/bin/fm-afk-contract.sh" propose --grant delivery >/dev/null \
+  with_home "$child" "$ROOT/bin/fm-afk-contract.sh" propose --words 'merge the delivery PR when green' >/dev/null \
     || fail 'could not propose child away posture'
   with_home "$child" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null \
     || fail 'could not confirm child away posture'
@@ -584,7 +584,9 @@ test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
   wrap_forge "$home"
   mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
   cp "$home/data/delivery/contributions.json" "$home/prior.json"
-  if [ "$mode" = exhaust ]; then /bin/date +%s > "$home/forge/clock"; fi
+  # Both modes freeze the clock: an unfrozen one can tick past a one-second
+  # budget before the first forge call, so nothing is ever observed.
+  /bin/date +%s > "$home/forge/clock"
   printf '%s\n' "$mode" > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" poll) \
     || fail "poll failed when its budget ran out ($mode)"

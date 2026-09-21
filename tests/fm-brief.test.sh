@@ -404,7 +404,7 @@ test_ask_user_escalation_format() {
   assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$brief" \
     "ship rule 6 must limit the verbatim axi slice to ask-user findings"
   # shellcheck disable=SC2016  # single quotes are deliberate: backticks and the key/findings/file tokens must stay literal
-  assert_grep 'needs-decision [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/$id/nm-<run>-findings.txt" "$brief" \
+  assert_grep 'needs-decision [at=<epoch>] [key=nm-<run>-<step>]: ask-user findings=<id1>,<id2>,... file='"$home/data/$id/nm-<run>-findings.txt" "$brief" \
     "ship rule 6 must render the exact needs-decision ask-user status line"
   assert_grep "$home/data/$id/nm-<run>-findings.txt" "$brief" \
     "ship rule 6 must point the snapshot file under this task's own data directory"
@@ -774,16 +774,16 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
 }
 
 test_pause_verb_override_renders_all_brief_scaffolds() {
-  local home kind id brief
+  local home kind id brief append now epoch templates template line signals
   home="$TMP_ROOT/pause-verb-home"
   mkdir -p "$home/data"
 
-  for kind in ship scout secondmate; do
-    id="brief-pause-verb-$kind"
+  for kind in ship:no-mistakes ship:direct-PR ship:local-only scout secondmate; do
+    id="brief-pause-verb-${kind//:/-}"
     case "$kind" in
-      ship)
+      ship:*)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
-          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+          "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode "${kind#ship:}" >/dev/null 2>&1
         ;;
       scout)
         FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
@@ -795,6 +795,55 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
         ;;
     esac
     brief="$home/data/$id/brief.md"
+    # Fill the scaffold's generated status-append command the way a worker does
+    # and run it. The stamp must be a value the worker supplies, so the command
+    # may not carry an unevaluated substitution that a file-write tool would
+    # copy through verbatim.
+    # shellcheck disable=SC2016 # Match literal backticks in the generated interface.
+    append=$(sed -n '/`echo "{state}/s/.*`\(echo .*\)`.*/\1/p' "$brief")
+    now=$(date +%s)
+    append=${append//\{state\}/done}
+    append=${append//\{one short line\}/test event}
+    append=${append//<epoch>/$now}
+    case "$append" in
+      *"\$("*) fail "$kind scaffold left an unevaluated command in its status-append line" ;;
+    esac
+    mkdir -p "$home/state"
+    bash -c "$append" || fail "generated status command failed"
+    epoch=$(bash -c '. "$1"; status_line_at_epoch "$(cat "$2")"' _ \
+      "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
+    [ "$epoch" = "$now" ] || fail "$kind scaffold did not record the worker's event time"
+    # Every status signal the brief instructs a worker to append is a template
+    # the worker fills in and writes verbatim, with or without a shell, not only
+    # rule 4's echo: substitute each one's named placeholders and read the stamp
+    # back. Extracting by "append" as well as by the stamp means dropping a stamp
+    # from any instruction fails here rather than shrinking the set.
+    templates=$(grep -o -e "append \`[^\`]*: [^\`]*\`" \
+      -e "\`[^\`]*\[at=<epoch>\][^\`]*\`" "$brief" \
+      | sed 's/^append //' | tr -d '`' | sort -u)
+    signals=0
+    while IFS= read -r template; do
+      [ -n "$template" ] || continue
+      case "$template" in
+        'echo "'*) template=${template#echo \"}; template=${template%%\" >>*} ;;
+      esac
+      case "$template" in
+        *"\$("*) fail "$kind signal embeds an unevaluated command: $template" ;;
+      esac
+      now=$(date +%s)
+      line=${template//\{state\}/done}
+      line=${line//<epoch>/$now}
+      line=$(printf '%s' "$line" \
+        | sed -e 's/{[^}]*}/one short line/g' -e 's/<[^>]*>/slug/g')
+      epoch=$(bash -c '. "$1"; status_line_at_epoch "$2"' _ \
+        "$ROOT/bin/fm-classify-lib.sh" "$line")
+      [ "$epoch" = "$now" ] || fail "$kind signal carries no worker-written stamp: $template"
+      signals=$((signals + 1))
+    done <<SIGNALS
+$templates
+SIGNALS
+    [ "$signals" -ge 4 ] \
+      || fail "$kind brief instructed only $signals stamped status signals"
     assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
@@ -854,7 +903,7 @@ test_scout_and_secondmate_load_decision_hold_policy() {
 # text-report instruction instead, so a scout never drives a below-floor Lavish.
 test_scout_lavish_line_follows_presentation_floor() {
   local base label version expect case_dir fakebin brief n=0
-  local hosting='you may host the Lavish review loop yourself'
+  local hosting='use the lavish-axi rule'
   local text_only='deliver your findings as a text report without Lavish'
   base=$(fm_test_base_path_sans "${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" lavish-axi)
   while IFS='^' read -r label version expect; do
@@ -946,7 +995,7 @@ test_base_branch_worker_steps() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-nm-omit some-proj --mode no-mistakes >/dev/null 2>&1 \
     || fail "omitted --base-branch no-mistakes brief should scaffold"
   brief="$home/data/brief-base-nm-omit/brief.md"
-  assert_grep "After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished." "$brief" \
+  assert_grep "After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished." "$brief" \
     "omitted --base-branch must keep the historical no-mistakes done line"
   assert_no_grep "axi run --base-branch" "$brief" \
     "omitted --base-branch no-mistakes brief must not pin a pipeline base"
@@ -968,7 +1017,7 @@ test_base_branch_worker_steps() {
     "--base-branch no-mistakes brief must record its PR target contract"
   assert_no_grep "gh pr edit" "$brief" \
     "--base-branch no-mistakes brief must not retarget after green"
-  assert_grep "After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished." "$brief" \
+  assert_grep "After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished." "$brief" \
     "--base-branch no-mistakes brief must keep the CI-ready done line"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-base-dpr-omit some-proj --mode direct-PR >/dev/null 2>&1 \
@@ -1098,13 +1147,13 @@ test_branch_name_worker_steps() {
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bn-local-omit some-proj --mode local-only >/dev/null 2>&1 \
     || fail "omitted --branch-name local-only brief should scaffold"
   brief="$home/data/brief-bn-local-omit/brief.md"
-  assert_grep "done: ready in branch fm/brief-bn-local-omit" "$brief" \
+  assert_grep "done [at=<epoch>]: ready in branch fm/brief-bn-local-omit" "$brief" \
     "omitted --branch-name must keep the historical local-only done line"
 
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-bn-local-on some-proj --mode local-only --branch-name feature/TD-131-visual-dom-editor >/dev/null 2>&1 \
     || fail "--branch-name local-only brief should scaffold"
   brief="$home/data/brief-bn-local-on/brief.md"
-  assert_grep "done: ready in branch feature/TD-131-visual-dom-editor" "$brief" \
+  assert_grep "done [at=<epoch>]: ready in branch feature/TD-131-visual-dom-editor" "$brief" \
     "--branch-name must replace the local-only done line"
   assert_grep "Work only on your \`feature/TD-131-visual-dom-editor\` branch" "$brief" \
     "--branch-name must replace the local-only push-rule branch"
