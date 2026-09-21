@@ -929,6 +929,7 @@ case "$*" in
 esac
 EOF
   chmod +x "$fb/herdr"
+  fm_backend_source herdr || fail "could not load herdr backend for agy identity checks"
 
   out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=agy FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=live FM_TEST_SHELL_PID=$$ \
     fm_backend_agent_status_raw herdr default:w1:p2 agy)
@@ -949,7 +950,14 @@ EOF
     fm_backend_agent_status_raw herdr default:w1:p2 agy)
   [ -z "$out" ] || fail "idle registration with unreadable process state must be rejected, got '$out'"
 
-  pass "fm-backend: raw herdr status requires a live agent process"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=agy FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=live FM_TEST_SHELL_PID=$$ \
+    fm_backend_herdr_composer_identity default:w1:p2)
+  [ "$out" = $'agy\tidle' ] || fail "composer identity should preserve process-verified agy idle, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=agy FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=foreign FM_TEST_SHELL_PID=$$ \
+    fm_backend_herdr_composer_identity default:w1:p2 2>/dev/null || true)
+  [ -z "$out" ] || fail "stale agy composer identity over a foreign process must be rejected, got '$out'"
+
+  pass "fm-backend: raw status and composer identity require a live agy process"
 }
 
 test_agy_busy_classify_herdr_native() {
@@ -1039,6 +1047,10 @@ next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
 } >> "$LOG"
 if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+  exit 0
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = process-info ]; then
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":424242,"foreground_processes":[{"pid":424243,"name":"agy","argv":["agy"],"argv0":"agy","cmdline":"agy"}]}}}\n'
   exit 0
 fi
 n=$next

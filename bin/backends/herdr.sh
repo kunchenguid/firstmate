@@ -3105,8 +3105,17 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 # backing the shared classifier's separated (pi) shape - the genuine herdr
 # primitive no other backend has natively.
 fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
+  local identity agent
   fm_backend_herdr_parse_target "$1" || return 1
-  fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+  identity=$(fm_backend_herdr_agent_identity_raw \
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || return 1
+  case "$identity" in *$'\t'*) ;; *) return 1 ;; esac
+  agent=${identity%%$'\t'*}
+  if [ "$agent" = agy ] && [ "$(fm_backend_herdr_pane_process_state \
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" agy)" != agent ]; then
+    return 1
+  fi
+  printf '%s' "$identity"
 }
 
 # fm_backend_herdr_composer_state: thin adapter - capture plus capabilities

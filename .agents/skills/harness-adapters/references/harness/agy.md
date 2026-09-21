@@ -21,7 +21,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
 | Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
 | Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
-| Composer | Borderless bare `>` row between separator rules; on Herdr, native `agent=agy` with `agent_status=idle` proves the bare composer `empty` and text such as `/exit` `pending`. Without that live identity the same shape remains `unknown` under the dead-shell rule. |
+| Composer | Borderless bare `>` row between separator rules; on Herdr, matching `agent=agy`, `agent_status=idle`, and a live agy process prove the bare composer `empty` and text such as `/exit` `pending`. Without that live identity the same shape remains `unknown` under the dead-shell rule. |
 
 ## Trust, and where the decision persists
 

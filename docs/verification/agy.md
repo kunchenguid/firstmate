@@ -140,7 +140,7 @@ agy stays out of the session-lock name vocabulary in `bin/fm-session-lock-lib.sh
 ## Composer: Herdr identity proves idle and pending states
 
 Byte-level capture of the idle pane shows a bare unstyled `>` between two full-width `─` rules, with an unstyled `? for shortcuts` cell and a dim (`SGR 2`) model cell in the status row below.
-The shared classifier combines that separated shape with Herdr's native `agent=agy, agent_status=idle` identity to report `empty`; the same shape containing `/exit` reports `pending`, which is what permits the submit core to retry the Enter swallowed by autocomplete.
+The shared classifier combines that separated shape with Herdr's native `agent=agy, agent_status=idle` registration and a matching live agy process identity to report `empty`; the same shape containing `/exit` reports `pending`, which is what permits the submit core to retry the Enter swallowed by autocomplete.
 Without that live identity the shape remains `unknown`, preserving the dead-shell rule.
 Steering confirms delivery through the Herdr native `idle`-to-`working` transition, and the delivery footer regex covers the tmux path.
 agy renders the busy footer late for that confirm loop - about 1.5 s after Enter for a short steer and 4-5 s for a realistic longer brief, measured live on `agy 1.2.1` (2026-09-12) against the shared budget's 3 x 0.4 s - so `bin/fm-send.sh` gives agy typed targets a longer default submit-confirm budget (20 retries, about 8 s at the default cadence); an explicit `FM_SEND_RETRIES` still wins and every other harness keeps the shared 3-retry default.
