@@ -293,17 +293,24 @@ test_claude_hooks_semantic_lifecycle() {
 # a notification of observed activity, never a state edge and never a fabricated
 # completed turn.
 test_claude_tool_hooks_report_progress_inside_one_turn() {
-  local rec id=busy-cl-3 out state settings before after
+  local rec id=busy-cl-3 out state settings before after matcher tool
   rec=$(make_spawn_case claude-tool-progress claude "$id")
   read_case_record "$rec"
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
   expect_code 0 $? "claude spawn should succeed: $out"
   state="$HOME_DIR/state"
   settings="$WT_DIR/.claude/settings.local.json"
+  # The matcher is the regex Claude Code tests each tool name against, so its
+  # VALUE decides which boundaries refresh the marker. A matcher narrowed to one
+  # tool would leave a browser- or MCP-heavy worker escalating exactly as before.
   for ev in PreToolUse PostToolUse; do
     jq -e ".hooks[\"$ev\"]" "$settings" >/dev/null || fail "claude hook settings lack $ev"
-    jq -e ".hooks[\"$ev\"][0].matcher" "$settings" >/dev/null \
-      || fail "$ev must carry an explicit all-tool matcher"
+    matcher=$(jq -r ".hooks[\"$ev\"][0].matcher // empty" "$settings")
+    [ -n "$matcher" ] || fail "$ev must carry an explicit all-tool matcher"
+    for tool in Bash Read Edit WebFetch Task mcp__chrome__take_snapshot; do
+      printf '%s\n' "$tool" | grep -Eq "$matcher" \
+        || fail "$ev matcher '$matcher' does not cover $tool, so that tool's boundary would not refresh progress"
+    done
   done
 
   rm -f "$state/$id.progress" "$state/$id.turn-ended"

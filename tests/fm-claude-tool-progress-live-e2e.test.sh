@@ -33,7 +33,6 @@ ID=claude-tool-progress
 # loaded runner, so the in-turn observation below is a real window rather than a
 # race the test could win by accident.
 PROBE_SLEEP=25
-POLL_LIMIT=180
 
 TMP_ROOT=$(fm_test_tmproot fm-claude-tool-progress-live)
 LAB="$TMP_ROOT/lab"
@@ -83,9 +82,11 @@ CLAUDE_PID=$!
 # produce one of those too. It is that the marker appears WHILE the turn is
 # still open, which is the only thing that keeps the busy-age bound fresh
 # during a long turn. So the observation is taken before turn-ended exists.
+# The loop ends on its two real conditions only - the turn closing, or the
+# session exiting. A tick cap would just add a false negative that blames a
+# vendor regression whenever the first boundary lands later than the cap.
 IN_TURN=0
-TICKS=0
-while [ "$TICKS" -lt "$POLL_LIMIT" ]; do
+while :; do
   if [ -e "$STATE/$ID.progress" ] && [ ! -e "$STATE/$ID.turn-ended" ]; then
     IN_TURN=1
     break
@@ -93,7 +94,6 @@ while [ "$TICKS" -lt "$POLL_LIMIT" ]; do
   [ ! -e "$STATE/$ID.turn-ended" ] || break
   kill -0 "$CLAUDE_PID" 2>/dev/null || break
   sleep 0.5
-  TICKS=$((TICKS + 1))
 done
 
 wait "$CLAUDE_PID" || fail "credentialed Claude tool-progress session failed: $(tail -20 "$TRANSCRIPT")"
