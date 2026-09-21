@@ -3097,7 +3097,7 @@ for (let moduleIndex = 1; moduleIndex <= 2; moduleIndex += 1) {
   );
   await instance.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 }
-// Replacement shutdown deliberately retains module 2's established arm until
+// Replacement shutdown deliberately retains the established module-2 arm until
 // a successor commits. Start that successor so both retiring modules publish
 // their late actionable closes under distinct process-wide tokens.
 const collectorMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?token-module=collector`);
