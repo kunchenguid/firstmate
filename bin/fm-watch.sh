@@ -61,7 +61,7 @@
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with nothing observable
-#                          running (busy_turn_quiet_age: the newer of
+#                          running (busy_turn_quiet_anchor: the newer of
 #                          state/<id>.turn-ended and state/<id>.progress, or the
 #                          spawn record before either exists). Past that bound, a
 #                          declared external
@@ -75,11 +75,11 @@
 #                          the dead-record probe above included, and surfaces
 #                          with the same "stale: ..." reason, escalation
 #                          count, and demand-deep-inspection marker for a live
-#                          agent, plus a situation clause naming the silence it
-#                          actually measured - that nothing has run inside the
-#                          still-open turn when the age is anchored on observed
-#                          activity, and otherwise that no turn has completed and
-#                          this runtime reports no activity to tell from - for
+#                          agent, plus a situation clause reporting how old the
+#                          selected marker is and which marker that was - the
+#                          last observed tool-call boundary, or the last
+#                          completed turn - and asserting nothing about whether
+#                          work is running, for
 #                          human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
@@ -275,7 +275,7 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
 # may go with nothing observable running - no completed turn and no explicit
-# harness progress (the marker-selection contract is in busy_turn_quiet_age
+# harness progress (the marker-selection contract is in busy_turn_quiet_anchor
 # below, and why it is not a bound on turn length). Once this bound
 # is crossed, busy_turn_over_age routes the pane through
 # busy_turn_bound_check, which hands a crossed bound to the same
@@ -1257,10 +1257,10 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # appended after the escalation count so the reason's stable "possible wedge,
 # escalation N" spine, and the demand-deep-inspection clause after it, are
 # unchanged. Only the busy-pane bound supplies one today: a pane whose harness
-# still reports an open turn with nothing running in it asks the supervisor for
-# a different thing than a pane that simply stopped rendering, and before this
-# the two arrived word for word identical - the 2026-09-20 case where four false
-# alarms and one real lost connection were indistinguishable.
+# still reports an open turn, with its newest marker that old, asks the
+# supervisor for a different thing than a pane that simply stopped rendering,
+# and before this the two arrived word for word identical - the 2026-09-20 case
+# where four false alarms and one real lost connection were indistinguishable.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [situation]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 situation=${7-} since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -1301,11 +1301,11 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
-# busy_turn_quiet_age: seconds since this task last showed anything observable -
-# the newer of its last completed turn (state/<id>.turn-ended) and explicit
-# harness progress (state/<id>.progress). Progress is actual observed model or
-# tool activity, never a timer or a busy footer. Before either marker exists,
-# age the spawn record.
+# busy_turn_quiet_anchor: the marker this task's busy age is taken from - the
+# newer of its last completed turn (state/<id>.turn-ended) and explicit harness
+# progress (state/<id>.progress). Progress is actual observed model or tool
+# activity, never a timer or a busy footer. Before either marker exists, the
+# spawn record is the anchor.
 #
 # The distinction this reads is the whole point of the bound below. A completed
 # TURN is not a measure of activity: a crewmate working autonomously ends no turn
@@ -1314,12 +1314,20 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # escalations against a crew that was updating one container plugin after
 # another, single commands of ten to twenty-five minutes, inside one unbroken
 # turn. Progress markers are refreshed at each tool-call boundary by every
-# adapter that reports one, so this age is time with NOTHING running, which is
-# what a wedge actually is. An adapter that reports no progress at all keeps the
-# completed-turn anchor it always had, so its threshold is unchanged - but then
-# the age measures turn silence, not activity, and the caller must not claim
-# otherwise. busy_turn_quiet_anchor is the single owner of the selection rule so
-# the age and the wording a caller builds from it cannot drift apart.
+# adapter that reports one, so where one exists this age is time since the last
+# observed boundary rather than time since a turn closed. An adapter that
+# reports no progress at all keeps the completed-turn anchor it always had, so
+# its threshold is unchanged.
+#
+# What the age does NOT establish is whether work is running. A boundary marker
+# is touched entering a tool call as well as leaving it, so a single call that
+# outlives the bound ages the marker while the command runs; and a runtime that
+# reports no boundaries leaves the watcher no activity evidence at all. Callers
+# may therefore report the age and WHICH marker it came from, and nothing else -
+# a confident "nothing is running" is exactly the false alarm this bound exists
+# to stop. busy_turn_quiet_anchor returns that marker so one resolution can
+# supply both the age and the wording; resolving it twice would let a boundary
+# landing between the two reads pair one marker's age with the other's wording.
 busy_turn_quiet_anchor() {  # <task>
   local task=$1 f progress
   f="$STATE/$task.turn-ended"
@@ -1329,23 +1337,11 @@ busy_turn_quiet_anchor() {  # <task>
   printf '%s' "$f"
 }
 
-busy_turn_quiet_age() {  # <task>
-  age_of "$(busy_turn_quiet_anchor "$1")"
-}
-
-# busy_turn_progress_anchored: 0 iff the age above is anchored on observed
-# activity rather than on a completed turn or the spawn record. Only then has
-# the watcher measured that nothing ran; otherwise it has measured nothing at
-# all about activity and may say only that no turn has completed.
-busy_turn_progress_anchored() {  # <task>
-  [ "$(busy_turn_quiet_anchor "$1")" = "$STATE/$1.progress" ]
-}
-
-# busy_turn_over_age: 0 iff busy_turn_quiet_age has reached BUSY_TURN_MAX_SECS.
+# busy_turn_over_age: 0 iff the anchor above has reached BUSY_TURN_MAX_SECS.
 # It does not emit a wake or change semantic busy state. The caller checks busy
 # state and routes a crossed bound through inspection.
 busy_turn_over_age() {  # <task>
-  [ "$(busy_turn_quiet_age "$1")" -ge "$BUSY_TURN_MAX_SECS" ]
+  [ "$(age_of "$(busy_turn_quiet_anchor "$1")")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -1416,7 +1412,7 @@ handle_paused_stale() {  # <window> <task> <hash>
 #
 # A busy pane past BUSY_TURN_MAX_SECS is normally a wedge suspect because a hung
 # foreground call can hide behind a busy signature - the bound is on
-# busy_turn_quiet_age, so crossing it means nothing observable has run for the
+# busy_turn_quiet_anchor's age, so crossing it means no marker has moved for the
 # whole bound, not merely that a long turn is still open. A `paused:` declaration or
 # verified captain-held transfer instead identifies that live foreground call as
 # the expected external wait. The caller has already confirmed liveness through
@@ -1425,10 +1421,9 @@ handle_paused_stale() {  # <window> <task> <hash>
 # exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS.
 # An undeclared crossing escalates with the shared ladder, but carries its own
 # situation clause naming that gap, so the supervisor can tell it apart from a
-# pane that simply stopped rendering. The clause asserts only what the anchor
-# supports: a runtime that reports no activity yields a bound crossed on turn
-# silence alone, and claiming nothing ran there would be exactly the confident
-# false alarm this bound exists to stop.
+# pane that simply stopped rendering. The clause reports the selected marker's
+# age and which marker it was, and stops there - what that silence means is the
+# inspection the wake is asking for, not something the watcher may assert.
 # A pane that declared nothing falls through to the shared wedge timer, which,
 # in a home that armed config/wedge-defer-parked-gate, applies the same rule to
 # the one wait a busy pane cannot declare: a validation gate of its own awaiting
@@ -1440,7 +1435,7 @@ handle_paused_stale() {  # <window> <task> <hash>
 # its own classification, which is why the declaration is read before the afk
 # branch rather than after it.
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
-  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 key statusf declared quiet label situation
+  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 key statusf declared anchor quiet label situation
   statusf="$STATE/$task.status"
   if status_is_paused_or_captain_held "$(last_status_line "$statusf")"; then
     if afk_present; then
@@ -1482,13 +1477,14 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  quiet=$(busy_turn_quiet_age "$task")
-  if busy_turn_progress_anchored "$task"; then
-    label="busy (nothing running)"
-    situation="the harness still reports an open turn but nothing has run in it for ${quiet}s"
+  anchor=$(busy_turn_quiet_anchor "$task")
+  quiet=$(age_of "$anchor")
+  if [ "$anchor" = "$STATE/$task.progress" ]; then
+    label="busy (no tool boundary)"
+    situation="the harness still reports an open turn and no tool-call boundary has been observed for ${quiet}s"
   else
     label="busy (no completed turn)"
-    situation="the harness still reports an open turn and no turn has completed for ${quiet}s; this worker runtime reports no activity, so the watcher cannot tell whether work is running"
+    situation="the harness still reports an open turn and no turn has completed for ${quiet}s"
   fi
   wedge_timer_check "$win" "$since_file" "$label" "$escalation_file" "$task" "$h" "$situation"
   return 1

@@ -4352,10 +4352,10 @@ test_busy_pane_native_progress_resets_age() {
 # lost power and the worker lost its connection. Both arrived word for word
 # identical, which is what made the real one invisible.
 #
-# Both halves are asserted on the SAME fixture, because only the observed-
-# activity evidence differs: a tool boundary inside the bound must not alarm,
-# and nothing running for longer than the bound must still alarm - and must say
-# which silence it is.
+# Both halves are asserted on the SAME fixture, because only the age of the
+# observed boundary differs: a tool boundary inside the bound must not alarm, a
+# boundary older than the bound must still alarm - and the alarm must name which
+# marker it measured without claiming what that silence means.
 test_busy_turn_bound_ages_from_observed_activity_not_the_turn() {
   local dir state fakebin out drain_out capture_file window key pane_hash sig pid
   dir=$(make_case busy-tool-activity-bound); state="$dir/state"; fakebin="$dir/fakebin"
@@ -4407,10 +4407,12 @@ test_busy_turn_bound_ages_from_observed_activity_not_the_turn() {
   grep -F "stale: $window" "$out" >/dev/null || fail "the stopped worker did not print a stale wake: $(cat "$out")"
   grep -F "possible wedge, escalation 1" "$out" >/dev/null \
     || fail "the stopped worker lost the shared escalation wording: $(cat "$out")"
+  grep -F "no tool-call boundary has been observed for" "$out" >/dev/null \
+    || fail "the escalation did not name the boundary marker it actually measured: $(cat "$out")"
   grep -F "nothing has run in it" "$out" >/dev/null \
-    || fail "the escalation did not distinguish an open turn with nothing running: $(cat "$out")"
+    && fail "the escalation claimed nothing was running, which the boundary marker cannot establish: $(cat "$out")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the stopped-worker escalation failed"
-  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "nothing has run in it" >/dev/null \
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "no tool-call boundary has been observed for" >/dev/null \
     || fail "the distinguishing clause did not reach the durable queue: $(cat "$drain_out")"
 
   # Phase C: the measured claim earns the assertive triage label too. Arming the
@@ -4423,11 +4425,11 @@ test_busy_turn_bound_ages_from_observed_activity_not_the_turn() {
   pid=$!
   wait_for_absorbed "$state" "$pid" "timer reset: $window" \
     || { reap "$pid"; fail "the progress-anchored pane did not re-arm the wedge timer: $(cat "$out")"; }
-  grep -F "absorbed busy (nothing running) timer reset: $window" "$state/.watch-triage.log" >/dev/null \
-    || { reap "$pid"; fail "a measured no-activity crossing lost its assertive triage label: $(cat "$state/.watch-triage.log")"; }
+  grep -F "absorbed busy (no tool boundary) timer reset: $window" "$state/.watch-triage.log" >/dev/null \
+    || { reap "$pid"; fail "a boundary-anchored crossing did not carry the boundary triage label: $(cat "$state/.watch-triage.log")"; }
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-C watcher stop"
-  pass "the busy-turn bound ages from observed tool activity, so a measuring crew is silent while one that stopped running anything still escalates with its own wording"
+  pass "the busy-turn bound ages from the observed tool boundary, so a measuring crew is silent while one whose boundaries stopped still escalates, naming that marker without claiming what it means"
 }
 
 # The same bound, reached by a worker runtime that reports no tool boundaries at
@@ -4482,16 +4484,16 @@ test_busy_turn_bound_does_not_claim_idleness_without_activity_evidence() {
   grep -F "stale: $window" "$out" >/dev/null || fail "the progressless crossing did not print a stale wake: $(cat "$out")"
   grep -F "possible wedge, escalation 1" "$out" >/dev/null \
     || fail "the progressless crossing lost the shared escalation wording: $(cat "$out")"
+  grep -F "no turn has completed for" "$out" >/dev/null \
+    || fail "the progressless crossing did not name the completed-turn marker it actually measured: $(cat "$out")"
+  grep -F "no tool-call boundary" "$out" >/dev/null \
+    && fail "a runtime that reports no boundaries cited a boundary marker it never wrote: $(cat "$out")"
   grep -F "nothing has run in it" "$out" >/dev/null \
     && fail "the watcher claimed nothing ran on a runtime that reports no activity at all: $(cat "$out")"
-  grep -F "no turn has completed for" "$out" >/dev/null \
-    || fail "the progressless crossing did not name the completed-turn anchor it actually measured: $(cat "$out")"
-  grep -F "cannot tell whether work is running" "$out" >/dev/null \
-    || fail "the progressless crossing did not admit it has no activity evidence: $(cat "$out")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the progressless escalation failed"
-  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "cannot tell whether work is running" >/dev/null \
-    || fail "the non-claiming clause did not reach the durable queue: $(cat "$drain_out")"
-  pass "a bound crossed without any activity evidence escalates saying only that no turn has completed, never that nothing is running"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "no turn has completed for" >/dev/null \
+    || fail "the completed-turn clause did not reach the durable queue: $(cat "$drain_out")"
+  pass "a bound crossed without any boundary marker escalates naming only the completed-turn marker and its age, never that nothing is running"
 }
 
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
