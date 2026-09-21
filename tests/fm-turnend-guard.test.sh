@@ -452,6 +452,11 @@ test_hook_foreign_live_home_owner_is_advisory_not_block() {
   local dir out status pid comm attempt
   dir=$(make_primary_dir "$TMP_ROOT/hook-foreign-owner")
   : > "$dir/state/task1.meta"
+  # The predicate requires a verified current-session harness ancestry before
+  # it can distinguish a foreign owner from an uncertain one.
+  # CI's ordinary shell has none, so run this case through a harness-named
+  # Bash copy while the owner remains a separate live Claude-shaped process.
+  cp "$(command -v bash)" "$dir/codex"
   cp "$(command -v sleep)" "$dir/claude"
   "$dir/claude" 300 &
   pid=$!
@@ -464,7 +469,8 @@ test_hook_foreign_live_home_owner_is_advisory_not_block() {
   done
   [ "$comm" = claude ] || fail "foreign owner did not become the expected claude process"
   printf '%s\n' "$pid" > "$dir/state/.lock"
-  out=$(run_hook_claude "$dir" false); status=$?
+  out=$(printf '{"stop_hook_active":false,"session_id":"sess-claude-mode"}' \
+    | CLAUDECODE=1 FM_HOME="$dir" "$dir/codex" "$dir/bin/fm-turnend-guard.sh" --claude 2>&1); status=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   expect_code 0 "$status" "--claude mode must not block a home owned by another live session"
