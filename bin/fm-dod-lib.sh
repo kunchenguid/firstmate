@@ -262,7 +262,7 @@ fm_voice_check_step() {  # <kind> <publish-action> <what-to-write>
   local kind=$1 action=$2 what=$3
   printf 'Write %s to a file, run `FM_HOME=%s %s/bin/fm-voice-check.sh --kind %s <file>`, and %s only on exit 0.\n' \
     "$what" "$FM_HOME" "$FM_ROOT" "$kind" "$action"
-  printf 'On exit 1, correct only the flagged passages, guided by the categories it printed, and check again; after at most two corrections that are still flagged, or on exit 3 (unverified), do not publish: append `needs-decision [key=voice-check]: %s voice check <status>: <printed categories>` and stop.\n' "$kind"
+  printf 'On exit 1, correct only the flagged passages, guided by the categories it printed, and check again; after at most two corrections that are still flagged, or on any other non-zero exit (3 unverified, 2 usage error), do not publish: append `needs-decision [key=voice-check]: %s voice check <status>: <printed categories>` and stop.\n' "$kind"
   printf 'Pass `--accept-unverified <reason>` only when firstmate explicitly instructs it for this one publication; nothing publishes a flagged text.'
 }
 

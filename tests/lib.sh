@@ -63,6 +63,13 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Clear the typed-resolution key. An operator shell may export TYPESAFE_API_KEY,
+# which turns on the pre-publication voice check in every no-mistakes spawn and
+# promotion, so a fixture would post its brief text to the live service and
+# depend on its verdict. A case that exercises the check sets the key itself
+# against a stubbed curl.
+unset TYPESAFE_API_KEY
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
