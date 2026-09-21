@@ -2008,7 +2008,7 @@ launch_template() {
   # Devin receives the typed launch envelope after --. Its private config
   # appends native worker lifecycle hooks. Clear NO_COLOR so the shared
   # composer guard can distinguish the dim placeholder from a real draft.
-  devin) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR FM_DEVIN_HARNESS=devin __DEVINBIN__ --permission-mode dangerous --respect-workspace-trust false --config __DEVINCONFIG__ __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  devin) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR __DEVINBIN__ --permission-mode dangerous --respect-workspace-trust false --config __DEVINCONFIG__ __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Kimi Code rejects a positional prompt, so it launches bare and receives
   # only an absolute brief pointer after the TUI readiness gate below.
   # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -4663,7 +4663,7 @@ esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
 claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
-  LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI -u FM_DEVIN_HARNESS $LAUNCH"
+  LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not

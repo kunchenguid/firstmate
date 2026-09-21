@@ -16,7 +16,7 @@ The router owns the crewmate/scout-only boundary; primary and secondmate integra
 | Model flag | `--model <model-id>`, including `swe-2-medium` and account-listed `fusion-<lead>-sidekick-swe-2-medium` ids. |
 | Effort flag | None; effort is encoded in the model id, and Firstmate records the independent axis without passing it. |
 | Model discovery | `devin models list`; authentication preflight is `devin auth status`. |
-| Marker | Firstmate sets `FM_DEVIN_HARNESS=devin`; anchored native `devin` ancestry also identifies the adapter and outranks foreign markers. |
+| Marker | None; anchored native `devin` ancestry identifies the adapter and outranks foreign inherited markers. |
 | Trust dialogs | The launch skips workspace trust for this run; the spawn owner carries the exact flags. |
 
 ## Worker lifecycle limits
