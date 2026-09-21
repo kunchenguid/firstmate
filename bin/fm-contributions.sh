@@ -144,13 +144,16 @@ export FM_FORGE_HOSTS
 
 warn_forge_hosts() {
   [ -n "$FORGE_HOSTS_REJECTED" ] || return 0
-  printf 'contributions: config/forge-hosts rejected %s; those hosts stay unmeasured\n' \
+  printf 'contributions: config/forge-hosts rejected %s; those hosts stay unmeasured and poll refuses every host until it is fixed\n' \
     "$FORGE_HOSTS_REJECTED" >&2
 }
 
 require_forge_hosts() {
-  [ -z "$FORGE_HOSTS_REJECTED" ] || fail \
-    "one or more configured hosts were rejected ($FORGE_HOSTS_REJECTED); refusing before any authenticated read"
+  [ -z "$FORGE_HOSTS_REJECTED" ] || {
+    printf 'contributions: config/forge-hosts rejected %s; refusing to poll any host before an authenticated read\n' \
+      "$FORGE_HOSTS_REJECTED"
+    exit 1
+  }
 }
 
 read_saved() {

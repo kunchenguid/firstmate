@@ -263,7 +263,10 @@ Every authenticated `api` read is addressed to the matched allowlist entry rathe
 `forge_host` in [`fm-contributions.jq`](../bin/fm-contributions.jq) is the single owner of host-name validity and drops any line it rejects, as does a file that is a symlink, is not a readable regular file, or exceeds 4096 bytes.
 A rejected line narrows coverage rather than taking a read-only path down: `fm-contributions.sh snapshot`, and therefore `fm-fleet-snapshot.sh` and Bearings, keep projecting on `github.com` plus the lines that did parse, report the rest as unmeasured, and warn once on stderr naming `config/forge-hosts` and what was rejected.
 `fm-contributions.sh poll` is the only path that refuses, because it is the only one that sends a credential: while any line is rejected it stops before the first authenticated read rather than polling against a silently narrowed allowlist.
-So a typo costs contribution coverage and prints why; it never costs the fleet snapshot.
+That refusal is not scoped to the rejected host — it halts polling for every host, `github.com` included.
+No record's `checked_at` advances while it stands, so once `FM_CONTRIBUTIONS_MAX_AGE` passes every contribution reports as fleet work needing a recheck, not just the ones on the rejected host.
+Poll prints the refusal on stdout, the same channel its other diagnostics use, so the armed check carries it through the watcher into a durable wake naming `config/forge-hosts` and what was rejected instead of failing where nobody sees it.
+So a typo costs all contribution polling until it is fixed, and says so; it never costs the fleet snapshot.
 Adding or removing a host changes only measurability; durable records written under a previously listed host are preserved and simply return to the unmeasured bucket.
 [`fm-contributions.sh --help`](../bin/fm-contributions.sh) owns the record contract, and `github_url` in [`fm-contributions.jq`](../bin/fm-contributions.jq) owns the decision, with coverage in [`tests/fm-contributions.test.sh`](../tests/fm-contributions.test.sh).
 
