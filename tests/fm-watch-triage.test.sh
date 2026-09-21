@@ -1934,6 +1934,29 @@ test_missing_and_unreadable_status_files_still_surface() {
 # The grace-period rescan lists every file the first scan listed, and each
 # listed line used to append its own queue row, so every surfaced status file
 # arrived as two rows with the same epoch and payload.
+# The scan's UNOBSERVABLE bookkeeping lines are stripped with builtins, so a
+# poll on a host where grep cannot fork still surfaces every changed status
+# file. A shim exiting 127 is what a failed exec looks like to the shell, and it
+# shadows grep for the watcher only.
+test_signal_batch_survives_a_failing_grep() {
+  local dir state fakebin out pid
+  dir=$(make_case grep-free-signals); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  printf 'blocked: need the captain\n' > "$state/task.status"
+  printf 'blocked: need the captain too\n' > "$state/other.status"
+  printf '#!/usr/bin/env bash\nexit 127\n' > "$fakebin/grep"; chmod +x "$fakebin/grep"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · fake default'
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 100 \
+    || { reap "$pid"; fail "the watcher never surfaced a changed status file without grep: $(cat "$out")"; }
+  [ "$(queue_rows_for "$state" signal task.status)" = 1 ] \
+    || fail "a failing grep dropped the first changed status file: $(cat "$state/.wake-queue")"
+  [ "$(queue_rows_for "$state" signal other.status)" = 1 ] \
+    || fail "a failing grep dropped the second changed status file: $(cat "$state/.wake-queue")"
+  pass "a poll's changed status files are surfaced even when grep cannot run"
+}
+
 test_signal_batch_queues_one_row_per_file() {
   local dir state fakebin out pid
   dir=$(make_case one-row-per-file); state="$dir/state"; fakebin="$dir/fakebin"
@@ -6443,6 +6466,7 @@ test_unobservable_status_signature_is_skipped_and_never_recorded
 test_persistent_unobservable_status_reports_once_per_episode
 test_missing_and_unreadable_status_files_still_surface
 test_signal_batch_queues_one_row_per_file
+test_signal_batch_survives_a_failing_grep
 test_secondmate_status_note_surfaced_despite_busy_agent
 test_secondmate_buried_block_wakes_despite_busy_agent
 test_self_announced_close_does_not_rewake_but_next_note_does

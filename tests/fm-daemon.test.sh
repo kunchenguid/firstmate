@@ -348,6 +348,51 @@ test_wedge_enriched_stale_keeps_the_unobservable_report() {
   pass "an enriched wedge stale wake still delivers the unobservable episode report it marks reported"
 }
 
+# A below-bound unobservable stale wake classified nothing: the span read failed
+# and the count has not reached the bound, so it proved neither the log's state
+# nor the pane's. It must leave the declared-wait bookkeeping byte-identical -
+# dropping the pause marker here restarts the mandatory recheck clock and
+# discards the until-due record, so an overdue wait goes quiet for another
+# window and can later re-escalate an extra time.
+test_below_bound_unobservable_stale_leaves_markers_alone() {
+  local dir state key paused until_due before_paused before_due
+  dir=$(make_supercase below-bound-markers); state="$dir/state"
+  printf 'paused: awaiting vendor\n' > "$state/vendor-r1.status"
+  key=$(printf '%s' "vendor-r1" | tr ':/.' '___')
+  paused="$state/.subsuper-paused-$key"
+  until_due="$state/.subsuper-pause-until-due-$key"
+  printf '100\n' > "$paused"
+  printf '200\n' > "$until_due"
+  before_paused=$(cat "$paused"); before_due=$(cat "$until_due")
+  make_observe_readers "$dir"
+  (
+    unobservable_wake() {
+      FM_UNOBSERVABLE_POLLS=3 FM_UNOBSERVABLE_MIN_GAP=0 FM_ESCALATE_BATCH_SECS=999 \
+        FM_STATUS_IDENTITY_READER="$dir/observe-identity" \
+        FM_STATUS_SIZE_READER="$dir/observe-size" \
+        FM_STATUS_PATH_STATE_READER="$dir/observe-path-state" \
+        FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-vendor-r1" "$state"
+    }
+    : > "$dir/observe-fail"
+    unobservable_wake
+    unobservable_wake
+    [ ! -s "$state/.subsuper-escalations" ] \
+      || fail "a below-bound unobservable stale wake escalated: $(cat "$state/.subsuper-escalations")"
+    [ "$(cat "$paused")" = "$before_paused" ] \
+      || fail "a below-bound unobservable stale wake reset the pause marker: $(cat "$paused" 2>/dev/null)"
+    [ "$(cat "$until_due")" = "$before_due" ] \
+      || fail "a below-bound unobservable stale wake dropped the until-due record"
+    [ ! -e "$state/.subsuper-stale-$key" ] \
+      || fail "a below-bound unobservable stale wake recorded a wedge marker"
+    # The bound still escalates, and only then does the wake reach delivery.
+    unobservable_wake
+    grep -F 'vendor-r1.status: status log unobservable' "$state/.subsuper-escalations" >/dev/null \
+      || fail "the bound did not escalate: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+    exit 0
+  ) || exit 1
+  pass "a below-bound unobservable stale wake changes no declared-wait marker"
+}
+
 test_stale_read_failure_surfaces_without_advancing_seen() {
   local dir state key out
   dir=$(make_supercase stale-unreadable); state="$dir/state"
@@ -845,7 +890,7 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
   local dir state fakebin task win pane key reason i escalations
   dir=$(make_supercase enriched-wedge-declared-wait)
   state="$dir/state"; fakebin="$dir/fakebin"
-  task=paused-wedge-w1; win="sess:fm-$task"; pane="$dir/pane.txt"
+  task="paused-wedge-w1"; win="sess:fm-$task"; pane="$dir/pane.txt"
   key=$(printf '%s' "$task" | tr ':/.' '___')
   fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
   printf 'working: dispatching the long audit\npaused: the audit engine is running to completion\n' \
@@ -3004,6 +3049,7 @@ test_status_read_failure_surfaces_without_advancing_seen
 test_daemon_unobservable_status_is_bounded_per_episode
 test_catchall_success_ends_the_unobservable_episode
 test_wedge_enriched_stale_keeps_the_unobservable_report
+test_below_bound_unobservable_stale_leaves_markers_alone
 test_catchall_advances_routine_then_surfaces_append
 test_escalation_buffer_failure_retains_wake_and_position
 test_catchall_buffer_failure_preserves_position

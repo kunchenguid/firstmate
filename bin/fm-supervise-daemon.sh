@@ -1468,6 +1468,20 @@ handle_wake() {  # <reason> <state>
   esac
   action=${decision%%|*}
   distilled=${decision#*|}
+  # A below-bound unobservable skip classified nothing: it proved neither the
+  # log's state nor the pane's, so it leaves every marker alone the way the
+  # watcher's stale skip does, instead of falling into the generic self arm and
+  # resetting a declared wait's recheck clock. Only the at-bound escalation, or
+  # an enriched wedge reason that outranked it above, continues into delivery.
+  case "$span_unobservable" in
+    self\|*)
+      if [ "$decision" = "$span_unobservable" ]; then
+        log "self-handle (status log unobservable, below the report bound): $reason"
+        rm -f "$capture"
+        return 0
+      fi
+      ;;
+  esac
   [ "$kind" = signal ] && sync_pause_markers_from_signal "$state" "$arg"
   if [ "$kind" = stale ] && [ "$action" = escalate ]; then
     task=$(window_to_task "$arg" "$state")

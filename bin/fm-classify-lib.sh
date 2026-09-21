@@ -29,10 +29,11 @@
 # with no output after one retry, and no marker writer records such a signature,
 # so one transient failure can neither wake the supervisor nor poison the
 # recorded state (status_observed_signature, status_observed_signature_unobservable).
-# The skip is bounded: consecutive failed observations of one file are counted
-# in its sidecar, once per supervisor cycle however many sites observe it, and
-# reported once per episode when they reach FM_UNOBSERVABLE_POLLS, so a
-# persistent failure stays loud (status_observation_skipped).
+# The skip is bounded: failed observations of one file are counted in its
+# sidecar at most once per FM_UNOBSERVABLE_MIN_GAP-second window however many
+# sites observe it, and reported once per episode when they reach
+# FM_UNOBSERVABLE_POLLS, so a persistent failure stays loud
+# (status_observation_skipped).
 # A missing, malformed, identity-mismatched, or past-end classified position reads
 # from byte 0, preferring a bounded duplicate over a lost event.
 #

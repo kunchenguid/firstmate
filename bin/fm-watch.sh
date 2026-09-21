@@ -1743,9 +1743,8 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # the stat-helper failure fm-classify-lib.sh's status_observed_signature owns) is
 # skipped, never listed as changed: the next poll observes it again. The skip is
 # bounded by that library's status_observation_skipped: it counts the skip in
-# the log's sidecar at most once per FM_UNOBSERVABLE_MIN_GAP seconds, so the
-# grace-period rescan and the stale paths share one count with this scan, and the
-# one skip per failure episode that reaches the bound is printed as an
+# the log's sidecar at most once per FM_UNOBSERVABLE_MIN_GAP-second window, and
+# the one skip per failure episode that reaches the bound is printed as an
 # "UNOBSERVABLE\t<file>\t<count>" line for the caller to report.
 # Each file is observed exactly once per poll and that signature is what the
 # marker is compared against.
@@ -1798,6 +1797,30 @@ unobservable_enqueue() {  # <scan-output>
 $1
 EOF
   printf '%s' "$all"
+}
+
+# Drop the UNOBSERVABLE bookkeeping lines a scan printed and keep every changed
+# file line, into STRIPPED_SIGNAL_LINES. Builtins only, and no command
+# substitution: grep failing to fork here would empty the poll's signal list and
+# silently drop every real change, on exactly the degraded host this bound is
+# for. Blank lines are dropped too, which the awk dedup below already ignores.
+STRIPPED_SIGNAL_LINES=
+strip_unobservable_lines() {  # <scan-output>
+  local line
+  STRIPPED_SIGNAL_LINES=''
+  while IFS= read -r line; do
+    case "$line" in
+      ''|UNOBSERVABLE$'\t'*) continue ;;
+    esac
+    if [ -n "$STRIPPED_SIGNAL_LINES" ]; then
+      STRIPPED_SIGNAL_LINES="$STRIPPED_SIGNAL_LINES"$'\n'"$line"
+    else
+      STRIPPED_SIGNAL_LINES=$line
+    fi
+  done <<EOF
+$1
+EOF
+  return 0
 }
 
 unobservable_reason() {  # <status-file> <count>
@@ -2582,13 +2605,13 @@ EOF
   # cycle wakes for it below when no signal does.
   pending=$(scan_signals)
   unobservable_reason=$(unobservable_enqueue "$pending") || exit 1
-  pending=$(printf '%s\n' "$pending" | grep -v "^UNOBSERVABLE$(printf '\t')" || true)
+  strip_unobservable_lines "$pending"; pending=$STRIPPED_SIGNAL_LINES
   if [ -n "$pending" ]; then
     sleep "$SIGNAL_GRACE"
     rescan=$(scan_signals)
     rescan_reason=$(unobservable_enqueue "$rescan") || exit 1
     [ -z "$rescan_reason" ] || unobservable_reason="${unobservable_reason:+$unobservable_reason; }$rescan_reason"
-    rescan=$(printf '%s\n' "$rescan" | grep -v "^UNOBSERVABLE$(printf '\t')" || true)
+    strip_unobservable_lines "$rescan"; rescan=$STRIPPED_SIGNAL_LINES
     pending=$(printf '%s\n%s' "$pending" "$rescan")
     # The re-scan lists every file the first scan listed (no marker has advanced
     # yet), so keep one line per file - its LAST observed signature, in
