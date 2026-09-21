@@ -48,10 +48,10 @@
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
 # lock identity before and after close, and successor disposition. A ledger
-# write waits a bounded 5s for that log's lock and then gives up rather than
-# stalling the cycle, but never silently: the skip is reported on stderr, so a
-# missing record is never mistaken for a hand-over that produced no successor.
-# The separate
+# write waits a bounded interval for that log's lock and then gives up rather
+# than stalling the cycle, but never silently: the skip is reported on stderr
+# under its own prefix, so a missing record is never mistaken for a hand-over
+# that produced no successor. The separate
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
 #
@@ -111,12 +111,13 @@ CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
 CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
-# Bounded, and deliberately not configurable: a successor links its
-# predecessor's record while that predecessor may still be rotating the ledger,
-# and the previous 400ms bound lost that link often enough for a completed
-# hand-over to read as a failed one. 5s covers a rotation of a size-capped log
-# without letting an observability wait grow into a supervision stall.
-CYCLE_LOG_LOCK_WAIT_MS=5000
+# Bounded, and deliberately not configurable, because the ceiling is not ours to
+# pick: the extension retires an arm on FM_WATCH_ARM_RETIRE_TIMEOUT_MS (1000ms)
+# and a signal-trap ledger write runs before the arm can exit, while the attached
+# path takes two of these waits back to back. Twice this bound must still fit
+# inside that retire budget, or contention on a diagnostic log turns a healthy
+# hand-over into a killed successor - the outage this ledger exists to expose.
+CYCLE_LOG_LOCK_WAIT_MS=400
 ARM_PID=${BASHPID:-$$}
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
@@ -178,7 +179,7 @@ cycle_log_lock_acquire() {
   local what=$1 waited=0
   while ! fm_lock_try_acquire "$CYCLE_LOG_LOCK"; do
     if [ "$waited" -ge "$CYCLE_LOG_LOCK_WAIT_MS" ]; then
-      echo "watcher: lifecycle ledger $what skipped - $CYCLE_LOG_LOCK stayed held for ${CYCLE_LOG_LOCK_WAIT_MS}ms" >&2
+      echo "watcher-ledger: $what skipped - $CYCLE_LOG_LOCK stayed held for ${CYCLE_LOG_LOCK_WAIT_MS}ms" >&2
       return 1
     fi
     sleep 0.02

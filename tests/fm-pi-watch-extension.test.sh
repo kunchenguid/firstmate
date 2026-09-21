@@ -2819,6 +2819,128 @@ EOF
   pass "Pi streaming-time wake delivery keeps the successor chain and replays only unconsumed wakes"
 }
 
+# The hand-over guarantee on the Pi path, driven at the one interleaving that
+# can silently break it: a successor closes actionably while the wake its own
+# predecessor produced is still being delivered, so the single-flight
+# restoration guard is held and nothing external is left to call the pipeline
+# back in. The generation must still end with a verified child rather than a
+# live session watching nothing.
+test_pi_actionable_close_during_delivery_still_gets_its_successor() {
+  local repo home plugin log trigger stop out status
+  repo="$TMP_ROOT/pi-inflight-actionable-root"
+  home="$TMP_ROOT/pi-inflight-actionable-home"
+  log="$TMP_ROOT/pi-inflight-actionable.log"
+  trigger="$TMP_ROOT/pi-inflight-actionable.trigger"
+  stop="$TMP_ROOT/pi-inflight-actionable.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s predecessor=%s\n' "$$" "${FM_WATCH_PREDECESSOR_ARM_PID:-none}" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+if [ "$count" -eq 1 ]; then
+  printf 'signal: pi inflight wake 1\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  # Closes only once the test says the first wake is in flight.
+  while [ ! -e "$FM_TRIGGER_FILE" ]; do sleep 0.02; done
+  printf 'signal: pi inflight wake 2\n'
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_TRIGGER_FILE="$trigger" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+const prompts = [];
+const armsAtDelivery = [];
+let releaseFirstDelivery = () => {};
+const firstDeliveryHeld = new Promise((resolve) => {
+  releaseFirstDelivery = resolve;
+});
+const arms = () => existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").split("\n").filter((row) => row.startsWith("arm=")).length
+  : 0;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+    armsAtDelivery.push(arms());
+    if (prompts.length === 1) await firstDeliveryHeld;
+  },
+  events: { on() {}, emit() {} },
+};
+async function waitFor(pred, label) {
+  for (let i = 0; i < 500; i += 1) {
+    if (pred()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timeout waiting for ${label}: arms=${arms()} prompts=${prompts.length}`);
+}
+const wakes = (text) => prompts.filter((message) => message.includes(text)).length;
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-inflight-actionable", {}, undefined, undefined, {});
+
+// Interleaving step 1: the first actionable close must have a verified
+// successor standing before its wake is handed to Pi at all.
+await waitFor(() => prompts.length === 1, "first wake reaching delivery");
+if (armsAtDelivery[0] !== 2) {
+  throw new Error(`first wake was delivered with ${armsAtDelivery[0]} arms, so no successor was verified first`);
+}
+
+// Interleaving step 2: that successor closes actionably while the delivery is
+// still held, leaving the generation with no child and the guard held.
+writeFileSync(process.env.FM_TRIGGER_FILE, "close\n");
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (arms() !== 2) {
+  throw new Error(`a successor was started while the guard was held: ${arms()} arms`);
+}
+if (prompts.length !== 1) {
+  throw new Error(`the queued wake was delivered while the guard was held: ${prompts.join(" | ")}`);
+}
+
+// Interleaving step 3: once the delivery settles, the queued close must get
+// its own verified successor without any external caller.
+releaseFirstDelivery();
+await waitFor(() => arms() === 3, "successor for the close that queued behind the delivery");
+await waitFor(() => prompts.length === 2, "the queued wake delivered after the guard released");
+if (wakes("signal: pi inflight wake 1") !== 1 || wakes("signal: pi inflight wake 2") !== 1) {
+  throw new Error(`wrong wakes delivered: ${prompts.join(" | ")}`);
+}
+if (armsAtDelivery[1] !== 3) {
+  throw new Error(`the queued wake was delivered with ${armsAtDelivery[1]} arms, so no successor was verified first`);
+}
+
+// The restoration stays single-flight: no extra arm keeps spinning afterwards.
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (arms() !== 3) throw new Error(`restoration re-entry was not single-flight: ${arms()} arms`);
+if (prompts.some((message) => message.includes("watcher: FAILED"))) {
+  throw new Error(`a healthy hand-over surfaced a failure: ${prompts.join(" | ")}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must give an actionable close that queued behind a delivery its own verified successor"
+  [ -z "$out" ] || fail "Pi in-flight actionable close test printed output: $out"
+  pass "Pi gives an actionable close queued behind an in-flight delivery its own verified successor"
+}
+
 # A verified successor can die while the wake it was started for is still
 # being delivered (a branch turn can take minutes). Its failure close arrives
 # while the pipeline is busy, so the ordinary retry path must be deferred to
@@ -4422,6 +4544,7 @@ test_pi_session_transition_generation_owner
 test_pi_session_replacement_carries_inflight_actionable_close
 test_pi_streaming_followup_is_replayed_after_replacement
 test_pi_streaming_time_delivery_keeps_the_successor_chain
+test_pi_actionable_close_during_delivery_still_gets_its_successor
 test_pi_successor_failure_during_delivery_is_retried_after_delivery
 test_pi_late_retiring_actionable_reaches_replacement
 test_pi_replacement_tokens_are_process_unique

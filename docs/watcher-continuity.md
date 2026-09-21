@@ -375,7 +375,9 @@ Each record includes:
 
 The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYCLE_LOG_KEEP_LINES`.
 A successor links its predecessor's record in place, which can collide with a predecessor still rotating that log, so the ledger lock is waited on for a bounded interval owned by `bin/fm-watch-arm.sh` before the write is abandoned.
-An abandoned write is reported on the arm's stderr rather than dropped, because a record missing its successor link is indistinguishable from a hand-over that produced no successor.
+That bound stays well under the extension's `FM_WATCH_ARM_RETIRE_TIMEOUT_MS`, because a ledger write runs before a signalled arm can exit and an arm that misses its retire budget is killed as an unready successor.
+An abandoned write is reported on the arm's stderr under the `watcher-ledger:` prefix rather than dropped, because a record missing its successor link is indistinguishable from a hand-over that produced no successor.
+The prefix is deliberately not `watcher:`: that prefix selects the arm's verdict lines for the repair payload relayed to the model, and a diagnostic must never crowd a verdict out of it.
 `state/.watch-triage.log` remains only the watcher's bounded absorbed-wake debug log and carries no lifecycle semantics.
 
 ### Grace, beacon, and stop signals

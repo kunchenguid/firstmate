@@ -602,7 +602,7 @@ export default function (pi: ExtensionAPI) {
         finishPendingActionable(owner, wake.pending);
       } catch (error) {
         surfaceCleanupFailure(owner, error);
-        schedulePendingActionables(owner);
+        schedulePendingCleanup(owner);
       }
       return;
     }
@@ -774,11 +774,7 @@ export default function (pi: ExtensionAPI) {
     surfaceFailure(owner, `watcher: FAILED - Pi extension could not clear a delivered replacement-session actionable wake\n${detail}`);
   }
 
-  // Delayed, single-flight re-entry into the pipeline. Both callers need the
-  // delay: an immediate re-entry would spin on a cycle that keeps failing, and
-  // the single timer keeps a cleanup and a queued record from racing each other
-  // back into restoration.
-  function schedulePendingActionables(owner: SessionGeneration): void {
+  function schedulePendingCleanup(owner: SessionGeneration): void {
     if (!generationIsLive(owner) || owner.cleanupTimer) return;
     const timer = setTimeout(() => {
       if (owner.cleanupTimer === timer) owner.cleanupTimer = null;
@@ -792,7 +788,6 @@ export default function (pi: ExtensionAPI) {
     if (!generationIsLive(owner) || owner.restoring || owner.pendingActionables.length === 0) return;
     owner.restoring = true;
     const attemptedCleanup = new Set<string>();
-    let failed = false;
     try {
       while (generationIsLive(owner) && owner.pendingActionables.length > 0) {
         for (const delivered of owner.pendingActionables.filter((item) => item.delivered && !attemptedCleanup.has(item.token))) {
@@ -876,23 +871,12 @@ export default function (pi: ExtensionAPI) {
         }
       }
     } catch (error) {
-      failed = true;
       const detail = error instanceof Error ? error.message : String(error);
       surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
     } finally {
       if (generationIsLive(owner)) {
         owner.restoring = false;
-        // A record queued while this cycle held the single-flight guard would
-        // otherwise sit unhandled until something else happened to call in,
-        // which is how a hand-over ended with no successor and no alarm. It
-        // takes the same delayed re-entry as an owed cleanup. A cycle that
-        // threw is excluded: its typed failure is already on its way to main,
-        // and re-entering would loop on whatever threw.
-        const reentryOwed = owner.pendingActionables.some((pending) =>
-          pending.delivered
-          || (!failed && !owner.unconsumedWakes.has(pending.token)),
-        );
-        if (reentryOwed) schedulePendingActionables(owner);
+        if (owner.pendingActionables.some((pending) => pending.delivered)) schedulePendingCleanup(owner);
         // No bare arm is launched here. A generation without a child at this
         // point has either delivered a typed restoration failure after its
         // bounded retries, which hands repair to main through fm_watch_arm_pi
