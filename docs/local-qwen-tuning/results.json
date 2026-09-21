@@ -1,0 +1,1749 @@
+{
+  "benchmark": "docs/local-qwen-tuning/bench.py",
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 3090 24576 MiB",
+    "driver": "610.57.04",
+    "model": "Qwen3.8-27B-EXL3-4.0bpw (turboderp/Qwen3.8-27B-exl3 @ 113cf7ab958054860e43fb7f3063b1af19171095)",
+    "server_unit": "/home/umer/.config/systemd/user/qwen-local.service",
+    "unit_sha256": "3da83671a431b6778083e2bcad1773057bf64f3f604638511f5fc5bf0c2db935",
+    "endpoint": "http://127.0.0.1:8080/v1"
+  },
+  "quality": [
+    {
+      "label": "thinking off, provider sampling temp 1.0/top_p 0.95",
+      "source": "14-thinking-off-temp1.json",
+      "settings": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "thinking": false,
+        "effort": null,
+        "speed_thinking": false,
+        "speed_max_tokens": 700
+      },
+      "passed": 7,
+      "total": 7,
+      "seconds_sum": 44.9,
+      "output_tokens_sum": 1242,
+      "per_task": {
+        "comprehend_locate": {
+          "passed": true,
+          "seconds": 3.27,
+          "output_tokens": 117,
+          "steps": 3,
+          "reason": "ok"
+        },
+        "comprehend_cross": {
+          "passed": true,
+          "seconds": 1.42,
+          "output_tokens": 68,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "longfile": {
+          "passed": true,
+          "seconds": 15.35,
+          "output_tokens": 178,
+          "steps": 4,
+          "reason": "ok"
+        },
+        "adherence": {
+          "passed": true,
+          "seconds": 0.44,
+          "output_tokens": 18,
+          "steps": 1,
+          "reason": "ok"
+        },
+        "refuse": {
+          "passed": true,
+          "seconds": 13.81,
+          "output_tokens": 187,
+          "steps": 5,
+          "reason": "ok"
+        },
+        "tools": {
+          "passed": true,
+          "seconds": 2.05,
+          "output_tokens": 162,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "patch": {
+          "passed": true,
+          "seconds": 8.6,
+          "output_tokens": 512,
+          "steps": 5,
+          "reason": "ok"
+        }
+      }
+    },
+    {
+      "label": "thinking off, instruct-card sampling temp 0.7/top_p 0.8",
+      "source": "13-thinking-off.json",
+      "settings": {
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+        "thinking": false,
+        "effort": null,
+        "speed_thinking": false,
+        "speed_max_tokens": 700
+      },
+      "passed": 6,
+      "total": 7,
+      "seconds_sum": 70.2,
+      "output_tokens_sum": 1170,
+      "per_task": {
+        "comprehend_locate": {
+          "passed": true,
+          "seconds": 1.03,
+          "output_tokens": 52,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "comprehend_cross": {
+          "passed": true,
+          "seconds": 1.1,
+          "output_tokens": 68,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "longfile": {
+          "passed": false,
+          "seconds": 44.37,
+          "output_tokens": 325,
+          "steps": 6,
+          "reason": "missing required value 'status_is_terminal_verb'"
+        },
+        "adherence": {
+          "passed": true,
+          "seconds": 0.45,
+          "output_tokens": 18,
+          "steps": 1,
+          "reason": "ok"
+        },
+        "refuse": {
+          "passed": true,
+          "seconds": 14.49,
+          "output_tokens": 186,
+          "steps": 5,
+          "reason": "ok"
+        },
+        "tools": {
+          "passed": true,
+          "seconds": 1.78,
+          "output_tokens": 149,
+          "steps": 1,
+          "reason": "ok"
+        },
+        "patch": {
+          "passed": true,
+          "seconds": 7.01,
+          "output_tokens": 372,
+          "steps": 4,
+          "reason": "ok"
+        }
+      }
+    },
+    {
+      "label": "thinking on, effort medium, run 2",
+      "source": "15-final-medium-2.json",
+      "settings": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "thinking": true,
+        "effort": "medium",
+        "speed_thinking": false,
+        "speed_max_tokens": 700
+      },
+      "passed": 7,
+      "total": 7,
+      "seconds_sum": 25.9,
+      "output_tokens_sum": 1637,
+      "per_task": {
+        "comprehend_locate": {
+          "passed": true,
+          "seconds": 1.41,
+          "output_tokens": 82,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "comprehend_cross": {
+          "passed": true,
+          "seconds": 1.47,
+          "output_tokens": 96,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "longfile": {
+          "passed": true,
+          "seconds": 6.57,
+          "output_tokens": 413,
+          "steps": 3,
+          "reason": "ok"
+        },
+        "adherence": {
+          "passed": true,
+          "seconds": 0.68,
+          "output_tokens": 43,
+          "steps": 1,
+          "reason": "ok"
+        },
+        "refuse": {
+          "passed": true,
+          "seconds": 3.55,
+          "output_tokens": 230,
+          "steps": 4,
+          "reason": "ok"
+        },
+        "tools": {
+          "passed": true,
+          "seconds": 2.13,
+          "output_tokens": 200,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "patch": {
+          "passed": true,
+          "seconds": 10.11,
+          "output_tokens": 573,
+          "steps": 4,
+          "reason": "ok"
+        }
+      }
+    },
+    {
+      "label": "thinking on, effort low",
+      "source": "12-effort-low.json",
+      "settings": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "thinking": true,
+        "effort": "low",
+        "speed_thinking": false,
+        "speed_max_tokens": 700
+      },
+      "passed": 7,
+      "total": 7,
+      "seconds_sum": 38.2,
+      "output_tokens_sum": 1928,
+      "per_task": {
+        "comprehend_locate": {
+          "passed": true,
+          "seconds": 2.39,
+          "output_tokens": 106,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "comprehend_cross": {
+          "passed": true,
+          "seconds": 2.25,
+          "output_tokens": 173,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "longfile": {
+          "passed": true,
+          "seconds": 6.59,
+          "output_tokens": 483,
+          "steps": 3,
+          "reason": "ok"
+        },
+        "adherence": {
+          "passed": true,
+          "seconds": 0.8,
+          "output_tokens": 59,
+          "steps": 1,
+          "reason": "ok"
+        },
+        "refuse": {
+          "passed": true,
+          "seconds": 13.72,
+          "output_tokens": 230,
+          "steps": 3,
+          "reason": "ok"
+        },
+        "tools": {
+          "passed": true,
+          "seconds": 2.99,
+          "output_tokens": 275,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "patch": {
+          "passed": true,
+          "seconds": 9.5,
+          "output_tokens": 602,
+          "steps": 4,
+          "reason": "ok"
+        }
+      }
+    },
+    {
+      "label": "thinking on, effort xhigh, run 1 (as configured before this task)",
+      "source": "10-baseline-xhigh.json",
+      "settings": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "thinking": true,
+        "effort": "xhigh",
+        "speed_thinking": false,
+        "speed_max_tokens": 700
+      },
+      "passed": 7,
+      "total": 7,
+      "seconds_sum": 86.3,
+      "output_tokens_sum": 5390,
+      "per_task": {
+        "comprehend_locate": {
+          "passed": true,
+          "seconds": 3.09,
+          "output_tokens": 206,
+          "steps": 3,
+          "reason": "ok"
+        },
+        "comprehend_cross": {
+          "passed": true,
+          "seconds": 1.7,
+          "output_tokens": 136,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "longfile": {
+          "passed": true,
+          "seconds": 23.96,
+          "output_tokens": 2207,
+          "steps": 5,
+          "reason": "ok"
+        },
+        "adherence": {
+          "passed": true,
+          "seconds": 0.91,
+          "output_tokens": 63,
+          "steps": 1,
+          "reason": "ok"
+        },
+        "refuse": {
+          "passed": true,
+          "seconds": 16.84,
+          "output_tokens": 486,
+          "steps": 4,
+          "reason": "ok"
+        },
+        "tools": {
+          "passed": true,
+          "seconds": 3.04,
+          "output_tokens": 286,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "patch": {
+          "passed": true,
+          "seconds": 36.72,
+          "output_tokens": 2006,
+          "steps": 6,
+          "reason": "ok"
+        }
+      }
+    },
+    {
+      "label": "thinking on, effort xhigh, run 2",
+      "source": "17-final-xhigh-2.json",
+      "settings": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "thinking": true,
+        "effort": "xhigh",
+        "speed_thinking": false,
+        "speed_max_tokens": 700
+      },
+      "passed": 7,
+      "total": 7,
+      "seconds_sum": 47.4,
+      "output_tokens_sum": 2336,
+      "per_task": {
+        "comprehend_locate": {
+          "passed": true,
+          "seconds": 2.64,
+          "output_tokens": 114,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "comprehend_cross": {
+          "passed": true,
+          "seconds": 2.17,
+          "output_tokens": 157,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "longfile": {
+          "passed": true,
+          "seconds": 10.23,
+          "output_tokens": 715,
+          "steps": 3,
+          "reason": "ok"
+        },
+        "adherence": {
+          "passed": true,
+          "seconds": 1.62,
+          "output_tokens": 141,
+          "steps": 1,
+          "reason": "ok"
+        },
+        "refuse": {
+          "passed": true,
+          "seconds": 13.15,
+          "output_tokens": 166,
+          "steps": 3,
+          "reason": "ok"
+        },
+        "tools": {
+          "passed": true,
+          "seconds": 2.98,
+          "output_tokens": 220,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "patch": {
+          "passed": true,
+          "seconds": 14.57,
+          "output_tokens": 823,
+          "steps": 5,
+          "reason": "ok"
+        }
+      }
+    },
+    {
+      "label": "thinking on, effort medium, run 1",
+      "source": "11-effort-medium.json",
+      "settings": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "thinking": true,
+        "effort": "medium",
+        "speed_thinking": false,
+        "speed_max_tokens": 700
+      },
+      "passed": 7,
+      "total": 7,
+      "seconds_sum": 33.8,
+      "output_tokens_sum": 1374,
+      "per_task": {
+        "comprehend_locate": {
+          "passed": true,
+          "seconds": 2.47,
+          "output_tokens": 96,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "comprehend_cross": {
+          "passed": true,
+          "seconds": 1.8,
+          "output_tokens": 111,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "longfile": {
+          "passed": true,
+          "seconds": 3.54,
+          "output_tokens": 242,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "adherence": {
+          "passed": true,
+          "seconds": 0.68,
+          "output_tokens": 41,
+          "steps": 1,
+          "reason": "ok"
+        },
+        "refuse": {
+          "passed": true,
+          "seconds": 13.41,
+          "output_tokens": 142,
+          "steps": 3,
+          "reason": "ok"
+        },
+        "tools": {
+          "passed": true,
+          "seconds": 2.52,
+          "output_tokens": 208,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "patch": {
+          "passed": true,
+          "seconds": 9.4,
+          "output_tokens": 534,
+          "steps": 4,
+          "reason": "ok"
+        }
+      }
+    },
+    {
+      "label": "thinking on, effort medium, run 3",
+      "source": "15-final-medium-3.json",
+      "settings": {
+        "temperature": 1.0,
+        "top_p": 0.95,
+        "top_k": 20,
+        "thinking": true,
+        "effort": "medium",
+        "speed_thinking": false,
+        "speed_max_tokens": 700
+      },
+      "passed": 7,
+      "total": 7,
+      "seconds_sum": 38.2,
+      "output_tokens_sum": 1805,
+      "per_task": {
+        "comprehend_locate": {
+          "passed": true,
+          "seconds": 1.4,
+          "output_tokens": 85,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "comprehend_cross": {
+          "passed": true,
+          "seconds": 1.67,
+          "output_tokens": 130,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "longfile": {
+          "passed": true,
+          "seconds": 7.33,
+          "output_tokens": 521,
+          "steps": 3,
+          "reason": "ok"
+        },
+        "adherence": {
+          "passed": true,
+          "seconds": 0.68,
+          "output_tokens": 36,
+          "steps": 1,
+          "reason": "ok"
+        },
+        "refuse": {
+          "passed": true,
+          "seconds": 14.59,
+          "output_tokens": 248,
+          "steps": 4,
+          "reason": "ok"
+        },
+        "tools": {
+          "passed": true,
+          "seconds": 2.28,
+          "output_tokens": 257,
+          "steps": 2,
+          "reason": "ok"
+        },
+        "patch": {
+          "passed": true,
+          "seconds": 10.26,
+          "output_tokens": 528,
+          "steps": 4,
+          "reason": "ok"
+        }
+      }
+    }
+  ],
+  "speed": {
+    "decode_final": {
+      "label": "final config, 700-token code generation",
+      "source": "70-final-decode.json",
+      "decode_tps_median": 121.94,
+      "ttft_s_median": 0.2299,
+      "prefill_tps_median": 400.2,
+      "prompt_tokens": 92,
+      "decode_tps_samples": [
+        112.84,
+        127.95,
+        121.56,
+        129.75,
+        121.94
+      ]
+    },
+    "decode_reference_replicates": [
+      {
+        "label": "unchanged baseline, replicate 1",
+        "source": "noise-1.json",
+        "decode_tps_median": 126.02,
+        "ttft_s_median": 0.2662,
+        "prefill_tps_median": 345.6,
+        "prompt_tokens": 92,
+        "decode_tps_samples": [
+          118.91,
+          122.54,
+          129.53,
+          128.02,
+          126.02
+        ]
+      },
+      {
+        "label": "unchanged baseline, replicate 2",
+        "source": "noise-2.json",
+        "decode_tps_median": 123.11,
+        "ttft_s_median": 0.2332,
+        "prefill_tps_median": 394.5,
+        "prompt_tokens": 92,
+        "decode_tps_samples": [
+          112.37,
+          129.53,
+          123.11,
+          125.58,
+          115.84
+        ]
+      },
+      {
+        "label": "unchanged baseline, replicate 3",
+        "source": "noise-3.json",
+        "decode_tps_median": 124.07,
+        "ttft_s_median": 0.2345,
+        "prefill_tps_median": 392.3,
+        "prompt_tokens": 92,
+        "decode_tps_samples": [
+          130.31,
+          97.9,
+          123.03,
+          126.97,
+          124.07
+        ]
+      },
+      {
+        "label": "unchanged baseline, replicate 4 (arguments were truncated to the baseline launch)",
+        "source": "20-dds-default.json",
+        "decode_tps_median": 127.13,
+        "ttft_s_median": 0.2625,
+        "prefill_tps_median": 350.5,
+        "prompt_tokens": 92,
+        "decode_tps_samples": [
+          97.59,
+          127.24,
+          116.96,
+          130.32,
+          127.13
+        ]
+      }
+    ],
+    "draft_sweep": [
+      {
+        "label": "mtp + dynamic draft",
+        "source": "20-dds.json",
+        "decode_tps_median": 126.18,
+        "ttft_s_median": 0.251,
+        "prefill_tps_median": 366.5,
+        "prompt_tokens": 92,
+        "decode_tps_samples": [
+          126.18,
+          121.45,
+          104.36,
+          129.26,
+          126.98
+        ]
+      },
+      {
+        "label": "mtp, 6 draft tokens",
+        "source": "21-ndt6.json",
+        "decode_tps_median": 123.65,
+        "ttft_s_median": 0.2298,
+        "prefill_tps_median": 400.3,
+        "prompt_tokens": 92,
+        "decode_tps_samples": [
+          125.5,
+          123.65,
+          108.64,
+          118.06,
+          126.13
+        ]
+      },
+      {
+        "label": "mtp, 2 draft tokens",
+        "source": "22-ndt2.json",
+        "decode_tps_median": 119.67,
+        "ttft_s_median": 0.245,
+        "prefill_tps_median": 375.5,
+        "prompt_tokens": 92,
+        "decode_tps_samples": [
+          113.14,
+          119.67,
+          126.97,
+          107.48,
+          124.71
+        ]
+      },
+      {
+        "label": "mtp + dynamic draft, 8 draft tokens ceiling",
+        "source": "23-dds-ndt8.json",
+        "decode_tps_median": 125.72,
+        "ttft_s_median": 0.265,
+        "prefill_tps_median": 347.2,
+        "prompt_tokens": 92,
+        "decode_tps_samples": [
+          125.04,
+          125.72,
+          124.69,
+          129.11,
+          132.37
+        ]
+      },
+      {
+        "label": "no speculative drafting (reference floor)",
+        "source": "24-nodraft.json",
+        "decode_tps_median": 43.84,
+        "ttft_s_median": 0.298,
+        "prefill_tps_median": 308.7,
+        "prompt_tokens": 92,
+        "decode_tps_samples": [
+          43.84,
+          43.94,
+          44.92,
+          43.69,
+          43.6
+        ]
+      }
+    ],
+    "prefill_final": {
+      "label": "final config, 105k-token distinct prompts, 8 output tokens",
+      "source": "71-final-prefill.json",
+      "decode_tps_median": 10159.3,
+      "ttft_s_median": 152.5608,
+      "prefill_tps_median": 688.5,
+      "prompt_tokens": 105036,
+      "decode_tps_samples": [
+        9922.41,
+        12196.31,
+        10159.3
+      ]
+    },
+    "decode_reference_range": {
+      "lo": 123.11,
+      "hi": 127.13,
+      "note": "medians of four probes of the byte-identical baseline launch; within-run single samples spread 97.6 to 132.4"
+    },
+    "draft_sweep_note": "Every sweep median (119.67 to 126.18) falls inside or brackets the unchanged baseline's own replicate range (123.11 to 127.13), so no draft-settings difference is resolvable at this measurement precision. Only disabling drafting is far outside it (43.84)."
+  },
+  "concurrency": {
+    "three_workers": {
+      "workers": 3,
+      "min_free_vram_mib": 752,
+      "readings": [
+        [
+          829,
+          0
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          99
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          98
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          99
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          821,
+          100
+        ],
+        [
+          866,
+          100
+        ],
+        [
+          866,
+          100
+        ],
+        [
+          836,
+          100
+        ],
+        [
+          847,
+          100
+        ],
+        [
+          847,
+          100
+        ],
+        [
+          761,
+          100
+        ],
+        [
+          763,
+          100
+        ],
+        [
+          764,
+          100
+        ],
+        [
+          774,
+          100
+        ],
+        [
+          774,
+          100
+        ],
+        [
+          807,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          806,
+          100
+        ],
+        [
+          806,
+          100
+        ],
+        [
+          806,
+          100
+        ],
+        [
+          806,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          99
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          99
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          99
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          98
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          829,
+          100
+        ],
+        [
+          840,
+          100
+        ],
+        [
+          752,
+          100
+        ],
+        [
+          754,
+          100
+        ],
+        [
+          755,
+          100
+        ],
+        [
+          755,
+          100
+        ],
+        [
+          765,
+          100
+        ],
+        [
+          807,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          74
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          813,
+          100
+        ],
+        [
+          806,
+          100
+        ],
+        [
+          806,
+          100
+        ],
+        [
+          806,
+          100
+        ],
+        [
+          806,
+          100
+        ],
+        [
+          806,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          99
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ],
+        [
+          812,
+          100
+        ]
+      ],
+      "results": {
+        "1": {
+          "ok": true,
+          "prompt_tokens": 52536,
+          "completion_tokens": 2,
+          "seconds": 59.5,
+          "finish": "stop"
+        },
+        "2": {
+          "ok": true,
+          "prompt_tokens": 52536,
+          "completion_tokens": 2,
+          "seconds": 119.1,
+          "finish": "stop"
+        },
+        "0": {
+          "ok": true,
+          "prompt_tokens": 52536,
+          "completion_tokens": 2,
+          "seconds": 178.7,
+          "finish": "stop"
+        }
+      }
+    },
+    "four_workers_cache_warm_not_independent": {
+      "workers": 4,
+      "min_free_vram_mib": 804,
+      "readings": [
+        [
+          812,
+          0
+        ],
+        [
+          804,
+          90
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          99
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          99
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          99
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          75
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ],
+        [
+          804,
+          100
+        ]
+      ],
+      "results": {
+        "2": {
+          "ok": true,
+          "prompt_tokens": 52536,
+          "completion_tokens": 2,
+          "seconds": 0.3,
+          "finish": "stop"
+        },
+        "1": {
+          "ok": true,
+          "prompt_tokens": 52536,
+          "completion_tokens": 2,
+          "seconds": 0.5,
+          "finish": "stop"
+        },
+        "0": {
+          "ok": true,
+          "prompt_tokens": 52536,
+          "completion_tokens": 2,
+          "seconds": 0.8,
+          "finish": "stop"
+        },
+        "3": {
+          "ok": true,
+          "prompt_tokens": 52536,
+          "completion_tokens": 2,
+          "seconds": 60.3,
+          "finish": "stop"
+        }
+      }
+    }
+  },
+  "notes": [
+    "Raw per-run evidence and the prior-state backups live under /home/umer/models/qwen/tuning/20260921T132112Z/.",
+    "Decode rate is measured with thinking off so a thinking-length change cannot move the number.",
+    "Within one configuration, single speed samples spread about 10 percent and medians of five samples spread about 3 percent; a draft-sweep difference below that is not treated as real.",
+    "Four earlier baseline probes whose engine arguments were silently truncated to the baseline launch were superseded by the correctly-parameterized sweep; only the surviving replicate is listed."
+  ]
+}
