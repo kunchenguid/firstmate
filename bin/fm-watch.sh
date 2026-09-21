@@ -1248,7 +1248,7 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # already own on their existing bounded cadences and only a pane that would
 # otherwise alarm pays for a backend read.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence key
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1265,17 +1265,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
            wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
           return 0
         fi
-        if evidence=$(crew_readable_health "$task" "$STATE"); then
-          key=$(window_key "$win")
-          clear_write_tracking "$key"
+        if crew_readable_health "$task" "$STATE"; then
+          clear_write_tracking "$(window_key "$win")"
           date +%s > "$since_file"
-          case "$evidence" in
-            delivered-pr:*)
-              resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" 0 \
-                "stale: $win (delivered pull request awaiting maintainer, rechecked on a long cadence; confirm the review still holds)" \
-                "$evidence" 0
-              ;;
-          esac
           triage_log "absorbed $label (readable health evidence, idle ${age}s): $win"
           return 0
         fi
@@ -1640,48 +1632,6 @@ captain_call_stale_bound() {  # <window-key> <task>
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
-# The third record of an expected wait, and the one that is routine rather than
-# rare: a delivery waiting on a maintainer outside this fleet. Its worker has
-# said `done:` and has nothing left to do, and nothing about the silence that
-# follows changes until someone else merges or closes the pull request - so,
-# unbounded, every new pane hash re-alarms a delivery the supervisor already
-# read, for as long as that maintainer takes.
-# The evidence is two durable records together, and needs both:
-#   - the worker's latest status event is still its `done` delivery: any later
-#     line - a steer back to work, a blocker, a failure, a question - means the
-#     silence is about something else, and keeps alarming exactly as before;
-#   - the task's merge watch is armed on the pull request recorded in its
-#     metadata, authenticated exactly as the watcher authenticates the poll it
-#     runs (fm_pr_poll_artifacts_valid), and that merge has not already been
-#     reported (fm_pr_poll_merge_already_notified).
-# Unlike a captain call there is no away-posture exception: the wait is on
-# someone outside the fleet, so it keeps the bounded recheck in either posture.
-# The declaration binds the pull request with the whole status signature, so a
-# new delivery, a re-armed watch on another pull request, or any status event
-# starts its own window and its first sight still alarms.
-# Sets STALE_WAIT_DECLARATION and returns as captain_call_stale_bound does.
-delivered_pr_stale_bound() {  # <window-key> <task>
-  local key=$1 task=$2 evidence
-  STALE_WAIT_DECLARATION=
-  evidence=$(crew_readable_health "$task" "$STATE") || return 1
-  case "$evidence" in
-    delivered-pr:*) STALE_WAIT_DECLARATION=$evidence ;;
-    *) return 1 ;;
-  esac
-  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
-}
-
-# Every recorded wait that can bound a due stale alarm, in precedence order: an
-# open captain call first, because the captain is the one who must act and the
-# away-posture rule only applies to it, then a delivery awaiting its maintainer.
-# The first record that exists owns STALE_WAIT_DECLARATION, whether or not its
-# window is throttled.
-recorded_wait_stale_bound() {  # <window-key> <task>
-  captain_call_stale_bound "$1" "$2" && return 0
-  [ -z "$STALE_WAIT_DECLARATION" ] || return 1
-  delivered_pr_stale_bound "$1" "$2"
-}
-
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
@@ -1698,10 +1648,9 @@ recorded_wait_stale_bound() {  # <window-key> <task>
 # and the throttle is read BEFORE anything is queued and advanced only by a wake
 # that really fires - a throttle written by the wake it should have prevented, or
 # read after that wake was already appended, bounds nothing.
-# Every record of an ordinary crew wait bounds it (see task_captain_call_open
-# and delivered_pr_stale_bound above): the status line the worker declared, the
-# backlog hold firstmate recorded once the captain took the work in hand, and a
-# delivered pull request awaiting its maintainer.
+# Both records of an ordinary crew wait bound it (see task_captain_call_open
+# above): the status line the worker declared, and the backlog hold firstmate
+# recorded once the captain took the work in hand.
 surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1 until now
   key=$(window_key "$win")
@@ -1732,7 +1681,7 @@ surface_nonterminal_stale() {  # <window> <hash>
     else
       stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
     fi
-  elif recorded_wait_stale_bound "$key" "$task"; then
+  elif captain_call_stale_bound "$key" "$task"; then
     bounded=0
     throttled=0
   elif [ -n "$STALE_WAIT_DECLARATION" ]; then
@@ -1760,7 +1709,7 @@ surface_nonterminal_stale() {  # <window> <hash>
     clear_pause_state "$key"
   fi
   if [ "$throttled" -eq 0 ]; then
-    triage_log "absorbed non-terminal stale (declared wait or recorded wait already re-surfaced this window): $win"
+    triage_log "absorbed non-terminal stale (declared wait or open captain call already re-surfaced this window): $win"
     return 0
   fi
   wake "stale: $win"
@@ -2769,19 +2718,18 @@ EOF
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            elif recorded_wait_stale_bound "$key" "$task"; then
-              # The line is captain-relevant and stays so, but a durable record
-              # says the work is already waiting on someone - the captain holds
-              # it, or its delivered pull request awaits its maintainer: further
-              # NEW pane hashes with the same status-log state have nothing to
-              # add meanwhile. Only that new-hash repetition is bounded - the first
+            elif captain_call_stale_bound "$key" "$task"; then
+              # The line is captain-relevant and stays so, but the backlog says
+              # the captain already holds this work: further NEW pane hashes with
+              # the same status-log state have nothing to add while they are
+              # deciding. Only that new-hash repetition is bounded - the first
               # sight already alarmed, a new hash inside the window is absorbed,
               # and a new hash after it alarms again. A stable hash stays as inert
               # here as it already was after a first terminal alarm.
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
-              triage_log "absorbed stale (open captain call or delivered pull request already surfaced for this status): $w"
+              triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"

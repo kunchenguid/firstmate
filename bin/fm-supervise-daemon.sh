@@ -494,20 +494,9 @@ stale_marker_remove() {  # <window> <state>
 }
 
 stale_health_absorb() {
-  local win=$1 state=$2 task evidence throttle
+  local win=$1 state=$2 task
   task=$(window_to_task "$win" "$state")
-  evidence=$(crew_readable_health "$task" "$state") || return 1
-  case "$evidence" in
-    delivered-pr:*)
-      throttle="$state/.paused-resurfaced-$(_stale_key "$win")"
-      if [ "$(cat "$throttle" 2>/dev/null || true)" != "$evidence" ] \
-        || [ "$(_file_age "$throttle")" -ge "${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}" ]; then
-        escalate_add "$state" "delivered pull request awaiting maintainer, rechecked on a long cadence; confirm the review still holds: $win" \
-          || return 0
-        printf '%s' "$evidence" > "$throttle" || return 0
-      fi
-      ;;
-  esac
+  crew_readable_health "$task" "$state" || return 1
   _now > "$state/.subsuper-stale-$(_stale_key "$task")"
   return 0
 }
@@ -1032,7 +1021,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
 #     re-read shared health evidence, then re-peek the pane; unexplained idle
-#     escalates as a wedge, while a delivered PR takes the bounded wait cadence.
+#     escalates as a wedge.
 #  2b) pause re-surface: for each declared-wait marker past PAUSE_RESURFACE_SECS,
 #     re-peek; gone -> clear; still declaring the wait, on an idle OR a busy pane
 #     -> escalate a recheck digest naming which human the wait is on, and reset

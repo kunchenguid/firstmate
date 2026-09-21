@@ -2145,28 +2145,15 @@ crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
 }
 
-crew_readable_health() (
-  local task=$1 state=$2 evidence signature src
+crew_readable_health() {
+  local task=$1 state=$2 evidence
   [ -n "$task" ] || return 1
-  if evidence=$(FM_STATE_OVERRIDE="$state" "$FM_CREW_STATE_BIN" "$task" 2>/dev/null); then
-    case "$evidence" in
-      'state: working · source: run-step · '*) printf 'run-step'; return 0 ;;
-      'state: done · source: run-step · '*) ;;
-      state:*)
-        src=${evidence#*source: }; src=${src%% *}
-        [ "$src" != run-step ] || return 1
-        ;;
-    esac
-  fi
-  [ "$(status_line_verb "$(last_status_line "$state/$task.status")")" = done ] || return 1
-  # shellcheck source=bin/fm-pr-lib.sh
-  . "$_FM_CLASSIFY_LIB_DIR/fm-pr-lib.sh"
-  fm_pr_poll_artifacts_valid "$state" "$task" "$_FM_CLASSIFY_LIB_DIR/fm-pr-poll.sh" || return 1
-  ! fm_pr_poll_merge_already_notified "$state" "$task" "$FM_PR_DATA_PROVIDER" \
-    "$FM_PR_DATA_HOST" "$FM_PR_DATA_PATH" "$FM_PR_DATA_NUMBER" || return 1
-  signature=$(status_observed_signature "$state/$task.status") || return 1
-  printf 'delivered-pr:%s:%s' "$FM_PR_DATA_URL" "$signature"
-)
+  evidence=$(FM_STATE_OVERRIDE="$state" "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
+  case "$evidence" in
+    'state: working · source: run-step · '*) return 0 ;;
+  esac
+  return 1
+}
 
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.
 # The stale path absorbs such a crew (on a long re-surface cadence) instead of

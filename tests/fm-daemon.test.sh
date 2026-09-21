@@ -1276,7 +1276,7 @@ test_daemon_rechecks_live_run_step_health() {
       case "$result" in
         idle) FM_FAKE_CREW_STATE='state: idle · source: pane · prompt ready' ;;
         finished) FM_FAKE_CREW_STATE='state: done · source: run-step · run passed' ;;
-        unknown) FM_FAKE_CREW_STATE='state: unknown · source: none · unavailable' ;;
+        unknown) FM_FAKE_CREW_STATE='state: unknown · source: run-step · run inventory unavailable' ;;
         unreadable) FM_CREW_STATE_BIN="$dir/missing-reader" ;;
       esac
       printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
@@ -1291,74 +1291,6 @@ test_daemon_rechecks_live_run_step_health() {
     done
   ) || fail "daemon live run-step health regression failed"
   pass "daemon thresholds and enriched wakes re-read live Codex run evidence and escalate once it disappears"
-}
-
-test_daemon_delivered_pr_health_keeps_wait_cadence() {
-  local dir state win pane marker throttle reason
-  dir=$(make_supercase delivered-pr-health); state="$dir/state"
-  win=sess:fm-held-merge; pane="$dir/pane.txt"; marker="$state/.subsuper-stale-held-merge"
-  throttle="$state/.paused-resurfaced-sess_fm-held-merge"
-  fm_write_meta "$state/held-merge.meta" "window=$win" 'backend=tmux' 'harness=codex' 'kind=ship'
-  printf 'done: PR https://github.com/example/repo/pull/7 checks green\n' > "$state/held-merge.status"
-  printf 'unchanged Codex pane\n' > "$pane"
-  make_fake_crew_state "$dir/fakebin" >/dev/null
-  arm_delivered_pr "$dir" || fail "could not arm the daemon delivery fixture"
-  (
-    export PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" LOG="$dir/daemon.log"
-    export FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_ESCALATE_BATCH_SECS=999999
-    export FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 FM_MAX_DEFER_SECS=999999
-    export FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh"
-    export FM_FAKE_CREW_STATE='state: working · source: run-step · CI rerun'
-    seen_through "$state" held-merge
-    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
-    housekeeping "$state"
-    [ ! -s "$state/.subsuper-escalations" ] || fail "the delivery's CI rerun raised an alert"
-    FM_FAKE_CREW_STATE='state: done · source: run-step · checks passed'
-    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
-    housekeeping "$state"
-    grep -F 'delivered pull request awaiting maintainer' "$state/.subsuper-escalations" >/dev/null \
-      || fail "green CI on an existing daemon timer did not enter the delivery wait cadence"
-    grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null && fail "the daemon labeled a delivery wait as a wedge"
-    : > "$state/.subsuper-escalations"
-    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
-    housekeeping "$state"
-    reason="stale: $win (idle 500s, possible wedge, escalation 3, demand-deep-inspection: inspect)"
-    handle_wake "$reason" "$state"
-    [ ! -s "$state/.subsuper-escalations" ] || fail "a healthy delivery repeated its alert inside the wait cadence"
-    [ -e "$marker" ] || fail "the absorbed delivery lost its evidence recheck timer"
-    touch -t 200001010000 "$throttle"
-    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
-    housekeeping "$state"
-    [ "$(wc -l < "$state/.subsuper-escalations" | tr -d '[:space:]')" -eq 1 ] \
-      || fail "a due daemon delivery recheck did not surface once"
-    grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null && fail "a due delivery recheck was labeled a wedge"
-    : > "$state/.subsuper-escalations"
-    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing)'
-    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
-    housekeeping "$state"
-    [ ! -s "$state/.subsuper-escalations" ] || fail "a live post-delivery auto-fix raised an alert"
-    FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at fix_review: 1 finding(s) · run: rerun'
-    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
-    housekeeping "$state"
-    grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null \
-      || fail "a parked rerun hid behind the old delivery in daemon housekeeping"
-    grep -F 'awaiting maintainer' "$state/.subsuper-escalations" >/dev/null \
-      && fail "the daemon reported a worker-owned gate as an external wait"
-    : > "$state/.subsuper-escalations"
-    handle_wake "$reason" "$state"
-    grep -F 'possible wedge, escalation 3' "$state/.subsuper-escalations" >/dev/null \
-      || fail "the daemon absorbed an enriched wedge behind a parked rerun's old delivery"
-    FM_FAKE_CREW_STATE='state: done · source: run-step · checks passed'
-    . "$ROOT/bin/fm-pr-lib.sh"
-    fm_pr_poll_merge_mark_notified "$state" held-merge github github.com example/repo 7 \
-      || fail "could not record the fixture's merge notification"
-    : > "$state/.subsuper-escalations"
-    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
-    housekeeping "$state"
-    grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null \
-      || fail "a reported merge kept suppressing the daemon wedge timer"
-  ) || fail "daemon delivered-PR health regression failed"
-  pass "daemon delivery waits survive green CI, yield to a parked rerun, and expire after a reported merge"
 }
 
 test_housekeeping_persistent_stale_escalates() {
@@ -2897,11 +2829,6 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
-if [ -n "${FM_TEST_ONLY:-}" ]; then
-  "$FM_TEST_ONLY"
-  exit 0
-fi
-
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -2924,7 +2851,6 @@ test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
 test_daemon_rechecks_live_run_step_health
-test_daemon_delivered_pr_health_keeps_wait_cadence
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets

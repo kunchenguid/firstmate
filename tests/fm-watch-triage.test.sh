@@ -2191,9 +2191,9 @@ SH
     done
     case "$result" in
       idle) printf 'state: idle · source: pane · prompt ready\n' > "$verdict_file" ;;
-      finished) printf 'state: finished · source: run-step · run passed\n' > "$verdict_file" ;;
+      finished) printf 'state: done · source: run-step · run passed\n' > "$verdict_file" ;;
       unreadable) rm "$verdict_file" ;;
-      unknown) printf 'state: unknown · source: none · no current-state source available\n' > "$verdict_file" ;;
+      unknown) printf 'state: unknown · source: run-step · run inventory unavailable\n' > "$verdict_file" ;;
     esac
     printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
     wait_for_exit "$pid" 100 || { reap "$pid"; fail "$result: unchanged pane did not escalate after live run-step evidence ended"; }
@@ -3769,196 +3769,6 @@ test_stale_churn_without_a_captain_call_still_alarms() {
   done
   pass "a stale window with no open captain call keeps alarming on every new hash"
 }
-
-# 2026-09-21 reproduction, default:w3Z:p2: a delivered task whose pull request was
-# recorded in its metadata with its merge watch armed kept raising stale wakes on
-# every new pane hash while it waited on a maintainer outside the fleet, and only
-# a hand-set captain hold quieted it. The delivery plus its armed watch is the
-# record of that wait: the first sight still alarms, churn inside the window is
-# absorbed, and the window re-surfaces it. A later blocker on the same armed
-# delivery keeps alarming on every hash, while a live run-step stays absorbed.
-
-test_delivered_pr_rerun_parked_overrides_old_delivery() {
-  local dir state out capture key pane_hash verdict evidence
-  local window=test:fm-held-merge
-  local parked='state: parked · source: run-step · parked at fix_review: 1 finding(s) · run: rerun'
-  dir=$(make_case delivered-rerun-parked); state="$dir/state"
-  out="$dir/watch.out"; capture="$dir/pane.txt"; key=$(hold_key)
-  mkdir -p "$dir/config"
-  printf 'window=%s\nkind=ship\nharness=codex\nbackend=tmux\n' "$window" > "$state/held-merge.meta"
-  printf 'done: PR https://github.com/example/repo/pull/7 checks green\n' > "$state/held-merge.status"
-  printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
-  arm_delivered_pr "$dir" || fail "could not arm the rerun delivery fixture"
-  printf 'delivered\n' > "$capture"
-  pane_hash=$(hash_text "$(cat "$capture")")
-  printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  FM_HOME="$dir" wedge_threshold_round "$state" "$dir/fakebin" "$out" "$capture" "$window" \
-    'state: done · source: run-step · checks passed' exit \
-    || fail "the initial delivery did not surface"
-  [ -s "$state/.paused-resurfaced-$key" ] || fail "the initial delivery did not record its wait cadence"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the initial delivery"
-
-  : > "$out"
-  printf 'CI rerun\n' > "$capture"
-  pane_hash=$(hash_text "$(cat "$capture")")
-  printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  FM_TEST_STALE_ESCALATE=999 FM_HOME="$dir" wedge_threshold_round \
-    "$state" "$dir/fakebin" "$out" "$capture" "$window" \
-    'state: working · source: run-step · validating (running)' absorb \
-    || fail "a live rerun after delivery raised a stale alert"
-  [ ! -s "$out" ] || fail "a live rerun printed a wake"
-  [ -s "$state/.stale-since-$key" ] || fail "the rerun did not start its stale timer"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the live rerun watcher stop"
-
-  printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
-  FM_TEST_STALE_ESCALATE=240 FM_HOME="$dir" wedge_threshold_round \
-    "$state" "$dir/fakebin" "$out" "$capture" "$window" "$parked" exit \
-    || fail "a worker-owned parked gate remained hidden behind the old delivery"
-  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
-    || fail "a rerun parked on the unchanged pane did not wedge-escalate: $(cat "$out")"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the parked rerun escalation"
-
-  : > "$out"
-  printf 'parked gate, elapsed 1s\n' > "$capture"
-  printf '%s' "$(hash_text "$(cat "$capture")")" > "$state/.hash-$key"
-  printf '1\n' > "$state/.count-$key"
-  FM_HOME="$dir" wedge_threshold_round "$state" "$dir/fakebin" "$out" "$capture" "$window" "$parked" exit \
-    || fail "a new pane hash bypassed current-run precedence and absorbed the parked gate"
-  [ "$(hold_stale_wakes "$state")" -eq 1 ] || fail "the parked new hash did not queue one stale alert"
-  grep -F 'awaiting maintainer' "$out" >/dev/null && fail "a parked new hash claimed an external wait"
-
-  for verdict in "$parked" \
-    'state: parked · source: run-step · parked at awaiting_approval' \
-    'state: failed · source: run-step · run failed' \
-    'state: failed · source: run-step · run cancelled' \
-    'state: unknown · source: run-step · run state unavailable'; do
-    if evidence=$(FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE="$verdict" \
-      crew_readable_health held-merge "$state"); then
-      fail "current run evidence admitted a stale delivery proxy: $verdict -> $evidence"
-    fi
-  done
-  for verdict in 'state: working · source: run-step · validating (running)' \
-    'state: working · source: run-step · validating (fixing)'; do
-    evidence=$(FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" FM_FAKE_CREW_STATE="$verdict" \
-      crew_readable_health held-merge "$state") || fail "a live rerun lost its work evidence"
-    [ "$evidence" = run-step ] || fail "a live rerun was misclassified as a delivered-PR wait"
-  done
-  pass "a delivered PR that reruns and parks escalates on existing timers and new hashes; current run evidence wins"
-}
-
-test_delivered_pr_awaiting_maintainer_bounds_stale_churn() {
-  local dir state out capture throttle wakes key pane_hash pid
-  command -v tasks-axi >/dev/null 2>&1 \
-    || { echo "skip: tasks-axi not found (delivered pull request stale bound)"; return 0; }
-  dir=$(make_hold_home delivered-pr 'done: PR https://github.com/example/repo/pull/7 checks green' nohold) \
-    || fail "could not build an unheld delivery fixture"
-  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
-  throttle="$state/.paused-resurfaced-$(hold_key)"
-  arm_delivered_pr "$dir" || fail "could not arm the merge watch on the delivered pull request"
-  grep -Fx 'pr=https://github.com/example/repo/pull/7' "$state/held-merge.meta" >/dev/null \
-    || fail "arming the merge watch recorded no pull request in the task metadata"
-
-  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
-    || fail "first sight of a delivery awaiting its maintainer did not surface"
-  wakes=$(hold_stale_wakes "$state")
-  [ "$wakes" -eq 1 ] || fail "first sight produced $wakes wakes instead of one: $(cat "$out")"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the first surface"
-
-  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
-    || fail "watcher exited during pane churn on a delivery awaiting its maintainer"
-  wakes=$(hold_stale_wakes "$state")
-  [ "$wakes" -eq 0 ] || fail "pane churn re-alarmed a delivery awaiting its maintainer $wakes time(s)"
-
-  [ -e "$throttle" ] || fail "the absorbed churn recorded no re-surface cadence to elapse"
-  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
-  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
-    || fail "a delivery awaiting its maintainer did not re-surface once its window elapsed"
-  wakes=$(hold_stale_wakes "$state")
-  [ "$wakes" -eq 1 ] || fail "elapsed re-surface window produced $wakes wakes instead of one"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the re-surface"
-
-  # A blocker after the delivery is about something else: every hash alarms.
-  printf 'blocked: the maintainer asked for a rebase I cannot do\n' >> "$state/held-merge.status"
-  printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
-  for round in 1 2; do
-    hold_watch_surface "$dir" "$out" "$capture" "blocked, elapsed ${round}s" \
-      || fail "a blocker on an armed delivery stopped alarming on round $round"
-    wakes=$(hold_stale_wakes "$state")
-    [ "$wakes" -eq 1 ] || fail "blocker round $round produced $wakes wakes instead of one"
-    ack_stopped_cycle "$state" || fail "could not acknowledge blocker round $round"
-  done
-
-  printf 'done: PR https://github.com/example/repo/pull/7 checks green\n' >> "$state/held-merge.status"
-  printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
-  key=$(hold_key)
-  printf 'validating, frozen\n' > "$capture"
-  pane_hash=$(hash_text "$(cat "$capture")")
-  printf '%s' "$pane_hash" > "$state/.hash-$key"
-  printf '%s' "$pane_hash" > "$state/.stale-$key"
-  printf '1\n' > "$state/.count-$key"
-  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  : > "$out"
-  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
-    FM_FAKE_TMUX_CAPTURE="$capture" \
-    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
-    FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
-    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
-  pid=$!
-  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a live run-step on an armed delivery escalated: $(cat "$out")"; }
-  reap "$pid"
-  [ ! -s "$out" ] || fail "a live run-step on an armed delivery printed a wake: $(cat "$out")"
-  [ "$(hold_stale_wakes "$state")" -eq 0 ] || fail "a live run-step on an armed delivery queued a stale wake"
-  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a live run-step on an armed delivery counted an escalation"
-  [ "$(cat "$state/.stale-since-$key")" -gt "$(( $(date +%s) - 240 ))" ] \
-    || fail "the armed delivery's live run-step was never rechecked at the threshold"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the live delivery watcher stop"
-
-  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  FM_TEST_STALE_ESCALATE=240 FM_HOME="$dir" wedge_threshold_round \
-    "$state" "$dir/fakebin" "$out" "$capture" test:fm-held-merge \
-    'state: done · source: run-step · checks passed' exit \
-    || fail "a completed CI rerun did not enter the delivered-PR recheck cadence"
-  grep -F 'delivered pull request awaiting maintainer' "$out" >/dev/null \
-    || fail "the existing timer did not recognize the delivered-PR wait: $(cat "$out")"
-  grep -F 'possible wedge' "$out" >/dev/null && fail "green CI on the same pane was wedge-escalated"
-  [ ! -e "$state/.wedge-escalations-$key" ] || fail "the delivery recheck advanced the wedge count"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the delivery recheck"
-
-  : > "$out"
-  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  FM_TEST_STALE_ESCALATE=240 FM_HOME="$dir" wedge_threshold_round \
-    "$state" "$dir/fakebin" "$out" "$capture" test:fm-held-merge \
-    'state: done · source: run-step · checks passed' absorb \
-    || fail "a delivery rechecked again inside its wait cadence"
-  [ ! -s "$out" ] || fail "a healthy delivery printed a repeated recheck: $(cat "$out")"
-  [ "$(hold_stale_wakes "$state")" -eq 0 ] || fail "a healthy delivery queued a repeated recheck"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the absorbed delivery watcher stop"
-
-  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
-  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  FM_TEST_STALE_ESCALATE=240 FM_HOME="$dir" wedge_threshold_round \
-    "$state" "$dir/fakebin" "$out" "$capture" test:fm-held-merge \
-    'state: done · source: run-step · checks passed' exit \
-    || fail "an existing delivery timer did not resurface after its wait cadence"
-  grep -F 'possible wedge' "$out" >/dev/null && fail "a due delivery recheck was labeled a wedge"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the due delivery recheck"
-
-  rm "$state/held-merge.pr-poll-registration"
-  : > "$out"
-  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
-  FM_TEST_STALE_ESCALATE=240 FM_HOME="$dir" wedge_threshold_round \
-    "$state" "$dir/fakebin" "$out" "$capture" test:fm-held-merge \
-    'state: done · source: run-step · checks passed' exit \
-    || fail "an unauthenticated merge watch kept suppressing the existing wedge timer"
-  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
-    || fail "loss of the authenticated merge watch did not restore escalation: $(cat "$out")"
-  pass "a delivered PR bounds new and existing timers through a CI rerun, and loss of its watch restores escalation"
-}
-
 
 # The cadence marker may never outlive the wake it claims to record. Recording it
 # before publishing the durable wake turned a delayed alarm into a lost one: the
@@ -6360,8 +6170,6 @@ test_wedge_threshold_parked_gate_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
-test_delivered_pr_awaiting_maintainer_bounds_stale_churn
-test_delivered_pr_rerun_parked_overrides_old_delivery
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
 test_secondmate_paused_resurfaces_in_normal_mode

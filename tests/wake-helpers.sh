@@ -354,16 +354,3 @@ dead_pid() {
   done
   printf '%s\n' "$p"
 }
-
-arm_delivered_pr() {  # <dir>
-  local dir=$1
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/fakebin/gh"
-  chmod +x "$dir/fakebin/gh"
-  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
-    "$ROOT/bin/fm-pr-check.sh" held-merge https://github.com/example/repo/pull/7 >/dev/null 2>&1 \
-    || return 1
-  # Arming also registers the contributions observer, whose first poll would
-  # wake on this unreachable example pull request; it is not the record under test.
-  [ ! -e "$dir/state/contributions.check.sh" ] \
-    || FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-check-unregister.sh" contributions >/dev/null
-}
