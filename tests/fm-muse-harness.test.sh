@@ -200,14 +200,46 @@ test_detects_versioned_process_ancestor() {
 # The match must be anchored: an unrelated command whose name merely CONTAINS
 # muse is a different program and must not be claimed by this adapter.
 test_detection_is_anchored() {
-  local dir bin out
+  local dir bin fakeps out
   dir="$TMP_ROOT/detect-neg"
-  mkdir -p "$dir"
+  fakeps="$dir/fakeps"
+  mkdir -p "$fakeps"
+  cat > "$fakeps/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = -o ] && [ "${3:-}" = -p ]; then
+  case "${2:-}" in
+    comm=)
+      if [ "${4:-}" = "${FM_FAKE_LEAF_PID:-}" ]; then
+        printf '%s\n' "${FM_FAKE_LEAF_COMM:?}"
+      else
+        printf '%s\n' bash
+      fi
+      exit 0
+      ;;
+    args=)
+      printf '%s\n' bash
+      exit 0
+      ;;
+    ppid=)
+      case "${4:-}" in
+        "${FM_FAKE_LEAF_PID:-}") printf '1\n' ;;
+        1) printf '0\n' ;;
+        *) printf '%s\n' "${FM_FAKE_LEAF_PID:?}" ;;
+      esac
+      exit 0
+      ;;
+  esac
+fi
+exit 1
+SH
+  chmod +x "$fakeps/ps"
   for bin in musescore amuse notmuse-bin muse-binary muse-bind; do
     cp "$(command -v bash)" "$dir/$bin"
     out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
       -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
-      "$dir/$bin" -c "r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
+      FM_FAKE_LEAF_COMM="$bin" PATH="$fakeps:$PATH" \
+      "$dir/$bin" -c "export FM_FAKE_LEAF_PID=\$BASHPID; r=\$(\"$HARNESS\"); printf '%s' \"\$r\"")
     [ "$out" != muse ] || fail "fm-harness.sh misdetected unrelated process '$bin' as muse"
   done
   pass "muse detection does not claim unrelated muse-containing commands"
