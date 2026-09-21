@@ -621,7 +621,7 @@ SH
 # own home can drain. The parent alarm stays silent when that ring actually
 # empties the child's queue.
 test_secondmate_proven_idle_ring_lets_the_child_drain() {
-  local dir state sub fakebin inbox_body
+  local dir state sub fakebin inbox_body inbox_rec steer
   dir=$(make_case secondmate-proven-idle-drain)
   state="$dir/state"
   sub="$dir/secondmate"
@@ -661,11 +661,19 @@ test_secondmate_proven_idle_ring_lets_the_child_drain() {
     || fail "a proven-idle child-first ring published a parent stall notification"
   [ ! -s "$sub/state/.wake-queue" ] \
     || fail "the child ring did not drain the leftover foreign row"
-  inbox_body=$(cat "$state/mate.inbox/"*.msg 2>/dev/null || true)
-  printf '%s\n' "$inbox_body" | grep -F 'delivery=fire-and-forget' >/dev/null \
+  inbox_rec=
+  for inbox_rec in "$state/mate.inbox/"*.msg; do break; done
+  [ -f "$inbox_rec" ] || fail "the child-first ring did not write a drain steer record"
+  sed '/^--$/q' "$inbox_rec" | grep -Fx 'delivery=fire-and-forget' >/dev/null \
     || fail "the child-first ring did not write a fire-and-forget drain steer"
-  printf '%s\n' "$inbox_body" | grep -F "Drain pending rows in this home's wake queue, then resume idle supervision." >/dev/null \
-    || fail "the child-first ring wrote the wrong drain instruction"
+  inbox_body=$(sed '1,/^--$/d' "$inbox_rec")
+  [ "$(printf '%s' "$inbox_body" | "$ROOT/bin/fm-operational-input.sh" kind)" = from-firstmate ] \
+    || fail "the child-first drain steer lacks the from-firstmate marker, so the mate would read it as captain intervention: $inbox_body"
+  steer=$(printf '%s' "$inbox_body" | "$ROOT/bin/fm-operational-input.sh" body)
+  [[ $steer =~ ^delivery=[0-9a-f]{16}\ (.*)$ ]] \
+    || fail "the child-first drain steer does not carry a fire-and-forget delivery id: $steer"
+  [ "${BASH_REMATCH[1]}" = "Drain pending rows in this home's wake queue, then resume idle supervision." ] \
+    || fail "the child-first ring wrote the wrong drain instruction: $steer"
   grep -F '[ENTER]' "$dir/sent" >/dev/null \
     || fail "the child-first ring did not submit the doorbell: $(cat "$dir/sent" 2>/dev/null)"
   pass "a proven-idle leftover row is rung so the child home can drain without a parent alarm"

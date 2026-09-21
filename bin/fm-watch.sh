@@ -811,13 +811,20 @@ secondmate_idle_ring_safe() {  # <window>
 }
 
 # Write one fire-and-forget drain steer and ring the child's doorbell. The
-# worker's ordinary wake-handling turn drains its own home's wake queue; this
-# parent never rewrites that foreign queue. 0 iff the ring call returned 0.
+# steer carries the same from-firstmate fire-and-forget carrier fm-send uses
+# for a secondmate (marker, then delivery=<16-hex-id>, then the text), so the
+# mate reads it as a parent request that expects no reply, never as captain
+# intervention. The worker's ordinary wake-handling turn drains its own home's
+# wake queue; this parent never rewrites that foreign queue. 0 iff the ring
+# call returned 0.
 secondmate_ring_to_drain() {  # <task> <window>
-  local task=$1 w=$2 rec backend
+  local task=$1 w=$2 rec backend delivery_id
   backend=$(window_backend "$w")
+  delivery_id=$(LC_ALL=C od -An -v -tx1 -N 8 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
+  case "$delivery_id" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#delivery_id}" -eq 16 ] || return 1
   rec=$(fm_task_inbox_write "$STATE" "$task" \
-    "Drain pending rows in this home's wake queue, then resume idle supervision." \
+    "${FM_FROMFIRST_MARK}delivery=${delivery_id} Drain pending rows in this home's wake queue, then resume idle supervision." \
     fire-and-forget) || return 1
   fm_task_inbox_ring "$backend" "$w" "$rec" "$(window_label "$w")"
 }
