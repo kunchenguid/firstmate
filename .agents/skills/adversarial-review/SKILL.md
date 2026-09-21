@@ -65,8 +65,9 @@ One side may be a single reviewer while the other orchestrates subagents; what h
 Both sides are scouts under `AGENTS.md` section 7: the deliverable is a report, never a PR.
 
 Write both briefs from one subject statement.
-Give each side the same questions, the same evidence pointers, the same scope, and the same per-side spend bound.
-Split the captain's pool in half by default and name that half in each brief as that side's own bound; he may set a different split or a different per-side figure.
+Give each side the same questions, the same evidence pointers, the same scope, and the same per-side spend bound where the captain has stated an allowance to bound.
+When he has named a pool, split it in half by default and name that half in each brief as that side's own bound; he may set a different split or a different per-side figure.
+When he has named no allowance, write no numeric bound into either brief and let the standing dispatch policy govern both sides' spend, because a figure firstmate invented is not his call.
 Never state the whole pool to a side, because neither side can observe the other's consumption during phase 1 and two sides each spending the pool spend it twice.
 Asymmetric briefs produce asymmetric reviews, and that difference is an artifact of your writing rather than a finding.
 
@@ -75,6 +76,9 @@ Each side writes its rounds inside its own worktree and names the path in its st
 Tell each side to declare the gap between rounds with the declared-external-wait verb its generated brief names, saying it awaits firstmate's relay of the other side's round, and to resume with a `working:` line when the relay lands.
 Firstmate copies each round out of that worktree into the shared exchange directory as it relays it, named after the subject rather than after either task so neither side owns it: `data/<subject>-converge/`, holding one file per side per round.
 Copy each round out before the worktree can be discarded, because the worktree is scratch and the exchange directory is the one durable record of what was exchanged.
+
+Require each side to answer what has gone well, not only what went wrong.
+A review that only finds faults is not a review, and a reviewer that never says so is not reading for the captain.
 
 Hold both reports until both exist.
 If one side finishes first it waits; handing it the other's report early destroys the only thing this pattern buys.
@@ -148,6 +152,7 @@ Its complete list of moves:
 5. Decide after each round whether the exchange closes, and say which stopping condition fired.
 6. Build the captain-facing outcome below.
 7. Register the contested captain calls, run the completion attestation once per side against that side's own task id with that same inventory, then tear down and complete both sides, only once the outcome is built and every round is copied out.
+   A side with nothing held attests with `captain-hold-lifecycle`'s explicit no-outstanding-call form instead, which is the form a fully converged run reaches for both sides.
 
 ## Outcome
 
@@ -165,9 +170,9 @@ No transcript, no file references, no agent names, no round numbers.
 He is choosing between two paths, so each paragraph exists to make one path's pro and con legible, not to win.
 When one side's case is missing, say plainly what is missing and, where it is known, why, and have the side whose case is on record write the strongest case it can for the absent side's position, so the captain still gets both sides.
 Name which paragraph its opponent wrote, because a steelmanned position is worth having only when he knows whose hand wrote it.
+When neither side's case is on record, name the item, say plainly that neither side made its case and, where it is known, why, and carry it with no paragraphs, because firstmate supplies no position for either side.
 
 The contested list is a captain call, so load `captain-hold-lifecycle` and carry the list on one captain-held task consolidating the questions and their two-sided options, before treating the review as complete.
-Register an item on its own row only where it gates an existing work item of its own, which that policy already prefers.
 
 Report both sides' spend and what the spend changed.
 A test that could not have changed a recommendation should not have been run.
