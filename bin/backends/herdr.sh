@@ -3008,20 +3008,22 @@ fm_backend_herdr_current_path() {  # <target>
 # pane still sitting at its prompt is shells-only, so anything else in the
 # foreground is proof the shell already took the line.
 #
-# <baseline> is how many times <text> already appeared in the unwrapped history
-# before this write (see fm_backend_herdr_text_occurrences). Only an occurrence
-# beyond it is this write's echo: a relaunch writes the same export lines into
-# a pane whose history already holds byte-identical copies from the original
-# spawn, and those must never read as this write being accepted.
-fm_backend_herdr_submitted_line_state() {  # <target> <text> [baseline]
-  local target=$1 text=$2 baseline=${3:-0} out last line
+# <before> is the unwrapped capture taken just before this write. Only output
+# after it (see fm_backend_herdr_output_after) can be this write's echo: a
+# relaunch writes the same export lines into a pane whose history already holds
+# byte-identical copies from the original spawn, and those must never read as
+# this write being accepted.
+fm_backend_herdr_submitted_line_state() {  # <target> <text> [before]
+  local target=$1 text=$2 before=${3:-} out last line
   [ -n "$text" ] || { printf 'submitted'; return 0; }
-  case "$baseline" in ''|*[!0-9]*) baseline=0 ;; esac
   # The capture below runs in a command substitution, so the session and pane
   # it resolves never reach this shell; parse them here for the process sample.
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   out=$(fm_backend_herdr_unwrapped_capture "$target") || { printf 'unknown'; return 0; }
-  [ "$(fm_backend_herdr_text_occurrences "$out" "$text")" -gt "$baseline" ] || { printf 'unseen'; return 0; }
+  case "$(fm_backend_herdr_output_after "$before" "$out")" in
+    *"$text"*) ;;
+    *) printf 'unseen'; return 0 ;;
+  esac
   last=
   while IFS= read -r line; do
     case "$line" in '') ;; *) last=$line ;; esac
@@ -3042,17 +3044,27 @@ EOF
   printf 'submitted'
 }
 
-# fm_backend_herdr_text_occurrences: how many times <text> appears in <out>.
-fm_backend_herdr_text_occurrences() {  # <out> <text>
-  local rest=$1 n=0
-  [ -n "$2" ] || { printf '0'; return 0; }
-  while :; do
-    case "$rest" in
-      *"$2"*) rest=${rest#*"$2"}; n=$((n + 1)) ;;
-      *) break ;;
-    esac
-  done
-  printf '%s' "$n"
+# fm_backend_herdr_output_after: the part of capture <out> written after
+# capture <before>. <before>'s last non-empty line is its prompt row, which the
+# next echo lands on, so everything above that row is the anchor. The recent
+# window may have scrolled the anchor's top rows (and cut the window's own top
+# row) away since, so the longest remaining suffix of the anchor that opens
+# <out> marks where the new output starts. With no anchor to align on, all of
+# <out> counts as new.
+fm_backend_herdr_output_after() {  # <before> <out>
+  local anchor=$1 cur a
+  anchor=${anchor%"${anchor##*[!$'\n']}"}
+  case "$anchor" in *$'\n'*) anchor=${anchor%$'\n'*} ;; *) anchor= ;; esac
+  if [ -n "$anchor" ]; then
+    for cur in "$2" "${2#*$'\n'}"; do
+      a=$anchor
+      while [ -n "$a" ]; do
+        case "$cur" in "$a"*) printf '%s' "${cur#"$a"}"; return 0 ;; esac
+        case "$a" in *$'\n'*) a=${a#*$'\n'} ;; *) a= ;; esac
+      done
+    done
+  fi
+  printf '%s' "$2"
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT and CONFIRM the pane's
@@ -3084,9 +3096,9 @@ fm_backend_herdr_text_occurrences() {  # <out> <text>
 # line was cleared so nothing can merge into the next write, 2 not submitted and
 # NOT cleared - the caller must refuse to append anything after it.
 fm_backend_herdr_send_text_line() {  # <target> <text>
-  local polls sleep_s enters state baseline pending_seen=0 enters_sent=0 i=0
+  local polls sleep_s enters state before pending_seen=0 enters_sent=0 i=0
   fm_backend_herdr_target_ready "$1" || return 1
-  baseline=$(fm_backend_herdr_text_occurrences "$(fm_backend_herdr_unwrapped_capture "$1")" "$2")
+  before=$(fm_backend_herdr_unwrapped_capture "$1")
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane run "$FM_BACKEND_HERDR_PANE" "$2" >/dev/null 2>&1 || return 1
   polls=${FM_BACKEND_HERDR_LINE_CONFIRM_POLLS:-40}
   sleep_s=${FM_BACKEND_HERDR_LINE_CONFIRM_SLEEP:-0.25}
@@ -3096,7 +3108,7 @@ fm_backend_herdr_send_text_line() {  # <target> <text>
   while [ "$i" -lt "$polls" ]; do
     sleep "$sleep_s"
     i=$((i + 1))
-    state=$(fm_backend_herdr_submitted_line_state "$1" "$2" "$baseline")
+    state=$(fm_backend_herdr_submitted_line_state "$1" "$2" "$before")
     case "$state" in
       submitted) return 0 ;;
       pending)

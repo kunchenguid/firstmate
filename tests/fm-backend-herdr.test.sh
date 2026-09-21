@@ -3843,6 +3843,27 @@ test_send_text_line_ignores_an_identical_line_already_in_history() {
   pass "fm_backend_herdr_send_text_line: an identical line already in the pane's history does not confirm the new write"
 }
 
+test_send_text_line_confirms_when_the_old_copy_scrolls_out() {
+  local dir log resp fb status
+  dir="$TMP_ROOT/lineconfirm-slide"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The recent window is bounded: by the time the relaunch's echo and next
+  # prompt render (3), the original spawn's identical copy has scrolled out of
+  # the top of the pre-write capture (1), so the text appears exactly once in
+  # both reads. The line was accepted and must confirm, not read unseen.
+  { printf '%s\n' 'old agent output'; herdr_line_render_submitted 'export FM_TASK_ID=t1'; } > "$resp/1.out"
+  { printf '%s\n' '' 'private/tmp'; herdr_line_render_submitted 'export FM_TASK_ID=t1'; } > "$resp/3.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_LINE_CONFIRM_SLEEP=0 FM_BACKEND_HERDR_LINE_CONFIRM_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_line default:w1:p2 "export FM_TASK_ID=t1"' "$ROOT"
+  status=$?
+  expect_code 0 "$status" "an accepted line should confirm even after the identical old copy scrolled out of the window"
+  case "$(cat "$log")" in
+    *$'\x1f''send-keys'*) fail "send_text_line sent keys for a line the shell already accepted"$'\n'"$(cat "$log")" ;;
+  esac
+  pass "fm_backend_herdr_send_text_line: confirms an accepted line when the old identical copy scrolls out of the recent window"
+}
+
 test_send_key_normalizes_and_targets_pane() {
   local dir log resp fb
   dir="$TMP_ROOT/sendkey"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
@@ -5549,6 +5570,7 @@ test_send_text_line_clears_an_unconfirmed_line
 test_send_text_line_reports_2_when_the_line_cannot_be_cleared
 test_send_text_line_reports_a_failed_send_without_confirming
 test_send_text_line_ignores_an_identical_line_already_in_history
+test_send_text_line_confirms_when_the_old_copy_scrolls_out
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
