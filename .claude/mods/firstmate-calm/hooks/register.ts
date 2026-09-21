@@ -64,17 +64,15 @@ const CALM_COMMAND = "calm";
 // same as a new Pi extension lifetime.
 let calm = false;
 let preferencePath: string | undefined;
-let scenePath: string | undefined;
 let activation: Promise<boolean> | undefined;
 let loading: Promise<void> | undefined;
 let ticker: { cancel(): void } | undefined;
 const workingNotes = new Set<string>();
 const finalReplies = new Set<string>();
-// The working picture is read from the home's scene setting only when the working row
-// first draws in a session, so a session that never shows it never reads the file.
+// The working picture is read from the home's scene setting with the preference each
+// time a session loads, and holds for that session.
 let scene: CalmWorkingScene = CALM_WORKING_SCENE_DEFAULT;
 let sprite = createCalmWorkingSceneSprite(scene);
-let sceneLoading: Promise<void> | undefined;
 let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light;
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
@@ -114,8 +112,12 @@ async function load($: EngineInterface): Promise<void> {
     FM_CONFIG_OVERRIDE: await $.env.get("FM_CONFIG_OVERRIDE"),
   };
   preferencePath = calmPreferencePath(home, $.plugin.root);
-  scenePath = calmScenePath(home, $.plugin.root);
   calm = parseCalmPreference(await readConfigFile($, preferencePath));
+  const chosen = parseCalmWorkingScene(await readConfigFile($, calmScenePath(home, $.plugin.root)));
+  if (chosen !== scene) {
+    scene = chosen;
+    sprite = createCalmWorkingSceneSprite(chosen);
+  }
   palette = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(await readTheme($))];
   try {
     const restored = classifyRestoredTranscript(await $.session.messages());
@@ -137,27 +139,11 @@ function ensureLoaded($: EngineInterface): Promise<void> {
   return loading;
 }
 
-/** Choose this session's working picture once; anything unreadable or unknown draws the boat. */
-async function loadScene($: EngineInterface): Promise<void> {
-  const chosen = scenePath === undefined ? CALM_WORKING_SCENE_DEFAULT : parseCalmWorkingScene(await readConfigFile($, scenePath));
-  if (chosen === scene) return;
-  scene = chosen;
-  sprite = createCalmWorkingSceneSprite(chosen);
-}
-
-function ensureScene($: EngineInterface): Promise<void> {
-  if (sceneLoading === undefined) sceneLoading = loadScene($).catch(() => undefined);
-  return sceneLoading;
-}
-
 async function resetSession($: EngineInterface): Promise<void> {
   if (loading !== undefined) await loading.catch(() => undefined);
-  if (sceneLoading !== undefined) await sceneLoading;
   calm = false;
   preferencePath = undefined;
-  scenePath = undefined;
   loading = undefined;
-  sceneLoading = undefined;
   workingNotes.clear();
   finalReplies.clear();
   sites.clear();
@@ -281,7 +267,6 @@ export const register: Register = (on) => {
       sites.delete(e.requestId);
       return next(e);
     }
-    await ensureScene($);
     const columns = calmShipRasterColumns(e.viewport?.columns);
     const packed = packCalmShipRasterCells(sprite.frame(columns), columns, palette);
     sites.set(e.requestId, { columns, rows: packed.rows });

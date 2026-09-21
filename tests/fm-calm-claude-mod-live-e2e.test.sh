@@ -190,8 +190,8 @@ working_row_shown() {  # <screen text>
   return 1
 }
 
-# Wait until the turn has settled: the answer is on screen and no working row or
-# boat remains.
+# Wait until the turn has settled: the answer is on screen and no working row, boat,
+# or candles remain.
 wait_settled() {  # <what> [iterations]
   local what=$1 limit=${2:-600} i=0 shot
   while [ "$i" -lt "$limit" ]; do
@@ -202,7 +202,7 @@ wait_settled() {  # <what> [iterations]
         fail "Claude Code $CLAUDE_VERSION exited while waiting for $what"
         ;;
       *'gamma'*)
-        if ! working_row_shown "$shot"; then
+        if ! working_row_shown "$shot" && [ -z "$(candle_row "$shot")" ]; then
           case "$shot" in
             *"$HULL"*) ;;
             *) return 0 ;;

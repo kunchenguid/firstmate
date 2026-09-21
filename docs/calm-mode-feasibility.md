@@ -749,22 +749,22 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 
 ## 2026-09-21 candles scene verification on Claude Code 2.1.278 and Pi 0.86.1
 
-The `config/calm-scene` candles scene was verified on this host against Claude Code 2.1.278, Pi 0.86.1 (`@earendil-works/pi-coding-agent`), Node 22.22.1 with type stripping, and tmux, with the boat checked frame-for-frame and Raster-for-Raster against the previous sprite core across widths 0 to 200 and 400 steps each, including freezes and hidden resizes.
+The `config/calm-scene` candles scene was first verified on this host against Claude Code 2.1.278, Pi 0.86.1 (`@earendil-works/pi-coding-agent`), Node 22.22.1 with type stripping, and tmux, with the boat checked frame-for-frame and Raster-for-Raster against the previous sprite core across widths 0 to 200 and 400 steps each, including freezes and hidden resizes.
+In that first run the Node, plugin, and Pi suites passed in full.
+Review then removed a one-row mode the candles used below five columns, so they now keep two rows down to one column, moved the Claude Code mod's scene read into its session load beside `config/calm`, and moved the live guard's candles section ahead of its boat section.
+
+After those changes the plugin suites passed all 53 of their cases:
 
 ```text
-$ tests/fm-calm-claude-mod.test.sh
-ok - the candles scene is chosen only by an exact candles setting, leaves the boat scene byte-for-byte the boat, fills every width in two rows or one when narrow with one-colored candles and blank gaps, scrolls one column left per boat move, reflows without wrapping, freezes and resumes, and paints as standard ANSI green and red on Pi and 256-color-stable theme greens and reds on Claude Code
-
 $ tests/fm-calm-claude-mod-plugin.test.sh
 ok - Claude Code 2.1.278 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings and /calm
 ok - Claude Code 2.1.278 (Claude Code) runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, the clock-driven working ship, and the candles scene
-
-$ tests/fm-calm-pi-extension.test.sh
-ok - Pi Calm draws the candles scene from config/calm-scene in exact-width standard ANSI green and red rows, falls back to one row when narrow, removes it on settle, resumes its last frame, and draws the boat for an unknown, absent, or unreadable setting
 ```
 
-Every other case of those three suites also passed, unchanged.
-The live guard's candles section, run alone in an isolated lab outside any repository, passed:
+`tests/fm-calm-claude-mod.test.sh` and `tests/fm-calm-pi-extension.test.sh` have not been re-run since those changes.
+On the host after review, Node 22.22.1 was a build without TypeScript support (`ERR_NO_TYPESCRIPT` under `--experimental-strip-types`), which stops every `.ts` check in both suites, and the Pi package was not installed; their first-run pass lines described the removed one-row mode and are not reproduced here.
+
+The live guard's candles section, run alone in an isolated lab outside any repository before review moved it, passed:
 
 ```text
 ok - Claude Code 2.1.278 (Claude Code) draws the chosen candles scene in the working row in the theme's green and red, scrolls it, and removes it when the turn settles
@@ -776,4 +776,4 @@ Claude Code 2.1.278 emits truecolor only at chalk color level 3 and otherwise qu
 Two 2.1.278 changes affect the full live guard independently of the candles scene.
 The debug log now names the loaded module `firstmate-calm@skills-dir`, and the guard's load check now accepts either spelling.
 The composer also strips U+2063 from typed input and waits for a second Enter ("Removed 1 invisible character · review and press Enter to send"), so the guard's operational-row step, which types an exact operational envelope, stops at that step on 2.1.278 and remains open.
-The guard runs its candles section before that step, so a full run on 2.1.278 still reaches the candles.
+The guard now runs its candles section before that step, so a full run on 2.1.278 would reach it, but no full run of the reordered guard is recorded.

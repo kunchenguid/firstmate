@@ -41,7 +41,7 @@ This preference is local to each Firstmate home and is not part of secondmate in
 Beside it, gitignored `config/calm-scene` picks the picture Calm draws in place of the working row, resolved from the same config directory by both harnesses.
 Its value `candles`, surrounding whitespace ignored, selects the candles scene [`calm.md`](calm.md) describes; an absent, unreadable, empty, or any other value draws the default boat.
 No command writes it; the captain or firstmate edits the file directly, and it takes effect at the next session start.
-The Pi extension reads it on every Pi `session_start`, and the Claude Code mod reads it once per session when the working row first draws while Calm is on, so a session that never shows that row never reads it.
+Both harnesses read it together with `config/calm`: the Pi extension on every Pi `session_start`, and the Claude Code mod on every `session.start` and on its lazy load before any earlier row, each reading it once per session.
 Like `config/calm`, it is local to each Firstmate home and is not part of secondmate inherited configuration.
 
 ## Pi supervision branch

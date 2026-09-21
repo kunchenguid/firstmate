@@ -114,11 +114,11 @@ describe("the candles scene", () => {
     expect(journal.fsReads).toEqual([PREFERENCE, SCENE]);
   });
 
-  test("reads the setting once per session, only when the working row draws, and re-reads it on a new session", async ($, on) => {
+  test("reads the setting with the preference once per session and re-reads it on a new session", async ($, on) => {
     const { files, journal } = world(on, { preference: "on\n" });
     files.set(SCENE, "candles\n");
     await $.session.start({ cwd: "/work", surface: "terminal", isInteractive: true });
-    expect(journal.fsReads).toEqual([PREFERENCE]);
+    expect(journal.fsReads).toEqual([PREFERENCE, SCENE]);
     await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 }));
     await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 }));
     expect(journal.fsReads).toEqual([PREFERENCE, SCENE]);
@@ -127,17 +127,18 @@ describe("the candles scene", () => {
     const still = decodeCells(rasterOf(await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 })))!.cells, 38, 2);
     expect(still.glyphs[1]).toMatch(CANDLE_ROW);
     await $.session.start({ cwd: "/work", surface: "terminal", isInteractive: true });
+    expect(journal.fsReads).toEqual([PREFERENCE, SCENE, PREFERENCE, SCENE]);
     const boat = decodeCells(rasterOf(await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 })))!.cells, 38, 2);
     expect(boat.glyphs[1]!.indexOf(HULL)).toBe(0);
   });
 
-  test("leaves the working row to the engine and reads no setting while Calm is off", async ($, on) => {
+  test("leaves the working row to the engine while Calm is off and draws the chosen candles once /calm turns it on", async ($, on) => {
     const { files, journal, clock } = world(on, { preference: "off\n" });
     files.set(SCENE, "candles\n");
     expect(isStock(await $.ui.render(spinner()))).toBe(true);
     await clock.advance(TICK * 4);
     expect(journal.blits).toHaveLength(0);
-    expect(journal.fsReads).toEqual([PREFERENCE]);
+    expect(journal.fsReads).toEqual([PREFERENCE, SCENE]);
     await $.command.run(calmCommand());
     const { glyphs } = decodeCells(rasterOf(await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 })))!.cells, 38, 2);
     expect(glyphs[0]).toMatch(CANDLE_ROW);
