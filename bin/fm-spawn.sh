@@ -59,6 +59,56 @@
 #   The replacement still never starts outside the copy
 #   holding the work: a Herdr shell that has drifted out of the recorded
 #   worktree is told once to return, and only a shell that will not go refuses.
+#        fm-spawn.sh <task-id> <project-dir> --resume-worktree <absolute-path> ...
+#   --resume-worktree is the CONTINUE/RESUME provisioning mode, beside the
+#   default allocate mode and --relaunch's reuse mode. It dispatches a fresh
+#   worker into an explicitly named EXISTING worktree that firstmate did not
+#   create, for work whose value is the committed or uncommitted state already
+#   sitting there. The governing invariant is that it AUTHENTICATES a workspace
+#   rather than provisioning one.
+#   It replaces allocation entirely: no `treehouse get`, no pane-cwd discovery
+#   poll, no pool slot claim, no Treehouse project lock, and never
+#   freshen_spawn_worktree_base, which is the one step that would reset the
+#   base. The path itself is the only thing that identifies the workspace: two
+#   worktrees are NEVER interchangeable for sharing a repository or a branch.
+#   The ISOLATION invariant is unchanged - the same spawn_worktree_isolated
+#   predicate every fresh spawn passes is applied, unrelaxed, so a resume can
+#   no more tangle the primary checkout than an allocation can.
+#   Deterministic git facts come from bin/fm-worktree-identity.sh, which owns
+#   them and reads only; no model reasoning establishes any of them. Its
+#   fingerprint is taken twice, once at authentication before any endpoint
+#   exists and once immediately before the launch command is sent, and a
+#   mismatch refuses - that pair is what closes the authorize-then-rebind window.
+#   DIRTY STATE IS SUPPORTED and is the expected case: staged, unstaged and
+#   untracked content are recorded as provenance in the task record, never
+#   normalized. The resume path issues no git write command at all, so "never
+#   resets, cleans, stashes, rebases, checks out, pulls, merges, or creates,
+#   removes or replaces a worktree" holds by construction.
+#   Arming a claude, opencode, grok or kimi worker writes one per-task wiring
+#   file into the worktree. A resume REFUSES when that exact path already
+#   exists rather than overwriting a file this spawn did not create; the other
+#   harnesses keep their wiring outside the worktree and are unaffected.
+#   A worktree already recorded as another task's in this home is refused too,
+#   because two workers in one workspace overwrite each other; a worktree in use
+#   by another firstmate home cannot be seen from here and stays the operator's
+#   call, since a resume deliberately writes no ownership claim into a workspace
+#   it does not own.
+#   It requires an absolute path; it is refused with --relaunch, --secondmate,
+#   backend=orca, and batch pairs; it is accepted for ship and --scout, and a ship resume
+#   still requires --mode and --yolo exactly as any other ship spawn does.
+#   A resumed task is an ORDINARY task in every other respect - task record,
+#   brief, status log, watcher and wake participation, crew-state reconciliation
+#   and teardown - so nothing becomes an invisible side-agent. Its record adds
+#   provision=resume, resume_fingerprint=, resume_head= and resume_dirty=; an
+#   ABSENT provision= line means spawn, so every existing record stays valid.
+#   bin/fm-teardown.sh reads provision=resume and never returns, removes, resets
+#   or cleans that worktree, while its unlanded-work refusal still applies.
+#   WINDOW AND WORKTREE ARE SEPARATE AXES. A fresh agent in a fresh worktree is
+#   the default spawn; a fresh agent in an existing worktree is this mode;
+#   --relaunch reuses an endpoint AND a worktree but still starts a fresh model
+#   context. Resuming a provider's own conversation is a per-harness capability
+#   and is not offered here, so a request for hot model context is refused by
+#   the absence of a flag rather than silently downgraded to fresh context.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max|ultra> are concrete profile
@@ -378,7 +428,7 @@
 # keeps no data/backlog.md. A configured non-markdown adapter remains
 # active without a markdown file; any active automatic backend without
 # compatible tasks-axi refuses before creating lifecycle state.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path> [provision=resume]
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -579,6 +629,8 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
+RESUME_WT_ARG=
+RESUME_WT_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -618,6 +670,10 @@ for a in "$@"; do
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
       ;;
+    resume-worktree)
+      RESUME_WT_ARG=$a
+      RESUME_WT_SET=1
+      ;;
     *)
       echo "error: internal parser state for --$want_value" >&2
       exit 1
@@ -636,6 +692,11 @@ for a in "$@"; do
     KIND_SET=1
     ;;
   --relaunch) RELAUNCH=1 ;;
+  --resume-worktree) want_value=resume-worktree ;;
+  --resume-worktree=*)
+    RESUME_WT_ARG=${a#--resume-worktree=}
+    RESUME_WT_SET=1
+    ;;
   --harness) want_value=harness ;;
   --harness=*)
     HARNESS_ARG=${a#--harness=}
@@ -706,6 +767,10 @@ done
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
 }
+[ "$RESUME_WT_SET" -eq 0 ] || [ -n "$RESUME_WT_ARG" ] || {
+  echo "error: --resume-worktree requires a non-empty value" >&2
+  exit 1
+}
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -719,6 +784,27 @@ if [ "$TRACEPARENT_SET" -eq 1 ]; then
     exit 1
   }
 fi
+# --resume-worktree is the CONTINUE/RESUME provisioning mode: it authenticates an
+# explicitly named existing worktree instead of provisioning a new one. The
+# refusals here mirror --relaunch's, because the same rule applies - a mode that
+# would contradict another mode's ownership of the worktree axis is refused in
+# one place rather than silently ignored. A secondmate runs its own firstmate
+# home, which is not a task worktree at all, so the combination is meaningless
+# rather than merely unsupported.
+if [ "$RESUME_WT_SET" -eq 1 ]; then
+  [ "$KIND" != secondmate ] || {
+    echo "error: --resume-worktree applies only to ship and scout spawns; a secondmate launches in its own provisioned firstmate home, not in a task worktree" >&2
+    exit 1
+  }
+  case "$RESUME_WT_ARG" in
+  /*) ;;
+  *)
+    echo "error: --resume-worktree requires an absolute path (got '$RESUME_WT_ARG'); a continuation dispatch must name the intended worktree exactly, never relative to whatever directory this spawn ran from" >&2
+    exit 1
+    ;;
+  esac
+fi
+
 case "$EFFORT" in
 '' | low | medium | high | xhigh | max | ultra) ;;
 *)
@@ -732,6 +818,10 @@ esac
 # task's own durable record below. Contradicting it on the command line is a
 # refusal rather than a silently-ignored flag.
 if [ "$RELAUNCH" -eq 1 ]; then
+  [ "$RESUME_WT_SET" -eq 0 ] || {
+    echo "error: --relaunch already reuses the task's own recorded worktree; --resume-worktree is the separate provisioning mode for a task that has no record yet" >&2
+    exit 1
+  }
   [ "$BACKEND_SET" -eq 0 ] || {
     echo "error: --relaunch reuses the task's recorded backend; --backend cannot override it" >&2
     exit 1
@@ -1336,6 +1426,13 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   echo "error: --relaunch is single-task only; relaunch each task explicitly" >&2
   exit 1
 fi
+# A batch shares every flag across its pairs, and one worktree cannot be shared
+# by several tasks. Refusing here - before any pair re-execs - is what stops a
+# batch from dispatching several workers into one authenticated workspace.
+if [ "$RESUME_WT_SET" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ]; then
+  echo "error: --resume-worktree is single-task only; a batch shares its flags across every pair, and one existing worktree cannot be continued by more than one task" >&2
+  exit 1
+fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac then
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
@@ -1536,6 +1633,15 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   if [ "$BACKEND" = cmux ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=cmux does not support --secondmate spawns yet" >&2
+    exit 1
+  fi
+  # Orca owns both the worktree and the terminal: it creates its own worktree
+  # rather than taking one it is handed. A continuation dispatch names the
+  # worktree, so the two cannot both be satisfied. Refusing is the contract -
+  # a combination that cannot actually be provided is named, never quietly
+  # served by provisioning a fresh Orca worktree and dropping the continuation.
+  if [ "$BACKEND" = orca ] && [ "$RESUME_WT_SET" -eq 1 ]; then
+    echo "error: backend=orca creates and owns its own task worktree, so it cannot continue the existing worktree named by --resume-worktree; dispatch this continuation on a session-provider backend (tmux, herdr, zellij, or cmux) instead" >&2
     exit 1
   fi
   if [ "$BACKEND" = orca ]; then
@@ -2705,7 +2811,12 @@ else
   WT=""
   BRIEF="$DATA/$ID/brief.md"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+# The Treehouse project lock serializes pool-slot ALLOCATION against return. A
+# resume allocates no slot and returns none, so it takes no part in that
+# contention and does not hold the lock; it also never writes a slot owner claim,
+# because a claim would assert an ownership firstmate does not have over a
+# worktree it did not create.
+if [ "$RELAUNCH" -eq 0 ] && [ "$RESUME_WT_SET" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$PROJ_ABS") || {
     echo "error: could not resolve the shared Treehouse project lock for $PROJ_ABS" >&2
     exit 1
@@ -2910,6 +3021,107 @@ validate_spawn_worktree() { # <source> <inspect-target>
     exit 1
   fi
 }
+
+# --resume-worktree AUTHENTICATION.
+#
+# A continuation dispatch authenticates an existing workspace; it never
+# provisions one. This block is that authentication, and it runs here - after
+# the brief and delivery gates, before any endpoint, temp root, or task record
+# exists - so every refusal below leaves the target worktree and this home
+# byte-for-byte unchanged.
+#
+# It establishes three things, in order:
+#   1. The deterministic git facts, from bin/fm-worktree-identity.sh, which is
+#      their single owner and reads only. Nothing here infers a git fact.
+#   2. The ISOLATION invariant, through the unchanged spawn_worktree_isolated
+#      predicate every fresh spawn already passes. A legitimate pre-existing
+#      worktree satisfies it as-is, so resume weakens, parameterizes and
+#      bypasses nothing: it calls the same predicate with the same meaning.
+#   3. The authenticated identity, kept for the pre-launch re-check further
+#      down.
+#
+# What resume does NOT do is the point of the mode: no slot allocation, no
+# `treehouse get`, and - critically - no freshen_spawn_worktree_base, which is
+# the only step in a fresh spawn that resets a worktree's base. The resume path
+# issues no git write command at any point, so the guarantee that a resume never
+# resets, cleans, stashes, rebases, checks out, pulls, merges, creates a branch,
+# or creates, removes or replaces a worktree holds BY CONSTRUCTION rather than by
+# a check that could be forgotten. tests/fm-spawn-resume-worktree.test.sh pins
+# that as a property by recording every git invocation the path makes.
+#
+# Dirty state is first-class here and is the expected common case, because hot
+# remediation routinely depends on intentional uncommitted work. It is recorded
+# as provenance, never normalized: no clean gate is applied, and none is reached.
+RESUME_FINGERPRINT=
+RESUME_GIT_DIR=
+RESUME_HEAD=
+RESUME_DIRTY=0
+if [ "$RESUME_WT_SET" -eq 1 ]; then
+  # shellcheck source=bin/fm-worktree-identity.sh
+  . "$FM_ROOT/bin/fm-worktree-identity.sh"
+  if ! fm_worktree_identity_collect "$RESUME_WT_ARG"; then
+    echo "error: --resume-worktree could not authenticate '$RESUME_WT_ARG': $FM_WT_IDENTITY_ERROR; a continuation dispatch names the exact existing worktree to continue, so nothing was provisioned and nothing was changed" >&2
+    exit 1
+  fi
+  WT=$FM_WT_PATH
+  if ! spawn_worktree_isolated "$WT"; then
+    echo "error: --resume-worktree '$WT' is not an isolated worktree of $PROJ_ABS ($SPAWN_WT_REASON); refusing to launch to avoid tangling the primary checkout, and leaving the target untouched" >&2
+    exit 1
+  fi
+  # One workspace holds one worker's work. A fresh spawn cannot collide, because
+  # it allocates its own slot and claims it; a resume names an arbitrary path, so
+  # this collision is new to the mode and is checked here rather than discovered
+  # when two workers overwrite each other. The per-home task-set lock is already
+  # held by this point, so this read of the home's task records is consistent
+  # with every other spawn in it.
+  #
+  # It is a SAME-HOME check. A resumed worktree deliberately carries no
+  # slot-owner claim - writing firstmate's bookkeeping into a workspace it does
+  # not own is exactly what this mode avoids - so a worktree already in use by
+  # another firstmate home cannot be detected from here, and that case stays the
+  # operator's call.
+  for resume_other in "$STATE"/*.meta; do
+    [ -f "$resume_other" ] && [ ! -L "$resume_other" ] || continue
+    resume_other_id=$(basename "$resume_other" .meta)
+    [ "$resume_other_id" != "$ID" ] || continue
+    resume_other_wt=$(fm_meta_get "$resume_other" worktree)
+    [ -n "$resume_other_wt" ] || continue
+    resume_other_real=$(CDPATH='' cd -- "$resume_other_wt" 2>/dev/null && pwd -P) || continue
+    [ "$resume_other_real" = "$WT" ] || continue
+    echo "error: --resume-worktree '$WT' is already task $resume_other_id's recorded worktree; refusing to put a second worker in one workspace, where the two would overwrite each other's work. Reconcile that task first (bin/fm-crew-state.sh $resume_other_id), then retry." >&2
+    exit 1
+  done
+
+  # Firstmate arms each harness's per-task turn-end and busy-state wiring by
+  # writing one file INTO the worktree, and that write overwrites whatever is
+  # already at the path. A fresh pool slot is proven clean first, so nothing can
+  # be there; a continued workspace can have the operator's own file sitting
+  # exactly there, and silently replacing it would destroy the state this mode
+  # exists to preserve. Skipping the wiring is not the alternative, because a
+  # worker with no turn-end signal stops participating in supervision, which is
+  # its own contract. So this refuses, names the file, and leaves the choice to
+  # the operator. Harnesses whose wiring lives outside the worktree - codex,
+  # pi, gemini, cursor, muse and the rest - are unaffected.
+  RESUME_WIRING=
+  case "$HARNESS" in
+  claude) RESUME_WIRING=.claude/settings.local.json ;;
+  opencode) RESUME_WIRING=.opencode/plugins/fm-busy-state.js ;;
+  grok) RESUME_WIRING=.fm-grok-turnend ;;
+  kimi) RESUME_WIRING=.fm-kimi-turnend ;;
+  esac
+  if [ -n "$RESUME_WIRING" ] &&
+    { [ -e "$WT/$RESUME_WIRING" ] || [ -L "$WT/$RESUME_WIRING" ]; }; then
+    echo "error: --resume-worktree '$WT' already contains '$RESUME_WIRING', which a $HARNESS launch must write to arm this task's turn-end and busy-state signals; refusing rather than overwriting a file this spawn did not create. Move that file aside yourself if it is disposable, or dispatch this continuation on a harness whose per-task wiring lives outside the worktree (codex, pi, gemini or cursor)." >&2
+    exit 1
+  fi
+  RESUME_FINGERPRINT=$FM_WT_FINGERPRINT
+  # Identity is the worktree's OWN git dir, which is unique per worktree. The
+  # repository common dir only proves same-repository membership, so sharing a
+  # repository - or a branch - can never make two worktrees interchangeable.
+  RESUME_GIT_DIR=$FM_WT_GIT_DIR
+  RESUME_HEAD=$FM_WT_HEAD_COMMIT
+  RESUME_DIRTY=$FM_WT_DIRTY
+fi
 
 # A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:
 # an earlier refresh moved the superproject and left the submodule checkout on
@@ -3839,6 +4051,33 @@ if [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
+elif [ "$RESUME_WT_SET" -eq 1 ] && [ "$BACKEND" != orca ]; then
+  # Resume PLACEMENT. Allocation is replaced entirely: no `treehouse get` is
+  # sent, no pool slot is claimed, and the worktree was authenticated above
+  # rather than discovered from whatever the pane happened to report. All that
+  # remains is to move the pane into the already-authenticated path and prove it
+  # settled there, so the launch below cannot start an agent anywhere else.
+  #
+  # `cd` is the one filesystem-adjacent action on this path, and it changes the
+  # shell's directory, never the worktree.
+  resume_wt_real=$(real_path_or_raw "$WT")
+  resume_cd_path=${WT//\'/\'\\\'\'}
+  spawn_send_text_line "$WT_TARGET" "cd -- '$resume_cd_path'" || {
+    echo "error: task $ID's endpoint could not be told to enter the authenticated worktree '$WT'; refusing to launch a resumed worker outside the workspace it was authorized for; inspect $T" >&2
+    exit 1
+  }
+  resume_seen=
+  for _ in $(seq 1 60); do
+    resume_seen=$(spawn_current_path "$WT_TARGET" || true)
+    [ -z "$resume_seen" ] || [ "$(real_path_or_raw "$resume_seen")" != "$resume_wt_real" ] || break
+    sleep 1
+  done
+  if [ -z "$resume_seen" ] || [ "$(real_path_or_raw "$resume_seen")" != "$resume_wt_real" ]; then
+    echo "error: task $ID's endpoint is in '${resume_seen:-unknown}', not the authenticated worktree '$WT'; refusing to launch a resumed worker outside the workspace it was authorized for; inspect $T" >&2
+    exit 1
+  fi
+  # The same isolation guard every fresh spawn passes, unchanged and unrelaxed.
+  validate_spawn_worktree "--resume-worktree" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
@@ -3921,7 +4160,11 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     SPAWN_SLOT_CLAIMED=1
   fi
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+# freshen_spawn_worktree_base is the FRESHNESS step, separate from the isolation
+# invariant above, and it is the only place a spawn fetches and hard-resets a
+# worktree's base. A resume must never reach it: the authorized state IS the
+# state the agent begins from, uncommitted work included.
+if [ "$RELAUNCH" -eq 0 ] && [ "$RESUME_WT_SET" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
@@ -4449,6 +4692,15 @@ else
   SPAWN_FRESH_COMMIT_PENDING=1
 fi
 SPAWN_META_PATH=$SPAWN_META_TMP
+# Keys this invocation re-derives; everything else in the existing record is
+# carried forward verbatim. The provisioning provenance (provision=,
+# resume_fingerprint=, resume_head=, resume_dirty=) is deliberately NOT listed,
+# so it survives a relaunch: how a task's worktree was obtained is a durable
+# fact about the task, and teardown depends on provision=resume to know the
+# worktree is not firstmate's to return. A relaunch that dropped it would hand a
+# resumed worktree back to the pool at the next teardown. Those three content
+# facts stay the ones recorded at the ORIGINAL authorization, which is what they
+# document: the state firstmate handed the first worker.
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
@@ -4470,6 +4722,17 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  # Provisioning provenance, written only for a resume. An ABSENT provision=
+  # line means spawn, which is what every record written before this mode
+  # existed already means, so no existing record is invalidated and no
+  # migration is needed. bin/fm-teardown.sh reads provision=resume to decide
+  # that this task's worktree is not firstmate's to return or remove.
+  if [ "$RESUME_WT_SET" -eq 1 ]; then
+    echo "provision=resume"
+    echo "resume_fingerprint=$RESUME_FINGERPRINT"
+    echo "resume_head=$RESUME_HEAD"
+    echo "resume_dirty=$RESUME_DIRTY"
+  fi
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -4833,6 +5096,41 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   echo "error: could not stage the launch command at $LAUNCH_FILE" >&2
   exit 1
 fi
+# Resume RE-AUTHENTICATION, the second half of the fingerprint contract.
+#
+# The first fingerprint was taken before any endpoint existed. Between then and
+# now the pane was created and moved into the worktree, so there is a window in
+# which the authorized workspace could have been mutated or the path rebound to
+# a different worktree. This re-read closes it: the launch command is the moment
+# the agent starts, and it is sent on the next line, so a fingerprint taken here
+# is the last observation before dispatch.
+#
+# A mismatch refuses. The launch is never sent, so no agent starts in a
+# workspace nobody authorized, and the target worktree is left exactly as this
+# spawn found it. The task record already exists by this point - the endpoint
+# does too - so the refusal follows the same shape as every other post-record
+# launch failure: a durable failed: event firstmate can reconcile, rather than a
+# silently discarded record.
+if [ "$RESUME_WT_SET" -eq 1 ]; then
+  if ! fm_worktree_identity_collect "$WT"; then
+    printf 'failed: %s\n' "resume worktree could not be re-authenticated before launch" >>"$STATE/$ID.status"
+    echo "error: the authenticated worktree '$WT' could not be re-read before launch ($FM_WT_IDENTITY_ERROR); refusing to start a resumed worker against a workspace this spawn can no longer verify; inspect $T" >&2
+    exit 1
+  fi
+  # Identity first, then content: a different worktree git dir means the path
+  # was rebound to another workspace, which is a different failure from the same
+  # workspace having changed, and the operator needs to be told which one.
+  if [ "$FM_WT_GIT_DIR" != "$RESUME_GIT_DIR" ]; then
+    printf 'failed: %s\n' "resume worktree identity changed before launch" >>"$STATE/$ID.status"
+    echo "error: '$WT' is no longer the worktree this spawn authenticated (authorized git dir '$RESUME_GIT_DIR', now '$FM_WT_GIT_DIR'); the path was rebound to a different workspace between authorization and launch, so the worker was not started; inspect $T" >&2
+    exit 1
+  fi
+  if [ "$FM_WT_FINGERPRINT" != "$RESUME_FINGERPRINT" ]; then
+    printf 'failed: %s\n' "resume worktree changed before launch" >>"$STATE/$ID.status"
+    echo "error: the authenticated worktree '$WT' changed between authorization and launch (fingerprint '$RESUME_FINGERPRINT' is now '$FM_WT_FINGERPRINT'); refusing to start a resumed worker against a workspace state nobody authorized, and leaving the worktree untouched; re-authorize the resume against its current state; inspect $T" >&2
+    exit 1
+  fi
+fi
 sleep 0.3
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
@@ -4979,4 +5277,9 @@ SPAWN_META_LOCK_HELD=0
 
 SPAWN_DELIVERY=
 [ -z "$MODE" ] || SPAWN_DELIVERY=" mode=$MODE yolo=$YOLO"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT"
+# A resume names its provisioning mode on the success line, so the caller can
+# see from the dispatch itself that this worker continues an existing workspace
+# rather than one firstmate created. A fresh spawn's line is unchanged.
+SPAWN_PROVISION=
+[ "$RESUME_WT_SET" -eq 0 ] || SPAWN_PROVISION=" provision=resume"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_PROVISION"

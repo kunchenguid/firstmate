@@ -328,6 +328,9 @@ Fill the task subsections according to section 11.
 
 Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
 The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
+Choose the provisioning mode at intake: the default spawn creates a fresh worktree, while a task whose value is the state already in one named existing worktree uses `--resume-worktree <absolute-path>`, which authenticates that workspace rather than provisioning over it.
+A brief that gives a full path to an existing worktree and says no new project is required is asking for that continuation, not for a new worktree; never resolve it by provisioning one, and never substitute a fresh model context for a requested hot one.
+`bin/fm-spawn.sh`'s header owns both modes' contracts and `docs/architecture.md` owns how worktree, endpoint, and model context differ as axes.
 When the configured tasks-axi backlog gate applies, the spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
 After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.
 A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
