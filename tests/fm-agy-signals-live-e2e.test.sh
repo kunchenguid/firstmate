@@ -22,6 +22,7 @@ cleanup() {
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
+  trap - EXIT
   cleanup
   exit 1
 }
@@ -58,6 +59,7 @@ cp -R "$HOME/.gemini" "$AGY_HOME/.gemini" || fail "could not stage the throwaway
 
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
+fm_backend_source herdr || fail "could not load the Herdr backend"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
 # shellcheck source=/dev/null
@@ -103,9 +105,11 @@ capture() {
 # The launch prompt asks for a computed answer (12345+67890=80235) so the
 # awaited token never appears in the echoed launch line itself, where a plain
 # reply token would false-positive on the shell echo (including across
-# terminal-wrapped rows).
+# terminal-wrapped rows). It also asks the real worker to publish its durable
+# completion event, letting this guard exercise the public crew-state read.
+STATUS_FILE="$FM_TEST_HOME/state/agy-signals.status"
 printf -v LAUNCH 'HOME=%q %q --prompt-interactive %q --model gemini-3.8-flash-low --effort low --dangerously-skip-permissions' \
-  "$AGY_HOME" "$AGY_BIN" "Add 12345 and 67890. Reply with exactly the sum and nothing else"
+  "$AGY_HOME" "$AGY_BIN" "Using a shell command, append exactly 'done: live completion probe' to $STATUS_FILE, then add 12345 and 67890. Reply with exactly the sum and nothing else"
 fm_backend_herdr_send_literal "$TARGET" "$LAUNCH" \
   || fail "could not type the agy launch line"
 fm_backend_herdr_send_key "$TARGET" Enter \
@@ -173,6 +177,25 @@ printf '%s' "$screen" | grep -v '^[[:space:]]*$' | tail -12 | fm_busy_lines_matc
 printf '%s' "$screen" | fm_busy_agy_tail_busy \
   && fail "the settled agy footer still matches the busy signature" || true
 
+grep -Fx 'done: live completion probe' "$STATUS_FILE" >/dev/null 2>&1 \
+  || fail "the real agy worker did not publish its completion event"
+CREW_OUT=
+for _ in $(seq 1 120); do
+  CREW_OUT=$(FM_HOME="$FM_TEST_HOME" HERDR_SESSION="$SESSION" \
+    "$ROOT/bin/fm-crew-state.sh" agy-signals 2>&1) \
+    || fail "fm-crew-state could not read the completed real agy worker: $CREW_OUT"
+  case "$CREW_OUT" in
+    *"state: done"*"source: status-log"*"live completion probe"*) break ;;
+  esac
+  sleep 0.5
+done
+case "$CREW_OUT" in
+  *"state: done"*"source: status-log"*"live completion probe"*) ;;
+  *) fail "fm-crew-state did not report the real agy completion: $CREW_OUT" ;;
+esac
+printf 'fm-crew-state after real agy completion:\n%s\n' "$CREW_OUT"
+pass "fm-crew-state reports the real idle agy worker's durable completion"
+
 # The dialog can outlive the turn it gated, so a still-rendered dialog must be
 # dismissed before steering anything: typed text would land in it instead of
 # the composer.
@@ -211,6 +234,7 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 [ -n "$cancelled" ] || fail "a single Escape never cancelled the real agy turn"
+printf 'agy rendered cancellation:\n%s\n' "$(printf '%s\n' "$screen" | grep 'Interrupted' | tail -1)"
 pass "a single Escape cancels the real agy turn"
 
 CONTROL_OUT=$(FM_HOME="$FM_TEST_HOME" HERDR_SESSION="$SESSION" \
@@ -223,6 +247,7 @@ case "$CONTROL_OUT" in
 esac
 [ "$(fm_backend_agent_state herdr "$TARGET")" = dead ] \
   || fail "fm-control exit returned before the real agy process terminated"
+printf 'fm-control exit output:\n%s\n' "$CONTROL_OUT"
 pass "fm-control /exit retry stops the real agy process"
 
 cleanup

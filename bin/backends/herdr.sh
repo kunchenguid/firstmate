@@ -2085,8 +2085,12 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #   agent      - a foreground process is a verified harness (any identity
 #                surface: kernel name, argv[0], or a node-bundle argument), or
 #                a verified harness is still a descendant of the pane shell
-#                outside the foreground group (suspended or backgrounded). A
-#                registered agent whose process still exists is never demoted.
+#                outside the foreground group (suspended or backgrounded).
+#                When expected-agent is supplied, only that exact harness can
+#                produce this verdict.
+#   foreign-agent - expected-agent was supplied, but only another verified
+#                harness is present. This never satisfies an identity-sensitive
+#                status or composer read.
 #   shell      - every foreground process is a recognized shell AND no
 #                descendant of the pane shell is a verified harness: positive
 #                proof the pane is shell-only. The descendant walk is what makes
@@ -3087,8 +3091,9 @@ fm_backend_herdr_capture_ansi() {  # <target> <lines>
 #
 # These functions are the ONLY herdr-specific composer knowledge left: the
 # ANSI pane capture (with its small-N workaround), the native `agent get`
-# identity probe, and the capability descriptor. Every shape - the bordered
-# box, the bare agent-glyph row, opencode's left-bar, and pi's
+# identity probe, AGY's matching live-process corroboration, and the capability
+# descriptor. Every shape - the bordered
+# box, the bare agent-glyph row, opencode's left-bar, and the Pi/AGY
 # identity-gated separated pair (which this adapter pioneered) - now lives in
 # the shared owner (bin/fm-composer-lib.sh, fm_composer_classify_screen), so
 # a new harness shape is taught there once and every backend learns it in the
@@ -3102,8 +3107,9 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 }
 
 # fm_backend_herdr_composer_identity: the native agent identity/state probe
-# backing the shared classifier's separated (pi) shape - the genuine herdr
-# primitive no other backend has natively.
+# backing the shared classifier's separated Pi/AGY shape - the genuine herdr
+# primitive no other backend has natively. AGY additionally requires its
+# registered identity to match the live harness process.
 fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
   local identity agent
   fm_backend_herdr_parse_target "$1" || return 1
@@ -3123,9 +3129,9 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # shared classifier strip ghost/placeholder text); when it fails on an older
 # herdr, the plain capture degrades the descriptor to styled=0 rather than
 # letting ghost text be misread as typed input. Identity is fetched lazily,
-# only when the classifier reports the verdict depends on it (a pi separator
-# pair below every other candidate), preserving this adapter's original
-# consult-only-when-needed behavior.
+# only when the classifier reports the verdict depends on it (a Pi/AGY
+# separator pair below every other candidate), preserving this adapter's
+# original consult-only-when-needed behavior.
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cap caps verdict identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
