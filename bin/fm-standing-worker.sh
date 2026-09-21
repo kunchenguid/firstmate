@@ -432,13 +432,23 @@ action_retire() {
 # docs/secondmate-parent-channel.md established. In a main home
 # fm_parent_channel_report declines (no parent binding) and the local wake is
 # the whole delivery, which is correct.
+PARENT_CHANNEL_LOADED=0
+
 publish_parent() {  # <line>
+  local rc=0
   [ -f "$FM_HOME/.fm-secondmate-home" ] || return 0
-  # shellcheck source=bin/fm-classify-lib.sh
-  . "$SCRIPT_DIR/fm-classify-lib.sh"
-  # shellcheck source=bin/fm-parent-channel-lib.sh
-  . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
-  fm_parent_channel_report "$FM_HOME" "$STATE" "$1" >/dev/null 2>&1 || true
+  if [ "$PARENT_CHANNEL_LOADED" -eq 0 ]; then
+    # Sourced lazily and exactly once: a main home never pays for it, and
+    # re-sourcing per worker inside the poll loop would reset the libraries'
+    # own globals partway through a sweep.
+    # shellcheck source=bin/fm-classify-lib.sh
+    . "$SCRIPT_DIR/fm-classify-lib.sh" || return 1
+    # shellcheck source=bin/fm-parent-channel-lib.sh
+    . "$SCRIPT_DIR/fm-parent-channel-lib.sh" || return 1
+    PARENT_CHANNEL_LOADED=1
+  fi
+  fm_parent_channel_report "$FM_HOME" "$STATE" "$1" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
 }
 
 action_check() {
@@ -481,7 +491,15 @@ action_check() {
         line="$line; no pane output could be captured, read the pane"
       fi
       printf '%s\n' "$line"
-      publish_parent "$line"
+      # An upward publish that fails is not a detail to swallow: in a mate home
+      # the parent channel is how this reaches anyone above, and a silent drop
+      # recreates the exact stranding this mechanism exists to prevent. Say so
+      # on the same wake, so the supervisor learns the stop AND that the parent
+      # was not told. The local line has already been printed, so the stop is
+      # never lost to the failure.
+      if ! publish_parent "$line"; then
+        printf 'standing worker %s stopped, but this home could not publish it upward; tell the parent home yourself\n' "$id"
+      fi
       reported=1
     fi
 

@@ -278,6 +278,35 @@ after=$(wc -l < "$CHANNEL")
   || fail 'a repeated poll must not republish the same stop upward'
 pass 'the upward publication is debounced with the wake'
 
+# --- a failed upward publish is reported, never silently dropped -------------
+#
+# If the mate home cannot reach the parent channel, the stop must still be
+# visible AND the failure must be said out loud. Swallowing it would recreate
+# the exact stranding this whole mechanism exists to prevent.
+
+MATE_BROKEN=$(new_home mate-broken)
+printf 'stack-broken\n' > "$MATE_BROKEN/.fm-secondmate-home"
+printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' \
+  "$TMP_ROOT/parent-that-does-not-exist/nope" > "$MATE_BROKEN/.fm-secondmate-parent"
+# A plain file where the channel's directory must be: the append cannot succeed.
+: > "$TMP_ROOT/parent-that-does-not-exist"
+
+set_pane default w4:pQ working 'mid turn'
+FM_HOME="$MATE_BROKEN" "$BIN" register stack-broken --session default --pane w4:pQ >/dev/null \
+  || fail 'registering the broken-channel fixture should succeed'
+FM_HOME="$MATE_BROKEN" "$BIN" check >/dev/null
+set_pane default w4:pQ idle 'a question nobody must lose'
+out=$(FM_HOME="$MATE_BROKEN" "$BIN" check)
+case "$out" in
+  *'standing worker stack-broken stopped working'*) ;;
+  *) fail "the stop must still be reported locally when the channel fails: $out" ;;
+esac
+case "$out" in
+  *'could not publish it upward'*) ;;
+  *) fail "a failed upward publish must be said out loud, not swallowed: $out" ;;
+esac
+pass 'a stop whose upward publish fails is still reported, and the failure is named'
+
 # --- a main home publishes nothing upward ------------------------------------
 
 set_pane default w1:pV working 'working again'
