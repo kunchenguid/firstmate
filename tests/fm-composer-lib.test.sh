@@ -219,6 +219,33 @@ test_matrix_claude_arrow_statusline_footer() {
   pass "matrix: claude's arrow statusline is footer furniture, not a composer holding text"
 }
 
+test_matrix_claude_stale_interrupted_banner_above_composer() {
+  # Real claude 2.1.278 on herdr (captured live 2026-09-21, herdr 0.9.0):
+  # `fm-control.sh interrupt` cancels a running Bash tool call, and claude
+  # leaves a `⎿  Interrupted · What should Claude do instead?` line in the
+  # transcript ABOVE its next composer redraw. Once that redraw settles, the
+  # pane is a bare `❯`+NBSP row between two solid rules exactly like every
+  # other idle claude composer - the banner is inert scrollback ABOVE the
+  # proven envelope, never inside or below it, so it can never compete with
+  # the composer the bottom-most-candidate rule already selected. Verified
+  # live: this reads `empty` today, both while the banner sits a few lines
+  # above the prompt and once fresh output has pushed it out of view - this
+  # regression pins the former, closer case so it can never silently regress.
+  local banner screen typed claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  banner=$'  '"${ESC}[38;2;153;153;153m"'Ran '"${ESC}[0m${ESC}[1m${ESC}[38;2;153;153;153m"'1'"${ESC}[0m${ESC}[38;2;153;153;153m"' shell command '"${ESC}[0m"$'\n'"${ESC}[38;2;153;153;153m"'  ⎿  '"$NBSP"'Interrupted · What should Claude do instead?'"${ESC}[0m"
+  screen="$banner"$'\n\n────────────────────────\n❯'"$NBSP"$'\n────────────────────────'
+  assert_screen "claude idle under a stale Interrupted banner on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "claude idle under a stale Interrupted banner on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "claude idle under a stale Interrupted banner on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  # Narrowness: a genuinely unsubmitted draft under the same stale banner must
+  # still refuse - the fix (here, the pre-existing self-proving pair) never
+  # widens into a blanket bypass of real pending text.
+  typed="$banner"$'\n\n────────────────────────\n❯ fix the login bug\n────────────────────────'
+  assert_screen "claude typed under a stale Interrupted banner" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  pass "matrix: a stale Interrupted banner above the composer never outranks the composer itself"
+}
+
 test_composer_footer_demotion_needs_a_proven_pair() {
   # The demotion is bounded in three directions, and each bound is a case
   # where a lower glyph row IS the live composer.
@@ -918,6 +945,7 @@ test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
 test_matrix_claude_arrow_statusline_footer
+test_matrix_claude_stale_interrupted_banner_above_composer
 test_composer_footer_demotion_needs_a_proven_pair
 test_composer_footer_zone_is_shape_independent
 test_composer_footer_zone_refuses_rather_than_allows
