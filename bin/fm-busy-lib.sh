@@ -875,7 +875,7 @@ fm_busy_agy_tail_busy() {
 # fm_backend_capture if available, else reports unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
-  local out rc r_state r_source native log
+  local out rc r_state r_source native raw_native='' log
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then
@@ -939,7 +939,10 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     fi
     case "$harness" in
       agy*)
-        if [ "$native" = idle ]; then
+        if command -v fm_backend_agent_status_raw >/dev/null 2>&1; then
+          raw_native=$(fm_backend_agent_status_raw "$backend" "$target" 2>/dev/null || true)
+        fi
+        if [ "$raw_native" = idle ]; then
           printf 'idle herdr-native'
           return 0
         fi

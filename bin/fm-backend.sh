@@ -853,6 +853,18 @@ fm_backend_busy_state() {  # <backend> <target>
   esac
 }
 
+fm_backend_agent_status_raw() {  # <backend> <target>
+  local backend=$1 target=$2
+  fm_backend_source "$backend" || return 0
+  case "$backend" in
+    herdr)
+      fm_backend_herdr_target_ready "$target" || return 0
+      fm_backend_herdr_agent_status_raw \
+        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+      ;;
+  esac
+}
+
 # fm_backend_composer_state: classify the composer/input area of <target> as
 # empty|pending|pending-unproven|unknown for callers that need a pre-submit
 # input guard, a submit acknowledgement, or a launch-readiness check. It is

@@ -47,6 +47,8 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-backend.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
@@ -897,6 +899,31 @@ test_agy_spawn_arms_no_busy_wiring() {
   pass "fm-spawn: agy arms no busy wiring and writes no sidecar"
 }
 
+test_agy_raw_herdr_status_boundary() {
+  command -v jq >/dev/null 2>&1 || { pass "agy raw status test skipped without jq"; return; }
+  local dir fb out
+  dir="$TMP_ROOT/agy-herdr-raw-status"
+  fb="$dir/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'EOF'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"status --json"*) printf '{"server":{"running":true}}\n' ;;
+  *"agent get"*) printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "${FM_TEST_AGY_STATUS:?}" ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$fb/herdr"
+
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_STATUS=idle fm_backend_agent_status_raw herdr default:w1:p2)
+  [ "$out" = idle ] || fail "raw herdr status boundary should preserve idle, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_STATUS=blocked fm_backend_agent_status_raw herdr default:w1:p2)
+  [ "$out" = blocked ] || fail "raw herdr status boundary should preserve blocked, got '$out'"
+
+  pass "fm-backend: raw herdr agent status preserves lifecycle states"
+}
+
 test_agy_busy_classify_herdr_native() {
   local state out
   state="$TMP_ROOT/busy-classify-state"
@@ -907,27 +934,45 @@ test_agy_busy_classify_herdr_native() {
     [ "$backend" = herdr ] || return 1
     case "$target" in
       herdr-working:*) printf 'busy' ;;
-      herdr-idle:*) printf 'idle' ;;
+      herdr-idle:*|herdr-blocked:*|herdr-done:*) printf 'idle' ;;
       *) printf 'unknown' ;;
+    esac
+  }
+
+  fm_backend_agent_status_raw() {
+    local backend=$1 target=$2
+    [ "$backend" = herdr ] || return 1
+    case "$target" in
+      herdr-working:*) printf 'working' ;;
+      herdr-idle:*) printf 'idle' ;;
+      herdr-blocked:*) printf 'blocked' ;;
+      herdr-done:*) printf 'done' ;;
+      *) return 1 ;;
     esac
   }
 
   # shellcheck source=/dev/null
   . "$ROOT/bin/fm-busy-lib.sh"
 
-  # 1. agy harness on herdr: busy -> busy herdr-native
   out=$(fm_busy_classify herdr herdr-working:p1 agy t1 "$state")
   [ "$out" = "busy herdr-native" ] || fail "agy on herdr working should classify 'busy herdr-native', got '$out'"
 
-  # 2. agy harness on herdr: idle -> idle herdr-native
   out=$(fm_busy_classify herdr herdr-idle:p1 agy t1 "$state")
   [ "$out" = "idle herdr-native" ] || fail "agy on herdr idle should classify 'idle herdr-native', got '$out'"
 
-  # 3. other harness (claude) on herdr: idle -> unknown missing (preserves hook-dependent contract)
+  out=$(fm_busy_classify herdr herdr-blocked:p1 agy t1 "$state" 'waiting for input')
+  [ "${out%% *}" = unknown ] || fail "agy on herdr blocked must remain unknown, got '$out'"
+
+  out=$(fm_busy_classify herdr herdr-done:p1 agy t1 "$state" 'task stopped')
+  [ "${out%% *}" = unknown ] || fail "agy on herdr done must remain unknown, got '$out'"
+
+  out=$(fm_busy_classify herdr herdr-unreadable:p1 agy t1 "$state" 'status unavailable')
+  [ "${out%% *}" = unknown ] || fail "agy with unreadable herdr status must remain unknown, got '$out'"
+
   out=$(fm_busy_classify herdr herdr-idle:p1 claude t1 "$state")
   [ "$out" = "unknown missing" ] || fail "claude on herdr idle without record should classify 'unknown missing', got '$out'"
 
-  pass "bin/fm-busy-lib.sh: agy on herdr maps native idle to 'idle herdr-native'"
+  pass "bin/fm-busy-lib.sh: agy accepts exact native idle only"
 }
 
 test_agy_exit_submits_retried_enter() {
@@ -1014,5 +1059,6 @@ test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
 test_agy_spawn_arms_no_busy_wiring
+test_agy_raw_herdr_status_boundary
 test_agy_busy_classify_herdr_native
 test_agy_exit_submits_retried_enter
