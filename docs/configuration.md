@@ -378,6 +378,20 @@ Any other value, or an unreadable file, refuses every spawn from that home, whic
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
 
+## Claude setting sources (config/claude-setting-sources)
+
+The optional local, gitignored `config/claude-setting-sources` holds a comma-separated list of distinct Claude Code settings scopes, drawn from `user`, `project`, and `local`, that every Claude crewmate and scout launch, including its control-plane relaunch, passes as `--setting-sources <value>` right after the permission flag.
+The value is the file's content with all whitespace removed, and an absent file launches with no such flag, exactly as before.
+Claude Code merges permission rules from every loaded scope and applies deny, then ask, then allow, so no user, local, or per-launch allow rule lifts an ask or deny rule in a project's tracked `.claude/settings.json`; leaving `project` out of the list is the machine-local way to keep those tracked rules away from this home's workers without changing the shared file.
+Leaving out `project` skips that whole scope, not only its permission rules: the project's deny rules, hooks, environment, plugin and MCP-server enablement, and its `.mcp.json` all stop loading for the worker.
+The `user` scope still loads when listed, so a captain who wants a rule such as `Bash(rm -rf:*)` kept denied re-supplies it in `~/.claude/settings.json`.
+Managed settings and the inline `--settings` JSON every Claude launch carries still apply whatever the list says, and the external `CLAUDE.md` imports dialog the Claude adapter reference describes is unaffected.
+The list must include `local`, because each worker's turn-end and busy-state hooks live in its worktree's `.claude/settings.local.json`.
+A Claude secondmate launch ignores the file, because a secondmate home's project scope is Firstmate's own tracked `.claude/settings.json`, which carries that secondmate's supervision hooks.
+A list without `local`, any other value, or an unreadable file refuses every spawn from that home, whichever harness or kind it would launch, before any endpoint, worktree, or task record exists, and names the accepted form.
+`bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change takes effect at the next launch without a restart.
+The file is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract, so a secondmate's own Claude crewmates launch with the same list.
+
 ## Lavish server address (config/lavish-axi-host)
 
 The optional local, gitignored `config/lavish-axi-host` contains one non-empty address without whitespace for the per-machine Lavish server.

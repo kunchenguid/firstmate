@@ -1481,6 +1481,86 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+# config/claude-setting-sources (bin/fm-spawn.sh header): a valid list adds
+# --setting-sources right after the permission flag on ship and scout launches,
+# an absent file adds nothing, and a malformed, local-less, or unreadable file
+# refuses before endpoint or metadata.
+test_claude_setting_sources_reach_ship_and_scout_launches() {
+  local rec id out status launch expected
+  id=sources-ship-z24
+  rec=$(make_spawn_case sources-ship claude "$id")
+  read_case_record "$rec"
+  # All whitespace is stripped, so an editor's spacing and trailing newline are fine.
+  printf ' user, local\n' > "$HOME_DIR/config/claude-setting-sources"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn with claude-setting-sources=user,local should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  expected=$(claude_expected_launch "$HOME_DIR" "$id" '--dangerously-skip-permissions --setting-sources user,local')
+  [ "$launch" = "$expected" ] || fail "setting sources changed more than adding the flag"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+
+  id=sources-scout-z25
+  rec=$(make_spawn_case sources-scout claude "$id")
+  read_case_record "$rec"
+  printf 'user,local\n' > "$HOME_DIR/config/claude-setting-sources"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "claude scout spawn with claude-setting-sources=user,local should succeed"
+  assert_contains "$(cat "$LAUNCH_LOG")" "claude --dangerously-skip-permissions --setting-sources user,local --settings" \
+    "scout launch did not carry --setting-sources user,local"
+  pass "config/claude-setting-sources=user,local adds --setting-sources to ship and scout launches"
+}
+
+test_claude_setting_sources_absent_adds_no_flag() {
+  local rec id out status launch expected
+  id=sources-absent-z26
+  rec=$(make_spawn_case sources-absent claude "$id")
+  read_case_record "$rec"
+  assert_absent "$HOME_DIR/config/claude-setting-sources" "fixture must start without the file"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn without claude-setting-sources should succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--setting-sources" "an absent file must not add --setting-sources"
+  expected=$(claude_expected_launch "$HOME_DIR" "$id" --dangerously-skip-permissions)
+  [ "$launch" = "$expected" ] || fail "an absent file changed the claude launch"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  pass "an absent config/claude-setting-sources launches with no --setting-sources flag"
+}
+
+test_claude_setting_sources_invalid_refuses_before_endpoint_or_metadata() {
+  local rec id out status value want n=0
+  rec=$(make_spawn_case sources-invalid claude sources-bad-1 sources-bad-2 sources-bad-3 sources-bad-4 sources-bad-5 sources-bad-6)
+  read_case_record "$rec"
+  # value|expected refusal fragment; the unreadable case writes a directory.
+  while IFS='|' read -r value want; do
+    n=$((n + 1))
+    id=sources-bad-$n
+    rm -rf "$HOME_DIR/config/claude-setting-sources"
+    if [ "$value" = '<directory>' ]; then
+      mkdir "$HOME_DIR/config/claude-setting-sources"
+    else
+      printf '%s\n' "$value" > "$HOME_DIR/config/claude-setting-sources"
+    fi
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 1 "$status" "claude-setting-sources '$value' must refuse the spawn"
+    assert_contains "$out" "$want" "refusal for '$value' must explain itself"
+    [ ! -s "$LAUNCH_LOG" ] || fail "claude-setting-sources '$value' must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+    assert_absent "$HOME_DIR/state/$id.meta" "refusal for '$value' must happen before meta is written"
+  done <<'EOF'
+user,team|config/claude-setting-sources holds 'user,team'; the accepted form is a comma-separated list of distinct values from user, project, local that includes local
+local,local|config/claude-setting-sources holds 'local,local'; the accepted form
+user,,local|config/claude-setting-sources holds 'user,,local'; the accepted form
+|config/claude-setting-sources holds ''; the accepted form
+user|config/claude-setting-sources holds 'user', which leaves out local; every claude worker's turn-end and busy-state hooks live in its worktree's .claude/settings.local.json
+<directory>|config/claude-setting-sources must be a readable regular file
+EOF
+  [ "$n" = 6 ] || fail "expected 6 refusal cases, ran $n"
+  pass "a malformed, local-less, or unreadable config/claude-setting-sources refuses before any endpoint or metadata"
+}
+
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
@@ -1524,6 +1604,9 @@ test_claude_permission_mode_auto_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
+test_claude_setting_sources_reach_ship_and_scout_launches
+test_claude_setting_sources_absent_adds_no_flag
+test_claude_setting_sources_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_config_dir
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority

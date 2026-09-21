@@ -1031,7 +1031,7 @@ new_world() {
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
     printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
     printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
-    printf 'config/claude-permission-mode\n'
+    printf 'config/claude-permission-mode\nconfig/claude-setting-sources\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"
@@ -1460,6 +1460,50 @@ test_claude_permission_mode_inheritance_present_and_absent() {
   expect_code 0 "$status" "claude-permission-mode absence push should succeed"
   [ -e "$w/sm/config/claude-permission-mode" ] && fail "claude-permission-mode not removed on primary absence"
   pass "B12c claude-permission-mode inheritance: present values and primary absence converge exactly"
+}
+
+# config/claude-setting-sources applies to ship and scout launches only: a
+# Claude SECONDMATE launch keeps loading its home's project scope, which is
+# Firstmate's own tracked .claude/settings.json with its supervision hooks.
+test_spawn_secondmate_ignores_claude_setting_sources() {
+  local w sm launchlog launch out status
+  w="$TMP_ROOT/spawn-claude-sources"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'claude opus\n' > "$w/home/config/secondmate-harness"
+  printf 'user,local\n' > "$w/home/config/claude-setting-sources"
+  make_seeded_home "$sm" sm
+
+  out=$(spawn_secondmate_capture "$w" sm "$sm" "$launchlog" 2>&1); status=$?
+  expect_code 0 "$status" "claude secondmate spawn under claude-setting-sources=user,local should succeed"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "claude --dangerously-skip-permissions --settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' --model 'opus'" \
+    "sources: secondmate launch changed beyond ignoring the file"
+  assert_not_contains "$launch" "--setting-sources" "sources: a secondmate launch must not narrow its settings scopes"
+  pass "C2c spawn: a Claude secondmate launch ignores config/claude-setting-sources"
+}
+
+# Inherited like config/claude-permission-mode, so a secondmate's own Claude
+# crewmates load the same settings scopes.
+test_claude_setting_sources_inheritance_present_and_absent() {
+  local w head out err status
+  w=$(new_world sources-inherit)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+
+  printf 'user,local\n' > "$w/home/config/claude-setting-sources"
+  err="$w/sources-inherit.err"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "claude-setting-sources present push should succeed"
+  assert_contains "$out" "claude-setting-sources: pushed" "present value should report pushed"
+  [ "$(cat "$w/sm/config/claude-setting-sources")" = user,local ] || fail "claude-setting-sources present value not pushed"
+
+  rm -f "$w/home/config/claude-setting-sources"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "claude-setting-sources absence push should succeed"
+  [ -e "$w/sm/config/claude-setting-sources" ] && fail "claude-setting-sources not removed on primary absence"
+  pass "B12d claude-setting-sources inheritance: present values and primary absence converge exactly"
 }
 
 test_backend_inheritance_present_and_absent() {
@@ -2661,6 +2705,8 @@ test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
 test_spawn_secondmate_claude_permission_mode_auto
 test_claude_permission_mode_inheritance_present_and_absent
+test_spawn_secondmate_ignores_claude_setting_sources
+test_claude_setting_sources_inheritance_present_and_absent
 test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation

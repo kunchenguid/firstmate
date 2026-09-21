@@ -581,6 +581,21 @@ test_disabled_relaunch_clears_prior_trace_context() {
   pass "fm-control relaunch: disabling tracing clears metadata and pane context"
 }
 
+# config/claude-setting-sources (bin/fm-spawn.sh header) reaches a ship
+# relaunch exactly as it reaches the first launch.
+test_relaunch_carries_the_claude_setting_sources_flag() {
+  local dir out rc
+  dir=$(new_case sources rl64)
+  add_ship_task "$dir" rl64 claude
+  mkdir -p "$dir/home/config"
+  printf 'user,local\n' > "$dir/home/config/claude-setting-sources"
+  out=$(run_control "$dir" rl64 relaunch --note "same worker, narrower settings"); rc=$?
+  expect_code 0 "$rc" "a relaunch under claude-setting-sources should succeed"$'\n'"$out"
+  grep -q 'claude --dangerously-skip-permissions --setting-sources user,local --settings' "$dir/fake/literal" \
+    || fail "the replacement claude launch did not carry --setting-sources user,local"$'\n'"$(cat "$dir/fake/literal")"
+  pass "fm-control relaunch: config/claude-setting-sources reaches the replacement claude launch"
+}
+
 test_relaunch_appends_the_progress_note_to_the_instructions() {
   local dir out rc brief launch_brief first_line role_line task_line
   dir=$(new_case note rl2)
@@ -2204,6 +2219,7 @@ test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
+test_relaunch_carries_the_claude_setting_sources_flag
 test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
