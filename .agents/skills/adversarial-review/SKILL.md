@@ -54,7 +54,8 @@ Confirm the model is currently available from that harness's own catalog rather 
 
 Run both sides at comparable effort.
 An asymmetric pair makes the weaker side's concessions meaningless, because a concession then measures effort rather than evidence.
-Confirm the selected effort actually reaches the launch: `bin/fm-spawn.sh` records an unsupported level in task metadata and omits the flag, so a reviewer can silently run below the level you intended.
+Before dispatch, confirm for each side separately that the resolved effort actually reaches its launch, because `bin/fm-spawn.sh` records an unsupported level in task metadata and omits the flag, and a harness adapter may accept a level only for particular models.
+A side whose launch cannot carry the intended effort makes the pair asymmetric, so report that to the captain and let him pick the harness, model, or effort instead of launching the pair anyway.
 
 The orchestration shape above each model is free and the two sides need not match.
 One side may be a single reviewer while the other orchestrates subagents; what has to differ is the model, not the topology.
@@ -64,13 +65,15 @@ One side may be a single reviewer while the other orchestrates subagents; what h
 Both sides are scouts under `AGENTS.md` section 7: the deliverable is a report, never a PR.
 
 Write both briefs from one subject statement.
-Give each side the same questions, the same evidence pointers, the same scope, and the same spend allowance, and say in each that the allowance is shared between them.
+Give each side the same questions, the same evidence pointers, the same scope, and the same per-side spend bound.
+Split the captain's pool in half by default and name that half in each brief as that side's own bound; he may set a different split or a different per-side figure.
+Never state the whole pool to a side, because neither side can observe the other's consumption during phase 1 and two sides each spending the pool spend it twice.
 Asymmetric briefs produce asymmetric reviews, and that difference is an artifact of your writing rather than a finding.
 
 Tell each side, in its `## Firstmate spec`, that it is one of two independent reviewers, that the other exists, and that it must not read the other's directory or the exchange directory until firstmate says the exchange is open.
-Name the exchange directory in the spec as an authorized write path, because the generated scout brief otherwise limits outside writes to the report and the status file.
-Name it after the subject rather than after either task, so neither side owns it: `data/<subject>-converge/`, holding one file per side per round.
-The exchange directory is not a task directory, so no teardown removes it and its round files remain as the record of what was exchanged.
+Each side writes its own rounds into its own task's data directory, `data/<its-task-id>/`, the same place the generated scout brief already sends its report.
+Firstmate copies each round into a shared exchange directory as it relays it, named after the subject rather than after either task so neither side owns it: `data/<subject>-converge/`, holding one file per side per round.
+Teardown removes runtime state and the disposable worktree, not a task's data directory, so the rounds and the exchange copies both survive as the record of what was exchanged.
 
 Require each side to answer what has gone well, not only what went wrong.
 A review that only finds faults is not a review, and a reviewer that never says so is not reading for the captain.
@@ -80,12 +83,13 @@ If one side finishes first it waits; handing it the other's report early destroy
 
 ## Phase 2 - the exchange
 
-Each round is one file per side under the exchange directory, written after reading the other side's latest material in full.
+Each round is one file per side, written into that side's own data directory after reading the other side's latest material in full, which firstmate then copies into the exchange directory.
 Both sides are told to aim at one joint recommendation per question, and to treat anything still contested as the captain's to decide rather than theirs to win.
 
 Both sides write their round simultaneously, so a pair of rounds routinely crosses: each answers the previous round rather than its counterpart.
-Crossing is correct and preserves independence within the round, but it means an item can look contested only because neither side had seen the other's concession yet.
-The mediator labels a crossed pair and never counts such an item as contested.
+Crossing is correct and preserves independence within the round, but it means an item can look contested only because one side had not yet seen the other's concession.
+The mediator labels a crossed pair, and withholds the contested label from an item only when that unseen concession is the whole of the apparent disagreement.
+An item both sides still take opposite positions on once each has seen the other's material is contested, whether or not the round that carried it crossed.
 
 Every round obeys four rules.
 
@@ -119,10 +123,12 @@ Close the exchange as soon as any of these holds.
 - A further round would only restate positions already on record.
 - The only thing standing between the sides is a call that belongs to the captain, which goes to him rather than being argued for another round.
 
+Closing with an open item requires each side's captain-facing case under rule 4 to already exist for that item.
+When one is missing, request exactly that case as the final round instead of closing, because the Contested bucket otherwise cannot be built without firstmate authoring a position it is forbidden to hold.
+
 Never let a round happen merely because a round is available.
 
-Five exchanged rounds per side is a safety net, not the mechanism.
-Reaching it means the subject was scoped too broadly; report the state as it stands and say so, rather than continuing.
+When a stopping condition fires with most questions still open, the subject was scoped too broadly; report the state as it stands and say so, rather than opening further rounds to work through the backlog.
 
 ## Firstmate's job is mechanical
 
@@ -132,8 +138,8 @@ It does not take a position, rank the arguments, add an argument of its own, tel
 Its complete list of moves:
 
 1. Write the two briefs and spawn both scouts.
-2. Hold each report until both exist, then open the exchange by steering both sides with the same instruction through `bin/fm-send.sh`, naming the other side's material and the exchange directory.
-3. Relay each round to the other side unaltered, by path.
+2. Hold each report until both exist, then open the exchange by steering both sides with the same instruction through `bin/fm-send.sh`, naming the other side's material, the exchange directory to read, and each side's own data directory to write its rounds into.
+3. Copy each round from the side's own data directory into the exchange directory and relay it to the other side unaltered, by path.
 4. Point a side at a contested claim that a bounded free measurement could settle, or at a question it did not answer.
    This is the only input firstmate adds, and it is a pointer, never a position.
 5. Decide after each round whether the exchange closes, and say which stopping condition fired.
@@ -141,7 +147,7 @@ Its complete list of moves:
 
 ## Outcome
 
-Three buckets, and the captain sees all three in his own language.
+Two buckets, and every item lands in exactly one of them, in the captain's own language.
 
 **Converged.**
 One clear recommendation per question, stated once.
@@ -149,15 +155,13 @@ Do not show him the argument that produced it, who conceded what, or how many ro
 Never re-litigate a converged item in front of him.
 
 **Contested.**
+Everything the two sides did not agree on, including a proposal the other side never answered before the exchange closed.
 One short paragraph per side, each naming what he gets and what he gives up on that path.
 No transcript, no file references, no agent names, no round numbers.
 He is choosing between two paths, so each paragraph exists to make one path's pro and con legible, not to win.
+When one side never answered the item, say that plainly and have its proposer write the case against their own proposal, so the captain still gets both sides.
 
-**Unreviewed.**
-A proposal the other side never answered before the exchange closed is neither agreed nor disputed.
-Carry it as one side's recommendation, labelled as not jointly reviewed, with the strongest case against it written by its own proposer.
-
-Every contested and unreviewed item is a captain call, so load `captain-hold-lifecycle` and register them before treating the review as complete.
+Every contested item is a captain call, so load `captain-hold-lifecycle` and register them before treating the review as complete.
 Whichever side owns the final captain-facing surface hosts its own review loop under the crew-hosted Lavish board contract in [`docs/configuration.md`](../../../docs/configuration.md#crew-hosted-lavish-review-boards); firstmate does not arm or poll that board.
 
 Report both sides' spend and what the spend changed.
