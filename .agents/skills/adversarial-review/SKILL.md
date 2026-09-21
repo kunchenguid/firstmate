@@ -130,7 +130,7 @@ Close the exchange as soon as any of these holds.
 
 Closing with an open item requires each side's rule 4 case for that item.
 When a case is missing, request exactly that case as one final round rather than closing, because firstmate may not author that position itself.
-When it still has not arrived, close anyway and carry the item under the Contested clause for a missing case, whatever the reason that side did not deliver it.
+When it still has not arrived, close anyway and carry the item in the Contested bucket, whatever the reason that side did not deliver it.
 The exchange always closes: a review that cannot finish delivers nothing, which is worse than one that finishes and names its gap honestly.
 
 Never let a round happen merely because a round is available.
@@ -151,8 +151,8 @@ Its complete list of moves:
    This is the only input firstmate adds, and it is a pointer, never a position.
 5. Decide after each round whether the exchange closes, and say which stopping condition fired.
 6. Build the captain-facing outcome below.
-7. Register the contested captain calls, run the completion attestation once per side against that side's own task id with that same inventory, then tear down and complete both sides, only once the outcome is built and every round is copied out.
-   A side with nothing held attests with `captain-hold-lifecycle`'s explicit no-outstanding-call form instead, which is the form a fully converged run reaches for both sides.
+7. Register the review's contested list as its one consolidated captain call, run the completion attestation once per side against that side's own task id naming that call, then tear down and complete both sides, only once the outcome is built and every round is copied out.
+   A fully converged run has no such call, so each side attests with `captain-hold-lifecycle`'s explicit no-outstanding-call form instead.
 
 ## Outcome
 
@@ -165,12 +165,13 @@ Never re-litigate a converged item in front of him.
 
 **Contested.**
 Everything the two sides did not agree on, including an item one side did not make its case on before the exchange closed.
-One short paragraph per side, each naming what he gets and what he gives up on that path.
 No transcript, no file references, no agent names, no round numbers.
-He is choosing between two paths, so each paragraph exists to make one path's pro and con legible, not to win.
-When one side's case is missing, say plainly what is missing and, where it is known, why, and have the side whose case is on record write the strongest case it can for the absent side's position, so the captain still gets both sides.
-Name which paragraph its opponent wrote, because a steelmanned position is worth having only when he knows whose hand wrote it.
-When neither side's case is on record, name the item, say plainly that neither side made its case and, where it is known, why, and carry it with no paragraphs, because firstmate supplies no position for either side.
+He is choosing between two paths, so a case exists to make one path's pro and con legible, not to win.
+
+He gets the cases that exist for an item, each short, each naming what he gets and what he gives up on that path, each attributed to the side whose hand wrote it, and a plain statement of which case is absent and, where it is known, why.
+Attribution is not optional, because a steelmanned position is worth having only when he knows whose hand wrote it.
+Ask a side that is still available for a case that is absent, including the strongest case it can make for the other side's position, before you build this bucket.
+Firstmate never supplies, authors, or improvises a position for either side, so what does not exist and cannot be asked for is named as missing rather than written.
 
 The contested list is a captain call, so load `captain-hold-lifecycle` and carry the list on one captain-held task consolidating the questions and their two-sided options, before treating the review as complete.
 
