@@ -18,7 +18,9 @@
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
 #                 "TREEHOUSE_LEASE: pool slot <path> is still leased to
-#                 <holder> for task <id> (<why it was retained>); ... reclaim
+#                 <holder> for task <id> (<why it was retained>); ... inspect
+#                 it and save any unlanded work first, because reclaiming
+#                 discards it; then reclaim
 #                 it with: treehouse return --if-lease-holder <holder> <path>,
 #                 then rm <record>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
@@ -1558,7 +1560,7 @@ detect_retained_treehouse_leases() {
     # empty holder or worktree, rejects embedded newlines, and commits the
     # record atomically, so a record that exists carries both fields. The
     # writer is the guard, and a hand-edited marker is out of scope.
-    echo "TREEHOUSE_LEASE: pool slot $worktree is still leased to $holder for task ${task:-unknown} (${reason:-reason not recorded}); once nothing is running in it, reclaim it with: treehouse return --if-lease-holder $holder $worktree, then rm $marker"
+    echo "TREEHOUSE_LEASE: pool slot $worktree is still leased to $holder for task ${task:-unknown} (${reason:-reason not recorded}); once nothing is running in it, inspect it and save any unlanded work, because reclaiming discards it; then reclaim it with: treehouse return --if-lease-holder $holder $worktree, then rm $marker"
   done
 }
 

@@ -481,8 +481,38 @@ test_aborted_projected_spawn_keeps_its_live_pane() {
   pass "an aborted projected spawn keeps the slot its live task pane runs in"
 }
 
+# The flat counterpart. No projection endpoint is recorded for a flat pane, so
+# only the fact that launch delivery already happened can tell this abort that
+# an agent is running in the slot; the pre-delivery flat return stays covered by
+# test_aborted_spawn_returns_its_lease.
+test_aborted_flat_spawn_keeps_its_launched_slot() {
+  local id=herdr-cwd-h8 out status marker pane
+  make_case flat-abort-after-launch "$id"
+  mkdir -p "$CASE_DIR/user-home"
+  make_backlog_fixture "$HOME_DIR"
+  out=$(FM_FAKE_TASKS_AXI_START_FAIL=1 run_herdr_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn whose In-flight commit fails should not report success"$'\n'"$out"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the rolled-back spawn left a task record"$'\n'"$out"
+  pane=$(jq -r --arg l "fm-$id" '.panes[]|select(.label==$l)|.pane_id' "$CASE_DIR/herdr-state.json")
+  [ -n "$pane" ] && [ "$(pane_field "$pane" cwd)" = "$WT_DIR" ] \
+    || fail "the flat task pane was not left running in its worktree"$'\n'"$out"
+  if grep -q -- "return --force --if-lease-holder fm-$id $WT_DIR" "$CASE_DIR/treehouse.log"; then
+    fail "the abort force-returned a slot its launched agent is running in"$'\n'"$out"
+  fi
+  grep -q "^$WT_DIR"$'\t'"fm-$id\$" "$CASE_DIR/treehouse-leases" \
+    || fail "the slot is no longer leased to fm-$id after the abort"
+  marker="$HOME_DIR/state/.treehouse-lease-retained/$id.$(basename "$(dirname "$WT_DIR")").retained"
+  [ -f "$marker" ] \
+    || fail "the retained slot was not recorded, so no session start would surface it"$'\n'"$out"
+  assert_contains "$(sed -n 's/^reason=//p' "$marker")" "$pane" \
+    "the retained-slot reason does not name the endpoint the agent was launched in"
+  pass "an aborted flat spawn keeps the slot its launched agent runs in"
+}
+
 test_task_pane_is_created_in_its_worktree
 test_aborted_projected_spawn_keeps_its_live_pane
+test_aborted_flat_spawn_keeps_its_launched_slot
 test_aborted_spawn_returns_its_lease
 test_aborted_reuse_keeps_its_worktree_and_work
 test_retained_lease_is_recorded_for_session_start

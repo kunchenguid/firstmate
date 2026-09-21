@@ -1095,6 +1095,7 @@ SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_SLOT_LEASED=0
 SPAWN_SLOT_REUSED=0
+SPAWN_LAUNCH_DELIVERED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1306,7 +1307,7 @@ spawn_abort_cleanup() {
       # that named this slot, so the guard above cannot tell a reused slot from
       # a fresh one - only this flag, set when the reuse happened, can. The
       # slot stays leased and the retained record is what makes it visible.
-      echo "warning: task $ID's leased Treehouse worktree $WT was reused from this task's own earlier lease and may hold that work, so the aborted spawn leaves it leased rather than returning it; inspect it, then release it with 'treehouse return --if-lease-holder $W $WT'" >&2
+      echo "warning: task $ID's leased Treehouse worktree $WT was reused from this task's own earlier lease and STILL HOLDS THE PREVIOUS WORKER'S UNLANDED WORK, so the aborted spawn leaves it leased rather than returning it. A retried respawn of $ID will NOT find this slot and starts in a FRESH one. 'treehouse return --if-lease-holder $W $WT' DISCARDS that work: INSPECT $WT and land or save anything worth keeping BEFORE reclaiming it" >&2
       spawn_record_retained_lease "the aborted spawn reused this task's existing lease and left the work in the slot untouched"
     elif spawn_abort_task_pane_survives; then
       if [ "$herdr_close_attempted" = 1 ]; then
@@ -1316,6 +1317,9 @@ spawn_abort_cleanup() {
       fi
       echo "warning: herdr pane $HERDR_PROJECTION_ABORT_TASK_PANE for $ID $herdr_pane_state, so task $ID's leased Treehouse worktree $WT is left leased rather than returned under that pane's own shell; close the pane, then release it with 'treehouse return --if-lease-holder $W $WT'" >&2
       spawn_record_retained_lease "herdr pane $HERDR_PROJECTION_ABORT_TASK_PANE $herdr_pane_state"
+    elif [ "$SPAWN_LAUNCH_DELIVERED" = 1 ]; then
+      echo "warning: the agent for $ID was already launched in endpoint $T, whose shell runs in task $ID's leased Treehouse worktree $WT, so the aborted spawn leaves that slot leased rather than returning it under a live agent; stop the agent and inspect $WT, then release it with 'treehouse return --if-lease-holder $W $WT'" >&2
+      spawn_record_retained_lease "the aborted spawn had already launched its agent in endpoint $T"
     elif ! (cd "$PROJ_ABS" && treehouse return --force --if-lease-holder "$W" "$WT") >/dev/null 2>&1; then
       echo "warning: could not return task $ID's leased Treehouse worktree $WT after the aborted spawn; release it with 'treehouse return --if-lease-holder $W $WT'" >&2
       spawn_record_retained_lease "the return of this slot failed during an aborted spawn"
@@ -4968,6 +4972,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+SPAWN_LAUNCH_DELIVERED=1
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"
