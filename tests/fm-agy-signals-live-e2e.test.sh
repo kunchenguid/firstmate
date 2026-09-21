@@ -9,14 +9,14 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGY_BIN=$(command -v agy 2>/dev/null || true)
-REAL_TMUX=$(command -v tmux 2>/dev/null || true)
 LAB=
-SOCKET="fm-agy-signals-$$"
-SESSION=agy-signals
-TARGET="$SESSION:agy"
+SESSION="fm-lab-agy-signals-$$"
+TARGET=
 
 cleanup() {
-  [ -n "$REAL_TMUX" ] && "$REAL_TMUX" -L "$SOCKET" kill-server >/dev/null 2>&1 || true
+  if declare -F herdr_safe_stop_and_delete >/dev/null 2>&1; then
+    herdr_safe_stop_and_delete "$SESSION"
+  fi
   [ -z "$LAB" ] || rm -rf -- "$LAB"
 }
 
@@ -30,8 +30,14 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
-fm_live_gate opt-in FM_AGY_SIGNALS_LIVE agy tmux
+fm_live_gate opt-in FM_AGY_SIGNALS_LIVE agy herdr jq
 [ -n "$AGY_BIN" ] || fail "agy is not installed"
+
+# shellcheck source=tests/herdr-test-safety.sh
+. "$ROOT/tests/herdr-test-safety.sh"
+herdr_forget_inherited_pane
+export HERDR_SESSION="$SESSION"
+fm_herdr_lab_prepare "$SESSION" || fail "could not prepare the isolated Herdr session"
 
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/fm-agy-signals.XXXXXX") || fail "could not create the isolated agy lab"
 trap cleanup EXIT
@@ -51,27 +57,58 @@ mkdir -p "$AGY_HOME" || fail "could not create the throwaway agy HOME"
 cp -R "$HOME/.gemini" "$AGY_HOME/.gemini" || fail "could not stage the throwaway agy credential copy"
 
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-backend.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
 
-"$REAL_TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -n control -c "$WORKSPACE" \
-  || fail "could not start the isolated tmux server"
-"$REAL_TMUX" -L "$SOCKET" new-window -d -t "$SESSION:" -n agy -c "$WORKSPACE" \
-  || fail "could not open the isolated agy window"
+CONTAINER_RAW=$(fm_backend_herdr_container_ensure "$WORKSPACE") \
+  || fail "could not create the isolated Herdr workspace"
+CONTAINER=${CONTAINER_RAW%%$'\t'*}
+SEEDED_TAB_ID=${CONTAINER_RAW#*$'\t'}
+WORKSPACE_ID=${CONTAINER#*:}
+TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-agy-signals" "$WORKSPACE" "$SEEDED_TAB_ID") \
+  || fail "could not create the isolated agy pane"
+read -r TAB_ID PANE_ID <<EOF
+$TASK_IDS
+EOF
+[ -n "$TAB_ID" ] && [ -n "$PANE_ID" ] || fail "Herdr did not return the agy pane identity"
+TARGET="$SESSION:$PANE_ID"
+
+FM_TEST_HOME="$LAB/firstmate-home"
+mkdir -p "$FM_TEST_HOME/state" "$FM_TEST_HOME/data/agy-signals"
+cat > "$FM_TEST_HOME/state/agy-signals.meta" <<EOF
+window=$TARGET
+endpoint_task_id=agy-signals
+worktree=$WORKSPACE
+project=$WORKSPACE
+harness=agy
+kind=scout
+mode=no-mistakes
+yolo=off
+model=gemini-3.8-flash-low
+effort=low
+backend=herdr
+herdr_session=$SESSION
+herdr_workspace_id=$WORKSPACE_ID
+herdr_tab_id=$TAB_ID
+herdr_pane_id=$PANE_ID
+EOF
 
 capture() {
-  "$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$TARGET" -S -100 2>/dev/null || true
+  fm_backend_capture herdr "$TARGET" 100 2>/dev/null || true
 }
 
 # The launch prompt asks for a computed answer (12345+67890=80235) so the
 # awaited token never appears in the echoed launch line itself, where a plain
-# reply token would false-positive on the shell echo (including across tmux
-# wrapped rows).
-"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l \
-  "HOME=\"$AGY_HOME\" $AGY_BIN --prompt-interactive \"Add 12345 and 67890. Reply with exactly the sum and nothing else\" --model gemini-3.8-flash-low --effort low --dangerously-skip-permissions" \
+# reply token would false-positive on the shell echo (including across
+# terminal-wrapped rows).
+printf -v LAUNCH 'HOME=%q %q --prompt-interactive %q --model gemini-3.8-flash-low --effort low --dangerously-skip-permissions' \
+  "$AGY_HOME" "$AGY_BIN" "Add 12345 and 67890. Reply with exactly the sum and nothing else"
+fm_backend_herdr_send_literal "$TARGET" "$LAUNCH" \
   || fail "could not type the agy launch line"
-"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
+fm_backend_herdr_send_key "$TARGET" Enter \
   || fail "could not submit the agy launch line"
 
 # A fresh workspace stops on the folder-trust dialog. Answer the preselected
@@ -87,7 +124,7 @@ for _ in $(seq 1 150); do
 done
 case "$screen" in
   *"Do you trust the contents of this project?"*)
-    "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
+    fm_backend_herdr_send_key "$TARGET" Enter \
       || fail "could not answer the agy trust dialog"
     ;;
 esac
@@ -140,7 +177,7 @@ printf '%s' "$screen" | fm_busy_agy_tail_busy \
 # dismissed before steering anything: typed text would land in it instead of
 # the composer.
 if case "$(capture)" in *"Do you trust the contents of this project?"*) true ;; *) false ;; esac; then
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
+  fm_backend_herdr_send_key "$TARGET" Enter \
     || fail "could not dismiss the residual agy trust dialog"
   idle=
   for _ in $(seq 1 120); do
@@ -154,10 +191,9 @@ fi
 # exactly one Escape and wait only for the Interrupted row it prints; a busy
 # footer that merely disappears is not cancellation and no further Escape is
 # sent, so a turn that survives one Escape fails this guard.
-"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l \
-  "Write a 1500-word essay on the history of glass" \
+fm_backend_herdr_send_literal "$TARGET" "Write a 1500-word essay on the history of glass" \
   || fail "could not type the long agy prompt"
-"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
+fm_backend_herdr_send_key "$TARGET" Enter \
   || fail "could not submit the long agy prompt"
 for _ in $(seq 1 100); do
   screen=$(capture)
@@ -166,7 +202,7 @@ for _ in $(seq 1 100); do
 done
 printf '%s' "$screen" | fm_busy_agy_tail_busy \
   || fail "the long agy turn never showed its busy footer"
-"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Escape \
+fm_backend_herdr_send_key "$TARGET" Escape \
   || fail "could not send Escape to the real agy turn"
 cancelled=
 for _ in $(seq 1 120); do
@@ -177,17 +213,17 @@ done
 [ -n "$cancelled" ] || fail "a single Escape never cancelled the real agy turn"
 pass "a single Escape cancels the real agy turn"
 
-"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l "/quit" \
-  || fail "could not type the agy exit command"
-"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
-  || fail "could not submit the agy exit command"
-gone=
-for _ in $(seq 1 60); do
-  current=$("$REAL_TMUX" -L "$SOCKET" display-message -p -t "$TARGET" '#{pane_current_command}' 2>/dev/null || true)
-  case "$current" in *agy*) sleep 0.5 ;; *) gone=1; break ;; esac
-done
-[ -n "$gone" ] || fail "/quit never stopped the real agy process"
-pass "/quit stops the real agy process"
+CONTROL_OUT=$(FM_HOME="$FM_TEST_HOME" HERDR_SESSION="$SESSION" \
+  FM_CONTROL_POLL=0.2 FM_CONTROL_EXIT_WAIT=30 FM_CONTROL_EXIT_RETRIES=3 \
+  "$ROOT/bin/fm-control.sh" agy-signals exit 2>&1) \
+  || fail "fm-control exit did not stop the real agy process: $CONTROL_OUT"
+case "$CONTROL_OUT" in
+  "stopped agy-signals"*) ;;
+  *) fail "fm-control exit returned an unexpected result: $CONTROL_OUT" ;;
+esac
+[ "$(fm_backend_agent_state herdr "$TARGET")" = dead ] \
+  || fail "fm-control exit returned before the real agy process terminated"
+pass "fm-control /exit retry stops the real agy process"
 
 cleanup
 trap - EXIT
