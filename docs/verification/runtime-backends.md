@@ -1021,7 +1021,8 @@ pane still at its prompt                        the line is already running
 "foreground_processes":[{"name":"zsh",...}]     "foreground_processes":[{"name":"sleep",...}]
 ```
 
-`fm_backend_herdr_submitted_line_state` reads both, and `fm_backend_herdr_send_text_line` polls it after every `pane run`, recovering an absorbed carriage return with one `pane send-keys enter` and never retyping the command.
+`fm_backend_herdr_submitted_line_state` reads both, and `fm_backend_herdr_send_text_line` polls it after every `pane run`, recovering an absorbed carriage return with a bounded number of `pane send-keys enter` retries and never retyping the command.
+Only output rendered after the capture taken just before the write counts as that write's echo, so a relaunch into a pane whose history already holds byte-identical lines cannot confirm from the old copies.
 
 `tests/fm-backend-herdr-launch-line-e2e.test.sh` is the guard that refreshes this entry.
 It drives the real spawn against real Herdr three times and fails naming the Herdr version; run it after a Herdr upgrade.
