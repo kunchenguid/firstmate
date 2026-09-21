@@ -6,13 +6,14 @@
 #   1. With CLAUDE_CODE_ENABLE_FUNCTION_HOOKS unset, the mod is a complete no-op even
 #      with the per-home preference already on: no hooks module loads, /calm is not a
 #      command, the stock working row shows, and tool rows draw as stock.
-#   2. With the flag on, the sailboat replaces the working row and moves, tool rows and
-#      an exact operational user row draw at zero height, /calm restores them and
-#      persists off, /calm hides them again and persists on, all without a Calm output
-#      row in the transcript.
-#   3. `claude --continue` restores the transcript with those rows still hidden.
-#   4. With config/calm-scene set to candles, scrolling candles replace the working row
-#      in the theme's green and red instead of the sailboat, and leave with the turn.
+#   2. With the flag on and config/calm-scene set to candles, scrolling candles replace
+#      the working row in the theme's green and red instead of the sailboat, and leave
+#      with the turn.
+#   3. With the flag on and no scene setting, the sailboat replaces the working row and
+#      moves, tool rows and an exact operational user row draw at zero height, /calm
+#      restores them and persists off, /calm hides them again and persists on, all
+#      without a Calm output row in the transcript.
+#   4. `claude --continue` restores the transcript with those rows still hidden.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication and one trusted temporary folder. A few Haiku turns are submitted.
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
@@ -172,6 +173,11 @@ hull_column() {  # <screen text>
   printf '%s\n' "$1" | awk -v hull="$HULL" 'index($0, hull) { print index($0, hull); exit }'
 }
 
+# The first screen row made only of candle glyphs, with at least eight candles.
+candle_row() {  # <screen text>
+  printf '%s\n' "$1" | perl -CSD -Mutf8 -ne 'if (/^[ ╷╻╵│╽╹╿┃]+$/) { my $n = () = /[╷╻╵│╽╹╿┃]/g; if ($n >= 8) { print; exit } }'
+}
+
 # The answer names words that live only in notes.txt, so the settled turn is told apart
 # from the echoed prompt by "gamma" on screen with no working row left.
 PROMPT='Run this exact bash command with the Bash tool: sleep 5; cat notes.txt   Then reply with one short sentence naming the three words.'
@@ -265,7 +271,55 @@ enter
 sleep 2
 pass "Claude Code $CLAUDE_VERSION with the flag unset: no hooks module, no /calm, stock working row, stock tool rows, preference on ignored"
 
-# --- 2. Flag on: the boat, the hidden rows, the toggle, the persisted choice -------
+# --- 2. The candles scene: scrolling candles in the working row -------------------
+# It runs before the boat section and removes its setting when it ends, so every later
+# section draws the default boat.
+printf 'candles\n' >"$FM_HOME_DIR/config/calm-scene"
+launch "$DEBUG_LOG_CANDLES" 1
+wait_idle
+send "$PROMPT"
+enter
+i=0
+first_row=''
+while [ "$i" -lt 200 ] && [ -z "$first_row" ]; do
+  first_row=$(candle_row "$(screen)")
+  sleep 0.1
+  i=$((i + 1))
+done
+[ -n "$first_row" ] || { printf '%s\n' "$(screen)" >&2; fail "the candles never replaced the working row"; }
+case "$(screen)" in
+  *"$HULL"*|*"$SAIL"*) fail "the sailboat drew although the candles scene is set" ;;
+esac
+# The candles are painted in the theme's green and red: 256-color 71/204 (dark) or
+# 29/125 (light), or the same values as truecolor.
+colored=$(tmux -L "$SOCKET" capture-pane -e -p -t "$SESSION" 2>/dev/null | grep -E '╽|╿|┃|╻|╹' | head -3)
+case "$colored" in
+  *'38;5;71m'*|*'38;5;204m'*|*'38;5;29m'*|*'38;5;125m'*|*'38;2;95;175;95m'*|*'38;2;255;95;135m'*|*'38;2;0;135;95m'*|*'38;2;175;0;95m'*) : ;;
+  *)
+    printf '%s\n' "$colored" | cat -v >&2
+    fail "the candles were not painted in the theme's green and red"
+    ;;
+esac
+second_row=$first_row
+i=0
+while [ "$i" -lt 60 ]; do
+  second_row=$(candle_row "$(screen)")
+  if [ -n "$second_row" ] && [ "$second_row" != "$first_row" ]; then
+    break
+  fi
+  sleep 0.1
+  i=$((i + 1))
+done
+[ -n "$second_row" ] && [ "$second_row" != "$first_row" ] || fail "the candles never scrolled"
+wait_settled 'the turn with the candles scene'
+[ -z "$(candle_row "$(screen)")" ] || fail "the candles stayed on screen after the turn settled"
+send '/exit'
+enter
+sleep 2
+rm -f "$FM_HOME_DIR/config/calm-scene"
+pass "Claude Code $CLAUDE_VERSION draws the chosen candles scene in the working row in the theme's green and red, scrolls it, and removes it when the turn settles"
+
+# --- 3. Flag on: the boat, the hidden rows, the toggle, the persisted choice -------
 launch "$DEBUG_LOG_ON" 1
 wait_idle
 i=0
@@ -399,7 +453,7 @@ enter
 sleep 2
 pass "Claude Code $CLAUDE_VERSION with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool and operational rows draw at zero height, /calm restores and re-hides them while persisting the shared preference"
 
-# --- 3. Resume: the restored transcript keeps the hidden rows hidden ---------------
+# --- 4. Resume: the restored transcript keeps the hidden rows hidden ---------------
 launch "$DEBUG_LOG_RESUME" 1 --continue
 wait_screen 'gamma' 'the resumed transcript' 400
 sleep 1
@@ -415,52 +469,3 @@ send '/exit'
 enter
 sleep 1
 pass "Claude Code $CLAUDE_VERSION resumes the transcript with Calm's hidden rows still hidden and the preference intact"
-
-# --- 4. The candles scene: scrolling candles in the working row -------------------
-# The first screen row made only of candle glyphs, with at least eight candles.
-candle_row() {  # <screen text>
-  printf '%s\n' "$1" | perl -CSD -Mutf8 -ne 'if (/^[ ╷╻╵│╽╹╿┃]+$/) { my $n = () = /[╷╻╵│╽╹╿┃]/g; if ($n >= 8) { print; exit } }'
-}
-printf 'candles\n' >"$FM_HOME_DIR/config/calm-scene"
-launch "$DEBUG_LOG_CANDLES" 1
-wait_idle
-send "$PROMPT"
-enter
-i=0
-first_row=''
-while [ "$i" -lt 200 ] && [ -z "$first_row" ]; do
-  first_row=$(candle_row "$(screen)")
-  sleep 0.1
-  i=$((i + 1))
-done
-[ -n "$first_row" ] || { printf '%s\n' "$(screen)" >&2; fail "the candles never replaced the working row"; }
-case "$(screen)" in
-  *"$HULL"*|*"$SAIL"*) fail "the sailboat drew although the candles scene is set" ;;
-esac
-# The candles are painted in the theme's green and red: 256-color 71/204 (dark) or
-# 29/125 (light), or the same values as truecolor.
-colored=$(tmux -L "$SOCKET" capture-pane -e -p -t "$SESSION" 2>/dev/null | grep -E '╽|╿|┃|╻|╹' | head -3)
-case "$colored" in
-  *'38;5;71m'*|*'38;5;204m'*|*'38;5;29m'*|*'38;5;125m'*|*'38;2;95;175;95m'*|*'38;2;255;95;135m'*|*'38;2;0;135;95m'*|*'38;2;175;0;95m'*) : ;;
-  *)
-    printf '%s\n' "$colored" | cat -v >&2
-    fail "the candles were not painted in the theme's green and red"
-    ;;
-esac
-second_row=$first_row
-i=0
-while [ "$i" -lt 60 ]; do
-  second_row=$(candle_row "$(screen)")
-  if [ -n "$second_row" ] && [ "$second_row" != "$first_row" ]; then
-    break
-  fi
-  sleep 0.1
-  i=$((i + 1))
-done
-[ -n "$second_row" ] && [ "$second_row" != "$first_row" ] || fail "the candles never scrolled"
-wait_settled 'the turn with the candles scene'
-[ -z "$(candle_row "$(screen)")" ] || fail "the candles stayed on screen after the turn settled"
-send '/exit'
-enter
-sleep 1
-pass "Claude Code $CLAUDE_VERSION draws the chosen candles scene in the working row in the theme's green and red, scrolls it, and removes it when the turn settles"

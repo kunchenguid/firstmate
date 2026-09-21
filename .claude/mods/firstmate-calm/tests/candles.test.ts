@@ -62,13 +62,18 @@ describe("the candles scene", () => {
     for (const row of [0, 1]) expect(moved.glyphs[row]!.slice(0, 37)).toBe(first.glyphs[row]!.slice(1));
   });
 
-  test("falls back to one row on a narrow viewport and reflows to a new width without wrapping", async ($, on) => {
+  test("keeps two rows on a viewport down to one column wide and reflows to a new width without wrapping", async ($, on) => {
     const { files } = world(on, { preference: "on\n" });
     files.set(SCENE, "candles\n");
-    const narrow = rasterOf(await $.ui.render(spinner("a", { columns: 6, rows: 24 })))!;
-    expect(narrow.columns).toBe(4);
-    expect(narrow.rows).toBe(1);
-    expect(decodeCells(narrow.cells, 4, 1).glyphs[0]).toMatch(CANDLE_ROW);
+    for (const columns of [1, 2, 3, 4]) {
+      const narrow = rasterOf(await $.ui.render(spinner("a", { columns: columns + 2, rows: 24 })))!;
+      expect(narrow.columns).toBe(columns);
+      expect(narrow.rows).toBe(2);
+      for (const row of decodeCells(narrow.cells, columns, 2).glyphs) {
+        expect(row).toHaveLength(columns);
+        expect(row).toMatch(CANDLE_ROW);
+      }
+    }
     const wide = rasterOf(await $.ui.render(spinner("a", { columns: 80, rows: 24 })))!;
     expect(wide.columns).toBe(78);
     const decoded = decodeCells(wide.cells, 78, 2);

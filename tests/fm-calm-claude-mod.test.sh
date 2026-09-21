@@ -453,8 +453,8 @@ for (const width of [0, 1, 3, 4, 5, 12, 40, 121]) {
   }
 }
 
-// Geometry: every row exactly fills the width, two rows from five columns up, one below,
-// only candle glyphs, one color per candle column, plain gaps.
+// Geometry: every row exactly fills the width, two rows at every width down to one
+// column, only candle glyphs, one color per candle column, plain gaps.
 let risingSeen = 0;
 let fallingSeen = 0;
 for (let width = 0; width <= 130; width += 1) {
@@ -462,7 +462,7 @@ for (let width = 0; width <= 130; width += 1) {
   for (let step = 0; step < 9; step += 1) {
     const frame = sprite.frame(width);
     if (width === 0) { check(frame.length === 0, "zero width painted a row"); break; }
-    check(frame.length === (width < 5 ? 1 : 2), `width ${width} painted ${frame.length} rows`);
+    check(frame.length === 2, `width ${width} painted ${frame.length} rows`);
     for (const row of frame) {
       check(Array.from(cells(row)).length === width, `a candle row is not exactly ${width} cells`);
       for (const run of row) {
@@ -569,7 +569,7 @@ console.log("candles-ok");
 JS
   out=$(MOD="$MOD" PI_SHIP="$PI_SHIP" run_node "$TMP_ROOT/candles.mjs" 2>&1) || fail "candles scene: $out"
   assert_contains "$out" "candles-ok" "the candles scene check did not complete"
-  pass "the candles scene is chosen only by an exact candles setting, leaves the boat scene byte-for-byte the boat, fills every width in two rows or one when narrow with one-colored candles and blank gaps, scrolls one column left per boat move, reflows without wrapping, freezes and resumes, and paints as standard ANSI green and red on Pi and 256-color-stable theme greens and reds on Claude Code"
+  pass "the candles scene is chosen only by an exact candles setting, leaves the boat scene byte-for-byte the boat, fills every width down to one column in two rows of one-colored candles and blank gaps, scrolls one column left per boat move, reflows without wrapping, freezes and resumes, and paints as standard ANSI green and red on Pi and 256-color-stable theme greens and reds on Claude Code"
 }
 
 test_plugin_shape

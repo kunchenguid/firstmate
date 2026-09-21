@@ -4373,12 +4373,13 @@ const fire = async (event, payload = {}) => {
 const widget = () => ui.widgets.get(CALM_WORKING_SHIP_WIDGET_KEY);
 
 // The candles replace the stock row while a run is under way, filling the width exactly
-// under Pi's own width rules, in standard ANSI green and red only.
+// under Pi's own width rules in two rows down to a single column, in standard ANSI green
+// and red only.
 await fire("session_start", { reason: "startup" });
 await fire("agent_start");
 check(!!widget(), "Calm with the candles setting installed no working widget");
 check(ui.workingVisible.at(-1) === false, "the candles did not hide Pi's stock working row");
-for (const width of [60, 17, 5]) {
+for (const width of [60, 17, 5, 4, 3, 2, 1]) {
   const lines = widget().render(width);
   check(lines.length === 2, `the candles drew ${lines.length} rows at width ${width}`);
   for (const line of lines) {
@@ -4388,8 +4389,6 @@ for (const width of [60, 17, 5]) {
     for (const code of codes) check([`${ESC}[32m`, `${ESC}[31m`, `${ESC}[39m`].includes(code), `a candle row used ${JSON.stringify(code)}`);
   }
 }
-const narrow = widget().render(4);
-check(narrow.length === 1 && visibleWidth(narrow[0]) === 4, "the candles did not fall back to one exact row when narrow");
 const painted = widget().render(60).join("\n");
 check(painted.includes(`${ESC}[32m`) && painted.includes(`${ESC}[31m`), "the candles did not paint both green and red");
 
@@ -4429,7 +4428,7 @@ console.log("candles-ok");
 JS
   ) || fail "Pi Calm candles scene: $out"
   assert_contains "$out" "candles-ok" "the Pi candles-scene check did not complete"
-  pass "Pi Calm draws the candles scene from config/calm-scene in exact-width standard ANSI green and red rows, falls back to one row when narrow, removes it on settle, resumes its last frame, and draws the boat for an unknown, absent, or unreadable setting"
+  pass "Pi Calm draws the candles scene from config/calm-scene in two exact-width standard ANSI green and red rows down to a single column, removes it on settle, resumes its last frame, and draws the boat for an unknown, absent, or unreadable setting"
 }
 
 test_home_resolution

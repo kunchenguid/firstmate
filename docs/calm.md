@@ -24,7 +24,8 @@ A home can pick candlesticks instead of the boat through its `config/calm-scene`
 The candles scene is two rows of one-column candles, one candle and one blank gap apart, each a heavy box-drawing body with light wicks above and below at half-row resolution.
 Rising candles are standard ANSI green and falling ones standard ANSI red, and the made-up series is a slow swell with bounded noise, a pattern rather than a real price.
 The chart scrolls left one column every 880ms, the boat's pace, so the newest candle enters at the right edge.
-It fills the usable width, reflows on resize without wrapping, falls back to one compressed row below five columns, freezes and resumes across hidden time like the boat, and appears and disappears exactly where the boat would.
+It fills the usable width, keeping both rows down to a single column, reflows on resize without wrapping, freezes and resumes across hidden time like the boat, and appears and disappears exactly where the boat would.
+
 Calm hides collapsed thinking labels, the mid-turn assistant working-note blocks governed by the shared preservation rule above, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
 Pi applies that rule independently to each text block, so a short working note can hide beside preserved substantive content in the same message.
 A working note is briefly visible while it streams before its settled row collapses.

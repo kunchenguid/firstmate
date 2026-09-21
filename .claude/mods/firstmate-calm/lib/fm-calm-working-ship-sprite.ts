@@ -345,8 +345,8 @@ export function parseCalmWorkingScene(stored: string | undefined): CalmWorkingSc
 
 /** Columns from one candle to the next: the candle and one empty gap. */
 export const CALM_WORKING_CANDLES_PITCH = 2;
-/** Below this width the chart falls back to one row of compressed candles. */
-export const CALM_WORKING_CANDLES_TWO_ROW_MIN_WIDTH = HULL_WIDTH;
+/** Rows the chart draws at every width: each candle is one column, so two rows always fit. */
+const CANDLE_ROWS = 2;
 
 // Half-cell boundaries run 0 (bottom of the lower row) to 4 (top of the upper row).
 const CANDLE_TOP = 4;
@@ -361,11 +361,6 @@ const CANDLE_GLYPHS: Readonly<Record<CandleSlot, Readonly<Record<CandleSlot, str
   wick: { none: "╵", wick: "│", body: "╽" },
   body: { none: "╹", wick: "╿", body: "┃" },
 };
-
-/** Every glyph a candle can draw, exposed for width and glyph-set assertions. */
-export const CALM_WORKING_CANDLE_GLYPHS: readonly string[] = [
-  ...new Set(Object.values(CANDLE_GLYPHS).flatMap((row) => Object.values(row))),
-].filter((glyph) => glyph !== " ");
 
 /** Stable 32-bit hash of a candle index and a salt. */
 function candleHash(index: number, salt: number): number {
@@ -410,13 +405,6 @@ function candleAt(index: number): Candle {
   return { rising, slots };
 }
 
-/** The stronger of two half-cells, used to fold two half-cells into one. */
-function strongerSlot(first: CandleSlot, second: CandleSlot): CandleSlot {
-  if (first === "body" || second === "body") return "body";
-  if (first === "wick" || second === "wick") return "wick";
-  return "none";
-}
-
 export function createCalmWorkingCandlesSprite(): CalmWorkingShipSprite {
   // offset counts whole-column scroll steps: absolute column = visible column + offset.
   let offset = 0;
@@ -432,24 +420,12 @@ export function createCalmWorkingCandlesSprite(): CalmWorkingShipSprite {
     renderedTicks = ticks;
   };
 
-  /** One cell of `row` (0 is the top row of a two-row frame) at absolute column `column`. */
-  const cell = (column: number, row: number, rows: number): CalmWorkingShipRun => {
+  /** One cell of `row` (0 is the top row) at absolute column `column`. */
+  const cell = (column: number, row: number): CalmWorkingShipRun => {
     if (column % CALM_WORKING_CANDLES_PITCH !== 0) return { text: " ", color: "plain" };
     const candle = candleAt(column / CALM_WORKING_CANDLES_PITCH);
     const [bottom, lowerMiddle, upperMiddle, top] = candle.slots as [CandleSlot, CandleSlot, CandleSlot, CandleSlot];
-    let upper: CandleSlot;
-    let lower: CandleSlot;
-    if (rows === 1) {
-      upper = strongerSlot(upperMiddle, top);
-      lower = strongerSlot(bottom, lowerMiddle);
-    } else if (row === 0) {
-      upper = top;
-      lower = upperMiddle;
-    } else {
-      upper = lowerMiddle;
-      lower = bottom;
-    }
-    const text = CANDLE_GLYPHS[upper][lower];
+    const text = row === 0 ? CANDLE_GLYPHS[top][upperMiddle] : CANDLE_GLYPHS[lowerMiddle][bottom];
     return text === " " ? { text, color: "plain" } : { text, color: candle.rising ? "rise" : "fall" };
   };
 
@@ -483,11 +459,10 @@ export function createCalmWorkingCandlesSprite(): CalmWorkingShipSprite {
 
     frame(width: number): CalmWorkingShipFrame {
       if (width <= 0) return [];
-      const rows = width < CALM_WORKING_CANDLES_TWO_ROW_MIN_WIDTH ? 1 : 2;
       const frame: CalmWorkingShipRun[][] = [];
-      for (let row = 0; row < rows; row += 1) {
+      for (let row = 0; row < CANDLE_ROWS; row += 1) {
         const runs: CalmWorkingShipRun[] = [];
-        for (let column = 0; column < width; column += 1) runs.push(cell(column + offset, row, rows));
+        for (let column = 0; column < width; column += 1) runs.push(cell(column + offset, row));
         frame.push(runs);
       }
       commitRenderedState();
