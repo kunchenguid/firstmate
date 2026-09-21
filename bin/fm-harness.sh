@@ -159,6 +159,63 @@ ancestry_names_omp() {
   return 1
 }
 
+# Print the Kimi launcher path firstmate would use, or nothing when no launcher
+# is installed. This mirrors fm-spawn's resolution order without probing the
+# binary during an ancestry walk.
+fm_kimi_resolve_binary() {
+  local candidate
+  candidate=$(command -v kimi 2>/dev/null || true)
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  if [ -n "${HOME:-}" ]; then
+    candidate="$HOME/.kimi-code/bin/kimi"
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# True when path $1 is the installed Kimi launcher, or the versioned binary the
+# launcher execs. Kimi 2.0.1 can present as MainThread, so process identity must
+# come from argv[0]'s resolved install path when the command name is generic.
+fm_kimi_path_is_kimi() {  # <path>
+  local path=$1 installed canonical installed_canonical installed_dir
+  [ -n "$path" ] || return 1
+  installed=$(fm_kimi_resolve_binary) || return 1
+  canonical=$(fm_cursor_canonical_path "$path") || return 1
+  installed_canonical=$(fm_cursor_canonical_path "$installed") || return 1
+  [ "$canonical" = "$installed_canonical" ] && return 0
+  installed_dir=$(dirname -- "$installed_canonical")
+  case "$canonical" in
+    "$installed_dir"/kimi-bin-*) return 0 ;;
+  esac
+  return 1
+}
+
+# True when a process carries Kimi's identity through its command name or the
+# argv[0] install path. A bare MainThread without Kimi install evidence is never
+# enough.
+fm_kimi_process_matches() {  # <comm> [argv0]
+  local comm=$1 argv0=${2:-} base
+  [ -n "$comm" ] || [ -n "$argv0" ] || return 1
+  base=$(basename -- "$comm")
+  base=${base#-}
+  case "$base" in
+    kimi|kimi-bin-*) return 0 ;;
+    MainThread|node|node-*|node[0-9]*)
+      [ -n "$argv0" ] || return 1
+      fm_kimi_path_is_kimi "$argv0"
+      return
+      ;;
+  esac
+  case "$comm" in */*) fm_kimi_path_is_kimi "$comm" && return 0 ;; esac
+  return 1
+}
+
 # Print "<strength> <harness>" when one process identifies a harness, or nothing.
 # Strength records how the match was made:
 #   comm - the ancestor's own executable name identifies the harness. This is a
@@ -173,6 +230,10 @@ harness_process_verdict() {  # <pid>
   argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
   if fm_cursor_process_matches "$comm" '' "$argv0"; then
     echo "comm cursor"
+    return
+  fi
+  if fm_kimi_process_matches "$comm" "$argv0"; then
+    echo "comm kimi"
     return
   fi
   if fm_gemini_path_is_gemini "$comm"; then
@@ -197,7 +258,6 @@ harness_process_verdict() {  # <pid>
     *codex*) echo "comm codex"; return ;;
     *opencode*) echo "comm opencode"; return ;;
     *grok*) echo "comm grok"; return ;;
-    kimi) echo "comm kimi"; return ;;
     rovo) echo "comm rovo"; return ;;
       # muse's installed launcher ~/.local/bin/muse execs ~/.local/bin/muse-bin-<version>
       # (verified in the published launcher, muse 0.1.0-R708.1), so the live process
