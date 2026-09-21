@@ -523,7 +523,7 @@ cmd_register() {
 
 cmd_register_task() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
-  local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner
+  local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner prior_record=''
   local -a argv=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "register-task is reserved for the Lavish adapter"
@@ -538,6 +538,8 @@ cmd_register_task() {
   done
   [ -f "$(adapter_script "$adapter")" ] || die "no installed adapter for: $adapter"
   state_root_bind create || die "cannot safely prepare the process-event state root"
+  fm_backend_validate_task_endpoint "$STATE/$task.meta" "$task" >/dev/null \
+    || die "cannot own a board for task $task; its captured feedback would reach no endpoint"
   (umask 077; mkdir -p "$REG") || die "cannot prepare the process-event registry"
   fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
   if [ -e "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
@@ -595,26 +597,43 @@ cmd_register_task() {
       i=$((i + 1))
     fi
   done
+  if [ "$adopting" -eq 0 ]; then
+    prior_record=$(umask 077; mktemp "$REG/.$id.prior.XXXXXX") || {
+      [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
+      fm_procevent_source_lock_release "$id"
+      die "cannot stage the registration this re-arm replaces: $id"
+    }
+    if ! cat -- "$(source_file "$id")" > "$prior_record"; then
+      rm -f -- "$prior_record"
+      [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
+      fm_procevent_source_lock_release "$id"
+      die "cannot read the registration this re-arm replaces: $id"
+    fi
+  fi
   if ! fm_procevent_task_registration_publish_locked "$STATE" "$adapter" "$id" "$task" "${argv[@]}"; then
+    [ -z "$prior_record" ] || rm -f -- "$prior_record"
     [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
     fm_procevent_source_lock_release "$id"
     die "cannot publish task-owned registration"
   fi
-  for stale in "$REG/.$id.reply."*; do
-    [ -e "$stale" ] || continue
-    case "$stale" in "$reply_dest") continue ;; esac
-    rm -f -- "$stale"
-  done
   # Re-arm is the worker's acknowledgement of every open nonterminal round.
   # It deliberately does not inspect, acquire, release, or replace the claim.
   while IFS= read -r pending; do
     [ -n "$pending" ] || continue
     result=$pending
     fm_procevent_mark_handled "$STATE" "$id" "$(fm_procevent_result_sequence "$result")" >/dev/null 2>&1 || {
+      [ -z "$prior_record" ] || mv -f -- "$prior_record" "$(source_file "$id")"
+      [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
       fm_procevent_source_lock_release "$id"
       die "cannot acknowledge captured round: $result"
     }
   done < <(source_pending "$id")
+  [ -z "$prior_record" ] || rm -f -- "$prior_record"
+  for stale in "$REG/.$id.reply."*; do
+    [ -e "$stale" ] || continue
+    case "$stale" in "$reply_dest") continue ;; esac
+    rm -f -- "$stale"
+  done
   fm_procevent_source_lock_release "$id"
   owner_lease_refresh
   printf 'registered: %s (%s, task=%s)\n' "$id" "$adapter" "$task"
@@ -725,7 +744,7 @@ cmd_register_extension() {
 # and drains until `fm_procevent_mark_handled` records it.
 publish_result() {  # <result-file>
   local result=$1 id seq adapter line status=1 owner_task='' message='' record=''
-  local ring_backend ring_target ring_meta
+  local ring_backend ring_target ring_meta active
   id=$(fm_procevent_result_source_id "$result")
   seq=$(fm_procevent_result_sequence "$result")
   fm_procevent_source_id_valid "$id" || return 1
@@ -754,6 +773,16 @@ publish_result() {  # <result-file>
         message="Lavish review feedback is captured for task $owner_task at $result. Read it with bin/fm-procevent-lavish.sh read $result, apply the round, and re-arm the board with the reply."
       fi
       record=$(fm_task_inbox_write_idempotent "$STATE" "$owner_task" "$message" 2>/dev/null || true)
+      case "$record" in
+        */handled/*)
+          active=${record%/handled/*}/${record##*/}
+          if mv -- "$record" "$active" 2>/dev/null; then
+            record=$active
+          else
+            record=''
+          fi
+          ;;
+      esac
       [ -n "$record" ] && status=0
       fm_procevent_source_lock_release "$id"
       if [ "$status" -eq 0 ]; then
@@ -1831,27 +1860,23 @@ cmd_handled() {
   owner_lease_refresh
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
-    result=$(source_pending "$id" | awk -v want="/$id.$seq.result" 'index($0, want) { print; exit }')
-    if [ -n "$result" ] \
+    result="$(fm_procevent_inbox_dir "$STATE")/$id.$seq.result"
+    if [ -f "$result" ] && [ ! -L "$result" ] \
       && result_adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null) \
       && adapter_result_is_terminal "$result_adapter" "$result"; then
       conclude=1
     fi
   fi
-  fm_procevent_mark_handled "$STATE" "$id" "$seq"
-  status=$?
-  if [ "$conclude" -eq 1 ] && [ "$status" -eq 0 ]; then
+  if [ "$conclude" -eq 1 ]; then
     registration=$(source_file "$id")
-    if rm -f -- "$registration" 2>/dev/null && [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
-      rm -f -- "$(runner_file "$id")"
-    else
-      rm -f -- "$(fm_procevent_handled_marker "$STATE" "$id" "$seq")"
+    if ! rm -f -- "$registration" 2>/dev/null || [ -e "$registration" ] || [ -L "$registration" ]; then
       fm_procevent_source_lock_release "$id"
       die "cannot retire the board its owner just acknowledged; the round stays open: $id"
     fi
-  else
-    conclude=0
+    rm -f -- "$(runner_file "$id")"
   fi
+  fm_procevent_mark_handled "$STATE" "$id" "$seq"
+  status=$?
   fm_procevent_source_lock_release "$id"
   case "$status" in
     0) printf 'handled: %s %s\n' "$id" "$seq" ;;

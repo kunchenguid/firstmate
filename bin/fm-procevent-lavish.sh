@@ -376,6 +376,8 @@ cmd_poll() {
   while :; do
     iteration_started=$(poll_iteration_started) || die "cannot start the poll rate governor"
     apply_configured_lavish_host "$original_host_present" "$original_host"
+    [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] \
+      || die "artifact is no longer a readable file: $artifact"
     # Posting a round's reply is BEST EFFORT and deliberately carries no delivery
     # machinery. The staged file is the only record that a reply is owed, so it is
     # consumed HERE - after every non-posting step that could abort this poll has
