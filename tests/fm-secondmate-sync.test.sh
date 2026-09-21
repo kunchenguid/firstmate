@@ -604,6 +604,44 @@ test_bootstrap_nudge_retry_is_idempotent() {
   pass "T8d bootstrap nudge retry is idempotent after success"
 }
 
+test_bootstrap_nudge_retry_reaches_secondmate_beside_fm_prefixed_task() {
+  local w c1 fakebin out marker log
+  w=$(new_world nudge-retry-id-collision)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  fakebin=$(make_fake_toolchain "$w")
+  log="$w/tmux.log"
+  : > "$w/home/state/sm-instr.inbox"   # block the steer record: a real local failure
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+  assert_contains "$out" "NUDGE_SECONDMATES: secondmate sm-instr: send failed:" \
+    "precondition: first nudge should fail"
+  marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
+  assert_present "$marker" "precondition: failed nudge should leave marker"
+
+  rm -f "$w/home/state/sm-instr.inbox"   # unblock: the steer record can be written again
+  # An unrelated task whose id is the secondmate's id with an fm- prefix.
+  {
+    printf 'window=firstmate:fm-fm-sm-instr\n'
+    printf 'harness=codex\n'
+  } > "$w/home/state/fm-sm-instr.meta"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged sm-instr with" \
+    "retry should report the secondmate it reached"
+  assert_contains "$(cat "$w/home/state/sm-instr.inbox/001.msg")" "firstmate was updated to the latest - please re-read your AGENTS.md" \
+    "retry should land in the secondmate's own inbox"
+  assert_absent "$w/home/state/fm-sm-instr.inbox" \
+    "retry must not reach the task whose id is fm-<secondmate id>"
+  assert_absent "$marker" "retry that reached the secondmate should clear its marker"
+  pass "T8h bootstrap nudge retry reaches the secondmate when an fm-<id> task also exists"
+}
+
 test_bootstrap_nudge_retry_refuses_changed_home() {
   local w c1 fakebin marker out other
   w=$(new_world nudge-retry-home-change)
@@ -1384,6 +1422,7 @@ test_bootstrap_nudge_reaches_secondmate_beside_fm_prefixed_task
 test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_retry_is_idempotent
+test_bootstrap_nudge_retry_reaches_secondmate_beside_fm_prefixed_task
 test_bootstrap_nudge_retry_refuses_changed_home
 test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home

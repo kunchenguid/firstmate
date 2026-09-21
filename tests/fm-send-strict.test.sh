@@ -133,6 +133,7 @@ test_unresolvable_target_does_not_tmux_fallback() {
   assert_contains "$(cat "$err")" "not resolvable" "unresolvable diagnostic should be loud"
   assert_contains "$(cat "$err")" "metadata window/terminal lookup" "unresolvable diagnostic should name the attempted lookup"
   assert_contains "$(cat "$err")" "backend=none" "unresolvable diagnostic should name that no backend was assumed"
+  assert_not_contains "$(cat "$err")" "fm-lost-target" "unresolvable diagnostic must not suggest an fm-prefixed task id"
   [ ! -s "$log" ] || fail "unresolvable target fell through to tmux send"$'\n'"$(cat "$log")"
   pass "fm-send strict: unresolvable selectors do not fall back to tmux"
 }
@@ -150,6 +151,8 @@ test_prefixless_herdr_pane_id_fails() {
   assert_contains "$(cat "$err")" "matches herdr_pane_id" "herdr pane diagnostic should name the meta match"
   assert_contains "$(cat "$err")" "expected <herdr-session>:<pane-id>" "herdr pane diagnostic should show expected shape"
   assert_contains "$(cat "$err")" "default:wB:p2" "herdr pane diagnostic should show the canonical target"
+  assert_contains "$(cat "$err")" "or use 'nudge'" "herdr pane diagnostic should suggest the plain task id"
+  assert_not_contains "$(cat "$err")" "fm-nudge" "herdr pane diagnostic must not suggest an fm-prefixed task id"
   [ ! -s "$log" ] || fail "prefixless herdr pane id fell through to tmux send"$'\n'"$(cat "$log")"
   pass "fm-send strict: prefixless herdr pane ids are rejected before tmux fallback"
 }

@@ -41,7 +41,7 @@ Pass `--backend orca` for a one-off Orca task, or rely on the already-selected O
 
 After spawn, check the task with firstmate helpers:
 
-- `bin/fm-peek.sh fm-<id>` for launch failures, trust dialogs, or first output.
+- `bin/fm-peek.sh <id>` for launch failures, trust dialogs, or first output.
 - `state/<id>.meta` for `backend=orca`, `terminal=`, `orca_worktree_id=`, and `worktree=`.
 - `bin/fm-crew-state.sh <id>` when the current run state matters.
 - `bin/fm-watch.sh` whenever there are tasks in flight and this session owns supervision.
@@ -52,7 +52,7 @@ Do not manually patch metadata to make an externally-created Orca terminal look 
 ## Supervision
 
 Use `bin/fm-peek.sh`, `bin/fm-send.sh`, `bin/fm-crew-state.sh`, and `bin/fm-teardown.sh` for routine operation.
-For steer messages, use `bin/fm-send.sh <id> '...'`; the stable `fm-<id>` alias also works, and ordinary local text steers may contain newlines because they ride the durable inbox.
+For steer messages, use `bin/fm-send.sh <id> '...'`; ordinary local text steers may contain newlines because they ride the durable inbox.
 Keep initial scope in the task brief; a temporary file remains useful when the instruction includes supporting material the worker should inspect separately.
 
 When supervising, treat `state/<id>.meta` as the routing record and Orca's own ids as backend implementation details.

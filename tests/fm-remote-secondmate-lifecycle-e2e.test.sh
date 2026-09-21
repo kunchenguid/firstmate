@@ -931,11 +931,19 @@ assert_grep '"revision":2' "$REMOTE_HOME/config/crew-dispatch.json" "partial inh
 NUDGE_MARKER="$PARENT/state/.secondmate-nudge-pending/ios.pending"
 assert_grep 'remote=1' "$NUDGE_MARKER" "partial inheritance left no durable remote reread marker"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$REMOTE_ROOT/bin/fm-watch.sh"
+# An unrelated local task whose id is the remote secondmate's id with an fm- prefix.
+printf 'window=firstmate:fm-fm-ios\n' > "$PARENT/state/fm-ios.meta"
+records_before_converge=$(find "$PARENT_ROUTE_INBOX" -maxdepth 1 -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')
 remote_env "$ROOT/bin/fm-bootstrap.sh" > "$TMP_ROOT/config-partial-retry.out" \
   || fail "bootstrap did not converge partial remote inheritance"
 [ "$(cat "$REMOTE_HOME/config/crew-harness")" = grok ] \
   || fail "bootstrap did not apply the remaining inherited file"
 assert_absent "$NUDGE_MARKER" "bootstrap cleared no remote reread marker after convergence"
+records_after_converge=$(find "$PARENT_ROUTE_INBOX" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+[ "$records_after_converge" -eq $((records_before_converge + 1)) ] \
+  || fail "bootstrap convergence nudge did not reach the remote secondmate, records went $records_before_converge -> $records_after_converge"
+assert_absent "$PARENT/state/fm-ios.inbox" "bootstrap convergence nudge reached the local fm-<id> task instead of the secondmate"
+rm -f "$PARENT/state/fm-ios.meta"
 PARTIAL_CONFIG_CORR=$(newest_remote_inbox_corr)
 [ -n "$PARTIAL_CONFIG_CORR" ] || fail "bootstrap config reread did not carry a correlation token"
 printf 'done [corr=%s]: converged inherited config re-read\n' "$PARTIAL_CONFIG_CORR" >> "$REMOTE_HOME/state/parent-replies.status"

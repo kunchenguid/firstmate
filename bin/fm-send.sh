@@ -399,7 +399,7 @@ fm_send_resolve_target() { # <raw-target>
     session=$(fm_meta_get "$pane_meta" herdr_session)
     hint="${session:-<herdr-session>}:$raw"
     id=$(fm_send_id_from_meta "$pane_meta")
-    echo "error: target '$raw' matches herdr_pane_id in $pane_meta but is missing its herdr session prefix; expected <herdr-session>:<pane-id> such as '$hint' or use 'fm-$id' (tried meta=$STATE/$raw.meta; backend=herdr)" >&2
+    echo "error: target '$raw' matches herdr_pane_id in $pane_meta but is missing its herdr session prefix; expected <herdr-session>:<pane-id> such as '$hint' or use '$id' (tried meta=$STATE/$raw.meta; backend=herdr)" >&2
     return 1
   fi
 
@@ -427,7 +427,7 @@ fm_send_resolve_target() { # <raw-target>
       assumed=tmux
     fi
     if ! fm_backend_target_exists "$assumed" "$raw"; then
-      echo "error: explicit target '$raw' is not a live $assumed endpoint (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=$assumed). Use fm-<id> for a recorded task/lane, or pass a target whose backend endpoint can be verified." >&2
+      echo "error: explicit target '$raw' is not a live $assumed endpoint (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=$assumed). Use <id> for a recorded task/lane, or pass a target whose backend endpoint can be verified." >&2
       return 1
     fi
     RESOLVED_TARGET=$raw
@@ -437,7 +437,7 @@ fm_send_resolve_target() { # <raw-target>
     ;;
   esac
 
-  echo "error: target '$raw' is not resolvable (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=none). Use fm-$raw for a recorded task/lane, or pass a well-formed explicit backend target such as session:window." >&2
+  echo "error: target '$raw' is not resolvable (tried meta=$STATE/$raw.meta; metadata window/terminal lookup; backend=none). Use <id> for a recorded task/lane, or pass a well-formed explicit backend target such as session:window." >&2
   return 1
 }
 
