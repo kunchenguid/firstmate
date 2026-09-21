@@ -76,7 +76,7 @@ write_quota() {  # <path> <cursor spendPriority> [<claude all_models spendPriori
   cat > "$path" <<JSON
 {
   "generatedAt": "2030-01-01T00:00:00Z",
-  "schemaVersion": 5,
+  "schemaVersion": 6,
   "providers": [
     { "provider": "claude", "state": { "status": "fresh" }, "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 79, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": $claude } },

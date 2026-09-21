@@ -269,10 +269,17 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" '
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
-  def prov($p): ([$q.providers[] | select(.provider == $p)] | first) // null;
+  def prov($p): ([$q.providers[] | select(.provider == $p or (.provider + "@" + (.accountKey // "")) == $p)] | first) // null;
   def rows($p): (prov($p) | .quotaSemantics.effectiveAvailability // []);
   def bare($m): ($m | split("/") | last);
-  def provider_of($c): ($c.provider // $pmap[$c.harness] // null);
+  def provider_of($c):
+    ($c.provider // $pmap[$c.harness] // null) as $provider |
+    (($c.model // "") | split("/") | first) as $account |
+    if $provider != null and
+       ([$q.providers[] | select(.provider == $provider and (.accountKey // "") == $account)] | length) > 0
+    then $provider + "@" + $account
+    else $provider
+    end;
   def measured($p):
     (prov($p) != null and (["known", "partial"] | index(prov($p).quotaSemantics.status)) != null);
   def applicable($p; $m):

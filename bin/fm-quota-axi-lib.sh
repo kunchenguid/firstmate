@@ -47,9 +47,11 @@ fm_quota_json_valid() {
     length == 1 and
     (.[0] | type) == "object" and
     (.[0] |
-      .schemaVersion == 5 and
+      .schemaVersion as $schema_version |
+      ([5, 6] | index($schema_version)) != null and
       (.providers | type) == "array" and
-      (([.providers[].provider] | length) == ([.providers[].provider] | unique | length)) and
+      (([.providers[] | (.provider + "@" + (.accountKey // ""))] | length) ==
+       ([.providers[] | (.provider + "@" + (.accountKey // ""))] | unique | length)) and
       all(.providers[];
       (.provider | type) == "string" and
       (.provider | test($provider_re)) and
