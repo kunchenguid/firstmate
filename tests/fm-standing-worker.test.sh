@@ -142,6 +142,16 @@ FM_HOME="$HOME_A" "$BIN" register stack-ui --session default --pane w1:pV \
   || fail 'registering a pane in its real session should succeed'
 pass 'registration succeeds when the named session holds the pane'
 
+# Re-registering a live id is refused rather than silently overwritten: a
+# replacement would also replace the remembered status, losing a pending stop.
+out=$(FM_HOME="$HOME_A" "$BIN" register stack-ui --session default --pane w1:pV 2>&1) \
+  && fail 'registering an id that is already in use should refuse'
+case "$out" in
+  *'already registered'*) ;;
+  *) fail "the refusal should say the id is taken: $out" ;;
+esac
+pass 'an id already in use is refused rather than silently overwritten'
+
 # --- every herdr call carries the recorded session explicitly ----------------
 
 : > "$HERDR_LOG"

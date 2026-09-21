@@ -891,7 +891,7 @@ Three properties matter to an operator, and each exists because of an observed f
   The debounce is the status remembered from the previous poll, not a timer, so a worker that stays stopped for an hour still produces exactly one notification, and a worker that resumes and stops again produces a second.
 - **The session is recorded, never assumed.**
   Every Herdr call made for a registered worker passes that worker's recorded session explicitly.
-  Registration refuses a pane that is not in the session the caller named and reports which sessions it searched.
+  Registration refuses a pane that is not in the session the caller named and reports which sessions it searched, and refuses an id already in use rather than replacing a record that may be holding an unreported stop.
   An agent running inside one Herdr session must not look for a worker in its own session: a mate that did exactly that concluded its workers were gone and launched a duplicate.
 
 The supervising home is the home holding the record.

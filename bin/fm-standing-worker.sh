@@ -123,7 +123,9 @@ Usage:
 Registration records an observation only: it never launches, closes, restarts,
 or steers the pane, and retiring it leaves the worker running. The pane must
 already exist in the NAMED session; a pane that is not there is refused, and
-the refusal names every session that was searched.
+the refusal names every session that was searched. An id already in use is
+refused too, because replacing a record would drop a stop it had not reported
+yet; retire it first to reuse the name.
 
 A remote worker is registered in the secondmate home on that host, so every
 Herdr call stays local to the machine owning the pane. Use bin/fm-on.sh to run
@@ -357,6 +359,20 @@ action_register() {
   fi
 
   records_dir_ready || { printf 'fm-standing-worker: cannot use %s\n' "$RECORDS" >&2; return 1; }
+
+  # An id already in use is refused rather than overwritten. Silently replacing
+  # a record would also replace its remembered status, and a worker that had
+  # just stopped would lose the pending wake with nothing reporting the loss.
+  # Retire the old registration deliberately to reuse the name.
+  if [ -e "$(record_path "$id")" ]; then
+    printf 'fm-standing-worker: %s is already registered; retire it first to reuse the name\n' "$id" >&2
+    if record_read "$id"; then
+      printf 'currently: session=%s pane=%s last=%s\n' \
+        "$RECORD_SESSION" "$RECORD_PANE" "${RECORD_LAST:-unpolled}" >&2
+    fi
+    return 1
+  fi
+
   added=$(date +%Y-%m-%d)
   # A fresh registration starts with no remembered status, so the first poll
   # establishes the baseline instead of reporting a stop that never happened.
