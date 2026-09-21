@@ -854,13 +854,17 @@ fm_backend_busy_state() {  # <backend> <target>
 }
 
 fm_backend_agent_status_raw() {  # <backend> <target>
-  local backend=$1 target=$2
+  local backend=$1 target=$2 raw
   fm_backend_source "$backend" || return 0
   case "$backend" in
     herdr)
       fm_backend_herdr_target_ready "$target" || return 0
-      fm_backend_herdr_agent_status_raw \
-        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+      raw=$(fm_backend_herdr_agent_status_raw \
+        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
+      [ -n "$raw" ] || return 0
+      [ "$(fm_backend_herdr_pane_process_state \
+        "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")" = agent ] || return 0
+      printf '%s' "$raw"
       ;;
   esac
 }

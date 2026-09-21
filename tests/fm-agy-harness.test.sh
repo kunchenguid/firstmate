@@ -911,17 +911,36 @@ set -u
 case "$*" in
   *"status --json"*) printf '{"server":{"running":true}}\n' ;;
   *"agent get"*) printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "${FM_TEST_AGY_STATUS:?}" ;;
+  *"pane process-info"*)
+    case "${FM_TEST_AGY_PROCESS:?}" in
+      live)
+        printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_processes":[{"pid":424243,"name":"agy","argv":["agy"],"argv0":"agy","cmdline":"agy"}]}}}\n' "${FM_TEST_SHELL_PID:?}"
+        ;;
+      stale)
+        printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_processes":[{"pid":%s,"name":"bash","argv":["bash"],"argv0":"bash","cmdline":"bash"}]}}}\n' "${FM_TEST_SHELL_PID:?}" "${FM_TEST_SHELL_PID:?}"
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
   *) exit 1 ;;
 esac
 EOF
   chmod +x "$fb/herdr"
 
-  out=$(PATH="$fb:$PATH" FM_TEST_AGY_STATUS=idle fm_backend_agent_status_raw herdr default:w1:p2)
-  [ "$out" = idle ] || fail "raw herdr status boundary should preserve idle, got '$out'"
-  out=$(PATH="$fb:$PATH" FM_TEST_AGY_STATUS=blocked fm_backend_agent_status_raw herdr default:w1:p2)
-  [ "$out" = blocked ] || fail "raw herdr status boundary should preserve blocked, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=live FM_TEST_SHELL_PID=$$ \
+    fm_backend_agent_status_raw herdr default:w1:p2)
+  [ "$out" = idle ] || fail "raw herdr status boundary should preserve process-verified idle, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_STATUS=blocked FM_TEST_AGY_PROCESS=live FM_TEST_SHELL_PID=$$ \
+    fm_backend_agent_status_raw herdr default:w1:p2)
+  [ "$out" = blocked ] || fail "raw herdr status boundary should preserve process-verified blocked, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=stale FM_TEST_SHELL_PID=$$ \
+    fm_backend_agent_status_raw herdr default:w1:p2)
+  [ -z "$out" ] || fail "stale idle registration over a shell-only pane must be rejected, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=unreadable FM_TEST_SHELL_PID=$$ \
+    fm_backend_agent_status_raw herdr default:w1:p2)
+  [ -z "$out" ] || fail "idle registration with unreadable process state must be rejected, got '$out'"
 
-  pass "fm-backend: raw herdr agent status preserves lifecycle states"
+  pass "fm-backend: raw herdr status requires a live agent process"
 }
 
 test_agy_busy_classify_herdr_native() {
