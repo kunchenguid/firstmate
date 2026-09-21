@@ -385,6 +385,13 @@ test_backend_key_capability_matrix() {
         || fail "$backend should be able to deliver $key"
     done
   done
+  fm_control_backend_supports_key herdr C-q \
+    || fail "herdr has the live-verified Grok quit key"
+  for backend in tmux orca zellij cmux; do
+    if fm_control_backend_supports_key "$backend" C-q; then
+      fail "$backend must not claim the unverified Grok quit key"
+    fi
+  done
   fm_control_backend_supports_key orca Escape \
     && fail "orca's terminal API has no Escape and must not claim it"
   fm_control_backend_supports_key orca C-u \
@@ -861,6 +868,47 @@ test_grok_idle_footer_does_not_confirm_cancellation() {
   pass "fm-control interrupt: grok's idle footer does not confirm cancellation"
 }
 
+test_grok_limit_menu_refuses_without_verified_quit_keys() {
+  local dir out rc
+  dir=$(new_case grok-limit)
+  add_task "$dir" t1 grok
+  alive_as "$dir" grok
+  cp "$ROOT/tests/fixtures/composer/grok-weekly-limit.ansi" "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "a backend without a verified quit key must refuse the Grok limit menu"$'\n'"$out"
+  assert_contains "$out" "not proven empty" "the refusal should name the unproven composer"
+  [ -z "$(literals "$dir")$(keys_sent "$dir")" ] || fail "an unverified quit key must send no bytes"
+  pass "fm-control: the Grok limit menu on tmux refuses without typing or an unverified quit key"
+}
+
+test_unproven_composer_guards_preserve_drafts() {
+  local dir out rc
+  dir=$(new_case pending-grok)
+  add_task "$dir" t1 grok
+  alive_as "$dir" grok
+  printf '╭─────────╮\n│ draft   │\n╰─────────╯\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "Grok draft must be preserved"
+  [ -z "$(literals "$dir")$(keys_sent "$dir")" ] || fail "pending draft must receive no lifecycle input"
+  dir=$(new_case unproven-grok)
+  add_task "$dir" t1 grok
+  alive_as "$dir" grok
+  printf '╭──────────╮\n│ > draft │\n╰──────────╯\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "Grok text in an unproven-geometry composer must be preserved"
+  assert_contains "$out" "visibly holds pending text" \
+    "the refusal should report the unproven draft"
+  [ -z "$(literals "$dir")$(keys_sent "$dir")" ] || fail "pending-unproven draft must receive no lifecycle input"
+  dir=$(new_case unknown-pi)
+  add_task "$dir" t1 pi
+  alive_as "$dir" pi
+  printf 'unrecognized menu\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "Pi must not inherit Grok quit keys"
+  [ -z "$(literals "$dir")$(keys_sent "$dir")" ] || fail "other harness unknown composer must remain untouched"
+  pass "fm-control: pending and unproven composers preserve drafts and other harnesses stay untouched"
+}
+
 # --- 6. marker non-regression -----------------------------------------------
 
 test_secondmate_control_command_carries_no_marker() {
@@ -926,6 +974,8 @@ test_harness_lookup_drains_producer() (
 )
 
 test_harness_lookup_drains_producer || exit 1
+test_grok_limit_menu_refuses_without_verified_quit_keys
+test_unproven_composer_guards_preserve_drafts
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
 test_opencode_interrupts_twice_and_others_once

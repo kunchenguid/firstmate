@@ -833,6 +833,79 @@ test_titled_bottom_requires_matching_width
 test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
 
+test_pi_captured_footer_and_zen_rail() {
+  local cap screen variant out identity tilde
+  tilde='~'
+  cap=$'styled=1\ncursor=0\nidentity=1\nrows=40'
+  for variant in pi-zen-idle pi-stock-idle; do
+    screen=$(cat "$ROOT/tests/fixtures/composer/$variant.ansi")
+    out=$(fm_composer_classify_screen "$cap" "$screen" '' $'pi\tidle')
+    [ "$out" = empty ] || fail "$variant captured live idle must be empty, got $out"
+    out=$(fm_composer_classify_screen "$cap" "$screen")
+    [ "$out" = need-identity ] || fail "$variant must request identity before claiming empty"
+    for identity in $'pi\tblocked' $'pi\tworking' $'grok\tidle' probe-absent; do
+      out=$(fm_composer_classify_screen "$cap" "$screen" '' "$identity")
+      [ "$out" = unknown ] || fail "$variant must preserve unknown for $identity, got $out"
+    done
+    out=$(fm_composer_classify_screen $'styled=1\ncursor=0\nidentity=0' "$screen")
+    [ "$out" = unknown ] || fail "$variant without identity must stay unknown"
+    out=$(fm_composer_classify_screen "$cap" "$screen"$'\n$ echo hi' '' $'pi\tidle')
+    [ "$out" = unknown ] || fail "lower shell must invalidate $variant"
+  done
+  screen=$(cat "$ROOT/tests/fixtures/composer/pi-zen-idle.ansi")
+  for variant in "${screen#*$'\n'}" $'─── ↑ 3 more ───\n'"${screen#*$'\n'}" "${screen%$'\n'*}"; do
+    out=$(fm_composer_classify_screen "$cap" "$variant" '' $'pi\tidle')
+    [ "$out" = unknown ] || fail "truncated/scrolled rail or missing footer must remain unknown, got $out"
+  done
+  # Literal dark input is still input: Zen has no placeholder to ghost-strip.
+  screen=${screen/┃/┃draft}
+  out=$(fm_composer_classify_screen "$cap" "$screen" '' $'pi\tidle')
+  [ "$out" = pending ] || fail "Zen real input must be pending, got $out"
+  screen=${screen/┃draft/$'┃first\n┃\n┃last┃'}
+  out=$(fm_composer_classify_screen "$cap" "$screen" '' $'pi\tdone')
+  [ "$out" = pending ] || fail "Zen multiline input including a final rail glyph must stay pending"
+  out=$(fm_composer_classify_screen "$cap" "$screen" '' $'pi\tblocked')
+  [ "$out" = unknown ] || fail "a blocked rail must never prove a composer"
+  screen=$(cat "$ROOT/tests/fixtures/composer/grok-weekly-limit.ansi")
+  out=$(fm_composer_classify_screen "$cap" "$screen" '' $'grok\tblocked')
+  [ "$out" = unknown ] || fail "Grok limit menu is not a composer"
+  screen=$(printf '%s\n' '' '↑ 0.000 (sub) 0.0%/272k (auto) (openai-codex) gpt-6-astra • xhigh' "${tilde}/project (main)")
+  out=$(fm_composer_classify_screen "$cap" "$screen" '' $'pi\tidle')
+  [ "$out" = unknown ] || fail "an up-arrow footer spelling must stay unknown, got $out"
+  pass "captured Pi stock/Zen footers require identity and preserve pending input and menu refusal"
+}
+
+test_pi_captured_footer_and_zen_rail
+
+test_pi_footer_rule_fragment_never_proves_empty() {
+  local cap screen out rule24 rule10 footer path tilde dollar
+  cap=$'styled=1\ncursor=0\nidentity=1\nrows=40'
+  rule24=$(printf '─%.0s' $(seq 1 24))
+  rule10=$(printf '─%.0s' $(seq 1 10))
+  tilde='~'
+  dollar='$'
+  path="${tilde}/project (main)"
+  footer="${dollar}0.000 (sub) 0.0%/272k (auto) (openai-codex) gpt-6-astra • xhigh"
+  # A typed draft row of rule glyphs re-opens the scan's pair at that row, so
+  # the pair closes exactly at the row above the path while the draft sits in
+  # the input region above its open.
+  screen=$(printf '%s\n' '' "$rule24" "$rule10" "$rule24" "$path" "$footer")
+  out=$(fm_composer_classify_screen "$cap" "$screen" '' $'pi\tidle')
+  [ "$out" = pending-unproven ] \
+    || fail "a typed rule fragment must never prove empty, got '$out'"
+  screen=$(printf '%s\n' '' "$rule24" 'hi' "$rule10" "$rule24" "$path" "$footer")
+  out=$(fm_composer_classify_screen "$cap" "$screen" '' $'pi\tidle')
+  [ "$out" = pending-unproven ] \
+    || fail "draft text above a typed rule must never prove empty, got '$out'"
+  screen=$(printf '%s\n' '' "$rule24" 'hi' "$rule10" '' "$rule24" "$path" "$footer")
+  out=$(fm_composer_classify_screen "$cap" "$screen" '' $'pi\tidle')
+  [ "$out" = pending-unproven ] \
+    || fail "draft text above a typed rule with a trailing blank must never prove empty, got '$out'"
+  pass "fm_composer_classify_screen: a typed rule fragment in Pi's footer path never proves empty"
+}
+
+test_pi_footer_rule_fragment_never_proves_empty
+
 test_queued_enter_verdict_busy_pending_is_empty() {
   local out
   out=$(fm_composer_queued_enter_verdict pending busy)

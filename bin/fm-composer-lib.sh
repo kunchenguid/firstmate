@@ -1396,6 +1396,84 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
+# Pi's ordinary footer can begin with a dollar-denominated cost, which is
+# otherwise (correctly) shell-prompt staleness evidence. Zen replaces Pi's
+# horizontal frame with a rail. Recognize these only as a conjunction of the
+# exact bottom footer, a complete input region, and native idle/done Pi identity.
+# This fallback never relaxes generic left-bar, shell, or separator verdicts.
+_fm_composer_pi_footer_verdict() {  # <plain-screen> <screen> <styled> <has-identity> <identity>
+  local plain=$1 screen=$2 styled=$3 has_identity=$4 identity=$5
+  local -a rows=()
+  local line n end first row content pending=0 shape=rail max=$FM_COMPOSER_PI_MAX_LINES open_row close_row
+  case "$max" in ''|*[!0-9]*|0) max=8 ;; esac
+  local metrics_re='(^|[[:space:]])[0-9]+([.][0-9]+)?%/[0-9]+([.][0-9]+)?[kM]?([[:space:]]+\(auto\))?[[:space:]]+\([^)]+\)[[:space:]]+[^[:space:]]'
+  while IFS= read -r line; do rows+=("$line"); done <<EOF
+$plain
+EOF
+  n=${#rows[@]}
+  while [ "$n" -gt 0 ]; do
+    line=${rows[$((n - 1))]}
+    fm_composer_normalize_trim_var line
+    [ -z "$line" ] || break
+    n=$((n - 1))
+  done
+  [ "$n" -ge 4 ] || { printf unknown; return; }
+  case "$line" in '$'*) ;; *) printf unknown; return ;; esac
+  [[ "$line" =~ $metrics_re ]] || { printf unknown; return; }
+  case "${rows[$((n - 2))]}" in /*|\~/*) ;; *) printf unknown; return ;; esac
+  end=$((n - 3))
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ] \
+     && [ "$FM_COMPOSER_SCAN_PI_CLOSE" -eq "$end" ]; then
+    shape=pair
+  else
+    row=$end
+    while [ "$row" -ge 0 ]; do
+      case "${rows[$row]}" in
+        '┃'*)
+          content=${rows[$row]#┃}
+          fm_composer_normalize_trim_var content
+          [ -z "$content" ] || pending=1
+          ;;
+        *) break ;;
+      esac
+      row=$((row - 1))
+    done
+    first=$((row + 1))
+    # A cut-off or scrolled editor cannot prove that all draft rows are visible.
+    if [ "$row" -lt 0 ] || [ "$first" -gt "$end" ] \
+       || [ "$((end - first + 1))" -gt "$max" ]; then
+      printf unknown; return
+    fi
+    line=${rows[$row]}
+    fm_composer_normalize_trim_var line
+    [ -z "$line" ] || { printf unknown; return; }
+  fi
+  [ "$has_identity" = 1 ] || { printf unknown; return; }
+  [ -n "$identity" ] || { printf need-identity; return; }
+  if [ "$shape" = pair ]; then
+    open_row=${rows[$FM_COMPOSER_SCAN_PI_OPEN]}
+    close_row=${rows[$FM_COMPOSER_SCAN_PI_CLOSE]}
+    fm_composer_normalize_trim_var open_row
+    fm_composer_normalize_trim_var close_row
+    # A draft row of rule glyphs is indistinguishable from a drawn separator,
+    # so the scan's last pair can bound a fragment with draft rows left above
+    # its open. Equal-width rules around at least one input row are the proof
+    # that the whole input region between them was inspected.
+    if [ "$FM_COMPOSER_SCAN_PI_CLOSE" -le "$((FM_COMPOSER_SCAN_PI_OPEN + 1))" ] \
+       || [ "${#open_row}" -ne "${#close_row}" ]; then
+      printf 'pending-unproven'
+      return
+    fi
+    _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+    return
+  fi
+  case "$identity" in
+    $'pi\tidle'|$'pi\tdone')
+      if [ "$pending" = 1 ]; then printf pending; else printf empty; fi ;;
+    *) printf unknown ;;
+  esac
+}
+
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity] [harness]
   local caps=$1 screen=$2 cy=${3:-} identity=${4:-} harness=${5:-}
   local styled=0 cursor=0 has_identity=0 kv plain
@@ -1472,7 +1550,7 @@ EOF
   # rules layered on (a live pi composer pair below the generic candidate
   # proves that candidate stale).
   if ! _fm_composer_select_cursorless "$plain" "$harness"; then
-    printf 'unknown'
+    _fm_composer_pi_footer_verdict "$plain" "$screen" "$styled" "$has_identity" "$identity"
     return 0
   fi
   case "$FM_COMPOSER_SELECTED_KIND" in

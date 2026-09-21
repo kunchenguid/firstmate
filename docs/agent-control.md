@@ -43,7 +43,9 @@ An interrupt is not complete until the composer is empty.
 muse is the one verified adapter that restores the cancelled prompt back into its composer as real text, so its interrupt key is followed by a Ctrl+U clear; without it the next submitted line - including this plane's own exit command - would concatenate onto the restored prompt and submit both as one line.
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
-`exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
+`exit` requires the exact `empty` composer verdict before typing an exit command and refuses when a draft is visibly pending or when real text sits in a container whose geometry cannot be proven (`pending-unproven`).
+An `unknown` composer - no readable draft and no proven geometry - can use only an adapter-owned non-typing quit fallback from `bin/fm-control-lib.sh`; absent that capability, it refuses without typing, and every other verdict refuses as well.
+Both paths retain the same agent-gone postcondition, including when reached through `relaunch`.
 
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.
@@ -109,13 +111,15 @@ Switching harness is therefore one ordinary relaunch rather than a separate mech
 
 Backend capability comes from each adapter's real surface, not from a policy choice.
 
-| Backend | Escape | Enter | Ctrl+C | Ctrl+U | Recovery-grade agent state |
-| --- | --- | --- | --- | --- | --- |
-| tmux | yes | yes | yes | yes | yes |
-| herdr | yes | yes | yes | yes | yes |
-| zellij | yes | yes | yes | yes | no |
-| cmux | yes | yes | yes | yes | no |
-| orca | no | yes | yes | no | no |
+| Backend | Escape | Enter | Ctrl+C | Ctrl+U | Ctrl+Q | Recovery-grade agent state |
+| --- | --- | --- | --- | --- | --- | --- |
+| tmux | yes | yes | yes | yes | no | yes |
+| herdr | yes | yes | yes | yes | yes | yes |
+| zellij | yes | yes | yes | yes | no | no |
+| cmux | yes | yes | yes | yes | no | no |
+| orca | no | yes | yes | no | no | no |
+
+Ctrl+Q is Grok's non-typing quit fallback, and only Herdr carries the live verification record for the real quit sequence; tmux has no such evidence, so it refuses an unproven Grok composer without sending the key.
 
 Per-harness interrupt keys, repeat counts, composer clears, exit commands, and supported task kinds live in `bin/fm-control-lib.sh` and are exercised for every verified harness by `tests/fm-control.test.sh`, with adapters outside its lane pinning their control mechanics in their own harness suites.
 The empirical basis for each adapter's value is the `harness-adapters` skill's verification record for that adapter.
@@ -125,3 +129,4 @@ The empirical basis for each adapter's value is the `harness-adapters` skill's v
 - `tests/fm-control.test.sh` - the adapter contract for its verified-harness lane (adapters outside the lane pin their control mechanics in their own harness suites), the backend capability matrix, exact-id scoping, the closed verb list, the busy, idle, dead, and idempotent lifecycle cases, and marker non-regression, all against a stubbed session provider.
 - `tests/fm-control-relaunch.test.sh` - the relaunch transaction: identity preservation, harness switching, the progress note, checkpoint refusals, and rollback after a failed launch.
 - `tests/fm-control-herdr-smoke.test.sh` - the second state-verified backend against the real herdr binary, on an isolated throwaway lab session.
+- `tests/fm-control-composer-live-e2e.test.sh` - real Pi composer/draft safety and Grok quota-menu recovery on an isolated Herdr lab; [runtime verification](verification/runtime-backends.md#pi-composer-and-grok-quota-menu-recovery) records the refresh command and observed limits.

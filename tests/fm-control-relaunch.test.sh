@@ -112,7 +112,9 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane)
     [ -z "${FM_FAKE_COMPOSER_READ_FAIL:-}" ] || exit 1
-    if [ -s "$D/composer" ]; then
+    if [ -f "$D/capture" ]; then
+      cat "$D/capture"
+    elif [ -s "$D/composer" ]; then
       printf '╭────╮\n│ %s  │\n╰────╯\n' "$(cat "$D/composer")"
     else
       printf '╭────╮\n│    │\n╰────╯\n'
@@ -307,6 +309,26 @@ SH
 
 # --- 1. same-harness relaunch -----------------------------------------------
 
+test_blocked_grok_relaunch_refuses_without_verified_quit_keys() {
+  local dir out rc before
+  dir=$(new_case grok-limit)
+  add_ship_task "$dir" t1 grok
+  printf grok > "$dir/fake/command"
+  cp "$ROOT/tests/fixtures/composer/grok-weekly-limit.ansi" "$dir/fake/capture"
+  printf 'uncommitted work\n' > "$dir/wt/draft.txt"
+  before=$(git -C "$dir/wt" rev-parse HEAD)
+  out=$(run_control "$dir" t1 relaunch --harness claude --note 'Continue the preserved work after the quota limit.'); rc=$?
+  expect_code 1 "$rc" "blocked Grok on tmux has no verified quit key and must refuse"$'\n'"$out"
+  assert_no_grep "C-q" "$dir/fake/keys" "an unverified quit key must not be sent"
+  if grep -Eq '^/(exit|quit)$' "$dir/fake/literal"; then fail "blocked relaunch must never type into the menu"; fi
+  [ "$(cat "$dir/fake/command")" = grok ] || fail "a refused relaunch must leave the old agent running"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$before" ] || fail "relaunch must preserve the branch"
+  [ "$(cat "$dir/wt/draft.txt")" = 'uncommitted work' ] || fail "relaunch must preserve uncommitted work"
+  pass "fm-control relaunch: blocked Grok on tmux refuses and preserves work without typing"
+}
+
+test_blocked_grok_relaunch_refuses_without_verified_quit_keys
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   local dir out rc gen_before gen_after
   dir=$(new_case same rl1)
@@ -368,6 +390,27 @@ test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven() {
   assert_no_grep "/exit" "$dir/fake/literal" \
     "the exit command must not be typed when the composer state is not proven empty"
   pass "fm-control relaunch: an unreadable composer fails safe before the exit command is typed"
+}
+
+test_relaunch_refuses_before_exit_when_the_composer_geometry_is_unproven() {
+  local dir out rc
+  dir=$(new_case unproven-draft rl45)
+  add_ship_task "$dir" rl45 grok
+  printf grok > "$dir/fake/command"
+  printf '╭──────────╮\n│ > draft │\n╰──────────╯\n' > "$dir/fake/capture"
+
+  out=$(run_control "$dir" rl45 relaunch --note "preserve the unproven draft"); rc=$?
+
+  expect_code 1 "$rc" "a relaunch must refuse before typing an exit command when a draft sits in unproven geometry"
+  assert_contains "$out" "visibly holds pending text" \
+    "the refusal should report the draft rather than reach for Grok's non-typing quit keys"
+  [ "$(cat "$dir/fake/command")" = grok ] \
+    || fail "a pending-unproven refusal must leave the old agent running"
+  assert_no_grep "/exit" "$dir/fake/literal" \
+    "the exit command must not be concatenated onto an unproven draft"
+  assert_no_grep "C-q" "$dir/fake/keys" \
+    "an unproven draft must not be discarded through the non-typing quit keys"
+  pass "fm-control relaunch: a draft in unproven geometry refuses instead of discarding it"
 }
 
 test_relaunch_from_linked_home_preserves_recorded_worktree() {
@@ -1684,6 +1727,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
+test_relaunch_refuses_before_exit_when_the_composer_geometry_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
 test_relaunch_serializes_concurrent_durable_metadata_publication

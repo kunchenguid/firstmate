@@ -1343,7 +1343,7 @@ ok - forced teardown retains a nested secondmate home and its grandchild's Herdr
 Real captures verified these active distinctions:
 
 - Claude and Codex use bare `❯` and `›` agent composers.
-- Pi uses content between complete separator rows and requires exact native Pi identity.
+- Pi uses complete separator rows or the footer-qualified Zen rail and requires exact native Pi identity, with current evidence under [Pi composer and Grok quota-menu recovery](#pi-composer-and-grok-quota-menu-recovery).
 - Dim or faint suggestion text is ghost content, while normally styled text is pending input.
 - Grok dark truecolor placeholders are ghost content, while bright truecolor typed input remains pending.
 - A bare shell prompt has no safe agent-composer container and is unknown.
@@ -1418,6 +1418,35 @@ Refresh that live pair after every Herdr upgrade. Observed 2026-09-10 on Herdr 0
 ok - agent get distinguishes leftover-shell (dead/no-agent) from live idle Pi
 ok - pane get agent_status lag cannot keep an exited occupant classified alive
 ```
+
+### Pi composer and Grok quota-menu recovery
+
+Verified 2026-09-19 on macOS with Herdr 0.9.0, Pi 0.85.1, pi-zen 0.1.2, and Grok 1.0.34 (3736acbc8658).
+The configured Pi editor draws a `┃` rail because pi-zen's `applyRail` replaces the horizontal frame; launching the same Pi with `--no-extensions` restores the separator pair.
+The rail was observed both detached at 120 columns and with the lab viewer attached at a narrower width, so this is an extension-dependent layout, not a Pi version or pane-size change.
+Stock Pi's zero-token footer begins with `$0.000`, which previously invalidated its separator pair as a lower shell prompt.
+The captured fixtures in `tests/fixtures/composer/` and `tests/fm-composer-lib.test.sh` pin both structures, native identity requirements, draft preservation, and the Grok limit menu's unchanged `unknown` verdict.
+
+Refresh with the real quota-limited account to require the blocked-recovery case:
+
+```sh
+FM_CONTROL_COMPOSER_LIVE=1 FM_CONTROL_GROK_REQUIRE_LIMIT=1 \
+  bin/fm-test-run.sh tests/fm-control-composer-live-e2e.test.sh
+```
+
+Observed result lines:
+
+```text
+ok - live Pi configured 0.85.1: empty, multiline pending refusal, verified exit, idempotence
+ok - live Pi stock 0.85.1: empty, multiline pending refusal, verified exit, idempotence
+ok - live Grok grok 1.0.34 (3736acbc8658): real weekly-limit menu replaced by Pi without human input; dirty work preserved
+```
+
+The test reaches the actual `fm-control.sh relaunch` transaction, proves the replacement alive on the same endpoint, and checks that both the branch head and uncommitted file survive.
+Every Herdr call goes through `fm-herdr-lab.sh`, whose teardown verifies that the default session remained unchanged.
+Without `FM_CONTROL_GROK_REQUIRE_LIMIT=1`, an account that does not expose its quota menu reports the missing live coverage explicitly.
+The non-typing quit fallback is Herdr-only: this refresh did not run the real Grok quit sequence on tmux, so tmux keeps its prior behavior and refuses an unproven Grok composer without sending Ctrl+Q. `tests/fm-control.test.sh` and `tests/fm-control-relaunch.test.sh` pin that tmux refusal and the draft-preserving guards; Herdr's real sequence is the live case above.
+The existing shared-classifier and Herdr backend suites passed without changing other harness expectations; Zellij, Orca, and cmux retain their refusal of stop-proving verbs and gain no quit-key capability.
 
 ### Endpoint recovery classification
 
