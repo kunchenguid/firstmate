@@ -1001,10 +1001,14 @@ if [ ! -f "$NUDGE_MARKER" ]; then
 fi
 assert_grep 'remote=1' "$NUDGE_MARKER" "remote config reread marker lost its placement"
 chmod 755 "$PARENT_ROUTE_INBOX"
+# An unrelated local task whose id is the remote secondmate's id with an fm- prefix.
+printf 'window=firstmate:fm-fm-ios\n' > "$PARENT/state/fm-ios.meta"
 remote_env "$ROOT/bin/fm-config-push.sh" > "$TMP_ROOT/config-push-retry.out" \
   || fail "unchanged remote config push did not retry its pending reread"
 assert_absent "$NUDGE_MARKER" "successful remote config reread left its retry marker"
 assert_grep 'config-reread: sent' "$TMP_ROOT/config-push-retry.out" "remote config reread retry was not reported"
+assert_absent "$PARENT/state/fm-ios.inbox" "remote config reread reached the local fm-<id> task instead of the secondmate"
+rm -f "$PARENT/state/fm-ios.meta"
 CONFIG_CORR=$(newest_remote_inbox_corr)
 [ -n "$CONFIG_CORR" ] || fail "remote config reread did not carry a correlation token"
 printf 'done [corr=%s]: inherited config re-read\n' "$CONFIG_CORR" >> "$REMOTE_HOME/state/parent-replies.status"

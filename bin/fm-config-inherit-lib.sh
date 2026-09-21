@@ -881,7 +881,7 @@ fm_config_reread_send_failure() {
 
 # fm_config_reread_send_pointer <id> <instruction-path>
 fm_config_reread_send_pointer() {
-  local id=$1 instruction_path=$2 pending_path selector out rc send_bin message pending_pointer
+  local id=$1 instruction_path=$2 pending_path out rc send_bin message pending_pointer
   pending_path="$instruction_path.pending"
   if [ ! -f "$instruction_path" ] || [ -L "$instruction_path" ]; then
     printf 'CONFIG_REREAD: secondmate %s: send failed: pending instruction file is missing\n' "$id"
@@ -892,7 +892,6 @@ fm_config_reread_send_pointer() {
     printf 'CONFIG_REREAD: secondmate %s: send failed: pending instruction file is mismatched\n' "$id"
     return 1
   fi
-  selector="fm-$id"
   send_bin="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-send.sh"
   if [ ! -x "$send_bin" ]; then
     fm_config_reread_send_failure "$id" "$instruction_path" "$pending_path" "fm-send.sh not executable at $send_bin"
@@ -907,7 +906,7 @@ fm_config_reread_send_pointer() {
     FM_ROOT_OVERRIDE="${FM_ROOT_OVERRIDE:-}" \
     FM_STATE_OVERRIDE="${FM_STATE_OVERRIDE:-}" \
     FM_SEND_SETTLE="${FM_SEND_SETTLE:-0}" \
-    "$send_bin" "$selector" "$message" 2>&1) && rc=0 || rc=$?
+    "$send_bin" "$id" "$message" 2>&1) && rc=0 || rc=$?
   if [ "$rc" -eq 0 ]; then
     rm -f "$pending_path"
     return 0

@@ -30,7 +30,7 @@
 #          without moving the host's Firstmate copy. If either placement changes
 #          its loaded instruction surface
 #          (AGENTS.md, bin/, or .agents/skills/), bootstrap immediately nudges it
-#          via FM_HOME=<active-home> bin/fm-send.sh fm-<id> so meta resolves the
+#          via FM_HOME=<active-home> bin/fm-send.sh <id> so meta resolves the
 #          current route and the standard from-firstmate marker is applied. A
 #          successful send prints one BOOTSTRAP_INFO line with the exact target
 #          and message sent; a failed send leaves an idempotent retry marker
@@ -404,8 +404,7 @@ secondmate_sync() {
   }
 
   secondmate_send_nudge() {
-    local id=$1 home=$2 commit=$3 instr=$4 selector marker out
-    selector="fm-$id"
+    local id=$1 home=$2 commit=$3 instr=$4 marker out
     marker=$(secondmate_nudge_marker_path "$id") || {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: unsafe id"
       return 0
@@ -414,9 +413,9 @@ secondmate_sync() {
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot record retry marker"
       return 0
     fi
-    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+    if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$id" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
       rm -f "$marker"
-      echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
+      echo "BOOTSTRAP_INFO: nudged $id with '$SECOND_MATE_NUDGE_MESSAGE'"
     else
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
     fi
@@ -428,7 +427,7 @@ secondmate_sync() {
   }
 
   secondmate_retry_pending_nudges() {
-    local marker id selector home commit message remote expected_marker meta meta_home home_real head out
+    local marker id home commit message remote expected_marker meta meta_home home_real head out
     [ -d "$SECOND_MATE_NUDGE_PENDING_DIR" ] || return 0
     for marker in "$SECOND_MATE_NUDGE_PENDING_DIR"/*.pending; do
       [ -f "$marker" ] || continue
@@ -441,16 +440,11 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry marker filename mismatch"
         continue
       }
-      selector=$(fm_meta_get "$marker" selector)
       home=$(fm_meta_get "$marker" home)
       commit=$(fm_meta_get "$marker" commit)
       message=$(fm_meta_get "$marker" message)
       remote=$(fm_meta_get "$marker" remote)
       [ -n "$remote" ] || remote=0
-      [ "$selector" = "fm-$id" ] || {
-        echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker selector mismatch"
-        continue
-      }
       case "$remote" in
         0) [ "$message" = "$SECOND_MATE_NUDGE_MESSAGE" ] || {
           echo "NUDGE_SECONDMATES: secondmate ${id:-unknown}: send failed: retry marker message mismatch"
@@ -487,9 +481,9 @@ secondmate_sync() {
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: retry target is not at recorded instruction commit"
         continue
       }
-      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$selector" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+      if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-send.sh" "$id" "$SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
         rm -f "$marker"
-        echo "BOOTSTRAP_INFO: nudged $selector with '$SECOND_MATE_NUDGE_MESSAGE'"
+        echo "BOOTSTRAP_INFO: nudged $id with '$SECOND_MATE_NUDGE_MESSAGE'"
       else
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
       fi
@@ -632,9 +626,9 @@ secondmate_sync() {
     [ "$remote_pending" -eq 0 ] || nudge_needed=1
     if [ "$converged" -eq 1 ] && [ "$nudge_needed" -eq 1 ]; then
       if out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" FM_STATE_OVERRIDE="$STATE" \
-        "$SCRIPT_DIR/fm-send.sh" "fm-$id" "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
+        "$SCRIPT_DIR/fm-send.sh" "$id" "$REMOTE_SECOND_MATE_NUDGE_MESSAGE" 2>&1); then
         rm -f "$remote_marker"
-        [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote fm-$id after convergence"
+        [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: nudged remote $id after convergence"
       else
         echo "NUDGE_SECONDMATES: secondmate $id: send failed: $(first_line "$out")"
       fi

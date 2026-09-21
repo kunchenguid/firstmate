@@ -175,7 +175,7 @@ The Bearings inventory-reconcile hook therefore accepts these markerless routes,
 Send routed requests normally:
 
 ```sh
-FM_HOME=<primary-home> bin/fm-send.sh fm-<id> '<request>'
+FM_HOME=<primary-home> bin/fm-send.sh <id> '<request>'
 ```
 
 The [`fm-send.sh` header](../bin/fm-send.sh) owns the exact delivery-status contract.

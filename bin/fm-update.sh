@@ -30,7 +30,7 @@
 #   - restart-secondmates: fm-<id>...|none (every live secondmate this pass left
 #     on origin's tip - advanced OR already there - whose recorded runtime can
 #     prove a restart)
-#   - nudge-secondmates: fm-<id>...|none   (the residual: live secondmates on
+#   - nudge-secondmates: <id>...|none   (the residual: live secondmates on
 #     that same tip whose runtime CANNOT prove a restart, so the older re-read
 #     steer is all that is honest for them)
 #
@@ -134,8 +134,11 @@ secondmate_agent_may_be_alive() {  # <id>
   esac
 }
 
-selector_claimed() {  # <selector>
-  case " $FF_RESTART_WINDOWS $FF_STEER_WINDOWS " in
+secondmate_claimed() {  # <id>
+  case " $FF_RESTART_WINDOWS " in
+    *" fm-$1 "*) return 0 ;;
+  esac
+  case " $FF_STEER_WINDOWS " in
     *" $1 "*) return 0 ;;
   esac
   return 1
@@ -147,12 +150,12 @@ selector_claimed() {  # <selector>
 # endpoint has no agent to replace and is left to startup recovery.
 claim_settled_secondmate() {  # <id>
   local id=$1
-  selector_claimed "fm-$id" && return 0
+  secondmate_claimed "$id" && return 0
   secondmate_agent_may_be_alive "$id" || return 0
   if fm_secondmate_restart_capable "$STATE/$id.meta"; then
     FF_RESTART_WINDOWS="$FF_RESTART_WINDOWS fm-$id"
   else
-    FF_STEER_WINDOWS="$FF_STEER_WINDOWS fm-$id"
+    FF_STEER_WINDOWS="$FF_STEER_WINDOWS $id"
   fi
 }
 

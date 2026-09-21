@@ -45,7 +45,7 @@ This touches only the firstmate repo and its own worktrees, never anything under
    It prints one status line per target (`updated <old>..<new>` / `reconciled redundant divergence <old>..<new>` / `already current` / `skipped: <reason>`), followed by three action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
    - `restart-secondmates: fm-<id>...|none`
-   - `nudge-secondmates: fm-<id>...|none`
+   - `nudge-secondmates: <id>...|none`
 
    The two second-mate sets are disjoint and the script owns the split; do not re-derive it.
    `restart-secondmates:` carries every live mate the pass left on the latest commit, whether it advanced or was already there.

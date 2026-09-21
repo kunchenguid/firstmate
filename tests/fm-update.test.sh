@@ -225,7 +225,7 @@ test_unprovable_runtime_gets_fallback_nudge() {
   out=$(run_update "$w")
 
   assert_contains "$out" "restart-secondmates: none" "an unprovable runtime must stay out of the restart set"
-  assert_contains "$out" "nudge-secondmates: fm-sm1" "an unverifiable runtime must retain the fallback re-read nudge"
+  assert_contains "$out" "nudge-secondmates: sm1" "an unverifiable runtime must retain the fallback re-read nudge"
   pass "T3c an unverifiable secondmate receives the fallback nudge"
 }
 
@@ -419,7 +419,7 @@ test_already_current_unprovable_mate_is_nudged() {
   restart_line=$(printf '%s\n' "$out" | grep '^restart-secondmates:')
   nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
   assert_not_contains "$restart_line" "sm1" "an unprovable runtime must stay out of the restart set"
-  assert_contains "$nudge_line" "fm-sm1" "an unprovable runtime must keep the honest re-read steer"
+  assert_contains "$nudge_line" "nudge-secondmates: sm1" "an unprovable runtime must keep the honest re-read steer"
   pass "T6b an already-current mate with an unprovable runtime is steered, not claimed as reloaded"
 }
 

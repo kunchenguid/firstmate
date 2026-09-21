@@ -825,7 +825,7 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
   nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
   assert_not_contains "$restart_line" "sm1" \
     "a mate whose restart cannot be proven must stay out of the restart set"
-  assert_contains "$nudge_line" "fm-sm1" \
+  assert_contains "$nudge_line" "nudge-secondmates: sm1" \
     "a live mate that cannot be restarted must keep the honest re-read steer"
 
   out=$(run_restart "$dir" sm1); rc=$?

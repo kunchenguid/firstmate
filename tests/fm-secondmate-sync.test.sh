@@ -428,7 +428,7 @@ test_bootstrap_sweep_nudges_only_instruction_change() {
     FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
-  info_line=$(printf '%s\n' "$out" | grep '^BOOTSTRAP_INFO: nudged fm-sm-instr ' || true)
+  info_line=$(printf '%s\n' "$out" | grep '^BOOTSTRAP_INFO: nudged sm-instr ' || true)
   [ -n "$info_line" ] || fail "no BOOTSTRAP_INFO nudge line emitted (got: $out)"
   assert_contains "$info_line" "firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions." \
     "successful nudge report should include the exact message sent"
@@ -472,8 +472,8 @@ test_bootstrap_nudge_send_uses_state_override() {
     FM_STATE_OVERRIDE="$override_state" FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
 
-  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
-    "nudge send should resolve fm-sm-instr through the effective state dir"
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged sm-instr with" \
+    "nudge send should resolve sm-instr through the effective state dir"
   assert_not_contains "$out" "NUDGE_SECONDMATES:" \
     "effective-state nudge should not fail through FM_HOME/state"
   assert_contains "$(cat "$override_state/sm-instr.inbox/001.msg")" "[fm-from-firstmate]" \
@@ -481,6 +481,33 @@ test_bootstrap_nudge_send_uses_state_override() {
   marker="$override_state/.secondmate-nudge-pending/sm-instr.pending"
   assert_absent "$marker" "successful effective-state nudge should clear its retry marker"
   pass "T8a bootstrap nudge send respects FM_STATE_OVERRIDE"
+}
+
+test_bootstrap_nudge_reaches_secondmate_beside_fm_prefixed_task() {
+  local w c1 fakebin out log
+  w=$(new_world nudge-id-collision)
+  c1=$(head_of "$w/main")
+  add_sm_worktree "$w" sm-instr "$c1"
+  bump_primary "$w" instr
+  # An unrelated task whose id is the secondmate's id with an fm- prefix.
+  {
+    printf 'window=firstmate:fm-fm-sm-instr\n'
+    printf 'harness=codex\n'
+  } > "$w/home/state/fm-sm-instr.meta"
+  fakebin=$(make_fake_toolchain "$w")
+  log="$w/tmux.log"
+
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_LOG="$log" \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged sm-instr with" \
+    "nudge should report the secondmate it reached"
+  assert_contains "$(cat "$w/home/state/sm-instr.inbox/001.msg")" "firstmate was updated to the latest - please re-read your AGENTS.md" \
+    "nudge should land in the secondmate's own inbox"
+  assert_absent "$w/home/state/fm-sm-instr.inbox" \
+    "nudge must not reach the task whose id is fm-<secondmate id>"
+  pass "T8g bootstrap nudge reaches the secondmate when an fm-<id> task also exists"
 }
 
 test_bootstrap_nudge_retry_rejects_malformed_marker_id() {
@@ -494,7 +521,6 @@ test_bootstrap_nudge_retry_rejects_malformed_marker_id() {
   marker="$w/home/state/.secondmate-nudge-pending/bad.pending"
   {
     printf 'id=../escape\n'
-    printf 'selector=fm-../escape\n'
     printf 'home=%s\n' "$evil"
     printf 'commit=%s\n' "$c1"
     printf 'instructions=AGENTS.md\n'
@@ -514,7 +540,7 @@ test_bootstrap_nudge_retry_rejects_malformed_marker_id() {
 
   assert_contains "$out" "NUDGE_SECONDMATES: secondmate ../escape: send failed: retry marker has unsafe id" \
     "malformed retry marker id should be rejected before target resolution"
-  assert_not_contains "$out" "BOOTSTRAP_INFO: nudged fm-../escape" \
+  assert_not_contains "$out" "BOOTSTRAP_INFO: nudged ../escape" \
     "malformed retry marker id must never send through a path-traversed selector"
   assert_present "$marker" "malformed retry marker should remain for operator inspection"
   assert_absent "$log" "malformed retry marker should not invoke fm-send"
@@ -540,7 +566,7 @@ test_bootstrap_nudge_failure_records_retry_marker() {
     "failed nudge send should be surfaced as actionable bootstrap output"
   marker="$w/home/state/.secondmate-nudge-pending/sm-instr.pending"
   assert_present "$marker" "failed nudge should leave a retry marker"
-  assert_grep "selector=fm-sm-instr" "$marker" "retry marker should pin the stable selector"
+  assert_grep "id=sm-instr" "$marker" "retry marker should pin the secondmate id"
   assert_grep "message=firstmate was updated to the latest - please re-read your AGENTS.md to pick up the new instructions." \
     "$marker" "retry marker should pin the exact message"
   pass "T8c failed bootstrap nudge is surfaced and recorded for retry"
@@ -564,9 +590,11 @@ test_bootstrap_nudge_retry_is_idempotent() {
   assert_present "$marker" "precondition: failed nudge should leave marker"
 
   rm -f "$w/home/state/sm-instr.inbox"   # unblock: the steer record can be written again
+  # A marker written before the plain-id selector still carries the old field.
+  printf 'selector=fm-sm-instr\n' >> "$marker"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$w/home" FM_ROOT_OVERRIDE="$w/main" \
     FM_SEND_SETTLE=0 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
-  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr with" \
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged sm-instr with" \
     "retry should send the pending nudge once the endpoint works"
   assert_absent "$marker" "successful retry should clear the marker"
 
@@ -704,7 +732,7 @@ SH
   # the best-effort doorbell, never the steer itself, so the nudge is SENT
   # (recorded) rather than failed, no retry marker is owed, and the watcher's
   # re-ring ladder owns delivery against the respawned fresh endpoint.
-  assert_contains "$out" "BOOTSTRAP_INFO: nudged fm-sm-instr" \
+  assert_contains "$out" "BOOTSTRAP_INFO: nudged sm-instr" \
     "a stale herdr endpoint must not fail a durably enqueued nudge"
   assert_contains "$(cat "$w/home/state/sm-instr.inbox/001.msg")" \
     "please re-read your AGENTS.md" \
@@ -1352,6 +1380,7 @@ test_no_fetch_in_local_path
 test_sweep_nudge_requires_instruction_change
 test_bootstrap_sweep_nudges_only_instruction_change
 test_bootstrap_nudge_send_uses_state_override
+test_bootstrap_nudge_reaches_secondmate_beside_fm_prefixed_task
 test_bootstrap_nudge_retry_rejects_malformed_marker_id
 test_bootstrap_nudge_failure_records_retry_marker
 test_bootstrap_nudge_retry_is_idempotent

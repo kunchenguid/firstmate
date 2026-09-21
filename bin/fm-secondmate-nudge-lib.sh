@@ -56,7 +56,6 @@ fm_secondmate_nudge_write() { # <state> <id> <home> <commit> <instructions> <mes
   tmp=$(umask 077; mktemp "$parent/.nudge.XXXXXX" 2>/dev/null) || return 1
   {
     printf 'id=%s\n' "$id"
-    printf 'selector=fm-%s\n' "$id"
     printf 'home=%s\n' "$home"
     printf 'commit=%s\n' "$commit"
     printf 'instructions=%s\n' "$instructions"

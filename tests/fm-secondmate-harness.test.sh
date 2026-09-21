@@ -1761,6 +1761,29 @@ test_config_push_rereads_after_partial_propagation() {
   pass "B14 config-push rereads completed config writes after partial propagation"
 }
 
+test_config_push_reread_reaches_secondmate_beside_fm_prefixed_task() {
+  local w head log out err status pointer
+  w=$(new_world config-push-id-collision)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+  # An unrelated task whose id is the secondmate's id with an fm- prefix.
+  printf 'window=firstmate:fm-fm-sm\n' > "$w/home/state/fm-sm.meta"
+  printf '{"default":{"harness":"codex"}}\n' > "$w/home/config/crew-dispatch.json"
+  log="$w/config-push-id-collision.tmux.log"
+  err="$w/config-push-id-collision.err"
+
+  out=$(run_config_push "$w" "$log" 2>"$err"); status=$?
+  expect_code 0 "$status" "config push should succeed beside an fm-<id> task"
+  assert_contains "$out" "config-reread: sent" \
+    "config push must send the reread instruction"
+  pointer="CONFIG_REREAD: $(reread_instruction_path "$w/sm")"
+  assert_contains "$(inbox_stream "$w/home/state" sm)" "$pointer" \
+    "config reread must land in the secondmate's own inbox"
+  assert_absent "$w/home/state/fm-sm.inbox" \
+    "config reread must not reach the task whose id is fm-<secondmate id>"
+  pass "B14a config-push reread reaches the secondmate when an fm-<id> task also exists"
+}
+
 # ---------------------------------------------------------------------------
 # Literal-content config reread nudge (post-propagation live-agent wake)
 # ---------------------------------------------------------------------------
@@ -2668,6 +2691,7 @@ test_config_push_propagates_reports_without_ff_or_nudge
 test_config_push_reports_skips_dirty_and_invalid_home
 test_config_push_exits_nonzero_on_copy_error
 test_config_push_rereads_after_partial_propagation
+test_config_push_reread_reaches_secondmate_beside_fm_prefixed_task
 test_config_reread_per_home_changed_sets_and_exact_bytes
 test_config_reread_isolation_and_absent_and_send_failure
 test_config_reread_publication_failure_retries_exact_generation
