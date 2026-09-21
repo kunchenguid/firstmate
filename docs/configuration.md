@@ -249,10 +249,15 @@ The allowlist decides two things together.
 An owned URL whose host is not on it stays owned and visibly unmeasured: it is never counted as measured coverage and never becomes fleet work.
 `bin/fm-contributions.sh poll` also never contacts such a URL, so an unmeasurable host cannot record a forge error for a read that never happened.
 
-The two unmeasured cases stay distinguishable, because only one of them is actionable.
-A URL that is shaped like a GitHub pull request or issue but whose host is not listed reports `host not listed in config/forge-hosts; coverage is unmeasured` — adding that one line is all it takes to measure it.
-A URL the tooling genuinely cannot read, such as a GitLab merge request, keeps reporting `unsupported forge; coverage is unmeasured`.
-Both reasons are visible per row through `fm-contributions.sh snapshot <input.json> --all`.
+The two unmeasured cases report different reasons, both visible per row through `fm-contributions.sh snapshot <input.json> --all`.
+Any URL that is not shaped like a GitHub pull request or issue reports `unsupported forge; coverage is unmeasured` — a GitLab merge request is one example, not the only one.
+A URL that *is* github-shaped but whose host is not listed reports `host not listed in config/forge-hosts; coverage is unmeasured (list it only if it is a GitHub host)`.
+
+That caveat is load-bearing, because the projection only knows the URL's shape and cannot tell a GitHub Enterprise host from any other forge without contacting it.
+The `/<owner>/<repo>/(pull|issues)/<n>` shape is not unique to GitHub: a Gitea or Codeberg issue, a Bitbucket issue, and even an unrelated three-segment documentation link all match it and all get this same reason.
+Listing such a host does not make it measurable — it makes every observation of it fail.
+The host becomes measurable to the projection, so `poll` stops skipping it and starts issuing `gh api --hostname <host>` reads against a forge that does not serve GitHub's API; each read fails, the row records a forge error, and it settles as fleet work that can never clear while consuming poll budget every cycle.
+Only add a host you know is GitHub Enterprise Cloud or Enterprise Server, and that `gh` is authenticated against.
 Every authenticated `api` read is addressed to the matched allowlist entry rather than to host text taken from a contribution URL, so a link arriving through a delivered backlog row cannot choose which host receives a forge credential.
 
 `forge_host` in [`fm-contributions.jq`](../bin/fm-contributions.jq) is the single owner of host-name validity and drops any line it rejects, as does a file that is a symlink, is not a readable regular file, or exceeds 4096 bytes.

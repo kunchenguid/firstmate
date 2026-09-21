@@ -28,8 +28,11 @@
 # allowlist entry rather than to host text taken from a URL, and poll never
 # contacts a URL the allowlist does not cover. GitLab and unlisted hosts stay
 # owned and visibly unmeasured, never fleet work, and the two cases keep
-# distinct reasons: an unlisted github-shaped host names config/forge-hosts as
-# the remedy, while a forge that cannot be read reports an unsupported forge.
+# distinct reasons: a URL that is not github-shaped reports an unsupported
+# forge, while an unlisted github-shaped host names config/forge-hosts and says
+# to list it only if it is a GitHub host. Shape is all the projection knows, so
+# a Gitea, Codeberg, or Bitbucket URL of that shape gets the same reason;
+# listing one makes its observations fail rather than making it measurable.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,

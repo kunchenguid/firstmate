@@ -417,28 +417,32 @@ test_forge_host_allowlist_decides_coverage() {
 }
 
 test_unlisted_host_reason_differs_from_unsupported_forge() {
-  local home ghe='https://precision-it.ghe.com/o/r/pull/18' gitlab='https://gitlab.com/o/r/-/merge_requests/2'
+  local home listable ghe='https://precision-it.ghe.com/o/r/pull/18'
+  local gitea='https://codeberg.org/owner/repo/issues/12' gitlab='https://gitlab.com/o/r/-/merge_requests/2'
+  listable='host not listed in config/forge-hosts; coverage is unmeasured (list it only if it is a GitHub host)'
   home=$(new_home unmeasured-reasons)
-  jq -n --arg ghe "$ghe" --arg gitlab "$gitlab" \
-    '{backlog:{present:true,records:[{id:"t",structured:true,links:[$ghe,$gitlab]}]},tasks:[]}' \
+  jq -n --arg ghe "$ghe" --arg gitea "$gitea" --arg gitlab "$gitlab" \
+    '{backlog:{present:true,records:[{id:"t",structured:true,links:[$ghe,$gitea,$gitlab]}]},tasks:[]}' \
     > "$home/input.json" || fail 'unmeasured-reason fixture failed'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all \
-    > "$home/unlisted.json" || fail 'a read-only snapshot of two unmeasured forges failed'
-  jq -e --arg ghe "$ghe" --arg gitlab "$gitlab" '(.rows | length) == 2
-    and (.rows | map(select(.url == $ghe))[0] | .actor == "unmeasured"
-      and .reason == "host not listed in config/forge-hosts; coverage is unmeasured")
+    > "$home/unlisted.json" || fail 'a read-only snapshot of three unmeasured forges failed'
+  jq -e --arg ghe "$ghe" --arg gitea "$gitea" --arg gitlab "$gitlab" --arg listable "$listable" \
+    '(.rows | length) == 3
+    and (.rows | map(select(.url == $ghe))[0] | .actor == "unmeasured" and .reason == $listable)
+    and (.rows | map(select(.url == $gitea))[0] | .actor == "unmeasured" and .reason == $listable)
     and (.rows | map(select(.url == $gitlab))[0] | .actor == "unmeasured"
       and .reason == "unsupported forge; coverage is unmeasured")' "$home/unlisted.json" >/dev/null \
-    || fail 'an unlisted GitHub host and an unreadable forge reported the same unmeasured reason'
+    || fail 'the unmeasured reasons did not separate a listable host from an unreadable forge, or claimed a non-GitHub host is listable without qualification'
   printf 'precision-it.ghe.com\n' > "$home/config/forge-hosts"
   with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all \
     > "$home/listed.json" || fail 'a read-only snapshot after listing the host failed'
-  jq -e --arg ghe "$ghe" --arg gitlab "$gitlab" \
+  jq -e --arg ghe "$ghe" --arg gitea "$gitea" --arg gitlab "$gitlab" --arg listable "$listable" \
     '(.rows | map(select(.url == $ghe))[0] | .actor != "unmeasured")
+    and (.rows | map(select(.url == $gitea))[0] | .actor == "unmeasured" and .reason == $listable)
     and (.rows | map(select(.url == $gitlab))[0]
       | .reason == "unsupported forge; coverage is unmeasured")' "$home/listed.json" >/dev/null \
-    || fail 'the remedy the unmeasured reason names did not make the host measurable'
-  pass 'an unlisted GitHub host names config/forge-hosts while an unreadable forge does not'
+    || fail 'listing one host changed how an unrelated unmeasured row is reported'
+  pass 'a github-shaped unlisted host is reported as listable only if it is GitHub; an unreadable forge is not'
 }
 
 test_commented_out_forge_host_is_rejected_not_ignored() {

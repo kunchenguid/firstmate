@@ -91,7 +91,7 @@ def projected($input; $saved; $now; $max_age):
        | map(. + {freshness:(if $observed_head != null and .commit_id != $observed_head then "STALE" elif $fresh then "current" else "unverified" end)})) as $reviews
     | (if ($k.url | github_url | not) then
          (if ($k.url | github_shaped_url) then
-            {actor:"unmeasured",reason:"host not listed in config/forge-hosts; coverage is unmeasured"}
+            {actor:"unmeasured",reason:"host not listed in config/forge-hosts; coverage is unmeasured (list it only if it is a GitHub host)"}
           else {actor:"unmeasured",reason:"unsupported forge; coverage is unmeasured"} end)
        elif $o.state == "merged" or $o.state == "closed" then
          if $fresh then {actor:"nobody",reason:("forge reports " + $o.state)}
