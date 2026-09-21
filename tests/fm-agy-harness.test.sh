@@ -166,8 +166,8 @@ test_agy_control_mechanics_are_the_verified_ones() {
   [ "$(fm_control_interrupt_repeat agy)" = 1 ] || fail "agy must interrupt on a single press"
   [ -z "$(fm_control_interrupt_clear_key agy)" ] || fail "agy must need no clear key"
   [ "$(fm_control_interrupt_ack_source agy)" = none ] || fail "agy must have no ack source"
-  [ "$(fm_control_exit_command agy)" = /quit ] || fail "agy must exit on /quit"
-  pass "fm-control-lib: agy mechanics are Escape once, no clear key, and /quit"
+  [ "$(fm_control_exit_command agy)" = /exit ] || fail "agy must exit on /exit"
+  pass "fm-control-lib: agy mechanics are Escape once, no clear key, and /exit"
 }
 
 test_agy_busy_tail_needs_the_pinned_status_row() {
