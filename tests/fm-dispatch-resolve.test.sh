@@ -617,12 +617,7 @@ cat > "$SCHEMA6" <<'JSON'
   ]
 }
 JSON
-cat > "$RESPONSE" <<'JSON'
-{ "model": "jev-1.13.0",
-  "answers": { "rule": { "type": "choice", "choice": "rule_1", "confidence": 0.9,
-    "probabilities": { "rule_1": 0.97, "default": 0.03 } } },
-  "usage": { "input_tokens": 812, "output_tokens": 60 } }
-JSON
+write_response "$RESPONSE" rule_1 0.9 '{ "rule_1": 0.97, "default": 0.03 }'
 cp "$LANE_RULES" "$RULES"
 reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6" run code out err "$BRIEF"
