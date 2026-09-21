@@ -257,6 +257,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".claude/rules/layout-and-state.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".greptile/rules.md",
       "audience": "maintainer-architecture"
     },
