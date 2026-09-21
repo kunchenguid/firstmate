@@ -1074,6 +1074,48 @@ esac
   || fail "repeating a closed acknowledgement retired the board armed after it"
 pass "acknowledging a terminal round concludes that round only"
 
+# --- end-user-aligned regression: an interrupted conclude ends the board -----
+# The conclude drops the registration and then records the acknowledgement. An
+# interruption between those steps must leave nothing that relaunches the ended
+# board, and the same acknowledgement has to finish the job on the next try.
+HINTR="$TMP_ROOT/hinterrupted"; new_home "$HINTR"
+INTR_ROOT="$TMP_ROOT/lavish-interrupted-root"; mkdir -p "$INTR_ROOT"; export INTR_ROOT
+INTR_BIN=$(fm_fakebin "$TMP_ROOT/lavish-interrupted-stub")
+cat > "$INTR_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+n=$(cat "$INTR_ROOT/count" 2>/dev/null || echo 0)
+printf '%s\n' "$((n + 1))" > "$INTR_ROOT/count"
+printf 'session:\n  status: ended\n  session_ended: true\n'
+SH
+chmod +x "$INTR_BIN/lavish-axi"
+INTR_ART="$TMP_ROOT/interrupted-board.html"
+printf '<h1>interrupted</h1>\n' > "$INTR_ART"
+intr_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$INTR_ART")
+fm_test_track_procevent_home "$HINTR"
+new_task_endpoint "$HINTR" worker-12
+PATH="$INTR_BIN:$PATH" FM_HOME="$HINTR" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$INTR_ART" --for worker-12 >/dev/null
+PATH="$INTR_BIN:$PATH" pe "$HINTR" start "$intr_id" >/dev/null 2>&1 || true
+[ "$(cat "$INTR_ROOT/count" 2>/dev/null || echo 0)" = 1 ] \
+  || fail "the terminal worker-owned round was not polled exactly once"
+rm -f "$HINTR/state/procevent/$intr_id.source"
+PATH="$INTR_BIN:$PATH" pe "$HINTR" reconcile >/dev/null 2>&1 || true
+[ "$(cat "$INTR_ROOT/count" 2>/dev/null || echo 0)" = 1 ] \
+  || fail "an interrupted conclude let the ended board be polled again"
+if PATH="$INTR_BIN:$PATH" FM_HOME="$HINTR" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$INTR_ART" --for worker-12 \
+  >/dev/null 2>"$INTR_ROOT/intr-arm.err"; then
+  fail "an interrupted conclude let its owner re-arm the ended board"
+fi
+assert_contains "$(cat "$INTR_ROOT/intr-arm.err")" "terminal" \
+  "the refusal did not say the round still owed a conclude is terminal"
+intr_out=$(PATH="$INTR_BIN:$PATH" pe "$HINTR" handled "$intr_id" 1)
+assert_contains "$intr_out" "handled: $intr_id 1" \
+  "repeating the interrupted acknowledgement did not record it"
+[ -f "$HINTR/state/procevent-inbox/$intr_id.1.handled" ] \
+  || fail "the interrupted conclude was never finished by the repeated acknowledgement"
+pass "an interrupted conclude leaves the ended board unpollable and finishes on retry"
+
 # --- end-user-aligned regression: a failed re-arm keeps the last generation ---
 # Re-arm publishes the next generation and acknowledges the round it replaces.
 # When that acknowledgement cannot be recorded the whole re-arm has to be off,

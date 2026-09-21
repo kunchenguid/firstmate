@@ -1860,7 +1860,7 @@ cmd_classify() {
 }
 
 cmd_handled() {
-  local id=${1-} seq=${2-} status result='' result_adapter='' conclude=0 registration=''
+  local id=${1-} seq=${2-} status result='' result_adapter='' conclude=0 registration='' retained=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
   owner_lease_refresh
@@ -1873,19 +1873,33 @@ cmd_handled() {
       conclude=1
     fi
   fi
-  fm_procevent_mark_handled "$STATE" "$id" "$seq"
-  status=$?
-  if [ "$conclude" -eq 1 ] && [ "$status" -eq 0 ]; then
+  if [ "$conclude" -eq 1 ]; then
     registration=$(source_file "$id")
-    if rm -f -- "$registration" 2>/dev/null && [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
-      rm -f -- "$(runner_file "$id")"
-    else
-      rm -f -- "$(fm_procevent_handled_marker "$STATE" "$id" "$seq")"
+    retained=$(umask 077; mktemp "$REG/.$id.concluding.XXXXXX") || {
+      fm_procevent_source_lock_release "$id"
+      die "cannot stage the registration this conclusion retires: $id"
+    }
+    if ! cat -- "$registration" > "$retained"; then
+      rm -f -- "$retained"
+      fm_procevent_source_lock_release "$id"
+      die "cannot read the registration this conclusion retires: $id"
+    fi
+    if ! rm -f -- "$registration" 2>/dev/null || [ -e "$registration" ] || [ -L "$registration" ]; then
+      rm -f -- "$retained"
       fm_procevent_source_lock_release "$id"
       die "cannot retire the board its owner just acknowledged; the round stays open: $id"
     fi
-  else
-    conclude=0
+  fi
+  fm_procevent_mark_handled "$STATE" "$id" "$seq"
+  status=$?
+  if [ "$conclude" -eq 1 ]; then
+    if [ "$status" -eq 0 ]; then
+      rm -f -- "$(runner_file "$id")"
+      rm -f -- "$retained"
+    else
+      mv -f -- "$retained" "$registration"
+      conclude=0
+    fi
   fi
   fm_procevent_source_lock_release "$id"
   case "$status" in
