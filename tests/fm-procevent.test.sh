@@ -1080,6 +1080,25 @@ PATH="$LAVISH_SCRIPTED_BIN:$PATH" pe "$HREPLY" start "$reply_id" >/dev/null
 unset LAVISH_REPLY_LOG
 pass "a staged worker reply is handed to the board once across quiet poll retries"
 
+# The other side of the same best-effort contract: posting a reply is allowed to
+# lose it, so a listener that starts with no staged reply - because a crash
+# consumed it, or because the round simply carries none - must still poll the
+# board, with no reply and no refusal.
+MISSING_REPLY_COUNT="$TMP_ROOT/missing-reply-count"
+MISSING_REPLY_LOG="$TMP_ROOT/missing-reply-log"
+missing_reply_status=0
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$MISSING_REPLY_COUNT" LAVISH_SCRIPT=feedback \
+  LAVISH_REPLY_LOG="$MISSING_REPLY_LOG" \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" \
+  --agent-reply-file "$TMP_ROOT/never-staged-reply" >/dev/null 2>&1 || missing_reply_status=$?
+[ "$missing_reply_status" -eq 0 ] \
+  || fail "a listener whose staged reply was gone refused to poll (status $missing_reply_status)"
+[ "$(cat "$MISSING_REPLY_COUNT" 2>/dev/null || echo 0)" = 1 ] \
+  || fail "a listener whose staged reply was gone never polled the board"
+[ ! -s "$MISSING_REPLY_LOG" ] \
+  || fail "a listener whose staged reply was gone still posted something: $(cat "$MISSING_REPLY_LOG")"
+pass "a listener whose staged reply is gone polls the board without one"
+
 # Exhaustion is news: after the bounded retries the same exact response is
 # captured and announced normally rather than being swallowed forever.
 HEXH="$TMP_ROOT/hexh"; new_home "$HEXH"

@@ -35,8 +35,11 @@
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
 #            transient interruption described below. A task-owned arm consumes
-#            its staged reply file once and hands its contents to the published
-#            `--agent-reply` argument; later retries poll without that reply.
+#            its staged reply file once - reading and removing it before the
+#            poll - and hands the contents to the published `--agent-reply`
+#            argument; later retries poll without that reply. That post is best
+#            effort: a crash while consuming drops that one round's reply
+#            instead of posting it twice. See the note at the consume site.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -343,7 +346,7 @@ poll_iteration_floor_wait() {
 
 cmd_poll() {
   local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
-  local pipeline_status original_host_present=0 original_host='' reply_file='' posted_reply=''
+  local pipeline_status original_host_present=0 original_host='' reply_file=''
   local reply_text='' reply_pending=0
   [ -n "$artifact" ] || usage
   if [ "${LAVISH_AXI_HOST+x}" = x ]; then
@@ -352,17 +355,18 @@ cmd_poll() {
   fi
   if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
     reply_file=$3
-    posted_reply="$reply_file.posted"
+    # Posting a round's reply is BEST EFFORT and deliberately carries no delivery
+    # machinery. The staged file is the only record that a reply is owed, and
+    # consuming it is one transition: a crash in the narrow window between that
+    # consumption and the poll drops this one round's reply rather than posting
+    # it twice, and a listener that starts with no staged file simply polls
+    # without one. Robust delivery waits on lavish-axi's own exclusive listener;
+    # do not add a receipt, retry, or idempotency marker here.
     if [ -f "$reply_file" ] && [ ! -L "$reply_file" ]; then
-      mv -f -- "$reply_file" "$posted_reply" \
-        || die "cannot consume agent reply file: $reply_file"
-      reply_text=$(cat -- "$posted_reply") \
+      reply_text=$(cat -- "$reply_file") \
         || die "cannot read agent reply file: $reply_file"
+      rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
       reply_pending=1
-    elif [ -f "$posted_reply" ] && [ ! -L "$posted_reply" ]; then
-      :
-    else
-      die "agent reply file does not exist: $reply_file"
     fi
   elif [ "$#" -ne 1 ]; then
     usage

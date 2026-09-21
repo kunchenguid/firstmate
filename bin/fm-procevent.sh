@@ -593,7 +593,7 @@ cmd_register_task() {
   fi
   for stale in "$REG/.$id.reply."*; do
     [ -e "$stale" ] || continue
-    case "$stale" in "$reply_dest"|"$reply_dest".posted) continue ;; esac
+    case "$stale" in "$reply_dest") continue ;; esac
     rm -f -- "$stale"
   done
   # Re-arm is the worker's acknowledgement of every open nonterminal round.
