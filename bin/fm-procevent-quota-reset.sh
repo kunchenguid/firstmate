@@ -170,7 +170,8 @@ write_watch() { # <file> then key=value args
 }
 
 cmd_arm() {
-  local task=${1-} run= provider= window= interval=$DEFAULT_INTERVAL timeout=$DEFAULT_TIMEOUT
+  # shellcheck disable=SC1007
+  local task=${1-} run='' provider='' window='' interval=$DEFAULT_INTERVAL timeout=$DEFAULT_TIMEOUT
   local sid record meta wt incarnation branch head status error failure_digest json wj reset_at reset_epoch percent existing
   [ -n "$task" ] || usage; shift
   valid_id "$task" || die "invalid task id: $task"
@@ -198,7 +199,8 @@ cmd_arm() {
   [ -f "$meta" ] && [ ! -L "$meta" ] || die "task metadata is absent"
   incarnation=$(meta_value "$meta" spawn_gen); wt=$(meta_value "$meta" worktree)
   valid_id "$incarnation" || die "task has no unambiguous spawn incarnation"
-  [ -n "$wt" ] && [ -d "$wt" ] && no_newline "$wt" || die "task worktree is unavailable or unsafe"
+  [ -n "$wt" ] && [ -d "$wt" ] || die "task worktree is unavailable or unsafe"
+  no_newline "$wt" || die "task worktree is unavailable or unsafe"
   [ -z "$(git -C "$wt" status --porcelain 2>/dev/null)" ] || die "task worktree is dirty"
   branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || die "task worktree has no branch"
   head=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || die "cannot read task head"

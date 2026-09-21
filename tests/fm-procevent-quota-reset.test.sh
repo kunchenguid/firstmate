@@ -169,13 +169,21 @@ run_refusal() { # name mutator expected
   [ "$(find "$STATE/task.inbox" -name '*.msg' 2>/dev/null | wc -l | tr -d ' ')" = 0 ] || fail "$name refusal delivered a retry"
 }
 
+# shellcheck disable=SC2016 # mutator expands inside run_refusal's eval, not here
 run_refusal retired 'rm -f "$STATE/task.meta"' 'task was retired'
+# shellcheck disable=SC2016 # mutator expands inside run_refusal's eval, not here
 run_refusal incarnation 'sed -i.bak "s/spawn_gen=spawn-one/spawn_gen=spawn-two/" "$STATE/task.meta"' 'task incarnation or worktree changed'
+# shellcheck disable=SC2016 # mutator expands inside run_refusal's eval, not here
 run_refusal head 'printf changed >> "$WT/file"; git -C "$WT" add file; git -C "$WT" commit -qm changed' 'branch or submitted head changed'
+# shellcheck disable=SC2016 # mutator expands inside run_refusal's eval, not here
 run_refusal dirty 'printf dirty >> "$WT/file"' 'task worktree is dirty'
+# shellcheck disable=SC2016 # mutator expands inside run_refusal's eval, not here
 run_refusal stale-run 'sed -i.bak "s/outcome: failed/outcome: cancelled/" "$RUN_STATUS"' 'terminal quota failure no longer matches'
+# shellcheck disable=SC2016 # mutator expands inside run_refusal's eval, not here
 run_refusal custody 'sed -i.bak "s/state: returned/state: pipeline_owned/" "$RUN_STATUS"' 'branch custody requires another action'
+# shellcheck disable=SC2016 # mutator expands inside run_refusal's eval, not here
 run_refusal merged 'printf "pr=https://example.invalid/pr/1\n" >> "$STATE/task.meta"' 'task already entered merge or cleanup'
+# shellcheck disable=SC2016 # mutator expands inside run_refusal's eval, not here
 run_refusal active 'cat > "$OVERVIEW" <<EOF
 count: 2 of 2 total
 runs[2]{id,branch,status,head,pr}:
