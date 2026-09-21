@@ -1253,8 +1253,9 @@ test_daemon_rechecks_live_run_step_health() {
   printf 'working: validating\n' > "$state/health.status"
   printf 'unchanged Codex pane\n' > "$pane"
   make_fake_crew_state "$dir/fakebin" >/dev/null
+  local PATH="$dir/fakebin:$PATH"
   (
-    export PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" LOG="$dir/daemon.log"
+    export PATH FM_HOME="$dir" FM_STATE_OVERRIDE="$state" LOG="$dir/daemon.log"
     export FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_ESCALATE_BATCH_SECS=999999
     export FM_STALE_ESCALATE_SECS=240 FM_MAX_DEFER_SECS=999999
     stale_window_is_busy "$win" "$state" && fail "the Codex fixture unexpectedly has semantic busy proof"
