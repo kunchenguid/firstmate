@@ -9,7 +9,10 @@
 #   2. With the flag on, the sailboat replaces the working row and moves, tool rows and
 #      an exact operational user row draw at zero height, /calm restores them and
 #      persists off, /calm hides them again and persists on, all without a Calm output
-#      row in the transcript.
+#      row in the transcript. The operational rows cover a typed watcher input and an
+#      away-mode escalation delivered through the daemon's real inject_msg; Claude Code
+#      2.1.277+ removes their U+2063 mark on submit, and the delivered escalation must
+#      still classify as away-supervisor.
 #   3. `claude --continue` restores the transcript with those rows still hidden.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication and one trusted temporary folder. A few Haiku turns are submitted.
@@ -19,7 +22,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fm_live_gate opt-in FM_CLAUDE_CALM_LIVE_E2E claude tmux
+fm_live_gate opt-in FM_CLAUDE_CALM_LIVE_E2E claude tmux jq
 
 MOD="$ROOT/.claude/mods/firstmate-calm"
 OPERATIONAL_INPUT="$ROOT/bin/fm-operational-input.sh"
@@ -33,7 +36,15 @@ DEBUG_LOG_ON="$LAB/debug-on.log"
 DEBUG_LOG_RESUME="$LAB/debug-resume.log"
 SOCKET="fm-calm-claude-$$"
 SESSION="fm-calm-claude-e2e"
+# A fixed id for the flag-on session, so its transcript can be read back.
+SESSION_ID=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null) \
+  || fail "could not generate a session id"
+SESSION_ID=$(printf '%s' "$SESSION_ID" | tr '[:upper:]' '[:lower:]')
+REAL_TMUX=$(command -v tmux)
 HULL='╲▁▁▁╱'
+# The debug log names the module by plugin name through 2.1.276 and by its
+# plugin@source label from 2.1.277 (`firstmate-calm@skills-dir`).
+CALM_LOADED_RE='hooks module firstmate-calm(@[^ ]+)? loaded'
 SAIL='◿│◣'
 
 cleanup() {
@@ -49,7 +60,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$PROJECT/.claude/skills" "$FM_HOME_DIR/config"
+mkdir -p "$PROJECT/.claude/skills" "$FM_HOME_DIR/config" "$FM_HOME_DIR/state" "$LAB/bin"
+# The daemon's bare tmux calls reach this test's private server through a PATH shim.
+printf '#!/bin/sh\nexec %s -L %s "$@"\n' "$REAL_TMUX" "$SOCKET" >"$LAB/bin/tmux"
+chmod +x "$LAB/bin/tmux"
 ln -s "$MOD" "$PROJECT/.claude/skills/firstmate-calm"
 printf 'alpha\nbeta\ngamma\n' >"$PROJECT/notes.txt"
 printf 'on\n' >"$FM_HOME_DIR/config/calm"
@@ -210,7 +224,7 @@ launch "$DEBUG_LOG_OFF" 0
 wait_idle
 grep -q 'hooks modules not loaded' "$DEBUG_LOG_OFF" \
   || fail "Claude Code $CLAUDE_VERSION did not report hooks modules off with the flag unset"
-if grep -q 'hooks module firstmate-calm loaded' "$DEBUG_LOG_OFF"; then
+if grep -Eq "$CALM_LOADED_RE" "$DEBUG_LOG_OFF"; then
   fail "Claude Code $CLAUDE_VERSION loaded the Calm hooks module although the flag was unset"
 fi
 if command_listed calm; then
@@ -260,14 +274,14 @@ sleep 2
 pass "Claude Code $CLAUDE_VERSION with the flag unset: no hooks module, no /calm, stock working row, stock tool rows, preference on ignored"
 
 # --- 2. Flag on: the boat, the hidden rows, the toggle, the persisted choice -------
-launch "$DEBUG_LOG_ON" 1
+launch "$DEBUG_LOG_ON" 1 --session-id "$SESSION_ID"
 wait_idle
 i=0
-while [ "$i" -lt 100 ] && ! grep -q 'hooks module firstmate-calm loaded' "$DEBUG_LOG_ON"; do
+while [ "$i" -lt 100 ] && ! grep -Eq "$CALM_LOADED_RE" "$DEBUG_LOG_ON"; do
   sleep 0.1
   i=$((i + 1))
 done
-grep -q 'hooks module firstmate-calm loaded' "$DEBUG_LOG_ON" \
+grep -Eq "$CALM_LOADED_RE" "$DEBUG_LOG_ON" \
   || fail "Claude Code $CLAUDE_VERSION did not load the Calm hooks module from the project's .claude/skills path with the flag on"
 # The engine logs one benign notice for every options-less hooks module ("options
 # requested but its manifest declares no userConfig"); anything else is a real problem.
@@ -315,6 +329,17 @@ operational=$(printf 'signal: %s/state/probe.status changed. Reply with exactly 
   || fail "could not encode the operational probe"
 send "$operational"
 enter
+# Claude Code 2.1.277+ removes the U+2063 mark on the first Enter and holds the cleaned
+# text for review; a second Enter sends it.
+i=0
+while [ "$i" -lt 20 ]; do
+  case "$(screen)" in
+    *'review and press Enter to send'*) enter; break ;;
+    *'OPERATIONAL_PROCESSED'*) break ;;
+  esac
+  sleep 0.25
+  i=$((i + 1))
+done
 wait_screen 'OPERATIONAL_PROCESSED' 'the operational answer' 600
 sleep 1
 operational_screen=$(screen)
@@ -325,19 +350,56 @@ case "$operational_screen" in
     ;;
 esac
 
+# An away-mode escalation delivered through the daemon's real injection path is
+# confirmed delivered, draws at zero height, and reaches the transcript as input the
+# canonical owner classifies as away-supervisor, with or without its U+2063 mark.
+wait_settled 'the operational turn'
+(
+  export PATH="$LAB/bin:$PATH" FM_HOME="$FM_HOME_DIR" FM_SUPERVISOR_TARGET="$SESSION" FM_SUPERVISOR_BACKEND=tmux
+  # shellcheck source=bin/fm-supervise-daemon.sh
+  . "$ROOT/bin/fm-supervise-daemon.sh"
+  afk_enter "$FM_HOME_DIR/state"
+  inject_msg 'Supervisor escalate (1 event(s)): AWAY_PROBE_ROW escalation. Reply with exactly AWAY_PROCESSED and nothing else.' "$FM_HOME_DIR/state"
+) || fail "Claude Code $CLAUDE_VERSION: the daemon could not confirm delivery of an away-mode escalation"
+rm -f "$FM_HOME_DIR/state/.afk"
+wait_screen 'AWAY_PROCESSED' 'the away-mode escalation answer' 600
+sleep 1
+away_screen=$(screen)
+case "$away_screen" in
+  *'AWAY_PROBE_ROW'*)
+    printf '%s\n' "$away_screen" >&2
+    fail "the away-mode escalation row drew while Calm was on"
+    ;;
+esac
+transcript=$(find "$HOME/.claude/projects" -name "$SESSION_ID.jsonl" 2>/dev/null | head -1)
+[ -n "$transcript" ] || fail "Claude Code $CLAUDE_VERSION wrote no transcript for session $SESSION_ID"
+away_row=$(jq -j 'select(.type == "user") | .message.content
+  | if type == "string" then . else (map(select(.type == "text") | .text) | join("")) end
+  | select(contains("AWAY_PROBE_ROW"))' "$transcript")
+[ -n "$away_row" ] || fail "Claude Code $CLAUDE_VERSION transcript holds no away-mode escalation row"
+away_kind=$(printf '%s' "$away_row" | "$OPERATIONAL_INPUT" classify) || away_kind=none
+[ "$away_kind" = away-supervisor ] \
+  || fail "Claude Code $CLAUDE_VERSION delivered the away-mode escalation as $away_kind, not away-supervisor: $away_row"
+case "$away_row" in
+  $'\xE2\x81\xA3'*) away_mark='with its U+2063 mark' ;;
+  *) away_mark='without its U+2063 mark' ;;
+esac
+
 # /calm off: rows restore, the preference persists off, no Calm output row.
 send '/calm'
 enter
 wait_screen 'shell command' 'the restored tool row after /calm off' 200
 [ "$(cat "$FM_HOME_DIR/config/calm")" = off ] || fail "/calm did not persist off"
 restored=$(screen)
-case "$restored" in
-  *'probe.status changed'*) : ;;
-  *)
-    printf '%s\n' "$restored" >&2
-    fail "/calm off did not restore the operational user row"
-    ;;
-esac
+for row in 'probe.status changed' 'AWAY_PROBE_ROW'; do
+  case "$restored" in
+    *"$row"*) : ;;
+    *)
+      printf '%s\n' "$restored" >&2
+      fail "/calm off did not restore the operational user row showing $row"
+      ;;
+  esac
+done
 # The toggle answers with a transient toast under the prompt, never a transcript row:
 # the plugin's name must leave the screen once the toast expires.
 case "$restored" in
@@ -371,14 +433,14 @@ i=0
 while [ "$i" -lt 200 ]; do
   hidden_again=$(screen)
   case "$hidden_again" in
-    *'Bash('*|*'probe.status changed'*) ;;
+    *'Bash('*|*'probe.status changed'*|*'AWAY_PROBE_ROW'*) ;;
     *) break ;;
   esac
   sleep 0.1
   i=$((i + 1))
 done
 case "$hidden_again" in
-  *'Bash('*|*'probe.status changed'*)
+  *'Bash('*|*'probe.status changed'*|*'AWAY_PROBE_ROW'*)
     printf '%s\n' "$hidden_again" >&2
     fail "/calm on did not hide the rows again"
     ;;
@@ -391,7 +453,7 @@ esac
 send '/exit'
 enter
 sleep 2
-pass "Claude Code $CLAUDE_VERSION with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool and operational rows draw at zero height, /calm restores and re-hides them while persisting the shared preference"
+pass "Claude Code $CLAUDE_VERSION with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool and operational rows draw at zero height (the daemon-injected away-mode escalation arriving $away_mark and classifying as away-supervisor), /calm restores and re-hides them while persisting the shared preference"
 
 # --- 3. Resume: the restored transcript keeps the hidden rows hidden ---------------
 launch "$DEBUG_LOG_RESUME" 1 --continue
@@ -399,7 +461,7 @@ wait_screen 'gamma' 'the resumed transcript' 400
 sleep 1
 resumed=$(screen)
 case "$resumed" in
-  *'Bash('*|*'probe.status changed'*)
+  *'Bash('*|*'probe.status changed'*|*'AWAY_PROBE_ROW'*)
     printf '%s\n' "$resumed" >&2
     fail "the resumed transcript drew a row Calm hides"
     ;;

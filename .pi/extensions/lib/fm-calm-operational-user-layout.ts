@@ -65,7 +65,10 @@ export function installCalmOperationalUserLayout(): void {
   };
   const hidesOperationalInput = (): boolean => calmPresentationHides("synthetic-user");
   const isOperationalInput = (text: string): boolean => {
-    if (!text.includes("\u2063")) return false;
+    // A cheap pre-filter so ordinary rows never spawn the owner's classifier:
+    // every shape it accepts either carries U+2063 or begins with the
+    // mark-less current header (bin/fm-operational-input.sh).
+    if (!text.includes("\u2063") && !text.startsWith("FIRSTMATE_OP: ")) return false;
     return (
       classifyFirstmateCurrentOperationalText(text) !== undefined ||
       text.startsWith(LEGACY_CALM_OPERATIONAL_PREFIX)

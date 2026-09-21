@@ -25,6 +25,8 @@
 # current daemon injection as the typed away-supervisor kind after the stable
 # FM_OPERATIONAL_PREFIX. A human cannot type its leading U+2063 from a normal
 # keyboard at the start of a message, and Herdr transports it as text.
+# Claude Code 2.1.277 and later remove it on submit, so the owner also parses
+# the same header without it (bin/fm-operational-input.sh).
 # Firstmate's contract: a message that starts with the current prefix, or a
 # legacy bare-marker daemon escalation, is internal (stay afk); an unmarked
 # message means the captain is back (exit afk, flush catch-up, resume per-wake
@@ -281,10 +283,10 @@ afk_exit() {  # <state>
 # should_exit_afk: encodes firstmate's afk-exit contract as a testable function.
 #   away posture inactive   -> 1 (nothing to exit; the posture is the record
 #                              bin/fm-afk-contract.sh owns, or the legacy flag)
-#   message has marker      -> 1 (internal escalation; stay afk)
+#   operational input       -> 1 (internal escalation; stay afk)
 #   message is /afk command -> 1 (re-entering/extending afk; stay afk)
 #   anything else           -> 0 (captain is back; exit afk)
-# Bias toward exit: only the marker and an explicit /afk invocation keep afk
+# Bias toward exit: only operational input and an explicit /afk invocation keep afk
 # alive. A false exit is self-correcting (the captain re-runs /afk).
 should_exit_afk() {  # <state> <message-text>
   local state=$1 msg=$2
@@ -297,16 +299,18 @@ should_exit_afk() {  # <state> <message-text>
 }
 
 # message_is_injection: 0 if the given message text starts with the sentinel
-# marker (a daemon escalation), 1 otherwise (a real user message). Firstmate's
-# afk-exit contract uses this: marker present -> stay afk; absent -> captain is
-# back. Bias ambiguous cases toward exit (a false exit is self-correcting).
+# marker or is a current generic operational envelope as its owner parses it (which
+# includes the mark-less header Claude Code delivers after removing U+2063), 1
+# otherwise (a real user message). Firstmate's afk-exit contract uses this:
+# operational input -> stay afk; anything else -> captain is back. Bias
+# ambiguous cases toward exit (a false exit is self-correcting).
 message_is_injection() {  # <message-text>
-  local msg=$1
+  local msg=$1 kind
   [ -n "$msg" ] || return 1
   case "$msg" in
     "$FM_INJECT_MARK"*) return 0 ;;
   esac
-  return 1
+  fm_operational_generic_kind "$msg" kind
 }
 
 # strip_injection_marker: remove a current typed away envelope, the landed

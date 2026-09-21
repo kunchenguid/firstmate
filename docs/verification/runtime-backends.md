@@ -508,6 +508,31 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Claude Code operational input
+
+Claude Code 2.1.277 added removal of invisible Unicode formatting characters from every submitted prompt, and U+2063 is always removed.
+An interactive submit that removed a character holds the cleaned text with `Removed 1 invisible character · review and press Enter to send`, and the next Enter sends it; the argv launch prompt is cleaned and sent at once.
+A Firstmate operational envelope therefore reaches a Claude transcript as the same `FIRSTMATE_OP: v1 <kind>: <body>` header without its leading mark, and `bin/fm-operational-input.sh` parses that exact mark-less header as the same current kind.
+The daemon's ordinary Enter retry sends the cleaned text, so delivery is still confirmed.
+
+Verified on 2026-09-21 on Linux with tmux 3.6 on a private socket, against Claude Code 2.1.276 and 2.1.278 side by side:
+
+```sh
+FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - Claude Code 2.1.278 (Claude Code) with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool and operational rows draw at zero height (the daemon-injected away-mode escalation arriving without its U+2063 mark and classifying as away-supervisor), /calm restores and re-hides them while persisting the shared preference
+ok - Claude Code 2.1.276 (Claude Code) with the flag on: the mod auto-loads from .claude/skills, /calm exists, the sailboat replaces and moves in the working row, tool and operational rows draw at zero height (the daemon-injected away-mode escalation arriving with its U+2063 mark and classifying as away-supervisor), /calm restores and re-hides them while persisting the shared preference
+```
+
+Both versions also passed the flag-off and resume sections.
+Run with the mark-only parser on 2.1.278, the same guard fails with `not ok - the operational user row drew while Calm was on`.
+The Claude Code debug log names a loaded hooks module by plugin name through 2.1.276 and by its `plugin@source` label from 2.1.277, which the guard accepts in both forms.
+This guard is the refresh command after a Claude Code upgrade.
+
 ## Codex hook trust
 
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.

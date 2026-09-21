@@ -10,6 +10,7 @@
 //
 // Current generic wire form:
 //   U+2063 FIRSTMATE_OP: v1 <kind>: <body>
+// also accepted without the leading U+2063 at byte 0, as the owner accepts it,
 // plus the established `[fm-from-firstmate]` U+2063 routing carrier, and the narrow
 // pre-protocol shapes the owner keeps only for persisted transcripts.
 
@@ -17,6 +18,7 @@ const OPERATIONAL_MARK = "\u2063";
 const OPERATIONAL_PREFIX = `${OPERATIONAL_MARK}FIRSTMATE_OP: `;
 const OPERATIONAL_VERSION = "v1";
 const OPERATIONAL_HEADER_PREFIX = `${OPERATIONAL_PREFIX}${OPERATIONAL_VERSION} `;
+const OPERATIONAL_UNMARKED_HEADER_PREFIX = `FIRSTMATE_OP: ${OPERATIONAL_VERSION} `;
 
 /** The kinds the owner's `FM_OPERATIONAL_KINDS` names, in its order. */
 export const FIRSTMATE_OPERATIONAL_GENERIC_KINDS = [
@@ -48,8 +50,14 @@ function isCurrentKind(kind: string): boolean {
 
 /** `fm_operational_generic_kind`: the kind of a current generic envelope, else undefined. */
 function genericKind(message: string): string | undefined {
-  if (!message.startsWith(OPERATIONAL_HEADER_PREFIX)) return undefined;
-  const remainder = message.slice(OPERATIONAL_HEADER_PREFIX.length);
+  let remainder: string;
+  if (message.startsWith(OPERATIONAL_HEADER_PREFIX)) {
+    remainder = message.slice(OPERATIONAL_HEADER_PREFIX.length);
+  } else if (message.startsWith(OPERATIONAL_UNMARKED_HEADER_PREFIX)) {
+    remainder = message.slice(OPERATIONAL_UNMARKED_HEADER_PREFIX.length);
+  } else {
+    return undefined;
+  }
   const separator = remainder.indexOf(": ");
   if (separator < 0) return undefined;
   const kind = remainder.slice(0, separator);

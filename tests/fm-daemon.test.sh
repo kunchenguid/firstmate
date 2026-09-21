@@ -1726,7 +1726,22 @@ test_marker_detection() {
     && fail "marker message should not exit afk (internal escalation)"
   should_exit_afk "$state" "status update please" \
     || fail "plain message should exit afk (captain is back)"
-  pass "marker detection: marker -> stay afk, no marker -> exit afk"
+  # Claude Code 2.1.277+ removes U+2063 on submit, so a daemon escalation reaches
+  # the first mate as the exact mark-less typed header.
+  local encoded unmarked
+  fm_operational_input_encode away-supervisor "Supervisor escalate (1 event(s)): done" encoded \
+    || fail "could not encode an away-supervisor escalation"
+  unmarked=${encoded#"$FM_INJECT_MARK"}
+  [ "$unmarked" != "$encoded" ] || fail "encoded escalation lost its leading mark"
+  message_is_injection "$unmarked" \
+    || fail "mark-less away-supervisor escalation not detected as injection"
+  should_exit_afk "$state" "$unmarked" \
+    && fail "mark-less away-supervisor escalation should not exit afk"
+  should_exit_afk "$state" "Captain here: $unmarked" \
+    || fail "a captain message quoting an escalation should exit afk"
+  should_exit_afk "$state" "FIRSTMATE_OP: v1 bogus-kind: hello" \
+    || fail "a mark-less header with an unknown kind should exit afk"
+  pass "marker detection: marker or exact mark-less header -> stay afk, anything else -> exit afk"
 }
 
 test_afk_turn_exemption() {

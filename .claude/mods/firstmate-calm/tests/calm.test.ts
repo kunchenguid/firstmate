@@ -171,11 +171,20 @@ describe("operational user rows", () => {
     "\u2063Supervisor escalate (needs you)",
     // A current prefix with no readable kind or body is the untyped legacy envelope.
     operational("watcher", "").replace(/ $/, ""),
+    // Claude Code 2.1.277+ removes U+2063 on submit, so a daemon escalation or launch
+    // brief reaches the transcript as the exact header without its mark.
+    operational("away-supervisor", "Supervisor escalate (1 event(s)): done").replace(/^\u2063/, ""),
+    operational("launch-brief", "# Task").replace(/^\u2063/, ""),
+    "FIRSTMATE_OP: v1 watcher: ascii only",
   ];
   const visibleTexts = [
     "hello there",
     "'\u2063FIRSTMATE_OP: v1 watcher: quoted'",
-    "FIRSTMATE_OP: v1 watcher: ascii only",
+    "Quote: FIRSTMATE_OP: v1 away-supervisor: text before the header",
+    "FIRSTMATE_OP: v1 bogus: unknown kind",
+    "FIRSTMATE_OP: v2 away-supervisor: unknown version",
+    "FIRSTMATE_OP: v1 away-supervisor: ",
+    "FIRSTMATE_OP: untyped ascii",
     "look: \u2063FIRSTMATE_OP: v1 watcher: text before the marker",
     "[fm-from-firstmate]\u2063",
     "\u2063FIRSTMATE_OP: ",

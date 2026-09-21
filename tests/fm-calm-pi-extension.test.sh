@@ -969,8 +969,18 @@ InteractiveMode.prototype.addMessageToChat.call(
   operationalMode,
   { role: "user", content: legacyAwayMessage },
 );
+// Claude Code 2.1.277+ removes U+2063 on submit; the owner parses the exact mark-less header.
+const markLessOperationalMessage = watcherMessage.replace(/^\u2063/, "");
+if (markLessOperationalMessage === watcherMessage) {
+  throw new Error("the encoded watcher envelope lost its leading U+2063 mark");
+}
+InteractiveMode.prototype.addMessageToChat.call(
+  operationalMode,
+  { role: "user", content: markLessOperationalMessage },
+);
 const operationalComponent = operationalChat.children[1];
 const legacyOperationalComponent = operationalChat.children[2];
+const markLessOperationalComponent = operationalChat.children[3];
 const stockOperationalComponent = new UserMessageComponent(watcherMessage, undefined, 1);
 const expectedCalmOffOperationalRows = ["", ...stockOperationalComponent.render(100)];
 if (JSON.stringify(operationalComponent.render(100)) !== JSON.stringify(expectedCalmOffOperationalRows)) {
@@ -1239,13 +1249,16 @@ if (operationalComponent.render(100).length !== 0) {
 if (legacyOperationalComponent.render(100).length !== 0) {
   throw new Error("Calm left the supported bare-marker legacy user row visible");
 }
+if (markLessOperationalComponent.render(100).length !== 0) {
+  throw new Error("Calm left a mark-less current operational user row visible");
+}
 const operationalNearMisses = [
   {
     content: `Captain quote: ${watcherMessage}`,
     visible: "Captain quote:",
   },
   {
-    content: "FIRSTMATE_OP: v1 watcher: ASCII_ONLY_CAPTAIN_MESSAGE",
+    content: "FIRSTMATE_OP: v1 not-a-kind: ASCII_ONLY_CAPTAIN_MESSAGE",
     visible: "ASCII_ONLY_CAPTAIN_MESSAGE",
   },
   {
@@ -3627,7 +3640,7 @@ TS
 {"type":"custom_message","id":"a0000010","parentId":"a0000009","timestamp":"$now","customType":"firstmate-synthetic-input","content":"FIRSTMATE WATCHER WAKE: signal: /tmp/probe.status\\n\\nRun bin/fm-wake-drain.sh first and handle the queued wake. Watcher continuity is extension-owned.","display":false,"details":{"kind":"watcher"}}
 {"type":"message","id":"a0000011","parentId":"a0000010","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"FIRSTMATE WATCHER WAKE: can you explain this phrase?"}],"timestamp":11}}
 {"type":"message","id":"a0000012","parentId":"a0000011","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"Captain quote: \u2063FIRSTMATE_OP: v1 watcher: QUOTED_CURRENT_NEAR_MISS"}],"timestamp":12}}
-{"type":"message","id":"a0000013","parentId":"a0000012","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"FIRSTMATE_OP: v1 watcher: ASCII_ONLY_NEAR_MISS"}],"timestamp":13}}
+{"type":"message","id":"a0000013","parentId":"a0000012","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"FIRSTMATE_OP: v1 not-a-kind: ASCII_ONLY_NEAR_MISS"}],"timestamp":13}}
 {"type":"message","id":"a0000014","parentId":"a0000013","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"Ordinary captain text before \u2063FIRSTMATE_OP: v1 watcher: EMBEDDED_CURRENT_NEAR_MISS"}],"timestamp":14}}
 {"type":"message","id":"a0000015","parentId":"a0000014","timestamp":"$now","message":{"role":"user","content":[{"type":"text","text":"\u2063ordinary captain text after unrelated separator"}],"timestamp":15}}
 {"type":"message","id":"a0000016","parentId":"a0000015","timestamp":"$now","message":{"role":"assistant","content":[{"type":"text","text":"The deterministic tool example is complete."}],"api":"anthropic-messages","provider":"anthropic","model":"claude-sonnet-4-5","usage":{"input":2,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":16}}

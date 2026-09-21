@@ -318,7 +318,7 @@ canonical_generic_kinds() {
 }
 
 write_parity_corpus() {
-  local dir=$1 kind index=0 body generic_kinds
+  local dir=$1 kind index=0 body generic_kinds encoded
   mkdir -p "$dir"
   generic_kinds=$(canonical_generic_kinds) || fail "could not read generic kinds from the operational-input owner"
   [ -n "$generic_kinds" ] || fail "the operational-input owner exposes no generic kinds"
@@ -327,6 +327,12 @@ write_parity_corpus() {
       index=$((index + 1))
       printf '%s' "$body" | "$OPERATIONAL_INPUT" encode "$kind" >"$dir/case-$index.txt" \
         || fail "the owner could not encode kind $kind for the parity corpus"
+      # The same envelope as Claude Code 2.1.277+ delivers it, with U+2063 removed.
+      index=$((index + 1))
+      encoded=$(printf '%s' "$body" | "$OPERATIONAL_INPUT" encode "$kind"; printf x) \
+        || fail "the owner could not encode mark-less kind $kind for the parity corpus"
+      encoded=${encoded%x}
+      printf '%s' "${encoded#$'\xE2\x81\xA3'}" >"$dir/case-$index.txt"
     done
   done
   for body in 'plain body' $'multi\nline\n\nbody' $'trailing newline\n' $'two trailing newlines\n\n' 'colon: inside: body' 'ünïcödé body ✓' ' '; do
@@ -356,6 +362,14 @@ write_parity_corpus() {
     '[fm-from-firstmate] no separator' \
     "'"$'\xE2\x81\xA3'"FIRSTMATE_OP: v1 watcher: quoted'" \
     'FIRSTMATE_OP: v1 watcher: ascii only' \
+    'FIRSTMATE_OP: v1 watcher:' \
+    'FIRSTMATE_OP: v1 watcher: ' \
+    'FIRSTMATE_OP: v1 bogus: body' \
+    'FIRSTMATE_OP: v2 watcher: body' \
+    'FIRSTMATE_OP: v1 from-firstmate: body' \
+    'FIRSTMATE_OP: untyped ascii' \
+    'Quote: FIRSTMATE_OP: v1 watcher: body' \
+    ' FIRSTMATE_OP: v1 watcher: body' \
     $'text before \xE2\x81\xA3FIRSTMATE_OP: v1 watcher: body' \
     $'\xE2\x81\xA3' \
     $'\xE2\x81\xA3unrelated' \

@@ -8,6 +8,12 @@
 # Current generic wire form:
 #   U+2063 FIRSTMATE_OP: v1 <kind>: <body>
 #
+# Construction always emits the leading U+2063. Parsing also accepts the same
+# header without it at byte 0, because Claude Code 2.1.277 and later remove
+# invisible characters from every submitted prompt, including the argv launch
+# prompt, so a marked input reaches that transcript mark-less. The exact
+# version, a current kind, and a non-empty body are still required.
+#
 # The landed U+2063 + "FIRSTMATE_OP: " prefix is permanent compatibility.
 # The version and kind header make current inputs structurally typed without
 # deriving provenance from body prose. The established from-firstmate routing
@@ -28,6 +34,7 @@ FM_OPERATIONAL_MARK=$'\xE2\x81\xA3'
 FM_OPERATIONAL_PREFIX="${FM_OPERATIONAL_MARK}FIRSTMATE_OP: "
 FM_OPERATIONAL_VERSION=v1
 FM_OPERATIONAL_HEADER_PREFIX="${FM_OPERATIONAL_PREFIX}${FM_OPERATIONAL_VERSION} "
+FM_OPERATIONAL_UNMARKED_HEADER_PREFIX="FIRSTMATE_OP: ${FM_OPERATIONAL_VERSION} "
 FM_OPERATIONAL_KINDS='session-start watcher turn-end-guard away-supervisor launch-brief branch-outcome'
 
 # Compatibility name retained for the away-mode owner and its tests.
@@ -65,14 +72,29 @@ fm_operational_input_construct() {  # <kind> <body> <result-var>
   fm_operational_input_encode "$kind" "$body" "$result_var"
 }
 
+# The header remainder after either the marked or the mark-less current header
+# prefix, which must begin the message; fails otherwise.
+fm_operational_header_remainder() {  # <message> <result-var>
+  local message=${1-} result_var=${2-}
+  case "$message" in
+    "$FM_OPERATIONAL_HEADER_PREFIX"*)
+      printf -v "$result_var" '%s' "${message#"$FM_OPERATIONAL_HEADER_PREFIX"}"
+      ;;
+    "$FM_OPERATIONAL_UNMARKED_HEADER_PREFIX"*)
+      printf -v "$result_var" '%s' "${message#"$FM_OPERATIONAL_UNMARKED_HEADER_PREFIX"}"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_operational_generic_kind() {  # <message> <result-var>
   local message=${1-} result_var=${2-} remainder parsed_kind body
   [ -n "$result_var" ] || return 2
-  case "$message" in
-    "$FM_OPERATIONAL_HEADER_PREFIX"*': '?*) ;;
+  fm_operational_header_remainder "$message" remainder || return 1
+  case "$remainder" in
+    *': '?*) ;;
     *) return 1 ;;
   esac
-  remainder=${message#"$FM_OPERATIONAL_HEADER_PREFIX"}
   parsed_kind=${remainder%%': '*}
   fm_operational_kind_is_current "$parsed_kind" || return 1
   body=${remainder#"${parsed_kind}: "}
@@ -100,7 +122,8 @@ fm_operational_input_body() {  # <current-message> <result-var>
   local message=${1-} result_var=${2-} current_kind parsed_body
   [ -n "$result_var" ] || return 2
   if fm_operational_generic_kind "$message" current_kind; then
-    parsed_body=${message#"${FM_OPERATIONAL_HEADER_PREFIX}${current_kind}: "}
+    fm_operational_header_remainder "$message" parsed_body || return 1
+    parsed_body=${parsed_body#"${current_kind}: "}
     printf -v "$result_var" '%s' "$parsed_body"
     return 0
   fi
