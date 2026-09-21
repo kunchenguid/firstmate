@@ -558,6 +558,32 @@ test_draft_pull_request_is_not_armed() {
   pass "arming refuses a draft pull request, naming it, and arms a ready or unreadable one"
 }
 
+test_control_plane_fields_after_pr_stay_authenticated() {
+  local dir state head
+  dir=$(make_case control-plane-after-pr)
+  state="$dir/home/state"
+  head=0123456789abcdef0123456789abcdef01234567
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1
+  printf 'pr_head=%s\n' "$head" >> "$state/task-a.meta"
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "control-plane fixture poll was not authentic before any field was appended"
+
+  printf 'control_relaunch_tx=tx-1\ntraceparent=00-trace\nspawn_gen=s1.1.1\ndecisions_reviewed=1\ndecision_keys=key-a\n' \
+    >> "$state/task-a.meta"
+  fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "an owned control-plane field after pr= made the record look corrupt"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "an owned control-plane field after pr= refused the armed poll"
+
+  printf 'window=unexpected\n' >> "$state/task-a.meta"
+  ! fm_pr_metadata_identity_parse "$state/task-a.meta" \
+    || fail "a foreign line after pr= was accepted as identity"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a foreign line after pr= still authenticated the armed poll"
+  pass "owned control-plane fields after pr= keep the poll authentic while a foreign line still refuses"
+}
+
 test_valid_recording_and_merge_derivation() {
   local dir expected sidecar count rc
   dir=$(make_case valid-recording)
@@ -2815,6 +2841,7 @@ test_retirement_queue_failure_and_receipt_tampering
 test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_draft_pull_request_is_not_armed
+test_control_plane_fields_after_pr_stay_authenticated
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract
