@@ -54,9 +54,10 @@
 # silence on every poll. That coupling is enforced rather than assumed: a budget
 # larger than FM_CHECK_TIMEOUT (default 30, read from this check's own
 # environment because the watcher runs it as a direct child) allows is cut down
-# to what fits, and the cut is reported in the report line so the operator sees
-# it. A budget that cannot be read as a whole number from 1 to 120 is still
-# refused outright.
+# to what fits; an explicit cut is reported in the report line so the operator
+# sees it, while a derived default is clamped silently so a current home still
+# prints nothing. A budget that cannot be read as a whole number from 1 to 120 is
+# still refused outright.
 #
 # The report record state/.tool-updates is written only when a sweep runs to its
 # end, and it carries the whole finding set the last report was made from,
@@ -167,7 +168,9 @@ if [ "$TOOL_COUNT" -gt 0 ]; then
   [ "$BUDGET_DEFAULT" -ge 20 ] || BUDGET_DEFAULT=20
 fi
 
+BUDGET_EXPLICIT=0
 if [ -n "${FM_TOOL_UPDATE_BUDGET_SECS:-}" ]; then
+  BUDGET_EXPLICIT=1
   BUDGET_SECS=$FM_TOOL_UPDATE_BUDGET_SECS
   case "$BUDGET_SECS" in
     ''|*[!0-9]*|0)
@@ -210,7 +213,9 @@ BUDGET_MAX=$((CHECK_TIMEOUT - PROBE_MIN_SECS - CLOCK_ROUNDING_SECS - KILL_GRACE_
 # silent is worse than a check that reports something awkward.
 BUDGET_CUT_FROM=
 if [ "$BUDGET_SECS" -gt "$BUDGET_MAX" ]; then
-  BUDGET_CUT_FROM=$BUDGET_SECS
+  if [ "$BUDGET_EXPLICIT" -eq 1 ]; then
+    BUDGET_CUT_FROM=$BUDGET_SECS
+  fi
   BUDGET_SECS=$BUDGET_MAX
 fi
 
@@ -566,12 +571,21 @@ GIT_PROBE_NOT_ISSUED=3
 # One bounded read-only git probe. The budget check lives here rather than in the
 # callers, so no probe can be issued past the sweep deadline whatever a caller
 # does, and the budget only has to leave room for the one probe that was already
-# running when the deadline passed.
+# running when the deadline passed. A probe that hits its bound gets one more
+# attempt while the sweep still has budget, so a loaded host is not reported as
+# an unreachable remote.
 git_probe() {
-  local repo=$1
+  local repo=$1 status out
   shift
   budget_exhausted && return "$GIT_PROBE_NOT_ISSUED"
-  fm_run_timed "$(probe_bound)" git -C "$repo" "$@"
+  out=$(fm_run_timed "$(probe_bound)" git -C "$repo" "$@")
+  status=$?
+  if [ "$status" -eq 124 ] && ! budget_exhausted; then
+    out=$(fm_run_timed "$(probe_bound)" git -C "$repo" "$@")
+    status=$?
+  fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+  return "$status"
 }
 
 # The single place that reads a probe status as no answer at all, so every probe

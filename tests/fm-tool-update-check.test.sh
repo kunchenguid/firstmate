@@ -894,26 +894,63 @@ test_an_oversized_budget_is_cut_to_fit_and_reported() {
   pass "a budget that cannot fit the watcher bound is cut and reported, and the sweep keeps working"
 }
 
-test_the_default_sweep_budget_scales_with_the_watched_tool_count() {
-  local home out report status i tools_json=
-  # A sweep gives each watched tool a full probe slice, so the default budget
-  # grows with the tool count instead of staying at the documented 20 seconds.
-  # The cut line is the observable proof: with a watcher bound too small for the
-  # derived budget, the cut names the derived value. A fixed default names 20.
-  home=$(make_home budget-scales)
-  for i in 1 2 3 4 5; do
+test_a_derived_default_budget_is_clamped_silently_on_a_current_home() {
+  local home dir out i tools_json=
+  # Six watched tools derive a 30 second default budget, larger than the 27
+  # seconds the default watcher bound leaves. The home is fully current, so the
+  # silent clamp must leave the check silent: emitting the clamp as a finding
+  # would wake the home on the first sweep, and again whenever a later real
+  # finding cleared and the line fell back to the clamp alone.
+  home=$(make_home budget-derived-silent)
+  dir="$TMP_ROOT/budget-derived-silent/bin"
+  for i in 1 2 3 4 5 6; do
+    make_copy "$dir" "tool$i" "tool$i 1.0.0"
     [ -z "$tools_json" ] || tools_json="$tools_json,"
-    tools_json="$tools_json{\"name\":\"absent-tool-$i\",\"command\":\"fm-absent-fixture-$i\"}"
+    tools_json="$tools_json{\"name\":\"t$i\",\"command\":\"tool$i\"}"
   done
   write_config "$home" "{\"tools\":[$tools_json]}"
   out="$home/out.txt"
-  status=0
-  env FM_HOME="$home" PATH="$PATH" FM_TOOL_UPDATE_INTERVAL=0 \
-    FM_CHECK_TIMEOUT=20 "$CHECK" >"$out" 2>&1 || status=$?
-  expect_code 0 "$status" "scaled budget exit"
+  run_check "$home" "$(fixture_path "$dir")" "$out"
+  [ ! -s "$out" ] || fail "a current home with a clamped derived budget spoke: $(cat "$out")"
+  pass "a derived default budget cut is silent on a fully current home"
+}
+
+test_a_transiently_slow_git_probe_is_retried_not_read_as_unavailable() {
+  local home work dir marker out report
+  # A git remote read on a loaded host can exceed its bound once and answer on
+  # the next try. This clone is ahead of its remote, which is silent when the
+  # probes answer, so any "did not answer" line here is the false unavailability
+  # the retry exists to remove.
+  home=$(make_home git-retry)
+  work=$(git_fixture git-retry-repo)
+  printf 'local only\n' > "$work/f4"
+  git -C "$work" add f4
+  git -C "$work" commit -qm four
+
+  dir="$TMP_ROOT/git-retry/bin"
+  marker="$TMP_ROOT/git-retry/slowed"
+  mkdir -p "$dir"
+  cat > "$dir/git" <<SH
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  if [ "\$arg" = cat-file ]; then
+    if [ ! -e '$marker' ]; then
+      : > '$marker'
+      sleep 30
+    fi
+    break
+  fi
+done
+exec $(command -v git) "\$@"
+SH
+  chmod 0755 "$dir/git"
+
+  write_config "$home" "{\"tools\":[{\"name\":\"firstmate\",\"git\":{\"repo\":\"$work\",\"remote\":\"origin\",\"branch\":\"main\"}}]}"
+  out="$home/out.txt"
+  run_check "$home" "$(fixture_path "$dir")" "$out" FM_TOOL_UPDATE_PROBE_SECS=1
   report=$(cat "$out")
-  assert_contains "$report" "sweep budget 25s cut to 17s to stay inside the watcher check timeout of 20s" "the default sweep budget was not derived from the watched tool count"
-  pass "the default sweep budget scales with the watched tool count"
+  [ ! -s "$out" ] || fail "a git probe that answered on retry still reported: $report"
+  pass "a transiently slow git probe is retried within the budget, not read as unavailable"
 }
 
 test_invalid_environment_and_action_refuse() {
@@ -1136,6 +1173,7 @@ test_missing_branch_on_a_readable_remote_is_still_reported
 test_git_probes_stop_when_the_sweep_budget_is_gone
 test_a_git_probe_that_does_not_answer_is_not_an_update
 test_a_stalled_repository_probe_is_not_reported_as_not_a_repository
+test_a_transiently_slow_git_probe_is_retried_not_read_as_unavailable
 test_absent_registry_is_silent
 test_malformed_registry_is_reported_not_ignored
 test_findings_are_reported_once_until_they_change
@@ -1143,7 +1181,7 @@ test_an_overlong_report_says_it_was_cut
 test_a_finding_past_the_cut_is_still_reported
 test_probes_are_skipped_between_intervals
 test_an_oversized_budget_is_cut_to_fit_and_reported
-test_the_default_sweep_budget_scales_with_the_watched_tool_count
+test_a_derived_default_budget_is_clamped_silently_on_a_current_home
 test_invalid_environment_and_action_refuse
 test_arm_registers_the_check_and_disarm_removes_it
 test_arm_refuses_a_symlink_at_the_shim_path
