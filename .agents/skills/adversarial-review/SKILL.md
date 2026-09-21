@@ -75,11 +75,11 @@ Each side writes its rounds inside its own worktree and names the path in its st
 Firstmate copies each round out of that worktree into the shared exchange directory as it relays it, named after the subject rather than after either task so neither side owns it: `data/<subject>-converge/`, holding one file per side per round.
 Copy each round out before the worktree can be discarded, because the worktree is scratch and the exchange directory is the one durable record of what was exchanged.
 
-Require each side to answer what has gone well, not only what went wrong.
-A review that only finds faults is not a review, and a reviewer that never says so is not reading for the captain.
-
 Hold both reports until both exist.
 If one side finishes first it waits; handing it the other's report early destroys the only thing this pattern buys.
+
+A side that reaches `done:` is not finished here, so keep both sides alive and complete neither until the exchange has closed and the captain-facing outcome is built.
+Tearing down the first side to finish destroys the worktree its rounds live in and the endpoint phase 2 relays to, so the exchange record survives only while both sides stand.
 
 ## Phase 2 - the exchange
 
@@ -123,8 +123,10 @@ Close the exchange as soon as any of these holds.
 - A further round would only restate positions already on record.
 - The only thing standing between the sides is a call that belongs to the captain, which goes to him rather than being argued for another round.
 
-Closing with an open item requires each side's captain-facing case under rule 4 to already exist for that item.
-When one is missing, request exactly that case as the final round instead of closing, because the Contested bucket otherwise cannot be built without firstmate authoring a position it is forbidden to hold.
+Closing with an open item requires the rule 4 case from each side that engaged that item.
+When a side engaged an item and its case is missing, request exactly that case as the final round instead of closing, because firstmate may not author that position itself.
+When a side never answered an item at all, close anyway and carry the item under the Contested clause for an unanswered proposal, where its proposer writes the case against it.
+The exchange always closes: a review that cannot finish delivers nothing, which is worse than one that finishes and names its gap honestly.
 
 Never let a round happen merely because a round is available.
 
@@ -144,6 +146,7 @@ Its complete list of moves:
    This is the only input firstmate adds, and it is a pointer, never a position.
 5. Decide after each round whether the exchange closes, and say which stopping condition fired.
 6. Build the captain-facing outcome below.
+7. Tear down and complete both sides, only once the outcome is built and every round is copied out.
 
 ## Outcome
 
