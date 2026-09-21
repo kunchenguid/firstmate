@@ -228,10 +228,45 @@ test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order() 
   pass "charted rows with no filed date follow the dated rows in payload order"
 }
 
+test_dispatch_bar_is_absent_when_nothing_is_pickable() {
+  local home out
+  home=$(make_home dispatch-absent)
+  out=$(render "$home" '[
+    {"id":"gated-one","repo":"sample","title":"Gated one","reason":"waiting on prep","dispatchable":false},
+    {"id":"gated-two","repo":"sample","title":"Gated two","reason":"waiting on prep","dispatchable":false}
+  ]')
+  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
+    || fail "the board rendered its fail-closed error instead of the fleet: $out"
+  printf '%s' "$out" | jq -e '.dispatch.presented == false' >/dev/null \
+    || fail "the dispatch bar reached the reader with nothing pickable: $out"
+  printf '%s' "$out" | jq -e '.dispatch.buttonDisabled == true' >/dev/null \
+    || fail "the dispatch button rendered enabled with no handler bound: $out"
+  pass "the dispatch bar stays off the board until a row is pickable"
+}
+
+test_dispatch_bar_arrives_wired_once_a_row_is_pickable() {
+  local home out
+  home=$(make_home dispatch-present)
+  out=$(render "$home" '[
+    {"id":"ready-one","repo":"sample","title":"Ready one","reason":"","dispatchable":true},
+    {"id":"gated-one","repo":"sample","title":"Gated one","reason":"waiting on prep","dispatchable":false}
+  ]')
+  printf '%s' "$out" | jq -e '.error == ""' >/dev/null \
+    || fail "the board rendered its fail-closed error instead of the fleet: $out"
+  printf '%s' "$out" | jq -e '
+    .dispatch.presented == true
+      and .dispatch.buttonWired == true
+      and .dispatch.buttonDisabled == true
+  ' >/dev/null || fail "the dispatch bar did not arrive wired and safely disabled: $out"
+  pass "the dispatch bar arrives with its handler bound and stays disabled until a pick"
+}
+
 test_an_underway_row_leads_with_the_task_name_and_keeps_its_run_status
 test_an_underway_identifier_label_is_not_replaced_by_run_status
 test_charted_next_reads_newest_filed_first
 test_charted_rows_without_a_filed_date_follow_the_dated_rows_in_payload_order
+test_dispatch_bar_is_absent_when_nothing_is_pickable
+test_dispatch_bar_arrives_wired_once_a_row_is_pickable
 test_a_warning_row_reads_as_a_repair_not_as_queued_work
 test_warnings_are_excluded_from_the_charted_next_count
 test_a_board_of_only_warnings_still_reports_nothing_queued

@@ -267,6 +267,9 @@ a { color: inherit; text-decoration: none; }
   display: flex; align-items: center; gap: 12px; padding: 12px 18px;
   border-top: 1.5px solid var(--border-default); background: var(--paper-100);
 }
+/* the author display above outranks the user-agent [hidden] rule, so the
+   hidden attribute needs this same explicit guard as the decision cards */
+.bb-dispatch[hidden] { display: none; }
 .bb-dispatch__count { flex: 1 1 auto; font-size: var(--fs-xs); font-weight: 800; color: var(--text-muted);
   text-transform: uppercase; letter-spacing: 0.07em; }
 
@@ -337,7 +340,7 @@ a { color: inherit; text-decoration: none; }
           <svg class="fm-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
           queued
         </span>
-        <button type="button" class="fm-btn fm-btn--sm fm-btn--gold" id="bb-dispatch-btn">Queue dispatch order</button>
+        <button type="button" class="fm-btn fm-btn--sm fm-btn--gold" id="bb-dispatch-btn" disabled>Queue dispatch order</button>
       </div>
     </div>
   </section>
@@ -718,27 +721,30 @@ __FM_BEARINGS_BOARD_DATA__
     ch.appendChild(el("span", "bb-morechip", "+" + chartedMoreWarnings + " more repair warning" + (chartedMoreWarnings === 1 ? "" : "s") + " - ask firstmate for the full chart"));
   }
 
+  /* The button's handler and enabled state always follow from the script, so
+     the control can never render live without a handler bound; only the bar's
+     visibility waits on a pickable row. */
+  barBtn.addEventListener("click", function () {
+    var ids = pickedIds();
+    var dispatchAnswer = ids.join(",");
+    if (!ids.length) return;
+    if (utf8ByteLength(dispatchAnswer) > 512) {
+      refreshBar("Selection is too long to queue (512 bytes maximum). ");
+      return;
+    }
+    if (window.lavish && window.lavish.queuePrompt) {
+      window.lavish.queuePrompt(
+        "Dispatch order - start this queued work now: " + ids.join(", "),
+        { tag: "choice", text: "Dispatch: " + ids.join(", "), element: bar,
+          queueKey: "dispatch.charted",
+          data: { question: "dispatch.charted", answer: dispatchAnswer } }
+      );
+    }
+    bar.classList.add("is-queued");
+  });
+  refreshBar();
   if (anyPickable) {
     bar.hidden = false;
-    refreshBar();
-    barBtn.addEventListener("click", function () {
-      var ids = pickedIds();
-      var dispatchAnswer = ids.join(",");
-      if (!ids.length) return;
-      if (utf8ByteLength(dispatchAnswer) > 512) {
-        refreshBar("Selection is too long to queue (512 bytes maximum). ");
-        return;
-      }
-      if (window.lavish && window.lavish.queuePrompt) {
-        window.lavish.queuePrompt(
-          "Dispatch order - start this queued work now: " + ids.join(", "),
-          { tag: "choice", text: "Dispatch: " + ids.join(", "), element: bar,
-            queueKey: "dispatch.charted",
-            data: { question: "dispatch.charted", answer: dispatchAnswer } }
-        );
-      }
-      bar.classList.add("is-queued");
-    });
   }
   } catch (e) {
     renderBoardError("The board data could not be rendered");
