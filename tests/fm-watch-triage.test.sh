@@ -167,11 +167,24 @@ prime_turnend_seen() {  # <file>
   printf '%s' "$(seen_sig "$f")" > "$(dirname "$f")/.seen-$base"
 }
 
-record_pi_busy() {  # <state-dir> <id>
-  local state=$1 id=$2 gen
+# A busy record through the only real writer, then dated as the fixture needs.
+# By default its turn opened long ago (2000-01-01), so the other anchors a
+# fixture sets - the completed-turn marker, native progress, the spawn record -
+# decide the busy-turn age exactly as they always have; pass an epoch to date the
+# current turn's opening busy event instead.
+record_pi_busy() {  # <state-dir> <id> [<busy-event-epoch>]
+  local state=$1 id=$2 at=${3:-946684800} gen
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
   "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
     --source pi-ext --event agent-start
+  date_busy_event "$state" "$id" "$at"
+}
+
+# Re-date the busy record's event time, the one field the writer stamps from the
+# clock, so a fixture can place the current turn's opening in the past.
+date_busy_event() {  # <state-dir> <id> <epoch>
+  local rec="$1/$2.busy-state"
+  sed "s/ ts=[0-9]*\$/ ts=$3/" "$rec" > "$rec.tmp" && mv "$rec.tmp" "$rec"
 }
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
@@ -3703,6 +3716,94 @@ test_stale_churn_without_a_captain_call_still_alarms() {
   pass "a stale window with no open captain call keeps alarming on every new hash"
 }
 
+# 2026-09-21 reproduction, default:w3Z:p2: a delivered task whose pull request was
+# recorded in its metadata with its merge watch armed kept raising stale wakes on
+# every new pane hash while it waited on a maintainer outside the fleet, and only
+# a hand-set captain hold quieted it. The delivery plus its armed watch is the
+# record of that wait: the first sight still alarms, churn inside the window is
+# absorbed, and the window re-surfaces it. A later blocker on the same armed
+# delivery keeps alarming on every hash, and a provably-working pane on it still
+# climbs the wedge ladder.
+arm_delivered_pr() {  # <dir>
+  local dir=$1
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/fakebin/gh"
+  chmod +x "$dir/fakebin/gh"
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
+    "$ROOT/bin/fm-pr-check.sh" held-merge https://github.com/example/repo/pull/7 >/dev/null 2>&1 \
+    || return 1
+  # Arming also registers the contributions observer, whose first poll would
+  # wake on this unreachable example pull request; it is not the record under test.
+  [ ! -e "$dir/state/contributions.check.sh" ] \
+    || FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-check-unregister.sh" contributions >/dev/null
+}
+
+test_delivered_pr_awaiting_maintainer_bounds_stale_churn() {
+  local dir state out capture throttle wakes key pane_hash pid
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (delivered pull request stale bound)"; return 0; }
+  dir=$(make_hold_home delivered-pr 'done: PR https://github.com/example/repo/pull/7 checks green' nohold) \
+    || fail "could not build an unheld delivery fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-$(hold_key)"
+  arm_delivered_pr "$dir" || fail "could not arm the merge watch on the delivered pull request"
+  grep -Fx 'pr=https://github.com/example/repo/pull/7' "$state/held-merge.meta" >/dev/null \
+    || fail "arming the merge watch recorded no pull request in the task metadata"
+
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "first sight of a delivery awaiting its maintainer did not surface"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "first sight produced $wakes wakes instead of one: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first surface"
+
+  hold_watch_churn "$dir" "$out" "$capture" 'idle, tick' 2 \
+    || fail "watcher exited during pane churn on a delivery awaiting its maintainer"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 0 ] || fail "pane churn re-alarmed a delivery awaiting its maintainer $wakes time(s)"
+
+  [ -e "$throttle" ] || fail "the absorbed churn recorded no re-surface cadence to elapse"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
+    || fail "a delivery awaiting its maintainer did not re-surface once its window elapsed"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "elapsed re-surface window produced $wakes wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the re-surface"
+
+  # A blocker after the delivery is about something else: every hash alarms.
+  printf 'blocked: the maintainer asked for a rebase I cannot do\n' >> "$state/held-merge.status"
+  printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
+  for round in 1 2; do
+    hold_watch_surface "$dir" "$out" "$capture" "blocked, elapsed ${round}s" \
+      || fail "a blocker on an armed delivery stopped alarming on round $round"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 1 ] || fail "blocker round $round produced $wakes wakes instead of one"
+    ack_stopped_cycle "$state" || fail "could not acknowledge blocker round $round"
+  done
+
+  # A provably-working pane on the armed delivery still escalates as a wedge.
+  printf 'done: PR https://github.com/example/repo/pull/7 checks green\n' >> "$state/held-merge.status"
+  printf '%s' "$(seen_sig "$state/held-merge.status")" > "$state/.seen-held-merge_status"
+  key=$(hold_key)
+  printf 'validating, frozen\n' > "$capture"
+  pane_hash=$(hash_text "$(cat "$capture")")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW=test:fm-held-merge \
+    FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' \
+    FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" FM_CONFIG_OVERRIDE="$dir/config" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a provably-working pane on an armed delivery did not escalate"; }
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "a provably-working pane on an armed delivery did not flag a possible wedge: $(cat "$out")"
+  pass "a delivery awaiting its maintainer surfaces once, absorbs pane churn, re-surfaces on its window, and a blocker or a wedge on it still alarms"
+}
+
 
 # The cadence marker may never outlive the wake it claims to record. Recording it
 # before publishing the durable wake turned a delayed alarm into a lost one: the
@@ -4745,6 +4846,77 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   [ -s "$state/.stale-since-$key" ] || fail "a 66-minute-old completed turn did not start a wedge timer under the default bound (default is not 3600s)"
   reap "$pid"
   pass "the production default busy-turn-age bound is 3600s (5min under does not wedge, 66min over does)"
+}
+
+# 2026-09-21 reproduction, default:w30:p2: a Claude worker parked for about an
+# hour and a half was steered into a new turn, and 240s later that live turn -
+# 5m37s old, a shell command running under it - wake-escalated as a possible
+# wedge. Its last completed turn was 5705s old, so the busy-turn bound read the
+# turn as over-age on its first busy poll and handed it to the wedge timer. The
+# turn's own busy event dates it; the same fixture with that event past the bound
+# is a hung turn and still escalates, and the same pane idle with no evidence of
+# work still surfaces on first sight.
+test_busy_turn_opened_after_long_idle_is_not_a_wedge() {
+  local dir state fakebin out capture_file window key pane_hash sig pid now
+  dir=$(make_case busy-turn-after-long-idle); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-steered"
+  printf 'Working... running a shell command' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-steered.meta"
+  printf 'working: back on it after the steer\n' > "$state/busy-steered.status"
+  sig=$(seen_sig "$state/busy-steered.status"); printf '%s' "$sig" > "$state/.seen-busy-steered_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Working... running a shell command")
+  now=$(date +%s)
+  set_mtime $(( now - 5705 )) "$state/busy-steered.meta"
+  set_mtime $(( now - 5705 )) "$state/busy-steered.turn-ended"
+  prime_turnend_seen "$state/busy-steered.turn-ended"
+  record_pi_busy "$state" busy-steered $(( now - 337 ))
+
+  # The live turn: the wedge timer the old anchor started is already past the
+  # threshold, exactly as it was when the measured wake fired.
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  echo $(( now - 241 )) > "$state/.stale-since-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a live turn opened after a long idle stretch escalated as a possible wedge: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a live turn opened after a long idle stretch printed a wake reason: $(cat "$out")"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a live turn opened after a long idle stretch kept its wedge timer"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional live-turn stop"
+
+  # The same turn, opened past the bound with nothing since: a hung turn.
+  date_busy_event "$state" busy-steered $(( now - 4000 ))
+  echo $(( now - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a turn busy past the bound since its own busy event did not escalate"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "the hung turn did not print the stale wake: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the hung turn did not flag a possible wedge: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the hung-turn escalation"
+
+  # The same pane idle, with no evidence of work: the first alert still fires.
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" busy-steered idle --current-gen \
+    --source pi-ext --event agent-settled >/dev/null || fail "could not record the turn settling"
+  rm -f "$state/.stale-since-$key" "$state/.wedge-escalations-$key" "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "an idle pane with no evidence of work did not surface on first sight"; }
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "the indeterminate first alert did not surface as a plain stale wake: $(cat "$out")"
+  pass "a live turn opened after a long idle stretch is aged from its own busy event, while a hung turn and an indeterminate idle pane still alarm"
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
@@ -6016,6 +6188,7 @@ test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_native_progress_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
+test_busy_turn_opened_after_long_idle_is_not_a_wedge
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
@@ -6033,6 +6206,7 @@ test_wedge_threshold_parked_gate_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
+test_delivered_pr_awaiting_maintainer_bounds_stale_churn
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
 test_secondmate_paused_resurfaces_in_normal_mode

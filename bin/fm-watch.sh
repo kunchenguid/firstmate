@@ -62,8 +62,10 @@
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
-#                          turn completes). Past that bound, a declared external
-#                          wait or verified captain-held transfer uses the long
+#                          turn completes), native progress, or busy event of the
+#                          current turn (busy_turn_over_age). Past that bound, a
+#                          declared external wait or verified captain-held
+#                          transfer uses the long
 #                          pause recheck cadence; under daemon-backed afk an
 #                          external wait is instead handed to the daemon as this
 #                          plain reason once per declaration, while captain-held
@@ -267,9 +269,10 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
 # footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
-# may go without a completed turn or explicit native-harness progress (the
-# marker-selection contract is in busy_turn_over_age below). Once this bound
-# is crossed, busy_turn_over_age routes the pane through
+# may go without a completed turn, explicit native-harness progress, or a
+# semantic busy event of its current turn (the marker-selection contract is in
+# busy_turn_over_age below). Once this bound is crossed, busy_turn_over_age
+# routes the pane through
 # busy_turn_bound_check, which hands a crossed bound to the same
 # STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
 # non-busy stale - so it escalates via the existing stale reason, escalation
@@ -1283,18 +1286,33 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
-# busy_turn_over_age: 0 iff the last completed turn or explicit native-harness
-# progress is at least BUSY_TURN_MAX_SECS old. Progress is actual observed model
-# or tool activity, never a timer or a busy footer. It does not emit a wake or
-# change semantic busy state. Before either marker exists, age the spawn record.
+# busy_turn_over_age: 0 iff the newest of the last completed turn, explicit
+# native-harness progress, and the semantic busy event of the current turn is at
+# least BUSY_TURN_MAX_SECS old. Progress is actual observed model or tool
+# activity, never a timer or a busy footer. It does not emit a wake or change
+# semantic busy state. Before either marker exists, age the spawn record.
 # The caller checks busy state and routes a crossed bound through inspection.
+# The busy event (fm_busy_record_busy_since) is what bounds a turn that opened
+# after a long idle stretch: without it, a worker idle past the bound - parked on
+# a declared wait, say - that is then steered into a new turn reads over the
+# bound on that turn's first busy poll, and escalates as a possible wedge one
+# FM_STALE_ESCALATE_SECS into perfectly live work. A turn that really hangs
+# still crosses the bound, measured from its own busy event rather than from the
+# end of the turn before it.
 busy_turn_over_age() {  # <task>
-  local task=$1 f progress
+  local task=$1 f progress age since now
   f="$STATE/$task.turn-ended"
   [ -e "$f" ] || f="$STATE/$task.meta"
   progress="$STATE/$task.progress"
   if [ -f "$progress" ] && [ "$progress" -nt "$f" ]; then f="$progress"; fi
-  [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
+  age=$(age_of "$f")
+  if since=$(fm_busy_record_busy_since "$STATE" "$task"); then
+    now=$(date +%s)
+    if [ "$since" -le "$now" ] && [ $(( now - since )) -lt "$age" ]; then
+      age=$(( now - since ))
+    fi
+  fi
+  [ "$age" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -1607,6 +1625,51 @@ captain_call_stale_bound() {  # <window-key> <task>
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
+# The third record of an expected wait, and the one that is routine rather than
+# rare: a delivery waiting on a maintainer outside this fleet. Its worker has
+# said `done:` and has nothing left to do, and nothing about the silence that
+# follows changes until someone else merges or closes the pull request - so,
+# unbounded, every new pane hash re-alarms a delivery the supervisor already
+# read, for as long as that maintainer takes.
+# The evidence is two durable records together, and needs both:
+#   - the worker's latest status event is still its `done` delivery: any later
+#     line - a steer back to work, a blocker, a failure, a question - means the
+#     silence is about something else, and keeps alarming exactly as before;
+#   - the task's merge watch is armed on the pull request recorded in its
+#     metadata, authenticated exactly as the watcher authenticates the poll it
+#     runs (fm_pr_poll_artifacts_valid), and that merge has not already been
+#     reported (fm_pr_poll_merge_already_notified).
+# Unlike a captain call there is no away-posture exception: the wait is on
+# someone outside the fleet, so it keeps the bounded recheck in either posture.
+# The declaration binds the pull request with the whole status signature, so a
+# new delivery, a re-armed watch on another pull request, or any status event
+# starts its own window and its first sight still alarms.
+# Sets STALE_WAIT_DECLARATION and returns as captain_call_stale_bound does.
+delivered_pr_stale_bound() {  # <window-key> <task>
+  local key=$1 task=$2 pr
+  STALE_WAIT_DECLARATION=
+  [ -n "$task" ] || return 1
+  [ "$(status_line_verb "$(last_status_line "$STATE/$task.status")")" = "done" ] || return 1
+  pr=$(fm_pr_poll_artifacts_valid "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh" \
+    && ! fm_pr_poll_merge_already_notified "$STATE" "$task" "$FM_PR_DATA_PROVIDER" \
+      "$FM_PR_DATA_HOST" "$FM_PR_DATA_PATH" "$FM_PR_DATA_NUMBER" \
+    && printf '%s' "$FM_PR_DATA_URL") || return 1
+  [ -n "$pr" ] || return 1
+  STALE_WAIT_DECLARATION="delivered-pr:$pr:$(fm_wake_signal_sig "$STATE/$task.status" || true)"
+  stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
+}
+
+# Every recorded wait that can bound a due stale alarm, in precedence order: an
+# open captain call first, because the captain is the one who must act and the
+# away-posture rule only applies to it, then a delivery awaiting its maintainer.
+# The first record that exists owns STALE_WAIT_DECLARATION, whether or not its
+# window is throttled.
+recorded_wait_stale_bound() {  # <window-key> <task>
+  captain_call_stale_bound "$1" "$2" && return 0
+  [ -z "$STALE_WAIT_DECLARATION" ] || return 1
+  delivered_pr_stale_bound "$1" "$2"
+}
+
 # Surface a stale pane no classifier could resolve, so firstmate inspects it: it
 # may have finished through an interactive menu that wrote no status, be waiting on
 # a decision, or be wedged. pause_state_class deliberately answers `none` for a
@@ -1623,9 +1686,10 @@ captain_call_stale_bound() {  # <window-key> <task>
 # and the throttle is read BEFORE anything is queued and advanced only by a wake
 # that really fires - a throttle written by the wake it should have prevented, or
 # read after that wake was already appended, bounds nothing.
-# Both records of an ordinary crew wait bound it (see task_captain_call_open
-# above): the status line the worker declared, and the backlog hold firstmate
-# recorded once the captain took the work in hand.
+# Every record of an ordinary crew wait bounds it (see task_captain_call_open
+# and delivered_pr_stale_bound above): the status line the worker declared, the
+# backlog hold firstmate recorded once the captain took the work in hand, and a
+# delivered pull request awaiting its maintainer.
 surface_nonterminal_stale() {  # <window> <hash>
   local win=$1 h=$2 key task last declared=1 bounded=1 throttled=1 until now
   key=$(window_key "$win")
@@ -1656,7 +1720,7 @@ surface_nonterminal_stale() {  # <window> <hash>
     else
       stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION" && throttled=0
     fi
-  elif captain_call_stale_bound "$key" "$task"; then
+  elif recorded_wait_stale_bound "$key" "$task"; then
     bounded=0
     throttled=0
   elif [ -n "$STALE_WAIT_DECLARATION" ]; then
@@ -1684,7 +1748,7 @@ surface_nonterminal_stale() {  # <window> <hash>
     clear_pause_state "$key"
   fi
   if [ "$throttled" -eq 0 ]; then
-    triage_log "absorbed non-terminal stale (declared wait or open captain call already re-surfaced this window): $win"
+    triage_log "absorbed non-terminal stale (declared wait or recorded wait already re-surfaced this window): $win"
     return 0
   fi
   wake "stale: $win"
@@ -2693,18 +2757,19 @@ EOF
               date +%s > "$ssf"
               clear_write_tracking "$key"
               triage_log "absorbed stale (provably working, overriding a stale captain-relevant status): $w"
-            elif captain_call_stale_bound "$key" "$task"; then
-              # The line is captain-relevant and stays so, but the backlog says
-              # the captain already holds this work: further NEW pane hashes with
-              # the same status-log state have nothing to add while they are
-              # deciding. Only that new-hash repetition is bounded - the first
+            elif recorded_wait_stale_bound "$key" "$task"; then
+              # The line is captain-relevant and stays so, but a durable record
+              # says the work is already waiting on someone - the captain holds
+              # it, or its delivered pull request awaits its maintainer: further
+              # NEW pane hashes with the same status-log state have nothing to
+              # add meanwhile. Only that new-hash repetition is bounded - the first
               # sight already alarmed, a new hash inside the window is absorbed,
               # and a new hash after it alarms again. A stable hash stays as inert
               # here as it already was after a first terminal alarm.
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
-              triage_log "absorbed stale (open captain call already surfaced for this status): $w"
+              triage_log "absorbed stale (open captain call or delivered pull request already surfaced for this status): $w"
             else
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"
