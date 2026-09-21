@@ -328,18 +328,38 @@ esac
 operational=$(printf 'signal: %s/state/probe.status changed. Reply with exactly OPERATIONAL_PROCESSED and nothing else.' "$LAB" | "$OPERATIONAL_INPUT" encode watcher) \
   || fail "could not encode the operational probe"
 send "$operational"
+wait_screen 'probe.status changed' 'the typed operational probe' 200
 enter
 # Claude Code 2.1.277+ removes the U+2063 mark on the first Enter and holds the cleaned
-# text for review; a second Enter sends it.
+# text for review; a second Enter sends it. With Calm on, only the unsent composer can
+# show the probe text, so its leaving the screen confirms the submit.
+held=0
 i=0
-while [ "$i" -lt 20 ]; do
-  case "$(screen)" in
-    *'review and press Enter to send'*) enter; break ;;
-    *'OPERATIONAL_PROCESSED'*) break ;;
+while [ "$i" -lt 200 ]; do
+  submit_screen=$(screen)
+  case "$submit_screen" in
+    *'review and press Enter to send'*)
+      if [ "$held" -eq 0 ]; then
+        enter
+        held=1
+      fi
+      ;;
+    *'probe.status changed'*) ;;
+    *) break ;;
   esac
   sleep 0.25
   i=$((i + 1))
 done
+case "$submit_screen" in
+  *'review and press Enter to send'*)
+    printf '%s\n' "$submit_screen" >&2
+    fail "Claude Code $CLAUDE_VERSION never sent the held operational probe"
+    ;;
+  *'probe.status changed'*)
+    printf '%s\n' "$submit_screen" >&2
+    fail "the operational user row drew while Calm was on"
+    ;;
+esac
 wait_screen 'OPERATIONAL_PROCESSED' 'the operational answer' 600
 sleep 1
 operational_screen=$(screen)

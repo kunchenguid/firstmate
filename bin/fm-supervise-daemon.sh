@@ -14,8 +14,8 @@
 #
 # PRESENCE-GATING (the /afk contract). The daemon is the away-mode engine: it
 # injects ONLY when the durable away-mode flag state/.afk is present. Invoking
-# the /afk skill sets that flag and starts this daemon; any real (unmarked)
-# user message clears it and firstmate resumes full responsiveness.
+# the /afk skill sets that flag and starts this daemon; any real user message
+# clears it and firstmate resumes full responsiveness.
 # When afk is off, normal fm-watch.sh always-on triage is the active mechanism.
 # Any buffered daemon escalations that remain while afk is off survive in
 # state/.subsuper-escalations and are flushed on the next "while you were out"
@@ -27,12 +27,12 @@
 # keyboard at the start of a message, and Herdr transports it as text.
 # Claude Code 2.1.277 and later remove it on submit, so the owner also parses
 # the same header without it (bin/fm-operational-input.sh).
-# Firstmate's contract: a message that starts with the current prefix, or a
-# legacy bare-marker daemon escalation, is internal (stay afk); an unmarked
-# message means the captain is back (exit afk, flush catch-up, resume per-wake
-# responsiveness). The prefix and busy-guard solve the same problem - the
-# daemon and the human share one input channel - so they live together under
-# /afk.
+# Firstmate's contract: a message that starts with the current prefix or its
+# exact mark-less current header, or a legacy bare-marker daemon escalation, is
+# internal (stay afk); any other message means the captain is back (exit afk,
+# flush catch-up, resume per-wake responsiveness). The prefix and busy-guard
+# solve the same problem - the daemon and the human share one input channel -
+# so they live together under /afk.
 #
 # Reliability model (see the /afk skill):
 #   - Nothing is lost in away mode: while state/.afk exists, the watcher reverts
@@ -234,9 +234,10 @@ LOG_MAX_BYTES_DEFAULT=1048576
 LOG_KEEP_LINES_DEFAULT=2000
 
 # --- presence-gating --------------------------------------------------------
-# bin/fm-operational-input.sh owns the U+2063 FIRSTMATE_OP bytes and typed
-# away-supervisor construction. The away-exit predicate intentionally retains
-# its landed leading-U+2063 compatibility behavior.
+# bin/fm-operational-input.sh owns the U+2063 FIRSTMATE_OP bytes, typed
+# away-supervisor construction, and the parse of the current header with or
+# without its mark, which the away-exit predicate delegates to it. The predicate
+# also retains its landed leading-U+2063 compatibility behavior.
 AFK_FLAG_NAME=".afk"
 
 # Resolve the effective state dir. FM_STATE_OVERRIDE wins (testing); otherwise
