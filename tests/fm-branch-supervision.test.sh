@@ -54,7 +54,7 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *) fail "branch prompt lost the requested-result, progress-routine, or routine-silence rules" ;;
   esac
   case "$out_a" in
-    *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
+    *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done [at=<epoch>]: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
     *) fail "branch prompt lost the copy-or-abstain PR identity rule" ;;
   esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
@@ -893,7 +893,7 @@ test_away_record_relocates_main_owned_actions_to_the_branch() {
   status=$?
   [ "$status" -ne 6 ] || fail "branch fm-spawn still hit the partition under the record: $out"
   assert_contains "$out" "main is parked" "the spawn relocation did not announce itself"
-  assert_contains "$out" "already-queued unblocked work" "an arbitrary branch spawn was not held to queued work"
+  assert_contains "$out" "queued unblocked work" "an arbitrary branch spawn was not held to queued work"
   assert_not_contains "$out" "caps concurrent workers" "one ordinary task under a cap of 2 was refused"
   fm_write_meta "$home/state/task-b.meta" "window=fm-task-b" "kind=ship"
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
@@ -981,12 +981,12 @@ EOF
     "$ROOT/bin/fm-spawn.sh" task-arbitrary --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -eq 1 ] || fail "an arbitrary branch spawn exited $status, not 1: $out"
-  assert_contains "$out" "already-queued unblocked work" "an arbitrary id was dispatched under the record"
+  assert_contains "$out" "queued unblocked work" "an arbitrary id was dispatched under the record"
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
     "$ROOT/bin/fm-spawn.sh" task-queued --mode no-mistakes --yolo off 2>&1)
   status=$?
-  assert_not_contains "$out" "already-queued unblocked work" "a queued item was refused as if it were arbitrary: $out"
+  assert_not_contains "$out" "queued unblocked work" "a queued item was refused as if it were arbitrary: $out"
   [ "$status" -ne 6 ] || fail "a queued branch spawn hit the partition: $out"
   assert_contains "$out" "main is parked" "the queued spawn lost its relocation note"
 
@@ -994,7 +994,7 @@ EOF
     "$ROOT/bin/fm-spawn.sh" task-inflight --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -eq 1 ] || fail "an in-flight branch spawn exited $status, not 1: $out"
-  assert_contains "$out" "already-queued unblocked work" "an in-flight row was dispatched by the away branch"
+  assert_contains "$out" "queued unblocked work" "an in-flight row was dispatched by the away branch"
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SUPERVISION_ACTOR=branch \
     "$ROOT/bin/fm-spawn.sh" mate-new --secondmate 2>&1)
@@ -1034,7 +1034,7 @@ WRAPPER
 
   out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
     "$ROOT/bin/fm-spawn.sh" task-arbitrary --mode no-mistakes --yolo off 2>&1)
-  assert_not_contains "$out" "already-queued unblocked work" "main's attended spawn was held to the branch queued-work gate"
+  assert_not_contains "$out" "queued unblocked work" "main's attended spawn was held to the branch queued-work gate"
   pass "relocated branch spawn admits only already-queued dispatchable work, including on a manual-backend home"
 }
 
