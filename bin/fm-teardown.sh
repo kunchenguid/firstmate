@@ -85,8 +85,11 @@
 # not genuinely this task's destroys another worker's live work. Before the first
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
-# in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
+# in its worktree= or home=, unless the slot's owner claim names one specific
+# task. One live path with two task records is the reuse collision itself when
+# no claim can identify the current owner. When the claim names one task,
+# records it does not name are stale for that slot and take the skip-slot path
+# below; the claimed owner's teardown proceeds and returns the slot.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2208,6 +2211,14 @@ require_exclusive_worktree_slot_record() {
   local slot state_dir other other_id field other_path other_slot
   slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
+  # A readable claim naming one task identifies the current owner, so this
+  # scan must not veto; require_owned_task_worktree_slot then skip-slots the
+  # stale record or returns the claimed owner's slot. A missing or unreadable
+  # claim keeps the conservative refusal below.
+  fm_treehouse_slot_owner_state "$slot" "$record_id"
+  case "$FM_TREEHOUSE_SLOT_OWNER" in
+    mine|other) return 0 ;;
+  esac
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
@@ -2236,11 +2247,12 @@ require_exclusive_task_worktree_slot() {
 # Positive slot ownership, read from the claim the task that took the slot wrote
 # into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
 #
-# The record scan above proves that no OTHER task record names this slot. It
-# cannot prove that THIS record is not the stale one, because the task that took
-# the slot next may leave no record this scan can reach: its own worker may have
-# exited and its record been cleaned up, or it may belong to a home this machine
-# does not register. The claim closes that gap from the other side - it names the
+# The record scan above refuses a collision unless the slot claim names a
+# specific owner. It still cannot prove that THIS record is not the stale one
+# when no reachable claim exists, because the task that took the slot next may
+# leave no record this scan can reach: its own worker may have exited and its
+# record been cleaned up, or it may belong to a home this machine does not
+# register. The claim closes that gap from the other side - it names the
 # task that actually took the slot, and it is written under the same project lock
 # that allocates it - so a claim naming another task is proof the slot was
 # reassigned after this record was written.
