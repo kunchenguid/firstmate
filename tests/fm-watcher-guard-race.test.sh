@@ -483,6 +483,98 @@ test_retain_evidence_exit_leaves_lock_and_marker_untouched() {
   pass "a retain-evidence exit leaves the held lock and the malformed marker untouched"
 }
 
+# The absent-lock retry in both directions, synchronized against real
+# publication state. A publisher releases the lock before each evaluation and
+# republishes only when the reader asks; the reader's own retry sleep is
+# intercepted so the republish lands during retry one, during the last retry
+# the budget allows, or only after the whole budget is exhausted. A transient
+# absence within the budget must verify healthy; an absence that outlasts the
+# budget must still block with lock-absent, having spent every retry.
+test_absent_lock_retry_rides_restart_gap_but_blocks_sustained_absence() {
+  local dir state out pub reader budget
+  dir=$(make_case absent-retry)
+  state="$dir/state"
+  out="$dir/absent.out"
+  touch "$state/.last-watcher-beat"
+  budget=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_watcher_absent_attempts' _ "$LIB")
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
+    . "$1"
+    dir=$2 lockdir="$2/state/.watch.lock"
+    fm_current_pid me || exit 10
+    ident=$(fm_pid_identity "$me") || exit 11
+    FM_LOCK_OWNER_FOR=$lockdir
+    FM_LOCK_OWNER_FM_HOME=$FM_HOME
+    FM_LOCK_OWNER_WATCHER_PATH=$3
+    FM_LOCK_OWNER_PID_IDENTITY=$ident
+    printf "%s\n" "$me" > "$dir/publisher.pid"
+    while [ ! -e "$dir/reader.done" ]; do
+      if [ -e "$dir/cmd.release" ]; then
+        rm -f "$dir/cmd.release"
+        fm_lock_release "$lockdir"
+        : > "$dir/ack.release"
+      elif [ -e "$dir/cmd.acquire" ]; then
+        rm -f "$dir/cmd.acquire"
+        fm_lock_try_acquire "$lockdir" || exit 12
+        : > "$dir/ack.acquire"
+      fi
+      sleep 0.01
+    done
+    fm_lock_release "$lockdir"
+  ' _ "$LIB" "$dir" "$WATCH" > "$out" 2>&1 &
+  pub=$!
+  reader=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
+    . "$1"
+    dir=$2 state=$3 watch=$4 budget=$5
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -s "$dir/publisher.pid" ]; do command sleep 0.1; i=$((i + 1)); done
+    [ -s "$dir/publisher.pid" ] || { printf "publisher never started\n"; exit 1; }
+    pub_pid=$(cat "$dir/publisher.pid")
+    pub() {
+      : > "$dir/cmd.$1"
+      while [ ! -e "$dir/ack.$1" ]; do command sleep 0.01; done
+      rm -f "$dir/ack.$1"
+    }
+    sleeps=0
+    republish_at=
+    sleep() {
+      sleeps=$((sleeps + 1))
+      reasons="$reasons[$FM_WATCHER_HEALTH_REASON]"
+      [ "$sleeps" != "$republish_at" ] || pub acquire
+      command sleep "$@"
+    }
+    fails=0
+    for republish_at in 1 "$budget" never; do
+      pub acquire
+      pub release
+      [ ! -e "$state/.watch.lock" ] && [ ! -L "$state/.watch.lock" ] || { printf "lock still published before evaluation\n"; exit 1; }
+      sleeps=0
+      reasons=
+      if fm_watcher_healthy "$state" "$watch" 300 "$dir"; then rc=0; else rc=1; fi
+      [ "$republish_at" != never ] || pub acquire
+      case "$republish_at" in
+        never)
+          if [ "$rc" -ne 1 ] || [ "$FM_WATCHER_HEALTH_REASON" != lock-absent ] || [ "$sleeps" -ne "$budget" ]; then
+            fails=$((fails + 1))
+            printf "absence outlasting the budget: rc=%s reason=%s retries=%s%s\n" "$rc" "$FM_WATCHER_HEALTH_REASON" "$sleeps" "$reasons"
+          fi
+          ;;
+        *)
+          if [ "$rc" -ne 0 ] || [ "$FM_WATCHER_HEALTHY_PID" != "$pub_pid" ] || [ "$sleeps" -ne "$republish_at" ]; then
+            fails=$((fails + 1))
+            printf "republish during retry %s: rc=%s reason=%s pid=%s retries=%s%s\n" "$republish_at" "$rc" "$FM_WATCHER_HEALTH_REASON" "$FM_WATCHER_HEALTHY_PID" "$sleeps" "$reasons"
+          fi
+          ;;
+      esac
+      pub release
+    done
+    : > "$dir/reader.done"
+    printf "fails=%s\n" "$fails"
+  ' _ "$LIB" "$dir" "$state" "$WATCH" "$budget")
+  wait "$pub" || fail "absent-retry publisher failed: $(cat "$out")"
+  [ "${reader##*fails=}" = 0 ] || fail "absent-lock retry misjudged a gap: $reader"
+  pass "absent-lock retry rides a republish inside its $budget-retry budget and blocks an absence that outlasts it"
+}
+
 test_staged_publication_never_shows_partial_generation
 test_legacy_staggered_publication_is_observable
 test_generation_flip_mid_read_yields_no_false_blind
@@ -491,3 +583,4 @@ test_staged_acquire_publishes_complete_lock
 test_published_pid_is_verified_not_rewritten
 test_staging_applies_only_to_the_published_watch_lock
 test_retain_evidence_exit_leaves_lock_and_marker_untouched
+test_absent_lock_retry_rides_restart_gap_but_blocks_sustained_absence
