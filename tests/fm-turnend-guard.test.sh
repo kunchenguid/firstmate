@@ -455,9 +455,11 @@ test_hook_foreign_live_home_owner_is_advisory_not_block() {
   cp "$(command -v sleep)" "$dir/claude"
   "$dir/claude" 300 &
   pid=$!
-  for attempt in $(seq 1 50); do
+  attempt=0
+  while [ "$attempt" -lt 50 ]; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null || true)
     [ "$comm" = claude ] && break
+    attempt=$((attempt + 1))
     sleep 0.01
   done
   [ "$comm" = claude ] || fail "foreign owner did not become the expected claude process"
