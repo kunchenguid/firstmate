@@ -147,11 +147,22 @@ REG_EXISTED=0
 [ -f "$REG" ] && { cp "$REG" "$TMP/registry.before"; REG_EXISTED=1; }
 
 # Keep the parent charter as its durable source, but publish a remote copy whose
-# status path is the remote append-only relay log rather than a local Mac path.
+# status path is the remote append-only relay log and whose steering-inbox path
+# is the host-local parent-route inbox the remote control plane writes to,
+# rather than local Mac paths. The two parents differ only by suffix, so the
+# two whole-string rewrites are order-independent and every mention - bare
+# path, /*.msg listing, and handled/ acknowledgement - lands host-local.
+# Each rewrite stays its own plain assignment: on stock macOS bash a quoted
+# substitution nested inside a double-quoted argument leaks literal quotes
+# into the replacement text.
 PARENT_STATUS="$STATE/$ID.status"
 REMOTE_STATUS="$REMOTE_HOME/state/parent-replies.status"
+PARENT_INBOX="$STATE/$ID.inbox"
+REMOTE_INBOX="$REMOTE_HOME/state/parent-route/$ID.inbox"
 while IFS= read -r line || [ -n "$line" ]; do
-  printf '%s\n' "${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}"
+  line=${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}
+  line=${line//"$PARENT_INBOX"/"$REMOTE_INBOX"}
+  printf '%s\n' "$line"
 done < "$BRIEF" > "$TMP/charter.remote"
 
 PROJECTS_CSV=

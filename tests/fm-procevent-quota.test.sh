@@ -56,7 +56,26 @@ case "${QUOTA_AXI_MALFORMED:-}" in
     printf '{"schemaVersion":5,"providers":[{"provider":" codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}}]}\n'
     exit 0
     ;;
+  schema6-keyless)
+    printf '{"schemaVersion":6,"providers":[{"provider":"codex","accountKey":"openai-codex","quotaSemantics":{"status":"unknown","effectiveAvailability":[]}},{"provider":"codex","quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}\n'
+    exit 0
+    ;;
+  schema6-duplicate)
+    printf '{"schemaVersion":6,"providers":[{"provider":"codex","accountKey":"openai-codex","quotaSemantics":{"status":"unknown","effectiveAvailability":[]}},{"provider":"codex","accountKey":"openai-codex","quotaSemantics":{"status":"unknown","effectiveAvailability":[]}}]}\n'
+    exit 0
+    ;;
 esac
+# Schema 6: an expanded provider (codex, two Pi lanes) puts one provider id on
+# two rows keyed by accountKey; the schema 5 pair is the same state from an
+# older quota-axi that only knows one codex account.
+if [ "${QUOTA_AXI_SCHEMA6:-0}" = 1 ]; then
+  printf '{"schemaVersion":6,"providers":[{"provider":"codex","accountKey":"openai-codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":3,"runway":{"status":"projected_exhaustion"}}]}},{"provider":"codex","accountKey":"openai-codex-work","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":0,"runway":{"status":"exhausted_now"}}]}},{"provider":"cursor","accountKey":"default","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":5,"runway":{"status":"through_reset"}}]}}]}\n'
+  exit 0
+fi
+if [ "${QUOTA_AXI_SCHEMA5_PAIR:-0}" = 1 ]; then
+  printf '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":3,"runway":{"status":"projected_exhaustion"}}]}},{"provider":"cursor","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":5,"runway":{"status":"through_reset"}}]}}]}\n'
+  exit 0
+fi
 if [ "${QUOTA_AXI_EXHAUSTED_DETAIL:-0}" = 1 ]; then
   printf '{"schemaVersion":5,"providers":[{"provider":"codex","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":10,"runway":{"status":"exhausted_now"}},{"scope":"model:foo","status":"known","effectivePercentRemaining":5,"runway":{"status":"through_reset"}}]}}]}\n'
   exit 0
@@ -209,6 +228,49 @@ for malformed in schema duplicate types range runway availability known-empty se
   printf '%s\n' "$out" | grep -qx 'condition_polls: 1' || fail "$malformed snapshot did not stop immediately"
 done
 ok "poll rejects malformed schema-five snapshots"
+
+for malformed in schema6-keyless schema6-duplicate; do
+  out=$(QUOTA_AXI_MALFORMED="$malformed" QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 1 --threshold 10 --provider codex --timeout 1)
+  printf '%s\n' "$out" | grep -qx 'status: error' || fail "$malformed snapshot did not report an error"
+  printf '%s\n' "$out" | grep -qx 'condition_polls: 1' || fail "$malformed snapshot did not stop immediately"
+done
+ok "poll rejects schema-six snapshots missing or repeating an account key"
+
+out=$(QUOTA_AXI_SCHEMA6=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 1 --threshold 10 --provider '' --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: exhausted' || fail "schema 6 aggregate watch did not report the exhausted account"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 1' || fail "schema 6 aggregate watch did not fire on the first poll"
+detail=$(printf '%s\n' "$out" | sed -n 's/^detail: //p')
+printf '%s\n' "$detail" | jq -e '
+  [.summary[] | select(.provider == "codex") | .accountKey] == ["openai-codex", "openai-codex-work"] and
+  ([.summary[] | select(.accountKey == "openai-codex-work") | .best.runway.status] == ["exhausted_now"]) and
+  ([.summary[] | select(.accountKey == "openai-codex") | .best.effectivePercentRemaining] == [3])
+' >/dev/null || fail "schema 6 aggregate detail did not keep each account separate: $detail"
+ok "aggregate watch reads every schema 6 account row without combining them"
+
+out=$(QUOTA_AXI_SCHEMA6=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 1 --threshold 10 --provider cursor --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: low' || fail "schema 6 provider watch included another provider's exhausted account"
+detail=$(printf '%s\n' "$out" | sed -n 's/^detail: //p')
+printf '%s\n' "$detail" | jq -e '.provider == "cursor" and .accountKey == "default" and .best.effectivePercentRemaining == 5' >/dev/null \
+  || fail "schema 6 provider detail did not name the default account: $detail"
+out=$(QUOTA_AXI_SCHEMA6=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 1 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: exhausted' || fail "expanded provider watch did not report the exhausted account"
+printf '%s\n' "$out" | grep -qx 'condition_polls: 1' || fail "expanded provider watch did not stop immediately"
+detail=$(printf '%s\n' "$out" | sed -n 's/^detail: //p')
+printf '%s\n' "$detail" | jq -e '
+  .provider == "codex" and
+  (.summary | length) == 2 and
+  all(.summary[]; .provider == "codex") and
+  ([.summary[] | select(.accountKey == "openai-codex") | .best.effectivePercentRemaining] == [3]) and
+  ([.summary[] | select(.accountKey == "openai-codex-work") | .best.runway.status] == ["exhausted_now"])
+' >/dev/null || fail "provider watch did not preserve independent account evidence: $detail"
+ok "provider watch classifies every matching account and preserves accountKey in details"
+
+out=$(QUOTA_AXI_SCHEMA5_PAIR=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 1 --threshold 10 --provider codex --timeout 1)
+printf '%s\n' "$out" | grep -qx 'status: low' || fail "schema 5 provider watch did not bind the keyless codex row"
+detail=$(printf '%s\n' "$out" | sed -n 's/^detail: //p')
+printf '%s\n' "$detail" | jq -e '.provider == "codex" and (has("accountKey") | not) and .best.effectivePercentRemaining == 3' >/dev/null \
+  || fail "schema 5 provider detail changed shape: $detail"
+ok "the same path still binds a schema 5 row by provider alone"
 
 rm -f "$COUNT"
 out=$(QUOTA_AXI_UNKNOWN_FIRST=1 QUOTA_AXI_COUNT="$COUNT" PATH="$FAKEBIN:$PATH" "$BIN/fm-procevent-quota.sh" poll --interval 0.01 --threshold 10 --provider codex --timeout 1)

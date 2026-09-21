@@ -1142,8 +1142,8 @@ test_portable_serial_shards_partition_the_serial_lane() {
   shard=1
   while [ "$shard" -le "$count" ]; do
     listed=$("$RUNNER" --list --lane "portable-serial-${shard}of${count}" | wc -l | tr -d ' ')
-    [ "$listed" -ge 2 ] \
-      || fail "portable-serial-${shard}of${count} holds only $listed script(s)"
+    # One expensive suite can legitimately occupy a whole runner. Non-empty
+    # coverage is asserted above; script counts are not duration weights.
     [ "$listed" -le "$cap" ] \
       || fail "portable-serial-${shard}of${count} holds $listed of $total scripts"
     shard=$((shard + 1))
@@ -1223,7 +1223,7 @@ test_jobs_requires_proven_isolated() {
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "--jobs with portable-serial must refuse (exit 2), got $rc"
-  grep -Fq 'not in the proven-isolated set' "$tmp/err" \
+  grep -Fq 'portable serial lanes stay serial' "$tmp/err" \
     || fail "--jobs refusal message missing: $(cat "$tmp/err")"
   set +e
   "$RUNNER" --jobs 2 tests/fm-afk-inject-e2e.test.sh >"$tmp/out2" 2>"$tmp/err2"
@@ -1237,7 +1237,7 @@ test_jobs_requires_proven_isolated() {
   rc=$?
   set -e
   [ "$rc" -eq 2 ] || fail "--jobs with a portable serial shard must refuse, got $rc"
-  grep -Fq 'not in the proven-isolated set' "$tmp/err3" \
+  grep -Fq 'portable serial lanes stay serial' "$tmp/err3" \
     || fail "shard --jobs refusal message missing: $(cat "$tmp/err3")"
   rm -rf "$tmp"
   pass "--jobs refuses non-proven / stateful selections"

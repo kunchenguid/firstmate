@@ -9,8 +9,7 @@
 #
 # The destination is the home's role, never the caller's choice:
 #   - a secondmate home reports upward on its parent channel, resolved and
-#     appended through bin/fm-parent-channel-lib.sh in the same
-#     "<state> [key=<slug>]: <note>" shape the charter contract defines;
+#     appended through bin/fm-parent-channel-lib.sh under its channel contract;
 #   - a main home reports to the captain through the durable wake queue.
 # A poll observed in a secondmate home also receives a local durable wake after
 # the upward write, so the mate can handle its own poll observation.
@@ -42,11 +41,13 @@ FM_MERGE_OUTCOME_ALREADY_RECORDED=false
 #   self - this home performed the merge.
 #   poll - this home's merge poll detected the merge, so the canonical outcome
 #          also wakes this home after any upward hop needed by a secondmate.
-# Optional <authority> is yolo, away-grant, attended, or external. Yolo,
-# away-grant, and external are appended to the ledger line; attended remains
-# untagged. The merge entrypoint supplies its authority after forge acceptance,
-# while the poll supplies the persisted identity-bound value or external when
-# no matching record proves that this home authorized the merge.
+# Optional <authority> is away, attended, or external (the retired yolo and
+# away-grant values are still accepted for a persisted authority written before
+# the words model landed). Away, external, and the retired tags are appended to
+# the ledger line; attended remains untagged. The merge entrypoint supplies its
+# authority after forge acceptance, while the poll supplies the persisted
+# identity-bound value or external when no matching record proves that this
+# home authorized the merge.
 #
 # Returns 0 when the outcome is recorded (or already was), 2 on an invalid
 # request, 3 when this home's own role or parent binding cannot be read well
@@ -63,7 +64,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   FM_MERGE_OUTCOME_ALREADY_RECORDED=false
   case "$origin" in self|poll) ;; *) return 2 ;; esac
   case "$authority" in
-    yolo|away-grant|external) suffix=" $authority" ;;
+    away|external|yolo|away-grant) suffix=" $authority" ;;
     attended|'') ;;
     *) return 2 ;;
   esac
@@ -97,7 +98,7 @@ fm_merge_outcome_report() {  # <home> <state> <task-id> <pr-url> <origin> [autho
   fi
 
   if [ -n "$destination" ]; then
-    fm_parent_channel_append_once "$destination" "$line" || status=1
+    fm_parent_channel_append_once "$destination" "$(status_stamp_line "$line")" || status=1
   fi
   if [ "$status" -eq 0 ] && { [ "$origin" = poll ] || [ -z "$destination" ]; }; then
     fm_wake_append check "merged-$id-$FM_PR_URL" \

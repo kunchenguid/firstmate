@@ -221,24 +221,92 @@ phase_recovery() {
 }
 
 phase_teardown() {
-  local teardown_out corr rec
+  local teardown_out corr rec leftover leftover_rec other_corr
   corr=$(FM_HOME="$HOME_DIR" bash -c '
     . "$1"
     fm_pending_reply_create "$2" "$2/state" design "New routed work is in your backlog."
   ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$HOME_DIR") \
     || fail "could not seed receiver wake retirement state"
   rec="$HOME_DIR/state/pending-replies/$corr"
+  leftover=$(FM_HOME="$HOME_DIR" bash -c '
+    . "$1"
+    fm_pending_reply_create "$2" "$2/state" design "Earlier routed ask that already resolved."
+  ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$HOME_DIR") \
+    || fail "could not seed leftover resolved pending-reply"
+  leftover_rec="$HOME_DIR/state/pending-replies/$leftover"
+  # Settle every parent pending-reply for this mate (earlier send/handoff
+  # phases leave open records) so non-forced retirement mirrors a clean
+  # captain-approved close rather than hitting the unresolved-reply refuse.
   FM_HOME="$HOME_DIR" bash -c '
     . "$1"
-    fm_pending_reply_set "$2" phase resolved
-    fm_pending_reply_set "$2" delivered_epoch 1
-  ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$rec" \
-    || fail "could not settle receiver wake retirement state"
+    state="$2/state"
+    for rec in "$state/pending-replies"/*; do
+      [ -f "$rec" ] || continue
+      [ "$(fm_pending_reply_get "$rec" task_id)" = design ] || continue
+      fm_pending_reply_set "$rec" phase resolved
+      fm_pending_reply_set "$rec" delivered_epoch 1
+    done
+  ' _ "$ROOT/bin/fm-pending-reply-lib.sh" "$HOME_DIR" \
+    || fail "could not settle pending-replies before retirement"
+  mkdir -p "$TMP_ROOT/external-pending"
+  printf 'task_id=design\nphase=resolved\n' > "$TMP_ROOT/external-pending/escape"
+  mv "$HOME_DIR/state/pending-replies" "$HOME_DIR/state/pending-replies.safe"
+  ln -s "$TMP_ROOT/external-pending" "$HOME_DIR/state/pending-replies"
+  if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    "$ROOT/bin/fm-teardown.sh" design >/dev/null 2>&1; then
+    fail "local retirement accepted a symlinked pending-replies directory"
+  fi
+  assert_present "$SUB" "unsafe pending-replies retirement removed the secondmate home"
+  assert_present "$HOME_DIR/state/design.meta" "unsafe pending-replies retirement removed parent metadata"
+  assert_grep '- design ' "$HOME_DIR/data/secondmates.md" \
+    "unsafe pending-replies retirement removed the registry route"
+  assert_present "$TMP_ROOT/external-pending/escape" \
+    "unsafe local retirement removed an external pending reply"
+  rm -f "$HOME_DIR/state/pending-replies"
+  mv "$HOME_DIR/state/pending-replies.safe" "$HOME_DIR/state/pending-replies"
+  mkdir -p "$HOME_DIR/state/pending-replies/.delivery-confirmed-.."
+  mkdir -p "$TMP_ROOT/escape"
+  touch "$TMP_ROOT/escape/pwned"
+  printf 'task_id=design\nphase=resolved\ncorr_id=../../../../../escape/pwned\n' \
+    > "$HOME_DIR/state/pending-replies/aaaaaaaaaaaaaaaa"
+  if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    "$ROOT/bin/fm-teardown.sh" design >/dev/null 2>&1; then
+    fail "local retirement accepted a pending-reply with unsafe corr_id"
+  fi
+  assert_present "$SUB" "unsafe corr_id retirement removed the secondmate home"
+  assert_present "$HOME_DIR/state/design.meta" "unsafe corr_id retirement removed parent metadata"
+  assert_grep '- design ' "$HOME_DIR/data/secondmates.md" \
+    "unsafe corr_id retirement removed the registry route"
+  assert_present "$TMP_ROOT/escape/pwned" \
+    "unsafe corr_id cleanup deleted outside pending-replies"
+  rm -rf "$HOME_DIR/state/pending-replies/.delivery-confirmed-.."
+  rm -f "$HOME_DIR/state/pending-replies/aaaaaaaaaaaaaaaa"
+  other_corr=bbbbbbbbbbbbbbbb
+  printf 'task_id=other\nphase=resolved\ncorr_id=%s\n' "$other_corr" \
+    > "$HOME_DIR/state/pending-replies/$other_corr"
+  : > "$HOME_DIR/state/pending-replies/.delivery-confirmed-$other_corr"
+  printf 'task_id=design\nphase=resolved\ncorr_id=%s\n' "$other_corr" \
+    > "$HOME_DIR/state/pending-replies/aaaaaaaaaaaaaaaa"
+  if PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    "$ROOT/bin/fm-teardown.sh" design >/dev/null 2>&1; then
+    fail "local retirement accepted a pending-reply with mismatched corr_id"
+  fi
+  assert_present "$SUB" "mismatched corr_id retirement removed the secondmate home"
+  assert_present "$HOME_DIR/state/design.meta" "mismatched corr_id retirement removed parent metadata"
+  assert_grep '- design ' "$HOME_DIR/data/secondmates.md" \
+    "mismatched corr_id retirement removed the registry route"
+  assert_present "$HOME_DIR/state/pending-replies/$other_corr" \
+    "mismatched corr_id cleanup deleted another task's pending reply"
+  assert_present "$HOME_DIR/state/pending-replies/.delivery-confirmed-$other_corr" \
+    "mismatched corr_id cleanup deleted another task's delivery confirmation"
+  rm -f "$HOME_DIR/state/pending-replies/aaaaaaaaaaaaaaaa" \
+    "$HOME_DIR/state/pending-replies/$other_corr" \
+    "$HOME_DIR/state/pending-replies/.delivery-confirmed-$other_corr"
   printf 'confirmed:%s\n' "$corr" > "$HOME_DIR/state/.backlog-handoff-design.wake-pending"
   : > "$LOG"
   teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-teardown.sh" design 2>&1) \
-    || fail "teardown failed for the empty secondmate home"
+    || fail "teardown failed for the empty secondmate home: $teardown_out"
   printf '%s\n' "$teardown_out" | grep -F 'Backlog:' >/dev/null \
     && fail "secondmate teardown emitted a main-backlog completion reminder"
   assert_absent "$SUB" "teardown did not remove the retired secondmate home"
@@ -246,6 +314,7 @@ phase_teardown() {
   assert_absent "$HOME_DIR/state/.backlog-handoff-design.wake-pending" \
     "teardown left receiver wake state that could poison a replacement route"
   assert_absent "$rec" "teardown left the retired receiver wake correlation"
+  assert_absent "$leftover_rec" "teardown left a resolved pending-reply for the retired secondmate"
   assert_no_grep '- design ' "$HOME_DIR/data/secondmates.md" "teardown did not remove the registry route"
   # The parent's source projects are untouched (no write through a parent home).
   assert_present "$HOME_DIR/projects/alpha" "teardown disturbed a parent project"

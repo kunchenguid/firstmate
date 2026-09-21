@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Parity guard for firstmate's shell-lint definition.
 #
-# bin/fm-lint.sh must be the single owner that BOTH CI
-# (.github/workflows/ci.yml) and the pre-push gate (.no-mistakes.yaml
-# commands.lint) invoke, so the local lint can never diverge from CI again.
+# bin/fm-lint.sh is the single owner invoked by CI
+# (.github/workflows/ci.yml) and by the pre-push gate (.no-mistakes.yaml
+# commands.lint). CI runs its two full-rigor canonical partitions; the local
+# gate uses its context-selected default. Their selection differs deliberately,
+# while this owner keeps analysis flags, configuration, and tool versions from
+# drifting.
 # Regression origin: with no commands.lint configured, the local no-mistakes
-# lint step never ran the deterministic
-# `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh`, so PRs passed local
-# validation yet failed that exact check in CI on info/warning findings such as
-# SC2015, SC1007, and SC2034. A second axis was tool-version skew: CI's
-# ShellCheck floated with the runner image and still emitted SC2015, which
-# ShellCheck retired in 0.11.0. fm-lint.sh now pins one exact version and both
-# gates resolve it, so command, file set, config, AND version all match.
+# lint step never ran the deterministic shell lint, so PRs passed local
+# validation yet failed CI on info/warning findings such as SC2015, SC1007, and
+# SC2034. A second axis was tool-version skew: CI's ShellCheck floated with the
+# runner image and still emitted SC2015, which ShellCheck retired in 0.11.0.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -176,6 +176,48 @@ test_list_files_reports_the_shell_inventory() {
   [ "$(printf '%s\n' "$listed" | LC_ALL=C sort)" = "$expected" ] \
     || fail "fm-lint.sh --list-files did not return the complete shell inventory"
   pass "fm-lint.sh --list-files reports the complete shell inventory"
+}
+
+test_canonical_partitions_preserve_full_lint() {
+  local tmp fakebin all part selected log flags mode rc option
+  tmp=$(fm_test_tmproot fm-lint-partitions)
+  fakebin="$tmp/bin"
+  mkdir -p "$fakebin"
+  all=$(CI=true "$LINT" --list-files | LC_ALL=C sort)
+  : > "$tmp/union"
+  for part in 1of2 2of2; do
+    selected=$(CI=false GITHUB_ACTIONS=false "$LINT" --partition "$part" --list-files) \
+      || fail "partition $part must select full canonical roots even on a local branch"
+    [ -n "$selected" ] || fail "empty lint partition $part"
+    printf '%s\n' "$selected" >> "$tmp/union"
+    [ "$selected" = "$("$LINT" --partition "$part" --list-files)" ] \
+      || fail "partition $part is nondeterministic"
+    log="$tmp/$part.roots"
+    flags="$tmp/$part.flags"
+    mode="$tmp/$part.mode"
+    fm_lint_stub_shellcheck "$fakebin" "$log"
+    PATH="$fakebin:$PATH" FM_TEST_FLAG_LOG="$flags" FM_TEST_MODE_LOG="$mode" \
+      "$LINT" --partition "$part" > "$tmp/$part.out" 2>&1 \
+      || fail "canonical partition $part failed: $(cat "$tmp/$part.out")"
+    [ "$(LC_ALL=C sort "$log")" = "$(printf '%s\n' "$selected" | LC_ALL=C sort)" ] \
+      || fail "partition $part executed a different root set than it listed"
+    [ "$(LC_ALL=C sort -u "$flags")" = "$(printf 'exclude=none\nexternal-sources=yes')" ] \
+      || fail "partition $part weakened source-aware analysis"
+    [ "$(LC_ALL=C sort -u "$mode")" = on ] || fail "partition $part disabled full analysis"
+  done
+  [ "$(LC_ALL=C sort "$tmp/union")" = "$all" ] || fail "lint partitions lose or duplicate canonical roots"
+  for option in 0of2 3of2 1of3; do
+    rc=0
+    "$LINT" --partition "$option" --list-files > "$tmp/refused" 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "invalid partition $option was not refused"
+  done
+  rc=0
+  "$LINT" --partition 1of2 --fast > "$tmp/refused" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "partition accepted --fast"
+  rc=0
+  "$LINT" --partition 1of2 bin/fm-lint.sh > "$tmp/refused" 2>&1 || rc=$?
+  [ "$rc" = 2 ] || fail "partition accepted an explicit subset"
+  pass "two canonical lint partitions preserve complete source-aware coverage and reject weakened modes"
 }
 
 # fm_lint_stub_git <fakebin-dir>: install a git stub for the changed-file mode
@@ -1364,6 +1406,7 @@ SH
 
 test_help_reports_the_complete_interface
 test_list_files_reports_the_shell_inventory
+test_canonical_partitions_preserve_full_lint
 test_fast_mode_disables_extended_analysis
 test_ci_defaults_to_full_analysis
 test_ci_rejects_explicit_fast_mode
