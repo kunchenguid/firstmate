@@ -19,8 +19,8 @@
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. A continuity break is escalated and not re-armed.
 # `rebase` is the supported recovery after that escalation: it holds the reply
-# lifecycle lock, preserves the superseded cursor beside the active cursor,
-# resets only the active cursor to the empty prefix, and re-arms the source.
+# lifecycle lock, reports the superseded cursor, resets the cursor to the empty
+# prefix, and re-arms the source.
 # Replay is safe because ingest deduplicates source lines before appending them.
 #
 # `autohandle` is the runner's own entry into that same `handle`: it takes the
@@ -266,7 +266,7 @@ cmd_arm_locked() {
 }
 
 cmd_rebase_locked() {
-  local id=${1:-} sid path archive reason empty status_file ingest_lock
+  local id=${1:-} sid path old_offset old_hash reason empty status_file ingest_lock
   validate_id "$id"
   remote_route_exists "$id"
   continuity_is_broken "$id" \
@@ -281,12 +281,8 @@ cmd_rebase_locked() {
   [ -n "$reason" ] || reason='operator rebase retry failed'
   empty=$(empty_hash) || die "cannot establish the empty cursor hash"
   "$SCRIPT_DIR/fm-procevent.sh" retire "$(source_id "$id")" || return 1
-  archive=none
-  if [ -e "$path" ]; then
-    archive=$(umask 077; mktemp "$CURSOR_DIR/$id.cursor.rebased.XXXXXX") \
-      || die "cannot reserve superseded remote reply cursor"
-    mv -f -- "$path" "$archive" || die "cannot preserve superseded remote reply cursor"
-  fi
+  old_offset=$(sed -n 's/^offset=//p' "$path" 2>/dev/null | head -n 1)
+  old_hash=$(sed -n 's/^prefix_sha256=//p' "$path" 2>/dev/null | head -n 1)
   write_cursor "$id" 0 "$empty" || die "cannot reset remote reply cursor"
   rm -f -- "$(continuity_break_path "$id")" || die "cannot clear remote reply continuity record"
   if ! cmd_arm_locked "$id"; then
@@ -298,7 +294,7 @@ cmd_rebase_locked() {
   printf 'resolved [key=remote-reply-continuity-%s]: rebased to empty prefix\n' "$id" >> "$status_file" \
     || { fm_lock_release "$ingest_lock"; die "cannot close remote reply continuity escalation"; }
   fm_lock_release "$ingest_lock"
-  printf 'rebased: %s cursor=%s\n' "$id" "$archive"
+  printf 'rebased: %s superseded_offset=%s superseded_prefix_sha256=%s\n' "$id" "${old_offset:-none}" "${old_hash:-none}"
 }
 
 cmd_rebase() {
@@ -605,7 +601,7 @@ cmd_ingest() {
       printf 'continuity-superseded: %s (%s)\n' "$id" "$reason"
       return 3
     fi
-    line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
+    line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason); stream is unarmed until: fm-procevent-remote-reply.sh rebase $id"
     if ! continuity_is_broken "$id"; then
       printf '%s\n' "$line" >> "$status_file" \
         || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
