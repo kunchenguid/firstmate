@@ -12,6 +12,7 @@ set -u
 
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 PR_MERGE="$ROOT/bin/fm-pr-merge.sh"
+PROMOTE="$ROOT/bin/fm-promote.sh"
 POLL="$ROOT/bin/fm-pr-poll.sh"
 WATCH="$ROOT/bin/fm-watch.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -259,6 +260,15 @@ run_merge_entry() {
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
+}
+
+run_promote_entry() {
+  local dir=$1
+  shift
+  FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+    FM_STATE_OVERRIDE="$dir/home/state" FM_DATA_OVERRIDE="$dir/home/data" \
+    FM_TEST_GUARD_LOG="$dir/guard.log" \
+    "$PROMOTE" "$@"
 }
 
 # shellcheck disable=SC2016 # Literal rejected URL bytes are parser test data.
@@ -582,6 +592,44 @@ test_control_plane_fields_after_pr_stay_authenticated() {
   ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
     || fail "a foreign line after pr= still authenticated the armed poll"
   pass "owned control-plane fields after pr= keep the poll authentic while a foreign line still refuses"
+}
+
+# Promotion rewrites the record by stripping kind=/mode=/yolo= and adding the
+# chosen ship values, so writing them back at the end would put them after pr=
+# and refuse the armed poll. The rewrite must keep the PR identity the tail.
+test_promotion_rewrite_keeps_an_armed_poll_authenticated() {
+  local dir state head
+  dir=$(make_case promotion-after-pr)
+  state="$dir/home/state"
+  head=0123456789abcdef0123456789abcdef01234567
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/1 kind=scout
+  printf 'pr_head=%s\n' "$head" >> "$state/task-a.meta"
+  mkdir -p "$dir/home/data/task-a"
+  cat > "$dir/home/data/task-a/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Investigate why the identity check is failing.
+## Firstmate spec
+Ship the identity-check fix.
+EOF
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/1
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "promotion fixture poll was not authentic before promotion"
+
+  run_promote_entry "$dir" task-a --mode no-mistakes --yolo off \
+    > "$dir/promote.stdout" 2> "$dir/promote.stderr" \
+    || fail "promotion of a scout record carrying an armed poll failed: $(cat "$dir/promote.stderr")"
+
+  grep -qxF 'kind=ship' "$state/task-a.meta" || fail "promotion did not record kind=ship"
+  grep -qxF 'mode=no-mistakes' "$state/task-a.meta" || fail "promotion did not record the mode"
+  grep -qxF 'yolo=off' "$state/task-a.meta" || fail "promotion did not record the yolo posture"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "the promoted record refused the armed poll"
+
+  printf 'window=unexpected\n' >> "$state/task-a.meta"
+  ! fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "a foreign line after pr= still authenticated the armed poll"
+  pass "promotion keeps the armed poll authentic and a foreign line after pr= still refuses"
 }
 
 test_valid_recording_and_merge_derivation() {
@@ -2842,6 +2890,7 @@ test_gitlab_merged_poll_retires
 test_invalid_entrypoints_have_zero_side_effects
 test_draft_pull_request_is_not_armed
 test_control_plane_fields_after_pr_stay_authenticated
+test_promotion_rewrite_keeps_an_armed_poll_authenticated
 test_valid_recording_and_merge_derivation
 test_rejected_metacharacter_bytes_are_inert
 test_static_poll_contract

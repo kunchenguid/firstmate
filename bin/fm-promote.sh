@@ -258,12 +258,15 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META" > "$TMP"
+# The PR identity parser reads every unrecognised line after pr= as corruption,
+# so the new contract lines go first and the preserved body keeps pr=/pr_head=
+# as the record's tail.
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
-} >> "$TMP"
+  grep -v -e '^kind=' -e '^mode=' -e '^yolo=' "$META"
+} > "$TMP"
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"
   TMP=
