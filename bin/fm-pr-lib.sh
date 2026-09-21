@@ -1206,7 +1206,7 @@ fm_pr_poll_quarantine_stale_secondmate() (
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
   [ "$(grep '^kind=' "$meta")" = kind=secondmate ] || return 1
   # Do not reinterpret a registered custom check or a check-only unknown file.
-  [ ! -e "$state/$id.check-trust" ] && [ ! -L "$state/$id.check-trust" ] || return 1
+  fm_custom_check_registered "$state" "$id" && return 1
   [ -e "$state/$id.pr-poll" ] || [ -e "$state/$id.pr-poll-registration" ] \
     || [ -e "$state/$id.pr-poll-retirement" ] || return 1
   trap 'if [ "${#locks[@]}" -gt 0 ]; then for lock in "${locks[@]}"; do fm_lock_release "$lock"; done; fi' EXIT
@@ -1218,7 +1218,7 @@ fm_pr_poll_quarantine_stale_secondmate() (
   device=$(fm_pr_file_device "$state") || return 1
   fm_pr_regular_destination_on_device_or_absent "$meta" "$device" || return 1
   [ -f "$meta" ] && [ "$(grep '^kind=' "$meta")" = kind=secondmate ] || return 1
-  [ ! -e "$state/$id.check-trust" ] && [ ! -L "$state/$id.check-trust" ] || return 1
+  fm_custom_check_registered "$state" "$id" && return 1
   fm_pr_poll_artifacts_valid "$state" "$id" "$template" && return 1
   fm_pr_poll_registration_device_shifted "$state" "$id" "$template" && return 1
   fm_pr_poll_retirement_state_valid "$state" "$id" && return 1

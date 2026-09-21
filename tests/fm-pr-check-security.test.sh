@@ -1883,8 +1883,8 @@ test_secondmate_quarantine_queue_failure() {
 }
 
 test_secondmate_quarantine_safety_boundaries() {
-  local dir state variant before out url=https://github.com/o/r/pull/9
-  for variant in valid stale-template orphan-receipt partial ship symlink hardlink custom busy; do
+  local dir state variant before out trust_before url=https://github.com/o/r/pull/9
+  for variant in valid stale-template stale-trust orphan-receipt partial ship symlink hardlink custom busy; do
     dir=$(make_case "quarantine-$variant")
     state="$dir/home/state"
     fm_write_meta "$state/domain.meta" 'kind=secondmate' 'mode=secondmate' "pr=$url"
@@ -1892,6 +1892,13 @@ test_secondmate_quarantine_safety_boundaries() {
     case "$variant" in
       valid) ;; # A legitimate open persistent poll keeps its identity.
       stale-template) printf '\n# obsolete template\n' >> "$state/domain.check.sh" ;;
+      stale-trust)
+        chmod 700 "$state/domain.check.sh"
+        FM_HOME="$dir/home" "$REGISTER" domain >/dev/null || fail "stale trust fixture registration failed"
+        seed_canonical_poll "$dir" domain "$url"
+        fm_write_meta "$state/domain.meta" 'kind=secondmate'
+        trust_before=$(shasum -a 256 "$state/domain.check-trust")
+        ;;
       orphan-receipt)
         fm_write_meta "$state/domain.meta" 'kind=secondmate'
         printf 'invalid old receipt\n' > "$state/domain.pr-poll-retirement"
@@ -1930,10 +1937,15 @@ test_secondmate_quarantine_safety_boundaries() {
       || fail "$variant quarantine watcher failed: $(cat "$dir/watch.err")"
     out=$(cat "$dir/watch.out")
     case "$variant" in
-      stale-template|orphan-receipt|partial)
+      stale-template|stale-trust|orphan-receipt|partial)
         case "$out" in *'rejected stale secondmate PR poll domain'*) ;; *) fail "$variant was not preserved: $out" ;; esac
         assert_poll_absent "$state" domain
         ! grep -q ' state ' "$dir/gh.log" || fail "$variant queried stale PR data"
+        if [ "$variant" = stale-trust ]; then
+          [ -f "$state/domain.check-trust" ] || fail "stale trust evidence was removed"
+          [ "$(shasum -a 256 "$state/domain.check-trust")" = "$trust_before" ] \
+            || fail "stale trust evidence was changed"
+        fi
         ;;
       *)
         [ "$(poll_artifact_snapshot "$state" domain)" = "$before" ] || fail "$variant poll was changed by quarantine"

@@ -1218,7 +1218,36 @@ test_owned_arm_detects_lost_health() {
   pass "five-task turn-end block stays strict and the owned arm detects post-readiness health loss"
 }
 
+test_owned_arm_uses_poll_derived_grace() {
+  local dir state fakebin armout armpid watcher_pid i
+  dir=$(make_case owned-arm-derived-grace)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_POLL=600 FM_ARM_ATTACH_POLL=0.05 \
+    FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH_ARM" > "$armout" 2> "$dir/arm.err" &
+  armpid=$!
+  for i in $(seq 1 100); do
+    grep -qF 'watcher: started pid=' "$armout" && break
+    sleep 0.1
+  done
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$watcher_pid" "$armout" || fail "long-poll watcher did not start"
+  fm_touch_epoch "$(( $(date +%s) - 330 ))" "$state/.last-watcher-beat"
+  sleep 0.5
+  is_live_non_zombie "$armpid" || fail "arm rejected a healthy watcher inside the poll-derived grace"
+  is_live_non_zombie "$watcher_pid" || fail "arm killed a healthy watcher inside the poll-derived grace"
+  kill -TERM "$armpid" 2>/dev/null || true
+  wait "$armpid" 2>/dev/null || true
+  ! is_live_non_zombie "$watcher_pid" || fail "arm cleanup left the long-poll watcher alive"
+  ! grep -q 'reason=watcher-unhealthy' "$state/.watch-cycle-exits.log" \
+    || fail "healthy long-poll watcher was classified unhealthy"
+  pass "owned arm shares the poll-derived watcher grace"
+}
+
 test_owned_arm_detects_lost_health
+test_owned_arm_uses_poll_derived_grace
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start
 test_pid_identity_is_locale_invariant
