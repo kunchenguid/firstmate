@@ -1864,6 +1864,18 @@ case "${1:-} ${2:-}" in
     printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":4242,"foreground_processes":[{"pid":4243,"name":"claude","argv":["claude"],"cmdline":"claude"}]}}}\n' \
       "$(cat "$D/herdr-pane")"
     exit 0 ;;
+  'pane run')
+    # The adapter submits a pre-launch line with `pane run` and then confirms
+    # from the pane's render that the shell accepted it, so this fake records
+    # what a real shell would have echoed.
+    printf '> %s\n' "${4:-}" >> "$D/herdr-screen"
+    exit 0 ;;
+  'pane read')
+    # A real pane renders each accepted command followed by the shell's next
+    # prompt, which is what tells an accepted line from one still being typed.
+    [ ! -f "$D/herdr-screen" ] || cat "$D/herdr-screen"
+    printf '>\n'
+    exit 0 ;;
   'pane send-text')
     # Mirrors the tmux fake's `becomes`: delivering the launch brief is what
     # makes an agent exist on this pane, so the control plane's alive-wait can

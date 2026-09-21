@@ -260,7 +260,7 @@ pass "real herdr: BOTH workspace ids/labels AND both tasks' pane ids survive a s
 
 fm_backend_herdr_kill "$SESSION:$SM_PANE_ID"
 
-# --- send_text_line (atomic run) ---------------------------------------------
+# --- send_text_line (confirmed run) ------------------------------------------
 
 fm_backend_herdr_send_text_line "$TARGET" "echo captain-on-deck-line" \
   || fail "send_text_line failed"
@@ -270,7 +270,7 @@ case "$out" in
   *captain-on-deck-line*) : ;;
   *) fail "real herdr: send_text_line did not run and echo the line"$'\n'"$out" ;;
 esac
-pass "real herdr: send_text_line runs a command atomically (pane run) and its output is capturable"
+pass "real herdr: send_text_line runs a command, confirms the shell accepted it, and its output is capturable"
 
 # --- send_literal + send_key(Enter), the two-step launch-command form -------
 

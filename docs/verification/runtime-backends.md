@@ -949,7 +949,8 @@ The CLI matrix was checked directly:
 | Guarantee | Command shape | Result |
 | --- | --- | --- |
 | Explicit session routing | `herdr <verb> ... --session <name>` | Reached the named session even while another server was running. |
-| Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter. |
+| Literal send | `herdr pane send-text <pane> <text> --session <name>` | Left text unsubmitted until Enter, and dropped any newline inside the text rather than submitting there. |
+| Submitted run | `herdr pane run <pane> <command> --session <name>` | Delivered `<command>` followed by a carriage return, with no paste brackets and no reordering across back-to-back calls; the receiving shell can still absorb that carriage return, so the caller must confirm. See "Herdr pre-launch line submission". |
 | Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
 | Viewport capture | `herdr pane read <pane> --source visible` | Verified on 2026-09-17 against Herdr 0.8.0 (protocol 19): `herdr pane read --help` documents `--source <SOURCE>` with `[possible values: visible, recent, recent-unwrapped, detection]`; `--source visible` exited 0 and returned 51 lines (the viewport) while `--source recent --lines 200` returned 200. This is the viewport-only read behind `fm_backend_herdr_visible_capture`, which Kimi's trust-dialog gate requires. |
@@ -959,6 +960,72 @@ The CLI matrix was checked directly:
 
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
+
+### Herdr pre-launch line submission
+
+Measured 2026-09-21 on macOS aarch64 (Darwin 24.6.0) with Herdr 0.9.1 protocol 22 and treehouse v2.0.0, in an isolated `fm-lab-` session.
+
+Herdr's own CLI reference documents `pane run` as the submitting primitive: "`pane run` honors live bracketed-paste mode and submits text plus Enter atomically", and "Prefer it over `send-text` plus `send-keys Enter` for commands; the separate send operations remain low-level and non-submitting".
+`herdr pane send-text --help` repeats the same routing hint: "next: herdr pane run <PANE_ID> <COMMAND> sends text and Enter in one call".
+
+Delivery matches that contract.
+A pane whose foreground process read its own raw stdin received exactly the expected bytes for two back-to-back `pane run` calls, both in a freshly created pane and in one that had already entered a `treehouse get` subshell:
+
+```sh
+herdr pane run <pane> 'python3 /tmp/dumpin.py' --session <lab>   # setraw, read stdin, print repr
+herdr pane run <pane> 'AAA' --session <lab>
+herdr pane run <pane> 'BBB' --session <lab>
+```
+
+```text
+CAPTURED=b'AAA\rBBB\r'
+```
+
+The carriage returns are present, ordered, and unbracketed, so a lost submission is never Herdr dropping or reordering input.
+
+The receiving shell is where a submission is lost.
+Driving the real `bin/fm-spawn.sh` on the Herdr backend reproduced that loss on every attempt, in exactly the shape the fleet hit: the pre-launch exports and the staged launch source concatenated onto one input line, and no agent started.
+
+```text
+> export GOTMPDIR=/tmp/fm-launchline1/gotmp
+export COMPACT_ADVISER_DISABLE=1
+export FM_TASK_ID=launchline1
+> export COMPACT_ADVISER_DISABLE=1export FM_TASK_ID=launchline1. '/tmp/fm-launchline1+7a3df.../launch.s1789980517.17689.31725.sh'
+export: not valid in this context: /tmp/fm-launchline1+7a3df.../launch.s1789980517.17689.31725.sh
+```
+
+The trigger is a pane whose shell has not finished taking over the tty when the first line is written, followed by a nested shell.
+Writing `treehouse get` into a pane that had settled for 1.5 seconds first, then sending the same three lines, produced three separate commands; writing it into a brand-new pane produced the merge.
+An early write with no nested shell, and a settled write with one, were both clean, so neither condition alone is sufficient.
+Consecutive and even concurrent `pane run` calls into a shell that was ready are always accepted separately, which is why the defect never appeared in adapter-level pane tests.
+
+Two rendered states tell a typed line from an accepted one, read through `pane read --source recent-unwrapped`:
+
+```text
+typed, not yet accepted        accepted
+'private/tmp'                  '> export PENDING=1'
+'> export PENDING=1'           ''
+                               'private/tmp'
+                               '>'
+```
+
+A typed line is the last non-empty rendered line; an accepted one always has the shell's next prompt rendered after it.
+Herdr exposes no pty input-queue state to read instead, so the render is the primary signal: `pane get` carries agent status, cwd, and a revision counter, none of which separate a typed line from an accepted one.
+
+The render alone is wrong for one shape, so a second independent signal carries the same positive verdict.
+A command that blocks without printing - an agent, `sleep`, a server - leaves its own echoed line as the last rendered line for as long as it runs, which renders identically to pending text.
+`pane process-info` separates them at the kernel: a pane still sitting at its prompt is shells-only, so anything else in its foreground process group is proof the shell already took the line.
+
+```text
+pane still at its prompt                        the line is already running
+"foreground_processes":[{"name":"zsh",...}]     "foreground_processes":[{"name":"sleep",...}]
+```
+
+`fm_backend_herdr_submitted_line_state` reads both, and `fm_backend_herdr_send_text_line` polls it after every `pane run`, recovering an absorbed carriage return with one `pane send-keys enter` and never retyping the command.
+
+`tests/fm-backend-herdr-launch-line-e2e.test.sh` is the guard that refreshes this entry.
+It drives the real spawn against real Herdr three times and fails naming the Herdr version; run it after a Herdr upgrade.
+`tests/fm-backend-herdr.test.sh` pins the classifier and the recovery ladder portably.
 
 ### fm-remote server birth and login-keychain access
 
