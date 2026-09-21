@@ -1079,9 +1079,22 @@ else
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
-    # Ring the doorbell, best-effort: no ring outcome changes the exit status,
-    # because the watcher owns loss detection from here, either through its
-    # bounded re-ring ladder or direct unavailable-endpoint recovery.
+    # Native Orca steering keeps the Firstmate inbox as the durable record and
+    # uses Orca mail only as the attention/consumption channel. A native send
+    # failure falls back to the existing terminal doorbell; it never changes
+    # the inbox delivery result.
+    if [ "$TARGET_BACKEND" = orca ] && [ "$(fm_meta_get "$TARGET_META" orca_mode)" = supervised ]; then
+      if fm_backend_source orca; then
+        native_dispatch=$(fm_meta_get "$TARGET_META" orca_dispatch_id)
+        native_run=$(fm_meta_get "$TARGET_META" orca_run_id)
+        native_task=$(fm_meta_get "$TARGET_META" orca_task_id)
+        native_line=$(fm_task_inbox_doorbell_line "$INBOX_RECORD" || true)
+        if [ -n "$native_line" ] && fm_backend_orca_supervised_send "$native_run" "$native_dispatch" "$native_task" "$native_line"; then
+          exit 0
+        fi
+      fi
+      echo "fm-send: native Orca steering was not enqueued; falling back to the terminal doorbell" >&2
+    fi
     ring_rc=0
     fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
     case "$ring_rc" in

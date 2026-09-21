@@ -1152,6 +1152,37 @@ if [ "$HAVE_RUN" = 1 ]; then
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi
 
+# Native Orca supervised workers are the authoritative fallback when no
+# no-mistakes run owns this crew.  The native Run/Task/Dispatch record is stable;
+# terminal handles and pane/incarnation values are only routing evidence.
+if [ "$TASK_BACKEND" = orca ] && [ "$(meta_value orca_mode)" = supervised ]; then
+  fm_backend_source orca || emit unknown native-worker "native Orca adapter unavailable"
+  NATIVE_DISPATCH=$(meta_value orca_dispatch_id)
+  NATIVE_SHOW=$(fm_backend_orca_supervised_worker_show "$NATIVE_DISPATCH" 2>/dev/null) || {
+    emit unknown native-worker "native Orca Dispatch unavailable"
+  }
+  fm_backend_orca_supervised_identity_matches "$META" "$NATIVE_SHOW" || {
+    emit unknown native-worker "native Orca identity mismatch"
+  }
+  fm_backend_orca_supervised_set_from_json "$NATIVE_SHOW" show
+  NATIVE_STATE=$(printf '%s:%s' "${FM_ORCA_SUPERVISED_WORKER_STATE:-}" "${FM_ORCA_SUPERVISED_DISPATCH_STATUS:-}" | tr '[:upper:]' '[:lower:]')
+  case "$NATIVE_STATE" in
+    *failed*|*cancelled*) emit failed native-worker "native Orca worker failed" ;;
+    *succeeded*|*completed*|*settled*|*done*) emit 'done' native-worker "native Orca worker settled" ;;
+    *waiting*|*paused*|*blocked*|*approval*) emit parked native-worker "native Orca worker waiting" ;;
+    *running*|*starting*|*working*|*active*|*ready*) emit working native-worker "native Orca worker active" ;;
+    *)
+      if [ "${FM_ORCA_SUPERVISED_SETTLED:-}" = true ]; then
+        emit 'done' native-worker "native Orca worker settled"
+      elif [ "${FM_ORCA_SUPERVISED_LIVENESS:-}" = live ]; then
+        emit working native-worker "native Orca worker live"
+      else
+        emit unknown native-worker "native Orca worker state unavailable"
+      fi
+      ;;
+  esac
+fi
+
 # --- fallback: no run attributed to this crew ------------------------------
 # The run-step path above already handled any crew with a run, regardless of pane
 # liveness, so a finished-but-pane-closed crew never reaches here. Down here there

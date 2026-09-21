@@ -25,10 +25,15 @@ No manual repository registration is required.
 Open the Orca app to watch a task's terminal.
 Routine supervision uses the recorded endpoint through `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'`.
 Enter and Ctrl-C are supported; Escape is not.
+Ordinary ships and scouts may opt into native supervision with `--orca-mode supervised`.
+The native mode is capability-gated and currently supports agent-first Claude, Codex, and Cursor launches; an unavailable runtime, schema, command, or response shape uses the tested terminal adapter instead.
+Secondmate spawns never use native supervision.
 
 ## Task shape and metadata
 
 Each task has one Orca-managed git worktree and one Orca terminal.
+Native supervision additionally records the Orca Run, Task, Dispatch, and worker identities.
+Those durable native identities are authoritative; terminal handles, PTY/incarnation ids, and pane keys are rebindable routing evidence.
 `fm-spawn.sh` does not call Treehouse for Orca tasks.
 The normal isolation and unlanded-work refusal rules still apply.
 
@@ -47,10 +52,15 @@ Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the w
 ## Current lifecycle and safety
 
 Spawn registers the repository, creates an independent worktree, reuses only the verified `result.terminal.handle` returned by Orca or creates a terminal explicitly, installs harness hooks, records metadata, and launches the selected harness.
-Exact command flags and response parsing are owned by `bin/backends/orca.sh` and script help.
+With `--orca-mode supervised`, it creates a Run, starts the worker through Orca's native supervised-worker command, verifies the returned Run/Task/Dispatch/worker/worktree identities, and requires a complete exact transcript observation from `worker-read` before considering launch consumption proven.
+Exact command flags and response parsing are owned by `bin/backends/orca.sh`, `bin/backends/orca-supervised.sh`, and script help.
 
-`fm-peek.sh` reads with `orca terminal read`.
-An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and only its best-effort constant doorbell passes through Orca's submit machinery.
+`fm-peek.sh` reads native workers with transcript-first `worker-read` source/cursor/clipping semantics and marks terminal fallback or clipped output as incomplete evidence.
+A native worker read or state projection refuses an identity mismatch instead of following a stale terminal handle.
+An ordinary metadata-routed `fm-send.sh` text steer becomes a durable steering-inbox record, and native supervision sends only its constant doorbell through Orca's mailbox; a mailbox failure falls back to the existing terminal doorbell.
+Recovery uses `worker-abandon` only when process state is unknown.
+Cleanup uses `worker-release` only after exact worker identity, coordinator ownership, and settled state are proven.
+Firstmate's durable inbox, status events, captain decisions, validation, delivery, and unlanded-work contracts remain authoritative.
 On the typed plane, `fm-send.sh` verifies composer clearance through the fleet-wide classifier in `bin/fm-composer-lib.sh`, retrying Enter without retyping when a slash popup first fills an argument placeholder.
 The composer read is one bounded tail of the live terminal and never pages backward into scrollback, so a stale startup banner cannot compete with the bottom-anchored composer.
 A bare shell row is `unknown`, not an empty agent composer, and plain-text captures degrade a glyph row carrying trailing text to `unknown` rather than a false `pending`.
@@ -62,7 +72,7 @@ A scout still requires its report and completed decision inventory.
 A ship still refuses dirty or unlanded work.
 Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
-After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command.
+After those checks, terminal mode closes the exact terminal, while native mode releases the exact settled Dispatch, and both modes release the exact worktree with Orca's worktree command.
 It never raw-deletes an Orca worktree.
 A close the CLI never attempted, because `orca` is not on the path, stops cleanup with the metadata intact even under `--force`: removing those records would leave nothing on disk naming a terminal that may still be live.
 Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/runtime-backends.md) "Endpoint close" owns what this arm can and cannot prove about its own close.
@@ -73,7 +83,7 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 - The app must be running and report ready.
 - Secondmate spawns are unsupported.
 - Escape is unsupported.
-- Orca exposes no stable CLI version or protocol marker, so readiness is the compatibility gate rather than a version floor.
+- Native supervision requires agent-context schema 1 and the required command shapes, while terminal supervision continues to use runtime readiness as its compatibility gate.
 - Only the verified terminal-handle and worktree result fields are accepted; speculative response shapes are rejected.
 - Orca's worktree shape is unverified against the spawn-time Claude workspace-trust check in `bin/fm-claude-trust.sh`, which refuses any path that is not a linked git worktree sharing the project's git common dir, so a claude spawn on Orca fails loudly at that check rather than launching if Orca clones instead of linking.
 

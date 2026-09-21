@@ -1689,19 +1689,27 @@ The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discov
 
 ## Orca
 
-Real readiness was verified against `/usr/local/bin/orca` with `/Applications/Orca.app` bundle version 1.4.116.
+Real readiness and native capability were verified on 2026-09-21 against Orca 1.4.206.
 
 ```sh
+orca --version
 orca status --json
+FM_ORCA_SUPERVISED_LIVE=1 bin/fm-test-run.sh tests/fm-backend-orca.test.sh
 ```
 
-Observed fields:
+Observed live output:
 
 ```text
+1.4.206
 result.runtime.reachable=true
 result.runtime.state=ready
+ok - native Orca 1.4.206 capability gate: claude schema=1 commands=236
+ok - native Orca 1.4.206 capability gate: codex schema=1 commands=236
+# cursor absent, not verified here
 ```
 
+The guard performs a token-free real `agent-context --json` capability probe for every installed supported agent-first harness and names absent harnesses rather than treating them as verified.
+The required native command shapes include Run creation, worker start/read/show/abandon/list/release, mailbox send/check, terminal wait, and worktree inspection.
 `orca terminal create --json` returned `result.terminal.handle`.
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
 Speculative bare ids and nested terminal fields were deliberately rejected.
@@ -1712,7 +1720,7 @@ tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```
 
-The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
+The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, native capability and worker-read projections, recovery/release boundaries, and path-matched release refusal.
 
 ## cmux
 

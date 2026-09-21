@@ -407,6 +407,7 @@ fm_backend_orca_worktree_id_valid() {  # <value>
 fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
+  local orca_mode orca_run_id orca_task_id orca_dispatch_id orca_worker_id orca_incar orca_pane native_id
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
@@ -514,6 +515,30 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
       }
       terminal=$(fm_backend_meta_exact_value "$meta" terminal) || terminal=
       worktree_id=$(fm_backend_meta_exact_value "$meta" orca_worktree_id) || worktree_id=
+      orca_mode=$(fm_meta_get "$meta" orca_mode)
+      case "$orca_mode" in
+        ''|terminal) ;;
+        supervised)
+          orca_run_id=$(fm_backend_meta_exact_value "$meta" orca_run_id) || orca_run_id=
+          orca_task_id=$(fm_backend_meta_exact_value "$meta" orca_task_id) || orca_task_id=
+          orca_dispatch_id=$(fm_backend_meta_exact_value "$meta" orca_dispatch_id) || orca_dispatch_id=
+          orca_worker_id=$(fm_backend_meta_exact_value "$meta" orca_worker_id) || orca_worker_id=
+          orca_incar=$(fm_backend_meta_exact_value "$meta" orca_terminal_incarnation) || orca_incar=
+          orca_pane=$(fm_backend_meta_exact_value "$meta" orca_pane_key) || orca_pane=
+          for native_id in "$orca_run_id" "$orca_task_id" "$orca_dispatch_id" "$orca_worker_id" "$orca_incar" "$orca_pane"; do
+            case "$native_id" in
+              ''|*$'\n'*|*$'\r'*|*$'\t'*)
+                echo "REFUSED: native Orca identity metadata for task $id is missing or malformed; preserving task state." >&2
+                return 1
+                ;;
+            esac
+          done
+          ;;
+        *)
+          echo "REFUSED: task $id has an unknown Orca mode '$orca_mode'; preserving task state." >&2
+          return 1
+          ;;
+      esac
       [ -n "$terminal" ] || {
         echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
         return 1

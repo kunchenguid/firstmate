@@ -3484,8 +3484,19 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
   if [ -n "$T_ORCA" ]; then
-    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
-      || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
+    if [ "$(meta_value "$META" orca_mode)" = supervised ]; then
+      fm_backend_source orca || {
+        echo "REFUSED: native Orca adapter is unavailable for task $ID; preserving task state." >&2
+        exit 1
+      }
+      fm_backend_orca_supervised_release "$META" || {
+        echo "REFUSED: native Orca Dispatch for task $ID is not proven owned and settled; preserving task state." >&2
+        exit 1
+      }
+    else
+      fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+        || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
+    fi
   fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
