@@ -24,12 +24,13 @@ bearings() {
     FM_BEARINGS_NOW="$NOW" "$ROOT/bin/fm-bearings-snapshot.sh" --json
 }
 
-record() { # home id number forge-state mergeability [hold]
+record() { # home id number forge-state mergeability [hold [url]]
   local home=$1 id=$2 number=$3 state=$4 mergeable=$5 hold=${6:-}
+  local url=${7:-https://github.com/o/r/pull/$number}
   mkdir -p "$home/data/$id"
-  printf -- '- [ ] %s - Contribution %s https://github.com/o/r/pull/%s (repo: sample) (kind: ship) %s\n' \
-    "$id" "$id" "$number" "$hold" >> "$home/data/backlog.md"
-  jq -n --arg task "$id" --arg url "https://github.com/o/r/pull/$number" \
+  printf -- '- [ ] %s - Contribution %s %s (repo: sample) (kind: ship) %s\n' \
+    "$id" "$id" "$url" "$hold" >> "$home/data/backlog.md"
+  jq -n --arg task "$id" --arg url "$url" \
     --arg head "$HEAD_A" --arg at "$NOW" --arg state "$state" --arg mergeable "$mergeable" '
     {schema:"fm-contributions.v1",task:$task,records:[{
       url:$url,kind:"pr",checked_at:$at,error:null,pending:[],seen:[],verdict:null,
@@ -123,21 +124,21 @@ case "$*" in
     jq -n --arg head "$(cat "$FORGE/head")" '{headRefOid:$head,reviewDecision:"APPROVED"}' ;;
   'pr view '*headRefOid*) cat "$FORGE/head" ;;
   'pr view '*state*) printf 'OPEN\n' ;;
-  'api repos/o/r/pulls/8')
+  api\ --hostname\ *\ repos/o/r/pulls/8)
     jq -n --arg head "$(cat "$FORGE/head")" --arg state "$(cat "$FORGE/state" 2>/dev/null || printf open)" '
       {state:(if $state == "open" then "open" else "closed" end),user:{login:"author"},head:{sha:$head},draft:false,
        mergeable:(if $state == "open" then true else null end),
        merged_at:(if $state == "merged" then "2026-09-16T07:00:00Z" else null end)}' ;;
-  'api repos/o/r/issues/9')
+  api\ --hostname\ *\ repos/o/r/issues/9)
     jq -n --slurpfile labels "$FORGE/labels.json" '{state:"open",user:{login:"author"},labels:$labels[0]}' ;;
-  'api repos/o/r/issues/'*'/events?'*) jq -s . "$FORGE/events.json" ;;
-  'api repos/o/r/issues/'*'/comments?'*) jq -s . "$FORGE/comments.json" ;;
-  'api repos/o/r/pulls/8/reviews?'*) jq -s . "$FORGE/reviews.json" ;;
-  'api repos/o/r/pulls/8/comments?'*) jq -s . "$FORGE/inline.json" ;;
-  'api repos/o/r/commits/'*'/check-runs?'*)
+  api\ --hostname\ *\ repos/o/r/issues/*/events?*) jq -s . "$FORGE/events.json" ;;
+  api\ --hostname\ *\ repos/o/r/issues/*/comments?*) jq -s . "$FORGE/comments.json" ;;
+  api\ --hostname\ *\ repos/o/r/pulls/8/reviews?*) jq -s . "$FORGE/reviews.json" ;;
+  api\ --hostname\ *\ repos/o/r/pulls/8/comments?*) jq -s . "$FORGE/inline.json" ;;
+  api\ --hostname\ *\ repos/o/r/commits/*/check-runs?*)
     printf '[{"check_runs":[{"name":"test","id":1,"status":"completed","conclusion":"success","started_at":"2026-09-16T08:00:00Z"}]}]\n' ;;
-  'api repos/o/r/commits/'*'/statuses?'*) printf '[[]]\n' ;;
-  'api repos/o/r') printf '{"permissions":{"push":false}}\n' ;;
+  api\ --hostname\ *\ repos/o/r/commits/*/statuses?*) printf '[[]]\n' ;;
+  api\ --hostname\ *\ repos/o/r) printf '{"permissions":{"push":false}}\n' ;;
   *) printf 'unexpected gh fixture call: %s\n' "$*" >&2; exit 1 ;;
 esac
 SH
@@ -393,6 +394,46 @@ test_retired_and_unsupported_coverage() {
   pass 'retired ownership persists and unsupported forge remains visibly unmeasured'
 }
 
+test_enterprise_and_unrecognized_host_coverage() {
+  local home
+  home=$(new_home enterprise-coverage)
+  record "$home" precision 18 open mergeable '' 'https://precision-it.ghe.com/o/r/pull/18'
+  record "$home" other-enterprise 19 open mergeable '' 'https://code.acme.test/o/r/pull/19'
+  printf -- '- [ ] gitlab - Filed https://gitlab.com/o/r/-/merge_requests/2 (repo: sample) (kind: ship)\n' \
+    >> "$home/data/backlog.md"
+  printf -- '- [ ] lookalike - Filed https://github.com.example/o/r/pull/20 (repo: sample) (kind: ship)\n' \
+    >> "$home/data/backlog.md"
+  bearings "$home" | jq -e '.contributions.known == 4 and .contributions.checked == 2
+    and .contributions.unmeasured == 2 and .contributions.counts.maintainer == 2
+    and .contributions.counts.fleet == 0 and .contributions.complete == false
+    and .contributions.proven_clear == false' >/dev/null \
+    || fail 'enterprise, non-GitHub, and unrecognized hosts were not classified independently'
+  pass 'generic enterprise hosts are measured while GitLab and GitHub-name lookalikes remain unmeasured'
+}
+
+test_enterprise_poll_uses_url_host() {
+  local home url='https://precision-it.ghe.com/o/r/pull/8'
+  home=$(new_home enterprise-poll)
+  forge_home "$home"
+  wrap_forge "$home"
+  jq --arg url "$url" '.records[0].url=$url | .records[0].checked_at="2026-09-15T08:00:00Z"' \
+    "$home/data/delivery/contributions.json" > "$home/update.json" || fail 'enterprise fixture mutation failed'
+  mv "$home/update.json" "$home/data/delivery/contributions.json"
+  printf '# Backlog\n\n## Queued\n- [ ] delivery - Contribution delivery %s (repo: sample) (kind: ship)\n' \
+    "$url" > "$home/data/backlog.md"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'enterprise contribution poll failed'
+  jq -e --arg now "$NOW" '.records[0].checked_at == $now and .records[0].error == null' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'enterprise contribution observation was not recorded as measured'
+  grep -Fx 'api --hostname precision-it.ghe.com repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
+    || fail 'enterprise contribution API reads fell back to the default GitHub host'
+  bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 1
+    and .contributions.unmeasured == 0 and .contributions.counts.maintainer == 1' >/dev/null \
+    || fail 'enterprise observation did not reach Bearings as measured coverage'
+  pass 'enterprise polling addresses and measures the host carried by the URL'
+}
+
 test_unsupported_forge_is_not_fleet_work() {
   local home
   home=$(new_home unsupported-forge)
@@ -558,16 +599,16 @@ printf '%s\n' "$*" >> "$FORGE/calls"
 fault=$(cat "$FORGE/fault" 2>/dev/null || true)
 case "$fault" in latency) sleep "${FORGE_LATENCY:-2}" ;; esac
 case "$fault:$*" in
-  reserve:'api repos/o/r/'*)
+  reserve:api\ --hostname\ *\ repos/o/r/*)
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 6 ))" > "$FORGE/clock" ;;
-  exhaust:'api repos/o/r/issues/8/comments?'*)
+  exhaust:api\ --hostname\ *\ repos/o/r/issues/8/comments?*)
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock" ;;
-  fail-late:'api repos/o/r/pulls/8/reviews?'*)
+  fail-late:api\ --hostname\ *\ repos/o/r/pulls/8/reviews?*)
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock"
     printf 'HTTP 502\n' >&2; exit 1 ;;
-  fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
+  fail:api\ --hostname\ *\ repos/o/r/pulls/8/reviews?*) printf 'HTTP 502\n' >&2; exit 1 ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
-  hang:'api repos/o/r/pulls/8') sleep 4 ;;
+  hang:api\ --hostname\ *\ repos/o/r/pulls/8) sleep 4 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
 esac
 exec "$(dirname "$0")/gh-fixture" "$@"
@@ -594,7 +635,7 @@ test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
   out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" poll) \
     || fail "poll failed when its budget ran out ($mode)"
   [ -z "$out" ] || fail "budget exhaustion ($mode) printed a wake line: $out"
-  grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
+  grep -F 'api --hostname github.com repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
     || fail "budget exhaustion ($mode) never started the observation"
   cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
     || fail "budget exhaustion ($mode) rewrote the prior record: $(cat "$home/data/delivery/contributions.json")"
@@ -631,7 +672,7 @@ test_shared_url_observed_once() {
     printf -- '- [ ] duplicate - Filed https://github.com/o/r/pull/8 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
     printf '%s\n' "$mode" > "$home/forge/fault"
     out=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll) || fail "shared-owner poll failed ($mode)"
-    calls=$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")
+    calls=$(grep -cFx 'api --hostname github.com repos/o/r/pulls/8' "$home/forge/calls")
     [ "$calls" = 1 ] || fail "a URL owned by two tasks was observed $calls times in one poll ($mode)"
     if [ "$mode" = ok ]; then
       expected=null
@@ -726,7 +767,7 @@ test_done_task_open_pr_still_observed() {
   printf '%s\n' "$HEAD_B" > "$home/forge/head"
   with_home "$home" env FM_CONTRIBUTIONS_NOW="$later" "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
     || fail 'second poll of a done task failed'
-  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] \
+  [ "$(grep -cFx 'api --hostname github.com repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] \
     || fail 'an open PR linked from a done task was not observed on every poll'
   jq -e --arg head "$HEAD_B" --arg at "$later" '.records[0] | .checked_at == $at and .error == null
     and .observation.state == "open" and .observation.head == $head' \
@@ -749,7 +790,7 @@ test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain() {
   jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
     "$home/data/filed/contributions.json" >/dev/null \
     || fail 'the first oldest issue was not observed before reserving the remaining budget'
-  grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
+  grep -F 'api --hostname github.com repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
     && fail 'a later PR began without the fifteen-second observation reservation'
   jq -e '.records[0].checked_at == "2026-09-15T08:00:00Z"' "$home/data/delivery/contributions.json" >/dev/null \
     || fail 'a later PR record changed when the poll deferred it for budget'
@@ -786,7 +827,7 @@ test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine ou
   [ -z "$out" ] || fail "an unchanged read failure woke again on the next cycle: $out"
   jq -e --argjson error "$error" '.records[0] | .checked_at == "2026-09-16T10:00:00Z" and .error == $error' \
     "$home/data/delivery/contributions.json" >/dev/null || fail 'a repeated read failure stopped recording its error'
-  [ "$(grep -cFx 'api repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] || fail 'a failing open PR stopped being observed'
+  [ "$(grep -cFx 'api --hostname github.com repos/o/r/pulls/8' "$home/forge/calls")" = 2 ] || fail 'a failing open PR stopped being observed'
   : > "$home/forge/fault"
   out=$(poll_at 2026-09-16T11:00:00Z)
   [ -z "$out" ] || fail "a successful read printed: $out"
@@ -832,7 +873,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_enterprise_and_unrecognized_host_coverage test_enterprise_poll_uses_url_host test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

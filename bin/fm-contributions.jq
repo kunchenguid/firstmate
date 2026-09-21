@@ -1,6 +1,25 @@
 # Projection for fm-contributions.sh; its header owns the record contract.
+def forge_host:
+  type == "string" and length <= 253
+  and test("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$");
+def github_host:
+  . as $host
+  | ($host | forge_host)
+  and ($host == "github.com" or
+    ($host != "gitlab.com"
+      and ($host | test("^github\\.com\\.") | not)
+      and ($host | test("\\.github\\.com($|\\.)") | not)));
+def github_host_part:
+  sub("^https://"; "") | split("/")[0];
+def github_shaped_url:
+  type == "string"
+  and test("^https://[a-z0-9.-]+/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$")
+  and (github_host_part | forge_host);
+def github_url:
+  github_shaped_url and (github_host_part | github_host);
 def canonical_url:
-  type == "string" and (test("^https://github.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$")
+  type == "string" and
+  (github_shaped_url
     or test("^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+/-/merge_requests/[1-9][0-9]*$"));
 def sha: type == "string" and test("^[a-fA-F0-9]{40}$");
 def valid_record:
@@ -52,7 +71,7 @@ def projected($input; $saved; $now; $max_age):
     | (($final or ($checked != null and ($now - $checked) >= 0 and ($now - $checked) <= $max_age))
        and (if $record.kind == "pr" then $observed_head != null
             else $record.error == null and $record.observation != null end)
-       and ($k.url | startswith("https://github.com/"))) as $fresh
+       and ($k.url | github_url)) as $fresh
     | (($o.checks // []) | latest_checks) as $checks
     | [$checks[] | select(.status == "completed" and (.conclusion == null or .conclusion == ""))] as $no_verdict
     | [$checks[] | select(.status != "completed")] as $pending
@@ -64,8 +83,8 @@ def projected($input; $saved; $now; $max_age):
     | ([$o.reviews[]? | select(.state != "COMMENTED")] | group_by(.user.login)
        | map(sort_by([.submitted_at,.id]) | last)
        | map(. + {freshness:(if $observed_head != null and .commit_id != $observed_head then "STALE" elif $fresh then "current" else "unverified" end)})) as $reviews
-    | (if ($k.url | startswith("https://github.com/") | not) then
-         {actor:"unmeasured",reason:"unsupported forge; coverage is unmeasured"}
+    | (if ($k.url | github_url | not) then
+         {actor:"unmeasured",reason:"unsupported forge or host; coverage is unmeasured"}
        elif $o.state == "merged" or $o.state == "closed" then
          if $fresh then {actor:"nobody",reason:("forge reports " + $o.state)}
          else {actor:"fleet",reason:"terminal observation needs refresh"} end
