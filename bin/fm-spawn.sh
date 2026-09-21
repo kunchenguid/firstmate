@@ -1181,6 +1181,8 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_TREEHOUSE_LEASED=0
+SPAWN_TREEHOUSE_RETURN_SAFE=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1331,6 +1333,23 @@ spawn_abort_cleanup() {
       fm_treehouse_slot_owner_release "$WT" "$ID" || true
     else
       echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
+    fi
+  fi
+  if [ "$SPAWN_TREEHOUSE_LEASED" = 1 ] && [ -n "${WT:-}" ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    if [ "$SPAWN_TREEHOUSE_RETURN_SAFE" != 1 ]; then
+      echo "warning: leaving preallocated Treehouse worktree $WT leased because the Herdr worktree-open result was ambiguous; its projection journal remains quarantined" >&2
+      status=1
+    elif [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+      if (cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null 2>&1); then
+        SPAWN_TREEHOUSE_LEASED=0
+      else
+        echo "warning: could not return preallocated Treehouse worktree $WT after aborted Herdr projection; its durable lease is retained" >&2
+        status=1
+      fi
+    else
+      echo "warning: leaving preallocated Treehouse worktree $WT leased after aborted Herdr projection because its project lock is no longer held" >&2
+      status=1
     fi
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
@@ -3599,17 +3618,49 @@ else
             echo "warning: herdr presentation parent is absent or ambiguous; using the ordinary flat layout without projection" >&2
             spawn_herdr_presentation_order_lock_release
           else
+            HERDR_PROJECTION_WORKTREE_PARENT=""
+            HERDR_PROJECTION_CWD=$PROJ_ABS
+            if fm_backend_herdr_projection_parent_sources_project \
+              "$HERDR_SES" "$HERDR_PARENT_WORKSPACE_ID" "$PROJ_ABS"; then
+              WT=$(cd "$PROJ_ABS" && treehouse get --lease --lease-holder "$ID") || {
+                echo "error: treehouse get --lease failed before nested Herdr projection for $ID" >&2
+                exit 1
+              }
+              SPAWN_TREEHOUSE_LEASED=1
+              SPAWN_TREEHOUSE_RETURN_SAFE=1
+              if ! spawn_worktree_isolated "$WT"; then
+                echo "error: treehouse get --lease did not yield an isolated worktree (resolved '$WT'; worktree root '${SPAWN_WT_TOP:-none}'; spawning project '$PROJ_ABS'); refusing nested Herdr projection" >&2
+                exit 1
+              fi
+              if fm_treehouse_pool_slot "$PROJ_ABS" "$WT"; then
+                if ! fm_treehouse_slot_owner_claim "$WT" "$ID" "$FM_HOME"; then
+                  echo "error: could not claim preallocated Treehouse pool slot $WT for task $ID; refusing nested Herdr projection" >&2
+                  exit 1
+                fi
+                SPAWN_SLOT_CLAIMED=1
+              fi
+              HERDR_PROJECTION_WORKTREE_PARENT=$HERDR_PARENT_WORKSPACE_ID
+              HERDR_PROJECTION_CWD=$WT
+            fi
             HERDR_PROJECTION_ID=$(fm_backend_herdr_projection_journal_create "$STATE" "$ID") || exit 1
             HERDR_PROJECTION_LABEL=$(fm_backend_herdr_projection_workspace_label "$ID" "$HERDR_PROJECTION_ID")
+            if [ -n "$HERDR_PROJECTION_WORKTREE_PARENT" ]; then
+              SPAWN_TREEHOUSE_RETURN_SAFE=0
+            fi
             if ! FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_create_task \
-              "$PROJ_ABS" "$HERDR_PROJECTION_LABEL" "$W"; then
+              "$HERDR_PROJECTION_CWD" "$HERDR_PROJECTION_LABEL" "$W" \
+              "$HERDR_PROJECTION_WORKTREE_PARENT"; then
               if [ "${FM_BACKEND_HERDR_PROJECTION_CLEANUP_SAFE:-0}" = 1 ]; then
                 HERDR_PROJECTION_ABORT_CLEANUP=1
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
                 HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
                 HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+                SPAWN_TREEHOUSE_RETURN_SAFE=1
               fi
               exit 1
+            fi
+            if [ -n "$HERDR_PROJECTION_WORKTREE_PARENT" ]; then
+              SPAWN_TREEHOUSE_RETURN_SAFE=1
             fi
             HERDR_PROJECTED=1
             HERDR_SES=$FM_BACKEND_HERDR_PROJECTION_SESSION
@@ -4091,7 +4142,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     fi
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
-elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] && [ -z "$WT" ]; then
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -4172,6 +4223,25 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     fi
     SPAWN_SLOT_CLAIMED=1
   fi
+elif [ "$KIND" != secondmate ] && [ "$BACKEND" = herdr ] && [ "$SPAWN_TREEHOUSE_LEASED" = 1 ]; then
+  # The nested projection was opened directly at a preallocated checkout, so
+  # there is no interactive `treehouse get` transition to observe. Prove that
+  # the exact response-derived task pane is nevertheless sitting in that exact
+  # checkout before freshening it or launching an agent. This also keeps a
+  # malformed or asynchronously-drifted child inside the normal abort cleanup
+  # boundary instead of publishing metadata for the wrong directory.
+  nested_wt_real=$(real_path_or_raw "$WT")
+  nested_seen=""
+  for _ in $(seq 1 10); do
+    nested_seen=$(spawn_current_path "$WT_TARGET" || true)
+    [ -z "$nested_seen" ] || [ "$(real_path_or_raw "$nested_seen")" != "$nested_wt_real" ] || break
+    sleep 0.5
+  done
+  if [ -z "$nested_seen" ] || [ "$(real_path_or_raw "$nested_seen")" != "$nested_wt_real" ]; then
+    echo "error: preallocated treehouse get --lease task pane did not enter an isolated worktree at '$WT' (last seen '${nested_seen:-none}'); inspect window $T" >&2
+    exit 1
+  fi
+  validate_spawn_worktree "treehouse get --lease" "$T"
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1

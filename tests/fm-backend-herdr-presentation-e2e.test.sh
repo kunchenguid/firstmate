@@ -129,7 +129,7 @@ fi
 mutation=
 mutation_target=${3:-}
 case "${1:-} ${2:-}" in
-  "workspace create") mutation=workspace-create; mutation_target=$label ;;
+  "workspace create"|"worktree open") mutation=workspace-create; mutation_target=$label ;;
   "tab create") mutation=tab-create; mutation_target=$label ;;
   "pane close") mutation=pane-close ;;
   "tab focus") mutation=tab-focus ;;
@@ -173,6 +173,7 @@ if [ "$status" -eq 0 ] && [ "$mutation" = tab-create ]; then
       task=${label#fm-}
       mkdir -p "$POST_CREATE_ABORT_CONTROL/$task"
       printf '%s\n' "$(printf '%s' "$out" | jq -r '.result.root_pane.pane_id')" > "$POST_CREATE_ABORT_CONTROL/$task/task-pane"
+      printf '%s\n' "$(arg_value --cwd "$@")" > "$POST_CREATE_ABORT_CONTROL/$task/worktree"
       ;;
   esac
 fi
@@ -209,7 +210,10 @@ set -u
   printf '\n'
 } >> "$TREEHOUSE_CALL_LOG"
 if [ -d "$POST_CREATE_ABORT_CONTROL" ] && [ "${1:-}" = get ]; then
-  exit 0
+  case " $* " in
+    *' --lease '*) ;;
+    *) exit 0 ;;
+  esac
 fi
 # Treehouse's pool allocator is outside the Herdr concurrency contract under
 # test. Serialize its calls so simultaneous recovery spawns cannot race for
@@ -471,7 +475,7 @@ log_line_count() { wc -l < "$HERDR_CALL_LOG" | tr -d '[:space:]'; }
 projection_labels_from_log() {  # <start-line>
   local start=$1
   sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG" | awk -F '\t' '
-    $1 == "workspace" && $2 == "create" {
+    $1 == "worktree" && $2 == "open" {
       for (i = 1; i < NF; i += 1) {
         if ($i == "--label" && $(i + 1) ~ /^└ /) {
           print $(i + 1)
@@ -499,7 +503,7 @@ assert_no_ordering_lifecycle_calls_since() {  # <line-count> <case-name>
 assert_no_projection_mutation_since() {  # <line-count> <case-name>
   local start=$1 name=$2 calls
   calls=$(sed -n "$((start + 1)),\$p" "$HERDR_CALL_LOG")
-  if printf '%s\n' "$calls" | grep -E $'^(workspace\t(create|close|rename)|tab\t(create|close)|pane\tclose|session\t(stop|delete)|server)' >/dev/null 2>&1; then
+  if printf '%s\n' "$calls" | grep -E $'^(workspace\t(create|close|rename)|worktree\topen|tab\t(create|close)|pane\tclose|session\t(stop|delete)|server)' >/dev/null 2>&1; then
     fail "$name performed a create, close, delete, rename, or lifecycle call during recovery inspection"
   fi
 }
@@ -542,9 +546,10 @@ remember_meta_worktree "$ANCHOR_META" >/dev/null
 FIRSTMATE_WSID=$(grep '^herdr_workspace_id=' "$ANCHOR_META" | cut -d= -f2-)
 [ -n "$FIRSTMATE_WSID" ] || fail "anchor metadata did not record the firstmate workspace"
 
-# The same task id and project run once opted out and once projected, so
-# Treehouse commands and metadata can be compared after normalizing endpoint
-# IDs and the deliberately fresh per-spawn incarnation.
+# The same task id and project run once opted out and once projected.
+# The nested path deliberately preallocates a durable Treehouse lease rather
+# than typing `treehouse get`, while the normalized metadata contract remains
+# unchanged apart from endpoint ids and the fresh spawn incarnation.
 : > "$TREEHOUSE_CALL_LOG"
 OFF_HERDR_START=$(log_line_count)
 OFF_MOVE_START=$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')
@@ -554,7 +559,6 @@ OFF_HERDR_END=$(log_line_count)
 OFF_META="$TMP_ROOT/off.meta"
 cp "$HOME_DIR/state/shape.meta" "$OFF_META"
 OFF_WT=$(remember_meta_worktree "$OFF_META")
-cp "$TREEHOUSE_CALL_LOG" "$TMP_ROOT/off-treehouse.log"
 [ "$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')" = "$OFF_MOVE_START" ] \
   || fail "opted-out spawn invoked the presentation-only workspace mover"
 OFF_HERDR_CALLS=$(sed -n "$((OFF_HERDR_START + 1)),${OFF_HERDR_END}p" "$HERDR_CALL_LOG")
@@ -642,8 +646,16 @@ assert_raw_presentation_mutations_preserved_since "$SHAPE_FOCUS_AUDIT_START" "pr
 ON_META="$TMP_ROOT/on.meta"
 cp "$HOME_DIR/state/shape.meta" "$ON_META"
 ON_WT=$(remember_meta_worktree "$ON_META")
-cmp -s "$TMP_ROOT/off-treehouse.log" "$TREEHOUSE_CALL_LOG" \
-  || fail "Treehouse command sequence changed between opted-out and projected spawns"
+awk -F '\t' '
+  $1 == "get" {
+    for (i = 2; i <= NF; i += 1) {
+      if ($i == "--lease") leased = 1
+      if ($i == "--lease-holder" && $(i + 1) == "shape") holder = 1
+    }
+  }
+  END { exit !(leased && holder) }
+' "$TREEHOUSE_CALL_LOG" \
+  || fail "same-project projection did not preallocate its exact Treehouse worktree durably"
 JOURNAL="$HOME_DIR/state/shape.herdr-presentation"
 [ -f "$JOURNAL" ] || fail "projected spawn did not publish its presentation journal"
 TOKEN=$(grep '^projection_id=' "$JOURNAL" | cut -d= -f2-)
@@ -657,6 +669,17 @@ PROJECTED_LABEL=$(printf '%s' "$PROJECTED_INFO" | jq -r '.result.workspace.label
   || fail "projected workspace label did not use the corner format with full token: $PROJECTED_LABEL"
 PROJECTED_TABS=$(lab tab list --workspace "$PROJECTED_WSID")
 PROJECTED_PANES=$(lab pane list --workspace "$PROJECTED_WSID")
+PROJECTED_WORKTREES=$(lab worktree list --workspace "$FIRSTMATE_WSID") \
+  || fail "could not inspect the projected worktree group"
+printf '%s' "$PROJECTED_WORKTREES" | jq -e \
+  --arg parent "$FIRSTMATE_WSID" --arg child "$PROJECTED_WSID" --arg path "$ON_WT" '
+    .result.type == "worktree_list"
+    and .result.source.source_workspace_id == $parent
+    and ([.result.worktrees[]?
+      | select(.open_workspace_id == $child)
+      | select(.path == $path and .is_linked_worktree == true)] | length) == 1
+  ' >/dev/null 2>&1 \
+  || fail "same-project projection was not rendered as the exact primary home's worktree child"
 [ "$(printf '%s' "$PROJECTED_TABS" | jq -r '.result.tabs | length')" = 1 ] \
   || fail "projected workspace retained a seeded or placeholder tab"
 [ "$(printf '%s' "$PROJECTED_PANES" | jq -r '.result.panes | length')" = 1 ] \
@@ -670,7 +693,7 @@ printf '%s' "$PROJECTED_PANES" | jq -e --arg pane "$PROJECTED_PANE" \
 SECOND_TWO_INFO=$(lab workspace get "$SECOND_TWO_WSID") || fail "focused secondmate disappeared during projected create"
 [ "$(printf '%s' "$SECOND_TWO_INFO" | jq -r '.result.workspace.focused')" = true ] \
   || fail "projected create or workspace.move stole focus from the captain's current space"
-pass "real Herdr lab: every projected create, task-tab create, seeded prune, and move preserves active workspace and tab"
+pass "real Herdr lab: a fresh same-project space renders one level below its exact home, with create, prune, and move preserving focus"
 
 mkdir -p "$ACTIVE_SEEDED_CONTROL"
 printf '%s\n' requested > "$ACTIVE_SEEDED_CONTROL/stage"
@@ -741,7 +764,7 @@ LOCK_CONTENTION_WSID=$(grep '^herdr_workspace_id=' "$LOCK_CONTENTION_META" | cut
 LOCK_CONTENTION_CALLS=$(sed -n "$((LOCK_CONTENTION_START + 1)),\$p" "$HERDR_CALL_LOG")
 # session list is required to resolve the shared session lock path before the
 # bounded acquire attempt; it must not unlock projection create or move.
-if printf '%s\n' "$LOCK_CONTENTION_CALLS" | grep -E $'^(workspace\tcreate|pane\tclose|api\tschema)' >/dev/null 2>&1; then
+if printf '%s\n' "$LOCK_CONTENTION_CALLS" | grep -E $'^(workspace\tcreate|worktree\topen|pane\tclose|api\tschema)' >/dev/null 2>&1; then
   fail "bounded lock contention performed an unlocked projection mutation or ordering capability call"
 fi
 [ "$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')" = "$LOCK_CONTENTION_MOVE_START" ] \
@@ -843,6 +866,7 @@ pass "real Herdr lab: forced workspace.move failure leaves a successful worker i
 mkdir -p "$POST_CREATE_ABORT_CONTROL"
 ABORT_START=$(log_line_count)
 ABORT_FOCUS_START=$(focus_audit_line_count)
+ABORT_TREEHOUSE_START=$(wc -l < "$TREEHOUSE_CALL_LOG" | tr -d '[:space:]')
 spawn_task abort-a "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-a.out" 2> "$TMP_ROOT/abort-a.err" &
 ABORT_A_PID=$!
 spawn_task abort-b "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/abort-b.out" 2> "$TMP_ROOT/abort-b.err" &
@@ -860,15 +884,21 @@ grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 
   || fail "post-create abort fixture B did not reach the armed validation failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
-ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
-  $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
-  $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
+[ -s "$POST_CREATE_ABORT_CONTROL/abort-a/worktree" ] \
+  && [ -s "$POST_CREATE_ABORT_CONTROL/abort-b/worktree" ] \
+  || fail "post-create abort fixtures did not record their exact preallocated checkouts"
+ABORT_SEQUENCE=$(sed -n "$((ABORT_TREEHOUSE_START + 1)),\$p" "$TREEHOUSE_CALL_LOG" | awk -F '\t' '
+  $1 == "get" {
+    for (i = 2; i < NF; i += 1) {
+      if ($i == "--lease-holder" && $(i + 1) == "abort-a") { pending = "a"; print "get-a" }
+      if ($i == "--lease-holder" && $(i + 1) == "abort-b") { pending = "b"; print "get-b" }
+    }
+  }
+  $1 == "return" && pending != "" { print "return-" pending; pending = "" }
 ')
 case "$ABORT_SEQUENCE" in
-  $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
-  *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
+  $'get-a\nreturn-a\nget-b\nreturn-b'|$'get-b\nreturn-b\nget-a\nreturn-a') ;;
+  *) fail "concurrent post-create abort cleanup and durable checkout return interleaved outside their lock: $ABORT_SEQUENCE" ;;
 esac
 ABORT_UNRESTORED=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
   ($1 == "workspace-create" || $1 == "tab-create" || $1 == "workspace-move" || ($1 == "pane-close" && $4 != a && $4 != b)) && $2 != $3 { print }
@@ -895,10 +925,18 @@ teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-t
   || fail "projected teardown failed: $(cat "$TMP_ROOT/on-teardown.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "projected teardown"
 assert_cleanup_focus_preserved "$SHAPE_CLEANUP_AUDIT_START" "$PROJECTED_PANE" "$CAPTAIN_FOCUS"
-pass "real Herdr lab: Treehouse commands and metadata shape are byte-identical except for endpoint IDs and spawn incarnation"
+pass "real Herdr lab: durable nested checkout allocation preserves the task metadata contract"
 if lab workspace get "$PROJECTED_WSID" >/dev/null 2>&1; then
   fail "closing the exact projected task pane did not remove its last-tab workspace"
 fi
+POST_CLEANUP_WORKTREES=$(lab worktree list --workspace "$FIRSTMATE_WSID") \
+  || fail "could not inspect the owning home after projected cleanup"
+printf '%s' "$POST_CLEANUP_WORKTREES" | jq -e \
+  --arg parent "$FIRSTMATE_WSID" --arg child "$PROJECTED_WSID" '
+    .result.source.source_workspace_id == $parent
+    and ([.result.worktrees[]? | select(.open_workspace_id == $child)] | length) == 0
+  ' >/dev/null 2>&1 \
+  || fail "projected cleanup did not retire only the exact worktree child's open workspace"
 lab pane get "$SECOND_TWO_PANE" >/dev/null 2>&1 \
   || fail "projected teardown affected the focused secondmate workspace"
 [ ! -e "$JOURNAL" ] || fail "confirmed projected teardown did not retire its presentation journal"
@@ -1094,7 +1132,7 @@ MULTI_EXPECTED=$(printf '%s\n' \
   2ndmate-bravo "$B1_LABEL" "$B2_LABEL")
 [ "$MULTI_LABELS" = "$MULTI_EXPECTED" ] \
   || fail "multi-home topology was not owning-parent grouped: $MULTI_LABELS"
-pass "real Herdr lab: primary and two secondmate homes each own a top-level contiguous child block"
+pass "real Herdr lab: primary and two secondmate homes each own a contiguous child block beneath its exact source workspace"
 
 # Concurrent cross-home wave under the one session lock.
 mkdir -p "$HOME_DIR/data/pcw" "$SECOND_HOME_A/data/acw" "$SECOND_HOME_B/data/bcw"
@@ -1322,8 +1360,20 @@ spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/p
 PRIMARY_WAVE_PID=$!
 spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" &
 BRAVO_WAVE_PID=$!
-wait "$PRIMARY_WAVE_PID" || fail "concurrent primary recovery failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
-wait "$BRAVO_WAVE_PID" || fail "concurrent secondmate recovery failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+if wait "$PRIMARY_WAVE_PID"; then PRIMARY_WAVE_STATUS=0; else PRIMARY_WAVE_STATUS=$?; fi
+if wait "$BRAVO_WAVE_PID"; then BRAVO_WAVE_STATUS=0; else BRAVO_WAVE_STATUS=$?; fi
+if [ "$PRIMARY_WAVE_STATUS" -ne 0 ]; then
+  grep -F "presentation recovery could not acquire its session lock" "$TMP_ROOT/primary-wave-resume.err" >/dev/null 2>&1 \
+    || fail "concurrent primary recovery failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
+  spawn_task "$PRIMARY_WAVE_ID" "$HOME_DIR" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/primary-wave-resume.out" 2> "$TMP_ROOT/primary-wave-resume.err" \
+    || fail "concurrent primary recovery retry failed: $(cat "$TMP_ROOT/primary-wave-resume.err")"
+fi
+if [ "$BRAVO_WAVE_STATUS" -ne 0 ]; then
+  grep -F "presentation recovery could not acquire its session lock" "$TMP_ROOT/bravo-wave-resume.err" >/dev/null 2>&1 \
+    || fail "concurrent secondmate recovery failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+  spawn_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" "$RECOVERY_PROJECT_DIR" > "$TMP_ROOT/bravo-wave-resume.out" 2> "$TMP_ROOT/bravo-wave-resume.err" \
+    || fail "concurrent secondmate recovery retry failed: $(cat "$TMP_ROOT/bravo-wave-resume.err")"
+fi
 PRIMARY_WAVE_NEW_WT=$(remember_meta_worktree "$PRIMARY_WAVE_META")
 BRAVO_WAVE_NEW_WT=$(remember_meta_worktree "$BRAVO_WAVE_META")
 PRIMARY_WAVE_NEW_PANE=$(grep '^herdr_pane_id=' "$PRIMARY_WAVE_META" | cut -d= -f2-)

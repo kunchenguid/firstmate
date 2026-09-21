@@ -266,10 +266,17 @@ It falls back to a unique home-label lookup only for a Firstmate outside Herdr.
 Projected children are never collapsed back into that parent.
 The parent is the placement and ordering reference the projection is bound under.
 
+When Herdr identifies that exact parent as the source workspace for the task's exact physical project checkout, Firstmate preallocates the task's durable Treehouse lease and opens that linked checkout through `herdr worktree open --workspace <exact-parent>`.
+That same-repository path renders a primary-home or secondmate-home task one level below its exact owner in Herdr instead of placing it beside the owner as a sibling.
+The response must prove a fresh, not-already-open linked checkout whose workspace, tab, pane, checkout path, and source-parent worktree listing all agree exactly before the spawn may continue.
+The preallocated checkout receives the same Firstmate slot claim as the ordinary interactive Treehouse path, and an aborted spawn returns it under the existing project lock only after exact presentation cleanup has run.
+When the exact owning home represents another repository, Herdr cannot group the task checkout beneath it, so the established top-level disposable workspace path remains unchanged.
+A Holtek-project task launched by a home represented by a Firstmate-project workspace therefore remains top-level; Firstmate does not create per-project home spaces, adopt another repository's source workspace, or weaken exact-parent binding to make it look nested.
+The exact owner remains the journal, placement, and ordering reference in either path, and projected children are never collapsed into that parent.
 The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
-Only the exact seeded default tab returned by the same workspace-create response can be pruned.
+Only the exact seeded default tab returned by the same workspace-create or worktree-open response can be pruned.
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
-An ambiguous response grants no mutation or cleanup authority.
+An ambiguous, reused, or mismatched response grants no mutation or cleanup authority.
 
 ### Ordering
 
@@ -326,13 +333,11 @@ The repositioning move-to-last preserves every surviving workspace's relative or
 Removal is confirmed against the exact moved workspace rather than inferred from pane disappearance.
 An unconfirmed removal then makes one verified attempt, under the same session lock, to roll the doomed workspace back to its exact original position.
 If that rollback cannot restore the verified original order, cleanup warns loudly and leaves the retained records for inspection rather than retrying the shared-layout mutation.
-
 The pane-death signals are pid-exact.
 The escalation re-reads the pane's process information and refuses unless the same shell pid still passes the strict bare-idle ownership proof, so an exited and reused pid is never signaled.
 
 A move-plan ambiguity, unsupported or failed move, or unproved shell falls back to the plain explicit close.
-Exact tab restoration remains the backstop whenever a surviving tab must be preserved.
-So degraded behavior is never worse than the pre-mitigation sub-second restore.
+Exact tab restoration remains the backstop whenever a surviving tab must be preserved, so degraded behavior is never worse than the pre-mitigation sub-second restore.
 
 ### Ordinary removal and cleanup locking
 
@@ -343,8 +348,9 @@ Ordinary non-projected task removal:
 - Keeps the legitimate plain close when the target is the active tab.
 - Refuses an unlocked close if the lock cannot be acquired.
 
-Task cleanup acquires that session lock before the task's isolated copy is returned.
-So a contended lock refuses up front while the copy, every durable record, and the endpoint are all intact for a plain rerun.
+Task cleanup acquires that session lock and binds the exact projected endpoint to its journal before the task's isolated copy is returned.
+So a contended or ambiguous preflight refuses while the copy, every durable record, and the endpoint are all intact for a plain rerun.
+A linked-worktree workspace can disappear when Treehouse returns its checkout, but the pre-return binding permits retirement only after that same exact pane reports structured not-found; it never grants workspace-close authority.
 
 Forced secondmate cleanup recursively preflights every Herdr child endpoint and acquires every affected named-session lock before mutating any child.
 It then retains each child's durable identity unless that exact pane returns structured not-found after its close.
