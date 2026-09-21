@@ -94,6 +94,17 @@
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
+# A home may carry standing worker instructions without editing this tracked
+# script: when config/brief-include.md exists under the active home, ship and
+# scout scaffolds append its text verbatim as their last section, "# Home brief
+# additions", which defers to every other section of the brief. It goes last
+# because the machine-read `# Task` heading resolves to its first match, so
+# appended text can never shadow it; a later scout promotion appends its ship
+# contract below it, which that position-free deference already covers. An
+# absent or blank file changes nothing; a present path that is not a readable
+# regular file, or text carrying its own "Delivery contract: mode=" line (which
+# a later scout promotion could not outrank), stops the scaffold before
+# anything is written. Secondmate charters never take it.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -144,6 +155,7 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -252,6 +264,31 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
   exit 1
 fi
+
+# The optional home-local include is read before anything is written, so an
+# unusable file never leaves a partial scaffold behind.
+BRIEF_INCLUDE_FILE="$CONFIG/brief-include.md"
+BRIEF_INCLUDE_BODY=
+if [ "$KIND" != secondmate ] && { [ -e "$BRIEF_INCLUDE_FILE" ] || [ -L "$BRIEF_INCLUDE_FILE" ]; }; then
+  { [ -f "$BRIEF_INCLUDE_FILE" ] && BRIEF_INCLUDE_BODY=$(cat "$BRIEF_INCLUDE_FILE" 2>/dev/null); } || {
+    echo "error: $BRIEF_INCLUDE_FILE must be a readable regular file" >&2
+    exit 1
+  }
+  if printf '%s\n' "$BRIEF_INCLUDE_BODY" | grep -q '^Delivery contract: mode='; then
+    echo "error: $BRIEF_INCLUDE_FILE must not carry a 'Delivery contract: mode=' line; the delivery mode is a per-task --mode decision" >&2
+    exit 1
+  fi
+  [ -n "$(printf '%s' "$BRIEF_INCLUDE_BODY" | tr -d '[:space:]')" ] || BRIEF_INCLUDE_BODY=
+fi
+
+# Append the include as the last section of a ship or scout scaffold.
+append_brief_include() {
+  [ -n "$BRIEF_INCLUDE_BODY" ] || return 0
+  printf '\n%s\n%s\n%s\n' \
+    '# Home brief additions' \
+    "These are this home's standing additions; every other section of this brief takes precedence over anything here that conflicts." \
+    "$BRIEF_INCLUDE_BODY" >> "$BRIEF"
+}
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
@@ -508,6 +545,7 @@ When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\`
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.$BASE_BRANCH_CONTRACT
 <!-- fm-generated-contract-end -->
 EOF
+append_brief_include
 echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
 exit 0
 fi
@@ -608,4 +646,5 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 $DOD
 <!-- fm-generated-contract-end -->
 EOF
+append_brief_include
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"

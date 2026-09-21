@@ -1168,6 +1168,65 @@ test_branch_name_worker_steps() {
   pass "fm-brief.sh: --branch-name replaces generated fm/<id> crew branches only when set"
 }
 
+# A home can carry standing worker instructions in its gitignored
+# config/brief-include.md. The include must land last on ship and scout
+# scaffolds, stay out of charters, change nothing when absent or blank, and stop
+# the scaffold before anything is written when the path is unusable.
+test_home_brief_include_is_appended_last() {
+  local home config brief kind out rc last_heading task_count
+  home="$TMP_ROOT/include-home"
+  config="$home/config"
+  mkdir -p "$config"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" include-absent some-proj --scout >/dev/null || fail "scout scaffold failed without an include"
+  assert_no_grep '# Home brief additions' "$home/data/include-absent/brief.md" "an absent include still added a section"
+  printf ' \n\n' > "$config/brief-include.md"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" include-blank some-proj --scout >/dev/null || fail "scout scaffold failed with a blank include"
+  assert_no_grep '# Home brief additions' "$home/data/include-blank/brief.md" "a blank include still added a section"
+
+  # shellcheck disable=SC2016 # The include is literal text and must never expand at scaffold time.
+  printf '%s\n' '# Task' 'Run `house-tool $(id)` first.' > "$config/brief-include.md"
+  for kind in ship scout; do
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "include-$kind" some-proj --scout >/dev/null || fail "scout scaffold failed with an include"
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "include-$kind" some-proj --mode no-mistakes >/dev/null || fail "ship scaffold failed with an include"
+    fi
+    brief="$home/data/include-$kind/brief.md"
+    # shellcheck disable=SC2016 # Literal include text.
+    assert_grep 'Run `house-tool $(id)` first.' "$brief" "$kind brief did not carry the include verbatim"
+    assert_grep 'every other section of this brief takes precedence' "$brief" "$kind include section lost its precedence line"
+    last_heading=$(grep -n '^# ' "$brief" | grep -v -x '[0-9]*:# Task' | tail -n 1)
+    [ "${last_heading#*:}" = '# Home brief additions' ] \
+      || fail "$kind include was not the last generated section (got: $last_heading)"
+    task_count=$(sed -n '/^# Home brief additions$/q;p' "$brief" | grep -c -x '# Task')
+    [ "$task_count" = 1 ] || fail "$kind scaffold lost its own # Task section ahead of the include"
+  done
+
+  printf '%s\n' 'Delivery contract: mode=local-only' > "$config/brief-include.md"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" include-contract some-proj --scout 2>&1); rc=$?
+  expect_code 1 "$rc" "an include carrying a delivery contract line must stop the scaffold"
+  assert_contains "$out" "must not carry a 'Delivery contract: mode=' line" "delivery-contract refusal did not explain itself"
+  assert_absent "$home/data/include-contract" "a refused include left a partial scaffold behind"
+  printf '%s\n' 'Prefer small commits.' > "$config/brief-include.md"
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
+    "$ROOT/bin/fm-brief.sh" include-mate --secondmate --no-projects >/dev/null || fail "secondmate scaffold failed with an include"
+  assert_no_grep '# Home brief additions' "$home/data/include-mate/brief.md" "a secondmate charter took the brief include"
+
+  FM_HOME="$home" FM_CONFIG_OVERRIDE="$TMP_ROOT/include-empty-config" \
+    "$ROOT/bin/fm-brief.sh" include-override some-proj --scout >/dev/null || fail "scout scaffold failed under FM_CONFIG_OVERRIDE"
+  assert_no_grep '# Home brief additions' "$home/data/include-override/brief.md" "FM_CONFIG_OVERRIDE did not select the config directory"
+
+  rm -f "$config/brief-include.md"
+  mkdir "$config/brief-include.md"
+  out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" include-unusable some-proj --scout 2>&1); rc=$?
+  expect_code 1 "$rc" "an unusable include path must stop the scaffold"
+  assert_contains "$out" "brief-include.md must be a readable regular file" "unusable include refusal did not name the file"
+  assert_absent "$home/data/include-unusable" "an unusable include left a partial scaffold behind"
+  pass "fm-brief.sh: the home brief include lands last on ship and scout, verbatim, and fails closed"
+}
+
 test_worker_role_scope
 test_script_parses
 test_no_heredoc_in_command_substitution
@@ -1195,3 +1254,4 @@ test_scout_and_secondmate_scaffold
 test_base_branch_worker_steps
 test_branch_name_worker_steps
 test_scout_lavish_line_follows_presentation_floor
+test_home_brief_include_is_appended_last
