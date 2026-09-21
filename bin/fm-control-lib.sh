@@ -37,12 +37,10 @@
 #      stopped. A verb whose postcondition cannot be proven on the recorded
 #      backend is refused rather than performed blind.
 #
-# `resume` is deliberately NOT a verb. It is not deterministic across the
-# verified adapters: codex and grok resume only from a session id printed at
-# exit, opencode resumes the most recent session for the cwd with --continue,
-# and claude, pi, pi-signed, omp, and kimi have no verified pane-resume contract
-# at all. `relaunch` covers the same need deterministically for every adapter,
-# because the brief on disk - not a harness-private session - is the durable
+# `resume` is deliberately NOT a verb: it is not deterministic across the
+# verified adapters (docs/agent-control.md owns the per-adapter resume facts).
+# `relaunch` covers the same need deterministically for every adapter, because
+# the brief on disk - not a harness-private session - is the durable
 # instruction.
 
 # The complete control-plane verb allowlist, one per line.
