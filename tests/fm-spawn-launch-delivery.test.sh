@@ -49,7 +49,7 @@ test_long_quoted_raw_launch_reaches_destination_shell_intact() {
   rec=$(make_case raw-long-quoted "$id")
   read_case "$rec"
   marker="$CASE_DIR/result.txt"
-  payload="prefix 'single quoted' \"double quoted\" literal command substitution \\$(printf should-not-run) $(python3 - <<'PY'
+  payload="prefix 'single quoted' \"double quoted\" literal command substitution \$(printf should-not-run) $(python3 - <<'PY'
 print('A' * 1800)
 PY
 ) suffix-after-long-padding"
