@@ -398,6 +398,43 @@ STUB
   pass "fm-promote: a promoted worker receives the same mode-specific delivery contract a briefed one does"
 }
 
+# fm-send takes the plain task id. The delivery command promotion prints used to
+# prefix it with "fm-", so a task whose id already began with "fm-" was named
+# "fm-fm-...". This runs the printed command against a capturing fm-send.sh and
+# asserts on the target it would have steered, for a plain and an fm-prefixed id.
+test_promotion_prints_the_plain_task_id_as_the_send_target() {
+  local home sendroot id out target
+  home="$TMP_ROOT/promote-target/home"
+  sendroot="$TMP_ROOT/promote-target/sendroot"
+  mkdir -p "$home/state" "$sendroot/bin"
+  cat > "$sendroot/bin/fm-send.sh" <<'STUB'
+#!/usr/bin/env bash
+# Capture the target a promoted worker would be steered through.
+printf '%s' "$1" > "$FM_TEST_CAPTURE"
+STUB
+  chmod +x "$sendroot/bin/fm-send.sh"
+
+  for id in promote-target-plain fm-promote-target-prefixed; do
+    printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$home/state/$id.meta"
+    FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+      || fail "$id: scout brief generation should succeed"
+    fill_brief_subsections "$home/data/$id/brief.md" \
+      "Ship the target change." "Print the plain task id."
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode no-mistakes --yolo off 2>&1) \
+      || fail "$id: promotion should succeed"
+
+    target="$TMP_ROOT/promote-target/target-$id"
+    ( cd "$sendroot" \
+      && FM_TEST_CAPTURE="$target" \
+         eval "$(printf '%s\n' "$out" | sed -n 's/^next: //p' | grep 'fm-send\.sh')" ) \
+      || fail "$id: promotion's delivery command did not run"
+    assert_present "$target" "$id: promotion's delivery command sent nothing"
+    [ "$(cat "$target")" = "$id" ] \
+      || fail "$id: promotion's delivery command targeted '$(cat "$target")', not the task id"
+  done
+  pass "fm-promote: the printed delivery command targets the plain task id"
+}
+
 # The registry parser survives for the mechanical consumers only. It accepts the
 # conditional policy, maps it to its most rigorous leg for them, and exposes the
 # raw annotation for the one caller that must tell a policy from a flat mode.
@@ -891,6 +928,7 @@ test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
+test_promotion_prints_the_plain_task_id_as_the_send_target
 test_project_mode_maps_the_conditional_policy
 test_spawn_and_promote_require_filled_task_subsections
 echo "# all fm-task-delivery tests passed"
