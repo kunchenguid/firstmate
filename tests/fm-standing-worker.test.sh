@@ -98,10 +98,8 @@ case "$sub:$obj" in
     ;;
   pane:read)
     if [ -f "$HERDR_STATE/$session/$pane/output" ]; then
-      jq -Rs '{result:{content:.}}' < "$HERDR_STATE/$session/$pane/output"
-      exit 0
+      cat "$HERDR_STATE/$session/$pane/output"
     fi
-    printf '{"result":{"content":""}}\n'
     exit 0
     ;;
 esac

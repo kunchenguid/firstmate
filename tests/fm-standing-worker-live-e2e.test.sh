@@ -158,6 +158,18 @@ pass "live: polling a working pane is silent against the real server (herdr $HER
 #
 # A real working->idle move on a real server must produce exactly one wake
 # carrying the pane's own text. This is the 2026-09-21 failure in miniature.
+#
+# The question is printed into the real pane first, because only a real
+# `pane read` proves the output shape the excerpt is parsed from.
+SENTINEL="fm-sw-question-$$"
+lab pane run "$PANE" "echo $SENTINEL" >/dev/null 2>&1 \
+  || fail "live: herdr $HERDR_VERSION rejected pane run for the sentinel echo"
+for _ in $(seq 1 40); do
+  case "$(lab pane read "$PANE" --source recent --lines 200 2>/dev/null)" in
+    *"$SENTINEL"*) break ;;
+  esac
+  sleep 0.25
+done
 report_agent idle 'which database should I migrate first' \
   || fail "live: herdr $HERDR_VERSION rejected pane report-agent --state idle"
 for _ in $(seq 1 40); do
@@ -177,6 +189,15 @@ case "$out" in
     ;;
   *)
     fail "live: a real stop must raise a wake on herdr $HERDR_VERSION, got: ${out:-<silence>}"
+    ;;
+esac
+
+case "$out" in
+  *"$SENTINEL"*)
+    pass "live: the stop wake carries the text printed in the real pane (herdr $HERDR_VERSION)"
+    ;;
+  *)
+    fail "live: the stop wake lost the pane's own text on herdr $HERDR_VERSION, so the worker's question never travels: $out"
     ;;
 esac
 

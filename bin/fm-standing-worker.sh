@@ -388,12 +388,17 @@ sessions_available() {
 # closing question is the last thing printed. The result is data for a human or a supervising model to
 # READ; it is never a command and is never evaluated.
 pane_excerpt() {  # <session> <pane>
-  local session=$1 pane=$2 out text
-  out=$(herdr_read "$session" pane read "$pane" \
-    --source recent --lines "$CAPTURE_LINES" 2>/dev/null) || true
-  text=$(printf '%s' "$out" | jq -r '
-    .result.content // .result.text // .result.output // empty' 2>/dev/null)
-  [ -n "$text" ] || return 1
+  local session=$1 pane=$2 fetch text
+  # `pane read` prints the pane text itself, not a JSON envelope. It also
+  # returns nothing at all when --lines is below the pane's viewport height
+  # (see fm_backend_herdr_capture), so ask generously and trim here.
+  local lines=$CAPTURE_LINES
+  case "$lines" in ''|*[!0-9]*) lines=40 ;; esac
+  fetch=$lines
+  [ "$fetch" -ge 200 ] || fetch=200
+  text=$(herdr_read "$session" pane read "$pane" \
+    --source recent --lines "$fetch" 2>/dev/null | tail -n "$lines") || true
+  [ -n "${text//[[:space:]]/}" ] || return 1
   printf '%s' "$text" \
     | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' \
     | LC_ALL=C tr '\t\r\n' '   ' \
