@@ -82,7 +82,10 @@
 #            deduplicated so a paired external effect is never authorized
 #            twice. Until this is called, the result stays eligible for
 #            bounded re-announcement on every reconcile. Marking a result
-#            handled does not retire its source registration or claim.
+#            handled does not retire its source registration or claim, with one
+#            exception: acknowledging the terminal round of a task-owned source
+#            is that board's conclude step, so it also drops the registration
+#            that kept the board with its owner, and reports `retired:` too.
 # retire     Drop a registration, stop a runner this home owns, release the claim.
 #            Idempotent, and still the supported explicit path after a source has
 #            already retired itself on its adapter's terminal verdict. Existing
@@ -520,7 +523,7 @@ cmd_register() {
 
 cmd_register_task() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
-  local reply_source='' reply_dest reply_tmp arg i
+  local reply_source='' reply_dest='' stale arg i
   local -a argv=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "register-task is reserved for the Lavish adapter"
@@ -556,37 +559,43 @@ cmd_register_task() {
       die "cannot re-arm terminal Lavish result $pending; stop and conclude the review"
     fi
   done < <(source_pending "$id")
-  reply_dest="$REG/$id.reply"
+  # Each generation stages its reply under its own path, so nothing a failed
+  # re-arm does can reach the reply the prior registration still references.
   i=0
   while [ "$i" -lt "${#argv[@]}" ]; do
     if [ "${argv[$i]}" = --agent-reply-file ]; then
       [ "$((i + 1))" -lt "${#argv[@]}" ] || { fm_procevent_source_lock_release "$id"; usage; }
       reply_source=${argv[$((i + 1))]}
+      [ -f "$reply_source" ] && [ ! -L "$reply_source" ] || {
+        [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
+        fm_procevent_source_lock_release "$id"
+        die "agent reply file does not exist: $reply_source"
+      }
+      reply_dest=$(umask 077; mktemp "$REG/.$id.reply.XXXXXX") || {
+        fm_procevent_source_lock_release "$id"
+        die "cannot stage agent reply"
+      }
+      if ! cat -- "$reply_source" > "$reply_dest" || ! chmod 0600 "$reply_dest"; then
+        rm -f -- "$reply_dest"
+        fm_procevent_source_lock_release "$id"
+        die "cannot persist agent reply"
+      fi
       argv[i + 1]=$reply_dest
       i=$((i + 2))
     else
       i=$((i + 1))
     fi
   done
-  if [ -n "$reply_source" ]; then
-    [ -f "$reply_source" ] && [ ! -L "$reply_source" ] || {
-      fm_procevent_source_lock_release "$id"
-      die "agent reply file does not exist: $reply_source"
-    }
-    reply_tmp=$(umask 077; mktemp "$REG/.reply.XXXXXX") || {
-      fm_procevent_source_lock_release "$id"
-      die "cannot stage agent reply"
-    }
-    if ! cat -- "$reply_source" > "$reply_tmp" || ! chmod 0600 "$reply_tmp" || ! mv -f -- "$reply_tmp" "$reply_dest"; then
-      rm -f -- "$reply_tmp"
-      fm_procevent_source_lock_release "$id"
-      die "cannot persist agent reply"
-    fi
-  fi
   if ! fm_procevent_task_registration_publish_locked "$STATE" "$adapter" "$id" "$task" "${argv[@]}"; then
+    [ -z "$reply_dest" ] || rm -f -- "$reply_dest"
     fm_procevent_source_lock_release "$id"
     die "cannot publish task-owned registration"
   fi
+  for stale in "$REG/.$id.reply."*; do
+    [ -e "$stale" ] || continue
+    case "$stale" in "$reply_dest"|"$reply_dest".posted) continue ;; esac
+    rm -f -- "$stale"
+  done
   # Re-arm is the worker's acknowledgement of every open nonterminal round.
   # It deliberately does not inspect, acquire, release, or replace the claim.
   while IFS= read -r pending; do
@@ -1807,7 +1816,7 @@ cmd_classify() {
 }
 
 cmd_handled() {
-  local id=${1-} seq=${2-} status result='' result_adapter='' conclude=0
+  local id=${1-} seq=${2-} status result='' result_adapter='' conclude=0 registration=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
   owner_lease_refresh
@@ -1823,7 +1832,14 @@ cmd_handled() {
   fm_procevent_mark_handled "$STATE" "$id" "$seq"
   status=$?
   if [ "$conclude" -eq 1 ] && [ "$status" -eq 0 ]; then
-    rm -f -- "$(source_file "$id")" "$(runner_file "$id")"
+    registration=$(source_file "$id")
+    if rm -f -- "$registration" 2>/dev/null && [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
+      rm -f -- "$(runner_file "$id")"
+    else
+      rm -f -- "$(fm_procevent_handled_marker "$STATE" "$id" "$seq")"
+      fm_procevent_source_lock_release "$id"
+      die "cannot retire the board its owner just acknowledged; the round stays open: $id"
+    fi
   else
     conclude=0
   fi
@@ -1945,6 +1961,7 @@ cmd_retire() {
   rm -f -- "$(runner_file "$id")"
   rm -f -- "$(stranded_file "$id")"
   rm -f -- "$(launch_failed_file "$id")"
+  rm -f -- "$REG/.$id.reply."*
   fm_procevent_source_lock_release "$id"
   # A retired source produces no further answer, so drop any decision binding it
   # carried. Generic and idempotent: the binding owner is asked to forget this

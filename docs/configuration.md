@@ -880,7 +880,7 @@ An already-armed Lavish source keeps its registered listener command until it is
 A live task that hosts a Lavish board owns its listener, so firstmate must never arm that board.
 The worker arms it with `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and never runs `lavish-axi poll` itself.
 The registration persists as one task-owned source record, while each captured round remains open until the worker re-arms and the existing handled marker acknowledges that round.
-Re-arm never acquires, releases, or hands off the source claim, and it may carry `--agent-reply-file <path>` whose contents are copied into private state and posted at most once.
+Re-arm never acquires, releases, or hands off the source claim, and it may carry `--agent-reply-file <path>` whose contents are copied into that generation's own private staging file and handed once to the published `--agent-reply` argument; a re-arm that fails never touches the reply the prior registration still references.
 The captured result is stored with immutable task-owner routing evidence and delivered directly to that task's steering inbox, without a firstmate `check` wake for the captain's words.
 A task-owned source with an unhandled capture is not relaunched, so delivery failure cannot consume a round and start another poll.
 That record is the only ownership evidence there is, so while any captured round of it is unacknowledged every retirement path refuses - the runner's own terminal retirement and an explicit `retire` alike - and the refusal names the acknowledgement that releases it.

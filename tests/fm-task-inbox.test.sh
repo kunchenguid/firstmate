@@ -132,7 +132,7 @@ age_path() {  # <path>  (set mtime well past any grace under test)
 }
 
 test_write_is_durable_and_exact() {
-  local state rec rec2 doorbell doorbell2 expected actual expected2 actual2 text
+  local state rec rec2 doorbell doorbell2 doorbell3 expected actual expected2 actual2 text
   state="$TMP_ROOT/write/state"; mkdir -p "$state"
   text=$'line one\nline two with  spaces\n/slash body\n\n'
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "$text") \
@@ -169,6 +169,11 @@ test_write_is_durable_and_exact() {
   case "$doorbell" in
     *$'\n'*) fail "the doorbell must be a single line" ;;
   esac
+  mkdir -p "$state/t1.inbox/handled"
+  mv -f "$rec2" "$state/t1.inbox/handled/${rec2##*/}"
+  doorbell3=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$state/t1.inbox/handled/${rec2##*/}")
+  [ "$doorbell3" = "$doorbell" ] \
+    || fail "a record already acknowledged into handled/ must still ring its own inbox, got: $doorbell3"
   pass "inbox: a steer is written durably and round-trips byte-exact with a self-describing doorbell"
 }
 

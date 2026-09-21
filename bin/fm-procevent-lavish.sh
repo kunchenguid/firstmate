@@ -35,7 +35,8 @@
 #            run in a conversational turn. It runs the published blocking poll
 #            and prints its response verbatim, absorbing only the one exact
 #            transient interruption described below. A task-owned arm consumes
-#            its staged reply once and later retries poll without that reply.
+#            its staged reply file once and hands its contents to the published
+#            `--agent-reply` argument; later retries poll without that reply.
 # terminal   Exit 0 when the captured result means this Lavish source will never
 #            produce another result, so the runner may retire it; any other exit
 #            keeps it armed. This is the generic adapter contract bin/fm-procevent.sh
@@ -343,6 +344,7 @@ poll_iteration_floor_wait() {
 cmd_poll() {
   local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
   local pipeline_status original_host_present=0 original_host='' reply_file='' posted_reply=''
+  local reply_text='' reply_pending=0
   [ -n "$artifact" ] || usage
   if [ "${LAVISH_AXI_HOST+x}" = x ]; then
     original_host_present=1
@@ -354,9 +356,11 @@ cmd_poll() {
     if [ -f "$reply_file" ] && [ ! -L "$reply_file" ]; then
       mv -f -- "$reply_file" "$posted_reply" \
         || die "cannot consume agent reply file: $reply_file"
-      reply_file=$posted_reply
+      reply_text=$(cat -- "$posted_reply") \
+        || die "cannot read agent reply file: $reply_file"
+      reply_pending=1
     elif [ -f "$posted_reply" ] && [ ! -L "$posted_reply" ]; then
-      reply_file=''
+      :
     else
       die "agent reply file does not exist: $reply_file"
     fi
@@ -381,13 +385,13 @@ cmd_poll() {
   while :; do
     iteration_started=$(poll_iteration_started) || die "cannot start the poll rate governor"
     apply_configured_lavish_host "$original_host_present" "$original_host"
-    if [ -n "$reply_file" ]; then
-      lavish-axi poll "$artifact" --agent-reply-file "$reply_file" | poll_response_filter "$response"
+    if [ "$reply_pending" -eq 1 ]; then
+      lavish-axi poll "$artifact" --agent-reply "$reply_text" | poll_response_filter "$response"
     else
       lavish-axi poll "$artifact" | poll_response_filter "$response"
     fi
     pipeline_status=("${PIPESTATUS[@]}")
-    reply_file=''
+    reply_pending=0
     rc=${pipeline_status[0]}
     filter_rc=${pipeline_status[1]}
     case "$filter_rc" in

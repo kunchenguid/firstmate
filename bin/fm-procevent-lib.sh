@@ -1091,7 +1091,6 @@ fm_procevent_capture() {
   adapter_dest="$inbox/$id.$seq.adapter"
   if [ "$#" -eq 5 ]; then
     owner_dest="$inbox/$id.$seq.owner-task"
-    [ ! -e "$owner_dest" ] && [ ! -L "$owner_dest" ] || return 1
   fi
   if [ "$#" -eq 9 ]; then
     [ ! -e "$dest" ] && [ ! -L "$dest" ] \

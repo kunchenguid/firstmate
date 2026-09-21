@@ -721,9 +721,17 @@ set -eu
 n=$(cat "$MULTI_ROOT/count" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$MULTI_ROOT/count"
-if [ "${1-}" = poll ] && [ "${3-}" = --agent-reply-file ]; then
-  printf 'poll%s reply: ' "$n" >> "$MULTI_ROOT/replies"
-  cat "$4" >> "$MULTI_ROOT/replies"
+for arg in "$@"; do
+  case "$arg" in
+    --agent-reply) ;;
+    --*)
+      printf 'error: unknown option %s\ncode: VALIDATION_ERROR\n' "$arg" >&2
+      exit 2
+      ;;
+  esac
+done
+if [ "${1-}" = poll ] && [ "${3-}" = --agent-reply ]; then
+  printf 'poll%s reply: %s\n' "$n" "$4" >> "$MULTI_ROOT/replies"
 fi
 while [ ! -e "$MULTI_ROOT/trigger$n" ]; do sleep 0.02; done
 case "$n" in
@@ -746,6 +754,11 @@ fm_test_track_procevent_home "$HMULTI"
 PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" --for worker-1 \
   --agent-reply-file "$MULTI_ROOT/reply1" >/dev/null
+if PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" --for worker-1 \
+  --agent-reply-file "$MULTI_ROOT/absent-reply" >/dev/null 2>&1; then
+  fail "a re-arm carrying a nonexistent reply path was accepted"
+fi
 if PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" >/dev/null 2>"$MULTI_ROOT/firstmate-arm.err"; then
   fail "firstmate arm replaced a worker-owned board"
@@ -830,6 +843,8 @@ assert_contains "$(cat "$HMULTI/state/worker-1.inbox/003.msg" 2>/dev/null || tru
   "do not re-arm" "terminal worker-owned result instructed the worker to stop"
 [ "$(grep -c '^poll[123] reply:' "$MULTI_ROOT/replies" 2>/dev/null || true)" = 3 ] \
   || fail "worker replies were not posted once per round"
+assert_contains "$(cat "$MULTI_ROOT/replies")" "poll1 reply: reply one" \
+  "the reply staged before the refused re-arm was not the one the board received"
 
 # The terminal round keeps the board with worker-1 until worker-1 acknowledges
 # it, so the one source record stays the only ownership evidence there is: while
@@ -862,6 +877,17 @@ PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
   || fail "a refused sibling registration consumed the owner's terminal round"
 [ ! -f "$HMULTI/state/worker-2.inbox/001.msg" ] \
   || fail "a refused sibling registration took delivery of the owner's feedback"
+chmod 0500 "$HMULTI/state/procevent"
+blocked_handled_status=0
+PATH="$MULTI_BIN:$PATH" pe "$HMULTI" handled "$multi_id" 3 \
+  >/dev/null 2>"$MULTI_ROOT/blocked-handled.err" || blocked_handled_status=$?
+chmod 0700 "$HMULTI/state/procevent"
+[ "$blocked_handled_status" -ne 0 ] \
+  || fail "an acknowledgement that could not retire the board still reported success"
+[ ! -f "$HMULTI/state/procevent-inbox/$multi_id.3.handled" ] \
+  || fail "an acknowledgement that could not retire the board still closed the round"
+[ -e "$HMULTI/state/procevent/$multi_id.source" ] \
+  || fail "a failed conclude left the board unowned"
 PATH="$MULTI_BIN:$PATH" pe "$HMULTI" handled "$multi_id" 3 >/dev/null
 [ -f "$HMULTI/state/procevent-inbox/$multi_id.3.handled" ] \
   || fail "the owner's acknowledgement of the terminal round was not recorded"
@@ -873,6 +899,35 @@ PATH="$MULTI_BIN:$PATH" pe "$HMULTI" reconcile >/dev/null 2>&1 || true
 [ -z "$(wake_payloads "$HMULTI")" ] \
   || fail "worker-owned rounds produced a firstmate wake: $(wake_payloads "$HMULTI")"
 pass "worker-owned Lavish rounds deliver to the worker, acknowledge on re-arm, and stop at session end"
+
+# --- end-user-aligned regression: a half-written capture does not wedge -----
+# The result file is a capture's commit marker, so an owner sidecar left behind
+# at a sequence with no result - a crash between publishing that sidecar and
+# committing the result - is replaceable staging state. The next capture takes
+# the same sequence and still routes to the owning worker.
+HORPHAN="$TMP_ROOT/horphan"; new_home "$HORPHAN"
+ORPHAN_BIN=$(fm_fakebin "$TMP_ROOT/lavish-orphan-stub")
+cat > "$ORPHAN_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","after the crash","","message",""\n'
+SH
+chmod +x "$ORPHAN_BIN/lavish-axi"
+ORPHAN_ART="$TMP_ROOT/orphan-board.html"
+printf '<h1>orphan</h1>\n' > "$ORPHAN_ART"
+orphan_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$ORPHAN_ART")
+fm_test_track_procevent_home "$HORPHAN"
+PATH="$ORPHAN_BIN:$PATH" FM_HOME="$HORPHAN" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$ORPHAN_ART" --for worker-4 >/dev/null
+(umask 077; mkdir -p "$HORPHAN/state/procevent-inbox")
+chmod 0700 "$HORPHAN/state/procevent-inbox"
+printf 'worker-4\n' > "$HORPHAN/state/procevent-inbox/$orphan_id.1.owner-task"
+chmod 0600 "$HORPHAN/state/procevent-inbox/$orphan_id.1.owner-task"
+PATH="$ORPHAN_BIN:$PATH" pe "$HORPHAN" start "$orphan_id" >/dev/null 2>&1 || true
+[ -f "$HORPHAN/state/procevent-inbox/$orphan_id.1.result" ] \
+  || fail "an owner sidecar with no committed result wedged the next capture of its source"
+[ -f "$HORPHAN/state/worker-4.inbox/001.msg" ] \
+  || fail "the recovered capture did not reach its owning worker's steering inbox"
+pass "a capture interrupted before its result commit does not wedge its source"
 
 # The other half of the same contract, on the same real path: a close that
 # carries what the captain actually said must still reach him. Same runner, same
@@ -920,8 +975,17 @@ cat > "$LAVISH_SCRIPTED_BIN/lavish-axi" <<'SH'
 n=$(cat "$LAVISH_COUNT" 2>/dev/null || echo 0)
 n=$((n + 1))
 printf '%s\n' "$n" > "$LAVISH_COUNT"
-if [ -n "${LAVISH_REPLY_LOG-}" ] && [ "${1-}" = poll ] && [ "${3-}" = --agent-reply-file ]; then
-  cat "$4" >> "$LAVISH_REPLY_LOG"
+for arg in "$@"; do
+  case "$arg" in
+    --agent-reply) ;;
+    --*)
+      printf 'error: unknown option %s\ncode: VALIDATION_ERROR\n' "$arg" >&2
+      exit 2
+      ;;
+  esac
+done
+if [ -n "${LAVISH_REPLY_LOG-}" ] && [ "${1-}" = poll ] && [ "${3-}" = --agent-reply ]; then
+  printf '%s\n' "$4" >> "$LAVISH_REPLY_LOG"
 fi
 read -r -a plan <<< "$LAVISH_SCRIPT"
 i=$((n - 1))
