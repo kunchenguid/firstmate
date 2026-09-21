@@ -263,7 +263,7 @@ run_spawn() {
     extra+=("$kindflag")
   fi
   mkdir -p "$home/data/$id"
-  printf 'brief\n' > "$home/data/$id/brief.md"
+  printf '# Task\n\nbrief\n' > "$home/data/$id/brief.md"
   ( cd "$NORMAL_CWD" && env -u NO_MISTAKES_GATE -u FM_GATE_REFUSE_BYPASS \
       "FM_ROOT_OVERRIDE=" "FM_HOME=$home" \
       "FM_STATE_OVERRIDE=$home/state" "FM_DATA_OVERRIDE=$home/data" \

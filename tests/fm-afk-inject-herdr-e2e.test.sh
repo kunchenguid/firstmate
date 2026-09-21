@@ -49,7 +49,44 @@ herdr_forget_inherited_pane
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
-SESSION="fm-lab-afk-herdr-e2e-$$"
+LAB_HELPER=${FM_HERDR_LAB_HELPER:-}
+LAB_SESSION=${FM_HERDR_LAB_SESSION:-}
+LAB_PROXY_DIR=
+LAB_BASE_PATH=$PATH
+if [ -n "$LAB_HELPER" ] || [ -n "$LAB_SESSION" ]; then
+  [ -n "$LAB_HELPER" ] && [ -n "$LAB_SESSION" ] \
+    || { echo "not ok - FM_HERDR_LAB_HELPER and FM_HERDR_LAB_SESSION must be set together" >&2; exit 1; }
+  [ -x "$LAB_HELPER" ] || { echo "not ok - lab helper is not executable: $LAB_HELPER" >&2; exit 1; }
+  LAB_PROXY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-lab-proxy.XXXXXX") || exit 1
+  cat > "$LAB_PROXY_DIR/herdr" <<'PROXY'
+#!/usr/bin/env bash
+set -u
+args=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session)
+      [ "$#" -gt 1 ] || exit 2
+      [ "$2" = "$FM_HERDR_LAB_SESSION" ] || exit 2
+      shift 2
+      ;;
+    --session=*)
+      [ "${1#--session=}" = "$FM_HERDR_LAB_SESSION" ] || exit 2
+      shift
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+PATH="$FM_HERDR_LAB_BASE_PATH" exec "$FM_HERDR_LAB_HELPER" run "$FM_HERDR_LAB_SESSION" "${args[@]}"
+PROXY
+  chmod +x "$LAB_PROXY_DIR/herdr"
+  export FM_HERDR_LAB_BASE_PATH="$LAB_BASE_PATH"
+  export PATH="$LAB_PROXY_DIR:$PATH"
+fi
+
+SESSION=${LAB_SESSION:-"fm-lab-afk-herdr-e2e-$$"}
 export HERDR_SESSION="$SESSION"
 STATE_DIR=
 HERDR_SHIM_DIR=
@@ -65,12 +102,22 @@ cleanup_all() {
     kill "$DAEMON_PID" 2>/dev/null || true
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
-  herdr_safe_stop_and_delete "$SESSION" 2>/dev/null || true
+  if [ -n "$LAB_HELPER" ]; then
+    "$LAB_HELPER" teardown "$SESSION" 2>/dev/null || true
+  else
+    herdr_safe_stop_and_delete "$SESSION" 2>/dev/null || true
+  fi
+  rm -rf "${LAB_PROXY_DIR:-}" 2>/dev/null || true
   rm -rf "${HERDR_SHIM_DIR:-}" 2>/dev/null || true
   rm -rf "${STATE_DIR:-}" 2>/dev/null || true
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+if [ -n "$LAB_HELPER" ]; then
+  "$LAB_HELPER" run "$SESSION" status --json >/dev/null \
+    || fail "could not confirm the supplied isolated Herdr lab session"
+else
+  fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
+fi
 
 # --- source the daemon (for afk_enter/afk_exit/FM_INJECT_MARK) + the backend -
 # shellcheck source=/dev/null
@@ -85,6 +132,7 @@ STATE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-herdr-e2e.XXXXXX")
 mkdir -p "$STATE_DIR"
 LOG_FILE="$STATE_DIR/submitted.log"
 : > "$LOG_FILE"
+: > "$STATE_DIR/fake-c1.meta"
 
 CONTAINER_RAW=$(fm_backend_herdr_container_ensure /tmp) || fail "container_ensure failed"
 CONTAINER=${CONTAINER_RAW%%$'\t'*}

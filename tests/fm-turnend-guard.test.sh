@@ -449,12 +449,18 @@ test_hook_blocks_when_unhealthy_in_primary() {
 # Non-claude harnesses (Codex, Grok, OpenCode, Pi) never read this advisory's
 # stdout systemMessage, so they keep the unchanged blocking behaviour.
 test_hook_foreign_live_home_owner_is_advisory_not_block() {
-  local dir out status pid
+  local dir out status pid comm attempt
   dir=$(make_primary_dir "$TMP_ROOT/hook-foreign-owner")
   : > "$dir/state/task1.meta"
   cp "$(command -v sleep)" "$dir/claude"
   "$dir/claude" 300 &
   pid=$!
+  for attempt in $(seq 1 50); do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null | xargs basename 2>/dev/null || true)
+    [ "$comm" = claude ] && break
+    sleep 0.01
+  done
+  [ "$comm" = claude ] || fail "foreign owner did not become the expected claude process"
   printf '%s\n' "$pid" > "$dir/state/.lock"
   out=$(run_hook_claude "$dir" false); status=$?
   kill "$pid" 2>/dev/null || true

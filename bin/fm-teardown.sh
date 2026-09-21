@@ -3620,15 +3620,16 @@ META_LOCK_HELD=0
 # Durable dispatch record (bin/fm-dispatch-log.sh header owns the log format).
 # Appended once the task record has been removed and its backlog transition has
 # committed, so a teardown that failed and will be retried leaves no record.
-# Best-effort and non-fatal: a logging failure must never fail an otherwise
-# successful teardown. Deliberately minimal (id only) - see the header
-# cross-reference.
-{
-  mkdir -p "$DATA" 2>/dev/null
-  printf '{"event":"teardown","ts":"%s","id":"%s"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ID" \
-    >> "$DATA/dispatch-log.jsonl"
-} 2>/dev/null || true
+# A nested remote retirement removes the overridden state and data home itself,
+# so do not recreate that retired home solely to append a best-effort record.
+if [ "$KIND" != secondmate ] || [ -d "$STATE" ]; then
+  {
+    mkdir -p "$DATA" 2>/dev/null
+    printf '{"event":"teardown","ts":"%s","id":"%s"}\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$ID" \
+      >> "$DATA/dispatch-log.jsonl"
+  } 2>/dev/null || true
+fi
 
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true

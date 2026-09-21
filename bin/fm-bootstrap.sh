@@ -156,6 +156,11 @@
 #          nothing; bin/fm-brief.sh uses it to gate scout Lavish hosting.
 set -u
 
+# A caller may invoke bootstrap under `bash -x` while testing the opt-in typed
+# dispatch gate.
+# Disable tracing before copying its key so neither the environment value nor
+# the private handoff variable reaches the shell trace.
+set +x
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
 export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
 unset TYPESAFE_API_KEY

@@ -1775,9 +1775,12 @@ _fm_status_open_decision_origins() {  # <status-file> [<kind>]
   while IFS= read -r line || [ -n "$line" ]; do
     number=$((number + 1))
     after=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
-    [ -n "$after" ] || origins=''
-    key=$(_fm_decision_key "$line") || { open=$after; continue; }
     verb=$(status_line_verb "$line")
+    # A failure clears the current open-decision set but still needs its unseen decision origin in the same escalation span.
+    # A completed task drops the historical origin from this escalation-specific view.
+    # An explicit resolution or verified captain-held transfer drops its own origin below.
+    [ -n "$after" ] || [ "$verb" != "done" ] || origins=''
+    key=$(_fm_decision_key "$line") || { open=$after; continue; }
     note=$(status_line_note "$line")
     case "$verb" in
       needs-decision|blocked)

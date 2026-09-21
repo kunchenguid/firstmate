@@ -88,7 +88,7 @@ make_trust_case() {
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   mkdir -p "$home/data/$id"
-  printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+  printf '# Task\n\n[captain] brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
   : > "$keylog"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$countfile|$keylog"
