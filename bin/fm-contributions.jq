@@ -142,6 +142,7 @@ def summary($rows; $errors):
    stale_verdicts:([$rows[].stale_verdicts] | add // 0),
    missing_verdicts:([$rows[].missing_verdicts] | add // 0),
    unreadable_records:$errors,
-   valid_until:([$rows[] | select(.final | not) | .checked_at | try (fromdateiso8601) catch 0] | min // 0),
+   valid_until:([$rows[] | select((.final | not) and .actor != "unmeasured")
+     | .checked_at | try (fromdateiso8601) catch 0] | min // 0),
    captain:[$rows[] | select(.actor == "captain") | {task,url,kind,head,reason:(.reason[:240]),hold,
      verdict_freshness:.verdict.freshness,verdict_head:.verdict.head,verdict_source:.verdict.source,checked_at}]};

@@ -632,6 +632,33 @@ test_forge_host_refusal_reaches_the_captain_through_the_watcher() {
   pass 'a rejected forge-host line reaches the captain through the watcher instead of halting polling silently'
 }
 
+test_unmeasurable_row_does_not_expire_measured_home_coverage() {
+  local home child now_epoch
+  home=$(new_home unmeasurable-window-parent)
+  child=$(new_home unmeasurable-window-child)
+  mkdir -p "$child/bin"
+  printf '# Fixture\n' > "$child/AGENTS.md"
+  printf 'child\n' > "$child/.fm-secondmate-home"
+  record "$child" held 21 open mergeable '(hold: choose scope) (hold-kind: captain)'
+  record "$child" awaiting 22 open mergeable
+  printf -- '- [ ] enterprise - Filed https://precision-it.ghe.com/o/r/pull/18 (repo: sample) (kind: ship)\n' \
+    >> "$child/data/backlog.md"
+  FM_SNAPSHOT_NOW="$NOW" with_home "$child" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary \
+    > "$child/state/home-summary.json" || fail 'could not collect child enterprise-link coverage'
+  now_epoch=$(jq -nr --arg now "$NOW" '$now | fromdateiso8601')
+  jq -e --argjson now "$now_epoch" '.contributions.valid_until > $now' \
+    "$child/state/home-summary.json" >/dev/null \
+    || fail 'a row poll never contacts expired the whole home summary the moment it was written'
+  printf -- '- child - fixture (home: %s; scope: fixture; projects: sample; added 2026-09-16)\n' "$child" \
+    > "$home/data/secondmates.md"
+  bearings "$home" | jq -e '.contributions.known == 3 and .contributions.checked == 2
+    and .contributions.unmeasured == 1 and .contributions.counts.captain == 1
+    and .contributions.counts.maintainer == 1 and .contributions.counts.fleet == 0
+    and (.contributions.captain | length) == 1' >/dev/null \
+    || fail 'an unmeasurable child row relabelled measured coverage as fleet work and dropped its captain hold'
+  pass 'a row poll never contacts does not expire the measured coverage beside it'
+}
+
 test_expired_child_unsupported_forge_stays_unmeasured() {
   local home child
   home=$(new_home expired-unsupported-parent)
@@ -996,7 +1023,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_forge_host_allowlist_decides_coverage test_unlisted_host_reason_differs_from_unsupported_forge test_commented_out_forge_host_is_rejected_not_ignored test_rejected_forge_host_narrows_coverage_without_failing_reads test_forge_reads_only_reach_allowlisted_hosts test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_forge_host_refusal_reaches_the_captain_through_the_watcher test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_forge_host_allowlist_decides_coverage test_unlisted_host_reason_differs_from_unsupported_forge test_commented_out_forge_host_is_rejected_not_ignored test_rejected_forge_host_narrows_coverage_without_failing_reads test_forge_reads_only_reach_allowlisted_hosts test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_forge_host_refusal_reaches_the_captain_through_the_watcher test_unmeasurable_row_does_not_expire_measured_home_coverage test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

@@ -66,6 +66,11 @@
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and a stale error beside it is cleared once.
+# summary.valid_until bounds how long a cached summary may be reused, so only
+# rows poll can actually refresh set it. A final row never expires, and neither
+# does an unmeasured one: poll never contacts it, so its checked_at can never
+# advance and treating it as overdue would expire the whole home's summary,
+# including the measured rows beside it, for as long as the URL is owned.
 # A genuine failure prints its unavailable line only when it starts an episode
 # (no prior owner has an error); a successful read ends the episode.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
