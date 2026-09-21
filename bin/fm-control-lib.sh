@@ -65,7 +65,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy devin
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -91,6 +91,7 @@ fm_control_harness_family() {  # <recorded-harness>
     pi-signed) printf 'pi-signed' ;;
     omp) printf 'omp' ;;
     agy) printf 'agy' ;;
+    devin) printf 'devin' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -104,7 +105,7 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse, gemini, rovo, and agy
+# Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, and devin
 # are crewmate/scout adapters only: none has a primary supervision protocol,
 # and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
@@ -114,6 +115,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
+    devin) case "$kind" in ship|scout) ;; *) return 1 ;; esac ;;
     muse|gemini|rovo|agy) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
@@ -131,17 +133,17 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # through Herdr).
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
-    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy) printf 'Escape' ;;
+    claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy|devin) printf 'Escape' ;;
     grok) printf 'C-c' ;;
     *) return 1 ;;
   esac
 }
 
-# How many times the interrupt key must be delivered. OpenCode needs a double
+# How many times the interrupt key must be delivered. OpenCode and Devin need a double
 # Escape; every other verified adapter interrupts on a single press.
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
-    opencode) printf '2' ;;
+    opencode|devin) printf '2' ;;
     claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '1' ;;
     *) return 1 ;;
   esac
@@ -163,7 +165,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) ;;
     *) return 1 ;;
   esac
 }
@@ -178,7 +180,7 @@ fm_control_interrupt_ack_source() {  # <harness>
     # rovo's TUI prints "Agent cancelled" on Escape, but for parity with
     # claude/cursor this stays 'none': the ack is a rendered string, not a
     # recorded state source, and rovo has no busy wiring to confirm against.
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy) printf 'none' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|devin) printf 'none' ;;
     *) return 1 ;;
   esac
 }
@@ -187,7 +189,7 @@ fm_control_interrupt_ack_source() {  # <harness>
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
     claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
-    codex|pi|pi-signed|omp|gemini|agy) printf '/quit' ;;
+    codex|pi|pi-signed|omp|gemini|agy|devin) printf '/quit' ;;
     *) return 1 ;;
   esac
 }
@@ -323,6 +325,7 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
     # is written into the worktree, whose own .gemini/settings.json belongs to
     # the project, and nothing global is installed.
     gemini) printf '%s\n' "$state/$id.gemini-settings.json" ;;
+    devin) printf '%s\n' "$state/$id.devin-config.json" ;;
   esac
 }
 

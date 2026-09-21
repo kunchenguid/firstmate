@@ -193,6 +193,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/devin.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/gemini.md",
       "audience": "agent-runtime"
     },
@@ -442,6 +446,10 @@
     },
     {
       "path": "docs/verification/agy.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/devin.md",
       "audience": "maintainer-verification"
     },
     {
