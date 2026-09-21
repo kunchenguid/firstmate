@@ -350,6 +350,10 @@ test_staged_acquire_publishes_complete_lock() {
 # acquisition outright, and the pinned read must see the complete generation.
 test_published_pid_is_verified_not_rewritten() {
   local dir state out
+  if [ "$(id -u)" = 0 ]; then
+    pass "skip: the read-only pid detector needs a filesystem that can deny root's rewrite"
+    return 0
+  fi
   dir=$(make_case claim-verify)
   state="$dir/state"
   out=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
