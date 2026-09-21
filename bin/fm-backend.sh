@@ -362,14 +362,38 @@ fm_backend_target_of_meta() {  # <meta-file>
   [ -n "$window" ] && printf '%s' "$window"
 }
 
+# fm_backend_meta_endpoint_cleared_value: the single explicit
+# `endpoint_cleared=<reason>` stamp a record may carry once its endpoint is
+# already gone (a workspace or pane closed by an earlier cleanup, or an agent
+# that died to a provider cap). Absent, empty, duplicated, or malformed returns
+# 1 so an ambiguous stamp is never mistaken for a confirmed cleared endpoint.
+fm_backend_meta_endpoint_cleared_value() {  # <meta-file>
+  local meta=$1 count value
+  count=$(grep -c '^endpoint_cleared=' "$meta" 2>/dev/null || true)
+  [ "$count" -eq 1 ] || return 1
+  value=$(grep '^endpoint_cleared=' "$meta" | cut -d= -f2-)
+  [ -n "$value" ] || return 1
+  case "$value" in *$'\n'*|*$'\r'*|*$'\t'*) return 1 ;; esac
+  printf '%s' "$value"
+}
+
 # fm_backend_validate_task_endpoint: validate a task cleanup record entirely
 # from its durable metadata before any runtime command or cleanup mutation.
 # The validation binds the exact task id, selected backend, target, project,
 # and worktree. New non-tmux records carry endpoint_task_id because their
 # opaque runtime ids do not encode the task label. Legacy tmux records remain
 # valid only when their window name itself is exactly fm-<task-id>.
+# With --allow-cleared, a record whose window is absent but which carries one
+# explicit endpoint_cleared stamp is accepted as an agent-less cleared endpoint
+# instead of refused: there is no live endpoint left to validate structurally,
+# and the stamp is the stronger agent-less evidence (a window may be dead while
+# an agent is gone; a cleared stamp records a close already performed). The
+# cleared contract sets FM_BACKEND_VALIDATED_ENDPOINT_CLEARED to the reason and
+# leaves FM_BACKEND_VALIDATED_TARGET empty; every caller that needs to operate
+# on a live endpoint must therefore stay strict and must not pass the flag.
 # On success, sets FM_BACKEND_VALIDATED_BACKEND and
-# FM_BACKEND_VALIDATED_TARGET. On failure, prints one refusal and returns 1.
+# FM_BACKEND_VALIDATED_TARGET (and FM_BACKEND_VALIDATED_ENDPOINT_CLEARED when
+# cleared). On failure, prints one refusal and returns 1.
 fm_backend_meta_exact_value() {  # <meta-file> <key>
   local meta=$1 key=$2 count value
   count=$(grep -c "^$key=" "$meta" 2>/dev/null || true)
@@ -404,11 +428,12 @@ fm_backend_orca_worktree_id_valid() {  # <value>
   esac
 }
 
-fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
-  local meta=$1 id=$2 backend_count backend window worktree project binding_count binding
+fm_backend_validate_task_endpoint() {  # <meta-file> <task-id> [--allow-cleared]
+  local meta=$1 id=$2 allow_cleared=${3:-} backend_count backend window cleared worktree project binding_count binding
   local session pane recorded_session workspace tab terminal worktree_id surface
   FM_BACKEND_VALIDATED_BACKEND=
   FM_BACKEND_VALIDATED_TARGET=
+  FM_BACKEND_VALIDATED_ENDPOINT_CLEARED=
   [ -f "$meta" ] && [ ! -L "$meta" ] || {
     echo "REFUSED: task $id has no regular endpoint metadata at $meta; preserving task state." >&2
     return 1
@@ -417,10 +442,15 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
     echo "REFUSED: task endpoint identity has an invalid task id; preserving task state." >&2
     return 1
   esac
-  window=$(fm_backend_meta_exact_value "$meta" window) || {
+  window=$(fm_backend_meta_exact_value "$meta" window) || window=
+  cleared=
+  if [ -z "$window" ] && [ "$allow_cleared" = --allow-cleared ]; then
+    cleared=$(fm_backend_meta_endpoint_cleared_value "$meta") || cleared=
+  fi
+  if [ -z "$window" ] && [ -z "$cleared" ]; then
     echo "REFUSED: task $id has a missing, empty, or ambiguous window endpoint; preserving task state." >&2
     return 1
-  }
+  fi
   worktree=$(fm_backend_meta_exact_value "$meta" worktree) || {
     echo "REFUSED: task $id has a missing, empty, or ambiguous worktree identity; preserving task state." >&2
     return 1
@@ -460,6 +490,14 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
   if [ -n "$binding" ] && [ "$binding" != "$id" ]; then
     echo "REFUSED: endpoint metadata belongs to task $binding, not $id; preserving task state." >&2
     return 1
+  fi
+
+  if [ -n "$cleared" ]; then
+    # shellcheck disable=SC2034 # Output globals are consumed by sourcing callers.
+    FM_BACKEND_VALIDATED_ENDPOINT_CLEARED=$cleared
+    FM_BACKEND_VALIDATED_BACKEND=$backend
+    FM_BACKEND_VALIDATED_TARGET=
+    return 0
   fi
 
   case "$backend" in

@@ -1358,6 +1358,107 @@ test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails() {
   pass "--legacy-record teardown rolls its stamp back when the close marker write fails"
 }
 
+# Write the operator shape this fix supports: an explicit endpoint_cleared
+# stamp and no window= line, as left after a dead lane's pane or workspace was
+# closed by hand. Args: <case-dir> [<worktree>] [<reason>]
+write_cleared_meta() {
+  local case_dir=$1 wt reason
+  wt=${2:-$case_dir/wt}
+  reason=${3:-workspace-or-pane-closed-cleanup-20260916}
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "worktree=$wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "backend=herdr" \
+    "herdr_session=default" \
+    "endpoint_cleared=$reason"
+}
+
+test_cleared_endpoint_teardown_completes_without_flag_or_force() {
+  local case_dir out rc
+  case_dir=$(make_case cleared-allow)
+  seed_backlog_in_flight "$case_dir"
+  # Absent worktree, no spawn_gen, and no window: any teardown path that still
+  # demanded a classifiable window would refuse exactly as the live fleet did.
+  rm -rf "$case_dir/wt"
+  write_cleared_meta "$case_dir" "$case_dir/wt-absent"
+
+  set +e
+  out=$(run_teardown "$case_dir" 2> "$case_dir/stderr")
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "cleared-allow: teardown should complete on an explicitly cleared endpoint"
+  grep -q REFUSED "$case_dir/stderr" \
+    && fail "cleared-allow: teardown refused an explicitly cleared endpoint: $(cat "$case_dir/stderr")"
+  printf '%s\n' "$out" | grep -Fq 'cleared:workspace-or-pane-closed-cleanup-20260916' \
+    || fail "cleared-allow: the teardown line did not name the cleared endpoint: $out"
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
+    || fail "cleared-allow: teardown returned success with its backlog item still open"
+  assert_absent "$case_dir/state/task-x1.meta" \
+    "cleared-allow: teardown left the task record behind"
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "cleared-allow: a landed close left its pending-close record behind"
+  pass "an explicitly cleared endpoint tears down without --force or --legacy-record"
+}
+
+test_cleared_endpoint_teardown_still_refuses_unlanded_work() {
+  local case_dir rc before
+  case_dir=$(make_case cleared-unlanded)
+  seed_backlog_in_flight "$case_dir"
+  write_cleared_meta "$case_dir" "$case_dir/wt"
+  # Real content committed but pushed nowhere and merged nowhere.
+  wt_commit_file "$case_dir" feature.txt unique-cleared-content "real unlanded work"
+  before=$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "cleared-unlanded: the cleared stamp must not relax the unlanded-work refusal"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "cleared-unlanded: no REFUSED line for unlanded work behind a cleared endpoint"
+  [ "$(cksum "$case_dir/state/task-x1.meta" | awk '{print $1, $2}')" = "$before" ] \
+    || fail "cleared-unlanded: the refusal modified the task record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "cleared-unlanded: the refusal closed the backlog item anyway"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "cleared-unlanded: the refusal removed the task record"
+  pass "an explicitly cleared endpoint never relaxes the unlanded-work refusal"
+}
+
+test_missing_window_without_a_cleared_stamp_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_case cleared-no-stamp)
+  seed_backlog_in_flight "$case_dir"
+  rm -rf "$case_dir/wt"
+  # No window, no endpoint_cleared stamp: the ordinary missing-endpoint refusal
+  # must survive --allow-cleared, or the cleared contract would widen into a
+  # blanket acceptance of malformed records. spawn_gen is present so the
+  # incarnation gate is not what refuses first.
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "worktree=$case_dir/wt-absent" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "backend=herdr" \
+    "spawn_gen=teardown-test-cleared-no-stamp"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "cleared-no-stamp: a missing window without a cleared stamp must refuse"
+  grep -q "missing, empty, or ambiguous window endpoint" "$case_dir/stderr" \
+    || fail "cleared-no-stamp: the refusal was not the ordinary missing-window refusal: $(cat "$case_dir/stderr")"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "cleared-no-stamp: the refusal removed the task record"
+  pass "a missing window without an endpoint_cleared stamp still refuses"
+}
+
 # Override fakebin/perl so ONLY the stamp rollback's truncate fails; every other
 # perl call in the lifecycle still runs the real interpreter, so the abandoned
 # attempt leaves its stamp behind for exactly the reason under test.
@@ -2577,6 +2678,136 @@ SH
   chmod +x "$case_dir/fakebin/herdr"
 }
 
+# A projected task whose workspace holds a SECOND pane besides the recorded task
+# pane, so closing the recorded pane leaves the workspace alive - the shape that
+# survives a Herdr restart and resurrects a lane. Closing the second pane (the
+# same focus-preserving path) removes the workspace, unless the fixture is put in
+# STUCK mode, which keeps it present so teardown must refuse and retain records.
+configure_herdr_lingering_workspace_case() {  # <case-dir>
+  local case_dir=$1 token=AbCdEfGhIjKlMnOpQrStUv
+  sed -i.bak 's/^window=.*/window=fmtest:w1:p2/' "$case_dir/state/task-x1.meta"
+  rm -f "$case_dir/state/task-x1.meta.bak"
+  printf '%s\n' \
+    'backend=herdr' \
+    'herdr_session=fmtest' \
+    'herdr_workspace_id=w1' \
+    'herdr_tab_id=w1:t2' \
+    'herdr_pane_id=w1:p2' >> "$case_dir/state/task-x1.meta"
+  printf '%s\n' \
+    'version=1' \
+    'task_id=task-x1' \
+    "projection_id=$token" > "$case_dir/state/task-x1.herdr-presentation"
+  cat > "$case_dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
+closed="${FM_FAKE_HERDR_CLOSED:?}"
+closed9="${FM_FAKE_HERDR_CLOSED9:?}"
+ws_gone=0
+[ -e "$closed" ] && [ -e "$closed9" ] && ws_gone=1
+[ "${FM_FAKE_HERDR_STUCK:-0}" = 1 ] && ws_gone=0
+case "${1:-} ${2:-}" in
+  "workspace list")
+    if [ "$ws_gone" = 1 ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true}]}}'
+    else
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 · p:AbCdEfGhIjKlMnOpQrStUv","focused":false},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true}]}}'
+    fi
+    ;;
+  "tab list")
+    case "$*" in
+      *"--workspace w1"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","workspace_id":"w1"},{"tab_id":"w1:t9","workspace_id":"w1"}]}}' ;;
+      *"--workspace w2"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","focused":true}]}}' ;;
+      *) printf '%s\n' '{"result":{"tabs":[]}}' ;;
+    esac
+    ;;
+  "pane list")
+    case "$*" in
+      *"--workspace w1"*)
+        if [ -e "$closed9" ]; then printf '%s\n' '{"result":{"panes":[]}}'
+        else printf '%s\n' '{"result":{"panes":[{"pane_id":"w1:p9","tab_id":"w1:t9","workspace_id":"w1"}]}}'
+        fi ;;
+      *) printf '%s\n' '{"result":{"panes":[]}}' ;;
+    esac
+    ;;
+  "status --json") printf '%s\n' '{"server":{"running":true}}' ;;
+  "session list") printf '%s\n' '{"sessions":[{"name":"fmtest","running":true,"socket_path":"/tmp/fmtest.sock"}]}' ;;
+  "pane close")
+    case "${3:-}" in
+      w1:p2) : > "$closed" ;;
+      w1:p9) : > "$closed9" ;;
+    esac
+    ;;
+  "pane get")
+    p="${3:-}"
+    if { [ "$p" = "w1:p2" ] && [ -e "$closed" ]; } || { [ "$p" = "w1:p9" ] && [ -e "$closed9" ]; }; then
+      printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2
+      exit 1
+    fi
+    case "$p" in
+      w1:p2) printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p2","tab_id":"w1:t2","workspace_id":"w1"}}}' ;;
+      w1:p9) printf '%s\n' '{"result":{"pane":{"pane_id":"w1:p9","tab_id":"w1:t9","workspace_id":"w1"}}}' ;;
+      *) printf '%s\n' '{"error":{"code":"pane_not_found"}}' >&2; exit 1 ;;
+    esac
+    ;;
+  "tab get") printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2"}}}' ;;
+  "tab focus")
+    : > "${FM_FAKE_HERDR_RESTORED:?}"
+    printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t2","workspace_id":"w2","focused":true}}}'
+    ;;
+  "agent get") printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$case_dir/fakebin/herdr"
+}
+
+test_herdr_projection_teardown_removes_a_workspace_left_by_the_task_pane_close() {
+  local case_dir log closed closed9 restored
+  case_dir=$(make_case herdr-lingering-workspace)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_lingering_workspace_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; closed9="$case_dir/closed9"
+  restored="$case_dir/restored"; : > "$log"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_CLOSED9="$closed9" \
+    FM_FAKE_HERDR_RESTORED="$restored" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "herdr-lingering-workspace: teardown failed while a surviving projected workspace could be removed: $(cat "$case_dir/stderr")"
+  [ -e "$closed" ] || fail "herdr-lingering-workspace: the recorded task pane was never closed"
+  [ -e "$closed9" ] || fail "herdr-lingering-workspace: the surviving workspace pane was never closed"
+  [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "herdr-lingering-workspace: the journal was retained even though the workspace was confirmed gone"
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-lingering-workspace: teardown left the task record behind"
+  assert_not_contains "$(cat "$log")" "workspace close" \
+    "herdr-lingering-workspace: teardown must never call workspace close"
+  pass "a projected teardown removes the workspace its task-pane close left behind, without calling workspace close"
+}
+
+test_herdr_projection_teardown_retains_records_when_its_workspace_survives() {
+  local case_dir log closed closed9 restored rc=0
+  case_dir=$(make_case herdr-lingering-workspace-stuck)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_lingering_workspace_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; closed9="$case_dir/closed9"
+  restored="$case_dir/restored"; : > "$log"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_CLOSED9="$closed9" \
+    FM_FAKE_HERDR_RESTORED="$restored" FM_FAKE_HERDR_STUCK=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "herdr-lingering-workspace-stuck: teardown reported success while the projected workspace still existed"
+  assert_grep "is not confirmed gone" "$case_dir/stderr" \
+    "herdr-lingering-workspace-stuck: the refusal did not explain the surviving workspace"
+  [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "herdr-lingering-workspace-stuck: the refusal retired the presentation journal"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "herdr-lingering-workspace-stuck: the refusal erased the durable endpoint metadata"
+  assert_not_contains "$(cat "$log")" "workspace close" \
+    "herdr-lingering-workspace-stuck: the refusal must never call workspace close"
+  pass "a projected teardown refuses and retains every record while its workspace cannot be confirmed gone"
+}
+
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
   local case_dir log closed restored
   case_dir=$(make_case herdr-projection-confirmed-close)
@@ -3688,6 +3919,8 @@ test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconf
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup
+test_herdr_projection_teardown_removes_a_workspace_left_by_the_task_pane_close
+test_herdr_projection_teardown_retains_records_when_its_workspace_survives
 test_squash_merged_branch_deleted_allows
 test_squash_merged_pr_allows_when_head_ancestor_of_pr_head
 test_no_pr_recorded_discovers_merged_pr_by_branch_allows
@@ -3708,6 +3941,9 @@ test_legacy_record_teardown_completes_when_landed_and_endpoint_dead
 test_legacy_record_teardown_refuses_unlanded_work
 test_legacy_record_teardown_refuses_an_ambiguous_endpoint
 test_legacy_record_rolls_the_stamp_back_when_the_marker_write_fails
+test_cleared_endpoint_teardown_completes_without_flag_or_force
+test_cleared_endpoint_teardown_still_refuses_unlanded_work
+test_missing_window_without_a_cleared_stamp_still_refuses
 test_retained_legacy_stamp_still_faces_the_endpoint_gate
 test_legacy_record_never_accepts_a_corrupt_spawn_gen
 test_stale_index_lock_cleared_and_teardown_succeeds

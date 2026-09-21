@@ -57,7 +57,11 @@
 #                          not a wedge and is reported ONCE instead of escalating
 #                          on that cadence forever (wedge_dead_record); only the
 #                          two recovery-grade verdicts license it, and every other
-#                          verdict escalates unchanged.
+#                          verdict escalates unchanged. A later redrawn dead
+#                          display is absorbed against that once-record
+#                          (dead_endpoint_absorb), so a husk cannot re-alarm on
+#                          pane churn, while a relaunched agent re-arms the
+#                          incarnation and is probed and reported afresh.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -1222,6 +1226,41 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   printf '%s %s' "$agent_state" "$id" > "$marker"
   clear_write_tracking "$key"
   wake "$reason"
+}
+
+# A pane whose endpoint a prior threshold already reported dead must not wake
+# again just because its dead display changed. wedge_dead_record writes
+# .dead-reported-<key> only from the wedge timer, which runs on a STABLE hash;
+# a husk whose display redraws (a shell prompt, a process-exited banner) enters
+# surface_nonterminal_stale on the next stable hash instead, re-alarming
+# firstmate for a record already known dead. This consults that marker and
+# absorbs the new display, comparing the SAME incarnation discriminator
+# wedge_dead_record wrote: the task's busy gen when readable, else the pane hash.
+# A relaunched agent re-arms the gen, so the marker no longer matches and the
+# normal path re-probes and re-reports; a hash-fallback marker never matches a
+# changed hash, so an incarnation that cannot be named keeps the unchanged
+# behavior. No backend probe is added: the marker already records a threshold
+# read, and an agent that resumed makes itself known through the busy verdict
+# the caller checks before calling this. Returns 0 to absorb, 1 otherwise.
+dead_endpoint_absorb() {  # <window> <task> <hash> <label>
+  local win=$1 task=$2 hash=$3 label=$4 key marker recorded verdict id gen
+  key=$(window_key "$win")
+  marker="$STATE/.dead-reported-$key"
+  [ -s "$marker" ] || return 1
+  recorded=$(cat "$marker" 2>/dev/null || true)
+  verdict=${recorded%% *}
+  id=${recorded#* }
+  case "$verdict" in
+    dead|missing) ;;
+    *) rm -f "$marker"; return 1 ;;
+  esac
+  if gen=$(fm_busy_current_gen "$STATE" "$task"); then
+    [ "$id" = "$gen" ] || return 1
+  else
+    [ "$id" = "$hash" ] || return 1
+  fi
+  triage_log "absorbed $label (endpoint $verdict already reported, incarnation $id): $win"
+  return 0
 }
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
@@ -2649,6 +2688,20 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # A window already reported dead absorbs a CHANGED display before any
+    # downstream surface path (surface_nonterminal_stale, paused, wedge) can
+    # re-alarm on the new hash, but only while it reads idle: a busy pane is a
+    # worker that came back, never a dead husk. An unchanged hash keeps the
+    # ordinary path, which already owns the dead-record once-report.
+    if [ "$h" != "$prev" ] && [ "$busy_now" -ne 0 ] \
+       && dead_endpoint_absorb "$w" "$task" "$h" "stale (endpoint already reported dead)"; then
+      printf '%s' "$h" > "$hf"
+      echo 0 > "$cf"
+      printf '%s' "$h" > "$sf"
+      rm -f "$ssf" "$ewf"
+      clear_write_tracking "$key"
+      continue
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

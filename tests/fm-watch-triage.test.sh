@@ -3297,6 +3297,59 @@ test_gone_endpoint_reports_once_instead_of_escalating_forever() {
   pass "a record whose endpoint is dead or missing reports itself once and is never re-escalated"
 }
 
+# The once-report alone is not enough: wedge_dead_record runs only on a STABLE
+# hash, so a dead husk whose display redraws (a shell prompt, a process-exited
+# banner) re-entered surface_nonterminal_stale on every new hash and re-alarmed
+# firstmate for a record already known dead. The window's recorded once-marker
+# must gate the surface paths too. The successor direction is pinned as well: a
+# relaunch re-arms the busy incarnation, the marker no longer matches, and the
+# replacement's own death is reported in full rather than swallowed.
+test_reported_dead_endpoint_absorbs_a_changed_dead_display() {
+  local dir state fakebin out capture window key
+  local failed='state: failed · source: run-step · run failed'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(wedge_threshold_fixture dead-display-churn 'working: still compiling' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" wedge >/dev/null \
+    || fail "could not arm the lane's busy incarnation"
+  gone_endpoint_env missing; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "the dead endpoint was never reported at the wedge threshold: $(cat "$out")"
+  [ -s "$state/.dead-reported-$key" ] || fail "the once-only report left no record of itself"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "the first report queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first dead report"
+
+  # The dead display redraws under the SAME incarnation: still the same dead
+  # pane, so a changed hash must absorb with no new wake. The marker gate is
+  # what absorbed it, not an unrelated pause cadence.
+  printf 'shell exited; press enter\n' > "$capture"
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" absorb \
+    || fail "a redrawn dead display re-alarmed firstmate: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a redrawn dead display queued a repeat wake: $(cat "$state/.wake-queue")"
+  grep -F 'endpoint missing already reported' "$state/.watch-triage.log" >/dev/null \
+    || fail "the redraw was not absorbed by the recorded dead-endpoint marker"
+  [ -s "$state/.dead-reported-$key" ] \
+    || fail "the redraw dropped the false-positive guard's once-record"
+
+  # A relaunch re-arms the incarnation, so the marker no longer describes this
+  # agent and the replacement's own death must reach firstmate again.
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" wedge >/dev/null \
+    || fail "could not re-arm the successor's busy incarnation"
+  printf 'successor died here\n' > "$capture"
+  : > "$out"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$failed" exit \
+    || fail "a successor's death was swallowed by the prior dead report: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 1 ] \
+    || fail "a successor's death queued $(wedge_stale_wakes "$state" "$window") wakes instead of one"
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  pass "a reported-dead window absorbs a redrawn dead display under the same incarnation and re-reports a successor's death"
+}
+
 # The load-bearing direction. A genuinely wedged LIVE agent must escalate exactly
 # as it did before, and so must every verdict short of proof: an unattributable
 # foreground process (`ambiguous`) and an unreadable endpoint keep the identical
@@ -6005,6 +6058,7 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_gone_endpoint_reports_once_instead_of_escalating_forever
+test_reported_dead_endpoint_absorbs_a_changed_dead_display
 test_live_and_unproven_endpoints_still_wedge_escalate
 test_gone_report_rearms_when_the_endpoint_comes_back
 test_second_death_after_a_same_window_relaunch_reports_in_full

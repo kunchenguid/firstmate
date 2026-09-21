@@ -2065,6 +2065,41 @@ fm_backend_herdr_workspace_presence_state() {  # <session> <workspace_id>
   esac
 }
 
+# fm_backend_herdr_projection_workspace_remove_focus_preserving: confirm one
+# disposable projected workspace is gone, closing its remaining panes through
+# the existing focus-preserving pane close when it is not. The recorded task
+# pane's own close removes the emptied workspace, but the recorded pane can
+# already be gone (a restored husk, a server restart) while the workspace's
+# saved layout survives; that close then fails on a nonexistent pane and the
+# workspace is left for the next server restart to resurrect as a live agent in
+# the wrong directory. This closes whatever panes the workspace still holds and
+# then requires structured absence. A pane holding a live or unknown agent
+# refuses rather than closing it, and `workspace close` is never called (Herdr
+# 0.7.5 steals focus on an emptying close). Returns 0 only when the workspace is
+# confirmed gone.
+fm_backend_herdr_projection_workspace_remove_focus_preserving() {  # <session> <workspace-id>
+  local session=$1 workspace=$2 presence panes pane state
+  [ -n "$session" ] && [ -n "$workspace" ] || return 1
+  presence=$(fm_backend_herdr_workspace_presence_state "$session" "$workspace")
+  [ "$presence" = dead ] && return 0
+  [ "$presence" = present ] || return 1
+  panes=$(fm_backend_herdr_cli "$session" pane list --workspace "$workspace" 2>/dev/null) || return 1
+  panes=$(printf '%s' "$panes" | jq -r '.result.panes[]?.pane_id // empty' 2>/dev/null) || return 1
+  while IFS= read -r pane; do
+    [ -n "$pane" ] || continue
+    state=$(fm_backend_herdr_pane_agent_state "$session" "$pane")
+    case "$state" in
+      dead|no-agent) ;;
+      *) return 1 ;;
+    esac
+    fm_backend_herdr_projection_close_pane_focus_preserving "$session" "$pane" "$state" || return 1
+  done <<FMEOF
+$panes
+FMEOF
+  presence=$(fm_backend_herdr_workspace_presence_state "$session" "$workspace")
+  [ "$presence" = dead ]
+}
+
 # fm_backend_herdr_explicit_close_pane_confirmed: issue one explicit close and
 # succeed only when a structured follow-up proves the exact pane is gone.
 fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
