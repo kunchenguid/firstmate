@@ -25,7 +25,9 @@
 #              still exists, and the agent is still alive where the backend can
 #              classify that. Cancellation is confirmed only from an adapter-
 #              owned acknowledgement and otherwise reported unconfirmed. Busy
-#              state is never rewritten as proof of the action.
+#              state is never rewritten as proof of the action. Devin
+#              cancellation invalidates it to unknown because its native hooks
+#              emit no cancellation close; this is not a success claim.
 #   exit       Stop the agent, preserving its terminal endpoint, worktree, and
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
@@ -434,10 +436,19 @@ interrupt_cancel_claim() {
 # deliver_interrupt: deliver and observe the strongest adapter-owned
 # cancellation claim available after delivery.
 deliver_interrupt() {
-  local cancel
+  local cancel devin_gen=
+  # Devin does not emit Stop for cancellation. Capture this incarnation before
+  # keys, then invalidate its state conservatively rather than claiming idle.
+  if [ "$HARNESS" = devin ]; then
+    devin_gen=$(fm_busy_current_gen "$STATE" "$ID" 2>/dev/null || true)
+  fi
   prepare_interrupt_ack
   send_interrupt_keys
   cancel=$(interrupt_cancel_claim)
+  if [ "$HARNESS" = devin ] && [ -n "$devin_gen" ]; then
+    "$SCRIPT_DIR/fm-busy-event.sh" apply "$STATE" "$ID" unknown \
+      --gen "$devin_gen" --source fm-interrupt --event interrupt >/dev/null 2>&1 || true
+  fi
   printf '%s' "$cancel"
 }
 
