@@ -358,13 +358,16 @@ The refusal is reached only through a close that could not do its job, and each 
 | Backend | already gone | a close that failed |
 | --- | --- | --- |
 | tmux | 0, silent | 1, resolved by re-reading the window's exact recorded identity; a read that itself could not run refuses rather than passing for absence |
-| orca | 0, silent | 1 when a missing CLI means no close was attempted; 0 for a close command that failed after the CLI accepted it |
-| zellij | 0, silent | 0, not yet distinguishable |
-| cmux | 0, silent | 0, not yet distinguishable |
-| herdr | 0, silent | 0 from this arm; `bin/fm-teardown.sh` gates every Herdr record removal on `fm_backend_herdr_endpoint_confirmed_gone` instead |
+| orca | 0, silent when the terminal handle is definitively stale | 1 when the CLI, close, or stale-handle re-read cannot prove absence |
+| zellij | 0, silent when the session is absent | 1 when the close or scoped tab/pane proof cannot prove absence |
+| cmux | 0, silent when the recorded workspace is absent | 1 when the close or scoped workspace proof cannot prove absence |
+| herdr | 0, silent when the exact recorded pane is confirmed dead | 1 when the exact pane presence is unknown or live |
 
-The three arms that still report 0 need a presence re-read taken after their own close, and the close-then-read timing that re-read depends on cannot be established without the real Zellij, Orca, and cmux binaries.
-Guessing it is what a refusal must never rest on: a gate that refused an already-exited session would break ordinary cleanup on every task, which is a worse failure than the stranded endpoint it would be trying to prevent.
+Every arm now performs its backend-specific absence proof after close.
+Zellij requires the recorded task label and confirms that both the scoped task tab and recorded pane are absent.
+cmux requires the recorded task label and confirms that both the scoped task workspace and recorded workspace are absent.
+Orca accepts only the documented stale-handle read result.
+Any missing, unreadable, or ambiguous proof returns 1 rather than passing for absence.
 tmux's re-read is deliberately exact - `=session` plus a whole-line window-name match - because a prefix match would read a neighboring window as this window's survivor, which is the same exactness the cleanup identity boundary above already requires.
 It is also deliberately conservative about the read itself, sharing `fm_backend_tmux_window_inventory` with `fm_backend_tmux_agent_state` so both mean the same thing by an absent session: only a definitive missing-session, missing-server, or connect-error response proves the window gone.
 Any other read failure - a momentarily unresponsive server, or a teardown PATH without tmux on it - refuses, because a read that could not run is not evidence of absence.

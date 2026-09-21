@@ -624,8 +624,11 @@ case "\$cmd \$sub" in
   "status --json")
     printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
     ;;
+  "session list")
+    printf '{"sessions":[{"name":"default","running":true,"socket_path":"/tmp/fm-secondmate-sync-herdr.sock"}]}\n'
+    ;;
   "pane get")
-    if [ "\$arg" = "${stale#*:}" ]; then
+    if [ "\$arg" = "${stale#*:}" ] && [ ! -e "$dir/closed" ]; then
       printf '{"result":{"pane":{"pane_id":"${stale#*:}"}}}\n'
     elif [ "\$arg" = "${fresh#*:}" ]; then
       printf '{"result":{"pane":{"pane_id":"${fresh#*:}"}}}\n'
@@ -633,6 +636,9 @@ case "\$cmd \$sub" in
       printf '{"error":{"code":"pane_not_found","message":"missing"}}\n' >&2
       exit 0
     fi
+    ;;
+  "pane close")
+    : > "$dir/closed"
     ;;
   "agent get")
     if [ "\$arg" = "${stale#*:}" ]; then

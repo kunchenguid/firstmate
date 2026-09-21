@@ -309,6 +309,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": ".omo/evidence/security-privacy-gate-review.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },

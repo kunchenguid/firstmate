@@ -428,6 +428,21 @@ test_changed_dependency_selection_and_unmapped_failure() {
   pass "changed selection covers dependents, fails closed for live unmapped source, and accepts retired unconsumed source"
 }
 
+test_changed_review_evidence_does_not_require_test_mapping() {
+  local tmp repo listed
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-evidence.XXXXXX")
+  repo="$tmp/repo"
+  init_changed_fixture_repo "$repo"
+  mkdir -p "$repo/.omo/evidence"
+  printf '# review evidence\n' >"$repo/.omo/evidence/review.md"
+
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  [ -z "$listed" ] || fail "review evidence selected unrelated tests: $listed"
+
+  rm -rf "$tmp"
+  pass "committed review evidence is ignored by changed-test selection"
+}
+
 # A direct test reference is per-script evidence. Widening it to the referencing
 # test's whole family is what turned a one-line change to a shared helper into
 # every real-Herdr E2E, including scripts with no dependency on it at all.
@@ -1834,6 +1849,7 @@ test_task_marker_refuses_the_primary_checkout
 test_changed_runner_surfaces_select_their_family
 test_shell_line_ending_policy_selects_runner_contract
 test_changed_dependency_selection_and_unmapped_failure
+test_changed_review_evidence_does_not_require_test_mapping
 test_changed_bin_reference_selects_per_script_not_per_family
 test_changed_uses_bounded_automatic_concurrency
 test_windows_posix_mode_emulation_does_not_fail_parallel_runs

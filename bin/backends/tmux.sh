@@ -203,6 +203,20 @@ fm_backend_tmux_kill() {  # <target>
   return 1
 }
 
+fm_backend_tmux_endpoint_confirmed_gone() {
+  local target=$1 session window windows inventory_status
+  case "$target" in
+    *:*) session=${target%%:*}; window=${target#*:} ;;
+    *) return 1 ;;
+  esac
+  case "$session:$window" in :*|*:|*:*:*) return 1 ;; esac
+  windows=$(fm_backend_tmux_window_inventory "=$session")
+  inventory_status=$?
+  [ "$inventory_status" -eq 2 ] && return 0
+  [ "$inventory_status" -eq 0 ] || return 1
+  ! printf '%s\n' "$windows" | grep -qxF -- "$window"
+}
+
 # fm_backend_tmux_current_command: <target>'s live foreground process name -
 # tmux's own `#{pane_current_command}`, already resolved from the pty's
 # foreground process group (verified empirically with real tmux 3.6a: a

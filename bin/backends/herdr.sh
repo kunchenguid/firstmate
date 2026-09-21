@@ -3608,11 +3608,12 @@ fm_backend_herdr_kill() {  # <target>
     done
   fi
   if [ "$lock_held" = 1 ]; then
-    fm_backend_herdr_kill_serialized "$session" "$pane"
+    fm_backend_herdr_kill_serialized "$session" "$pane" || true
     fm_lock_release "$lock_path" || true
   else
     echo "warning: herdr task kill could not acquire its session presentation lock; refusing an unlocked pane close" >&2
   fi
+  return 0
 }
 
 # fm_backend_herdr_endpoint_confirmed_gone: gate durable-record removal on

@@ -61,7 +61,7 @@ Tracked files hold shared instructions and tooling; `data/` holds durable privat
 Load `firstmate-layout` before reasoning about any more specific path.
 
 ```
-AGENTS.md            this file (CLAUDE.md is a real @AGENTS.md pointer to it)
+AGENTS.md            this file
 CONTRIBUTING.md      contributor workflow and repo conventions
 README.md            public overview and development notes
 .github/workflows/   shared CI and PR enforcement, committed
@@ -431,7 +431,7 @@ Each skill owns its own daemon procedure, which is otherwise identical; these sa
 
 - Every current daemon injection uses the `away-supervisor` kind from `bin/fm-operational-input.sh` after `FM_OPERATIONAL_PREFIX` (U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), while the `/afk` skill owns legacy bare-marker compatibility.
 - `state/.afk-contract` is the away posture, written only after the captain confirms the read-back of their away words; entry announces hold-for-return only, and the record's clauses are recorded, not executed, in this release.
-- While `state/.afk` exists, the daemon owns supervision; do not arm a separate watcher.
+- On harnesses that launch the away daemon, while `state/.afk` exists, the daemon owns supervision; do not arm a separate watcher.
   The daemon is never launched on Pi, where the ordinary supervision session continues under the record with main parked: the branch takes every safe actionable wake it can, and only a declined wake (including a broken branch or unsafe scan) or a watcher failure wakes main.
 - A marked message while away or quiet mode is active is internal escalation and does not exit that mode.
 - A message beginning `/afk` refreshes away mode; a message beginning `/quiet` refreshes quiet mode.

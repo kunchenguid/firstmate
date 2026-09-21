@@ -760,8 +760,27 @@ secondmate_liveness_one() {  # <meta> <id>
     alive)
       [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" != 1 ] || echo "BOOTSTRAP_INFO: $FM_SM_LIVE_LINE"
       ;;
-    relaunchable)
-      if fm_secondmate_liveness_relaunch "$meta" "$id"; then
+    dead|missing)
+      if [ "$agent_state" = dead ]; then
+        cause="confirmed agent absence on existing endpoint"
+        case "$backend" in
+          zellij)
+            fm_backend_kill "$backend" "$target" "$(fm_meta_get "$meta" zellij_tab_id)" "fm-$id" 2>/dev/null
+            ;;
+          cmux)
+            fm_backend_kill "$backend" "$target" '' "fm-$id" 2>/dev/null
+            ;;
+          *)
+            fm_backend_kill "$backend" "$target" 2>/dev/null
+            ;;
+        esac || {
+          echo "SECONDMATE_LIVENESS: secondmate $id: skipped: endpoint cleanup could not be confirmed (backend=$backend)"
+          return 0
+        }
+      else
+        cause="recorded endpoint confidently missing"
+      fi
+      if out=$(FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "$id" --secondmate 2>&1); then
         secondmate_note_respawned "$id"
         report_relaunch "$id" "$FM_SM_LIVE_CAUSE" "$FM_SM_LIVE_WHERE"
       elif [ "$FM_SM_LIVE_STATUS" = skipped ]; then

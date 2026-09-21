@@ -1043,6 +1043,8 @@ test_teardown_conformance_old_vs_new() {
   old_bin=$(build_old_bin teardown-old)
   git -C "$ROOT" show "$old_tmux_ref:bin/backends/tmux.sh" > "$old_bin/bin/backends/tmux.sh" \
     || { BASE_REF=$saved_base_ref; fail "could not materialize historical tmux adapter from $old_tmux_ref"; }
+  cp "$ROOT/bin/fm-backend.sh" "$old_bin/bin/fm-backend.sh" \
+    || { BASE_REF=$saved_base_ref; fail "could not overlay the current backend wrapper in the legacy adapter fixture"; }
   BASE_REF=$saved_base_ref
   proj="$TMP_ROOT/teardown-project"; wt="$TMP_ROOT/teardown-wt"
   id="teardownconform1"

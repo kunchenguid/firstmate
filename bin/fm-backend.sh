@@ -856,14 +856,10 @@ fm_backend_send_text_submit() {  # <backend> <target> <text> <retries> <enter-sl
 # not do its job and the endpoint may still be live: the caller owns that
 # refusal and must not delete the durable records that are the only thing
 # naming the endpoint (bin/fm-teardown.sh's retain-and-stop path).
-# How much each adapter can prove differs, and no arm ever guesses: tmux
-# resolves a failed close against the window's exact recorded identity, Orca
-# reports a close its missing CLI never attempted, and the remaining arms
-# still report 0 for a close command that failed after being accepted.
 # docs/verification/runtime-backends.md "Endpoint close" is the per-backend
 # record.
 fm_backend_kill() {  # <backend> <target>
-  local backend=$1
+  local backend=$1 kill_status
   shift
   [ -n "${1:-}" ] || { echo "error: refusing empty backend kill target" >&2; return 1; }
   fm_backend_source "$backend" || return 1
@@ -874,6 +870,25 @@ fm_backend_kill() {  # <backend> <target>
     orca) fm_backend_orca_kill "$@" ;;
     cmux) fm_backend_cmux_kill "$@" ;;
     *) echo "error: no kill implementation for backend '$backend'" >&2; return 1 ;;
+  esac
+  kill_status=$?
+  [ "$kill_status" -eq 0 ] || return 1
+  fm_backend_endpoint_confirmed_gone "$backend" "$@" && return 0
+  return 1
+}
+
+fm_backend_endpoint_confirmed_gone() {
+  local backend=$1
+  shift
+  local helper="fm_backend_${backend}_endpoint_confirmed_gone"
+  declare -F "$helper" >/dev/null 2>&1 || return 0
+  case "$backend" in
+    tmux) fm_backend_tmux_endpoint_confirmed_gone "$@" ;;
+    herdr) fm_backend_herdr_endpoint_confirmed_gone "$@" ;;
+    zellij) fm_backend_zellij_endpoint_confirmed_gone "$@" ;;
+    orca) fm_backend_orca_endpoint_confirmed_gone "$@" ;;
+    cmux) fm_backend_cmux_endpoint_confirmed_gone "$@" ;;
+    *) return 1 ;;
   esac
 }
 
