@@ -79,6 +79,32 @@ pass() {
   printf 'ok - %s\n' "$1"
 }
 
+# --- portable mtime ----------------------------------------------------------
+#
+# Every fixture that ages a marker needs these two, and each local copy has been
+# a chance to re-roll the same two portability bugs. They live here so there is
+# one of each.
+#
+# fm_test_file_mtime reads an mtime in epoch seconds. The Darwin branch calls
+# /usr/bin/stat by absolute path for the reason tests/fm-stat-shadowing.test.sh
+# exists to pin: a GNU stat earlier on PATH takes `-f` as *filesystem* stat, so
+# a bare `stat -f %m` there prints a filesystem dump and still exits 0. For the
+# same reason this must never be written as `stat -f ... || stat -c ...`.
+fm_test_file_mtime() {  # <path>
+  if [ "$(uname)" = Darwin ]; then /usr/bin/stat -f %m "$1" 2>/dev/null
+  else stat -c %Y "$1" 2>/dev/null
+  fi
+}
+
+# fm_test_set_mtime sets <file>'s mtime to exactly <epoch>. `touch -t` takes a
+# local-time stamp rather than an epoch on both platforms, so the epoch is
+# converted first - BSD `date -r`, else GNU `date -d @`.
+fm_test_set_mtime() {  # <epoch> <file>
+  local epoch=$1 f=$2 stamp
+  stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null) || stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S)
+  touch -t "$stamp" "$f"
+}
+
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal

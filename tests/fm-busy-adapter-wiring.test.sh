@@ -234,20 +234,6 @@ run_claude_hook() {  # <settings.json> <hook-event>
   sh -c "$cmd"
 }
 
-# Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
-# fallback (which writes a partial filesystem dump on Linux; see fm-busy-event.sh).
-file_mtime() {  # <path>
-  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
-}
-
-# touch -t takes a local-time stamp, not an epoch, on both platforms.
-back_date() {  # <seconds-ago> <path>
-  local epoch stamp
-  epoch=$(( $(date +%s) - $1 ))
-  stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null) || stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S)
-  touch -t "$stamp" "$2"
-}
-
 test_claude_hooks_semantic_lifecycle() {
   local rec id=busy-cl-1 out state settings
   rec=$(make_spawn_case claude-lifecycle claude "$id")
@@ -322,10 +308,10 @@ test_claude_tool_hooks_report_progress_inside_one_turn() {
 
   # A second boundary must move the marker forward, or a long turn's later tool
   # calls would not keep the watcher's busy-age bound fresh.
-  back_date 600 "$state/$id.progress"
-  before=$(file_mtime "$state/$id.progress")
+  fm_test_set_mtime "$(( $(date +%s) - 600 ))" "$state/$id.progress"
+  before=$(fm_test_file_mtime "$state/$id.progress")
   run_claude_hook "$settings" PostToolUse || fail "PostToolUse hook command failed"
-  after=$(file_mtime "$state/$id.progress")
+  after=$(fm_test_file_mtime "$state/$id.progress")
   [ "$after" -gt "$before" ] || fail "PostToolUse did not refresh the progress marker"
   [ ! -e "$state/$id.turn-ended" ] || fail "PostToolUse fabricated a completed turn"
   out=$(classify claude "$id" "$state")

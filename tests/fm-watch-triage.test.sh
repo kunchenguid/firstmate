@@ -81,14 +81,14 @@ wait_poll_cycle() {  # <state> <pid> [limit-ticks]
   first=""
   while [ "$i" -lt "$limit" ]; do
     kill -0 "$pid" 2>/dev/null || return 1
-    first=$(file_mtime "$beat")
+    first=$(fm_test_file_mtime "$beat")
     [ -n "$first" ] && break
     sleep 0.1
     i=$((i + 1))
   done
   while [ "$i" -lt "$limit" ]; do
     kill -0 "$pid" 2>/dev/null || return 1
-    now=$(file_mtime "$beat")
+    now=$(fm_test_file_mtime "$beat")
     if [ -n "$now" ] && [ "$now" != "$first" ]; then
       return 0
     fi
@@ -118,25 +118,6 @@ wait_numeric_file() {
   return 1
 }
 
-# Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
-# fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
-file_mtime() {
-  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
-}
-
-# Set <file>'s mtime to exactly <epoch> seconds, for aging a busy-turn marker by
-# a precise amount (touch -t takes a local-time stamp, not an epoch, on both
-# platforms, so convert via BSD `date -r` or GNU `date -d @`).
-set_mtime() {  # <epoch> <file>
-  local epoch=$1 f=$2 stamp
-  if stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null); then
-    touch -t "$stamp" "$f"
-  else
-    stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S)
-    touch -t "$stamp" "$f"
-  fi
-}
-
 # Signature a primed .seen-* marker must hold so the per-poll signal scan does not
 # fire on a pre-existing status (mirrors fm-watch.sh's stat_sig exactly).
 seen_sig() {
@@ -160,7 +141,7 @@ seen_sig() {
 # Busy-turn-age fixtures create/backdate turn-ended directly (there is no real
 # harness touching it), so without this the marker's own first sighting would
 # fire an unrelated "signal:" wake and mask the busy-turn-age assertion under
-# test. Call again after any further touch/set_mtime on the same file.
+# test. Call again after any further touch/fm_test_set_mtime on the same file.
 prime_turnend_seen() {  # <file>
   local f=$1 base
   base=$(basename "$f" | tr '.' '_')
@@ -179,6 +160,13 @@ record_claude_busy() {  # <state-dir> <id>
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
   "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
+}
+
+record_gemini_busy() {  # <state-dir> <id>
+  local state=$1 id=$2 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" busy --gen "$gen" \
+    --source gemini-hook --event before-agent
 }
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
@@ -496,9 +484,9 @@ test_crew_worktree_written_since_classifier() {
   anchor="$state/anchor"; wt="$dir/wt"; home="$dir/mate-home"; statedir_wt="$dir/wt-with-state"
   mkdir -p "$wt/src" "$wt/.git/objects"
   printf 'old\n' > "$wt/src/existing.c"
-  set_mtime "$(( $(date +%s) - 300 ))" "$wt/src/existing.c"
+  fm_test_set_mtime "$(( $(date +%s) - 300 ))" "$wt/src/existing.c"
   : > "$anchor"
-  set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
+  fm_test_set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
 
   # No recorded worktree at all: absence of evidence, never a positive.
   printf 'window=test:fm-a\nkind=ship\n' > "$state/a.meta"
@@ -561,7 +549,7 @@ test_empty_write_prune_widens_the_probe() {
   anchor="$state/anchor"; wt="$dir/wt"
   mkdir -p "$wt/src" "$wt/.git"
   : > "$anchor"
-  set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
+  fm_test_set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
   printf 'window=test:fm-e\nkind=ship\nworktree=%s\n' "$wt" > "$state/e.meta"
   saved=$FM_WORKTREE_WRITE_PRUNE
   FM_WORKTREE_WRITE_PRUNE=''
@@ -572,7 +560,7 @@ test_empty_write_prune_widens_the_probe() {
   crew_worktree_written_since e "$state" "$anchor" \
     || fail "an empty prune list disabled the probe instead of widening it"
   # Widened means nothing is skipped, including what the default list prunes.
-  set_mtime "$(( $(date +%s) - 900 ))" "$wt/src/new.c"
+  fm_test_set_mtime "$(( $(date +%s) - 900 ))" "$wt/src/new.c"
   printf 'pack\n' > "$wt/.git/index"
   crew_worktree_written_since e "$state" "$anchor" \
     || fail "an empty prune list still skipped a directory the default list prunes"
@@ -596,7 +584,7 @@ test_empty_write_prune_from_the_environment_widens_the_probe() {
   anchor="$state/anchor"; wt="$dir/wt"
   mkdir -p "$wt/.git/objects"
   : > "$anchor"
-  set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
+  fm_test_set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
   printf 'window=test:fm-wenv\nkind=ship\nworktree=%s\n' "$wt" > "$state/wenv.meta"
   # The one thing written since the anchor sits exactly where the DEFAULT list prunes.
   printf 'pack\n' > "$wt/.git/objects/fresh"
@@ -623,7 +611,7 @@ test_worktree_write_probe_is_wall_clock_bounded() {
   anchor="$state/anchor"; wt="$dir/wt"; slowbin="$dir/slowbin"; fastbin="$dir/fastbin"
   mkdir -p "$wt/src" "$slowbin" "$fastbin"
   : > "$anchor"
-  set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
+  fm_test_set_mtime "$(( $(date +%s) - 120 ))" "$anchor"
   printf 'window=test:fm-slow\nkind=ship\nworktree=%s\n' "$wt" > "$state/slow.meta"
   # Both stand-ins report the same hit; only one of them takes longer than the bound
   # to do it, so the prompt one shows what a positive outcome looks like and the
@@ -2519,7 +2507,7 @@ test_live_declared_wait_churn_honors_the_resurface_throttle() {
 
     # End of the window: the wait must re-surface exactly once, on the same plain
     # identity as before, so absorbing churn never becomes silence.
-    set_mtime "$(( $(date +%s) - 2000 ))" "$throttle"
+    fm_test_set_mtime "$(( $(date +%s) - 2000 ))" "$throttle"
     printf 'parked, elapsed 5s' > "$capture_file"
     parked_watch_round "$state" "$fakebin" "$out" "$capture_file" "$window" exit \
       || fail "[$name] a parked worker did not re-surface once its re-surface window elapsed"
@@ -2642,7 +2630,7 @@ wedge_threshold_fixture() {  # <name> <status-log> <status-age-secs> [<wedge-tim
   printf 'window=%s\nkind=ship\nharness=grok\nbackend=tmux\n' "$window" > "$state/wedge.meta"
   printf '%s\n' "$log" > "$statusf"
   back=$(( $(date +%s) - age ))
-  set_mtime "$back" "$statusf"
+  fm_test_set_mtime "$back" "$statusf"
   printf '%s' "$(seen_sig "$statusf")" > "$state/.seen-wedge_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   printf '%s' "$(hash_text "$text")" > "$state/.hash-$key"
@@ -3668,7 +3656,7 @@ test_open_captain_call_bounds_stale_churn() {
     # After the window ends, the next new pane hash re-surfaces held work exactly
     # once, so a forgotten call on a churning pane cannot hide behind the bound.
     [ -e "$throttle" ] || fail "[$name] the absorbed churn recorded no re-surface cadence to elapse"
-    set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+    fm_test_set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
     hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
       || fail "[$name] held work did not re-surface once its re-surface window elapsed"
     wakes=$(hold_stale_wakes "$state")
@@ -4384,13 +4372,13 @@ test_busy_turn_bound_ages_from_observed_activity_not_the_turn() {
   printf '1\n' > "$state/.count-$key"
   # No turn has ever completed: the crew has been inside one turn since spawn,
   # hours ago, exactly as an autonomous crewmate works.
-  set_mtime "$(( $(date +%s) - 18000 ))" "$state/plugin-update.meta"
+  fm_test_set_mtime "$(( $(date +%s) - 18000 ))" "$state/plugin-update.meta"
 
   # Phase A: the longest single command the captain measured - twenty-five
   # minutes - has just finished, so the last tool boundary is 1500s old, well
   # inside the hour-long bound. No alarm, and no wedge timer left running.
   touch "$state/plugin-update.progress"
-  set_mtime "$(( $(date +%s) - 1500 ))" "$state/plugin-update.progress"
+  fm_test_set_mtime "$(( $(date +%s) - 1500 ))" "$state/plugin-update.progress"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=3600 FM_STALE_ESCALATE_SECS=240 \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
@@ -4408,7 +4396,7 @@ test_busy_turn_bound_ages_from_observed_activity_not_the_turn() {
   # connection is gone and nothing has run since. The bound must still fire, and
   # the reason must name that silence instead of reading like any other quiet
   # pane.
-  set_mtime "$(( $(date +%s) - 7200 ))" "$state/plugin-update.progress"
+  fm_test_set_mtime "$(( $(date +%s) - 7200 ))" "$state/plugin-update.progress"
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -4424,7 +4412,86 @@ test_busy_turn_bound_ages_from_observed_activity_not_the_turn() {
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the stopped-worker escalation failed"
   grep "$(printf '\tstale\t')" "$drain_out" | grep -F "nothing has run in it" >/dev/null \
     || fail "the distinguishing clause did not reach the durable queue: $(cat "$drain_out")"
+
+  # Phase C: the measured claim earns the assertive triage label too. Arming the
+  # timer from scratch is what writes it, so clear the timer and re-arm.
+  rm -f "$state/.stale-since-$key" "$state/.wedge-escalations-$key" "$state/.watch-triage.log"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=3600 FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "timer reset: $window" \
+    || { reap "$pid"; fail "the progress-anchored pane did not re-arm the wedge timer: $(cat "$out")"; }
+  grep -F "absorbed busy (nothing running) timer reset: $window" "$state/.watch-triage.log" >/dev/null \
+    || { reap "$pid"; fail "a measured no-activity crossing lost its assertive triage label: $(cat "$state/.watch-triage.log")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-C watcher stop"
   pass "the busy-turn bound ages from observed tool activity, so a measuring crew is silent while one that stopped running anything still escalates with its own wording"
+}
+
+# The same bound, reached by a worker runtime that reports no tool boundaries at
+# all. Most adapters write no state/<id>.progress, so their age is time since the
+# last COMPLETED TURN and the watcher holds no activity evidence whatsoever.
+# Saying "nothing has run in it" there would be a confident claim about something
+# never measured - and on the intent's own fixture (a crew running 10-25 minute
+# commands inside one unbroken turn) it would be flatly false. The escalation
+# must still fire on that path, but must say what it actually knows.
+test_busy_turn_bound_does_not_claim_idleness_without_activity_evidence() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid
+  dir=$(make_case busy-no-activity-evidence); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-gemini-bound"
+  printf 'Running docker exec... (esc to cancel)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=gemini\n' "$window" > "$state/gemini-plugins.meta"
+  record_gemini_busy "$state" gemini-plugins
+  printf 'working: updating plugins one by one\n' > "$state/gemini-plugins.status"
+  sig=$(seen_sig "$state/gemini-plugins.status"); printf '%s' "$sig" > "$state/.seen-gemini-plugins_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "Running docker exec... (esc to cancel)")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # One unbroken turn since spawn, and no progress marker will ever exist for
+  # this runtime, so the bound is crossed on turn silence alone.
+  fm_test_set_mtime "$(( $(date +%s) - 18000 ))" "$state/gemini-plugins.meta"
+
+  # Phase A: first sight past the bound arms the wedge timer and names the pane
+  # in the triage log. That label is the same claim in miniature, so it must not
+  # say nothing is running either.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=3600 FM_STALE_ESCALATE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_absorbed "$state" "$pid" "timer reset: $window" \
+    || { reap "$pid"; fail "a progressless busy pane past the bound did not arm the wedge timer: $(cat "$out")"; }
+  grep -F "absorbed busy (no completed turn) timer reset: $window" "$state/.watch-triage.log" >/dev/null \
+    || { reap "$pid"; fail "the triage label claimed more than the anchor supports: $(cat "$state/.watch-triage.log")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional progressless phase-A stop"
+
+  # Phase B: the timer reaches the escalation threshold. The alarm must fire -
+  # this path is not being silenced - but must say only what it measured.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_BUSY_TURN_MAX_SECS=3600 FM_STALE_ESCALATE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a progressless busy pane past the bound did not escalate: $(cat "$out")"
+  assert_absent "$state/gemini-plugins.progress" "the fixture must stay progressless for this path to be the one under test"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the progressless crossing did not print a stale wake: $(cat "$out")"
+  grep -F "possible wedge, escalation 1" "$out" >/dev/null \
+    || fail "the progressless crossing lost the shared escalation wording: $(cat "$out")"
+  grep -F "nothing has run in it" "$out" >/dev/null \
+    && fail "the watcher claimed nothing ran on a runtime that reports no activity at all: $(cat "$out")"
+  grep -F "no turn has completed for" "$out" >/dev/null \
+    || fail "the progressless crossing did not name the completed-turn anchor it actually measured: $(cat "$out")"
+  grep -F "cannot tell whether work is running" "$out" >/dev/null \
+    || fail "the progressless crossing did not admit it has no activity evidence: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the progressless escalation failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "cannot tell whether work is running" >/dev/null \
+    || fail "the non-claiming clause did not reach the durable queue: $(cat "$drain_out")"
+  pass "a bound crossed without any activity evidence escalates saying only that no turn has completed, never that nothing is running"
 }
 
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
@@ -4798,7 +4865,7 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
 
-  set_mtime $(( $(date +%s) - 300 )) "$state/busy-default.turn-ended"
+  fm_test_set_mtime $(( $(date +%s) - 300 )) "$state/busy-default.turn-ended"
   prime_turnend_seen "$state/busy-default.turn-ended"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -4811,7 +4878,7 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   reap "$pid"
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional five-minute-bound stop"
 
-  set_mtime $(( $(date +%s) - 4000 )) "$state/busy-default.turn-ended"
+  fm_test_set_mtime $(( $(date +%s) - 4000 )) "$state/busy-default.turn-ended"
   prime_turnend_seen "$state/busy-default.turn-ended"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -4902,7 +4969,7 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
   printf '%s' "$pane_hash" > "$state/.stale-$key"
   back=$(( $(date +%s) - 500 ))
   echo "$back" > "$state/.stale-since-$key"
-  set_mtime "$back" "$state/.stale-since-$key"
+  fm_test_set_mtime "$back" "$state/.stale-since-$key"
 
   # Phase A: the crew wrote a file after the idle window opened. Deferred.
   printf 'int main(void) { return 0; }\n' > "$wt/src/main.c"
@@ -4925,9 +4992,9 @@ test_wedge_escalation_deferred_while_worktree_is_written() {
 
   # Phase B: same fixture, same quiet pane, but nothing written during this idle
   # window (the crew really is stalled). The unchanged schedule must still fire.
-  set_mtime "$(( $(date +%s) - 900 ))" "$wt/src/main.c"
+  fm_test_set_mtime "$(( $(date +%s) - 900 ))" "$wt/src/main.c"
   echo "$back" > "$state/.stale-since-$key"
-  set_mtime "$back" "$state/.stale-since-$key"
+  fm_test_set_mtime "$back" "$state/.stale-since-$key"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 \
@@ -4966,10 +5033,10 @@ test_write_deferral_resurfaces_on_the_bounded_cadence() {
   printf '%s' "$pane_hash" > "$state/.stale-$key"
   back=$(( $(date +%s) - 500 ))
   echo "$back" > "$state/.stale-since-$key"
-  set_mtime "$back" "$state/.stale-since-$key"
+  fm_test_set_mtime "$back" "$state/.stale-since-$key"
   # This pane has been deferring on write evidence for 500s already.
   : > "$state/.writing-since-$key"
-  set_mtime "$back" "$state/.writing-since-$key"
+  fm_test_set_mtime "$back" "$state/.writing-since-$key"
   printf 'churn\n' > "$wt/src/main.c"
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -5014,10 +5081,10 @@ test_secondmate_home_supervision_churn_is_not_write_evidence() {
   printf 'working: implementing\n' > "$state/mate.status"
   sig=$(seen_sig "$state/mate.status"); printf '%s' "$sig" > "$state/.seen-mate_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  set_mtime "$(( $(date +%s) - 4000 ))" "$state/mate.meta"
+  fm_test_set_mtime "$(( $(date +%s) - 4000 ))" "$state/mate.meta"
   back=$(( $(date +%s) - 500 ))
   echo "$back" > "$state/.stale-since-$key"
-  set_mtime "$back" "$state/.stale-since-$key"
+  fm_test_set_mtime "$back" "$state/.stale-since-$key"
   # The only thing written since the idle window opened is the mate home's own
   # supervision bookkeeping.
   printf 'beat\n' > "$home/state/.last-watcher-beat"
@@ -5063,7 +5130,7 @@ test_timer_repair_drops_a_finished_write_deferral_chain() {
   # bounded re-surface window.
   back=$(( $(date +%s) - 5000 ))
   : > "$state/.writing-since-$key"
-  set_mtime "$back" "$state/.writing-since-$key"
+  fm_test_set_mtime "$back" "$state/.writing-since-$key"
   # The idle-window timer is corrupt, so this poll repairs it and opens a NEW quiet
   # window without probing the worktree at all.
   printf 'corrupt\n' > "$state/.stale-since-$key"
@@ -5089,7 +5156,7 @@ test_timer_repair_drops_a_finished_write_deferral_chain() {
   # inheriting the finished chain's age.
   back=$(( $(date +%s) - 500 ))
   echo "$back" > "$state/.stale-since-$key"
-  set_mtime "$back" "$state/.stale-since-$key"
+  fm_test_set_mtime "$back" "$state/.stale-since-$key"
   printf 'int main(void) { return 0; }\n' > "$wt/src/main.c"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -5129,7 +5196,7 @@ test_terminal_first_sight_drops_a_finished_write_deferral_chain() {
   printf '1\n' > "$state/.count-$key"
   back=$(( $(date +%s) - 5000 ))
   : > "$state/.writing-since-$key"
-  set_mtime "$back" "$state/.writing-since-$key"
+  fm_test_set_mtime "$back" "$state/.writing-since-$key"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
   # First sight of this hash, absorbed because the active run outranks the stale
@@ -5155,7 +5222,7 @@ test_terminal_first_sight_drops_a_finished_write_deferral_chain() {
   rm -f "$state/.stale-$key" "$state/.stale-since-$key"
   printf '1\n' > "$state/.count-$key"
   : > "$state/.writing-since-$key"
-  set_mtime "$back" "$state/.writing-since-$key"
+  fm_test_set_mtime "$back" "$state/.writing-since-$key"
   FM_FAKE_CREW_STATE='state: unknown · source: none · no run, no busy pane'
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -5693,11 +5760,11 @@ test_beacon_stays_fresh_while_absorbing() {
   # bounded startup can outlast a short wait, and reading an absent beacon would
   # report a missing beacon that simply had not been written yet.
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "watcher exited while absorbing the first benign signal"; }
-  m1=$(file_mtime "$state/.last-watcher-beat")
+  m1=$(fm_test_file_mtime "$state/.last-watcher-beat")
   # A second benign signal keeps it absorbing; the beacon must keep advancing.
   printf 'working: b\n' >> "$status_file"
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "watcher exited while absorbing a second benign signal"; }
-  m2=$(file_mtime "$state/.last-watcher-beat")
+  m2=$(fm_test_file_mtime "$state/.last-watcher-beat")
   now=$(date +%s)
   if [ -z "$m1" ] || [ -z "$m2" ]; then
     reap "$pid"
@@ -6094,6 +6161,7 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_native_progress_resets_age
 test_busy_turn_bound_ages_from_observed_activity_not_the_turn
+test_busy_turn_bound_does_not_claim_idleness_without_activity_evidence
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_3600s
 test_busy_declared_pause_is_rechecked_not_wedge_escalated
