@@ -335,27 +335,30 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
 read_attempts() {
   local file="$STATE/.contributions-attempts.json"
   if [ -f "$file" ] && [ ! -L "$file" ] \
-    && jq -e 'type == "object" and all(.[]; type == "number")' "$file" >/dev/null 2>&1; then
+    && jq -e 'type == "object" and (.seq | type == "number") and (.urls | type == "object") and all(.urls[]; type == "number")' "$file" >/dev/null 2>&1; then
     cp "$file" "$TMP/attempts.json"
   else
-    printf '{}\n' > "$TMP/attempts.json"
+    printf '{"seq":0,"urls":{}}\n' > "$TMP/attempts.json"
   fi
 }
 
 mark_attempt() { # url
-  jq --arg url "$1" '.[$url] = ((.[$url] // 0) + 1)' "$TMP/attempts.json" > "$TMP/attempts.next.json"
+  jq --arg url "$1" '.seq += 1 | .urls[$url] = .seq' "$TMP/attempts.json" > "$TMP/attempts.next.json"
   mv -- "$TMP/attempts.next.json" "$TMP/attempts.json"
 }
 
-write_attempts() { # keep only URLs still owned, so the cursor cannot grow forever
+write_attempts() { # keep only owned URLs and seed first-seen URLs at the current maximum
   local device staged
   cut -f1 "$TMP/known.tsv" | sort -u > "$TMP/known-urls"
   jq -R -s 'split("\n") | map(select(length > 0))' "$TMP/known-urls" > "$TMP/known-urls.json"
   device=$(fm_pr_file_device "$STATE")
   fm_pr_regular_destination_on_device_or_absent "$STATE/.contributions-attempts.json" "$device" || fail 'unsafe attempt destination'
   staged=$(umask 077; mktemp "$STATE/.contributions-attempts.XXXXXX")
-  jq --slurpfile known "$TMP/known-urls.json" \
-    'with_entries(select(.key as $k | ($known[0] | index($k))))' "$TMP/attempts.json" > "$staged"
+  jq --slurpfile known "$TMP/known-urls.json" '
+    .seq as $seq
+    | (.urls | with_entries(select(.key as $k | ($known[0] | index($k))))) as $kept
+    | .urls = (reduce ($known[0][]) as $k ($kept; if has($k) then . else .[$k] = $seq end))' \
+    "$TMP/attempts.json" > "$staged"
   chmod 600 "$staged"
   fm_pr_regular_destination_on_device_or_absent "$STATE/.contributions-attempts.json" "$device" || fail 'attempt destination changed'
   mv -f -- "$staged" "$STATE/.contributions-attempts.json"
@@ -369,13 +372,13 @@ poll() {
   read_saved
   read_attempts
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
-  # One line per distinct URL: the URL, then every owning task. Each completed
-  # attempt advances the URL's cursor, so no read can pin the queue.
+  # One line per distinct URL: the URL, then every owning task. Attempts order
+  # the queue by recency, so no read can pin its head.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" \
     --slurpfile attempts "$TMP/attempts.json" '
-    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .checked_at] | first // ""),attempts:($attempts[0][$k.url] // 0)})
-    | group_by(.url) | map({url:.[0].url,at:(map(.at) | min),attempts:(map(.attempts) | max),tasks:(map(.task) | unique)})
-    | sort_by(.attempts,.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
+    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .checked_at] | first // ""),last:($attempts[0].urls[$k.url] // $attempts[0].seq)})
+    | group_by(.url) | map({url:.[0].url,at:(map(.at) | min),last:(map(.last) | max),tasks:(map(.task) | unique)})
+    | sort_by(.last,.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
   OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
   BUDGET_EXHAUSTED=0
