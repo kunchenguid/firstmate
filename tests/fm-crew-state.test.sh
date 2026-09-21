@@ -4674,6 +4674,62 @@ test_captured_completed_history() {
   pass 'captured completed status yields to synthetic subsequent development'
 }
 
+# The v1.75.2 captures bind a real capped overview and a status read from a
+# branch with no recorded run to a disposable repository; see that capture
+# directory's README.
+V1752=$ROOT/tests/captures/no-mistakes-v1.75.2
+
+# Persist the captured overview's visible rows as the complete inventory, so
+# the capped window resolves through the same read-only lookup as production.
+seed_v1752_inventory() {  # <case-dir>
+  local d=$1
+  NM_HOME="$d/nm"
+  mkdir -p "$NM_HOME"
+  python3 - "$NM_HOME/state.sqlite" "$d/wt" "$V1752/overview.toon" <<'PY'
+import csv
+import sqlite3
+import sys
+database, worktree, overview = sys.argv[1:]
+lines = open(overview).read().splitlines()
+start = lines.index("runs[10]{id,branch,status,head,pr}:") + 1
+rows = list(csv.reader(line.strip() for line in lines[start:start + 10]))
+with sqlite3.connect(database) as db:
+    db.executescript("""
+        CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
+                           status TEXT NOT NULL, head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
+    """)
+    db.execute("INSERT INTO repos VALUES ('repo', ?)", (worktree,))
+    db.executemany("INSERT INTO runs VALUES (?, 'repo', ?, ?, ?, ?)",
+                   [(r[0], r[1], r[2], r[3], 100 - i) for i, r in enumerate(rows)])
+PY
+  FM_FAKE_AXI_HOME=$(sed "s#^repo: /captured/firstmate\$#repo: $d/wt#" "$V1752/overview.toon")
+}
+
+test_captured_v1752_capped_overview_without_branch_run() {
+  reset_fakes
+  local d out branch=fm/fm-prepublish-voice-classifier
+  d=$(new_case v1752-no-branch-run)
+  make_repo_on_branch "$d/wt" "$branch"
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/voice.meta" "window=fm:fm-voice" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/voice.status"
+  seed_v1752_inventory "$d"
+  FM_FAKE_AXI_STATUS=$(cat "$V1752/no-branch-run.toon")
+  FM_FAKE_RUNS_LIST=$(cat "$V1752/runs.out")
+  assert_not_contains "$FM_FAKE_AXI_HOME" "$branch," 'the captured overview shows no row for this branch'
+  arm_idle_record "$d/state" voice
+  out=$(run_crew_state "$d" voice)
+  assert_not_contains "$out" 'state: unknown' 'a complete inventory with no branch run is absence, not an unreadable table'
+  assert_contains "$out" 'source: status-log' 'absence of any run defers to worker evidence'
+  rm "$NM_HOME/state.sqlite"
+  out=$(run_crew_state "$d" voice)
+  assert_contains "$out" 'state: unknown' 'an unreadable complete inventory still cannot establish absence'
+  pass 'captured v1.75.2 capped overview without a branch run reads as no run'
+}
+
+test_captured_v1752_capped_overview_without_branch_run
+
 test_captured_axi_status_shapes
 test_captured_inventory_replay
 test_captured_authority_transition

@@ -198,6 +198,9 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree>
     }
     inrows { inrows = 0 }
     END {
+      # Compare counts numerically: an empty table leaves seen unset, and a
+      # string comparison of "" with "0" would call it unreadable.
+      seen += 0; expected += 0
       if (!found) print "unavailable"
       else if (bad || counts != 1 || seen != expected || seen != shown || total < shown)
         print "unknown|unreadable runs table; run ids: " ids

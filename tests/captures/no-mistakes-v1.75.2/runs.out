@@ -1,0 +1,22 @@
+  running      fm/fm-note-line-ends-declared-wait 2d375896  2026-09-18 10:11  https://github.com/kunchenguid/firstmate/pull/4818
+  running      fm/fm-status-write-resets-pause-cadence 9feea610  2026-09-17 18:44  https://github.com/kunchenguid/firstmate/pull/4742
+  failed       fm/fm-status-write-resets-pause-cadence f4cd8c45  2026-09-17 18:16
+  failed       fm/fm-status-write-resets-pause-cadence f4cd8c45  2026-09-17 18:07
+  completed    fm/fm-contributions-merged-pr-never-settles ff56b413  2026-09-17 10:38  https://github.com/kunchenguid/firstmate/pull/4710
+  failed       fm/fm-superseded-cancelled-run-outranks-live 4495215c  2026-09-17 09:33  https://github.com/kunchenguid/firstmate/pull/4476
+  completed    fm/fm-contributions-budget-false-unavailable 055ea956  2026-09-16 19:50  https://github.com/kunchenguid/firstmate/pull/4661
+  completed    fm/fm-reboot-disarms-every-merge-watch 0f8fa0a2  2026-09-16 18:53  https://github.com/kunchenguid/firstmate/pull/4656
+  failed       fm/fm-superseded-cancelled-run-outranks-live d639d469  2026-09-16 14:28  https://github.com/kunchenguid/firstmate/pull/4476
+  completed    fm/fm-4469-suivi-contributions 97e8fe0d  2026-09-16 14:19  https://github.com/kunchenguid/firstmate/pull/4627
+  cancelled    fm/fm-4469-suivi-contributions 61ef33f8  2026-09-16 13:46
+  cancelled    fm/fm-4469-suivi-contributions bfe13f7f  2026-09-16 11:12  https://github.com/kunchenguid/firstmate/pull/4627
+  failed       fm/fm-installed-timeout-watcher-will-not-stop 31e4d35b  2026-09-15 13:52  https://github.com/kunchenguid/firstmate/pull/4073
+  failed       fm/fm-clear-3173-conflict 91c7a758  2026-09-15 09:50  https://github.com/kunchenguid/firstmate/pull/4521
+  failed       fm/fm-prepush-internal-voice-guard 1f31e08e  2026-09-15 08:12  https://github.com/kunchenguid/firstmate/pull/3844
+  failed       fm/fm-superseded-cancelled-run-outranks-live a221d61a  2026-09-14 22:51  https://github.com/kunchenguid/firstmate/pull/4476
+  failed       fm/fm-spawn-tests-borrow-the-checkout a0eb3010  2026-09-14 22:51  https://github.com/kunchenguid/firstmate/pull/4056
+  failed       fm/fm-origin-credentials-printed-in-errors 4e5713f5  2026-09-14 21:55  https://github.com/kunchenguid/firstmate/pull/4138
+  failed       fm/fm-ci-refresh-portable-serial-hints e6be9247  2026-09-14 18:11  https://github.com/kunchenguid/firstmate/pull/4144
+  completed    fm/fm-bearings-board-loses-owner-state-and-links 146a90ee  2026-09-14 18:09  https://github.com/kunchenguid/firstmate/pull/4019
+
+  (73 more runs, use --limit to see more)

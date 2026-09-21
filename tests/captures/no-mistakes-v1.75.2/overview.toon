@@ -1,0 +1,38 @@
+bin: ~/.no-mistakes/bin/no-mistakes
+description: "Validate your code changes through the no-mistakes pipeline - automated code review, tests, lint, docs, push, PR, and CI - before they reach the configured push target. Use when the user asks to run no-mistakes, gate or ship or validate their changes, push safely, asks you to do a task and then validate it, or invokes /no-mistakes."
+repo: /captured/firstmate
+current_branch: fm/fm-prepublish-voice-classifier
+daemon: running
+other_branch_active_run:
+  id: "01M2SS4ZQEBBP3ZAV5WBZ5X4Z5"
+  branch: fm/fm-note-line-ends-declared-wait
+  status: running
+  head: 2d375896
+  head_sha: 2d3758963491d42624118e670ea1bd956dea2bb2
+  pr: "https://github.com/kunchenguid/firstmate/pull/4818"
+  findings: none
+  steps[9]{step,status,findings,duration_ms}:
+    intent,completed,0,89
+    rebase,completed,0,1508
+    review,completed,0,350290
+    test,completed,0,694415
+    document,completed,0,42687
+    lint,completed,0,21508
+    push,completed,0,3849
+    pr,completed,0,33919
+    ci,running,0,0
+  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
+    ci,running,22m55s,22m55s,"3m27s ago: log: all CI checks passed - still monitoring until merged or closed","",starting
+count: 10 of 93 total
+runs[10]{id,branch,status,head,pr}:
+  "01M2SS4ZQEBBP3ZAV5WBZ5X4Z5",fm/fm-note-line-ends-declared-wait,running,2d375896,"https://github.com/kunchenguid/firstmate/pull/4818"
+  "01M2R420V63BKXCNFG1SYG3WWZ",fm/fm-status-write-resets-pause-cadence,running,9feea610,"https://github.com/kunchenguid/firstmate/pull/4742"
+  "01M2R2FM5365HQ6G21RMYWDZJY",fm/fm-status-write-resets-pause-cadence,failed,f4cd8c45,""
+  "01M2R1Y9J0EE05DCGEH5R3ZNMD",fm/fm-status-write-resets-pause-cadence,failed,f4cd8c45,""
+  "01M2Q89G2YC92K8EGDV2ZN4M4A",fm/fm-contributions-merged-pr-never-settles,completed,ff56b413,"https://github.com/kunchenguid/firstmate/pull/4710"
+  "01M2Q4J96JM7KVQ38X1V6DA52K",fm/fm-superseded-cancelled-run-outranks-live,failed,4495215c,"https://github.com/kunchenguid/firstmate/pull/4476"
+  "01M2NNFR74M8END4XM5ZG5EZYC",fm/fm-contributions-budget-false-unavailable,completed,"055ea956","https://github.com/kunchenguid/firstmate/pull/4661"
+  "01M2NJ6554JPZTDTTR2S71YYQ4",fm/fm-reboot-disarms-every-merge-watch,completed,0f8fa0a2,"https://github.com/kunchenguid/firstmate/pull/4656"
+  "01M2N31T5M1NJFXRYHRHFP1RQQ",fm/fm-superseded-cancelled-run-outranks-live,failed,d639d469,"https://github.com/kunchenguid/firstmate/pull/4476"
+  "01M2N2H0B7Q6ZZ09JXH4MQT51M",fm/fm-4469-suivi-contributions,completed,97e8fe0d,"https://github.com/kunchenguid/firstmate/pull/4627"
+help[5]: "Run `no-mistakes axi run --intent \"<what the user set out to accomplish>\"` to validate your changes",Another active run is on fm/fm-note-line-ends-declared-wait; leave it alone unless you are working on that branch,"Commit post-pipeline follow-up work on top of the existing branch so every pipeline fix commit remains present. Never abort-and-restart, reset, or replace the branch in a way that drops prior gate-fix commits.",The calling agent drives AXI gates but does not replace the configured pipeline agent; run `no-mistakes doctor` if no native agent or ACP runner is available,"How to drive the pipeline: `no-mistakes axi run --help`, or the `/no-mistakes` skill (loaded when you invoke `/no-mistakes`)"
