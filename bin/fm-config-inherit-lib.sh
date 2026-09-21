@@ -47,14 +47,15 @@
 # secondmates, and a secondmate never spawns secondmates, so it must not flow
 # downstream.
 #
-# That single declaration is also the ONE owner of the inherited-material
-# allowlist for remote routes: bin/fm-remote-inherit-push.sh (sender) and
-# bin/fm-remote-inherit.sh (receiver, executing inside the remote home) both
-# derive their item set from fm_config_inherit_items rather than restating it,
-# so a new inheritable item cannot be accepted by one side and refused by the
-# other. A local and remote code root that disagree about this list must be
-# reconciled by the ordinary remote sync/update path before the transfer
-# succeeds; there is no separate allowlist version negotiation.
+# That single declaration, minus the local-only sub-category below, is also the
+# ONE owner of the inherited-material allowlist for remote routes:
+# bin/fm-remote-inherit-push.sh (sender) and bin/fm-remote-inherit.sh (receiver,
+# executing inside the remote home) both derive their item set from
+# fm_config_inherit_items rather than restating it, so a new inheritable item
+# cannot be accepted by one side and refused by the other. A local and remote
+# code root that disagree about this list must be reconciled by the ordinary
+# remote sync/update path before the transfer succeeds; there is no separate
+# allowlist version negotiation.
 #
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
@@ -68,7 +69,27 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host agy-turnend-hook}"
+
+# Items whose value is consent to touch ONE MACHINE's own home directory rather
+# than firstmate configuration. A local secondmate home runs under the same uid
+# as the primary and therefore shares the very file the consent is about, so it
+# must inherit the answer or the captain is asked twice for one write; a remote
+# secondmate runs against a different machine's home, so carrying the answer
+# there would grant on one machine what was consented on another. They are
+# therefore inherited by local convergence and EXCLUDED from
+# fm_config_inherit_items, the derived remote allowlist, which makes the remote
+# sender skip them and the remote receiver refuse them by construction.
+FM_LOCAL_ONLY_INHERITABLE_CONFIG="agy-turnend-hook"
+
+# True when <item> is local-only in the sense above.
+fm_config_inherit_item_local_only() {  # <item>
+  local item=$1 candidate
+  for candidate in $FM_LOCAL_ONLY_INHERITABLE_CONFIG; do
+    [ "$candidate" = "$item" ] && return 0
+  done
+  return 1
+}
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
@@ -86,13 +107,15 @@ fm_config_inherit_item_session_scoped() {  # <item>
   return 1
 }
 
-# The complete declared inherited-material set as home-relative paths, one per
-# line, in propagation order: every FM_INHERITABLE_CONFIG item under config/,
-# then the one shared data file. This is what remote senders and receivers
-# derive from, so both ends of a transfer agree by construction.
+# The declared REMOTE-transferable inherited-material set as home-relative
+# paths, one per line, in propagation order: every FM_INHERITABLE_CONFIG item
+# under config/ that is not local-only, then the one shared data file. This is
+# what remote senders and receivers derive from, so both ends of a transfer
+# agree by construction. Local convergence uses the full list instead.
 fm_config_inherit_items() {
   local item
   for item in $FM_INHERITABLE_CONFIG; do
+    fm_config_inherit_item_local_only "$item" && continue
     printf 'config/%s\n' "$item"
   done
   printf '%s\n' "$FM_SHARED_CAPTAIN_REL"

@@ -16,12 +16,15 @@
 # CAPTAIN CONSENT. That store is the captain's own per-user file, not firstmate's,
 # so install is gated on a one-time consent recorded in this home's
 # config/agy-turnend-hook: "allow" permits the write, "deny" refuses it, and an
-# absent file means the captain has not been asked yet. Absent and "deny" are
-# both ordinary refusals on the existing no-write path, so the spawn degrades to
-# its retained rendered-tail read instead of dying; only the absent case carries
-# the instruction to ask, so a recorded answer of either kind is never asked
-# again. Firstmate asks the captain and records the answer; this command never
-# prompts, and remove needs no consent because it only undoes the write.
+# absent file means the captain has not been asked yet. A recorded "deny" also
+# RETRACTS: install runs the remove action instead, taking a key an earlier
+# "allow" wrote back out of the store, and then refuses anyway. Consent that
+# cannot be withdrawn is not consent. Absent and "deny" both end as ordinary
+# refusals on the existing no-write path, so the spawn degrades to its retained
+# rendered-tail read instead of dying; only the absent case carries the
+# instruction to ask, so a recorded answer of either kind is never asked again.
+# Firstmate asks the captain and records the answer; this command never prompts,
+# and remove needs no consent because it only undoes the write.
 #
 # WHY A GLOBAL FILE. agy reads hooks only from its customization roots: the
 # global ${HOME}/.gemini/config/ and a workspace's own .agents/ directory. It
@@ -58,7 +61,7 @@ CONSENT_FILE="$CONFIG/agy-turnend-hook"
 case "${1:-}" in
 install | remove) ACTION=$1 ;;
 -h | --help)
-  sed -n '2,48{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,51{s/^# \{0,1\}//;p;}' "$0"
   exit 0
   ;;
 *)
@@ -67,6 +70,7 @@ install | remove) ACTION=$1 ;;
   ;;
 esac
 
+DENIED=0
 CREATED_GEMINI_DIR=0
 CREATED_CONFIG_DIR=0
 CREATED_CLI_DIR=0
@@ -88,6 +92,18 @@ refuse() {
   rollback_install
   printf 'fm-agy-turnend-hook: refused: %s\n' "$1" >&2
   exit 1
+}
+
+# The one success exit. A retraction run reached it by completing the remove a
+# recorded deny demands, but the install it was asked for is still refused, so
+# the caller gets the same nonzero every other refusal gives it.
+finish() {
+  if [ "$DENIED" -eq 1 ]; then
+    printf "fm-agy-turnend-hook: refused: the captain declined the global agy turn-end hook in '%s'; any key an earlier consent installed has been removed.\n" \
+      "$CONSENT_FILE" >&2
+    exit 1
+  fi
+  exit 0
 }
 
 [ -n "${HOME:-}" ] || refuse "HOME is unset."
@@ -113,7 +129,12 @@ if [ "$ACTION" = install ]; then
     case "$CONSENT" in
     allow) ;;
     deny)
-      refuse "the captain declined the global agy turn-end hook in '$CONSENT_FILE'."
+      # A withdrawn consent takes the write back rather than only declining the
+      # next one. Nothing has been created yet at this point, so switching to
+      # the remove action here needs no rollback; finish turns the completed
+      # removal back into the refusal the caller asked about.
+      DENIED=1
+      ACTION=remove
       ;;
     *)
       refuse "'$CONSENT_FILE' holds '$CONSENT'; accepted values are: allow, deny."
@@ -133,7 +154,7 @@ if [ -e "$STORE" ]; then
   [ -w "$STORE" ] || refuse "'$STORE' is not writable."
 fi
 if [ "$ACTION" = remove ] && [ ! -e "$STORE" ]; then
-  exit 0
+  finish
 fi
 if [ -f "$STORE" ] && ! node - "$STORE" <<'NODE'; then
 const fs = require("node:fs");
@@ -320,4 +341,4 @@ NODE
   refuse "agy's hooks.json could not be updated safely."
 fi
 
-exit 0
+finish

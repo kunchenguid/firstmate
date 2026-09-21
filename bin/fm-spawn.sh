@@ -1818,6 +1818,61 @@ agy_model_validate() {  # <agy-bin> <model>
   return 1
 }
 
+# agy's turn-end hook surface was established on 1.2.6 (docs/verification/agy.md);
+# the versions this adapter was first verified against, 1.2.0 and 1.2.1, read no
+# hooks.json at all. Arming a build like that would seed a busy record neither
+# PreInvocation nor Stop could ever clear, so the pane would read busy until
+# BUSY_TURN_MAX_SECS turned it into a phantom wedge suspect. The probe therefore
+# demands POSITIVE evidence and fails closed: an unreachable, empty, or
+# unparseable version reads as unsupported and takes the same unwired shape a
+# raw launch and a refused install already take. This is deliberately the
+# opposite of agy_model_validate's launch-unvalidated posture, because an
+# unproven model only risks a loud refusal while an unproven hook surface risks
+# a silent wedge. The probe runs under the shared hard bound (bin/fm-timeout-lib.sh)
+# with stdin detached, so it can never block the spawn before any pane exists.
+FM_AGY_TURNEND_MIN_VERSION=1.2.6
+AGY_TURNEND_UNSUPPORTED_REASON=
+
+# Numeric dotted-release comparison, the bin/backends/herdr.sh shape: any
+# prerelease or build suffix is stripped first, and an unparseable candidate is
+# the caller's fail-closed case rather than a third verdict.
+agy_version_at_least() {  # <candidate> <floor>
+  local candidate=${1:-} floor=${2:-} c f
+  candidate=${candidate%%[-+]*}
+  case "$candidate" in '' | *[!0-9.]*) return 1 ;; esac
+  while [ -n "$floor" ]; do
+    c=${candidate%%.*}
+    f=${floor%%.*}
+    [ -n "$c" ] || c=0
+    [ "$c" -gt "$f" ] 2>/dev/null && return 0
+    [ "$c" -lt "$f" ] 2>/dev/null && return 1
+    case "$candidate" in *.*) candidate=${candidate#*.} ;; *) candidate= ;; esac
+    case "$floor" in *.*) floor=${floor#*.} ;; *) floor= ;; esac
+  done
+  return 0
+}
+
+agy_turnend_hook_supported() {  # <agy-bin>
+  local bin=$1 raw version bound=${FM_AGY_VERSION_TIMEOUT:-5}
+  case "$bound" in '' | *[!0-9]* | 0*) bound=5 ;; esac
+  AGY_TURNEND_UNSUPPORTED_REASON=
+  if ! raw=$(fm_run_timed "$bound" "$bin" --version 2>/dev/null </dev/null); then
+    AGY_TURNEND_UNSUPPORTED_REASON="'agy --version' is unreachable, so the turn-end hook surface is unproven"
+    return 1
+  fi
+  version=$(printf '%s\n' "$raw" \
+    | awk 'NF { for (i = 1; i <= NF; i++) if ($i ~ /^v?[0-9]+(\.[0-9]+)+$/) { sub(/^v/, "", $i); print $i; exit } }')
+  if [ -z "$version" ]; then
+    AGY_TURNEND_UNSUPPORTED_REASON="'agy --version' printed no recognisable version, so the turn-end hook surface is unproven"
+    return 1
+  fi
+  if ! agy_version_at_least "$version" "$FM_AGY_TURNEND_MIN_VERSION"; then
+    AGY_TURNEND_UNSUPPORTED_REASON="agy $version is older than $FM_AGY_TURNEND_MIN_VERSION, the first version with a turn-end hook surface"
+    return 1
+  fi
+  return 0
+}
+
 # The verified launch command per adapter. The knowledge half of each adapter
 # (busy-state source, exit command, dialogs, quirks) lives in the harness-adapters skill.
 launch_template() {
@@ -2202,24 +2257,33 @@ agy)
   # captain's own sessions and the Antigravity IDE, so the installer owns the
   # edit and the hook stays inert without this task's token. Installed before a
   # managed launch and deliberately never removed at teardown: another live agy
-  # task may still depend on it. A raw launch is skipped on the same predicate
+  # task may still depend on it. A recorded deny is the one thing that does take
+  # it out, and it takes it out from under those other live tasks too, which is
+  # the price of a consent that can actually be withdrawn.
+  # A raw launch is skipped on the same predicate
   # the busy arm and the token mint use: it mints no token, so its hook firing
   # could never resolve one, and writing the key would only add two synchronous
   # subprocesses to every turn of the captain's own sessions for no benefit.
-  # A refused install is NOT fatal. The installer refuses a store firstmate does
-  # not own outright - a symlink, another uid's file, a non-object root - and a
-  # home whose hooks.json a dotfiles tool manages is exactly that shape. It also
-  # refuses until the captain's one-time consent is recorded in
-  # config/agy-turnend-hook, because that store is the captain's own file; the
-  # installer's own refusal carries the instruction to ask. Every one of those
-  # refusals takes the same path: the spawn drops to the raw-launch shape it
-  # already supports - no busy arm, no token, and the retained rendered-tail
+  # An installed build too old to READ hooks.json is checked first, so a stale
+  # agy never triggers the consent ask for a write that could not do anything.
+  # A refused install is NOT fatal either. The installer refuses a store
+  # firstmate does not own outright - a symlink, another uid's file, a
+  # non-object root - and a home whose hooks.json a dotfiles tool manages is
+  # exactly that shape. It also refuses until the captain's one-time consent is
+  # recorded in config/agy-turnend-hook, because that store is the captain's own
+  # file; the installer's own refusal carries the instruction to ask. Every one
+  # of those cases takes the same path: the spawn drops to the raw-launch shape
+  # it already supports - no busy arm, no token, and the retained rendered-tail
   # fallback in bin/fm-busy-lib.sh carrying detection. The supervisor is told
   # which shape this worker got.
-  if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] \
-    && ! "$FM_ROOT/bin/fm-agy-turnend-hook.sh" install; then
-    AGY_TURNEND_WIRED=0
-    echo "warning: agy's global turn-end hook was not installed (see the refusal above); task $ID will run WITHOUT semantic busy state and WITHOUT a turn-end signal, on the weaker rendered-tail idle read alone" >&2
+  if [ "$RAW_LAUNCH" -eq 0 ]; then
+    if ! agy_turnend_hook_supported "$AGY_BIN"; then
+      AGY_TURNEND_WIRED=0
+      echo "warning: agy's global turn-end hook was not installed ($AGY_TURNEND_UNSUPPORTED_REASON); task $ID will run WITHOUT semantic busy state and WITHOUT a turn-end signal, on the weaker rendered-tail idle read alone" >&2
+    elif ! "$FM_ROOT/bin/fm-agy-turnend-hook.sh" install; then
+      AGY_TURNEND_WIRED=0
+      echo "warning: agy's global turn-end hook was not installed (see the refusal above); task $ID will run WITHOUT semantic busy state and WITHOUT a turn-end signal, on the weaker rendered-tail idle read alone" >&2
+    fi
   fi
   ;;
 esac
@@ -4106,8 +4170,9 @@ if [ "$KIND" != secondmate ]; then
   agy)
     # Armed only for the managed launch shape, the gemini rule: a raw command
     # carries no token export, so its hook could never clear a seeded record.
-    # An unwired launch is the same case: with no installed hook nothing could
-    # ever clear a seeded record, so it stays on the rendered-tail fallback.
+    # An unwired launch is the same case: with no installed hook, or a build
+    # too old to read one, nothing could ever clear a seeded record, so it
+    # stays on the rendered-tail fallback.
     if [ "$RAW_LAUNCH" -eq 0 ] && [ "$AGY_TURNEND_WIRED" -eq 1 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -4461,7 +4526,8 @@ EOF
     # directly, so nothing is written into the project under test.
     # Skipped for a raw launch, the gemini rule: that command carries no token
     # placeholder to substitute, so a token minted here could never fire, and
-    # skipped for an unwired launch, whose hook was never installed to read it.
+    # skipped for an unwired launch, whose hook was never installed - or whose
+    # agy is too old to read one - so nothing could ever resolve it.
     if [ "$RAW_LAUNCH" -eq 0 ] && [ "$AGY_TURNEND_WIRED" -eq 1 ]; then
       AGY_AUTH_DIR="$HOME/.gemini/antigravity-cli/fm-turn-end.d"
       mkdir -p "$AGY_AUTH_DIR"

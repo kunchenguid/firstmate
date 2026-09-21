@@ -366,8 +366,9 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For agy crews, `fm-spawn.sh` runs `fm-agy-turnend-hook.sh install`, which writes the hook script `~/.gemini/antigravity-cli/fm-turn-end.sh` and adds exactly one firstmate-owned `firstmate-turn-end` key to the global `~/.gemini/config/hooks.json`, a file shared with the captain's own agy sessions and the Antigravity IDE, preserving every other key.
 Unlike grok and Kimi no pointer is written into the worktree: the per-task parameters live in a private registry token under `~/.gemini/antigravity-cli/fm-turn-end.d/` whose name the launch exports to the agy process, so the installed hook stays inert for every session that does not carry one.
-A raw launch command skips both the install and the token, and teardown removes only the task's own token, deliberately leaving the shared hook installed because another live agy task may still depend on it.
+A raw launch command skips both the install and the token, and teardown removes only the task's own token, deliberately leaving the shared hook installed because another live agy task may still depend on it; a recorded `deny` is the one thing that takes the shared hook back out.
 The agy installer requires `node` and refuses before writing when that `hooks.json` is a symlink, is not owned by this user, or does not hold a JSON object, which is the shape a dotfiles-managed store has; a refusal is not fatal, and the spawn instead warns on its own path and runs that task with no semantic busy state and no turn-end signal, on the retained rendered-tail idle read alone.
+Before it calls the installer at all, `fm-spawn.sh` probes `agy --version` and requires at least the `1.2.6` that first carried the hook surface: an older, unreachable, or unrecognisable version gives the same degraded shape, because a build that never reads `hooks.json` would leave a seeded busy record standing until the watcher's turn bound made the pane look wedged.
 Because that store is the captain's own per-user file, the install also refuses until his one-time consent is recorded in `config/agy-turnend-hook`, and that refusal degrades the spawn the same way; see [agy turn-end hook consent](#agy-turn-end-hook-consent-configagy-turnend-hook) below.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch instead carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
@@ -389,13 +390,19 @@ The optional local, gitignored `config/agy-turnend-hook` records the captain's o
 That file is the captain's own per-user agy configuration, shared with his own agy sessions and the Antigravity IDE, so `bin/fm-agy-turnend-hook.sh install` will not touch it before he has answered.
 The token is the file's whitespace-trimmed content.
 `allow` permits the write, and every later install in that home proceeds without asking again.
-`deny` refuses it, and is equally durable: a recorded decline is never raised again either.
+`deny` refuses it, and is equally durable: a recorded decline is never raised again either, and it also retracts.
+The next install in a home that reads `deny` removes the `firstmate-turn-end` key an earlier `allow` had written, leaving every other key untouched, and then refuses as usual.
+A consent that could not be withdrawn would leave the captain's own agy sessions and the Antigravity IDE running two synchronous subprocesses per turn for good.
+Because the key is shared, a `deny` recorded while other agy crewmates are still running takes the hook out from under them too: each one keeps its seeded busy record with nothing left to close it, and reads busy until the watcher's `BUSY_TURN_MAX_SECS` bound ages it out.
+Prefer retracting between tasks when that matters.
 An absent file means the captain has not been asked yet, and is the only case whose refusal carries the instruction to ask him.
 Any other value, or an unreadable file, refuses the install and names the accepted values rather than guessing an answer.
 Firstmate asks the captain and records his answer; the installer itself never prompts, because a crewmate must never address the captain directly.
 Only `install` is gated, since `remove` merely takes back a write this consent authorised.
 A refusal of any kind is not fatal: `bin/fm-spawn.sh` drops that task to the same degraded shape a store it cannot own produces, with no busy state and no turn-end signal, and says so on its own path.
-The file is deliberately NOT inherited into secondmate homes, because consent is to touch one specific machine's home directory and a remote secondmate runs against a different one; each home therefore asks once for itself.
+The file is inherited within one machine's local homes and never carried across machines.
+A local secondmate runs under the same uid as the primary and therefore shares the very `~/.gemini/config/hooks.json` the answer is about, so it inherits the answer rather than asking the captain a second time for one write to one file; a remote secondmate runs against a different machine's home directory, so the answer is deliberately excluded from the remote transfer set and that home asks once for itself.
+`bin/fm-config-inherit-lib.sh` owns that split through `FM_LOCAL_ONLY_INHERITABLE_CONFIG`, which local convergence carries and the derived remote allowlist in `fm_config_inherit_items` excludes.
 The [agy adapter reference](../.agents/skills/harness-adapters/references/harness/agy.md) records the hook surface this consent governs.
 
 ## Lavish server address (config/lavish-axi-host)
@@ -606,7 +613,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
-It uses the same live secondmate discovery and propagation helper as bootstrap; its [help](../bin/fm-config-push.sh) owns reporting and exit semantics, and [`fm_config_inherit_items`](../bin/fm-config-inherit-lib.sh) declares the inherited items.
+It uses the same live secondmate discovery and propagation helper as bootstrap; its [help](../bin/fm-config-push.sh) owns reporting and exit semantics, and [`FM_INHERITABLE_CONFIG`](../bin/fm-config-inherit-lib.sh) declares the inherited items, of which the local-only sub-category is excluded from the remote transfer set `fm_config_inherit_items` derives.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
 The locked bootstrap inheritance pass uses the same placement-specific behavior; see `secondmate-provisioning` for the single contract owner.

@@ -871,7 +871,8 @@ fm_busy_rovo_tail_busy() {
 # agy-hook writer rather than replaced by it, but it is NOT a pre-hook window:
 # fm_busy_classify reaches this arm only when no record exists, and a managed
 # launch has one from the spawn seed onwards. The reachable cases are a raw
-# launch, a launch whose global hook install was refused, and a retired
+# launch, a launch whose global hook install was refused, a launch whose agy is
+# older than the version that first carried the hook surface, and a retired
 # incarnation - every shape in which no hook could write a record at all.
 fm_busy_agy_tail_busy() {
   grep -v '^[[:space:]]*$' | tail -12 \

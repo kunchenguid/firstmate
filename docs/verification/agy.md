@@ -7,7 +7,7 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 
 | Field | Value |
 |---|---|
-| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12); the turn-end hook surface was established on `agy 1.2.6` (2026-09-18) |
+| Version | Launch, detection, trust, and control were established on `agy 1.2.0`, with the send-confirmation timing below re-measured on `agy 1.2.1` (2026-09-12); the turn-end hook surface was established on `agy 1.2.6` (2026-09-18) and `1.2.6` is the enforced floor for arming it |
 | Verified | 2026-09-10; hook surface 2026-09-18 |
 | Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable |
 | Platform | Linux x64 (Arch, kernel 7.2.3) |
@@ -205,6 +205,8 @@ Across one interrupted turn and one completed turn:
 The interrupt landed; the pane rendered `⎿  Interrupted · What should Antigravity CLI do instead?` and the status row returned to `? for shortcuts`. Because agy also has no session-end event, firstmate closes the record itself on both interrupt planes, `bin/fm-control.sh` and the legacy `bin/fm-send.sh --key Escape`, and `fm_busy_agy_tail_busy` is retained as the no-record fallback.
 The busy record needs no agy-specific age bound: `BUSY_TURN_MAX_SECS` in `../../bin/fm-watch.sh` (default 3600s) already ages any busy pane from its last completed turn, and the `Stop` hook above touches `state/<id>.turn-ended`, so that clock resets on every turn agy finishes.
 Where the hook cannot be installed at all - a `hooks.json` firstmate does not own, which the installer refuses without a write - the spawn says so on its own path and runs that task unarmed on the rendered-tail read instead of failing.
+An installed agy older than `1.2.6` takes the same unarmed path, decided before the installer runs: `bin/fm-spawn.sh` probes `agy --version` and requires positive evidence of the hook surface, so an older, unreachable, or unrecognisable version neither writes the captain's store nor seeds a busy record that no `PreInvocation` or `Stop` could ever clear.
+That probe runs stdin-detached under the same shared hard bound as the model listing (5 seconds by default, `FM_AGY_VERSION_TIMEOUT`, clamped back to that default when the value is non-positive or non-numeric), and unlike the model listing a bound that expires fails closed rather than launching unvalidated, because an unproven hook surface costs a silent wedge while an unproven model only costs a loud refusal.
 
 The `Stop` payload carries no re-entrancy flag; its output contract is what bounds re-entry:
 
@@ -260,6 +262,7 @@ No slash-skill invocation form was verified, so skill invocation stays natural l
 `--continue` and `--conversation` resume were never exercised; recovery uses deterministic relaunch from the brief on disk.
 No primary or secondmate behavior was built or tested, and none is claimed.
 `terminationReason` was only ever observed as `NO_TOOL_CALL`; the vendor guide names `model_stop`, `max_steps_exceeded`, and `error` in a different casing, so those values are unconfirmed.
+Versions `1.2.2` through `1.2.5` were never probed, so `1.2.6` is the first version the hook surface was SEEN on rather than the first that shipped it; a host on one of those four versions is refused the arm and runs on the rendered-tail read until someone verifies it and lowers the floor.
 Whether a firstmate hook in the shared global root also runs inside the Antigravity IDE or Antigravity 2.0 was not tested; the vendor guide describes one mechanism across all three, which is why the installed handlers are bounded and exit 0 on every path.
 Hook failure modes - a handler that times out, exits non-zero, or emits invalid JSON - were not exercised against live agy.
 Concurrent agy tasks in one home were never run, so token attribution is proven by construction and by the portable suite rather than under live parallelism.
