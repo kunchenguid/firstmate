@@ -445,6 +445,40 @@ test_foreign_project_worktree_is_refused() {
   pass "fm-claude-trust.sh: refuses a worktree belonging to another project"
 }
 
+# A treehouse pool worktree is not always a worktree of the exact <project>
+# clone the spawning home passes: treehouse pools a project's task worktrees
+# globally by project name, so a secondmate's pooled worktree can end up a
+# linked worktree of the MAIN home's own separate clone of the same project.
+# The two clones have different common dirs but share an origin, and that
+# must be accepted - and trusted against the worktree's OWN actual clone,
+# never the unrelated clone the caller happened to pass.
+test_pool_worktree_from_a_different_clone_of_the_same_project_is_accepted() {
+  local rec out seed bare clone_a clone_b wt clone_a_real clone_b_real
+  rec=$(make_case pool)
+  read_case "$rec"
+  seed="$CASE_DIR/seed"
+  bare="$CASE_DIR/pool-origin.git"
+  clone_a="$CASE_DIR/clone-a"
+  clone_b="$CASE_DIR/clone-b"
+  wt="$CASE_DIR/pool-wt"
+  fm_git_init_commit "$seed"
+  git clone --quiet --bare "$seed" "$bare"
+  git clone --quiet "$bare" "$clone_a"
+  git clone --quiet "$bare" "$clone_b"
+  git -C "$clone_a" worktree add --quiet -b wt-pool "$wt"
+  clone_a_real=$(cd "$clone_a" && pwd -P)
+  clone_b_real=$(cd "$clone_b" && pwd -P)
+  out=$(run_trust "$CONFIG" "$wt" "$clone_b")
+  expect_code 0 $? "a pool worktree linked to a different clone of the same project must be accepted: $out"
+  assert_contains "$out" "$clone_a_real" \
+    "the outcome did not name the worktree's own actual clone as the resolved project root"
+  assert_trusted "$CONFIG/.claude.json" "$wt" "the pool worktree was not trusted"
+  assert_trusted "$CONFIG/.claude.json" "$clone_a_real" "the worktree's own clone root was not trusted"
+  assert_not_trusted "$CONFIG/.claude.json" "$clone_b_real" \
+    "the spawning home's unrelated separate clone was trusted instead of the worktree's real clone"
+  pass "fm-claude-trust.sh: accepts and trusts a pool worktree whose common dir differs from the spawning home's own project clone, when both clones share an origin"
+}
+
 test_worktree_subdirectory_is_refused() {
   local rec out sub
   rec=$(make_case subdir)
@@ -829,6 +863,7 @@ test_relative_config_dir_is_refused
 test_non_git_directory_is_refused
 test_missing_directory_is_refused
 test_foreign_project_worktree_is_refused
+test_pool_worktree_from_a_different_clone_of_the_same_project_is_accepted
 test_worktree_subdirectory_is_refused
 test_project_argument_that_is_itself_a_worktree_resolves_to_the_primary_checkout
 test_unrelated_store_content_is_preserved
