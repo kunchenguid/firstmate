@@ -260,7 +260,7 @@ test_ship_mode_is_explicit_not_registry() {
   brief="$home/data/brief-explicit-a5/brief.md"
   grep -qx "Delivery contract: mode=no-mistakes" "$brief" \
     || fail "registered direct-PR posture overrode the explicit --mode"
-  assert_grep "Firstmate will then instruct you to run /no-mistakes" "$brief" \
+  assert_grep "start /no-mistakes to validate and ship a PR" "$brief" \
     "explicit no-mistakes brief did not render the pipeline definition of done"
 
   # An unregistered project is not a blocker either, because nothing is looked up.
@@ -303,6 +303,8 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
   brief="$home/data/$id/brief.md"
   assert_grep "The configured merge authority decides whether to merge the PR; firstmate relays the outcome." "$brief" \
     "direct-PR brief lost configured merge authority"
+  assert_grep "The task is complete only after the branch is pushed and a PR is open." "$brief" \
+    "direct-PR brief still treats the implementation commit as completion"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
   id="brief-local-authority-a4"
@@ -362,6 +364,14 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD must require a self-sufficient --intent string"
   assert_grep "write the substance of the referenced items into \`--intent\`" "$brief" \
     "no-mistakes DOD must tell the worker to resolve report, decision, and PR references into substance"
+  assert_grep "The task is complete only after the branch is pushed and a PR is open with checks green" "$brief" \
+    "no-mistakes DOD must require a pushed branch and open PR before done"
+  assert_grep "never report done from the bare implementation commit" "$brief" \
+    "no-mistakes DOD must reject a done claim from the implementation commit"
+  assert_grep "Do not append \`done:\` until the pipeline reports CI green" "$brief" \
+    "no-mistakes DOD must keep done until CI green"
+  assert_no_grep "The task is complete only when committed on your branch." "$brief" \
+    "no-mistakes DOD still treats the implementation commit as completion"
 
   # The --yes ban is a fleet-wide prohibition, not a preference, and it must not
   # claim an enforcement the tool does not provide: this is instruction only.

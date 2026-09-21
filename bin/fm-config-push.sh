@@ -11,8 +11,9 @@
 # After a successful per-home propagation that changes any allowlisted config/*
 # item, local routes receive the generation-specific literal-content pointer from
 # fm-config-inherit-lib.sh. Remote routes receive one durable marked reread nudge
-# through their SSH route. Unchanged config and data/captain-shared.md-only
-# updates send no reread unless a previous send failure is pending for that home.
+# through their SSH route. Unchanged config, a payload byte-identical to that
+# home's latest delivered generation, and data/captain-shared.md-only updates
+# send no reread unless a previous send failure is pending for that home.
 # Warnings-only skips exit 0; real propagation or reread-send errors exit non-zero.
 set -u
 
@@ -27,7 +28,8 @@ This is local-material-only:
   - does not fast-forward tracked files
   - after successful config/* changes, sends a local literal-content pointer or
     one durable marked remote reread nudge
-    (no message when config is unchanged unless a previous send failure is pending)
+    (no message when config is unchanged or the payload matches the latest
+    delivered generation, unless a previous send failure is pending)
   - reports each live home and each inheritable item as pushed, unchanged,
     skipped, or error
   - exits non-zero for real propagation errors or reread-send failures
@@ -228,14 +230,12 @@ while IFS='|' read -r id home _window meta; do
     errors=1
   fi
   print_item_report "$report"
-  reread_pending=0
-  if fm_config_reread_has_pending "$home_real" || fm_config_reread_has_staged "$FM_HOME" "$id"; then
-    reread_pending=1
-  fi
+  reread_before=$(fm_config_reread_latest_delivered "$home_real" || true)
   if reread_out=$(FM_HOME="$FM_HOME" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$STATE" \
     fm_config_send_reread_nudge "$id" "$home_real" "$report" 2>&1); then
-    if [ -n "$(fm_config_reread_changed_items "$report")" ] || [ "$reread_pending" -eq 1 ]; then
+    reread_after=$(fm_config_reread_latest_delivered "$home_real" || true)
+    if [ -n "$reread_after" ] && [ "$reread_after" != "$reread_before" ]; then
       printf '  config-reread: sent\n'
     fi
     [ -z "$reread_out" ] || printf '%s\n' "$reread_out"
