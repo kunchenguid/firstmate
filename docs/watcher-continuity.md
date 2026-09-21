@@ -43,7 +43,7 @@ The model no longer re-arms after ordinary wakes.
 No PreToolUse hook denies fleet commands based on watcher status.
 A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
-Codex retains its bounded foreground checkpoint protocol.
+Codex selects native asynchronous Stop ownership or the legacy foreground checkpoint protocol as described below.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
 
@@ -130,6 +130,30 @@ It also covers generation-claim single-flight, stuck-claim supersession, superse
 The goal is continuity without a Pi, omp, or OpenCode model-memory re-arm step.
 No zero-latency guarantee is claimed because lock verification, watcher startup, and bounded retry delays remain deliberate safety work.
 OpenCode support targets persistent TUI sessions rather than headless `opencode run`.
-Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex retains bounded foreground checkpoints.
+Claude depends on the Stop `asyncRewake` rewake, Cursor depends on its awaited stop-hook park, Grok retains native background-completion notifications, and Codex selects its supervision path through the capability gate below.
 
 [`verification/supervision.md`](verification/supervision.md#watcher-continuity) records the current five-harness live evidence, the 2026-07-24 Stop-owned Claude auto-arm results, and exact opt-in commands.
+
+## Codex native Stop ownership
+
+`bin/fm-codex-native-capable.sh` is the single capability gate for the instruction renderer, supervision model, Stop guard, and async owner.
+Native ownership requires a stable Codex CLI version at least 0.154.0, enabled hooks, and the verified session-targeted `codex queue` interface.
+Unknown or prerelease versions, unavailable queue transport, disabled hooks, and failed bounded probes retain the prior foreground checkpoint protocol in [`supervision-protocols/codex-checkpoint.md`](supervision-protocols/codex-checkpoint.md).
+In that fallback the async registration exits without arming, writing receipts, or queuing messages, the model uses the persistent watcher predicate, and the Stop guard directs recovery to a fresh checkpoint.
+The gate probes the executable and configuration visible to the current process; restart Codex after a binary or hook-configuration change.
+A capable CLI runs `bin/fm-codex-stop-autoarm.sh` as a native asynchronous Stop hook.
+The hook owns the existing arm wrapper as a tracked child and targets the originating session with `codex queue` when a durable watcher event arrives.
+Background hook output alone does not wake an idle Codex session; the explicit queue delivery is essential.
+The synchronous `--codex` turn-end guard requires both the identity-bound callback and the healthy watcher, or a recent successful queue receipt for that exact Stop turn.
+A finished checkpoint or a fresh leftover beacon cannot satisfy that proof.
+The mid-turn pull guard separately tolerates a successful native queue hand-off for one grace window while the same live session owns the home; a failed or expired receipt stays unhealthy.
+Concurrent Stops share one per-home owner, and a foreign session or ordinary linked worker cannot arm it.
+The script header owns receipt fields, lifecycle bounds, and command syntax.
+
+The queue is acknowledged only by the handling model after it drains and processes the event.
+A failed native delivery leaves the event durable and the receipt failed; it never acknowledges work or fabricates healthy supervision.
+Watcher failure notifications are bounded to one per session failure episode, with a successful cycle resetting the episode.
+The native hook lifetime covers idle intervals and ordinary user turns while the interactive session remains open.
+The owner checks session-lock authority during quiet waits and reaps its watcher child when that authority disappears, including after an abrupt native session exit.
+This is not an independent unattended daemon and does not extend supervision past closing Codex.
+`tests/fm-codex-stop-autoarm.test.sh` covers the process and delivery contract, and the credentialed `tests/fm-codex-continuity-live-e2e.test.sh` verifies the native idle wake and re-arm boundary.

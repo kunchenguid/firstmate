@@ -96,9 +96,16 @@ case "$HARNESS" in
   pi-signed) SNIPPET="$DOC_DIR/pi.md" ;;
   *) HARNESS=unknown; SNIPPET="$DOC_DIR/unknown.md" ;;
 esac
+CODEX_NATIVE=0
+if [ "$HARNESS" = codex ]; then
+  if "$SCRIPT_DIR/fm-codex-native-capable.sh"; then
+    CODEX_NATIVE=1
+  else
+    SNIPPET="$DOC_DIR/codex-checkpoint.md"
+  fi
+fi
 [ -f "$SNIPPET" ] || SNIPPET="$DOC_DIR/unknown.md"
 
-checkpoint_seconds=${FM_CODEX_WATCH_CHECKPOINT:-180}
 pi_ext="$FM_ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 pi_turnend_ext="$FM_ROOT/.pi/extensions/fm-primary-turnend-guard.ts"
 omp_ext="$FM_ROOT/.omp/extensions/fm-primary-omp-watch.ts"
@@ -157,7 +164,11 @@ repair_line() {
       printf '%s%s\n' "$prefix" 'watcher supervision needs Stop-owned automatic recovery; inspect the hook registration and startup status before ending the turn.'
       ;;
     codex)
-      printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "$checkpoint_seconds" '.'
+      if [ "$CODEX_NATIVE" -eq 1 ]; then
+        printf '%s%s\n' "$prefix" 'watcher supervision needs the native Codex Stop owner; inspect .codex/hooks.json and state/.codex-autoarm.json before ending the turn.'
+      else
+        printf '%s%s%s%s\n' "$prefix" 'repair missing watcher supervision with a foreground checkpoint: bin/fm-watch-checkpoint.sh --seconds ' "${FM_CODEX_WATCH_CHECKPOINT:-180}" '.'
+      fi
       ;;
     pi|pi-signed)
       printf '%s%s%s%s%s%s\n' "$prefix" 'repair a missing or failed watcher cycle with the Pi tool fm_watch_arm_pi, or restart Pi with -e ' "$pi_turnend_ext" ' -e ' "$pi_ext" ' if the extensions are not loaded.'
@@ -186,7 +197,11 @@ ordinary_wake_line() {
       printf '%s\n' '- Ordinary wake: the Stop-owned auto-arm (bin/fm-claude-stop-autoarm.sh) already owns watcher continuity; drain and handle the wake, and do not arm another cycle yourself.'
       ;;
     codex)
-      printf '%s\n' '- Ordinary wake: take the next foreground bin/fm-watch-checkpoint.sh checkpoint as directed below.'
+      if [ "$CODEX_NATIVE" -eq 1 ]; then
+        printf '%s\n' '- Ordinary wake: the native Codex Stop hook owns watcher continuity; drain and handle the wake, then end the turn normally.'
+      else
+        printf '%s\n' '- Ordinary wake: drain and handle queued wakes, then start the next foreground checkpoint as directed below.'
+      fi
       ;;
     pi|pi-signed)
       printf '%s\n' '- Ordinary wake: the Pi extension already owns watcher continuity; do not arm another cycle.'

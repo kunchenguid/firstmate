@@ -1,16 +1,15 @@
-Mode: Codex foreground checkpoint.
+Mode: Codex native Stop-owned supervision.
 
 When this session owns supervision and away mode is not active:
-1. Drain first with `bin/fm-wake-drain.sh`.
-   After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
-2. Source `__FM_X_MODE_ENV__` first when Relay is active.
-3. First cycle: run one foreground watcher checkpoint with `bin/fm-watch-checkpoint.sh --seconds "${FM_CODEX_WATCH_CHECKPOINT:-180}"`.
-4. Ordinary wake: if the command prints `signal:`, `stale:`, `check:`, or `heartbeat`, drain queued wakes, handle that wake, then start the next checkpoint.
-5. If the command prints `checkpoint:` or exits 124 with no wake, drain queued wakes anyway, process any queued user message now visible to Codex, then start the next checkpoint.
-6. Never use shell `&` or Codex background tasks for firstmate watcher supervision.
-7. Do not run `bin/fm-watch-arm.sh` as Codex's normal supervision command.
-   If it is ever shelled anyway, a backgrounded, piped, or bundled anti-pattern is denied automatically by the PreToolUse seatbelt (`bin/fm-arm-pretool-check.sh`) registered in `.codex/hooks.json`.
-8. Failure or missing cycle only: drain queued wakes, inspect the failure, then start a fresh foreground checkpoint.
+1. Drain queued wakes with `bin/fm-wake-drain.sh`, handle the events, and run its exact acknowledgement command.
+2. End the turn normally after completing the work or answering the user.
+   The native asynchronous Stop hook owns the watcher and queues an actionable wake into this same Codex session, even while idle.
+3. On a `Firstmate watcher wake` or lease-renewal message, drain, handle, acknowledge, and end the turn again.
+   Do not manually arm or repeat foreground checkpoints.
+4. If the Stop guard reports missing supervision or native delivery fails, inspect the hook registration, `state/.codex-autoarm.json`, and the watcher startup path.
+   A foreground `bin/fm-watch-checkpoint.sh` remains a bounded diagnostic tool, not proof of supervision after the turn ends.
+5. Never start a detached shell watcher or use a model-owned background task to replace the native hook.
 
-Codex cannot reason while a foreground tool call is running.
-The bounded checkpoint returns control regularly so user messages and queued wakes can be handled without relying on background-task wake semantics.
+The renderer selects this protocol only when the shared capability gate confirms native support; otherwise it emits the legacy foreground checkpoint protocol.
+Its verified scope is a running interactive Codex session; exiting the session cancels its background hooks.
+The callback ownership and failure contract is defined in [`../watcher-continuity.md`](../watcher-continuity.md).

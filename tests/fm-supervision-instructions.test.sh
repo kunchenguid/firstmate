@@ -8,11 +8,56 @@ set -u
 TMP_ROOT=$(fm_test_tmproot fm-supervision-instructions)
 RENDER="$ROOT/bin/fm-supervision-instructions.sh"
 
+FAKEBIN=$(fm_fakebin "$TMP_ROOT/fakebin")
+cat > "$FAKEBIN/codex" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  --version) printf 'codex-cli %s\n' "${CODEX_TEST_VERSION:-0.154.0}" ;;
+  'features list') printf 'hooks stable %s\n' "${CODEX_TEST_HOOKS:-true}" ;;
+   'queue --help')
+    case "${CODEX_TEST_QUEUE:-1}" in
+      0) exit 1 ;;
+      generic) printf 'Usage: codex [OPTIONS]\n'; exit 0 ;;
+      flags) printf 'Usage: codex queue [OPTIONS]\n'; exit 0 ;;
+    esac
+    printf 'Usage: codex queue --thread <THREAD> --message <TEXT>\n' ;;
+  *) exit 1 ;;
+esac
+SH
+chmod +x "$FAKEBIN/codex"
+export PATH="$FAKEBIN:$PATH"
+
+test_codex_compatibility() {
+  local version out
+  for version in 0.153.0 0.99.0 0.154.0-alpha.1 malformed; do
+    out=$(CODEX_TEST_VERSION="$version" "$RENDER" --harness codex)
+    assert_contains "$out" 'Mode: Codex foreground checkpoint.' "unsupported $version lost checkpoint fallback"
+    assert_not_contains "$out" 'native Codex Stop hook owns watcher continuity' 'native ordinary wake leaked into fallback'
+    out=$(CODEX_TEST_VERSION="$version" "$RENDER" --harness codex --repair-line)
+    assert_contains "$out" 'fm-watch-checkpoint.sh' 'fallback repair does not restore checkpoint'
+  done
+  for version in 0.154.0 0.155.0 1.0.0; do
+    out=$(CODEX_TEST_VERSION="$version" "$RENDER" --harness codex)
+    assert_contains "$out" 'Mode: Codex native Stop-owned supervision.' "supported $version lost native supervision"
+  done
+  for version in 0 generic flags; do
+    out=$(CODEX_TEST_QUEUE="$version" "$RENDER" --harness codex)
+    assert_contains "$out" 'Mode: Codex foreground checkpoint.' 'missing or invalid queue help lost fallback'
+  done
+  out=$(CODEX_TEST_VERSION=0.153.0 FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --repair-line)
+  assert_contains "$out" 'fm-watch-checkpoint.sh --seconds 7' 'fallback lost checkpoint duration override'
+  out=$(CODEX_TEST_HOOKS=false "$RENDER" --harness codex)
+  assert_contains "$out" 'Mode: Codex foreground checkpoint.' 'disabled hooks lost fallback'
+  pass 'Codex capability selection preserves checkpoint fallback across versions and unavailable features'
+}
+
+test_codex_compatibility
+
 test_selected_harness_block_only() {
   local out
   out=$("$RENDER" --harness codex)
   assert_contains "$out" "SUPERVISION OPERATING INSTRUCTIONS - primary harness: codex" "codex heading missing"
-  assert_contains "$out" "Mode: Codex foreground checkpoint." "codex snippet missing"
+  assert_contains "$out" "Mode: Codex native Stop-owned supervision." "codex snippet missing"
   assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex checkpoint helper missing"
   assert_not_contains "$out" "Mode: Claude Stop-hook-owned supervision." "renderer printed the claude snippet too"
   assert_not_contains "$out" "Mode: Pi extension background wake." "renderer printed the pi snippet too"
@@ -37,7 +82,7 @@ test_conditional_stanzas() {
   assert_contains "$out" "- Away mode: active" "afk stanza missing"
   assert_contains "$out" "- X mode: active" "x-mode stanza missing"
   assert_contains "$out" "$config/x-mode.env" "x-mode stanza did not render the effective config path"
-  assert_contains "$out" 'Mode: Codex foreground checkpoint.' "codex snippet missing"
+  assert_contains "$out" 'Mode: Codex native Stop-owned supervision.' "codex snippet missing"
   assert_not_contains "$out" "Source \`config/x-mode.env\`" "snippet kept the repo-relative x-mode config path"
   pass "renderer includes read-only, afk, and effective x-mode current-state stanzas"
 }
@@ -72,7 +117,7 @@ test_repair_lines() {
   home="$TMP_ROOT/repair-home"
   mkdir -p "$home/state" "$home/config"
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --repair-line)
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "codex repair line did not use checkpoint helper and env override"
+  assert_contains "$out" "native Codex Stop owner" "codex repair line lost native owner"
 
   out=$(FM_HOME="$home" "$RENDER" --harness claude --queue-pending 1 --repair-line)
   assert_contains "$out" "After draining queued wakes" "queue-pending prefix missing"
@@ -85,7 +130,7 @@ test_repair_lines() {
   : > "$home/config/x-mode.env"
   out=$(FM_HOME="$home" FM_CODEX_WATCH_CHECKPOINT=7 "$RENDER" --harness codex --x-mode 1 --repair-line)
   assert_contains "$out" "source '$home/config/x-mode.env' first" "x-mode repair line did not source the effective cadence config"
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh --seconds 7" "x-mode codex repair line lost the checkpoint helper"
+  assert_contains "$out" "native Codex Stop owner" "x-mode codex repair line lost native owner"
 
   out=$(FM_HOME="$home" "$RENDER" --harness opencode --read-only 1 --repair-line)
   assert_contains "$out" "session holding the fleet lock" "read-only repair line missing"
@@ -150,12 +195,12 @@ test_cross_harness_ordinary_continuation_and_repair_matrix() {
 
   out=$("$RENDER" --harness codex)
   ordinary=$(printf '%s\n' "$out" | grep -F -- '- Ordinary wake:')
-  assert_contains "$ordinary" "next foreground" "codex ordinary-wake line lost its foreground checkpoint"
-  assert_contains "$ordinary" "bin/fm-watch-checkpoint.sh" "codex ordinary-wake line lost the checkpoint command"
+  assert_contains "$ordinary" "native Codex Stop hook" "codex ordinary-wake line lost its native owner"
+  assert_contains "$ordinary" "end the turn normally" "codex ordinary-wake line lost its continuation"
   assert_not_contains "$ordinary" "bin/fm-watch-arm.sh" "codex ordinary-wake line incorrectly uses a background arm"
   out=$("$RENDER" --harness codex --repair-line)
-  assert_contains "$out" "foreground checkpoint" "codex recovery line lost its checkpoint repair"
-  assert_contains "$out" "bin/fm-watch-checkpoint.sh" "codex recovery line lost the checkpoint command"
+  assert_contains "$out" "native Codex Stop owner" "codex recovery line lost its repair"
+  assert_contains "$out" "state/.codex-autoarm.json" "codex recovery line lost its receipt diagnostic"
 
   pass "renderer preserves every harness ordinary-continuation and missing-cycle repair path"
 }

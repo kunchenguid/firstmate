@@ -19,6 +19,8 @@
 # exit 2 as one bounded follow-up, because exit 2 is a silent no-op on Cursor's
 # stop step; without that flag a Cursor-shaped payload is the Claude-settings
 # duplicate Cursor also loads, and this guard stands down.
+# Codex --codex mode cooperates with its native async Stop owner, accepting
+# a live callback/watcher pair or a fresh queue receipt for this exact turn.
 # See docs/turnend-guard.md for the per-harness mechanics, validation evidence,
 # and fail-open tradeoffs.
 #
@@ -100,6 +102,7 @@ GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
 CURSOR_MODE=0
+CODEX_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
@@ -110,8 +113,9 @@ case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 for arg in "$@"; do
   case "$arg" in
     --claude) CLAUDE_MODE=1 ;;
+    --codex) CODEX_MODE=1 ;;
     --cursor) CURSOR_MODE=1 ;;
-    *) echo "usage: $(basename "$0") [--claude|--cursor]" >&2; exit 2 ;;
+    *) echo "usage: $(basename "$0") [--claude|--cursor|--codex]" >&2; exit 2 ;;
   esac
 done
 
@@ -167,6 +171,13 @@ fi
 # checkout has the two equal. Child worktrees never carry the gitignored marker,
 # so this exempts them while guarding every real secondmate home.
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+if [ "$CODEX_MODE" -eq 1 ]; then
+  # The async owner may only arm for the session holding this home's lock.
+  # A read-only competing session must not be sent into an impossible repair.
+  # shellcheck source=bin/fm-session-lock-lib.sh
+  . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+  fm_session_lock_owned_by_self "$STATE" || exit 0
+fi
 
 # --- the actual predicate ----------------------------------------------------
 # shellcheck source=bin/fm-wake-lib.sh
@@ -202,7 +213,16 @@ allow_supervised_stop() {
   exit 2
 }
 
-if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
+if [ "$CODEX_MODE" -eq 1 ] && [ ! -e "$STATE/.afk" ] && "$SCRIPT_DIR/fm-codex-native-capable.sh"; then
+  CODEX_TURN=$(printf '%s' "$PAYLOAD" | jq -r '.turn_id // ""')
+  CODEX_DEADLINE=$(( $(date +%s) + 12 ))
+  while [ "$(date +%s)" -lt "$CODEX_DEADLINE" ]; do
+    if "$SCRIPT_DIR/fm-codex-stop-autoarm.sh" --ready "$SESSION_ID" "$CODEX_TURN"; then
+      allow_supervised_stop
+    fi
+    sleep 0.1
+  done
+elif fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   allow_supervised_stop
 fi
 
