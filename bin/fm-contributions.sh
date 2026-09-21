@@ -27,7 +27,9 @@
 # measurability; an authenticated api read is addressed to the matched
 # allowlist entry rather than to host text taken from a URL, and poll never
 # contacts a URL the allowlist does not cover. GitLab and unlisted hosts stay
-# owned and visibly unmeasured, never fleet work.
+# owned and visibly unmeasured, never fleet work, and the two cases keep
+# distinct reasons: an unlisted github-shaped host names config/forge-hosts as
+# the remedy, while a forge that cannot be read reports an unsupported forge.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,

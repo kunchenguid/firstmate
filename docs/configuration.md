@@ -246,8 +246,13 @@ The file is the only input that widens the allowlist; an ambient `FM_FORGE_HOSTS
 The list is a per-machine credential decision, so it is not inherited by secondmate homes.
 
 The allowlist decides two things together.
-An owned URL whose host is not on it stays owned and visibly unmeasured, exactly like a GitLab merge request: it is never counted as measured coverage and never becomes fleet work.
+An owned URL whose host is not on it stays owned and visibly unmeasured: it is never counted as measured coverage and never becomes fleet work.
 `bin/fm-contributions.sh poll` also never contacts such a URL, so an unmeasurable host cannot record a forge error for a read that never happened.
+
+The two unmeasured cases stay distinguishable, because only one of them is actionable.
+A URL that is shaped like a GitHub pull request or issue but whose host is not listed reports `host not listed in config/forge-hosts; coverage is unmeasured` — adding that one line is all it takes to measure it.
+A URL the tooling genuinely cannot read, such as a GitLab merge request, keeps reporting `unsupported forge; coverage is unmeasured`.
+Both reasons are visible per row through `fm-contributions.sh snapshot <input.json> --all`.
 Every authenticated `api` read is addressed to the matched allowlist entry rather than to host text taken from a contribution URL, so a link arriving through a delivered backlog row cannot choose which host receives a forge credential.
 
 `forge_host` in [`fm-contributions.jq`](../bin/fm-contributions.jq) is the single owner of host-name validity and drops any line it rejects, as does a file that is a symlink, is not a readable regular file, or exceeds 4096 bytes.
