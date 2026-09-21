@@ -4,6 +4,9 @@
 # A small mail client used by fm-mail.sh:
 #   read                   List unseen INBOX mail as a compact digest.
 #   send <to> <subj> <body | ->   Send one SMTP message; "-" reads stdin.
+#   send-template <to> <subj> <json-file | ->   Send text + HTML alternatives.
+#   render-template <json-file | -> [html|text]   Offline template preview.
+#                          fm-mail.sh --help owns the versioned JSON contract.
 #   poll_list              Emit unseen mail as tab-separated rows for the bash
 #                          poll, bounded to uids this home has not surfaced,
 #                          plus a retry-set of previously unfetchable uids;
@@ -14,6 +17,8 @@
 # so credentials never appear in argv or logs. read/poll use BODY.PEEK so mail
 # is never marked seen before firstmate answers it.
 import imaplib
+import html
+import json
 import os
 import re
 import socket
@@ -23,14 +28,18 @@ import email
 import smtplib
 from email.header import decode_header, make_header
 from email.message import EmailMessage
-from email.utils import formatdate
+from email.policy import SMTP
+from email.utils import formatdate, make_msgid
+from urllib.parse import urlsplit
 
-USER = os.environ['FM_MAIL_USER']
-PW = os.environ['FM_MAIL_PASS']
-IMH = os.environ['FM_IMAP_HOST']
-IMP = int(os.environ['FM_IMAP_PORT'])
-STH = os.environ['FM_SMTP_HOST']
-STP = int(os.environ['FM_SMTP_PORT'])
+# Offline rendering ignores mail configuration, including malformed ports.
+OFFLINE = len(sys.argv) > 1 and sys.argv[1] == 'render-template'
+USER = os.environ.get('FM_MAIL_USER', '')
+PW = os.environ.get('FM_MAIL_PASS', '')
+IMH = os.environ.get('FM_IMAP_HOST', '')
+IMP = 993 if OFFLINE else int(os.environ.get('FM_IMAP_PORT', '993'))
+STH = os.environ.get('FM_SMTP_HOST', '')
+STP = 465 if OFFLINE else int(os.environ.get('FM_SMTP_PORT', '465'))
 CTX = ssl.create_default_context()
 
 
@@ -143,23 +152,250 @@ def cmd_read():
         return 1
 
 
+def send_message(to, subj, body, html_body=None):
+    """Both send surfaces share authentication, envelope handling, and TLS."""
+    m = EmailMessage(policy=SMTP)
+    m['From'] = USER
+    m['To'] = to
+    m['Subject'] = subj
+    m['Date'] = formatdate(localtime=True)
+    m['Message-ID'] = make_msgid()
+    m.set_content(body)
+    if html_body is not None:
+        m.add_alternative(html_body, subtype='html')
+    with smtplib.SMTP_SSL(STH, STP, context=CTX, timeout=MAIL_TIMEOUT) as s:
+        s.login(USER, PW)
+        s.send_message(m)
+    print('sent to', to)
+
+
 def cmd_send(to, subj, body):
     try:
         if body == '-':
             body = sys.stdin.read().rstrip('\n')
-        m = EmailMessage()
-        m['From'] = USER
-        m['To'] = to
-        m['Subject'] = subj
-        m['Date'] = formatdate(localtime=True)
-        m.set_content(body)
-        with smtplib.SMTP_SSL(STH, STP, context=CTX, timeout=MAIL_TIMEOUT) as s:
-            s.login(USER, PW)
-            s.send_message(m)
-        print('sent to', to)
+        send_message(to, subj, body)
         return 0
     except Exception as e:
         print('fm-mail send error:', e)
+        return 1
+
+
+def template_string(value, name, limit, multiline=False):
+    if not isinstance(value, str) or not value.strip() or len(value) > limit:
+        raise ValueError(f'{name} must be non-empty text of at most {limit} characters')
+    if any((ord(c) < 32 and not (multiline and c == '\n')) or
+           127 <= ord(c) <= 159 or 0xd800 <= ord(c) <= 0xdfff for c in value):
+        raise ValueError(f'{name} contains unsupported control characters')
+    return value
+
+
+def template_object(value, name, required, optional=()):
+    if not isinstance(value, dict) or not set(required) <= value.keys():
+        raise ValueError(f'{name} is missing required fields: {", ".join(required)}')
+    if value.keys() - set(required) - set(optional):
+        raise ValueError(f'{name} contains unknown fields')
+
+
+def unique_fields(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('template contains duplicate JSON fields')
+        result[key] = value
+    return result
+
+
+def load_template(source):
+    """Validate the entire payload before rendering or connecting to SMTP."""
+    if source == '-':
+        raw = sys.stdin.buffer.read(32769)
+    else:
+        with open(source, 'rb') as stream:
+            raw = stream.read(32769)
+    if len(raw) > 32768:
+        raise ValueError('template exceeds 32768 bytes')
+    data = json.loads(raw.decode('utf-8'), object_pairs_hook=unique_fields)
+    template_object(data, 'template', ('version', 'kind', 'title', 'body'),
+                    ('project', 'preheader', 'facts', 'action', 'question',
+                     'options', 'recommendation', 'reply_hint'))
+    if type(data['version']) is not int or data['version'] != 1:
+        raise ValueError('template version must be 1')
+    if data['kind'] not in ('notification', 'question'):
+        raise ValueError('kind must be notification or question')
+    for key, limit in (('title', 160), ('body', 6000), ('project', 100),
+                       ('preheader', 200), ('question', 400),
+                       ('recommendation', 1000), ('reply_hint', 400)):
+        if key in data:
+            template_string(data[key], key, limit, multiline=key == 'body')
+    facts = data.get('facts', [])
+    if not isinstance(facts, list) or len(facts) > 4:
+        raise ValueError('facts must be a list of at most 4 items')
+    for fact in facts:
+        template_object(fact, 'fact', ('label', 'value'))
+        template_string(fact['label'], 'fact label', 40)
+        template_string(fact['value'], 'fact value', 200)
+    if 'action' in data:
+        action = data['action']
+        template_object(action, 'action', ('label', 'url'))
+        template_string(action['label'], 'action label', 80)
+        url = template_string(action['url'], 'action url', 2048)
+        parsed = urlsplit(url)
+        if (parsed.scheme != 'https' or not parsed.hostname or
+                parsed.username is not None or parsed.password is not None or
+                any(c.isspace() or c in '\\<>"' for c in url)):
+            raise ValueError('action url must be an absolute HTTPS URL without credentials')
+        # Accessing port also rejects malformed and out-of-range values.
+        try:
+            port = parsed.port
+        except ValueError:
+            raise ValueError('action url has an invalid port') from None
+        if port == 0:
+            raise ValueError('action url port must be positive')
+    question_fields = {'question', 'options', 'recommendation', 'reply_hint'}
+    if data['kind'] == 'question':
+        if not {'question', 'reply_hint'} <= data.keys():
+            raise ValueError('question templates require question and reply_hint')
+        options = data.get('options', [])
+        if not isinstance(options, list) or not 0 <= len(options) <= 4 or len(options) == 1:
+            raise ValueError('options must contain 2 to 4 choices, or be omitted/empty')
+        for option in options:
+            template_object(option, 'option', ('label', 'detail'))
+            template_string(option['label'], 'option label', 100)
+            template_string(option['detail'], 'option detail', 600)
+    elif question_fields & data.keys():
+        raise ValueError('question fields are only valid for kind=question')
+    return data
+
+
+def render_template(data):
+    """Render validated content once for both delivery and offline review.
+
+    Brand colors and the Cooper/Rockwell fallback follow myfirstmate.io's
+    Firstmate design system. Inline table layout remains readable without the
+    optional mobile media query; no network assets or active email content.
+    """
+    e = html.escape
+    kind = 'Notification' if data['kind'] == 'notification' else 'Your decision'
+    context = data.get('project', 'From your firstmate')
+    plain = ['FIRSTMATE / ' + kind, context, '', data['title'], '', data['body']]
+    facts_html = ''
+    for fact in data.get('facts', []):
+        plain.append(f"{fact['label']}: {fact['value']}")
+        facts_html += (
+            '<tr><th scope="row" align="left" valign="top" width="32%" '
+            'style="padding:10px 12px 10px 0;border-bottom:1px solid #ddc89c;'
+            'font-size:12px;font-weight:normal;color:#6f5e46;">'
+            f'{e(fact["label"])}</th><td valign="top" '
+            'style="padding:10px 0;border-bottom:1px solid #ddc89c;font-size:14px;">'
+            f'{e(fact["value"])}</td></tr>')
+    if facts_html:
+        facts_html = ('<table width="100%" cellpadding="0" cellspacing="0" '
+                      'style="border-collapse:collapse;table-layout:fixed;margin:24px 0;">'
+                      f'{facts_html}</table>')
+    question_html = ''
+    if data['kind'] == 'question':
+        plain.extend(['', data['question']])
+        choices = ''
+        for index, option in enumerate(data.get('options', [])):
+            letter = chr(65 + index)
+            plain.append(f'{letter}. {option["label"]}: {option["detail"]}')
+            choices += (
+                '<tr><td width="28" valign="top" style="padding:14px 0;'
+                'border-top:1px solid #ddc89c;color:#c0452a;font-weight:bold;">'
+                f'{letter}.</td><td style="padding:14px 0;border-top:1px solid #ddc89c;">'
+                f'<strong>{e(option["label"])}</strong><br>'
+                f'<span style="color:#6f5e46;font-size:14px;">{e(option["detail"])}</span>'
+                '</td></tr>')
+        recommendation = ''
+        if 'recommendation' in data:
+            plain.extend(['', 'Recommendation: ' + data['recommendation']])
+            recommendation = (
+                '<p style="margin:16px 0 24px;font-size:14px;line-height:1.6;">'
+                '<strong>My recommendation</strong><br>'
+                f'{e(data["recommendation"])}</p>')
+        plain.extend(['', data['reply_hint']])
+        question_html = f'''
+<h2 style="margin:28px 0 16px;font-family:Georgia,serif;font-weight:normal;font-size:25px;line-height:1.25;color:#2a3656;">{e(data['question'])}</h2>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;table-layout:fixed;">{choices}</table>
+{recommendation}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td bgcolor="#2a3656" style="padding:20px 24px;border-left:4px solid #e0a52e;color:#fffdf7;">
+<p style="margin:0 0 8px;font-family:Consolas,'Courier New',monospace;font-size:11px;letter-spacing:1px;">REPLY TO FIRSTMATE</p>
+<p style="margin:0;font-size:15px;line-height:1.6;">{e(data['reply_hint'])}</p>
+</td></tr></table>'''
+    action_html = ''
+    if 'action' in data:
+        action = data['action']
+        plain.extend(['', f'{action["label"]}: {action["url"]}'])
+        action_html = (
+            '<p style="margin:28px 0 0;line-height:1.6;">'
+            f'<a href="{e(action["url"])}" style="color:#a93a1f;font-weight:bold;'
+            f'text-decoration:underline;">{e(action["label"])} &rarr;</a></p>')
+    plain.extend(['', 'Your firstmate', 'Talk to one agent. Ship with a crew.'])
+    body_html = ''.join(
+        '<p style="margin:0 0 16px;font-size:16px;line-height:1.65;">'
+        + e(paragraph).replace('\n', '<br>') + '</p>'
+        for paragraph in data['body'].split('\n\n'))
+    html_body = f'''<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{e(data['title'])}</title>
+<style>@media screen and (max-width:480px){{.fm-outer{{padding:12px 8px!important}}.fm-content{{padding:28px 22px!important}}.fm-title{{font-size:30px!important}}}}</style>
+</head><body style="margin:0;padding:0;background-color:#f6ecd3;color:#241c14;">
+<div style="display:none;font-size:1px;line-height:1px;max-height:0;max-width:0;overflow:hidden;mso-hide:all;">{e(data.get('preheader', data['title']))}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#f6ecd3" style="border-collapse:collapse;"><tr><td class="fm-outer" align="center" style="padding:32px 16px;">
+<!--[if mso]><table role="presentation" width="600" cellpadding="0" cellspacing="0"><tr><td><![endif]-->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="#fffdf7" style="max-width:600px;border:1px solid #ddc89c;border-top:4px solid #c0452a;border-collapse:collapse;table-layout:fixed;">
+<tr><td class="fm-content" style="padding:36px 40px;font-family:'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.55;word-wrap:break-word;overflow-wrap:anywhere;">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+<td style="padding-bottom:24px;border-bottom:2px solid #2a3656;">
+<span style="font-family:'Cooper Black',Rockwell,Georgia,serif;font-size:30px;font-weight:bold;letter-spacing:-1px;color:#c0452a;">firstmate<span style="color:#2a3656;">.</span></span>
+</td><td align="right" valign="middle" width="42" style="padding-bottom:24px;border-bottom:2px solid #2a3656;">
+<span aria-hidden="true" style="font-size:26px;color:#c0452a;">&#9875;&#65038;</span>
+</td></tr></table>
+<p style="margin:24px 0 10px;font-family:Consolas,'Courier New',monospace;font-size:11px;line-height:1.6;letter-spacing:1px;color:#6f5e46;">{e(context)}</p>
+<p style="margin:0 0 22px;"><span style="display:inline-block;padding:5px 9px;border:1px solid #241c14;border-radius:3px;background-color:#f6ecd3;font-size:10px;line-height:1.4;font-weight:bold;letter-spacing:1px;color:#2a3656;">{kind.upper()}</span></p>
+<h1 class="fm-title" style="margin:0 0 22px;font-family:Georgia,'Times New Roman',serif;font-size:36px;line-height:1.15;font-weight:normal;letter-spacing:-0.5px;color:#2a3656;">{e(data['title'])}</h1>
+{body_html}{facts_html}{question_html}{action_html}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:32px;"><tr><td style="padding-top:20px;border-top:1px solid #ddc89c;">
+<p style="margin:0;font-family:Georgia,serif;font-size:18px;font-style:italic;color:#2a3656;">Your firstmate</p>
+<p style="margin:8px 0 0;font-size:11px;line-height:1.5;color:#6f5e46;">Talk to one agent. Ship with a crew.</p>
+</td></tr></table>
+</td></tr></table>
+<!--[if mso]></td></tr></table><![endif]-->
+</td></tr></table></body></html>'''
+    return '\n'.join(plain), html_body
+
+
+def cmd_template(source, to=None, subj=None, output='html'):
+    try:
+        if output not in ('html', 'text'):
+            raise ValueError('render format must be html or text')
+        if to is not None:
+            template_string(to, 'recipient', 320)
+            template_string(subj, 'subject', 200)
+            # The explicit template interface accepts one unambiguous mailbox.
+            # Legacy send retains its existing address-list interface.
+            if not re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+                                r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", to):
+                raise ValueError('recipient must be one bare email address')
+            local, domain = to.rsplit('@', 1)
+            if (len(local) > 64 or local.startswith('.') or local.endswith('.') or
+                    '..' in to or any(not label or len(label) > 63 or
+                                     label.startswith('-') or label.endswith('-')
+                                     for label in domain.split('.'))):
+                raise ValueError('recipient must be one bare email address')
+        plain, markup = render_template(load_template(source))
+        if to is None:
+            print(markup if output == 'html' else plain)
+        else:
+            send_message(to, subj, plain, markup)
+        return 0
+    except (ValueError, OSError, RecursionError) as exc:
+        # File/JSON errors must not echo a payload, credentials, or a path.
+        reason = str(exc) if type(exc) is ValueError else 'cannot read valid UTF-8 template JSON'
+        print('fm-mail template error:', reason, file=sys.stderr)
+        return 1
+    except Exception:
+        print('fm-mail template error: SMTP delivery failed', file=sys.stderr)
         return 1
 
 
@@ -480,6 +716,10 @@ def main():
         if len(sys.argv) < 5:
             return 1
         return cmd_send(sys.argv[2], sys.argv[3], sys.argv[4])
+    if cmd == 'send-template' and len(sys.argv) == 5:
+        return cmd_template(sys.argv[4], sys.argv[2], sys.argv[3])
+    if cmd == 'render-template' and len(sys.argv) in (3, 4):
+        return cmd_template(sys.argv[2], output=sys.argv[3] if len(sys.argv) == 4 else 'html')
     if cmd == 'seen':
         return cmd_seen(sys.argv[2] if len(sys.argv) > 2 else '')
     if cmd == 'poll_list':

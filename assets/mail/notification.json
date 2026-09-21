@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "kind": "notification",
+  "project": "Web app / Release preparation",
+  "preheader": "The checkout fix is ready. All checks passed; nothing has been deployed.",
+  "title": "The checkout fix is ready.",
+  "body": "The intermittent payment failure is fixed. Retried requests now reuse the original payment, so a slow response no longer creates a second charge.\n\nThe change and its regression test are ready for review.",
+  "facts": [
+    {"label": "Checks", "value": "24 passed"},
+    {"label": "Delivery", "value": "Ready for review"},
+    {"label": "Deployment", "value": "Awaiting approval"}
+  ],
+  "action": {"label": "Review the change", "url": "https://example.com/review/checkout-fix"}
+}
