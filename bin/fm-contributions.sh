@@ -17,11 +17,17 @@
 # A GitHub PR or issue is measurable only when its host is allowlisted:
 # github.com always, plus every host named in config/forge-hosts (one DNS host
 # name per line; blank lines and # comments allowed; absent means github.com
-# only, and a malformed file refuses rather than silently unmeasuring work).
-# github_url in bin/fm-contributions.jq owns that decision. An authenticated
-# forge read is addressed to the matched allowlist entry, never to host text
-# taken from a URL, and poll never contacts a URL the allowlist does not cover.
-# GitLab and unlisted hosts stay owned and visibly unmeasured, never fleet work.
+# only). forge_host in bin/fm-contributions.jq is the single owner of host-name
+# validity and drops a line it rejects, as does an unreadable, symlinked, or
+# oversized file. A read-only path never refuses for that reason: it keeps
+# projecting on github.com plus the lines that did parse, reports the rest as
+# unmeasured, and warns once on stderr naming config/forge-hosts and what was
+# rejected. poll refuses before any authenticated read while a line is rejected,
+# so a narrowed allowlist can never redirect a credential. github_url owns
+# measurability; an authenticated api read is addressed to the matched
+# allowlist entry rather than to host text taken from a URL, and poll never
+# contacts a URL the allowlist does not cover. GitLab and unlisted hosts stay
+# owned and visibly unmeasured, never fleet work.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
@@ -117,15 +123,30 @@ jq_lib() { # jq options/program via final argument
 # The allowlist comes from this home's configuration alone; an ambient
 # FM_FORGE_HOSTS never widens which hosts may receive an authenticated read.
 FM_FORGE_HOSTS=''
+FORGE_HOSTS_REJECTED=''
 if [ -e "$CONFIG/forge-hosts" ] || [ -L "$CONFIG/forge-hosts" ]; then
-  [ -f "$CONFIG/forge-hosts" ] && [ ! -L "$CONFIG/forge-hosts" ] && [ -r "$CONFIG/forge-hosts" ] \
-    && [ "$(wc -c < "$CONFIG/forge-hosts")" -le 4096 ] \
-    || fail 'config/forge-hosts must be a readable regular file of at most 4096 bytes'
-  FM_FORGE_HOSTS=$(cat "$CONFIG/forge-hosts")
-  jq_lib -ne --arg hosts "$FM_FORGE_HOSTS" '$hosts | forge_host_lines | all(forge_host)' >/dev/null \
-    || fail 'config/forge-hosts must hold one DNS host name per line'
+  if [ -f "$CONFIG/forge-hosts" ] && [ ! -L "$CONFIG/forge-hosts" ] && [ -r "$CONFIG/forge-hosts" ] \
+    && [ "$(wc -c < "$CONFIG/forge-hosts")" -le 4096 ]; then
+    FM_FORGE_HOSTS=$(cat "$CONFIG/forge-hosts")
+    FORGE_HOSTS_REJECTED=$(jq_lib -nr --arg hosts "$FM_FORGE_HOSTS" \
+      '$hosts | forge_hosts_rejected | join(", ")') || FORGE_HOSTS_REJECTED='the file could not be parsed'
+  else
+    FM_FORGE_HOSTS=''
+    FORGE_HOSTS_REJECTED='the file is not a readable regular file of at most 4096 bytes'
+  fi
 fi
 export FM_FORGE_HOSTS
+
+warn_forge_hosts() {
+  [ -n "$FORGE_HOSTS_REJECTED" ] || return 0
+  printf 'contributions: config/forge-hosts rejected %s; those hosts stay unmeasured\n' \
+    "$FORGE_HOSTS_REJECTED" >&2
+}
+
+require_forge_hosts() {
+  [ -z "$FORGE_HOSTS_REJECTED" ] || fail \
+    "one or more configured hosts were rejected ($FORGE_HOSTS_REJECTED); refusing before any authenticated read"
+}
 
 read_saved() {
   local file
@@ -350,6 +371,7 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
 poll() {
   local task url old kind error observed
   local -a row
+  require_forge_hosts
   acquire
   get_input
   read_saved
@@ -436,6 +458,7 @@ arm() {
   "$SCRIPT_DIR/fm-check-register.sh" contributions
 }
 
+case "${1:-}" in poll) ;; *) warn_forge_hosts ;; esac
 case "${1:-}" in
   snapshot)
     [ "$#" -ge 2 ] && [ "$#" -le 3 ] || fail 'snapshot needs canonical input'

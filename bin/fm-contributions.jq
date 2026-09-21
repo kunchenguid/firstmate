@@ -10,6 +10,8 @@ def forge_allowlist:
   ["github.com"]
   + (($ENV.FM_FORGE_HOSTS // "") | forge_host_lines | map(select(forge_host)))
   | unique;
+def forge_hosts_rejected:
+  forge_host_lines | map(select(forge_host | not));
 def github_host_part:
   sub("^https://"; "") | split("/")[0];
 def github_shaped_url:
