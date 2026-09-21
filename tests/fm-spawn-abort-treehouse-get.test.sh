@@ -91,8 +91,14 @@ if [ "\${1:-}" = get ]; then
   fi
   if [ "$start_get" = 1 ]; then
     lock=\${FM_FAKE_TREEHOUSE_LOCK:?}
-    exec 9>"\$lock"
-    flock 9
+    (
+      exec 9>"\$lock"
+      flock 9
+      /bin/sleep 30
+    ) &
+    if [ -n "\${FM_FAKE_TREEHOUSE_CHILD_PIDFILE:-}" ]; then
+      printf '%s\\n' "\$!" > "\$FM_FAKE_TREEHOUSE_CHILD_PIDFILE"
+    fi
     /bin/sleep 30
     exit 0
   fi
@@ -150,13 +156,14 @@ test_abort_after_lease_closes_pane_and_returns_slot() {
 }
 
 test_abort_after_interactive_get_reaps_get_and_closes_pane() {
-  local home proj fakebin rec log pidfile lock out status pid
+  local home proj fakebin rec log pidfile childpidfile lock out status pid child
   home=$(setup_abort_home get-abort)
   proj="$TMP_ROOT/get-abort/proj"
   fakebin=$(make_abort_fakebin "$TMP_ROOT/get-abort/fake" 1 0)
   rec="$TMP_ROOT/get-abort/tmux.log"
   log="$TMP_ROOT/get-abort/treehouse.log"
   pidfile="$TMP_ROOT/get-abort/get.pid"
+  childpidfile="$TMP_ROOT/get-abort/git.pid"
   lock="$TMP_ROOT/get-abort/HEAD.lock"
   : > "$rec"
   : > "$log"
@@ -168,6 +175,7 @@ test_abort_after_interactive_get_reaps_get_and_closes_pane() {
     FM_TMUX_REC="$rec" FM_FAKE_TREEHOUSE_LOG="$log" \
     FM_FAKE_START_TREEHOUSE_GET=1 \
     FM_FAKE_TREEHOUSE_GET_PIDFILE="$pidfile" \
+    FM_FAKE_TREEHOUSE_CHILD_PIDFILE="$childpidfile" \
     FM_FAKE_TREEHOUSE_LOCK="$lock" \
       fm_test_run_spawn "$home" "$TMP_ROOT/get-abort/notgit-root/plain" "$fakebin" \
       abort-get-bb2 "$proj" codex --mode no-mistakes --yolo off
@@ -180,13 +188,26 @@ test_abort_after_interactive_get_reaps_get_and_closes_pane() {
     "treehouse without --lease must still send interactive get to the pane"
   assert_grep "kill-window" "$rec" "aborted interactive-get spawn did not close the failed pane"
   [ -f "$pidfile" ] || fail "interactive treehouse get was never started in the pane"
+  [ -f "$childpidfile" ] || fail "lock-holding child of treehouse get was never started"
   pid=$(cat "$pidfile")
+  child=$(cat "$childpidfile")
   case "$pid" in
     ''|*[!0-9]*) fail "interactive treehouse get pid was not recorded" ;;
   esac
+  case "$child" in
+    ''|*[!0-9]*) fail "lock-holding child pid was not recorded" ;;
+  esac
   if kill -0 "$pid" 2>/dev/null; then
     kill -KILL "$pid" 2>/dev/null || true
+    kill -KILL "$child" 2>/dev/null || true
     fail "interactive treehouse get $pid was still running after spawn abort"
+  fi
+  if kill -0 "$child" 2>/dev/null; then
+    kill -KILL "$child" 2>/dev/null || true
+    fail "lock-holding child $child of treehouse get was still running after spawn abort"
+  fi
+  if ! ( exec 9>"$lock" && flock -n 9 ); then
+    fail "pooled copy HEAD.lock still held after spawn abort"
   fi
   pass "fm-spawn: abort after interactive get reaps the get and closes the pane"
 }

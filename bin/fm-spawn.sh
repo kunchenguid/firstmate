@@ -1112,7 +1112,6 @@ SPAWN_SLOT_CLAIMED=0
 SPAWN_FRESH_ENDPOINT_ABORT=0
 SPAWN_TREEHOUSE_LEASED=0
 SPAWN_TREEHOUSE_GET_IN_PANE=0
-SPAWN_TREEHOUSE_GET_PID=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1140,19 +1139,7 @@ spawn_pane_leader_pid() {
 # copy's git locks. The unpublished-pane close that follows is the other
 # half of that guarantee.
 spawn_reap_treehouse_get() {
-  local pid leader snapshot descendants frontier next child parent args depth
-  if [ -n "${SPAWN_TREEHOUSE_GET_PID:-}" ]; then
-    pid=$SPAWN_TREEHOUSE_GET_PID
-    SPAWN_TREEHOUSE_GET_PID=
-    case "$pid" in
-    ''|*[!0-9]*) ;;
-    *)
-      if [ "$pid" -ne "$$" ] && [ "$pid" -ne "$PPID" ]; then
-        kill -TERM "$pid" 2>/dev/null || true
-      fi
-      ;;
-    esac
-  fi
+  local leader snapshot descendants frontier next child parent args depth gets get_descendants
   [ "$SPAWN_TREEHOUSE_GET_IN_PANE" = 1 ] || return 0
   SPAWN_TREEHOUSE_GET_IN_PANE=0
   leader=$(spawn_pane_leader_pid) || leader=
@@ -1183,6 +1170,7 @@ EOF
     frontier=$next
     depth=$((depth + 1))
   done
+  gets=
   while read -r child parent args; do
     case "$child" in ''|*[!0-9]*) continue ;; esac
     case " $descendants " in
@@ -1193,12 +1181,42 @@ EOF
     *treehouse*get*)
       [ "$child" -eq "$$" ] && continue
       [ "$child" -eq "$PPID" ] && continue
-      kill -TERM "$child" 2>/dev/null || true
+      gets="$gets $child"
       ;;
     esac
   done <<EOF
 $snapshot
 EOF
+  [ -n "$gets" ] || return 0
+  get_descendants=
+  frontier=$gets
+  depth=0
+  while [ -n "$frontier" ] && [ "$depth" -lt 32 ]; do
+    next=
+    while read -r child parent args; do
+      case "$child" in ''|*[!0-9]*) continue ;; esac
+      case "$parent" in ''|*[!0-9]*) continue ;; esac
+      case " $frontier " in
+      *" $parent "*) ;;
+      *) continue ;;
+      esac
+      case " $gets $get_descendants " in
+      *" $child "*) continue ;;
+      esac
+      get_descendants="$get_descendants $child"
+      next="$next $child"
+    done <<EOF
+$snapshot
+EOF
+    frontier=$next
+    depth=$((depth + 1))
+  done
+  for child in $get_descendants $gets; do
+    case "$child" in ''|*[!0-9]*) continue ;; esac
+    [ "$child" -eq "$$" ] && continue
+    [ "$child" -eq "$PPID" ] && continue
+    kill -TERM "$child" 2>/dev/null || true
+  done
 }
 
 spawn_close_failed_endpoint() {
@@ -1270,7 +1288,9 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_FRESH_ENDPOINT_ABORT" = 1 ]; then
     SPAWN_FRESH_ENDPOINT_ABORT=0
     spawn_reap_treehouse_get || true
-    if [ "$BACKEND" != orca ]; then
+    if [ "$BACKEND" != orca ] &&
+      [ "$HERDR_PROJECTION_ABORT_CLEANUP" != 1 ] &&
+      [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" != 1 ]; then
       spawn_close_failed_endpoint || true
     fi
     if [ "$SPAWN_TREEHOUSE_LEASED" = 1 ] && [ -n "${WT:-}" ]; then
