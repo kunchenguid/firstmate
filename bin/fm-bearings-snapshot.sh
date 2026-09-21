@@ -150,6 +150,7 @@ Default fields: schema, home, generated, prs, in_flight{id,kind,state,repo,name,
   secondmate_reconcile{id,spawn_gen,host,kind,ids},
   decisions_open{id,key,verb,summary,owner}, landed{id,what,artifact,owner},
   gates{id,title,blocked_by,reason,owner,filed}, reports{id,path}, recorded_prs{id,url},
+  standing_workers{id,session,pane,last,cwd,note} (only when this home has any),
   unhealthy_endpoints{...} (only when non-empty), omitted{surface,reveal}.
 Default gates are selected newest filed first before their bound; undated gates
   retain input order after dated gates.
@@ -340,7 +341,19 @@ case "$BEARINGS_TODAY" in
   [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
   *) BEARINGS_TODAY=$(date -u +%Y-%m-%d) ;;
 esac
+# Standing workers are adopted panes rather than fleet tasks, so the canonical
+# snapshot - which models tasks - does not carry them. Their last observed
+# status is exactly the "who is idle and waiting" line a bearings read is for,
+# and it is a cheap local read of this home's own records, so it is projected in
+# here beside the snapshot rather than by widening the task model.
+STANDING_WORKERS=$("$SCRIPT_DIR/fm-standing-worker.sh" list --json 2>/dev/null) || STANDING_WORKERS='[]'
+case "$STANDING_WORKERS" in
+  '['*) ;;
+  *) STANDING_WORKERS='[]' ;;
+esac
+
 MODEL=$(printf '%s' "$SNAP" | jq \
+  --argjson standing_workers "$STANDING_WORKERS" \
   --arg home "$HOME_LABEL" \
   --arg now "$NOW" \
   --arg today "$BEARINGS_TODAY" \
@@ -638,6 +651,10 @@ MODEL=$(printf '%s' "$SNAP" | jq \
       reports: (if $all_reports == 1 then $reports_all else $reports_all[:$reports_n] end),
       recorded_prs: (if $all_recorded_prs == 1 then $recorded_prs_all else $recorded_prs_all[:$recorded_prs_n] end)
     }
+    + (if ($standing_workers | length) > 0 then
+         {standing_workers: ($standing_workers | map({id, session, pane,
+            last:(.last // "unpolled"), cwd:(.cwd // ""), note:(.note // "")}))}
+       else {} end)
   | . + (if ($unhealthy_all | length) > 0 then
            {unhealthy_endpoints:(if $all_unhealthy == 1 then $unhealthy_all else $unhealthy_all[:$unhealthy_n] end)}
          else {} end)

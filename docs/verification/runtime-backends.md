@@ -1548,6 +1548,43 @@ ok - real herdr 0.9.0 + pi 0.85.1: the registration left behind by a quit pi rea
 `tests/fm-crew-state.test.sh` pins the recovery classifier: a stale registration over a shell-only pane reports agent gone rather than alive or unreachable, and a stale `working` record never reports the pane working.
 A stale-registration pane is never a husk: create, reclaim, presentation recovery, and session cleanup keep refusing it, and only recovery reuses it.
 
+### Standing worker stop detection
+
+Verified 2026-09-21 against Herdr 0.9.1 and the installed Claude Code on Linux x86_64.
+
+`bin/fm-standing-worker.sh` decides that an adopted standing worker has stopped and is holding a question from `herdr agent get`'s `agent_status`, so that field is a harness-dependent signal and is proven here rather than only against a fake.
+Refresh with:
+
+```sh
+tests/fm-standing-worker-live-e2e.test.sh
+```
+
+The guard spends no model tokens: it drives a real lab pane's lifecycle through `herdr pane report-agent`, Herdr's own reporting entry point, and samples the already-registered agents on the host without creating, steering, or closing any of their panes.
+
+Observed 2026-09-21:
+
+```text
+ok - live: a pane is not registrable from a session it does not live in (herdr herdr 0.9.1)
+ok - live: a working agent reads back as working on the real server (herdr herdr 0.9.1)
+ok - live: a real working->idle transition raises one wake (herdr herdr 0.9.1)
+ok - live: the stop wake is debounced against the real server (herdr herdr 0.9.1)
+ok - live: a closed pane is reported as vanished, not as still working (herdr herdr 0.9.1)
+ok - live: a registered harness publishes working on herdr herdr 0.9.1 (sampled claude)
+```
+
+The last line is the one that matters most, and it exists because of a specific way this mechanism can die silently.
+A harness that never publishes `working` makes the whole poll inert without failing anything: the remembered status is never `working`, so a departure from it never occurs and a stopped worker is never reported.
+"Submit confirmation" above records exactly that shape on Claude Code 2.1.236 with Herdr 0.8.0, where `agent_status` held `idle` through an entire landed turn.
+That no longer reproduces on this pairing - live Claude panes on Herdr 0.9.1 report `working` and `done` through `agent get`:
+
+```text
+{"agent":"claude","agent_status":"working"}
+{"agent":"claude","agent_status":"done"}
+```
+
+The guard therefore asserts the property against whatever agents are registered at run time instead of assuming it, reports rather than passes when every sampled agent happens to be stopped, and fails naming the harness and version if one publishes a status the stop classifier does not accept.
+`tests/fm-standing-worker.test.sh` pins the surrounding logic portably with no harness: the working-to-idle wake and its bounded untrusted excerpt, the stored-status debounce that keeps one stop to one wake, a vanished pane, an unreadable status that neither wakes nor overwrites the baseline, the wrong-session registration refusal and the sessions it names, and a secondmate home publishing the stop on its parent channel.
+
 ### Away-mode transport
 
 The away daemon is no longer launched on Pi; the away posture there is the record `bin/fm-afk-contract.sh` owns.

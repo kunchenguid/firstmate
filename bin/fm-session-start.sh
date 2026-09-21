@@ -863,6 +863,19 @@ for meta in "$STATE"/*.meta; do
 done
 [ "$META_FOUND" -eq 1 ] || printf '(none)\n'
 
+# Standing workers are adopted panes, not fleet tasks, so they appear in none of
+# the sections above: they have no .meta and no status log. Their last observed
+# status is what answers "who is idle and waiting" in one read, which is exactly
+# the question nobody could answer on 2026-09-21. Printed only when this home
+# has registrations, so a home without any adds no lines.
+STANDING_WORKERS=$("$SCRIPT_DIR/fm-standing-worker.sh" list 2>/dev/null) || STANDING_WORKERS=
+if [ -n "$STANDING_WORKERS" ] && [ "$STANDING_WORKERS" != '(none)' ]; then
+  subsection "Standing workers (adopted panes, state/standing-workers/)"
+  printf '%s\n' "$STANDING_WORKERS"
+  printf '\nlast= is the status observed at the previous poll, not a live read.\n'
+  printf 'A worker showing idle, done, or blocked is holding a question or a result.\n'
+fi
+
 subsection "Orphan status logs (state/*.status without matching .meta)"
 ORPHAN_STATUS_FOUND=0
 for status in "$STATE"/*.status; do

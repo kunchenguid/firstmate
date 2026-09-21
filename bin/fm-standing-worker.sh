@@ -324,7 +324,7 @@ pane_excerpt() {  # <session> <pane>
 # --- register ---------------------------------------------------------------
 
 action_register() {
-  local id= session= pane= cwd= note= added seen
+  local id='' session='' pane='' cwd='' note='' added seen
   [ "$#" -ge 1 ] || die_usage 'register needs an id'
   id=$1; shift
   fm_pr_task_id_valid "$id" || die_usage "invalid standing worker id: $id"

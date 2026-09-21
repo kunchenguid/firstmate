@@ -105,7 +105,7 @@ set_pane() {  # <session> <pane> <status> [output]
 }
 
 drop_pane() {  # <session> <pane>
-  rm -rf "$HERDR_STATE/$1/$2"
+  rm -rf "${HERDR_STATE:?}/$1/$2"
 }
 
 new_home() {  # <name>
@@ -203,7 +203,7 @@ pass 'a move between two stopped states does not re-wake'
 set_pane default w1:pV working 'back to work'
 out=$(FM_HOME="$HOME_A" "$BIN" check)
 [ -z "$out" ] || fail "resuming work is not a stop, got: $out"
-set_pane default w1:pV done 'finished the PRD, eleven open questions'
+set_pane default w1:pV 'done' 'finished the PRD, eleven open questions'
 out=$(FM_HOME="$HOME_A" "$BIN" check)
 case "$out" in
   *'stopped working (now done)'*eleven*) ;;
