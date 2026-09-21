@@ -654,10 +654,10 @@ Poll emission is exactly-once-recovering: a published wake always carries a dura
 A duplicate wake is possible if the process is killed between the queue append and the journal write and the drain acknowledges that row before the next poll heals it, or under a triple write fault that leaves a queued row with no durable record; neither case drops mail.
 IMAP and SMTP use implicit TLS on the default ports 993 and 465 (`IMAP4_SSL` / `SMTP_SSL`).
 STARTTLS and port 587 are not supported.
-It is off unless the home's gitignored `.env` provides the connection values.
+Online mail commands require connection values; offline rendering and help remain available without them.
 This section is the single owner of the mail-plane configuration schema; for direct invocations, environment values override `.env`, matching the Relay contract.
 
-Required, in the home's gitignored `.env`:
+Required for online mail commands, in the environment or the home's gitignored `.env`:
 
 ```sh
 FM_MAIL_USER=   # IMAP/SMTP login
