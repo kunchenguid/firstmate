@@ -55,7 +55,7 @@ Attach to the selected named Herdr session and switch to the relevant home works
 Routine supervision uses `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'` without attaching.
 
 A pane's session is always read from that pane's own record, never from the session the reader happens to be running in.
-An agent running inside one named session must not look for a pane in its own session and conclude from an empty result that the pane is gone: a secondmate running in `fm-remote` did exactly that while its workers sat in `default`, decided they had disappeared, and launched a duplicate.
+An agent running inside one named session must not look for a pane in its own session and conclude from an empty result that the pane is gone: a secondmate running in `fm-remote` finds nothing of workers that sit in `default`, and acting on that empty result launches a duplicate.
 Adopted standing workers therefore record their session at registration and pass it explicitly on every later call ([`configuration.md`](configuration.md) "Standing workers"), and the adapter's own session-scoped helper applies the same rule to every task call.
 When a lookup comes back empty, confirm which session was actually searched before concluding anything about the pane.
 

@@ -897,8 +897,7 @@ A stop reaches the supervisor two ways, and the event is the one to rely on.
   The watcher dispatches the shim on the ordinary check cadence, and a worker leaving the working state becomes one ordinary `check:` wake.
   A worker found already stopped on its first poll after registration is reported once too, so adopting a stalled worker is never a silent baseline.
   The hook is the primary signal and the poll is the backstop, so the poll wakes only when a transition proves a stop nobody observed; the full transition table lives in the script header, which is its single owner.
-  A worker that arrives at `blocked` from `idle`, `done`, or `turn-end` is reported, because a permission prompt does not end the turn, the Stop hook never fires for it, and the poll is the only signal there is.
-  A worker that moves from `idle` to `done`, or from `blocked` to `done` or `idle`, is reported, because each proves a whole turn ran and finished between two polls.
+  A permission prompt does not end the turn, so the Stop hook never fires for it and a newly blocked worker is reported by the poll alone.
   Only Herdr's own `pane_not_found` is reported as a vanished pane, once and from any remembered status, because a standing worker rests stopped and that is when its pane gets closed; a read that failed or timed out is neither a stop nor a vanish, leaves the remembered status alone, and costs the sweep one read for that session rather than starving the workers in healthy sessions.
 
 Three properties matter to an operator, and each exists because of an observed failure:
@@ -913,7 +912,7 @@ Three properties matter to an operator, and each exists because of an observed f
 - **The session is recorded, never assumed.**
   Every Herdr call made for a registered worker passes that worker's recorded session explicitly.
   Registration refuses a pane that is not in the session the caller named and reports which sessions it searched, and refuses an id already in use rather than replacing a record that may be holding an unreported stop.
-  An agent running inside one Herdr session must not look for a worker in its own session: a mate that did exactly that concluded its workers were gone and launched a duplicate.
+  An agent running inside one Herdr session must not look for a worker in its own session; [`herdr-backend.md`](herdr-backend.md) owns that rule.
 
 The supervising home is the home holding the record.
 A worker on a remote host is registered in the secondmate home on that host - use [`bin/fm-on.sh`](../bin/fm-on.sh) to run the command there - so every Herdr call stays local to the machine owning the pane.
@@ -1178,6 +1177,9 @@ FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 pro
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=20   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
+FM_STANDING_WORKER_CAPTURE_LINES=40   # pane scrollback lines read for a standing worker's stop excerpt
+FM_STANDING_WORKER_CAPTURE_CHARS=600  # bound on the folded excerpt carried by one stop line; a longer capture keeps its end
+FM_STANDING_WORKER_READ_TIMEOUT=8     # seconds allowed per Herdr read in the standing-worker poll; a session that hits it is skipped for the rest of that sweep
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_PROCEVENT_OWNER_LEASE_SECONDS=600    # how long a source runner keeps going with no activity in its owning home; 1..86400
