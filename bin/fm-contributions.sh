@@ -39,11 +39,14 @@
 # 15) before starting a URL, so an in-progress normal-budget observation gets
 # all three waves and a later URL waits for the next oldest-checked-first poll.
 # A deliberately smaller configured budget remains bounded and may be
-# unmeasured, rather than being mislabeled unavailable. Each distinct URL is
-# observed once per poll and applied to every owner. A final observation applies
-# to every owner without another forge read. When the budget runs out
-# mid-observation, the poll ends with that URL's records untouched; only a
-# genuine forge failure or head change records an error.
+# unmeasured, rather than being mislabeled unavailable. A read that crosses its
+# own five-second slice while budget still remains is slow and unmeasured too:
+# its records stay untouched and it is observed first on the next poll, never
+# reported as an unreachable forge. Each distinct URL is observed once per poll
+# and applied to every owner. A final observation applies to every owner without
+# another forge read. When the budget runs out mid-observation, the poll ends
+# with that URL's records untouched; only a genuine forge failure or head change
+# records an error.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
@@ -189,10 +192,14 @@ forge() {
   if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  # A read killed at the budget's own deadline is budget exhaustion too.
+  # A read killed at the budget's own deadline is budget exhaustion; one killed
+  # at its own five-second slice while budget remained is only slow, so it is
+  # unmeasured rather than an unreachable forge.
   if [ "$rc" -eq 124 ] && [ "$bounded" -eq 1 ]; then
     BUDGET_EXHAUSTED=1
     : > "$TMP/budget-exhausted"
+  elif [ "$rc" -eq 124 ]; then
+    : > "$TMP/forge-slow"
   elif [ "$rc" -ne 0 ]; then
     : > "$TMP/forge-unavailable"
   fi
@@ -212,10 +219,10 @@ wait_forges() { # background forge pids from one independent read wave
 
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
+  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP/forge-slow"
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
-  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
   forge api "$endpoint" > "$TMP/core.json" || return 1
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
@@ -356,6 +363,13 @@ poll() {
     # An observation the budget cut short is unmeasured, not unavailable: keep
     # every owner's prior record so the URL is observed first next poll.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
+    # A read that crossed its own five-second slice while budget remained is
+    # slow, not an unreachable forge: keep every owner's prior record so the URL
+    # is observed first next poll, and never wake for it.
+    if [ "$observed" -ne 0 ] && [ ! -e "$TMP/forge-unavailable" ] \
+      && [ -e "$TMP/forge-slow" ]; then
+      continue
+    fi
     # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
       'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
