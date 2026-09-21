@@ -21,7 +21,10 @@
 #   option, and a confidence. Everything after that is jq: the confidence
 #   floor, the rule's declared `approval` and `floor`, each profile's declared
 #   `provider` and `floor`, the quota rows from ONE quota-axi --json snapshot,
-#   and the spendPriority argmax over the eligible candidates. The model never
+#   and, among the eligible candidates, the spendPriority argmax within the
+#   best available preference tier: the lowest `priority` number that still has
+#   an eligible candidate, so quota headroom orders peers rather than promoting
+#   a lower-preference profile over an eligible higher-preference one. The model never
 #   sees quota, catalogs, approvals, `why`, or `use`. With no rules, it returns
 #   a non-clear result so firstmate keeps using the existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
@@ -270,6 +273,10 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def prov($p): ([$q.providers[] | select(.provider == $p)] | first) // null;
+  # Preference tier: the configured priority on a profile, lowest number first.
+  # A profile without a numeric priority sorts last, so a rules file that sets
+  # none leaves every candidate in one tier and ranks purely on spendPriority.
+  def tier($c): ($c.profile.priority) as $n | if ($n | type) == "number" then $n else infinite end;
   def rows($p): (prov($p) | .quotaSemantics.effectiveAvailability // []);
   def bare($m): ($m | split("/") | last);
   def provider_of($c): ($c.provider // $pmap[$c.harness] // null);
@@ -369,8 +376,10 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     ([$cands[] | select(.unranked)]) as $unranked |
     if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
     else
-      ($elig | max_by(.spendPriority)) as $best |
-      ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
+      ([$elig[] | tier(.)] | min) as $best_tier |
+      ([$elig[] | select(tier(.) == $best_tier)]) as $tiered |
+      ($tiered | max_by(.spendPriority)) as $best |
+      ([$tiered[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
       if $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $sel.note, candidates: $cands}
       else $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $best}
         + (if ($unranked | length) > 0 then

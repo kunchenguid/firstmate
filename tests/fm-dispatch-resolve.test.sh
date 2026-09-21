@@ -503,6 +503,136 @@ assert_contains "$out" '  reason: no rankable eligible candidate' "no-candidate 
 assert_contains "$out" '-> not eligible: runway exhausted_now' "exhausted candidates keep their reason"
 pass "no rankable candidate: the tool escalates instead of guessing"
 
+# --- priority tiers gate the quota ranking -------------------------------------
+# A rule's `priority` is a preference order: the lowest number that still has an
+# eligible candidate wins the tier, and spendPriority only orders peers inside it.
+PRIORITY_RULES="$TMP_ROOT/priority-rules.json"
+cat > "$PRIORITY_RULES" <<'JSON'
+{
+  "rules": [
+    {
+      "when": "A simple bug fix with a stated root cause.",
+      "use": [
+        { "harness": "claude", "model": "sonnet", "effort": "high", "priority": 1 },
+        { "harness": "agy", "priority": 2 },
+        { "harness": "cursor", "model": "cursor-grok-4.6-medium", "priority": 3 }
+      ]
+    }
+  ],
+  "default": [ { "harness": "claude", "model": "opus" } ]
+}
+JSON
+cp "$PRIORITY_RULES" "$RULES"
+cat > "$RESPONSE" <<'JSON'
+{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.99,"probabilities":{"rule_1":0.99,"default":0.01}}},"usage":{"input_tokens":100,"output_tokens":60}}
+JSON
+
+# priority 1 wins although both lower tiers hold far more quota headroom.
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "priority 1 resolves"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "priority 1 wins despite the lowest spendPriority"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=0.7597  runway=through_reset  -> eligible' "the outranked higher-quota candidate stays eligible in the evidence"
+
+# priority 2 is used only once every priority 1 candidate is ineligible.
+reset_log
+TIER2="$TMP_ROOT/tier2.json"
+jq '.providers |= map(if .provider == "claude" then .quotaSemantics.effectiveAvailability |= map(.runway.status = "exhausted_now") else . end)' "$QUOTA" > "$TIER2"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TIER2" run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "priority 2 resolves when tier 1 is gone"
+assert_contains "$out" "  profile: --harness 'agy'" "priority 2 is used when every priority 1 candidate is ineligible"
+
+# priority 3 is used only once both higher tiers are ineligible.
+reset_log
+TIER3="$TMP_ROOT/tier3.json"
+jq '.providers |= map(if .provider == "claude" or .provider == "agy" then .quotaSemantics.effectiveAvailability |= map(.runway.status = "exhausted_now") else . end)' "$QUOTA" > "$TIER3"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TIER3" run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "priority 3 resolves when both higher tiers are gone"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "priority 3 is used only when higher tiers are ineligible"
+
+# quota headroom still orders peers that share one tier.
+PEER_RULES="$TMP_ROOT/peer-rules.json"
+cat > "$PEER_RULES" <<'JSON'
+{
+  "rules": [
+    {
+      "when": "A simple bug fix with a stated root cause.",
+      "use": [
+        { "harness": "claude", "model": "sonnet", "effort": "high", "priority": 1 },
+        { "harness": "cursor", "model": "cursor-grok-4.6-medium", "priority": 1 },
+        { "harness": "agy", "priority": 2 }
+      ]
+    }
+  ]
+}
+JSON
+cp "$PEER_RULES" "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "same-tier peers resolve"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "spendPriority breaks the order between peers sharing a priority"
+
+# a tie is judged inside the winning tier, and a richer lower tier never settles it.
+TIE_RULES="$TMP_ROOT/tie-rules.json"
+cat > "$TIE_RULES" <<'JSON'
+{
+  "rules": [
+    {
+      "when": "A simple bug fix with a stated root cause.",
+      "use": [
+        { "harness": "claude", "model": "sonnet", "effort": "high", "priority": 1 },
+        { "harness": "claude", "model": "opus", "effort": "high", "priority": 1 },
+        { "harness": "cursor", "model": "cursor-grok-4.6-medium", "priority": 3 }
+      ]
+    }
+  ]
+}
+JSON
+cp "$TIE_RULES" "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "a tie inside the winning tier escalates"
+assert_contains "$out" '  reason: genuine spendPriority tie' "the tie reason is unchanged"
+assert_not_contains "$out" '  profile:' "an escalating tie never falls through to a lower tier"
+
+# tiering never leaks into the non-clear paths: approval still escalates and a
+# low confidence is still ambiguous, both with their candidate evidence intact.
+APPROVAL_RULES="$TMP_ROOT/approval-priority.json"
+cat > "$APPROVAL_RULES" <<'JSON'
+{
+  "rules": [
+    {
+      "when": "A simple bug fix with a stated root cause.",
+      "approval": "captain",
+      "use": [
+        { "harness": "claude", "model": "sonnet", "effort": "high", "priority": 1 },
+        { "harness": "cursor", "model": "cursor-grok-4.6-medium", "priority": 3 }
+      ]
+    }
+  ]
+}
+JSON
+cp "$APPROVAL_RULES" "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "captain approval still escalates with priorities present"
+assert_contains "$out" "  reason: rule requires the captain's explicit approval before dispatch" "the approval reason is unchanged"
+assert_not_contains "$out" '  profile:' "an approval escalation still emits no profile"
+
+cp "$PRIORITY_RULES" "$RULES"
+cat > "$RESPONSE" <<'JSON'
+{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.4,"probabilities":{"rule_1":0.4,"default":0.6}}},"usage":{"input_tokens":100,"output_tokens":60}}
+JSON
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "a low confidence is still ambiguous with priorities present"
+assert_not_contains "$out" '  profile:' "an ambiguous result still emits no profile"
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%' "ambiguous keeps its candidate evidence"
+
+cp "$BASE_RULES" "$RULES"
+write_response "$RESPONSE" rule_4 0.9
+pass "priority tiers gate the quota ranking and leave the non-clear paths alone"
+
 # --- quota-axi is read exactly once --------------------------------------------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
