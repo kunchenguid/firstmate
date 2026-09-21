@@ -48,6 +48,7 @@ agy is deliberately absent from the session-lock name vocabulary in `../../../..
 
 agy's hooks load only from its global customization root or a workspace's own `.agents/` directory, and it exposes no settings-path variable or flag, so there is no per-task copy to point it at the way gemini's `GEMINI_CLI_SYSTEM_SETTINGS_PATH` allows.
 The hook is therefore global and `../../../../../bin/fm-agy-turnend-hook.sh` owns it: it adds or replaces one `firstmate-turn-end` key, preserves every other key, and refuses a symlinked store, a store this uid does not own, or a non-object root.
+It also refuses to install until the captain's one-time consent is recorded in `config/agy-turnend-hook`, because that store is his own file; firstmate asks him once and records the answer, and the refusal degrades the spawn rather than failing it.
 A firing is attributed to one task by a private token: the spawn mints a random entry in agy's turn-end registry carrying that task's turn-end marker, busy-state writer, state dir, id, and busy generation, and exports its name to the launched process, whose hook children inherit it.
 Unlike grok and kimi there is deliberately no worktree pointer, because a hook runs with the config directory as its cwd and the environment carries the token instead, so nothing is written into the project under test.
 The hook is inert for every session that token does not name, drains stdin, prints the JSON object agy requires, and always exits 0; both handlers carry an explicit 5s timeout because hooks block agy's agent loop under a 30s vendor default.

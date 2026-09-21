@@ -594,6 +594,10 @@ Exercise Antigravity dispatch.
 Verify launch and delivery behavior.
 EOF
   printf 'agy\n' > "$home/config/crew-harness"
+  # The global hook installer refuses until the captain's one-time consent is
+  # recorded, so every spawn case stands for a home that has already answered.
+  # test_agy_unconsented_hook_degrades_the_spawn_visibly removes it again.
+  printf 'allow\n' > "$home/config/agy-turnend-hook"
   mkdir -p "$home/.gemini/antigravity-cli"
   printf '%s\n' '{"model":"Gemini 3.8 Flash (High)","trustedWorkspaces":["/home/someone/elsewhere"]}' \
     > "$home/.gemini/antigravity-cli/settings.json"
@@ -976,8 +980,14 @@ test_agy_spawn_arms_the_turnend_wiring() {
 # and the Antigravity IDE, so these cases pin the two properties that keep that
 # safe: it edits only its own key, and it is inert without a registry-backed
 # token. They exercise the real installer and the real generated hook script.
+# The cases below exercise the store edit rather than the consent gate, so the
+# helper records the captain's answer in a throwaway firstmate home beside the
+# agy HOME. test_agy_turnend_install_needs_the_captains_consent owns the gate.
 agy_turnend_install() {  # <home>
-  HOME="$1" "$ROOT/bin/fm-agy-turnend-hook.sh" install
+  local fm_home="$1.fmhome"
+  mkdir -p "$fm_home/config" || return 1
+  printf 'allow\n' >"$fm_home/config/agy-turnend-hook" || return 1
+  HOME="$1" FM_CONFIG_OVERRIDE="$fm_home/config" "$ROOT/bin/fm-agy-turnend-hook.sh" install
 }
 
 # hooks.json is agy's own machine-read configuration, so these assertions parse
@@ -1072,6 +1082,113 @@ test_agy_refused_hook_install_degrades_the_spawn_visibly() {
   assert_not_contains "$launch" "FM_AGY_TURNEND_TOKEN" "an unwired agy launch still exported a turn-end token"
   assert_not_contains "$launch" "__AGYTOKEN__" "an unwired agy launch left its token placeholder unsubstituted"
   pass "fm-spawn: a refused agy hook install degrades the spawn visibly instead of killing it"
+}
+
+# hooks.json is the captain's own per-user file, shared with his agy sessions
+# and the Antigravity IDE, so the install is gated on his one-time answer in
+# config/agy-turnend-hook. This pins the three properties the gate exists for:
+# no answer means no write at all, the refusal that carries the instruction to
+# ask appears ONLY while no answer is recorded, and a recorded answer of either
+# kind is never asked about again. remove stays ungated because it only takes
+# back a write this installer made.
+agy_consent_install() {  # <agy-home> <fm-config-dir>
+  HOME="$1" FM_CONFIG_OVERRIDE="$2" "$ROOT/bin/fm-agy-turnend-hook.sh" install 2>&1
+}
+
+test_agy_turnend_install_needs_the_captains_consent() {
+  local home store config before out rc ASK_MARKER
+  # The exact instruction firstmate acts on; its presence IS the ask.
+  ASK_MARKER="ASK THE CAPTAIN ONCE"
+  home="$TMP_ROOT/turnend-consent"
+  config="$TMP_ROOT/turnend-consent-config"
+  rm -rf "$home" "$config"
+  mkdir -p "$home/.gemini/config" "$config"
+  store="$home/.gemini/config/hooks.json"
+  printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' >"$store"
+  before=$(cat "$store")
+
+  # No answer recorded: refuse, tell firstmate to ask, and write nothing.
+  rc=0
+  out=$(agy_consent_install "$home" "$config") || rc=$?
+  [ "$rc" -ne 0 ] || fail "the installer wrote the captain's hooks.json without his consent"
+  assert_contains "$out" "$ASK_MARKER" \
+    "an unasked home did not tell firstmate to ask the captain"
+  assert_contains "$out" "agy-turnend-hook" \
+    "the refusal did not name the file that records the captain's answer"
+  [ "$(cat "$store")" = "$before" ] || fail "an unconsented install changed the captain's hooks.json"
+  assert_agy_home_untouched "$home" "unconsented install"
+
+  # Answer recorded as a refusal: still no write, and never asked again.
+  printf 'deny\n' >"$config/agy-turnend-hook"
+  rc=0
+  out=$(agy_consent_install "$home" "$config") || rc=$?
+  [ "$rc" -ne 0 ] || fail "the installer wrote the store after the captain declined"
+  assert_not_contains "$out" "$ASK_MARKER" \
+    "a recorded decline still asked the captain again"
+  [ "$(cat "$store")" = "$before" ] || fail "a declined install changed the captain's hooks.json"
+  assert_agy_home_untouched "$home" "declined install"
+
+  # A value that is neither answer is a configuration error, not a silent write.
+  printf 'sometimes\n' >"$config/agy-turnend-hook"
+  rc=0
+  out=$(agy_consent_install "$home" "$config") || rc=$?
+  [ "$rc" -ne 0 ] || fail "the installer accepted an unrecognised consent value"
+  assert_contains "$out" "accepted values are: allow, deny" \
+    "an unrecognised consent value did not name the accepted answers"
+  [ "$(cat "$store")" = "$before" ] || fail "an unrecognised consent value still changed the store"
+
+  # Consent recorded: the ordinary install, and never asked again.
+  printf 'allow\n' >"$config/agy-turnend-hook"
+  rc=0
+  out=$(agy_consent_install "$home" "$config") || rc=$?
+  expect_code 0 "$rc" "the installer refused a store the captain consented to"
+  assert_not_contains "$out" "$ASK_MARKER" "a consented install still asked the captain"
+  assert_agy_hooks_store "$store" installed \
+    "the consented install did not register the bounded firstmate handlers beside the foreign key"
+
+  # A later spawn in the same home neither asks again nor changes the answer.
+  rc=0
+  out=$(agy_consent_install "$home" "$config") || rc=$?
+  expect_code 0 "$rc" "a second consented install refused"
+  assert_not_contains "$out" "$ASK_MARKER" "a second install asked the captain a second time"
+
+  # remove is not gated: it only takes back the write consent authorised.
+  rm -f "$config/agy-turnend-hook"
+  HOME="$home" FM_CONFIG_OVERRIDE="$config" "$ROOT/bin/fm-agy-turnend-hook.sh" remove \
+    || fail "remove was refused for want of a consent it does not need"
+  assert_agy_hooks_store "$store" removed \
+    "ungated remove did not leave the store with the foreign key alone"
+  pass "fm-agy-turnend-hook.sh: install needs the captain's one-time consent and asks at most once"
+}
+
+# The same degrade must cover the unasked captain, not just a store firstmate
+# cannot own: no consent means no global write, and the worker still launches on
+# the weaker detection with the supervisor told why.
+test_agy_unconsented_hook_degrades_the_spawn_visibly() {
+  local id rec out rc launch
+  id="agy-unconsented-z16-$$"
+  rec=$(make_agy_spawn_case unconsented "$id")
+  read_agy_spawn_record "$rec"
+  rm -f "$HOME_DIR/config/agy-turnend-hook"
+  rc=0
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "an unconsented turn-end hook must not kill the agy spawn"
+  assert_contains "$out" "spawned $id" "the degraded agy spawn did not report success"
+  assert_contains "$out" "ASK THE CAPTAIN ONCE" \
+    "the degradation did not carry the installer's instruction to ask the captain"
+  assert_contains "$out" "rendered-tail idle read" \
+    "the spawn did not tell the supervisor this worker runs on the weaker detection"
+  [ -e "$HOME_DIR/.gemini/config/hooks.json" ] \
+    && fail "an unconsented spawn wrote the captain's global hooks.json" || true
+  assert_agy_home_untouched "$HOME_DIR" "unconsented install on the spawn path"
+  [ -e "$HOME_DIR/state/$id.busy-gen" ] \
+    && fail "an unconsented agy spawn armed a busy generation no hook could ever clear" || true
+  [ -e "$HOME_DIR/state/$id.agy-turnend-token" ] \
+    && fail "an unconsented agy spawn minted a turn-end token no hook could ever read" || true
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_not_contains "$launch" "FM_AGY_TURNEND_TOKEN" "an unconsented agy launch still exported a turn-end token"
+  pass "fm-spawn: an unconsented agy hook install degrades the spawn visibly instead of killing it"
 }
 
 test_agy_turnend_installer_owns_only_its_own_key() {
@@ -1301,6 +1418,8 @@ test_agy_spawn_arms_the_turnend_wiring
 test_agy_raw_launch_installs_no_global_hook
 test_agy_pre_trusted_pane_that_never_renders_a_turn_fails_the_spawn
 test_agy_refused_hook_install_degrades_the_spawn_visibly
+test_agy_unconsented_hook_degrades_the_spawn_visibly
+test_agy_turnend_install_needs_the_captains_consent
 test_agy_turnend_installer_owns_only_its_own_key
 test_agy_turnend_installer_refuses_a_store_it_does_not_own
 test_agy_turnend_installer_leaves_nothing_behind_when_the_store_edit_fails

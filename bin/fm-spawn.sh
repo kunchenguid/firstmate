@@ -339,6 +339,9 @@
 # settings path, so bin/fm-agy-turnend-hook.sh installs one guarded hook shared
 # with the captain's own sessions and the Antigravity IDE, and this spawn mints
 # a private token the launch exports so only a firstmate task is ever touched.
+# That installer writes the captain's own file, so it is gated on a one-time
+# consent recorded in config/agy-turnend-hook and refuses until the captain has
+# answered; the refusal degrades this spawn rather than failing it (below).
 # PreInvocation opens a turn and Stop closes it; Stop does NOT fire on a manual
 # interrupt and agy has no session-end event, so fm-control closes the record on
 # interrupt and the screen-scrape fallback stays as the no-record fallback.
@@ -2205,14 +2208,18 @@ agy)
   # subprocesses to every turn of the captain's own sessions for no benefit.
   # A refused install is NOT fatal. The installer refuses a store firstmate does
   # not own outright - a symlink, another uid's file, a non-object root - and a
-  # home whose hooks.json a dotfiles tool manages is exactly that shape. The
-  # spawn instead drops to the raw-launch shape it already supports: no busy
-  # arm, no token, and the retained rendered-tail fallback in bin/fm-busy-lib.sh
-  # carrying detection. The supervisor is told which shape this worker got.
+  # home whose hooks.json a dotfiles tool manages is exactly that shape. It also
+  # refuses until the captain's one-time consent is recorded in
+  # config/agy-turnend-hook, because that store is the captain's own file; the
+  # installer's own refusal carries the instruction to ask. Every one of those
+  # refusals takes the same path: the spawn drops to the raw-launch shape it
+  # already supports - no busy arm, no token, and the retained rendered-tail
+  # fallback in bin/fm-busy-lib.sh carrying detection. The supervisor is told
+  # which shape this worker got.
   if [ "$KIND" != secondmate ] && [ "$RAW_LAUNCH" -eq 0 ] \
     && ! "$FM_ROOT/bin/fm-agy-turnend-hook.sh" install; then
     AGY_TURNEND_WIRED=0
-    echo "warning: agy's global turn-end hook could not be installed safely (see the refusal above); task $ID will run WITHOUT semantic busy state and WITHOUT a turn-end signal, on the weaker rendered-tail idle read alone" >&2
+    echo "warning: agy's global turn-end hook was not installed (see the refusal above); task $ID will run WITHOUT semantic busy state and WITHOUT a turn-end signal, on the weaker rendered-tail idle read alone" >&2
   fi
   ;;
 esac

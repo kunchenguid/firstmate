@@ -368,6 +368,7 @@ For agy crews, `fm-spawn.sh` runs `fm-agy-turnend-hook.sh install`, which writes
 Unlike grok and Kimi no pointer is written into the worktree: the per-task parameters live in a private registry token under `~/.gemini/antigravity-cli/fm-turn-end.d/` whose name the launch exports to the agy process, so the installed hook stays inert for every session that does not carry one.
 A raw launch command skips both the install and the token, and teardown removes only the task's own token, deliberately leaving the shared hook installed because another live agy task may still depend on it.
 The agy installer requires `node` and refuses before writing when that `hooks.json` is a symlink, is not owned by this user, or does not hold a JSON object, which is the shape a dotfiles-managed store has; a refusal is not fatal, and the spawn instead warns on its own path and runs that task with no semantic busy state and no turn-end signal, on the retained rendered-tail idle read alone.
+Because that store is the captain's own per-user file, the install also refuses until his one-time consent is recorded in `config/agy-turnend-hook`, and that refusal degrades the spawn the same way; see [agy turn-end hook consent](#agy-turn-end-hook-consent-configagy-turnend-hook) below.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 For omp secondmate launches, `fm-spawn.sh` passes no `-e` at all: omp auto-discovers the home's tracked `.omp/extensions/` with no trust gate, and naming a discovered file with `-e` as well loads it twice; every omp launch instead carries the tracked `.omp/fm-worker-overlay.yml` posture overlay through `--config`, which [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns.
 
@@ -381,6 +382,21 @@ Any other value, or an unreadable file, refuses every spawn from that home, whic
 `bin/fm-spawn.sh` reads the file on every spawn and relaunch, so a change takes effect at the next launch without a restart.
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
+
+## agy turn-end hook consent (config/agy-turnend-hook)
+
+The optional local, gitignored `config/agy-turnend-hook` records the captain's one-time answer to a single question: may Firstmate add its own `firstmate-turn-end` key to `~/.gemini/config/hooks.json`?
+That file is the captain's own per-user agy configuration, shared with his own agy sessions and the Antigravity IDE, so `bin/fm-agy-turnend-hook.sh install` will not touch it before he has answered.
+The token is the file's whitespace-trimmed content.
+`allow` permits the write, and every later install in that home proceeds without asking again.
+`deny` refuses it, and is equally durable: a recorded decline is never raised again either.
+An absent file means the captain has not been asked yet, and is the only case whose refusal carries the instruction to ask him.
+Any other value, or an unreadable file, refuses the install and names the accepted values rather than guessing an answer.
+Firstmate asks the captain and records his answer; the installer itself never prompts, because a crewmate must never address the captain directly.
+Only `install` is gated, since `remove` merely takes back a write this consent authorised.
+A refusal of any kind is not fatal: `bin/fm-spawn.sh` drops that task to the same degraded shape a store it cannot own produces, with no busy state and no turn-end signal, and says so on its own path.
+The file is deliberately NOT inherited into secondmate homes, because consent is to touch one specific machine's home directory and a remote secondmate runs against a different one; each home therefore asks once for itself.
+The [agy adapter reference](../.agents/skills/harness-adapters/references/harness/agy.md) records the hook surface this consent governs.
 
 ## Lavish server address (config/lavish-axi-host)
 

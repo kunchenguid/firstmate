@@ -56,7 +56,12 @@ cp -R "$HOME/.gemini" "$AGY_HOME/.gemini" || fail "could not stage the throwaway
 # The turn-end hook is installed into the throwaway HOME by the shipped
 # installer, and attributed by a token minted the way bin/fm-spawn.sh mints one,
 # so this guard exercises the real hook script rather than a reconstruction.
-HOME="$AGY_HOME" "$ROOT/bin/fm-agy-turnend-hook.sh" install \
+# The installer is gated on the captain's one-time consent, so this guard records
+# it in a throwaway firstmate config dir rather than reading the operator's own.
+HOOK_CONFIG="$LAB/fm-config"
+mkdir -p "$HOOK_CONFIG" || fail "could not create the throwaway firstmate config dir"
+printf 'allow\n' >"$HOOK_CONFIG/agy-turnend-hook" || fail "could not record the hook consent"
+HOME="$AGY_HOME" FM_CONFIG_OVERRIDE="$HOOK_CONFIG" "$ROOT/bin/fm-agy-turnend-hook.sh" install \
   || fail "the agy turn-end hook installer refused the throwaway HOME"
 HOOK_STATE="$LAB/state"
 mkdir -p "$HOOK_STATE" || fail "could not create the agy hook state dir"

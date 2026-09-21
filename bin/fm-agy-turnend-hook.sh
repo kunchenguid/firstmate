@@ -13,6 +13,16 @@
 #   fm-agy-turnend-hook.sh install
 #   fm-agy-turnend-hook.sh remove
 #
+# CAPTAIN CONSENT. That store is the captain's own per-user file, not firstmate's,
+# so install is gated on a one-time consent recorded in this home's
+# config/agy-turnend-hook: "allow" permits the write, "deny" refuses it, and an
+# absent file means the captain has not been asked yet. Absent and "deny" are
+# both ordinary refusals on the existing no-write path, so the spawn degrades to
+# its retained rendered-tail read instead of dying; only the absent case carries
+# the instruction to ask, so a recorded answer of either kind is never asked
+# again. Firstmate asks the captain and records the answer; this command never
+# prompts, and remove needs no consent because it only undoes the write.
+#
 # WHY A GLOBAL FILE. agy reads hooks only from its customization roots: the
 # global ${HOME}/.gemini/config/ and a workspace's own .agents/ directory. It
 # exposes no settings-path environment variable or flag, so there is no gemini
@@ -39,10 +49,16 @@
 set -u
 unset CDPATH
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+CONSENT_FILE="$CONFIG/agy-turnend-hook"
+
 case "${1:-}" in
 install | remove) ACTION=$1 ;;
 -h | --help)
-  sed -n '2,38{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,48{s/^# \{0,1\}//;p;}' "$0"
   exit 0
   ;;
 *)
@@ -85,6 +101,28 @@ REGISTRY="$CLI_DIR/fm-turn-end.d"
 HOOK_SCRIPT="$CLI_DIR/fm-turn-end.sh"
 
 shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# Captain consent, checked before the store is inspected at all so an unasked
+# home never reads or touches the captain's own file. remove is not gated: it
+# only takes back a write this command made.
+if [ "$ACTION" = install ]; then
+  if [ -e "$CONSENT_FILE" ] || [ -L "$CONSENT_FILE" ]; then
+    [ -f "$CONSENT_FILE" ] && [ -r "$CONSENT_FILE" ] \
+      || refuse "'$CONSENT_FILE' must be a readable regular file holding one of: allow, deny."
+    CONSENT=$(tr -d '[:space:]' <"$CONSENT_FILE" || true)
+    case "$CONSENT" in
+    allow) ;;
+    deny)
+      refuse "the captain declined the global agy turn-end hook in '$CONSENT_FILE'."
+      ;;
+    *)
+      refuse "'$CONSENT_FILE' holds '$CONSENT'; accepted values are: allow, deny."
+      ;;
+    esac
+  else
+    refuse "the captain has not been asked about the global agy turn-end hook. ASK THE CAPTAIN ONCE whether firstmate may add its own 'firstmate-turn-end' key to '$STORE', a file agy and the Antigravity IDE share with the captain's own sessions, then record the answer by writing allow or deny to '$CONSENT_FILE'."
+  fi
+fi
 
 if [ -L "$STORE" ]; then
   refuse "'$STORE' is a symlink; firstmate edits only a regular file it owns."
