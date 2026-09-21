@@ -34,6 +34,11 @@
 #   claude-hook      Claude lifecycle hooks (UserPromptSubmit/Stop/StopFailure/SessionEnd)
 #   gemini-hook      Gemini agent hooks (BeforeAgent opens; AfterAgent and
 #                    SessionEnd close)
+#   devin-hook       Devin lifecycle hooks (SessionStart and UserPromptSubmit
+#                    open; Stop and SessionEnd close). Stop fires on normal
+#                    completion only, never on a manual interrupt, so like
+#                    Claude an interrupt preserves the adapter-owned state
+#                    until the next hook event settles it.
 #   codex-hook, codex-appserver  reserved: Codex, gated by
 #                    fm_busy_codex_semantic_source
 #   kimi-wire, kimi-hook  reserved: standalone Kimi, gated by fm_busy_kimi_verified
@@ -198,6 +203,7 @@ fm_busy_sources_for_harness() {  # <harness>
       ;;
     opencode*) adapter=opencode-plugin ;;
     gemini*) adapter=gemini-hook ;;
+    devin*) adapter=devin-hook ;;
     pi|pi-signed) adapter=pi-ext ;;
     omp) adapter=omp-ext ;;
     kimi*)

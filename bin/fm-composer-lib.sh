@@ -56,7 +56,7 @@
 #                still starts and ends with the family's rule glyph is
 #                tolerated, including Grok 1.0.5's three-column title overhang.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
-#                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
+#                codex `›`, muse `⟩`, cursor `→`, devin `❭`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
 #                A bare composer's WRAP region (typed input continuing on the
 #                rows beneath the glyph row) is bounded by blank rows, by
@@ -121,7 +121,8 @@
 # genuine empty agent composer ONLY inside a bordered container. On a bare row
 # it is a dead-shell prompt and classifies `unknown` (never a safe injection
 # target). The AGENT glyphs `❯` (claude), `›` (codex), `⟩` (U+27E9, muse),
-# and `→` (U+2192, cursor) are a genuine empty agent composer either way.
+# `→` (U+2192, cursor), and `❭` (U+276D, devin) are a genuine empty agent
+# composer either way.
 # Both glyph sets are declared
 # exactly once below; every decision reaches them through the declarations.
 #
@@ -447,7 +448,7 @@ fm_busy_lines_match() {  # [harness]
 # a dead-shell prompt and must never read `empty`. Newline-separated and
 # consumed by `read` rather than word splitting, so `$`, `%`, and `#` stay
 # literal and no entry is ever exposed to pathname expansion.
-FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩' '→')
+FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩' '→' '❭')
 FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 
 # The ONE fleet-wide idle-placeholder set: composer text a harness renders in
@@ -457,9 +458,14 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # hence the unanchored tail). cursor-agent renders
 # two, both anchored: `Plan, search, build anything` in a fresh session and
 # `Add a follow-up` once a turn has completed (verified live on cursor-agent
-# 2026.08.11-e8db854). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
+# 2026.08.11-e8db854). devin renders two, both anchored: `Ask Devin to build
+# features, fix bugs, or work on your code` on an idle composer and `Guide
+# Devin while it works` while a turn runs (verified live on devin 3000.10.31;
+# both draw dim truecolor 124,124,124, so the ghost stripper normally removes
+# them and this set covers the reverse-video cursor remnant and unstyled
+# captures). FM_COMPOSER_IDLE_RE overrides for an unverified harness;
 # matching is case-insensitive.
-FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$'
+FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$|^Ask Devin to build features, fix bugs, or work on your code$|^Guide Devin while it works$'
 
 # Opencode draws a mode/model footer line INSIDE its left-bar composer
 # ("Build · GPT-5.5 Fast OpenAI · high"). It is composer furniture, not typed

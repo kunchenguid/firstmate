@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -228,6 +228,22 @@ harness_process_verdict() {  # <pid>
     # inherited launcher value, not an agy identity), so like muse it is
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
+    # devin (Devin CLI) is a natively-compiled single binary whose process
+    # name is exactly `devin` (verified, devin 3000.10.31: `ps -o comm=`
+    # reports devin with argv[0] devin or the versioned install path
+    # .../cli/_versions/<version>/bin/devin). Anchored, never *devin*, so
+    # unrelated commands cannot be misread as this harness. devin publishes
+    # no harness-identity marker of its own: DEVIN_MODEL, DEVIN_PERMISSION_MODE,
+    # and DEVIN_SANDBOX are launch configuration, present only when the
+    # launcher sets them, and the one devin-set variable on a live TUI is
+    # CHISEL_SESSION_DB, a sessions-db PATH rather than an identity (verified
+    # on devin 3000.10.31 with DEVIN_PERMISSION_MODE unset at launch). Do NOT
+    # promote it to a marker without verifying it reaches children AND that
+    # it cannot survive in a multiplexer's stored environment, the muse
+    # precedent. Like agy and muse, devin is detected by ancestry alone, and
+    # the spawn clears foreign markers at the launch boundary as defense in
+    # depth.
+    devin) echo "comm devin"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
