@@ -2,21 +2,25 @@
 def forge_host:
   type == "string" and length <= 253
   and test("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$");
-def github_host:
-  . as $host
-  | ($host | forge_host)
-  and ($host == "github.com" or
-    ($host != "gitlab.com"
-      and ($host | test("^github\\.com\\.") | not)
-      and ($host | test("\\.github\\.com($|\\.)") | not)));
+def forge_host_lines:
+  split("\n")
+  | map(gsub("^[ \t\r]+"; "") | gsub("[ \t\r]+$"; "") | ascii_downcase)
+  | map(select(length > 0 and (startswith("#") | not)));
+def forge_allowlist:
+  ["github.com"]
+  + (($ENV.FM_FORGE_HOSTS // "") | forge_host_lines | map(select(forge_host)))
+  | unique;
 def github_host_part:
   sub("^https://"; "") | split("/")[0];
 def github_shaped_url:
   type == "string"
-  and test("^https://[a-z0-9.-]+/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$")
-  and (github_host_part | forge_host);
+  and test("^https://[a-z0-9.-]+/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$");
+def github_forge_host:
+  if github_shaped_url
+  then (github_host_part as $host | forge_allowlist | map(select(. == $host)) | first)
+  else null end;
 def github_url:
-  github_shaped_url and (github_host_part | github_host);
+  github_forge_host != null;
 def canonical_url:
   type == "string" and
   (github_shaped_url

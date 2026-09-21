@@ -14,10 +14,14 @@
 # Every URL explicitly linked by a structured backlog row or a task's pr= is
 # owned. Previously observed URLs remain in data/<task>/contributions.json after
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
-# GitHub PRs and issues on github.com or a GitHub Enterprise Server host are
-# supported; canonical_url in bin/fm-contributions.jq recognizes an Enterprise
-# host from its canonical GitHub route and well-formed non-reserved DNS name.
-# GitLab and unrecognized hosts remain visibly unmeasured.
+# A GitHub PR or issue is measurable only when its host is allowlisted:
+# github.com always, plus every host named in config/forge-hosts (one DNS host
+# name per line; blank lines and # comments allowed; absent means github.com
+# only, and a malformed file refuses rather than silently unmeasuring work).
+# github_url in bin/fm-contributions.jq owns that decision. An authenticated
+# forge read is addressed to the matched allowlist entry, never to host text
+# taken from a URL, and poll never contacts a URL the allowlist does not cover.
+# GitLab and unlisted hosts stay owned and visibly unmeasured, never fleet work.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
@@ -77,6 +81,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 export FM_HOME FM_STATE_OVERRIDE="$STATE"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -108,6 +113,19 @@ jq_lib() { # jq options/program via final argument
   set -- "${@:1:$#-1}"
   jq -L "$SCRIPT_DIR" "$@" "include \"fm-contributions\"; $program"
 }
+
+# The allowlist comes from this home's configuration alone; an ambient
+# FM_FORGE_HOSTS never widens which hosts may receive an authenticated read.
+FM_FORGE_HOSTS=''
+if [ -e "$CONFIG/forge-hosts" ] || [ -L "$CONFIG/forge-hosts" ]; then
+  [ -f "$CONFIG/forge-hosts" ] && [ ! -L "$CONFIG/forge-hosts" ] && [ -r "$CONFIG/forge-hosts" ] \
+    && [ "$(wc -c < "$CONFIG/forge-hosts")" -le 4096 ] \
+    || fail 'config/forge-hosts must be a readable regular file of at most 4096 bytes'
+  FM_FORGE_HOSTS=$(cat "$CONFIG/forge-hosts")
+  jq_lib -ne --arg hosts "$FM_FORGE_HOSTS" '$hosts | forge_host_lines | all(forge_host)' >/dev/null \
+    || fail 'config/forge-hosts must hold one DNS host name per line'
+fi
+export FM_FORGE_HOSTS
 
 read_saved() {
   local file
@@ -215,8 +233,8 @@ wait_forges() { # background forge pids from one independent read wave
 
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 host part number kind endpoint head after label
-  jq_lib -ne --arg url "$url" '$url | github_url' >/dev/null || return 1
-  host=${url#https://}; host=${host%%/*}
+  host=$(jq_lib -nr --arg url "$url" '$url | github_forge_host // empty') || return 1
+  [ -n "$host" ] || return 1
   part=${url#https://}; part=${part#*/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
   rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
@@ -336,9 +354,11 @@ poll() {
   get_input
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
-  # One line per distinct URL: the URL, then every owning task.
+  # One line per distinct URL the allowlist covers, then every owning task. An
+  # unmeasurable host is never contacted, so it never records a forge error.
   jq_lib -nr --slurpfile input "$TMP/input.json" --slurpfile saved "$TMP/saved.json" '
-    known($input[0];$saved[0]) | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .checked_at] | first // "")})
+    known($input[0];$saved[0]) | map(select(.url | github_url))
+    | map(. as $k | . + {at:([$saved[0][] | select(.task == $k.task) | .records[] | select(.url == $k.url) | .checked_at] | first // "")})
     | group_by(.url) | map({url:.[0].url,at:(map(.at) | min),tasks:(map(.task) | unique)})
     | sort_by(.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))

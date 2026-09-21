@@ -229,6 +229,29 @@ With the flag absent the wedge timer spends no fold or current-state read for it
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which supervise their own crew and own that trade separately.
 [`architecture.md`](architecture.md) owns the wait-evidence contract and which records may take the ladder away; `bin/fm-watch.sh`'s `wedge_wait_evidence` owns the exact derivation and its fail-closed boundaries.
 
+## Measurable forge hosts (config/forge-hosts)
+
+The optional local, gitignored `config/forge-hosts` names the GitHub hosts beyond `github.com` whose pull requests and issues the contribution observer may measure.
+Write one DNS host name per line; blank lines and lines beginning with `#` are allowed, and `github.com` is always allowed whether or not the file exists.
+A GitHub Enterprise Cloud or Enterprise Server host the captain works on, such as `precision-it.ghe.com`, belongs here:
+
+```text
+# GitHub Enterprise Cloud tenant
+precision-it.ghe.com
+```
+
+The file is the only input that widens the allowlist; an ambient `FM_FORGE_HOSTS` never does.
+The list is a per-machine credential decision, so it is not inherited by secondmate homes.
+
+The allowlist decides two things together.
+An owned URL whose host is not on it stays owned and visibly unmeasured, exactly like a GitLab merge request: it is never counted as measured coverage and never becomes fleet work.
+`bin/fm-contributions.sh poll` also never contacts such a URL, so an unmeasurable host cannot record a forge error for a read that never happened.
+Every authenticated read is addressed to the matched allowlist entry rather than to host text taken from a contribution URL, so a link arriving through a delivered backlog row cannot choose which host receives a forge credential.
+
+A file that is a symlink, is not a readable regular file, exceeds 4096 bytes, or holds a line that is not a DNS host name refuses the run instead of silently leaving contributions unmeasured.
+Adding or removing a host changes only measurability; durable records written under a previously listed host are preserved and simply return to the unmeasured bucket.
+[`fm-contributions.sh --help`](../bin/fm-contributions.sh) owns the record contract, and `github_url` in [`fm-contributions.jq`](../bin/fm-contributions.jq) owns the decision, with coverage in [`tests/fm-contributions.test.sh`](../tests/fm-contributions.test.sh).
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` sets `test.evidence.store_in_repo: true` and pins `commands.lint` to `bin/fm-lint.sh`, the same owner CI invokes.
