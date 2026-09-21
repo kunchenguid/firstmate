@@ -65,6 +65,7 @@ Nothing reaches the captain in that case.
 Never restart, stop, or update the shared daemon on a crewmate's claim.
 It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
 Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
+If the exact terminal run instead failed because `quota-axi` shows one fresh measurable rolling provider window exhausted, load `process-event-sources` and arm its task-bound quota-reset adapter rather than restarting validation, changing reviewers, or inferring a reset from provider prose.
 
 ## Live-endpoint escalation
 

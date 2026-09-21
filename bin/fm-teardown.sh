@@ -3585,6 +3585,12 @@ if [ -n "$LAUNCH_HOME_TOKEN" ]; then
   rm -rf "/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
 fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
+# A task-bound rolling-quota wait cannot outlive the task identity it guards.
+# Use its adapter so process-event ownership and private watch cleanup retain
+# their normal generation-safe retirement instead of deleting runner files.
+if [ "$KIND" != secondmate ] && [ -x "$SCRIPT_DIR/fm-procevent-quota-reset.sh" ]; then
+  "$SCRIPT_DIR/fm-procevent-quota-reset.sh" retire "$ID" >/dev/null || exit 1
+fi
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
