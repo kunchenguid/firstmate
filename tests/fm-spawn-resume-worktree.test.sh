@@ -423,7 +423,7 @@ test_primary_dispatch_guard_accepts_resume_and_still_blocks_delegation() {
 
   # 13. The resume runs with the escape hatch explicitly cleared. If the mode
   # needed FM_ALLOW_SUBAGENT to work, this dispatch would not complete.
-  out=$(FM_ALLOW_SUBAGENT= run_resume "$id" "$EXISTING_DIR" --mode direct-PR --yolo off)
+  out=$(FM_ALLOW_SUBAGENT='' run_resume "$id" "$EXISTING_DIR" --mode direct-PR --yolo off)
   status=$?
   expect_code 0 "$status" \
     "a governed resume must dispatch without the delegation escape hatch"$'\n'"$out"
@@ -437,14 +437,14 @@ test_primary_dispatch_guard_accepts_resume_and_still_blocks_delegation() {
   "$GIT_REAL" -C "$primary" init -q
 
   guard_out=$(FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" FM_STATE_OVERRIDE="$primary/state" \
-    FM_ALLOW_SUBAGENT= "$GUARD" --tool Bash 2>&1)
+    FM_ALLOW_SUBAGENT='' "$GUARD" --tool Bash 2>&1)
   guard_status=$?
   expect_code 0 "$guard_status" \
     "the dispatch guard blocked the tool shape a governed resume actually uses"$'\n'"$guard_out"
 
   # 14. Arbitrary direct delegation is still refused in that same primary home.
   guard_out=$(FM_ROOT_OVERRIDE="$primary" FM_HOME="$primary" FM_STATE_OVERRIDE="$primary/state" \
-    FM_ALLOW_SUBAGENT= "$GUARD" --tool Task 2>&1)
+    FM_ALLOW_SUBAGENT='' "$GUARD" --tool Task 2>&1)
   guard_status=$?
   expect_code 2 "$guard_status" \
     "arbitrary direct subagent dispatch is no longer blocked"$'\n'"$guard_out"
@@ -462,7 +462,7 @@ test_least_privilege_scope_stays_bounded() {
   dirty_the_worktree "$EXISTING_DIR"
   project_before=$(fingerprint_of "$PROJECT_DIR")
   sibling_before=$(fingerprint_of "$SIBLING_DIR")
-  parent_before=$(ls -A "$CASE_DIR" | LC_ALL=C sort)
+  parent_before=$(find "$CASE_DIR" -mindepth 1 -maxdepth 1 | LC_ALL=C sort)
 
   out=$(run_resume "$id" "$EXISTING_DIR" --mode direct-PR --yolo off)
   status=$?
@@ -472,7 +472,7 @@ test_least_privilege_scope_stays_bounded() {
     || fail "resume authority over one worktree reached the repository primary checkout"
   [ "$(fingerprint_of "$SIBLING_DIR")" = "$sibling_before" ] \
     || fail "resume authority over one worktree reached a sibling worktree"
-  [ "$(ls -A "$CASE_DIR" | LC_ALL=C sort)" = "$parent_before" ] \
+  [ "$(find "$CASE_DIR" -mindepth 1 -maxdepth 1 | LC_ALL=C sort)" = "$parent_before" ] \
     || fail "the resume changed the parent folder holding the authorized workspace"
   pass "resume authority stays bounded to the authorized workspace"
 }
@@ -486,7 +486,7 @@ test_failed_resume_leaves_the_worktree_unchanged() {
   read_case "$rec"
   dirty_the_worktree "$EXISTING_DIR"
   before=$(fingerprint_of "$EXISTING_DIR")
-  listing_before=$(cd "$EXISTING_DIR" && ls -A | LC_ALL=C sort)
+  listing_before=$(find "$EXISTING_DIR" -mindepth 1 -maxdepth 1 | LC_ALL=C sort)
 
   # A ship resume still owes its delivery contract, so this refuses after the
   # path has been named but before anything is provisioned.
@@ -501,7 +501,7 @@ test_failed_resume_leaves_the_worktree_unchanged() {
   [ "$status" -ne 0 ] || fail "a resume whose endpoint left the authorized workspace was accepted"$'\n'"$out"
 
   after=$(fingerprint_of "$EXISTING_DIR")
-  listing_after=$(cd "$EXISTING_DIR" && ls -A | LC_ALL=C sort)
+  listing_after=$(find "$EXISTING_DIR" -mindepth 1 -maxdepth 1 | LC_ALL=C sort)
   [ "$before" = "$after" ] || fail "a failed resume changed the target worktree"
   [ "$listing_before" = "$listing_after" ] || fail "a failed resume added or removed files in the target worktree"
   assert_no_forbidden_git "a failed resume"
