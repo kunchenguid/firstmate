@@ -463,6 +463,13 @@ That warning rendered in the same shape as the trust dialog, with the selection 
 That gate is not a production blocker, because a normal environment has already accepted it and the treatment arm above ran against the real config and saw neither dialog.
 This change does not address that warning and does not claim to.
 
+### Post-launch startup health gate
+
+Added 2026-09-17: `claude_wait_for_working()` in `../../bin/fm-spawn.sh` is a post-launch backstop that fails the spawn immediately, naming the concrete reason and closing the endpoint, if the pane renders the exact dialog title captured above, the external-imports dialog title, or a stale/expired credential's `Login expired` banner (`../remote-secondmates.md`) within a short bounded settle window.
+The dialog and import-dialog strings it matches are the same ones verified byte-exact above; `../../tests/fm-claude-startup-health.test.sh` pins the matching logic against all three with a fake pane (portable, no harness required).
+Live-verified the same date under real Herdr (protocol reported: herdr 0.9.0) and a real claude process: a pre-trusted ship worktree spawn and a pre-trusted secondmate home spawn both passed the gate and reached a genuinely busy turn with zero false positives, for both a fresh worktree and a fresh secondmate home.
+That run did not reproduce the live blocking dialog itself through the new gate (it would require deliberately un-registering trust against a real interactive pane, which the disposable validation session did not attempt); the gate's detection of that exact case rests on the byte-exact string captured in the control-arm evidence above, not a fresh live reproduction through the gate's own code path.
+
 ### Secondmate homes
 
 Verified 2026-09-11 on Claude Code 2.1.269.

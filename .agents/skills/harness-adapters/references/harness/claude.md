@@ -41,6 +41,13 @@ Inspect the pane to identify which dialog is on screen, and report it rather tha
 A launch under `config/claude-permission-mode=auto` never meets the bypass confirmation, because it does not request bypass mode: on 2.1.269 `claude --permission-mode auto` reached the composer directly with the footer `⏵⏵ auto mode on (shift+tab to cycle)`, so a captain who refuses the bypass dialog selects `auto` there instead of accepting it.
 The workspace-trust dialog is unaffected by the permission mode and still needs the pre-registration above.
 
+## Startup health gate
+
+Pre-registration removes the trust and import dialogs only when it can prove the launch target's scope; it cannot prove the vendor honors that registration, and a stale or expired credential is a separate failure pre-registration never addresses at all.
+`claude_wait_for_working()` in `../../../../../bin/fm-spawn.sh` is the post-launch backstop: after the brief is sent, it inspects the pane for a short bounded settle window and fails the spawn immediately - naming the concrete blocking render, and closing the endpoint it just launched - on any of the three renders above (the trust dialog title, the import dialog title, or a stale/expired credential's `Login expired` banner, see `../../../../../docs/remote-secondmates.md`).
+It deliberately does not wait for positive proof of a working turn the way the kimi/rovo/agy gates do, because claude's busy record is armed to busy before the brief is even sent (`../../../../../bin/fm-busy-lib.sh`); an ordinary pane showing none of the three known renders passes within the window rather than blocking on that record.
+The once-per-machine bypass-permissions confirmation is not one of the three: it renders in the same shape as the trust dialog with no reliable distinguishing text, so it still surfaces only as a generic stuck pane for an operator to inspect.
+
 ## Composer ghost
 
 Completed turns can render dim predicted text inside an empty composer, indistinguishable in plain `tmux capture-pane`.

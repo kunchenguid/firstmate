@@ -33,6 +33,8 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-herdr-tests)
 # still override this default.
 mkdir -p "$TMP_ROOT/ambient-home"
 export FM_HOME="$TMP_ROOT/ambient-home"
+# Binding tests require an explicit socket identity; the fake session is fixed.
+export HERDR_SOCKET_PATH=/tmp/fm-herdr-unit/fmtest.sock
 export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 
 # make_herdr_fakebin: a `herdr` stub that logs every invocation (one line,
@@ -44,6 +46,11 @@ export FM_BACKEND_HERDR_SUBMIT_MIN_SLEEP=0
 # on success in the real CLI - verified in herdr-verification-p2.md).
 make_herdr_fakebin() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
+  # Tests normally use a fresh fake invocation; do not let a prior binding
+  # leak between independent cases. Tests of binding reuse opt in explicitly.
+  if [ "${FM_HERDR_PRESERVE_BINDING:-0}" != 1 ]; then
+    rm -f "$FM_HOME/state/herdr-workspace"
+  fi
   mkdir -p "$fb"
   cat > "$fb/herdr" <<'SH'
 #!/usr/bin/env bash
@@ -131,6 +138,7 @@ SH
 # the same unit-separated form as make_herdr_fakebin.
 make_herdr_statefake() {  # <dir> -> echoes fakebin dir; seeds an empty state file
   local dir=$1 fb="$1/fakebin"
+  rm -f "$FM_HOME/state/herdr-workspace"
   mkdir -p "$fb"
   printf '{"next":1,"workspaces":[],"tabs":[],"agent_status":{}}\n' > "$dir/state.json"
   cat > "$fb/herdr" <<'SH'
@@ -920,7 +928,7 @@ test_launcher_identity_refuses_a_missing_server_socket() {
   dir="$TMP_ROOT/launcher-no-socket"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
-    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest \
+    HERDR_ENV=1 HERDR_PANE_ID=w7:p3 HERDR_SESSION=fmtest HERDR_SOCKET_PATH='' \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_launcher_identity fmtest' "$ROOT" 2>&1 )
   status=$?
   expect_code 1 "$status" "a launcher pane without an injected server socket must refuse"
