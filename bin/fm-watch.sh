@@ -2332,6 +2332,11 @@ WATCHER_PID=${BASHPID:-$$}
 
 PR_POLL_CONTROL_LOCK=
 PR_POLL_PUBLISH_LOCK=
+# Set by the post-acquire exits that deliberately keep the held lock as stale
+# evidence: cleanup then leaves the lock and the recovery marker exactly as they
+# are instead of releasing the lock and re-attempting the marker write that
+# just failed.
+WATCHER_RETAIN_LOCK_EVIDENCE=0
 
 pr_poll_control_release() {
   [ -z "$PR_POLL_CONTROL_LOCK" ] || fm_lock_release "$PR_POLL_CONTROL_LOCK" || return 1
@@ -2357,7 +2362,7 @@ watcher_cleanup() {
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
-  if [ "$owns_lock" -eq 1 ] \
+  if [ "$owns_lock" -eq 1 ] && [ "$WATCHER_RETAIN_LOCK_EVIDENCE" -eq 0 ] \
     && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
     cleanup_status=1
@@ -2372,11 +2377,12 @@ watcher_stop_signals
 # Stage the full owner generation BEFORE acquiring: fm_lock_prepare_owner
 # writes these into the owner directory ahead of the lock-symlink publication,
 # so a concurrent turn-end guard never observes a published lock with missing
-# fm-home, watcher-path, or pid-identity files (HHE-1805). The refresh below
-# rewrites the identical values once the lock is held.
+# fm-home, watcher-path, or pid-identity files (HHE-1805). Nothing rewrites
+# them afterwards: the published generation is complete and never truncated.
 # shellcheck disable=SC2034 # Consumed by wake() in the separately linted transition owner.
 FM_WATCH_DELIVERY_PID=$WATCHER_PID
 FM_WATCH_DELIVERY_IDENTITY=$(fm_pid_identity "$WATCHER_PID" 2>/dev/null || true)
+FM_LOCK_OWNER_FOR=$WATCH_LOCK
 FM_LOCK_OWNER_FM_HOME=$FM_HOME
 FM_LOCK_OWNER_WATCHER_PATH=$WATCH_PATH
 FM_LOCK_OWNER_PID_IDENTITY=$FM_WATCH_DELIVERY_IDENTITY
@@ -2402,7 +2408,7 @@ fi
 # The watch lock is held: drop the staging values so later acquisitions of
 # unrelated locks (cycle ledger, delivery ledger, PR poll locks) publish bare
 # owner directories exactly as before.
-unset FM_LOCK_OWNER_FM_HOME FM_LOCK_OWNER_WATCHER_PATH FM_LOCK_OWNER_PID_IDENTITY
+unset FM_LOCK_OWNER_FOR FM_LOCK_OWNER_FM_HOME FM_LOCK_OWNER_WATCHER_PATH FM_LOCK_OWNER_PID_IDENTITY
 WATCHER_RECOVERY_PENDING=0
 if [ -n "${FM_LOCK_RECOVERED_PID:-}" ]; then
   WATCHER_RECOVERY_PENDING=1
@@ -2410,11 +2416,13 @@ fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" != 1 ]; then
   if ! fm_recovery_marker_reopen_announced "$WATCHER_DOWNTIME_MARKER"; then
     echo "watcher: recovery state could not be reopened safely; retaining stale lock evidence" >&2
+    WATCHER_RETAIN_LOCK_EVIDENCE=1
     exit 1
   fi
 fi
 if ! fm_recovery_marker_arm_check "$WATCHER_DOWNTIME_MARKER"; then
   echo "watcher: recovery state could not be consumed safely; retaining stale lock evidence" >&2
+  WATCHER_RETAIN_LOCK_EVIDENCE=1
   exit 1
 fi
 if [ "${FM_WATCH_HANDLING_SUCCESSOR:-0}" = 1 ]; then
@@ -2478,12 +2486,6 @@ reconcile_requests_detached() {
     "$SCRIPT_DIR/fm-secondmate-reconcile.sh" process-requests </dev/null >/dev/null 2>&1 &
   RECONCILE_REQUEST_PID=$!
 }
-
-# The owner files were staged before the lock-symlink publication above, so this
-# refresh rewrites the identical values and converges any pre-staging lock.
-printf '%s\n' "$FM_HOME" > "$WATCH_LOCK/fm-home" || true
-printf '%s\n' "$WATCH_PATH" > "$WATCH_LOCK/watcher-path" || true
-printf '%s\n' "$FM_WATCH_DELIVERY_IDENTITY" > "$WATCH_LOCK/pid-identity" 2>/dev/null || true
 
 [ -e "$STATE/.last-heartbeat" ] || touch "$STATE/.last-heartbeat"
 

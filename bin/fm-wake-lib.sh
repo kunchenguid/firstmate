@@ -140,9 +140,7 @@ fm_poll_derived_grace() {
 # never decided on: the attempt is discarded and retried boundedly.
 # FM_WATCHER_PIN_ATTEMPTS bounds torn-generation retries (default 10, a few
 # hundred milliseconds total: far above any structural publish gap, far below
-# any guard grace). FM_WATCHER_PIN_TORN counts discarded torn attempts in this
-# shell.
-: "${FM_WATCHER_PIN_TORN:=0}"
+# any guard grace).
 fm_watcher_pin_attempts() {
   local attempts=${FM_WATCHER_PIN_ATTEMPTS:-10}
   case "$attempts" in
@@ -201,9 +199,8 @@ fm_watcher_lock_read_pinned() {
   path=$(cat "$owner/watcher-path" 2>/dev/null || true)
   identity=$(cat "$owner/pid-identity" 2>/dev/null || true)
   link_after=$(readlink "$lockdir" 2>/dev/null || true)
-  [ "$link_after" = "$link" ] || { FM_WATCHER_PIN_TORN=$(( ${FM_WATCHER_PIN_TORN:-0} + 1 )); return 2; }
+  [ "$link_after" = "$link" ] || return 2
   if [ -z "$link" ] && { [ -L "$lockdir" ] || [ ! -d "$lockdir" ]; }; then
-    FM_WATCHER_PIN_TORN=$(( ${FM_WATCHER_PIN_TORN:-0} + 1 ))
     return 2
   fi
   pid_after=$(cat "$owner/pid" 2>/dev/null || true)
@@ -211,7 +208,6 @@ fm_watcher_lock_read_pinned() {
   path_after=$(cat "$owner/watcher-path" 2>/dev/null || true)
   identity_after=$(cat "$owner/pid-identity" 2>/dev/null || true)
   if [ "$pid_after" != "$pid" ] || [ "$home_after" != "$home" ] || [ "$path_after" != "$path" ] || [ "$identity_after" != "$identity" ]; then
-    FM_WATCHER_PIN_TORN=$(( ${FM_WATCHER_PIN_TORN:-0} + 1 ))
     return 2
   fi
   FM_WATCHER_PIN_PID=$pid
@@ -243,9 +239,50 @@ fm_watcher_lock_unheld() {
   return 1
 }
 
+# FM_WATCHER_HEALTH_REASON names which predicate failed the last guard
+# evaluation: ok, lock-absent, pid-missing, pid-dead, home-mismatch,
+# path-mismatch, identity-missing, identity-unreadable, identity-mismatch,
+# beacon-stale, or torn-generation (still flipping after every retry).
+# shellcheck disable=SC2034 # Read by guards and tests after fm_watcher_healthy returns.
+FM_WATCHER_HEALTH_REASON='unknown'
+
+# fm_watcher_pinned_lock_matches_pid <watch_path> <pid> <home>
+# The single owner of the lock-matching rule, evaluated against the owner
+# generation already pinned by fm_watcher_lock_read_pinned: the recorded home
+# and watcher path must equal the caller's, and the recorded identity must be
+# present and equal the live identity of <pid>. Names the failed predicate in
+# FM_WATCHER_HEALTH_REASON and, on success, exports the matched identity.
 FM_WATCHER_MATCHED_IDENTITY=
+fm_watcher_pinned_lock_matches_pid() {
+  local watch_path=$1 pid=$2 home=$3 current_identity
+  FM_WATCHER_MATCHED_IDENTITY=
+  if [ "$FM_WATCHER_PIN_HOME" != "$home" ]; then
+    FM_WATCHER_HEALTH_REASON='home-mismatch'
+    return 1
+  fi
+  if [ "$FM_WATCHER_PIN_PATH" != "$watch_path" ]; then
+    FM_WATCHER_HEALTH_REASON='path-mismatch'
+    return 1
+  fi
+  if [ -z "$FM_WATCHER_PIN_IDENTITY" ]; then
+    FM_WATCHER_HEALTH_REASON='identity-missing'
+    return 1
+  fi
+  current_identity=$(fm_pid_identity "$pid") || {
+    FM_WATCHER_HEALTH_REASON='identity-unreadable'
+    return 1
+  }
+  if [ "$current_identity" != "$FM_WATCHER_PIN_IDENTITY" ]; then
+    FM_WATCHER_HEALTH_REASON='identity-mismatch'
+    return 1
+  fi
+  # shellcheck disable=SC2034 # Output of the matching rule for external sourcers.
+  FM_WATCHER_MATCHED_IDENTITY=$FM_WATCHER_PIN_IDENTITY
+  return 0
+}
+
 fm_watcher_lock_matches_pid() {
-  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} attempts attempt rc current_identity
+  local state=$1 watch_path=$2 pid=$3 home=${4:-$FM_HOME} attempts attempt rc
   FM_WATCHER_MATCHED_IDENTITY=
   attempts=$(fm_watcher_pin_attempts)
   attempt=0
@@ -257,28 +294,16 @@ fm_watcher_lock_matches_pid() {
       continue
     fi
     [ "$rc" -eq 0 ] || return 1
-    [ "$FM_WATCHER_PIN_HOME" = "$home" ] || return 1
-    [ "$FM_WATCHER_PIN_PATH" = "$watch_path" ] || return 1
-    [ -n "$FM_WATCHER_PIN_IDENTITY" ] || return 1
-    current_identity=$(fm_pid_identity "$pid") || return 1
-    [ "$current_identity" = "$FM_WATCHER_PIN_IDENTITY" ] || return 1
-    # shellcheck disable=SC2034 # Output of fm_watcher_lock_matches_pid for external sourcers.
-    FM_WATCHER_MATCHED_IDENTITY=$FM_WATCHER_PIN_IDENTITY
-    return 0
+    fm_watcher_pinned_lock_matches_pid "$watch_path" "$pid" "$home"
+    return
   done
   return 1
 }
 
 FM_WATCHER_HEALTHY_PID=
 FM_WATCHER_HEALTHY_IDENTITY=
-# FM_WATCHER_HEALTH_REASON names which predicate failed the last guard
-# evaluation: ok, lock-absent, pid-missing, pid-dead, home-mismatch,
-# path-mismatch, identity-missing, identity-unreadable, identity-mismatch,
-# beacon-stale, or torn-generation (still flipping after every retry).
-# shellcheck disable=SC2034 # Read by guards and tests after fm_watcher_healthy returns.
-FM_WATCHER_HEALTH_REASON='unknown'
 fm_watcher_healthy() {
-  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} beat pid identity age attempts attempt absent_left rc current_identity
+  local state=$1 watch_path=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME} beat pid identity age attempts attempt absent_left rc
   FM_WATCHER_HEALTHY_PID=
   FM_WATCHER_HEALTHY_IDENTITY=
   FM_WATCHER_HEALTH_REASON='unknown'
@@ -310,27 +335,8 @@ fm_watcher_healthy() {
       FM_WATCHER_HEALTH_REASON='pid-dead'
       return 1
     fi
-    if [ "$FM_WATCHER_PIN_HOME" != "$home" ]; then
-      FM_WATCHER_HEALTH_REASON='home-mismatch'
-      return 1
-    fi
-    if [ "$FM_WATCHER_PIN_PATH" != "$watch_path" ]; then
-      FM_WATCHER_HEALTH_REASON='path-mismatch'
-      return 1
-    fi
-    if [ -z "$FM_WATCHER_PIN_IDENTITY" ]; then
-      FM_WATCHER_HEALTH_REASON='identity-missing'
-      return 1
-    fi
-    current_identity=$(fm_pid_identity "$pid") || {
-      FM_WATCHER_HEALTH_REASON='identity-unreadable'
-      return 1
-    }
-    if [ "$current_identity" != "$FM_WATCHER_PIN_IDENTITY" ]; then
-      FM_WATCHER_HEALTH_REASON='identity-mismatch'
-      return 1
-    fi
-    identity=$FM_WATCHER_PIN_IDENTITY
+    fm_watcher_pinned_lock_matches_pid "$watch_path" "$pid" "$home" || return 1
+    identity=$FM_WATCHER_MATCHED_IDENTITY
     age=$(fm_path_age "$beat")
     if ! [ "$age" -lt "$grace" ] 2>/dev/null; then
       FM_WATCHER_HEALTH_REASON='beacon-stale'
@@ -572,18 +578,12 @@ fm_afk_mode() {
 FM_WATCHER_VERDICT_OK=false
 # shellcheck disable=SC2034 # Read by callers after the function returns.
 FM_WATCHER_VERDICT_REASON=stale-beacon
-# FM_WATCHER_VERDICT_DETAIL carries the strict health predicate that failed
-# (FM_WATCHER_HEALTH_REASON) whenever the verdict consulted fm_watcher_healthy.
-# shellcheck disable=SC2034 # Read by callers after the function returns.
-FM_WATCHER_VERDICT_DETAIL='stale-beacon'
 fm_watcher_supervision_verdict() {
   local state=$1 watch=$2 grace=${3:-${FM_GUARD_GRACE:-300}} home=${4:-$FM_HOME}
   local root=${5:-$FM_ROOT}
   local beat age fresh=false model
   FM_WATCHER_VERDICT_OK=false
   FM_WATCHER_VERDICT_REASON=stale-beacon
-  FM_WATCHER_VERDICT_DETAIL='stale-beacon'
-  FM_WATCHER_HEALTH_REASON='unknown'
   beat="$state/.last-watcher-beat"
   age=$(fm_path_age "$beat")
   case "$age" in
@@ -600,8 +600,6 @@ fm_watcher_supervision_verdict() {
   if fm_watcher_healthy "$state" "$watch" "$grace" "$home"; then
     # shellcheck disable=SC2034 # Read by callers after the function returns.
     FM_WATCHER_VERDICT_OK=true
-    # shellcheck disable=SC2034 # Read by callers after the function returns.
-    FM_WATCHER_VERDICT_DETAIL='ok'
   elif [ "$fresh" = true ]; then
     if [ "$model" = extension ] && fm_watcher_lock_unheld "$state" \
       && fm_extension_owns_supervision "$state" "$root"; then
@@ -610,12 +608,7 @@ fm_watcher_supervision_verdict() {
     else
       # shellcheck disable=SC2034 # Read by callers after the function returns.
       FM_WATCHER_VERDICT_REASON=no-watcher
-      # shellcheck disable=SC2034 # Read by callers after the function returns.
-      FM_WATCHER_VERDICT_DETAIL=$FM_WATCHER_HEALTH_REASON
     fi
-  elif [ "$FM_WATCHER_HEALTH_REASON" != 'unknown' ]; then
-    # shellcheck disable=SC2034 # Read by callers after the function returns.
-    FM_WATCHER_VERDICT_DETAIL=$FM_WATCHER_HEALTH_REASON
   fi
   return 0
 }
@@ -665,11 +658,14 @@ fm_lock_owner_dir() {
 
 # Staged owner metadata for atomic lock publication.
 # A publisher that must publish a COMPLETE owner directory (bin/fm-watch.sh's
-# watch lock: pid, fm-home, watcher-path, pid-identity) sets FM_LOCK_OWNER_*
-# before acquiring: every non-empty value is written into the owner directory
-# and verified BEFORE the lock symlink is published, so a concurrent guard
-# reader never observes a published lock with missing owner files. Empty values
-# are skipped, so every other lock using this primitive is unaffected.
+# watch lock: pid, fm-home, watcher-path, pid-identity) sets FM_LOCK_OWNER_FOR
+# to that lock's path plus FM_LOCK_OWNER_* before acquiring: every non-empty
+# value is written into the owner directory and verified BEFORE the lock
+# symlink is published, so a concurrent guard reader never observes a published
+# lock with missing owner files. Staging applies only to the lock whose path
+# equals FM_LOCK_OWNER_FOR, so the steal and recovery-marker locks acquired
+# inside that same acquisition, and every other lock using this primitive,
+# publish bare owner directories as before.
 fm_lock_stage_owner_file() {
   local ownerdir=$1 name=$2 value=$3 back
   [ -n "$value" ] || return 0
@@ -679,11 +675,12 @@ fm_lock_stage_owner_file() {
 }
 
 fm_lock_prepare_owner() {
-  local ownerdir=$1 mypid back
+  local ownerdir=$1 lockdir=${2:-} mypid back
   fm_current_pid mypid || return 1
   printf '%s\n' "$mypid" > "$ownerdir/pid" 2>/dev/null || return 1
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   [ "$back" = "$mypid" ] || return 1
+  [ -n "$lockdir" ] && [ "$lockdir" = "${FM_LOCK_OWNER_FOR:-}" ] || return 0
   fm_lock_stage_owner_file "$ownerdir" fm-home "${FM_LOCK_OWNER_FM_HOME:-}" || return 1
   fm_lock_stage_owner_file "$ownerdir" watcher-path "${FM_LOCK_OWNER_WATCHER_PATH:-}" || return 1
   fm_lock_stage_owner_file "$ownerdir" pid-identity "${FM_LOCK_OWNER_PID_IDENTITY:-}" || return 1
@@ -730,15 +727,18 @@ fm_lock_claim_blocked_by_steal() {
   return 0
 }
 
+# The owner directory was fully staged by fm_lock_prepare_owner before the
+# symlink was published, so the claim only VERIFIES the recorded pid: a
+# truncate-then-rewrite here would reopen a torn-read window on a lock that
+# concurrent guard readers can already see.
 fm_lock_claim() {
   local lockdir=$1 ownerdir=$2 allowed_steal_owner=${3:-} mypid back
   fm_current_pid mypid || return 1
-  if ! { printf '%s\n' "$mypid" > "$ownerdir/pid"; } 2>/dev/null; then
-    fm_lock_discard_owner "$ownerdir"
-    return 1
-  fi
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   if [ "$back" != "$mypid" ]; then
+    if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+      rm -f "$lockdir" 2>/dev/null || true
+    fi
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
@@ -764,7 +764,7 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ! fm_lock_prepare_owner "$ownerdir"; then
+  if ! fm_lock_prepare_owner "$ownerdir" "$lockdir"; then
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
