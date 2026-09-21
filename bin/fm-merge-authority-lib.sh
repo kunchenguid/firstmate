@@ -53,7 +53,7 @@ FM_MERGE_AUTHORITY_REASON=
 FM_MERGE_AUTHORITY_RECORD_IDENTITY=
 
 fm_merge_authority_resolve() {  # <home> <state> <meta> <task-id>
-  local home=${1-} state=${2-} meta=${3-} id=${4-}
+  local home=${1-} state=${2-} meta=${3-} id=${4-} yolo=
   FM_MERGE_AUTHORITY=
   FM_MERGE_AUTHORITY_REASON='invalid'
   [ -n "$home" ] && [ -n "$state" ] && [ -n "$meta" ] && [ -n "$id" ] || return 1
