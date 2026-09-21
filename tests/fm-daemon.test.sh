@@ -1245,6 +1245,105 @@ test_housekeeping_pause_marker_transitions_to_clear() {
   pass "housekeeping clears tracking when a crew leaves pause"
 }
 
+test_daemon_rechecks_live_run_step_health() {
+  local dir state win pane marker result round reason
+  dir=$(make_supercase live-run-step-health); state="$dir/state"
+  win=sess:fm-health; pane="$dir/pane.txt"; marker="$state/.subsuper-stale-health"
+  fm_write_meta "$state/health.meta" "window=$win" 'backend=tmux' 'harness=codex' 'kind=ship'
+  printf 'working: validating\n' > "$state/health.status"
+  printf 'unchanged Codex pane\n' > "$pane"
+  make_fake_crew_state "$dir/fakebin" >/dev/null
+  (
+    export PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" LOG="$dir/daemon.log"
+    export FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_ESCALATE_BATCH_SECS=999999
+    export FM_STALE_ESCALATE_SECS=240 FM_MAX_DEFER_SECS=999999
+    stale_window_is_busy "$win" "$state" && fail "the Codex fixture unexpectedly has semantic busy proof"
+    for result in idle finished unknown unreadable; do
+      export FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh"
+      export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+      : > "$state/.subsuper-escalations"
+      handle_wake "stale: $win" "$state"
+      for round in 1 2; do
+        printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
+        housekeeping "$state"
+        [ ! -s "$state/.subsuper-escalations" ] || fail "$result: live Codex run escalated at threshold $round"
+        [ "$(cat "$marker")" -gt "$(( $(date +%s) - 240 ))" ] \
+          || fail "$result: live Codex run did not restart the existing stale timer"
+      done
+      reason="stale: $win (idle 500s, possible wedge, escalation 3, demand-deep-inspection: inspect)"
+      handle_wake "$reason" "$state"
+      [ ! -s "$state/.subsuper-escalations" ] || fail "$result: an enriched wake overrode current live run-step proof"
+      case "$result" in
+        idle) FM_FAKE_CREW_STATE='state: idle · source: pane · prompt ready' ;;
+        finished) FM_FAKE_CREW_STATE='state: done · source: run-step · run passed' ;;
+        unknown) FM_FAKE_CREW_STATE='state: unknown · source: none · unavailable' ;;
+        unreadable) FM_CREW_STATE_BIN="$dir/missing-reader" ;;
+      esac
+      printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
+      housekeeping "$state"
+      grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null \
+        || fail "$result: losing live proof did not restore the daemon wedge alert"
+      [ ! -e "$marker" ] || fail "$result: the delivered wedge alert retained its stale timer"
+      : > "$state/.subsuper-escalations"
+      handle_wake "$reason" "$state"
+      grep -F 'possible wedge, escalation 3' "$state/.subsuper-escalations" >/dev/null \
+        || fail "$result: an enriched wedge stayed suppressed without live proof"
+    done
+  ) || fail "daemon live run-step health regression failed"
+  pass "daemon thresholds and enriched wakes re-read live Codex run evidence and escalate once it disappears"
+}
+
+test_daemon_delivered_pr_health_keeps_wait_cadence() {
+  local dir state win pane marker throttle reason
+  dir=$(make_supercase delivered-pr-health); state="$dir/state"
+  win=sess:fm-held-merge; pane="$dir/pane.txt"; marker="$state/.subsuper-stale-held-merge"
+  throttle="$state/.paused-resurfaced-sess_fm-held-merge"
+  fm_write_meta "$state/held-merge.meta" "window=$win" 'backend=tmux' 'harness=codex' 'kind=ship'
+  printf 'done: PR https://github.com/example/repo/pull/7 checks green\n' > "$state/held-merge.status"
+  printf 'unchanged Codex pane\n' > "$pane"
+  make_fake_crew_state "$dir/fakebin" >/dev/null
+  arm_delivered_pr "$dir" || fail "could not arm the daemon delivery fixture"
+  (
+    export PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" LOG="$dir/daemon.log"
+    export FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_ESCALATE_BATCH_SECS=999999
+    export FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=3600 FM_MAX_DEFER_SECS=999999
+    export FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh"
+    export FM_FAKE_CREW_STATE='state: working · source: run-step · CI rerun'
+    seen_through "$state" held-merge
+    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
+    housekeeping "$state"
+    [ ! -s "$state/.subsuper-escalations" ] || fail "the delivery's CI rerun raised an alert"
+    FM_FAKE_CREW_STATE='state: done · source: run-step · checks passed'
+    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
+    housekeeping "$state"
+    grep -F 'delivered pull request awaiting maintainer' "$state/.subsuper-escalations" >/dev/null \
+      || fail "green CI on an existing daemon timer did not enter the delivery wait cadence"
+    grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null && fail "the daemon labeled a delivery wait as a wedge"
+    : > "$state/.subsuper-escalations"
+    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
+    housekeeping "$state"
+    reason="stale: $win (idle 500s, possible wedge, escalation 3, demand-deep-inspection: inspect)"
+    handle_wake "$reason" "$state"
+    [ ! -s "$state/.subsuper-escalations" ] || fail "a healthy delivery repeated its alert inside the wait cadence"
+    [ -e "$marker" ] || fail "the absorbed delivery lost its evidence recheck timer"
+    touch -t 200001010000 "$throttle"
+    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
+    housekeeping "$state"
+    [ "$(wc -l < "$state/.subsuper-escalations" | tr -d '[:space:]')" -eq 1 ] \
+      || fail "a due daemon delivery recheck did not surface once"
+    grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null && fail "a due delivery recheck was labeled a wedge"
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_poll_merge_mark_notified "$state" held-merge github github.com example/repo 7 \
+      || fail "could not record the fixture's merge notification"
+    : > "$state/.subsuper-escalations"
+    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
+    housekeeping "$state"
+    grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null \
+      || fail "a reported merge kept suppressing the daemon wedge timer"
+  ) || fail "daemon delivered-PR health regression failed"
+  pass "daemon delivery evidence bounds rechecks across green CI and expires after a reported merge"
+}
+
 test_housekeeping_persistent_stale_escalates() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-persistent)
@@ -2781,6 +2880,11 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -2802,6 +2906,8 @@ test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
+test_daemon_rechecks_live_run_step_health
+test_daemon_delivered_pr_health_keeps_wait_cadence
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets

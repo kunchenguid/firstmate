@@ -493,6 +493,25 @@ stale_marker_remove() {  # <window> <state>
   rm -f "$state/.subsuper-stale-$key"
 }
 
+stale_health_absorb() {
+  local win=$1 state=$2 task evidence throttle
+  task=$(window_to_task "$win" "$state")
+  evidence=$(crew_readable_health "$task" "$state") || return 1
+  case "$evidence" in
+    delivered-pr:*)
+      throttle="$state/.paused-resurfaced-$(_stale_key "$win")"
+      if [ "$(cat "$throttle" 2>/dev/null || true)" != "$evidence" ] \
+        || [ "$(_file_age "$throttle")" -ge "${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}" ]; then
+        escalate_add "$state" "delivered pull request awaiting maintainer, rechecked on a long cadence; confirm the review still holds: $win" \
+          || return 0
+        printf '%s' "$evidence" > "$throttle" || return 0
+      fi
+      ;;
+  esac
+  _now > "$state/.subsuper-stale-$(_stale_key "$task")"
+  return 0
+}
+
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared wait (a
 # paused: external wait or a verified captain-held transfer) was first observed
 # declared, whether its pane read idle or busy. Housekeeping ages it against
@@ -1012,7 +1031,8 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
-#     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
+#     re-read shared health evidence, then re-peek the pane; unexplained idle
+#     escalates as a wedge, while a delivered PR takes the bounded wait cadence.
 #  2b) pause re-surface: for each declared-wait marker past PAUSE_RESURFACE_SECS,
 #     re-peek; gone -> clear; still declaring the wait, on an idle OR a busy pane
 #     -> escalate a recheck digest naming which human the wait is on, and reset
@@ -1073,6 +1093,7 @@ housekeeping() {  # <state>
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
+    stale_health_absorb "$win" "$state" && continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
@@ -1384,8 +1405,9 @@ handle_wake() {  # <reason> <state>
               fi
               # An enriched wedge reason carries the watcher's own escalation count
               # and its "do not re-absorb on the run-step/pane state alone" demand,
-              # so it outranks this daemon's cheaper status-log absorption - EXCEPT
-              # under a current declared wait. A `pause` verdict is not run-step or
+              # so it outranks this daemon's cheaper status-log absorption unless
+              # shared health evidence or a current declared wait accounts for it.
+              # A `pause` verdict is not run-step or
               # pane state at all: it is the crew's own declaration that this pane
               # waits by design, which is the one question the wedge timer cannot
               # answer for itself. Overriding it escalated healthy declared waits
@@ -1397,8 +1419,13 @@ handle_wake() {  # <reason> <state>
                 *) case "$stale_detail" in
                      idle\ *s,\ possible\ wedge,\ escalation\ *)
                        last=$(last_status_line "$state/$task.status")
-                       status_is_paused_or_captain_held "$last" \
-                         || decision="escalate|${reason#stale: }"
+                       if ! status_is_paused_or_captain_held "$last"; then
+                         if stale_health_absorb "$arg" "$state"; then
+                           [ "${decision%%|*}" = escalate ] || decision="healthy|readable health evidence: $arg"
+                         else
+                           decision="escalate|${reason#stale: }"
+                         fi
+                       fi
                        ;;
                    esac ;;
               esac ;;
@@ -1415,6 +1442,9 @@ handle_wake() {  # <reason> <state>
     reconcile_pause_tracking "$arg" "$state" "$last"
   fi
   case "$action" in
+    healthy)
+      log "self-handle (healthy): $reason -> $distilled"
+      ;;
     escalate)
       log "escalate: $reason -> $distilled"
       if escalate_add "$state" "$distilled"; then
@@ -1470,7 +1500,7 @@ handle_wake() {  # <reason> <state>
       log "self-handle: $reason -> $distilled"
       ;;
   esac
-  if [ "$action" = self ] && { [ "$kind" = signal ] || [ "$kind" = stale ]; }; then
+  if { [ "$action" = self ] || [ "$action" = healthy ]; } && { [ "$kind" = signal ] || [ "$kind" = stale ]; }; then
     mark_escalated_seen "$state" "$capture" || classification_failed=1
   fi
   rm -f "$capture"

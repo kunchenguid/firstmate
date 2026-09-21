@@ -3777,18 +3777,6 @@ test_stale_churn_without_a_captain_call_still_alarms() {
 # record of that wait: the first sight still alarms, churn inside the window is
 # absorbed, and the window re-surfaces it. A later blocker on the same armed
 # delivery keeps alarming on every hash, while a live run-step stays absorbed.
-arm_delivered_pr() {  # <dir>
-  local dir=$1
-  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/fakebin/gh"
-  chmod +x "$dir/fakebin/gh"
-  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" \
-    "$ROOT/bin/fm-pr-check.sh" held-merge https://github.com/example/repo/pull/7 >/dev/null 2>&1 \
-    || return 1
-  # Arming also registers the contributions observer, whose first poll would
-  # wake on this unreachable example pull request; it is not the record under test.
-  [ ! -e "$dir/state/contributions.check.sh" ] \
-    || FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" "$ROOT/bin/fm-check-unregister.sh" contributions >/dev/null
-}
 
 test_delivered_pr_awaiting_maintainer_bounds_stale_churn() {
   local dir state out capture throttle wakes key pane_hash pid
@@ -3857,7 +3845,48 @@ test_delivered_pr_awaiting_maintainer_bounds_stale_churn() {
   [ ! -e "$state/.wedge-escalations-$key" ] || fail "a live run-step on an armed delivery counted an escalation"
   [ "$(cat "$state/.stale-since-$key")" -gt "$(( $(date +%s) - 240 ))" ] \
     || fail "the armed delivery's live run-step was never rechecked at the threshold"
-  pass "a delivery awaiting its maintainer bounds pane churn, surfaces blockers, and absorbs a live run-step"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the live delivery watcher stop"
+
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  FM_TEST_STALE_ESCALATE=240 FM_HOME="$dir" wedge_threshold_round \
+    "$state" "$dir/fakebin" "$out" "$capture" test:fm-held-merge \
+    'state: done · source: run-step · checks passed' exit \
+    || fail "a completed CI rerun did not enter the delivered-PR recheck cadence"
+  grep -F 'delivered pull request awaiting maintainer' "$out" >/dev/null \
+    || fail "the existing timer did not recognize the delivered-PR wait: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null && fail "green CI on the same pane was wedge-escalated"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "the delivery recheck advanced the wedge count"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the delivery recheck"
+
+  : > "$out"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  FM_TEST_STALE_ESCALATE=240 FM_HOME="$dir" wedge_threshold_round \
+    "$state" "$dir/fakebin" "$out" "$capture" test:fm-held-merge \
+    'state: done · source: run-step · checks passed' absorb \
+    || fail "a delivery rechecked again inside its wait cadence"
+  [ ! -s "$out" ] || fail "a healthy delivery printed a repeated recheck: $(cat "$out")"
+  [ "$(hold_stale_wakes "$state")" -eq 0 ] || fail "a healthy delivery queued a repeated recheck"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the absorbed delivery watcher stop"
+
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  FM_TEST_STALE_ESCALATE=240 FM_HOME="$dir" wedge_threshold_round \
+    "$state" "$dir/fakebin" "$out" "$capture" test:fm-held-merge \
+    'state: done · source: run-step · checks passed' exit \
+    || fail "an existing delivery timer did not resurface after its wait cadence"
+  grep -F 'possible wedge' "$out" >/dev/null && fail "a due delivery recheck was labeled a wedge"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the due delivery recheck"
+
+  rm "$state/held-merge.pr-poll-registration"
+  : > "$out"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  FM_TEST_STALE_ESCALATE=240 FM_HOME="$dir" wedge_threshold_round \
+    "$state" "$dir/fakebin" "$out" "$capture" test:fm-held-merge \
+    'state: done · source: run-step · checks passed' exit \
+    || fail "an unauthenticated merge watch kept suppressing the existing wedge timer"
+  grep -F 'possible wedge, escalation 1' "$out" >/dev/null \
+    || fail "loss of the authenticated merge watch did not restore escalation: $(cat "$out")"
+  pass "a delivered PR bounds new and existing timers through a CI rerun, and loss of its watch restores escalation"
 }
 
 

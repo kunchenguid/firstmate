@@ -32,8 +32,8 @@
 #                          human the wait is on. Only when neither absorb class
 #                          applies does the log's latest recognized status event decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
-#                          both surfaced at once. At each wedge threshold, a
-#                          current working run-step verdict restarts the timer;
+#                          both surfaced at once. At each wedge threshold,
+#                          readable health evidence restarts the timer;
 #                          without that proof a stale can surface with an "escalation N"
 #                          count in the reason; at FM_WEDGE_DEMAND_INSPECT_COUNT
 #                          consecutive escalations on the SAME pane, the reason
@@ -1231,7 +1231,7 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
-# rechecks current run-step evidence once STALE_ESCALATE_SECS have elapsed.
+# rechecks shared health evidence once STALE_ESCALATE_SECS have elapsed.
 # Shared by both places a hash can be absorbed this way: the plain non-terminal path, and the
 # stale_is_terminal-overridden path (a captain-relevant status-log line that an
 # active run/busy pane outranked).
@@ -1248,7 +1248,7 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # already own on their existing bounded cadences and only a pane that would
 # otherwise alarm pays for a backend read.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
-  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
+  local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence key
   since=$(cat "$since_file" 2>/dev/null || true)
   case "$since" in
     ''|*[!0-9]*)
@@ -1265,15 +1265,19 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
            wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
           return 0
         fi
-        if [ -n "$task" ] && evidence=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null); then
+        if evidence=$(crew_readable_health "$task" "$STATE"); then
+          key=$(window_key "$win")
+          clear_write_tracking "$key"
+          date +%s > "$since_file"
           case "$evidence" in
-            'state: working · source: run-step · '*)
-              clear_write_tracking "$(window_key "$win")"
-              date +%s > "$since_file"
-              triage_log "absorbed $label (current run-step is working, idle ${age}s): $win"
-              return 0
+            delivered-pr:*)
+              resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" 0 \
+                "stale: $win (delivered pull request awaiting maintainer, rechecked on a long cadence; confirm the review still holds)" \
+                "$evidence" 0
               ;;
           esac
+          triage_log "absorbed $label (readable health evidence, idle ${age}s): $win"
+          return 0
         fi
         if crew_worktree_written_since "$task" "$STATE" "$since_file"; then
           wedge_defer_writing "$win" "$since_file" "$label" "$age"
@@ -1657,16 +1661,9 @@ captain_call_stale_bound() {  # <window-key> <task>
 # starts its own window and its first sight still alarms.
 # Sets STALE_WAIT_DECLARATION and returns as captain_call_stale_bound does.
 delivered_pr_stale_bound() {  # <window-key> <task>
-  local key=$1 task=$2 pr
+  local key=$1 task=$2
   STALE_WAIT_DECLARATION=
-  [ -n "$task" ] || return 1
-  [ "$(status_line_verb "$(last_status_line "$STATE/$task.status")")" = "done" ] || return 1
-  pr=$(fm_pr_poll_artifacts_valid "$STATE" "$task" "$SCRIPT_DIR/fm-pr-poll.sh" \
-    && ! fm_pr_poll_merge_already_notified "$STATE" "$task" "$FM_PR_DATA_PROVIDER" \
-      "$FM_PR_DATA_HOST" "$FM_PR_DATA_PATH" "$FM_PR_DATA_NUMBER" \
-    && printf '%s' "$FM_PR_DATA_URL") || return 1
-  [ -n "$pr" ] || return 1
-  STALE_WAIT_DECLARATION="delivered-pr:$pr:$(fm_wake_signal_sig "$STATE/$task.status" || true)"
+  STALE_WAIT_DECLARATION=$(crew_delivered_pr_wait "$task" "$STATE") || return 1
   stale_wait_throttled "$key" "$STALE_WAIT_DECLARATION"
 }
 
