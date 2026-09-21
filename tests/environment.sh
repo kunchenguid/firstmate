@@ -12,4 +12,13 @@ fm_test_sanitize_environment() {
     OPENROUTER_API_KEY_PRIVATE JEV_ROUTE JEV_MODEL JEV_URL JEV_BASE JEV_TIMEOUT \
     FM_JEV_DISPATCH_SHADOW FM_JEV_DISPATCH_EXTRA FM_JEV_DISPATCH_COMPACT \
     FM_WIKI_ENGINE FM_WIKI_CATALOG FM_MEMORY_DIR FM_OV_HOME
+  # The account's own chrome-devtools-axi bridges and process table are
+  # operational state, never a fixture: a fixture bootstrap run must not read
+  # the host's process table or reap its bridges as a side effect. Both hooks
+  # are inert values - an empty table and a state dir that cannot be a
+  # directory. A test that deliberately wants the real process table
+  # (tests/fm-browser-bridge-sweep.test.sh) unsets the table hook itself.
+  FM_BROWSER_BRIDGE_PROC_TABLE=/dev/null
+  FM_CHROME_AXI_STATE_DIR=/dev/null
+  export FM_BROWSER_BRIDGE_PROC_TABLE FM_CHROME_AXI_STATE_DIR
 }

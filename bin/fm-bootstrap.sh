@@ -22,6 +22,8 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "BROWSER_BRIDGES: <what the orphaned chrome-devtools-axi
+#                 bridge sweep reaped, reported, or refused>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
@@ -101,18 +103,33 @@
 #          The `code-root <file>` variant is a detect-only local check that runs
 #          even in a read-only session; detect_code_root_backlog_fork owns what
 #          it reports.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
+#          The browser bridge sweep (bin/fm-browser-bridge-sweep-lib.sh) reaps
+#          chrome-devtools-axi bridge trees whose owning task is proven dead -
+#          the bridge is detached and has no parent-liveness check, so a task
+#          that ends without a signal leaves bridge, mcp, and Chrome running.
+#          Every reap names the process group, age, and profile dir first, and
+#          the tree's --user-data-dir profile directories are removed only under
+#          the sweep library's removable rules; anything else is reported and
+#          left. A bridge with a live owner, an unproven owner, or no
+#          firstmate attribution is never touched, and
+#          stale bridge pid files are removed once their recorded pid is dead
+#          or reused. Its detect-only mode reports the same findings without
+#          reaping.
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the eight MUTATING sweeps
 #          (backlog_record_reconcile, secondmate_sync,
 #          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
-#          fleet_sync, fm_watch_orphan_state_sweep) while still
+#          fm_browser_bridge_sweep, fleet_sync,
+#          fm_watch_orphan_state_sweep) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
-#          checkout command. Used by
+#          checkout command, and the browser bridge sweep still runs its
+#          read-only detection and reports what it found. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
 #          secondmate homes, pending handoff outboxes and receiver wakes,
-#          X-mode artifacts, project clones, or repair instructions.
-#          Unset/0 (the default) runs all seven sweeps - this flag is purely
+#          X-mode artifacts, project clones, orphaned bridge trees, or repair
+#          instructions.
+#          Unset/0 (the default) runs all eight sweeps - this flag is purely
 #          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
@@ -125,8 +142,8 @@
 #                 secondmate_handoff_resume, and fleet_sync.
 #            only - ONLY those network steps and nothing else. No tool detection,
 #                 no version floors, no tangle check, no backlog
-#                 reconciliation, no x_mode_setup: those already ran on the
-#                 local pass.
+#                 reconciliation, no x_mode_setup, no browser bridge sweep:
+#                 those already ran on the local pass.
 #          FM_BOOTSTRAP_DETECT_ONLY composes with it unchanged, so `only` plus
 #          detect-only is the read-only `gh auth status` probe on its own.
 #          bin/fm-startup-network.sh owns the deferral: it runs the `only` phase
@@ -200,6 +217,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-remote-readiness-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
+# shellcheck source=bin/fm-browser-bridge-sweep-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-browser-bridge-sweep-lib.sh"
 # fm-timing-lib.sh is inert unless FM_TIMING_LOG names a file, which only the
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
@@ -1673,6 +1692,11 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
+  # The browser bridge sweep is local-only: it reads this account's process
+  # table, reaps chrome-devtools-axi bridge trees whose owning task is proven
+  # dead, and removes their browser profile dirs. Lock-gated like every
+  # mutating sweep; read-only session starts only report what it found.
+  local_phase && fm_browser_bridge_sweep mutate "$STATE" "$DATA/secondmates.md"
   # Adopt existing durable contribution links without making a network call.
   # Detection-only startup must never publish a check registration.
   if local_phase && command -v jq >/dev/null 2>&1 \
@@ -1685,6 +1709,10 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     cat "$fleet_sync_out"
     rm -f "$fleet_sync_out"
   fi
+else
+  # Read-only session: the browser bridge sweep still runs its detection and
+  # reports orphans and stale pid files, but reaps and removes nothing.
+  local_phase && fm_browser_bridge_sweep report "$STATE" "$DATA/secondmates.md"
 fi
 local_phase && secondmate_handoff_detect
 exit 0
