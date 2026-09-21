@@ -10,7 +10,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 |---|---|
 | Binary | Absolute `agy` from `PATH`, refused if absent; a Go-compiled single binary, so the live process name is exactly `agy` with `argv[0]=agy`. |
 | Launch | `agy --prompt-interactive "<brief>" --model <id> --effort <level> --dangerously-skip-permissions`, with the resolved absolute binary; the brief auto-submits with no extra Enter. The spawn pre-registers the worktree in agy's trust store first, then waits for a busy turn (answering the folder-trust dialog if it renders anyway) before reporting success. |
-| Busy state | No hook or plugin writer, so nothing is armed and no record is seeded; on Herdr native `working` classifies busy, while exact raw `idle` from a process-verified live agent maps to `idle herdr-native` and allows status-log fallback; everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
+| Busy state | No hook or plugin writer, so nothing is armed and no record is seeded; on Herdr native `working` classifies busy, while exact raw `idle` from an identity-matched, process-verified live agy agent maps to `idle herdr-native` and allows status-log fallback; everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
 | Rendered tail | Busy status row carries `esc to cancel` on the left; the idle row shows `? for shortcuts` instead. The `Generating...` word beside the braille spinner is free-floating output and is not a signal. |
 | Turn end | No turn-end hook or notification touch exists; completion arrives through the worker status protocol and, on Herdr, the native return to `idle`. |
 | Exit | `/quit` or `/exit`, one or two Enters; on Herdr, `/exit` autocomplete popup is confirmed by retried Enter; the process exits. |
@@ -42,7 +42,7 @@ Antigravity CLI does not automatically exit upon task completion; it remains ope
 When running under Herdr, Herdr natively tracks the process execution state (`working` vs `idle`).
 While an AGY worker is actively generating text or executing tools, Herdr reports `working`, which `fm_busy_classify` evaluates as `busy herdr-native`.
 When the AGY worker finishes its task and appends `done: <summary>` to `state/<id>.status`, Herdr reports `idle`.
-`bin/fm-busy-lib.sh` accepts exact raw `idle` for `agy*` only after Herdr's process view proves the agent is still live, allowing `bin/fm-crew-state.sh` to fall through to the status log and report `state: done · source: status-log` without waiting for process exit. A stale registration over a shell-only pane remains unknown.
+`bin/fm-busy-lib.sh` accepts exact raw `idle` for `agy*` only after Herdr identifies the registered agent as `agy` and its process view proves that agent is still live, allowing `bin/fm-crew-state.sh` to fall through to the status log and report `state: done · source: status-log` without waiting for process exit. A stale registration over a shell-only pane remains unknown.
 For lifecycle control, `bin/fm-control.sh <id> exit` submits `/exit`.
 Typing `/exit` into AGY opens an interactive autocomplete dropdown menu that absorbs the first Enter keypress.
 `bin/fm-composer-lib.sh` classifies the composer containing `> /exit` or `/exit` as `pending` rather than `unknown`.

@@ -940,7 +940,7 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
     case "$harness" in
       agy*)
         if command -v fm_backend_agent_status_raw >/dev/null 2>&1; then
-          raw_native=$(fm_backend_agent_status_raw "$backend" "$target" 2>/dev/null || true)
+          raw_native=$(fm_backend_agent_status_raw "$backend" "$target" agy 2>/dev/null || true)
         fi
         if [ "$raw_native" = idle ]; then
           printf 'idle herdr-native'

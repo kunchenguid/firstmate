@@ -112,7 +112,7 @@ No busy phase without the status row was observed live; every captured mid-turn 
 `fm_busy_classify` reports `unknown agy-regex` when the token is absent, because a long turn can scroll the marker out of the captured tail.
 The signature is hardcoded with no environment override, so a stray variable can never change worker-state classification.
 Herdr's own registry agreed throughout: `agent get` reported `agent_status=working` mid-turn and exact `idle` after completion.
-On Herdr, native `working` carries busy and exact raw `idle` from a process-verified live agent permits the durable status-log completion fallback; stale registrations over shell-only panes, `blocked`, `done`, and unreadable states remain unknown so they cannot revive a stale `done:` event.
+On Herdr, native `working` carries busy and exact raw `idle` from an identity-matched, process-verified live agy agent permits the durable status-log completion fallback; foreign-agent or shell-only registrations, `blocked`, `done`, and unreadable states remain unknown so they cannot revive a stale `done:` event.
 
 ## Interrupt and exit
 
