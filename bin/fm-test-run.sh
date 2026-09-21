@@ -1448,6 +1448,9 @@ families_for_changed_path() {
     bin/fm-quota-choose.sh)
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       ;;
+    bin/fm-reviewer-choose.sh)
+      printf '%s\n' "__script__:fm-reviewer-choose.test.sh"
+      ;;
     bin/fm-dispatch-resolve.sh)
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
