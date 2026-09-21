@@ -1859,12 +1859,28 @@ test_projection_journal_v2_binds_and_advances_exact_endpoint() {
     printf "%s|%s\n" "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID"
   ' "$ROOT" "$state" "$home") || fail "version 2 projection journal binding failed"
   token=$(sed -n 's/^projection_id=//p' "$state/fm-hibit-r1.herdr-presentation")
-  [ "$(printf '%s\n' "$out" | sed -n '1p')" = "2|$home_real|w2|w2:t2|w2:p2|w1|└ hibit-r1 · p:$token" ] \
+  [ "$(printf '%s\n' "$out" | sed -n '1p')" = "2|$home_real|w2|w2:t2|w2:p2|w1|└ hibit-r1" ] \
     || fail "version 2 projection journal did not retain exact home/endpoint/parent binding: $out"
   [ "$(printf '%s\n' "$out" | sed -n '2p')" = "w2:t3|w2:p3" ] \
     || fail "version 2 projection journal did not advance the exact replacement endpoint: $out"
   [ "$(wc -l < "$state/fm-hibit-r1.herdr-presentation" | tr -d '[:space:]')" = 12 ] \
     || fail "version 2 projection journal must have exactly 12 fields"
+  cat > "$state/legacy-v2.herdr-presentation" <<EOF
+version=2
+task_id=fm-hibit-r1
+projection_id=$token
+home=$home_real
+session=lab-session
+workspace_id=w2
+tab_id=w2:t2
+pane_id=w2:p2
+parent_workspace_id=w1
+parent_label=firstmate
+workspace_label=└ hibit-r1 · p:$token
+task_label=fm-fm-hibit-r1
+EOF
+  bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_snapshot "$1" fm-hibit-r1' \
+    "$ROOT" "$state/legacy-v2.herdr-presentation" || fail "legacy version 2 journal snapshot failed"
   printf 'pane_id=duplicate\n' >> "$state/fm-hibit-r1.herdr-presentation"
   if bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_snapshot "$1" fm-hibit-r1' \
     "$ROOT" "$state/fm-hibit-r1.herdr-presentation"; then
@@ -1909,8 +1925,8 @@ test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   journal="$state/task-p2.herdr-presentation"
   token=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_token "$1" task-p2' "$ROOT" "$journal") \
     || fail "projection journal was not readable"
-  assert_contains "$(cat "$log")" $'workspace\x1fcreate\x1f--cwd\x1f/tmp/proj\x1f--label\x1f└ task-p2 · p:'"$token"$'\x1f--no-focus' \
-    "projection workspace create did not use the corner label, full token, and --no-focus"
+  assert_contains "$(cat "$log")" $'workspace\x1fcreate\x1f--cwd\x1f/tmp/proj\x1f--label\x1f└ task-p2\x1f--no-focus' \
+    "projection workspace create did not use the corner label and --no-focus"
   assert_contains "$(cat "$log")" $'tab\x1fcreate\x1f--workspace\x1fw9\x1f--cwd\x1f/tmp/proj\x1f--label\x1ffm-task-p2\x1f--no-focus' \
     "projection task tab did not target the exact new workspace"
   assert_contains "$(cat "$log")" $'pane\x1fclose\x1fw9:p1' \
@@ -2989,26 +3005,29 @@ test_projection_seeded_prune_refuses_active_tab() {
 }
 
 test_projection_label_builder_uses_corner_and_strips_owner_prefixes() {
-  local primary secondmate token
+  local primary secondmate legacy token
   token='AbCdEfGhIjKlMnOpQrStUv'
   [ "${#token}" -eq 22 ] || fail "fixture token must be 22 characters"
   primary=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label task-p2 '"$token" "$ROOT")
-  [ "$primary" = "└ task-p2 · p:$token" ] \
+  [ "$primary" = "└ task-p2" ] \
     || fail "primary child label was wrong: $primary"
   secondmate=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label secondmate-child-demo '"$token" "$ROOT")
-  [ "$secondmate" = "└ secondmate-child-demo · p:$token" ] \
+  [ "$secondmate" = "└ secondmate-child-demo" ] \
     || fail "secondmate child label was wrong: $secondmate"
   primary=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label firstmate/task-p2 '"$token" "$ROOT")
-  [ "$primary" = "└ task-p2 · p:$token" ] \
+  [ "$primary" = "└ task-p2" ] \
     || fail "firstmate/ owner prefix was not stripped: $primary"
   secondmate=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label 2ndmate-fmdev-f2/child '"$token" "$ROOT")
-  [ "$secondmate" = "└ child · p:$token" ] \
+  [ "$secondmate" = "└ child" ] \
     || fail "2ndmate owner prefix was not stripped: $secondmate"
   primary=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label fm-task-p2 '"$token" "$ROOT")
-  [ "$primary" = "└ task-p2 · p:$token" ] \
+  [ "$primary" = "└ task-p2" ] \
     || fail "presentation fm- owner prefix was not stripped: $primary"
+  legacy=$(bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_workspace_label_legacy task-p2 '"$token" "$ROOT")
+  [ "$legacy" = "└ task-p2 · p:$token" ] \
+    || fail "legacy child label was wrong: $legacy"
   case "$primary" in $'└ '*) ;; *) fail "label must start with U+2514 and one space" ;; esac
-  pass "herdr presentation labels: └ concise-task · p:<full-token> for primary and secondmate children"
+  pass "herdr presentation labels: └ concise-task for primary and secondmate children"
 }
 
 test_projection_order_moves_only_exact_new_workspace_and_preserves_relative_order() {
@@ -3407,7 +3426,7 @@ test_projection_reclaim_refusal_matrix_is_non_mutating() {
     printf "%s" "$token"
   ' "$ROOT" "$state" "$home_real") || fail "could not create reclaim refusal fixture"
   journal="$state/refusal-r1.herdr-presentation"
-  label="└ refusal-r1 · p:$token"
+  label="└ refusal-r1"
   mkdir -p "$state/legacy"
   bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_projection_journal_create "$1" refusal-r1 >/dev/null' \
     "$ROOT" "$state/legacy" || fail "could not create legacy reclaim fixture"
@@ -3473,7 +3492,7 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
     printf "%s" "$token"
   ' "$ROOT" "$state" "$home_real") || fail "could not create exact reclaim journal fixture"
   journal="$state/fm-hibit-r1.herdr-presentation"
-  label="└ hibit-r1 · p:$token"
+  label="└ hibit-r1"
   printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w0\",\"label\":\"firstmate\",\"focused\":false,\"active_tab_id\":\"w0:t1\"},{\"workspace_id\":\"w1\",\"label\":\"firstmate\",\"focused\":true,\"active_tab_id\":\"w1:t1\"},{\"workspace_id\":\"w2\",\"label\":\"$label\",\"focused\":false,\"active_tab_id\":\"w2:t2\"}]}}" > "$resp/1.out"
   printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","label":"fm-fm-hibit-r1"}]}}' > "$resp/2.out"
   printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/3.out"
@@ -3533,6 +3552,103 @@ test_projection_reclaim_replaces_only_exact_husk_and_advances_binding() {
   assert_not_contains "$calls" $'tab\x1ffocus' "focus-preserving reclaim changed an already-stable focus snapshot"
   assert_not_contains "$calls" $'\x1fw0' "reclaim touched the same-labeled sibling parent"
   pass "herdr presentation reclaim: exact agent-free husk survives duplicate parent labels while its sibling stays untouched"
+}
+
+test_projection_reclaim_replaces_exact_legacy_husk_and_advances_binding() {
+  local dir state home home_real log resp fb journal token label out calls
+  dir="$TMP_ROOT/projection-reclaim-legacy"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$dir/responses" "$state" "$home"
+  home_real=$(cd "$home" && pwd -P)
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" fm-hibit-legacy) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label_legacy fm-hibit-legacy "$token")
+    fm_backend_herdr_projection_journal_bind \
+      "$1/fm-hibit-legacy.herdr-presentation" fm-hibit-legacy "$2" fmtest \
+      w2 w2:t2 w2:p2 w1 firstmate "$label" fm-fm-hibit-legacy || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home_real") || fail "could not create legacy reclaim journal fixture"
+  journal="$state/fm-hibit-legacy.herdr-presentation"
+  label="└ hibit-legacy · p:$token"
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w0\",\"label\":\"firstmate\",\"focused\":false,\"active_tab_id\":\"w0:t1\"},{\"workspace_id\":\"w1\",\"label\":\"firstmate\",\"focused\":true,\"active_tab_id\":\"w1:t1\"},{\"workspace_id\":\"w2\",\"label\":\"$label\",\"focused\":false,\"active_tab_id\":\"w2:t2\"}]}}" > "$resp/1.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","label":"fm-fm-hibit-legacy"}]}}' > "$resp/2.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p2","tab_id":"w2:t2"}]}}' > "$resp/3.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/4.out"
+  printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/5.out"
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\",\"focused\":true,\"active_tab_id\":\"w1:t1\"},{\"workspace_id\":\"w2\",\"label\":\"$label\",\"focused\":false,\"active_tab_id\":\"w2:t2\"}]}}" > "$resp/6.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t1","focused":true}]}}' > "$resp/7.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t3"},"root_pane":{"pane_id":"w2:p3"}}}' > "$resp/8.out"
+  cp "$resp/6.out" "$resp/9.out"
+  cp "$resp/7.out" "$resp/10.out"
+  printf '%s\n' '{"result":{"tab":{"tab_id":"w2:t3","workspace_id":"w2"}}}' > "$resp/11.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p3","tab_id":"w2:t3","workspace_id":"w2"}}}' > "$resp/12.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/13.out"
+  printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/14.out"
+  cp "$resp/6.out" "$resp/15.out"
+  cp "$resp/7.out" "$resp/16.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2","tab_id":"w2:t2","workspace_id":"w2"}}}' > "$resp/17.out"
+  printf '%s\n' '{"result":{"pane":{"pane_id":"w2:p2"}}}' > "$resp/18.out"
+  printf '%s\n' '{"error":{"code":"agent_not_found"}}' > "$resp/19.out"
+  # The emptying-close plan sees the replacement tab alongside the old husk
+  # tab, so the husk close stays plain.
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","label":"fm-fm-hibit-legacy"},{"tab_id":"w2:t3","label":"fm-fm-hibit-legacy"}]}}' > "$resp/20.out"
+  : > "$resp/21.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/22.out"
+  cp "$resp/6.out" "$resp/23.out"
+  cp "$resp/7.out" "$resp/24.out"
+  printf '%s\n' '{"error":{"code":"pane_not_found"}}' > "$resp/25.out"
+  cp "$resp/1.out" "$resp/26.out"
+  printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t3","label":"fm-fm-hibit-legacy"}]}}' > "$resp/27.out"
+  printf '%s\n' '{"result":{"panes":[{"pane_id":"w2:p3","tab_id":"w2:t3"}]}}' > "$resp/28.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_reclaim_task \
+        fmtest "$1" fm-hibit-legacy "$2" w2 w2:t2 w2:p2 firstmate fm-fm-hibit-legacy /tmp/project || exit 1
+      printf "%s %s" "$FM_BACKEND_HERDR_PROJECTION_TAB_ID" "$FM_BACKEND_HERDR_PROJECTION_PANE_ID"
+    ' "$ROOT" "$journal" "$home") || fail "legacy agent-free projection reclaim failed"
+  [ "$out" = "w2:t3 w2:p3" ] || fail "legacy reclaim did not return exact replacement ids: $out"
+  [ "$(sed -n 's/^tab_id=//p' "$journal")" = w2:t3 ] \
+    && [ "$(sed -n 's/^pane_id=//p' "$journal")" = w2:p3 ] \
+    || fail "legacy reclaim did not advance the journal to the replacement endpoint"
+  pass "herdr presentation reclaim: exact legacy token-bearing husk is reclaimed and advances binding"
+}
+
+test_projection_reclaim_refuses_duplicate_ambiguous_label() {
+  local dir state home home_real log resp fb journal token label out rc calls
+  dir="$TMP_ROOT/projection-reclaim-dup"; state="$dir/state"; home="$dir/home"
+  mkdir -p "$dir/responses" "$state" "$home"
+  home_real=$(cd "$home" && pwd -P)
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  token=$(bash -c '
+    . "$0/bin/backends/herdr.sh"
+    token=$(fm_backend_herdr_projection_journal_create "$1" fm-hibit-dup) || exit 1
+    label=$(fm_backend_herdr_projection_workspace_label fm-hibit-dup)
+    fm_backend_herdr_projection_journal_bind \
+      "$1/fm-hibit-dup.herdr-presentation" fm-hibit-dup "$2" fmtest \
+      w2 w2:t2 w2:p2 w1 firstmate "$label" fm-fm-hibit-dup || exit 1
+    printf "%s" "$token"
+  ' "$ROOT" "$state" "$home_real") || fail "could not create duplicate reclaim fixture"
+  journal="$state/fm-hibit-dup.herdr-presentation"
+  label="└ hibit-dup"
+  # Both w2 and w3 carry the identical label "└ hibit-dup" - ambiguous!
+  printf '%s\n' "{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\",\"label\":\"firstmate\",\"focused\":true,\"active_tab_id\":\"w1:t1\"},{\"workspace_id\":\"w2\",\"label\":\"$label\",\"focused\":false,\"active_tab_id\":\"w2:t2\"},{\"workspace_id\":\"w3\",\"label\":\"$label\",\"focused\":false,\"active_tab_id\":\"w3:t1\"}]}}" > "$resp/1.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      fm_backend_herdr_projection_reclaim_task \
+        fmtest "$1" fm-hibit-dup "$2" w2 w2:t2 w2:p2 firstmate fm-fm-hibit-dup /tmp/project
+    ' "$ROOT" "$journal" "$home" 2>&1)
+  rc=$?
+  [ "$rc" -eq 2 ] || fail "duplicate-label reclaim should return 2 (flat fallback permitted), got: $rc"
+  assert_contains "$out" "ambiguous" "duplicate label did not report ambiguous warning: $out"
+  calls=$(cat "$log")
+  assert_not_contains "$calls" $'pane\x1fclose' "duplicate label reclaim must not close any pane"
+  assert_not_contains "$calls" $'tab\x1fcreate' "duplicate label reclaim must not create replacement tab"
+  pass "herdr presentation reclaim: duplicate ambiguous child labels refuse mutation and permit flat fallback"
 }
 
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk() {
@@ -5709,6 +5825,8 @@ test_presentation_session_lock_path_rejects_malformed_socket
 test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
 test_projection_reclaim_replaces_only_exact_husk_and_advances_binding
+test_projection_reclaim_replaces_exact_legacy_husk_and_advances_binding
+test_projection_reclaim_refuses_duplicate_ambiguous_label
 test_projection_recovery_is_read_only_and_refuses_live_duplicate_risk
 test_workspace_find_matches_only_this_homes_own_label
 test_list_live_scoped_to_this_homes_workspace_only

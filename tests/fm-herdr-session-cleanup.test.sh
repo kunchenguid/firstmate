@@ -269,6 +269,21 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching v2 cleanup kept the journal"
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching v2 cleanup did not close exactly once"
 pass "v2 cleanup requires and accepts the exact journal endpoint binding"
+
+reset_fixture
+printf '%s\n' '└ task' > "$FIXTURE_DIR/title"
+{
+  printf 'version=2\n'
+  printf 'task_id=%s\n' "$ID"
+  printf 'projection_id=%s\n' "$TOKEN"
+  printf 'home=%s\n' "$FM_HOME"
+  printf 'session=test\nworkspace_id=%s\ntab_id=%s\npane_id=%s\n' "$WS" "$TAB" "$PANE"
+  printf 'parent_workspace_id=w1\nparent_label=firstmate\nworkspace_label=└ %s\ntask_label=fm-%s\n' "$ID" "$ID"
+} > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "matching clean new-label v2 cleanup kept the journal"
+[ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "matching clean new-label v2 cleanup did not close exactly once"
+pass "v2 cleanup requires and accepts the exact journal endpoint binding with clean label"
 reset_fixture; : > "$FM_STATE_OVERRIDE/$ID.meta"; assert_preserved "current task metadata"
 reset_fixture; printf 'live\n' > "$FIXTURE_DIR/agent"; assert_preserved "registered agent"
 reset_fixture; printf 'unknown\n' > "$FIXTURE_DIR/agent"; assert_preserved "unknown agent"
