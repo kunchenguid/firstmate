@@ -1467,7 +1467,12 @@ To turn it on:
 
 The dashboard owns account creation, identity linking, bot installation, and token issuance; this document owns only what the local firstmate home does with the token once it is in `.env`.
 
-**Generated state and watcher cadence**
+### Optional reply persona overlays
+
+Relay replies use the default first-mate voice unless the effective home's local, gitignored `config/persona-soul.md` or `config/persona-user.md` file is non-empty.
+`config/persona-soul.md` can adjust public reply tone and phrasing, while `config/persona-user.md` supplies private background context for calibrating tone and relevance.
+These captain-edited overlays never override the public address rule, public-safety limits, or reply conciseness, and their contents are never quoted or leaked into a public reply.
+Absent or empty files have no effect, and neither file should be committed.
 
 The locked session-start bootstrap step turns the token into local generated state.
 It writes `state/x-watch.check.sh`, a byte-static identity shim for `bin/fm-x-poll.sh`, and `config/x-mode.env`, which exports `FM_CHECK_INTERVAL=30` for watcher processes in that home.

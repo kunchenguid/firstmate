@@ -135,6 +135,7 @@ Reply in firstmate's own voice - the crisp, lightly nautical first-mate persona 
 
 - Apply the address and optional-flavor rules in [`AGENTS.md`](../../../AGENTS.md#firstmate) to these captain-directed public replies, within the public-safety limits above.
 - **Be concise by default: aim for a single message, two at the very most.** A short, sharp answer beats a wall of text. Write tight on purpose - one or two sentences.
+- Apply the optional reply persona overlays documented in the [Relay configuration reference](../../../docs/configuration.md#optional-reply-persona-overlays).
 
 You do not hand-format threads or add "(1/n)" numbering yourself.
 Compose the reply as one piece of prose; if it is genuinely too long for one message, `bin/fm-x-reply.sh` automatically splits it into a platform-aware numbered thread on fenced-code, paragraph, line, and word boundaries.
