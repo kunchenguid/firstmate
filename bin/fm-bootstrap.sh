@@ -57,8 +57,9 @@
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
 #          A TREEHOUSE_LEASE line means an aborted spawn deliberately kept a
-#          pool slot leased (its task pane survived a refused close, or the
-#          return itself failed) and recorded it under
+#          pool slot leased (its task pane survived, its agent was already
+#          launched, it reused the task's own earlier lease, or the return
+#          itself failed) and recorded it under
 #          state/.treehouse-lease-retained/. Nothing reclaims it automatically:
 #          the pane may still hold an agent or unlanded work.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
@@ -1540,13 +1541,14 @@ detect_local_config() {
   detect_retained_treehouse_leases
 }
 
-# Retained Treehouse slots (bin/fm-wake-lib.sh owns the record). A spawn that
-# aborted while its task pane survived kept that slot leased on purpose, and no
-# task record exists for it, so nothing else will ever name it. `treehouse get`
-# never hands a leased slot out again and `prune` never removes one, so the
-# pool stays one slot smaller until a human reclaims it. Detect-only: the pane
-# may still hold an agent or its unlanded work, so nothing here releases,
-# probes, or removes anything - the line carries both steps instead.
+# Retained Treehouse slots (bin/fm-wake-lib.sh owns the record and why a slot
+# is kept). An aborted spawn that could not safely return its slot kept it
+# leased on purpose, and no task record exists for it, so nothing else will
+# ever name it. `treehouse get` never hands a leased slot out again and `prune`
+# never removes one, so the pool stays one slot smaller until a human reclaims
+# it. Detect-only: the pane may still hold an agent or its unlanded work, so
+# nothing here releases, probes, or removes anything - the line carries both
+# steps instead.
 detect_retained_treehouse_leases() {
   local marker task holder worktree reason
   [ -d "$STATE/.treehouse-lease-retained" ] || return 0

@@ -1350,10 +1350,11 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
 
 # Retained-lease record: a Treehouse pool slot this home left durably leased.
 #
-# A spawn that aborts while its task pane survives keeps the lease on purpose -
-# nothing may force-return a slot whose pane can still hold an agent or its
-# unlanded work - and so does an abort whose return itself failed. Neither case
-# published a task record, so teardown never runs for that id and no other
+# A spawn that aborts while its task pane survives, after its launch was
+# delivered, or after it reused the task's own earlier lease keeps the lease on
+# purpose - nothing may force-return a slot that can still hold an agent or its
+# unlanded work - and so does an abort whose return itself failed. No such case
+# leaves a task record, so teardown never runs for that id and no other
 # reader can name the slot afterwards; the stderr warning dies with the
 # terminal. This record is what outlives both: one file per retained slot,
 # naming the slot, its lease holder, the task, and why it was kept.
