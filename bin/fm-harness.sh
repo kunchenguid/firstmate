@@ -118,8 +118,6 @@ harness_marker() {
     echo omp
     return
   fi
-  # Firstmate-owned marker; ancestry still arbitrates foreign inherited markers.
-  [ "${FM_DEVIN_HARNESS:-}" = devin ] && { echo devin; return; }
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -135,7 +133,7 @@ harness_marker() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # codex, opencode, kimi, muse, and agy publish no harness-identity marker at all, so
+  # codex, opencode, kimi, muse, agy, and devin publish no harness-identity marker at all, so
   # they are never named here and are identified by ancestry alone. That is the
   # whole reason a foreign marker must not outrank ancestry: with markers winning
   # unconditionally, any retained CLAUDECODE would silently rename one of them.
@@ -466,10 +464,6 @@ resolve_secondmate() {
   local sm
   sm=$(secondmate_field 1)
   if [ -z "$sm" ] || [ "$sm" = "default" ]; then sm=$(resolve_crew); fi
-  if [ "$sm" = devin ]; then
-    echo "error: devin is a crewmate/scout adapter only; no primary or secondmate integration" >&2
-    return 1
-  fi
   echo "$sm"
 }
 

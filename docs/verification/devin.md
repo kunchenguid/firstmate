@@ -85,7 +85,7 @@ Native `-r <session-id>` accepted a new prompt and preserved the prior conversat
 
 ## Coverage and limits
 
-The portable regression drives ancestry and marker evidence independently, rejects unrelated process names, preserves drafts, checks both delivery signals independently, exercises config preservation and generation rejection, and verifies worker-only launch plus model and effort handling.
+The portable regression drives ancestry evidence, rejects unrelated process names, preserves drafts, checks both delivery signals independently, exercises config preservation and generation rejection, and verifies worker-only launch plus model and effort handling.
 The control-plane regression covers double-Escape delivery and conservative state invalidation.
 Rejected stale-generation events emit no turn-end notification.
 The live guard checks main-turn completion, doorbell acknowledgement, interruption, process liveness, exit, and native resume.

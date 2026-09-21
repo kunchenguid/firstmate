@@ -14,7 +14,7 @@ set -u
 . "$ROOT/bin/fm-agent-process-lib.sh"
 TMP_ROOT=$(fm_test_tmproot fm-devin-harness)
 HARNESS="$ROOT/bin/fm-harness.sh"
-unset CLAUDECODE PI_CODING_AGENT GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI FM_OMP_HARNESS FM_DEVIN_HARNESS ATLASSIAN_AGENT_TYPE ROVODEV_CLI
+unset CLAUDECODE PI_CODING_AGENT GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS GEMINI_CLI FM_OMP_HARNESS ATLASSIAN_AGENT_TYPE ROVODEV_CLI
 
 mkdir -p "$TMP_ROOT/names"
 for name in devin devin-helper; do ln -s /bin/bash "$TMP_ROOT/names/$name"; done
@@ -24,14 +24,9 @@ out=$(CLAUDECODE=1 "$TMP_ROOT/names/devin" -c '"$1"; :' _ "$HARNESS")
 # shellcheck disable=SC2016
 out=$("$TMP_ROOT/names/devin-helper" -c '"$1" ancestry "$$"; :' _ "$HARNESS")
 [ "$out" != 'comm devin' ] || fail "unrelated devin-helper claimed the adapter"
-# Blind ancestry independently to prove the Firstmate-owned marker path.
-fakebin=$(fm_fakebin "$TMP_ROOT/marker")
-fm_fake_blind_ancestry "$fakebin"
-out=$(PATH="$fakebin:$PATH" FM_DEVIN_HARNESS=devin CLAUDECODE=1 "$HARNESS")
-[ "$out" = devin ] || fail "launch marker must identify Devin without ancestry"
 [ "$(fm_agent_process_classify_name /opt/bin/devin)" = agent ] || fail "liveness lost Devin"
 [ "$(fm_agent_process_classify_name devin-helper)" = other ] || fail "liveness claims unrelated executable"
-pass "Devin native identity and independent marker; anchored liveness"
+pass "Devin native identity; anchored liveness"
 
 [ "$(fm_control_interrupt_key devin)" = Escape ] || fail 'wrong interrupt key'
 [ "$(fm_control_interrupt_repeat devin)" = 2 ] || fail 'Devin needs double Escape'
@@ -40,10 +35,6 @@ pass "Devin native identity and independent marker; anchored liveness"
 fm_control_harness_supports_kind devin ship || fail 'ship refused'
 fm_control_harness_supports_kind devin scout || fail 'scout refused'
 ! fm_control_harness_supports_kind devin secondmate || fail 'secondmate accepted'
-mkdir -p "$TMP_ROOT/config"
-printf 'devin\n' > "$TMP_ROOT/config/crew-harness"
-! FM_CONFIG_OVERRIDE="$TMP_ROOT/config" "$HARNESS" secondmate > "$TMP_ROOT/refusal" 2>&1 || fail 'secondmate fallback accepted Devin'
-assert_grep 'crewmate/scout adapter only' "$TMP_ROOT/refusal" 'secondmate refusal missing'
 pass "worker-only resolution and lifecycle capabilities"
 
 [ "$(fm_composer_classify_content 1 '❭ Ask Devin to build features, fix bugs, or work on your code' "$FM_COMPOSER_IDLE_RE_DEFAULT" sensitive '' 1 0)" = empty ] || fail 'idle placeholder not empty'
@@ -95,7 +86,6 @@ fm_test_spawn_brief "$home" devin-worker
 if ! out=$(FM_FAKE_LAUNCH_LOG="$case_dir/launch" fm_test_run_spawn "$home" "$wt" "$fakebin" devin-worker "$proj" --scout --harness devin --model fusion-claude-fable-5-1-high-sidekick-swe-2-medium --effort xhigh 2>&1)
 then fail "spawn failed: $out"; fi
 launch=$(cat "$case_dir/launch")
-assert_contains "$launch" 'FM_DEVIN_HARNESS=devin' 'launch marker missing'
 assert_contains "$launch" '--permission-mode dangerous --respect-workspace-trust false' 'autonomy/trust flags missing'
 assert_contains "$launch" "--config '$home/state/devin-worker.devin-config.json'" 'private config missing'
 assert_contains "$launch" "--model 'fusion-claude-fable-5-1-high-sidekick-swe-2-medium'" 'Fusion model lost'
