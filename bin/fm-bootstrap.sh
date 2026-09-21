@@ -1211,7 +1211,7 @@ crew_dispatch_validate() {
 # snapshot's classifier and bin/fm-secondmate-reconcile.sh's nudge stay as
 # backstops for what this cannot see. Never reads or writes another home.
 backlog_record_reconcile() {
-  local marker meta control_lock meta_lock id row label has_record=0 gate_status
+  local marker meta control_lock meta_lock id row label has_record=0 gate_status disposition
   # A fresh home with no state directory has no physical task records to pair.
   # Keep bootstrap diagnostics working without creating state just for a no-op.
   [ -e "$STATE" ] || [ -L "$STATE" ] || return 0
@@ -1265,6 +1265,17 @@ backlog_record_reconcile() {
           ;;
         answered)
           echo "BOOTSTRAP_INFO: finished the interrupted cleanup for $label; the captain had already answered its call"
+          ;;
+        retain_absent|retain_absent_incomplete)
+          if [ -n "$FM_BACKLOG_CLOSE_REPLAY_DELIVERABLE" ]; then
+            disposition="its recorded deliverable ($FM_BACKLOG_CLOSE_REPLAY_DELIVERABLE) should be reconciled with the captain"
+          else
+            disposition="it recorded no deliverable, so the call's disposition must be settled with the captain"
+          fi
+          if [ "$FM_BACKLOG_CLOSE_REPLAY_RESULT" = retain_absent_incomplete ]; then
+            disposition="its endpoint or local copy may also remain, and $disposition"
+          fi
+          echo "BACKLOG_RECONCILE: $label: the captain-held call could not be returned to Queued after an interrupted cleanup because its backlog row no longer exists; $disposition"
           ;;
       esac
     else
