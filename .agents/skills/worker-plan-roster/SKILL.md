@@ -15,12 +15,16 @@ This skill is the single owner of the worker roster presented immediately before
 
 ## Procedure
 
-1. Resolve every planned worker's concrete model and effort through the normal dispatch path before presenting the plan, so the roster states what will actually run rather than a placeholder.
-2. Make the roster the last section of the plan, directly above the approval request.
-3. List every planned worker, including coordinating, implementation, investigation, review, and validation roles, one row each.
-4. Give each row the worker's bounded task in a short phrase, its concrete model, and its effort.
-5. If a worker's model or effort is not yet resolved, say so in its row and resolve it before asking for approval rather than guessing.
-6. Launch nothing until the captain approves; a changed roster needs a fresh roster and fresh approval.
+1. Resolve every planned worker's launch-effective model and effort through the normal dispatch path and the selected harness reference before presenting the plan.
+2. Prefer an explicit model or effort value that the adapter will pass to the harness.
+3. When an axis must remain omitted, verify the exact harness default from its authoritative current discovery surface and write it as `default (<value>)`; an omitted value or an unsupported value recorded only in task metadata is not a concrete runtime value.
+4. If a requested effort will be recorded and omitted, show both the effective default and the metadata-only request in the effort cell.
+5. Do not ask for approval while either launch-effective value is unknown; select a dispatch whose values can be resolved or report the blocker.
+6. Make the roster the last section of the plan, directly above the approval request.
+7. List every planned worker, including coordinating, implementation, investigation, review, and validation roles, one row each.
+8. Give each row the worker's bounded task in a short phrase, its launch-effective model, and its launch-effective effort.
+9. Launch the approved roster with those exact values, and re-resolve any omitted-axis default immediately before launch.
+10. Launch nothing until the captain approves; a changed value or a default that can no longer be verified needs a fresh roster and fresh approval.
 
 ## Shape
 
