@@ -67,7 +67,7 @@ function runProcess(command, args, options = {}) {
       stderr += chunk.toString();
     });
     proc.on("error", (error) => resolve({ code: 127, stdout, stderr: String(error?.message ?? error) }));
-    proc.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
+    proc.on("close", (code, signal) => resolve({ code: signal ? 128 : code, signal, stdout, stderr }));
   });
 }
 
@@ -79,15 +79,24 @@ function effectivePaths(root) {
   return { root: fmRoot, home: fmHome, state, config };
 }
 
-async function isPrimaryRoot(root, home) {
+function revParse(root, flag) {
+  const result = spawnSync("git", ["-C", root, "rev-parse", flag], { encoding: "utf8" });
+  if (result.status !== 0) return null;
+  return String(result.stdout || "").trim();
+}
+
+function isPrimaryRoot(root, home) {
   if (!root) return false;
   if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`)) return false;
   if (existsSync(`${root}/.fm-secondmate-home`)) return false;
   if (home && home !== root && existsSync(`${home}/.fm-secondmate-home`)) return false;
-  const gitDir = await runProcess("git", ["-C", root, "rev-parse", "--git-dir"]);
-  const commonDir = await runProcess("git", ["-C", root, "rev-parse", "--git-common-dir"]);
-  if (gitDir.code !== 0 || commonDir.code !== 0) return false;
-  return gitDir.stdout.trim() === commonDir.stdout.trim();
+  // Synchronous on purpose: OpenCode tears down the turn's process group at the
+  // terminal session.execution.* event, which SIGTERMs an async child mid-read and
+  // would leave this reading empty stdout and declining to arm.
+  const gitDir = revParse(root, "--git-dir");
+  const commonDir = revParse(root, "--git-common-dir");
+  if (gitDir === null || commonDir === null) return false;
+  return gitDir === commonDir;
 }
 
 function shouldArm(paths) {
@@ -443,7 +452,7 @@ function spawnArm(paths, sessionID, ctx, predecessorArmPid = "", generation) {
 async function beginArm(paths, sessionID, ctx, predecessorArmPid, generation) {
   if (!generationIsActive(generation)) return { status: "disposed", armChild: null };
   if (!sessionID) return { status: "skipped", armChild: null };
-  if (!(await isPrimaryRoot(paths.root, paths.home))) return { status: "not-primary", armChild: null };
+  if (!isPrimaryRoot(paths.root, paths.home)) return { status: "not-primary", armChild: null };
   if (!generationIsActive(generation)) return { status: "disposed", armChild: null };
   if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
   if (!generationIsActive(generation)) return { status: "disposed", armChild: null };
