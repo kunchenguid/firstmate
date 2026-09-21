@@ -225,6 +225,7 @@ When the selected named server is not running, the adapter launches it without i
 Herdr passes its server startup environment to every later pane, so retaining those values could misroute panes for another Firstmate home or harness.
 An already-running server is reused without restart or environment changes.
 Explicit named-session routing and unrelated launch environment remain intact.
+That same inherited server environment can carry a bash-preexec `PROMPT_COMMAND` exported by whatever process started the server without the matching `__bp_*` function definitions, so `bin/fm-spawn.sh` overrides a freshly created tab's own environment and sends a scrub line to clear it before any other pane-bootstrap text, otherwise wedging the launch command that follows (`FM_BACKEND_PROMPT_COMMAND_SCRUB` in `bin/fm-backend.sh`).
 
 Literal text and Enter are separate operations on `fm-send.sh`'s typed plane; ordinary local text steers instead use the durable steering inbox and send only its best-effort constant doorbell through this adapter.
 Spawn-time fixed commands may use Herdr's atomic run primitive.
@@ -374,6 +375,7 @@ tests/fm-herdr-session-cleanup-e2e.test.sh
 tests/fm-herdr-attached-viewer-live-e2e.test.sh
 tests/fm-afk-inject-herdr-e2e.test.sh
 tests/fm-afk-pi-herdr-return-e2e.test.sh
+tests/fm-backend-herdr-prompt-command-scrub.test.sh
 ```
 
 Real Herdr tests use the named lab helper and default-session tripwire.

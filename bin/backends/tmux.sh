@@ -100,7 +100,15 @@ fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints 
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
-  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
+  # -e 'PROMPT_COMMAND=' overrides just THIS pane's own environment (never the
+  # session's or server's shared table - see FM_BACKEND_PROMPT_COMMAND_SCRUB in
+  # bin/fm-backend.sh for why a fresh pane must not inherit an exported
+  # bash-preexec PROMPT_COMMAND string with no matching function definitions).
+  # tmux < 3.2 rejects -e on new-window; fall back to the plain form so an
+  # older tmux still creates the window, relying on the scrub line fm-spawn.sh
+  # sends next as the floor.
+  wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs" -e 'PROMPT_COMMAND=' 2>/dev/null) ||
+    wid=$(tmux new-window -dP -F '#{window_id}' -t "$ses:" -n "$wname" -c "$proj_abs") || return 1
   tmux set-window-option -t "$wid" automatic-rename off 2>/dev/null || true
   tmux set-window-option -t "$wid" allow-rename off 2>/dev/null || true
   printf '%s\n' "$wid"
