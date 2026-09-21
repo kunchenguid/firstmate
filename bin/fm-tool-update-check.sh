@@ -45,7 +45,9 @@
 # FM_TOOL_UPDATE_INTERVAL (default 900, 0 disables the gate, otherwise 60..86400)
 # and stays silent in between. Each probe is bounded by
 # FM_TOOL_UPDATE_PROBE_SECS (default 5, valid 1..30) and a whole sweep by
-# FM_TOOL_UPDATE_BUDGET_SECS (default 20, valid 1..120).
+# FM_TOOL_UPDATE_BUDGET_SECS (valid 1..120), which defaults to the documented 20
+# seconds or one probe bound per watched tool, whichever is larger, so a tool
+# late in a long sweep is not left with a bound it cannot meet.
 #
 # The sweep has to finish inside the watcher's own per check bound, because a run
 # the watcher kills prints nothing and writes no record, so it would repeat that
@@ -134,16 +136,51 @@ if [ "$PROBE_SECS" -gt 30 ]; then
   exit 2
 fi
 
-BUDGET_SECS=${FM_TOOL_UPDATE_BUDGET_SECS:-20}
-case "$BUDGET_SECS" in
-  ''|*[!0-9]*|0)
+# How many tools the sweep is about to probe, so a fair sweep budget can be
+# derived from it. The registry is only read for its length here, not validated:
+# the sweep still has to bound itself before config_validate reports a bad
+# registry. An absent or unreadable registry leaves the count at zero, and that
+# path is either silent or reports the registry problem, so its budget is unused.
+watched_tool_count() {
+  local count
+  if ! command -v jq >/dev/null 2>&1 || [ ! -f "$CONFIG" ]; then
+    printf '0\n'
+    return 0
+  fi
+  count=$(jq -r 'if (.tools | type) == "array" then (.tools | length) else 0 end' "$CONFIG" 2>/dev/null) || count=0
+  case "$count" in
+    ''|*[!0-9]*) count=0 ;;
+  esac
+  printf '%s\n' "$count"
+}
+
+# A tool can cost one slow probe (its update announcement, or a git remote read),
+# so one probe bound per watched tool is a fair default sweep budget. Deriving it
+# from the tool count is what stops a healthy but loaded probe late in the sweep
+# from being cut down to whatever budget the earlier probes left. It is never
+# below the documented default of 20, so a home with few watched tools keeps its
+# old headroom rather than having the default shrink under it.
+BUDGET_DEFAULT=20
+TOOL_COUNT=$(watched_tool_count)
+if [ "$TOOL_COUNT" -gt 0 ]; then
+  BUDGET_DEFAULT=$((PROBE_SECS * TOOL_COUNT))
+  [ "$BUDGET_DEFAULT" -ge 20 ] || BUDGET_DEFAULT=20
+fi
+
+if [ -n "${FM_TOOL_UPDATE_BUDGET_SECS:-}" ]; then
+  BUDGET_SECS=$FM_TOOL_UPDATE_BUDGET_SECS
+  case "$BUDGET_SECS" in
+    ''|*[!0-9]*|0)
+      printf 'fm-tool-update-check: FM_TOOL_UPDATE_BUDGET_SECS must be a whole number from 1 to 120\n' >&2
+      exit 2
+      ;;
+  esac
+  if [ "$BUDGET_SECS" -gt 120 ]; then
     printf 'fm-tool-update-check: FM_TOOL_UPDATE_BUDGET_SECS must be a whole number from 1 to 120\n' >&2
     exit 2
-    ;;
-esac
-if [ "$BUDGET_SECS" -gt 120 ]; then
-  printf 'fm-tool-update-check: FM_TOOL_UPDATE_BUDGET_SECS must be a whole number from 1 to 120\n' >&2
-  exit 2
+  fi
+else
+  BUDGET_SECS=$BUDGET_DEFAULT
 fi
 
 # The smallest bound a probe can be given, because fm_run_timed treats a
@@ -401,6 +438,24 @@ probe_output() {
   fm_run_timed "$(probe_bound)" "$path" "$@" 2>&1
 }
 
+# A probe that hits its bound gets one more attempt while the sweep still has
+# budget. A healthy tool under load can answer just past a short bound, and one
+# slow answer is not the same as a tool that cannot answer: the retry keeps the
+# honest "did not answer" signal for a tool that never answers without turning a
+# loaded host into an unavailability wake.
+probe_output_bounded() {
+  local path=$1 status out
+  shift
+  out=$(probe_output "$path" "$@")
+  status=$?
+  if [ "$status" -eq 124 ] && ! budget_exhausted; then
+    out=$(probe_output "$path" "$@")
+    status=$?
+  fi
+  printf '%s\n' "$out"
+  return "$status"
+}
+
 command_findings() {
   local name=$1 command_name=$2 args_joined=$3 announce=$4 announce_args=$5
   local hit out version matched announce_out status
@@ -427,7 +482,7 @@ command_findings() {
       break
     fi
     # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
-    out=$(probe_output "$hit" $args_joined)
+    out=$(probe_output_bounded "$hit" $args_joined)
     version=$(parse_version "$out")
     if [ -z "$resolved_path" ]; then
       resolved_path=$hit
@@ -460,7 +515,7 @@ EOF
         announce_out=
       else
         # shellcheck disable=SC2086  # deliberate split on validated space-free tokens
-        announce_out=$(probe_output "$resolved_path" $announce_args)
+        announce_out=$(probe_output_bounded "$resolved_path" $announce_args)
         status=$?
         if [ "$status" -eq 124 ]; then
           # A source that was asked and never answered is not a source that had
