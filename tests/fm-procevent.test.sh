@@ -929,6 +929,44 @@ PATH="$ORPHAN_BIN:$PATH" pe "$HORPHAN" start "$orphan_id" >/dev/null 2>&1 || tru
   || fail "the recovered capture did not reach its owning worker's steering inbox"
 pass "a capture interrupted before its result commit does not wedge its source"
 
+# --- end-user-aligned regression: an orphaned capture keeps its owner ---------
+# An unacknowledged capture belongs to whoever it was routed to. Retiring the
+# board it came from orphans that capture without handing it to anyone, so a
+# worker arming the same artifact is refused rather than silently acknowledging
+# a round that never reached it.
+HADOPT="$TMP_ROOT/hadopt"; new_home "$HADOPT"
+ADOPT_BIN=$(fm_fakebin "$TMP_ROOT/lavish-adopt-stub")
+cat > "$ADOPT_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","for firstmate","","message",""\n'
+SH
+chmod +x "$ADOPT_BIN/lavish-axi"
+ADOPT_ART="$TMP_ROOT/adopt-board.html"
+printf '<h1>adopt</h1>\n' > "$ADOPT_ART"
+adopt_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$ADOPT_ART")
+fm_test_track_procevent_home "$HADOPT"
+PATH="$ADOPT_BIN:$PATH" FM_HOME="$HADOPT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$ADOPT_ART" >/dev/null
+PATH="$ADOPT_BIN:$PATH" pe "$HADOPT" start "$adopt_id" >/dev/null 2>&1 || true
+[ -f "$HADOPT/state/procevent-inbox/$adopt_id.1.result" ] \
+  || fail "the firstmate fixture capture never landed"
+[ ! -f "$HADOPT/state/procevent-inbox/$adopt_id.1.handled" ] \
+  || fail "the firstmate fixture capture was already acknowledged"
+PATH="$ADOPT_BIN:$PATH" FM_HOME="$HADOPT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$ADOPT_ART" >/dev/null
+if PATH="$ADOPT_BIN:$PATH" FM_HOME="$HADOPT" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$ADOPT_ART" --for worker-5 \
+  >/dev/null 2>"$TMP_ROOT/adopt-arm.err"; then
+  fail "a worker armed a board carrying another owner's unacknowledged capture"
+fi
+assert_contains "$(cat "$TMP_ROOT/adopt-arm.err")" "firstmate" \
+  "the refusal did not name the owner the orphaned capture belongs to"
+[ ! -f "$HADOPT/state/procevent-inbox/$adopt_id.1.handled" ] \
+  || fail "a refused arm still acknowledged another owner's capture"
+[ ! -e "$HADOPT/state/procevent/$adopt_id.source" ] \
+  || fail "a refused arm still published its task-owned registration"
+pass "an orphaned capture is not acknowledged by a worker it never reached"
+
 # The other half of the same contract, on the same real path: a close that
 # carries what the captain actually said must still reach him. Same runner, same
 # adapter, one different response shape.
@@ -1098,6 +1136,26 @@ PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$MISSING_REPLY_COUNT" LAVISH_SCR
 [ ! -s "$MISSING_REPLY_LOG" ] \
   || fail "a listener whose staged reply was gone still posted something: $(cat "$MISSING_REPLY_LOG")"
 pass "a listener whose staged reply is gone polls the board without one"
+
+# The accepted loss window is consuming-to-calling and nothing wider: a listener
+# that never reaches the board at all must leave the staged reply for the next
+# one. A malformed retry-delay override is one of the ordinary setup refusals
+# that used to happen after the reply had already been consumed.
+SETUP_GUARD_REPLY="$TMP_ROOT/setup-guard-reply"
+SETUP_GUARD_COUNT="$TMP_ROOT/setup-guard-count"
+printf 'kept for the next listener\n' > "$SETUP_GUARD_REPLY"
+setup_guard_status=0
+PATH="$LAVISH_SCRIPTED_BIN:$PATH" LAVISH_COUNT="$SETUP_GUARD_COUNT" LAVISH_SCRIPT=feedback \
+  FM_LAVISH_POLL_RETRY_DELAY=not-a-number \
+  "$ROOT/bin/fm-procevent-lavish.sh" poll "$REPLY_ART" \
+  --agent-reply-file "$SETUP_GUARD_REPLY" >/dev/null 2>&1 || setup_guard_status=$?
+[ "$setup_guard_status" -ne 0 ] \
+  || fail "a malformed retry delay did not stop the listener before it polled"
+[ "$(cat "$SETUP_GUARD_COUNT" 2>/dev/null || echo 0)" = 0 ] \
+  || fail "a listener that refused its setup still reached the board"
+[ -f "$SETUP_GUARD_REPLY" ] \
+  || fail "a listener that never reached the board consumed its staged reply anyway"
+pass "a listener that refuses its own setup leaves the staged reply for the next one"
 
 # Exhaustion is news: after the bounded retries the same exact response is
 # captured and announced normally rather than being swallowed forever.

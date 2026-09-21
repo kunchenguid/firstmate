@@ -355,19 +355,6 @@ cmd_poll() {
   fi
   if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
     reply_file=$3
-    # Posting a round's reply is BEST EFFORT and deliberately carries no delivery
-    # machinery. The staged file is the only record that a reply is owed, and
-    # consuming it is one transition: a crash in the narrow window between that
-    # consumption and the poll drops this one round's reply rather than posting
-    # it twice, and a listener that starts with no staged file simply polls
-    # without one. Robust delivery waits on lavish-axi's own exclusive listener;
-    # do not add a receipt, retry, or idempotency marker here.
-    if [ -f "$reply_file" ] && [ ! -L "$reply_file" ]; then
-      reply_text=$(cat -- "$reply_file") \
-        || die "cannot read agent reply file: $reply_file"
-      rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
-      reply_pending=1
-    fi
   elif [ "$#" -ne 1 ]; then
     usage
   fi
@@ -389,6 +376,20 @@ cmd_poll() {
   while :; do
     iteration_started=$(poll_iteration_started) || die "cannot start the poll rate governor"
     apply_configured_lavish_host "$original_host_present" "$original_host"
+    # Posting a round's reply is BEST EFFORT and deliberately carries no delivery
+    # machinery. The staged file is the only record that a reply is owed, so it is
+    # consumed HERE - after every non-posting step that could abort this poll has
+    # already succeeded - leaving one narrow window: a crash between consuming the
+    # file and the call below drops this one round's reply rather than posting it
+    # twice. A listener that starts with no staged file simply polls without one.
+    # Robust delivery waits on lavish-axi's own exclusive listener; do not add a
+    # receipt, retry, or idempotency marker here.
+    if [ -f "$reply_file" ] && [ ! -L "$reply_file" ]; then
+      reply_text=$(cat -- "$reply_file") \
+        || die "cannot read agent reply file: $reply_file"
+      rm -f -- "$reply_file" || die "cannot consume agent reply file: $reply_file"
+      reply_pending=1
+    fi
     if [ "$reply_pending" -eq 1 ]; then
       lavish-axi poll "$artifact" --agent-reply "$reply_text" | poll_response_filter "$response"
     else

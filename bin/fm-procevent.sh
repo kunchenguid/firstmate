@@ -523,7 +523,7 @@ cmd_register() {
 
 cmd_register_task() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
-  local reply_source='' reply_dest='' stale arg i
+  local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner
   local -a argv=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "register-task is reserved for the Lavish adapter"
@@ -550,9 +550,18 @@ cmd_register_task() {
       fm_procevent_source_lock_release "$id"
       die "cannot replace task-owned source $id owned by task $reply_source; steer that task to re-arm its board"
     fi
+  else
+    adopting=1
   fi
   while IFS= read -r pending; do
     [ -n "$pending" ] || continue
+    if [ "$adopting" -eq 1 ]; then
+      pending_owner=$(fm_procevent_result_owner_task "$pending" 2>/dev/null || true)
+      if [ "$pending_owner" != "$task" ]; then
+        fm_procevent_source_lock_release "$id"
+        die "cannot arm source $id while its unacknowledged capture $pending belongs to ${pending_owner:-firstmate}; that owner acknowledges it first"
+      fi
+    fi
     pending_adapter=$(fm_procevent_result_adapter "$pending" 2>/dev/null || true)
     if [ -n "$pending_adapter" ] && adapter_result_is_terminal "$pending_adapter" "$pending"; then
       fm_procevent_source_lock_release "$id"
