@@ -60,16 +60,23 @@ unit_propose_confirm_records_the_posture_without_a_daemon() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-propose.XXXXXX")
   mkdir -p "$st/state"
   out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" propose \
-    --words 'merge the windows fix when green' --action merge --object 'task fix-windows PR' --when 'checks green' \
-    --action merge --object regardless 2>&1)
+    --words 'merge the windows fix when green' --expected-return 2026-09-08T08:00Z --spend 2 2>&1)
   rc=$?
-  if [ "$rc" -eq 3 ] && [ -f "$st/state/.afk-contract.proposed" ] \
-    && printf '%s' "$out" | grep -F '1. merge task fix-windows PR when checks green' >/dev/null \
-    && printf '%s' "$out" | grep -F '2. "action=merge object=regardless when=(none)" - refused: missing when' >/dev/null \
+  if [ "$rc" -eq 0 ] && [ -f "$st/state/.afk-contract.proposed" ] \
+    && printf '%s' "$out" | grep -F '    merge the windows fix when green' >/dev/null \
+    && printf '%s' "$out" | grep -F 'expected return: 2026-09-08T08:00Z' >/dev/null \
+    && printf '%s' "$out" | grep -F 'spend cap: 2 concurrent workers' >/dev/null \
     && [ ! -e "$st/state/.afk-contract" ]; then
-    pass "propose: the read-back lists accepted and refused clauses and writes only a proposal"
+    pass "propose: the read-back carries the words verbatim with the expected return and spend cap, and writes only a proposal"
   else
     fail "propose: read-back or proposal wrong (rc=$rc): $out"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" propose --words 'merge it' --grant fix-windows 2>&1)
+  rc=$?
+  if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -F -- '--grant was retired' >/dev/null; then
+    pass "propose: the retired --grant flag is refused by name"
+  else
+    fail "propose: --grant was not refused by name (rc=$rc): $out"
   fi
   out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" confirm 2>&1)
   rc=$?
@@ -81,7 +88,7 @@ unit_propose_confirm_records_the_posture_without_a_daemon() {
     fail "confirm: record, announcement, or daemon state wrong (rc=$rc): $out"
   fi
   printf 'schema\tfm-afk-return.v1\nphase\tblocked\n' > "$st/state/.afk-return-catchup"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" propose --action merge --object 'task a PR' --when 'checks green' >/dev/null 2>&1; then
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" propose --words 'merge task a PR when green' >/dev/null 2>&1; then
     fail "propose: accepted a new mandate while the prior return catch-up was pending"
   else
     pass "propose: refuses while the prior return catch-up is pending"
@@ -120,7 +127,7 @@ unit_daemon_entry_requires_confirmation() {
   local st out rc
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-entry-record.XXXXXX")
   mkdir -p "$st/state"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" propose --action merge --object 'task a PR' --when 'checks green' >/dev/null 2>&1
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" propose --words 'merge task a PR when green' >/dev/null 2>&1
   out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ] && [ -f "$st/state/.afk-contract.proposed" ] && [ ! -e "$st/state/.afk-contract" ] \

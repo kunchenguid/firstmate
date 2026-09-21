@@ -30,11 +30,35 @@
 #              every uncommitted change. Interrupts first when the task reads
 #              busy, then submits the harness's exit command. Postcondition:
 #              the backend's recovery-grade classifier reports the agent gone.
-#              Already-stopped is success (idempotent).
+#              Already-stopped is success (idempotent). An endpoint that reads
+#              `missing` is put through the control plane's per-backend absence
+#              proof (fm_control_endpoint_absence_verdict) before anything is
+#              claimed about it, because `missing` also covers an endpoint that
+#              is merely unreachable from this seat. That proof exists only on
+#              HERDR, whose reads are scoped to the session the record names:
+#              proven gone reports `endpoint-gone` rather than
+#              `already-stopped`, because the endpoint this verb normally
+#              preserves did not survive; a pane that turns out to be there and
+#              idle is the ordinary `already-stopped`; one whose agent is back
+#              takes the ordinary interrupt-then-exit path. A tmux `missing`
+#              always REFUSES: a task record carries no socket identity for its
+#              endpoint, so this verb cannot tell a destroyed window from one on
+#              a tmux server it cannot address, and it will not claim a stop it
+#              cannot see.
 #   relaunch   Transactionally replace the running agent with a new one, in the
-#              SAME endpoint and SAME worktree, on the same or a newly chosen
+#              SAME worktree - and the same endpoint whenever that endpoint
+#              still exists - on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. An explicit `default` model or effort clears that
+#              of this verb. When the recorded endpoint is instead proven gone -
+#              a Herdr pane or workspace destroyed in churn - the launch owner
+#              re-creates one in that worktree, in the herdr session the record
+#              names, and the task's record rebinds to it; that is how a task
+#              whose terminal was destroyed is reclaimed by the home that owns
+#              it, rather than being stranded with a parked approval nobody can
+#              answer. Reclaim is HERDR-ONLY for the reason `exit` gives above:
+#              a tmux `missing` cannot be proven absent from a task record, so
+#              it refuses.
+#              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
 #              re-resolves its durable config/secondmate-harness pin (harness
 #              plus its optional model and effort tokens) exactly as any other
@@ -447,9 +471,9 @@ retire_busy_incarnation() {
 }
 
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
-# `already-stopped` or `stopped`.
+# `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
-  local state cmd verdict composer_state cancel interrupt_result=not-needed
+  local state cmd verdict composer_state cancel absence interrupt_result=not-needed
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
@@ -458,7 +482,40 @@ do_exit() {
       return 0
       ;;
     alive) ;;
-    missing) die "task $ID's recorded endpoint is gone, so there is no agent to stop; reconcile the task before any further control action" ;;
+    missing)
+      # `missing` on its own is not a finding about the endpoint: it conflates
+      # "destroyed" with "unreachable from this seat". Route it through the
+      # control plane's one absence proof - the same one the relaunch gate uses
+      # - and report what that proof actually established, never more.
+      absence=$(fm_control_endpoint_absence_verdict "$BACKEND" "$T")
+      case "${absence%%$'\t'*}" in
+        gone)
+          # Proven gone, so the agent that lived in it went with it: exit's
+          # postcondition already holds and there is nothing to send. Its own
+          # outcome rather than `already-stopped`, because the endpoint this
+          # verb normally preserves did not survive. The worktree and every
+          # uncommitted change are untouched, and `relaunch` re-creates the
+          # endpoint from here.
+          printf 'endpoint-gone'
+          return 0
+          ;;
+        dead)
+          # The endpoint was only unreachable and is there after all, holding
+          # no agent - a herdr pane whose session server was merely stopped is
+          # the common case. Nothing is gone, so this is the ordinary
+          # already-stopped outcome.
+          printf 'already-stopped'
+          return 0
+          ;;
+        alive)
+          # The agent came back with its endpoint. Fall through to the ordinary
+          # alive path: interrupt if busy, then the harness's exit command.
+          ;;
+        *)
+          die "task $ID's endpoint $T reads 'missing', but ${absence#*$'\t'}; exit will not claim an agent stopped at an address it cannot trust, nor send lifecycle input to one"
+          ;;
+      esac
+      ;;
     *) die "task $ID's endpoint reads '$state' rather than a positively classified state; refusing to send a lifecycle command into an unattributed endpoint" ;;
   esac
   # A busy agent is interrupted first before the exit command is submitted.
@@ -596,8 +653,16 @@ relaunch_rollback() {
           echo "error: $ID's agent stopped but relaunch did not reach replacement launch; no agent is running, and its work plus progress note are preserved at $WT" >&2
           ;;
         *)
-          journal_write "failed:$RELAUNCH_PHASE" "rollback=none-agent-state-$state" || true
-          echo "error: relaunch of $ID failed while stopping the old agent and its state is '$state'; the durable record and progress note were retained for recovery" >&2
+          # The old agent was NOT proven stopped, so no replacement is coming
+          # and the agent that may still be reading these instructions is the
+          # original one. The note exists to brief a replacement; leaving it in
+          # a possibly-live agent's brief would be an unrequested edit to a
+          # running task. Restore byte-exact, exactly as the alive case does.
+          if [ -n "$RELAUNCH_BRIEF" ] && [ -f "$BRIEF_PRIOR" ]; then
+            cp -p "$BRIEF_PRIOR" "$RELAUNCH_BRIEF" 2>/dev/null || true
+          fi
+          journal_write "failed:$RELAUNCH_PHASE" "rollback=instructions-restored-agent-state-$state" || true
+          echo "error: relaunch of $ID failed while stopping the old agent and its state is '$state', so it was not proven stopped; its original instructions were restored and the durable record was retained for recovery" >&2
           ;;
       esac
       ;;
@@ -851,6 +916,23 @@ do_relaunch() {
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
+    # $T was resolved from the record before the launch. When the recorded
+    # endpoint was gone, the launch owner created a fresh one and republished
+    # the record pointing at it, so every postcondition below must be read from
+    # the endpoint the task now HAS, not the one it had. Re-resolving through
+    # the same shared validation is what makes that safe: a record that no
+    # longer passes it refuses here rather than leaving this transaction
+    # polling an address nothing owns.
+    # stdout is dropped (it is only the resolved target), but the refusal on
+    # stderr names the exact row that failed - and in this one branch the record
+    # was just rewritten by the launch owner, so that row is the whole
+    # diagnostic. Let it through rather than dying with nothing to act on.
+    if fm_backend_validate_task_endpoint "$META" "$ID" >/dev/null \
+       && [ -n "$FM_BACKEND_VALIDATED_TARGET" ]; then
+      T=$FM_BACKEND_VALIDATED_TARGET
+    else
+      die "the replacement agent for $ID was launched, but task $ID's republished record no longer passes endpoint validation (the refusal above names the row), so this transaction cannot say which endpoint to confirm it on; reconcile $META before any further control action"
+    fi
   else
     [ "$(fm_meta_get "$META" control_relaunch_tx)" != "$RELAUNCH_TX" ] \
       || RELAUNCH_META_PUBLISHED=1

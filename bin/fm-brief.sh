@@ -60,6 +60,10 @@
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
 # "blocked:": pause for a known external wait expected to clear on its own,
 # blocked when firstmate must act.
+# Emission-time syntax and legacy unknown-time handling are owned by
+# bin/fm-classify-lib.sh; each scaffold renders the stamp as a literal <epoch>
+# placeholder the worker replaces with a numeric Unix time as it appends, so a
+# scaffold never emits a substitution a file-write tool would copy through.
 # Every scaffold also carries the steering-inbox receive-and-ack section:
 # process state/<id>.inbox/*.msg in order and acknowledge each by moving it to
 # handled/ (record, doorbell, and ladder owned by bin/fm-task-inbox-lib.sh).
@@ -71,6 +75,17 @@
 # Scaffolds carry no role scope: fm-spawn.sh supplies fm_brief_worker_role from
 # fm-dod-lib.sh to every ship/scout launch brief, so this file never becomes a
 # second owner of a contract that must stay current across relaunches.
+# A home may carry standing worker instructions without editing this tracked
+# script: when config/brief-include.md exists under the active home, ship and
+# scout scaffolds append its text verbatim as their last section, "# Home brief
+# additions", which defers to every other section of the brief. It goes last
+# because the machine-read `# Task` heading resolves to its first match, so
+# appended text can never shadow it; a later scout promotion appends its ship
+# contract below it, which that position-free deference already covers. An
+# absent or blank file changes nothing; a present path that is not a readable
+# regular file, or text carrying its own "Delivery contract: mode=" line (which
+# a later scout promotion could not outrank), stops the scaffold before
+# anything is written. Secondmate charters never take it.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -121,6 +136,7 @@ if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
 else
   STATE="$FM_HOME/state"
 fi
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
@@ -185,6 +201,31 @@ if [ "$NO_PROJECTS" -eq 1 ] && [ "$KIND" != secondmate ]; then
   echo "error: --no-projects applies only to --secondmate charters" >&2
   exit 1
 fi
+
+# The optional home-local include is read before anything is written, so an
+# unusable file never leaves a partial scaffold behind.
+BRIEF_INCLUDE_FILE="$CONFIG/brief-include.md"
+BRIEF_INCLUDE_BODY=
+if [ "$KIND" != secondmate ] && { [ -e "$BRIEF_INCLUDE_FILE" ] || [ -L "$BRIEF_INCLUDE_FILE" ]; }; then
+  { [ -f "$BRIEF_INCLUDE_FILE" ] && BRIEF_INCLUDE_BODY=$(cat "$BRIEF_INCLUDE_FILE" 2>/dev/null); } || {
+    echo "error: $BRIEF_INCLUDE_FILE must be a readable regular file" >&2
+    exit 1
+  }
+  if printf '%s\n' "$BRIEF_INCLUDE_BODY" | grep -q '^Delivery contract: mode='; then
+    echo "error: $BRIEF_INCLUDE_FILE must not carry a 'Delivery contract: mode=' line; the delivery mode is a per-task --mode decision" >&2
+    exit 1
+  fi
+  [ -n "$(printf '%s' "$BRIEF_INCLUDE_BODY" | tr -d '[:space:]')" ] || BRIEF_INCLUDE_BODY=
+fi
+
+# Append the include as the last section of a ship or scout scaffold.
+append_brief_include() {
+  [ -n "$BRIEF_INCLUDE_BODY" ] || return 0
+  printf '\n%s\n%s\n%s\n' \
+    '# Home brief additions' \
+    "These are this home's standing additions; every other section of this brief takes precedence over anything here that conflicts." \
+    "$BRIEF_INCLUDE_BODY" >> "$BRIEF"
+}
 
 BRIEF="$DATA/$ID/brief.md"
 [ -e "$BRIEF" ] && { echo "error: $BRIEF already exists" >&2; exit 1; }
@@ -284,8 +325,9 @@ $INBOX_SECTION
 # Escalation to main firstmate
 Handle routine work yourself.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`echo "{state} [at=<epoch>]: {one short line}" >> $STATUS_FILE\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own, naming when it clears with \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) when you know; use \`blocked:\` when you are stuck and need firstmate to act.
 Use this only for material phase changes, a captain decision, a real blocker, a failure, work ready for review, or work you landed.
 Work you landed includes a merge you performed yourself under standing merge authority and one the captain merged on the forge: under that authority nothing is ever \"ready for review\", so a landed merge that goes unreported reaches the captain as silence.
@@ -294,9 +336,9 @@ A marked request requires one correlated answer after the work; it does not requ
 Never append \`working:\` merely to acknowledge receipt or announce that a marked request has started.
 When a routed-work phase has a supervisor-actionable material change worth reporting under the rule above, give that reported phase a stable key.
 If its first reportable event is \`working [key=<work-slug>]: {material phase}\`, use the same key on its later \`$PAUSED_VERB\`, \`done\`, \`failed\`, \`needs-decision\`, or \`blocked\` event so the earlier working phase is superseded.
-When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>]: {why it is no longer active}\`.
+When a keyed phase ends without another reportable state, append \`resolved [key=<work-slug>] [at=<epoch>]: {why it is no longer active}\`.
 \`resolved\` separately closes an escalated decision or blocker, and only a \`resolved\` line carrying that decision's exact key closes it: a later \`done\` or \`working\` event never does, even when the answer is what started that work.
-The main firstmate's answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main firstmate, append \`resolved: {how it cleared}\` yourself (keyed with \`[key=<slug>]\` if you opened it with one) as your domain resumes.
+The main firstmate's answer normally writes that closing line at answer time; when a blocker or wait clears WITHOUT an answer from the main firstmate, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (keyed with \`[key=<slug>]\` if you opened it with one) as your domain resumes.
 Routine internal supervision, heartbeats, retries, and crewmate churn stay inside your own home and must not touch that status file.
 
 # Definition of done
@@ -304,7 +346,7 @@ You are persistent by default. Do not exit just because your queue is empty.
 On startup and restart, run normal firstmate bootstrap and recovery through \`bin/fm-session-start.sh\` for your own home, but only to RECONCILE work that is already yours: in-flight crewmates, tracked backlog items, and durable watches recorded in this home.
 When you have no assigned or in-flight work after that reconciliation, go idle and wait silently for the main firstmate to route you a task.
 An empty queue is a healthy resting state, not a cue to invent work: never spawn a survey, audit, or any self-directed "find work" task on your own initiative.
-If this charter cannot be carried out, append \`blocked: {why}\` or \`failed: {why}\` to the main status file and stop.
+If this charter cannot be carried out, append \`blocked [at=<epoch>]: {why}\` or \`failed [at=<epoch>]: {why}\` to the main status file and stop.
 EOF
 if [ "$SECONDMATE_CHARTER" = "{TASK}" ]; then
   echo "scaffolded: $BRIEF (secondmate charter; replace {TASK})"
@@ -360,7 +402,7 @@ TASK_SECTION=${TASK_SECTION%$'\n'}
 
 if [ "$KIND" = scout ]; then
 if "$SCRIPT_DIR/fm-bootstrap.sh" lavish-compatible >/dev/null 2>&1; then
-  LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, you may host the Lavish review loop yourself (poll, revise, re-serve, staying alive) instead of handing it back to firstmate.'
+  LAVISH_LINE='If your deliverable is a visual artifact the captain will review and iterate on, use the lavish-axi rule: arm your board with bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>; never run lavish-axi poll yourself. Re-arm with the reply after each nonterminal round to acknowledge it, route the board feedback through your steering inbox, write needs-decision [key=board-review] with the live board URL when the captain owes a decision, and stop at session_ended or an empty End without re-arming - acknowledge that final round with bin/fm-procevent.sh handled <source-id> <sequence> to conclude and retire your board.'
 else
   LAVISH_LINE='Lavish is unavailable (lavish-axi is missing or below its supported version floor), so deliver your findings as a text report without Lavish, even for a visual deliverable.'
 fi
@@ -382,8 +424,9 @@ The report is the only thing that survives, so anything worth keeping must be in
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`echo "{state} [at=<epoch>]: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on and the needs-decision/blocked/paused/done/failed states. No step-by-step
    FYI progress lines; firstmate reads your pane for that.
@@ -396,17 +439,17 @@ The report is the only thing that survives, so anything worth keeping must be in
    treating it as a possible wedge. When you know when the wait clears, say so in the line with
    \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) and firstmate rechecks at that time instead.
    Use \`blocked:\` when you are stuck and need help.
-5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
+5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
-   append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+   append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
-   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
    manages the daemon.
    Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
    \`no-mistakes axi status\`. If the daemon socket refuses connections or is missing, append
-   \`blocked: {the daemon error}\` and stop even when the local run record still says running or
+   \`blocked [at=<epoch>]: {the daemon error}\` and stop even when the local run record still says running or
    fixing, because that record can be stale after the daemon exits. A run record failed with a
    daemon error is also a real block.
    Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
@@ -421,9 +464,10 @@ Write your findings to \`$DATA/$ID/report.md\`.
 The report must stand alone: what you did, what you found, the evidence (commands run, output, file:line references), and what you recommend.
 $LAVISH_LINE
 Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-lifecycle/SKILL.md\` and pass its shared completion gate for the report and any visual review.
-When the report is complete, append \`done: {one-line conclusion}\` to the status file and stop.
+When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
+append_brief_include
 echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
 exit 0
 fi
@@ -460,7 +504,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
-If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked: launched in primary checkout, not an isolated worktree\` to the status file and stop.
+If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked [at=<epoch>]: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
 1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
 
@@ -469,8 +513,9 @@ $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state}: {one short line}" >> $STATUS_FILE\`
+   \`echo "{state} [at=<epoch>]: {one short line}" >> $STATUS_FILE\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
+   Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
    would act on (setup done, bug reproduced, fix implemented, validation passed) and the
    needs-decision/blocked/paused/done/failed states. No step-by-step FYI progress lines;
@@ -484,18 +529,18 @@ $RULE1
    known external wait you expect to clear on its own ($CREWMATE_PAUSE_WAIT_EXAMPLES):
    firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
-5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
+5. If you hit the same obstacle twice, append \`blocked [at=<epoch>]: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions),
-   append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
+   append \`needs-decision [at=<epoch>]: {summary of options}\` and stop. Firstmate will reply with the decision.
 $ASK_USER_BLOCK
    A decision or blocker you opened stays open until a \`resolved\` line carrying its exact key lands; a later \`done:\` or \`working:\` line never closes it, even when the answer is what started that work.
-   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
+   Firstmate's reply normally writes that closing line at answer time; when a blocker or wait clears WITHOUT a firstmate reply, append \`resolved [at=<epoch>]: {how it cleared}\` yourself (same \`[key=<slug>]\` if you opened it with one) as you resume.
 7. Never stop, restart, or update the shared \`no-mistakes\` daemon - it is one instance serving
    every lane/home, so restarting it kills other lanes' in-flight pipeline runs; only firstmate
    manages the daemon.
    Before you append \`blocked:\` about the pipeline, run \`no-mistakes daemon status\` and
    \`no-mistakes axi status\`. If the daemon socket refuses connections or is missing, append
-   \`blocked: {the daemon error}\` and stop even when the local run record still says running or
+   \`blocked [at=<epoch>]: {the daemon error}\` and stop even when the local run record still says running or
    fixing, because that record can be stale after the daemon exits. A run record failed with a
    daemon error is also a real block.
    Only after ruling out socket refusal, if the run is still running or fixing, reattach and keep
@@ -514,4 +559,5 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 
 $DOD
 EOF
+append_brief_include
 echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"

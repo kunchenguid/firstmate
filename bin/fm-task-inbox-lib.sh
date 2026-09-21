@@ -260,6 +260,7 @@ fm_task_inbox_body() {  # <record-path>
 fm_task_inbox_doorbell_line() {  # <record-path>
   local dir=${1%/*} abs quoted LC_ALL=C
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
+  abs=${abs%/handled}
   case "$abs" in
     *[![:print:]]*) return 1 ;;
   esac

@@ -124,6 +124,26 @@ case "${1:-}" in
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
+          # A spawn types a short line sourcing its staged launch file; log
+          # the staged command itself so suites assert what the pane runs.
+          # Direct literals past the terminal line buffer are truncated, so a
+          # long launch only survives when it arrived through that short source.
+          case "$a" in
+            ". '"*"'")
+              staged=${a#". '"}
+              staged=${staged%"'"}
+              if [ -f "$staged" ]; then
+                a=$(cat "$staged")
+              elif [ "${#a}" -gt 1024 ]; then
+                a=${a:0:1024}
+              fi
+              ;;
+            *)
+              if [ "${#a}" -gt 1024 ]; then
+                a=${a:0:1024}
+              fi
+              ;;
+          esac
           printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
         fi
         prev=$a
