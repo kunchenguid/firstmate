@@ -234,8 +234,10 @@ run_claude_hook() {  # <settings.json> <hook-event>
   sh -c "$cmd"
 }
 
+# Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
+# fallback (which writes a partial filesystem dump on Linux; see fm-busy-event.sh).
 file_mtime() {  # <path>
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"
+  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
 }
 
 # touch -t takes a local-time stamp, not an epoch, on both platforms.
