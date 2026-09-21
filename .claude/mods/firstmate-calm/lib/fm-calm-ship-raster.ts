@@ -10,7 +10,8 @@
 // palette rather than the standard 16-color ANSI codes Pi's widget emits, which
 // docs/calm-mode-feasibility.md records as a bounded gap. The palette is Claude Code's
 // own: the water takes the theme's spinner blue and the whole boat takes the Claude
-// orange of the stock spinner, one set per theme family. The family follows the
+// orange of the stock spinner, and the candles scene takes the theme's success green
+// and error red snapped to the 256-color cube, one set per theme family. The family follows the
 // `theme` setting's prefix (`dark*` or `light*`); `auto`, custom, missing, and
 // unreadable values use the light set as the both-readable fallback. The Pi extension
 // keeps its standard ANSI colors and is unaffected.
@@ -43,11 +44,15 @@ export type CalmShipPaletteFamily = "dark" | "light";
 /**
  * Claude Code's own colors per theme family: the dark and light spinner blues for the
  * water and the Claude orange of the stock spinner for the boat, from the app's
- * built-in theme tables.
+ * built-in theme tables. The candles scene's rising and falling candles take the
+ * theme's success green and error red snapped to xterm-256 cube entries (dark
+ * `#4eba65`/`#ff6b80` to 71/204, light `#2c7a39`/`#ab2b3f` to 29/125), so a truecolor
+ * and a 256-color terminal paint the same hue: Claude Code's own 256-color fallback
+ * would turn the light theme's success green into gray 239.
  */
 export const CALM_SHIP_RASTER_PALETTES: Readonly<Record<CalmShipPaletteFamily, CalmShipRasterPalette>> = {
-  dark: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x93a5ff, boat: 0xd77757 },
-  light: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x5769f7, boat: 0xd77757 },
+  dark: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x93a5ff, boat: 0xd77757, rise: 0x5faf5f, fall: 0xff5f87 },
+  light: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x5769f7, boat: 0xd77757, rise: 0x00875f, fall: 0xaf005f },
 };
 
 /**

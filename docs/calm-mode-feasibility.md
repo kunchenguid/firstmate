@@ -291,8 +291,10 @@ Quoted current markers, ASCII-only labels, ordinary text before a marker, unrela
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
 `tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against whichever Pi declarations are installed, without pinning a version of its own.
 `tests/fm-calm-claude-mod.test.sh` needs no Claude Code binary: it proves the mod is one hooks module with no command, skill, agent, or classic hook path around its opt-in, that Pi's working ship renders byte-for-byte the shared sprite core painted in ANSI at every width and step, that the Raster packing lays that frame out exactly, that the mod resolves its home like Pi, that its live and restored working-note classifiers enforce the visibility boundaries [`calm.md`](calm.md#claude-code) owns, and that its operational-input classifier agrees with `bin/fm-operational-input.sh` on a corpus the shell owner itself encodes plus legacy shapes and near misses.
+It also proves the `config/calm-scene` candles scene: only an exact `candles` value selects it, the boat scene stays byte-for-byte the boat, every width fills exactly in two rows or one narrow row of one-colored candles and blank gaps, the chart scrolls one column per boat move, reflows, freezes and resumes, and Pi and the Raster packing paint it in their own greens and reds.
 `tests/fm-calm-claude-mod-plugin.test.sh` runs wherever `claude` is installed without spending a model turn: strict `claude plugin validate` on the folder and on the `.claude/skills` auto-load path, then the mod's own `claude plugin test` suites, which drive the hooks module in the engine's host against a mocked clock, environment, file system, and drawing surface.
-`tests/fm-calm-claude-mod-live-e2e.test.sh` is the opt-in credentialed guard in a real Claude Code TUI under tmux: flag off is a complete no-op with the preference already on, flag on shows the moving boat, hides tool and operational rows, toggles and persists through `/calm`, and `claude --continue` restores the hidden rows.
+`tests/fm-calm-claude-mod-live-e2e.test.sh` is the opt-in credentialed guard in a real Claude Code TUI under tmux: flag off is a complete no-op with the preference already on, flag on shows the moving boat, hides tool and operational rows, toggles and persists through `/calm`, `claude --continue` restores the hidden rows, and with `config/calm-scene` set to `candles` the scrolling candles replace the working row in the theme's green and red.
+`tests/fm-calm-pi-extension.test.sh` drives the same setting through the extension's session and run events, proving exact-width green and red candle rows, the narrow fallback, settle and resume, and the boat for an unknown, absent, or unreadable value.
 
 The relevant commands are:
 
@@ -744,3 +746,33 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 
 ✻ Sautéed for 8s · done 11:07 AM
 ```
+
+## 2026-09-21 candles scene verification on Claude Code 2.1.278 and Pi 0.86.1
+
+The `config/calm-scene` candles scene was verified on this host against Claude Code 2.1.278, Pi 0.86.1 (`@earendil-works/pi-coding-agent`), Node 22.22.1 with type stripping, and tmux, with the boat checked frame-for-frame and Raster-for-Raster against the previous sprite core across widths 0 to 200 and 400 steps each, including freezes and hidden resizes.
+
+```text
+$ tests/fm-calm-claude-mod.test.sh
+ok - the candles scene is chosen only by an exact candles setting, leaves the boat scene byte-for-byte the boat, fills every width in two rows or one when narrow with one-colored candles and blank gaps, scrolls one column left per boat move, reflows without wrapping, freezes and resumes, and paints as standard ANSI green and red on Pi and 256-color-stable theme greens and reds on Claude Code
+
+$ tests/fm-calm-claude-mod-plugin.test.sh
+ok - Claude Code 2.1.278 (Claude Code) validates the Calm mod strictly at its folder and its auto-load path, hooking exactly the working row, tool, user, and assistant drawings and /calm
+ok - Claude Code 2.1.278 (Claude Code) runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, the clock-driven working ship, and the candles scene
+
+$ tests/fm-calm-pi-extension.test.sh
+ok - Pi Calm draws the candles scene from config/calm-scene in exact-width standard ANSI green and red rows, falls back to one row when narrow, removes it on settle, resumes its last frame, and draws the boat for an unknown, absent, or unreadable setting
+```
+
+Every other case of those three suites also passed, unchanged.
+The live guard's candles section, run alone in an isolated lab outside any repository, passed:
+
+```text
+ok - Claude Code 2.1.278 (Claude Code) draws the chosen candles scene in the working row in the theme's green and red, scrolls it, and removes it when the turn settles
+```
+
+A capture of that row showed Claude Code painting the dark family's candles as `38;5;71` and `38;5;204`.
+Claude Code 2.1.278 emits truecolor only at chalk color level 3 and otherwise quantizes RGB to the xterm-256 cube or gray ramp, whichever is nearer; that quantizer maps the light theme's success green `#2c7a39` to gray 239, which is why the candle palette uses cube entries directly.
+
+Two 2.1.278 changes affect the full live guard independently of the candles scene.
+The debug log now names the loaded module `firstmate-calm@skills-dir`, and the guard's load check now accepts either spelling.
+The composer also strips U+2063 from typed input and waits for a second Enter ("Removed 1 invisible character · review and press Enter to send"), so the guard's operational-row step, which types an exact operational envelope, stops at that step on 2.1.278 and remains open.

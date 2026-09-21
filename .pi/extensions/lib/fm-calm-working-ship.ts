@@ -1,7 +1,8 @@
 // Firstmate's Calm-only animated working presentation for Pi.
 //
-// Calm replaces Pi's stock working row with a tiny SSHHIP-derived boat while one
-// logical agent run is active. The sprite geometry, bounce track, two animation
+// Calm replaces Pi's stock working row with a tiny SSHHIP-derived boat, or the
+// candles scene when the home's Calm scene setting chooses it, while one logical agent
+// run is active. The sprite geometry, bounce track, two animation
 // cadences, palette classes, and freeze/resume state are owned by the harness-neutral
 // ./fm-calm-working-ship-sprite.ts (a tracked symlink into the Claude Code Calm mod,
 // which both harnesses share); this module owns only Pi's rendering of those frames
@@ -26,20 +27,25 @@ import type { Component, TUI } from "@earendil-works/pi-tui";
 import {
   CALM_WORKING_SHIP_TICK_MS,
   CALM_WORKING_SHIP_TICKS_PER_MOVE,
-  createCalmWorkingShipSprite,
+  createCalmWorkingSceneSprite,
+  type CalmWorkingScene,
   type CalmWorkingShipColor,
   type CalmWorkingShipRun,
   type CalmWorkingShipSprite,
 } from "./fm-calm-working-ship-sprite.ts";
 
 export { CALM_WORKING_SHIP_TICK_MS, CALM_WORKING_SHIP_TICKS_PER_MOVE };
+export { parseCalmWorkingScene, type CalmWorkingScene } from "./fm-calm-working-ship-sprite.ts";
 
 // Standard ANSI foreground codes only: no theme lookup, bright variant, or 256/RGB.
 // Water is a single blue so the swell reads through glyph height alone; the boat is a
 // single yellow so its sail halves, mast, and hull never split into mismatched colors.
+// The candles scene paints each rising candle green and each falling candle red.
 const ANSI_FOREGROUND: Record<Exclude<CalmWorkingShipColor, "plain">, string> = {
   water: "\u001b[34m",
   boat: "\u001b[33m",
+  rise: "\u001b[32m",
+  fall: "\u001b[31m",
 };
 // Restores the default foreground so color never bleeds into padding or later frames.
 const RESET = "\u001b[39m";
@@ -57,8 +63,9 @@ function paintRun(run: CalmWorkingShipRun): string {
   return `${ANSI_FOREGROUND[run.color]}${run.text}${RESET}`;
 }
 
-export function createCalmWorkingShipAnimation(): CalmWorkingShipAnimation {
-  const sprite = createCalmWorkingShipSprite();
+/** An animation of `scene`, the boat unless the home's Calm scene setting chose otherwise. */
+export function createCalmWorkingShipAnimation(scene: CalmWorkingScene = "boat"): CalmWorkingShipAnimation {
+  const sprite = createCalmWorkingSceneSprite(scene);
   return {
     position: sprite.position,
     direction: sprite.direction,

@@ -16,8 +16,9 @@
 // drawings and leaves the stored transcript, model context, and session storage alone.
 //
 // Presentation while Calm is on, sharing Pi Calm's goals where the mods API allows:
-// the stock working row (`Spinner`) becomes the two-row sailboat, repainted through
-// `$.ui.blit` on the sprite's own tick; `ToolUse`, `ToolResult`, and `ToolGroup` rows
+// the stock working row (`Spinner`) becomes the two-row sailboat, or the candles scene
+// when the home's scene setting picks it, repainted through `$.ui.blit` on the sprite's
+// own tick; `ToolUse`, `ToolResult`, and `ToolGroup` rows
 // draw as zero-height boxes; a `UserMessage` whose text the canonical operational-input
 // classifier recognizes draws as zero height; an `AssistantMessage` block recorded as a
 // mid-turn working note draws as zero height. Calm off returns every drawing to the
@@ -31,8 +32,11 @@
 // Each `session.start` clears presentation classifications and reloads the new session.
 import type { EngineInterface, Register, RenderElement, RenderInput } from "claude-code";
 import {
+  CALM_WORKING_SCENE_DEFAULT,
   CALM_WORKING_SHIP_TICK_MS,
-  createCalmWorkingShipSprite,
+  createCalmWorkingSceneSprite,
+  parseCalmWorkingScene,
+  type CalmWorkingScene,
 } from "../lib/fm-calm-working-ship-sprite.ts";
 import {
   CALM_SHIP_RASTER_KEY,
@@ -44,6 +48,7 @@ import {
 } from "../lib/fm-calm-ship-raster.ts";
 import {
   calmPreferencePath,
+  calmScenePath,
   parseCalmPreference,
   classifyRestoredTranscript,
   serializeCalmPreference,
@@ -59,12 +64,17 @@ const CALM_COMMAND = "calm";
 // same as a new Pi extension lifetime.
 let calm = false;
 let preferencePath: string | undefined;
+let scenePath: string | undefined;
 let activation: Promise<boolean> | undefined;
 let loading: Promise<void> | undefined;
 let ticker: { cancel(): void } | undefined;
 const workingNotes = new Set<string>();
 const finalReplies = new Set<string>();
-const sprite = createCalmWorkingShipSprite();
+// The working picture is read from the home's scene setting only when the working row
+// first draws in a session, so a session that never shows it never reads the file.
+let scene: CalmWorkingScene = CALM_WORKING_SCENE_DEFAULT;
+let sprite = createCalmWorkingSceneSprite(scene);
+let sceneLoading: Promise<void> | undefined;
 let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light;
 // Every Spinner site currently drawing the boat, by its requestId, with the mounted
 // Raster size a blit must repeat exactly.
@@ -80,7 +90,7 @@ function isActivated($: EngineInterface): Promise<boolean> {
   return activation;
 }
 
-async function readPreference($: EngineInterface, path: string): Promise<string | undefined> {
+async function readConfigFile($: EngineInterface, path: string): Promise<string | undefined> {
   try {
     return await $.fs.read(path);
   } catch {
@@ -98,15 +108,14 @@ async function readTheme($: EngineInterface): Promise<unknown> {
 }
 
 async function load($: EngineInterface): Promise<void> {
-  preferencePath = calmPreferencePath(
-    {
-      FM_HOME: await $.env.get("FM_HOME"),
-      FM_ROOT_OVERRIDE: await $.env.get("FM_ROOT_OVERRIDE"),
-      FM_CONFIG_OVERRIDE: await $.env.get("FM_CONFIG_OVERRIDE"),
-    },
-    $.plugin.root,
-  );
-  calm = parseCalmPreference(await readPreference($, preferencePath));
+  const home = {
+    FM_HOME: await $.env.get("FM_HOME"),
+    FM_ROOT_OVERRIDE: await $.env.get("FM_ROOT_OVERRIDE"),
+    FM_CONFIG_OVERRIDE: await $.env.get("FM_CONFIG_OVERRIDE"),
+  };
+  preferencePath = calmPreferencePath(home, $.plugin.root);
+  scenePath = calmScenePath(home, $.plugin.root);
+  calm = parseCalmPreference(await readConfigFile($, preferencePath));
   palette = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(await readTheme($))];
   try {
     const restored = classifyRestoredTranscript(await $.session.messages());
@@ -128,11 +137,27 @@ function ensureLoaded($: EngineInterface): Promise<void> {
   return loading;
 }
 
+/** Choose this session's working picture once; anything unreadable or unknown draws the boat. */
+async function loadScene($: EngineInterface): Promise<void> {
+  const chosen = scenePath === undefined ? CALM_WORKING_SCENE_DEFAULT : parseCalmWorkingScene(await readConfigFile($, scenePath));
+  if (chosen === scene) return;
+  scene = chosen;
+  sprite = createCalmWorkingSceneSprite(chosen);
+}
+
+function ensureScene($: EngineInterface): Promise<void> {
+  if (sceneLoading === undefined) sceneLoading = loadScene($).catch(() => undefined);
+  return sceneLoading;
+}
+
 async function resetSession($: EngineInterface): Promise<void> {
   if (loading !== undefined) await loading.catch(() => undefined);
+  if (sceneLoading !== undefined) await sceneLoading;
   calm = false;
   preferencePath = undefined;
+  scenePath = undefined;
   loading = undefined;
+  sceneLoading = undefined;
   workingNotes.clear();
   finalReplies.clear();
   sites.clear();
@@ -256,6 +281,7 @@ export const register: Register = (on) => {
       sites.delete(e.requestId);
       return next(e);
     }
+    await ensureScene($);
     const columns = calmShipRasterColumns(e.viewport?.columns);
     const packed = packCalmShipRasterCells(sprite.frame(columns), columns, palette);
     sites.set(e.requestId, { columns, rows: packed.rows });

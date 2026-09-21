@@ -4277,6 +4277,161 @@ JS
   pass "Pi calm native E2E replaces the stock working row with a moving, resize-clamped working ship that freezes and resumes across two working periods in one Pi session, clears on abort, keeps captain turns visible, hides exact operational user rows without changing persistence, restores stock rendering Calm-off, survives restart, and preserves export plus Ctrl+O behavior"
 }
 
+test_working_candles_scene() {
+  local fixture out version
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    echo "skip: node or npm not found for Pi Calm candles-scene test"
+    return 0
+  fi
+  if [ ! -f "$PI_PACKAGE_DIR/package.json" ]; then
+    echo "skip: installed @earendil-works/pi-coding-agent package not found"
+    return 0
+  fi
+  version=$(node -p "require('$PI_PACKAGE_DIR/package.json').version")
+  record_pi_version_evidence "$version" "Pi Calm candles-scene assumptions"
+
+  fixture="$TMP_ROOT/working-candles"
+  mkdir -p "$fixture/home/config" "$fixture/lib" "$fixture/node_modules/@earendil-works"
+  cp "$EXT" "$fixture/fm-calm.ts"
+  cp "$ASSISTANT_LAYOUT" "$fixture/lib/fm-calm-assistant-layout.ts"
+  cp "$PRESERVATION" "$fixture/lib/fm-calm-preservation.ts"
+  cp "$OPERATIONAL_USER_LAYOUT" "$fixture/lib/fm-calm-operational-user-layout.ts"
+  cp "$VISIBILITY" "$fixture/lib/fm-calm-visibility.ts"
+  cp "$WORKING_SHIP" "$fixture/lib/fm-calm-working-ship.ts"
+  cp "$WORKING_SHIP_SPRITE" "$fixture/lib/fm-calm-working-ship-sprite.ts"
+  cp "$PI_OPERATIONAL_INPUT" "$fixture/lib/fm-operational-input.ts"
+  ln -s "$PI_PACKAGE_DIR" "$fixture/node_modules/@earendil-works/pi-coding-agent"
+  ln -s "$PI_PACKAGE_DIR/node_modules/@earendil-works/pi-tui" "$fixture/node_modules/@earendil-works/pi-tui"
+  ln -s "$PI_PACKAGE_DIR/node_modules/typebox" "$fixture/node_modules/typebox"
+  printf '%s\n' '{"type":"module"}' >"$fixture/package.json"
+  printf '%s\n' on >"$fixture/home/config/calm"
+  printf '%s\n' candles >"$fixture/home/config/calm-scene"
+
+  out=$(cd "$fixture" && EXT="$fixture/fm-calm.ts" FM_HOME="$fixture/home" PI_PACKAGE_DIR="$PI_PACKAGE_DIR" node --input-type=module 2>&1 <<'JS'
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const packageRoot = process.env.PI_PACKAGE_DIR;
+const [{ initTheme, theme }, { visibleWidth, setCapabilities }] = await Promise.all([
+  import(pathToFileURL(`${packageRoot}/dist/modes/interactive/theme/theme.js`).href),
+  import(pathToFileURL(`${packageRoot}/node_modules/@earendil-works/pi-tui/dist/index.js`).href),
+]);
+initTheme("dark");
+setCapabilities({ images: null, trueColor: true, hyperlinks: false });
+const { CALM_WORKING_SHIP_WIDGET_KEY } = await import(pathToFileURL(`${process.cwd()}/lib/fm-calm-working-ship.ts`).href);
+
+const ESC = "\u001b";
+const HULL = "╲▁▁▁╱";
+const scenePath = `${process.env.FM_HOME}/config/calm-scene`;
+const strip = (text) => text.replace(new RegExp(`${ESC}\\[[0-9;]*m`, "g"), "");
+const check = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
+
+const handlers = new Map();
+const pi = {
+  events: { emit() {}, on() {} },
+  on(event, handler) {
+    handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+  },
+  registerCommand() {},
+  registerEntryRenderer() {},
+  registerTool() {},
+  getAllTools: () => [],
+  appendEntry() {},
+  sendMessage() {},
+  sendUserMessage() {},
+  setSessionName() {},
+};
+const extension = await import(`${pathToFileURL(process.env.EXT).href}?candles=${Date.now()}`);
+extension.default(pi);
+
+const tui = { requestRender() {} };
+const ui = {
+  workingVisible: [],
+  widgets: new Map(),
+  setWorkingVisible(visible) {
+    this.workingVisible.push(visible);
+  },
+  setWidget(key, content) {
+    this.widgets.get(key)?.dispose?.();
+    this.widgets.delete(key);
+    if (content !== undefined) this.widgets.set(key, typeof content === "function" ? content(tui, theme) : content);
+  },
+  getEditorText: () => "",
+  getToolsExpanded: () => false,
+  onTerminalInput: () => () => {},
+  setHiddenThinkingLabel() {},
+  setStatus() {},
+  setToolsExpanded() {},
+  notify() {},
+  theme,
+};
+const fire = async (event, payload = {}) => {
+  for (const handler of handlers.get(event) ?? []) await handler(payload, { ui });
+};
+const widget = () => ui.widgets.get(CALM_WORKING_SHIP_WIDGET_KEY);
+
+// The candles replace the stock row while a run is under way, filling the width exactly
+// under Pi's own width rules, in standard ANSI green and red only.
+await fire("session_start", { reason: "startup" });
+await fire("agent_start");
+check(!!widget(), "Calm with the candles setting installed no working widget");
+check(ui.workingVisible.at(-1) === false, "the candles did not hide Pi's stock working row");
+for (const width of [60, 17, 5]) {
+  const lines = widget().render(width);
+  check(lines.length === 2, `the candles drew ${lines.length} rows at width ${width}`);
+  for (const line of lines) {
+    check(visibleWidth(line) === width, `a candle row is ${visibleWidth(line)} columns wide at width ${width}`);
+    check(/^[ ╷╻╵│╽╹╿┃]+$/.test(strip(line)), `a candle row drew other glyphs: ${JSON.stringify(strip(line))}`);
+    const codes = new Set(line.match(new RegExp(`${ESC}\\[[0-9;]*m`, "g")) ?? []);
+    for (const code of codes) check([`${ESC}[32m`, `${ESC}[31m`, `${ESC}[39m`].includes(code), `a candle row used ${JSON.stringify(code)}`);
+  }
+}
+const narrow = widget().render(4);
+check(narrow.length === 1 && visibleWidth(narrow[0]) === 4, "the candles did not fall back to one exact row when narrow");
+const painted = widget().render(60).join("\n");
+check(painted.includes(`${ESC}[32m`) && painted.includes(`${ESC}[31m`), "the candles did not paint both green and red");
+
+// Settling removes the candles and restores the stock row; the next run resumes the
+// same frame rather than advancing through the hidden time.
+await fire("agent_settled");
+check(!widget(), "the candles outlived the settled run");
+check(ui.workingVisible.at(-1) === true, "settling did not restore Pi's stock working row");
+await new Promise((resolve) => setTimeout(resolve, 500));
+await fire("agent_start");
+check(widget().render(60).join("\n") === painted, "the candles did not resume from their last painted frame");
+await fire("agent_settled");
+
+// Any other value, and an unreadable setting, draws the boat without throwing.
+for (const [label, prepare] of [
+  ["an unknown value", () => writeFileSync(scenePath, "fish\n")],
+  ["an absent setting", () => rmSync(scenePath, { force: true })],
+  ["an unreadable setting", () => mkdirSync(scenePath)],
+]) {
+  prepare();
+  await fire("session_start", { reason: "new" });
+  await fire("agent_start");
+  const boat = widget().render(40).map(strip);
+  check(boat.length === 2 && boat[1].indexOf(HULL) === 0, `${label} did not draw the boat at its start: ${JSON.stringify(boat)}`);
+  await fire("agent_settled");
+}
+rmSync(scenePath, { recursive: true, force: true });
+
+// The setting is read at each session start, so switching back takes effect there.
+writeFileSync(scenePath, "candles\n");
+await fire("session_start", { reason: "new" });
+await fire("agent_start");
+check(/^[ ╷╻╵│╽╹╿┃]+$/.test(strip(widget().render(40)[1])), "a new session did not pick up the candles setting");
+await fire("agent_settled");
+await fire("session_shutdown");
+console.log("candles-ok");
+JS
+  ) || fail "Pi Calm candles scene: $out"
+  assert_contains "$out" "candles-ok" "the Pi candles-scene check did not complete"
+  pass "Pi Calm draws the candles scene from config/calm-scene in exact-width standard ANSI green and red rows, falls back to one row when narrow, removes it on settle, resumes its last frame, and draws the boat for an unknown, absent, or unreadable setting"
+}
+
 test_home_resolution
 test_pi_compat_no_upper_bound
 test_pi_compat_degraded_adapter
@@ -4288,5 +4443,6 @@ test_calm_mid_turn_working_notes
 test_operational_followup_turn_e2e
 test_hidden_block_geometry_e2e
 test_working_ship_geometry_and_lifecycle
+test_working_candles_scene
 test_export_dom_render_guard
 test_interactive_terminal_e2e

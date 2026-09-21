@@ -38,6 +38,12 @@ The Pi extension reloads this preference on every Pi `session_start`, including 
 The Claude Code mod likewise reloads it on every `session.start`, including same-process session replacement, and also loads it lazily before any row that can draw ahead of that event, including during `claude --continue` restoration.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+Beside it, gitignored `config/calm-scene` picks the picture Calm draws in place of the working row, resolved from the same config directory by both harnesses.
+Its value `candles`, surrounding whitespace ignored, selects the candles scene [`calm.md`](calm.md) describes; an absent, unreadable, empty, or any other value draws the default boat.
+No command writes it; the captain or firstmate edits the file directly, and it takes effect at the next session start.
+The Pi extension reads it on every Pi `session_start`, and the Claude Code mod reads it once per session when the working row first draws while Calm is on, so a session that never shows that row never reads it.
+Like `config/calm`, it is local to each Firstmate home and is not part of secondmate inherited configuration.
+
 ## Pi supervision branch
 
 On a Pi primary, an in-process supervision branch handles eligible task-local wake rows and selected heartbeat reviews while keeping main-only rows on the captain-facing path; [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns its conversation lifecycle, row eligibility, mixed-queue dispatch, heartbeat routing, and pre-drain recheck.

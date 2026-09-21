@@ -418,8 +418,163 @@ JS
   pass "the mod's operational-input classifier agrees with bin/fm-operational-input.sh on all $count corpus cases: every current kind the owner encodes, every legacy shape, and every near miss"
 }
 
+test_candles_scene() {
+  local out
+  cat >"$TMP_ROOT/candles.mjs" <<'JS'
+import { pathToFileURL } from "node:url";
+const core = await import(pathToFileURL(process.env.MOD + "/lib/fm-calm-working-ship-sprite.ts").href);
+const raster = await import(pathToFileURL(process.env.MOD + "/lib/fm-calm-ship-raster.ts").href);
+const policy = await import(pathToFileURL(process.env.MOD + "/lib/fm-calm-presentation.ts").href);
+const pi = await import(pathToFileURL(process.env.PI_SHIP).href);
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+const cells = (row) => row.map((run) => run.text).join("");
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const GLYPHS = new Set(["╷", "╻", "╵", "│", "╽", "╹", "╿", "┃"]);
+
+// The setting: only "candles" picks the candles; everything else draws the boat.
+for (const [stored, expected] of [["candles\n", "candles"], [" candles ", "candles"], ["candles", "candles"], ["boat\n", "boat"], ["", "boat"], [undefined, "boat"], ["Candles", "boat"], ["candle", "boat"], ["candles please", "boat"], ["ships", "boat"]]) {
+  check(core.parseCalmWorkingScene(stored) === expected, `scene ${JSON.stringify(stored)} read as ${core.parseCalmWorkingScene(stored)}`);
+}
+check(core.CALM_WORKING_SCENE_DEFAULT === "boat", "the default scene is not the boat");
+const plugin = "/repo/.claude/mods/firstmate-calm";
+check(policy.calmScenePath({}, plugin) === "/repo/config/calm-scene", "scene path plugin-root fallback");
+check(policy.calmScenePath({ FM_HOME: "/home/fm", FM_ROOT_OVERRIDE: "/o" }, plugin) === "/home/fm/config/calm-scene", "scene path FM_HOME");
+check(policy.calmScenePath({ FM_ROOT_OVERRIDE: "/o" }, plugin) === "/o/config/calm-scene", "scene path FM_ROOT_OVERRIDE");
+check(policy.calmScenePath({ FM_HOME: "/home/fm", FM_CONFIG_OVERRIDE: "/cfg" }, plugin) === "/cfg/calm-scene", "scene path FM_CONFIG_OVERRIDE");
+
+// The boat scene is exactly today's boat at every width and step.
+for (const width of [0, 1, 3, 4, 5, 12, 40, 121]) {
+  const scene = core.createCalmWorkingSceneSprite("boat");
+  const boat = core.createCalmWorkingShipSprite();
+  for (let step = 0; step < 45; step += 1) {
+    check(same(scene.frame(width), boat.frame(width)), `the boat scene diverged from the boat at width ${width} step ${step}`);
+    scene.tick();
+    boat.tick();
+  }
+}
+
+// Geometry: every row exactly fills the width, two rows from five columns up, one below,
+// only candle glyphs, one color per candle column, plain gaps.
+let risingSeen = 0;
+let fallingSeen = 0;
+for (let width = 0; width <= 130; width += 1) {
+  const sprite = core.createCalmWorkingSceneSprite("candles");
+  for (let step = 0; step < 9; step += 1) {
+    const frame = sprite.frame(width);
+    if (width === 0) { check(frame.length === 0, "zero width painted a row"); break; }
+    check(frame.length === (width < 5 ? 1 : 2), `width ${width} painted ${frame.length} rows`);
+    for (const row of frame) {
+      check(Array.from(cells(row)).length === width, `a candle row is not exactly ${width} cells`);
+      for (const run of row) {
+        check(Array.from(run.text).length === 1, "a candle run is not one cell");
+        if (run.text === " ") check(run.color === "plain", "a blank cell is colored");
+        else {
+          check(GLYPHS.has(run.text), `unexpected candle glyph ${run.text}`);
+          check(run.color === "rise" || run.color === "fall", `candle glyph colored ${run.color}`);
+          if (run.color === "rise") risingSeen += 1; else fallingSeen += 1;
+        }
+      }
+    }
+    for (let column = 0; column < width; column += 1) {
+      const colors = new Set(frame.map((row) => row[column].color).filter((color) => color !== "plain"));
+      check(colors.size <= 1, `candle column ${column} mixes colors`);
+      const absolute = column + sprite.position();
+      if (absolute % core.CALM_WORKING_CANDLES_PITCH !== 0) check(colors.size === 0, `gap column ${column} is not blank`);
+      else check(colors.size === 1, `candle column ${column} is blank`);
+    }
+    for (let tick = 0; tick < 4; tick += 1) sprite.tick();
+  }
+}
+check(risingSeen > 0 && fallingSeen > 0, "the chart never showed both rising and falling candles");
+
+// Motion: one column left per boat move, nothing in between, never wrapping.
+{
+  const sprite = core.createCalmWorkingSceneSprite("candles");
+  const width = 40;
+  const first = sprite.frame(width).map(cells);
+  check(sprite.direction() === -1 && sprite.position() === 0, "the chart did not start at the left edge travelling left");
+  for (let tick = 1; tick < core.CALM_WORKING_SHIP_TICKS_PER_MOVE; tick += 1) {
+    sprite.tick();
+    check(same(sprite.frame(width).map(cells), first), `the chart moved on tick ${tick} before its move tick`);
+    check(sprite.waterPhase() === tick, "the phase did not advance every tick");
+  }
+  sprite.tick();
+  const moved = sprite.frame(width).map(cells);
+  check(sprite.position() === 1, "the chart did not scroll on its move tick");
+  for (let row = 0; row < 2; row += 1) {
+    check(Array.from(moved[row]).slice(0, width - 1).join("") === Array.from(first[row]).slice(1).join(""), "the chart did not scroll exactly one column left");
+  }
+  // Reflow: a wider frame extends the same chart to the right, a narrower one clips it.
+  const wide = sprite.frame(90).map(cells);
+  const narrow = sprite.frame(12).map(cells);
+  for (let row = 0; row < 2; row += 1) {
+    check(Array.from(wide[row]).slice(0, width).join("") === moved[row], "a wider frame changed the visible chart");
+    check(narrow[row] === Array.from(moved[row]).slice(0, 12).join(""), "a narrower frame changed the visible chart");
+  }
+}
+
+// Freeze and resume: unpainted ticks are discarded, reset returns to the start.
+{
+  const sprite = core.createCalmWorkingSceneSprite("candles");
+  const start = sprite.frame(30);
+  for (let tick = 0; tick < 9; tick += 1) sprite.tick();
+  const painted = sprite.frame(30);
+  const state = [sprite.position(), sprite.waterPhase()];
+  for (let tick = 0; tick < 23; tick += 1) sprite.tick();
+  sprite.restoreLastRendered();
+  check(same([sprite.position(), sprite.waterPhase()], state), "hidden ticks advanced the frozen chart");
+  sprite.clampToWidth(3);
+  check(same(sprite.frame(30), painted), "the chart did not resume from its last painted frame");
+  sprite.reset();
+  check(same(sprite.frame(30), start), "reset did not return the chart to its initial frame");
+}
+
+// Pi paints the candles byte-for-byte as the shared frame in standard ANSI green and red.
+{
+  const ESC = "\u001b";
+  const ANSI = { water: ESC + "[34m", boat: ESC + "[33m", rise: ESC + "[32m", fall: ESC + "[31m" };
+  const paint = (row) => row.map((run) => (run.color === "plain" ? run.text : ANSI[run.color] + run.text + ESC + "[39m")).join("");
+  for (const width of [1, 4, 5, 33, 80]) {
+    const animation = pi.createCalmWorkingShipAnimation("candles");
+    const sprite = core.createCalmWorkingSceneSprite("candles");
+    for (let step = 0; step < 13; step += 1) {
+      check(same(animation.render(width), sprite.frame(width).map(paint)), `Pi candles diverged at width ${width} step ${step}`);
+      animation.tick();
+      sprite.tick();
+    }
+  }
+  check(same(pi.createCalmWorkingShipAnimation().render(40), core.createCalmWorkingShipSprite().frame(40).map(paint)), "Pi's default animation is not the boat");
+}
+
+// Claude Code paints the candles in each theme family's green and red, fixed to
+// xterm-256 cube entries so truecolor and 256-color terminals agree.
+{
+  const palettes = raster.CALM_SHIP_RASTER_PALETTES;
+  check(palettes.dark.rise === 0x5faf5f && palettes.dark.fall === 0xff5f87, "dark candle colors");
+  check(palettes.light.rise === 0x00875f && palettes.light.fall === 0xaf005f, "light candle colors");
+  const sprite = core.createCalmWorkingSceneSprite("candles");
+  const frame = sprite.frame(20);
+  const packed = raster.packCalmShipRasterCells(frame, 20, palettes.dark);
+  const words = new Uint32Array(new Uint8Array(Buffer.from(packed.cells, "base64")).buffer);
+  check(packed.rows === 2, "the candles did not pack two rows");
+  for (let row = 0; row < 2; row += 1) for (let column = 0; column < 20; column += 1) {
+    const offset = (row * 20 + column) * 3;
+    const run = frame[row][column];
+    check(String.fromCodePoint(words[offset]) === run.text, "a packed candle glyph differs");
+    check(words[offset + 1] === palettes.dark[run.color], "a packed candle color differs");
+    check(words[offset + 2] === raster.CALM_SHIP_RASTER_DEFAULT_COLOR, "a candle cell set a background");
+  }
+}
+console.log("candles-ok");
+JS
+  out=$(MOD="$MOD" PI_SHIP="$PI_SHIP" run_node "$TMP_ROOT/candles.mjs" 2>&1) || fail "candles scene: $out"
+  assert_contains "$out" "candles-ok" "the candles scene check did not complete"
+  pass "the candles scene is chosen only by an exact candles setting, leaves the boat scene byte-for-byte the boat, fills every width in two rows or one when narrow with one-colored candles and blank gaps, scrolls one column left per boat move, reflows without wrapping, freezes and resumes, and paints as standard ANSI green and red on Pi and 256-color-stable theme greens and reds on Claude Code"
+}
+
 test_plugin_shape
 test_shared_sprite_and_pi_rendering
 test_raster_packing
 test_presentation_policy
 test_classifier_parity_with_shell_owner
+test_candles_scene

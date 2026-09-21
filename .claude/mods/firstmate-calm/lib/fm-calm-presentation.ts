@@ -46,10 +46,19 @@ export function calmCodeRootFromPluginRoot(pluginRoot: string): string {
  * `FM_CONFIG_OVERRIDE` naming the config directory outright when present.
  */
 export function calmPreferencePath(env: CalmHomeEnvironment, pluginRoot: string): string {
-  const configDirectory =
+  return `${calmConfigDirectory(env, pluginRoot)}/calm`;
+}
+
+/** The per-home `config/calm-scene` path that picks the working picture, beside `config/calm`. */
+export function calmScenePath(env: CalmHomeEnvironment, pluginRoot: string): string {
+  return `${calmConfigDirectory(env, pluginRoot)}/calm-scene`;
+}
+
+function calmConfigDirectory(env: CalmHomeEnvironment, pluginRoot: string): string {
+  return (
     env.FM_CONFIG_OVERRIDE ||
-    `${env.FM_HOME || env.FM_ROOT_OVERRIDE || calmCodeRootFromPluginRoot(pluginRoot)}/config`;
-  return `${configDirectory}/calm`;
+    `${env.FM_HOME || env.FM_ROOT_OVERRIDE || calmCodeRootFromPluginRoot(pluginRoot)}/config`
+  );
 }
 
 /**

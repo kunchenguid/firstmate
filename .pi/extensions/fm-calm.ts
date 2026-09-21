@@ -53,6 +53,8 @@ import {
   CALM_WORKING_SHIP_WIDGET_KEY,
   createCalmWorkingShipAnimation,
   createCalmWorkingShipWidget,
+  parseCalmWorkingScene,
+  type CalmWorkingScene,
 } from "./lib/fm-calm-working-ship.ts";
 import {
   calmPresentationHides,
@@ -130,10 +132,12 @@ export default function (pi: ExtensionAPI) {
   // continuations, retries, or compaction that stay inside the same run.
   let agentRunActive = false;
   let workingShipShown = false;
-  // One animation instance per extension lifetime. Hiding the working widget freezes
-  // this state; the next working period resumes it. session_start resets it so a fresh
-  // Pi session starts at the normal initial position. Never module-global.
-  const workingShipAnimation = createCalmWorkingShipAnimation();
+  // One animation instance per extension lifetime and scene. Hiding the working widget
+  // freezes this state; the next working period resumes it. session_start resets it so
+  // a fresh Pi session starts at the normal initial position, and replaces it only when
+  // the home's scene setting names a different picture. Never module-global.
+  let workingShipScene: CalmWorkingScene = "boat";
+  let workingShipAnimation = createCalmWorkingShipAnimation(workingShipScene);
 
   // Single owner of Calm's working-row presentation choice. The widget is only created
   // or removed on a real transition, so repeated starts cannot duplicate its timer.
@@ -170,6 +174,16 @@ export default function (pi: ExtensionAPI) {
       return false;
     }
     return stored === "on" || stored === "max";
+  };
+  // The working picture, read at every session_start; docs/configuration.md owns the
+  // file. Anything missing, unreadable, or unknown draws the boat.
+  const calmScenePath = resolve(configDirectory, "calm-scene");
+  const loadCalmScene = (): CalmWorkingScene => {
+    try {
+      return parseCalmWorkingScene(readFileSync(calmScenePath, "utf8"));
+    } catch {
+      return "boat";
+    }
   };
   const persistCalmPreference = (active: boolean): void => {
     mkdirSync(dirname(calmPreferencePath), { recursive: true });
@@ -417,6 +431,11 @@ export default function (pi: ExtensionAPI) {
     publishPresentationState();
     agentRunActive = false;
     workingShipShown = false;
+    const scene = loadCalmScene();
+    if (scene !== workingShipScene) {
+      workingShipScene = scene;
+      workingShipAnimation = createCalmWorkingShipAnimation(scene);
+    }
     // A genuine new session lifetime starts the boat at the normal initial position.
     workingShipAnimation.reset();
     applyWorkingPresentation(ctx.ui, true);

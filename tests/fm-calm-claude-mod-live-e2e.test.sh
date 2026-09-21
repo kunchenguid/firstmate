@@ -11,6 +11,8 @@
 #      persists off, /calm hides them again and persists on, all without a Calm output
 #      row in the transcript.
 #   3. `claude --continue` restores the transcript with those rows still hidden.
+#   4. With config/calm-scene set to candles, scrolling candles replace the working row
+#      in the theme's green and red instead of the sailboat, and leave with the turn.
 # The project and FM_HOME are isolated; Claude keeps using its existing managed
 # authentication and one trusted temporary folder. A few Haiku turns are submitted.
 # shellcheck disable=SC2016 # the model, not this test shell, reads the prompt text
@@ -31,10 +33,14 @@ FM_HOME_DIR="$LAB/fmhome"
 DEBUG_LOG_OFF="$LAB/debug-off.log"
 DEBUG_LOG_ON="$LAB/debug-on.log"
 DEBUG_LOG_RESUME="$LAB/debug-resume.log"
+DEBUG_LOG_CANDLES="$LAB/debug-candles.log"
 SOCKET="fm-calm-claude-$$"
 SESSION="fm-calm-claude-e2e"
 HULL='╲▁▁▁╱'
 SAIL='◿│◣'
+# Claude Code's debug-log line for the loaded module; 2.1.278 appends the plugin's
+# source to its name (`firstmate-calm@skills-dir`), 2.1.272 printed the bare name.
+MODULE_LOADED='hooks module firstmate-calm(@[^ ]+)? loaded'
 
 cleanup() {
   local i=0
@@ -210,7 +216,7 @@ launch "$DEBUG_LOG_OFF" 0
 wait_idle
 grep -q 'hooks modules not loaded' "$DEBUG_LOG_OFF" \
   || fail "Claude Code $CLAUDE_VERSION did not report hooks modules off with the flag unset"
-if grep -q 'hooks module firstmate-calm loaded' "$DEBUG_LOG_OFF"; then
+if grep -Eq "$MODULE_LOADED" "$DEBUG_LOG_OFF"; then
   fail "Claude Code $CLAUDE_VERSION loaded the Calm hooks module although the flag was unset"
 fi
 if command_listed calm; then
@@ -263,11 +269,11 @@ pass "Claude Code $CLAUDE_VERSION with the flag unset: no hooks module, no /calm
 launch "$DEBUG_LOG_ON" 1
 wait_idle
 i=0
-while [ "$i" -lt 100 ] && ! grep -q 'hooks module firstmate-calm loaded' "$DEBUG_LOG_ON"; do
+while [ "$i" -lt 100 ] && ! grep -Eq "$MODULE_LOADED" "$DEBUG_LOG_ON"; do
   sleep 0.1
   i=$((i + 1))
 done
-grep -q 'hooks module firstmate-calm loaded' "$DEBUG_LOG_ON" \
+grep -Eq "$MODULE_LOADED" "$DEBUG_LOG_ON" \
   || fail "Claude Code $CLAUDE_VERSION did not load the Calm hooks module from the project's .claude/skills path with the flag on"
 # The engine logs one benign notice for every options-less hooks module ("options
 # requested but its manifest declares no userConfig"); anything else is a real problem.
@@ -409,3 +415,52 @@ send '/exit'
 enter
 sleep 1
 pass "Claude Code $CLAUDE_VERSION resumes the transcript with Calm's hidden rows still hidden and the preference intact"
+
+# --- 4. The candles scene: scrolling candles in the working row -------------------
+# The first screen row made only of candle glyphs, with at least eight candles.
+candle_row() {  # <screen text>
+  printf '%s\n' "$1" | perl -CSD -Mutf8 -ne 'if (/^[ ╷╻╵│╽╹╿┃]+$/) { my $n = () = /[╷╻╵│╽╹╿┃]/g; if ($n >= 8) { print; exit } }'
+}
+printf 'candles\n' >"$FM_HOME_DIR/config/calm-scene"
+launch "$DEBUG_LOG_CANDLES" 1
+wait_idle
+send "$PROMPT"
+enter
+i=0
+first_row=''
+while [ "$i" -lt 200 ] && [ -z "$first_row" ]; do
+  first_row=$(candle_row "$(screen)")
+  sleep 0.1
+  i=$((i + 1))
+done
+[ -n "$first_row" ] || { printf '%s\n' "$(screen)" >&2; fail "the candles never replaced the working row"; }
+case "$(screen)" in
+  *"$HULL"*|*"$SAIL"*) fail "the sailboat drew although the candles scene is set" ;;
+esac
+# The candles are painted in the theme's green and red: 256-color 71/204 (dark) or
+# 29/125 (light), or the same values as truecolor.
+colored=$(tmux -L "$SOCKET" capture-pane -e -p -t "$SESSION" 2>/dev/null | grep -E '╽|╿|┃|╻|╹' | head -3)
+case "$colored" in
+  *'38;5;71m'*|*'38;5;204m'*|*'38;5;29m'*|*'38;5;125m'*|*'38;2;95;175;95m'*|*'38;2;255;95;135m'*|*'38;2;0;135;95m'*|*'38;2;175;0;95m'*) : ;;
+  *)
+    printf '%s\n' "$colored" | cat -v >&2
+    fail "the candles were not painted in the theme's green and red"
+    ;;
+esac
+second_row=$first_row
+i=0
+while [ "$i" -lt 60 ]; do
+  second_row=$(candle_row "$(screen)")
+  if [ -n "$second_row" ] && [ "$second_row" != "$first_row" ]; then
+    break
+  fi
+  sleep 0.1
+  i=$((i + 1))
+done
+[ -n "$second_row" ] && [ "$second_row" != "$first_row" ] || fail "the candles never scrolled"
+wait_settled 'the turn with the candles scene'
+[ -z "$(candle_row "$(screen)")" ] || fail "the candles stayed on screen after the turn settled"
+send '/exit'
+enter
+sleep 1
+pass "Claude Code $CLAUDE_VERSION draws the chosen candles scene in the working row in the theme's green and red, scrolls it, and removes it when the turn settles"

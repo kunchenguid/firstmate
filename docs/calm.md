@@ -19,6 +19,12 @@ Hidden elapsed time does not advance the animation, and a resize while hidden cl
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
+
+A home can pick candlesticks instead of the boat through its `config/calm-scene` setting, which [`configuration.md`](configuration.md#calm-preference-configcalm) owns; the boat stays the default and is drawn unchanged for every other value.
+The candles scene is two rows of one-column candles, one candle and one blank gap apart, each a heavy box-drawing body with light wicks above and below at half-row resolution.
+Rising candles are standard ANSI green and falling ones standard ANSI red, and the made-up series is a slow swell with bounded noise, a pattern rather than a real price.
+The chart scrolls left one column every 880ms, the boat's pace, so the newest candle enters at the right edge.
+It fills the usable width, reflows on resize without wrapping, falls back to one compressed row below five columns, freezes and resumes across hidden time like the boat, and appears and disappears exactly where the boat would.
 Calm hides collapsed thinking labels, the mid-turn assistant working-note blocks governed by the shared preservation rule above, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
 Pi applies that rule independently to each text block, so a short working note can hide beside preserved substantive content in the same message.
 A working note is briefly visible while it streams before its settled row collapses.
@@ -75,6 +81,8 @@ The toggle answers with a transient "Calm on" or "Calm off" notice under the pro
 While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) becomes the same two-row sailboat Pi draws, from the same shared sprite geometry: it fills the row inside the transcript margin, repaints on the boat's 220ms cadence with the hull moving every 880ms, reflows on resize, and appears and disappears exactly where the stock row would.
 On Claude Code the boat is painted in Claude Code's own theme colors rather than Pi's standard ANSI codes: every water cell takes the spinner blue of the active theme family (`#93a5ff` on a dark theme, `#5769f7` on a light one) and the whole boat, both sail halves, mast, and hull, takes the Claude orange of the stock spinner (`#d77757`).
 The family follows the `theme` setting by its prefix, `dark` or `light`, is re-read when the theme changes, and uses the light set as the both-readable fallback for `auto`, custom, missing, or unreadable values; the Pi extension keeps its standard ANSI blue and yellow.
+When the home's `config/calm-scene` picks candles, the same row draws the candles scene described under [Pi](#pi) instead, in the active theme family's green and red: `#5faf5f` and `#ff5f87` on a dark theme, `#00875f` and `#af005f` on a light one.
+Those are Claude Code's success green and error red snapped to xterm-256 entries, because Claude Code's own 256-color fallback turns the light theme's success green into gray, and snapped values paint the same hue in truecolor and 256-color terminals.
 Tool rows, tool result blocks, and folded tool groups draw at zero height, so a turn that used tools takes the same space as one that did not.
 A user row whose text the canonical operational-input parser recognizes, a Firstmate session-start, watcher, turn-end guard, away-supervisor, launch-brief, or branch-outcome envelope, a from-firstmate routed message, or one of the narrow pre-protocol shapes kept for old transcripts, draws at zero height; every other user row, including near misses such as a quoted or ASCII-only marker, stays visible.
 Assistant text follows the shared per-block preservation rule above, including when `claude --continue` restores the transcript.

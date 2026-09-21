@@ -76,7 +76,7 @@ test_plugin_suites() {
     printf '%s\n' "$report" >&2
     fail "Claude Code $CLAUDE_VERSION reported Calm mod plugin test failures"
   }
-  pass "Claude Code $CLAUDE_VERSION runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, and the clock-driven working ship"
+  pass "Claude Code $CLAUDE_VERSION runs the Calm mod's plugin test suites clean: persisted toggle, hidden rows, working notes, the clock-driven working ship, and the candles scene"
 }
 
 test_validate_strict
