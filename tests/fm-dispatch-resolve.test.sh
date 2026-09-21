@@ -4,8 +4,8 @@
 # Drives the public argv and environment interface with a fake curl on PATH
 # that records argv, the request body it read from stdin, and the header it
 # read from file descriptor 3, and answers with a canned typesafe.ai response.
-# A fake quota-axi serves the selected schema-5 fixture. No case touches the
-# network, and the absent-key case proves the tool makes no call
+# A fake quota-axi serves the selected schema-5 or schema-6 fixture. No case
+# touches the network, and the absent-key case proves the tool makes no call
 # at all.
 set -u
 
@@ -627,6 +627,34 @@ reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-keyless.json" run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "a schema 6 row without accountKey is an error outcome"
 assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "keyless schema 6 row is named as an invalid snapshot"
+
+# quota-axi documents schemaVersion as 5 or 6 only. Additive extra fields do
+# not bump the version, so 4 and 7 are unsupported contracts, not a range to
+# widen. Duplicate ids are invalid on both accepted versions: schema 5 is
+# unique on provider, schema 6 on provider + accountKey.
+jq '.schemaVersion = 4' "$SCHEMA6" > "$TMP_ROOT/schema4.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema4.json" run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "schema 4 is an error outcome"
+assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "schema 4 is named as an invalid snapshot"
+
+jq '.schemaVersion = 7' "$SCHEMA6" > "$TMP_ROOT/schema7.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema7.json" run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "schema 7 is an error outcome"
+assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "schema 7 is named as an invalid snapshot"
+
+jq '.providers[2].accountKey = "openai-codex"' "$SCHEMA6" > "$TMP_ROOT/schema6-duplicate.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-duplicate.json" run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "duplicate schema 6 provider+accountKey is an error outcome"
+assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "duplicate schema 6 key is named as an invalid snapshot"
+
+jq '.providers += [.providers[0]]' "$SCHEMA5_PAIR" > "$TMP_ROOT/schema5-duplicate.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema5-duplicate.json" run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "duplicate schema 5 provider is an error outcome"
+assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot' "duplicate schema 5 provider is named as an invalid snapshot"
 cp "$BASE_RULES" "$RULES"
 pass "schema 6: each candidate binds to its account row; schema 5 is unchanged"
 
