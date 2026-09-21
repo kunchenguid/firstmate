@@ -157,6 +157,10 @@ case "${1:-} ${2:-}" in
         cat "$FM_TEST_GH_HEAD"
         exit 0
         ;;
+      *isDraft*)
+        cat "$FM_TEST_GH_VIEW_JSON"
+        exit 0
+        ;;
     esac
     ;;
   "pr merge")
@@ -2430,6 +2434,10 @@ test_github_draft_or_unreadable_draft_state_refuses() {
       "github-$label: the draft state was not named"
     assert_no_grep 'pr merge' "$case_dir/gh.log" \
       "github-$label: gh pr merge ran without a non-draft reading"
+    assert_no_grep 'declare a wait instead of done' "$case_dir/stderr" \
+      "github-$label: the arm-time draft refusal preempted the merge refusal"
+    grep -qxF 'pr=https://github.com/example/repo/pull/82' "$case_dir/state/task-x1.meta" \
+      || fail "github-$label: pr= was not recorded before the merge refusal"
   done
   pass "fm-pr-merge refuses a draft pull request and one with no boolean draft state"
 }
