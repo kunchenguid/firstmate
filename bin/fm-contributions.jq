@@ -23,15 +23,18 @@ def github_forge_host:
   else null end;
 def github_url:
   github_forge_host != null;
+def gitlab_merge_request_url:
+  type == "string"
+  and test("^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+/-/merge_requests/[1-9][0-9]*$");
+def record_url:
+  github_shaped_url or gitlab_merge_request_url;
 def canonical_url:
-  github_url
-  or (type == "string"
-    and test("^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+/-/merge_requests/[1-9][0-9]*$"));
+  github_url or gitlab_merge_request_url;
 def sha: type == "string" and test("^[a-fA-F0-9]{40}$");
 def valid_record:
   try (.schema == "fm-contributions.v1" and (.task | type == "string")
   and (.records | type == "array")
-  and all(.records[]; (.url | canonical_url) and (.kind == "pr" or .kind == "issue")
+  and all(.records[]; (.url | record_url) and (.kind == "pr" or .kind == "issue")
     and (.pending | type == "array") and (.seen | type == "array")
     and all(.pending[]; (.token | type == "string" and length > 0))
     and all(.seen[]; type == "string")

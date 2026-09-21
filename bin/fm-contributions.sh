@@ -19,20 +19,22 @@
 # non-blank line is a host name; absent means github.com
 # only). forge_host in bin/fm-contributions.jq is the single owner of host-name
 # validity and drops a line it rejects, as does an unreadable, symlinked, or
-# oversized file. A read-only path never refuses for that reason: it keeps
-# projecting on github.com plus the lines that did parse, reports the rest as
-# unmeasured, and warns once on stderr naming config/forge-hosts and what was
-# rejected. poll refuses before any authenticated read while a line is rejected,
-# so a narrowed allowlist can never redirect a credential. github_url owns
+# oversized file. A rejected line only ever narrows the allowlist, so nothing
+# refuses over one: every host that did parse keeps being measured and polled,
+# and the rejected line is named once, on poll's stdout so the armed check
+# carries it to the captain, and on stderr elsewhere so JSON stays clean.
+# github_url owns
 # measurability; an authenticated api read is addressed to the matched
 # allowlist entry rather than to host text taken from a URL, and poll never
 # contacts a URL the allowlist does not cover. canonical_url owns by the same
 # rule, so a linked URL is owned only when it is on an allowlisted host or is a
 # GitLab merge request; a github-shaped URL on any other host is not owned at
 # all and never appears in coverage. A GitLab merge request stays owned and
-# visibly unmeasured, never fleet work. Because record validity shares that
-# rule, de-listing a host withdraws its ownership and leaves any record already
-# written for it unreadable rather than silently unmeasured.
+# visibly unmeasured, never fleet work. record_url, not canonical_url, owns
+# whether a stored record reads: it checks shape alone, so de-listing a host
+# narrows what is owned and polled without invalidating records already written
+# under it. Such a record stays readable and returns to the unmeasured bucket,
+# and polling the other URLs in its task file continues normally.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
@@ -147,18 +149,10 @@ if [ -e "$CONFIG/forge-hosts" ] || [ -L "$CONFIG/forge-hosts" ]; then
 fi
 export FM_FORGE_HOSTS
 
-warn_forge_hosts() {
+warn_forge_hosts() { # the caller picks the stream: poll's stdout, otherwise stderr
   [ -n "$FORGE_HOSTS_REJECTED" ] || return 0
-  printf 'contributions: config/forge-hosts rejected %s; those hosts stay unmeasured and poll refuses every host until it is fixed\n' \
-    "$FORGE_HOSTS_REJECTED" >&2
-}
-
-require_forge_hosts() {
-  [ -z "$FORGE_HOSTS_REJECTED" ] || {
-    printf 'contributions: config/forge-hosts rejected %s; refusing to poll any host before an authenticated read\n' \
-      "$FORGE_HOSTS_REJECTED"
-    exit 1
-  }
+  printf 'contributions: config/forge-hosts rejected %s; those hosts stay unmeasured\n' \
+    "$FORGE_HOSTS_REJECTED"
 }
 
 read_saved() {
@@ -195,8 +189,10 @@ project() {
     --arg all "${2:-}" '
     projected($input[0];$saved[0];$now;$max_age) as $rows
     | summary($rows;($errors + (if $input[0].backlog.present == true then 0 else 1 end)))
-    # Final rows never expire; a home holding only final rows is valid from now.
-    | .valid_until = (if ($rows | length) > 0 and all($rows[]; .final) then $now else .valid_until end) + $max_age
+    # Neither a final nor an unmeasured row expires; a home with nothing left
+    # for poll to refresh is valid from now rather than from the epoch.
+    | .valid_until = (if ($rows | length) > 0 and all($rows[]; .final or .actor == "unmeasured")
+        then $now else .valid_until end) + $max_age
     | .captain_omitted = ([0, (.captain | length) - 20] | max)
     | .captain |= .[:20]
     | . + (if $all == "--all" then {rows:$rows} else {} end)'
@@ -384,7 +380,7 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
 poll() {
   local task url old kind error observed
   local -a row
-  require_forge_hosts
+  warn_forge_hosts
   acquire
   get_input
   read_saved
@@ -471,7 +467,7 @@ arm() {
   "$SCRIPT_DIR/fm-check-register.sh" contributions
 }
 
-case "${1:-}" in poll) ;; *) warn_forge_hosts ;; esac
+case "${1:-}" in poll) ;; *) warn_forge_hosts >&2 ;; esac
 case "${1:-}" in
   snapshot)
     [ "$#" -ge 2 ] && [ "$#" -le 3 ] || fail 'snapshot needs canonical input'

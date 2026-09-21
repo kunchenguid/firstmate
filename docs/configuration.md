@@ -260,15 +260,13 @@ A GitLab merge request remains owned and visibly unmeasured, reporting `unsuppor
 Every authenticated `api` read is addressed to the matched allowlist entry rather than to host text taken from a contribution URL, so a link arriving through a delivered backlog row cannot choose which host receives a forge credential.
 
 `forge_host` in [`fm-contributions.jq`](../bin/fm-contributions.jq) is the single owner of host-name validity and drops any line it rejects, as does a file that is a symlink, is not a readable regular file, or exceeds 4096 bytes.
-A rejected line narrows coverage rather than taking a read-only path down: `fm-contributions.sh snapshot`, and therefore `fm-fleet-snapshot.sh` and Bearings, keep projecting on `github.com` plus the lines that did parse, report the rest as unmeasured, and warn once on stderr naming `config/forge-hosts` and what was rejected.
-`fm-contributions.sh poll` is the only path that refuses, because it is the only one that sends a credential: while any line is rejected it stops before the first authenticated read rather than polling against a silently narrowed allowlist.
-That refusal is not scoped to the rejected host — it halts polling for every host, `github.com` included.
-No record's `checked_at` advances while it stands, so once `FM_CONTRIBUTIONS_MAX_AGE` passes every contribution reports as fleet work needing a recheck, not just the ones on the rejected host.
-Poll prints the refusal on stdout, the same channel its other diagnostics use, so the armed check carries it through the watcher into a durable wake naming `config/forge-hosts` and what was rejected instead of failing where nobody sees it.
-So a typo costs all contribution polling until it is fixed, and says so; it never costs the fleet snapshot.
-Removing a host is not purely cosmetic, because record validity follows the same allowlist.
-De-listing a host withdraws its ownership, and any durable record already polled under it stops reading as a valid record: that task's `contributions.json` is then counted in `unreadable_records` rather than quietly returning to the unmeasured bucket.
-Restoring the line restores both. Delete a host's line only when you mean to stop tracking its contributions altogether.
+A rejected line can only ever narrow the allowlist — the surviving entries are exactly the hosts you wrote that parsed — so nothing refuses over one.
+Every host that did parse keeps being measured and polled, `github.com` included, and the rejected line is reported rather than acted on: `fm-contributions.sh snapshot`, and therefore `fm-fleet-snapshot.sh` and Bearings, keep projecting normally and name it once on stderr, while `poll` names it once on stdout so the armed check carries it through the watcher into a durable wake.
+So a typo costs coverage of the host it was meant to name, and says so on whichever channel the caller reads; it costs neither the rest of your polling nor the fleet snapshot.
+
+Removing a host narrows what is owned and polled, and nothing more.
+Whether a stored record reads is decided by its shape alone, not by the current allowlist, so a record already polled under a de-listed host stays readable and simply returns to the unmeasured bucket.
+Polling the other URLs recorded in the same task file continues normally.
 [`fm-contributions.sh --help`](../bin/fm-contributions.sh) owns the record contract, and `github_url` in [`fm-contributions.jq`](../bin/fm-contributions.jq) owns the decision, with coverage in [`tests/fm-contributions.test.sh`](../tests/fm-contributions.test.sh).
 
 ## Gate defaults (.no-mistakes.yaml)

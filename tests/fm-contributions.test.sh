@@ -409,11 +409,11 @@ test_forge_host_allowlist_decides_coverage() {
     and .contributions.complete == false and .contributions.proven_clear == false' >/dev/null \
     || fail 'ownership followed URL shape instead of the configured forge-host allowlist'
   rm -f "$home/config/forge-hosts"
-  bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 0
-    and .contributions.unmeasured == 1 and .contributions.counts.fleet == 0
-    and .contributions.unreadable_records == 1' >/dev/null \
-    || fail 'de-listing a host kept measuring it, or hid that its durable record no longer reads'
-  pass 'only an allowlisted host or a GitLab merge request is owned; de-listing withdraws it visibly'
+  bearings "$home" | jq -e '.contributions.known == 2 and .contributions.checked == 0
+    and .contributions.unmeasured == 2 and .contributions.counts.fleet == 0
+    and .contributions.unreadable_records == 0' >/dev/null \
+    || fail 'de-listing a host kept measuring it, or invalidated the record already stored under it'
+  pass 'only an allowlisted host or a GitLab merge request is measured; de-listing only unmeasures'
 }
 
 test_only_allowlisted_hosts_and_gitlab_are_owned() {
@@ -454,12 +454,12 @@ test_commented_out_forge_host_is_rejected_not_ignored() {
     || fail 'a commented-out host was silently ignored instead of reported as rejected'
   jq -e '.known == 0 and .unreadable_records == 0' "$home/coverage.json" >/dev/null \
     || fail 'a commented-out host still owned its contribution'
-  local refusal
-  refusal=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll 2>/dev/null) \
-    && fail 'poll ran against an allowlist silently narrowed by a commented-out host'
-  case "$refusal" in
+  local diagnostic
+  diagnostic=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll 2>/dev/null) \
+    || fail 'poll refused over a commented-out host instead of narrowing coverage'
+  case "$diagnostic" in
     *'config/forge-hosts rejected #precision-it.ghe.com'*) ;;
-    *) fail "poll refused over a commented-out host without saying so on stdout: $refusal" ;;
+    *) fail "poll passed over a commented-out host without naming it on stdout: $diagnostic" ;;
   esac
   pass 'a commented-out host is a rejected line, never a silently ignored one'
 }
@@ -517,19 +517,21 @@ test_forge_reads_only_reach_allowlisted_hosts() {
     and .contributions.unmeasured == 0 and .contributions.counts.maintainer == 1
     and .contributions.counts.fleet == 0' >/dev/null \
     || fail 'an unlisted host was owned, or the listed one was not measured'
-  local before after refusal
-  before=$(wc -l < "$home/forge/calls")
+  local before after diagnostic
+  before=$(grep -cFx 'api --hostname precision-it.ghe.com repos/o/r/pulls/8' "$home/forge/calls")
   printf 'precision-it.ghe.com\nnot a host/\n' > "$home/config/forge-hosts"
-  refusal=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll 2>/dev/null) \
-    && fail 'poll ran against a narrowed allowlist instead of refusing'
-  case "$refusal" in
+  jq '.records[0].checked_at="2026-09-15T08:00:00Z"' "$home/data/delivery/contributions.json" \
+    > "$home/update.json" && mv "$home/update.json" "$home/data/delivery/contributions.json"
+  diagnostic=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll 2>/dev/null) \
+    || fail 'one rejected host line halted polling for the hosts that parsed'
+  case "$diagnostic" in
     *'config/forge-hosts rejected not a host/'*) ;;
-    *) fail "poll refused over a rejected host line without saying so on stdout: $refusal" ;;
+    *) fail "poll narrowed over a rejected host line without naming it on stdout: $diagnostic" ;;
   esac
-  after=$(wc -l < "$home/forge/calls")
-  [ "$before" = "$after" ] \
-    || fail 'poll reached the forge before refusing over a rejected host line'
-  pass 'only allowlisted hosts receive forge reads; an unlisted host stays unmeasured'
+  after=$(grep -cFx 'api --hostname precision-it.ghe.com repos/o/r/pulls/8' "$home/forge/calls")
+  [ "$after" -gt "$before" ] \
+    || fail 'a rejected host line stopped the listed host from being polled'
+  pass 'only allowlisted hosts receive forge reads; a rejected line narrows without halting the rest'
 }
 
 test_unsupported_forge_is_not_fleet_work() {
@@ -607,7 +609,39 @@ test_watcher_keeps_diagnostics_separate_from_contribution_wakes() {
   pass 'watcher keeps observer diagnostics separate from contribution wakes'
 }
 
-test_forge_host_refusal_reaches_the_captain_through_the_watcher() {
+test_delisted_host_leaves_polling_healthy_for_the_rest() {
+  local home ghe='https://precision-it.ghe.com/o/r/pull/18' calls
+  home=$(new_home delisted-host-poll)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf 'precision-it.ghe.com\n' > "$home/config/forge-hosts"
+  jq --arg ghe "$ghe" '.records += [(.records[0] | .url=$ghe)]
+    | .records[0].checked_at="2026-09-15T08:00:00Z"' \
+    "$home/data/delivery/contributions.json" > "$home/update.json" \
+    || fail 'de-listing fixture mutation failed'
+  mv "$home/update.json" "$home/data/delivery/contributions.json"
+  printf '# Backlog\n\n## Queued\n- [ ] delivery - Contribution delivery %s (repo: sample) (kind: ship)\n' \
+    'https://github.com/o/r/pull/8' > "$home/data/backlog.md"
+  rm -f "$home/config/forge-hosts"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'de-listing a host aborted the whole poll instead of narrowing it'
+  calls=$(grep -cFx 'api --hostname github.com repos/o/r/pulls/8' "$home/forge/calls")
+  [ "$calls" -ge 1 ] || fail 'a de-listed host stopped its co-recorded github.com URL from being polled'
+  ! grep -F 'precision-it.ghe.com' "$home/forge/calls" >/dev/null \
+    || fail 'a de-listed host was still contacted'
+  jq -e --arg now "$NOW" --arg ghe "$ghe" \
+    '(.records | map(select(.url == "https://github.com/o/r/pull/8"))[0]
+       | .checked_at == $now and .error == null)
+    and (.records | map(select(.url == $ghe)) | length) == 1' \
+    "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'the poll did not refresh the listed URL, or discarded the de-listed record'
+  bearings "$home" | jq -e '.contributions.unreadable_records == 0
+    and .contributions.checked == 1 and .contributions.unmeasured == 1' >/dev/null \
+    || fail 'a record stored under a de-listed host stopped reading as a valid record'
+  pass 'de-listing a host unmeasures it without aborting polling or invalidating its record'
+}
+
+test_forge_host_rejection_reaches_the_captain_through_the_watcher() {
   local home out rc diagnostic
   home=$(new_home forge-host-refusal-watcher)
   forge_home "$home"
@@ -619,14 +653,14 @@ test_forge_host_refusal_reaches_the_captain_through_the_watcher() {
   rc=0
   with_home "$home" env FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
     "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 15 > "$out" 2> "$home/watcher-refusal.err" || rc=$?
-  [ "$rc" -eq 0 ] || fail "watcher did not survive the forge-host refusal: $(cat "$home/watcher-refusal.err")"
+  [ "$rc" -eq 0 ] || fail "watcher did not survive the rejected forge-host line: $(cat "$home/watcher-refusal.err")"
   diagnostic=$(awk -F '\t' -v key="$home/state/contributions.check.sh" \
     '$3 == "check" && $4 == key { print $5 }' "$home/state/.wake-queue")
   case "$diagnostic" in
     *'config/forge-hosts rejected not a host/'*) ;;
-    *) fail "a rejected forge-host line halted polling without reaching the captain: $diagnostic" ;;
+    *) fail "a rejected forge-host line never reached the captain: $diagnostic" ;;
   esac
-  pass 'a rejected forge-host line reaches the captain through the watcher instead of halting polling silently'
+  pass 'a rejected forge-host line reaches the captain through the watcher'
 }
 
 test_unmeasurable_row_does_not_expire_measured_home_coverage() {
@@ -653,6 +687,17 @@ test_unmeasurable_row_does_not_expire_measured_home_coverage() {
     and .contributions.counts.maintainer == 1 and .contributions.counts.fleet == 0
     and (.contributions.captain | length) == 1' >/dev/null \
     || fail 'an unmeasurable child row relabelled measured coverage as fleet work and dropped its captain hold'
+  mutate_record "$child" held '.records[0].observation.state="merged"'
+  mutate_record "$child" awaiting '.records[0].observation.state="merged"'
+  FM_SNAPSHOT_NOW="$NOW" with_home "$child" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary \
+    > "$child/state/home-summary.json" || fail 'could not collect all-final child coverage'
+  jq -e --argjson now "$now_epoch" '.contributions.valid_until > $now' \
+    "$child/state/home-summary.json" >/dev/null \
+    || fail 'a home with nothing left to poll dated its summary from the epoch'
+  bearings "$home" | jq -e '.contributions.known == 3 and .contributions.checked == 2
+    and .contributions.unmeasured == 1 and .contributions.counts.nobody == 2
+    and .contributions.counts.fleet == 0' >/dev/null \
+    || fail 'landed child contributions beside an unmeasurable row were relabelled as fleet work'
   pass 'a row poll never contacts does not expire the measured coverage beside it'
 }
 
@@ -1020,7 +1065,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_forge_host_allowlist_decides_coverage test_only_allowlisted_hosts_and_gitlab_are_owned test_commented_out_forge_host_is_rejected_not_ignored test_rejected_forge_host_narrows_coverage_without_failing_reads test_forge_reads_only_reach_allowlisted_hosts test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_forge_host_refusal_reaches_the_captain_through_the_watcher test_unmeasurable_row_does_not_expire_measured_home_coverage test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_forge_host_allowlist_decides_coverage test_only_allowlisted_hosts_and_gitlab_are_owned test_commented_out_forge_host_is_rejected_not_ignored test_rejected_forge_host_narrows_coverage_without_failing_reads test_forge_reads_only_reach_allowlisted_hosts test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_delisted_host_leaves_polling_healthy_for_the_rest test_forge_host_rejection_reaches_the_captain_through_the_watcher test_unmeasurable_row_does_not_expire_measured_home_coverage test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
