@@ -232,13 +232,15 @@ The flag is a home-local supervision-noise preference and is not inherited by se
 ## Measurable forge hosts (config/forge-hosts)
 
 The optional local, gitignored `config/forge-hosts` names the GitHub hosts beyond `github.com` whose pull requests and issues the contribution observer may measure.
-Write one DNS host name per line; blank lines and lines beginning with `#` are allowed, and `github.com` is always allowed whether or not the file exists.
+Every non-blank line is a DNS host name; there are no comments, and `github.com` is always allowed whether or not the file exists.
 A GitHub Enterprise Cloud or Enterprise Server host the captain works on, such as `precision-it.ghe.com`, belongs here:
 
 ```text
-# GitHub Enterprise Cloud tenant
 precision-it.ghe.com
 ```
+
+Commenting a host out does not disable it quietly: `#precision-it.ghe.com` is not a host name, so it is a rejected line like any other typo.
+To stop measuring a host, delete its line.
 
 The file is the only input that widens the allowlist; an ambient `FM_FORGE_HOSTS` never does.
 The list is a per-machine credential decision, so it is not inherited by secondmate homes.

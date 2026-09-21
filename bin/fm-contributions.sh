@@ -15,8 +15,8 @@
 # owned. Previously observed URLs remain in data/<task>/contributions.json after
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
 # A GitHub PR or issue is measurable only when its host is allowlisted:
-# github.com always, plus every host named in config/forge-hosts (one DNS host
-# name per line; blank lines and # comments allowed; absent means github.com
+# github.com always, plus every host named in config/forge-hosts (every
+# non-blank line is a host name; absent means github.com
 # only). forge_host in bin/fm-contributions.jq is the single owner of host-name
 # validity and drops a line it rejects, as does an unreadable, symlinked, or
 # oversized file. A read-only path never refuses for that reason: it keeps

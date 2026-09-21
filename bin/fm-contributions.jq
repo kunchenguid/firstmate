@@ -5,7 +5,7 @@ def forge_host:
 def forge_host_lines:
   split("\n")
   | map(gsub("^[ \t\r]+"; "") | gsub("[ \t\r]+$"; "") | ascii_downcase)
-  | map(select(length > 0 and (startswith("#") | not)));
+  | map(select(length > 0));
 def forge_allowlist:
   ["github.com"]
   + (($ENV.FM_FORGE_HOSTS // "") | forge_host_lines | map(select(forge_host)))
