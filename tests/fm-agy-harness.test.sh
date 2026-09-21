@@ -119,10 +119,21 @@ SH
 }
 
 test_agy_claims_no_inherited_launcher_marker() {
-  local fakebin out
+  local fakebin fakebin_neutral out
   # AGENT=1 was observed on a live agy TUI as inherited launcher state, so it
   # must never promote to an agy identity the way GEMINI_CLI does for gemini.
-  out=$(AGENT=1 "$HARNESS")
+  # Ensure ambient agy ancestry does not leak when run under agy itself.
+  fakebin_neutral=$(fm_fakebin "$TMP_ROOT/anc-neutral")
+  cat > "$fakebin_neutral/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' bash; exit 0 ;;
+  *"args="*) printf '%s\n' bash; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin_neutral/ps"
+  out=$(AGENT=1 PATH="$fakebin_neutral:$PATH" "$HARNESS")
   [ "$out" != agy ] \
     || fail "an inherited AGENT=1 must never claim the agy identity, got '$out'"
   # Drive the hazard the other way: agy does not clear an inherited CLAUDECODE,
