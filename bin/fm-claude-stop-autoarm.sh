@@ -17,8 +17,10 @@
 #     transient helper chain is recycled).
 #     When an existing numeric owner fails the shared harness-liveness predicate,
 #     the hook delegates guarded recovery to bin/fm-lock.sh and then re-verifies
-#     ownership. A live owner, missing lock, malformed lock, or unresolved
-#     ancestry remains inert, so a competing session never arms or rewakes.
+#     ownership. An absent or malformed lock names no owner, so it is claimed
+#     the same way (the turn-end guard blocks that home and this hook is its
+#     only remedy). A live owner or unresolved ancestry remains inert, so a
+#     competing session never arms or rewakes.
 #   - AFK: while state/.afk exists the away daemon owns the watcher and triage;
 #     this hook exits 0 and NEVER rewakes the primary (checked again at
 #     translation time so a mid-cycle AFK transition is honored).
@@ -132,10 +134,14 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 RECOVER_SESSION_LOCK=0
 if ! fm_session_lock_owned_by_self "$STATE"; then
   LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+  # An absent or malformed lock names no owner at all, so nothing can be
+  # competing for it: claim it through fm-lock.sh like a dead owner. Staying
+  # inert here deadlocked against the turn-end guard, which blocks the same
+  # unowned home and has no other remedy (docs/turnend-guard.md).
   case "$LOCK_PID" in
-    ''|*[!0-9]*) exit 0 ;;
+    ''|*[!0-9]*) : ;;
+    *) fm_harness_pid_alive "$LOCK_PID" && exit 0 ;;
   esac
-  fm_harness_pid_alive "$LOCK_PID" && exit 0
   RECOVER_SESSION_LOCK=1
 fi
 

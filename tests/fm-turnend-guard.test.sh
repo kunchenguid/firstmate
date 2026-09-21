@@ -1389,6 +1389,35 @@ SH
   pass "fm-turnend-guard --claude: terminal owner boundary excludes a concurrent start without deadlock"
 }
 
+# The 4927 invariant: a home with work in flight and no live watcher recovers
+# within ONE turn end with no operator action. Claude fires both Stop hooks for
+# the same event, so run the real guard and the real auto-arm together against a
+# home whose session lock is absent. The guard must not block for a recovery the
+# arm cannot start: the arm has to claim the lock and arm, and the guard must
+# see that claim and let the turn end.
+test_hook_claude_mode_home_with_no_watcher_and_no_lock_self_heals_in_one_turn_end() {
+  local dir guard_out guard_status arm_out
+  dir=$(make_primary_dir "$TMP_ROOT/hook-claude-self-heal")
+  : > "$dir/state/task1.meta"
+  install_integrated_autoarm "$dir"
+  cat > "$dir/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+echo "$$" >> "$FM_HOME/state/arm-ran"
+sleep 3
+printf 'watcher: FAILED - fixture cycle ended\n'
+exit 1
+SH
+  chmod +x "$dir/bin/fm-watch-arm.sh"
+  arm_out="$dir/arm.out"
+  run_integrated_autoarm_unowned "$dir" > "$arm_out" 2>&1 &
+  guard_pid=$!
+  guard_out=$(run_hook_claude "$dir" false); guard_status=$?
+  wait "$guard_pid" 2>/dev/null || true
+  assert_present "$dir/state/arm-ran" "the Stop-owned auto-arm never armed a home with no watcher and no lock"
+  expect_code 0 "$guard_status" "the guard blocked a turn end whose recovery the auto-arm owns: $guard_out"
+  pass "fm-turnend-guard --claude: a home with no watcher and no lock self-heals within one turn end"
+}
+
 test_hook_claude_mode_allows_on_fresh_rewake_epoch() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-claude-epoch")
@@ -1636,7 +1665,7 @@ test_hook_claude_mode_integrated_monotonic_fail_open() {
 }
 
 # The auto-arm's ledger epoch advances only when the hook reaches its
-# generation claim. An unowned hook with no session lock stays inert, so the
+# generation claim. A hook that cannot claim the session lock stays inert, so the
 # ledger stays at the exhausted-failure epoch the hook wrote before it went
 # quiet. The block budget used to advance only on an epoch change, so this
 # shape re-blocked without limit and the attended fail-open never fired: the
@@ -1655,8 +1684,11 @@ test_hook_claude_mode_frozen_epoch_reaches_bounded_fail_open() {
   epoch_line=$(sed -n '1p' "$dir/state/.claude-autoarm-epoch")
 
   # Remove the dead lock left by the fixture arm so this case isolates the
-  # frozen-ledger accounting path rather than the live foreign-owner escape.
+  # frozen-ledger accounting path rather than the live foreign-owner escape,
+  # and make the lock claim fail so the hook stays inert before its generation
+  # claim, exactly like a hook that never fires.
   rm -f "$dir/state/.lock"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/bin/fm-lock.sh"
   for i in 1 2 3 4; do
     out=$(run_integrated_autoarm_unowned "$dir"); status=$?
     expect_code 0 "$status" "an auto-arm outside the lock owner's ancestry must stay inert at stop $i"
@@ -2243,6 +2275,7 @@ test_hook_claude_mode_reblocks_x_mode_without_tasks
 test_hook_claude_mode_allows_when_autoarm_owner_alive
 test_hook_claude_mode_repeated_failed_to_arming_interleavings_reach_fail_open
 test_hook_claude_mode_terminal_boundary_excludes_starting_owner
+test_hook_claude_mode_home_with_no_watcher_and_no_lock_self_heals_in_one_turn_end
 test_hook_claude_mode_allows_on_fresh_rewake_epoch
 test_hook_claude_mode_blocks_on_abandoned_autoarm_claim
 test_hook_claude_mode_blocks_on_pid_reused_arming_claim

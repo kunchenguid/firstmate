@@ -946,6 +946,48 @@ wedge_alarm_notify() {  # <summary> <marker>
   return 0
 }
 
+# One-shot delivery check run at away entry (fm-afk-launch.sh start and
+# start-native, via --verify-wedge-alarm): send a real test alert through every
+# configured channel and require that at least one lands, so a missing or broken
+# out-of-band channel fails loudly at entry instead of silently at the hour the
+# wedge alarm is finally needed (the 2026-09-18 ten-hour wedge on Linux, where
+# `auto` resolves to no channel and the alarm only logged). An explicit `off`
+# is the captain's own opt-out and passes. Prints the outcome on stdout, exits
+# 0 when delivery is verified or opted out, 1 otherwise.
+wedge_alarm_verify() {
+  local ch delivered=0 tried=0 summary
+  local -a channels=()
+  summary="firstmate away-mode alarm check: this test alert confirms the wedge alarm can reach you outside the supervised pane"
+  while IFS= read -r ch; do
+    [ -n "$ch" ] || continue
+    channels+=("$ch")
+  done < <(wedge_alarm_configured_channels)
+  for ch in "${channels[@]}"; do
+    if [ "$ch" = off ]; then
+      echo "wedge alarm: disabled by config (off); a wedged away session would only leave the durable marker"
+      return 0
+    fi
+  done
+  for ch in "${channels[@]}"; do
+    case "$ch" in auto|default) ch=$(wedge_alarm_platform_default) ;; esac
+    case "$ch" in
+      '') ;;
+      osascript|herdr) tried=$((tried + 1)); wedge_alarm_emit "$ch" "$summary" && delivered=$((delivered + 1)) ;;
+      command:*) tried=$((tried + 1)); wedge_alarm_emit command "$summary" "${ch#command:}" && delivered=$((delivered + 1)) ;;
+    esac
+  done
+  if [ "$delivered" -gt 0 ]; then
+    echo "wedge alarm: test alert delivered through $delivered of $tried channel(s)"
+    return 0
+  fi
+  if [ "$tried" -eq 0 ]; then
+    echo "wedge alarm: NO out-of-band channel is configured on $(uname); a wedged away session would go unnoticed. Add a command: directive (phone or pager push) to config/wedge-alarm, or write off to accept that (docs/wedge-alarm.md)"
+  else
+    echo "wedge alarm: the test alert was not delivered through any of $tried configured channel(s); fix config/wedge-alarm before going away (docs/wedge-alarm.md)"
+  fi
+  return 1
+}
+
 # Raise a loud, rate-limited alarm when escalations cannot be delivered after
 # max-defer (the supervisor pane is genuinely busy/wedged, or the submit's Enter
 # is swallowed). The daemon must NEVER silently wedge: this logs
@@ -1534,6 +1576,10 @@ trim_log() {
 # ============================================================================
 
 fm_super_main() {
+  if [ "${1:-}" = --verify-wedge-alarm ]; then
+    wedge_alarm_verify
+    return $?
+  fi
   local STATE
   STATE="$(_state_root)"
   mkdir -p "$STATE"

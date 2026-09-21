@@ -28,6 +28,14 @@ On timeout or daemon shutdown, the notifier process group is terminated and the 
 AppleScript receives the summary as an argv item rather than interpolated source, so summary text cannot alter the script.
 See [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
+## Entry verification
+
+`bin/fm-afk-launch.sh start` and `start-native` run `bin/fm-supervise-daemon.sh --verify-wedge-alarm` before launching a daemon, unless one is already running.
+It sends one real test alert through every configured channel and requires at least one to deliver.
+Entry is refused, with nothing recorded, when no out-of-band channel exists or none delivers.
+On Linux an absent config resolves `auto` to no channel, so away entry fails until `config/wedge-alarm` carries a `command:` directive or an explicit `off`.
+Writing `off` is the captain's own opt-out and passes, leaving only the durable marker.
+
 ## Test safety
 
 Every notifier routes through `FM_WEDGE_ALARM_EXEC` in `wedge_alarm_emit`.
@@ -35,5 +43,5 @@ When the daemon is sourced as a library, that seam defaults to `discard`, so a t
 `tests/wake-helpers.sh` replaces it with a recorder when a suite needs to assert channel selection and summary propagation.
 Production leaves the seam unset and uses the configured real channels.
 
-`tests/fm-daemon.test.sh` covers directive parsing, rate limiting, timeout and process-group cleanup, argv-safe dispatch, channel fallback, and safe `command:` summary delivery.
+`tests/fm-afk-launch.test.sh` covers entry verification, and `tests/fm-daemon.test.sh` covers directive parsing, rate limiting, timeout and process-group cleanup, argv-safe dispatch, channel fallback, and safe `command:` summary delivery.
 [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) records the bounded manual macOS and Herdr channel proof.
