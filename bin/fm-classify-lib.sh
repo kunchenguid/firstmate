@@ -264,6 +264,19 @@ status_is_paused_or_captain_held() {  # <status-line>
   status_is_paused "$line" || status_is_captain_held "$line"
 }
 
+# The raw `until <YYYY-MM-DDTHH:MM[:SS]Z>` token a `paused:` line names, if any.
+# The one parser both status_paused_until (epoch) and a caller that must echo
+# the same declared time back verbatim (bin/fm-watch.sh's due-recheck note)
+# read through, so the token grammar has one owner. Empty when the line is not
+# a pause or declares no time.
+status_paused_until_token() {  # <status-line> -> ISO token on stdout
+  local line=$1
+  status_is_paused "$line" || return 1
+  printf '%s' "$line" \
+    | sed -n 's/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]Z\).*/\1/p; s/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\).*/\1/p' \
+    | head -1
+}
+
 # A condition-aware declared wait: a `paused:` line may say WHEN it expects to
 # clear with `until <YYYY-MM-DDTHH:MM[:SS]Z>` anywhere in its text (UTC only, so
 # no local-zone guess is ever recorded). Prints that time as epoch seconds so a
@@ -273,10 +286,7 @@ status_is_paused_or_captain_held() {  # <status-line>
 # silencing the wait.
 status_paused_until() {  # <status-line> -> epoch on stdout
   local line=$1 token
-  status_is_paused "$line" || return 1
-  token=$(printf '%s' "$line" \
-    | sed -n 's/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]Z\).*/\1/p; s/.*[[:space:]][Uu][Nn][Tt][Ii][Ll][[:space:]]\{1,\}\([0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z\).*/\1/p' \
-    | head -1)
+  token=$(status_paused_until_token "$line") || return 1
   [ -n "$token" ] || return 1
   fm_utc_iso_to_epoch "$token"
 }

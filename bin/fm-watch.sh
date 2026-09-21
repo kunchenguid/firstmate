@@ -882,6 +882,21 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # without a scoped declaration keep the timestamp body. Shared by the
 # declared-pause absorb and the worktree-write deferral so the two cadences cannot
 # drift apart; each caller owns its own marker and reason.
+# 0 if resurface_absorbed below would actually fire right now for this exact
+# <throttle>/<age>/<scope>/<min-age>, 1 if it would stay absorbed. A pure read
+# (no marker write, no wake), factored out so a caller that must mutate state
+# ONLY when a resurface is truly about to happen - handle_paused_stale's
+# due-recheck note - can ask this instead of duplicating the gate.
+resurface_absorbed_would_fire() {  # <throttle> <age> <scope> <min-age>
+  local throttle=$1 age=$2 scope=$3 min_age=$4
+  if [ -z "$scope" ] || [ ! -e "$throttle" ] \
+    || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
+    [ "$age" -ge "$min_age" ] || return 1
+    [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 1   # 999999 when no prior re-surface
+  fi
+  return 0
+}
+
 # Returns without waking while either the absorb or the throttle is inside the
 # window; wake() itself exits the cycle, exactly as it does inline. An optional
 # <min-age> replaces the cadence as the absorb-age gate for one call (0 lets a
@@ -889,11 +904,7 @@ FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
 # throttle keeps the cadence between repeats.
 resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min-age]
   local win=$1 throttle=$2 age=$3 reason=$4 scope=${5-} min_age=${6:-$PAUSE_RESURFACE_SECS}
-  if [ -z "$scope" ] || [ ! -e "$throttle" ] \
-    || [ "$(cat "$throttle" 2>/dev/null || true)" = "$scope" ]; then
-    [ "$age" -ge "$min_age" ] || return 0
-    [ "$(age_of "$throttle")" -ge "$PAUSE_RESURFACE_SECS" ] || return 0   # 999999 when no prior re-surface
-  fi
+  resurface_absorbed_would_fire "$throttle" "$age" "$scope" "$min_age" || return 0
   fm_wake_append stale "$win" "$reason" || exit 1
   if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
   wake "$reason"
@@ -1313,8 +1324,30 @@ busy_turn_over_age() {  # <task>
 # captain themself for a verified hold. Only the captain-held verb takes the second
 # wording; a caller that reached the bounded cadence off pause tracking alone, with
 # no declaring verb left on the log, keeps the external-wait wording it always had.
+#
+# The moment a declared `until` time is reached, this also advances the task's
+# OWN status log with a `paused:` recheck note, idempotent through
+# status_event_recorded so a repeated due poll before the next actual resurface
+# never appends twice. Without it the original `paused: ... until <time>` line
+# stays the newest event forever, so a fresh read of the log cannot tell "still
+# within the original declared wait" from "recheck already fired, awaiting a
+# fresh look" for up to the whole PAUSE_RESURFACE_SECS window. The note echoes
+# the SAME declared `until` token back (status_paused_until_token) rather than
+# dropping it, so a later poll still classifies as due instead of falling back
+# to the undated wording.
+#
+# This function's own file-signature-derived scope (fm_wake_signal_sig) is the
+# SAME .paused-resurfaced-<key> throttle a live worker's declared wait shares
+# through surface_nonterminal_stale, so appending on every due poll would flip
+# that shared scope out from under whichever of the two call sites fired last
+# and force an immediate re-fire outside the cadence. The note is therefore
+# appended, and this call's scope recomputed from the file as it stands after
+# that append, ONLY on the exact poll resurface_absorbed_would_fire says this
+# call is about to notify; every other due poll leaves the file - and the
+# shared throttle - exactly as some earlier fire (by either call site) left it.
 handle_paused_stale() {  # <window> <task> <hash>
-  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration last until now min_age
+  local win=$1 task=$2 h=$3 key statusf mtime age detail reason declaration \
+    last until until_token now min_age due note_line
   key=$(window_key "$win")
   printf '%s' "$h" > "$STATE/.stale-$key"
   : > "$STATE/.paused-$key"
@@ -1327,6 +1360,7 @@ handle_paused_stale() {  # <window> <task> <hash>
   age=$(( now - mtime ))
   last=$(last_status_line "$statusf")
   min_age=$PAUSE_RESURFACE_SECS
+  due=0
   declaration="declared:$(fm_wake_signal_sig "$statusf" || true)"
   if status_is_captain_held "$last"; then
     if afk_record_present; then
@@ -1349,10 +1383,39 @@ handle_paused_stale() {  # <window> <task> <hash>
       reason="paused ${age}s, awaiting external - the declared clearing time has passed, rechecked on a long cadence not a wedge; confirm the wait cleared"
       declaration="$declaration:due"
       min_age=0
+      due=1
     fi
   else
     detail="paused, awaiting external"
     reason="paused ${age}s, awaiting external - declared pause, rechecked on a long cadence not a wedge; confirm the wait still holds"
+  fi
+  if [ "$due" -eq 1 ] \
+    && resurface_absorbed_would_fire "$STATE/.paused-resurfaced-$key" "$age" "$declaration" "$min_age"; then
+    until_token=$(status_paused_until_token "$last")
+    note_line="paused: recheck fired - the wait declared until ${until_token} has passed; awaiting a fresh look, not yet cleared"
+    if ! status_event_recorded "$statusf" "$note_line" \
+      && printf '%s\n' "$(status_stamp_line "$note_line")" >> "$statusf" 2>/dev/null; then
+      # This note is never captain-relevant, so keep it from re-surfacing
+      # through the ordinary signal path exactly like any other benign,
+      # non-actionable status change already is (the main poll loop's own
+      # benign-absorb commit below). Skip the commit when
+      # signal_files_actionable finds something genuinely pending instead, so
+      # a real unclassified captain-relevant event already sitting in this log
+      # is never silently swallowed by this bookkeeping append.
+      if ! signal_files_actionable "$statusf"; then
+        while IFS=$(printf '\t') read -r f surface_end surface_ident; do
+          [ -n "$f" ] || continue
+          fm_wake_status_seen_commit "$STATE" "$f" "$surface_end" "$surface_ident" || true
+        done <<EOF
+$FM_SIGNAL_SURFACE_ENDPOINTS
+EOF
+      fi
+      # This call is the one about to fire (that is what was just predicted),
+      # so recompute the scope from the file as it now stands with the note:
+      # the throttle this fire is about to record must match what every later
+      # poll - by either call site sharing it - will (re)compute from then on.
+      declaration="declared:$(fm_wake_signal_sig "$statusf" || true):due"
+    fi
   fi
   resurface_absorbed "$win" "$STATE/.paused-resurfaced-$key" "$age" "stale: $win ($reason)" "$declaration" "$min_age"
   triage_log "absorbed stale ($detail, age ${age}s): $win"
