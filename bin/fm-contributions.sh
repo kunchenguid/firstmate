@@ -18,7 +18,8 @@
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
-# observation, verdict, seen event tokens, pending events, and notified tokens.
+# observation, verdict, seen event tokens, pending events, notified tokens, and
+# an optional last_failure {kind: forge|timeout, head}.
 # observation is one coherent forge read (a PR head is rechecked after fetching
 # checks/reviews). Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
@@ -32,24 +33,35 @@
 #
 # poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
-# 1..25). Every read is capped at five seconds. A pull observation has three
-# dependent waves: core, six independent reads, then the closing head read;
-# an issue has two waves. Parallelizing each independent wave bounds either
-# observation to 3 * 5 = 15 seconds. poll reserves min(the configured budget,
-# 15) before starting a URL, so an in-progress normal-budget observation gets
-# all three waves and a later URL waits for the next oldest-checked-first poll.
-# A deliberately smaller configured budget remains bounded and may be
-# unmeasured, rather than being mislabeled unavailable. Each distinct URL is
-# observed once per poll and applied to every owner. A final observation applies
-# to every owner without another forge read. When the budget runs out
-# mid-observation, the poll ends with that URL's records untouched; only a
-# genuine forge failure or head change records an error.
+# 1..25). The budget is cut to leave five seconds of the watcher's per-check
+# bound (FM_CHECK_TIMEOUT, default 30, inherited from the watcher that runs
+# this check) for the local reads and writes around it. A pull observation has
+# three dependent waves: core, six independent reads, then the closing head
+# read; an issue has two waves. A read still silent after five seconds is
+# retried once, and that retry is bounded only by the remaining budget, so a
+# slow read on a large repository can use the whole budget. poll reserves
+# min(the configured budget, 15), three unretried waves, before starting a URL,
+# so an in-progress normal-budget observation gets all three waves and a later
+# URL waits for the next oldest-checked-first poll. A read the budget refuses,
+# or cuts short before its first five seconds, leaves the observation
+# unmeasured: the poll ends with that URL's records untouched, so a deliberately
+# smaller budget is never mislabeled unavailable. Each distinct URL is observed
+# once per poll and applied to every owner. A final observation applies to
+# every owner without another forge read. A genuine forge failure or head
+# change records the forge error; a retried read that still gets no answer
+# records the timeout error. Either stamps checked_at, so the next poll starts
+# with an older URL instead of retrying this one first.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and a stale error beside it is cleared once.
-# A genuine failure prints its unavailable line only when it starts an episode
-# (no prior owner has an error); a successful read ends the episode.
+# A forge failure prints its unavailable line only when it starts an episode
+# (no owner has a forge error); a successful read ends the episode.
+# last_failure records the kind and head of a record's latest failure and
+# survives a successful read. The head is the one this observation read, else
+# the last observed head. A timeout prints its timed-out line only when no
+# owner has an error and none last timed out on that same head, so a repository
+# whose reads keep timing out wakes once per head, not once per recovery.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -91,6 +103,12 @@ BUDGET=${FM_CONTRIBUTIONS_BUDGET:-20}
 case "$MAX_AGE" in ''|*[!0-9]*) fail 'invalid freshness bound' ;; esac
 case "$BUDGET" in ''|*[!0-9]*) fail 'invalid poll budget' ;; esac
 [ "$BUDGET" -ge 1 ] && [ "$BUDGET" -le 25 ] || fail 'poll budget must be 1..25 seconds'
+CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}
+case "$CHECK_TIMEOUT" in ''|*[!0-9]*|0) CHECK_TIMEOUT=30 ;; esac
+[ "$BUDGET" -le $((CHECK_TIMEOUT - 5)) ] || BUDGET=$((CHECK_TIMEOUT - 5))
+[ "$BUDGET" -ge 1 ] || BUDGET=1
+READ_STALL=5
+TIMEOUT_ERROR='forge observation timed out'
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-contributions.XXXXXX")
 LOCK_HELD=0
 cleanup() {
@@ -181,45 +199,64 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
-forge() {
-  local remaining bounded=0 rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
-  remaining=$((DEADLINE - $(date +%s)))
-  # The budget, not the forge, refused this read.
-  [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-    gh "$@" 2> "$forge_err" || rc=$?
-  # A read killed at the budget's own deadline is budget exhaustion too.
-  if [ "$rc" -eq 124 ] && [ "$bounded" -eq 1 ]; then
-    BUDGET_EXHAUSTED=1
-    : > "$TMP/budget-exhausted"
-  elif [ "$rc" -ne 0 ]; then
-    : > "$TMP/forge-unavailable"
-  fi
+forge() { # gh args; outcome markers in $TMP classify a failed observation
+  local remaining bound attempt=1 rc forge_err=${FORGE_ERR:-$TMP/forge.err} out
+  out=$(mktemp "$TMP/forge-out.XXXXXX")
+  while :; do
+    remaining=$((DEADLINE - $(date +%s)))
+    # The budget, not the forge, refused a first attempt. A stalled read with
+    # no budget left for its retry has timed out.
+    if [ "$remaining" -le 0 ]; then
+      if [ "$attempt" -eq 1 ]; then : > "$TMP/budget-exhausted"; else : > "$TMP/timed-out"; fi
+      rm -f -- "$out"; return 1
+    fi
+    bound=$remaining
+    [ "$attempt" -gt 1 ] || [ "$remaining" -le "$READ_STALL" ] || bound=$READ_STALL
+    rc=0
+    # Each attempt writes its own output, so a killed attempt leaves no partial JSON.
+    fm_run_timed "$bound" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+      gh "$@" > "$out" 2> "$forge_err" || rc=$?
+    [ "$rc" -eq 124 ] || break
+    # A first attempt still silent at its stall bound gets one retry.
+    if [ "$attempt" -eq 1 ] && [ "$bound" -lt "$remaining" ]; then attempt=2; continue; fi
+    # A first attempt cut short by the budget's own deadline is budget
+    # exhaustion; a retry that ran out of budget has timed out.
+    if [ "$attempt" -eq 1 ]; then : > "$TMP/budget-exhausted"; else : > "$TMP/timed-out"; fi
+    rm -f -- "$out"; return 1
+  done
+  if [ "$rc" -eq 0 ]; then cat -- "$out"; else : > "$TMP/forge-unavailable"; fi
+  rm -f -- "$out"
   return "$rc"
 }
 
 wait_forges() { # background forge pids from one independent read wave
   local pid rc=0
   for pid in "$@"; do wait "$pid" || rc=1; done
-  # A known failed parallel read is unavailable even if another read reached
-  # the deadline. Only an otherwise successful wave cut short is unmeasured.
-  if [ ! -e "$TMP/forge-unavailable" ] && [ -e "$TMP/budget-exhausted" ]; then
-    BUDGET_EXHAUSTED=1
-  fi
   return "$rc"
+}
+
+failure_kind() { # after a failed observe: forge, timeout, or budget
+  # A known forge error outranks a timeout in the same wave, and a timeout
+  # outranks a read the budget alone cut short, which stays unmeasured.
+  if [ -e "$TMP/forge-unavailable" ]; then printf 'forge\n'
+  elif [ -e "$TMP/timed-out" ]; then printf 'timeout\n'
+  elif [ -e "$TMP/budget-exhausted" ]; then printf 'budget\n'
+  else printf 'forge\n'
+  fi
 }
 
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
+  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP/timed-out"
+  OBSERVED_HEAD=
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
   case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
-  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
   forge api "$endpoint" > "$TMP/core.json" || return 1
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
     head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
+    OBSERVED_HEAD=$head
     FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
     FORGE_ERR="$TMP/reviews.err" forge api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" &
@@ -326,7 +363,7 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
 }
 
 poll() {
-  local task url old kind error observed
+  local task url old kind error observed failure
   local -a row
   acquire
   get_input
@@ -339,7 +376,6 @@ poll() {
     | sort_by(.at,.tasks[0],.url)[] | [.url] + .tasks | @tsv' > "$TMP/known.tsv"
   DEADLINE=$(( $(date +%s) + BUDGET ))
   OBSERVATION_RESERVE=$((BUDGET < 15 ? BUDGET : 15))
-  BUDGET_EXHAUSTED=0
   while IFS=$'\t' read -r -a row; do
     [ "${#row[@]}" -ge 2 ] || continue
     [ $((DEADLINE - $(date +%s))) -ge "$OBSERVATION_RESERVE" ] || break
@@ -351,16 +387,27 @@ poll() {
       settle_final "$url" "${row[@]:1}"
       continue
     fi
-    observed=0
+    observed=0 failure=
     observe "$url" || observed=$?
+    [ "$observed" -eq 0 ] || failure=$(failure_kind)
     # An observation the budget cut short is unmeasured, not unavailable: keep
     # every owner's prior record so the URL is observed first next poll.
-    [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
-    # Wake once per failure episode: only when no owner has a prior error.
-    if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
-      'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
-        .error == null)' "${row[@]:1}" >/dev/null; then
-      printf 'contributions: observation unavailable for %s\n' "$url"
+    [ "$failure" != budget ] || break
+    # A forge failure wakes once per forge-error episode. A timeout wakes only
+    # when no owner has an error and none last timed out on the same head.
+    if [ -n "$failure" ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" \
+      --arg failure "$failure" --arg head "$OBSERVED_HEAD" --arg timeout "$TIMEOUT_ERROR" --args '
+      [$ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first
+        | select(. != null)] as $owners
+      | if $failure == "forge" then all($owners[]; .error == null or .error == $timeout)
+        else all($owners[]; .error == null and (.last_failure.kind != "timeout"
+          or .last_failure.head != (if $head == "" then .observation.head else $head end))) end' \
+      "${row[@]:1}" >/dev/null; then
+      if [ "$failure" = timeout ]; then
+        printf 'contributions: observation timed out for %s\n' "$url"
+      else
+        printf 'contributions: observation unavailable for %s\n' "$url"
+      fi
     fi
     case "$url" in */issues/*) kind=issue ;; *) kind="pr" ;; esac
     for task in "${row[@]:1}"; do
@@ -381,7 +428,10 @@ poll() {
             pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
       else
         error='forge observation unavailable or changed during read'
-        jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
+        [ "$failure" != timeout ] || error=$TIMEOUT_ERROR
+        jq --arg now "$NOW" --arg error "$error" --arg failure "$failure" --arg head "$OBSERVED_HEAD" '
+          .checked_at=$now | .error=$error
+          | .last_failure={kind:$failure,head:(if $head == "" then .observation.head else $head end)}' "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
       publish_pending "$task" "$url" "$TMP/row.json"
