@@ -765,11 +765,6 @@ PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" --for worker-1 \
   --agent-reply-file "$MULTI_ROOT/reply1" >/dev/null
 if PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
-  "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" --for worker-1 \
-  --agent-reply-file "$MULTI_ROOT/absent-reply" >/dev/null 2>&1; then
-  fail "a re-arm carrying a nonexistent reply path was accepted"
-fi
-if PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" >/dev/null 2>"$MULTI_ROOT/firstmate-arm.err"; then
   fail "firstmate arm replaced a worker-owned board"
 fi
@@ -854,7 +849,7 @@ assert_contains "$(cat "$HMULTI/state/worker-1.inbox/003.msg" 2>/dev/null || tru
 [ "$(grep -c '^poll[123] reply:' "$MULTI_ROOT/replies" 2>/dev/null || true)" = 3 ] \
   || fail "worker replies were not posted once per round"
 assert_contains "$(cat "$MULTI_ROOT/replies")" "poll1 reply: reply one" \
-  "the reply staged before the refused re-arm was not the one the board received"
+  "the reply staged with the arm was not the one the board received"
 
 # The terminal round keeps the board with worker-1 until worker-1 acknowledges
 # it, so the one source record stays the only ownership evidence there is: while
@@ -1105,6 +1100,62 @@ PATH="$ROLL_BIN:$PATH" pe "$HROLL" start "$roll_id" >/dev/null 2>&1 || true
 [ "$(grep -c 'generation two' "$ROLL_ROOT/replies" 2>/dev/null || true)" = 1 ] \
   || fail "the retried re-arm did not hand the board its generation's reply exactly once"
 pass "a re-arm that cannot acknowledge its round leaves the running generation alone"
+
+# --- end-user-aligned regression: re-arm is acknowledgement, nothing else -----
+# The board is armed once and re-armed only to acknowledge a captured round. A
+# worker that re-arms while its listener is still waiting would replace the
+# generation carrying the reply it already handed over, and that reply would be
+# swept away without ever reaching the board.
+HREARM="$TMP_ROOT/hrearm"; new_home "$HREARM"
+REARM_ROOT="$TMP_ROOT/lavish-rearm-root"; mkdir -p "$REARM_ROOT"; export REARM_ROOT
+REARM_BIN=$(fm_fakebin "$TMP_ROOT/lavish-rearm-stub")
+cat > "$REARM_BIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "${3-}" != --agent-reply ] || printf '%s\n' "$4" >> "$REARM_ROOT/replies"
+printf 'session:\n  status: feedback\nprompts[1]{uid,prompt,selector,tag,text}:\n  "","one more round","","message",""\n'
+SH
+chmod +x "$REARM_BIN/lavish-axi"
+REARM_ART="$TMP_ROOT/rearm-board.html"
+printf '<h1>rearm</h1>\n' > "$REARM_ART"
+rearm_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$REARM_ART")
+fm_test_track_procevent_home "$HREARM"
+new_task_endpoint "$HREARM" worker-11
+printf 'first generation reply\n' > "$REARM_ROOT/reply1"
+printf 'second generation reply\n' > "$REARM_ROOT/reply2"
+PATH="$REARM_BIN:$PATH" FM_HOME="$HREARM" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REARM_ART" --for worker-11 \
+  --agent-reply-file "$REARM_ROOT/reply1" >/dev/null
+[ -e "$HREARM/state/procevent/$rearm_id.source" ] \
+  || fail "the initial arm of a worker-owned board did not register it"
+if PATH="$REARM_BIN:$PATH" FM_HOME="$HREARM" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REARM_ART" --for worker-11 \
+  --agent-reply-file "$REARM_ROOT/reply2" >/dev/null 2>"$REARM_ROOT/idle-rearm.err"; then
+  fail "a worker re-armed its own board with no captured round to acknowledge"
+fi
+assert_contains "$(cat "$REARM_ROOT/idle-rearm.err")" "worker-11" \
+  "the refused idle re-arm did not name the task that already holds the board"
+PATH="$REARM_BIN:$PATH" pe "$HREARM" start "$rearm_id" >/dev/null 2>&1 || true
+[ "$(grep -c 'first generation reply' "$REARM_ROOT/replies" 2>/dev/null || true)" = 1 ] \
+  || fail "the refused idle re-arm cost the board the reply its listener was already carrying"
+[ -f "$HREARM/state/procevent-inbox/$rearm_id.1.result" ] \
+  || fail "the first worker-owned round never landed"
+if PATH="$REARM_BIN:$PATH" FM_HOME="$HREARM" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REARM_ART" --for worker-11 \
+  --agent-reply-file "$REARM_ROOT/never-written" >/dev/null 2>&1; then
+  fail "a re-arm carrying a nonexistent reply path was accepted"
+fi
+[ ! -f "$HREARM/state/procevent-inbox/$rearm_id.1.handled" ] \
+  || fail "a re-arm refused over its reply path still acknowledged the open round"
+PATH="$REARM_BIN:$PATH" FM_HOME="$HREARM" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$REARM_ART" --for worker-11 \
+  --agent-reply-file "$REARM_ROOT/reply2" >/dev/null
+[ -f "$HREARM/state/procevent-inbox/$rearm_id.1.handled" ] \
+  || fail "re-arming over an open round did not acknowledge that round"
+PATH="$REARM_BIN:$PATH" pe "$HREARM" start "$rearm_id" >/dev/null 2>&1 || true
+[ "$(grep -c 'second generation reply' "$REARM_ROOT/replies" 2>/dev/null || true)" = 1 ] \
+  || fail "the acknowledging re-arm did not hand the board its own generation's reply"
+pass "a worker-owned board is armed once and re-armed only to acknowledge an open round"
 
 # The other half of the same contract, on the same real path: a close that
 # carries what the captain actually said must still reach him. Same runner, same

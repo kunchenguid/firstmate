@@ -524,6 +524,7 @@ cmd_register() {
 cmd_register_task() {
   local adapter=${1-} id=${2-} task=${3-} sep=${4-} result pending pending_adapter
   local reply_source='' reply_dest='' stale arg i adopting=0 pending_owner prior_record=''
+  local pending_rounds=0
   local -a argv=()
   shift 4 2>/dev/null || usage
   [ "$adapter" = lavish ] || die "register-task is reserved for the Lavish adapter"
@@ -557,6 +558,7 @@ cmd_register_task() {
   fi
   while IFS= read -r pending; do
     [ -n "$pending" ] || continue
+    pending_rounds=$((pending_rounds + 1))
     if [ "$adopting" -eq 1 ]; then
       pending_owner=$(fm_procevent_result_owner_task "$pending" 2>/dev/null || true)
       if [ "$pending_owner" != "$task" ]; then
@@ -570,6 +572,10 @@ cmd_register_task() {
       die "cannot re-arm terminal Lavish result $pending; stop and conclude the review"
     fi
   done < <(source_pending "$id")
+  if [ "$adopting" -eq 0 ] && [ "$pending_rounds" -eq 0 ]; then
+    fm_procevent_source_lock_release "$id"
+    die "cannot re-arm source $id: task $task already holds this board and no captured round is waiting to be acknowledged"
+  fi
   # Each generation stages its reply under its own path, so nothing a failed
   # re-arm does can reach the reply the prior registration still references.
   i=0

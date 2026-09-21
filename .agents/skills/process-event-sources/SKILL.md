@@ -34,6 +34,7 @@ bin/fm-procevent-lavish.sh arm <artifact.html>
 ```
 
 A worker-owned board uses `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and re-arms with its reply after each round; the existing handled marker is the acknowledgement.
+Arm it once, then re-arm only when a round is actually waiting: arming again with nothing to acknowledge is refused, because it would discard the reply your listener is still holding.
 Posting that reply is best effort: a rare crash while the listener consumes the staged file drops that one round's reply rather than posting it twice, and robust reply delivery waits on lavish-axi's exclusive listener.
 A terminal round is never re-armed: the board stays yours until you acknowledge it with `bin/fm-procevent.sh handled <source-id> <sequence>`, which retires it, and until then `retire` refuses the board too.
 Never arm a board that a live task hosts; follow the crew-hosted Lavish board contract in [`docs/configuration.md`](../../../docs/configuration.md#crew-hosted-lavish-review-boards).
