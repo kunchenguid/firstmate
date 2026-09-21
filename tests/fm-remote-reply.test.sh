@@ -838,21 +838,22 @@ assert_grep 'offset=0' "$PARENT/state/remote-replies/ios.cursor" \
 pass "guarded rebase reports the old cursor and re-arms the replay-safe stream"
 
 # A repeat incident after a repair is a new incident: the status stream already
-# holds the first break's byte-identical escalation, and it must not mute this one.
+# holds the first break's escalation with the same message content (emission
+# time aside), and it must not mute this one.
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
   || fail "rebased reply source did not replay the remote log"
 if grep -q '^offset=0$' "$PARENT/state/remote-replies/ios.cursor"; then
   fail "rebased replay did not advance the cursor"
 fi
-first_break=$(grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")
+first_break=$(grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" | sed 's/ \[at=[0-9]*\]//')
 printf 'x\n' > "$REMOTE/state/parent-replies.status"
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
   || fail "second continuity break was not captured as a structured result"
 assert_present "$PARENT/state/remote-replies/ios.continuity-broken" \
   "second continuity break did not leave durable stream-health state"
-[ "$(grep -cFx -- "$first_break" "$PARENT/state/ios.status")" -eq 2 ] \
+[ "$(grep -F 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" | sed 's/ \[at=[0-9]*\]//' | grep -cFx -- "$first_break")" -eq 2 ] \
   || fail "second continuity break after a rebase did not escalate again"
-[ "$(tail -n 1 "$PARENT/state/ios.status")" = "$first_break" ] \
+[ "$(tail -n 1 "$PARENT/state/ios.status" | sed 's/ \[at=[0-9]*\]//')" = "$first_break" ] \
   || fail "second continuity break did not reopen the closed escalation"
 pass "a repeat continuity break after a rebase escalates again"
 

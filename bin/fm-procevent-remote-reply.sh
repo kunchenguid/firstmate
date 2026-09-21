@@ -607,7 +607,7 @@ cmd_ingest() {
     fi
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason); stream is unarmed until: fm-procevent-remote-reply.sh rebase $id"
     if ! continuity_is_broken "$id"; then
-      printf '%s\n' "$line" >> "$status_file" \
+      printf '%s\n' "$(status_stamp_line "$line")" >> "$status_file" \
         || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
     fi
     write_continuity_break "$id" "$reason" \
