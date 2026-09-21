@@ -177,9 +177,13 @@ EOF
     || fail "run $n: a pre-launch command merged with the staged launch source on $HERDR_VER"$'\n'"$merged"
 
   # The exports are only meaningful as evidence if they were rendered at all;
-  # an empty capture must not pass checks 3 silently.
-  printf '%s\n' "$cap" | grep -qF "export FM_TASK_ID=$id" \
-    || fail "run $n: the pane never rendered its FM_TASK_ID export"$'\n'"--- pane ---"$'\n'"$cap"
+  # an empty capture must not pass checks 3 silently. The first export is the
+  # anchor: the row just above the launch line is not stable, because a
+  # multi-line or transient shell prompt redraws upward over it when the long
+  # launch command wraps (observed with a starship two-line prompt), even
+  # though that export ran - check 2 above already proved it did.
+  printf '%s\n' "$cap" | grep -qF "export GOTMPDIR=$tasktmp/gotmp" \
+    || fail "run $n: the pane never rendered its GOTMPDIR export"$'\n'"--- pane ---"$'\n'"$cap"
 
   CHECKED=$((CHECKED + 1))
   pass "run $n: every pre-launch line landed as its own command and the launch ran on $HERDR_VER"
