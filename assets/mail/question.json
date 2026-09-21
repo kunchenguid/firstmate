@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "kind": "question",
+  "project": "Web app / Release preparation",
+  "preheader": "One decision before release: keep the current retry limit or increase it?",
+  "title": "One call before release.",
+  "body": "The checkout fix is ready. There is one remaining tradeoff: how long to wait for a slow payment provider before showing a retry message.",
+  "question": "Keep the current retry limit?",
+  "options": [
+    {"label": "Keep two attempts", "detail": "Preserves the current wait time. A small number of slow payments will need a manual retry."},
+    {"label": "Allow three attempts", "detail": "Recovers more slow payments, but can add five seconds before the customer sees a result."}
+  ],
+  "recommendation": "Keep two attempts for this release. We can revisit the limit with a week of production timing data.",
+  "reply_hint": "Reply with A or B, or describe another approach. The release will wait for your decision.",
+  "action": {"label": "Read the test results", "url": "https://example.com/review/checkout-results"}
+}

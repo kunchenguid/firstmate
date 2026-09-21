@@ -644,6 +644,11 @@ A budget that is not a whole number from 1 to 120 is still refused outright.
 ## Mail plane (.env)
 
 The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
+Its explicit `send-template` path sends Firstmate notifications and questions as `multipart/alternative`, with a complete plain-text fallback and self-contained HTML using system fonts.
+The existing `send` path remains plain text; neither path changes reply authority or approves actions from a link.
+The template borrows the palette and display-font fallbacks from the [Firstmate visual system](https://myfirstmate.io/), using inline table layout with an optional mobile media query following [Gmail's CSS support](https://developers.google.com/workspace/gmail/design/css).
+For the versioned JSON schema and exact commands, use `bin/fm-mail.sh --help`; [notification](../assets/mail/notification.json) and [question](../assets/mail/question.json) examples contain fictional content and placeholder links.
+`render-template` previews the same renderer offline without credentials or home state; `tests/fm-mail.test.sh` verifies MIME alternatives, input validation, escaping, and legacy sending through the executable interface.
 Its `poll` command surfaces each new message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
 Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed.
 A duplicate wake is possible if the process is killed between the queue append and the journal write and the drain acknowledges that row before the next poll heals it, or under a triple write fault that leaves a queued row with no durable record; neither case drops mail.

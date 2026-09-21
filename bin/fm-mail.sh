@@ -13,6 +13,12 @@
 #   send <to> <subject> <body | ->
 #                        Send one message. A "-" body reads plain text from
 #                        stdin.
+#   send-template <to> <subject> <json-file | ->
+#                        Send a versioned notification or question as plain
+#                        text + HTML alternatives; --help owns the JSON schema.
+#   render-template <json-file | -> [html|text]
+#                        Render that same template offline to stdout (HTML by
+#                        default), without credentials, home state, or SMTP.
 #   poll                 Surface UNSEEN mail this home has not yet woken as a
 #                        `check` wake so firstmate answers it concisely. IMAP
 #                        \Seen mail never wakes a poll, no message is ever
@@ -65,6 +71,64 @@ set -euo pipefail
 
 # --- resolve home, env, and endpoints -------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  cat <<'EOF'
+fm-mail.sh read
+fm-mail.sh send <to> <subject> <body | ->
+fm-mail.sh send-template <to> <subject> <json-file | ->
+fm-mail.sh render-template <json-file | -> [html|text]
+fm-mail.sh poll
+fm-mail.sh status
+
+send-template accepts one bare ASCII mailbox and a non-empty, single-line
+subject (at most 200 characters). Existing send still accepts plain text.
+The JSON file (or stdin with "-") must be UTF-8, at most 32768 bytes.
+All content is literal text, escaped for HTML; unknown/duplicate fields,
+wrong types, blank strings, and control characters are rejected before SMTP.
+Character limits below are inclusive. Only body permits newlines (LF).
+
+Template version 1:
+  version         required integer 1
+  kind            required "notification" or "question"
+  title           required text, 160 characters
+  body            required text, 6000 characters; blank lines split paragraphs
+  project         optional text, 100 characters
+  preheader       optional inbox preview text, 200 characters; defaults to title
+  facts           optional array of at most 4 {"label": text, "value": text}
+                  label: 40 characters; value: 200 characters
+  action          optional {"label": text, "url": text}
+                  label: 80 characters; url: 2048 characters, absolute HTTPS,
+                  no credentials or whitespace; a review link, not an approval
+For kind=question only:
+  question        required text, 400 characters
+  reply_hint      required text, 400 characters; explain how to answer
+  options         optional array of 2-4 {"label": text, "detail": text}, or []
+                  label: 100 characters; detail: 600 characters
+                  displayed as A, B, C, D; omit for an open-ended question
+  recommendation  optional text, 1000 characters
+
+Questions display reply instructions, never executable approval controls.
+Reply handling and authority remain the ordinary mail-plane workflow.
+Offline examples: assets/mail/notification.json and assets/mail/question.json.
+EOF
+}
+
+# Keep previews independent of home configuration and state, including .env.
+case "${1:-}" in
+  -h|--help)
+    usage
+    exit 0
+    ;;
+  render-template)
+    if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+      usage >&2
+      exit 1
+    fi
+    exec python3 "$SCRIPT_DIR/fm-mail.py" "$@"
+    ;;
+esac
+
 FM_HOME="${FM_HOME:-}"
 if [ -z "$FM_HOME" ]; then
   FM_HOME="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -176,15 +240,6 @@ run_py() {
   FM_MAIL_RETRY_POS="$RETRY_POS" FM_MAIL_TURN="$TURN" \
   FM_MAIL_POLL_MAX_WAKES="$MAIL_MAX_WAKES" \
     "$PY" "$PY_BIN" "$@"
-}
-
-usage() {
-  cat <<'EOF'
-fm-mail.sh read
-fm-mail.sh send <to> <subject> <body | ->
-fm-mail.sh poll
-fm-mail.sh status
-EOF
 }
 
 mail_seen() {
@@ -633,6 +688,13 @@ case "${1:-}" in
     fi
     printf '%s' "$body" | run_py send "$to" "$subj" "-"
     ;;
+  send-template)
+    if [ "$#" -ne 4 ]; then
+      usage >&2
+      exit 1
+    fi
+    run_py "$@"
+    ;;
   status)
     echo "mail account: $FM_MAIL_USER"
     echo "imap: $IMAP_HOST:$IMAP_PORT smtp: $SMTP_HOST:$SMTP_PORT"
@@ -640,9 +702,6 @@ case "${1:-}" in
     ;;
   poll)
     mail_poll
-    ;;
-  -h|--help)
-    usage
     ;;
   *)
     usage

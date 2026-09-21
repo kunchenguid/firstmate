@@ -2,8 +2,8 @@
 # Behavior tests for bin/fm-mail.sh.
 #
 # fm-mail.sh is a network mail client, so these tests exercise only the paths
-# that need no real IMAP/SMTP connection: the config-validation dry run, the
-# read-only `status` surface, and the CLI usage/help plumbing. All of them go
+# that need no real IMAP/SMTP connection: configuration, polling, rendering,
+# and MIME delivery through a captured SMTP transport. All of them go
 # through the executable public interface of bin/fm-mail.sh and never assert
 # internal source bytes.
 set -u
@@ -123,6 +123,198 @@ SH
   captured=$(cat "$stdin_file" 2>/dev/null || echo "")
   assert_contains "$captured" "hello world" "send passes body through stdin to python3"
   pass "fm-mail: send passes body not empty through stdin"
+}
+
+test_template_delivery_and_validation() {
+  local harness="$TMP_ROOT/template-test.py"
+  cat > "$harness" <<'PYTHON'
+import copy
+import email
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from email import policy
+from html.parser import HTMLParser
+
+root, temp = map(Path, sys.argv[1:])
+mail = str(root / 'bin/fm-mail.sh')
+transport = temp / 'transport'
+transport.mkdir()
+(transport / 'sitecustomize.py').write_text('''
+import os
+from pathlib import Path
+import smtplib
+class SMTP:
+    def __init__(self, host, port, context, timeout):
+        Path(os.environ['SMTP_OPENED']).write_text('opened')
+        assert host == 'smtp.example.invalid' and port == 465
+        assert context.check_hostname and timeout > 0
+    def __enter__(self): return self
+    def __exit__(self, *args): pass
+    def login(self, user, password):
+        assert user == 'firstmate@example.com' and password == 'test-secret'
+    def send_message(self, message):
+        if os.environ.get('SMTP_FAIL'):
+            raise RuntimeError('test-secret must not leak')
+        Path(os.environ['SMTP_CAPTURE']).write_bytes(message.as_bytes())
+smtplib.SMTP_SSL = SMTP
+''')
+opened, capture = temp / 'smtp-opened', temp / 'message.eml'
+home = temp / 'template-home'
+env = {k: v for k, v in os.environ.items() if not k.startswith('FM_MAIL_')}
+env.update(FM_HOME=str(home), FM_MAIL_USER='firstmate@example.com',
+           FM_MAIL_PASS='test-secret', FM_IMAP_HOST='imap.example.invalid',
+           FM_SMTP_HOST='smtp.example.invalid', FM_IMAP_PORT='993', FM_SMTP_PORT='465',
+           PYTHONPATH=str(transport), SMTP_OPENED=str(opened), SMTP_CAPTURE=str(capture))
+
+def run(args, payload=None, expected=0, overrides=None):
+    opened.unlink(missing_ok=True)
+    capture.unlink(missing_ok=True)
+    result = subprocess.run([mail, *args], input=payload, capture_output=True,
+                            env={**env, **(overrides or {})})
+    assert result.returncode == expected, (args, result.stdout, result.stderr)
+    assert b'test-secret' not in result.stdout + result.stderr
+    if expected:
+        assert not capture.exists()
+    return result
+
+def send(data, **kwargs):
+    return run(['send-template', 'reader@example.com', 'Release review', '-'],
+               json.dumps(data).encode(), **kwargs)
+
+class Markup(HTMLParser):
+    def __init__(self, markup):
+        super().__init__()
+        self.tags, self.links, self.text = [], [], []
+        self.feed(markup)
+    def handle_starttag(self, tag, attrs):
+        self.tags.append(tag)
+        for name, value in attrs:
+            assert not name.lower().startswith('on'), (tag, attrs)
+            assert name not in ('src', 'srcset'), (tag, attrs)
+            if name == 'href': self.links.append(value)
+    def handle_data(self, data): self.text.append(data)
+
+samples = {}
+for kind in ('notification', 'question'):
+    path = root / 'assets/mail' / (kind + '.json')
+    data = samples[kind] = json.loads(path.read_text())
+    run(['send-template', 'reader@example.com', 'Release café', str(path)])
+    raw = capture.read_bytes()
+    msg = email.message_from_bytes(raw, policy=policy.default)
+    assert msg.get_content_type() == 'multipart/alternative'
+    assert msg['From'] == 'firstmate@example.com' and msg['To'] == 'reader@example.com'
+    assert str(msg['Subject']) == 'Release café' and msg['Date'] and msg['Message-ID']
+    parts = list(msg.iter_parts())
+    assert [p.get_content_type() for p in parts] == ['text/plain', 'text/html']
+    assert all(p.get_content_charset() == 'utf-8' for p in parts)
+    assert not any(p.defects for p in msg.walk())
+    assert b'\n' not in raw.replace(b'\r\n', b'')
+    plain, markup = (p.get_content() for p in parts)
+    assert data['title'] in plain and data['body'].replace('\n', '\r\n') in plain
+    assert data['action']['url'] in plain
+    assert 'Your firstmate' in plain
+    parsed = Markup(markup)
+    assert not {'script', 'iframe', 'form', 'input', 'img', 'link'} & set(parsed.tags)
+    assert parsed.links == [data['action']['url']]
+    assert data['title'] in ''.join(parsed.text)
+    assert len(markup.encode()) < 20000
+    if kind == 'question':
+        assert data['question'] in plain and data['reply_hint'] in plain
+        assert data['recommendation'] in plain
+        for index, option in enumerate(data['options']):
+            assert f"{chr(65 + index)}. {option['label']}: {option['detail']}" in plain
+    # The reviewed output is the same content as the delivered alternatives.
+    for mode, content in [('html', markup), ('text', plain)]:
+        rendered = run(['render-template', str(path), mode]).stdout.decode()
+        assert rendered.strip() == content.replace('\r\n', '\n').strip()
+        assert not opened.exists()
+
+# Every dynamic HTML text surface is escaped; URL query delimiters round-trip.
+data = copy.deepcopy(samples['question'])
+attack = '<img src=x onerror="bad()"> & "quoted" café'
+for key in ('project', 'preheader', 'title', 'body', 'question', 'reply_hint', 'recommendation'):
+    data[key] = attack
+for option in data['options']:
+    option.update(label=attack, detail=attack)
+data['facts'] = [{'label': '<script>bad()</script>', 'value': attack}]
+data['action'] = {'label': attack, 'url': "https://example.com/review?a=1&b='two'"}
+send(data)
+msg = email.message_from_bytes(capture.read_bytes(), policy=policy.default)
+plain, markup = [p.get_content() for p in msg.iter_parts()]
+assert attack in plain
+assert '&lt;img' in markup and '&amp;' in markup and '&quot;' in markup
+parsed = Markup(markup)
+assert not {'img', 'script'} & set(parsed.tags)
+assert parsed.links == [data['action']['url']]
+assert ''.join(parsed.text).count(attack) >= 10
+
+# Optional fields, open questions, and Unicode work without assets or credentials.
+minimal = {'version': 1, 'kind': 'notification', 'title': 'Build ready ✓', 'body': '你好'}
+send(minimal)
+open_question = {**minimal, 'kind': 'question', 'question': 'Which date?', 'reply_hint': 'Reply with a date.'}
+send(open_question)
+preview_home = temp / 'unused-preview-home'
+run(['render-template', '-'], json.dumps(minimal).encode(), overrides={
+    'FM_HOME': str(preview_home), 'FM_MAIL_USER': '', 'FM_MAIL_PASS': '',
+    'FM_IMAP_PORT': 'broken', 'FM_SMTP_PORT': 'broken'})
+assert not opened.exists() and not preview_home.exists()
+
+# Strict schema and boundary validation must fail before network access.
+invalid = [[], {}, {**minimal, 'version': True}, {**minimal, 'version': 2},
+           {**minimal, 'kind': 'alert'}, {**minimal, 'title': ' '},
+           {**minimal, 'body': '<bad>\x00'}, {**minimal, 'body': '\ud800'},
+           {**minimal, 'title': 'x' * 161}, {**minimal, 'body': 'x' * 6001},
+           {**minimal, 'html': '<p>raw</p>'}, {**minimal, 'facts': {}},
+           {**minimal, 'facts': [{'label': 'x', 'value': 2}]},
+           {**minimal, 'facts': [{'label': 'x', 'value': 'y'}] * 5},
+           {**minimal, 'recommendation': 'unexpected'},
+           {**minimal, 'kind': 'question'},
+           {**open_question, 'options': [{'label': 'Only one', 'detail': 'x'}]},
+           {**open_question, 'options': [None, None]},
+           {**open_question, 'reply_hint': 'a\nb'}]
+for url in ('javascript:bad()', 'http://example.com', '//example.com',
+            'https:///missing', 'https://u:p@example.com', 'https://example.com/a b',
+            'https://example.com/\\bad', 'https://example.com:99999/',
+            'https://example.com:zero/', 'https://example.com/" onclick="bad'):
+    invalid.append({**minimal, 'action': {'label': 'Read', 'url': url}})
+for data in invalid:
+    send(data, expected=1)
+    assert not opened.exists(), data
+for raw in (b'{broken', b'\xff', b'x' * 32769,
+            b'{"version":1,"version":1,"kind":"notification","title":"a","body":"b"}'):
+    run(['send-template', 'reader@example.com', 'Subject', '-'], raw, expected=1)
+    assert not opened.exists()
+for to, subject in [('a@example.com\r\nBcc: b@example.com', 'Subject'),
+                    ('a@example.com,b@example.com', 'Subject'),
+                    ('a..b@example.com', 'Subject'), ('a@-example.com', 'Subject'),
+                    ('a@example.com', 'Subject\nBcc: b@example.com'),
+                    ('a@example.com', ''), ('a@example.com', 'x' * 201)]:
+    run(['send-template', to, subject, '-'], json.dumps(minimal).encode(), expected=1)
+    assert not opened.exists()
+for args in (['send-template', 'a@example.com', 'Subject'],
+             ['send-template', 'a@example.com', 'Subject', '-', 'extra'],
+             ['render-template'], ['render-template', '-', 'pdf']):
+    run(args, json.dumps(minimal).encode(), expected=1)
+    assert not opened.exists()
+run(['send-template', 'a@example.com', 'Subject', str(temp / 'absent.json')], expected=1)
+assert not opened.exists()
+send(minimal, expected=1, overrides={'SMTP_FAIL': '1'})
+
+# Legacy send keeps literal body text, address lists, stdin, and text/plain MIME.
+for body_arg, stdin in [('Literal <b>text</b> & café', None), ('-', b'first\nsecond\n\n')]:
+    run(['send', 'One <one@example.com>, two@example.com', 'Legacy', body_arg], stdin)
+    msg = email.message_from_bytes(capture.read_bytes(), policy=policy.default)
+    assert msg.get_content_type() == 'text/plain' and not msg.is_multipart()
+    expected = body_arg if stdin is None else stdin.decode().rstrip('\n')
+    assert msg.get_content().replace('\r\n', '\n') == expected + '\n'
+    assert str(msg['To']) == 'One <one@example.com>, two@example.com'
+print('template CLI: MIME, preview parity, escaping, boundary validation, SMTP errors, legacy OK')
+PYTHON
+  python3 "$harness" "$ROOT" "$TMP_ROOT" || fail "template delivery and validation"
+  pass "fm-mail: template MIME, preview, escaping, validation, and legacy sending"
 }
 
 test_poll_error_propagates() {
@@ -2607,6 +2799,7 @@ test_help_plumbing
 test_unknown_subcommand_prints_usage
 test_no_secret_leaked_to_status
 test_send_passes_body
+test_template_delivery_and_validation
 test_poll_error_propagates
 test_poll_dedupes_surfaces_by_uid
 test_poll_resurfaces_uid_after_generation_change
