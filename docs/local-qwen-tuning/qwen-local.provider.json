@@ -1,0 +1,56 @@
+{
+  "qwen-local": {
+    "name": "Qwen Local CUDA",
+    "baseUrl": "http://127.0.0.1:8080/v1",
+    "api": "openai-completions",
+    "apiKey": "local",
+    "compat": {
+      "supportsDeveloperRole": false,
+      "supportsReasoningEffort": false,
+      "maxTokensField": "max_tokens",
+      "thinkingFormat": "chat-template",
+      "chatTemplateKwargs": {
+        "enable_thinking": {
+          "$var": "thinking.enabled"
+        },
+        "reasoning_effort": {
+          "$var": "thinking.effort"
+        },
+        "preserve_thinking": true
+      },
+      "supportsUsageInStreaming": true
+    },
+    "models": [
+      {
+        "id": "qwen3.8-27b",
+        "name": "Qwen3.8 27B EXL3 4.0bpw (Local RTX 3090)",
+        "reasoning": true,
+        "thinkingLevelMap": {
+          "minimal": null,
+          "low": "low",
+          "medium": "medium",
+          "high": "xhigh",
+          "xhigh": "xhigh",
+          "max": null
+        },
+        "input": [
+          "text",
+          "image"
+        ],
+        "contextWindow": 262144,
+        "maxTokens": 32768,
+        "cost": {
+          "input": 0,
+          "output": 0,
+          "cacheRead": 0,
+          "cacheWrite": 0
+        },
+        "samplingParams": {
+          "temperature": 1.0,
+          "top_p": 0.95,
+          "top_k": 20
+        }
+      }
+    ]
+  }
+}

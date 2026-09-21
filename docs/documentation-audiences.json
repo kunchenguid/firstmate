@@ -575,6 +575,10 @@
     {
       "path": ".agents/skills/validation-supervision/SKILL.md",
       "audience": "agent-runtime"
+    },
+    {
+      "path": "docs/local-qwen-tuning/README.md",
+      "audience": "operator-current"
     }
   ]
 }
