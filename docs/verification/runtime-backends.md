@@ -2159,6 +2159,29 @@ It verifies native `ultra` on initial and operational turns and after restart, s
 Its native App Server peer and watcher-close process are deterministic fixtures; it does not claim a real backend or a live model was tested by that command.
 `tests/fm-busy-state.test.sh`, `tests/fm-busy-adapter-wiring.test.sh`, and `tests/fm-watch-triage.test.sh` cover separate progress notification, unchanged semantic busy state, rejection of a superseded worker's events, and progress refreshing the busy-age bound without fabricating a completed turn.
 
+## Pi nested CLI marker binding
+
+A short-lived Pi CLI started under a live session used to overwrite both primary marker files with its own pid.
+That pid then died, so session start printed a false `PI_WATCH_EXTENSION: not loaded` line and watcher hand-off lost its extension-owned tolerance.
+The writer now binds a marker only when the lock names this process, or when the lock is free or dead.
+Ancestry still counts as ownership for watcher arming.
+Verified on 2026-09-21 against Pi 0.86.1 on macOS, token-free, in an isolated home with `defaultProjectTrust: "always"`:
+
+```sh
+bin/fm-test-run.sh tests/fm-pi-nested-probe-marker-live-e2e.test.sh
+```
+
+```text
+ok - pi --help still loads project extensions onto a free lock
+ok - pi --help leaves a live ancestor binding in place
+ok - refused Pi-harness spawn leaves a live ancestor binding in place
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=3164
+```
+
+The first line is the non-vacuous vendor pin: on this Pi, `--help` still auto-loads trusted project extensions.
+`tests/fm-pi-watch-extension.test.sh` pins the same writer rule with a stubbed Node child and no harness, checking both the watch marker and the turn-end marker.
+Refresh the live guard after a Pi upgrade, and fail naming the installed version if `--help` stops loading project extensions.
+
 ## Oh My Pi (omp)
 
 omp runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#omp-oh-my-pi-native-delivery-2026-09-05) owns the primary evidence.

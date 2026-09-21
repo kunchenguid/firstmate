@@ -74,6 +74,80 @@ export const Type = {
 JS
 }
 
+install_pi_turnend_extension_fixture() {
+  local repo=$1
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/bin"
+  cp "$ROOT/.pi/extensions/fm-primary-turnend-guard.ts" "$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$repo/.pi/extensions/lib/fm-operational-input.ts"
+  cp "$ROOT/bin/fm-operational-input.sh" "$repo/bin/fm-operational-input.sh"
+  chmod +x "$repo/bin/fm-operational-input.sh"
+}
+
+seed_pi_extension_markers() {
+  local home=$1 repo=$2 pid=$3
+  mkdir -p "$home/state"
+  printf '%s\n' "$pid" > "$home/state/.lock"
+  printf '%s\n%s\n' "$(fm_test_pi_extension_version "$repo/.pi/extensions/fm-primary-pi-watch.ts")" "$pid" \
+    > "$home/state/.pi-watch-extension-loaded"
+  printf '%s\n%s\n' "$(fm_test_pi_extension_version "$repo/.pi/extensions/fm-primary-turnend-guard.ts")" "$pid" \
+    > "$home/state/.pi-turnend-extension-loaded"
+}
+
+fm_test_pi_extension_version() {
+  local file=$1
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print "sha256:" $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print "sha256:" $1}'
+  else
+    cksum "$file" | awk '{print "cksum:" $1 ":" $2}'
+  fi
+}
+
+load_pi_extensions_as_child() {
+  local repo=$1 home=$2 claim_lock=${3:-}
+  WATCH_PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" \
+  TURNEND_PLUGIN="$repo/.pi/extensions/fm-primary-turnend-guard.ts" \
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" CLAIM_LOCK="$claim_lock" \
+    node --input-type=module <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+if (process.env.CLAIM_LOCK) writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage: async () => {},
+  events: { on() {} },
+};
+const watch = await import(pathToFileURL(process.env.WATCH_PLUGIN).href);
+const turnend = await import(pathToFileURL(process.env.TURNEND_PLUGIN).href);
+watch.default(pi);
+turnend.default(pi);
+EOF
+}
+
+assert_pi_supervision_bound() {
+  local home=$1 repo=$2
+  if ! (
+    export FM_HOME="$home" FM_ROOT_OVERRIDE="$repo"
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_pi_extension_owns_supervision "$home/state" "$repo" || exit 1
+    fm_pi_extension_loaded \
+      "$home/state/.pi-watch-extension-loaded" \
+      "$(fm_pi_extension_version "$repo/.pi/extensions/fm-primary-pi-watch.ts")" \
+      "$home/state/.lock" || exit 1
+    fm_pi_extension_loaded \
+      "$home/state/.pi-turnend-extension-loaded" \
+      "$(fm_pi_extension_version "$repo/.pi/extensions/fm-primary-turnend-guard.ts")" \
+      "$home/state/.lock" || exit 1
+  ); then
+    fail "nested Pi load replaced a live binding; session-start would print PI_WATCH_EXTENSION"
+  fi
+}
+
 test_pi_extension_reports_external_healthy_watcher() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-external-healthy-root"
@@ -4150,6 +4224,81 @@ EOF
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
 
+test_pi_nested_cli_does_not_replace_live_binding() {
+  local repo home status
+  repo="$TMP_ROOT/pi-nested-live-binding-root"
+  home="$TMP_ROOT/pi-nested-live-binding-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  install_pi_turnend_extension_fixture "$repo"
+  seed_pi_extension_markers "$home" "$repo" "$$"
+  load_pi_extensions_as_child "$repo" "$home"
+  status=$?
+  expect_code 0 "$status" "nested Pi extension load must not fail"
+  [ "$(sed -n '2p' "$home/state/.pi-watch-extension-loaded")" = "$$" ] \
+    || fail "watch marker pid was replaced by a nested Pi process"
+  [ "$(sed -n '2p' "$home/state/.pi-turnend-extension-loaded")" = "$$" ] \
+    || fail "turn-end marker pid was replaced by a nested Pi process"
+  assert_pi_supervision_bound "$home" "$repo"
+  pass "nested Pi load leaves a live session binding in place"
+}
+
+test_pi_mark_loaded_claims_free_or_dead_lock() {
+  local repo home dead status watch_pid turnend_pid
+  repo="$TMP_ROOT/pi-free-dead-lock-root"
+  home="$TMP_ROOT/pi-free-dead-lock-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  install_pi_turnend_extension_fixture "$repo"
+
+  load_pi_extensions_as_child "$repo" "$home"
+  status=$?
+  expect_code 0 "$status" "free-lock marker write must not fail"
+  watch_pid=$(sed -n '2p' "$home/state/.pi-watch-extension-loaded")
+  turnend_pid=$(sed -n '2p' "$home/state/.pi-turnend-extension-loaded")
+  [ -n "$watch_pid" ] && [ "$watch_pid" != "$$" ] \
+    || fail "free lock did not write a watch marker for the loading process"
+  [ "$turnend_pid" = "$watch_pid" ] \
+    || fail "free lock wrote mismatched watch and turn-end pids"
+
+  sleep 30 &
+  dead=$!
+  kill "$dead" 2>/dev/null || true
+  wait "$dead" 2>/dev/null || true
+  printf '%s\n' "$dead" > "$home/state/.lock"
+  rm -f "$home/state/.pi-watch-extension-loaded" "$home/state/.pi-turnend-extension-loaded"
+  load_pi_extensions_as_child "$repo" "$home"
+  status=$?
+  expect_code 0 "$status" "dead-lock marker write must not fail"
+  watch_pid=$(sed -n '2p' "$home/state/.pi-watch-extension-loaded")
+  turnend_pid=$(sed -n '2p' "$home/state/.pi-turnend-extension-loaded")
+  [ -n "$watch_pid" ] && [ "$watch_pid" != "$dead" ] \
+    || fail "dead lock did not write a watch marker for the loading process"
+  [ "$turnend_pid" = "$watch_pid" ] \
+    || fail "dead lock wrote mismatched watch and turn-end pids"
+  pass "free or dead lock still produces a marker for the loading process"
+}
+
+test_pi_mark_loaded_binds_live_lock_naming_this_process() {
+  local repo home status lock_pid
+  repo="$TMP_ROOT/pi-self-lock-root"
+  home="$TMP_ROOT/pi-self-lock-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  install_pi_turnend_extension_fixture "$repo"
+  load_pi_extensions_as_child "$repo" "$home" 1
+  status=$?
+  expect_code 0 "$status" "self-lock marker write must not fail"
+  lock_pid=$(cat "$home/state/.lock")
+  [ -n "$lock_pid" ] && [ "$lock_pid" != "$$" ] \
+    || fail "loading process did not claim the lock"
+  [ "$(sed -n '2p' "$home/state/.pi-watch-extension-loaded")" = "$lock_pid" ] \
+    || fail "live lock naming the loading process did not bind the watch marker"
+  [ "$(sed -n '2p' "$home/state/.pi-turnend-extension-loaded")" = "$lock_pid" ] \
+    || fail "live lock naming the loading process did not bind the turn-end marker"
+  pass "live lock naming the loading process still binds both markers"
+}
+
 test_pi_extension_reports_external_healthy_watcher
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
@@ -4199,3 +4348,6 @@ test_opencode_established_empty_close_honors_retry_limit
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard
 test_opencode_healthy_arm_output_does_not_suppress_guard
+test_pi_nested_cli_does_not_replace_live_binding
+test_pi_mark_loaded_claims_free_or_dead_lock
+test_pi_mark_loaded_binds_live_lock_naming_this_process

@@ -242,7 +242,16 @@ function lockOwnership(): LockOwnership {
 }
 
 function markLoaded(): void {
-  if (lockOwnership() === "other") return;
+  // Only the session process the lock names (or one about to claim a free or
+  // dead lock) may bind the marker. A Pi CLI child of that session, such as
+  // fm-spawn's `pi --help` probe, sees the lock as owned through its ancestry
+  // but can never be the pid the lock names. Arming still uses lockOwnership().
+  let lockPid = "";
+  try {
+    lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
+  } catch {
+  }
+  if (lockPid && lockPid !== String(process.pid) && (!/^[0-9]+$/.test(lockPid) || lockPid === "1" || pidAlive(lockPid))) return;
   mkdirSync(state, { recursive: true });
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }

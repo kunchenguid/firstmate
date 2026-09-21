@@ -12,8 +12,6 @@ import {
 
 let guardFollowupActive = false;
 
-type LockOwnership = "owned" | "missing" | "other";
-
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
@@ -21,12 +19,6 @@ const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
 const state = process.env.FM_STATE_OVERRIDE || `${fmHome}/state`;
 const marker = `${state}/.pi-turnend-extension-loaded`;
 const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(extensionFile)).digest("hex")}`;
-
-function parentPid(pid: string): string {
-  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
-  if (result.status !== 0) return "";
-  return result.stdout.trim();
-}
 
 function pidAlive(pid: string): boolean {
   try {
@@ -37,25 +29,18 @@ function pidAlive(pid: string): boolean {
   }
 }
 
-function lockOwnership(): LockOwnership {
+function markLoaded(): void {
+  if (!existsSync(state)) return;
+  // Only the session process the lock names (or one about to claim a free or
+  // dead lock) may bind the marker. A Pi CLI child of that session, such as
+  // fm-spawn's `pi --help` probe, sees the lock as owned through its ancestry
+  // but can never be the pid the lock names.
   let lockPid = "";
   try {
     lockPid = readFileSync(`${state}/.lock`, "utf8").trim();
   } catch {
-    return "missing";
   }
-  if (!/^[0-9]+$/.test(lockPid) || lockPid === "1") return "other";
-  let pid = String(process.pid);
-  for (let i = 0; i < 8; i += 1) {
-    if (pid === lockPid) return "owned";
-    pid = parentPid(pid);
-    if (!pid || pid === "1") break;
-  }
-  return pidAlive(lockPid) ? "other" : "missing";
-}
-
-function markLoaded(): void {
-  if (!existsSync(state) || lockOwnership() === "other") return;
+  if (lockPid && lockPid !== String(process.pid) && (!/^[0-9]+$/.test(lockPid) || lockPid === "1" || pidAlive(lockPid))) return;
   writeFileSync(marker, `${extensionVersion}\n${process.pid}\n`);
 }
 
