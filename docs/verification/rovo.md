@@ -221,7 +221,7 @@ A `no-mistakes`-mode rovo ship crewmate is blocked by this gap; a rovo scout, wh
 
 ## quota-axi provider mapping: not established
 
-`bin/fm-quota-choose.sh`'s `provider_for_harness` has no `rovo` entry.
+The harness-to-provider mapping `fm_quota_provider_for_harness` in `bin/fm-quota-axi-lib.sh`, which `bin/fm-quota-choose.sh` and `bin/fm-reviewer-choose.sh` share, has no `rovo` entry.
 rovo routes to several distinct underlying model families (OpenAI, Anthropic, Gemini) through Atlassian's own account, and this task found no live evidence of how, or whether, `quota-axi` models that relationship.
 Rather than guess a provider family and risk a wrong quota verdict, `rovo` stays absent from that mapping, so a `rovo` candidate in a quota-balanced dispatch array fails closed with `unknown harness: rovo` instead of being silently misjudged; establishing the real mapping is follow-up work, not part of this adapter.
 
