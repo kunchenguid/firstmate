@@ -2,6 +2,12 @@
 # Behavioral tests for task-bound rolling-quota reset recovery.
 set -u
 
+# This test drives the real bin/fm-send.sh (via `handle`'s guarded delivery),
+# one of the fleet-lifecycle entrypoints fm-gate-refuse-lib.sh guards. See that
+# library's TEST-HARNESS ESCAPE HATCH note: firstmate's own test suite must be
+# exempt from the gate-agent refusal to exercise these scripts for real.
+export FM_GATE_REFUSE_BYPASS=1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 BIN="$ROOT/bin"
