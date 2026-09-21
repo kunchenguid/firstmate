@@ -563,6 +563,235 @@ SH
   pass "a long-lived mate mid-turn is not a stall, but a queue frozen past the busy bound still alarms"
 }
 
+# Agent liveness matches the exact window name from list-windows. Printing
+# session:window makes the pane look missing, which is the leftover-row tests'
+# ring-unsafe path and must keep the parent alarm. These cases print fm-mate
+# and a claude foreground command so a proven-idle mate can actually be rung.
+install_secondmate_alive_tmux() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf '%s\n' 'fm-mate' ;;
+  capture-pane) exit 0 ;;
+  display-message)
+    case "$*" in
+      *pane_current_command*) printf 'claude\n' ;;
+      *pane_tty*) exit 1 ;;
+      *cursor_y*) printf '0\n' ;;
+      *) printf '0\n' ;;
+    esac
+    ;;
+  send-keys)
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -l) shift; [ "$#" -gt 0 ] && printf '%s\n' "$1" >> "${FM_FAKE_TMUX_SENT:-/dev/null}" ;;
+        Enter)
+          printf '[ENTER]\n' >> "${FM_FAKE_TMUX_SENT:-/dev/null}"
+          if [ -n "${FM_FAKE_CHILD_WAKE_QUEUE:-}" ]; then
+            : > "$FM_FAKE_CHILD_WAKE_QUEUE"
+          fi
+          ;;
+      esac
+      shift
+    done
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+install_secondmate_stall_date() {  # <fakebin>
+  local fakebin=$1 real_date
+  real_date=$(command -v date)
+  cat > "$fakebin/date" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = +%s ]; then
+  cat "\${FM_FAKE_NOW_FILE:?}"
+else
+  exec "$real_date" "\$@"
+fi
+SH
+  chmod +x "$fakebin/date"
+}
+
+# A proven-idle, ring-safe mate with a leftover foreign row is rung so its
+# own home can drain. The parent alarm stays silent when that ring actually
+# empties the child's queue.
+test_secondmate_proven_idle_ring_lets_the_child_drain() {
+  local dir state sub fakebin inbox_body
+  dir=$(make_case secondmate-proven-idle-drain)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '100\t7\tcheck\trouted\tcheck: routed row\n' > "$sub/state/.wake-queue"
+  install_secondmate_alive_tmux "$fakebin"
+  install_secondmate_stall_date "$fakebin"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
+    || fail "could not arm the mate's busy contract"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --current-gen \
+    --source claude-hook --event stop >/dev/null \
+    || fail "could not mark the mate idle"
+
+  printf '1000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-first.out" 2> "$dir/watch-first.err" || true
+  [ ! -s "$state/.wake-queue" ] || fail "the first observation of a leftover row produced an alert"
+  [ ! -s "$dir/sent" ] || fail "a proven-idle mate was rung before the stall interval"
+
+  printf '1002\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_FAKE_CHILD_WAKE_QUEUE="$sub/state/.wake-queue" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-ring.out" 2> "$dir/watch-ring.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-ring.out" >/dev/null \
+    || fail "a proven-idle mate that drained after the ring still alarmed: $(cat "$dir/watch-ring.out")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a proven-idle child-first ring published a parent stall notification"
+  [ ! -s "$sub/state/.wake-queue" ] \
+    || fail "the child ring did not drain the leftover foreign row"
+  inbox_body=$(cat "$state/mate.inbox/"*.msg 2>/dev/null || true)
+  printf '%s\n' "$inbox_body" | grep -F 'delivery=fire-and-forget' >/dev/null \
+    || fail "the child-first ring did not write a fire-and-forget drain steer"
+  printf '%s\n' "$inbox_body" | grep -F "Drain pending rows in this home's wake queue, then resume idle supervision." >/dev/null \
+    || fail "the child-first ring wrote the wrong drain instruction"
+  grep -F '[ENTER]' "$dir/sent" >/dev/null \
+    || fail "the child-first ring did not submit the doorbell: $(cat "$dir/sent" 2>/dev/null)"
+  pass "a proven-idle leftover row is rung so the child home can drain without a parent alarm"
+}
+
+# Busy and unknown panes are never typed into. Busy still defers inside the
+# active-turn bound. Unknown keeps the parent alarm. Empty inbox is not idle
+# proof, so the unknown fixture starts with no instruction records.
+test_secondmate_busy_and_unknown_panes_are_not_rung() {
+  local dir state sub fakebin
+  dir=$(make_case secondmate-busy-unknown-no-ring)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '100\t7\tcheck\trouted\tcheck: routed row\n' > "$sub/state/.wake-queue"
+  install_secondmate_alive_tmux "$fakebin"
+  install_secondmate_stall_date "$fakebin"
+
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
+    || fail "could not arm the mate's busy contract"
+  printf '1000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent-busy" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-busy-first.out" 2> "$dir/watch-busy-first.err" || true
+  printf '1002\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent-busy" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-busy.out" 2> "$dir/watch-busy.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-busy.out" >/dev/null \
+    || fail "a busy mate was escalated as a stalled wake loop: $(cat "$dir/watch-busy.out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a busy mate published a durable stall notification"
+  [ ! -e "$dir/sent-busy" ] || fail "a busy mate was rung"
+  [ ! -e "$state/mate.inbox" ] || fail "a busy mate received a drain steer"
+
+  rm -f "$state/.secondmate-wake-progress-mate" "$state/.secondmate-wake-stall-mate" \
+    "$state/.secondmate-wake-ring-mate"
+  rm -rf "$state/.secondmate-wake-stall-receipts" "$state/mate.busy-state" "$state/mate.busy-gen"
+  : > "$dir/sent-unknown"
+  printf '1000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent-unknown" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-unknown-first.out" 2> "$dir/watch-unknown-first.err" || true
+  printf '1002\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent-unknown" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-unknown.out" 2> "$dir/watch-unknown.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 idle=2s' "$dir/watch-unknown.out" >/dev/null \
+    || fail "an unknown pane did not keep the parent alarm: $(cat "$dir/watch-unknown.out")"
+  [ ! -s "$dir/sent-unknown" ] || fail "an unknown pane was rung: $(cat "$dir/sent-unknown")"
+  [ ! -e "$state/mate.inbox" ] || fail "an unknown pane received a drain steer"
+  pass "busy panes defer without a ring and unknown panes keep the parent alarm"
+}
+
+# After a proven-idle ring, the same leftover row is a genuine stall if the
+# child home does not drain it. The second stall interval must still surface.
+test_secondmate_genuine_stall_after_idle_ring_still_alarms() {
+  local dir state sub fakebin row_before stall_count
+  dir=$(make_case secondmate-genuine-stall-after-ring)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '100\t7\tcheck\trouted\tcheck: routed row\n' > "$sub/state/.wake-queue"
+  row_before="$dir/foreign-before"
+  cp "$sub/state/.wake-queue" "$row_before"
+  install_secondmate_alive_tmux "$fakebin"
+  install_secondmate_stall_date "$fakebin"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
+    || fail "could not arm the mate's busy contract"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --current-gen \
+    --source claude-hook --event stop >/dev/null \
+    || fail "could not mark the mate idle"
+
+  printf '1000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-first.out" 2> "$dir/watch-first.err" || true
+
+  printf '1002\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-ring.out" 2> "$dir/watch-ring.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-ring.out" >/dev/null \
+    || fail "the first proven-idle ring published a parent alarm: $(cat "$dir/watch-ring.out")"
+  [ ! -s "$state/.wake-queue" ] || fail "the first proven-idle ring published a durable stall"
+  grep -F '[ENTER]' "$dir/sent" >/dev/null \
+    || fail "the genuine-stall fixture never rang the child"
+  [ "$(cat "$state/.secondmate-wake-ring-mate" 2>/dev/null || true)" = "100-7" ] \
+    || fail "the successful ring did not record the frozen row"
+  cmp -s "$row_before" "$sub/state/.wake-queue" \
+    || fail "the unread ring rewrote the foreign queue"
+
+  printf '1004\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-stall.out" 2> "$dir/watch-stall.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 idle=2s' "$dir/watch-stall.out" >/dev/null \
+    || fail "a leftover row that survived the idle ring stayed hidden: $(cat "$dir/watch-stall.out")"
+  stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$state/.wake-queue" || true)
+  [ "$stall_count" -eq 1 ] || fail "the genuine stall after a ring did not publish exactly one notification"
+  cmp -s "$row_before" "$sub/state/.wake-queue" \
+    || fail "the parent alarm path rewrote the foreign queue"
+  pass "a leftover row that survives a proven-idle ring still surfaces as a genuine stall"
+}
+
 test_secondmate_stall_marker_rejects_symlink() {
   local dir state sub fakebin marker outside expected epoch
   dir=$(make_case secondmate-stall-marker-symlink)
@@ -2019,6 +2248,9 @@ test_secondmate_declared_pause_rows_do_not_feed_stall_escalation
 test_secondmate_reprovisioned_queue_starts_a_fresh_interval
 test_secondmate_active_turn_defers_stall_until_the_turn_ends
 test_secondmate_long_lived_mate_mid_turn_is_not_a_stall
+test_secondmate_proven_idle_ring_lets_the_child_drain
+test_secondmate_busy_and_unknown_panes_are_not_rung
+test_secondmate_genuine_stall_after_idle_ring_still_alarms
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt

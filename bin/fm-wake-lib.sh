@@ -1886,6 +1886,22 @@ fm_wake_secondmate_progress_marker_write() { # <task> <observed-at> <oldest-row-
   fi
 }
 
+fm_wake_secondmate_ring_marker_write() { # <task> <row-key>
+  local task=$1 row_key=$2 marker tmp
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$row_key" in ''|*[!0-9-]*) return 1 ;; esac
+  marker="$STATE/.secondmate-wake-ring-$task"
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  fi
+  tmp=$(mktemp "$STATE/.secondmate-wake-ring.XXXXXX") || return 1
+  if ! printf '%s\n' "$row_key" > "$tmp" || ! chmod 0600 "$tmp" \
+    || ! _fm_atomic_replace "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 fm_wake_secondmate_stall_marker_write() { # <task> <row-key>
   local task=$1 row_key=$2 marker tmp
   case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
