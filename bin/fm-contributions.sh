@@ -37,7 +37,8 @@
 # an issue has two waves. Parallelizing each independent wave bounds either
 # observation to 3 * 5 = 15 seconds. poll reserves min(the configured budget,
 # 15) before starting a URL, so an in-progress normal-budget observation gets
-# all three waves and a later URL waits for the next oldest-checked-first poll.
+# all three waves and a later URL waits for the next poll, which serves the
+# least recently attempted URLs first from the durable rotation cursor.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. A read that crosses its
 # own five-second slice while budget still remains is slow and unmeasured too:
