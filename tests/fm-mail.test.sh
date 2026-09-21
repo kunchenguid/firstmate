@@ -520,6 +520,7 @@ SH
   mkdir -p "$roll_home/state"
   printf 'uidvalidity=90009\n' > "$roll_home/state/.mail-seen"
   : > "$roll_home/state/.mail-woken"
+  printf 'announced:downtime:mail-rollback.fixture\n' > "$roll_home/state/.watcher-down"
   chmod 0400 "$roll_home/state/.mail-seen" "$roll_home/state/.mail-woken"
   [ -w "$roll_home/state/.mail-seen" ] && { echo "fixture unexpected: cursor still writable"; return 1; }
 
@@ -532,6 +533,40 @@ SH
   local wakeq
   wakeq=$(grep -c "check: mail 66" "$roll_home/state/.wake-queue" 2>/dev/null || true)
   expect_code 0 "$wakeq" "rolled-back wake must not stay queued without a durable record"
+  assert_equals 'announced:downtime:mail-rollback.fixture' \
+    "$(cat "$roll_home/state/.watcher-down")" \
+    "rolled-back wake restores the empty recovery episode"
+
+  printf '1700000000\t1\tcheck\texisting\tcheck: existing wake\n' \
+    > "$roll_home/state/.wake-queue"
+  printf '1\n' > "$roll_home/state/.wake-queue.seq"
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$roll_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll with an existing announced row must still roll back"
+  assert_equals 'announced:downtime:mail-rollback.fixture' \
+    "$(cat "$roll_home/state/.watcher-down")" \
+    "rollback restores announced downtime with an existing row"
+  expect_code 1 \
+    "$(grep -c "$(printf '\tcheck\texisting\t')" "$roll_home/state/.wake-queue")" \
+    "rollback preserves the previously announced row"
+  expect_code 0 \
+    "$(grep -c "$(printf '\tcheck\tmail:90009/66\t')" "$roll_home/state/.wake-queue" || true)" \
+    "rollback removes only the failed mail wake"
+
+  printf 'announced:handling:mail-handling.fixture\n' > "$roll_home/state/.watcher-down"
+  rc=0
+  out=$(FM_MAIL_USER=test FM_MAIL_PASS=pass FM_IMAP_HOST=imap.test FM_SMTP_HOST=smtp.test \
+    FM_HOME="$roll_home" PATH="$fakebin:$PATH" \
+    "$MAIL" poll 2>&1) || rc=$?
+  expect_code 1 "$rc" "poll during announced handling must still roll back"
+  assert_equals 'announced:handling:mail-handling.fixture' \
+    "$(cat "$roll_home/state/.watcher-down")" \
+    "rollback restores the exact announced handling token"
+  expect_code 1 \
+    "$(grep -c "$(printf '\tcheck\texisting\t')" "$roll_home/state/.wake-queue")" \
+    "handling rollback preserves the previously announced row"
 
   # Restore write access: the next poll must surface the mail fresh, exactly
   # once, as if the interrupted attempt never happened.
@@ -544,6 +579,10 @@ SH
   assert_contains "$out" "woke for 66" "retry poll surfaces the mail exactly once"
   wakeq=$(grep -c "check: mail 66" "$roll_home/state/.wake-queue" 2>/dev/null || true)
   expect_code 1 "$wakeq" "retry poll appends exactly one wake for uid 66"
+  case "$(cat "$roll_home/state/.watcher-down")" in
+    pending:downtime:mail-handling.fixture) ;;
+    *) fail "successful retry did not reopen recovery for its durable wake" ;;
+  esac
   pass "fm-mail: a wake with no durable record is rolled back, not left ackable"
 }
 
