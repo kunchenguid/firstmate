@@ -93,6 +93,16 @@ case "${1:-} ${2:-}" in
        | .working |= with_entries(select(.key != $p))' | save ;;
   "pane send-text")
     [ ! -f "$SEND_FAIL" ] || exit 1
+    # Stand in for a pane that really sources the staged launch file. A spawn
+    # waits for the record its first line writes before it will report a worker,
+    # and a landed launch then removes the file, so capture the command the pane
+    # runs - the file's last line - at the moment it is sourced rather than
+    # reading it back afterwards.
+    staged=$(printf '%s' "${4:-}" | sed -n "s/^\\. '\\(.*\\)'$/\\1/p")
+    if [ -n "$staged" ] && [ -f "$staged" ]; then
+      tail -n 1 "$staged" > "$LOG.staged"
+      [ -n "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] || : > "$staged.started"
+    fi
     jq_state --arg p "${3:-}" '.typed[$p] = true' | save ;;
   "pane send-keys")
     [ ! -f "$SEND_FAIL" ] || exit 1
@@ -123,6 +133,9 @@ SH
 
 # reset_remote_herdr_fixture <state>: return the fake host to "no workspaces,
 # tabs, or panes", which is what a test means by "the previous endpoint is gone".
-reset_remote_herdr_fixture() { # <state>
+reset_remote_herdr_fixture() { # <state> [log]
   printf '{"next":1,"workspaces":[],"tabs":[],"typed":{},"working":{}}\n' > "$1"
+  # Drop any captured launch command too, so a run that never reaches the pane
+  # cannot be read as having delivered the previous run's command.
+  [ -z "${2:-}" ] || rm -f "$2.staged"
 }

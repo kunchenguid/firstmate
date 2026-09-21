@@ -104,7 +104,7 @@ case "${1:-}" in
     done
     if [ -n "$literal" ]; then
       case "$literal" in
-        ". '"*"'") staged=${literal#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || literal=$(cat "$staged") ;;
+        ". '"*"'") staged=${literal#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || { [ -n "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] || : > "$staged.started"; literal=$(tail -n 1 "$staged"); } ;;
       esac
       case "$literal" in
         *' --auto')
@@ -323,8 +323,12 @@ test_kimi_launch_then_send_is_verified() {
     || fail "kimi spawn staged its launch command at the shared per-id path"
   [ "$(path_mode "$launch_dir")" = 700 ] \
     || fail "kimi spawn left its launch directory readable by others: $(path_mode "$launch_dir")"
-  [ "$(path_mode "$launch_file")" = 600 ] \
-    || fail "kimi spawn staged its launch command without mode 0600: $(path_mode "$launch_file")"
+  # A landed launch drops the staged command rather than leaving it, system
+  # prompt included, under /tmp for the whole life of the task. Its 0600 mode
+  # while it IS staged is covered where the file survives, in
+  # tests/fm-spawn-dispatch-profile.test.sh.
+  [ ! -e "$launch_file" ] \
+    || fail "kimi spawn left its staged launch command behind after the launch landed: $launch_file"
   grep -qF -- "-l . '$launch_file'" "$CASE_DIR/tmux-calls.log" \
     || fail "kimi spawn did not type a short line sourcing its staged launch command"
   assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
@@ -414,8 +418,12 @@ test_kimi_spawn_refuses_shared_task_temp_root() {
   esac
   [ "$launch_file" != "$stale_file" ] \
     || fail "kimi spawn rebound a pre-existing launch.sh instead of writing a new nonce file"
-  [ "$(path_mode "$launch_file")" = 600 ] \
-    || fail "kimi spawn staged its launch command without mode 0600: $(path_mode "$launch_file")"
+  # A landed launch drops the staged command rather than leaving it, system
+  # prompt included, under /tmp for the whole life of the task. Its 0600 mode
+  # while it IS staged is covered where the file survives, in
+  # tests/fm-spawn-dispatch-profile.test.sh.
+  [ ! -e "$launch_file" ] \
+    || fail "kimi spawn left its staged launch command behind after the launch landed: $launch_file"
   [ "$(path_mode "$stale_file")" = 644 ] \
     || fail "kimi spawn overwrote a pre-existing launch.sh"
   [ "$(path_mode "$task_tmp/launch.sh")" = 644 ] \

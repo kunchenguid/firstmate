@@ -1481,6 +1481,71 @@ test_non_claude_harness_ignores_claude_permission_mode() {
   pass "config/claude-permission-mode changes claude launches only"
 }
 
+test_launch_that_never_runs_refuses_the_spawn() {
+  local rec id out status
+  id=profile-launch-never-ran-z25
+  rec=$(make_spawn_case profile-launch-never-ran claude "$id")
+  read_case_record "$rec"
+
+  # A pane that takes the launch command and never runs it is exactly the
+  # failure the staged-launch delivery path can still hit: a shell parked part
+  # way through an earlier command swallows the source line into an open quote.
+  # Nothing about that fails a send, so the spawn used to report success over a
+  # pane with no agent in it.
+  out=$(FM_FAKE_LAUNCH_NOT_RUN=1 FM_SPAWN_LAUNCH_CONFIRM_TIMEOUT=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a launch that never ran reported success"$'\n'"$out"
+  assert_contains "$out" "never ran there, so no agent started" \
+    "spawn did not name the unrun launch as the reason"
+  # Status lines carry a stamp between the state and the text
+  # (`failed [at=<epoch>]: ...`), so match the text rather than the whole line.
+  assert_grep "launch command never ran in the pane" \
+    "$HOME_DIR/state/$id.status" \
+    "an unrun launch left no failure on the task's own record"
+  pass "fm-spawn: a launch command the pane never runs fails the spawn instead of reporting a worker"
+}
+
+# Any staged launch command still present for <task-id>. Globbed rather than
+# found: /tmp is a symlink on macOS, and find will not traverse it, which would
+# quietly turn every assertion built on it into a pass.
+staged_launch_files() {  # <task-id>
+  local f found=
+  for f in /tmp/fm-"$1"+*/launch.*.sh; do
+    [ -e "$f" ] || continue
+    found="$found$f"
+  done
+  printf '%s' "$found"
+}
+
+test_staged_launch_command_is_dropped_only_once_it_has_run() {
+  local rec unrun landed out status left
+  unrun=profile-staging-unrun-z26
+  landed=profile-staging-landed-z27
+  rec=$(make_spawn_case profile-launch-staging claude "$unrun" "$landed")
+  read_case_record "$rec"
+
+  # Drive the two halves apart deliberately. A launch the pane never runs must
+  # LEAVE its staged command for inspection, and a launch that lands must remove
+  # it. Asserting only the second would pass just as happily if the search
+  # stopped finding the file at all, which is the failure this pairing rules out.
+  out=$(FM_FAKE_LAUNCH_NOT_RUN=1 FM_SPAWN_LAUNCH_CONFIRM_TIMEOUT=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$unrun" "$PROJ_DIR")
+  [ -n "$(staged_launch_files "$unrun")" ] \
+    || fail "a launch the pane never ran left nothing staged to inspect"$'\n'"$out"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$landed" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn should succeed"$'\n'"$out"
+  left=$(staged_launch_files "$landed")
+  [ -z "$left" ] \
+    || fail "a landed launch left its staged command, system prompt included, at $left"
+
+  rm -rf /tmp/fm-"$unrun"+* /tmp/fm-"$landed"+*
+  pass "fm-spawn: the staged launch command survives a launch that never ran and is dropped once one lands"
+}
+
 test_worker_launch_delivers_role_scope
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
@@ -1531,5 +1596,7 @@ test_claude_long_launch_is_delivered_intact
 test_claude_crewmate_launch_carries_the_attribution_policy
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
+test_launch_that_never_runs_refuses_the_spawn
+test_staged_launch_command_is_dropped_only_once_it_has_run
 
 echo "# all fm-spawn-dispatch-profile tests passed"

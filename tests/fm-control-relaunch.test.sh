@@ -71,7 +71,7 @@ case "${1:-}" in
     payload=${1:-}
     if [ "$literal" = 1 ]; then
       case "$payload" in
-        ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
+        ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || { [ -n "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] || : > "$staged.started"; payload=$(tail -n 1 "$staged"); } ;;
       esac
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
@@ -1873,7 +1873,7 @@ case "${1:-} ${2:-}" in
     # and tests/fixtures.sh do.
     payload=${4:-}
     case "$payload" in
-      ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
+      ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || { [ -n "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] || : > "$staged.started"; payload=$(tail -n 1 "$staged"); } ;;
     esac
     case "$payload" in
       *'encode launch-brief'*) : > "$D/herdr-agent-live" ;;

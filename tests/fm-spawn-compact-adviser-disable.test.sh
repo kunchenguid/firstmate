@@ -219,7 +219,7 @@ case "${1:-}" in
         ". '"*"'")
           staged=${payload#". '"}
           staged=${staged%"'"}
-          [ ! -f "$staged" ] || payload=$(cat "$staged")
+          [ ! -f "$staged" ] || { [ -n "${FM_FAKE_LAUNCH_NOT_RUN:-}" ] || : > "$staged.started"; payload=$(tail -n 1 "$staged"); }
           ;;
       esac
       printf '%s\n' "$payload" >> "$D/literal"
