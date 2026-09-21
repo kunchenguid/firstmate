@@ -761,6 +761,7 @@ pass "a cursor-loss whole-log recapture is acknowledged quietly with no duplicat
 # The adapter re-armed at the committed cursor. Truncation is detected from the
 # next blocking source and escalated once; it is never silently treated as a new
 # log or re-armed past the break.
+cp "$PARENT/state/remote-replies/ios.cursor" "$TMP_ROOT/cursor-before-continuity-break"
 printf 'failed [corr=fedcba9876543210]: source was replaced\n' > "$REMOTE/state/parent-replies.status"
 GEN=$((GEN + 1))
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-two.out" 2>&1 &
@@ -777,10 +778,32 @@ set -e
 [ "$handle_rc" -eq 3 ] || fail "continuity handling returned an unexpected status: $handle_rc"
 assert_grep 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" "continuity break did not escalate"
 assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-armed without an operator rebase"
+assert_present "$PARENT/state/remote-replies/ios.continuity-broken" \
+  "continuity break did not leave durable stream-health state"
+if remote_env "$ADAPTER" arm ios > "$TMP_ROOT/continuity-arm.out" 2>&1; then
+  fail "continuity break allowed an ordinary arm without a rebase"
+fi
+assert_grep 'rebase ios' "$TMP_ROOT/continuity-arm.out" \
+  "ordinary arm did not name the guarded continuity recovery"
 remote_env "$ADAPTER" ingest ios "$RESULT_TWELVE" >/dev/null 2>&1 || true
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "continuity replay duplicated the escalation"
-pass "truncation is detected, escalated once, and not silently rebased"
+pass "truncation is detected, escalated once, and remains loudly unarmed"
+
+out=$(remote_env "$ADAPTER" rebase ios)
+assert_contains "$out" 'rebased: ios cursor=' "guarded rebase did not report its recovered cursor"
+assert_present "$PARENT/state/procevent/$SID.source" \
+  "guarded rebase did not re-arm the remote reply source"
+assert_absent "$PARENT/state/remote-replies/ios.continuity-broken" \
+  "successful guarded rebase left the stream marked broken"
+assert_grep 'offset=0' "$PARENT/state/remote-replies/ios.cursor" \
+  "guarded rebase did not reset the active cursor to the empty prefix"
+archive=$(printf '%s\n' "$out" | sed -n 's/^rebased: ios cursor=//p')
+[ -n "$archive" ] && [ -f "$archive" ] \
+  || fail "guarded rebase did not preserve a recoverable superseded cursor"
+cmp -s "$TMP_ROOT/cursor-before-continuity-break" "$archive" \
+  || fail "guarded rebase did not preserve the exact superseded cursor"
+pass "guarded rebase preserves the old cursor and re-arms the replay-safe stream"
 
 rm -f "$PARENT/state/procevent-inbox/$SID.$GEN.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then

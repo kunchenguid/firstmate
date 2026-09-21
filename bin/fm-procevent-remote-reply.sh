@@ -3,6 +3,7 @@
 #
 # Usage:
 #   fm-procevent-remote-reply.sh arm <secondmate-id>
+#   fm-procevent-remote-reply.sh rebase <secondmate-id>
 #   fm-procevent-remote-reply.sh handle <secondmate-id> <sequence> <result-file>
 #   fm-procevent-remote-reply.sh autohandle <source-id> <sequence> <result-file>
 #   fm-procevent-remote-reply.sh classify <result-file>
@@ -17,6 +18,10 @@
 # terminal for that exact registration; `handle` validates and idempotently
 # ingests it, acknowledges the captured generation, then registers the next
 # cursor-anchored source. A continuity break is escalated and not re-armed.
+# `rebase` is the supported recovery after that escalation: it holds the reply
+# lifecycle lock, preserves the superseded cursor beside the active cursor,
+# resets only the active cursor to the empty prefix, and re-arms the source.
+# Replay is safe because ingest deduplicates source lines before appending them.
 #
 # `autohandle` is the runner's own entry into that same `handle`: it takes the
 # canonical source id instead of the secondmate id and is called by the runner
@@ -121,6 +126,7 @@ source_id() {
 }
 
 cursor_path() { printf '%s/%s.cursor\n' "$CURSOR_DIR" "$1"; }
+continuity_break_path() { printf '%s/%s.continuity-broken\n' "$CURSOR_DIR" "$1"; }
 ingest_receipt_path() { printf '%s/%s.%s.ingested\n' "$CURSOR_DIR" "$1" "$2"; }
 mirrored_source_path() { printf '%s/.remote-reply-mirrored-%s\n' "$STATE" "$1"; }
 
@@ -153,6 +159,29 @@ write_cursor() { # <id> <offset> <hash>
     printf 'schema=fm-remote-reply-cursor.v1\n'
     printf 'offset=%s\n' "$offset"
     printf 'prefix_sha256=%s\n' "$hash"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$path"
+}
+
+continuity_is_broken() { # <id>
+  local path
+  path=$(continuity_break_path "$1")
+  [ -e "$path" ] || [ -L "$path" ] || return 1
+  [ -f "$path" ] && [ ! -L "$path" ] || die "remote reply continuity record is unsafe: $path"
+  return 0
+}
+
+write_continuity_break() { # <id> <reason>
+  local id=$1 reason=$2 path tmp
+  mkdir -p "$CURSOR_DIR" || return 1
+  chmod 700 "$CURSOR_DIR" 2>/dev/null || true
+  path=$(continuity_break_path "$id")
+  [ ! -L "$path" ] || return 1
+  tmp=$(umask 077; mktemp "$CURSOR_DIR/.continuity.XXXXXX") || return 1
+  {
+    printf 'schema=fm-remote-reply-continuity.v1\n'
+    printf 'reason=%s\n' "$reason"
   } > "$tmp" || { rm -f -- "$tmp"; return 1; }
   chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$path"
@@ -226,11 +255,50 @@ cmd_arm_locked() {
   local id=${1:-} sid
   validate_id "$id"
   remote_route_exists "$id"
+  if continuity_is_broken "$id"; then
+    die "remote reply continuity is broken for $id; run fm-procevent-remote-reply.sh rebase $id"
+  fi
   read_cursor "$id"
   sid=$(source_id "$id")
   "$SCRIPT_DIR/fm-procevent.sh" register remote-reply "$sid" -- \
     "$SCRIPT_DIR/fm-procevent-remote-reply.sh" source "$id" || return 1
   printf 'armed: %s offset=%s\n' "$sid" "$CURSOR_OFFSET"
+}
+
+cmd_rebase_locked() {
+  local id=${1:-} sid path archive reason empty
+  validate_id "$id"
+  remote_route_exists "$id"
+  continuity_is_broken "$id" \
+    || die "remote reply continuity is not marked broken for $id"
+  path=$(cursor_path "$id")
+  [ -f "$path" ] && [ ! -L "$path" ] \
+    || die "broken remote reply cursor is unavailable or unsafe: $path"
+  reason=$(sed -n 's/^reason=//p' "$(continuity_break_path "$id")" | head -n 1)
+  [ -n "$reason" ] || reason='operator rebase retry failed'
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$(source_id "$id")" || return 1
+  archive=$(umask 077; mktemp "$CURSOR_DIR/$id.cursor.rebased.XXXXXX") \
+    || die "cannot reserve superseded remote reply cursor"
+  mv -f -- "$path" "$archive" || die "cannot preserve superseded remote reply cursor"
+  empty=$(empty_hash) || die "cannot establish the empty cursor hash"
+  write_cursor "$id" 0 "$empty" || die "cannot reset remote reply cursor"
+  rm -f -- "$(continuity_break_path "$id")" || die "cannot clear remote reply continuity record"
+  if ! cmd_arm_locked "$id"; then
+    write_continuity_break "$id" "$reason" || die "cannot restore remote reply continuity record"
+    die "cannot re-arm rebased remote reply source"
+  fi
+  printf 'rebased: %s cursor=%s\n' "$id" "$archive"
+}
+
+cmd_rebase() {
+  local id=${1:-} lock
+  validate_id "$id"
+  lock=$(secondmate_reply_lifecycle_lock_path "$STATE" "$id")
+  (
+    fm_lock_acquire_wait "$lock" || die "cannot lock remote reply lifecycle for $id"
+    trap 'fm_lock_release "$lock"' EXIT
+    cmd_rebase_locked "$id"
+  )
 }
 
 cmd_arm() {
@@ -530,6 +598,8 @@ cmd_ingest() {
     append_rc=0
     append_status_once "$status_file" "$line" || append_rc=$?
     [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
+    write_continuity_break "$id" "$reason" \
+      || { fm_lock_release "$lock"; die "cannot record remote reply continuity failure"; }
     fm_lock_release "$lock"
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
     return 3
@@ -718,6 +788,7 @@ cmd_retire_finalize_locked() {
   fi
   rm -f -- "$(cursor_path "$id")"
   rm -f -- "$CURSOR_DIR/$id".*.ingested
+  rm -f -- "$(continuity_break_path "$id")"
   rm -f -- "$(fm_pending_reply_remote_channel_watermark_path "$STATE" "$id")"
 }
 
@@ -748,6 +819,7 @@ require_parent_lifecycle_lock() {
 
 case "${1:-}" in
   arm) shift; [ "$#" -eq 1 ] || usage; cmd_arm "$@" ;;
+  rebase) shift; [ "$#" -eq 1 ] || usage; cmd_rebase "$@" ;;
   arm-locked) shift; [ "$#" -eq 1 ] || usage; require_parent_lifecycle_lock "$1"; cmd_arm_locked "$@" ;;
   source) shift; [ "$#" -eq 1 ] || usage; cmd_source "$@" ;;
   handle) shift; [ "$#" -eq 3 ] || usage; cmd_handle "$@" ;;

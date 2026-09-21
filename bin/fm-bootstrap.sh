@@ -588,14 +588,14 @@ secondmate_sync() {
   # "move on to the next secondmate".
   secondmate_sync_remote_one() {  # <id> <home> <remote-host>
     local id=$1 _home=$2 remote_host=$3
-    local sync_out sync_rc inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation
+    local sync_out sync_rc inherit_out nudge_needed remote_marker remote_pending converged out remote_lock remote_generation reply_arm_out
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_lock" ] || ! fm_lock_acquire_wait "$remote_lock"; then
       echo "NUDGE_SECONDMATES: secondmate $id: send failed: cannot lock remote inheritance transaction"
       return 0
     fi
-    if ! "$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" >/dev/null 2>&1; then
-      echo "SECONDMATE_LIVENESS: secondmate $id: skipped: remote reply source could not be registered"
+    if ! reply_arm_out=$("$SCRIPT_DIR/fm-procevent-remote-reply.sh" arm "$id" 2>&1); then
+      echo "SECONDMATE_LIVENESS: secondmate $id: remote reply stream is unarmed: $(first_line "$reply_arm_out")"
     fi
     remote_generation=$(fm_remote_inherit_generation_next "$STATE" "$id" 2>/dev/null || true)
     if [ -z "$remote_generation" ]; then
