@@ -147,7 +147,7 @@ Its complete list of moves:
    This is the only input firstmate adds, and it is a pointer, never a position.
 5. Decide after each round whether the exchange closes, and say which stopping condition fired.
 6. Build the captain-facing outcome below.
-7. Register the contested items as captain calls, then tear down and complete both sides, only once the outcome is built and every round is copied out.
+7. Register the contested captain calls, run the completion attestation once per side against that side's own task id with that same inventory, then tear down and complete both sides, only once the outcome is built and every round is copied out.
 
 ## Outcome
 
@@ -163,9 +163,11 @@ Everything the two sides did not agree on, including an item one side did not ma
 One short paragraph per side, each naming what he gets and what he gives up on that path.
 No transcript, no file references, no agent names, no round numbers.
 He is choosing between two paths, so each paragraph exists to make one path's pro and con legible, not to win.
-When one side's case is missing, say plainly what is missing and, where it is known, why, and have the item's proposer write the case against their own proposal, so the captain still gets both sides.
+When one side's case is missing, say plainly what is missing and, where it is known, why, and have the side whose case is on record write the strongest case it can for the absent side's position, so the captain still gets both sides.
+Name which paragraph its opponent wrote, because a steelmanned position is worth having only when he knows whose hand wrote it.
 
-Every contested item is a captain call, so load `captain-hold-lifecycle` and register them before treating the review as complete.
+The contested list is a captain call, so load `captain-hold-lifecycle` and carry the list on one captain-held task consolidating the questions and their two-sided options, before treating the review as complete.
+Register an item on its own row only where it gates an existing work item of its own, which that policy already prefers.
 
 Report both sides' spend and what the spend changed.
 A test that could not have changed a recommendation should not have been run.
