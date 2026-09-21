@@ -385,6 +385,13 @@ source_owner_task() { source_field "$1" owner_task; }
 source_pending() {  # <source-id>
   fm_procevent_pending "$STATE" | awk -v id="$1" 'index($0, "/" id ".") { print }'
 }
+# The registration record is a worker-owned board's ONLY ownership evidence, so
+# it cannot be retired while a captured round of it is still unacknowledged.
+# Every retirement path asks here, with the source lock already held.
+source_retirement_blocked_locked() {  # <source-id>
+  [ "$(source_kind "$1" 2>/dev/null || true)" = task-owned ] || return 1
+  [ -n "$(source_pending "$1" | head -1)" ]
+}
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
 stranded_file() { printf '%s/.%s.stranded\n' "$REG" "$1"; }
@@ -1213,12 +1220,13 @@ EOF
   else
     printf 'not-autohandled: %s (left for the handler; still unacknowledged)\n' "$id" >&2
   fi
-  if [ -z "$task_owner" ] && adapter_result_is_terminal "$adapter" "$durable"; then
-    if retire_owned_terminal_source "$id"; then
-      printf 'retired: %s (adapter classified the captured result terminal)\n' "$id"
-    else
-      printf 'cannot retire terminal source; it remains registered: %s\n' "$id" >&2
-    fi
+  if adapter_result_is_terminal "$adapter" "$durable"; then
+    retire_owned_terminal_source "$id"
+    case "$?" in
+      0) printf 'retired: %s (adapter classified the captured result terminal)\n' "$id" ;;
+      2) printf 'round-open: %s (its owner has not acknowledged the terminal round)\n' "$id" ;;
+      *) printf 'cannot retire terminal source; it remains registered: %s\n' "$id" >&2 ;;
+    esac
   fi
   printf 'captured: %s\n' "$durable"
   if [ "$extension_owner" -eq 1 ]; then
@@ -1238,6 +1246,10 @@ retire_owned_terminal_source() {  # <source-id>
   local id=$1 status=0 registration current_identity
   registration=$(source_file "$id")
   fm_procevent_source_lock_acquire "$id" || return 1
+  if source_retirement_blocked_locked "$id"; then
+    fm_procevent_source_lock_release "$id"
+    return 2
+  fi
   if fm_procevent_claim_load_locked "$id" 2>/dev/null \
     && [ "$FM_PROCEVENT_CLAIM_HOME" = "$CLAIM_HOME" ] \
     && [ "$FM_PROCEVENT_CLAIM_PID" = "$CLAIM_PID" ] \
@@ -1828,7 +1840,7 @@ cmd_handled() {
 
 cmd_retire() {
   local id=${1-} condition=${2-} adapter='' sep='' expected_owner='' owner='' pid='' token='' identity='' stop_state owner_state
-  local extension_binding_digest=''
+  local extension_binding_digest='' round_owner=''
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$condition" in
     '') [ "$#" -eq 1 ] || usage ;;
@@ -1850,6 +1862,11 @@ cmd_retire() {
     *) usage ;;
   esac
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  if source_retirement_blocked_locked "$id"; then
+    round_owner=$(source_owner_task "$id")
+    fm_procevent_source_lock_release "$id"
+    die "cannot retire task-owned source $id while a captured round for task $round_owner is unacknowledged; acknowledge it with bin/fm-procevent.sh handled $id <sequence>"
+  fi
   if [ -e "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
     if [ -z "$condition" ]; then
       fm_procevent_extension_registration_load_locked "$STATE" "$id"

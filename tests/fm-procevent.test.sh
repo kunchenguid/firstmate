@@ -765,6 +765,40 @@ for _ in $(seq 1 100); do [ -f "$HMULTI/state/worker-1.inbox/001.msg" ] && break
   || fail "worker-owned feedback did not reach the worker inbox"
 [ -z "$(wake_payloads "$HMULTI")" ] \
   || fail "worker-owned feedback woke firstmate: $(wake_payloads "$HMULTI")"
+
+# An open nonterminal round keeps the board with worker-1 through every
+# retirement and registration path: the one source record cannot be retired out
+# from under that round, and while it stands neither firstmate nor a sibling
+# task can register over it or acknowledge worker-1's capture.
+open_retire_status=0
+PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$MULTI_ART" \
+  >/dev/null 2>"$MULTI_ROOT/open-retire.err" || open_retire_status=$?
+[ "$open_retire_status" -ne 0 ] \
+  || fail "explicit retire removed a worker-owned board with an unacknowledged round"
+assert_contains "$(cat "$MULTI_ROOT/open-retire.err")" "unacknowledged" \
+  "the refused retire did not say the owner's round is still unacknowledged"
+[ -e "$HMULTI/state/procevent/$multi_id.source" ] \
+  || fail "a refused retire still removed the worker-owned source record"
+if PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" --for worker-2 \
+  >/dev/null 2>"$MULTI_ROOT/open-sibling.err"; then
+  fail "a sibling task registered over an open worker-owned round"
+fi
+assert_contains "$(cat "$MULTI_ROOT/open-sibling.err")" "owned by task worker-1" \
+  "the sibling refusal over an open round did not name the worker owner"
+if PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" \
+  >/dev/null 2>"$MULTI_ROOT/open-firstmate.err"; then
+  fail "firstmate armed a board with an open worker-owned round"
+fi
+assert_contains "$(cat "$MULTI_ROOT/open-firstmate.err")" "owned by task worker-1" \
+  "the firstmate refusal over an open round did not name the worker owner"
+[ ! -f "$HMULTI/state/procevent-inbox/$multi_id.1.handled" ] \
+  || fail "a refused retire or registration acknowledged the owner's open round"
+[ ! -e "$HMULTI/state/worker-2.inbox" ] \
+  || fail "a refused sibling registration took delivery of the owner's feedback"
+
 PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
   "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" --for worker-1 \
   --agent-reply-file "$MULTI_ROOT/reply2" >/dev/null
@@ -816,6 +850,14 @@ if PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
 fi
 assert_contains "$(cat "$MULTI_ROOT/sibling-arm.err")" "owned by task worker-1" \
   "the sibling registration refusal did not name the worker owner"
+terminal_retire_status=0
+PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$MULTI_ART" \
+  >/dev/null 2>"$MULTI_ROOT/terminal-retire.err" || terminal_retire_status=$?
+[ "$terminal_retire_status" -ne 0 ] \
+  || fail "explicit retire removed a worker-owned board with an unacknowledged terminal round"
+[ -e "$HMULTI/state/procevent/$multi_id.source" ] \
+  || fail "a refused retire removed the worker-owned record of an open terminal round"
 [ ! -f "$HMULTI/state/procevent-inbox/$multi_id.3.handled" ] \
   || fail "a refused sibling registration consumed the owner's terminal round"
 [ ! -f "$HMULTI/state/worker-2.inbox/001.msg" ] \
