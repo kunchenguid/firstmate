@@ -136,11 +136,30 @@ ok "exhausted reviewer fails over with a recorded switch"
 
 # 3. The author is skipped even when quota-healthy; selection continues.
 out=$(call_choose --author claude:claude-opus-5 --snapshot "$FIXTURE" \
-  --candidate claude:claude-opus-5 --candidate pi:openai-codex/gpt-6-astra)
+  --candidate claude:claude-opus-5 --candidate pi:anthropic/claude-sonnet-5@claude)
 expected="skipped: claude:claude-opus-5 author
-reviewer: pi openai-codex/gpt-6-astra"
+reviewer: pi anthropic/claude-sonnet-5"
 [ "$out" = "$expected" ] || fail "author skip: expected '$expected', got '$out'"
 ok "author candidate is skipped for a non-author reviewer"
+
+# 3b. The same underlying model reached through another harness is still the
+# author: the docs/examples/crew-dispatch.json pair claude/claude-sonnet-5 and
+# pi/anthropic/claude-sonnet-5 compares equal in both directions.
+out=$(call_choose --author claude:claude-sonnet-5 --snapshot "$FIXTURE" \
+  --candidate pi:anthropic/claude-sonnet-5 --candidate claude:claude-opus-5)
+expected="skipped: pi:anthropic/claude-sonnet-5 author
+reviewer: claude claude-opus-5"
+[ "$out" = "$expected" ] || fail "cross-harness author: expected '$expected', got '$out'"
+out=$(call_choose --author pi:anthropic/claude-sonnet-5 --snapshot "$FIXTURE" \
+  --candidate claude:Claude-Sonnet-5@claude --candidate claude:claude-opus-5)
+expected="skipped: claude:Claude-Sonnet-5@claude author
+reviewer: claude claude-opus-5"
+[ "$out" = "$expected" ] || fail "cross-harness author reverse: expected '$expected', got '$out'"
+if out=$(call_choose --author claude:claude-sonnet-5 --snapshot "$FIXTURE" \
+  --candidate pi:anthropic/claude-sonnet-5 2>/dev/null); then
+  fail "cross-harness author: expected a park, got exit 0 with '$out'"
+fi
+ok "the non-author gate holds across harness spellings"
 
 # 4. A leading model: scope prefix still counts as the same author.
 out=$(call_choose --author codex:codex_bengalfox --snapshot "$FIXTURE" \
@@ -194,6 +213,47 @@ grep -Eq '^reviewer-choose [0-9]+ parked skipped codex:gpt-6=quota-ineligible, c
   || fail "record: missing park line in '$(cat "$RECORD")'"
 ok "switch record captures selections and parks"
 
+# 7b. A declared provider is measured against that provider's row, not the
+# harness's primary family: with the pi row healthy and the codex row
+# exhausted, pi:openai-codex/gpt-6-astra@codex is quota-ineligible.
+out=$(call_choose --author grok:grok-4 --snapshot "$FIXTURE" \
+  --candidate pi:openai-codex/gpt-6-astra@codex --candidate claude:claude-opus-5)
+expected="skipped: pi:openai-codex/gpt-6-astra@codex quota-ineligible
+reviewer: claude claude-opus-5"
+[ "$out" = "$expected" ] || fail "declared provider: expected '$expected', got '$out'"
+out=$(call_choose --author grok:grok-4 --snapshot "$FIXTURE" \
+  --candidate pi:openai-codex/gpt-6-astra@pi)
+[ "$out" = "reviewer: pi openai-codex/gpt-6-astra" ] \
+  || fail "declared primary provider: expected selection, got '$out'"
+if call_choose --author grok:grok-4 --snapshot "$FIXTURE" \
+  --candidate pi:anthropic/claude-sonnet-5@Claude >/dev/null 2>&1; then
+  fail "malformed provider unexpectedly succeeded"
+fi
+ok "a declared provider selects the quota row that is probed"
+
+# 7c. Unmeasurable quota is disclosed uncertainty, never an abort: a supported
+# harness with no quota-axi mapping stays eligible behind measured candidates.
+out=$(call_choose --author grok:grok-4 --snapshot "$FIXTURE" \
+  --candidate codex:gpt-6 --candidate gemini:gemini-3-pro --candidate claude:claude-opus-5)
+expected="skipped: codex:gpt-6 quota-ineligible
+deferred: gemini:gemini-3-pro quota-unmeasured (harness gemini has no quota-axi provider mapping)
+reviewer: claude claude-opus-5"
+[ "$out" = "$expected" ] || fail "unmodeled harness: expected '$expected', got '$out'"
+UNMEASURED_RECORD="$LAB/unmeasured.log"
+: > "$UNMEASURED_RECORD"
+out=$(call_choose --author grok:grok-4 --snapshot "$FIXTURE" \
+  --candidate codex:gpt-6 --candidate pi:xai/grok-4-fast@xai --candidate gemini:gemini-3-pro \
+  --record "$UNMEASURED_RECORD")
+expected="skipped: codex:gpt-6 quota-ineligible
+deferred: pi:xai/grok-4-fast@xai quota-unmeasured (provider xai has no quota-axi provider mapping)
+deferred: gemini:gemini-3-pro quota-unmeasured (harness gemini has no quota-axi provider mapping)
+unmeasured: pi:xai/grok-4-fast@xai provider xai has no quota-axi provider mapping
+reviewer: pi xai/grok-4-fast"
+[ "$out" = "$expected" ] || fail "unmeasured fallback: expected '$expected', got '$out'"
+grep -Eq '^reviewer-choose [0-9]+ selected pi xai/grok-4-fast unmeasured pi:xai/grok-4-fast@xai skipped codex:gpt-6=quota-ineligible$' "$UNMEASURED_RECORD" \
+  || fail "unmeasured record: got '$(cat "$UNMEASURED_RECORD")'"
+ok "unmeasured quota defers a candidate without aborting selection"
+
 # 8. Snapshots arrive on stdin as well as by file.
 out=$(call_choose --author grok:grok-4 --candidate claude:claude-opus-5 < "$FIXTURE")
 [ "$out" = "reviewer: claude claude-opus-5" ] \
@@ -211,6 +271,8 @@ if call_choose --author grok:grok-4 --snapshot "$FIXTURE" \
   --candidate frobnicate:model-x >/dev/null 2>&1; then
   fail "unknown harness unexpectedly succeeded"
 fi
+call_choose --author grok:grok-4 --snapshot "$FIXTURE" claude:claude-opus-5 >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 2 ] || fail "positional candidate exited $rc instead of 2"
 ok "usage errors fail closed with exit 2"
 
 # 10. A rejected snapshot is an error, never a quiet park.

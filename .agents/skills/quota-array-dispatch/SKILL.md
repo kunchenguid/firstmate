@@ -33,6 +33,17 @@ Authoritative multi-provider routing - including provider discovery from the har
 Use it only when the brief already fixed the candidate order and every candidate's provider is the harness's primary family.
 It does not replace the reasoning-class, runway-feasibility, or authentication gates above.
 Firstmate can optionally arm `bin/fm-procevent-quota.sh` for a recurring mid-task check that wakes when the tracked provider drops below its configured threshold or its runway becomes `exhausted_now`.
+## Reviewer selection at review setup
+
+The canonical helper for choosing the reviewer seat of a validation review is `bin/fm-reviewer-choose.sh`; use it whenever review setup pins a reviewer and the review rule or reviewer configuration lists more than one candidate.
+Trigger: at review setup, before pinning `review_agents.reviewer` for a no-mistakes run, when the configured reviewer is a profile array or the pinned reviewer's provider is `exhausted_now` or at zero known headroom in the intake snapshot.
+Pass `--author <harness:model>` for the head's author, the same already-captured intake snapshot through `--snapshot` or stdin, and one `--candidate <harness:model[@provider]>` per profile of the matching `config/crew-dispatch.json` review rule in its listed order, carrying each profile's declared `provider` as the `@provider` suffix; pass `--needs-approval` for any candidate under an `approval` rule and `--approved` only for one the captain has approved.
+The helper applies the non-author, approval, and quota gates in that order, prints the selected reviewer or a truthful park line, and appends the switch to the `--record` file you name; pin the printed harness and model with that profile's configured effort.
+It fails closed on authorship: two spellings that may denote the same underlying model count as the same author.
+Quota it cannot measure (a harness with no quota-axi mapping, or a declared provider no mapped harness measures) is disclosed uncertainty that keeps the candidate eligible behind every measured candidate, and its `deferred:` and `unmeasured:` lines are the evidence to carry into the run record.
+The no-mistakes `review_agents.reviewer.agent` field accepts one explicit harness only, never an ordered list like the pipeline `agent` field, so the ordered fallback lives in the review rule and this helper resolves it to the single pin that field accepts.
+Never hardcode a model substitution, add a second routing table, or park a review on an exhausted reviewer when the review rule still lists an eligible non-author candidate.
+
 The opt-in `bin/fm-dispatch-resolve.sh` (`docs/configuration.md` "Typed dispatch resolution") applies the same eligibility gates and `spendPriority` argmax in code after a typed rule match; it never removes this skill's authority, and its `ambiguous`, `escalate`, and `error` outcomes return here.
 
 ## Read the default TOON
