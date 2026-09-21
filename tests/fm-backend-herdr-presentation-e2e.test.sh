@@ -374,6 +374,15 @@ assert_cleanup_focus_preserved() {  # <line-count> <pane-id> <expected-focus>
   fi
 }
 
+# The fixture's stand-in for reconciling a slot by hand: return the lease and
+# drop the claim naming the task that held it. A claim naming another task is
+# never overwritten by a later spawn, so a slot returned outside teardown must
+# not keep its claim.
+return_fixture_slot() {  # <worktree>
+  "$REAL_TREEHOUSE" return --force "$1" >/dev/null 2>&1 || true
+  rm -f "$(dirname "$1")/.fm-slot-owner"
+}
+
 remember_meta_worktree() {  # <meta>
   local wt
   wt=$(grep '^worktree=' "$1" | cut -d= -f2-)
@@ -860,12 +869,20 @@ grep -F "did not enter an isolated worktree" "$TMP_ROOT/abort-b.err" >/dev/null 
   || fail "post-create abort fixture B did not reach the armed validation failure"
 ABORT_A_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/task-pane")
 ABORT_B_PANE=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/task-pane")
-ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" '
+# A task pane that is a lone idle shell is removed through Herdr's pane-death
+# path, which logs no pane.close (see assert_cleanup_focus_preserved), so each
+# task's close is any pane.close inside its own projected workspace, the seeded
+# pane's prune included, and consecutive closes of one task collapse into one.
+ABORT_A_WS=$(cat "$POST_CREATE_ABORT_CONTROL/abort-a/workspace")
+ABORT_B_WS=$(cat "$POST_CREATE_ABORT_CONTROL/abort-b/workspace")
+[ -n "$ABORT_A_WS" ] && [ -n "$ABORT_B_WS" ] || fail "post-create abort fixtures did not record their projected workspaces"
+ABORT_SEQUENCE=$(sed -n "$((ABORT_FOCUS_START + 1)),\$p" "$FOCUS_AUDIT_LOG" | awk -F '\t' \
+  -v a="$ABORT_A_PANE" -v b="$ABORT_B_PANE" -v wa="$ABORT_A_WS" -v wb="$ABORT_B_WS" '
   $1 == "workspace-create" && $4 ~ /^└ abort-a · p:/ { print "create-a" }
   $1 == "workspace-create" && $4 ~ /^└ abort-b · p:/ { print "create-b" }
-  $1 == "pane-close" && $4 == a { print "close-a" }
-  $1 == "pane-close" && $4 == b { print "close-b" }
-')
+  $1 == "pane-close" && ($4 == a || index($4, wa ":") == 1) { print "close-a" }
+  $1 == "pane-close" && ($4 == b || index($4, wb ":") == 1) { print "close-b" }
+' | uniq)
 case "$ABORT_SEQUENCE" in
   $'create-a\nclose-a\ncreate-b\nclose-b'|$'create-b\nclose-b\ncreate-a\nclose-a') ;;
   *) fail "concurrent post-create abort cleanup interleaved outside the presentation lock: $ABORT_SEQUENCE" ;;
@@ -1246,7 +1263,7 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     [ "$NEW_RESTART_PANE" != "$PRIOR_RESTART_PANE" ] \
       || fail "$RESTART_ID repeated reclaim reused the prior husk pane"
     if [ "$PRIOR_RESTART_WT" != "$NEW_RESTART_WT" ]; then
-      "$REAL_TREEHOUSE" return --force "$PRIOR_RESTART_WT" >/dev/null 2>&1 || true
+      return_fixture_slot "$PRIOR_RESTART_WT"
     fi
   fi
 
@@ -1254,8 +1271,8 @@ for RESTART_ID in fm-hibit-resume-r1 wheelhouse-healing-r1; do
     || fail "$RESTART_ID teardown after reclaim failed: $(cat "$TMP_ROOT/$RESTART_ID-teardown.err")"
   [ ! -e "$HOME_DIR/state/$RESTART_ID.herdr-presentation" ] \
     || fail "$RESTART_ID exact reclaimed teardown did not retire its journal"
-  "$REAL_TREEHOUSE" return --force "$OLD_RESTART_WT" >/dev/null 2>&1 || true
-  "$REAL_TREEHOUSE" return --force "$NEW_RESTART_WT" >/dev/null 2>&1 || true
+  return_fixture_slot "$OLD_RESTART_WT"
+  return_fixture_slot "$NEW_RESTART_WT"
 done
 pass "real Herdr lab: Hi Bit and Wheelhouse-style same-identity restarts reclaim one nested space with exact focus and idempotence"
 
@@ -1290,8 +1307,8 @@ CROSS_NEW_PANE=$(grep '^herdr_pane_id=' "$CROSS_RESTART_META" | cut -d= -f2-)
   || fail "cross-home reclaim changed the secondmate child's presentation label"
 teardown_task "$CROSS_RESTART_ID" "$SECOND_HOME_A" > "$TMP_ROOT/cross-restart-teardown.out" 2> "$TMP_ROOT/cross-restart-teardown.err" \
   || fail "cross-home reclaimed teardown failed: $(cat "$TMP_ROOT/cross-restart-teardown.err")"
-"$REAL_TREEHOUSE" return --force "$CROSS_OLD_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$CROSS_NEW_WT" >/dev/null 2>&1 || true
+return_fixture_slot "$CROSS_OLD_WT"
+return_fixture_slot "$CROSS_NEW_WT"
 pass "real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent"
 
 # Two homes recovering concurrently serialize on the named session lock and
@@ -1343,10 +1360,10 @@ teardown_task "$PRIMARY_WAVE_ID" "$HOME_DIR" > "$TMP_ROOT/primary-wave-teardown.
   || fail "concurrent primary recovery teardown failed: $(cat "$TMP_ROOT/primary-wave-teardown.err")"
 teardown_task "$BRAVO_WAVE_ID" "$SECOND_HOME_B" > "$TMP_ROOT/bravo-wave-teardown.out" 2> "$TMP_ROOT/bravo-wave-teardown.err" \
   || fail "concurrent secondmate recovery teardown failed: $(cat "$TMP_ROOT/bravo-wave-teardown.err")"
-"$REAL_TREEHOUSE" return --force "$PRIMARY_WAVE_OLD_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$BRAVO_WAVE_OLD_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$PRIMARY_WAVE_NEW_WT" >/dev/null 2>&1 || true
-"$REAL_TREEHOUSE" return --force "$BRAVO_WAVE_NEW_WT" >/dev/null 2>&1 || true
+return_fixture_slot "$PRIMARY_WAVE_OLD_WT"
+return_fixture_slot "$BRAVO_WAVE_OLD_WT"
+return_fixture_slot "$PRIMARY_WAVE_NEW_WT"
+return_fixture_slot "$BRAVO_WAVE_NEW_WT"
 pass "real Herdr lab: concurrent cross-home recoveries replace exact husks under one session lock with no focus drift"
 
 # Seed a legacy old-format primary projection and a flat secondmate tab; correction must not migrate them.

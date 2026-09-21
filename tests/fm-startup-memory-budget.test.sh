@@ -37,8 +37,8 @@ exit 0
 SH
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-if [ "${1:-}" = get ] && [ "${2:-}" = --help ]; then
-  printf '%s\n' 'Usage: treehouse get [--lease]'
+if [ "${1:-}" = return ] && [ "${2:-}" = --help ]; then
+  printf '%s\n' '      --if-lease-id string   Return only if the current lease has this identity'
 fi
 SH
   cat > "$fakebin/no-mistakes" <<'SH'

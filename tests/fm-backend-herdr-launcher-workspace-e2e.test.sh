@@ -425,7 +425,9 @@ pass "real herdr E2E: a --secondmate launch still stands up that secondmate's ow
 
 # --- 8. teardown closes only the worker's own pane --------------------------
 
-FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
+# Like every real caller, teardown runs with the FM_HOME the task was spawned
+# from: slot ownership binds the task id to that canonical home.
+FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
   FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
   "$ROOT/bin/fm-teardown.sh" dupC >"$TMP_ROOT/teardown.out" 2>&1
 status=$?

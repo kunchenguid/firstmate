@@ -49,6 +49,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-secondmate-charter-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-backend.sh
+. "$SCRIPT_DIR/fm-backend.sh"
 
 usage() {
   echo "usage: fm-home-seed.sh <id> <home|-> {<project>...|--no-projects}" >&2
@@ -388,15 +390,31 @@ seeded_origin_url() {
 }
 
 acquire_treehouse_home() {
-  local id=$1 home
+  local id=$1 home lock
   # Durably lease a firstmate worktree from the pool. The lease persists with no
   # live process and is skipped by later get/prune, so the home survives restarts
   # until teardown or rollback returns it. treehouse prints only the worktree path
   # to stdout (banners go to stderr), so command substitution captures the path.
+  # The get shares bin/fm-spawn.sh's Treehouse project lock and legacy-record
+  # preflight, so it never reissues a Firstmate slot a task record still names.
+  lock=$(fm_treehouse_project_lock_path "$FM_ROOT") || {
+    echo "error: could not resolve the shared Treehouse project lock for $FM_ROOT" >&2
+    return 1
+  }
+  fm_lock_try_acquire "$lock" || {
+    echo "error: another Treehouse slot allocation or return is in progress for $FM_ROOT; refusing to race it" >&2
+    return 1
+  }
+  if ! fm_treehouse_require_reserved_records "$FM_ROOT"; then
+    fm_lock_release "$lock"
+    return 1
+  fi
   home=$(cd "$FM_ROOT" && treehouse get --lease --lease-holder "$id") || {
+    fm_lock_release "$lock"
     echo "error: treehouse get --lease failed to lease a firstmate home" >&2
     return 1
   }
+  fm_lock_release "$lock"
   [ -n "$home" ] || { echo "error: treehouse get --lease did not report a firstmate home" >&2; return 1; }
   printf '%s\n' "$home"
 }

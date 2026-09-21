@@ -225,7 +225,9 @@ pass "real herdr E2E: list_live from the secondmate's own context sees only task
 # --- 5. teardown closes the RIGHT tab, and no other ------------------------
 
 TD1_OUT="$TMP_ROOT/td1.out"
-FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
+# Like every real caller, teardown runs with the FM_HOME the task was spawned
+# from: slot ownership binds the task id to that canonical home.
+FM_HOME="$PRIMARY_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" FM_DATA_OVERRIDE="$PRIMARY_HOME/data" \
   FM_CONFIG_OVERRIDE="$PRIMARY_HOME/config" \
   "$ROOT/bin/fm-teardown.sh" cm1 >"$TD1_OUT" 2>&1
 rc=$?
@@ -244,7 +246,7 @@ WT1=
 pass "real herdr E2E: tearing down cm1 closes only its own tab - the secondmate's and cm2's tabs survive untouched"
 
 TD2_OUT="$TMP_ROOT/td2.out"
-FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$SM_HOME/state" FM_DATA_OVERRIDE="$SM_HOME/data" \
+FM_HOME="$SM_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$SM_HOME/state" FM_DATA_OVERRIDE="$SM_HOME/data" \
   FM_CONFIG_OVERRIDE="$SM_HOME/config" \
   "$ROOT/bin/fm-teardown.sh" cm2 >"$TD2_OUT" 2>&1
 rc=$?
