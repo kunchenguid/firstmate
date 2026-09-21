@@ -801,11 +801,11 @@ test_view_renders_snapshot() {
     "view should render queued backlog row"
   assert_contains "$view" "| done-task | Done Task | alpha | ship | - | https://github.com/kunchenguid/firstmate/pull/7 |" \
     "view should render done backlog row"
-  assert_contains "$view" "bin/fm-send.sh fm-secondmate-task" \
+  assert_contains "$view" "bin/fm-send.sh secondmate-task" \
     "view should show secondmate send guidance"
   assert_contains "$view" "| secondmate-task | working / status-log | secondmate | $home/secondmate-home | tmux | present / alive |" \
     "view should show secondmate endpoint agent liveness"
-  assert_not_contains "$view" "fm-peek.sh fm-secondmate-task" \
+  assert_not_contains "$view" "fm-peek.sh secondmate-task" \
     "view must not tell firstmate to routinely peek secondmates"
   pass "fleet view renders the snapshot without secondmate peek guidance"
 }
@@ -829,6 +829,65 @@ test_view_renders_dead_secondmate_agent_status() {
   assert_contains "$view" "| dead-secondmate | unknown / none | secondmate | $home/secondmate-home | tmux | present / dead | - | $home/secondmate-home (absent) |" \
     "view should show a recorded missing secondmate home path"
   pass "fleet view renders secondmate agent liveness"
+}
+
+# The per-task actions are commands the operator runs as-is, and fm-send and
+# fm-peek match an exact task id before a legacy fm-<id> label. Hints that
+# prefixed "fm-" therefore steered task fm-<id> whenever one existed, and named
+# "fm-fm-..." for an id that already began with "fm-". This runs every emitted
+# command hint against capturing fm-send.sh/fm-peek.sh stubs and asserts on the
+# target it would have reached, for a plain id, its fm-prefixed twin, and an
+# fm-prefixed secondmate.
+test_action_hints_target_the_plain_task_id() {
+  local home fakebin hintroot tool out id key cmd target ran=0
+  home=$(make_home action-hints)
+  hintroot="$TMP_ROOT/action-hints-root"
+  mkdir -p "$hintroot/bin" "$home/secondmate-home"
+  for tool in fm-send.sh fm-peek.sh; do
+    cat > "$hintroot/bin/$tool" <<'STUB'
+#!/usr/bin/env bash
+# Capture the target an operator running the hint would reach.
+printf '%s' "$1" > "$FM_TEST_CAPTURE"
+STUB
+    chmod +x "$hintroot/bin/$tool"
+  done
+  for id in steer-me fm-steer-me; do
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" \
+      "worktree=$home/projects/$id" \
+      "project=alpha" \
+      "harness=codex" \
+      "kind=ship" \
+      "mode=ship"
+  done
+  fm_write_meta "$home/state/fm-mate.meta" \
+    "window=firstmate:fm-fm-mate" \
+    "project=$home/secondmate-home" \
+    "harness=codex" \
+    "kind=secondmate" \
+    "mode=secondmate" \
+    "home=$home/secondmate-home" \
+    "projects=alpha"
+  fakebin=$(make_fakebin "$home")
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "snapshot should succeed: $out"
+
+  target="$TMP_ROOT/action-hints-target"
+  while IFS=$'\t' read -r id key cmd; do
+    rm -f "$target"
+    ( cd "$hintroot" && FM_TEST_CAPTURE="$target" eval "$cmd" ) \
+      || fail "$id: actions.$key hint did not run: $cmd"
+    assert_present "$target" "$id: actions.$key hint reached no task: $cmd"
+    [ "$(cat "$target")" = "$id" ] \
+      || fail "$id: actions.$key hint targeted '$(cat "$target")', not the task id: $cmd"
+    ran=$((ran + 1))
+  done < <(printf '%s' "$out" | jq -r '
+    .tasks[] | .id as $id | .actions | to_entries[]
+    | select((.value | type) == "string" and (.value | startswith("bin/")))
+    | [$id, .key, .value] | @tsv')
+  [ "$ran" -eq 5 ] \
+    || fail "expected watch+steer for two ship tasks and send for the secondmate, ran $ran hints: $out"
+  pass "fleet snapshot action hints target the plain task id"
 }
 
 # A still-open decision must survive a LATER, UNRELATED terminal event on the same
@@ -1170,3 +1229,4 @@ test_scout_reports_include_teardown_reports
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
+test_action_hints_target_the_plain_task_id

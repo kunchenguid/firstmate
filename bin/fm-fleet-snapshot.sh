@@ -917,12 +917,12 @@ task_json_lines() {
         },
         actions:(
           if $kind == "secondmate" then
-            {send:"bin/fm-send.sh fm-\($id) \u0027<request>\u0027",
+            {send:"bin/fm-send.sh \($id) \u0027<request>\u0027",
              watch:"read status/doc return channel; do not routinely fm-peek a secondmate for answers",
              return_channel_note:"Secondmate answers come back through status/doc paths after a marked fm-send request."}
           else
-            {watch:"bin/fm-peek.sh fm-\($id)",
-             steer:"bin/fm-send.sh fm-\($id) \u0027<instruction>\u0027",
+            {watch:"bin/fm-peek.sh \($id)",
+             steer:"bin/fm-send.sh \($id) \u0027<instruction>\u0027",
              return_channel_note:null}
           end)
       }'
