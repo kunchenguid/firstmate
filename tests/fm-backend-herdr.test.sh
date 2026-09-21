@@ -3730,7 +3730,7 @@ test_submitted_line_state_unknown_when_the_pane_cannot_be_read() {
 test_send_text_line_confirms_without_a_needless_enter() {
   local dir log resp fb status
   dir="$TMP_ROOT/lineconfirm-clean"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  herdr_line_render_submitted 'export FM_TASK_ID=t1' > "$resp/2.out"
+  herdr_line_render_submitted 'export FM_TASK_ID=t1' > "$resp/3.out"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_BACKEND_HERDR_LINE_CONFIRM_SLEEP=0 \
@@ -3748,12 +3748,12 @@ test_send_text_line_confirms_without_a_needless_enter() {
 test_send_text_line_recovers_an_absorbed_enter() {
   local dir log resp fb status enters
   dir="$TMP_ROOT/lineconfirm-recover"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  # 1 pane run; 2 and 4 the line still pending (3 and 5 are the process-group
-  # samples a pending render takes, left unreadable here); 6 the recovery Enter;
-  # 7 accepted.
-  herdr_line_render_pending 'export FM_TASK_ID=t1' > "$resp/2.out"
-  herdr_line_render_pending 'export FM_TASK_ID=t1' > "$resp/4.out"
-  herdr_line_render_submitted 'export FM_TASK_ID=t1' > "$resp/7.out"
+  # 1 the pre-write baseline read; 2 pane run; 3 and 5 the line still pending
+  # (4 and 6 are the process-group samples a pending render takes, left
+  # unreadable here); 7 the recovery Enter; 8 accepted.
+  herdr_line_render_pending 'export FM_TASK_ID=t1' > "$resp/3.out"
+  herdr_line_render_pending 'export FM_TASK_ID=t1' > "$resp/5.out"
+  herdr_line_render_submitted 'export FM_TASK_ID=t1' > "$resp/8.out"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_BACKEND_HERDR_LINE_CONFIRM_SLEEP=0 \
@@ -3773,8 +3773,8 @@ test_send_text_line_recovers_an_absorbed_enter() {
 test_send_text_line_clears_an_unconfirmed_line() {
   local dir log resp fb status
   dir="$TMP_ROOT/lineconfirm-clear"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  herdr_line_render_pending 'export FM_TASK_ID=t1' > "$resp/2.out"
-  herdr_line_render_pending 'export FM_TASK_ID=t1' > "$resp/4.out"
+  herdr_line_render_pending 'export FM_TASK_ID=t1' > "$resp/3.out"
+  herdr_line_render_pending 'export FM_TASK_ID=t1' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_BACKEND_HERDR_LINE_CONFIRM_SLEEP=0 FM_BACKEND_HERDR_LINE_CONFIRM_POLLS=2 \
@@ -3789,10 +3789,10 @@ test_send_text_line_clears_an_unconfirmed_line() {
 test_send_text_line_reports_2_when_the_line_cannot_be_cleared() {
   local dir log resp fb status
   dir="$TMP_ROOT/lineconfirm-stuck"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  herdr_line_render_pending 'export TRACEPARENT=carrier' > "$resp/2.out"
-  herdr_line_render_pending 'export TRACEPARENT=carrier' > "$resp/4.out"
-  # 6 is the recovery Enter, 7 the clearing ctrl+u - the one that fails here.
-  printf '1\n' > "$resp/7.exit"
+  herdr_line_render_pending 'export TRACEPARENT=carrier' > "$resp/3.out"
+  herdr_line_render_pending 'export TRACEPARENT=carrier' > "$resp/5.out"
+  # 7 is the recovery Enter, 8 the clearing ctrl+u - the one that fails here.
+  printf '1\n' > "$resp/8.exit"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_BACKEND_HERDR_LINE_CONFIRM_SLEEP=0 FM_BACKEND_HERDR_LINE_CONFIRM_POLLS=2 \
@@ -3805,17 +3805,42 @@ test_send_text_line_reports_2_when_the_line_cannot_be_cleared() {
 test_send_text_line_reports_a_failed_send_without_confirming() {
   local dir log resp fb status
   dir="$TMP_ROOT/lineconfirm-sendfail"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
-  printf '1\n' > "$resp/1.exit"
+  printf '1\n' > "$resp/2.exit"
   fb=$(make_herdr_fakebin "$dir")
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     FM_BACKEND_HERDR_LINE_CONFIRM_SLEEP=0 \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_line default:w1:p2 "export FM_TASK_ID=t1"' "$ROOT" 2>/dev/null
   status=$?
   expect_code 1 "$status" "a failed pane run should report 1"
-  case "$(cat "$log")" in
-    *$'\x1f''pane'$'\x1f''read'*) fail "send_text_line should not poll for confirmation when the send itself failed" ;;
-  esac
+  [ "$(grep -c "pane.read.w1:p2" "$log" || true)" = 1 ] \
+    || fail "send_text_line should not poll for confirmation when the send itself failed"$'\n'"$(cat "$log")"
   pass "fm_backend_herdr_send_text_line: reports a failed send without polling for confirmation"
+}
+
+test_send_text_line_ignores_an_identical_line_already_in_history() {
+  local dir log resp fb status enters
+  dir="$TMP_ROOT/lineconfirm-relaunch"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # A relaunch writes the same export into a pane whose history already holds
+  # an accepted copy from the original spawn. That old copy is the baseline
+  # read (1); after pane run (2) the new write is not rendered yet (3), then
+  # sits pending (4 and 6, with 5 and 7 their unreadable process samples), so
+  # only the recovery Enter (8) gets it accepted (9). Reading the old copy as
+  # this write's echo would return at 3 instead.
+  herdr_line_render_submitted 'export FM_TASK_ID=t1' > "$resp/1.out"
+  herdr_line_render_submitted 'export FM_TASK_ID=t1' > "$resp/3.out"
+  { herdr_line_render_submitted 'export FM_TASK_ID=t1'; herdr_line_render_pending 'export FM_TASK_ID=t1'; } > "$resp/4.out"
+  { herdr_line_render_submitted 'export FM_TASK_ID=t1'; herdr_line_render_pending 'export FM_TASK_ID=t1'; } > "$resp/6.out"
+  { herdr_line_render_submitted 'export FM_TASK_ID=t1'; herdr_line_render_submitted 'export FM_TASK_ID=t1'; } > "$resp/9.out"
+  fb=$(make_herdr_fakebin "$dir")
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    FM_BACKEND_HERDR_LINE_CONFIRM_SLEEP=0 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_line default:w1:p2 "export FM_TASK_ID=t1"' "$ROOT"
+  status=$?
+  expect_code 0 "$status" "the new write should be confirmed once its own echo is accepted"
+  enters=$(grep -c "pane.send-keys.w1:p2.enter" "$log" || true)
+  [ "$enters" = 1 ] \
+    || fail "an identical line already in history must not confirm the new write; expected 1 recovery Enter, sent $enters"$'\n'"$(cat "$log")"
+  pass "fm_backend_herdr_send_text_line: an identical line already in the pane's history does not confirm the new write"
 }
 
 test_send_key_normalizes_and_targets_pane() {
@@ -5523,6 +5548,7 @@ test_send_text_line_recovers_an_absorbed_enter
 test_send_text_line_clears_an_unconfirmed_line
 test_send_text_line_reports_2_when_the_line_cannot_be_cleared
 test_send_text_line_reports_a_failed_send_without_confirming
+test_send_text_line_ignores_an_identical_line_already_in_history
 test_send_key_normalizes_and_targets_pane
 test_kill_is_best_effort
 test_current_path_reads_cwd
