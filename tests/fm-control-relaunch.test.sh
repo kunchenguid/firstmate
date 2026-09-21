@@ -238,7 +238,8 @@ run_control() {  # <case-dir> <args...>
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR="${FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR:-}" \
+    FM_CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_OVERRIDE:-}" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
@@ -260,7 +261,8 @@ run_spawn() {  # <case-dir> <args...>
   env -u HERDR_ENV -u HERDR_PANE_ID -u HERDR_SESSION -u HERDR_SOCKET_PATH \
     -u HERDR_TAB_ID -u HERDR_WORKSPACE_ID \
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
-    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR="${FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR:-}" \
+    FM_CLAUDE_CONFIG_DIR="${FM_TEST_CLAUDE_CONFIG_OVERRIDE:-}" \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     "$SPAWN" "$@" 2>&1
 }
@@ -2531,6 +2533,186 @@ SH
 
 test_exit_and_relaunch_remove_the_dialog_file
 test_exit_removes_the_dialog_file_before_releasing_the_lock
+# --- Claude config store durability -----------------------------------------
+# bin/fm-claude-store-lib.sh owns the contract: a task's recorded store wins
+# over the relauncher's ambient CLAUDE_CONFIG_DIR, FM_CLAUDE_CONFIG_DIR is the
+# only override, and a vanished recorded store refuses. Every case below runs
+# with a DIFFERENT ambient store, which is the shape a relaunch driven from a
+# primary on another account really has.
+
+# add_recorded_store records <case-dir>/store-work on the task and
+# creates both it and the ambient <case-dir>/store-personal.
+add_recorded_store() {  # <case-dir> <id>
+  mkdir -p "$1/store-work" "$1/store-personal"
+  printf 'claude_config_dir=%s\n' "$1/store-work" >> "$1/home/state/$2.meta"
+}
+
+launched_with_store() {  # <case-dir> <store> <what>
+  assert_contains "$(cat "$1/fake/literal")" "CLAUDE_CONFIG_DIR='$2' " \
+    "$3 did not launch claude on the store $2"
+}
+
+add_claude_secondmate() {  # <case-dir> <id>
+  local dir=$1 id=$2 home="$1/home"
+  fm_git_worktree "$dir/proj" "$dir/smhome" "sm-$id"
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf '%s\n' "$id" > "$dir/smhome/.fm-secondmate-home"
+  printf '# charter\n' > "$dir/smhome/data/charter.md"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+    echo "projects="
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+}
+
+test_control_relaunch_reuses_the_recorded_claude_store() {
+  local dir out rc
+  dir=$(new_case store-control cs1)
+  add_ship_task "$dir" cs1 claude
+  add_recorded_store "$dir" cs1
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-personal" \
+    run_control "$dir" cs1 relaunch --note "account check"); rc=$?
+  expect_code 0 "$rc" "a relaunch with a recorded store should succeed"$'\n'"$out"
+  launched_with_store "$dir" "$dir/store-work" "fm-control relaunch"
+  assert_no_grep "store-personal" "$dir/fake/literal" \
+    "fm-control relaunch leaked the relauncher's ambient store into the launch"
+  [ "$(meta_field "$dir" cs1 claude_config_dir)" = "$dir/store-work" ] \
+    || fail "the recorded store must survive the relaunch, got '$(meta_field "$dir" cs1 claude_config_dir)'"
+  [ "$(grep -c '^claude_config_dir=' "$dir/home/state/cs1.meta")" = 1 ] \
+    || fail "the relaunched record must carry exactly one store line"
+  pass "fm-control relaunch: the recorded Claude store wins over the relauncher's ambient store"
+}
+
+test_spawn_relaunch_reuses_the_recorded_claude_store() {
+  local dir out rc
+  dir=$(new_case store-spawn cs2)
+  add_ship_task "$dir" cs2 claude
+  add_recorded_store "$dir" cs2
+  printf 'zsh' > "$dir/fake/command"
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-personal" \
+    run_spawn "$dir" cs2 --relaunch); rc=$?
+  expect_code 0 "$rc" "fm-spawn --relaunch with a recorded store should succeed"$'\n'"$out"
+  launched_with_store "$dir" "$dir/store-work" "fm-spawn --relaunch"
+  assert_no_grep "store-personal" "$dir/fake/literal" \
+    "fm-spawn --relaunch leaked the ambient store into the launch"
+  [ "$(meta_field "$dir" cs2 claude_config_dir)" = "$dir/store-work" ] \
+    || fail "fm-spawn --relaunch must keep the recorded store"
+  pass "fm-spawn --relaunch: the recorded Claude store wins over the ambient store"
+}
+
+test_relaunch_override_replaces_the_recorded_claude_store() {
+  local dir out rc
+  dir=$(new_case store-override cs3)
+  add_ship_task "$dir" cs3 claude
+  add_recorded_store "$dir" cs3
+  mkdir -p "$dir/store-other"
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-personal" \
+    FM_TEST_CLAUDE_CONFIG_OVERRIDE="$dir/store-other" \
+    run_control "$dir" cs3 relaunch --note "switch account"); rc=$?
+  expect_code 0 "$rc" "an explicit store override should relaunch"$'\n'"$out"
+  launched_with_store "$dir" "$dir/store-other" "an overridden relaunch"
+  assert_no_grep "store-work" "$dir/fake/literal" "the override must replace the recorded store in the launch"
+  [ "$(meta_field "$dir" cs3 claude_config_dir)" = "$dir/store-other" ] \
+    || fail "the override must update the record, got '$(meta_field "$dir" cs3 claude_config_dir)'"
+  pass "fm-control relaunch: FM_CLAUDE_CONFIG_DIR launches on and records a new store"
+}
+
+test_missing_recorded_claude_store_refuses_before_stopping_the_agent() {
+  local dir out rc before
+  dir=$(new_case store-missing cs4)
+  add_ship_task "$dir" cs4 claude
+  mkdir -p "$dir/store-personal"
+  printf 'claude_config_dir=%s\n' "$dir/store-gone" >> "$dir/home/state/cs4.meta"
+  before=$(cat "$dir/home/state/cs4.meta")
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-personal" \
+    run_control "$dir" cs4 relaunch --note "account check"); rc=$?
+  expect_code 1 "$rc" "a relaunch onto a vanished recorded store must refuse"
+  assert_contains "$out" "recorded Claude config store '$dir/store-gone'" \
+    "the refusal should name the missing recorded store"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the refusal must leave the running agent alone"
+  assert_no_grep "/exit" "$dir/fake/literal" "the old agent must not be stopped for a launch that refuses"
+  [ "$(cat "$dir/home/state/cs4.meta")" = "$before" ] || fail "a refused relaunch must leave the record untouched"
+
+  printf 'zsh' > "$dir/fake/command"
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-personal" \
+    run_spawn "$dir" cs4 --relaunch); rc=$?
+  expect_code 1 "$rc" "fm-spawn --relaunch onto a vanished recorded store must refuse"
+  assert_contains "$out" "no longer exists" "fm-spawn should say the recorded store is gone"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" "no replacement may launch on another store"
+  [ "$(cat "$dir/home/state/cs4.meta")" = "$before" ] || fail "fm-spawn --relaunch refusal must leave the record untouched"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_OVERRIDE="$dir/store-also-gone" \
+    run_spawn "$dir" cs4 --relaunch); rc=$?
+  expect_code 1 "$rc" "a missing override store must refuse too"
+  assert_contains "$out" "FM_CLAUDE_CONFIG_DIR '$dir/store-also-gone' is not an existing directory" \
+    "the refusal should name the missing override store"
+  pass "relaunch: a recorded or override Claude store that does not exist refuses, and fm-control refuses before the stop"
+}
+
+test_harness_switch_carries_the_recorded_claude_store() {
+  local dir out rc
+  dir=$(new_case store-switch cs5)
+  add_ship_task "$dir" cs5 claude
+  add_recorded_store "$dir" cs5
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-personal" \
+    run_control "$dir" cs5 relaunch --harness codex --note "switch"); rc=$?
+  expect_code 0 "$rc" "a harness switch should relaunch"$'\n'"$out"
+  assert_no_grep "CLAUDE_CONFIG_DIR=" "$dir/fake/literal" "a codex launch must not carry a Claude store"
+  [ "$(meta_field "$dir" cs5 claude_config_dir)" = "$dir/store-work" ] \
+    || fail "a non-claude incarnation must carry the recorded store forward for a later switch back"
+  pass "fm-control relaunch: a harness switch away from claude keeps the recorded store for the switch back"
+}
+
+test_secondmate_relaunch_and_respawn_reuse_the_recorded_claude_store() {
+  local dir out rc
+  dir=$(new_case store-sm cs6)
+  add_claude_secondmate "$dir" cs6
+  add_recorded_store "$dir" cs6
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-personal" \
+    run_control "$dir" cs6 relaunch); rc=$?
+  expect_code 0 "$rc" "a secondmate relaunch with a recorded store should succeed"$'\n'"$out"
+  launched_with_store "$dir" "$dir/store-work" "a secondmate relaunch"
+  assert_no_grep "store-personal" "$dir/fake/literal" "a secondmate relaunch leaked the ambient store"
+  [ "$(meta_field "$dir" cs6 claude_config_dir)" = "$dir/store-work" ] \
+    || fail "a secondmate relaunch must keep the recorded store"
+
+  # The session-start liveness sweep recovers a dead secondmate by running this
+  # exact respawn from the primary, whose own store is the ambient one here.
+  : > "$dir/fake/literal"
+  printf 'zsh' > "$dir/fake/command"
+  : > "$dir/fake/windows"
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-personal" \
+    run_spawn "$dir" cs6 --secondmate); rc=$?
+  expect_code 0 "$rc" "a secondmate respawn with a recorded store should succeed"$'\n'"$out"
+  launched_with_store "$dir" "$dir/store-work" "a secondmate respawn"
+  assert_no_grep "store-personal" "$dir/fake/literal" "a secondmate respawn leaked the ambient store"
+  [ "$(meta_field "$dir" cs6 claude_config_dir)" = "$dir/store-work" ] \
+    || fail "a secondmate respawn must rewrite its record with the same store"
+
+  rm -rf "$dir/store-work"
+  : > "$dir/fake/literal"
+  : > "$dir/fake/windows"
+  out=$(FM_TEST_AMBIENT_CLAUDE_CONFIG_DIR="$dir/store-personal" \
+    run_spawn "$dir" cs6 --secondmate); rc=$?
+  expect_code 1 "$rc" "a secondmate respawn onto a vanished recorded store must refuse"
+  assert_contains "$out" "no longer exists" "the respawn refusal should name the missing store"
+  assert_no_grep "encode launch-brief" "$dir/fake/literal" "no secondmate may launch on another store"
+  pass "secondmate: relaunch and liveness respawn keep the recorded Claude store, and a vanished one refuses"
+}
+
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
@@ -2606,3 +2788,9 @@ test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
+test_control_relaunch_reuses_the_recorded_claude_store
+test_spawn_relaunch_reuses_the_recorded_claude_store
+test_relaunch_override_replaces_the_recorded_claude_store
+test_missing_recorded_claude_store_refuses_before_stopping_the_agent
+test_harness_switch_carries_the_recorded_claude_store
+test_secondmate_relaunch_and_respawn_reuse_the_recorded_claude_store

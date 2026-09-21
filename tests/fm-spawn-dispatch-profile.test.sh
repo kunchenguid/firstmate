@@ -1530,7 +1530,9 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions $(claude_worker_add_dirs "$HOME_DIR" "$id")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}'" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
-  pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
+  assert_grep "claude_config_dir=$CASE_DIR/claude-work" "$HOME_DIR/state/$id.meta" \
+    "a first claude spawn did not record the store it launched on"
+  pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store, and records it"
 }
 
 test_lavish_server_address_is_exported_to_worker_launch() {
@@ -1590,6 +1592,8 @@ test_claude_omits_config_dir_prefix_when_unset() {
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
     "claude launch must not add a config-dir prefix when firstmate has no CLAUDE_CONFIG_DIR set"
+  assert_no_grep "claude_config_dir=" "$HOME_DIR/state/$id.meta" \
+    "a claude spawn on the default store must not record one"
   pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
 }
 
@@ -1606,6 +1610,8 @@ test_non_claude_harness_ignores_config_dir() {
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
     "non-claude harness launch must not receive the claude-specific config-dir prefix"
+  assert_no_grep "claude_config_dir=" "$HOME_DIR/state/$id.meta" \
+    "a non-claude spawn must not record a Claude store"
   pass "non-claude harnesses do not receive the claude CLAUDE_CONFIG_DIR prefix"
 }
 

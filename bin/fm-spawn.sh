@@ -421,6 +421,15 @@
 #   account_provider=) in the task record and on the spawned line. A local
 #   secondmate reads this launching home's file; pins are never inherited.
 #   bin/fm-worker-account-lib.sh owns parsing, the check, and the shed list.
+# Claude config store (claude_config_dir= in state/<id>.meta):
+#   A claude launch records the CLAUDE_CONFIG_DIR store it launched on, and
+#   every relaunch or secondmate respawn of that task reuses the record instead
+#   of the invoking process's ambient CLAUDE_CONFIG_DIR, so automatic recovery
+#   keeps the task on the account it was launched with. FM_CLAUDE_CONFIG_DIR=<dir>
+#   on the call is the only way to change it; it launches with and records the
+#   new store. A recorded or override store that is not an existing directory
+#   refuses before any endpoint exists. bin/fm-claude-store-lib.sh owns the
+#   full precedence contract.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -732,6 +741,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-claude-store-lib.sh
+. "$SCRIPT_DIR/fm-claude-store-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -2715,6 +2726,32 @@ if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
     export CLAUDE_CONFIG_DIR=$WORKER_ACCOUNT_ROOT
   else
     unset CLAUDE_CONFIG_DIR
+  fi
+fi
+# Claude config store (bin/fm-claude-store-lib.sh owns the contract): resolved
+# before any endpoint, worktree, or trust registration exists, so a recorded
+# store that has vanished refuses cleanly. Only a relaunch or a secondmate
+# respawn has an existing record of this task to honour.
+SPAWN_CLAUDE_STORE_META=
+if [ "$RELAUNCH" -eq 1 ]; then
+  SPAWN_CLAUDE_STORE_META=$RELAUNCH_META
+elif [ "$KIND" = secondmate ] && [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+  SPAWN_CLAUDE_STORE_META="$STATE/$ID.meta"
+fi
+# A Claude worker account pin replaces the store outright: the task records
+# the pinned root, and neither the record nor FM_CLAUDE_CONFIG_DIR applies.
+if [ -n "$WORKER_ACCOUNT" ] && [ "$HARNESS" = claude ]; then
+  SPAWN_CLAUDE_STORE=$WORKER_ACCOUNT_ROOT
+else
+  fm_claude_store_resolve "$HARNESS" "$SPAWN_CLAUDE_STORE_META" || {
+    echo "error: $FM_CLAUDE_STORE_ERROR" >&2
+    exit 1
+  }
+  SPAWN_CLAUDE_STORE=$FM_CLAUDE_STORE
+  if [ "$HARNESS" = claude ] && [ -n "$SPAWN_CLAUDE_STORE" ]; then
+    # Exported so bin/fm-claude-trust.sh registers trust in the same store the
+    # launch below forwards.
+    export CLAUDE_CONFIG_DIR="$SPAWN_CLAUDE_STORE"
   fi
 fi
 
@@ -5457,7 +5494,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch upstream_consent forge backup_remote backup_prefix model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx claude_config_dir", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5493,6 +5530,8 @@ preserve_relaunch_meta() {
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
   [ "$BACKEND" = tmux ] || echo "backend=$BACKEND"
+  # claude_config_dir= is owned by bin/fm-claude-store-lib.sh.
+  [ -z "$SPAWN_CLAUDE_STORE" ] || echo "claude_config_dir=$SPAWN_CLAUDE_STORE"
   if [ "$BACKEND" = herdr ]; then
     echo "herdr_session=$HERDR_SES"
     echo "herdr_workspace_id=$HERDR_WORKSPACE_ID"
@@ -5723,9 +5762,10 @@ esac
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
+# Forward the task's resolved store onto the claude launch: the durable record
+# or deliberate override when there is one, otherwise firstmate's own store
+# (bin/fm-claude-store-lib.sh owns that choice). Only when set; an unset value
+# is the single-store default and needs no prefix.
 # A home's worker account pin replaces that forwarding: the launch names the
 # pinned root (or unsets the variable for the ordinary Claude account) and
 # sheds the environment credentials Claude ranks above the root's login.
@@ -5742,8 +5782,8 @@ if [ -n "$WORKER_ACCOUNT" ]; then
     LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     ;;
   esac
-elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+elif [ "$HARNESS" = claude ] && [ -n "$SPAWN_CLAUDE_STORE" ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$SPAWN_CLAUDE_STORE") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
