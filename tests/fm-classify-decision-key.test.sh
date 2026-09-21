@@ -338,3 +338,149 @@ EOF
 
 test_closing_verb_separates_resolution_from_durable_transfer
 test_closing_verb_tracks_the_last_transition_in_both_positions
+
+# The per-key read pre-selects candidate lines by their leading verb before the
+# bash fold sees them, and the resolve/durable-transfer verbs are overridable, so
+# an overridden verb buried behind unrelated history must still close its key.
+test_closing_verb_honors_overridden_transition_verbs() {
+  local dir f i
+  dir=$(case_dir closing-verb-overrides)
+  f="$dir/task.status"
+  printf 'kind=ship\n' > "$dir/task.meta"
+  printf 'blocked [key=route]: waiting\n' > "$f"
+  for ((i = 0; i < 200; i++)); do
+    printf 'note: routine reply\nworking: still going\nContinuation prose here.\n' >> "$f"
+  done
+  printf 'answered [key=route]: settled\n' >> "$f"
+  [ "$(FM_CLASSIFY_RESOLVE_VERB=answered status_key_closing_verb "$f" route)" = answered ] \
+    || fail "an overridden resolve verb stopped closing its key"
+  [ "$(status_key_closing_verb "$f" route)" = blocked ] \
+    || fail "without the override the same line must leave the key open"
+  printf 'blocked [key=access]: waiting\nawaiting-captain [key=access]: handed off\n' >> "$f"
+  [ "$(FM_CLASSIFY_CAPTAIN_HELD_VERB=awaiting-captain status_key_closing_verb "$f" access)" = awaiting-captain ] \
+    || fail "an overridden durable-transfer verb stopped closing its key"
+  pass "overridden resolve and durable-transfer verbs still close keys behind unrelated history"
+}
+
+test_closing_verb_filters_unrelated_history_without_subshell_growth() {
+  local dir f want tag size i level small large
+  dir=$(case_dir closing-verb-processes)
+  f="$dir/task.status"
+  printf 'kind=secondmate\n' > "$dir/task.meta"
+  for want in route default; do
+    tag="[key=$want]"
+    [ "$want" != default ] || tag=''
+    for size in 1 1000; do
+      printf 'blocked corr=0123456789abcdef %s: waiting\n' "$tag" > "$f"
+      for ((i = 0; i < size; i++)); do
+        printf 'note: routine reply\nworking: mentions [key=%s] in prose\ndone: another task finished\nfailed: unrelated work\nPR ready https://example.com/pull/1\n\n' "$want" >> "$f"
+        if [ "$want" != default ]; then
+          printf 'blocked [key=other]: another question\nresolved [key=other]: answered\n' >> "$f"
+        fi
+      done
+      printf 'resolved corr=0123456789abcdef: %s answered\nnote: cleanup complete\n' "$tag" >> "$f"
+      : > "$dir/children-$size"
+      (
+        level=$BASH_SUBSHELL
+        set -T
+        trap 'if [ "$BASH_SUBSHELL" -gt "$level" ]; then printf x >> "$dir/children-$size"; fi' DEBUG
+        status_key_closing_verb "$f" "$want" > "$dir/output"
+      )
+      [ "$(cat "$dir/output")" = resolved ] || fail "$want lost its resolution behind unrelated history"
+    done
+    small=$(wc -c < "$dir/children-1")
+    large=$(wc -c < "$dir/children-1000")
+    [ "$large" -le "$((small + 20))" ] || fail "$want launches subprocess work for unrelated history ($small -> $large)"
+  done
+  pass "per-key reads retain resolutions without subprocess work growing with unrelated history"
+}
+
+test_closing_verb_filter_preserves_terminal_chronology() {
+  local dir f kind want tag terminal expected
+  dir=$(case_dir closing-verb-terminals)
+  f="$dir/task.status"
+  for kind in ship scout secondmate; do
+    printf 'kind=%s\n' "$kind" > "$dir/task.meta"
+    for want in access default; do
+      tag="[key=$want]"
+      [ "$want" != default ] || tag=''
+      for terminal in 'done' failed; do
+        printf 'blocked %s: waiting\n' "$tag" > "$f"
+        case "$terminal" in
+          done) printf 'done: report saved\n' >> "$f" ;;
+          failed) printf 'failed corr=0123456789abcdef [key=other]: task failed\n' >> "$f" ;;
+        esac
+        printf 'note: cleanup complete\n' >> "$f"
+        expected=$terminal
+        [ "$kind" != secondmate ] || expected=blocked
+        [ "$(status_key_closing_verb "$f" "$want")" = "$expected" ] || fail "$kind/$want lost $terminal chronology"
+        printf 'needs-decision: [key=%s] reopened\nnote: more cleanup\n' "$want" >> "$f"
+        [ "$(status_key_closing_verb "$f" "$want")" = needs-decision ] || fail "$kind/$want lost a post-terminal reopening"
+      done
+    done
+  done
+  pass "per-key filtering retains ship/scout terminals, reopenings, and secondmate blockers"
+}
+
+test_closing_verb_filters_unrelated_history_without_subshell_growth
+test_closing_verb_honors_overridden_transition_verbs
+test_closing_verb_filter_preserves_terminal_chronology
+
+test_bare_prose_cannot_impersonate_a_terminal_declaration() {
+  local dir f kind word open
+  dir=$(case_dir prose-terminal)
+  open=$(printf 'route\tneeds-decision\tA or B?\n')
+  for kind in ship scout; do
+    for word in 'done' failed; do
+      f="$dir/$kind-$word.status"
+      printf 'kind=%s\n' "$kind" > "$dir/$kind-$word.meta"
+      printf 'needs-decision [key=route]: A or B?\npaused: waiting on the vendor\nSteps remaining:\n %s\n' \
+        "$word" > "$f"
+      assert_fold "$f" "$open" "$kind: bare '$word' prose"
+      [ "$(status_key_closing_verb "$f" route)" = needs-decision ] \
+        || fail "$kind: bare '$word' prose closed a still-open key"
+      f="$dir/$kind-$word-real.status"
+      printf 'kind=%s\n' "$kind" > "$dir/$kind-$word-real.meta"
+      printf 'needs-decision [key=route]: A or B?\n%s: real outcome\n' "$word" > "$f"
+      assert_fold "$f" '' "$kind: genuine $word supersedes"
+      [ "$(status_key_closing_verb "$f" route)" = "$word" ] \
+        || fail "$kind: genuine $word no longer supersedes the open key"
+    done
+  done
+  pass "prose without a colon cannot impersonate a ship or scout terminal declaration"
+}
+
+test_bare_prose_cannot_impersonate_a_terminal_declaration
+
+test_bare_prose_cannot_open_or_close_a_decision() {
+  local dir f word blocked
+  dir=$(case_dir prose-decision)
+  blocked=$(printf 'default\tblocked\tneed release access\n')
+  for word in blocked needs-decision resolved; do
+    f="$dir/open-$word.status"
+    printf 'kind=ship\n' > "$dir/open-$word.meta"
+    printf 'working: investigating the deploy\nOptions considered:\n %s\n' "$word" > "$f"
+    assert_fold "$f" '' "bare '$word' prose opened a decision"
+
+    f="$dir/close-$word.status"
+    printf 'kind=ship\n' > "$dir/close-$word.meta"
+    printf 'blocked: need release access\nSteps remaining:\n %s\n' "$word" > "$f"
+    assert_fold "$f" "$blocked" "bare '$word' prose moved an open decision"
+  done
+
+  f="$dir/keyed-colonless.status"
+  printf 'kind=ship\n' > "$dir/keyed-colonless.meta"
+  printf 'blocked [key=access]\n' > "$f"
+  assert_fold "$f" "$(printf 'access\tblocked\tblocked [key=access]\n')" \
+    "a keyed colonless line stopped opening its key"
+  printf 'resolved [key=access]\n' >> "$f"
+  assert_fold "$f" '' "a keyed colonless line stopped closing its key"
+
+  f="$dir/real-resolution.status"
+  printf 'kind=ship\n' > "$dir/real-resolution.meta"
+  printf 'blocked: need release access\nresolved: access granted\n' > "$f"
+  assert_fold "$f" '' "a genuine resolution stopped closing its decision"
+  pass "only a colon-bearing or keyed line is a decision transition in the fold"
+}
+
+test_bare_prose_cannot_open_or_close_a_decision

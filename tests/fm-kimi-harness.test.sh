@@ -5,10 +5,11 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-# bin/fm-harness.sh checks verified ENV markers before ancestry. A suite run
-# from inside Cursor, Claude, Pi, or Grok inherits those markers, which outrank
-# the fake ancestry the detection cases set up. Drop the ambient markers so the
-# asserted verdict does not depend on which harness launched the suite.
+# bin/fm-harness.sh answers from environment markers and process ancestry. A
+# suite run from inside Cursor, Claude, Pi, or Grok inherits those markers and
+# its own real ancestry, either of which can decide a case the detection cases
+# meant to control. Drop the ambient markers so the asserted verdict does not
+# depend on which harness launched the suite.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -16,6 +17,7 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
 KIMI_RUNTIME_TASK_TMP=
+KIMI_RUNTIME_LAUNCH_DIR=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
@@ -23,6 +25,7 @@ BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 cleanup_kimi_harness() {
   [ -z "$KIMI_RUNTIME_TASK_TMP" ] || rm -rf "$KIMI_RUNTIME_TASK_TMP"
+  [ -z "$KIMI_RUNTIME_LAUNCH_DIR" ] || rm -rf "$KIMI_RUNTIME_LAUNCH_DIR"
   rm -rf "$TMP_ROOT"
 }
 trap cleanup_kimi_harness EXIT
@@ -40,6 +43,26 @@ fake_screen() {
     ready)
       printf 'Welcome to Kimi Code!\ncontext: 0%% (0/256k)\n╭────────────────────────────────╮\n│ >                              │\n╰────────────────────────────────╯\n'
       ;;
+    trust)
+      printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate · Enter select · Esc exit │\n│ %s │\n│ ❯ Trust this folder │\n│   Don'"'"'t trust │\n╰──────────────────────────────╯\n' "$FM_FAKE_PANE_PATH"
+      ;;
+    trust-decoy)
+      printf 'Trust this folder?\n%s\n❯ Trust this folder\nDon'"'"'t trust\n' "$FM_FAKE_PANE_PATH"
+      ;;
+    trust-partial)
+      printf 'Welcome to Kimi Code!\nTrust this folder?\n%s\nDon'"'"'t trust\n' "$FM_FAKE_PANE_PATH"
+      ;;
+    booting)
+      printf 'shell starting\n$ \n'
+      ;;
+    banner-only|banner-first)
+      printf 'Welcome to Kimi Code!\nstarting in %s\n' "$FM_FAKE_PANE_PATH"
+      ;;
+    blank-frame)
+      ;;
+    trust-wrapped)
+      printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate ·        │\n│ Enter select · Esc   │\n│ exit                 │\n│ %s │\n│ ❯ Trust this folder  │\n│   Don'"'"'t trust         │\n╰──────────────────────╯\n' "$FM_FAKE_PANE_PATH"
+      ;;
     pointer-typed)
       printf 'context: 0%% (0/256k)\n╭────────────────────────────────╮\n│ > Read the brief and follow it │\n│                                │\n╰────────────────────────────────╯\n'
       ;;
@@ -50,6 +73,12 @@ fake_screen() {
       printf 'shell starting\n$ \n'
       ;;
   esac
+}
+fake_history() {
+  if [ "${FM_FAKE_KIMI_HISTORY_KEEPS_DIALOG:-no}" = yes ] \
+     && [ -s "$FM_FAKE_KIMI_TRUST_ENTER_LOG" ]; then
+    printf '╭─ Trust this folder? ─╮\n│ ↑↓ navigate · Enter select · Esc exit │\n│ ❯ Trust this folder │\n│   Don'"'"'t trust │\n╰──────────────────────╯\n'
+  fi
 }
 fake_cursor_y() {
   case "$state" in
@@ -75,13 +104,19 @@ case "${1:-}" in
     done
     if [ -n "$literal" ]; then
       case "$literal" in
+        ". '"*"'") staged=${literal#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || literal=$(cat "$staged") ;;
+      esac
+      case "$literal" in
         *' --auto')
           printf '%s\n' "$literal" >> "$FM_FAKE_LAUNCH_LOG"
           printf 'launched\n' > "$FM_FAKE_KIMI_STATE"
           ;;
         *)
           printf '%s\n' "$literal" >> "$FM_FAKE_POINTER_LOG"
-          printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE"
+          case "$state" in
+            trust|trust-wrapped|trust-partial|trust-decoy|booting|banner-only|banner-first|blank-frame) ;;
+            *) printf 'pointer-typed\n' > "$FM_FAKE_KIMI_STATE" ;;
+          esac
           ;;
       esac
       exit 0
@@ -91,8 +126,29 @@ case "${1:-}" in
         case "$state" in
           launched)
             if [ "${FM_FAKE_KIMI_READY:-yes}" = yes ]; then
-              printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+              case "${FM_FAKE_KIMI_TRUST:-remembered}" in
+                fresh) printf 'trust\n' > "$FM_FAKE_KIMI_STATE" ;;
+                decoy) printf 'trust-decoy\n' > "$FM_FAKE_KIMI_STATE" ;;
+                partial) printf 'trust-partial\n' > "$FM_FAKE_KIMI_STATE" ;;
+                late) printf 'booting\n' > "$FM_FAKE_KIMI_STATE" ;;
+                blink) printf 'banner-first\n' > "$FM_FAKE_KIMI_STATE" ;;
+                wrapped) printf 'trust-wrapped\n' > "$FM_FAKE_KIMI_STATE" ;;
+                *) printf 'ready\n' > "$FM_FAKE_KIMI_STATE" ;;
+              esac
             fi
+            ;;
+          trust|trust-wrapped)
+            printf 'enter\n' >> "$FM_FAKE_KIMI_TRUST_ENTER_LOG"
+            trust_enters=$(wc -l < "$FM_FAKE_KIMI_TRUST_ENTER_LOG" | tr -d ' ')
+            case "${FM_FAKE_KIMI_TRUST_CLEARS:-yes}" in
+              yes) printf 'ready\n' > "$FM_FAKE_KIMI_STATE" ;;
+              after-second)
+                [ "$trust_enters" -lt 2 ] || printf 'ready\n' > "$FM_FAKE_KIMI_STATE"
+                ;;
+            esac
+            ;;
+          ready|delivered)
+            printf 'enter\n' >> "$FM_FAKE_KIMI_STRAY_ENTER_LOG"
             ;;
           pointer-typed)
             if [ "${FM_FAKE_KIMI_DELIVERY:-yes}" = yes ]; then
@@ -120,6 +176,26 @@ case "${1:-}" in
       esac
       case "$arg" in -S|-E) prev=$arg ;; *) prev= ;; esac
     done
+    if [ "$start" = -0 ] && [ "${FM_FAKE_TMUX_VISIBLE_FAILS:-no}" = yes ]; then
+      echo "can't find pane" >&2
+      exit 1
+    fi
+    case "$start" in
+      -0|-120)
+        case "$state" in
+          booting) printf 'banner-only\n' > "$FM_FAKE_KIMI_STATE" ;;
+          banner-first) printf 'blank-frame\n' > "$FM_FAKE_KIMI_STATE" ;;
+          blank-frame) printf 'banner-only\n' > "$FM_FAKE_KIMI_STATE" ;;
+          banner-only) printf 'trust\n' > "$FM_FAKE_KIMI_STATE" ;;
+        esac
+        ;;
+    esac
+    if [ "$start" = -0 ] && [ "${FM_FAKE_KIMI_BLANK_AFTER_TRUST:-no}" = yes ] \
+       && [ -s "$FM_FAKE_KIMI_TRUST_ENTER_LOG" ] && [ ! -f "$FM_FAKE_KIMI_BLANKED" ]; then
+      : > "$FM_FAKE_KIMI_BLANKED"
+      exit 0
+    fi
+    [ "$start" != -120 ] || fake_history
     case "$start:$end" in
       *[!0-9:]*|'':*|*:'') fake_screen ;;
       *) fake_screen | awk -v start="$start" -v end="$end" \
@@ -146,13 +222,22 @@ make_spawn_case() {
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config" "$home/.kimi-code"
   printf '# Kimi test config\ndefault_model = "test"\n' > "$home/.kimi-code/config.toml"
-  printf 'brief for kimi\n' > "$home/data/$id/brief.md"
+  cat > "$home/data/$id/brief.md" <<'EOF'
+# Task
+## Captain's intent
+Exercise Kimi dispatch.
+
+## Firstmate spec
+Verify launch and delivery behavior.
+EOF
   printf 'kimi\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   : > "$case_dir/launch.log"
   : > "$case_dir/pointer.log"
   : > "$case_dir/kimi.state"
+  : > "$case_dir/trust-enter.log"
+  : > "$case_dir/stray-enter.log"
   : > "$case_dir/tmux-calls.log"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
 }
@@ -167,11 +252,19 @@ run_spawn() {
     FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     FM_FAKE_POINTER_LOG="$case_dir/pointer.log" \
     FM_FAKE_KIMI_STATE="$case_dir/kimi.state" \
+    FM_FAKE_KIMI_TRUST_ENTER_LOG="$case_dir/trust-enter.log" \
+    FM_FAKE_KIMI_TRUST="${FM_FAKE_KIMI_TRUST:-remembered}" \
+    FM_FAKE_KIMI_TRUST_CLEARS="${FM_FAKE_KIMI_TRUST_CLEARS:-yes}" \
+    FM_FAKE_KIMI_HISTORY_KEEPS_DIALOG="${FM_FAKE_KIMI_HISTORY_KEEPS_DIALOG:-no}" \
+    FM_FAKE_KIMI_STRAY_ENTER_LOG="$case_dir/stray-enter.log" \
+    FM_FAKE_KIMI_BLANK_AFTER_TRUST="${FM_FAKE_KIMI_BLANK_AFTER_TRUST:-no}" \
+    FM_FAKE_KIMI_BLANKED="$case_dir/kimi.blanked" \
+    FM_FAKE_TMUX_VISIBLE_FAILS="${FM_FAKE_TMUX_VISIBLE_FAILS:-no}" \
     FM_FAKE_KIMI_SWALLOWED="$case_dir/kimi.swallowed" \
     FM_FAKE_KIMI_SWALLOW_FIRST="${FM_FAKE_KIMI_SWALLOW_FIRST:-no}" \
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
-    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
-    FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/launch-brief.md" \
+    FM_KIMI_READY_POLLS="${FM_KIMI_READY_POLLS:-2}" FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -183,13 +276,16 @@ EOF
 }
 
 test_kimi_launch_then_send_is_verified() {
-  local id rec out rc launch pointer brief_real meta task_tmp
+  local id rec out rc launch pointer brief_real meta task_tmp launch_dir launch_file launch_base
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
   rm -rf "$task_tmp"
   rec=$(make_spawn_case success "$id")
   read_spawn_record "$rec"
+  launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
+  KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
+  rm -rf "$launch_dir"
   out=$(FM_FAKE_KIMI_SWALLOW_FIRST=yes run_spawn \
     "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model kimi-code/k3 --effort high)
@@ -198,13 +294,13 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
+  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
     || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
 
-  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/brief.md"
+  brief_real="$(cd "$HOME_DIR/data/$id" && pwd -P)/launch-brief.md"
   pointer=$(cat "$CASE_DIR/pointer.log")
   [ "$pointer" = "Read the brief at $brief_real and follow it exactly." ] \
     || fail "kimi pointer was not the exact absolute-path-only instruction: $pointer"
@@ -213,13 +309,121 @@ test_kimi_launch_then_send_is_verified() {
   assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
   assert_grep "tasktmp=$task_tmp" "$meta" "kimi meta did not record its task temp root"
   assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
+  [ "$(path_mode "$task_tmp")" = 700 ] \
+    || fail "kimi spawn left its task temp root readable by others: $(path_mode "$task_tmp")"
+  launch_file=$(kimi_typed_launch_file "$CASE_DIR/tmux-calls.log")
+  launch_base=$(basename "$launch_file")
+  case "$launch_file" in
+    "$launch_dir"/launch.*) ;;
+    *) fail "kimi spawn typed a launch path outside its home namespace: $launch_file" ;;
+  esac
+  [ "$launch_base" != launch.sh ] \
+    || fail "kimi spawn reused a mutable launch.sh name"
+  [ "$launch_file" != "$task_tmp/launch.sh" ] \
+    || fail "kimi spawn staged its launch command at the shared per-id path"
+  [ "$(path_mode "$launch_dir")" = 700 ] \
+    || fail "kimi spawn left its launch directory readable by others: $(path_mode "$launch_dir")"
+  [ "$(path_mode "$launch_file")" = 600 ] \
+    || fail "kimi spawn staged its launch command without mode 0600: $(path_mode "$launch_file")"
+  grep -qF -- "-l . '$launch_file'" "$CASE_DIR/tmux-calls.log" \
+    || fail "kimi spawn did not type a short line sourcing its staged launch command"
   assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not export its Go temp directory into the pane"
+  assert_grep "export FM_TASK_ID=$id" "$CASE_DIR/tmux-calls.log" \
+    "kimi spawn did not mark the pane with its task id"
   assert_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$HOME_DIR/.kimi-code/config.toml" \
     "kimi spawn did not install its guarded global hook region"
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
   assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
+}
+
+path_mode() {
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
+}
+
+kimi_launch_dir() {
+  local id=$1 home=$2 root hash
+  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
+  else
+    fail "test needs shasum or sha256sum"
+  fi
+  printf '/tmp/fm-%s+%s' "$id" "$hash"
+}
+
+kimi_typed_launch_file() {
+  local log=$1 src
+  src=$(grep -o "\. '/tmp/fm-[^']*'" "$log" | tail -1)
+  src=${src#". '"}
+  src=${src%"'"}
+  [ -n "$src" ] || fail "spawn did not type a staged launch source line"
+  printf '%s' "$src"
+}
+
+test_kimi_spawn_refuses_shared_task_temp_root() {
+  local id rec out rc task_tmp launch_dir launch_file stale_file
+  id="kimi-sharedtmp-z1-$$"
+  task_tmp="/tmp/fm-$id"
+  KIMI_RUNTIME_TASK_TMP=$task_tmp
+  rm -rf "$task_tmp"
+  mkdir "$task_tmp"
+  chmod 777 "$task_tmp"
+  rec=$(make_spawn_case sharedtmp "$id")
+  read_spawn_record "$rec"
+  launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
+  KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
+  rm -rf "$launch_dir"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "kimi spawn accepted a world-writable task temp root"
+  assert_contains "$out" "is not a private directory owned by this user" \
+    "kimi spawn did not name the unsafe task temp root"
+  assert_absent "$task_tmp/launch.sh" "kimi spawn staged its launch command in a shared directory"
+  assert_absent "$launch_dir" "kimi spawn staged a namespaced launch directory after refusing the shared temp root"
+  [ ! -s "$CASE_DIR/launch.log" ] || fail "kimi spawn launched despite an unsafe task temp root"
+  rm -rf "$task_tmp"
+  mkdir "$task_tmp"
+  chmod 755 "$task_tmp"
+  rec=$(make_spawn_case ownedtmp "$id")
+  read_spawn_record "$rec"
+  launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
+  KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
+  rm -rf "$launch_dir"
+  mkdir "$launch_dir"
+  chmod 755 "$launch_dir"
+  stale_file="$launch_dir/launch.sh"
+  printf 'stale launch command\n' > "$stale_file"
+  chmod 644 "$stale_file"
+  printf 'stale shared launch command\n' > "$task_tmp/launch.sh"
+  chmod 644 "$task_tmp/launch.sh"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "kimi spawn should reuse an existing temp root it owns: $out"
+  launch_file=$(kimi_typed_launch_file "$CASE_DIR/tmux-calls.log")
+  [ "$(path_mode "$task_tmp")" = 700 ] \
+    || fail "kimi spawn did not tighten its reused task temp root: $(path_mode "$task_tmp")"
+  [ "$(path_mode "$launch_dir")" = 700 ] \
+    || fail "kimi spawn did not tighten its reused launch directory: $(path_mode "$launch_dir")"
+  case "$launch_file" in
+    "$launch_dir"/launch.*) ;;
+    *) fail "kimi spawn typed a launch path outside its home namespace: $launch_file" ;;
+  esac
+  [ "$launch_file" != "$stale_file" ] \
+    || fail "kimi spawn rebound a pre-existing launch.sh instead of writing a new nonce file"
+  [ "$(path_mode "$launch_file")" = 600 ] \
+    || fail "kimi spawn staged its launch command without mode 0600: $(path_mode "$launch_file")"
+  [ "$(path_mode "$stale_file")" = 644 ] \
+    || fail "kimi spawn overwrote a pre-existing launch.sh"
+  [ "$(path_mode "$task_tmp/launch.sh")" = 644 ] \
+    || fail "kimi spawn reused the shared per-id launch file"
+  grep -qF -- "-l . '$launch_file'" "$CASE_DIR/tmux-calls.log" \
+    || fail "kimi spawn did not type a short line sourcing its namespaced launch command"
+  rm -rf "$task_tmp" "$launch_dir"
+  pass "fm-spawn: unsafe task roots are refused, owned roots are tightened, and launch files stay unique and 0600"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
@@ -422,14 +626,19 @@ test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation() {
 }
 
 test_kimi_teardown_removes_pointer_and_registry_token() {
-  local id rec out rc token
+  local id rec out rc token launch_dir foreign_dir
   id=kimi-teardown-z8
   rec=$(make_spawn_case teardown "$id")
   read_spawn_record "$rec"
+  launch_dir=$(kimi_launch_dir "$id" "$HOME_DIR")
+  KIMI_RUNTIME_LAUNCH_DIR=$launch_dir
+  foreign_dir="/tmp/fm-$id+zzzzzzzz"
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
   expect_code 0 "$rc" "Kimi spawn should succeed before teardown"
   token=$(sed -n 's/^token=//p' "$WT_DIR/.fm-kimi-turnend")
+  mkdir -p "$foreign_dir"
+  printf 'other home\n' > "$foreign_dir/launch.sh"
 
   HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$HOME_DIR" \
     FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
@@ -439,6 +648,12 @@ test_kimi_teardown_removes_pointer_and_registry_token() {
   assert_absent "$WT_DIR/.fm-kimi-turnend" "Kimi token pointer survived teardown"
   assert_absent "$HOME_DIR/.kimi-code/fm-turn-end.d/$token" "Kimi registry token survived teardown"
   assert_absent "$HOME_DIR/state/$id.kimi-turnend-token" "Kimi token state survived teardown"
+  assert_absent "$launch_dir" "Kimi staged launch directory survived teardown"
+  if [ ! -f "$foreign_dir/launch.sh" ]; then
+    rm -rf "$foreign_dir"
+    fail "teardown removed another home's staged launch directory"
+  fi
+  rm -rf "$foreign_dir"
   pass "fm-teardown: Kimi task pointer and registry token are removed"
 }
 
@@ -455,7 +670,7 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$fallback' --auto" ] \
+  [ "$launch" = "export COMPACT_ADVISER_DISABLE=1; env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI '$fallback' --auto" ] \
     || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
@@ -489,7 +704,7 @@ test_kimi_unconfirmed_delivery_fails_loudly() {
   [ "$rc" -ne 0 ] || fail "an unconfirmed kimi delivery should fail"
   assert_contains "$out" "kimi brief pointer delivery was not confirmed" \
     "unconfirmed kimi delivery lacked a loud diagnostic"
-  assert_grep 'failed: kimi brief pointer delivery was not confirmed' "$HOME_DIR/state/$id.status" \
+  assert_grep 'failed: kimi brief pointer delivery was not confirmed' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
     "unconfirmed kimi delivery did not leave a supervisor-visible failure"
   pass "fm-spawn: kimi treats a silent pointer drop as a failed spawn"
 }
@@ -506,7 +721,239 @@ test_kimi_readiness_gate_precedes_pointer() {
   assert_contains "$out" "kimi did not show a verified ready signal" \
     "kimi readiness failure lacked a loud diagnostic"
   [ ! -s "$CASE_DIR/pointer.log" ] || fail "kimi pointer was sent before readiness"
+  jq -e --arg id "$id" 'any(.endpoints[]; .id == $id)' \
+    "$HOME_DIR/state/home-summary.json" >/dev/null \
+    || fail "kimi readiness failure omitted its durable endpoint from the home summary"
   pass "fm-spawn: kimi never sends the brief pointer before an observable ready signal"
+}
+
+test_kimi_fresh_worktree_trust_is_answered_and_verified() {
+  local id rec out rc
+  id=kimi-trust-z9
+  rec=$(make_spawn_case trust "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=fresh run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "fresh Kimi trust dialog should advance into verified delivery"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not continue after the trust dialog cleared"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "a Kimi trust dialog that cleared on its first answer was answered again"
+  assert_grep "Read the brief at " "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered after trust and readiness verification"
+  pass "fm-spawn: a fresh Kimi worktree answers the exact trust dialog once and verifies advancement"
+}
+
+test_kimi_swallowed_trust_enter_is_retried_until_the_dialog_clears() {
+  local id rec out rc
+  id=kimi-trust-swallow-y3
+  rec=$(make_spawn_case trust-swallow "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=5 FM_FAKE_KIMI_TRUST=fresh FM_FAKE_KIMI_TRUST_CLEARS=after-second run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a swallowed first trust Enter should be retried into a verified spawn"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not recover from a swallowed trust keypress"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 2 ] \
+    || fail "Kimi trust dialog was not re-answered exactly until it cleared"
+  assert_grep "Read the brief at " "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered after the retried trust answer"
+  pass "fm-spawn: a swallowed Kimi trust keypress is re-sent until the dialog clears"
+}
+
+test_kimi_banner_before_the_dialog_paints_does_not_pass_readiness() {
+  local id rec out rc
+  id=kimi-trust-late-y5
+  rec=$(make_spawn_case trust-late "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=5 FM_FAKE_KIMI_TRUST=late run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a banner captured before the dialog painted should wait, then trust and deliver"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not survive a banner captured before the trust dialog painted"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi trust dialog painted after the banner was not answered exactly once"
+  [ "$(wc -l < "$CASE_DIR/pointer.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi brief pointer was not typed exactly once, after the dialog cleared"
+  assert_grep "Read the brief at " "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered once the late dialog cleared"
+  pass "fm-spawn: a Kimi banner captured before the trust dialog paints does not read as ready"
+}
+
+test_kimi_answered_dialog_left_in_history_does_not_restart_the_answer() {
+  local id rec out rc
+  id=kimi-trust-history-y6
+  rec=$(make_spawn_case trust-history "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=fresh FM_FAKE_KIMI_HISTORY_KEEPS_DIALOG=yes run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "an answered trust dialog still in scrollback should not block the spawn"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not complete with the answered trust dialog still in scrollback"
+  case "$out" in
+    *"did not clear"*) fail "Kimi reported a stuck trust dialog that had already cleared" ;;
+  esac
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi answered the trust dialog again from its scrollback copy"
+  assert_grep "Read the brief at " "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered past the scrollback copy of the dialog"
+  pass "fm-spawn: an answered Kimi trust dialog left in scrollback neither re-answers nor fails the spawn"
+}
+
+test_kimi_blank_viewport_frame_costs_only_its_poll() {
+  local id rec out rc
+  id=kimi-trust-blank-y7
+  rec=$(make_spawn_case trust-blank "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=4 FM_FAKE_KIMI_TRUST=fresh FM_FAKE_KIMI_BLANK_AFTER_TRUST=yes \
+    FM_FAKE_KIMI_HISTORY_KEEPS_DIALOG=yes run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a blank viewport frame should cost one poll, not the spawn"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not survive a blank viewport frame after the trust answer"
+  case "$out" in
+    *"did not clear"*) fail "a blank viewport frame was reported as a stuck trust dialog" ;;
+  esac
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi answered the trust dialog again after a blank viewport frame"
+  [ ! -s "$CASE_DIR/stray-enter.log" ] \
+    || fail "Kimi sent a stray Enter into the live composer after a blank viewport frame"
+  assert_grep "Read the brief at " "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered after the blank viewport frame"
+  pass "fm-spawn: a blank Kimi viewport frame costs its poll and nothing else"
+}
+
+test_kimi_refuses_a_backend_without_a_viewport_capture() {
+  local id rec out rc
+  id=kimi-no-viewport-y8
+  rec=$(make_spawn_case no-viewport "$id")
+  read_spawn_record "$rec"
+  fm_fake_exit0 "$FAKEBIN_DIR" cmux
+  rc=0
+  out=$(FM_BACKEND=cmux run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a Kimi spawn on a backend without a viewport capture should refuse"
+  assert_contains "$out" "backend 'cmux' has no verified viewport-bounded capture" \
+    "Kimi refusal did not name the backend and the missing viewport capability"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] \
+    || fail "Kimi pressed Enter on a backend it cannot read the viewport of"
+  [ ! -s "$CASE_DIR/launch.log" ] \
+    || fail "Kimi was launched on a backend without a viewport capture"
+  pass "fm-spawn: Kimi refuses a backend that cannot read the viewport, before launching"
+}
+
+test_kimi_answers_a_trust_dialog_with_a_wrapped_hint() {
+  local id rec out rc
+  id=kimi-trust-wrapped-y9
+  rec=$(make_spawn_case trust-wrapped "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_KIMI_TRUST=wrapped run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "a trust dialog whose hint wrapped in a narrow pane should be answered"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not survive a trust dialog with a wrapped navigation hint"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi did not answer a trust dialog with a wrapped hint exactly once"
+  assert_grep "Read the brief at " "$CASE_DIR/pointer.log" \
+    "Kimi brief pointer was not delivered after the wrapped-hint dialog cleared"
+  pass "fm-spawn: a Kimi trust dialog with its hint wrapped across rows is answered normally"
+}
+
+test_kimi_blank_frame_between_banners_restarts_the_ready_count() {
+  local id rec out rc
+  id=kimi-trust-blink-z4
+  rec=$(make_spawn_case trust-blink "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=6 FM_FAKE_KIMI_TRUST=blink run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  expect_code 0 "$rc" "banners split by a blank frame should not read as two ready captures"
+  assert_contains "$out" "spawned $id harness=kimi" \
+    "Kimi spawn did not wait out a blank frame before the trust dialog painted"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi did not answer the trust dialog that painted after the blank frame"
+  [ "$(wc -l < "$CASE_DIR/pointer.log" | tr -d ' ')" = 1 ] \
+    || fail "Kimi brief pointer was typed before the trust dialog painted"
+  pass "fm-spawn: a blank Kimi frame between banners restarts the two-capture ready count"
+}
+
+test_kimi_failed_viewport_read_fails_readiness_at_once() {
+  local id rec out rc
+  id=kimi-viewport-fail-z5
+  rec=$(make_spawn_case viewport-fail "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_KIMI_READY_POLLS=3 FM_FAKE_TMUX_VISIBLE_FAILS=yes FM_FAKE_KIMI_TRUST=fresh run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a Kimi spawn whose viewport read fails should fail"
+  assert_contains "$out" "could not read the visible viewport of backend 'tmux'" \
+    "failed Kimi viewport read was reported as something other than a capture failure"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] \
+    || fail "Kimi pressed Enter without being able to read the viewport"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "Kimi pointer was sent without a readable viewport"
+  pass "fm-spawn: a failed Kimi viewport read fails readiness with the backend named"
+}
+
+test_kimi_partial_trust_dialog_blocks_the_ready_verdict() {
+  local id rec out rc
+  id=kimi-trust-partial-y4
+  rec=$(make_spawn_case trust-partial "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_TRUST=partial run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a banner above an unanswered trust dialog should not pass readiness"
+  assert_contains "$out" "trust dialog text stayed on screen without the complete dialog" \
+    "partially rendered Kimi trust dialog lacked its concrete failure reason"
+  [ ! -s "$CASE_DIR/pointer.log" ] \
+    || fail "Kimi pointer was sent while trust dialog markers were still on screen"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] \
+    || fail "Kimi answered a trust dialog it could not fully read"
+  pass "fm-spawn: Kimi refuses the ready verdict while trust dialog markers remain"
+}
+
+test_kimi_stuck_trust_dialog_fails_before_delivery() {
+  local id rec out rc
+  id=kimi-trust-stuck-y1
+  rec=$(make_spawn_case trust-stuck "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_TRUST=fresh FM_FAKE_KIMI_TRUST_CLEARS=no run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a Kimi trust dialog that never clears should fail"
+  assert_contains "$out" "kimi trust dialog did not clear after selecting 'Trust this folder'" \
+    "stuck Kimi trust dialog lacked its concrete failure reason"
+  assert_contains "$out" "navigation hint, selected 'Trust this folder'" \
+    "stuck Kimi trust diagnostic did not name the observed dialog signals"
+  [ "$(wc -l < "$CASE_DIR/trust-enter.log" | tr -d ' ')" -gt 1 ] \
+    || fail "stuck Kimi trust dialog was not re-answered while it stayed on screen"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "Kimi pointer was sent through a stuck trust dialog"
+  assert_grep 'failed: kimi trust dialog did not clear' <(sed -E 's/ \[at=[0-9]+\]//' "$HOME_DIR/state/$id.status") \
+    "stuck Kimi trust dialog did not leave a supervisor-visible failure"
+  pass "fm-spawn: a Kimi trust dialog must visibly clear before brief delivery"
+}
+
+test_kimi_trust_detection_requires_the_complete_dialog() {
+  local id rec out rc
+  id=kimi-trust-decoy-y2
+  rec=$(make_spawn_case trust-decoy "$id")
+  read_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_KIMI_TRUST=decoy run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id") || rc=$?
+  [ "$rc" -ne 0 ] || fail "an incomplete Kimi trust lookalike should not pass readiness"
+  assert_contains "$out" "trust dialog text stayed on screen without the complete dialog" \
+    "incomplete Kimi trust lookalike did not report the unanswerable dialog text"
+  [ ! -s "$CASE_DIR/trust-enter.log" ] \
+    || fail "Kimi answered an incomplete trust lookalike with Enter"
+  [ ! -s "$CASE_DIR/pointer.log" ] || fail "Kimi pointer was sent through a trust lookalike"
+  pass "fm-spawn: Kimi trust detection requires every observed dialog signal"
 }
 
 test_kimi_detection_uses_ancestry_after_markers() {
@@ -537,13 +984,16 @@ SH
   chmod +x "$fakebin/ps"
 
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT \
-    -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
     PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
   [ "$out" = kimi ] || fail "kimi ancestry detection returned '$out'"
-  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+  # Kimi publishes no identity marker, so an inherited CLAUDECODE used to rename
+  # it outright. A structural kimi ancestor now outranks that marker;
+  # tests/fm-harness-precedence.test.sh owns the general boundary.
+  out=$(env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI \
     CLAUDECODE=1 PATH="$fakebin:$BASE_PATH" FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh")
-  [ "$out" = claude ] || fail "verified env-marker precedence changed, got '$out'"
-  pass "fm-harness: markerless kimi is detected by ancestry after env-marker precedence"
+  [ "$out" = kimi ] || fail "an inherited CLAUDECODE renamed markerless kimi, got '$out'"
+  pass "fm-harness: markerless kimi keeps its ancestry identity under an inherited marker"
 }
 
 test_kimi_session_lock_identity() {
@@ -670,6 +1120,7 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
+test_kimi_spawn_refuses_shared_task_temp_root
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
 test_kimi_teardown_removes_pointer_and_registry_token
@@ -677,6 +1128,18 @@ test_kimi_falls_back_to_expanded_home_binary
 test_kimi_missing_binary_refuses_before_pane_creation
 test_kimi_unconfirmed_delivery_fails_loudly
 test_kimi_readiness_gate_precedes_pointer
+test_kimi_fresh_worktree_trust_is_answered_and_verified
+test_kimi_swallowed_trust_enter_is_retried_until_the_dialog_clears
+test_kimi_banner_before_the_dialog_paints_does_not_pass_readiness
+test_kimi_answered_dialog_left_in_history_does_not_restart_the_answer
+test_kimi_blank_viewport_frame_costs_only_its_poll
+test_kimi_refuses_a_backend_without_a_viewport_capture
+test_kimi_answers_a_trust_dialog_with_a_wrapped_hint
+test_kimi_blank_frame_between_banners_restarts_the_ready_count
+test_kimi_failed_viewport_read_fails_readiness_at_once
+test_kimi_partial_trust_dialog_blocks_the_ready_verdict
+test_kimi_stuck_trust_dialog_fails_before_delivery
+test_kimi_trust_detection_requires_the_complete_dialog
 test_kimi_detection_uses_ancestry_after_markers
 test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines

@@ -22,23 +22,26 @@ document:
     evidence destination, and unique safety facts, then review the complete
     branch diff again after every documentation or lint fix.
 
-# Pin lint to the same owner CI runs instead of leaving it to no-mistakes'
+# Pin lint to the same owner CI invokes instead of leaving it to no-mistakes'
 # default handling, which does not invoke the repository's canonical lint gate.
-# `bin/fm-lint.sh` owns the complete lint definition, including GitHub workflow
-# lint via pinned actionlint in `bin/fm-lint-workflows.sh`, and
-# `.github/workflows/ci.yml` invokes it directly, with parity asserted by
-# `tests/fm-lint.test.sh` and `tests/fm-lint-workflows.test.sh`.
+# `bin/fm-lint.sh` owns the context-sensitive ShellCheck modes and GitHub
+# workflow lint via pinned actionlint in `bin/fm-lint-workflows.sh`.
+# Invocation wiring is asserted by `tests/fm-lint.test.sh` and
+# `tests/fm-lint-workflows.test.sh`.
 #
-# Do not set commands.test to a complete tests/*.test.sh walk. Local no-mistakes
-# Test is intent-targeted validation of whether the change meets its brief;
-# .github/workflows/ci.yml owns broad regression (behavior suite, platform,
-# security, Herdr, tmux, and lifecycle coverage). A full-suite override here
-# would duplicate CI and defeat the targeted Test contract.
+# Keep commands.test absent; the firstmate-coding-guidelines skill owns this policy.
 commands:
   lint: 'bin/fm-lint.sh'
 
 # Publish each run's test evidence to the orphan no-mistakes/evidence branch linked from the PR.
 # The evidence is not committed to the feature or default branch.
 test:
+  instructions: |
+    Run live Herdr scenarios only through bin/fm-herdr-lab.sh with a named non-default fm-lab-* session, following that helper's prepare, provision, run, and teardown contract exactly.
+    Never touch the live default Herdr session or fleet panes.
+    Prefer a throwaway lab for spawn, long-launch, and Claude-path proofs, and tear it down in the same evidence turn.
+    Do not mutate the operator primary checkout, real fleet FM_HOME state, or production credentials, and keep git changes otherwise inside the run worktree.
+    Read docs/herdr-backend.md and the bin/fm-herdr-lab.sh header as the owners of Herdr lab mechanics rather than reproducing that manual here.
+    Ship or scout briefs that will drive Herdr lifecycle still require --herdr-lab at scaffold time; these Test-agent instructions are not a substitute for that brief flag.
   evidence:
     store_in_repo: true

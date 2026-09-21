@@ -7,6 +7,8 @@
 #   fm-herdr-lab.sh prepare <session>
 #   fm-herdr-lab.sh provision <session>
 #   fm-herdr-lab.sh run <session> <herdr arguments...>
+#   fm-herdr-lab.sh viewer start <session>
+#   fm-herdr-lab.sh viewer stop <session>
 #   fm-herdr-lab.sh stop <session>
 #   fm-herdr-lab.sh teardown <session>
 #
@@ -23,6 +25,14 @@
 # destructive call.
 # Provision records the running default session as a fleet-state tripwire and
 # teardown requires that record to be identical afterward.
+# The viewer command attaches or detaches one real foreground Herdr client on
+# an owned lab session over a fixed 40-row by 120-column pty;
+# bin/fm-herdr-lab-viewer.py owns the pty mechanics.
+# Start succeeds only when that session reports a foreground client and the
+# recorded viewer process still matches its launch identity.
+# Stop signals only identity-matched recorded processes and retains its
+# ownership record until detach is confirmed or the session is stopped or
+# absent; teardown refuses when that stop cannot be confirmed.
 set -u
 
 fm_herdr_lab_error() {
@@ -153,6 +163,227 @@ fm_herdr_lab_cli() { # <session> <herdr arguments...>
   fm_herdr_lab_raw "$name" "$@"
 }
 
+# --- foreground viewer ------------------------------------------------------
+#
+# Herdr counts a client as the session's foreground viewer only once that
+# client reports a usable window grid, so a zero-sized pty attaches nothing and
+# leaves `terminal title clear` answering no_foreground_client. Attaching a
+# real viewer is what lets a test drive the live-client teardown paths instead
+# of only their detached halves. bin/fm-herdr-lab-viewer.py owns the pty and
+# environment mechanics; the guards below own who may be attached to.
+# Per-session locks are deliberately absent: generated fm-lab-<label>-$$-$RANDOM
+# names have no caller that starts one viewer concurrently, so locks add risk.
+# A subsecond interrupt window and SIGKILL residue are accepted in this isolated
+# lab helper because teardown drops any stray viewer connection with the session.
+
+readonly fm_herdr_lab_viewer_timeout_seconds=5
+readonly fm_herdr_lab_viewer_launcher_grace_seconds=6
+
+fm_herdr_lab_viewer_record_path() { # <session>
+  printf '%s/%s.viewer' "$(fm_herdr_lab_state_dir)" "$1"
+}
+
+fm_herdr_lab_viewer_log_path() { # <session>
+  printf '%s/%s.viewer.log' "$(fm_herdr_lab_state_dir)" "$1"
+}
+
+fm_herdr_lab_viewer_launcher_path() {
+  printf '%s/fm-herdr-lab-viewer.py' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+}
+
+# Prints the session's current foreground-client reason, or nothing when it
+# cannot be read.
+fm_herdr_lab_viewer_reason() { # <session>
+  local name=$1 out
+  out=$(fm_herdr_lab_cli "$name" terminal title clear 2>/dev/null) || return 1
+  printf '%s' "$out" | jq -r '.result.reason // empty' 2>/dev/null
+}
+
+fm_herdr_lab_process_start() { # <pid>
+  LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+fm_herdr_lab_process_parent() { # <pid>
+  LC_ALL=C ps -p "$1" -o ppid= 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+fm_herdr_lab_viewer_recorded_value() { # <session> <key>
+  local record value
+  record=$(fm_herdr_lab_viewer_record_path "$1")
+  [ -f "$record" ] || return 1
+  value=$(sed -n "s/^$2=//p" "$record" | head -n 1)
+  [ -n "$value" ] || return 1
+  printf '%s' "$value"
+}
+
+fm_herdr_lab_viewer_owned_pair() { # <session>
+  local launcher_pid viewer_pid launcher_start viewer_start current_start parent_pid
+  launcher_pid=$(fm_herdr_lab_viewer_recorded_value "$1" launcher_pid) || return 1
+  viewer_pid=$(fm_herdr_lab_viewer_recorded_value "$1" viewer_pid) || return 1
+  case "$launcher_pid:$viewer_pid" in
+    *[!0-9:]*) return 1 ;;
+  esac
+  launcher_start=$(fm_herdr_lab_viewer_recorded_value "$1" launcher_start) || return 1
+  viewer_start=$(fm_herdr_lab_viewer_recorded_value "$1" viewer_start) || return 1
+  current_start=$(fm_herdr_lab_process_start "$launcher_pid") || return 1
+  [ -n "$current_start" ] && [ "$current_start" = "$launcher_start" ] || return 1
+  current_start=$(fm_herdr_lab_process_start "$viewer_pid") || return 1
+  [ -n "$current_start" ] && [ "$current_start" = "$viewer_start" ] || return 1
+  parent_pid=$(fm_herdr_lab_process_parent "$viewer_pid") || return 1
+  [ "$parent_pid" = "$launcher_pid" ] || return 1
+  printf '%s %s' "$launcher_pid" "$viewer_pid"
+}
+
+fm_herdr_lab_viewer_owned_pid() { # <session> <launcher|viewer>
+  local pair
+  pair=$(fm_herdr_lab_viewer_owned_pair "$1") || return 1
+  case "$2" in
+    launcher) printf '%s' "${pair%% *}" ;;
+    viewer) printf '%s' "${pair#* }" ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_herdr_lab_viewer_signal() { # <session> <launcher|viewer> <signal>
+  local pid
+  pid=$(fm_herdr_lab_viewer_owned_pid "$1" "$2") || return 0
+  kill "-$3" "$pid" 2>/dev/null || true
+}
+
+# True while this lab owns a viewer process that is still running.
+fm_herdr_lab_viewer_owned_alive() { # <session>
+  fm_herdr_lab_viewer_owned_pair "$1" >/dev/null
+}
+
+fm_herdr_lab_viewer_session_stopped_or_absent() { # <session>
+  local sessions running
+  sessions=$(fm_herdr_lab_session_list "$1" 2>/dev/null) || return 1
+  running=$(printf '%s' "$sessions" | jq -r --arg name "$1" \
+    '[.sessions[]? | select(.name == $name) | .running] | if length == 0 then "absent" elif length == 1 then .[0] else "ambiguous" end' \
+    2>/dev/null) || return 1
+  [ "$running" = false ] || [ "$running" = absent ]
+}
+
+fm_herdr_lab_viewer_start() { # <session>
+  local name=$1 record log launcher launcher_pid waited attempt reason pid interrupt_traps=0 timeout=$fm_herdr_lab_viewer_timeout_seconds
+  fm_herdr_lab_validate_name "$name" || return 1
+  command -v herdr >/dev/null 2>&1 || { fm_herdr_lab_error "herdr is required"; return 1; }
+  command -v jq >/dev/null 2>&1 || { fm_herdr_lab_error "jq is required"; return 1; }
+  command -v python3 >/dev/null 2>&1 || { fm_herdr_lab_error "python3 is required for the lab viewer"; return 1; }
+
+  [ -f "$(fm_herdr_lab_tripwire_path "$name")" ] || {
+    fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing to attach a viewer to a session this lab does not own"
+    return 1
+  }
+  fm_herdr_lab_refuse_if_default "$name" || return 1
+
+  record=$(fm_herdr_lab_viewer_record_path "$name")
+  if fm_herdr_lab_viewer_owned_alive "$name"; then
+    fm_herdr_lab_error "a lab viewer is already attached to '$name'; stop it before starting another"
+    return 1
+  fi
+  rm -f "$record"
+
+  launcher=$(fm_herdr_lab_viewer_launcher_path)
+  [ -f "$launcher" ] || { fm_herdr_lab_error "missing viewer launcher at $launcher"; return 1; }
+  log=$(fm_herdr_lab_viewer_log_path "$name")
+  mkdir -p "$(fm_herdr_lab_state_dir)" || return 1
+  launcher_pid=
+  if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+    interrupt_traps=1
+    trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 130' INT
+    trap 'trap - INT TERM; [ -z "${launcher_pid:-}" ] || fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"; exit 143' TERM
+  fi
+  nohup python3 "$launcher" "$name" "$record" >"$log" 2>&1 &
+  launcher_pid=$!
+
+  waited=0
+  attempt=$((timeout * 5))
+  while [ "$waited" -lt "$attempt" ]; do
+    reason=$(fm_herdr_lab_viewer_reason "$name") || reason=
+    if [ "$reason" = cleared ]; then
+      pid=$(fm_herdr_lab_viewer_owned_pid "$name" viewer) || pid=
+      if [ -n "$pid" ]; then
+        [ "$interrupt_traps" = 0 ] || trap - INT TERM
+        disown "$launcher_pid" 2>/dev/null || true
+        printf 'viewer attached to %s (pid %s)\n' "$name" "$pid"
+        return 0
+      fi
+    fi
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  fm_herdr_lab_cancel_viewer_launcher "$launcher_pid"
+  [ "$interrupt_traps" = 0 ] || trap - INT TERM
+  fm_herdr_lab_error "lab viewer did not become the foreground client of '$name' within $timeout seconds (last reason: ${reason:-<unreadable>})"
+  [ ! -s "$log" ] || fm_herdr_lab_error "viewer log: $(tail -n 5 "$log" | tr '\n' ' ')"
+  fm_herdr_lab_viewer_stop "$name" >/dev/null 2>&1 || true
+  return 1
+}
+
+fm_herdr_lab_viewer_stop() { # <session>
+  local name=$1 record log role waited attempt reason timeout=$fm_herdr_lab_viewer_timeout_seconds
+  fm_herdr_lab_validate_name "$name" || return 1
+  record=$(fm_herdr_lab_viewer_record_path "$name")
+  log=$(fm_herdr_lab_viewer_log_path "$name")
+  # An absent record means this lab owns no viewer. Any client attached in that
+  # case belongs to someone else and must never be signalled from here.
+  [ -f "$record" ] || return 0
+
+  for role in viewer launcher; do
+    fm_herdr_lab_viewer_signal "$name" "$role" TERM
+  done
+  waited=0
+  while fm_herdr_lab_viewer_owned_alive "$name" && [ "$waited" -lt 50 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  for role in viewer launcher; do
+    fm_herdr_lab_viewer_signal "$name" "$role" KILL
+  done
+
+  waited=0
+  attempt=$((timeout * 5))
+  while [ "$waited" -lt "$attempt" ]; do
+    reason=$(fm_herdr_lab_viewer_reason "$name") || reason=
+    if [ "$reason" = no_foreground_client ] \
+      || { [ -z "$reason" ] && fm_herdr_lab_viewer_session_stopped_or_absent "$name"; }; then
+      rm -f "$record" "$log"
+      return 0
+    fi
+    sleep 0.2
+    waited=$((waited + 1))
+  done
+  fm_herdr_lab_error "lab viewer for '$name' did not detach within $timeout seconds (last reason: ${reason:-<unreadable>})"
+  return 1
+}
+
+fm_herdr_lab_viewer() { # <start|stop> <session>
+  case "${1:-}" in
+    start) fm_herdr_lab_viewer_start "$2" ;;
+    stop) fm_herdr_lab_viewer_stop "$2" ;;
+    *)
+      fm_herdr_lab_error "viewer takes 'start' or 'stop'"
+      return 2
+      ;;
+  esac
+}
+
+fm_herdr_lab_cancel_viewer_launcher() { # <pid>
+  local pid=$1 attempt=0 max_attempts=$((fm_herdr_lab_viewer_launcher_grace_seconds * 10))
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt "$max_attempts" ]; do
+      sleep 0.1
+      attempt=$((attempt + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
 fm_herdr_lab_cancel_provision() { # <pid>
   local pid=$1 attempt=0
   if kill -0 "$pid" 2>/dev/null; then
@@ -261,6 +492,10 @@ fm_herdr_lab_teardown() { # <session>
     fm_herdr_lab_error "missing fleet-state tripwire for '$name'; refusing destructive calls"
     return 1
   }
+  fm_herdr_lab_viewer_stop "$name" || {
+    fm_herdr_lab_error "refusing teardown of '$name' while this lab's viewer is still attached"
+    return 1
+  }
   sessions=$(fm_herdr_lab_session_list "$name" 2>/dev/null) || {
     fm_herdr_lab_error "cannot list Herdr sessions before teardown"
     return 1
@@ -299,7 +534,7 @@ fm_herdr_lab_name() { # <label>
 }
 
 fm_herdr_lab_usage() {
-  sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 fm_herdr_lab_main() {
@@ -321,6 +556,10 @@ fm_herdr_lab_main() {
       [ "$#" -ge 3 ] || { fm_herdr_lab_usage >&2; return 2; }
       shift
       fm_herdr_lab_cli "$@"
+      ;;
+    viewer)
+      [ "$#" -eq 3 ] || { fm_herdr_lab_usage >&2; return 2; }
+      fm_herdr_lab_viewer "$2" "$3"
       ;;
     stop)
       [ "$#" -eq 2 ] || { fm_herdr_lab_usage >&2; return 2; }

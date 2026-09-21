@@ -144,8 +144,29 @@ test_orphan_sweep_respects_fixture_ownership() {
   pass "the orphan sweep reaps only old fixtures without a live owner"
 }
 
+test_orphan_sweep_reaps_read_only_package_tree() {
+  local stale_dir package_dir
+  stale_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-cleanup-read-only.XXXXXX")
+  package_dir="$stale_dir/packages/extension"
+  mkdir -p "$package_dir"
+  printf '%s\n%s\n' "$$" reused-process-identity > "$stale_dir/.fm-test-fixture"
+  printf 'installed package\n' > "$package_dir/entrypoint.py"
+  chmod -R a-w "$stale_dir/packages"
+  touch -t 202001010000 "$stale_dir/.fm-test-fixture"
+
+  bash -c '
+    # shellcheck source=tests/lib.sh
+    . "$1"
+  ' _ "$LIB"
+
+  assert_absent "$stale_dir" \
+    "the orphan reaper left a stale fixture containing a read-only package tree"
+  pass "the orphan sweep reaps read-only package fixtures"
+}
+
 test_fixture_root_gone_after_normal_exit
 test_fixture_root_gone_after_sigterm
 test_cleanup_registry_resists_precreation
 test_fixture_registration_failure_rolls_back_root
 test_orphan_sweep_respects_fixture_ownership
+test_orphan_sweep_reaps_read_only_package_tree

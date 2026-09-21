@@ -141,7 +141,8 @@ test_real_text_is_pending() {
 #
 # Fixtures are the audit's byte-level captures of six REAL idle harnesses:
 # claude 2.1.226 (bare `❯` + U+00A0 NO-BREAK SPACE), codex 0.146.0 (bold `›`
-# + SGR-2 dim hint), muse (truecolor `⟩`, 38;2;90;160;255), pi (blank row
+# + SGR-2 dim hint), codex 0.154.0 (the same `›` amid a braille starfield over
+# a status footer, captured through Herdr on 2026-09-15), muse (truecolor `⟩`, 38;2;90;160;255), pi (blank row
 # between solid `─` rules), opencode 1.14.46 (left-bar `┃` rows), and grok
 # 1.0.0 (bordered box with a TITLED bottom border), plus claude captured
 # inside zellij through `dump-screen --ansi` (`ESC[m` `❯` U+00A0).
@@ -186,6 +187,140 @@ test_matrix_claude_bare_nbsp_row() {
   # the styled=0 degradation defers instead of fabricating pending.
   assert_screen "claude typed on plain backends" unknown "$CAPS_PLAIN" "$typed"
   pass "matrix: claude's ❯+NBSP row reads empty on every profile in both locales (#1988)"
+}
+
+test_matrix_claude_arrow_statusline_footer() {
+  # Real claude 2.x on herdr (captured live 2026-09-20, herdr 0.8.0): the
+  # composer is a bare `❯`+U+00A0 row between two solid rules, and the harness
+  # draws a user statusLine plus its permission-mode hint directly BELOW the
+  # closing rule. That statusLine opened with `→`, which is Cursor's own agent
+  # prompt glyph, so the bottom-most-candidate rule selected the statusLine as
+  # a bare composer, swallowed the hint row beneath it as wrapped input, and
+  # every steer to a claude worker was refused with a `pending` verdict on a
+  # visibly empty composer. A pair that closed over a bare agent-glyph row is
+  # a proven composer container, so its contiguous non-blank footer rows are
+  # furniture and cannot outrank the composer they sit under.
+  local pair footer screen typed residue claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  pair=$'transcript line\n────────────────────────\n❯'"$NBSP"$'\n────────────────────────'
+  footer=$'\n  → repo git:(fm/branch)× | Opus 5 | ctx 15%\n  ⏵⏵ bypass permissions on (shift+tab to cycle)'
+  screen="$pair$footer"
+  assert_screen "claude idle under an arrow statusline on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "claude idle under an arrow statusline on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "claude idle under an arrow statusline on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  # The protection this must NOT remove: real unsubmitted text in that same
+  # composer, under that same statusline, still refuses.
+  typed=$'transcript line\n────────────────────────\n❯ fix the login bug\n────────────────────────'"$footer"
+  assert_screen "claude typed under an arrow statusline" pending "$CAPS_STYLED" "$typed" '' "$claude_idle"
+  # The live second defect: a stray SGR mouse report left in the composer by
+  # a click in the pane is real pending content, not furniture.
+  residue=$'transcript line\n────────────────────────\n❯ <65;77;27M\n────────────────────────'"$footer"
+  assert_screen "stray mouse report in the composer" pending "$CAPS_STYLED" "$residue" '' "$claude_idle"
+  pass "matrix: claude's arrow statusline is footer furniture, not a composer holding text"
+}
+
+test_composer_footer_demotion_needs_a_proven_pair() {
+  # The demotion is bounded in three directions, and each bound is a case
+  # where a lower glyph row IS the live composer.
+  local screen out claude_idle pi_idle
+  claude_idle=$(printf 'claude\tidle'); pi_idle=$(printf 'pi\tidle')
+  # 1. Contiguity: a blank row ends the footer zone, so a composer redrawn
+  #    below an old rule pair still wins.
+  screen=$'────────────────────────\n❯ old draft\n────────────────────────\n  → repo git:(main)\n\n→'
+  assert_screen "blank row reopens lower candidates" empty "$CAPS_STYLED_NOID" "$screen"
+  # 2. Proof: a pair that closed over NO agent-glyph row proves no composer,
+  #    so nothing below it is demoted. pi's own blank pair is exactly that.
+  screen=$'────────────────────────\n\n────────────────────────\n→'
+  assert_screen "an unproven pair demotes nothing" empty "$CAPS_STYLED_NOID" "$screen"
+  # 3. No pair at all: Cursor draws its `→` composer between half-block rules,
+  #    which are not separator rules, so its footer rows change nothing.
+  screen=$' ▄▄▄▄▄▄▄▄\n  →\n ▀▀▀▀▀▀▀▀\n  Cursor Grok 4.5 High · 6.7%   Run Everything\n  ~/wt · 64cdd3a'
+  assert_screen "cursor keeps its own bare composer" empty "$CAPS_STYLED_NOID" "$screen"
+  # A later pair WITHOUT a glyph row must reopen candidates the earlier proven
+  # pair had closed, so the zone cannot leak down a screen.
+  screen=$'────────────────────────\n❯'"$NBSP"$'\n────────────────────────\n  → repo git:(main)\n────────────────────────\n────────────────────────\n→'
+  assert_screen "a later unproven pair reopens candidates" empty "$CAPS_STYLED_NOID" "$screen"
+  # And the strict posture is untouched: a footer row alone proves nothing.
+  out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" $'transcript\n  → repo git:(main) | Opus 5')
+  [ "$out" != empty ] \
+    || fail "an unanchored statusline row must never prove an empty composer, got '$out'"
+  pass "fm_composer_classify_screen: footer demotion needs a contiguous, glyph-proven pair"
+}
+
+test_composer_footer_zone_is_shape_independent() {
+  # The same captain-facing failure on the BORDERED composer: claude 2.x
+  # renders its composer inside a rounded box on a wide pane, and this home's
+  # statusLine (opening with `→`, Cursor's prompt glyph) plus the permission
+  # hint still land on the two contiguous rows below the closing border. The
+  # footer-zone invariant is a property of an envelope proven by a glyph row
+  # inside it, not of the pi separator pair, so it must hold here too.
+  local box footer screen out claude_idle
+  claude_idle=$(printf 'claude\tidle')
+  box=$'transcript line\n╭───────────────────────────╮\n│ ❯'"$NBSP"$'                        │\n╰───────────────────────────╯'
+  footer=$'\n → repo git:(fm/branch)× | Opus 5 | ctx 15%\n ⏵⏵ bypass permissions on'
+  screen="$box$footer"
+  assert_screen "boxed claude idle under an arrow statusline on herdr" empty "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  assert_screen "boxed claude idle under an arrow statusline on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "boxed claude idle under an arrow statusline on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
+  case "$out" in
+    *'repo git:'*|*'bypass permissions'*)
+      fail "the statusline footer must never be extracted as composer content, got '$out'" ;;
+  esac
+  # The protection this must NOT remove: real unsubmitted text inside that same
+  # bordered composer, under that same footer, still refuses.
+  screen=$'transcript line\n╭───────────────────────────╮\n│ ❯ half-typed draft        │\n╰───────────────────────────╯'"$footer"
+  assert_screen "boxed claude typed under an arrow statusline" pending "$CAPS_STYLED" "$screen" '' "$claude_idle"
+  # The deliberate counterexample, pinned as such: codex's startup banner has
+  # no glyph row inside it, so it proves no composer, opens no footer zone, and
+  # the live bare row contiguously below it keeps winning.
+  screen=$'╭────────────────────────╮\n│ permissions: YOLO mode │\n╰────────────────────────╯\n❯'"$NBSP"
+  assert_screen "unproven banner still yields to the bare row below it" empty "$CAPS_PLAIN" "$screen"
+  pass "fm_composer_classify_screen: the footer zone holds for boxes, not only separator pairs"
+}
+
+test_composer_footer_zone_refuses_rather_than_allows() {
+  # The footer-zone demotion is ASYMMETRIC: `empty` is the only verdict that
+  # authorizes fm-send to type into the pane, so the rule may move a verdict
+  # toward refusing but never toward `empty`. Every screen below classified
+  # `pending` before the footer zone existed and must never read `empty`.
+  local screen out
+  # 1. Draft loss. A row leading with the SAME glyph the envelope was proven by
+  #    is a live composer, not furniture, and must keep winning - otherwise the
+  #    doorbell types over a draft the worker can see.
+  screen=$'────────────────────────\n❯'"$NBSP"$'\n────────────────────────\n❯ my typed draft'
+  assert_screen "separated: a live draft below the pair keeps winning" pending "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$out" = 'my typed draft' ] \
+    || fail "the live draft must be the extracted composer content, got '$out'"
+  screen=$'╭────────────────────────╮\n│ ❯'"$NBSP"$'                     │\n╰────────────────────────╯\n❯ my typed draft'
+  assert_screen "boxed: a live draft below the box keeps winning" pending "$CAPS_STYLED_NOID" "$screen"
+  # 2. Working agent. Unclaimed activity below a proven envelope is not
+  #    furniture in EITHER row order, even when one of the rows leads with a
+  #    foreign agent glyph, so the envelope above it stays stale.
+  for screen in \
+    $'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\nWorking on request...\n→ ran npm test (3 failures)' \
+    $'╭────────────────────────╮\n│ ❯                      │\n╰────────────────────────╯\n→ ran npm test (3 failures)\nWorking on request...' \
+    $'────────────────────────\n❯'"$NBSP"$'\n────────────────────────\nWorking on request...\n→ ran npm test (3 failures)' \
+    $'────────────────────────\n❯'"$NBSP"$'\n────────────────────────\n→ ran npm test (3 failures)\nWorking on request...'
+  do
+    out=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" != empty ] \
+      || fail "a working agent below a proven envelope must never read empty, got '$out'"
+    out=$(LC_ALL=C fm_composer_classify_screen "$CAPS_STYLED_NOID" "$screen")
+    [ "$out" != empty ] \
+      || fail "a working agent below a proven envelope must never read empty under LC_ALL=C, got '$out'"
+  done
+  # 3. The other direction, which the demotion must not invert either: a pair
+  #    holding a QUOTED prompt in the transcript above a live, visibly empty
+  #    composer row reads empty, and the quoted text is never composer content.
+  screen=$'────────────────────────\ntranscript one\ntranscript two\n❯ some quoted prompt in the transcript\n────────────────────────\n❯'"$NBSP"
+  assert_screen "a quoted prompt above a live empty row stays empty" empty "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  case "$out" in
+    *'some quoted prompt'*) fail "a quoted transcript prompt must never be composer content, got '$out'" ;;
+  esac
+  pass "fm_composer_classify_screen: the footer zone only ever refuses, never allows"
 }
 
 test_matrix_codex_dim_hint_row() {
@@ -271,21 +406,178 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap() {
   # footer, whose real content turns an idle pane into a false `pending`.
   # Captured live from a herdr cursor pane.
   local screen plain out
-  plain=$'transcript\n \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n  \u2192 Add a follow-up\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n  Cursor Grok 4.5 High \u00b7 6.7%   Run Everything\n  ~/wt \u00b7 64cdd3a'
+  plain=$'transcript\n ▄▄▄▄▄▄▄▄\n  → Add a follow-up\n ▀▀▀▀▀▀▀▀\n  Cursor Grok 4.5 High · 6.7%   Run Everything\n  ~/wt · 64cdd3a'
   # The closing rule must bound the region, so the footer below is not input.
-  fm_composer_row_has_edge " $(printf '\u2580\u2580\u2580')" \
+  fm_composer_row_has_edge ' ▀▀▀' \
     || fail "a half-block rule row must count as a structural edge"
-  fm_composer_row_has_edge " $(printf '\u2584\u2584\u2584')" \
+  fm_composer_row_has_edge ' ▄▄▄' \
     || fail "the upper half-block rule must count as a structural edge"
   # Non-vacuousness: the footer rows really are non-blank content that would be
   # swallowed if the rule did not bound the region.
   case "$plain" in *"Run Everything"*) : ;; *) fail "fixture lost its footer content" ;; esac
   ESC_LOCAL=$(printf '\033')
-  screen=$'transcript\n \u2584\u2584\u2584\u2584\u2584\u2584\u2584\u2584\n'"  ${ESC_LOCAL}[2m\u2192 ${ESC_LOCAL}[0;7mA${ESC_LOCAL}[0;2mdd a follow-up${ESC_LOCAL}[0m"$'\n \u2580\u2580\u2580\u2580\u2580\u2580\u2580\u2580\n  Cursor Grok 4.5 High \u00b7 6.7%   Run Everything\n  ~/wt \u00b7 64cdd3a'
-  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$(printf '%b' "$screen")")
+  screen=$'transcript\n ▄▄▄▄▄▄▄▄\n'"  ${ESC_LOCAL}[2m→ ${ESC_LOCAL}[0;7mA${ESC_LOCAL}[0;2mdd a follow-up${ESC_LOCAL}[0m"$'\n ▀▀▀▀▀▀▀▀\n  Cursor Grok 4.5 High · 6.7%   Run Everything\n  ~/wt · 64cdd3a'
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$screen")
   [ "$out" = empty ] \
     || fail "an idle cursor composer inside herdr half-block rules must read empty, got '$out'"
   pass "matrix: herdr half-block rules bound a bare composer's wrap region"
+}
+
+test_matrix_omp_status_row_bounds_bare_composer() {
+  # omp (Oh My Pi) draws its status line directly BELOW the borderless `❯`
+  # composer. Captured live through Herdr on omp 18.1.11 under the captain's
+  # unicode preset (idle), plus the nerd-preset idle row and the busy spinner
+  # row from the 18.1.2 investigation. Without the status-row rule the bare
+  # wrap region swallows that row and an idle omp pane reads `pending`, which
+  # skipped the doorbell on the first live omp worker.
+  local idle_unicode idle_nerd busy typed wrapped
+  idle_unicode=$'transcript line
+
+❯
+ π  · ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 15.4%/272K ⟲ · (sub)'
+  idle_nerd=$'transcript line
+
+❯
+ 󰵗  ·  qwen3:8b ·  kun-agent-workspace/… ·  detached ?1 ·  36.7%/41K'
+  busy=$'transcript line
+
+  ⎋ Working…
+
+❯
+ ⠧ 11s  · ◔ GPT-6-Astra · ◫ 15.4%/272K'
+  typed=$'transcript line
+
+❯ fix the flaky test
+ π  · ◔ GPT-6-Astra · 🌳 …-workspace · ⑂ detached · ◫ 15.4%/272K ⟲ · (sub)'
+  # Non-vacuousness: each status row is real non-blank content that the wrap
+  # region would otherwise take as typed input.
+  _fm_composer_row_is_omp_status ' π  · ◔ GPT-6-Astra · 🌳 …-workspace' \
+    || fail "the unicode-preset omp status row must be recognized as furniture"
+  _fm_composer_row_is_omp_status ' 󰵗  ·  qwen3:8b ·  kun-agent-workspace/… ·  detached ?1 ·  36.7%/41K' \
+    || fail "the nerd-preset omp status row must be recognized as furniture"
+  _fm_composer_row_is_omp_status ' ⠧ 11s  · ◔ GPT-6-Astra' \
+    || fail "the busy omp spinner row must be recognized as furniture"
+  _fm_composer_row_is_omp_status 'fix the flaky test' \
+    && fail "ordinary typed text must not be mistaken for omp status furniture"
+  _fm_composer_row_is_omp_status 'please rerun the suite and report' \
+    && fail "ordinary prose must not be mistaken for omp status furniture"
+  # Only omp's identity cell opens the row: a wrapped typed row that happens
+  # to begin with a short word and a spaced middle dot is composer input.
+  _fm_composer_row_is_omp_status 'fix · tests before pushing' \
+    && fail "wrapped typed text with a middle dot must not be mistaken for omp status furniture"
+  # The ascii preset's identity cell is `pi`, but that preset separates its
+  # cells with ` - `, so a row opening `pi ·` is never omp furniture.
+  _fm_composer_row_is_omp_status 'pi · e · phi as the three constants' \
+    && fail "typed text opening 'pi ·' must not be mistaken for omp status furniture"
+  _fm_composer_row_is_omp_status ' ⣾ 3s  · ◔ GPT-6-Astra' \
+    || fail "the status-set omp spinner row must be recognized as furniture"
+  assert_screen "idle omp (unicode preset)" empty "$CAPS_STYLED" "$idle_unicode"
+  assert_screen "idle omp (nerd preset)" empty "$CAPS_STYLED" "$idle_nerd"
+  assert_screen "busy omp keeps an empty composer" empty "$CAPS_STYLED" "$busy"
+  assert_screen "typed omp text is pending" pending "$CAPS_STYLED" "$typed"
+  assert_screen "idle omp on a plain capture" empty "$CAPS_PLAIN" "$idle_unicode"
+  # The boundary must not cut a bare composer's own wrapped input: with the
+  # cursor on a continuation row that opens `fix · tests`, the composer is a
+  # proven wrap region and reads pending, exactly as it did before the rule.
+  wrapped=$'transcript line\n\n❯ please run the suite and then\nfix · tests before pushing'
+  assert_screen "wrapped typed text with a middle dot stays pending" pending "$CAPS_TMUX" "$wrapped" 3
+  wrapped=$'transcript line\n\n❯ document the constants in the order\npi · e · phi with one example each'
+  assert_screen "wrapped typed text opening 'pi ·' stays pending" pending "$CAPS_TMUX" "$wrapped" 3
+  pass "matrix: omp's status row bounds the bare composer's wrap region"
+}
+
+# codex_cell <grey> <glyph>: one codex 0.154 starfield cell exactly as the
+# harness draws it - a truecolor grey foreground, the composer's grey
+# background, the braille glyph, then a reset.
+codex_cell() {
+  printf '%s[38;2;%s;%s;%sm%s[48;2;57;57;57m%s%s[0m' "$ESC" "$1" "$1" "$1" "$ESC" "$2" "$ESC"
+}
+
+test_matrix_codex_idle_starfield_furniture() {
+  # Real idle codex-cli 0.154.0 (gpt-6-astra, fast mode) captured byte-for-byte
+  # through Herdr (`pane read --format ansi`) from the first codex second mate:
+  # an animated braille "starfield" on the row above the bold `›`, on the `›`
+  # row behind the SGR-2 dim `Ask Codex to do anything` placeholder, and on
+  # the row below, then a bright model/path/title status footer. The cells are
+  # truecolor greys on BOTH sides of the 128 ghost-luma ceiling, so the
+  # brighter ones survive the ghost strip, and the rows below the glyph carry
+  # no structural edge. The bare shape therefore extended its wrap region over
+  # the two rows beneath the glyph and read the survivors as wrapped typed
+  # input: `pending`, which deferred every steering doorbell for that pane.
+  local bg="${ESC}[48;2;57;57;57m" above glyph glyph2 below footer
+  local screen screen2 plain plain2 ascii_screen stripped out
+  above="${ESC}[0m${bg}                         ${ESC}[0m$(codex_cell 82 ⢀)${bg}      ${ESC}[0m$(codex_cell 136 ⠂)${bg} ${ESC}[0m$(codex_cell 163 ⠄)${bg}     ${ESC}[0m$(codex_cell 118 ⠈)"
+  glyph="${ESC}[0m${ESC}[1m${bg}›${ESC}[0m${bg} ${ESC}[0m${ESC}[2m${bg}Ask Codex to do anything${ESC}[0m$(codex_cell 117 ⡀)${bg}  ${ESC}[0m$(codex_cell 88 ⠈)${bg}       ${ESC}[0m$(codex_cell 156 ⠂)${bg}        ${ESC}[0m$(codex_cell 71 ⠁)$(codex_cell 161 ⠐)${bg} ${ESC}[0m$(codex_cell 165 ⠁)"
+  # A second live sample of the same pane, minutes later: the animation had
+  # placed a bright cell BETWEEN the glyph and the placeholder.
+  glyph2="${ESC}[0m${ESC}[1m${bg}›${ESC}[0m$(codex_cell 138 ⠁)${ESC}[2m${bg}Ask Codex to do anything${ESC}[0m$(codex_cell 163 ⡀)${bg}  ${ESC}[0m$(codex_cell 132 ⠈)"
+  below="${ESC}[0m${bg}        ${ESC}[0m$(codex_cell 101 ⠐)${bg}    ${ESC}[0m$(codex_cell 111 ⠄)${bg}   ${ESC}[0m$(codex_cell 165 ⠠)${bg}  ${ESC}[0m$(codex_cell 121 ⢀)$(codex_cell 122 ⠠)$(codex_cell 81 ⡀)$(codex_cell 150 ⠄⠂)"
+  footer="  ${ESC}[0m${ESC}[38;2;246;226;183mgpt-6-astra high fast${ESC}[0m${ESC}[2m · ${ESC}[0m${ESC}[38;2;171;223;167m~/Projects/purser${ESC}[0m${ESC}[2m · ${ESC}[0m${ESC}[38;2;156;222;211mLaunch Purser desk brief${ESC}[0m"
+  screen=$'transcript line\n\n'"$above"$'\n'"$glyph"$'\n'"$below"$'\n'"$footer"
+  screen2=$'transcript line\n\n'"$above"$'\n'"$glyph2"$'\n'"$below"$'\n'"$footer"
+  plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
+  plain2=$(printf '%s\n' "$screen2" | fm_composer_strip_ansi)
+
+  # NON-VACUOUSNESS: the ghost strip really leaves braille survivors behind the
+  # placeholder and on the row below (cells above the luma ceiling), and the
+  # footer really is non-blank, edge-free content the wrap region would take.
+  stripped=$(printf '%s\n' "$glyph" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var stripped
+  [ "$stripped" != '›' ] \
+    || fail "the glyph row's starfield cells must survive ghost stripping, or the furniture case is vacuous"
+  stripped=$(printf '%s\n' "$stripped" | fm_composer_strip_braille)
+  fm_composer_normalize_trim_var stripped
+  [ "$stripped" = '›' ] \
+    || fail "everything surviving ghost stripping behind the glyph must be braille, got '$stripped'"
+  stripped=$(printf '%s\n' "$below" | fm_composer_strip_ghost)
+  fm_composer_normalize_trim_var stripped
+  [ -n "$stripped" ] \
+    || fail "the row below the glyph must keep starfield cells after ghost stripping"
+  _fm_composer_row_is_braille_furniture "$stripped" \
+    || fail "the row below the glyph must be recognized as braille furniture"
+  fm_composer_row_has_edge '  gpt-6-astra high fast · ~/Projects/purser · Launch Purser desk brief' \
+    && fail "fixture drift: the footer must carry no structural edge, or the boundary rule is untested"
+
+  # The verdicts: empty wherever styling can prove the placeholder ghost, on
+  # both live samples, in both locales; unknown (never pending) on a plain
+  # capture, exactly as the codex dim-hint row above.
+  assert_screen "codex 0.154 idle on herdr" empty "$CAPS_STYLED" "$screen"
+  assert_screen "codex 0.154 idle on zellij" empty "$CAPS_STYLED_NOID" "$screen"
+  assert_screen "codex 0.154 idle on tmux (cursor on the glyph row)" empty "$CAPS_TMUX" "$screen" 3
+  assert_screen "codex 0.154 idle on cmux/orca" unknown "$CAPS_PLAIN" "$plain"
+  assert_screen "codex 0.154 idle (second sample) on herdr" empty "$CAPS_STYLED" "$screen2"
+  assert_screen "codex 0.154 idle (second sample) on tmux" empty "$CAPS_TMUX" "$screen2" 3
+  assert_screen "codex 0.154 idle (second sample) on cmux/orca" unknown "$CAPS_PLAIN" "$plain2"
+  # A cursor parked on the starfield row below the glyph is not inside a wrap
+  # region, so the strict blank-row posture keeps it unknown.
+  assert_screen "codex 0.154 cursor on the starfield row" unknown "$CAPS_TMUX" "$screen" 4
+
+  # DIVERGENCE: the same screen with every starfield cell replaced by a letter
+  # is wrapped typed input and must stay pending, so the furniture verdict
+  # above cannot come from anything but the braille rule.
+  ascii_screen=$(printf '%s\n' "$screen" | LC_ALL=C sed 's/⢀/x/g; s/⠂/x/g; s/⠄/x/g; s/⠈/x/g; s/⡀/x/g; s/⠁/x/g; s/⠐/x/g; s/⠠/x/g')
+  case "$ascii_screen" in *'⠂'*|*'⠁'*) fail "fixture drift: the divergence screen still carries braille" ;; esac
+  assert_screen "starfield replaced by letters on herdr" pending "$CAPS_STYLED" "$ascii_screen"
+  assert_screen "starfield replaced by letters on tmux" pending "$CAPS_TMUX" "$ascii_screen" 3
+
+  # NEGATIVES that keep the rule from over-stripping:
+  # (i) a real message wrapped below the `›` row, footer beneath, stays pending.
+  out=$'transcript line\n\n› please run the suite and then\ncontinue with the docs\n'"$footer"
+  assert_screen "wrapped typed input above the codex footer on herdr" pending "$CAPS_STYLED" "$out"
+  assert_screen "wrapped typed input above the codex footer on tmux" pending "$CAPS_TMUX" "$out" 3
+  # (ii) braille mixed with typed text is typed text, on the glyph row and on
+  # a wrapped row alike.
+  assert_screen "braille mixed into the glyph row" pending "$CAPS_STYLED" $'transcript line\n\n› fix ⠂ the tests'
+  assert_screen "braille mixed into a wrapped row" pending "$CAPS_STYLED" $'transcript line\n\n› please\nfix ⠂ the tests'
+  # (iii) a typed row carrying a spaced middle dot is composer input.
+  assert_screen "wrapped typed row with a middle dot on herdr" pending "$CAPS_STYLED" $'transcript line\n\n› deploy\nfix · tests before pushing'
+  assert_screen "wrapped typed row with a middle dot on tmux" pending "$CAPS_TMUX" $'transcript line\n\n› deploy\nfix · tests before pushing' 3
+  # (iv) the footer or a starfield row alone, with no bare glyph above, gains
+  # no new verdict: still no container proof.
+  assert_screen "codex footer alone on herdr" unknown "$CAPS_STYLED" $'transcript line\n\n'"$footer"
+  assert_screen "codex footer alone on tmux" unknown "$CAPS_TMUX" $'transcript line\n\n'"$footer" 2
+  assert_screen "starfield row alone on herdr" unknown "$CAPS_STYLED" $'transcript line\n\n'"$below"
+  pass "matrix: codex 0.154's starfield rows are furniture; typed, mixed, and unanchored rows keep their verdicts"
 }
 
 test_matrix_pi_separated_needs_identity() {
@@ -328,17 +620,25 @@ test_matrix_pi_separated_needs_identity() {
 }
 
 test_matrix_opencode_leftbar_signals() {
-  # Real idle opencode: `┃`-prefixed rows holding the "Ask anything..." hint,
+  # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
   # idle-placeholder pattern (works on plain captures) and the ghost strip
   # (works on styled captures even if the pattern is overridden away).
-  local screen typed dim_screen out
+  local screen typed dim_screen captured_idle captured_pending out
   screen=$'  ┃\n  ┃  Ask anything... "What is the tech stack?"\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
   dim_screen=$'  ┃\n  ┃  '"${ESC}[2mAsk anything...${ESC}[0m"$'\n  ┃\n  ┃  Build · GPT-5.5 Fast OpenAI · high\n  ╹▀▀▀▀'
   assert_screen "opencode idle on tmux (cursor on hint)" empty "$CAPS_TMUX" "$dim_screen" 1
   assert_screen "opencode idle on herdr" empty "$CAPS_STYLED" "$dim_screen"
   assert_screen "opencode idle on zellij" empty "$CAPS_STYLED_NOID" "$dim_screen"
   assert_screen "opencode idle on cmux/orca" empty "$CAPS_PLAIN" "$screen"
+  # This sanitized live OpenCode 1.18.30 capture preserves its U+2026 hint and
+  # RGB 128 styling. RGB 128 is deliberately outside the ghost threshold, so
+  # the placeholder spelling is the independent empty signal. The completed-
+  # turn row above the active composer also pins the incident's idle layout.
+  captured_idle=$'  ▣ Build · Big Pickle · 3.4s\n\n  ┃\n  ┃  '"${ESC}[38;2;128;128;128mAsk anything… \"Fix a TODO in the codebase\"${ESC}[38;2;255;255;255m"$'\n  ┃\n  ┃  Build · Big Pickle OpenCode Zen\n  ╹▀▀▀▀▀▀▀▀'
+  assert_screen "opencode 1.18.30 completed-turn idle hint on tmux" empty "$CAPS_TMUX" "$captured_idle" 3
+  captured_pending=$'  ▣ Build · Big Pickle · 3.4s\n\n  ┃\n  ┃  '"${ESC}[38;2;255;255;255mReply with OK.${ESC}[38;2;255;255;255m"$'\n  ┃\n  ┃  Build · Big Pickle OpenCode Zen\n  ╹▀▀▀▀▀▀▀▀'
+  assert_screen "opencode 1.18.30 completed-turn typed composer on tmux" pending "$CAPS_TMUX" "$captured_pending" 3
   # Signal separation: with the idle pattern overridden to something that
   # cannot match, a DIM-styled hint still proves empty through the ghost strip.
   out=$(FM_COMPOSER_IDLE_RE='^NEVER-MATCHES$' fm_composer_classify_screen "$CAPS_TMUX" "$dim_screen" 1)
@@ -355,25 +655,29 @@ test_matrix_opencode_leftbar_signals() {
 }
 
 test_matrix_grok_titled_bottom_border() {
-  # Real idle grok: a bordered box whose BOTTOM border carries the model name.
-  # The audit showed the title alone flipped tmux's geometry check to
-  # ambiguous and the verdict to unknown, stranding every grok steer.
-  local titled plain_border typed placeholder_draft
-  titled=$'  ╭──────────────────────────────────────╮\n  │ ❯                                    │\n  ╰──────────────────── Grok 4.5 (high) ─╯'
+  # Grok 1.0.5 widened its titled BOTTOM border three columns past the top and
+  # content rows. This is the idle capture from issue #3436; Herdr has no
+  # cursor anchor, so the geometry mismatch used to make the proven box
+  # ambiguous and the verdict unknown, stranding away-mode injection.
+  local titled plain_border typed malformed placeholder_draft
+  titled=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                        │\n  ╰────────────────────────────────────────────────────────── Grok 4.6 (xhigh) ─╯\n\n  Shift+Tab:mode  │  Ctrl+x:shortcuts'
   plain_border=$'  ╭──────────────────────────────────────╮\n  │ ❯                                    │\n  ╰──────────────────────────────────────╯'
   assert_screen "grok titled on tmux" empty "$CAPS_TMUX" "$titled" 1
   assert_screen "grok titled on tmux bottom-border cursor" empty "$CAPS_TMUX" "$titled" 2
-  assert_screen "grok titled on herdr" empty "$CAPS_STYLED" "$titled"
-  placeholder_draft=$'  ╭──────────────────────────────────────╮\n  │ ❯ Type a message...                  │\n  ╰──────────────────── Grok 4.5 (high) ─╯'
+  assert_screen "issue #3436 idle grok 1.0.5 on herdr" empty "$CAPS_STYLED" "$titled"
+  placeholder_draft=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯ Type a message...                                                      │\n  ╰────────────────────────────────────────────────────────── Grok 4.6 (xhigh) ─╯'
   assert_screen "grok bright placeholder-like draft on tmux" pending "$CAPS_TMUX" "$placeholder_draft" 1
   assert_screen "grok placeholder on plain backends" empty "$CAPS_PLAIN" "$placeholder_draft"
   assert_screen "grok titled on cmux/orca" empty "$CAPS_PLAIN" "$titled"
   assert_screen "grok titled on zellij" empty "$CAPS_STYLED_NOID" "$titled"
   # The tolerance is additive: an untitled border still proves the same box.
   assert_screen "grok untitled border" empty "$CAPS_TMUX" "$plain_border" 1
-  typed=$'  ╭──────────────────────────────────────╮\n  │ ❯ deploy the fix                     │\n  ╰──────────────────── Grok 4.5 (high) ─╯'
+  typed=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯ deploy the fix                                                         │\n  ╰────────────────────────────────────────────────────────── Grok 4.6 (xhigh) ─╯'
   assert_screen "grok typed on tmux" pending "$CAPS_TMUX" "$typed" 1
-  pass "matrix: grok's titled bottom border is tolerated as a title, not read as ambiguity"
+  assert_screen "grok typed on herdr" pending "$CAPS_STYLED" "$typed"
+  malformed=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                        │\n  ╰────────────────────────────────────────────────────────── unknown surface ─╯'
+  assert_screen "oversized unknown title on herdr" unknown "$CAPS_STYLED" "$malformed"
+  pass "matrix: grok's real oversized titled bottom is empty while typed and unproved panes stay safe"
 }
 
 test_matrix_kimi_bordered_shell_glyph_box() {
@@ -613,10 +917,16 @@ test_idle_placeholder_is_empty
 test_idle_placeholder_case_mode_is_explicit
 test_real_text_is_pending
 test_matrix_claude_bare_nbsp_row
+test_matrix_claude_arrow_statusline_footer
+test_composer_footer_demotion_needs_a_proven_pair
+test_composer_footer_zone_is_shape_independent
+test_composer_footer_zone_refuses_rather_than_allows
 test_matrix_codex_dim_hint_row
 test_matrix_muse_truecolor_glyph_survives_signal_loss
 test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
+test_matrix_omp_status_row_bounds_bare_composer
+test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
