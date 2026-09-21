@@ -2700,20 +2700,47 @@ test_allow_red_requires_one_separate_name() {
   expect_code 2 "$rc" "github-allow-red-equals: equals form must be refused"
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
     "github-allow-red-equals: gh pr merge ran for the equals alias"
+  pass "fm-pr-merge refuses the equals form of --allow-red"
+}
 
-  case_dir=$(make_case github-allow-red-duplicate)
+# --allow-red may be repeated, each occurrence waiving one exactly-named check,
+# so a pull request with several red checks merges only once every one of them
+# is named and still refuses when one is left uncovered.
+test_allow_red_may_repeat_to_cover_several_checks() {
+  local case_dir rc head
+  head=b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0
+
+  case_dir=$(make_case github-allow-red-repeat-uncovered)
   mkdir -p "$case_dir/wt"
   add_gh_mocks "$case_dir" "$head"
-  write_github_red_json "$case_dir" "$head" lint
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run lint COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run unit COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run readiness COMPLETED FAILURE 2026-01-01T00:00:01Z)"
   set +e
   run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/88 \
     --allow-red lint --allow-red unit > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 2 "$rc" "github-allow-red-duplicate: duplicate waiver must be refused"
+  expect_code 1 "$rc" "github-allow-red-repeat-uncovered: a third red check left unnamed must refuse"
+  assert_grep "check 'readiness' is not green" "$case_dir/stderr" \
+    "github-allow-red-repeat-uncovered: the uncovered check was not named"
   assert_no_grep 'pr merge' "$case_dir/gh.log" \
-    "github-allow-red-duplicate: gh pr merge ran for duplicate waivers"
-  pass "fm-pr-merge accepts exactly one separately named red-check waiver"
+    "github-allow-red-repeat-uncovered: gh pr merge ran with an unwaived red check"
+
+  case_dir=$(make_case github-allow-red-repeat-covered)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_rollup_json "$case_dir" "$head" \
+    "$(check_run lint COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run unit COMPLETED FAILURE 2026-01-01T00:00:01Z)" \
+    "$(check_run readiness COMPLETED FAILURE 2026-01-01T00:00:01Z)"
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/89 \
+    --allow-red lint --allow-red unit --allow-red readiness \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-allow-red-repeat-covered: naming every red check should merge"$'\n'"$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 89 example/repo --squash
+  pass "fm-pr-merge lets --allow-red repeat to waive several exactly-named checks"
 }
 
 test_away_record_permits_any_green_merge_under_away_authority() {
@@ -3207,6 +3234,7 @@ test_undated_runs_never_supersede
 test_allow_red_still_waives_only_the_current_failure
 test_allow_red_is_refused_while_away
 test_allow_red_requires_one_separate_name
+test_allow_red_may_repeat_to_cover_several_checks
 test_away_record_permits_any_green_merge_under_away_authority
 test_away_branch_actor_merges_green_under_the_record
 test_away_branch_refuses_when_record_archived_during_preflight
