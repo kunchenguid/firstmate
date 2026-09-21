@@ -788,9 +788,6 @@ for _ in $(seq 1 100); do
 done
 touch "$MULTI_ROOT/trigger3"
 for _ in $(seq 1 100); do [ -f "$HMULTI/state/worker-1.inbox/003.msg" ] && break; sleep 0.02; done
-for _ in $(seq 1 100); do [ ! -e "$HMULTI/state/procevent/$multi_id.source" ] && break; sleep 0.02; done
-[ ! -e "$HMULTI/state/procevent/$multi_id.source" ] \
-  || fail "session_ended worker-owned board was automatically re-armed"
 [ -f "$HMULTI/state/procevent-inbox/$multi_id.1.handled" ] \
   || fail "first worker-owned round was not acknowledged by re-arm"
 [ -f "$HMULTI/state/procevent-inbox/$multi_id.2.handled" ] \
@@ -799,6 +796,38 @@ assert_contains "$(cat "$HMULTI/state/worker-1.inbox/003.msg" 2>/dev/null || tru
   "do not re-arm" "terminal worker-owned result instructed the worker to stop"
 [ "$(grep -c '^poll[123] reply:' "$MULTI_ROOT/replies" 2>/dev/null || true)" = 3 ] \
   || fail "worker replies were not posted once per round"
+
+# The terminal round keeps the board with worker-1 until worker-1 acknowledges
+# it, so the one source record stays the only ownership evidence there is: while
+# it is open neither firstmate nor a sibling task can arm the board or consume
+# the round, and acknowledging it is what concludes and retires the board.
+[ -e "$HMULTI/state/procevent/$multi_id.source" ] \
+  || fail "the terminal round released the worker's board before it was acknowledged"
+if PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" >/dev/null 2>"$MULTI_ROOT/terminal-arm.err"; then
+  fail "firstmate armed a worker-owned board whose terminal round was unacknowledged"
+fi
+assert_contains "$(cat "$MULTI_ROOT/terminal-arm.err")" "owned by task worker-1" \
+  "the refusal over an open terminal round did not name the worker owner"
+if PATH="$MULTI_BIN:$PATH" FM_HOME="$HMULTI" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$MULTI_ART" --for worker-2 \
+  >/dev/null 2>"$MULTI_ROOT/sibling-arm.err"; then
+  fail "a sibling task took over a worker-owned board whose terminal round was unacknowledged"
+fi
+assert_contains "$(cat "$MULTI_ROOT/sibling-arm.err")" "owned by task worker-1" \
+  "the sibling registration refusal did not name the worker owner"
+[ ! -f "$HMULTI/state/procevent-inbox/$multi_id.3.handled" ] \
+  || fail "a refused sibling registration consumed the owner's terminal round"
+[ ! -f "$HMULTI/state/worker-2.inbox/001.msg" ] \
+  || fail "a refused sibling registration took delivery of the owner's feedback"
+PATH="$MULTI_BIN:$PATH" pe "$HMULTI" handled "$multi_id" 3 >/dev/null
+[ -f "$HMULTI/state/procevent-inbox/$multi_id.3.handled" ] \
+  || fail "the owner's acknowledgement of the terminal round was not recorded"
+[ ! -e "$HMULTI/state/procevent/$multi_id.source" ] \
+  || fail "acknowledging the terminal round did not retire the worker-owned board"
+PATH="$MULTI_BIN:$PATH" pe "$HMULTI" reconcile >/dev/null 2>&1 || true
+[ "$(cat "$MULTI_ROOT/count")" = 3 ] \
+  || fail "the concluded board was polled again: $(cat "$MULTI_ROOT/count") polls"
 [ -z "$(wake_payloads "$HMULTI")" ] \
   || fail "worker-owned rounds produced a firstmate wake: $(wake_payloads "$HMULTI")"
 pass "worker-owned Lavish rounds deliver to the worker, acknowledge on re-arm, and stop at session end"

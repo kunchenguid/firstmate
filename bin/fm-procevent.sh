@@ -381,6 +381,10 @@ source_field() {  # <source-id> <field>
 }
 source_kind() { source_field "$1" kind; }
 source_owner_task() { source_field "$1" owner_task; }
+# Every captured round of one source with no handled acknowledgement yet.
+source_pending() {  # <source-id>
+  fm_procevent_pending "$STATE" | awk -v id="$1" 'index($0, "/" id ".") { print }'
+}
 runner_file()  { printf '%s/%s.runner\n' "$REG" "$1"; }
 staging_file() { printf '%s/.%s.%s.output\n' "$REG" "$1" "$2"; }
 stranded_file() { printf '%s/.%s.stranded\n' "$REG" "$1"; }
@@ -526,14 +530,6 @@ cmd_register_task() {
   state_root_bind create || die "cannot safely prepare the process-event state root"
   (umask 077; mkdir -p "$REG") || die "cannot prepare the process-event registry"
   fm_procevent_source_lock_acquire "$id" || die "cannot lock the source"
-  while IFS= read -r pending; do
-    [ -n "$pending" ] || continue
-    pending_adapter=$(fm_procevent_result_adapter "$pending" 2>/dev/null || true)
-    if [ -n "$pending_adapter" ] && adapter_result_is_terminal "$pending_adapter" "$pending"; then
-      fm_procevent_source_lock_release "$id"
-      die "cannot re-arm terminal Lavish result $pending; stop and conclude the review"
-    fi
-  done < <(fm_procevent_pending "$STATE" | awk -v id="$id" 'index($0, "/" id ".") { print }')
   if [ -e "$(source_file "$id")" ] || [ -L "$(source_file "$id")" ]; then
     if [ "$(source_kind "$id" 2>/dev/null || true)" != task-owned ]; then
       fm_procevent_source_lock_release "$id"
@@ -545,6 +541,14 @@ cmd_register_task() {
       die "cannot replace task-owned source $id owned by task $reply_source; steer that task to re-arm its board"
     fi
   fi
+  while IFS= read -r pending; do
+    [ -n "$pending" ] || continue
+    pending_adapter=$(fm_procevent_result_adapter "$pending" 2>/dev/null || true)
+    if [ -n "$pending_adapter" ] && adapter_result_is_terminal "$pending_adapter" "$pending"; then
+      fm_procevent_source_lock_release "$id"
+      die "cannot re-arm terminal Lavish result $pending; stop and conclude the review"
+    fi
+  done < <(source_pending "$id")
   reply_dest="$REG/$id.reply"
   i=0
   while [ "$i" -lt "${#argv[@]}" ]; do
@@ -585,7 +589,7 @@ cmd_register_task() {
       fm_procevent_source_lock_release "$id"
       die "cannot acknowledge captured round: $result"
     }
-  done < <(fm_procevent_pending "$STATE" | awk -v id="$id" 'index($0, "/" id ".") { print }')
+  done < <(source_pending "$id")
   fm_procevent_source_lock_release "$id"
   owner_lease_refresh
   printf 'registered: %s (%s, task=%s)\n' "$id" "$adapter" "$task"
@@ -708,7 +712,7 @@ publish_result() {  # <result-file>
   if ! fm_procevent_is_handled "$STATE" "$id" "$seq"; then
     if [ -n "$owner_task" ]; then
       if adapter_result_is_terminal "$adapter" "$result"; then
-        message="Lavish review result $id sequence $seq is terminal at $result. Read it, stop and conclude the review, and do not re-arm the board."
+        message="Lavish review result $id sequence $seq is terminal at $result. Read it with bin/fm-procevent-lavish.sh read $result, stop and conclude the review, and do not re-arm the board. The board stays yours until you acknowledge this round with bin/fm-procevent.sh handled $id $seq, which retires it."
       else
         export FM_PROCEVENT_CAPTURE_SOURCE_LOCK_HELD=1
         if adapter_result_is_silent "$adapter" "$result"; then
@@ -884,7 +888,7 @@ cmd_start() {
   fi
   if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
     task_owner=$(source_owner_task "$id" 2>/dev/null || true)
-    task_pending=$(fm_procevent_pending "$STATE" | awk -v id="$id" 'index($0, "/" id ".") { print; exit }')
+    task_pending=$(source_pending "$id" | head -1)
     if [ -n "$task_pending" ]; then
       fm_procevent_source_lock_release "$id"
       printf 'round-open: %s\n' "$id"
@@ -1209,7 +1213,7 @@ EOF
   else
     printf 'not-autohandled: %s (left for the handler; still unacknowledged)\n' "$id" >&2
   fi
-  if adapter_result_is_terminal "$adapter" "$durable"; then
+  if [ -z "$task_owner" ] && adapter_result_is_terminal "$adapter" "$durable"; then
     if retire_owned_terminal_source "$id"; then
       printf 'retired: %s (adapter classified the captured result terminal)\n' "$id"
     else
@@ -1534,7 +1538,7 @@ cmd_reconcile() {
         fm_procevent_claim_state_locked "$id"
         claim_state=$?
         if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
-          task_pending=$(fm_procevent_pending "$STATE" | awk -v id="$id" 'index($0, "/" id ".") { print; exit }')
+          task_pending=$(source_pending "$id" | head -1)
           if [ -n "$task_pending" ]; then
             fm_procevent_source_lock_release "$id"
             continue
@@ -1791,19 +1795,35 @@ cmd_classify() {
 }
 
 cmd_handled() {
-  local id=${1-} seq=${2-} status
+  local id=${1-} seq=${2-} status result='' result_adapter='' conclude=0
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   case "$seq" in ''|*[!0-9]*) die "sequence must be a nonnegative integer: $seq" ;; esac
   owner_lease_refresh
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
+  if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
+    result=$(source_pending "$id" | awk -v want="/$id.$seq.result" 'index($0, want) { print; exit }')
+    if [ -n "$result" ] \
+      && result_adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null) \
+      && adapter_result_is_terminal "$result_adapter" "$result"; then
+      conclude=1
+    fi
+  fi
   fm_procevent_mark_handled "$STATE" "$id" "$seq"
   status=$?
+  if [ "$conclude" -eq 1 ] && [ "$status" -eq 0 ]; then
+    rm -f -- "$(source_file "$id")" "$(runner_file "$id")"
+  else
+    conclude=0
+  fi
   fm_procevent_source_lock_release "$id"
   case "$status" in
     0) printf 'handled: %s %s\n' "$id" "$seq" ;;
     1) printf 'already-handled: %s %s\n' "$id" "$seq" ;;
     *) die "cannot durably record handling: $id $seq" ;;
   esac
+  if [ "$conclude" -eq 1 ]; then
+    printf 'retired: %s (owner acknowledged its terminal round)\n' "$id"
+  fi
 }
 
 cmd_retire() {
