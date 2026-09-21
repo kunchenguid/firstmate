@@ -75,25 +75,47 @@
 # missed one. A matching pane id in the recorded session proves the worker,
 # so only then may the agent's current directory sit below the registered one.
 #
-# THE POLL BACKSTOP. `check` reads each record's pane status with the
-# session-scoped backend reader, compares it against the status stored from
-# the previous poll, and prints one line per worker that just left `working`.
-# A worker found already stopped on its first poll after registration is
-# reported once too, so adopting a stalled worker is never a silent baseline.
-# Two moves between stopped states are reported as well, because each is a
-# worker waiting that nothing else will announce. Arriving at `blocked` from
-# any other status is one: a permission prompt does not end the turn, so the
-# Stop hook never fires for it and the poll is the only signal there is.
-# Arriving at `done` from `idle` or `turn-end` is the other: it proves a whole
-# turn ran and finished between two polls. `turn-end` to `idle` stays silent,
-# since the hook already delivered that stop.
-# A worker that stays stopped stays silent, so one stop is one wake - the
-# debounce is the stored status, not a timer. A pane Herdr positively reports
-# as not found is reported once as vanished; a read that merely failed or timed
-# out is neither a stop nor a vanish and leaves the stored status alone. The
-# previous status lives in the record's own `last` field, replaced atomically
-# after each poll, and `turn-end` stores `turn-end` there so the poll does not
-# report the same stop a second time.
+# THE POLL BACKSTOP. The turn-end hook is the PRIMARY signal and the poll is
+# the BACKSTOP: the poll wakes only when a transition proves a stop nobody has
+# observed, and stays silent when the hook has already reported that same stop.
+# `check` reads each record's pane status with the session-scoped backend
+# reader and compares it against the status remembered from the previous poll,
+# which lives in the record's own `last` field and is replaced atomically after
+# each poll. `turn-end` stores `turn-end` there. This table, read as
+# (remembered -> observed), is the whole rule, and it is settled here:
+#
+#   WAKE   vanished         any remembered state -> gone. Only Herdr's own
+#                           pane_not_found is `gone`. Reported once, then
+#                           silent while the pane stays gone.
+#   WAKE   stopped working  working -> idle, working -> done,
+#                           working -> blocked, working -> turn-end.
+#   WAKE   already stopped  unpolled -> idle, unpolled -> done,
+#                           unpolled -> blocked: the first poll after a
+#                           registration, so adopting a stalled worker is
+#                           never a silent baseline.
+#   WAKE   missed turn      idle -> done, blocked -> done, blocked -> idle.
+#                           Each proves a whole turn finished between polls.
+#   WAKE   newly blocked    idle -> blocked, done -> blocked,
+#                           turn-end -> blocked. A permission prompt does not
+#                           end the turn, so the Stop hook never fires for it
+#                           and the poll is the only signal there is.
+#   SILENT hook aftermath   turn-end -> done, turn-end -> idle. The hook
+#                           already delivered this stop. Herdr's `done` only
+#                           means "ready for input, completion not yet seen",
+#                           so an unattended worker reaches it on every turn.
+#                           idle -> done is a WAKE because it proves an
+#                           unobserved turn; turn-end -> done is not, because
+#                           the turn it follows was observed.
+#   SILENT no information   any state -> itself, anything -> working
+#                           (resuming work is not a stop), done -> idle (a
+#                           reported stop being seen).
+#   SILENT unreadable       a pane that is present with an unreadable status,
+#                           and a read that failed or timed out, never wake
+#                           and never overwrite the remembered state.
+#
+# Any pair not listed is SILENT, so a status this table does not know cannot
+# invent a wake. The debounce is the remembered status, not a timer: one stop
+# is one wake however long the worker stays stopped.
 #
 # THE CAPTURE. "It stopped" is not enough to act on: the supervisor needs the
 # question. So each stop line carries a bounded capture of the pane's last
@@ -742,28 +764,28 @@ action_check() {
       continue
     fi
 
-    # A pane that vanished is an event from any remembered state, because a
-    # standing worker rests stopped and that is when its pane gets closed. A
-    # departure from `working` is an event, and so is a worker found already
-    # stopped on its first poll. So is arriving at `blocked` from anywhere,
-    # which no turn-end hook announces, and arriving at `done` from `idle` or
-    # `turn-end`, which proves a whole turn was missed between two polls.
-    # Arriving at `working`, and `turn-end` to `idle`, update the memory
-    # silently. The stored status bounds every one of these to a single wake.
+    # The header's transition table, as (remembered>observed). Every pair not
+    # named here is silent.
     what=
     capture=1
-    if [ "$now" = gone ]; then
-      what='vanished from'
-      capture=0
-    elif [ "$RECORD_LAST" = working ]; then
-      what="stopped working (now $now) in"
-    elif [ -z "$RECORD_LAST" ] && [ "$now" != working ]; then
-      what="was already stopped when registered (now $now) in"
-    elif [ "$now" = blocked ]; then
-      what="is blocked and waiting (was $RECORD_LAST) in"
-    elif [ "$now" = 'done' ] && { [ "$RECORD_LAST" = idle ] || [ "$RECORD_LAST" = turn-end ]; }; then
-      what="finished a turn between polls (now done, was $RECORD_LAST) in"
-    fi
+    case "$RECORD_LAST>$now" in
+      *'>gone')
+        what='vanished from'
+        capture=0
+        ;;
+      'working>idle'|'working>done'|'working>blocked')
+        what="stopped working (now $now) in"
+        ;;
+      '>idle'|'>done'|'>blocked')
+        what="was already stopped when registered (now $now) in"
+        ;;
+      'idle>done'|'blocked>done'|'blocked>idle')
+        what="finished a turn between polls (now $now, was $RECORD_LAST) in"
+        ;;
+      'idle>blocked'|'done>blocked'|'turn-end>blocked')
+        what="is blocked and waiting (was $RECORD_LAST) in"
+        ;;
+    esac
 
     if [ -n "$what" ]; then
       text=$(stop_text "$id" "$what" "$capture")

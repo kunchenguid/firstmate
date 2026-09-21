@@ -230,10 +230,19 @@ out=$(FM_HOME="$HOME_A" "$BIN" check)
 [ -z "$out" ] || fail "a worker still blocked must not wake again, got: $out"
 pass 'a worker that becomes blocked between polls wakes its supervisor once'
 
-# idle->done proves a whole turn ran and finished between two polls.
-set_pane default w1:pV idle 'waiting'
+# Leaving blocked for a stopped state proves the prompt was answered and a
+# whole turn finished between two polls, so blocked->idle must wake.
+set_pane default w1:pV idle 'token rotated, which environment should I deploy to?'
 out=$(FM_HOME="$HOME_A" "$BIN" check)
-[ -z "$out" ] || fail "blocked->idle is not a new stop, got: $out"
+case "$out" in
+  *'standing worker stack-ui finished a turn between polls (now idle, was blocked)'*'which environment'*) ;;
+  *) fail "blocked->idle is a missed turn and must wake: ${out:-<silence>}" ;;
+esac
+out=$(FM_HOME="$HOME_A" "$BIN" check)
+[ -z "$out" ] || fail "a worker still idle must not wake again, got: $out"
+pass 'a worker that leaves blocked and stops idle between polls wakes its supervisor once'
+
+# idle->done proves a whole turn ran and finished between two polls.
 set_pane default w1:pV 'done' 'the migration plan is ready for review'
 out=$(FM_HOME="$HOME_A" "$BIN" check)
 case "$out" in
@@ -243,6 +252,26 @@ esac
 out=$(FM_HOME="$HOME_A" "$BIN" check)
 [ -z "$out" ] || fail "a worker still done must not wake again, got: $out"
 pass 'a turn that ran and finished between two polls wakes its supervisor once'
+
+# done->blocked is a new prompt, and blocked->done is the turn that followed it.
+set_pane default w1:pV blocked 'allow the deploy command?'
+out=$(FM_HOME="$HOME_A" "$BIN" check)
+case "$out" in
+  *'is blocked and waiting (was done)'*) ;;
+  *) fail "done->blocked is a worker waiting and must wake: ${out:-<silence>}" ;;
+esac
+set_pane default w1:pV 'done' 'deployed, smoke test results attached'
+out=$(FM_HOME="$HOME_A" "$BIN" check)
+case "$out" in
+  *'standing worker stack-ui finished a turn between polls (now done, was blocked)'*'smoke test results'*) ;;
+  *) fail "blocked->done is a missed turn and must wake: ${out:-<silence>}" ;;
+esac
+out=$(FM_HOME="$HOME_A" "$BIN" check)
+[ -z "$out" ] || fail "a worker still done must not wake again, got: $out"
+set_pane default w1:pV idle 'deployed, smoke test results attached'
+out=$(FM_HOME="$HOME_A" "$BIN" check)
+[ -z "$out" ] || fail "done->idle is a reported stop being seen, not a new one, got: $out"
+pass 'a turn finished after a blocked prompt wakes once, and done settling to idle is silent'
 
 # Resuming work and stopping again is a genuinely new stop, so it must report.
 set_pane default w1:pV working 'back to work'
@@ -638,6 +667,15 @@ pass 'the hook stays silent for a sibling worktree agent, a foreign cwd, and a f
 [ "$(wc -l < "$HOOK_STATUS")" -eq 2 ] \
   || fail "the worker's own pane and project must be accepted: $(cat "$HOOK_STATUS")"
 pass 'every turn end of the registered worker is its own event'
+
+# An unattended pane reads `done` after the turn the hook just reported. That
+# is the aftermath of a delivered stop, never a second one.
+set_pane default w8:pH 'done' 'Finished the PRD. Eleven open questions for you.'
+out=$(FM_HOME="$HOME_H" "$BIN" check)
+[ -z "$out" ] || fail "turn-end->done must not repeat the stop the hook delivered: $out"
+out=$(FM_HOME="$HOME_H" "$BIN" check)
+[ -z "$out" ] || fail "a worker still done after its hook stop must stay silent, got: $out"
+pass 'a pane left at done after a hook-reported stop does not wake a second time'
 
 # A turn often ends in a subdirectory the last command moved into. With the
 # pane proven that stop must still be delivered; without it, or with another
