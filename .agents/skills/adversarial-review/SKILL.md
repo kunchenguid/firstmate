@@ -71,9 +71,9 @@ Never state the whole pool to a side, because neither side can observe the other
 Asymmetric briefs produce asymmetric reviews, and that difference is an artifact of your writing rather than a finding.
 
 Tell each side, in its `## Firstmate spec`, that it is one of two independent reviewers, that the other exists, and that it must not read the other's directory or the exchange directory until firstmate says the exchange is open.
-Each side writes its own rounds into its own task's data directory, `data/<its-task-id>/`, the same place the generated scout brief already sends its report.
-Firstmate copies each round into a shared exchange directory as it relays it, named after the subject rather than after either task so neither side owns it: `data/<subject>-converge/`, holding one file per side per round.
-Teardown removes runtime state and the disposable worktree, not a task's data directory, so the rounds and the exchange copies both survive as the record of what was exchanged.
+Each side writes its rounds inside its own worktree and names the path in its status line, because the generated scout brief already permits every write there and authorizes nothing outside it beyond the report and the status file.
+Firstmate copies each round out of that worktree into the shared exchange directory as it relays it, named after the subject rather than after either task so neither side owns it: `data/<subject>-converge/`, holding one file per side per round.
+Copy each round out before the worktree can be discarded, because the worktree is scratch and the exchange directory is the one durable record of what was exchanged.
 
 Require each side to answer what has gone well, not only what went wrong.
 A review that only finds faults is not a review, and a reviewer that never says so is not reading for the captain.
@@ -83,7 +83,7 @@ If one side finishes first it waits; handing it the other's report early destroy
 
 ## Phase 2 - the exchange
 
-Each round is one file per side, written into that side's own data directory after reading the other side's latest material in full, which firstmate then copies into the exchange directory.
+Each round is one file per side, written inside that side's own worktree after reading the other side's latest material in full, which firstmate then copies into the exchange directory as it relays it.
 Both sides are told to aim at one joint recommendation per question, and to treat anything still contested as the captain's to decide rather than theirs to win.
 
 Both sides write their round simultaneously, so a pair of rounds routinely crosses: each answers the previous round rather than its counterpart.
@@ -138,8 +138,8 @@ It does not take a position, rank the arguments, add an argument of its own, tel
 Its complete list of moves:
 
 1. Write the two briefs and spawn both scouts.
-2. Hold each report until both exist, then open the exchange by steering both sides with the same instruction through `bin/fm-send.sh`, naming the other side's material, the exchange directory to read, and each side's own data directory to write its rounds into.
-3. Copy each round from the side's own data directory into the exchange directory and relay it to the other side unaltered, by path.
+2. Hold each report until both exist, then open the exchange by steering both sides with the same instruction through `bin/fm-send.sh`, naming the other side's material and the exchange directory to read, and telling each side to write its rounds inside its own worktree and name the path.
+3. Copy each round out of that side's worktree into the exchange directory and relay it to the other side unaltered, by its exchange path.
 4. Point a side at a contested claim that a bounded free measurement could settle, or at a question it did not answer.
    This is the only input firstmate adds, and it is a pointer, never a position.
 5. Decide after each round whether the exchange closes, and say which stopping condition fired.
@@ -162,7 +162,6 @@ He is choosing between two paths, so each paragraph exists to make one path's pr
 When one side never answered the item, say that plainly and have its proposer write the case against their own proposal, so the captain still gets both sides.
 
 Every contested item is a captain call, so load `captain-hold-lifecycle` and register them before treating the review as complete.
-Whichever side owns the final captain-facing surface hosts its own review loop under the crew-hosted Lavish board contract in [`docs/configuration.md`](../../../docs/configuration.md#crew-hosted-lavish-review-boards); firstmate does not arm or poll that board.
 
 Report both sides' spend and what the spend changed.
 A test that could not have changed a recommendation should not have been run.
