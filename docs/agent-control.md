@@ -78,7 +78,7 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    When the recorded endpoint is proven gone rather than merely idle or unreachable - which only Herdr can establish - the launch owner creates one fresh endpoint in that same worktree and the republished record rebinds the task to it - see [Reclaiming a task whose endpoint is gone](#reclaiming-a-task-whose-endpoint-is-gone).
 6. **Keep a runtime's session authority valid.**
    A runtime can bind a pane's agent status to one session identity and ignore reports carrying another, so a replacement that starts a fresh session reports into a pane that discards it and the pane keeps showing the previous agent's last state.
-   The launch owner therefore passes the session reference the endpoint's own runtime recorded back to a replacement that can consume it - the read is the backend's, the per-harness rule and the launch argument are the launch owner's - and every other case launches exactly what it did before: a fresh session.
+   The launch owner therefore passes the session reference the endpoint's own runtime recorded back to a replacement that can consume it - the read is the backend's, the per-harness rule is the control plane's, and the launch argument is the launch owner's - and every other case launches exactly what it did before: a fresh session.
    Nothing here relaxes a guard, and the reference is a launch input, never authority to send, close, or act on the pane.
    [`docs/herdr-backend.md`](herdr-backend.md#agent-status-authority-and-relaunch) owns the mechanism and the measured behavior; `bin/fm-control-lib.sh`'s `fm_control_relaunch_resume_flag` and `relaunch_resume_args` in `bin/fm-spawn.sh` own the implementation.
 
