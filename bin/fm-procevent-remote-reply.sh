@@ -266,27 +266,38 @@ cmd_arm_locked() {
 }
 
 cmd_rebase_locked() {
-  local id=${1:-} sid path archive reason empty
+  local id=${1:-} sid path archive reason empty status_file ingest_lock
   validate_id "$id"
   remote_route_exists "$id"
   continuity_is_broken "$id" \
     || die "remote reply continuity is not marked broken for $id"
   path=$(cursor_path "$id")
-  [ -f "$path" ] && [ ! -L "$path" ] \
-    || die "broken remote reply cursor is unavailable or unsafe: $path"
+  [ ! -L "$path" ] && { [ ! -e "$path" ] || [ -f "$path" ]; } \
+    || die "broken remote reply cursor is unsafe: $path"
+  status_file="$STATE/$id.status"
+  [ ! -L "$status_file" ] && { [ ! -e "$status_file" ] || [ -f "$status_file" ]; } \
+    || die "parent status log is unsafe: $status_file"
   reason=$(sed -n 's/^reason=//p' "$(continuity_break_path "$id")" | head -n 1)
   [ -n "$reason" ] || reason='operator rebase retry failed'
-  "$SCRIPT_DIR/fm-procevent.sh" retire "$(source_id "$id")" || return 1
-  archive=$(umask 077; mktemp "$CURSOR_DIR/$id.cursor.rebased.XXXXXX") \
-    || die "cannot reserve superseded remote reply cursor"
-  mv -f -- "$path" "$archive" || die "cannot preserve superseded remote reply cursor"
   empty=$(empty_hash) || die "cannot establish the empty cursor hash"
+  "$SCRIPT_DIR/fm-procevent.sh" retire "$(source_id "$id")" || return 1
+  archive=none
+  if [ -e "$path" ]; then
+    archive=$(umask 077; mktemp "$CURSOR_DIR/$id.cursor.rebased.XXXXXX") \
+      || die "cannot reserve superseded remote reply cursor"
+    mv -f -- "$path" "$archive" || die "cannot preserve superseded remote reply cursor"
+  fi
   write_cursor "$id" 0 "$empty" || die "cannot reset remote reply cursor"
   rm -f -- "$(continuity_break_path "$id")" || die "cannot clear remote reply continuity record"
   if ! cmd_arm_locked "$id"; then
     write_continuity_break "$id" "$reason" || die "cannot restore remote reply continuity record"
     die "cannot re-arm rebased remote reply source"
   fi
+  ingest_lock="$STATE/.remote-reply-ingest-$id.lock"
+  fm_lock_acquire_wait "$ingest_lock" || die "cannot lock remote reply ingest for $id"
+  printf 'resolved [key=remote-reply-continuity-%s]: rebased to empty prefix\n' "$id" >> "$status_file" \
+    || { fm_lock_release "$ingest_lock"; die "cannot close remote reply continuity escalation"; }
+  fm_lock_release "$ingest_lock"
   printf 'rebased: %s cursor=%s\n' "$id" "$archive"
 }
 
@@ -588,21 +599,27 @@ cmd_ingest() {
   chmod 600 "$source_record" \
     || { fm_lock_release "$lock"; die "cannot secure remote reply mirrored-source record"; }
   read_cursor "$id"
-  if [ "$CURSOR_OFFSET" -eq "$to" ] && [ "$CURSOR_HASH" = "$to_hash" ]; then
-    cursor_already=1
-  elif [ "$CURSOR_OFFSET" -ne "$from" ] || [ "$CURSOR_HASH" != "$from_hash" ]; then
-    die "result does not continue the current cursor for $id"
-  fi
   if [ "$class" = continuity-broken ]; then
+    if [ "$CURSOR_OFFSET" -ne "$from" ] || [ "$CURSOR_HASH" != "$from_hash" ]; then
+      fm_lock_release "$lock"
+      printf 'continuity-superseded: %s (%s)\n' "$id" "$reason"
+      return 3
+    fi
     line="blocked [key=remote-reply-continuity-$id]: remote reply continuity broke for $id ($reason)"
-    append_rc=0
-    append_status_once "$status_file" "$line" || append_rc=$?
-    [ "$append_rc" -ne 2 ] || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
+    if ! continuity_is_broken "$id"; then
+      printf '%s\n' "$line" >> "$status_file" \
+        || { fm_lock_release "$lock"; die "cannot append continuity escalation"; }
+    fi
     write_continuity_break "$id" "$reason" \
       || { fm_lock_release "$lock"; die "cannot record remote reply continuity failure"; }
     fm_lock_release "$lock"
     printf 'continuity-broken: %s (%s)\n' "$id" "$reason"
     return 3
+  fi
+  if [ "$CURSOR_OFFSET" -eq "$to" ] && [ "$CURSOR_HASH" = "$to_hash" ]; then
+    cursor_already=1
+  elif [ "$CURSOR_OFFSET" -ne "$from" ] || [ "$CURSOR_HASH" != "$from_hash" ]; then
+    die "result does not continue the current cursor for $id"
   fi
   [ "$status" = delta ] && [ "$payload_bytes" -gt 0 ] || { fm_lock_release "$lock"; die "delta result has no payload"; }
   # Every document this delta OFFERS, deduplicated across the whole delta, is
