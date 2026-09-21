@@ -11,6 +11,11 @@
 #
 # snapshot is read-only and never contacts a forge. Its input is the canonical
 # fleet snapshot's backlog/tasks pair; --all adds rows for supervisor inspection.
+# snapshot and internally fetched input require exactly one JSON object with a
+# backlog object and tasks array; missing, unreadable, empty or invalid input,
+# or a failed producer, exits nonzero before projection rather than reporting zero.
+# Input failures print an fm-contributions: diagnostic to stderr; poll also prints
+# a contributions: diagnostic to stdout so the authenticated check surfaces it.
 # Every URL explicitly linked by a structured backlog row or a task's pr= is
 # owned. Previously observed URLs remain in data/<task>/contributions.json after
 # endpoint teardown. Repository-wide PR discovery never establishes ownership.
@@ -48,7 +53,7 @@
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
 # never re-read, stays fresh, and a stale error beside it is cleared once.
-# A genuine failure prints its unavailable line only when it starts an episode
+# A genuine forge failure prints its unavailable line only when it starts an episode
 # (no prior owner has an error); a successful read ends the episode.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
@@ -57,7 +62,7 @@
 # New maintainer comments/reviews (OWNER, MEMBER, COLLABORATOR, excluding the
 # contribution author) and issue transitions to ready-for-pr persist as pending
 # before any wake. poll appends ordinary durable check wakes through fm-wake-lib
-# and emits only newly durable signals for the authenticated check to surface.
+# and emits newly durable signals alongside diagnostics for the authenticated check.
 # ack removes
 # only the named pending token. A crash after enqueue can duplicate a wake but
 # cannot consume the pending signal. Source bodies are data, never commands.

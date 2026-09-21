@@ -114,6 +114,10 @@
 #
 # --contribution-input prints only the canonical backlog/tasks ownership pair,
 # without worker observations or cross-home collection, for the home-local poll.
+# Both this mode and the full snapshot stage contribution JSON through temporary
+# files and jq --slurpfile so backlog/task payloads do not consume argv space.
+# Contribution serialization failure exits nonzero with a stderr diagnostic,
+# without emitting a snapshot; fm-contributions.sh owns reader input validation.
 # Compatibility: JSON is the primary machine-readable surface.
 # Human views must render this output instead of parsing state files again.
 set -u
