@@ -176,6 +176,18 @@ command_listed() {  # <command>
   return $((1 - listed))
 }
 
+# The flag-on session transcript's user rows that contain <text>, as plain text; fails
+# while that session has written no transcript.
+transcript_user_rows() {  # <text>
+  local transcript
+  transcript=$(find "$HOME/.claude/projects" -name "$SESSION_ID.jsonl" 2>/dev/null | head -1)
+  [ -n "$transcript" ] || return 1
+  jq -j --arg text "$1" 'select(.type == "user") | .message.content
+    | if type == "string" then . else (map(select(.type == "text") | .text) | join("")) end
+    | select(contains($text))' "$transcript"
+  return 0
+}
+
 hull_column() {  # <screen text>
   printf '%s\n' "$1" | awk -v hull="$HULL" 'index($0, hull) { print index($0, hull); exit }'
 }
@@ -332,24 +344,22 @@ wait_screen 'probe.status changed' 'the typed operational probe' 200
 enter
 # Claude Code 2.1.277+ removes the U+2063 mark on the first Enter and holds the cleaned
 # text for review, ignoring an Enter that lands too soon after; Enter is resent every
-# 0.5 s, the daemon's submit cadence, while the probe text stays on screen. With Calm on,
-# only the unsent composer can show the probe text, so its leaving confirms the submit.
+# 0.5 s, the daemon's submit cadence, until the session transcript records the probe as a
+# user row. An unsent composer cannot write that row, and a drawn row cannot hide it, so
+# the submit is confirmed whether or not Calm works.
+submitted=''
 i=0
 while [ "$i" -lt 100 ]; do
   sleep 0.5
-  submit_screen=$(screen)
-  case "$submit_screen" in
-    *'probe.status changed'*) enter ;;
-    *) break ;;
-  esac
+  submitted=$(transcript_user_rows 'probe.status changed')
+  [ -z "$submitted" ] || break
+  enter
   i=$((i + 1))
 done
-case "$submit_screen" in
-  *'probe.status changed'*)
-    printf '%s\n' "$submit_screen" >&2
-    fail "Claude Code $CLAUDE_VERSION never submitted the operational probe"
-    ;;
-esac
+if [ -z "$submitted" ]; then
+  printf '%s\n' "$(screen)" >&2
+  fail "Claude Code $CLAUDE_VERSION never submitted the operational probe"
+fi
 wait_screen 'OPERATIONAL_PROCESSED' 'the operational answer' 600
 sleep 1
 operational_screen=$(screen)
@@ -381,11 +391,8 @@ case "$away_screen" in
     fail "the away-mode escalation row drew while Calm was on"
     ;;
 esac
-transcript=$(find "$HOME/.claude/projects" -name "$SESSION_ID.jsonl" 2>/dev/null | head -1)
-[ -n "$transcript" ] || fail "Claude Code $CLAUDE_VERSION wrote no transcript for session $SESSION_ID"
-away_row=$(jq -j 'select(.type == "user") | .message.content
-  | if type == "string" then . else (map(select(.type == "text") | .text) | join("")) end
-  | select(contains("AWAY_PROBE_ROW"))' "$transcript")
+away_row=$(transcript_user_rows 'AWAY_PROBE_ROW') \
+  || fail "Claude Code $CLAUDE_VERSION wrote no transcript for session $SESSION_ID"
 [ -n "$away_row" ] || fail "Claude Code $CLAUDE_VERSION transcript holds no away-mode escalation row"
 away_kind=$(printf '%s' "$away_row" | "$OPERATIONAL_INPUT" classify) || away_kind=none
 [ "$away_kind" = away-supervisor ] \
