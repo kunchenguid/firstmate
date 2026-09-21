@@ -20,7 +20,10 @@
 #      classifier accepts, or a recognizable agent_not_found - never something
 #      it would silently read as "still working";
 #   3. a pane that disappears is seen as gone rather than as still working,
-#      which is the difference between a wake and a silently stranded worker.
+#      which is the difference between a wake and a silently stranded worker;
+#   4. the installed turn-end hook command, run inside the real pane, recognizes
+#      that pane as its own - the pane identity Herdr gives a process in a pane
+#      is the same id the registration recorded - and records the turn end.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -116,7 +119,7 @@ out=$(PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" FM_HOME="$HOME_DIR" \
   fail "live: registering into session $WRONG_SESSION should have been refused on herdr $HERDR_VERSION"
 }
 case "$out" in
-  *"is not in session $WRONG_SESSION"*) ;;
+  *"in session $WRONG_SESSION"*) ;;
   *) fail "live: the refusal must name the session searched on herdr $HERDR_VERSION: $out" ;;
 esac
 [ ! -e "$HOME_DIR/state/standing-workers/wrong-session.json" ] \
@@ -125,7 +128,8 @@ pass "live: a pane is not registrable from a session it does not live in (herdr 
 
 # --- 2. agent_status reads as one of the statuses the classifier accepts -----
 
-standing_worker register live-worker --session "$HERDR_LAB_SESSION" --pane "$PANE" >/dev/null \
+standing_worker register live-worker --session "$HERDR_LAB_SESSION" --pane "$PANE" \
+  --cwd "$TMP_ROOT" >/dev/null \
   || fail "live: registering an existing pane in its own session failed on herdr $HERDR_VERSION"
 pass "live: an existing pane registers in the session it actually lives in (herdr $HERDR_VERSION)"
 
@@ -179,6 +183,28 @@ esac
 out=$(standing_worker check)
 [ -z "$out" ] || fail "live: the stop must be reported once on herdr $HERDR_VERSION, got a repeat: $out"
 pass "live: the stop wake is debounced against the real server (herdr $HERDR_VERSION)"
+
+# --- the turn-end hook fires inside the real pane ---------------------------
+#
+# The hook's pane check compares the pane identity Herdr hands a process in a
+# pane against the id recorded at registration. Only a real pane can prove
+# those are the same spelling; if they were not, every turn end would be
+# silently discarded as somebody else's. No agent runs: the pane's own shell
+# executes the installed command exactly as a Stop hook would.
+HOOK_CMD=$(jq -r '.hooks.Stop[0].hooks[0].command // empty' "$TMP_ROOT/.claude/settings.local.json" 2>/dev/null)
+[ -n "$HOOK_CMD" ] || fail "live: register --cwd installed no Stop hook on herdr $HERDR_VERSION"
+HOOK_STATUS="$HOME_DIR/state/standing-live-worker.status"
+lab pane run "$PANE" "env -u CLAUDE_PROJECT_DIR $HOOK_CMD </dev/null" >/dev/null 2>&1 \
+  || fail "live: herdr $HERDR_VERSION rejected pane run for the hook command"
+for _ in $(seq 1 80); do
+  [ -s "$HOOK_STATUS" ] && break
+  sleep 0.25
+done
+if [ -s "$HOOK_STATUS" ] && grep -q 'standing worker live-worker ended its turn' "$HOOK_STATUS"; then
+  pass "live: the hook run inside the registered pane records its turn end (herdr $HERDR_VERSION)"
+else
+  fail "live: the hook run inside pane $PANE recorded nothing on herdr $HERDR_VERSION; the pane identity a pane process sees no longer matches the registered pane id"
+fi
 
 # --- 3. a pane that disappears is seen as gone ------------------------------
 #

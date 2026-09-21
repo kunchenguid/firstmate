@@ -1568,6 +1568,7 @@ ok - live: a pane is not registrable from a session it does not live in (herdr h
 ok - live: a working agent reads back as working on the real server (herdr herdr 0.9.1)
 ok - live: a real working->idle transition raises one wake (herdr herdr 0.9.1)
 ok - live: the stop wake is debounced against the real server (herdr herdr 0.9.1)
+ok - live: the hook run inside the registered pane records its turn end (herdr herdr 0.9.1)
 ok - live: a closed pane is reported as vanished, not as still working (herdr herdr 0.9.1)
 ok - live: a registered harness publishes working on herdr herdr 0.9.1 (sampled claude)
 ```
@@ -1583,7 +1584,11 @@ That no longer reproduces on this pairing - live Claude panes on Herdr 0.9.1 rep
 ```
 
 The guard therefore asserts the property against whatever agents are registered at run time instead of assuming it, reports rather than passes when every sampled agent happens to be stopped, and fails naming the harness and version if one publishes a status the stop classifier does not accept.
-`tests/fm-standing-worker.test.sh` pins the surrounding logic portably with no harness: the working-to-idle wake and its bounded untrusted excerpt, the stored-status debounce that keeps one stop to one wake, a vanished pane, an unreadable status that neither wakes nor overwrites the baseline, the wrong-session registration refusal and the sessions it names, and a secondmate home publishing the stop on its parent channel.
+The turn-end hook adds a second harness-dependent signal: its pane check compares the `HERDR_PANE_ID` a process inside a pane sees against the pane id recorded at registration.
+The guard runs the installed hook command in the real lab pane's own shell, with no agent and no prompt, and fails naming the Herdr version if that run records nothing, because a changed pane-id spelling would silently discard every turn end as another worker's.
+That the Claude Code harness itself fires a Stop hook from `.claude/settings.local.json` at each turn end is not exercised token-free; it was observed on 2026-09-21, when a hand-written hook of the same shape delivered the stops of all four incident workers while status sampling missed them.
+
+`tests/fm-standing-worker.test.sh` pins the surrounding logic portably with no harness: the working-to-idle wake and its bounded untrusted excerpt, the stored-status debounce that keeps one stop to one wake, a vanished pane, an unreadable status, a failed or timed-out Herdr read that is never a vanish, a hung session that does not starve a healthy one, the worker already stopped at registration, the wrong-session registration refusal and the sessions it names, a secondmate home publishing a keyed, defused stop event on its parent channel, the Stop hook merge and its tracked-file refusal, the hook event that catches a turn shorter than the poll interval, and the hook's silence for a foreign cwd, project directory, or pane.
 
 ### Away-mode transport
 
