@@ -4,7 +4,7 @@ Launch OpenCode with `--standalone`; the plugin runs inside the server process, 
 When this session owns supervision and away mode is not active:
 1. Drain first with `bin/fm-wake-drain.sh`.
    After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
-2. First cycle: let `.opencode/plugins/fm-primary-watch-arm.js` arm supervision after the OpenCode session goes idle.
+2. First cycle: let `.opencode/plugins/fm-primary-watch-arm.js` arm supervision after the OpenCode session's first turn ends.
 3. The plugin listens for the terminal `session.execution` events - `succeeded`, `failed`, and `interrupted` - spawns `bin/fm-watch-arm.sh --restart` without awaiting it in the turn-end handler, and owns every later successor launch.
    An interrupted turn re-arms the watcher so a cancelled turn cannot silently leave supervision off, except when `reason` is `shutdown`, which OpenCode itself does not project to idle.
 4. After an actionable child close, the plugin rechecks session-lock ownership and verifies one singleton successor before it calls `ctx.session.prompt`; its bounded fallback is defined in `docs/watcher-continuity.md`.

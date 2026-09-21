@@ -7,7 +7,7 @@ Earlier interactive behavior was verified across V1 versions 1.15.7 through 1.18
 
 | Fact | Value |
 |---|---|
-| Busy state | The Firstmate-owned plugin's `session.execution` lifecycle: `started` is active, `succeeded` and `failed` are inactive, latched to the worker's own session. |
+| Busy state | The Firstmate-owned plugin's `session.execution` lifecycle: `started` is active, and the three terminal events `succeeded`, `failed`, and `interrupted` are inactive, latched to the worker's own session so a cancelled turn still clears busy. |
 | Exit command | `/exit`. |
 | Interrupt | Double Escape; it is known to be flaky while a long shell command runs, so use `../../../bin/fm-control.sh <task-id> relaunch` for a wedged pane. |
 | Skill invocation | No separate verified form beyond normal slash-command behavior; use natural language when the exact command is uncertain. |
@@ -45,4 +45,5 @@ On native Windows, the operational-input adapter runs its Bash helper through `b
 
 OpenCode 2.x hosts plugins in the server process, so a primary or crewmate launch must pass `--standalone`; a plugin hosted by the shared background service reads the daemon environment, walks the daemon PID for lock ownership, and shares one process-wide coordinator across every project it serves.
 The companion `.opencode/plugins/fm-primary-watch-arm.js` owns normal TUI watcher supervision, wakes it with `ctx.session.prompt`, and coordinates with the guard before a blind-turn follow-up.
+It also re-arms on `session.execution.interrupted`, which the guard deliberately skips; `../../../docs/supervision-protocols/opencode.md` and `../../../docs/turnend-guard.md` own that interrupted-turn policy.
 The PreToolUse-equivalent watcher-arm seatbelt blocks by throwing from the V2 `execute.before` tool hook.
