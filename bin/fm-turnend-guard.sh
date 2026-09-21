@@ -248,6 +248,9 @@ block_stop() {
     if [ "$CLAUDE_MODE" -eq 1 ]; then
       printf '●  The Stop-owned auto-arm did not claim this home either, so recovery is NOT already under way.\n'
     fi
+    if [ -n "${FM_WATCHER_HEALTH_REASON:-}" ]; then
+      printf '●  Lock evidence: %s.\n' "$FM_WATCHER_HEALTH_REASON"
+    fi
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
   } >&2
