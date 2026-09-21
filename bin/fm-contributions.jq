@@ -24,9 +24,9 @@ def github_forge_host:
 def github_url:
   github_forge_host != null;
 def canonical_url:
-  type == "string" and
-  (github_shaped_url
-    or test("^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+/-/merge_requests/[1-9][0-9]*$"));
+  github_url
+  or (type == "string"
+    and test("^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+/-/merge_requests/[1-9][0-9]*$"));
 def sha: type == "string" and test("^[a-fA-F0-9]{40}$");
 def valid_record:
   try (.schema == "fm-contributions.v1" and (.task | type == "string")
@@ -90,9 +90,7 @@ def projected($input; $saved; $now; $max_age):
        | map(sort_by([.submitted_at,.id]) | last)
        | map(. + {freshness:(if $observed_head != null and .commit_id != $observed_head then "STALE" elif $fresh then "current" else "unverified" end)})) as $reviews
     | (if ($k.url | github_url | not) then
-         (if ($k.url | github_shaped_url) then
-            {actor:"unmeasured",reason:"host not listed in config/forge-hosts; coverage is unmeasured (list it only if it is a GitHub host)"}
-          else {actor:"unmeasured",reason:"unsupported forge; coverage is unmeasured"} end)
+         {actor:"unmeasured",reason:"unsupported forge; coverage is unmeasured"}
        elif $o.state == "merged" or $o.state == "closed" then
          if $fresh then {actor:"nobody",reason:("forge reports " + $o.state)}
          else {actor:"fleet",reason:"terminal observation needs refresh"} end

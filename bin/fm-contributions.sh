@@ -26,13 +26,13 @@
 # so a narrowed allowlist can never redirect a credential. github_url owns
 # measurability; an authenticated api read is addressed to the matched
 # allowlist entry rather than to host text taken from a URL, and poll never
-# contacts a URL the allowlist does not cover. GitLab and unlisted hosts stay
-# owned and visibly unmeasured, never fleet work, and the two cases keep
-# distinct reasons: a URL that is not github-shaped reports an unsupported
-# forge, while an unlisted github-shaped host names config/forge-hosts and says
-# to list it only if it is a GitHub host. Shape is all the projection knows, so
-# a Gitea, Codeberg, or Bitbucket URL of that shape gets the same reason;
-# listing one makes its observations fail rather than making it measurable.
+# contacts a URL the allowlist does not cover. canonical_url owns by the same
+# rule, so a linked URL is owned only when it is on an allowlisted host or is a
+# GitLab merge request; a github-shaped URL on any other host is not owned at
+# all and never appears in coverage. A GitLab merge request stays owned and
+# visibly unmeasured, never fleet work. Because record validity shares that
+# rule, de-listing a host withdraws its ownership and leaves any record already
+# written for it unreadable rather than silently unmeasured.
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,

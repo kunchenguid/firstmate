@@ -399,66 +399,61 @@ test_forge_host_allowlist_decides_coverage() {
   home=$(new_home enterprise-coverage)
   printf 'precision-it.ghe.com\n\n' > "$home/config/forge-hosts"
   record "$home" precision 18 open mergeable '' 'https://precision-it.ghe.com/o/r/pull/18'
-  record "$home" other-enterprise 19 open mergeable '' 'https://code.acme.test/o/r/pull/19'
-  printf -- '- [ ] gitlab - Filed https://gitlab.com/o/r/-/merge_requests/2 (repo: sample) (kind: ship)\n' \
+  printf -- '- [ ] unlisted - Filed https://code.acme.test/o/r/pull/19 (repo: sample) (kind: ship)\n%s\n%s\n' \
+    '- [ ] gitlab - Filed https://gitlab.com/o/r/-/merge_requests/2 (repo: sample) (kind: ship)' \
+    '- [ ] lookalike - Filed https://github.com.example/o/r/pull/20 (repo: sample) (kind: ship)' \
     >> "$home/data/backlog.md"
-  printf -- '- [ ] lookalike - Filed https://github.com.example/o/r/pull/20 (repo: sample) (kind: ship)\n' \
-    >> "$home/data/backlog.md"
-  bearings "$home" | jq -e '.contributions.known == 4 and .contributions.checked == 1
-    and .contributions.unmeasured == 3 and .contributions.counts.maintainer == 1
-    and .contributions.counts.fleet == 0 and .contributions.complete == false
-    and .contributions.proven_clear == false' >/dev/null \
-    || fail 'the configured forge-host allowlist did not decide measurability on its own'
+  bearings "$home" | jq -e '.contributions.known == 2 and .contributions.checked == 1
+    and .contributions.unmeasured == 1 and .contributions.counts.maintainer == 1
+    and .contributions.counts.fleet == 0 and .contributions.unreadable_records == 0
+    and .contributions.complete == false and .contributions.proven_clear == false' >/dev/null \
+    || fail 'ownership followed URL shape instead of the configured forge-host allowlist'
   rm -f "$home/config/forge-hosts"
-  bearings "$home" | jq -e '.contributions.known == 4 and .contributions.checked == 0
-    and .contributions.unmeasured == 4 and .contributions.counts.fleet == 0' >/dev/null \
-    || fail 'an absent forge-host list measured a host other than github.com'
-  pass 'only github.com plus configured hosts are measured; every other host stays unmeasured'
+  bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 0
+    and .contributions.unmeasured == 1 and .contributions.counts.fleet == 0
+    and .contributions.unreadable_records == 1' >/dev/null \
+    || fail 'de-listing a host kept measuring it, or hid that its durable record no longer reads'
+  pass 'only an allowlisted host or a GitLab merge request is owned; de-listing withdraws it visibly'
 }
 
-test_unlisted_host_reason_differs_from_unsupported_forge() {
-  local home listable ghe='https://precision-it.ghe.com/o/r/pull/18'
+test_only_allowlisted_hosts_and_gitlab_are_owned() {
+  local home ghe='https://precision-it.ghe.com/o/r/pull/18'
   local gitea='https://codeberg.org/owner/repo/issues/12' gitlab='https://gitlab.com/o/r/-/merge_requests/2'
-  listable='host not listed in config/forge-hosts; coverage is unmeasured (list it only if it is a GitHub host)'
-  home=$(new_home unmeasured-reasons)
+  home=$(new_home ownership-by-allowlist)
   jq -n --arg ghe "$ghe" --arg gitea "$gitea" --arg gitlab "$gitlab" \
     '{backlog:{present:true,records:[{id:"t",structured:true,links:[$ghe,$gitea,$gitlab]}]},tasks:[]}' \
-    > "$home/input.json" || fail 'unmeasured-reason fixture failed'
+    > "$home/input.json" || fail 'ownership fixture failed'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all \
-    > "$home/unlisted.json" || fail 'a read-only snapshot of three unmeasured forges failed'
-  jq -e --arg ghe "$ghe" --arg gitea "$gitea" --arg gitlab "$gitlab" --arg listable "$listable" \
-    '(.rows | length) == 3
-    and (.rows | map(select(.url == $ghe))[0] | .actor == "unmeasured" and .reason == $listable)
-    and (.rows | map(select(.url == $gitea))[0] | .actor == "unmeasured" and .reason == $listable)
-    and (.rows | map(select(.url == $gitlab))[0] | .actor == "unmeasured"
+    > "$home/unlisted.json" || fail 'a read-only snapshot with no configured hosts failed'
+  jq -e --arg gitlab "$gitlab" '(.rows | length) == 1
+    and (.rows[0] | .url == $gitlab and .actor == "unmeasured"
       and .reason == "unsupported forge; coverage is unmeasured")' "$home/unlisted.json" >/dev/null \
-    || fail 'the unmeasured reasons did not separate a listable host from an unreadable forge, or claimed a non-GitHub host is listable without qualification'
+    || fail 'a github-shaped URL on an unlisted host was owned, or a GitLab merge request was not'
   printf 'precision-it.ghe.com\n' > "$home/config/forge-hosts"
   with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" --all \
     > "$home/listed.json" || fail 'a read-only snapshot after listing the host failed'
-  jq -e --arg ghe "$ghe" --arg gitea "$gitea" --arg gitlab "$gitlab" --arg listable "$listable" \
-    '(.rows | map(select(.url == $ghe))[0] | .actor != "unmeasured")
-    and (.rows | map(select(.url == $gitea))[0] | .actor == "unmeasured" and .reason == $listable)
-    and (.rows | map(select(.url == $gitlab))[0]
-      | .reason == "unsupported forge; coverage is unmeasured")' "$home/listed.json" >/dev/null \
-    || fail 'listing one host changed how an unrelated unmeasured row is reported'
-  pass 'a github-shaped unlisted host is reported as listable only if it is GitHub; an unreadable forge is not'
+  jq -e --arg ghe "$ghe" --arg gitea "$gitea" --arg gitlab "$gitlab" '(.rows | length) == 2
+    and (.rows | map(select(.url == $gitea)) | length) == 0
+    and (.rows | map(select(.url == $ghe))[0] | .actor != "unmeasured")
+    and (.rows | map(select(.url == $gitlab))[0] | .actor == "unmeasured")' "$home/listed.json" >/dev/null \
+    || fail 'listing one host did not bring exactly that host, and only that host, into owned coverage'
+  pass 'only an allowlisted GitHub host or a GitLab merge request is owned'
 }
 
 test_commented_out_forge_host_is_rejected_not_ignored() {
   local home
   home=$(new_home commented-host)
   printf '#precision-it.ghe.com\n' > "$home/config/forge-hosts"
-  record "$home" precision 18 open mergeable '' 'https://precision-it.ghe.com/o/r/pull/18'
-  printf '{"backlog":{"present":true,"records":[]},"tasks":[]}\n' > "$home/input.json"
+  jq -n --arg ghe 'https://precision-it.ghe.com/o/r/pull/18' \
+    '{backlog:{present:true,records:[{id:"t",structured:true,links:[$ghe]}]},tasks:[]}' \
+    > "$home/input.json" || fail 'commented-out host fixture failed'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" \
     > "$home/coverage.json" 2> "$home/warnings.txt" \
     || fail 'a commented-out host refused a read-only snapshot'
   grep -F '#precision-it.ghe.com' "$home/warnings.txt" >/dev/null \
     || fail 'a commented-out host was silently ignored instead of reported as rejected'
-  jq -e '.known == 1 and .checked == 0 and .unmeasured == 1 and .counts.fleet == 0' \
-    "$home/coverage.json" >/dev/null \
-    || fail 'a commented-out host still measured its own contribution'
+  jq -e '.known == 0 and .unreadable_records == 0' "$home/coverage.json" >/dev/null \
+    || fail 'a commented-out host still owned its contribution'
   local refusal
   refusal=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" poll 2>/dev/null) \
     && fail 'poll ran against an allowlist silently narrowed by a commented-out host'
@@ -474,14 +469,16 @@ test_rejected_forge_host_narrows_coverage_without_failing_reads() {
   home=$(new_home rejected-hosts)
   printf 'precision-it.ghe.com\nnot a host/\n' > "$home/config/forge-hosts"
   record "$home" precision 18 open mergeable '' 'https://precision-it.ghe.com/o/r/pull/18'
-  record "$home" rejected 19 open mergeable '' 'https://code.acme.test/o/r/pull/19'
-  printf '{"backlog":{"present":true,"records":[]},"tasks":[]}\n' > "$home/input.json"
+  jq -n --arg unlisted 'https://code.acme.test/o/r/pull/19' \
+    '{backlog:{present:true,records:[{id:"t",structured:true,links:[$unlisted]}]},tasks:[]}' \
+    > "$home/input.json" || fail 'rejected-host fixture failed'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" snapshot "$home/input.json" \
     > "$home/coverage.json" 2> "$home/warnings.txt" \
     || fail 'a read-only snapshot refused because one configured host was rejected'
-  jq -e '.known == 2 and .checked == 1 and .unmeasured == 1
-    and .counts.maintainer == 1 and .counts.fleet == 0' "$home/coverage.json" >/dev/null \
-    || fail 'a rejected host line did not narrow coverage to the lines that parsed'
+  jq -e '.known == 1 and .checked == 1 and .unmeasured == 0
+    and .counts.maintainer == 1 and .counts.fleet == 0 and .unreadable_records == 0' \
+    "$home/coverage.json" >/dev/null \
+    || fail 'a rejected host line did not leave the lines that parsed measuring normally'
   warnings=$(grep -c 'config/forge-hosts' "$home/warnings.txt")
   [ "$warnings" = 1 ] || fail "a rejected host line warned $warnings times instead of once"
   grep -F 'not a host/' "$home/warnings.txt" >/dev/null \
@@ -489,7 +486,7 @@ test_rejected_forge_host_narrows_coverage_without_failing_reads() {
   out=$(bearings "$home" 2>/dev/null) \
     || fail 'a rejected host line took the whole fleet snapshot down with it'
   printf '%s' "$out" | jq -e '.schema != null and .in_flight != null and .prs != null
-    and .contributions.known == 2 and .contributions.unmeasured == 1' >/dev/null \
+    and .contributions.known == 1 and .contributions.checked == 1' >/dev/null \
     || fail 'fleet state was lost instead of only contribution coverage narrowing'
   pass 'a rejected forge host narrows coverage and warns once without failing a read-only path'
 }
@@ -516,10 +513,10 @@ test_forge_reads_only_reach_allowlisted_hosts() {
     || fail 'an authenticated forge read was addressed to a host the allowlist does not cover'
   [ ! -e "$home/data/unlisted/contributions.json" ] \
     || fail 'an unlisted host recorded a forge error for a URL that was never contacted'
-  bearings "$home" | jq -e '.contributions.known == 2 and .contributions.checked == 1
-    and .contributions.unmeasured == 1 and .contributions.counts.maintainer == 1
+  bearings "$home" | jq -e '.contributions.known == 1 and .contributions.checked == 1
+    and .contributions.unmeasured == 0 and .contributions.counts.maintainer == 1
     and .contributions.counts.fleet == 0' >/dev/null \
-    || fail 'an unlisted host became fleet work instead of unmeasured coverage'
+    || fail 'an unlisted host was owned, or the listed one was not measured'
   local before after refusal
   before=$(wc -l < "$home/forge/calls")
   printf 'precision-it.ghe.com\nnot a host/\n' > "$home/config/forge-hosts"
@@ -641,7 +638,7 @@ test_unmeasurable_row_does_not_expire_measured_home_coverage() {
   printf 'child\n' > "$child/.fm-secondmate-home"
   record "$child" held 21 open mergeable '(hold: choose scope) (hold-kind: captain)'
   record "$child" awaiting 22 open mergeable
-  printf -- '- [ ] enterprise - Filed https://precision-it.ghe.com/o/r/pull/18 (repo: sample) (kind: ship)\n' \
+  printf -- '- [ ] unsupported - Filed https://gitlab.com/o/r/-/merge_requests/2 (repo: sample) (kind: ship)\n' \
     >> "$child/data/backlog.md"
   FM_SNAPSHOT_NOW="$NOW" with_home "$child" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary \
     > "$child/state/home-summary.json" || fail 'could not collect child enterprise-link coverage'
@@ -1023,7 +1020,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_forge_host_allowlist_decides_coverage test_unlisted_host_reason_differs_from_unsupported_forge test_commented_out_forge_host_is_rejected_not_ignored test_rejected_forge_host_narrows_coverage_without_failing_reads test_forge_reads_only_reach_allowlisted_hosts test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_forge_host_refusal_reaches_the_captain_through_the_watcher test_unmeasurable_row_does_not_expire_measured_home_coverage test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_forge_host_allowlist_decides_coverage test_only_allowlisted_hosts_and_gitlab_are_owned test_commented_out_forge_host_is_rejected_not_ignored test_rejected_forge_host_narrows_coverage_without_failing_reads test_forge_reads_only_reach_allowlisted_hosts test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_forge_host_refusal_reaches_the_captain_through_the_watcher test_unmeasurable_row_does_not_expire_measured_home_coverage test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"

@@ -245,19 +245,18 @@ To stop measuring a host, delete its line.
 The file is the only input that widens the allowlist; an ambient `FM_FORGE_HOSTS` never does.
 The list is a per-machine credential decision, so it is not inherited by secondmate homes.
 
-The allowlist decides two things together.
-An owned URL whose host is not on it stays owned and visibly unmeasured: it is never counted as measured coverage and never becomes fleet work.
-`bin/fm-contributions.sh poll` also never contacts such a URL, so an unmeasurable host cannot record a forge error for a read that never happened.
+The allowlist decides ownership, not just measurement.
+A linked URL becomes an owned contribution only when it is a GitHub pull request or issue on an allowlisted host, or a GitLab merge request.
+**An enterprise host must be listed here to be seen at all**: until it is, a `precision-it.ghe.com` pull request linked from a backlog row is not owned, does not appear in coverage, and does not affect `complete` or `proven_clear`.
+Listing the host is what brings it into coverage, and `github.com` is listed implicitly.
 
-The two unmeasured cases report different reasons, both visible per row through `fm-contributions.sh snapshot <input.json> --all`.
-Any URL that is not shaped like a GitHub pull request or issue reports `unsupported forge; coverage is unmeasured` — a GitLab merge request is one example, not the only one.
-A URL that *is* github-shaped but whose host is not listed reports `host not listed in config/forge-hosts; coverage is unmeasured (list it only if it is a GitHub host)`.
+This is deliberately ownership by allowlist rather than by URL shape.
+The `/<owner>/<repo>/(pull|issues)/<n>` shape is not unique to GitHub — a Gitea or Codeberg issue, a Bitbucket issue, and even an unrelated three-segment documentation link all match it — and the observer cannot tell a GitHub Enterprise host from any of those without contacting it.
+Owning URLs on that evidence would mean counting links the observer will never read as permanently incomplete coverage, so it does not.
+Only add a host you know is GitHub Enterprise Cloud or Enterprise Server, and that `gh` is authenticated against; listing a host that does not serve GitHub's API makes every observation of it fail rather than making it measurable.
 
-That caveat is load-bearing, because the projection only knows the URL's shape and cannot tell a GitHub Enterprise host from any other forge without contacting it.
-The `/<owner>/<repo>/(pull|issues)/<n>` shape is not unique to GitHub: a Gitea or Codeberg issue, a Bitbucket issue, and even an unrelated three-segment documentation link all match it and all get this same reason.
-Listing such a host does not make it measurable — it makes every observation of it fail.
-The host becomes measurable to the projection, so `poll` stops skipping it and starts issuing `gh api --hostname <host>` reads against a forge that does not serve GitHub's API; each read fails, the row records a forge error, and it settles as fleet work that can never clear while consuming poll budget every cycle.
-Only add a host you know is GitHub Enterprise Cloud or Enterprise Server, and that `gh` is authenticated against.
+A GitLab merge request remains owned and visibly unmeasured, reporting `unsupported forge; coverage is unmeasured` — visible per row through `fm-contributions.sh snapshot <input.json> --all`.
+`bin/fm-contributions.sh poll` never contacts such a URL, so an unmeasurable forge cannot record an error for a read that never happened.
 Every authenticated `api` read is addressed to the matched allowlist entry rather than to host text taken from a contribution URL, so a link arriving through a delivered backlog row cannot choose which host receives a forge credential.
 
 `forge_host` in [`fm-contributions.jq`](../bin/fm-contributions.jq) is the single owner of host-name validity and drops any line it rejects, as does a file that is a symlink, is not a readable regular file, or exceeds 4096 bytes.
@@ -267,7 +266,9 @@ That refusal is not scoped to the rejected host — it halts polling for every h
 No record's `checked_at` advances while it stands, so once `FM_CONTRIBUTIONS_MAX_AGE` passes every contribution reports as fleet work needing a recheck, not just the ones on the rejected host.
 Poll prints the refusal on stdout, the same channel its other diagnostics use, so the armed check carries it through the watcher into a durable wake naming `config/forge-hosts` and what was rejected instead of failing where nobody sees it.
 So a typo costs all contribution polling until it is fixed, and says so; it never costs the fleet snapshot.
-Adding or removing a host changes only measurability; durable records written under a previously listed host are preserved and simply return to the unmeasured bucket.
+Removing a host is not purely cosmetic, because record validity follows the same allowlist.
+De-listing a host withdraws its ownership, and any durable record already polled under it stops reading as a valid record: that task's `contributions.json` is then counted in `unreadable_records` rather than quietly returning to the unmeasured bucket.
+Restoring the line restores both. Delete a host's line only when you mean to stop tracking its contributions altogether.
 [`fm-contributions.sh --help`](../bin/fm-contributions.sh) owns the record contract, and `github_url` in [`fm-contributions.jq`](../bin/fm-contributions.jq) owns the decision, with coverage in [`tests/fm-contributions.test.sh`](../tests/fm-contributions.test.sh).
 
 ## Gate defaults (.no-mistakes.yaml)
