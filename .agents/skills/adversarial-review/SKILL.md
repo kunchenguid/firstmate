@@ -72,6 +72,7 @@ Asymmetric briefs produce asymmetric reviews, and that difference is an artifact
 
 Tell each side, in its `## Firstmate spec`, that it is one of two independent reviewers, that the other exists, and that it must not read the other's directory or the exchange directory until firstmate says the exchange is open.
 Each side writes its rounds inside its own worktree and names the path in its status line, because the generated scout brief already permits every write there and authorizes nothing outside it beyond the report and the status file.
+Tell each side to declare the gap between rounds with the declared-external-wait verb its generated brief names, saying it awaits firstmate's relay of the other side's round, and to resume with a `working:` line when the relay lands.
 Firstmate copies each round out of that worktree into the shared exchange directory as it relays it, named after the subject rather than after either task so neither side owns it: `data/<subject>-converge/`, holding one file per side per round.
 Copy each round out before the worktree can be discarded, because the worktree is scratch and the exchange directory is the one durable record of what was exchanged.
 
@@ -123,9 +124,9 @@ Close the exchange as soon as any of these holds.
 - A further round would only restate positions already on record.
 - The only thing standing between the sides is a call that belongs to the captain, which goes to him rather than being argued for another round.
 
-Closing with an open item requires the rule 4 case from each side that engaged that item.
-When a side engaged an item and its case is missing, request exactly that case as the final round instead of closing, because firstmate may not author that position itself.
-When a side never answered an item at all, close anyway and carry the item under the Contested clause for an unanswered proposal, where its proposer writes the case against it.
+Closing with an open item requires each side's rule 4 case for that item.
+When a case is missing, request exactly that case as one final round rather than closing, because firstmate may not author that position itself.
+When it still has not arrived, close anyway and carry the item under the Contested clause for a missing case, whatever the reason that side did not deliver it.
 The exchange always closes: a review that cannot finish delivers nothing, which is worse than one that finishes and names its gap honestly.
 
 Never let a round happen merely because a round is available.
@@ -146,7 +147,7 @@ Its complete list of moves:
    This is the only input firstmate adds, and it is a pointer, never a position.
 5. Decide after each round whether the exchange closes, and say which stopping condition fired.
 6. Build the captain-facing outcome below.
-7. Tear down and complete both sides, only once the outcome is built and every round is copied out.
+7. Register the contested items as captain calls, then tear down and complete both sides, only once the outcome is built and every round is copied out.
 
 ## Outcome
 
@@ -158,11 +159,11 @@ Do not show him the argument that produced it, who conceded what, or how many ro
 Never re-litigate a converged item in front of him.
 
 **Contested.**
-Everything the two sides did not agree on, including a proposal the other side never answered before the exchange closed.
+Everything the two sides did not agree on, including an item one side did not make its case on before the exchange closed.
 One short paragraph per side, each naming what he gets and what he gives up on that path.
 No transcript, no file references, no agent names, no round numbers.
 He is choosing between two paths, so each paragraph exists to make one path's pro and con legible, not to win.
-When one side never answered the item, say that plainly and have its proposer write the case against their own proposal, so the captain still gets both sides.
+When one side's case is missing, say plainly what is missing and, where it is known, why, and have the item's proposer write the case against their own proposal, so the captain still gets both sides.
 
 Every contested item is a captain call, so load `captain-hold-lifecycle` and register them before treating the review as complete.
 
