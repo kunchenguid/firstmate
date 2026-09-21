@@ -99,9 +99,16 @@ Both payloads carry `stop_hook_active`.
 In the default Codex mode, a true value lets the second stop finish after one forced continuation.
 
 Claude runs the guard with `--claude`, which ignores `stop_hook_active` and cooperates with the Stop-owned auto-arm.
+Recovery ownership in Claude mode is fixed and ordered.
+Claude fires both registered `Stop` hooks for the same event in parallel, so the guard never runs before or instead of the arm.
+The Stop-owned auto-arm is the only component that restores a missing watcher: it claims the session lock when no live harness holds it, then takes the generation claim, then arms.
+The guard only observes that claim within its bounded wait and allows the stop, and it blocks solely when the arm is genuinely absent.
+The invariant is that a home with in-flight work and no live watcher recovers within one turn end with no operator action, and any state the guard blocks must be one the arm can claim, which is why the arm claims an absent or malformed session lock instead of staying inert.
+`tests/fm-turnend-guard.test.sh` pins the invariant by running the real guard and the real arm together against such a home.
 Before the Claude cooperative budget can re-block a Stop, the guard checks for a live foreign session-lock owner and takes the same safe diagnostic exit described under "Guard predicates".
 Claude Code sets `stop_hook_active=true` on every stop after any stop-hook continuation, including `asyncRewake` rewakes, which re-opened the 2026-07-21 blind window under the default one-shot behavior.
 The Claude mode waits up to `FM_CLAUDE_AUTOARM_SYNC_WAIT_MS` (default 800 milliseconds) and allows the stop when the watcher is healthy, the auto-arm's generation claim is open, or `state/.claude-autoarm-epoch` contains a fresh actionable rewake owned by this event epoch.
+When the session lock is unowned, the wait grows by `FM_CLAUDE_AUTOARM_LOCK_CLAIM_WAIT_MS` (default 2000 milliseconds) because the arm must first claim the lock through `bin/fm-lock.sh`.
 The claim is the ledger entry itself: the epoch sequence in `state/.claude-autoarm-epoch` is a monotonic claim generation, line 1 records the claim and terminal outcome, and line 2 records the claiming process's mandatory pid-identity; `fm_autoarm_claim_open` and `fm_autoarm_claim_next` in `bin/fm-wake-lib.sh` own the format contract.
 A claim is open while its outcome is `arming`, its owner pid is alive, its recorded identity successfully recomputes and matches that pid, and it is not stuck - stuck meaning the entry and the watcher beacon are both older than the guard grace, which proves the owner hung mid-arm (a healthy hours-long foregrounded cycle keeps the beacon beating, and every arming phase with no watcher is bounded in seconds).
 Anything else - a finished outcome, a dead or identity-mismatched owner, a stuck owner, an identityless entry, or no entry - lets the next Stop-owned firing take the next generation and arm; taking a newer generation is the reclaim, and a steady-state predecessor is never signalled or revoked.

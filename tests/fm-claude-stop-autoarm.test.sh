@@ -260,11 +260,13 @@ test_inert_without_session_lock() {
   dir=$(make_primary_dir "$TMP_ROOT/no-lock")
   : > "$dir/state/task.meta"
   write_arm_fixture "$dir" actionable
-  # No state/.lock: run the hook directly (no fake harness, no lock file).
+  # No state/.lock and a lock claim that cannot succeed (as with no harness in
+  # the hook's ancestry): the hook must stay inert rather than arm unowned.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$dir/bin/fm-lock.sh"
   out=$(printf '%s\n' '{"session_id":"s"}' | FM_HOME="$dir" bash "$dir/bin/fm-claude-stop-autoarm.sh" 2>&1); status=$?
-  expect_code 0 "$status" "hook must stay inert when no session holds the home lock"
+  expect_code 0 "$status" "hook must stay inert when no session holds the home lock and the claim fails"
   [ ! -e "$dir/state/arm-ran" ] || fail "hook armed without a session lock"
-  pass "auto-arm: inert with no session lock"
+  pass "auto-arm: inert with no session lock when the claim fails"
 }
 
 test_reclaims_stale_session_lock_before_arming() {
@@ -285,6 +287,30 @@ test_reclaims_stale_session_lock_before_arming() {
   [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after reclaiming the stale session lock"
   [ "$(epoch_outcome "$dir")" = rewake ] || fail "stale-lock recovery must record outcome=rewake"
   pass "auto-arm: a demonstrably dead recorded session owner is reclaimed through fm-lock.sh before arming"
+}
+
+# An absent or malformed lock names no owner, so the hook claims it through
+# fm-lock.sh instead of staying inert. Inert here deadlocked against the
+# turn-end guard, which blocks the same unowned home and has no other remedy.
+test_claims_absent_or_malformed_session_lock_before_arming() {
+  local dir out status expected_owner actual_owner kind
+  for kind in absent malformed; do
+    dir=$(make_primary_dir "$TMP_ROOT/unowned-lock-$kind")
+    : > "$dir/state/task.meta"
+    [ "$kind" = absent ] || printf 'not-a-pid\n' > "$dir/state/.lock"
+    write_arm_fixture "$dir" actionable
+    out=$(printf '%s\n' '{"session_id":"unowned"}' \
+      | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
+          printf "%s\n" "$$" > "$FM_HOME/state/expected-owner"
+          "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
+        ' 2>&1); status=$?
+    expect_code 2 "$status" "a $kind session lock must be claimed so the actionable rewake is delivered"
+    expected_owner=$(cat "$dir/state/expected-owner")
+    actual_owner=$(cat "$dir/state/.lock")
+    [ "$actual_owner" = "$expected_owner" ] || fail "$kind lock was not claimed by the current harness: expected $expected_owner, got $actual_owner"
+    [ -e "$dir/state/arm-ran" ] || fail "hook did not arm after claiming the $kind session lock"
+  done
+  pass "auto-arm: an absent or malformed session lock is claimed through fm-lock.sh before arming"
 }
 
 test_inert_when_lock_held_by_other_harness() {
@@ -1235,6 +1261,7 @@ test_fm_lock_status_still_works_with_shared_lib() {
 
 test_inert_in_child_worktree
 test_inert_without_session_lock
+test_claims_absent_or_malformed_session_lock_before_arming
 test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk

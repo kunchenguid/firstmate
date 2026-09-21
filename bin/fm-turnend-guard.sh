@@ -101,9 +101,11 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 CLAUDE_MODE=0
 CURSOR_MODE=0
 SYNC_WAIT_MS=${FM_CLAUDE_AUTOARM_SYNC_WAIT_MS:-800}
+LOCK_CLAIM_WAIT_MS=${FM_CLAUDE_AUTOARM_LOCK_CLAIM_WAIT_MS:-2000}
 EPOCH_FRESH=${FM_CLAUDE_AUTOARM_EPOCH_FRESH:-15}
 BLOCK_BUDGET=${FM_CLAUDE_TURNEND_BLOCK_BUDGET:-3}
 case "$SYNC_WAIT_MS" in ''|*[!0-9]*) SYNC_WAIT_MS=800 ;; esac
+case "$LOCK_CLAIM_WAIT_MS" in ''|*[!0-9]*) LOCK_CLAIM_WAIT_MS=2000 ;; esac
 case "$EPOCH_FRESH" in ''|*[!0-9]*|0) EPOCH_FRESH=15 ;; esac
 case "$BLOCK_BUDGET" in ''|*[!0-9]*|0) BLOCK_BUDGET=3 ;; esac
 
@@ -485,6 +487,15 @@ failure_episode_verified() {
     *) return 1 ;;
   esac
 }
+
+# An unowned session lock (absent, malformed, or held by a dead harness) makes
+# the arm claim it through fm-lock.sh before its generation claim, which costs
+# a subprocess chain the plain wait does not budget for (docs/turnend-guard.md).
+LOCK_PID=$(cat "$STATE/.lock" 2>/dev/null || true)
+case "$LOCK_PID" in
+  ''|*[!0-9]*) SYNC_WAIT_MS=$((SYNC_WAIT_MS + LOCK_CLAIM_WAIT_MS)) ;;
+  *) fm_harness_pid_alive "$LOCK_PID" || SYNC_WAIT_MS=$((SYNC_WAIT_MS + LOCK_CLAIM_WAIT_MS)) ;;
+esac
 
 i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
