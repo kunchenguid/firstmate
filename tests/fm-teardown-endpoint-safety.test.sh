@@ -60,6 +60,14 @@ run_case() {  # <case> <id>
     "$TEARDOWN" "$id" --force
 }
 
+run_case_args() {  # <case> <id> [teardown-args...]
+  local dir=$1 id=$2
+  shift 2
+  FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" FM_TEARDOWN_GUARD_DONE=1 \
+  PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$id" "$@"
+}
+
 assert_refused_without_mutation() {  # <case> <id> <description>
   local dir=$1 id=$2 description=$3 rc
   set +e
@@ -531,6 +539,218 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
     || fail "teardown reached the runtime on a slot held by a secondmate home: $(cat "$dir/runtime.log")"
 
   pass "fm-teardown: a pool slot named by a second task record is never returned, killed, or reset"
+}
+
+test_stale_association_correction_preserves_current_owner() {
+  local dir id=jev-old-benchmark other=jev-new-benchmark worker rc current_commit
+
+  dir=$(make_case jev-stale-association)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" \
+    "spawn_gen=fixture-old"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" \
+    "spawn_gen=fixture-new"
+  claim_pool_slot "$dir" "$other"
+  mkdir -p "$dir/home/data/$other/evidence"
+  printf 'current-owner report\n' > "$dir/home/data/$other/report.md"
+  printf 'synthetic benchmark result\n' > "$dir/home/data/$other/evidence/result.txt"
+  printf 'manual\n' > "$dir/home/config/backlog-backend"
+  printf '%s\n' '# synthetic held decision' '- [ ] unrelated-held - keep this captain call' \
+    > "$dir/home/data/backlog.md"
+  cp "$dir/home/data/backlog.md" "$dir/backlog.before"
+  cp "$dir/home/state/$id.meta" "$dir/stale-meta.before"
+  cp "$dir/home/state/$other.meta" "$dir/owner-meta.before"
+  cp "$dir/pool/1/.fm-slot-owner" "$dir/claim.before"
+  printf 'current-owner-uncommitted\n' > "$dir/worktree/current-owner-uncommitted"
+  git -C "$dir/worktree" add current-owner-uncommitted
+  git -C "$dir/worktree" -c user.name=test -c user.email=test@example.invalid \
+    commit -qm current-owner-commit
+  current_commit=$(git -C "$dir/worktree" rev-parse HEAD)
+  printf 'current-owner-dirty\n' > "$dir/worktree/current-owner-dirty"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  # The triggering reassignment, duplicate records, and visible refusal are
+  # independently observable through the ordinary public cleanup command.
+  set +e
+  run_case_args "$dir" "$id" > "$dir/refusal-1.out" 2> "$dir/refusal-1.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "duplicate reassignment should refuse ordinary cleanup"
+  assert_contains "$(cat "$dir/refusal-1.err")" "$other" \
+    "ordinary duplicate cleanup should name the current owner"
+  assert_present "$dir/home/state/$id.meta" "ordinary duplicate cleanup removed the stale record"
+  assert_present "$dir/home/state/$other.meta" "ordinary duplicate cleanup removed the current-owner record"
+  assert_present "$dir/worktree/current-owner-dirty" \
+    "ordinary duplicate cleanup changed the current owner's copy"
+  [ ! -s "$dir/runtime.log" ] || fail "ordinary duplicate cleanup reached a runtime before refusing"
+  cmp -s "$dir/stale-meta.before" "$dir/home/state/$id.meta" \
+    || fail "ordinary duplicate refusal changed the stale record"
+
+  # Repeating the refusal proves the duplicate condition is not a one-shot
+  # observation and still leaves both records and the copy intact.
+  set +e
+  run_case_args "$dir" "$id" > "$dir/refusal-2.out" 2> "$dir/refusal-2.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "repeated duplicate reassignment should still refuse"
+  [ ! -s "$dir/runtime.log" ] || fail "repeated duplicate cleanup reached a runtime"
+
+  # The explicit correction stages only an exact prior record and an owner-bound
+  # marker; it does not clear or rewrite either task's live metadata.
+  run_case_args "$dir" "$id" --correct-stale-association \
+    > "$dir/correction-1.out" 2> "$dir/correction-1.err" \
+    || fail "positive stale-association correction refused: $(cat "$dir/correction-1.err")"
+  assert_present "$dir/home/state/$id.stale-association.before" \
+    "correction did not preserve the prior stale record"
+  assert_present "$dir/home/state/$id.stale-association" \
+    "correction did not publish its protected marker"
+  cmp -s "$dir/stale-meta.before" "$dir/home/state/$id.stale-association.before" \
+    || fail "correction backup is not the exact prior stale record"
+  cmp -s "$dir/owner-meta.before" "$dir/home/state/$other.meta" \
+    || fail "correction changed the current-owner record"
+  cmp -s "$dir/claim.before" "$dir/pool/1/.fm-slot-owner" \
+    || fail "correction changed the current-owner claim"
+  assert_present "$dir/worktree/current-owner-dirty" \
+    "correction changed the current owner's uncommitted work"
+  [ "$(git -C "$dir/worktree" rev-parse HEAD)" = "$current_commit" ] \
+    || fail "current-owner commit changed during correction"
+  [ ! -s "$dir/runtime.log" ] || fail "record-only correction reached a runtime"
+
+  # The saved prior record is also evidence: tampering with it blocks ordinary
+  # cleanup rather than turning a damaged correction marker into authority.
+  printf 'tampered backup\n' > "$dir/home/state/$id.stale-association.before"
+  set +e
+  run_case_args "$dir" "$id" > "$dir/tampered-backup.out" 2> "$dir/tampered-backup.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cleanup accepted a tampered stale-association backup"
+  assert_present "$dir/home/state/$id.meta" \
+    "tampered-backup refusal removed the stale record"
+  assert_present "$dir/home/state/$id.stale-association" \
+    "tampered-backup refusal removed the correction marker"
+  cp "$dir/stale-meta.before" "$dir/home/state/$id.stale-association.before"
+  chmod 600 "$dir/home/state/$id.stale-association.before"
+
+  # A changed current-owner record cannot authorize a correction retry.
+  printf 'worktree=%s\n' "$dir/other-worktree" >> "$dir/home/state/$other.meta"
+  set +e
+  run_case_args "$dir" "$id" --correct-stale-association \
+    > "$dir/changed-owner-record.out" 2> "$dir/changed-owner-record.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "correction accepted a changed current-owner record"
+  assert_present "$dir/home/state/$id.meta" \
+    "changed-owner-record refusal removed the stale record"
+  assert_present "$dir/home/state/$id.stale-association" \
+    "changed-owner-record refusal removed the correction marker"
+  cp "$dir/owner-meta.before" "$dir/home/state/$other.meta"
+
+  # A changed claim cannot authorize either a correction retry or cleanup.
+  printf 'task=other-owner\nhome=%s\n' "$dir/home" > "$dir/pool/1/.fm-slot-owner"
+  set +e
+  run_case_args "$dir" "$id" --correct-stale-association \
+    > "$dir/changed-owner.out" 2> "$dir/changed-owner.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "correction accepted changed ownership evidence"
+  assert_present "$dir/home/state/$id.meta" \
+    "changed-owner refusal removed the stale record"
+  assert_present "$dir/home/state/$id.stale-association" \
+    "changed-owner refusal removed the correction marker"
+  cp "$dir/claim.before" "$dir/pool/1/.fm-slot-owner"
+  run_case_args "$dir" "$id" --correct-stale-association \
+    > "$dir/correction-2.out" 2> "$dir/correction-2.err" \
+    || fail "idempotent correction retry refused after evidence was restored"
+
+  # Ordinary cleanup now consumes the marker, kills only the stale endpoint,
+  # leaves the reassigned slot out of the pool, and retains the prior record.
+  run_case_args "$dir" "$id" > "$dir/cleanup.out" 2> "$dir/cleanup.err" \
+    || fail "protected cleanup after correction failed: $(cat "$dir/cleanup.err")"
+  assert_absent "$dir/home/state/$id.meta" "protected cleanup left the stale record"
+  assert_absent "$dir/home/state/$id.stale-association" \
+    "protected cleanup left its correction marker"
+  assert_present "$dir/home/state/$id.stale-association.before" \
+    "protected cleanup discarded the recoverable prior record"
+  cmp -s "$dir/stale-meta.before" "$dir/home/state/$id.stale-association.before" \
+    || fail "protected cleanup changed the recoverable prior record"
+  assert_present "$dir/home/state/$other.meta" \
+    "protected cleanup removed the current-owner record"
+  assert_present "$dir/worktree/current-owner-dirty" \
+    "protected cleanup removed the current owner's uncommitted work"
+  [ "$(git -C "$dir/worktree" rev-parse HEAD)" = "$current_commit" ] \
+    || fail "current-owner commit changed during protected cleanup"
+  assert_present "$dir/home/data/$other/report.md" \
+    "protected cleanup removed the current-owner report"
+  assert_present "$dir/home/data/$other/evidence/result.txt" \
+    "protected cleanup removed the current-owner synthetic result"
+  cmp -s "$dir/backlog.before" "$dir/home/data/backlog.md" \
+    || fail "protected cleanup changed an unrelated held decision"
+  assert_contains "$(cat "$dir/runtime.log")" "kill-window" \
+    "protected cleanup did not retire only the stale endpoint"
+  assert_not_contains "$(cat "$dir/runtime.log")" "treehouse return" \
+    "protected cleanup returned the current owner's pool slot"
+  kill -0 "$worker" 2>/dev/null || fail "protected cleanup killed the current owner's process"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  pass "fm-teardown: an owner-proven duplicate association is corrected and cleaned without touching the current owner"
+}
+
+test_stale_association_correction_refuses_unproven_owner() {
+  local dir id=jev-old-benchmark other=jev-new-benchmark rc
+
+  dir=$(make_case jev-stale-unknown-owner)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" \
+    "spawn_gen=fixture-old"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" \
+    "spawn_gen=fixture-new"
+  printf 'task=unknown-owner\nhome=%s\n' "$dir/home" > "$dir/pool/1/.fm-slot-owner"
+  set +e
+  run_case_args "$dir" "$id" --correct-stale-association \
+    > "$dir/unknown.out" 2> "$dir/unknown.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "correction accepted an owner claim without a matching record"
+  assert_present "$dir/home/state/$id.meta" "unknown-owner correction removed the stale record"
+  assert_present "$dir/home/state/$other.meta" "unknown-owner correction removed the current-owner record"
+  assert_absent "$dir/home/state/$id.stale-association.before" \
+    "unknown-owner correction created a backup"
+  [ ! -s "$dir/runtime.log" ] || fail "unknown-owner correction reached a runtime"
+
+  dir=$(make_case jev-stale-unreadable-owner)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" \
+    "spawn_gen=fixture-old"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=ship" \
+    "spawn_gen=fixture-new"
+  printf 'not-a-claim\n' > "$dir/pool/1/.fm-slot-owner"
+  set +e
+  run_case_args "$dir" "$id" --correct-stale-association \
+    > "$dir/unreadable.out" 2> "$dir/unreadable.err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "correction accepted an unreadable owner claim"
+  assert_present "$dir/home/state/$id.meta" "unreadable-owner correction removed the stale record"
+  assert_present "$dir/home/state/$other.meta" "unreadable-owner correction removed the current-owner record"
+  assert_absent "$dir/home/state/$id.stale-association" \
+    "unreadable-owner correction created a marker"
+  [ ! -s "$dir/runtime.log" ] || fail "unreadable-owner correction reached a runtime"
+
+  pass "fm-teardown: stale-association correction refuses unknown and unreadable ownership evidence"
 }
 
 test_cross_home_pool_slot_collision_refuses() {
@@ -1383,6 +1603,8 @@ test_orca_close_failure_refuses_even_under_force
 test_already_gone_endpoint_still_completes_without_a_refusal
 test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
+test_stale_association_correction_preserves_current_owner
+test_stale_association_correction_refuses_unproven_owner
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
