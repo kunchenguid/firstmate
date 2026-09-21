@@ -105,6 +105,10 @@ case "${1:-}" in
   daemon)
     # FM_FAKE_DAEMON_DOWN: the explicit down-probe fails, as the real
     # `no-mistakes daemon status` does when the daemon is not running.
+    # FM_FAKE_DAEMON_TIMEOUT: the probe does not answer at all, which is what
+    # the bounded call reports as 124 when `timeout` kills a slow daemon status.
+    [ -z "${FM_FAKE_DAEMON_PROBE_LOG:-}" ] || printf 'probe\n' >> "$FM_FAKE_DAEMON_PROBE_LOG"
+    [ "${FM_FAKE_DAEMON_TIMEOUT:-0}" = 1 ] && exit 124
     [ "${FM_FAKE_DAEMON_DOWN:-0}" = 1 ] && exit 1
     printf '%s\n' 'daemon running (pid 4242)'
     exit 0 ;;
@@ -298,6 +302,8 @@ reset_fakes() {
   FM_FAKE_HERDR_SHELL_PID=$$
   FM_FAKE_CI_LOGS=""
   FM_FAKE_DAEMON_DOWN=0
+  FM_FAKE_DAEMON_TIMEOUT=0
+  FM_FAKE_DAEMON_PROBE_LOG=
   FM_FAKE_PR_STATE=MERGED
   FM_FAKE_PR_MERGED=true
   FM_FAKE_PR_READ_FAIL=0
@@ -309,7 +315,7 @@ reset_fakes() {
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
-  export FM_FAKE_DAEMON_DOWN FM_FAKE_AXI_HOME
+  export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_DAEMON_PROBE_LOG FM_FAKE_AXI_HOME
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
   export FM_FAKE_GLAB_STATE FM_FAKE_GLAB_READ_FAIL FM_FAKE_GLAB_READ_LOG
@@ -420,6 +426,95 @@ run:
   findings[2]{id,severity,file,line,action,description}:
     r1,warning,a.go,,auto-fix,ignored error
     r2,error,b.go,,ask-user,changes product behavior
+gate: review
+EOF
+}
+
+# A gate owed the CREWMATE's own answer: every finding's `action` column is
+# auto-fix. The free-text `description` column is where this repository's own
+# review output routinely quotes finding actions, so one row spells the token out
+# the way an enumeration does - surrounded by commas, in the exact shape a
+# substring or unanchored-regex derivation would accept - and the branch name
+# carries it too. Both are the counterexample: the ONLY thing that may mint the
+# human-decision component is the `action` column read by position.
+run_parked_crewmate_gate_with_ask_user_prose() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: fix_review
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[2]{id,severity,file,line,action,description}:
+    r1,warning,a.go,,auto-fix,the action field is one of no-op, auto-fix, ask-user, so pick one
+    r2,warning,b.go,,auto-fix,ignored error
+gate: review
+EOF
+}
+
+# The same gate with the findings table's columns in a different order, so the
+# derivation is proven to read the column INDEX out of the header rather than
+# assuming action is the fifth field. Only the last row is owed a human.
+run_parked_reordered_columns() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: awaiting_approval
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[2]{severity,action,id,file,line,description}:
+    warning,auto-fix,r1,a.go,,ignored error
+    error,ask-user,r2,b.go,,changes product behavior
+gate: review
+EOF
+}
+
+# The same crewmate-owed gate with `description` placed BEFORE `action` in the
+# header. Every row's real action column is auto-fix, but one description spells
+# the token out surrounded by commas at exactly the comma offset the `action`
+# index lands on, so a derivation that reads the index from the header and then
+# walks raw commas to it accepts free text as the action. The table's shape is
+# not provably safe here, so the only correct answer is to keep the ladder.
+run_parked_free_text_before_action() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: fix_review
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[1]{id,severity,file,line,description,action}:
+    r1,warning,a.go,12,the action field is one of auto-fix, ask-user,auto-fix
+gate: review
+EOF
+}
+
+# The same crewmate-owed gate preceded by an UNBRACED `findings[N]:` block from
+# an earlier, already-resolved round. The braced header that follows is the live
+# gate's table and is the one the column index is read from, so the rows walked
+# must be that table's rows too. An earlier block carrying `ask-user` at the very
+# comma offset the braced header's `action` index resolves to is the counter-
+# example: a row scan that anchors on the looser unbraced pattern reads the wrong
+# block's rows at the right block's index, and mints the component for a gate
+# whose every action is auto-fix.
+run_parked_unbraced_findings_precursor() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: fix_review
+  awaiting_agent: parked 2m10s
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings[2]:
+    prior-1,warning,a.go,ask-user,an earlier already-resolved block
+    prior-2,info,b.go,ask-user,another earlier row
+  findings[1]{id,severity,file,action,description}:
+    r1,warning,a.go,auto-fix,the live gate is owed to the crewmate
 gate: review
 EOF
 }
@@ -846,6 +941,109 @@ test_genuine_parked_not_superseded() {
   assert_contains "$out" "ask-user" "parked surfaces ask-user finding"
   assert_not_contains "$out" "superseded" "agreeing parked+needs-decision not flagged stale"
   pass "genuine parked run is not flagged superseded"
+}
+
+# Which HUMAN owes a parked gate its answer is the distinction the watcher's
+# wedge deferral rests on, so the component that carries it must come from the
+# findings table's `action` column and from nothing else. Both directions, plus
+# the counterexample a text match would have accepted.
+test_parked_human_decision_comes_from_the_action_column() {
+  local d out
+  reset_fakes
+  d=$(new_case parked-ask-user-action-column)
+  make_repo_on_branch "$d/wt" fm/feat-au
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-au.meta" "window=fm:fm-feat-au" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-au.status"
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-au)"
+  out=$(run_crew_state "$d" feat-au)
+  assert_contains "$out" "state: parked" "an ask-user row still reports parked"
+  assert_contains "$out" " · ask-user: authority decision" \
+    "an action column of ask-user mints the human-decision component"
+
+  # The counterexample. Nothing here is owed a human: every action column is
+  # auto-fix. A description enumerating the action values, and a branch named
+  # after the same token, must not mint the component - a crewmate that goes
+  # quiet before answering its own gate has to keep the wedge ladder.
+  reset_fakes
+  d=$(new_case parked-ask-user-prose-only)
+  make_repo_on_branch "$d/wt" fm/ask-user-authority-fix
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ap.meta" "window=fm:fm-feat-ap" "worktree=$d/wt" "kind=ship"
+  printf 'working: validation under way\n' > "$d/state/feat-ap.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_crewmate_gate_with_ask_user_prose fm/ask-user-authority-fix)"
+  # Guard the counterexample against going vacuous: the payload this gate is read
+  # from must really contain the token in a position a substring or unanchored
+  # regex would accept, or the case below proves nothing.
+  assert_contains "$FM_FAKE_AXI_STATUS" ", ask-user," \
+    "the counterexample payload must carry the token where a naive match accepts it"
+  assert_contains "$FM_FAKE_AXI_STATUS" "branch: fm/ask-user-authority-fix" \
+    "the counterexample payload must also carry the token in its branch name"
+  out=$(run_crew_state "$d" feat-ap)
+  assert_contains "$out" "state: parked" "a crewmate-owed gate still reports parked"
+  assert_not_contains "$out" " · ask-user: authority decision" \
+    "free text and a branch name must not mint the human-decision component"
+
+  # Column order is read from the header, not assumed.
+  reset_fakes
+  d=$(new_case parked-ask-user-reordered)
+  make_repo_on_branch "$d/wt" fm/feat-ar
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ar.meta" "window=fm:fm-feat-ar" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-ar.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_reordered_columns fm/feat-ar)"
+  out=$(run_crew_state "$d" feat-ar)
+  assert_contains "$out" " · ask-user: authority decision" \
+    "the action column is located by header index, not by fixed position"
+
+  # A header index alone is not enough, because the row is split on raw commas.
+  # With `description` ahead of `action` the comma walk lands inside free text,
+  # so a gate whose every action is auto-fix would mint the component. The table
+  # is not provably safe to walk, so the derivation must refuse and the crewmate
+  # must keep the wedge ladder.
+  reset_fakes
+  d=$(new_case parked-free-text-before-action)
+  make_repo_on_branch "$d/wt" fm/feat-af
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-af.meta" "window=fm:fm-feat-af" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-af.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_free_text_before_action fm/feat-af)"
+  # Non-vacuity: the payload must really carry the token at the comma offset the
+  # `action` index resolves to, or the case below proves nothing.
+  assert_contains "$FM_FAKE_AXI_STATUS" "findings[1]{id,severity,file,line,description,action}:" \
+    "the fixture must really place free text before the action column"
+  assert_contains "$FM_FAKE_AXI_STATUS" ", ask-user," \
+    "the fixture description must carry the token where the comma walk would accept it"
+  out=$(run_crew_state "$d" feat-af)
+  assert_contains "$out" "state: parked" "an unsafe findings header still reports parked"
+  assert_not_contains "$out" " · ask-user: authority decision" \
+    "a findings header that puts free text before action must not mint the human-decision component"
+
+  # The header and the rows must come from the SAME block. An earlier unbraced
+  # `findings[N]:` block ahead of the live gate's braced table would otherwise
+  # supply the rows while the braced header supplies the count and the `action`
+  # index, so the walk reads the wrong rows at the right index. Here that earlier
+  # block carries ask-user at exactly that offset while the live gate's only row
+  # is auto-fix: the crewmate owes this gate its own answer and must keep the
+  # wedge ladder.
+  reset_fakes
+  d=$(new_case parked-unbraced-findings-precursor)
+  make_repo_on_branch "$d/wt" fm/feat-ub
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ub.meta" "window=fm:fm-feat-ub" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: review gate\n' > "$d/state/feat-ub.status"
+  FM_FAKE_AXI_STATUS="$(run_parked_unbraced_findings_precursor fm/feat-ub)"
+  # Non-vacuity: the payload must really carry an unbraced findings block ahead
+  # of the braced one, with the token at the offset the walk would land on.
+  assert_contains "$FM_FAKE_AXI_STATUS" "findings[2]:" \
+    "the fixture must really place an unbraced findings block before the gate's table"
+  assert_contains "$FM_FAKE_AXI_STATUS" ",ask-user," \
+    "the earlier block must carry the token where the wrong-block walk would accept it"
+  out=$(run_crew_state "$d" feat-ub)
+  assert_contains "$out" "state: parked" "an unbraced findings precursor still reports parked"
+  assert_not_contains "$out" " · ask-user: authority decision" \
+    "rows from an earlier unbraced findings block must not mint the human-decision component"
+  pass "the parked human-decision component is derived from the findings table's action column"
 }
 
 test_scalar_gate_parked_not_superseded() {
@@ -2731,9 +2929,34 @@ EOF
   pass "coarse scan with a mismatched anchor stays unknown and lets the pane answer"
 }
 
-# Negative control: the exemption is gated on pipeline_owned specifically - any
-# other branch_sync state keeps the strict head rule.
-test_non_pipeline_owned_unresolvable_head_not_attributed() {
+# The same ledger with the newest row TERMINAL keeps the strict rule: a finished
+# run on a diverged head is history, not this worktree's current run.
+test_coarse_terminal_row_at_foreign_head_not_attributed() {
+  reset_fakes
+  local d; d=$(new_case f10-coarse-terminal)
+  make_repo_on_branch "$d/wt" fm/feat-f10h
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-f10h.meta" "window=fm:fm-feat-f10h" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-f10h.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-27 14:00
+  failed     fm/feat-f10h f0f0f0f0  2026-08-27 13:53
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-f10h
+  local out; out=$(run_crew_state "$d" feat-f10h)
+  assert_not_contains "$out" "source: run-step" "a terminal row at an unresolvable head must not bind"
+  assert_not_contains "$out" "state: failed" "an unattributed terminal row must not read as failure"
+  assert_contains "$out" "source: status-log" "the status log answers without an attributable run"
+  pass "coarse terminal row at a foreign head is not attributed"
+}
+
+# An EXECUTING run on the task's branch binds whatever branch_sync says and
+# whatever its head, so the pipeline_owned exemption is no longer the only way a
+# live run with an unresolvable lane head is attributed.
+test_executing_run_binds_without_pipeline_owned_sync() {
   reset_fakes
   local d; d=$(new_case f10-not-owned)
   make_repo_on_branch "$d/wt" fm/feat-f10d
@@ -2745,9 +2968,64 @@ test_non_pipeline_owned_unresolvable_head_not_attributed() {
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" feat-f10d
   local out; out=$(run_crew_state "$d" feat-f10d)
-  assert_not_contains "$out" "source: run-step" "a non-pipeline-owned unresolvable head must not bind"
-  assert_contains "$out" "source: status-log" "falls back to the status log without the exemption"
-  pass "the exemption requires branch_sync.state=pipeline_owned"
+  assert_contains "$out" "source: run-step" "an executing run binds without the pipeline_owned label"
+  assert_contains "$out" "state: working" "the executing run reads working"
+  pass "an executing run binds regardless of branch_sync state"
+}
+
+# Negative control: a run PARKED at a gate keeps the strict head rule, so a
+# non-pipeline_owned parked run at an unresolvable head is not attributed. The
+# ledger carries a live same-branch row at that same unresolvable head - the
+# coarse fallback must not revive the rejected run's gate detail through it,
+# because a bare `running` row cannot tell working from waiting at a gate.
+test_non_pipeline_owned_parked_unresolvable_head_not_attributed() {
+  reset_fakes
+  local d; d=$(new_case f10-parked-not-owned)
+  make_repo_on_branch "$d/wt" fm/feat-f10p
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-f10p.meta" "window=fm:fm-feat-f10p" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-f10p.status"
+  FM_FAKE_RUN_HEAD=f0f0f0f0
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-f10p)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-f10p f0f0f0f0  2026-08-27 13:53"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-f10p
+  local out; out=$(run_crew_state "$d" feat-f10p)
+  assert_not_contains "$out" "source: run-step" "a non-pipeline-owned parked run at an unresolvable head must not bind"
+  assert_not_contains "$out" "parked at" "a live ledger row must not revive the rejected run's gate detail"
+  assert_contains "$out" "source: status-log" "falls back to the status log for the unbound parked run"
+  pass "a parked run keeps the strict head rule without pipeline_owned"
+}
+
+# The CLI leaves the top-level `status:` word at `running` while a run WAITS at
+# a gate, so the word alone cannot decide "executing". A gate-parked run at an
+# unresolvable head, on a branch the pipeline has released, must keep the strict
+# head rule in both gate shapes - otherwise the crew reports a stale
+# `parked at <gate>` from a run whose code identity was never verified.
+test_gate_parked_run_with_live_status_word_not_attributed() {
+  local fixture d out
+  for fixture in run_parked_scalar_gate_running run_parked_in_gate_block; do
+    reset_fakes
+    d=$(new_case "f10-gate-parked-$fixture")
+    make_repo_on_branch "$d/wt" fm/feat-f10q
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-f10q.meta" "window=fm:fm-feat-f10q" "worktree=$d/wt" "kind=ship" "harness=claude"
+    printf 'working: implementing\n' > "$d/state/feat-f10q.status"
+    FM_FAKE_RUN_HEAD=f0f0f0f0
+    FM_FAKE_AXI_STATUS="$($fixture fm/feat-f10q)
+branch_sync:
+  state: synced"
+    FM_FAKE_RUNS_LIST=""
+    FM_FAKE_BUSY=0
+    arm_idle_record "$d/state" feat-f10q
+    out=$(run_crew_state "$d" feat-f10q)
+    assert_not_contains "$out" "source: run-step" "$fixture: a gate-parked run at an unresolvable head must not bind"
+    assert_not_contains "$out" "parked at" "$fixture: no gate detail may come from an unverified run"
+    assert_contains "$out" "source: status-log" "$fixture: the status log answers for the unbound parked run"
+    pass "$fixture keeps the strict head rule despite its live status word"
+  done
 }
 
 # Negative control: the exemption also requires an ACTIVE run - a terminal run
@@ -2839,11 +3117,11 @@ EOF
   pass "active fix round with an unfetched pipeline head reads working"
 }
 
-# Negative control for the ledger continuation rule: without the anchor row
-# ending at exactly this worktree's head, an active row with an unverifiable
-# head is branch-name coincidence and must stay unattributed - the historical
-# status-log fallback answers instead, never the runs rows.
-test_unanchored_unfetched_active_row_does_not_match() {
+# A live run on the task's branch is authoritative regardless of head, so an
+# active row with an unverifiable head binds even when the ledger cannot anchor
+# it to this worktree's head: the older row and the historical status-log
+# `failed:` event never answer for the live run.
+test_unanchored_unfetched_active_row_still_binds() {
   reset_fakes
   local d h2 out
   d=$(new_case unfetched-no-anchor)
@@ -2858,7 +3136,7 @@ test_unanchored_unfetched_active_row_does_not_match() {
   FM_FAKE_RUN_HEAD="$h2"
   FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-noanchor)"
   # The row before the active one is an OLDER commit, not this worktree's
-  # head: the ledger proves nothing about whose run the active row is.
+  # head: the ledger anchor proves nothing, and the live run binds anyway.
   FM_FAKE_RUNS_LIST="$(cat <<EOF
   running    fm/other aaaaaaa  2026-07-30 22:10
   running    fm/feat-noanchor $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  2026-07-30 22:05
@@ -2868,10 +3146,10 @@ EOF
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" noanchor
   out=$(run_crew_state "$d" noanchor)
-  assert_not_contains "$out" "source: run-step" "an unanchored unverifiable active row must not match"
-  assert_contains "$out" "source: status-log" "historical fallback preserved when no active run is proven"
-  assert_contains "$out" "state: failed" "status-log answers, not the runs rows"
-  pass "unanchored unverifiable active row is never attributed"
+  assert_contains "$out" "source: run-step" "an unanchored active row on the branch still binds"
+  assert_contains "$out" "state: working" "the live run reads working"
+  assert_not_contains "$out" "state: failed" "neither the older failed row nor the stale status-log event answers"
+  pass "unanchored unverifiable active row is attributed because it is live"
 }
 
 # Negative control: a TERMINAL row whose commit object is gone from the task
@@ -3343,6 +3621,871 @@ branch_sync:
   pass 'superseded cancelled run preserves the replacement review gate'
 }
 
+# A commit the task copy HAS but that is neither the local head, an ancestor,
+# nor a descendant of it: exactly what a pipeline rebase leaves as the run head.
+make_rebased_head() {  # <worktree> -> echoes the diverged commit's short sha
+  local wt=$1 tree commit
+  tree=$(git -C "$wt" hash-object -t tree -w /dev/null)
+  commit=$(git -C "$wt" commit-tree "$tree" -m 'pipeline rebased head')
+  git -C "$wt" merge-base --is-ancestor HEAD "$commit" && fail "rebased head must not descend from local head"
+  git -C "$wt" merge-base --is-ancestor "$commit" HEAD && fail "rebased head must not be an ancestor of local head"
+  git -C "$wt" rev-parse --short=8 "$commit"
+}
+
+# A live run whose head diverged from the local head because the pipeline
+# rebased the branch is this task's current run. The newest overview row is the
+# live run, and an older FAILED run still matches the local head; the failed run
+# must not be read as the task's state (2026-08-23 billing-cycle-crash-safety).
+test_live_rebased_run_beats_older_failed_run_at_local_head() {
+  make_competing_runs_case live-rebased running failed
+  local d=$TMP_ROOT/live-rebased out rebased
+  rebased=$(make_rebased_head "$d/wt")
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed "/01NEW/s/,[a-f0-9]*,\"\"\$/,$rebased,\"\"/")
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed 's/01RUN/01NEW/')
+branch_sync:
+  state: synced"
+  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+  printf 'working: validating\n' > "$d/state/competing.status"
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: working' 'a live run on the branch reads working despite its rebased head'
+  assert_contains "$out" 'source: run-step' 'the live run is the authoritative source'
+  assert_not_contains "$out" 'state: failed' 'the older failed run must not be read as current'
+  pass 'a live rebased run beats an older failed run at the local head'
+}
+
+# The same live run reads working for every EXECUTING status word the CLI can
+# actually deliver here. `fm_nm_select_run` validates the overview status column
+# against pending|running|completed|failed|cancelled, so those are the only live
+# words that reach the predicate; the overview and the id-addressed detail read
+# the same runs.status column, so the fixture carries one word in BOTH surfaces.
+test_live_rebased_run_reads_working_for_every_executing_status() {
+  local status d rebased out
+  for status in pending running; do
+    make_competing_runs_case "live-rebased-$status" "$status" failed
+    d=$TMP_ROOT/live-rebased-$status
+    rebased=$(make_rebased_head "$d/wt")
+    FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed "/01NEW/s/,[a-f0-9]*,\"\"\$/,$rebased,\"\"/")
+    FM_FAKE_RUN_HEAD=$rebased
+    FM_FAKE_AXI_STATUS="$(run_running fm/competing | sed "s/01RUN/01NEW/; s/status: running/status: $status/")"
+    FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+    out=$(run_crew_state "$d" competing)
+    assert_contains "$out" 'state: working' "$status run with a rebased head reads working"
+    assert_contains "$out" 'source: run-step' "$status run with a rebased head is run-step sourced"
+    assert_not_contains "$out" 'state: failed' "$status run with a rebased head is never failed"
+    pass "$status run with a rebased head reads working"
+  done
+}
+
+# The LEGACY bare-status surface carries run-level `fixing` and `ci`, which the
+# overview table's vocabulary does not include. The selector never validates a
+# word there (it answers `unavailable` with no table), so those runs are the
+# crew's own live run and must bind at a rebased head like any other.
+test_legacy_surface_binds_fixing_and_ci_at_a_rebased_head() {
+  local status d rebased out
+  for status in fixing ci; do
+    reset_fakes
+    d=$(new_case "legacy-live-$status")
+    make_repo_on_branch "$d/wt" fm/feat-legacylive
+    rebased=$(make_rebased_head "$d/wt")
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-legacylive.meta" "window=fm:fm-feat-legacylive" "worktree=$d/wt" "kind=ship" "harness=claude"
+    printf 'failed: earlier stage run\n' > "$d/state/feat-legacylive.status"
+    FM_FAKE_RUN_HEAD=$rebased
+    FM_FAKE_AXI_STATUS="$(run_running fm/feat-legacylive | sed "s/status: running/status: $status/")
+branch_sync:
+  state: synced"
+    FM_FAKE_RUNS_LIST=""
+    FM_FAKE_BUSY=0
+    arm_idle_record "$d/state" feat-legacylive
+    out=$(run_crew_state "$d" feat-legacylive)
+    assert_contains "$out" "source: run-step" "a legacy $status run at a rebased head binds"
+    assert_contains "$out" "state: working" "a legacy $status run reads working"
+    assert_not_contains "$out" "state: failed" "the stale failed event must not answer for a live $status run"
+    pass "legacy surface binds a $status run at a rebased head"
+  done
+}
+
+# Legacy CLI surface (no overview table): the bare `axi status` run is live on
+# this branch with a rebased head, while the runs ledger still holds an older
+# failed row at the local head.
+test_legacy_live_rebased_run_is_authoritative() {
+  reset_fakes
+  local d rebased short out; d=$(new_case legacy-live-rebased)
+  make_repo_on_branch "$d/wt" fm/feat-rebased
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rebased.meta" "window=fm:fm-feat-rebased" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating\n' > "$d/state/feat-rebased.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-rebased)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-rebased ${rebased}  2026-08-23 13:53
+  failed     fm/feat-rebased ${short}  2026-08-23 12:09
+EOF
+)"
+  out=$(run_crew_state "$d" feat-rebased)
+  assert_contains "$out" 'state: working' 'legacy live rebased run reads working'
+  assert_contains "$out" 'source: run-step' 'legacy live rebased run is run-step sourced'
+  assert_not_contains "$out" 'state: failed' 'the older failed row must not read as current'
+  pass 'legacy live rebased run is authoritative over an older failed row'
+}
+
+# The head-free route is licensed by the daemon being reachable. Once the daemon
+# answers down AND no ledger row anchors the run, nothing ties the record to this
+# worktree at all, so it stops answering and the status log takes over.
+test_live_record_at_diverged_head_does_not_bind_an_unproven_record() {
+  reset_fakes
+  local d rebased out; d=$(new_case zombie-daemon-down)
+  make_repo_on_branch "$d/wt" fm/feat-zombie
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-zombie.meta" "window=fm:fm-feat-zombie" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating\n' > "$d/state/feat-zombie.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-zombie)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-zombie
+  out=$(run_crew_state "$d" feat-zombie)
+  assert_not_contains "$out" "source: run-step" "a record with neither head nor anchor identity must not bind"
+  assert_contains "$out" "source: status-log" "the crew's own evidence answers instead"
+  pass "an unproven record at a diverged head does not answer for the crew"
+}
+
+# A run PARKED at a gate keeps its gate and findings when the daemon dies. The
+# ledger word stays `running` while a run waits (parked.toon), so classifying
+# off the ledger would relabel an open decision as a dead live record and the
+# findings would never reach the supervisor.
+test_parked_gate_survives_a_dead_daemon() {
+  reset_fakes
+  local d local_short out; d=$(new_case parked-dead-daemon)
+  make_repo_on_branch "$d/wt" fm/feat-parkdd
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-parkdd.meta" "window=fm:fm-feat-parkdd" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-parkdd.status"
+  FM_FAKE_RUN_HEAD=f0f0f0f0
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-parkdd)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-parkdd f0f0f0f0  2026-08-27 13:53
+  completed  fm/feat-parkdd ${local_short}  2026-08-27 12:09
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-parkdd
+  out=$(run_crew_state "$d" feat-parkdd)
+  assert_contains "$out" "state: parked" "an open gate stays parked when the instrument dies"
+  assert_contains "$out" "parked at review" "the gate itself still reaches the supervisor"
+  assert_contains "$out" "finding(s)" "the gate findings still reach the supervisor"
+  assert_not_contains "$out" "state: unknown" "a parked run is not a dead live record"
+  pass "a parked gate survives a dead daemon with its findings intact"
+}
+
+# The modern selected-run route reaches the same diverged-head shape: the run
+# head RESOLVES but diverged after the pipeline rebased, and no ledger row
+# anchors it, so identity is unproven and the record must not answer at all.
+test_selected_run_diverged_head_does_not_bind_an_unproven_record() {
+  reset_fakes
+  local d rebased out; d=$(new_case selected-diverged-down)
+  make_repo_on_branch "$d/wt" fm/feat-seldiv
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/seldiv.meta" "window=fm:fm-seldiv" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating\n' > "$d/state/seldiv.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-seldiv,running,$rebased,\"\""
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-seldiv)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" seldiv
+  out=$(run_crew_state "$d" seldiv)
+  assert_not_contains "$out" "source: run-step" "an unproven record must not bind on the selected route either"
+  assert_contains "$out" "source: status-log" "the crew's own evidence answers instead"
+  pass "an unproven record at a diverged head does not answer on the selected route"
+}
+
+# The crew observed the refused socket itself. The ledger anchor BINDS a record
+# here and the dead daemon makes it unverified, so this drives the dead-daemon
+# verdict directly - and the blocker must still outrank it.
+test_socket_refused_log_survives_the_dead_daemon_verdict() {
+  reset_fakes
+  local d local_short out; d=$(new_case socket-refused-anchored)
+  make_repo_on_branch "$d/wt" fm/feat-sockdiv
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-sockdiv.meta" "window=fm:fm-feat-sockdiv" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'blocked: no-mistakes daemon socket refused connections\n' > "$d/state/feat-sockdiv.status"
+  FM_FAKE_RUN_HEAD=f0f0f0f0
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-sockdiv)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-sockdiv f0f0f0f0  2026-08-27 13:53
+  completed  fm/feat-sockdiv ${local_short}  2026-08-27 12:09
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-sockdiv
+  out=$(run_crew_state "$d" feat-sockdiv)
+  assert_contains "$out" "state: blocked" "a first-hand socket refusal is not demoted to a generic unknown"
+  assert_contains "$out" "socket refused" "the crew's own blocker reaches the supervisor"
+  assert_not_contains "$out" "state: unknown" "the unverified record must not replace the blocker"
+  pass "a socket-refused blocker survives the dead-daemon verdict"
+}
+
+# The selected route's anchored shape with an ORDINARY blocker: the header rule
+# says a blocked tip stays blocked with the unverified record named, and nothing
+# else reaches that path with a `blocked:` tip.
+test_ordinary_blocked_tip_survives_the_dead_daemon_verdict() {
+  reset_fakes
+  local d h2 short out; d=$(new_case ordinary-blocked-anchored)
+  make_repo_on_branch "$d/wt" fm/feat-obanch
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  h2=$(mint_unfetched_fix_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-obanch.meta" "window=fm:fm-feat-obanch" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'blocked: database upload failed with broken pipe\n' > "$d/state/feat-obanch.status"
+  FM_FAKE_RUN_HEAD="$h2"
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-obanch,running,$h2,\"\""
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-obanch)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-obanch $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  2026-07-30 22:05
+  failed     fm/feat-obanch ${short}  2026-07-29 20:00
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-obanch
+  out=$(run_crew_state "$d" feat-obanch)
+  assert_contains "$out" "state: blocked" "an ordinary blocker stays blocked when the record is unverified"
+  assert_contains "$out" "broken pipe" "the crew's own blocker reaches the supervisor"
+  assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
+  assert_not_contains "$out" "superseded" "an unverified record never supersedes an open blocker"
+  pass "an ordinary blocked tip survives the dead-daemon verdict"
+}
+
+
+# A visibly working crew must never be overridden by a stale record that merely
+# names its branch. Identity is proven by neither head nor ledger anchor here,
+# so the busy pane answers - the base behaviour before the daemon guard existed.
+test_unproven_record_with_dead_daemon_does_not_override_a_busy_pane() {
+  reset_fakes
+  local d rebased out gen; d=$(new_case unproven-busy-pane)
+  make_repo_on_branch "$d/wt" fm/feat-unproven
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unproven.meta" "window=fm:fm-feat-unproven" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-unproven.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-unproven)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=1
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-unproven)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-unproven busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  out=$(run_crew_state "$d" feat-unproven)
+  assert_contains "$out" "state: working" "a busy crew keeps reading working"
+  assert_contains "$out" "source: pane" "the live pane answers, not the stale record"
+  assert_not_contains "$out" "state: unknown" "an unproven record must not blank out a working crew"
+  pass "an unproven record with a dead daemon never overrides a busy pane"
+}
+
+# Only a gate is ambiguous under a coarse live row. An ordinary blocker keeps the
+# pre-existing reading, exactly as it does on the full route.
+test_coarse_live_row_over_ordinary_blocked_keeps_superseded_reading() {
+  reset_fakes
+  local d local_short out; d=$(new_case coarse-ordinary-blocked)
+  make_repo_on_branch "$d/wt" fm/feat-cob
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cob.meta" "window=fm:fm-feat-cob" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'blocked: database upload failed with broken pipe\n' > "$d/state/feat-cob.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  running    fm/feat-cob ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cob
+  out=$(run_crew_state "$d" feat-cob)
+  assert_contains "$out" "state: working" "an ordinary blocker over a live coarse row keeps working"
+  assert_contains "$out" "superseded by active run" "the generic superseded reading is kept"
+  assert_not_contains "$out" "state: blocked" "a validating crew must not read blocked"
+  pass "an ordinary blocked tip over a coarse live row keeps the superseded reading"
+}
+
+# The head-free route still binds while the daemon answers: the daemon probe
+# narrows the zombie case only, it does not undo the rebase fix.
+test_live_record_at_diverged_head_binds_while_daemon_answers() {
+  reset_fakes
+  local d rebased out; d=$(new_case live-daemon-up)
+  make_repo_on_branch "$d/wt" fm/feat-livedaemon
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-livedaemon.meta" "window=fm:fm-feat-livedaemon" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating\n' > "$d/state/feat-livedaemon.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-livedaemon)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_DAEMON_DOWN=0
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-livedaemon
+  out=$(run_crew_state "$d" feat-livedaemon)
+  assert_contains "$out" "source: run-step" "a reachable daemon keeps the rebased live run authoritative"
+  assert_contains "$out" "state: working" "the live rebased run still reads working"
+  pass "a live record at a diverged head binds while the daemon answers"
+}
+
+
+# Same anchored shape with the daemon answering: the guard narrows the dead
+# instrument only, the unfetched-head fix round still binds.
+test_anchored_continuation_binds_while_daemon_answers() {
+  reset_fakes
+  local d local_short out; d=$(new_case anchored-daemon-up)
+  make_repo_on_branch "$d/wt" fm/feat-anchorup
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-anchorup.meta" "window=fm:fm-feat-anchorup" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: validating\n' > "$d/state/feat-anchorup.status"
+  FM_FAKE_RUN_HEAD=f0f0f0f0
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-anchorup)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-anchorup f0f0f0f0  2026-08-27 13:53
+  completed  fm/feat-anchorup ${local_short}  2026-08-27 12:09
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=0
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-anchorup
+  out=$(run_crew_state "$d" feat-anchorup)
+  assert_contains "$out" "source: run-step" "the anchored continuation still binds with the daemon answering"
+  assert_contains "$out" "state: working" "the anchored live run reads working"
+  pass "the anchored continuation binds while the daemon answers"
+}
+
+# A record that just declared itself unverified cannot also declare an open
+# decision superseded.
+test_unverified_coarse_record_makes_no_supersede_claim() {
+  reset_fakes
+  local d local_short out; d=$(new_case coarse-unknown-supersede)
+  make_repo_on_branch "$d/wt" fm/feat-cus
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cus.meta" "window=fm:fm-feat-cus" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-cus.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  running    fm/feat-cus ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cus
+  out=$(run_crew_state "$d" feat-cus)
+  assert_contains "$out" "state: working" "a head-tied coarse row keeps its working reading whatever the daemon answers"
+  assert_contains "$out" "superseded by active run" "the coarse route keeps its original supersede note"
+  pass "a head-tied coarse record keeps its working reading and its original note"
+}
+
+# The modern selected-run route reaches the anchored-continuation rule through
+# its own `elif` (the run head is not an object in this copy). That route binds
+# on ledger evidence which proves IDENTITY, not liveness, so the daemon rule
+# has to hold there too.
+test_selected_run_anchored_continuation_needs_a_live_daemon() {
+  reset_fakes
+  local d h2 short out
+  d=$(new_case selected-anchored-down)
+  make_repo_on_branch "$d/wt" fm/feat-selanchor
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  h2=$(mint_unfetched_fix_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/selanchor.meta" "window=fm:fm-selanchor" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/selanchor.status"
+  FM_FAKE_RUN_HEAD="$h2"
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-selanchor,running,$h2,\"\""
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-selanchor)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-selanchor $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  2026-07-30 22:05
+  failed     fm/feat-selanchor ${short}  2026-07-29 20:00
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" selanchor
+  out=$(run_crew_state "$d" selanchor)
+  assert_not_contains "$out" "state: working" "the selected anchored route must not read working with the daemon answering down"
+  assert_contains "$out" "daemon unreachable" "the ledger anchor proved identity, so liveness is what is reported"
+  assert_not_contains "$out" "code identity unverified" "an anchored run's identity is proven, not unverified"
+  assert_contains "$out" "run: 01RUN" "the verdict still names the run for a later --run read"
+  pass "the selected-run anchored continuation reports the dead daemon, not an identity failure"
+}
+
+# The selected route honours the parked exemption too: an anchored PARKED run
+# with a dead daemon keeps its gate and findings, exactly as the legacy route
+# does on the same evidence.
+test_selected_run_anchored_parked_keeps_its_gate_with_a_dead_daemon() {
+  reset_fakes
+  local d local_short out; d=$(new_case selected-anchored-parked)
+  make_repo_on_branch "$d/wt" fm/feat-selpark
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/selpark.meta" "window=fm:fm-selpark" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/selpark.status"
+  FM_FAKE_RUN_HEAD=f0f0f0f0
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-selpark,running,f0f0f0f0,\"\""
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-selpark)
+branch_sync:
+  state: synced"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-selpark f0f0f0f0  2026-08-27 13:53
+  completed  fm/feat-selpark ${local_short}  2026-08-27 12:09
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" selpark
+  out=$(run_crew_state "$d" selpark)
+  assert_contains "$out" "state: parked" "an anchored parked run stays parked when the instrument dies"
+  assert_contains "$out" "parked at review" "the gate reaches the supervisor on the selected route too"
+  assert_contains "$out" "finding(s)" "the gate findings reach the supervisor"
+  assert_not_contains "$out" "state: unknown" "a parked run is not a dead live record"
+  pass "the selected route keeps an anchored parked run's gate with a dead daemon"
+}
+
+# An open decision outranks the unverified record on the selected route as well.
+# The ledger anchor binds the run here, so the dead-daemon verdict is genuinely
+# produced and the reconciliation is what keeps the decision visible.
+test_selected_run_dead_daemon_leaves_the_open_decision_open() {
+  reset_fakes
+  local d h2 short out; d=$(new_case selected-dead-decision)
+  make_repo_on_branch "$d/wt" fm/feat-seldec
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  h2=$(mint_unfetched_fix_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/seldec.meta" "window=fm:fm-seldec" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/seldec.status"
+  FM_FAKE_RUN_HEAD="$h2"
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-seldec,running,$h2,\"\""
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-seldec)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-seldec $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  2026-07-30 22:05
+  failed     fm/feat-seldec ${short}  2026-07-29 20:00
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" seldec
+  out=$(run_crew_state "$d" seldec)
+  assert_contains "$out" "state: parked" "the open decision is not hidden behind the unverified record"
+  assert_contains "$out" "approve the schema change" "the crew's own decision note reaches the supervisor"
+  assert_contains "$out" "daemon unreachable" "the unverified record is named as the reason"
+  assert_contains "$out" "run: 01RUN" "the verdict names the run so a human can go look at it"
+  assert_not_contains "$out" "superseded" "an unverified record never supersedes an open decision"
+  pass "an open decision survives the dead-daemon verdict on the selected route"
+}
+
+# A probe that did not ANSWER proves nothing, so it must not hand the verdict to
+# a stale open decision: a genuinely failed run would be reported as awaiting a
+# human on probe latency alone. The record still degrades to unknown, which is
+# ambiguous but not falsely actionable.
+test_unanswered_probe_does_not_turn_a_failed_coarse_record_into_a_gate() {
+  reset_fakes
+  local d local_short out; d=$(new_case coarse-failed-probe-timeout)
+  make_repo_on_branch "$d/wt" fm/feat-cfpt
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cfpt.meta" "window=fm:fm-feat-cfpt" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-cfpt.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  failed     fm/feat-cfpt ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_DAEMON_TIMEOUT=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cfpt
+  out=$(run_crew_state "$d" feat-cfpt)
+  assert_contains "$out" "state: unknown" "an unanswered probe still degrades the terminal record"
+  assert_not_contains "$out" "state: parked" "probe latency must not assert an open gate over a failed run"
+  pass "an unanswered probe never turns a failed coarse record into a gate"
+}
+
+
+
+# The selected route already appends `run: <id>` to every ordinary verdict, so
+# the dead-daemon detail must not carry its own copy.
+test_selected_route_dead_daemon_names_the_run_once() {
+  reset_fakes
+  local d h2 short out ids; d=$(new_case selected-id-once)
+  make_repo_on_branch "$d/wt" fm/feat-selonce
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  h2=$(mint_unfetched_fix_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/selonce.meta" "window=fm:fm-selonce" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/selonce.status"
+  FM_FAKE_RUN_HEAD="$h2"
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-selonce,running,$h2,\"\""
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-selonce)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-selonce $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  2026-07-30 22:05
+  failed     fm/feat-selonce ${short}  2026-07-29 20:00
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" selonce
+  out=$(run_crew_state "$d" selonce)
+  ids=$(printf '%s\n' "$out" | grep -o '01RUN' | wc -l | tr -d ' ')
+  assert_contains "$out" "daemon unreachable" "the dead instrument is still named"
+  assert_contains "$out" "01RUN" "the verdict still names the run"
+  assert_equals "1" "$ids" "the run id appears exactly once"
+  pass "the selected-route dead-daemon verdict names the run once"
+}
+
+# The same run, the same head, the same dead daemon must read the same way
+# whichever run the shared daemon's bare `axi status` happens to name - that is
+# routine once several crews validate one repo. The ledger row sits at this
+# worktree's own head, so the head rule exempts it either way.
+test_head_tied_row_reads_the_same_whichever_run_axi_names() {
+  local who d local_short out
+  for who in self other; do
+    reset_fakes
+    d=$(new_case "head-tied-$who")
+    make_repo_on_branch "$d/wt" fm/feat-htied
+    local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+    make_fakebin "$d" >/dev/null
+    fm_write_meta "$d/state/feat-htied.meta" "window=fm:fm-feat-htied" "worktree=$d/wt" "kind=ship" "harness=claude"
+    printf 'working: implementing\n' > "$d/state/feat-htied.status"
+    if [ "$who" = self ]; then
+      FM_FAKE_AXI_STATUS="$(run_running fm/feat-htied)
+branch_sync:
+  state: synced"
+    else
+      FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+    fi
+    FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  running    fm/feat-htied ${local_short}  2026-08-23 13:53
+EOF
+)"
+    FM_FAKE_DAEMON_DOWN=1
+    FM_FAKE_BUSY=0
+    arm_idle_record "$d/state" feat-htied
+    out=$(run_crew_state "$d" feat-htied)
+    assert_contains "$out" "state: working" "$who: a head-tied run reads working with the daemon down"
+    assert_not_contains "$out" "state: unknown" "$who: the head rule exempts a head-tied record"
+    pass "a head-tied row reads working when axi names the $who run"
+  done
+}
+
+# The record's head and the ledger row's head are INDEPENDENT. A same-branch
+# record whose own head diverged still reaches the coarse fallback, where the
+# newest ledger row can sit at this worktree's own head - a head-tied row the
+# head rule exempts. The coarse route carries no dead-daemon verdict, so that
+# row keeps its working reading.
+test_coarse_head_tied_row_is_exempt_even_when_the_record_head_diverged() {
+  reset_fakes
+  local d local_short out; d=$(new_case coarse-head-tied-diverged-record)
+  make_repo_on_branch "$d/wt" fm/feat-chtd
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-chtd.meta" "window=fm:fm-feat-chtd" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-chtd.status"
+  FM_FAKE_RUN_HEAD=f0f0f0f0
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-chtd)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST="  running    fm/feat-chtd ${local_short}  2026-08-23 13:53"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-chtd
+  out=$(run_crew_state "$d" feat-chtd)
+  assert_contains "$out" "state: working" "a head-tied ledger row keeps its working reading"
+  assert_not_contains "$out" "state: unknown" "the head rule exempts a head-tied row whatever the record head says"
+  assert_not_contains "$out" "daemon unreachable" "the coarse route carries no dead-instrument verdict"
+  pass "a head-tied coarse row is exempt even when the record head diverged"
+}
+
+# An unrecognised ledger word yields an unknown verdict from a LIVE daemon, so it
+# is not an unverified record: the ordinary supersede note applies, as it did
+# before the coarse-unknown special case existed.
+test_unrecognised_ledger_word_keeps_the_ordinary_supersede_note() {
+  reset_fakes
+  local d local_short out; d=$(new_case unrecognised-word-supersede)
+  make_repo_on_branch "$d/wt" fm/feat-uws
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-uws.meta" "window=fm:fm-feat-uws" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-uws.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  pending    fm/feat-uws ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=0
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-uws
+  out=$(run_crew_state "$d" feat-uws)
+  assert_contains "$out" "state: unknown" "an unrecognised word still reads unknown"
+  assert_contains "$out" "runs list status: pending" "the unrecognised word is reported as itself"
+  assert_contains "$out" "superseded (run unknown)" "a live daemon's unknown keeps the ordinary supersede note"
+  pass "an unrecognised ledger word keeps the ordinary supersede note"
+}
+
+# The coarse ledger word `pending` is not an acceptance: it keeps its unknown
+# reading rather than claiming the crew is validating.
+test_coarse_pending_ledger_word_reads_unknown() {
+  reset_fakes
+  local d local_short out; d=$(new_case coarse-pending)
+  make_repo_on_branch "$d/wt" fm/feat-cpend
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cpend.meta" "window=fm:fm-feat-cpend" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-cpend.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  pending    fm/feat-cpend ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cpend
+  out=$(run_crew_state "$d" feat-cpend)
+  assert_contains "$out" "state: unknown" "a pending ledger word is not a working claim"
+  assert_contains "$out" "runs list status: pending" "the unrecognised word is reported as itself"
+  pass "a coarse pending ledger word reads unknown"
+}
+
+# The same anchored selected-run shape with the daemon answering still binds.
+test_selected_run_anchored_continuation_binds_while_daemon_answers() {
+  reset_fakes
+  local d h2 short out
+  d=$(new_case selected-anchored-up)
+  make_repo_on_branch "$d/wt" fm/feat-selanchorup
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  h2=$(mint_unfetched_fix_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/selanchorup.meta" "window=fm:fm-selanchorup" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/selanchorup.status"
+  FM_FAKE_RUN_HEAD="$h2"
+  FM_FAKE_AXI_HOME="count: 1 of 1 total
+runs[1]{id,branch,status,head,pr}:
+  \"01RUN\",fm/feat-selanchorup,running,$h2,\"\""
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-selanchorup)"
+  FM_FAKE_AXI_STATUS_RUN="$FM_FAKE_AXI_STATUS"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-selanchorup $(git -C "$d/wt.pipe" rev-parse --short=7 HEAD)  2026-07-30 22:05
+  failed     fm/feat-selanchorup ${short}  2026-07-29 20:00
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=0
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" selanchorup
+  out=$(run_crew_state "$d" selanchorup)
+  assert_contains "$out" "source: run-step" "the selected anchored route binds with the daemon answering"
+  assert_contains "$out" "state: working" "the anchored fix round still reads working"
+  pass "the selected-run anchored continuation binds while the daemon answers"
+}
+
+# A coarse TERMINAL record whose daemon is down is degraded to unknown, and that
+# is where it stops: the ledger row is head-tied, so its identity is PROVEN and
+# it records a run that reached a terminal failure at this worktree's own head.
+# A daemon dying afterwards does not unmake that outcome, so the reading must
+# not become a claim that a human decision is pending.
+test_coarse_failed_record_with_dead_daemon_reads_unknown() {
+  reset_fakes
+  local d local_short out; d=$(new_case coarse-failed-supersede)
+  make_repo_on_branch "$d/wt" fm/feat-cfs
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cfs.meta" "window=fm:fm-feat-cfs" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: approve the schema change\n' > "$d/state/feat-cfs.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  failed     fm/feat-cfs ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cfs
+  out=$(run_crew_state "$d" feat-cfs)
+  assert_contains "$out" "state: unknown" "a dead daemon degrades the terminal record to unknown"
+  assert_contains "$out" "unverified" "the unverified record is named"
+  assert_not_contains "$out" "state: parked" "a recorded terminal failure is never relabelled an open decision"
+  pass "a coarse failed record with a dead daemon reads unknown"
+}
+
+# A probe that does not ANSWER proves nothing about the daemon, so it must not
+# suppress a live rebased run: otherwise a slow `daemon status` on a busy fleet
+# drops the crew back to a stale `failed:` log line, and the crew flaps between
+# working and failed on probe latency alone.
+test_unanswered_daemon_probe_does_not_suppress_live_run() {
+  reset_fakes
+  local d rebased out; d=$(new_case probe-timeout)
+  make_repo_on_branch "$d/wt" fm/feat-probeto
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-probeto.meta" "window=fm:fm-feat-probeto" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'failed: earlier run failed\n' > "$d/state/feat-probeto.status"
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-probeto)
+branch_sync:
+  state: synced"
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_DAEMON_TIMEOUT=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-probeto
+  out=$(run_crew_state "$d" feat-probeto)
+  assert_contains "$out" "source: run-step" "an unanswered probe must not unbind the live run"
+  assert_contains "$out" "state: working" "the live rebased run still reads working"
+  assert_not_contains "$out" "state: failed" "the stale failed event must not answer on probe latency"
+  pass "an unanswered daemon probe leaves a live rebased run bound"
+}
+
+# The coarse ledger row sits at this worktree's own head, so the head rule has
+# already proven its identity and exempts it from the dead-instrument verdict:
+# a dead daemon does not change what a head-tied row says about this crew.
+test_coarse_live_row_is_exempt_from_the_dead_daemon_verdict() {
+  reset_fakes
+  local d local_short out; d=$(new_case coarse-live-daemon-down)
+  make_repo_on_branch "$d/wt" fm/feat-cldd
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cldd.meta" "window=fm:fm-feat-cldd" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-cldd.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  running    fm/feat-cldd ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_DAEMON_DOWN=1
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cldd
+  out=$(run_crew_state "$d" feat-cldd)
+  assert_contains "$out" "state: working" "a head-tied coarse row keeps its working reading"
+  assert_not_contains "$out" "daemon unreachable" "the head rule exempts a head-tied record from the dead-instrument verdict"
+  assert_not_contains "$out" "01RUN" "the foreign crew's run id is never offered as this crew's"
+  pass "a head-tied coarse live row is exempt from the dead-daemon verdict"
+}
+
+# The coarse route carries no special reading for an open decision: a live row
+# over a needs-decision tip keeps the pre-existing supersede note, and the crew
+# reads working rather than awaiting a human.
+test_coarse_live_row_keeps_the_original_supersede_note() {
+  reset_fakes
+  local d local_short out; d=$(new_case coarse-gate-signal)
+  make_repo_on_branch "$d/wt" fm/feat-cg
+  local_short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-cg.meta" "window=fm:fm-feat-cg" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'needs-decision: review gate has an ask-user finding\n' > "$d/state/feat-cg.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  running    fm/feat-cg ${local_short}  2026-08-23 13:53
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-cg
+  out=$(run_crew_state "$d" feat-cg)
+  assert_contains "$out" "state: working" "a genuinely validating crew is not reported as awaiting a human"
+  assert_contains "$out" "superseded by active run" "the coarse route keeps its original supersede note"
+  pass "a coarse live row over an open decision keeps the original supersede note"
+}
+
+# Coarse negative control (axi answers another branch): a live row on the task's
+# branch at a rebased head is not tied to this worktree by anything but the
+# branch name, so the ledger must not answer for it and the older failed row
+# must not answer either.
+test_coarse_live_rebased_row_is_not_attributed() {
+  reset_fakes
+  local d rebased short out; d=$(new_case coarse-live-rebased)
+  make_repo_on_branch "$d/wt" fm/feat-rebased2
+  short=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  rebased=$(make_rebased_head "$d/wt")
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rebased2.meta" "window=fm:fm-feat-rebased2" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/feat-rebased2.status"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-23 14:00
+  running    fm/feat-rebased2 ${rebased}  2026-08-23 13:53
+  failed     fm/feat-rebased2 ${short}  2026-08-23 12:09
+EOF
+)"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-rebased2
+  out=$(run_crew_state "$d" feat-rebased2)
+  assert_not_contains "$out" 'source: run-step' 'a branch-name-only live row must not bind'
+  assert_not_contains "$out" 'state: failed' 'the older failed row must not answer either'
+  assert_contains "$out" 'source: status-log' 'the status log answers without an attributable run'
+  pass 'a coarse live row at a rebased head is not attributed'
+}
+
+# Negative control: once the rebased run has FAILED it is finished history on a
+# head this worktree does not match, so it is not attributed and never reads as
+# the task's failure.
+test_terminal_rebased_run_is_not_attributed() {
+  make_competing_runs_case terminal-rebased failed completed
+  local d=$TMP_ROOT/terminal-rebased out rebased
+  rebased=$(make_rebased_head "$d/wt")
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed "/01NEW/s/,[a-f0-9]*,\"\"\$/,$rebased,\"\"/")
+  FM_FAKE_RUN_HEAD=$rebased
+  FM_FAKE_AXI_STATUS="$(run_failed fm/competing | sed 's/01RUN/01NEW/')"
+  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+  fm_write_meta "$d/state/competing.meta" "window=fm:fm-competing" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementing\n' > "$d/state/competing.status"
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" competing
+  out=$(run_crew_state "$d" competing)
+  assert_not_contains "$out" 'source: run-step' 'a terminal run on a diverged head is not attributed'
+  assert_contains "$out" 'source: status-log' 'the status log answers when only a foreign terminal run exists'
+  pass 'a terminal run at a diverged head keeps the strict head rule'
+}
+
 test_competing_live_runs_report_unknown_with_both_ids() {
   make_competing_runs_case ambiguous-runs running running
   local d=$TMP_ROOT/ambiguous-runs out
@@ -3442,9 +4585,13 @@ test_captured_axi_status_shapes() {
     assert_contains "$out" '01NEW' "captured $shape preserves the selected identity"
     if [ "$shape" = parked ]; then
       assert_contains "$out" 'parked at test: 1 finding(s)' 'the captured gate retains its actual step and finding count'
+      assert_contains "$out" ' · ask-user: authority decision' \
+        'the captured gate mints the human-decision component from the real column layout'
       toolbin=$(make_no_python_toolbin "$d")
       out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
       assert_contains "$out" 'parked at test: 1 finding(s)' 'a complete captured gate remains readable without Python'
+      assert_contains "$out" ' · ask-user: authority decision' \
+        'the captured gate mints the human-decision component without Python'
       assert_contains "$out" '01NEW' 'the captured gate retains its id without Python'
     fi
     pass "captured AXI $shape status replays through crew-state"
@@ -3546,6 +4693,7 @@ test_single_owner_terminal_declaration_supersedes_stale_decision
 test_latest_status_preserves_legacy_completions
 test_latest_status_subshell_work_does_not_grow_with_history
 test_genuine_parked_not_superseded
+test_parked_human_decision_comes_from_the_action_column
 test_scalar_gate_parked_not_superseded
 test_gate_block_parked_not_superseded
 test_ci_ready_done_log_beats_monitoring_run
@@ -3622,11 +4770,14 @@ test_pipeline_owned_active_run_beats_superseded_failed_row
 test_failed_run_with_no_later_run_still_surfaces
 test_coarse_unresolvable_active_row_never_falls_to_older_row
 test_coarse_mismatched_anchor_falls_to_pane_not_older_row
-test_non_pipeline_owned_unresolvable_head_not_attributed
+test_coarse_terminal_row_at_foreign_head_not_attributed
+test_executing_run_binds_without_pipeline_owned_sync
+test_non_pipeline_owned_parked_unresolvable_head_not_attributed
+test_gate_parked_run_with_live_status_word_not_attributed
 test_pipeline_owned_terminal_run_not_exempt
 test_missing_run_head_falls_back_to_current_state
 test_active_fix_round_unfetched_pipeline_head_reports_current
-test_unanchored_unfetched_active_row_does_not_match
+test_unanchored_unfetched_active_row_still_binds
 test_unresolved_terminal_row_is_history_not_current
 test_runs_list_continuation_found_when_axi_answers_other_branch
 test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
@@ -3651,6 +4802,36 @@ test_uninitialized_idle_worker_uses_status
 test_historical_inventory_uses_current_pane
 test_historical_inventory_uses_current_status
 test_superseded_cancelled_run_preserves_replacement_gate
+test_live_rebased_run_beats_older_failed_run_at_local_head
+test_live_rebased_run_reads_working_for_every_executing_status
+test_legacy_live_rebased_run_is_authoritative
+test_legacy_surface_binds_fixing_and_ci_at_a_rebased_head
+test_live_record_at_diverged_head_does_not_bind_an_unproven_record
+test_unproven_record_with_dead_daemon_does_not_override_a_busy_pane
+test_coarse_live_row_over_ordinary_blocked_keeps_superseded_reading
+test_socket_refused_log_survives_the_dead_daemon_verdict
+test_ordinary_blocked_tip_survives_the_dead_daemon_verdict
+test_parked_gate_survives_a_dead_daemon
+test_selected_run_diverged_head_does_not_bind_an_unproven_record
+test_live_record_at_diverged_head_binds_while_daemon_answers
+test_anchored_continuation_binds_while_daemon_answers
+test_unverified_coarse_record_makes_no_supersede_claim
+test_coarse_failed_record_with_dead_daemon_reads_unknown
+test_selected_run_anchored_continuation_needs_a_live_daemon
+test_selected_run_anchored_continuation_binds_while_daemon_answers
+test_selected_run_anchored_parked_keeps_its_gate_with_a_dead_daemon
+test_selected_run_dead_daemon_leaves_the_open_decision_open
+test_coarse_pending_ledger_word_reads_unknown
+test_unanswered_probe_does_not_turn_a_failed_coarse_record_into_a_gate
+test_selected_route_dead_daemon_names_the_run_once
+test_head_tied_row_reads_the_same_whichever_run_axi_names
+test_coarse_head_tied_row_is_exempt_even_when_the_record_head_diverged
+test_unrecognised_ledger_word_keeps_the_ordinary_supersede_note
+test_unanswered_daemon_probe_does_not_suppress_live_run
+test_coarse_live_row_is_exempt_from_the_dead_daemon_verdict
+test_coarse_live_row_keeps_the_original_supersede_note
+test_coarse_live_rebased_row_is_not_attributed
+test_terminal_rebased_run_is_not_attributed
 test_competing_live_runs_report_unknown_with_both_ids
 test_newer_failed_run_is_not_hidden_by_older_live_run
 test_unverifiable_run_selection_reports_unknown
