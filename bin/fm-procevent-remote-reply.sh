@@ -272,11 +272,13 @@ cmd_rebase_locked() {
   continuity_is_broken "$id" \
     || die "remote reply continuity is not marked broken for $id"
   path=$(cursor_path "$id")
-  [ ! -L "$path" ] && { [ ! -e "$path" ] || [ -f "$path" ]; } \
-    || die "broken remote reply cursor is unsafe: $path"
+  if [ -L "$path" ] || { [ -e "$path" ] && [ ! -f "$path" ]; }; then
+    die "broken remote reply cursor is unsafe: $path"
+  fi
   status_file="$STATE/$id.status"
-  [ ! -L "$status_file" ] && { [ ! -e "$status_file" ] || [ -f "$status_file" ]; } \
-    || die "parent status log is unsafe: $status_file"
+  if [ -L "$status_file" ] || { [ -e "$status_file" ] && [ ! -f "$status_file" ]; }; then
+    die "parent status log is unsafe: $status_file"
+  fi
   reason=$(sed -n 's/^reason=//p' "$(continuity_break_path "$id")" | head -n 1)
   [ -n "$reason" ] || reason='operator rebase retry failed'
   empty=$(empty_hash) || die "cannot establish the empty cursor hash"
