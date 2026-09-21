@@ -1024,10 +1024,10 @@ PATH="$ADOPT_BIN:$PATH" pe "$HREDELIVER" reconcile >/dev/null 2>&1 || true
   || fail "re-delivering the note acknowledged the round it is still asking for"
 pass "an open worker-owned round is re-delivered after its note was filed away"
 
-# --- end-user-aligned regression: a half-finished conclude still concludes ----
-# Acknowledging a terminal round retires the board. A crash between those two
-# durable steps must not leave a registered board whose only round is already
-# acknowledged, because nothing would ever open a round on it again.
+# --- end-user-aligned regression: a conclude only closes its own round --------
+# Acknowledging a terminal round retires the board it belongs to. The same
+# acknowledgement repeated later is a no-op on a closed round, so it must not
+# reach past it and retire whatever board the artifact carries by then.
 HCONC="$TMP_ROOT/hconclude"; new_home "$HCONC"
 CONC_BIN=$(fm_fakebin "$TMP_ROOT/lavish-conclude-stub")
 cat > "$CONC_BIN/lavish-axi" <<'SH'
@@ -1047,11 +1047,22 @@ PATH="$CONC_BIN:$PATH" pe "$HCONC" start "$conc_id" >/dev/null 2>&1 || true
   || fail "the terminal worker-owned round never landed"
 [ -e "$HCONC/state/procevent/$conc_id.source" ] \
   || fail "the terminal round released the board before its owner acknowledged it"
-: > "$HCONC/state/procevent-inbox/$conc_id.1.handled"
-PATH="$CONC_BIN:$PATH" pe "$HCONC" handled "$conc_id" 1 >/dev/null
+conclude_out=$(PATH="$CONC_BIN:$PATH" pe "$HCONC" handled "$conc_id" 1)
+assert_contains "$conclude_out" "retired: $conc_id" \
+  "acknowledging the terminal round did not report the board retired"
 [ ! -e "$HCONC/state/procevent/$conc_id.source" ] \
-  || fail "a conclude interrupted after its acknowledgement left the board registered forever"
-pass "a conclude interrupted between its two steps still retires the board"
+  || fail "acknowledging the terminal round did not retire the worker-owned board"
+PATH="$CONC_BIN:$PATH" FM_HOME="$HCONC" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$CONC_ART" --for worker-7 >/dev/null
+repeat_out=$(PATH="$CONC_BIN:$PATH" pe "$HCONC" handled "$conc_id" 1)
+assert_contains "$repeat_out" "already-handled: $conc_id 1" \
+  "repeating a closed acknowledgement did not report it as already handled"
+case "$repeat_out" in
+  *retired:*) fail "repeating a closed acknowledgement retired a board it never belonged to" ;;
+esac
+[ -e "$HCONC/state/procevent/$conc_id.source" ] \
+  || fail "repeating a closed acknowledgement retired the board armed after it"
+pass "acknowledging a terminal round concludes that round only"
 
 # --- end-user-aligned regression: a failed re-arm keeps the last generation ---
 # Re-arm publishes the next generation and acknowledges the round it replaces.

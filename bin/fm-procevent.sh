@@ -1866,8 +1866,8 @@ cmd_handled() {
   owner_lease_refresh
   fm_procevent_source_lock_acquire "$id" || die "cannot lock source: $id"
   if [ "$(source_kind "$id" 2>/dev/null || true)" = task-owned ]; then
-    result="$(fm_procevent_inbox_dir "$STATE")/$id.$seq.result"
-    if [ -f "$result" ] && [ ! -L "$result" ] \
+    result=$(source_pending "$id" | awk -v want="/$id.$seq.result" 'index($0, want) { print; exit }')
+    if [ -n "$result" ] \
       && result_adapter=$(fm_procevent_result_adapter "$result" 2>/dev/null) \
       && adapter_result_is_terminal "$result_adapter" "$result"; then
       conclude=1

@@ -890,7 +890,7 @@ A task-owned source with an unhandled capture is not relaunched, so delivery fai
 That record is the only ownership evidence there is, so while any captured round of it is unacknowledged every retirement path refuses - the runner's own terminal retirement and an explicit `retire` alike - and the refusal names the acknowledgement that releases it.
 A terminal result, including `session_ended`, an empty End, or missing, is delivered to the owner with an explicit stop-and-conclude instruction and is never auto-rearmed.
 That round keeps the board with its owner: the source record is not retired while the terminal capture is unacknowledged, so no second armer can take the board, and acknowledging it with `bin/fm-procevent.sh handled <source-id> <sequence>` is what concludes and retires it.
-That conclude retires the board before it records the acknowledgement, and it reads the captured result rather than the open-round list, so an interrupted conclude is finished by simply running the same command again.
+That conclude retires the board before it records the acknowledgement, and it concludes only a round that is still open, so a repeated acknowledgement of an already-closed round reports `already-handled` and never touches whatever registration holds the board now.
 A second armer is refused with the current owner named, and the source list derives `listening`, `round-open`, or `dead` from the claim and handled captures without a second ownership record.
 If the hosting worker cannot be recovered, relaunch a worker to re-host first; guarded firstmate adoption is an explicit last resort only after the old claim is proved dead.
 The cross-home gap between worker rounds remains an accepted residual until lavish-axi's exclusive listener lands.
