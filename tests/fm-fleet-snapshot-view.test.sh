@@ -132,6 +132,34 @@ EOF
     "mode=ship"
 }
 
+test_contribution_input_serialization_failure_is_loud() {
+  local home fakebin stdout stderr
+  home=$(make_home contribution-serialization-failure)
+  fakebin="$home/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+set -u
+for arg in "$@"; do
+  if [ "$arg" = --slurpfile ]; then
+    printf 'forced jq serialization failure\n' >&2
+    exit 42
+  fi
+done
+exec /usr/bin/jq "$@"
+SH
+  chmod +x "$fakebin/jq"
+  stdout="$home/stdout"
+  stderr="$home/stderr"
+  if PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --contribution-input >"$stdout" 2>"$stderr"; then
+    fail 'contribution input serialization failure was reported as success'
+  fi
+  [ ! -s "$stdout" ] || fail 'failed contribution input serialization emitted a document'
+  grep -F 'fm-fleet-snapshot: contribution input serialization failed' "$stderr" >/dev/null \
+    || fail 'contribution input serialization failure was not explained'
+  pass 'contribution input serialization failure is non-zero and loud'
+}
+
 test_empty_fleet_json() {
   local home out view
   home=$(make_home empty)
@@ -1152,6 +1180,7 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+test_contribution_input_serialization_failure_is_loud
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory

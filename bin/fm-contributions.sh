@@ -131,7 +131,13 @@ read_saved() {
 }
 
 get_input() {
-  "$SCRIPT_DIR/fm-fleet-snapshot.sh" --contribution-input > "$TMP/input.json"
+  if ! "$SCRIPT_DIR/fm-fleet-snapshot.sh" --contribution-input > "$TMP/input.json"; then
+    fail 'contribution snapshot unavailable'
+  fi
+  [ -s "$TMP/input.json" ] || fail 'contribution snapshot was empty'
+  jq -e -s 'length == 1 and (.[0] | type == "object" and (.backlog | type == "object") and (.tasks | type == "array"))' \
+    "$TMP/input.json" >/dev/null \
+    || fail 'contribution snapshot was invalid'
 }
 
 project() {
