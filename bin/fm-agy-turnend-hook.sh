@@ -26,6 +26,15 @@
 # Firstmate asks the captain and records the answer; this command never prompts,
 # and remove needs no consent because it only undoes the write.
 #
+# ONE RECORDING PLACE PER MACHINE. The answer is about one machine's single
+# hooks.json, so the primary firstmate home is the only home that records it and
+# local secondmate homes inherit the copy. A non-primary local home that
+# recorded its own would have it erased by the next primary-authoritative
+# convergence and would ask again, which is the repeated ask this gate exists to
+# end, so an unasked local secondmate's refusal names the PRIMARY home's file
+# instead of its own. A remote secondmate is a different machine that never
+# receives the item, so it remains its own recording place.
+#
 # WHY A GLOBAL FILE. agy reads hooks only from its customization roots: the
 # global ${HOME}/.gemini/config/ and a workspace's own .agents/ directory. It
 # exposes no settings-path environment variable or flag, so there is no gemini
@@ -58,10 +67,15 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 CONSENT_FILE="$CONFIG/agy-turnend-hook"
 
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
+
 case "${1:-}" in
 install | remove) ACTION=$1 ;;
 -h | --help)
-  sed -n '2,51{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,60{s/^# \{0,1\}//;p;}' "$0"
   exit 0
   ;;
 *)
@@ -118,6 +132,32 @@ HOOK_SCRIPT="$CLI_DIR/fm-turn-end.sh"
 
 shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
 
+# The one place this machine's answer belongs, rendered for the refusal text.
+# A primary home names its own file. A local secondmate names the primary's,
+# because it inherits that copy and anything it recorded itself would be erased
+# by the next convergence. A remote secondmate is another machine and never
+# receives the item, so it names its own file after all.
+consent_recording_location() {
+  if ! fm_root_is_secondmate_home "$FM_HOME"; then
+    printf "'%s'" "$CONSENT_FILE"
+    return 0
+  fi
+  if fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent"; then
+    case "$FM_SECONDMATE_PARENT_ROUTE" in
+    local)
+      printf "'%s/config/agy-turnend-hook', this machine's primary firstmate home" \
+        "$FM_SECONDMATE_PARENT_HOME"
+      return 0
+      ;;
+    remote)
+      printf "'%s'" "$CONSENT_FILE"
+      return 0
+      ;;
+    esac
+  fi
+  printf '%s' "config/agy-turnend-hook in this machine's primary firstmate home"
+}
+
 # Captain consent, checked before the store is inspected at all so an unasked
 # home never reads or touches the captain's own file. remove is not gated: it
 # only takes back a write this command made.
@@ -141,7 +181,7 @@ if [ "$ACTION" = install ]; then
       ;;
     esac
   else
-    refuse "the captain has not been asked about the global agy turn-end hook. ASK THE CAPTAIN ONCE whether firstmate may add its own 'firstmate-turn-end' key to '$STORE', a file agy and the Antigravity IDE share with the captain's own sessions, then record the answer by writing allow or deny to '$CONSENT_FILE'."
+    refuse "the captain has not been asked about the global agy turn-end hook. ASK THE CAPTAIN ONCE whether firstmate may add its own 'firstmate-turn-end' key to '$STORE', a file agy and the Antigravity IDE share with the captain's own sessions, then record the answer by writing allow or deny to $(consent_recording_location)."
   fi
 fi
 

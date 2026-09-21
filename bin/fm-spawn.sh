@@ -1861,7 +1861,7 @@ agy_turnend_hook_supported() {  # <agy-bin>
     return 1
   fi
   version=$(printf '%s\n' "$raw" \
-    | awk 'NF { for (i = 1; i <= NF; i++) if ($i ~ /^v?[0-9]+(\.[0-9]+)+$/) { sub(/^v/, "", $i); print $i; exit } }')
+    | awk 'NF { for (i = 1; i <= NF; i++) if ($i ~ /^v?[0-9]+(\.[0-9]+)+([-+].*)?$/) { sub(/^v/, "", $i); print $i; exit } }')
   if [ -z "$version" ]; then
     AGY_TURNEND_UNSUPPORTED_REASON="'agy --version' printed no recognisable version, so the turn-end hook surface is unproven"
     return 1

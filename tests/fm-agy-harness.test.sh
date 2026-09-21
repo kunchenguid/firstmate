@@ -1454,6 +1454,44 @@ test_agy_stale_build_is_never_armed() {
     || fail "a version above the hook-surface floor was left unarmed"
   [ -s "$HOME_DIR/state/$id.agy-turnend-token" ] \
     || fail "a version above the hook-surface floor minted no turn-end token"
+
+  # A prerelease or build suffix is a real release shape, so it must be read as
+  # its release core rather than dropped into the unrecognised-version branch,
+  # which would leave a build that does carry the hook surface unarmed.
+  id="agy-prerelease-z22-$$"
+  rec=$(make_agy_spawn_case prerelease "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_VERSION=1.3.0-rc.1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "a prerelease agy spawn should succeed"
+  assert_not_contains "$out" "no recognisable version" \
+    "a prerelease release core was not recognised as a version at all"
+  [ -s "$HOME_DIR/state/$id.busy-gen" ] \
+    || fail "a prerelease above the hook-surface floor was left unarmed"
+
+  id="agy-build-z23-$$"
+  rec=$(make_agy_spawn_case build "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_VERSION=1.2.8+build7 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "a build-suffixed agy spawn should succeed"
+  [ -s "$HOME_DIR/state/$id.busy-gen" ] \
+    || fail "a build-suffixed version above the hook-surface floor was left unarmed"
+
+  # The suffix must not promote a release core that is still below the floor.
+  id="agy-oldrc-z24-$$"
+  rec=$(make_agy_spawn_case oldrc "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_VERSION=1.2.5-rc.1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "a below-floor prerelease must not kill the spawn"
+  assert_contains "$out" "older than 1.2.6" \
+    "a below-floor prerelease was not compared on its release core"
+  [ -e "$HOME_DIR/state/$id.busy-gen" ] \
+    && fail "a prerelease below the hook-surface floor was armed anyway" || true
   pass "fm-spawn: agy arms only on a build proven to carry the turn-end hook surface"
 }
 
@@ -1558,13 +1596,6 @@ test_agy_consent_is_inherited_locally_and_never_remotely() {
   [ "$(cat "$dest/agy-turnend-hook" 2>/dev/null)" = allow ] \
     || fail "a local secondmate home did not inherit the captain's recorded agy consent"
 
-  # Primary-authoritative the same way every other inherited item is.
-  rm -f "$src/agy-turnend-hook"
-  propagate_inheritable_config "$src" "$dest" \
-    || fail "local propagation failed while mirroring a cleared agy consent"
-  [ -e "$dest/agy-turnend-hook" ] \
-    && fail "clearing the primary's agy consent left it standing in a local secondmate home" || true
-
   # The remote transfer set is derived from the same declaration and must not
   # carry it, so one machine's consent can never land on another machine.
   found=0
@@ -1594,6 +1625,140 @@ EOF
   assert_not_contains "$out" "not inherited material" \
     "the remote receiver stopped recognising ordinary inherited material"
   pass "fm-config-inherit-lib.sh: the agy consent is inherited locally and refused across machines"
+}
+
+# One recording place per machine. A LOCAL secondmate shares the primary's one
+# hooks.json and inherits the primary's answer, so anything it recorded itself
+# would be erased by the next primary-authoritative convergence and asked
+# again; its refusal must therefore send the answer to the primary home. A
+# REMOTE secondmate is a different machine that never receives the item, so it
+# stays its own recording place. Neither may write anything while unasked.
+test_agy_unasked_secondmate_is_sent_to_the_primary_home() {
+  local dir home agyhome primary out rc
+
+  dir="$TMP_ROOT/consent-ownership"
+  rm -rf "$dir"
+  primary="$dir/primary"
+  agyhome="$dir/agyhome"
+  mkdir -p "$primary/config" "$agyhome/.gemini/config"
+  printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' \
+    >"$agyhome/.gemini/config/hooks.json"
+
+  # A local secondmate home: marker plus a local parent binding naming the primary.
+  home="$dir/local-mate"
+  mkdir -p "$home/config"
+  printf 'alpha\n' >"$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$primary" \
+    >"$home/.fm-secondmate-parent"
+  rc=0
+  out=$(HOME="$agyhome" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unasked local secondmate installed the hook anyway"
+  assert_contains "$out" "ASK THE CAPTAIN ONCE" "the local secondmate refusal dropped the ask marker"
+  assert_contains "$out" "$primary/config/agy-turnend-hook" \
+    "an unasked local secondmate did not send the answer to the primary home"
+  assert_not_contains "$out" "$home/config/agy-turnend-hook" \
+    "an unasked local secondmate offered its own config as the recording place"
+  [ -e "$home/config/agy-turnend-hook" ] \
+    && fail "a local secondmate recorded a consent of its own" || true
+  assert_agy_home_untouched "$agyhome" "unasked local secondmate"
+
+  # A remote secondmate is another machine: it never receives the inherited
+  # item, so being sent to a primary it cannot inherit from would strand it.
+  home="$dir/remote-mate"
+  mkdir -p "$home/config"
+  printf 'bravo\n' >"$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=lab\n' \
+    >"$home/.fm-secondmate-parent"
+  rc=0
+  out=$(HOME="$agyhome" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unasked remote secondmate installed the hook anyway"
+  assert_contains "$out" "$home/config/agy-turnend-hook" \
+    "a remote secondmate was not left as its own recording place"
+  assert_not_contains "$out" "$primary/config/agy-turnend-hook" \
+    "a remote secondmate was sent to another machine's primary home"
+
+  # A secondmate marker with no readable parent binding still must not name its
+  # own file as the place to record; it names the primary home in words.
+  home="$dir/orphan-mate"
+  mkdir -p "$home/config"
+  printf 'charlie\n' >"$home/.fm-secondmate-home"
+  rc=0
+  out=$(HOME="$agyhome" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unasked secondmate with no parent binding installed the hook anyway"
+  assert_contains "$out" "primary firstmate home" \
+    "a secondmate with no parent binding did not name the primary home at all"
+  assert_not_contains "$out" "$home/config/agy-turnend-hook" \
+    "a secondmate with no parent binding offered its own config as the recording place"
+
+  # The primary home's own refusal is unchanged: it names its own file.
+  rc=0
+  out=$(HOME="$agyhome" FM_HOME="$primary" FM_CONFIG_OVERRIDE="$primary/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unasked primary home installed the hook anyway"
+  assert_contains "$out" "$primary/config/agy-turnend-hook" \
+    "the primary home's refusal stopped naming its own recording place"
+  pass "fm-agy-turnend-hook.sh: only the primary home records a machine's agy consent"
+}
+
+# A captain who records deny stops spawning agy, so a retraction reachable only
+# from install would never fire and the key would keep running two synchronous
+# subprocesses per turn in his own sessions. Session-start bootstrap therefore
+# runs the same remove, and stays silent when there is nothing to take back.
+run_bootstrap_home() {  # <fm-home> <agy-home> <fakebin>
+  PATH="$3:$BASE_PATH" HOME="$2" FM_HOME="$1" FM_ROOT_OVERRIDE="$1" \
+    FM_BOOTSTRAP_NETWORK_PHASE=skip "$ROOT/bin/fm-bootstrap.sh" 2>&1
+}
+
+test_agy_bootstrap_retracts_a_recorded_deny() {
+  local dir home agyhome store fakebin out rc
+
+  dir="$TMP_ROOT/consent-bootstrap"
+  rm -rf "$dir"
+  home="$dir/home"
+  agyhome="$dir/agyhome"
+  mkdir -p "$home/config" "$home/state" "$home/data" "$agyhome/.gemini/config"
+  fakebin=$(fm_fakebin "$dir/fake")
+  store="$agyhome/.gemini/config/hooks.json"
+  printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' >"$store"
+
+  # Nothing recorded yet: bootstrap must not touch the captain's store.
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
+  assert_not_contains "$out" "AGY_TURNEND_HOOK" "bootstrap spoke about a consent nobody recorded"
+
+  # Consent given and the key installed, the state a withdrawal starts from.
+  printf 'allow\n' >"$home/config/agy-turnend-hook"
+  HOME="$agyhome" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install >/dev/null 2>&1 \
+    || fail "the consented install failed before the retraction case could run"
+  assert_agy_hooks_store "$store" installed "the consented install registered no firstmate handlers"
+
+  # An allow left standing is not a withdrawal, so bootstrap leaves it alone.
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
+  assert_not_contains "$out" "AGY_TURNEND_HOOK" "bootstrap retracted a consent that still reads allow"
+  assert_agy_hooks_store "$store" installed "bootstrap removed a key the captain still allows"
+
+  # The captain withdraws and never spawns agy again: bootstrap takes it back.
+  printf 'deny\n' >"$home/config/agy-turnend-hook"
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
+  assert_contains "$out" "AGY_TURNEND_HOOK" "bootstrap retracted the key without saying so"
+  assert_agy_hooks_store "$store" removed \
+    "a recorded deny survived session start with firstmate's key still installed"
+
+  # Idempotent: with the key already gone there is nothing to say or do.
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
+  assert_not_contains "$out" "AGY_TURNEND_HOOK" "bootstrap spoke again about an already-clean store"
+
+  # Safe when the captain has no agy store at all.
+  rm -f "$store"
+  rc=0
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin") || rc=$?
+  expect_code 0 "$rc" "bootstrap failed on a deny with no agy store present"
+  assert_not_contains "$out" "AGY_TURNEND_HOOK" "bootstrap spoke about a store that does not exist"
+  [ -e "$store" ] && fail "bootstrap created the captain's agy store to retract from it" || true
+  pass "fm-bootstrap.sh: a recorded deny retracts the global agy key at session start"
 }
 
 test_agy_ancestry_detects_the_native_command_name
@@ -1636,6 +1801,8 @@ test_agy_stale_build_is_never_armed
 test_agy_withdrawn_consent_retracts_the_installed_hook
 test_agy_spawn_retracts_the_hook_when_consent_is_withdrawn
 test_agy_consent_is_inherited_locally_and_never_remotely
+test_agy_unasked_secondmate_is_sent_to_the_primary_home
+test_agy_bootstrap_retracts_a_recorded_deny
 test_agy_turnend_installer_owns_only_its_own_key
 test_agy_turnend_installer_refuses_a_store_it_does_not_own
 test_agy_turnend_installer_leaves_nothing_behind_when_the_store_edit_fails

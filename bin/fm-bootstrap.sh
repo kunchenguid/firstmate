@@ -1381,6 +1381,30 @@ startup_memory_budget_setup() {
   fi
 }
 
+# A recorded deny must take the global agy turn-end key back out even when no
+# further agy spawn ever runs in this home, which is the likeliest sequence: the
+# captain writes deny precisely so firstmate stops touching his agy, and the
+# install path's retraction then never fires. This is the SAME remove action,
+# gated so it costs one small read when there is nothing to do. Every store
+# refusal stays the installer's own: the key name is literal JSON text, so the
+# grep can only over-trigger into a no-op remove, never miss a key that is
+# there. Local homes act on an inherited deny too, because one machine has one
+# hooks.json and the removal is idempotent.
+agy_turnend_consent_retract() {
+  local consent="$CONFIG/agy-turnend-hook" store
+  [ -n "${HOME:-}" ] || return 0
+  store="$HOME/.gemini/config/hooks.json"
+  [ -f "$consent" ] && [ ! -L "$consent" ] || return 0
+  [ "$(tr -d '[:space:]' <"$consent" 2>/dev/null || true)" = deny ] || return 0
+  [ -f "$store" ] || return 0
+  grep -q 'firstmate-turn-end' "$store" 2>/dev/null || return 0
+  if "$SCRIPT_DIR/fm-agy-turnend-hook.sh" remove >/dev/null 2>&1; then
+    echo "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny - removed firstmate's key from $store"
+  else
+    echo "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny but firstmate's key could not be removed from $store - run bin/fm-agy-turnend-hook.sh remove"
+  fi
+}
+
 if [ "${1:-}" = "lavish-compatible" ]; then
   tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"
   exit
@@ -1446,6 +1470,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
     fi
   fi
   startup_memory_budget_setup
+  agy_turnend_consent_retract
   if backlog_record_reconcile; then
     :
   else

@@ -208,6 +208,17 @@ Where the hook cannot be installed at all - a `hooks.json` firstmate does not ow
 An installed agy older than `1.2.6` takes the same unarmed path, decided before the installer runs: `bin/fm-spawn.sh` probes `agy --version` and requires positive evidence of the hook surface, so an older, unreachable, or unrecognisable version neither writes the captain's store nor seeds a busy record that no `PreInvocation` or `Stop` could ever clear.
 That probe runs stdin-detached under the same shared hard bound as the model listing (5 seconds by default, `FM_AGY_VERSION_TIMEOUT`, clamped back to that default when the value is non-positive or non-numeric), and unlike the model listing a bound that expires fails closed rather than launching unvalidated, because an unproven hook surface costs a silent wedge while an unproven model only costs a loud refusal.
 
+The arming decision depends on the format of that output, so the observed shape is recorded here alongside the `1.2.0` reading in the Detection section above:
+
+```
+$ agy --version
+1.2.7
+```
+
+Observed on macOS 26.1 (Darwin 25.5.0) on 2026-09-22.
+The probe accepts the first whitespace-separated token on stdout that is a dotted numeric version, optionally `v`-prefixed and optionally carrying a `-` prerelease or `+` build suffix, and compares the release core alone, so `1.3.0-rc.1` is read as `1.3.0` and arms while `1.2.5-rc.1` is read as `1.2.5` and does not.
+No suffixed agy release has been observed; that shape is accepted so a real one is never mistaken for an unrecognisable version and silently left unarmed.
+
 The `Stop` payload carries no re-entrancy flag; its output contract is what bounds re-entry:
 
 ```

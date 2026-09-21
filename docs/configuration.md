@@ -392,6 +392,8 @@ The token is the file's whitespace-trimmed content.
 `allow` permits the write, and every later install in that home proceeds without asking again.
 `deny` refuses it, and is equally durable: a recorded decline is never raised again either, and it also retracts.
 The next install in a home that reads `deny` removes the `firstmate-turn-end` key an earlier `allow` had written, leaving every other key untouched, and then refuses as usual.
+Because a captain who records `deny` usually stops spawning agy crewmates altogether, that install-time retraction could otherwise never fire, so session-start bootstrap runs the same removal whenever this home reads `deny` and the key is still in the store, and reports the one line it takes to do so.
+`bin/fm-agy-turnend-hook.sh remove` is the immediate manual withdrawal for anyone who does not want to wait for either: it is ungated, needs no recorded consent, removes only firstmate's own key, and exits cleanly when no key or no store is present.
 A consent that could not be withdrawn would leave the captain's own agy sessions and the Antigravity IDE running two synchronous subprocesses per turn for good.
 Because the key is shared, a `deny` recorded while other agy crewmates are still running takes the hook out from under them too: each one keeps its seeded busy record with nothing left to close it, and reads busy until the watcher's `BUSY_TURN_MAX_SECS` bound ages it out.
 Prefer retracting between tasks when that matters.
@@ -400,8 +402,9 @@ Any other value, or an unreadable file, refuses the install and names the accept
 Firstmate asks the captain and records his answer; the installer itself never prompts, because a crewmate must never address the captain directly.
 Only `install` is gated, since `remove` merely takes back a write this consent authorised.
 A refusal of any kind is not fatal: `bin/fm-spawn.sh` drops that task to the same degraded shape a store it cannot own produces, with no busy state and no turn-end signal, and says so on its own path.
-The file is inherited within one machine's local homes and never carried across machines.
-A local secondmate runs under the same uid as the primary and therefore shares the very `~/.gemini/config/hooks.json` the answer is about, so it inherits the answer rather than asking the captain a second time for one write to one file; a remote secondmate runs against a different machine's home directory, so the answer is deliberately excluded from the remote transfer set and that home asks once for itself.
+One consent per machine, recorded in the primary firstmate home, inherited into that machine's local homes, never carried to a remote home.
+A local secondmate runs under the same uid as the primary and therefore shares the very `~/.gemini/config/hooks.json` the answer is about, so it only ever holds the inherited copy and never records its own: an unasked local secondmate's refusal names the primary home's `config/agy-turnend-hook`, because a copy it recorded itself would be erased by the next primary-authoritative convergence and asked again.
+A remote secondmate is a different machine with its own `~/.gemini/config/hooks.json`, so the item is excluded from the remote transfer set and that home is its own recording place, asked once for itself.
 `bin/fm-config-inherit-lib.sh` owns that split through `FM_LOCAL_ONLY_INHERITABLE_CONFIG`, which local convergence carries and the derived remote allowlist in `fm_config_inherit_items` excludes.
 The [agy adapter reference](../.agents/skills/harness-adapters/references/harness/agy.md) records the hook surface this consent governs.
 
