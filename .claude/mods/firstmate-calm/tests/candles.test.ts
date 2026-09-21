@@ -107,11 +107,11 @@ describe("the candles scene", () => {
     });
   }
 
-  test("draws the boat when the setting is absent or unreadable", async ($, on) => {
+  test("draws the boat when the setting is absent, without a failed read of the missing file", async ($, on) => {
     const { journal } = world(on, { preference: "on\n" });
     const { glyphs } = decodeCells(rasterOf(await $.ui.render(spinner("agent-main", { columns: 40, rows: 24 })))!.cells, 38, 2);
     expect(glyphs[1]!.indexOf(HULL)).toBe(0);
-    expect(journal.fsReads).toEqual([PREFERENCE, SCENE]);
+    expect(journal.fsReads).toEqual([PREFERENCE]);
   });
 
   test("reads the setting with the preference once per session and re-reads it on a new session", async ($, on) => {

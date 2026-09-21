@@ -82,6 +82,7 @@ export function world(on: On, options: WorldOptions = {}): World {
   let blitDenial: string | undefined;
   let writeFailure: string | undefined;
 
+  on("fs.exists", async (_$, e) => ({ value: files.has(e.path) }));
   on("fs.read", async (_$, e) => {
     journal.fsReads.push(e.path);
     return files.has(e.path) ? { value: files.get(e.path)! } : { deny: `ENOENT: ${e.path}` };

@@ -88,9 +88,13 @@ function isActivated($: EngineInterface): Promise<boolean> {
   return activation;
 }
 
+/**
+ * A config file's text, or undefined when it is absent or unreadable. Absence is asked
+ * first, so a home without the file costs no failed read the engine logs as an error.
+ */
 async function readConfigFile($: EngineInterface, path: string): Promise<string | undefined> {
   try {
-    return await $.fs.read(path);
+    return (await $.fs.exists(path)) ? await $.fs.read(path) : undefined;
   } catch {
     return undefined;
   }

@@ -46,8 +46,10 @@ MODULE_LOADED='hooks module firstmate-calm(@[^ ]+)? loaded'
 cleanup() {
   local i=0
   tmux -L "$SOCKET" kill-server 2>/dev/null || true
-  # Claude's debug logger may still be flushing into the lab for a moment.
-  while [ "$i" -lt 20 ] && pgrep -f "debug-file '$LAB/" >/dev/null 2>&1; do
+  # Claude's debug logger may still be flushing into the lab for a moment, and would
+  # recreate it after the removal. Its own argv carries the path unquoted; the tmux
+  # shell that launched it carries it quoted.
+  while [ "$i" -lt 20 ] && pgrep -f "debug-file '?$LAB/" >/dev/null 2>&1; do
     sleep 0.25
     i=$((i + 1))
   done
@@ -83,8 +85,12 @@ screen() {
   tmux -L "$SOCKET" capture-pane -p -t "$SESSION" 2>/dev/null || true
 }
 
+# Typed text arrives as one fast burst, and an Enter inside that burst lands in the
+# composer as a newline instead of submitting, so let the burst settle first, as
+# bin/fm-send.sh does before its own Enter.
 send() {
   tmux -L "$SOCKET" send-keys -t "$SESSION" -l "$1"
+  sleep 1
 }
 
 enter() {

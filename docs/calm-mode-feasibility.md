@@ -752,6 +752,7 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 The `config/calm-scene` candles scene was first verified on this host against Claude Code 2.1.278, Pi 0.86.1 (`@earendil-works/pi-coding-agent`), Node 22.22.1 with type stripping, and tmux, with the boat checked frame-for-frame and Raster-for-Raster against the previous sprite core across widths 0 to 200 and 400 steps each, including freezes and hidden resizes.
 In that first run the Node, plugin, and Pi suites passed in full.
 Review then removed a one-row mode the candles used below five columns, so they now keep two rows down to one column, moved the Claude Code mod's scene read into its session load beside `config/calm`, and moved the live guard's candles section ahead of its boat section.
+Testing then made the mod ask `$.fs.exists` before reading `config/calm` or `config/calm-scene`, because Claude Code 2.1.278 logs a failed `$.fs.read` of an absent file as an `[ERROR] $.fs.read ... ENOENT` line against the mod, which the live guard's load check rejects; a home without either file now loads with no failed read.
 
 After those changes the plugin suites passed all 53 of their cases:
 
@@ -776,4 +777,11 @@ Claude Code 2.1.278 emits truecolor only at chalk color level 3 and otherwise qu
 Two 2.1.278 changes affect the full live guard independently of the candles scene.
 The debug log now names the loaded module `firstmate-calm@skills-dir`, and the guard's load check now accepts either spelling.
 The composer also strips U+2063 from typed input and waits for a second Enter ("Removed 1 invisible character · review and press Enter to send"), so the guard's operational-row step, which types an exact operational envelope, stops at that step on 2.1.278 and remains open.
-The guard now runs its candles section before that step, so a full run on 2.1.278 would reach it, but no full run of the reordered guard is recorded.
+The guard now runs its candles section before that step.
+A full run of the reordered guard on 2.1.278 passed the flag-off and candles sections, then passed the flag-on load check with no Calm warning or error beyond the options notice, the moving boat, and the hidden tool row, and stopped at that step:
+
+```text
+ok - Claude Code 2.1.278 (Claude Code) with the flag unset: no hooks module, no /calm, stock working row, stock tool rows, preference on ignored
+ok - Claude Code 2.1.278 (Claude Code) draws the chosen candles scene in the working row in the theme's green and red, scrolls it, and removes it when the turn settles
+not ok - the operational user row drew while Calm was on
+```
