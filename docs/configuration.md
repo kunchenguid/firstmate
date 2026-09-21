@@ -690,6 +690,13 @@ Captain consent for this path: the query string may be sent to Jev; page bodies,
 The classifier never retries the engine, never enables embeddings or OpenViking, and never writes a wiki vault, catalog, or engine config.
 Classification results remain in the helper's local log rather than being added to the engine envelope.
 
+## Memory store (config/memory-dir)
+
+Durable memory is plain markdown searched by a light BM25 index; [`docs/memory.md`](memory.md) owns the store contract, the OpenViking migration, and the retirement of the old server.
+The store lives at `FM_MEMORY_DIR`, else the first non-comment non-blank line of gitignored `config/memory-dir` (under `FM_CONFIG_OVERRIDE` when set), else `$FM_HOME/data/memories`.
+The file is home-local and not part of secondmate inherited configuration.
+[`bin/fm-memory.sh`](../bin/fm-memory.sh) is the store/recall command surface, [`bin/fm-memory-migrate.sh`](../bin/fm-memory-migrate.sh) the verified export path, and [`bin/fm-openviking-retire.sh`](../bin/fm-openviking-retire.sh) the reversible server stop.
+
 ## Toolchain
 
 On session start the first mate detects what its required toolchain is missing or too old and lists each problem with either an exact install command or manual instructions.
@@ -1306,6 +1313,8 @@ JEV_TIMEOUT=25          # optional Jev HTTP timeout in seconds; default 25 (same
 FM_JEV_DISPATCH_SHADOW= # 1 logs the Jev dispatch pick to state/jev-dispatch-shadow.jsonl; 0 overrides config/jev-dispatch-shadow off (docs/configuration.md "Typed dispatch resolution")
 FM_WIKI_ENGINE=         # wiki-tool executable path or command; else config/wiki-engine (docs/configuration.md "Wiki engine ask")
 FM_WIKI_CATALOG=        # private wiki-tool catalog JSON path; else config/wiki-catalog (docs/configuration.md "Wiki engine ask")
+FM_MEMORY_DIR=          # memory store directory; else config/memory-dir, else $FM_HOME/data/memories (docs/configuration.md "Memory store")
+FM_OV_HOME=             # OpenViking home override for migration/retire scripts; default ~/.openviking (docs/memory.md)
 FM_JEV_TOOL_GATE=shadow # remainder Jev tool-gate after arm-command policy; live needs this plus two opt-in files; hard-ship is a do-not (docs/configuration.md "Jev remainder tool-gate")
 FM_JEV_SKILL_SELECT=shadow # skill selection mode; activation and safe-query requirements: "Jev skill selector" above
 FM_JEV_BRIEF_PREFLIGHT=shadow # spawn-path Jev brief preflight; off skips; never blocks launch (docs/configuration.md "Jev brief preflight")

@@ -60,6 +60,10 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-jev-done-verify.sh` | Log-only shadow score of a worker done line; drain-invoked, never closes or tears down (docs/configuration.md) |
 | `fm-jev-retrieval-miss.sh` | Metadata-only Jev miss classifier; refuses excerpts and conflict lines (docs/configuration.md) |
 | `fm-wiki-ask.sh` | Config-gated wiki-tool ask; classifies no-match and missing-source only (docs/configuration.md) |
+| `fm-memory.sh` | Plain-markdown memory store: remember, BM25 recall, list, reindex (docs/memory.md) |
+| `fm-memory-bm25.mjs` | BM25 index and query engine behind fm-memory.sh; owns the index format and staleness rule |
+| `fm-memory-migrate.sh` | Verified OpenViking-workspace export into the markdown store plus archive (docs/memory.md) |
+| `fm-openviking-retire.sh` | Reversibly stop the OpenViking launchd agent and rotate its logs (docs/memory.md) |
 | `fm-subagent-pretool-check.sh` | Primary-home delegation-shape PreToolUse guard (docs/subagent-guard.md) |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a local secondmate home and maintain `data/secondmates.md` |
