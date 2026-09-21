@@ -76,10 +76,11 @@
 #                          with the same "stale: ..." reason, escalation
 #                          count, and demand-deep-inspection marker for a live
 #                          agent, plus a situation clause reporting how old the
-#                          selected marker is and which marker that was - the
-#                          last observed tool-call boundary, or the last
-#                          completed turn - and asserting nothing about whether
-#                          work is running, for
+#                          selected marker is and which of the two markers that
+#                          was - observed harness progress, whose adapter-specific
+#                          source the clause deliberately never names, or the
+#                          last completed turn - and asserting nothing about
+#                          whether work is running, for
 #                          human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
@@ -1324,9 +1325,13 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # is touched entering a tool call as well as leaving it, so a single call that
 # outlives the bound ages the marker while the command runs; and a runtime that
 # reports no boundaries leaves the watcher no activity evidence at all. Callers
-# may therefore report the age and WHICH marker it came from, and nothing else -
-# a confident "nothing is running" is exactly the false alarm this bound exists
-# to stop. busy_turn_quiet_anchor returns that marker so one resolution can
+# may therefore report the age and WHICH of the two markers it came from, and
+# nothing else - a confident "nothing is running" is exactly the false alarm
+# this bound exists to stop. Which activity refreshes the progress marker is the
+# adapter's business and differs between them, so the wake names progress
+# without its source: citing a tool-call boundary to a supervisor watching a
+# native-Codex crew would send them looking for evidence that adapter never
+# writes. busy_turn_quiet_anchor returns that marker so one resolution can
 # supply both the age and the wording; resolving it twice would let a boundary
 # landing between the two reads pair one marker's age with the other's wording.
 busy_turn_quiet_anchor() {  # <task>
@@ -1481,8 +1486,8 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
   anchor=$(busy_turn_quiet_anchor "$task")
   quiet=$(age_of "$anchor")
   if [ "$anchor" = "$STATE/$task.progress" ]; then
-    label="busy (no tool boundary)"
-    situation="the harness still reports an open turn and no tool-call boundary has been observed for ${quiet}s"
+    label="busy (no progress)"
+    situation="the harness still reports an open turn and no progress has been observed for ${quiet}s"
   else
     label="busy (no completed turn)"
     situation="the harness still reports an open turn and no turn has completed for ${quiet}s"
