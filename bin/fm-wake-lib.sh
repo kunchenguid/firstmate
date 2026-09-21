@@ -1254,8 +1254,9 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # Treehouse can record ownership durably: `treehouse get --lease --lease-holder`
 # reserves a slot under a label until `treehouse return --if-lease-holder`
 # releases it, and Firstmate uses exactly that for secondmate homes
-# (bin/fm-home-seed.sh). Crewmate spawns do not take that path: they acquire
-# their slot through the interactive pane-driven `treehouse get`, whose state
+# (bin/fm-home-seed.sh) and Herdr crewmate spawns (bin/fm-spawn.sh). Other
+# crewmate spawns do not take that path: they acquire their slot through the
+# interactive pane-driven `treehouse get`, whose state
 # entry is a live process lease (owner_pid plus owner_started_at, and `treehouse
 # status` reports in-use from the processes actually running under the path).
 # That answers "is anything running here", never "which task owns this", and it
@@ -1264,8 +1265,8 @@ fm_treehouse_pool_slot() {  # <project-dir> <worktree>
 # this task's or has since been handed to another one. Firstmate therefore keeps
 # its own claim on top: one file naming the task that took the slot, written by
 # bin/fm-spawn.sh under the same project lock that allocates the slot and
-# released by bin/fm-teardown.sh when the slot goes back to the pool. Moving
-# crewmate spawns onto the durable lease is separate follow-up work.
+# released by bin/fm-teardown.sh when the slot goes back to the pool. A leased
+# Herdr slot takes the same claim, so teardown reads ownership one way.
 #
 # The claim lives at <pool>/<slot>/.fm-slot-owner - a sibling of the repo
 # checkout rather than a file inside it - so claiming a slot can never dirty the
@@ -1345,6 +1346,53 @@ fm_treehouse_slot_owner_release() {  # <worktree> <task-id>
   [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || return 0
   marker=$(fm_treehouse_slot_owner_marker "$worktree") || return 0
   rm -f "$marker" 2>/dev/null || true
+}
+
+# Retained-lease record: a Treehouse pool slot this home left durably leased.
+#
+# A spawn that aborts while its task pane survives, after its launch was
+# delivered, or after it reused the task's own earlier lease keeps the lease on
+# purpose - nothing may force-return a slot that can still hold an agent or its
+# unlanded work - and so does an abort whose return itself failed. No such case
+# leaves a task record, so teardown never runs for that id and no other
+# reader can name the slot afterwards; the stderr warning dies with the
+# terminal. This record is what outlives both: one file per retained slot,
+# naming the slot, its lease holder, the task, and why it was kept.
+# bin/fm-bootstrap.sh reads <state>/.treehouse-lease-retained/ at session start
+# and prints one actionable line per record. Reclaiming a slot stays a
+# deliberate human step; nothing here releases anything.
+fm_treehouse_lease_retained_marker_path() {  # <state-dir> <task-id> <worktree>
+  local state=$1 id=$2 worktree=$3 slot
+  case "$id" in *[!A-Za-z0-9._-]*|''|.|..) return 1 ;; esac
+  slot=${worktree%/}
+  slot=${slot%/*}
+  slot=${slot##*/}
+  case "$slot" in *[!A-Za-z0-9._-]*|''|.|..) return 1 ;; esac
+  printf '%s/.treehouse-lease-retained/%s.%s.retained\n' "$state" "$id" "$slot"
+}
+
+fm_treehouse_lease_retained_write() {  # <state-dir> <task-id> <holder> <worktree> <reason>
+  local state=$1 id=$2 holder=$3 worktree=$4 reason=$5 marker parent tmp
+  case "$holder$worktree$reason" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  [ -n "$holder" ] && [ -n "$worktree" ] && [ -n "$reason" ] || return 1
+  marker=$(fm_treehouse_lease_retained_marker_path "$state" "$id" "$worktree") || return 1
+  parent=${marker%/*}
+  if [ -e "$parent" ] || [ -L "$parent" ]; then
+    [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  else
+    mkdir -p "$parent" || return 1
+  fi
+  [ ! -L "$marker" ] || return 1
+  tmp=$(umask 077; mktemp "$parent/.retained.XXXXXX" 2>/dev/null) || return 1
+  {
+    printf 'task=%s\n' "$id"
+    printf 'holder=%s\n' "$holder"
+    printf 'worktree=%s\n' "$worktree"
+    printf 'reason=%s\n' "$reason"
+    printf 'recorded_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$marker" || { rm -f -- "$tmp"; return 1; }
 }
 
 fm_failure_episode_reset() {

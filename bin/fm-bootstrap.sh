@@ -17,6 +17,12 @@
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
+#                 "TREEHOUSE_LEASE: pool slot <path> is still leased to
+#                 <holder> for task <id> (<why it was retained>); ... inspect
+#                 it and save any unlanded work first, because reclaiming
+#                 discards it; then reclaim
+#                 it with: treehouse return --if-lease-holder <holder> <path>,
+#                 then rm <record>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -50,6 +56,12 @@
 #          failed names whether the endpoint was missing or agent-less.
 #          Already-live and successfully relaunched secondmates are silent
 #          unless FM_BOOTSTRAP_VERBOSE_FACTS=1 requests BOOTSTRAP_INFO facts.
+#          A TREEHOUSE_LEASE line means an aborted spawn deliberately kept a
+#          pool slot leased (its task pane survived, its agent was already
+#          launched, it reused the task's own earlier lease, or the return
+#          itself failed) and recorded it under
+#          state/.treehouse-lease-retained/. Nothing reclaims it automatically:
+#          the pane may still hold an agent or unlanded work.
 #          A TANGLE line means the firstmate primary checkout (FM_ROOT) is stranded
 #          on a feature branch instead of its default branch - a crewmate's work
 #          landed in the primary instead of its own worktree; restore it per the line.
@@ -1526,6 +1538,32 @@ detect_local_config() {
   fi
   detect_code_root_backlog_fork
   detect_home_summary_publication
+  detect_retained_treehouse_leases
+}
+
+# Retained Treehouse slots (bin/fm-wake-lib.sh owns the record and why a slot
+# is kept). An aborted spawn that could not safely return its slot kept it
+# leased on purpose, and no task record exists for it, so nothing else will
+# ever name it. `treehouse get` never hands a leased slot out again and `prune`
+# never removes one, so the pool stays one slot smaller until a human reclaims
+# it. Detect-only: the pane may still hold an agent or its unlanded work, so
+# nothing here releases, probes, or removes anything - the line carries both
+# steps instead.
+detect_retained_treehouse_leases() {
+  local marker task holder worktree reason
+  [ -d "$STATE/.treehouse-lease-retained" ] || return 0
+  for marker in "$STATE"/.treehouse-lease-retained/*.retained; do
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    task=$(fm_meta_get "$marker" task)
+    holder=$(fm_meta_get "$marker" holder)
+    worktree=$(fm_meta_get "$marker" worktree)
+    reason=$(fm_meta_get "$marker" reason)
+    # No unreadable-record branch: fm_treehouse_lease_retained_write refuses an
+    # empty holder or worktree, rejects embedded newlines, and commits the
+    # record atomically, so a record that exists carries both fields. The
+    # writer is the guard, and a hand-edited marker is out of scope.
+    echo "TREEHOUSE_LEASE: pool slot $worktree is still leased to $holder for task ${task:-unknown} (${reason:-reason not recorded}); once nothing is running in it, inspect it and save any unlanded work, because reclaiming discards it; then reclaim it with: treehouse return --if-lease-holder $holder $worktree, then rm $marker"
+  done
 }
 
 # Shadow-backlog check. When this home's data directory is not the code root's,

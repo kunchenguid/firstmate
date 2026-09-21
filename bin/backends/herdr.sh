@@ -2090,8 +2090,9 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #   shell      - every foreground process is a recognized shell AND no
 #                descendant of the pane shell is a verified harness: positive
 #                proof the pane is shell-only. The descendant walk is what makes
-#                this safe for the crew shape, where a nested `treehouse get`
-#                shell sits under the pane's top shell.
+#                this safe for a pane holding a nested interactive shell under
+#                its top shell, whatever opened it: a task pane's own top shell
+#                is its worktree shell, so no `treehouse get` nests one here.
 #   other      - the foreground group holds something that is neither: a tool
 #                the agent is running in its own process group, a pager, a
 #                stranger's process. Not a shell-only pane. An idle shell
