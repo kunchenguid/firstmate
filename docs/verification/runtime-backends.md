@@ -508,6 +508,28 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Codex directory trust
+
+Verified 2026-09-20 on macOS arm64 with codex-cli 0.155.1, Node v22.23.2, and stock Python 3.9.6:
+
+```sh
+bin/fm-test-run.sh tests/fm-codex-trust.test.sh tests/fm-codex-trust-live-e2e.test.sh
+```
+
+The live guard launched the installed Codex without a prompt in a private PTY, using a linked Git worktree, throwaway user/config directories, and synthetic API credentials.
+With the primary root absent from the config, Codex rendered its directory-trust dialog.
+After `bin/fm-codex-trust.sh` registered only that primary root, the same worktree reached its initialized composer without the dialog:
+
+```text
+ok - codex codex-cli 0.155.1: an unregistered project root shows the directory dialog
+ok - codex codex-cli 0.155.1: intake registration reaches the composer without a directory dialog
+```
+
+The guard spends no model tokens and runs by default wherever its tools are installed; `FM_CODEX_TRUST_LIVE=1` forces it on and `=0` disables it.
+It deliberately never answers the directory dialog: native acceptance is Codex's behavior, while this guard verifies the effect of Firstmate's registration.
+The portable companion covers refusal of every noncanonical construct that could name the target project, skipping the ordinary multiline constructs that cannot, unchanged existing decisions, exact config bytes, publication failure, and both root scopes: a project's primary checkout, and a secondmate home the seed marked for that id whose source checkout this config already trusts.
+The helper's header owns registration mechanics and limits; the project-management skill owns intake consent and the non-fatal failure policy.
+
 ## Codex hook trust
 
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.

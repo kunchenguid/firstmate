@@ -60,15 +60,24 @@ A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote 
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
 
+After the confirmed intake and initialization succeed, register Codex directory trust using `bin/fm-codex-trust.sh --project-add <project-root>` when Codex is installed.
+The captain's decision to add this specific project authorizes that invocation; a discovered clone, registry rebuild, fleet sync, or worker spawn does not.
+The same authorization reaches a secondmate's own clone of a project, because the captain provisioned that secondmate with that project list, and `secondmate-provisioning` owns that step for the homes it creates.
+The helper's header owns the store, prerequisites, scope checks, and refusal behavior.
+Registration is best effort and must never block intake or a later spawn: report a refusal or an unchanged untrusted entry, preserve the project and its existing decision, and leave the directory dialog available for an operator decision.
+One remaining dialog is preferable to risking an unreadable user config; the add request never overrides an explicit untrusted entry or authorizes automatically answering that dialog.
+
 ## Create a project
 
 Creating a GitHub repository is outward-facing.
 Before making that remote change, propose the repository name, owner or organization, visibility, and delivery posture, defaulting visibility to private and the posture to `no-mistakes-prod-only`, then obtain the captain's explicit consent for those exact values; a stated default never replaces that consent.
 Use `gh-axi` for the approved GitHub operation and consult its current help rather than relying on remembered flags.
 After remote creation succeeds, clone it locally, add the registry entry, and initialize it according to its delivery posture.
+Complete the same Codex trust step as an existing-project intake.
 
 For a purely `local-only` project, create a local Git repository under its unused `projects/<name>` path, add the registry entry, and make no GitHub call.
 The captain's request to create that local project authorizes this local initialization, but it does not authorize an unmentioned remote repository.
+Complete the same Codex trust step after local initialization.
 
 ## Initialize
 

@@ -159,6 +159,14 @@ Secondmate project lists may include `no-mistakes` and `direct-PR` projects only
 `local-only` projects stay with the main firstmate.
 For `no-mistakes` projects, seeding initializes only projects newly cloned into a secondmate home and refuses to mutate a preexisting clone that is not already initialized.
 
+After a local seed succeeds, register Codex directory trust for each project clone it created, using `bin/fm-codex-trust.sh --project-add <home>/projects/<project>` when Codex is installed.
+The captain's decision to provision this secondmate with that project list authorizes those invocations, exactly as an intake decision authorizes the main home's own clone; a spawn into one of those clones does not.
+Register the home itself the same way when the seed created a standalone clone, using `bin/fm-codex-trust.sh --secondmate-home <home> <id>`: a secondmate's pane starts in the home, so an unregistered standalone clone wedges that worker on the same dialog.
+That registration is inherited, not granted: the helper reads the firstmate checkout the home was cloned from and refuses unless that checkout is already trusted, so report the refusal and leave the dialog for an operator decision.
+A treehouse-leased home is a linked worktree of the firstmate checkout, which the helper refuses because Codex already answers it from that checkout's own entry.
+A remote home and its clones live on another machine whose Codex config this helper cannot write, so they keep the first-run dialog.
+`project-management` owns the rest of that policy: registration is best effort, never blocks the seed or a later spawn, never overrides an existing decision, and never authorizes answering the dialog.
+
 ## Record intake for an existing or inherited domain
 
 Classify the domain before seeding, because this step applies to only one of the two cases.

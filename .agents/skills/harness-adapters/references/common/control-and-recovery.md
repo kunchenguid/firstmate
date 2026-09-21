@@ -22,7 +22,7 @@ agy gates every fresh worktree too; the spawn pre-registers it in agy's own stor
 Cursor suppresses its dialog with launch-time `--trust`, and Muse suppresses its own with `--yolo`.
 Grok dodges its gate instead of granting trust, because its project picker appears only outside a project and the spawn starts in the isolated git root.
 Pi gates the fresh-worktree case too, but unlike Claude its dialog is answered with Enter, and `references/harness/pi.md` owns that recipe and where the decision persists.
-Codex shows a directory-trust dialog on the first run for a repository root.
+Codex shows a directory-trust dialog on the first run for a repository root it has no recorded decision for, and `references/harness/codex.md` owns where that decision persists and which intake step pre-registers it.
 
 Use the tool's exact skill form, or natural language only when no separate command is verified or the form remains uncertain.
 A successful send or key return is not proof of submission; require the tool-specific postcondition.
