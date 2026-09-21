@@ -2302,9 +2302,8 @@ fm_backend_herdr_pane_agent_state() {  # <session> <pane_id>
 # (measured 2026-09-21: herdr 0.9.1, `pane report-agent-session` and
 # `report-agent` accepted with rc=0 but never applied, and `pane release-agent`
 # ineffective from outside the agent process). Handing the bound reference back
-# to the replacement - Pi's own `--session <path-or-id>`, which is also the
-# reference Herdr itself resumes Pi panes with after a server restart - keeps
-# that identity, and the authority with it.
+# to the replacement - Pi's own `--session <path-or-id>` - keeps that identity,
+# and the authority with it.
 #
 # The value is only reported when it has the shape the harness can consume: a
 # `path` reference must be absolute, and an `id` reference must be a bare token.
