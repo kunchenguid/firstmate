@@ -1084,6 +1084,89 @@ SH
   pass "cycle-exit ledger successor links survive temporary lifecycle-log contention"
 }
 
+# The ledger is diagnostic evidence, so a lock this arm cannot take within its
+# bound must not stall the cycle. It must also not vanish: a record silently
+# dropped here reads exactly like a hand-over that never happened, which is the
+# alarm this ledger exists to raise. So the arm reports the skip on stderr and
+# still starts and confirms its successor.
+test_cycle_successor_link_reports_a_ledger_write_it_gave_up_on() {
+  local dir state fakebin armout armerr check_file first_arm successor_arm successor_pid holder ready release i
+  dir=$(make_case cycle-ledger-link-abandoned)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/first-arm.out"
+  check_file="$state/task.check.sh"
+  ready="$dir/ledger-lock-ready"
+  release="$dir/ledger-lock-release"
+  cat > "$check_file" <<'SH'
+#!/usr/bin/env bash
+printf 'done: synthetic abandoned-link cycle\n'
+SH
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register abandoned-link cycle-ledger check"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  first_arm=$!
+  wait "$first_arm" || fail "first abandoned-link ledger cycle did not surface its actionable wake"
+  drain_and_ack "$state" || fail "first abandoned-link ledger wake handling acknowledgement failed"
+  rm -f "$check_file" "$state/task.check-trust"
+
+  # Held until this test releases it, not for a fixed interval: the successor
+  # spends an unbounded-in-practice share of its own confirmation budget before
+  # it reaches the link, so a timed hold could still be inside the arm's 5s
+  # bound on a loaded machine and the abandonment would never happen.
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 1
+    printf ready > "$3"
+    i=0
+    while [ ! -f "$4" ] && [ "$i" -lt 600 ]; do
+      sleep 0.1
+      i=$((i + 1))
+    done
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watch-cycle-exits.lock" "$ready" "$release" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ -f "$ready" ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$ready" ] || fail "test could not hold the lifecycle ledger lock"
+
+  armout="$dir/successor-arm.out"
+  armerr="$dir/successor-arm.err"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" 2> "$armerr" &
+  successor_arm=$!
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  successor_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$successor_pid" "$armout" \
+    || fail "abandoned-link successor cycle did not start: $(cat "$armout")"
+  i=0
+  while [ "$i" -lt 200 ]; do
+    grep -qF 'lifecycle ledger successor link skipped' "$armerr" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  printf release > "$release"
+  grep -qF 'watcher: lifecycle ledger successor link skipped' "$armerr" \
+    || fail "arm dropped a ledger successor link without reporting it: $(cat "$armerr")"
+  grep -q '^watcher: FAILED' "$armout" \
+    && fail "an abandoned ledger write must not be reported as a watcher verdict: $(cat "$armout")"
+  wait "$holder" || fail "test lifecycle ledger lock holder failed"
+  kill -HUP "$successor_arm" 2>/dev/null || true
+  wait "$successor_arm" 2>/dev/null || true
+  drain_and_ack "$state" || fail "recovery drain after abandoned-link successor interruption failed"
+  pass "an abandoned cycle-exit ledger write is reported instead of silently dropped"
+}
+
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   local dir state fakebin armout armpid watcher_pid i status
   dir=$(make_case stopped-watcher)
@@ -1340,4 +1423,5 @@ test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
 test_cycle_successor_link_waits_for_temporarily_busy_ledger
+test_cycle_successor_link_reports_a_ledger_write_it_gave_up_on
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

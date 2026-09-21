@@ -47,7 +47,11 @@
 # Every observed watcher cycle appends one tab-separated lifecycle record to
 # state/.watch-cycle-exits.log. The arm layer owns that bounded ledger; it records
 # arm/watcher identities, timestamps, exit/signal classification, beacon age,
-# lock identity before and after close, and successor disposition. The separate
+# lock identity before and after close, and successor disposition. A ledger
+# write waits a bounded 5s for that log's lock and then gives up rather than
+# stalling the cycle, but never silently: the skip is reported on stderr, so a
+# missing record is never mistaken for a hand-over that produced no successor.
+# The separate
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
 #
@@ -107,15 +111,21 @@ CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
 CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
-CYCLE_LOG_LOCK_WAIT_MS=${FM_WATCH_CYCLE_LOG_LOCK_WAIT_MS:-5000}
+# Bounded, and deliberately not configurable: a successor links its
+# predecessor's record while that predecessor may still be rotating the ledger,
+# and the previous 400ms bound lost that link often enough for a completed
+# hand-over to read as a failed one. 5s covers a rotation of a size-capped log
+# without letting an observability wait grow into a supervision stall.
+CYCLE_LOG_LOCK_WAIT_MS=5000
 ARM_PID=${BASHPID:-$$}
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
-case "$CYCLE_LOG_LOCK_WAIT_MS" in ''|*[!0-9]*) CYCLE_LOG_LOCK_WAIT_MS=5000 ;; esac
 
 # The lifecycle ledger is diagnostic evidence, not a supervision dependency.
-# Writes are bounded and best-effort so an observability failure cannot stall an
-# otherwise healthy watcher cycle.
+# Writes stay bounded so an observability failure cannot stall an otherwise
+# healthy watcher cycle, but a write this arm had to give up on is reported on
+# stderr rather than dropped, because a silently missing record reads exactly
+# like a hand-over that never happened.
 cycle_clean_field() {
   printf '%s' "$1" | tr '\t\r\n' '   ' | cut -c1-512
 }
@@ -165,9 +175,12 @@ cycle_signal_name() {
 }
 
 cycle_log_lock_acquire() {
-  local waited=0
+  local what=$1 waited=0
   while ! fm_lock_try_acquire "$CYCLE_LOG_LOCK"; do
-    [ "$waited" -lt "$CYCLE_LOG_LOCK_WAIT_MS" ] || return 1
+    if [ "$waited" -ge "$CYCLE_LOG_LOCK_WAIT_MS" ]; then
+      echo "watcher: lifecycle ledger $what skipped - $CYCLE_LOG_LOCK stayed held for ${CYCLE_LOG_LOCK_WAIT_MS}ms" >&2
+      return 1
+    fi
     sleep 0.02
     waited=$((waited + 20))
   done
@@ -180,7 +193,7 @@ cycle_log_append() {
   beacon_age=$(fm_path_age "$BEAT")
   lock_after=$(lock_snapshot)
 
-  cycle_log_lock_acquire || return 0
+  cycle_log_lock_acquire 'cycle record' || return 0
   printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\tsuccessor=%s\n' \
     "$ARM_PID" \
     "$(cycle_clean_field "$cycle_watcher_pid")" \
@@ -224,7 +237,7 @@ cycle_mark_predecessor_successor() {
     ''|*[!0-9]*) return 0 ;;
   esac
   [ -f "$CYCLE_LOG" ] || return 0
-  cycle_log_lock_acquire || return 0
+  cycle_log_lock_acquire 'successor link' || return 0
   tmp="$CYCLE_LOG.link.$ARM_PID"
   awk -v target="arm_pid=$predecessor" -v replacement="successor=$(cycle_clean_field "$successor")" '
     {
