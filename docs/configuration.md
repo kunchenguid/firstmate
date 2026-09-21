@@ -888,12 +888,14 @@ A stop reaches the supervisor two ways, and the event is the one to rely on.
   A settings file tracked by git is refused and left untouched, and the registration continues poll-only and says so.
   A hook is loaded only when its agent starts, so `register` reports that the running agent predates the hook and prints the `claude --continue` command that resumes it; it never restarts the agent itself.
   A hook in one git worktree can be loaded by a sibling worktree's agent, so the hook compares the firing agent's project directory, its hook-input cwd, and its Herdr pane against the registration and stays completely silent on any mismatch: a misattributed stop is worse than a missed one.
+  The project directory must always be the registered one.
+  When the Herdr pane id matches, the pane already proves the worker, so a turn that ends in a subdirectory of the registered directory is still reported; with no pane id available the agent's cwd must equal the registered directory exactly.
   `retire` takes only that hook back out.
 - **The poll backstop.**
   `register` arms the poll shim itself when it is not armed, `arm` and `disarm` remain for doing it by hand, and `list` states plainly when nothing polls the listed workers.
   The watcher dispatches the shim on the ordinary check cadence, and a worker leaving the working state becomes one ordinary `check:` wake.
   A worker found already stopped on its first poll after registration is reported once too, so adopting a stalled worker is never a silent baseline.
-  Only Herdr's own `pane_not_found` is reported as a vanished pane; a read that failed or timed out is neither a stop nor a vanish, leaves the remembered status alone, and costs the sweep one read for that session rather than starving the workers in healthy sessions.
+  Only Herdr's own `pane_not_found` is reported as a vanished pane, once and from any remembered status, because a standing worker rests stopped and that is when its pane gets closed; a read that failed or timed out is neither a stop nor a vanish, leaves the remembered status alone, and costs the sweep one read for that session rather than starving the workers in healthy sessions.
 
 Three properties matter to an operator, and each exists because of an observed failure:
 

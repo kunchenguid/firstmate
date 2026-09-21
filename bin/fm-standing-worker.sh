@@ -72,7 +72,8 @@
 # worktree can fire for a sibling worktree's agent, so `turn-end` compares the
 # firing agent's project directory and Herdr pane against the record and stays
 # completely silent on any mismatch: a misattributed stop is worse than a
-# missed one.
+# missed one. A matching pane id proves the worker, so only then may the
+# agent's current directory sit below the registered one.
 #
 # THE POLL BACKSTOP. `check` reads each record's pane status with the
 # session-scoped backend reader, compares it against the status stored from
@@ -733,21 +734,21 @@ action_check() {
       continue
     fi
 
-    # A departure from `working` is an event, and so is a worker found already
+    # A pane that vanished is an event from any remembered state, because a
+    # standing worker rests stopped and that is when its pane gets closed. A
+    # departure from `working` is an event, and so is a worker found already
     # stopped on its first poll. Arriving at `working`, and any other move
     # between two non-working states, updates the memory silently - which is
     # what keeps one stop to one wake however long the worker stays stopped.
     what=
     capture=1
-    if [ "$RECORD_LAST" = working ] || { [ -z "$RECORD_LAST" ] && [ "$now" != working ]; }; then
-      if [ "$now" = gone ]; then
-        what='vanished from'
-        capture=0
-      elif [ -z "$RECORD_LAST" ]; then
-        what="was already stopped when registered (now $now) in"
-      else
-        what="stopped working (now $now) in"
-      fi
+    if [ "$now" = gone ]; then
+      what='vanished from'
+      capture=0
+    elif [ "$RECORD_LAST" = working ]; then
+      what="stopped working (now $now) in"
+    elif [ -z "$RECORD_LAST" ] && [ "$now" != working ]; then
+      what="was already stopped when registered (now $now) in"
     fi
 
     if [ -n "$what" ]; then
@@ -778,31 +779,48 @@ EOF
 # per turn end. Its input is untrusted and is only ever compared, never
 # evaluated. It must identify its own worker before saying anything: the hook
 # file sits in a working tree, and a sibling worktree's agent can load it. So
-# every directory the firing agent names must be the registered cwd, and when
-# Herdr names the pane the hook runs in, that must be the registered pane. Any
+# the firing agent's project root must be the registered cwd, and when Herdr
+# names the pane the hook runs in, that must be the registered pane. Any
 # mismatch, and any failure at all, is complete silence with a zero exit: a
 # hook that spoke for the wrong worker would be worse than one that missed,
 # and the poll is still there behind it.
 action_turn_end() {
-  local id=${1:-} input='' input_cwd fired want have text event status_file
+  local id=${1:-} input='' input_cwd fired want have pane_proven=0 text event status_file
   fm_pr_task_id_valid "$id" || return 0
   [ -t 0 ] || input=$(cat 2>/dev/null) || input=
   record_read "$id" || return 0
   [ -n "$RECORD_CWD" ] || return 0
 
-  # Every directory the firing agent names must be the registered one: its
-  # project root, the cwd in the hook input, and this process's own cwd. An
-  # agent in a sibling worktree differs in at least one of them.
+  if [ -n "${HERDR_PANE_ID:-}" ]; then
+    [ "$HERDR_PANE_ID" = "$RECORD_PANE" ] || return 0
+    pane_proven=1
+  fi
+
+  # The project root must always be the registered directory. The cwd in the
+  # hook input and this process's own cwd follow the agent's shell, so a worker
+  # whose last command left it in a subdirectory ends its turn there. A missed
+  # stop is the failure this script exists to remove, and a matching pane id
+  # already excludes a sibling worktree's agent, so with the pane proven those
+  # two may sit at or under the registered directory - at a directory
+  # boundary, never a bare string prefix. Without a pane id identity is not
+  # otherwise proven, a misattributed stop is still worse than a missed one,
+  # and both must equal the registered directory exactly.
   want=$(physical_dir "$RECORD_CWD") || return 0
+  if [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
+    have=$(physical_dir "$CLAUDE_PROJECT_DIR") || return 0
+    [ "$want" = "$have" ] || return 0
+  fi
   input_cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null) || input_cwd=
-  for fired in "${CLAUDE_PROJECT_DIR:-}" "$input_cwd" "$PWD"; do
+  for fired in "$input_cwd" "$PWD"; do
     [ -n "$fired" ] || continue
     have=$(physical_dir "$fired") || return 0
-    [ "$want" = "$have" ] || return 0
+    [ "$want" = "$have" ] && continue
+    [ "$pane_proven" -eq 1 ] || return 0
+    case "$have" in
+      "${want%/}"/*) ;;
+      *) return 0 ;;
+    esac
   done
-  if [ -n "${HERDR_PANE_ID:-}" ] && [ "$HERDR_PANE_ID" != "$RECORD_PANE" ]; then
-    return 0
-  fi
 
   channel_libs_load || return 0
   text=$(stop_text "$id" 'ended its turn in' 1)

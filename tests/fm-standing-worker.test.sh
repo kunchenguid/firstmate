@@ -252,6 +252,26 @@ out=$(FM_HOME="$HOME_B" "$BIN" check)
 [ -z "$out" ] || fail "a pane that is still gone must not wake again, got: $out"
 pass 'a vanished pane is reported once and then stays quiet'
 
+# A standing worker rests stopped, and that is when its pane gets closed. The
+# vanish must be reported from that state too, or the supervisor learns nothing
+# and the next thing that happens is a duplicate launch.
+set_pane default w2:pI working 'mid turn'
+FM_HOME="$HOME_B" "$BIN" register stack-idle --session default --pane w2:pI >/dev/null \
+  || fail 'registering the idle-vanish fixture should succeed'
+FM_HOME="$HOME_B" "$BIN" check >/dev/null
+set_pane default w2:pI idle 'waiting for an answer'
+FM_HOME="$HOME_B" "$BIN" check >/dev/null
+drop_pane default w2:pI
+out=$(FM_HOME="$HOME_B" "$BIN" check)
+case "$out" in
+  *'standing worker stack-idle vanished from session default pane w2:pI'*) ;;
+  *) fail "a pane that disappears while its worker is stopped must be reported: ${out:-<silence>}" ;;
+esac
+out=$(FM_HOME="$HOME_B" "$BIN" check)
+[ -z "$out" ] || fail "a vanish from a stopped state is reported once, got: $out"
+FM_HOME="$HOME_B" "$BIN" retire stack-idle >/dev/null
+pass 'a pane that vanishes while its worker is stopped is reported once'
+
 # --- retire drops the record and stops the polling ---------------------------
 
 FM_HOME="$HOME_B" "$BIN" retire stack-api >/dev/null \
@@ -544,6 +564,14 @@ case "$line" in
   *'Eleven open questions'*'untrusted'*|*'untrusted'*'Eleven open questions'*) ;;
   *) fail "the turn-end line must carry the question as untrusted data: $line" ;;
 esac
+# The line only matters if the watcher acts on it, so hand the file to the
+# watcher's own classifier rather than trusting the shape above.
+(
+  # shellcheck source=bin/fm-classify-lib.sh
+  . "$ROOT/bin/fm-classify-lib.sh"
+  status_span_first_actionable_record "$HOOK_STATUS" 0
+) >/dev/null 2>&1 \
+  || fail "the watcher's classifier must find the turn-end line actionable: $(cat "$HOOK_STATUS")"
 pass 'a turn shorter than the poll interval is reported by the hook event, once'
 
 # A sibling worktree's agent can load this same hook file. It is not this
@@ -567,6 +595,30 @@ pass 'the hook stays silent for a sibling worktree agent, a foreign cwd, and a f
   || fail "the worker's own pane and project must be accepted: $(cat "$HOOK_STATUS")"
 pass 'every turn end of the registered worker is its own event'
 
+# A turn often ends in a subdirectory the last command moved into. With the
+# pane proven that stop must still be delivered; without it, or with another
+# pane, or from a directory that merely shares the prefix, it must not.
+mkdir -p "$WORK/apps/web"
+out=$(cd "$WORK/apps/web" && printf '{"cwd":"%s"}' "$WORK/apps/web" \
+  | HERDR_PANE_ID=w9:pX CLAUDE_PROJECT_DIR="$WORK" sh -c "$HOOK_CMD" 2>&1)
+[ -z "$out" ] || fail "a foreign pane in a subdirectory must get silence, got: $out"
+out=$(cd "$WORK/apps/web" && printf '{"cwd":"%s"}' "$WORK/apps/web" \
+  | CLAUDE_PROJECT_DIR="$WORK" sh -c "$HOOK_CMD" 2>&1)
+[ -z "$out" ] || fail "a subdirectory with no pane identity must get silence, got: $out"
+out=$(cd "$SIBLING" && printf '{"cwd":"%s"}' "$SIBLING" \
+  | HERDR_PANE_ID=w8:pH CLAUDE_PROJECT_DIR="$WORK" sh -c "$HOOK_CMD" 2>&1)
+[ -z "$out" ] || fail "a directory that only shares the prefix must get silence, got: $out"
+out=$(cd "$WORK/apps/web" && printf '{"cwd":"%s"}' "$WORK/apps/web" \
+  | HERDR_PANE_ID=w8:pH CLAUDE_PROJECT_DIR="$SIBLING" sh -c "$HOOK_CMD" 2>&1)
+[ -z "$out" ] || fail "a foreign project directory must get silence even with the pane, got: $out"
+[ "$(wc -l < "$HOOK_STATUS")" -eq 2 ] \
+  || fail "a subdirectory stop was accepted without proof of identity: $(cat "$HOOK_STATUS")"
+(cd "$WORK/apps/web" && printf '{"cwd":"%s"}' "$WORK/apps/web" \
+  | HERDR_PANE_ID=w8:pH CLAUDE_PROJECT_DIR="$WORK" sh -c "$HOOK_CMD")
+[ "$(wc -l < "$HOOK_STATUS")" -eq 3 ] \
+  || fail "a turn ending in a subdirectory of the registered worker's own pane must be delivered: $(cat "$HOOK_STATUS")"
+pass 'a turn ending in a subdirectory is delivered only when the pane proves the worker'
+
 # Registering again after a retire must not stack a second copy of the hook,
 # and retiring takes only this hook back out.
 FM_HOME="$HOME_H" "$BIN" retire stack-hook >/dev/null || fail 'retiring the hooked worker should succeed'
@@ -576,7 +628,7 @@ FM_HOME="$HOME_H" "$BIN" retire stack-hook >/dev/null || fail 'retiring the hook
   || fail 'retire dropped an existing settings key'
 out=$(cd "$WORK" && printf '{"cwd":"%s"}' "$WORK" | sh -c "$HOOK_CMD" 2>&1)
 [ -z "$out" ] || fail "a hook that outlives its registration must stay silent, got: $out"
-[ "$(wc -l < "$HOOK_STATUS")" -eq 2 ] || fail 'a retired worker must record no further turn ends'
+[ "$(wc -l < "$HOOK_STATUS")" -eq 3 ] || fail 'a retired worker must record no further turn ends'
 pass 'retire removes only its own hook, and a leftover hook is silent'
 
 # A settings file under version control is never written.
