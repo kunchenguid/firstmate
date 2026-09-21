@@ -1313,8 +1313,9 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # and keeps alarming - the 2026-09-20 case of five consecutive possible-wedge
 # escalations against a crew that was updating one container plugin after
 # another, single commands of ten to twenty-five minutes, inside one unbroken
-# turn. Progress markers are refreshed at each tool-call boundary by every
-# adapter that reports one, so where one exists this age is time since the last
+# turn. Progress markers are refreshed inside an open turn by every adapter that
+# reports activity there - a Claude tool-call boundary, a Pi native progress
+# event - so where one exists this age is time since the last
 # observed boundary rather than time since a turn closed. An adapter that
 # reports no progress at all keeps the completed-turn anchor it always had, so
 # its threshold is unchanged.
