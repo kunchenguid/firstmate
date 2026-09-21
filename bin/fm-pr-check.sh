@@ -3,8 +3,9 @@
 # exact pr_head=<sha> when available, then atomically arm a static merge poll.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# A GitHub pull request URL, a GitLab merge request URL, and a Gitea pull
+# request URL are all accepted, including one on a self-hosted GitLab or Gitea
+# instance and, for Gitea, on a non-default port.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -60,12 +61,36 @@ if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   exit 1
 fi
 
+# A Gitea watch is refused here for the same reason, and its requirements are
+# reported together rather than one per attempt. Gitea is read over its REST
+# API, so the watch needs curl and jq, and it needs a credential for that exact
+# instance from git's own helper chain: the operator's existing login for the
+# host they already clone and push to, never a firstmate-specific token.
+if [ "$PROVIDER" = gitea ]; then
+  GITEA_MISSING=
+  for GITEA_TOOL in curl jq git; do
+    command -v "$GITEA_TOOL" >/dev/null 2>&1 \
+      || GITEA_MISSING="${GITEA_MISSING:+$GITEA_MISSING and }$GITEA_TOOL"
+  done
+  if [ -n "$GITEA_MISSING" ]; then
+    echo "error: watching a Gitea pull request requires $GITEA_MISSING on PATH" >&2
+    exit 1
+  fi
+  if ! fm_pr_gitea_credential_available "$HOST"; then
+    printf 'error: watching a Gitea pull request on %s requires a git credential for that host; store one with: printf '"'"'protocol=https\\nhost=%s\\nusername=<user>\\npassword=<token>\\n\\n'"'"' | git credential approve\n' \
+      "$HOST" "$HOST" >&2
+    exit 1
+  fi
+fi
+
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 # pr_head is recorded only when the forge's CLI can supply it. gh exposes the
 # head commit as a selectable field; plain glab exposes it only inside its JSON
 # output, which would need a JSON processor firstmate does not require, so a
-# GitLab task records no pr_head. Both consumers already treat it as optional:
+# GitLab task records no pr_head. Gitea records none either: its API returns the
+# head, but reading it would spend the instance credential at arm time for a
+# value no consumer requires. Both consumers already treat it as optional:
 # bin/fm-teardown.sh reads the head from the forge at teardown rather than from
 # metadata and falls back to its provider-agnostic content check, and
 # bin/fm-review-diff.sh resolves the head from the remote when none is recorded.
