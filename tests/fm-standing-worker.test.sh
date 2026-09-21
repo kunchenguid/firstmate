@@ -217,11 +217,32 @@ out=$(FM_HOME="$HOME_A" "$BIN" check)
 [ -z "$out" ] || fail "repeated polls of a stopped worker must stay silent, got: $out"
 pass 'one stop is one wake however long the worker stays stopped'
 
-# A transition between two non-working states is not a new stop either.
-set_pane default w1:pV blocked 'credential expired'
+# A worker that was idle, was handed an instruction, and hit a permission
+# prompt before the next poll never ends a turn, so no hook announces it. The
+# poll is the only signal, and idle->blocked must wake.
+set_pane default w1:pV blocked 'credential expired, approve a new token?'
 out=$(FM_HOME="$HOME_A" "$BIN" check)
-[ -z "$out" ] || fail "idle->blocked is not a fresh stop, got: $out"
-pass 'a move between two stopped states does not re-wake'
+case "$out" in
+  *'standing worker stack-ui is blocked and waiting (was idle)'*'approve a new token?'*) ;;
+  *) fail "idle->blocked is a worker waiting and must wake: ${out:-<silence>}" ;;
+esac
+out=$(FM_HOME="$HOME_A" "$BIN" check)
+[ -z "$out" ] || fail "a worker still blocked must not wake again, got: $out"
+pass 'a worker that becomes blocked between polls wakes its supervisor once'
+
+# idle->done proves a whole turn ran and finished between two polls.
+set_pane default w1:pV idle 'waiting'
+out=$(FM_HOME="$HOME_A" "$BIN" check)
+[ -z "$out" ] || fail "blocked->idle is not a new stop, got: $out"
+set_pane default w1:pV 'done' 'the migration plan is ready for review'
+out=$(FM_HOME="$HOME_A" "$BIN" check)
+case "$out" in
+  *'standing worker stack-ui finished a turn between polls (now done, was idle)'*'ready for review'*) ;;
+  *) fail "idle->done is a missed turn and must wake: ${out:-<silence>}" ;;
+esac
+out=$(FM_HOME="$HOME_A" "$BIN" check)
+[ -z "$out" ] || fail "a worker still done must not wake again, got: $out"
+pass 'a turn that ran and finished between two polls wakes its supervisor once'
 
 # Resuming work and stopping again is a genuinely new stop, so it must report.
 set_pane default w1:pV working 'back to work'
@@ -510,6 +531,29 @@ case "$line" in
 esac
 pass 'status-stream tokens in pane text are defused before they travel'
 
+# --- the excerpt keeps the closing question, not the oldest output -----------
+#
+# A capture longer than the cap must lose its head, never its tail: the
+# question is the last thing the worker printed.
+
+LONG_OUTPUT=$(printf 'summary line %03d of the work that was done here. ' $(seq 1 60))
+set_pane default w1:pW working 'back to it'
+FM_HOME="$MATE" "$BIN" check >/dev/null
+set_pane default w1:pW idle "${LONG_OUTPUT}Should I proceed with option A or option B?"
+out=$(FM_HOME="$MATE" FM_STANDING_WORKER_CAPTURE_CHARS=200 "$BIN" check)
+case "$out" in
+  *'Should I proceed with option A or option B?"'*) ;;
+  *) fail "the wake must keep the closing question of a long capture: $out" ;;
+esac
+case "$out" in
+  *'summary line 001'*) fail "a capped excerpt must drop the oldest output, not the newest: $out" ;;
+esac
+case "$(tail -1 "$CHANNEL")" in
+  *'Should I proceed with option A or option B?"'*) ;;
+  *) fail "the parent channel line must keep the closing question: $(tail -1 "$CHANNEL")" ;;
+esac
+pass 'a capture longer than the cap keeps the closing question on the wake and upward'
+
 # --- the turn-end hook -------------------------------------------------------
 #
 # Sampling cannot see a turn shorter than the poll interval, so a registration
@@ -617,7 +661,22 @@ out=$(cd "$WORK/apps/web" && printf '{"cwd":"%s"}' "$WORK/apps/web" \
   | HERDR_PANE_ID=w8:pH CLAUDE_PROJECT_DIR="$WORK" sh -c "$HOOK_CMD")
 [ "$(wc -l < "$HOOK_STATUS")" -eq 3 ] \
   || fail "a turn ending in a subdirectory of the registered worker's own pane must be delivered: $(cat "$HOOK_STATUS")"
+# Pane ids repeat across Herdr sessions, so the same pane id in another
+# session is another agent.
+out=$(cd "$WORK/apps/web" && printf '{"cwd":"%s"}' "$WORK/apps/web" \
+  | HERDR_PANE_ID=w8:pH HERDR_SESSION=fm-remote CLAUDE_PROJECT_DIR="$WORK" sh -c "$HOOK_CMD" 2>&1)
+[ -z "$out" ] || fail "the same pane id in a foreign session must get silence, got: $out"
+out=$(cd "$WORK" && printf '{"cwd":"%s"}' "$WORK" \
+  | HERDR_PANE_ID=w8:pH HERDR_SESSION=fm-remote CLAUDE_PROJECT_DIR="$WORK" sh -c "$HOOK_CMD" 2>&1)
+[ -z "$out" ] || fail "a foreign session must get silence even from the registered directory, got: $out"
+[ "$(wc -l < "$HOOK_STATUS")" -eq 3 ] \
+  || fail "a stop from the same pane id in another session was attributed to this worker: $(cat "$HOOK_STATUS")"
+(cd "$WORK/apps/web" && printf '{"cwd":"%s"}' "$WORK/apps/web" \
+  | HERDR_PANE_ID=w8:pH HERDR_SESSION=default CLAUDE_PROJECT_DIR="$WORK" sh -c "$HOOK_CMD")
+[ "$(wc -l < "$HOOK_STATUS")" -eq 4 ] \
+  || fail "the recorded session and pane together must be accepted: $(cat "$HOOK_STATUS")"
 pass 'a turn ending in a subdirectory is delivered only when the pane proves the worker'
+pass 'a matching pane id in a foreign Herdr session records nothing'
 
 # Registering again after a retire must not stack a second copy of the hook,
 # and retiring takes only this hook back out.
@@ -628,7 +687,7 @@ FM_HOME="$HOME_H" "$BIN" retire stack-hook >/dev/null || fail 'retiring the hook
   || fail 'retire dropped an existing settings key'
 out=$(cd "$WORK" && printf '{"cwd":"%s"}' "$WORK" | sh -c "$HOOK_CMD" 2>&1)
 [ -z "$out" ] || fail "a hook that outlives its registration must stay silent, got: $out"
-[ "$(wc -l < "$HOOK_STATUS")" -eq 3 ] || fail 'a retired worker must record no further turn ends'
+[ "$(wc -l < "$HOOK_STATUS")" -eq 4 ] || fail 'a retired worker must record no further turn ends'
 pass 'retire removes only its own hook, and a leftover hook is silent'
 
 # A settings file under version control is never written.

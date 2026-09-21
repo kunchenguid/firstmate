@@ -72,14 +72,21 @@
 # worktree can fire for a sibling worktree's agent, so `turn-end` compares the
 # firing agent's project directory and Herdr pane against the record and stays
 # completely silent on any mismatch: a misattributed stop is worse than a
-# missed one. A matching pane id proves the worker, so only then may the
-# agent's current directory sit below the registered one.
+# missed one. A matching pane id in the recorded session proves the worker,
+# so only then may the agent's current directory sit below the registered one.
 #
 # THE POLL BACKSTOP. `check` reads each record's pane status with the
 # session-scoped backend reader, compares it against the status stored from
 # the previous poll, and prints one line per worker that just left `working`.
 # A worker found already stopped on its first poll after registration is
 # reported once too, so adopting a stalled worker is never a silent baseline.
+# Two moves between stopped states are reported as well, because each is a
+# worker waiting that nothing else will announce. Arriving at `blocked` from
+# any other status is one: a permission prompt does not end the turn, so the
+# Stop hook never fires for it and the poll is the only signal there is.
+# Arriving at `done` from `idle` or `turn-end` is the other: it proves a whole
+# turn ran and finished between two polls. `turn-end` to `idle` stays silent,
+# since the hook already delivered that stop.
 # A worker that stays stopped stays silent, so one stop is one wake - the
 # debounce is the stored status, not a timer. A pane Herdr positively reports
 # as not found is reported once as vanished; a read that merely failed or timed
@@ -355,7 +362,8 @@ sessions_available() {
 # framing. The excerpt also travels on status streams, whose readers give
 # meaning to `report=` document pointers and to `[key=` and `[at=` tokens, so
 # those spellings are defused here: pane text must never offer a document or
-# name a decision. The result is data for a human or a supervising model to
+# name a decision. The cap keeps the END of the folded text, because the
+# closing question is the last thing printed. The result is data for a human or a supervising model to
 # READ; it is never a command and is never evaluated.
 pane_excerpt() {  # <session> <pane>
   local session=$1 pane=$2 out text
@@ -367,9 +375,9 @@ pane_excerpt() {  # <session> <pane>
   printf '%s' "$text" \
     | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' \
     | LC_ALL=C tr '\t\r\n' '   ' \
-    | sed -e 's/  */ /g' -e 's/^ *//' -e 's/ *$//' \
-      -e 's/report=/report-/g' -e 's/\[key=/(key=/g' -e 's/\[at=/(at=/g' \
-    | cut -c1-"$CAPTURE_CHARS"
+    | sed -e 's/  */ /g' -e 's/report=/report-/g' -e 's/\[key=/(key=/g' -e 's/\[at=/(at=/g' \
+    | tail -c "$CAPTURE_CHARS" \
+    | sed -e 's/^ *//' -e 's/ *$//'
 }
 
 # --- turn-end hook ----------------------------------------------------------
@@ -737,9 +745,11 @@ action_check() {
     # A pane that vanished is an event from any remembered state, because a
     # standing worker rests stopped and that is when its pane gets closed. A
     # departure from `working` is an event, and so is a worker found already
-    # stopped on its first poll. Arriving at `working`, and any other move
-    # between two non-working states, updates the memory silently - which is
-    # what keeps one stop to one wake however long the worker stays stopped.
+    # stopped on its first poll. So is arriving at `blocked` from anywhere,
+    # which no turn-end hook announces, and arriving at `done` from `idle` or
+    # `turn-end`, which proves a whole turn was missed between two polls.
+    # Arriving at `working`, and `turn-end` to `idle`, update the memory
+    # silently. The stored status bounds every one of these to a single wake.
     what=
     capture=1
     if [ "$now" = gone ]; then
@@ -749,6 +759,10 @@ action_check() {
       what="stopped working (now $now) in"
     elif [ -z "$RECORD_LAST" ] && [ "$now" != working ]; then
       what="was already stopped when registered (now $now) in"
+    elif [ "$now" = blocked ]; then
+      what="is blocked and waiting (was $RECORD_LAST) in"
+    elif [ "$now" = 'done' ] && { [ "$RECORD_LAST" = idle ] || [ "$RECORD_LAST" = turn-end ]; }; then
+      what="finished a turn between polls (now done, was $RECORD_LAST) in"
     fi
 
     if [ -n "$what" ]; then
@@ -791,8 +805,12 @@ action_turn_end() {
   record_read "$id" || return 0
   [ -n "$RECORD_CWD" ] || return 0
 
+  # Pane ids restart at the same low numbers in every Herdr session, so a
+  # pane id names this worker only together with the session it was recorded
+  # in. Either one differing is another agent, and that is silence.
   if [ -n "${HERDR_PANE_ID:-}" ]; then
     [ "$HERDR_PANE_ID" = "$RECORD_PANE" ] || return 0
+    [ "${HERDR_SESSION:-default}" = "$RECORD_SESSION" ] || return 0
     pane_proven=1
   fi
 
