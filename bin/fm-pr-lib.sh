@@ -310,6 +310,13 @@ fm_pr_regular_destination_on_device_or_absent() {
   [ ! -e "$path" ] || [ "$(fm_pr_file_device "$path")" = "$device" ]
 }
 
+# The record's PR identity is exactly one pr= line, whose URL reconstructs to
+# the stored provider, host, path, and number, plus an optional validated
+# pr_head= after it. Every other line is ignored before pr= and refused after
+# it, because a line after the identity means the record changed after that
+# identity was recorded. The allowlist below is the deliberate exception for
+# non-identity fields other producers append, so extending it is a record
+# contract change rather than a local parser detail.
 fm_pr_metadata_identity_parse() {
   local file=$1 line value pr_count=0 seen_pr=0 post_pr_invalid=0
   FM_PR_META_PROVIDER=

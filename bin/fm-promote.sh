@@ -258,9 +258,9 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-# The PR identity parser reads every unrecognised line after pr= as corruption,
-# so the new contract lines go first and the preserved body keeps pr=/pr_head=
-# as the record's tail.
+# The record's tail is the PR identity, which fm_pr_metadata_identity_parse in
+# bin/fm-pr-lib.sh requires for an armed poll to authenticate, so the new
+# contract lines go first and the preserved body keeps pr=/pr_head= last.
 {
   echo "kind=ship"
   echo "mode=$MODE"
