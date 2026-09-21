@@ -24,7 +24,10 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
+# A no-mistakes promotion also runs the opt-in pre-publication voice check on
+# that intent (bin/fm-voice-check.sh); --voice-accept-unverified <reason>
+# publishes an unverified intent only on an explicit instruction.
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--voice-accept-unverified <reason>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,6 +55,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
 MODE=
 YOLO=
+VOICE_ACCEPT_UNVERIFIED=
 MODE_SET=0
 YOLO_SET=0
 POS=()
@@ -64,6 +68,7 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
+      voice-accept-unverified) VOICE_ACCEPT_UNVERIFIED=$a ;;
     esac
     want_value=
     continue
@@ -73,6 +78,7 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
+    --voice-accept-unverified) want_value=voice-accept-unverified ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -166,6 +172,12 @@ fi
 if [ -z "$(printf '%s' "$INTENT_BODY" | tr -d '[:space:]')" ]; then
   echo "error: $SCOUT_BRIEF has no provenance-marked Captain's intent; add the captain's actual words before promotion" >&2
   exit 1
+fi
+if [ "$MODE" = no-mistakes ]; then
+  fm_intent_voice_check "$INTENT_BODY" "$VOICE_ACCEPT_UNVERIFIED" || {
+    fm_intent_voice_refusal "$SCOUT_BRIEF" "$?" promotion --voice-accept-unverified
+    exit 1
+  }
 fi
 
 # The promoted worker must receive the same delivery contract an ordinary ship
