@@ -76,6 +76,7 @@ A relaunch does take one session reference when the endpoint's own runtime recor
    A harness change resets model and effort unless they are named too, because a model chosen for one adapter does not transfer to another.
    A Claude or Pi replacement must also pass the home's [worker account pin](configuration.md#worker-account-pin-configclaude-account-configpi-account), so a pin that no longer resolves or is signed out refuses before the old agent stops.
    Ship and scout replacements also pass the [worker tool exclusion checks](configuration.md#worker-tool-exclusions-configcrew-exclude-tools) at this step.
+   Absent a Claude worker account pin, a claude replacement keeps the task's recorded Claude config store (`claude_config_dir=`) unless `FM_CLAUDE_CONFIG_DIR=<store>` names another, and a store that no longer exists refuses here, before anything is stopped; `bin/fm-claude-store-lib.sh` owns that precedence.
 2. **Safe checkpoint.**
    The recorded worktree must exist and be a worktree root; its head and dirty state are recorded.
    For a `kind=secondmate` task, the home's identity marker must match and its child records must be readable, so a relaunch can never strand child work behind an unreadable home.
