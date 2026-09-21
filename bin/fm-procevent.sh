@@ -1873,16 +1873,20 @@ cmd_handled() {
       conclude=1
     fi
   fi
-  if [ "$conclude" -eq 1 ]; then
+  fm_procevent_mark_handled "$STATE" "$id" "$seq"
+  status=$?
+  if [ "$conclude" -eq 1 ] && [ "$status" -eq 0 ]; then
     registration=$(source_file "$id")
-    if ! rm -f -- "$registration" 2>/dev/null || [ -e "$registration" ] || [ -L "$registration" ]; then
+    if rm -f -- "$registration" 2>/dev/null && [ ! -e "$registration" ] && [ ! -L "$registration" ]; then
+      rm -f -- "$(runner_file "$id")"
+    else
+      rm -f -- "$(fm_procevent_handled_marker "$STATE" "$id" "$seq")"
       fm_procevent_source_lock_release "$id"
       die "cannot retire the board its owner just acknowledged; the round stays open: $id"
     fi
-    rm -f -- "$(runner_file "$id")"
+  else
+    conclude=0
   fi
-  fm_procevent_mark_handled "$STATE" "$id" "$seq"
-  status=$?
   fm_procevent_source_lock_release "$id"
   case "$status" in
     0) printf 'handled: %s %s\n' "$id" "$seq" ;;

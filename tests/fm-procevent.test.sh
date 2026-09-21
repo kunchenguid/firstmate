@@ -1047,6 +1047,16 @@ PATH="$CONC_BIN:$PATH" pe "$HCONC" start "$conc_id" >/dev/null 2>&1 || true
   || fail "the terminal worker-owned round never landed"
 [ -e "$HCONC/state/procevent/$conc_id.source" ] \
   || fail "the terminal round released the board before its owner acknowledged it"
+chmod 0500 "$HCONC/state/procevent-inbox"
+unrecordable_status=0
+PATH="$CONC_BIN:$PATH" pe "$HCONC" handled "$conc_id" 1 >/dev/null 2>&1 || unrecordable_status=$?
+chmod 0700 "$HCONC/state/procevent-inbox"
+[ "$unrecordable_status" -ne 0 ] \
+  || fail "an acknowledgement that could not be recorded still reported success"
+[ ! -f "$HCONC/state/procevent-inbox/$conc_id.1.handled" ] \
+  || fail "an acknowledgement that could not be recorded still closed the round"
+[ -e "$HCONC/state/procevent/$conc_id.source" ] \
+  || fail "an acknowledgement that could not be recorded still released the board it was owed"
 conclude_out=$(PATH="$CONC_BIN:$PATH" pe "$HCONC" handled "$conc_id" 1)
 assert_contains "$conclude_out" "retired: $conc_id" \
   "acknowledging the terminal round did not report the board retired"
