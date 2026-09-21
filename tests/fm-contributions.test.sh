@@ -557,13 +557,16 @@ set -eu
 printf '%s\n' "$*" >> "$FORGE/calls"
 fault=$(cat "$FORGE/fault" 2>/dev/null || true)
 case "$fault" in latency) sleep "${FORGE_LATENCY:-2}" ;; esac
+# Parallel forge reads share the clock: replace it atomically so a concurrent
+# reader never sees a truncated, empty clock.
+advance_clock() { printf '%s\n' "$(( $(cat "$FORGE/clock") + $1 ))" > "$FORGE/clock.$$"; mv -f "$FORGE/clock.$$" "$FORGE/clock"; }
 case "$fault:$*" in
   reserve:'api repos/o/r/'*)
-    printf '%s\n' "$(( $(cat "$FORGE/clock") + 6 ))" > "$FORGE/clock" ;;
+    advance_clock 6 ;;
   exhaust:'api repos/o/r/issues/8/comments?'*)
-    printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock" ;;
+    advance_clock 100 ;;
   fail-late:'api repos/o/r/pulls/8/reviews?'*)
-    printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock"
+    advance_clock 100
     printf 'HTTP 502\n' >&2; exit 1 ;;
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
