@@ -36,7 +36,7 @@ START_NEAR_MISS='Captain quote: Run `bin/fm-session-start.sh` now, exactly once,
 fm_operational_input_encode watcher "CURRENT_AHOY_WATCHER_BODY" CURRENT_WATCHER \
   || fail "could not construct current Ahoy watcher fixture"
 QUOTED_CURRENT="Captain quote: $CURRENT_WATCHER"
-ASCII_ONLY='FIRSTMATE_OP: v1 watcher: captain-authored text'
+ASCII_ONLY='FIRSTMATE_OP: v1 not-a-kind: captain-authored text'
 
 capture() {
   "$TMUX" -L "$SOCKET" capture-pane -p -t "$SESSION" -S -800 2>/dev/null || true

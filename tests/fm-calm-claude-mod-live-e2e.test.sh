@@ -331,33 +331,23 @@ send "$operational"
 wait_screen 'probe.status changed' 'the typed operational probe' 200
 enter
 # Claude Code 2.1.277+ removes the U+2063 mark on the first Enter and holds the cleaned
-# text for review; a second Enter sends it. With Calm on, only the unsent composer can
-# show the probe text, so its leaving the screen confirms the submit.
-held=0
+# text for review, ignoring an Enter that lands too soon after; Enter is resent every
+# 0.5 s, the daemon's submit cadence, while the probe text stays on screen. With Calm on,
+# only the unsent composer can show the probe text, so its leaving confirms the submit.
 i=0
-while [ "$i" -lt 200 ]; do
+while [ "$i" -lt 100 ]; do
+  sleep 0.5
   submit_screen=$(screen)
   case "$submit_screen" in
-    *'review and press Enter to send'*)
-      if [ "$held" -eq 0 ]; then
-        enter
-        held=1
-      fi
-      ;;
-    *'probe.status changed'*) ;;
+    *'probe.status changed'*) enter ;;
     *) break ;;
   esac
-  sleep 0.25
   i=$((i + 1))
 done
 case "$submit_screen" in
-  *'review and press Enter to send'*)
-    printf '%s\n' "$submit_screen" >&2
-    fail "Claude Code $CLAUDE_VERSION never sent the held operational probe"
-    ;;
   *'probe.status changed'*)
     printf '%s\n' "$submit_screen" >&2
-    fail "the operational user row drew while Calm was on"
+    fail "Claude Code $CLAUDE_VERSION never submitted the operational probe"
     ;;
 esac
 wait_screen 'OPERATIONAL_PROCESSED' 'the operational answer' 600

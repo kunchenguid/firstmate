@@ -32,7 +32,7 @@
 // posture and the recorded facts at execution time, captain-verdict outcomes
 // accumulate unprocessed in the store instead of opening the processing turn
 // on the parked main, and the guarded scripts pass the branch actor under
-// main's standing authority (bin/fm-lease-lib.sh). The first unmarked captain
+// main's standing authority (bin/fm-lease-lib.sh). The first genuine captain
 // message archives the record; the next run boundary then presents the
 // accumulated captain rows exactly as after any other gap.
 //

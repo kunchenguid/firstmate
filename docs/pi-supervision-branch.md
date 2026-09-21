@@ -153,7 +153,7 @@ No caching machinery beyond this exists, deliberately: any later dynamic content
 
 ## Postures
 
-One supervision session runs in two postures, attended and away, and the posture is a file: the away-posture record `state/.afk-contract`, written only by `bin/fm-afk-contract.sh` when the captain confirms `/afk`'s read-back and archived by the return path on the captain's first unmarked message.
+One supervision session runs in two postures, attended and away, and the posture is a file: the away-posture record `state/.afk-contract`, written only by `bin/fm-afk-contract.sh` when the captain confirms `/afk`'s read-back and archived by the return path on the captain's first genuine message, one that is neither marked nor the exact mark-less current operational header.
 The record is never inferred from chat and never placed in the branch's byte-stable prompt prefix; the dispatcher reads its presence at every routing decision, the branch reads it at the tail of every wake and immediately before every captain-outcome presentation, and the guarded scripts validate it through the record owner at every gate.
 On Pi the away daemon is never launched, so the watcher is the single owner of supervision in both postures, and a leftover `state/.afk` flag declines nothing.
 

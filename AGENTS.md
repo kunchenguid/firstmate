@@ -459,7 +459,7 @@ Harness-aware turn-end guards are structural backstops, not permission to omit t
 
 ### Away-mode and quiet-mode stub
 
-Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
+Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK` or the exact mark-less current `FIRSTMATE_OP: v1 <kind>: ` header, or any `state/.subsuper-*` marker is involved.
 Invoke the `/quiet` skill instead when the captain says `/quiet` or asks for quiet mode, or `state/.afk` already exists in quiet mode (`fm_afk_mode` in `bin/fm-wake-lib.sh`).
 Each skill owns its own daemon procedure, which is otherwise identical; these safety facts remain inline for both:
 
