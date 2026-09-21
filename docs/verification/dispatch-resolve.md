@@ -10,6 +10,7 @@ Task chronology, the captain's rules, and the briefs themselves stay in the priv
 
 Verified 2026-09-16 against `https://api.typesafe.ai`.
 `GET /v1/models` listed `jev-latest` and `jev-preview`, both released 2026-09-10; a `jev-latest` request answered as `jev-1.13.0`.
+Every dated record below requested the alias; the shipped resolver has pinned `jev-1.13.0` since, so these runs are history rather than the current contract.
 `POST /v1/systemone` takes `{model, state, questions}`; a `choice` question returns `{choice, probabilities, confidence}` with the probabilities summing to 1.
 Observed error shapes: 401 `authentication_error` for a bad key, 403 when the header is missing, 422 with a `detail[].loc` naming the offending field, 400 `api_usage_error` for an unknown model, 405 on GET.
 No rate-limit headers were present on any response; every response carried `x-typesafe-request-id`.
@@ -63,6 +64,8 @@ It proves the documented starter configuration resolves its Pi default through t
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
 It proves the request uses the fixed endpoint and model, carries only the project, brief, and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
+It proves an agreeing dispatch matches its chosen profile under the `{harness, model, effort}` projection while the whole objects differ, because `chosen_profile` keeps the declared `provider` the dispatch flags cannot carry.
+It proves `brief_path` is display only and recorded exactly as the caller spelled it, so the same brief resolved from two working directories can show two different-looking paths; `brief_sha256` is the field that identifies the brief and carries the dispatch join.
 `tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
 
 ```console
@@ -71,3 +74,95 @@ $ bash tests/fm-dispatch-resolve.test.sh | tail -1
 ```
 
 A live run needs a key and is not part of the suite; rerun the table above by pointing the tool at a brief with the key injected for that one command.
+
+## What the receipt path costs
+
+Measured 2026-09-20 on Linux 6.8 x86_64 with bash 5.2, jq 1.7, and GNU coreutils `sha256sum`, against the fake `curl` and `quota-axi` above, so every figure is the tool's own work rather than the network.
+The harness below separates the moment the resolver's first stdout byte is readable from the moment its process exits; everything between the two is the receipt, because each receipt write now follows its own `printf`.
+
+| Measure | Result |
+| --- | --- |
+| Resolve run, receipts idle: first stdout byte | 165 to 194 ms |
+| Resolve run, receipts idle: receipt work after the block | 40 to 52 ms |
+| Resolve run, lock held by a live owner: receipt work after the block, then dropped | 127 to 149 ms |
+| Brief and rules content hashes, taken before the block | 3 to 4 ms |
+| A `--record-dispatch` join run, end to end | 71 to 83 ms |
+
+The receipt path's contract is a measured bound, not a few milliseconds: receipt work after the block stays at or under a 100 ms median on an idle home, and at or under 200 ms under the held-lock fixture described below.
+Both hold on these figures - the idle median is 42 ms across seven harness runs (40, 41, 41, 42, 42, 44, 52), and the worst single contended run is 149 ms.
+The first-stdout-byte row is a re-measurement taken after three forks were removed from the work ahead of the block: `dirname`, `basename`, and the `cd`/`pwd -P` subshell that resolved the brief path.
+Neither figure reaches stdout: the block is complete and readable at the first number in every case, and exit status is 0 throughout.
+One `jq -cn` to build the record dominates the idle figure; the retry budget dominates the contended one.
+
+The receipts lock is one per home, `state/.dispatch-receipts.lock`, not one per brief, and AGENTS.md directs firstmate to dispatch isolated work with no concurrency cap, so several independent intakes in one turn contend on it.
+The two paths therefore wait on it for different lengths, under separately named budgets.
+
+`RESOLVE_LOCK_ATTEMPTS` is 7, the smallest value that lost no record at three-way contention: 7 records of 300 at 5 attempts, 1 of 300 at 6, and none of 900 at 7.
+It is deliberately not raised, because the resolve path may not extend the resolver's process further to save a best-effort receipt; a contended resolve receipt is dropped instead, and the run names that drop on one fixed stderr line, as the contended row above records.
+
+`DISPATCH_LOCK_ATTEMPTS` is 21, the smallest value that lost no record with twelve simultaneous `--record-dispatch` runs against a 200-record home, which is the parallel intake AGENTS.md permits.
+That probe lost 187 records of 360 at 7 attempts, 132 of 360 at 10, 48 of 360 at 14, 10 of 720 at 19, 2 of 720 at 20, and none of 1,440 at 21 across two independent 60-trial runs.
+The join runs after the spawn and prints nothing to the resolver's stdout, so the longer wait cannot reach the resolve path's latency.
+
+Contention past either budget drops the record by design rather than waiting.
+A `--record-dispatch` run that cannot take the lock appends nothing, names itself on the stderr drop line, and still exits 0, so that loss is observable; a resolve run that cannot write its receipt prints `dispatch-resolve: no resolution receipt for this run` on stderr whatever its outcome, and on `clear` the later join for that brief reports the missing resolution as well, so neither loss is swallowed.
+The suite drives both, on a `clear` run and on an `error` run, by making `state/dispatch-receipts.jsonl` a directory the append cannot use, and asserts the stdout block and exit 0 are identical to the same run with receipts working.
+It drives the same refusal with a dangling symlink at that path, asserting the resolver leaves the link's target uncreated and still prints its block and exits 0.
+The suite asserts that shape rather than a fixed append count - each concurrent run either appends its record or reports the drop, with no third outcome, and the file stays valid JSONL with no partial or interleaved line.
+
+The held-lock fixture is the contention case both the bound above and the contended row are measured under, and the suite holds the lock the same way in `tests/fm-dispatch-resolve.test.sh` ("a blocked receipt cannot delay the resolver block").
+A live process creates `state/.dispatch-receipts.lock` as a symlink to its own PID before the resolve starts and removes it only after the resolve has exited, so the owner is demonstrably alive for the whole run and the resolver spends its entire `RESOLVE_LOCK_ATTEMPTS` budget before dropping the record.
+Measurement is the same split as the idle case: the timer records the moment the first stdout byte is readable and the moment the process exits, and receipt work is the difference, so the fixture changes what the receipt path does and nothing about how it is timed.
+
+An `error` receipt records the run's `reason` verbatim, and an HTTP failure reason carries up to 200 bytes of the remote response body - the same bytes the block already printed to stdout - so a receipts file can hold remote text durably; it is neither trimmed nor redacted.
+
+The receipts file is append-only and unbounded, so the `jq -s` slurp the join holds the lock across grows with a home's history.
+It grows slowly: an end-to-end `--record-dispatch` run cost 81 ms at 100 records (28 KiB), 98 ms at 500 (141 KiB), 106 ms at 1,500 (426 KiB), and 122 ms at 5,000 (1,424 KiB).
+Whether a home that old wants pruning or rotation is out of scope for this change and has no owner yet.
+
+```console
+$ bash receipt-cost.sh   # the harness below, saved to a scratch file and run from the repository root
+idle:      stdout 175 ms, exit 218 ms, receipt 42 ms after the block
+locked:    stdout 165 ms, exit 307 ms, receipt 142 ms after the block, then dropped
+hashes:    4 ms before the block
+join run:  74 ms end to end
+```
+
+The harness, run from the repository root:
+
+```sh
+H=$(mktemp -d); mkdir -p "$H/state" "$H/config" "$H/fakebin"
+printf '# Task\nFix the off-by-one in the pager.\n' > "$H/brief.md"
+printf '{"rules":[{"when":"A simple bug fix.","use":{"harness":"cursor","model":"cursor-grok-4.6-medium"}}]}\n' > "$H/config/crew-dispatch.json"
+cat > "$H/fakebin/curl" <<'EOF'
+#!/usr/bin/env bash
+out=''; hdr=''
+while [ $# -gt 0 ]; do case "$1" in -o) out=$2; shift 2;; -D) hdr=$2; shift 2;; *) shift;; esac; done
+cat > /dev/null
+printf 'x-typesafe-request-id: bench\r\n' > "$hdr"
+printf '{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.9,"probabilities":{"rule_1":0.97,"default":0.03}}},"usage":{"input_tokens":812,"output_tokens":60}}' > "$out"
+printf '200'
+EOF
+cat > "$H/fakebin/quota-axi" <<'EOF'
+#!/usr/bin/env bash
+printf '{"schemaVersion":5,"providers":[{"provider":"cursor","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":80,"runway":{"status":"ok"},"selection":{"spendPriority":10}}]}}]}'
+EOF
+chmod +x "$H/fakebin/curl" "$H/fakebin/quota-axi"
+export PATH="$H/fakebin:$PATH" FM_HOME="$H" TYPESAFE_API_KEY=bench-key
+split() { # prints "<ms to the first stdout byte> <ms to exit>"
+  local t0 a b pid; : > "$H/out"; t0=$(date +%s%N)
+  bin/fm-dispatch-resolve.sh "$H/brief.md" > "$H/out" 2>/dev/null & pid=$!
+  a=0; while kill -0 "$pid" 2>/dev/null; do [ -s "$H/out" ] && { a=$(date +%s%N); break; }; done
+  [ "$a" -ne 0 ] || a=$(date +%s%N); wait "$pid"; b=$(date +%s%N)
+  echo "$(( (a-t0)/1000000 )) $(( (b-t0)/1000000 ))"
+}
+s=0; e=0; for _ in $(seq 20); do read -r x y < <(split); s=$((s+x)); e=$((e+y)); done
+echo "idle:      stdout $((s/20)) ms, exit $((e/20)) ms, receipt $(( (e-s)/20 )) ms after the block"
+ln -s $$ "$H/state/.dispatch-receipts.lock"; read -r x y < <(split); rm -f "$H/state/.dispatch-receipts.lock"
+echo "locked:    stdout $x ms, exit $y ms, receipt $((y-x)) ms after the block, then dropped"
+t0=$(date +%s%N); for _ in $(seq 20); do sha256sum "$H/brief.md" "$H/config/crew-dispatch.json" >/dev/null; done
+echo "hashes:    $(( ($(date +%s%N)-t0)/1000000/20 )) ms before the block"
+t0=$(date +%s%N); for _ in $(seq 20); do bin/fm-dispatch-resolve.sh --record-dispatch "$H/brief.md" --harness cursor >/dev/null 2>&1; done
+echo "join run:  $(( ($(date +%s%N)-t0)/1000000/20 )) ms end to end"
+rm -rf "$H"
+```

@@ -520,6 +520,7 @@ Rules come only from the effective home's `config/crew-dispatch.json`; `FM_CONFI
 
 ```sh
 bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON block on stdout
+bin/fm-dispatch-resolve.sh --record-dispatch data/<id>/brief.md --harness <name> [--model <name>] [--effort <level>]   # after the spawn
 ```
 
 Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.
@@ -532,15 +533,28 @@ Missing or nonnumeric `spendPriority` evidence is never ranked, and every candid
 On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
 The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor), `escalate` (an approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
 Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
-Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
+Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq` once a rules file exists to match against, each reported and never selected around.
+With no rules file at all, the `no rules to match` block and exit 0 hold whether or not `jq` is installed, because that path asks nothing of the model or the rules; the run's own receipt is the only casualty, and it says so on its one stderr line.
 Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
+Every keyed outcome also appends one resolution receipt to the home's gitignored `state/dispatch-receipts.jsonl`, holding the brief and rules content hashes, the answering model id, the request id, usage, the full probabilities, the confidence, the reason a non-clear outcome gives, and the chosen profile, and never the key or any rule `why`.
+On `clear` only, after passing the profile line to `fm-spawn`, firstmate reruns the script with `--record-dispatch` for the profile it actually dispatched, which appends a dispatch receipt joined by brief content hash to that brief's latest resolution, so chosen-versus-dispatched disagreement is inspectable; no other outcome records a dispatch.
+The dispatch receipt copies that resolution's row, so its `resolution_id` names the one resolution instance the dispatch joined even when a brief resolves several times under the same content hash.
+Read that disagreement by projecting both `chosen_profile` and `dispatched_profile` to `{harness, model, effort}` and comparing the projections: `chosen_profile` is the rules file's profile verbatim and may also carry the declared `provider` or `floor`, which no dispatch flag can express, so comparing the whole objects reports a disagreement on profiles the dispatch in fact matched exactly.
+Resolve-path receipt writes are best-effort but never silent: a failure changes neither the resolver's stdout nor its exit status, because every receipt is written after its block is printed, and on every outcome, clear or not, the run prints the one fixed line `dispatch-resolve: no resolution receipt for this run` on stderr, which carries nothing from the receipt, the brief, the model's answer, or the key.
+On `clear` the same loss is additionally detectable later, when the `--record-dispatch` run for that brief reports on stderr that no resolution receipt carries its content hash; the other outcomes record no dispatch, so the stderr line is the whole of their visibility.
+It does cost the resolver's own process lifetime after the block, and that cost is bounded rather than incidental: receipt work stays at or under a 100 ms median on an idle home and at or under 200 ms under the held-lock fixture, both measured in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
+Those two figures are the accepted governing bound for the receipt path, adopted in place of any looser few-milliseconds reading, so a run that exceeds them is a regression to fix here rather than a cost to renegotiate.
+A `--record-dispatch` run that cannot land its join instead names the reason on one stderr line and still exits 0, so an absent dispatch receipt is never mistaken for an agreeing one; the file is append-only and unbounded, and the home's `state/` directory is gitignored.
+Both paths append only to a regular file at that exact path: a `state/dispatch-receipts.jsonl` that is a symlink, live or dangling, is refused rather than followed, so relocating the receipts elsewhere by symlink drops every record instead of writing through it.
+
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-1.13.0`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+That model is pinned to the exact version the floor was exercised against rather than tracking the `jev-latest` alias, so a vendor release cannot move the answers behind the floor without a change here.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
 ## Toolchain
