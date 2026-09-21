@@ -2248,11 +2248,15 @@ SH
       "$ROOT/bin/fm-config-push.sh" > "$first_out" 2>&1
   ) &
   first_pid=$!
-  for _ in $(seq 1 100); do
+  # A cold config push can take several seconds to reach delivery on a slow
+  # host, so wait on the push itself rather than a fixed 2s budget: stop once it
+  # reaches delivery or exits, with a generous ceiling only for a hang.
+  for _ in $(seq 1 3000); do
     [ -e "$entered" ] && break
+    kill -0 "$first_pid" 2>/dev/null || break
     sleep 0.02
   done
-  [ -e "$entered" ] || fail "first config push did not reach pointer delivery"
+  [ -e "$entered" ] || fail "first config push did not reach pointer delivery: $(cat "$first_out" 2>/dev/null)"
   first_instr=$(reread_instruction_path "$w/sm") \
     || fail "first concurrent push did not publish its generation"
   printf 'two\n' > "$w/home/config/crew-harness"

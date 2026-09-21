@@ -847,12 +847,16 @@ FM_FAKE_SSH_MODE=inherit-block remote_env "$ROOT/bin/fm-spawn.sh" ios --secondma
   > "$TMP_ROOT/spawn-concurrent.out" 2>&1 &
 spawn_concurrent=$!
 spawn_inherit_wait=0
-# Earlier inherited files traverse the worker before captain-shared.md, so give
-# a loaded portable runner 30 seconds to reach this deliberately blocked write.
+# Earlier inherited files traverse the worker before captain-shared.md, which
+# can take well over 30 seconds on a loaded host, so wait on the spawn itself:
+# stop once it reaches this deliberately blocked write or exits, with a generous
+# ceiling only for a real hang.
 while [ ! -f "$TMP_ROOT/inherit.entered" ]; do
-  kill -0 "$spawn_concurrent" 2>/dev/null || fail "remote spawn exited before its blocked inheritance write"
+  kill -0 "$spawn_concurrent" 2>/dev/null \
+    || fail "remote spawn exited before its blocked inheritance write: $(cat "$TMP_ROOT/spawn-concurrent.out" 2>/dev/null)"
   spawn_inherit_wait=$((spawn_inherit_wait + 1))
-  [ "$spawn_inherit_wait" -le 1500 ] || fail "remote spawn never reached its blocked inheritance write"
+  [ "$spawn_inherit_wait" -le 15000 ] \
+    || fail "remote spawn never reached its blocked inheritance write: $(cat "$TMP_ROOT/spawn-concurrent.out" 2>/dev/null)"
   sleep 0.02
 done
 cat > "$PARENT/data/captain-shared.md" <<'EOF'
