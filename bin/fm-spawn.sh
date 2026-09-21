@@ -511,6 +511,11 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# The watcher marker lifecycle owner: a task record claiming an endpoint
+# retires whatever supervision bookkeeping a previous owner left under the
+# same marker key before the record is published.
+# shellcheck source=bin/fm-watch-state-lib.sh
+. "$SCRIPT_DIR/fm-watch-state-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -1044,6 +1049,11 @@ spawn_remote_secondmate() {
     echo "remote_target=$remote_target"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } >"$tmp"
+  # The route this record claims may carry a previous owner's watcher
+  # bookkeeping; claim the endpoint before publication so no poll can classify
+  # this mate inside a predecessor's supervision state.
+  fm_watch_retire_task_state "$STATE" "$id" || return 1
+  fm_watch_window_claim "$STATE" "$(fm_backend_target_of_meta "$tmp")" "$id" || return 1
   if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
     if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
       SPAWN_TASK_SET_LOCK_HELD=0
@@ -1208,6 +1218,8 @@ spawn_abort_cleanup() {
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
           } >"$SPAWN_META_TMP" 2>/dev/null &&
+            fm_watch_retire_task_state "$STATE" "$ID" &&
+            fm_watch_window_claim "$STATE" "$(fm_backend_target_of_meta "$SPAWN_META_TMP")" "$ID" &&
             fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE" ||
             true
         fi
@@ -4443,6 +4455,12 @@ preserve_relaunch_meta() {
   exit 1
 }
 if [ "$RELAUNCH" -eq 0 ]; then
+  # The endpoint this record claims may still carry a previous owner's watcher
+  # bookkeeping under the same marker key. Claim it before publication, so no
+  # poll can ever classify this worker inside a predecessor's stale counters
+  # or escalation count.
+  fm_watch_retire_task_state "$STATE" "$ID" || exit 1
+  fm_watch_window_claim "$STATE" "$(fm_backend_target_of_meta "$SPAWN_META_TMP")" "$ID" || exit 1
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1
@@ -4500,6 +4518,11 @@ spawn_report_preserved_state() {
 
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
+  # Same guarantee as a fresh spawn: the replacement incarnation starts with
+  # clean watcher bookkeeping, never inside the prior incarnation's stale
+  # counters or escalation count.
+  fm_watch_retire_task_state "$STATE" "$ID" || exit 1
+  fm_watch_window_claim "$STATE" "$(fm_backend_target_of_meta "$SPAWN_META_TMP")" "$ID" || exit 1
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
     exit 1

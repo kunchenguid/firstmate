@@ -277,6 +277,10 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# The watcher marker lifecycle owner: teardown retires the task's per-window
+# and per-task supervision bookkeeping with the rest of its runtime state.
+# shellcheck source=bin/fm-watch-state-lib.sh
+. "$SCRIPT_DIR/fm-watch-state-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
@@ -932,6 +936,8 @@ remote_secondmate_teardown() {
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
   status_retire_presentation_task "$STATE" "$ID" || return 1
+  fm_watch_retire_task_state "$STATE" "$ID" || return 1
+  fm_watch_retire_window_state "$STATE" "$(fm_backend_target_of_meta "$META")" "$ID" || return 1
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
   rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
@@ -3567,6 +3573,12 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
+# The endpoint this task recorded is dead and its task-scoped supervision is
+# over: retire the watcher's per-window and per-task bookkeeping now, so a
+# successor claiming the same endpoint can never inherit this worker's stale
+# counters or escalation count.
+fm_watch_retire_task_state "$STATE" "$ID" || exit 1
+fm_watch_retire_window_state "$STATE" "$T" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$(fm_wake_signal_seen_path "$STATE" "$STATE/$ID.turn-ended")" "$STATE/$ID.progress" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \

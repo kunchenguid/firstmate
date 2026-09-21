@@ -13,7 +13,29 @@ set -u
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
-WATCH="$ROOT/bin/fm-watch.sh"
+REAL_WATCH="$ROOT/bin/fm-watch.sh"
+# Same spawn-claim ordering model as fm-watch-triage.test.sh: a window any
+# recorded meta names is already owned when the watcher binds, so a fixture's
+# seeded markers survive the first bind.
+WATCH=watch_under_test
+watch_under_test() {
+  local meta task window key
+  if [ -n "${FM_STATE_OVERRIDE:-}" ]; then
+    for meta in "$FM_STATE_OVERRIDE"/*.meta; do
+      [ -e "$meta" ] || continue
+      task=${meta##*/}; task=${task%.meta}
+      window=$(sed -n 's/^window=\(..*\)/\1/p' "$meta" | head -1)
+      [ -n "$window" ] || continue
+      key=$(printf '%s' "$window" | tr ':/.' '___')
+      [ -e "$FM_STATE_OVERRIDE/.window-owner-$key" ] \
+        || printf '%s' "$task" > "$FM_STATE_OVERRIDE/.window-owner-$key"
+    done
+  fi
+  # exec: the backgrounded function must BE the watcher process - running it
+  # as a child would leave tests reaping a subshell pid while the real watcher
+  # survives orphaned, still holding .watch.lock for the next launch.
+  exec "$REAL_WATCH" "$@"
+}
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 GRANT="$ROOT/bin/fm-wake-grant.sh"
 GUARD="$ROOT/bin/fm-guard.sh"
@@ -733,7 +755,7 @@ test_drain_asserts_watcher_liveness() {
   mkdir "$state/.watch.lock"
   printf '%s\n' "$$" > "$state/.watch.lock/pid"
   printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
-  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$REAL_WATCH" > "$state/.watch.lock/watcher-path"
   printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
   touch "$state/.last-watcher-beat"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=300 "$DRAIN" >/dev/null 2> "$err" \

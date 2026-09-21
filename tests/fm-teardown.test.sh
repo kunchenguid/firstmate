@@ -780,6 +780,90 @@ test_local_only_fork_remote_allows() {
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
 }
 
+# The watcher's per-endpoint and per-task bookkeeping under state/ must retire
+# with the task: a successor claiming the same endpoint later must never
+# inherit counters, timers, or wedge-escalation counts a dead worker left
+# (bin/fm-watch-state-lib.sh owns the retire functions teardown calls).
+seed_watcher_state() {  # <case_dir> <endpoint-target> <task>
+  local case_dir=$1 key task=$3
+  key=$(printf '%s' "$2" | tr ':/.' '___')
+  printf 'abc\n' > "$case_dir/state/.hash-$key"
+  printf '7\n' > "$case_dir/state/.count-$key"
+  printf 'abc\n' > "$case_dir/state/.stale-$key"
+  printf '1\n' > "$case_dir/state/.stale-since-$key"
+  printf '2\n' > "$case_dir/state/.wedge-escalations-$key"
+  touch "$case_dir/state/.paused-$key" "$case_dir/state/.paused-rechecked-$key" \
+    "$case_dir/state/.paused-resurfaced-$key" "$case_dir/state/.writing-since-$key" \
+    "$case_dir/state/.writing-resurfaced-$key" "$case_dir/state/.waiting-resurfaced-$key" \
+    "$case_dir/state/.churn-since-$key" "$case_dir/state/.dead-reported-$key"
+  printf 'predecessor\n' > "$case_dir/state/.window-owner-$key"
+  touch "$case_dir/state/$task.turn-ended" "$case_dir/state/$task.progress" \
+    "$case_dir/state/.seen-${task}_turn-ended" \
+    "$case_dir/state/.subsuper-stale-$task" "$case_dir/state/.subsuper-paused-$task" \
+    "$case_dir/state/.subsuper-pause-until-due-$task" \
+    "$case_dir/state/.secondmate-wake-stall-$task" "$case_dir/state/.secondmate-wake-progress-$task"
+  mkdir -p "$case_dir/state/.secondmate-wake-stall-receipts/$task"
+}
+
+assert_watcher_state_retired() {  # <case_dir> <endpoint-target> <task>
+  local case_dir=$1 key task=$3 marker
+  key=$(printf '%s' "$2" | tr ':/.' '___')
+  for marker in .hash- .count- .stale- .stale-since- .wedge-escalations- \
+      .paused- .paused-rechecked- .paused-resurfaced- .writing-since- \
+      .writing-resurfaced- .waiting-resurfaced- .churn-since- .dead-reported- \
+      .window-owner-; do
+    [ ! -e "$case_dir/state/$marker$key" ] \
+      || fail "teardown left the endpoint's $marker marker behind"
+  done
+  for marker in "$task.turn-ended" "$task.progress" ".seen-${task}_turn-ended"; do
+    [ ! -e "$case_dir/state/$marker" ] \
+      || fail "teardown left the task's $marker behind"
+  done
+  for marker in .subsuper-stale- .subsuper-paused- .subsuper-pause-until-due- \
+      .secondmate-wake-stall- .secondmate-wake-progress-; do
+    [ ! -e "$case_dir/state/$marker$task" ] \
+      || fail "teardown left the task's $marker marker behind"
+  done
+  [ ! -d "$case_dir/state/.secondmate-wake-stall-receipts/$task" ] \
+    || fail "teardown left the task's wake-stall receipts dir behind"
+}
+
+test_teardown_retires_watcher_state() {
+  local case_dir rc
+  case_dir=$(make_case watch-state-retire)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  seed_watcher_state "$case_dir" "firstmate:fm-task-x1" task-x1
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "watch-state-retire: teardown should succeed when HEAD is on a fork remote"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "watch-state-retire: teardown printed a REFUSED line"
+  assert_watcher_state_retired "$case_dir" "firstmate:fm-task-x1" task-x1
+  pass "teardown retires the task's watcher state with its endpoint"
+}
+
+test_remote_teardown_retires_watcher_state() {
+  local case_dir remote_home rc out
+  case_dir=$(make_case remote-watch-state-retire)
+  configure_remote_secondmate_for_teardown "$case_dir"
+  remote_home=$(collapse_path_slashes "$case_dir/remote-home")
+  add_remote_retire_ssh_stub "$case_dir"
+  seed_watcher_state "$case_dir" "remote:task-x1" task-x1
+
+  rc=0
+  out=$(run_remote_teardown "$case_dir" 2> "$case_dir/stderr") || rc=$?
+  expect_code 0 "$rc" "remote-watch-state-retire: teardown should complete"
+  assert_contains "$out" "teardown task-x1 complete (remote remote-mac:$remote_home)" \
+    "remote-watch-state-retire: success line missing"
+  assert_watcher_state_retired "$case_dir" "remote:task-x1" task-x1
+  pass "remote secondmate teardown retires the task's watcher state"
+}
+
 test_teardown_closes_the_backlog_item_itself() {
   local case_dir out
   case_dir=$(make_case tasks-axi-close)
@@ -3902,6 +3986,7 @@ if [ "${1:-}" = --turn-end-signals ]; then
 fi
 
 test_local_only_fork_remote_allows
+test_teardown_retires_watcher_state
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
@@ -3923,6 +4008,7 @@ test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_remote_secondmate_pending_reply_cleanup_foreign_last_record
+test_remote_teardown_retires_watcher_state
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_surfaces_restore_failure_without_blocking_cleanup

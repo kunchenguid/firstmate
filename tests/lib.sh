@@ -515,14 +515,24 @@ fm_git_worktree() {
 # --- state/<id>.meta writers ------------------------------------------------
 
 # fm_write_meta <file> <key=val> ...: write the given key=val lines to a meta
-# file (truncating any prior content).
+# file (truncating any prior content). When the fields record a window, the
+# matching .window-owner-<key> claim is written first - fm-spawn.sh claims the
+# endpoint before it publishes the record, so a fixture meta always arrives
+# with its owner already bound, and only a test that explicitly removes the
+# claim afterwards can model pre-owner-era residue.
 fm_write_meta() {
-  local file=$1 kv
+  local file=$1 kv dir task window key
   shift
   : > "$file"
   for kv in "$@"; do
     printf '%s\n' "$kv" >> "$file"
+    case "$kv" in window=?*) [ -z "${window:-}" ] && window=${kv#window=} ;; esac
   done
+  if [ -n "${window:-}" ]; then
+    dir=$(dirname "$file"); task=${file##*/}; task=${task%.meta}
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    printf '%s' "$task" > "$dir/.window-owner-$key"
+  fi
 }
 
 # fm_write_secondmate_meta <file> <home> [window] [projects] [harness]: write the

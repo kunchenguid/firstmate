@@ -101,10 +101,10 @@
 #          The `code-root <file>` variant is a detect-only local check that runs
 #          even in a read-only session; detect_code_root_backlog_fork owns what
 #          it reports.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (backlog_record_reconcile, secondmate_sync,
 #          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
-#          fleet_sync) while still
+#          fleet_sync, fm_watch_orphan_state_sweep) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
@@ -112,7 +112,7 @@
 #          the fleet lock, so a second concurrent session never race-mutates
 #          secondmate homes, pending handoff outboxes and receiver wakes,
 #          X-mode artifacts, project clones, or repair instructions.
-#          Unset/0 (the default) runs all six sweeps - this flag is purely
+#          Unset/0 (the default) runs all seven sweeps - this flag is purely
 #          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
@@ -187,6 +187,11 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# The watcher marker lifecycle owner: the locked startup sweep retires
+# orphaned per-window/per-task supervision bookkeeping after the backlog
+# reconcile settles which task records are live.
+# shellcheck source=bin/fm-watch-state-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-watch-state-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
@@ -1453,6 +1458,18 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
     if [ "$BOOTSTRAP_BACKLOG_RECONCILE_STATUS" -eq 2 ]; then
       exit 1
     fi
+  fi
+  # With the live task-record set settled, retire the watcher supervision
+  # bookkeeping no live meta or task owns - the residue an interrupted
+  # teardown or a torn-down worker leaves behind, which is what a reused
+  # endpoint could otherwise inherit.
+  if BOOTSTRAP_WATCH_SWEEP_COUNT=$(fm_watch_orphan_state_sweep "$STATE"); then
+    if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] && [ "$BOOTSTRAP_WATCH_SWEEP_COUNT" -gt 0 ]; then
+      echo "BOOTSTRAP_INFO: retired $BOOTSTRAP_WATCH_SWEEP_COUNT orphaned watcher state marker(s)"
+    fi
+  else
+    echo "error: bootstrap could not retire orphaned watcher state in $STATE" >&2
+    exit 1
   fi
 fi
 

@@ -194,6 +194,11 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$FM_DAEMON_DIR/fm-busy-lib.sh"
 
+# The ONE watcher marker-key derivation, shared with the watcher whose
+# .paused-*/.stale-* window files this daemon reads and clears.
+# shellcheck source=bin/fm-watch-state-lib.sh
+. "$FM_DAEMON_DIR/fm-watch-state-lib.sh"
+
 # --- tunables ---------------------------------------------------------------
 # Supervisor backends this daemon knows how to inject into today. zellij, orca,
 # and cmux are real backends elsewhere in firstmate (bin/fm-backend.sh) but this
@@ -478,7 +483,10 @@ classify_unknown() {  # <reason>
 #           classified byte offset, so failures and events do not re-fire while
 #           unread bytes remain recoverable.
 
-_stale_key() { printf '%s' "$1" | tr ':/.' '___'; }
+# The marker-key derivation lives in bin/fm-watch-state-lib.sh
+# (fm_watch_state_key) - the same owner the watcher binds and retires by, so
+# this daemon's per-task and per-window keys can never drift from that cleanup.
+_stale_key() { fm_watch_state_key "$1"; }
 
 stale_marker_record() {  # <window> <state>  — create if absent
   local win=$1 state=$2 key marker
