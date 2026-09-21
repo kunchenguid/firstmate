@@ -567,13 +567,19 @@ case "$fault:$*" in
     printf 'HTTP 502\n' >&2; exit 1 ;;
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
-  hang:'api repos/o/r/pulls/8') sleep "${FORGE_HANG:-4}" ;;
+  hang:'api repos/o/r/pulls/8') sleep 4 ;;
   # The first check-runs read outlasts the five-second stall bound, then answers.
   stall-once:'api repos/o/r/commits/'*'/check-runs?'*)
     [ -e "$FORGE/stalled" ] || { : > "$FORGE/stalled"; sleep 7; } ;;
   # A check-runs read that never answers and outlasts the remaining budget.
   stall:'api repos/o/r/commits/'*'/check-runs?'*)
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock"; sleep 30 ;;
+  # The first check-runs read stalls past the five-second bound and its retry
+  # answers after eleven seconds: inside the remaining budget, but past the five
+  # seconds held for the closing head read, which itself never answers.
+  slow:'api repos/o/r/commits/'*'/check-runs?'*)
+    if [ -e "$FORGE/stalled" ]; then sleep 11; else : > "$FORGE/stalled"; sleep 7; fi ;;
+  slow:'pr view '*) sleep 30 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
 esac
 exec "$(dirname "$0")/gh-fixture" "$@"
@@ -586,30 +592,31 @@ SH
   chmod +x "$home/fakebin/gh" "$home/fakebin/date"
 }
 
-test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
+test_deadline_cut_records_timeout() { # exhaust|hang: a budget too small for its observation
   local mode=$1 home out
   home=$(new_home "budget-$mode")
   forge_home "$home"
   wrap_forge "$home"
   mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
-  cp "$home/data/delivery/contributions.json" "$home/prior.json"
   # Both modes freeze the clock: an unfrozen one can tick past a one-second
   # budget before the first forge call, so nothing is ever observed.
   /bin/date +%s > "$home/forge/clock"
   printf '%s\n' "$mode" > "$home/forge/fault"
   out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" poll) \
     || fail "poll failed when its budget ran out ($mode)"
-  [ -z "$out" ] || fail "budget exhaustion ($mode) printed a wake line: $out"
+  [ "$out" = 'contributions: observation timed out for https://github.com/o/r/pull/8' ] \
+    || fail "a deadline cut ($mode) did not wake as a timeout: $out"
   grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
-    || fail "budget exhaustion ($mode) never started the observation"
-  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
-    || fail "budget exhaustion ($mode) rewrote the prior record: $(cat "$home/data/delivery/contributions.json")"
-  [ ! -s "$home/state/.wake-queue" ] || fail "budget exhaustion ($mode) enqueued a wake"
-  pass "budget exhausted mid-observation ($mode) keeps the prior record and stays silent"
+    || fail "a deadline cut ($mode) never started the observation"
+  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == "forge observation timed out"
+    and .last_failure == {kind:"timeout"}' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "a deadline cut ($mode) left no timeout evidence: $(cat "$home/data/delivery/contributions.json")"
+  [ ! -s "$home/state/.wake-queue" ] || fail "a deadline cut ($mode) enqueued a wake"
+  pass "a deadline that cuts the observation ($mode) records a timeout with checked_at stamped"
 }
 
-test_budget_refusal_between_calls() { test_budget_exhaustion_keeps_prior_record exhaust; }
-test_budget_bounded_call_timeout() { test_budget_exhaustion_keeps_prior_record hang; }
+test_budget_refusal_between_calls() { test_deadline_cut_records_timeout exhaust; }
+test_budget_bounded_call_timeout() { test_deadline_cut_records_timeout hang; }
 
 test_genuine_failure_near_deadline_is_unavailable() {
   local home out
@@ -858,63 +865,70 @@ test_stalled_read_is_retried_within_the_budget() {
   pass 'a read past the five-second stall bound is retried and completes within the budget'
 }
 
-test_repeated_timeout_on_same_head_does_not_wake() {
-  local home out error='"forge observation timed out"'
+test_cut_retry_records_timeout_and_spares_the_closing_read() { # the filed sequence against a real clock
+  local home out
+  home=$(new_home cut-retry)
+  forge_home "$home"
+  wrap_forge "$home"
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  printf 'slow\n' > "$home/forge/fault"
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 "$ROOT/bin/fm-contributions.sh" poll) \
+    || fail 'a poll whose retry outlasted its bound failed'
+  [ "$out" = 'contributions: observation timed out for https://github.com/o/r/pull/8' ] \
+    || fail "a retry the deadline cut did not wake as a timeout: $out"
+  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == "forge observation timed out"
+    and .last_failure == {kind:"timeout"}' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "a retry the deadline cut left the record untouched: $(cat "$home/data/delivery/contributions.json")"
+  ! grep -F 'pr view' "$home/forge/calls" >/dev/null \
+    || fail "a retry ran into the five seconds held for the closing head read: $(cat "$home/forge/calls")"
+  pass 'a retry stops five seconds before the deadline for the closing read and a cut retry records a timeout'
+}
+
+test_repeated_timeout_does_not_wake() { # timeouts and forge errors alternate inside one episode, then recoveries
+  local home out timed_out='contributions: observation timed out for https://github.com/o/r/pull/8'
+  local unavailable='contributions: observation unavailable for https://github.com/o/r/pull/8'
+  local timeout='"forge observation timed out"' forge_error='"forge observation unavailable or changed during read"'
   home=$(new_home repeated-timeout)
   forge_home "$home"
   wrap_forge "$home"
   poll_at() { with_home "$home" env FM_CONTRIBUTIONS_NOW="$1" "$ROOT/bin/fm-contributions.sh" poll || fail "poll at $1 failed"; }
-  # A recovered record whose last failure was a timeout on the current head.
-  mutate_record "$home" delivery ".records[0].checked_at=\"2026-09-15T08:00:00Z\" | .records[0].last_failure={kind:\"timeout\",head:\"$HEAD_A\"}"
+  failed_as() { # error-json last-kind
+    jq -e --argjson error "$1" --arg kind "$2" '.records[0] | .error == $error and .last_failure == {kind:$kind}' \
+      "$home/data/delivery/contributions.json" >/dev/null
+  }
   /bin/date +%s > "$home/forge/clock"
-  printf 'stall\n' > "$home/forge/fault"
-  out=$(poll_at 2026-09-16T09:00:00Z)
-  [ -z "$out" ] || fail "a repeated timeout on the same head woke again: $out"
-  jq -e --argjson error "$error" --arg head "$HEAD_A" '.records[0] | .checked_at == "2026-09-16T09:00:00Z"
-    and .error == $error and .last_failure == {kind:"timeout",head:$head}' \
-    "$home/data/delivery/contributions.json" >/dev/null \
-    || fail "a repeated timeout left no timeout evidence: $(cat "$home/data/delivery/contributions.json")"
-  : > "$home/forge/fault"
-  printf '%s\n' "$HEAD_B" > "$home/forge/head"
-  out=$(poll_at 2026-09-16T10:00:00Z)
-  [ -z "$out" ] || fail "a successful read printed: $out"
-  jq -e --arg head "$HEAD_A" '.records[0] | .error == null and .last_failure == {kind:"timeout",head:$head}' \
-    "$home/data/delivery/contributions.json" >/dev/null || fail 'a successful read lost the last recorded failure'
-  printf 'stall\n' > "$home/forge/fault"
-  out=$(poll_at 2026-09-16T11:00:00Z)
-  [ "$out" = 'contributions: observation timed out for https://github.com/o/r/pull/8' ] \
-    || fail "the first timeout on a new head did not wake: $out"
   printf 'down\n' > "$home/forge/fault"
+  out=$(poll_at 2026-09-16T09:00:00Z)
+  [ "$out" = "$unavailable" ] || fail "the first failure of an episode did not wake: $out"
+  printf 'stall\n' > "$home/forge/fault"
+  out=$(poll_at 2026-09-16T10:00:00Z)
+  [ -z "$out" ] || fail "a timeout after a forge error woke without a recovery between them: $out"
+  failed_as "$timeout" timeout || fail "a timeout inside an episode left no timeout evidence: $(cat "$home/data/delivery/contributions.json")"
+  printf 'down\n' > "$home/forge/fault"
+  out=$(poll_at 2026-09-16T11:00:00Z)
+  [ -z "$out" ] || fail "a forge error after a timeout woke without a recovery between them: $out"
+  failed_as "$forge_error" forge || fail "a forge error inside an episode left no forge evidence: $(cat "$home/data/delivery/contributions.json")"
+  : > "$home/forge/fault"
   out=$(poll_at 2026-09-16T12:00:00Z)
-  [ "$out" = 'contributions: observation unavailable for https://github.com/o/r/pull/8' ] \
-    || fail "a forge error after a timeout did not wake: $out"
-  pass 'a timeout on the head that last timed out stays silent while new heads and forge errors wake'
-}
-
-test_budget_fits_inside_the_watcher_check_bound() {
-  local home out
-  home=$(new_home watcher-bound)
-  forge_home "$home"
-  wrap_forge "$home"
-  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
-  cp "$home/data/delivery/contributions.json" "$home/prior.json"
-  /bin/date +%s > "$home/forge/clock"
-  printf 'hang\n' > "$home/forge/fault"
-  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 FM_CHECK_TIMEOUT=6 FORGE_HANG=2 "$ROOT/bin/fm-contributions.sh" poll) \
-    || fail 'a poll under a short watcher check bound failed'
-  [ -z "$out" ] || fail "a budget cut to the watcher check bound printed: $out"
-  cmp -s "$home/prior.json" "$home/data/delivery/contributions.json" \
-    || fail 'a two-second read completed although a six-second watcher bound leaves one second of budget'
-  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=20 FORGE_HANG=2 "$ROOT/bin/fm-contributions.sh" poll) \
-    || fail 'a poll under the default watcher check bound failed'
-  jq -e --arg now "$NOW" '.records[0] | .checked_at == $now and .error == null' \
-    "$home/data/delivery/contributions.json" >/dev/null \
-    || fail 'a two-second read did not complete under the default watcher check bound'
-  pass 'the poll budget is cut to fit inside the watcher check bound'
+  [ -z "$out" ] || fail "a successful read printed: $out"
+  failed_as null forge || fail 'a successful read lost the last recorded failure'
+  printf 'stall\n' > "$home/forge/fault"
+  out=$(poll_at 2026-09-16T13:00:00Z)
+  [ "$out" = "$timed_out" ] || fail "a timeout after recovering from a forge error did not wake: $out"
+  : > "$home/forge/fault"
+  out=$(poll_at 2026-09-16T14:00:00Z)
+  [ -z "$out" ] || fail "a successful read printed: $out"
+  printf 'stall\n' > "$home/forge/fault"
+  out=$(poll_at 2026-09-16T15:00:00Z)
+  [ -z "$out" ] || fail "a timeout after recovering from a timeout woke again: $out"
+  failed_as "$timeout" timeout || fail "a repeated timeout left no timeout evidence: $(cat "$home/data/delivery/contributions.json")"
+  jq -e '.records[0].checked_at == "2026-09-16T15:00:00Z"' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail 'a repeated timeout did not stamp checked_at'
+  pass 'any failure keeps an episode open and a timeout wakes only after recovering from a forge error'
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_stalled_read_is_retried_within_the_budget test_repeated_timeout_on_same_head_does_not_wake test_budget_fits_inside_the_watcher_check_bound; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed test_stalled_read_is_retried_within_the_budget test_cut_retry_records_timeout_and_spares_the_closing_read test_repeated_timeout_does_not_wake; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
