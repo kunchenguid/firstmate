@@ -54,7 +54,7 @@ External process-event bindings intentionally expose no answer operation and can
 
 A configured remote secondmate reply source is armed and handled through `bin/fm-procevent-remote-reply.sh`.
 Its header owns exact commands, while the adapter owns cursor continuity, validated deduplicated status ingest, path-confined document fetch, acknowledgement, and re-arming after a good delta.
-A continuity break is escalated once and stays unarmed until an operator runs `bin/fm-procevent-remote-reply.sh rebase <secondmate-id>`.
+Each continuity break is escalated once and stays unarmed until an operator runs `bin/fm-procevent-remote-reply.sh rebase <secondmate-id>`.
 
 For a recurring mid-task quota check, arm the quota adapter:
 

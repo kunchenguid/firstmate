@@ -211,6 +211,7 @@ A remote mate that did answer is therefore never asked to repost while its answe
 The [process-to-event operating contract](configuration.md#process-to-event-sources-stateprocevent) owns automatic application, one-announcement replay deduplication, and the unhandled fallback path.
 The source log is never truncated or consumed.
 A shortened or changed prefix stops the relay and surfaces a continuity failure instead of silently resetting the cursor.
+The stream then stays unarmed, whatever the endpoint's liveness, until an operator runs `bin/fm-procevent-remote-reply.sh rebase <secondmate-id>`, which resets the cursor to the empty prefix and re-arms; the replay is safe because ingest deduplicates lines already mirrored.
 
 An SSH exit status of 255 always means transport failure or unknown remote completion.
 The underlying `fm-on` transport never retries automatically, but `fm-send` retries its correlation-preserving steering-inbox leg exactly once.
