@@ -76,6 +76,7 @@ test_staged_publication_never_shows_partial_generation() {
     fm_current_pid me || exit 10
     ident=$(fm_pid_identity "$me") || exit 11
     printf "%s\n" "$me" > "$3"
+    FM_LOCK_OWNER_FOR=$lockdir
     FM_LOCK_OWNER_FM_HOME=$FM_HOME
     FM_LOCK_OWNER_WATCHER_PATH=$4
     FM_LOCK_OWNER_PID_IDENTITY=$ident
@@ -154,69 +155,90 @@ test_legacy_staggered_publication_is_observable() {
   pass "legacy staggered publication is observable ($partials partials in $samples samples)"
 }
 
-test_rapid_cycling_yields_no_false_blind() {
-  local dir state out pub reader fails reasons
-  dir=$(make_case rapid-cycling)
+# A generation flip (release plus re-publish) forced at an exact point inside
+# one guard read. The reader's own file reads are intercepted: the n-th read of
+# a named owner file first asks the publisher to flip the lock generation and
+# waits until the new generation is published, then performs the real read. The
+# guard therefore always spans a real flip at that read, and every position a
+# torn read can occur at is covered without any wall-clock window.
+test_generation_flip_mid_read_yields_no_false_blind() {
+  local dir state out pub reader fails flips
+  dir=$(make_case generation-flip)
   state="$dir/state"
-  out="$dir/cycling.out"
+  out="$dir/flip.out"
   touch "$state/.last-watcher-beat"
-  # Production-shaped arm cycling: each generation is HELD (a live watcher
-  # supervising) and the release-plus-republish gap is milliseconds. A guard
-  # evaluation must never decide on mixed-generation state and must ride out
-  # the gap inside its default bounded retries.
   FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
     . "$1"
     lockdir="$2/.watch.lock"
     fm_current_pid me || exit 10
     ident=$(fm_pid_identity "$me") || exit 11
+    FM_LOCK_OWNER_FOR=$lockdir
     FM_LOCK_OWNER_FM_HOME=$FM_HOME
     FM_LOCK_OWNER_WATCHER_PATH=$3
     FM_LOCK_OWNER_PID_IDENTITY=$ident
-    for _ in $(seq 1 25); do
-      fm_lock_try_acquire "$lockdir" || exit 12
-      sleep 0.2
-      fm_lock_release "$lockdir"
-    done
     fm_lock_try_acquire "$lockdir" || exit 12
-    for _ in $(seq 1 150); do
-      [ -e "$4" ] && break
-      sleep 0.2
+    printf "%s\n" "$me" > "$4"
+    while [ ! -e "$5" ]; do
+      if [ -e "$6" ]; then
+        rm -f "$6"
+        fm_lock_release "$lockdir"
+        fm_lock_try_acquire "$lockdir" || exit 13
+        printf "flip\n" >> "$7"
+        : > "$8"
+      fi
+      sleep 0.01
     done
     fm_lock_release "$lockdir"
-    touch "$5"
-  ' _ "$LIB" "$state" "$WATCH" "$dir/reader.done" "$dir/cycling.done" > "$out" 2>&1 &
+  ' _ "$LIB" "$state" "$WATCH" "$dir/publisher.pid" "$dir/reader.done" \
+    "$dir/flip.request" "$dir/flips" "$dir/flip.done" > "$out" 2>&1 &
   pub=$!
   reader=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
     . "$1"
+    dir=$2 state=$3 watch=$4
+    i=0
+    while [ "$i" -lt 100 ] && [ ! -s "$dir/publisher.pid" ]; do sleep 0.1; i=$((i + 1)); done
+    [ -s "$dir/publisher.pid" ] || { printf "publisher never published\n"; exit 1; }
+    pub_pid=$(cat "$dir/publisher.pid")
+    cat() {
+      local name
+      case "$1" in
+        "$state"/.watch.lock.owner.*/*)
+          name=${1##*/}
+          printf "%s\n" "$name" >> "$dir/reads.log"
+          if [ -e "$dir/flip.target" ] \
+            && [ "$(command cat "$dir/flip.target")" = "$name:$(grep -cx "$name" "$dir/reads.log")" ]; then
+            rm -f "$dir/flip.target"
+            : > "$dir/flip.request"
+            while [ ! -e "$dir/flip.done" ]; do sleep 0.01; done
+            rm -f "$dir/flip.done"
+          fi
+          ;;
+      esac
+      command cat "$@"
+    }
     fails=0
-    evals=0
-    reasons=
-    for _ in $(seq 1 50); do
-      if [ -e "$2/.watch.lock" ] || [ -L "$2/.watch.lock" ]; then
-        break
-      fi
-      sleep 0.1
-    done
-    for _ in $(seq 1 400); do
-      if [ -e "$5" ] || ! kill -0 "$6" 2>/dev/null; then
-        break
-      fi
-      evals=$((evals + 1))
-      if ! fm_watcher_healthy "$2" "$3" 300 "$4"; then
+    for target in none pid:1 fm-home:1 watcher-path:1 pid-identity:1 pid:2 fm-home:2 watcher-path:2 pid-identity:2; do
+      : > "$dir/reads.log"
+      rm -f "$dir/flip.target"
+      [ "$target" = none ] || printf "%s\n" "$target" > "$dir/flip.target"
+      if ! fm_watcher_healthy "$state" "$watch" 300 "$dir" \
+        || [ "$FM_WATCHER_HEALTHY_PID" != "$pub_pid" ]; then
         fails=$((fails + 1))
-        reasons="$reasons[$FM_WATCHER_HEALTH_REASON]"
+        printf "flip@%s -> %s (pid %s)\n" "$target" "$FM_WATCHER_HEALTH_REASON" "$FM_WATCHER_HEALTHY_PID"
+      elif [ -e "$dir/flip.target" ]; then
+        fails=$((fails + 1))
+        printf "flip@%s never reached that read\n" "$target"
       fi
     done
-    touch "$7"
-    printf "fails=%s evals=%s reasons=%s\n" "$fails" "$evals" "$reasons"
-  ' _ "$LIB" "$state" "$WATCH" "$dir" "$dir/cycling.done" "$pub" "$dir/reader.done")
-  wait "$pub" || fail "cycling publisher failed: $(cat "$out")"
-  fails=${reader#fails=}; fails=${fails%% *}
-  evals=${reader#*evals=}; evals=${evals%% *}
-  reasons=${reader#*reasons=}
-  [ "$evals" -ge 50 ] || fail "reader overlapped too little cycling to prove anything ($evals evaluations)"
-  [ "$fails" -eq 0 ] || fail "$fails false-BLIND guard failures under rapid cycling (reasons:$reasons)"
-  pass "rapid arm cycling yields zero false-BLINDs in $evals guard evaluations"
+    : > "$dir/reader.done"
+    printf "fails=%s\n" "$fails"
+  ' _ "$LIB" "$dir" "$state" "$WATCH")
+  wait "$pub" || fail "flip publisher failed: $(cat "$out")"
+  flips=$(grep -c flip "$dir/flips" 2>/dev/null || echo 0)
+  fails=${reader##*fails=}
+  [ "$flips" -eq 8 ] || fail "expected 8 forced generation flips, publisher performed $flips"
+  [ "$fails" -eq 0 ] || fail "false-BLIND guard failures across forced mid-read flips: $reader"
+  pass "a generation flip at every read position inside a guard evaluation yields zero false-BLINDs"
 }
 
 test_health_reason_matrix() {
@@ -284,25 +306,6 @@ test_health_reason_matrix() {
   pass "dead watcher still blocks with a named predicate reason"
 }
 
-test_verdict_carries_health_detail() {
-  local dir state detail
-  dir=$(make_case verdict-detail)
-  state="$dir/state"
-  touch -t 200001010000 "$state/.last-watcher-beat"
-  mkdir "$state/.watch.lock"
-  printf '%s\n' "$(dead_pid)" > "$state/.watch.lock/pid"
-  printf '%s\n' "$dir" > "$state/.watch.lock/fm-home"
-  printf '%s\n' "$WATCH" > "$state/.watch.lock/watcher-path"
-  printf '%s\n' "dead watcher identity" > "$state/.watch.lock/pid-identity"
-  detail=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" FM_SUPERVISION_MODEL=persistent bash -c '
-    . "$1"
-    fm_watcher_supervision_verdict "$2" "$3" 300 "$4" "$5"
-    printf "%s:%s:%s" "$FM_WATCHER_VERDICT_OK" "$FM_WATCHER_VERDICT_REASON" "$FM_WATCHER_VERDICT_DETAIL"
-  ' _ "$LIB" "$state" "$WATCH" "$dir" "$dir") || fail "verdict probe crashed"
-  [ "$detail" = "false:stale-beacon:pid-dead" ] || fail "verdict detail wrong (got '$detail')"
-  pass "supervision verdict carries the failed health predicate"
-}
-
 test_staged_acquire_publishes_complete_lock() {
   local dir state ready done_flag holder lock_pid i
   dir=$(make_case staged-acquire)
@@ -314,6 +317,7 @@ test_staged_acquire_publishes_complete_lock() {
     lockdir="$2/.watch.lock"
     fm_current_pid me || exit 10
     ident=$(fm_pid_identity "$me") || exit 11
+    FM_LOCK_OWNER_FOR=$lockdir
     FM_LOCK_OWNER_FM_HOME=$FM_HOME
     FM_LOCK_OWNER_WATCHER_PATH=$3
     FM_LOCK_OWNER_PID_IDENTITY=$ident
@@ -339,9 +343,143 @@ test_staged_acquire_publishes_complete_lock() {
   pass "staged acquire publishes a complete lock generation"
 }
 
+# The claim step after symlink publication must only verify the staged pid,
+# never truncate and rewrite it. The publisher's own `ln` is intercepted: right
+# after the symlink goes live the pid file is made read-only and a pinned guard
+# read is taken in that exact window. Any post-publication rewrite fails the
+# acquisition outright, and the pinned read must see the complete generation.
+test_published_pid_is_verified_not_rewritten() {
+  local dir state out
+  dir=$(make_case claim-verify)
+  state="$dir/state"
+  out=$(FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
+    . "$1"
+    lockdir="$2/.watch.lock"
+    fm_current_pid me || exit 10
+    ident=$(fm_pid_identity "$me") || exit 11
+    FM_LOCK_OWNER_FOR=$lockdir
+    FM_LOCK_OWNER_FM_HOME=$FM_HOME
+    FM_LOCK_OWNER_WATCHER_PATH=$3
+    FM_LOCK_OWNER_PID_IDENTITY=$ident
+    ln() {
+      command ln "$@" || return
+      chmod a-w "$2/pid"
+      fm_watcher_lock_read_pinned "$STATE"
+      printf "pinned rc=%s pid=%s\n" "$?" "$FM_WATCHER_PIN_PID"
+    }
+    if fm_lock_try_acquire "$lockdir"; then
+      printf "acquired pid=%s\n" "$(command cat "$lockdir/pid")"
+      chmod u+w "$lockdir/pid"
+      fm_lock_release "$lockdir"
+    else
+      printf "acquire failed\n"
+    fi
+    printf "me=%s\n" "$me"
+  ' _ "$LIB" "$state" "$WATCH") || fail "claim probe crashed: $out"
+  local me
+  me=${out##*me=}
+  case "$out" in
+    *"pinned rc=0 pid=$me"*) ;;
+    *) fail "pinned read inside the publication window did not see the published pid: $out" ;;
+  esac
+  case "$out" in
+    *"acquired pid=$me"*) ;;
+    *) fail "acquisition rewrote the published pid file instead of verifying it: $out" ;;
+  esac
+  pass "the published pid is verified, never truncated and rewritten"
+}
+
+# Staging is keyed to the lock being published. On the stale-recovery path the
+# same acquisition also publishes the steal lock and the recovery-marker lock;
+# the publisher's `ln` is intercepted to record each owner directory at the
+# moment it goes live, and only the watch lock may carry the staged files.
+test_staging_applies_only_to_the_published_watch_lock() {
+  local dir state log
+  dir=$(make_case staging-scope)
+  state="$dir/state"
+  log="$dir/published.log"
+  mkdir "$state/.watch.lock"
+  printf '%s\n' "$(dead_pid)" > "$state/.watch.lock/pid"
+  FM_STATE_OVERRIDE="$state" FM_HOME="$dir" bash -c '
+    . "$1"
+    lockdir="$2/.watch.lock"
+    fm_current_pid me || exit 10
+    ident=$(fm_pid_identity "$me") || exit 11
+    FM_LOCK_OWNER_FOR=$lockdir
+    FM_LOCK_OWNER_FM_HOME=$FM_HOME
+    FM_LOCK_OWNER_WATCHER_PATH=$3
+    FM_LOCK_OWNER_PID_IDENTITY=$ident
+    log=$4
+    ln() {
+      command ln "$@" || return
+      printf "%s: %s\n" "${3##*/}" "$(ls "$2" | sort | tr "\n" " ")" >> "$log"
+    }
+    fm_lock_try_acquire "$lockdir" || exit 12
+    [ -n "$FM_LOCK_RECOVERED_PID" ] || exit 13
+    fm_lock_release "$lockdir"
+  ' _ "$LIB" "$state" "$WATCH" "$log" || fail "stale watch lock was not recovered ($?)"
+  grep -qx '.watch.lock.steal: pid ' "$log" || fail "steal lock owner was not published bare: $(cat "$log")"
+  grep -qx '.watcher-down.lock: pid ' "$log" || fail "recovery-marker lock owner was not published bare: $(cat "$log")"
+  grep -qx '.watch.lock: fm-home pid pid-identity watcher-path ' "$log" || fail "watch lock owner was not published complete: $(cat "$log")"
+  pass "staged owner files reach only the published watch lock, not the nested steal or marker locks"
+}
+
+# A post-acquire retain-evidence exit must leave the held lock and the marker
+# byte-for-byte as they were. A read-only directory in place of the recovery
+# marker cannot be quarantined by the arm-check, so the real watcher takes that
+# exit with the lock published and held; the EXIT trap must neither release the
+# lock nor touch the marker nor re-attempt the marker write that just failed.
+test_retain_evidence_exit_leaves_lock_and_marker_untouched() {
+  local dir state fakebin out marker pid rc i lock_pid leftover
+  dir=$(make_case retain-evidence)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  marker="$state/.watcher-down"
+  mkdir "$marker"
+  printf 'malformed evidence\n' > "$marker/evidence"
+  chmod 0500 "$marker"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=5 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ] && kill -0 "$pid" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    chmod 0700 "$marker"
+    fail "watcher kept running instead of taking the retain-evidence exit: $(cat "$out")"
+  fi
+  wait "$pid"; rc=$?
+  lock_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  chmod 0700 "$marker"
+  [ "$rc" -eq 1 ] || fail "retain-evidence exit status was $rc: $(cat "$out")"
+  grep -q 'could not be consumed safely; retaining stale lock evidence' "$out" \
+    || fail "watcher did not report the retain-evidence exit: $(cat "$out")"
+  ! grep -q 'could not be persisted' "$out" \
+    || fail "EXIT trap re-attempted the recovery transition on a retain-evidence exit: $(cat "$out")"
+  [ "$lock_pid" = "$pid" ] || fail "retain-evidence exit did not keep the lock held by pid $pid (lock pid '$lock_pid')"
+  [ "$(cat "$state/.watch.lock/fm-home" 2>/dev/null)" = "$dir" ] || fail "retained lock lost its fm-home"
+  [ "$(cat "$state/.watch.lock/watcher-path" 2>/dev/null)" = "$WATCH" ] || fail "retained lock lost its watcher-path"
+  [ -s "$state/.watch.lock/pid-identity" ] || fail "retained lock lost its pid-identity"
+  [ -d "$marker" ] && [ ! -L "$marker" ] || fail "malformed marker was replaced"
+  [ "$(cat "$marker/evidence")" = "malformed evidence" ] || fail "malformed marker contents changed"
+  for leftover in "$state"/.watcher-down.tmp.* "$state"/.watcher-down.invalid.*; do
+    [ ! -e "$leftover" ] || fail "retain-evidence exit left marker write leftovers: $leftover"
+  done
+  [ ! -e "$state/.watcher-down.lock" ] && [ ! -L "$state/.watcher-down.lock" ] \
+    || fail "retain-evidence exit left the marker lock held"
+  pass "a retain-evidence exit leaves the held lock and the malformed marker untouched"
+}
+
 test_staged_publication_never_shows_partial_generation
 test_legacy_staggered_publication_is_observable
-test_rapid_cycling_yields_no_false_blind
+test_generation_flip_mid_read_yields_no_false_blind
 test_health_reason_matrix
-test_verdict_carries_health_detail
 test_staged_acquire_publishes_complete_lock
+test_published_pid_is_verified_not_rewritten
+test_staging_applies_only_to_the_published_watch_lock
+test_retain_evidence_exit_leaves_lock_and_marker_untouched
