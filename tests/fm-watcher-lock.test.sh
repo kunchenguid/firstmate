@@ -1024,6 +1024,66 @@ SH
   pass "cycle-exit ledger links a verified successor and remains size-capped"
 }
 
+test_cycle_successor_link_waits_for_temporarily_busy_ledger() {
+  local dir state fakebin armout check_file first_arm successor_arm successor_pid holder ready i
+  dir=$(make_case cycle-ledger-link-contention)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/first-arm.out"
+  check_file="$state/task.check.sh"
+  ready="$dir/ledger-lock-ready"
+  cat > "$check_file" <<'SH'
+#!/usr/bin/env bash
+printf 'done: synthetic contended cycle\n'
+SH
+  chmod 0700 "$check_file"
+  FM_STATE_OVERRIDE="$state" "$ROOT/bin/fm-check-register.sh" task >/dev/null \
+    || fail "could not register contended cycle-ledger check"
+
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_GUARD_GRACE=0 FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  first_arm=$!
+  wait "$first_arm" || fail "first contended ledger cycle did not surface its actionable wake"
+  grep -q "arm_pid=$first_arm.*reason=actionable-check.*successor=none" "$state/.watch-cycle-exits.log" \
+    || fail "first contended ledger record omitted its actionable classification"
+  drain_and_ack "$state" || fail "first contended ledger wake handling acknowledgement failed"
+  rm -f "$check_file" "$state/task.check-trust"
+
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 1
+    printf ready > "$3"
+    sleep 1
+    fm_lock_release "$2"
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$state/.watch-cycle-exits.lock" "$ready" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 80 ]; do
+    [ -f "$ready" ] && break
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -f "$ready" ] || fail "test could not hold the lifecycle ledger lock"
+
+  armout="$dir/successor-arm.out"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_WATCH_PREDECESSOR_ARM_PID="$first_arm" FM_POLL=5 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH_ARM" > "$armout" &
+  successor_arm=$!
+  i=0
+  while [ "$i" -lt 120 ]; do
+    grep -qF 'watcher: started pid=' "$armout" 2>/dev/null && break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  wait "$holder" || fail "test lifecycle ledger lock holder failed"
+  successor_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  grep -qF "watcher: started pid=$successor_pid" "$armout" || fail "contended successor ledger cycle did not start: $(cat "$armout")"
+  grep -q "arm_pid=$first_arm.*successor=started:$successor_pid" "$state/.watch-cycle-exits.log" \
+    || fail "predecessor ledger record was not linked after temporary lock contention"
+  kill -HUP "$successor_arm" 2>/dev/null || true
+  wait "$successor_arm" 2>/dev/null || true
+  drain_and_ack "$state" || fail "recovery drain after contended successor interruption failed"
+  pass "cycle-exit ledger successor links survive temporary lifecycle-log contention"
+}
+
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
   local dir state fakebin armout armpid watcher_pid i status
   dir=$(make_case stopped-watcher)
@@ -1279,4 +1339,5 @@ test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
+test_cycle_successor_link_waits_for_temporarily_busy_ledger
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified

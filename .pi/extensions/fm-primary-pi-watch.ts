@@ -788,6 +788,7 @@ export default function (pi: ExtensionAPI) {
     if (!generationIsLive(owner) || owner.restoring || owner.pendingActionables.length === 0) return;
     owner.restoring = true;
     const attemptedCleanup = new Set<string>();
+    let failed = false;
     try {
       while (generationIsLive(owner) && owner.pendingActionables.length > 0) {
         for (const delivered of owner.pendingActionables.filter((item) => item.delivered && !attemptedCleanup.has(item.token))) {
@@ -871,6 +872,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
     } catch (error) {
+      failed = true;
       const detail = error instanceof Error ? error.message : String(error);
       surfaceFailure(owner, `watcher: FAILED - Pi extension could not deliver an actionable wake\n${detail}`);
     } finally {
@@ -889,6 +891,9 @@ export default function (pi: ExtensionAPI) {
         owner.deferredClose = null;
         if (deferred && !owner.child && !owner.retryTimer) {
           scheduleRetry(owner, deferred.message, deferred.predecessorArmPid);
+        }
+        if (!failed && owner.pendingActionables.some((pending) => !pending.delivered && !owner.unconsumedWakes.has(pending.token))) {
+          void processPendingActionables(owner);
         }
       }
     }

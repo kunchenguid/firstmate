@@ -107,9 +107,11 @@ CYCLE_LOG="$STATE/.watch-cycle-exits.log"
 CYCLE_LOG_LOCK="$STATE/.watch-cycle-exits.lock"
 CYCLE_LOG_MAX_BYTES=${FM_WATCH_CYCLE_LOG_MAX_BYTES:-262144}
 CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
+CYCLE_LOG_LOCK_WAIT_MS=${FM_WATCH_CYCLE_LOG_LOCK_WAIT_MS:-5000}
 ARM_PID=${BASHPID:-$$}
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
+case "$CYCLE_LOG_LOCK_WAIT_MS" in ''|*[!0-9]*) CYCLE_LOG_LOCK_WAIT_MS=5000 ;; esac
 
 # The lifecycle ledger is diagnostic evidence, not a supervision dependency.
 # Writes are bounded and best-effort so an observability failure cannot stall an
@@ -162,19 +164,23 @@ cycle_signal_name() {
   kill -l "$signal_number" 2>/dev/null || printf '%s' "$signal_number"
 }
 
+cycle_log_lock_acquire() {
+  local waited=0
+  while ! fm_lock_try_acquire "$CYCLE_LOG_LOCK"; do
+    [ "$waited" -lt "$CYCLE_LOG_LOCK_WAIT_MS" ] || return 1
+    sleep 0.02
+    waited=$((waited + 20))
+  done
+}
+
 cycle_log_append() {
-  local exit_code=$1 signal=$2 reason=$3 successor=$4 ended_at beacon_age lock_after size tmp raw i
+  local exit_code=$1 signal=$2 reason=$3 successor=$4 ended_at beacon_age lock_after size tmp raw
   [ "$cycle_active" -eq 1 ] || return 0
   ended_at=$(date +%s)
   beacon_age=$(fm_path_age "$BEAT")
   lock_after=$(lock_snapshot)
 
-  i=0
-  while ! fm_lock_try_acquire "$CYCLE_LOG_LOCK"; do
-    [ "$i" -lt 20 ] || return 0
-    sleep 0.02
-    i=$((i + 1))
-  done
+  cycle_log_lock_acquire || return 0
   printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\tsuccessor=%s\n' \
     "$ARM_PID" \
     "$(cycle_clean_field "$cycle_watcher_pid")" \
@@ -213,17 +219,12 @@ cycle_log_append() {
 # one-record-per-cycle ledger captures the actual successor outcome without an
 # extra synthetic lifecycle row.
 cycle_mark_predecessor_successor() {
-  local successor=$1 predecessor=${FM_WATCH_PREDECESSOR_ARM_PID:-} i tmp
+  local successor=$1 predecessor=${FM_WATCH_PREDECESSOR_ARM_PID:-} tmp
   case "$predecessor" in
     ''|*[!0-9]*) return 0 ;;
   esac
   [ -f "$CYCLE_LOG" ] || return 0
-  i=0
-  while ! fm_lock_try_acquire "$CYCLE_LOG_LOCK"; do
-    [ "$i" -lt 20 ] || return 0
-    sleep 0.02
-    i=$((i + 1))
-  done
+  cycle_log_lock_acquire || return 0
   tmp="$CYCLE_LOG.link.$ARM_PID"
   awk -v target="arm_pid=$predecessor" -v replacement="successor=$(cycle_clean_field "$successor")" '
     {
