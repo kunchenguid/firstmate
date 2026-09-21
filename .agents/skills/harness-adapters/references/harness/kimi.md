@@ -20,6 +20,18 @@ Verified on 2026-09-21 with Kimi Code CLI 2.0.1.
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
 | Effort | `kimi provider list --json` exposes per-model `supportEfforts` values `low`, `high`, and `max` plus a `defaultEffort`; the launch flag and mapping remain unverified, so spawn records and omits requested effort per `references/common/model-and-effort.md`. |
 
+## Detection
+
+Kimi does not clear inherited markers, so a Kimi worker under another harness carries both markers.
+`../../../bin/fm-harness.sh` tests Kimi after checking for comm-based matches but before the case statement, using `fm_kimi_process_matches` to identify Kimi by either:
+- The command name being `kimi` or `kimi-bin-*`
+- Or the command name being a generic node-bundle name (like `MainThread`, `node`, etc.) and argv[0] resolving to the installed Kimi launcher.
+- Or the full command path being the installed Kimi launcher.
+
+Kimi is a bundled Node script, so tmux can report bare `node` or `MainThread` while `ps -o comm=` may show the install path.
+`fm_kimi_process_matches` proves identity from the install path in argv zero when the foreground process presents as a generic node-bundle name.
+Unrelated node processes remain `other` unless they happen to use the Kimi launcher path.
+
 ## Readiness-gated start
 
 `../../../bin/fm-spawn.sh` launches Kimi bare, handles the complete 2.0.1 trust dialog when it appears, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
