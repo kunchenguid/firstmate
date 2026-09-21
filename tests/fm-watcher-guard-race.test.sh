@@ -435,6 +435,10 @@ test_staging_applies_only_to_the_published_watch_lock() {
 # lock nor touch the marker nor re-attempt the marker write that just failed.
 test_retain_evidence_exit_leaves_lock_and_marker_untouched() {
   local dir state fakebin out marker pid rc i lock_pid leftover
+  if [ "$(id -u)" = 0 ]; then
+    pass "skip: the read-only marker needs a filesystem that can deny root's quarantine rename"
+    return 0
+  fi
   dir=$(make_case retain-evidence)
   state="$dir/state"
   fakebin="$dir/fakebin"
