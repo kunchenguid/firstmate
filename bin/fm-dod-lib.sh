@@ -10,7 +10,11 @@
 # mode is refused rather than silently rendered as the pipeline contract.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
-# This file is the one owner of the no-mistakes `--intent` contract: only the
+# This file is the one owner of the definition of done's before/after
+# evidence-pair requirement, rendered by fm_dod_evidence_pair into every mode's
+# block: any change with an observable surface needs a before/after pair taken
+# with one stated methodology, and the before is captured at reproduction time.
+# It also owns the no-mistakes `--intent` contract: only the
 # brief's `## Captain's intent` subsection plus later captain words, never
 # `## Firstmate spec` and never the worker's own tradeoffs.
 # Author the subsection body and later relays as the actual words, without
@@ -240,13 +244,33 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
+fm_dod_evidence_pair() {
+  cat <<'EOF'
+
+## Evidence pair (capture the before at reproduction)
+Any change with an observable surface requires a before/after pair captured with one stated methodology, and the before is captured while reproducing the defect, before any fix, when it is cheapest.
+The surface is observable when a person could see it or a number could move: a UI or rendered artifact, an API response, a measured value, or an output pair.
+State the methodology once - the tool, the exact command or URL, the data set, the environment, and any device or viewport - and apply that same methodology to both captures, so they are comparable and a measurement that is wrong in both directions cannot pass unnoticed.
+A change with no visible surface uses the same discipline with measured numbers or before/after output instead of screenshots; when nothing observable can move, say so and name what you verified instead.
+Keep the pair with the task's own deliverable - in the PR body, the delivery path's evidence location, or the task report - and never upload it to a public host.
+EOF
+}
+
 fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2
   case "$mode" in
+    direct-PR|local-only|no-mistakes) ;;
+    *)
+      echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
+      return 1 ;;
+  esac
+  printf '# Definition of done\n'
+  printf 'Delivery contract: mode=%s\n' "$mode"
+  fm_dod_evidence_pair
+  printf '\n'
+  case "$mode" in
     direct-PR)
       cat <<EOF
-# Definition of done
-Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
 When it is implemented and committed, push your branch and open a PR with \`gh-axi\`, then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
@@ -255,8 +279,6 @@ EOF
       ;;
     local-only)
       cat <<EOF
-# Definition of done
-Delivery contract: mode=local-only
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`fm/$id\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
@@ -266,8 +288,6 @@ EOF
       ;;
     no-mistakes)
       cat <<EOF
-# Definition of done
-Delivery contract: mode=no-mistakes
 The task is complete only when committed on your branch.
 When you believe it is complete, append \`done [at=<epoch>]: {summary}\` to the status file and stop.
 Firstmate will then instruct you to run /no-mistakes to validate and ship a PR.
@@ -300,8 +320,5 @@ Two firstmate-specific rules layer on top of that guidance:
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done [at=<epoch>]: PR {url} checks green\` and stop. You are finished.
 EOF
       ;;
-    *)
-      echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
-      return 1 ;;
   esac
 }

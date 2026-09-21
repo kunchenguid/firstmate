@@ -376,6 +376,35 @@ test_no_mistakes_dod_wording() {
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 
+# Reproducing a defect is the cheapest point to capture its before state, and an
+# after-only check cannot catch a measurement that was wrong in both directions:
+# the same wrong ruler applied twice shows no movement. Every ship mode's
+# definition of done must therefore require a before/after pair captured with one
+# stated methodology, the before taken at reproduction time, including measured
+# numbers and output pairs for non-UI work.
+test_ship_dod_requires_evidence_pair() {
+  local home id mode brief
+  home="$TMP_ROOT/evidence-pair-home"
+  mkdir -p "$home/data"
+  for mode in no-mistakes direct-PR local-only; do
+    id="brief-evidence-$(printf '%s' "$mode" | tr '[:upper:]' '[:lower:]')"
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$mode" >/dev/null 2>&1 \
+      || fail "fm-brief.sh $id --mode $mode should scaffold"
+    brief="$home/data/$id/brief.md"
+    assert_grep "requires a before/after pair captured with one stated methodology" "$brief" \
+      "$mode DOD must require a before/after pair with one stated methodology"
+    assert_grep "the before is captured while reproducing the defect, before any fix" "$brief" \
+      "$mode DOD must require the before at reproduction time"
+    assert_grep "apply that same methodology to both captures" "$brief" \
+      "$mode DOD must apply one methodology to both captures"
+    assert_grep "measured numbers or before/after output instead of screenshots" "$brief" \
+      "$mode DOD must cover non-UI observable surfaces with measured or output pairs"
+    assert_grep "never upload it to a public host" "$brief" \
+      "$mode DOD must keep evidence off a public upload host"
+  done
+  pass "fm-brief.sh: every ship DOD requires a before/after pair taken at reproduction"
+}
+
 test_ask_user_escalation_format() {
   local home id brief mode other_id other_brief
   home="$TMP_ROOT/ask-user-home"
@@ -1042,6 +1071,7 @@ test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
 test_faster_paths_use_configured_authority_without_stacked_review
 test_no_mistakes_dod_wording
+test_ship_dod_requires_evidence_pair
 test_ask_user_escalation_format
 test_ship_project_memory_wording
 test_herdr_lab_contract_is_explicit_and_complete
