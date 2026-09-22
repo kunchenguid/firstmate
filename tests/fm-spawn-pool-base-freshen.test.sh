@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Regression tests for fm-spawn's pooled-worktree base refresh.
+# Regression tests for fm-spawn's pooled-worktree acceptance: the base refresh
+# and the ownership screens a handed-out slot must clear before it is claimed.
 #
 # A treehouse pool can return a clean detached worktree whose origin/main was
-# advanced after the worktree was allocated.
+# advanced after the worktree was allocated, or a slot another task's durable
+# record still owns although its worker already exited.
 # These tests drive the real spawn path with a fake terminal, then prove it
 # starts the worker from the fetched origin tip, launches a clean origin-less
-# pool as-is, or stops when a configured origin is unusable.
+# pool as-is, refuses a worktree a living task record still names, or stops
+# when a configured origin is unusable.
 set -u
 
 # shellcheck source=tests/fixtures.sh
@@ -183,6 +186,11 @@ test_stale_pool_base_refreshes_before_branching() {
       "$branch_head" "$current" "$(cat "$POOL_DIR/advanced-main.txt")"
   fi
 
+  # A repeat can only reuse the copy once the earlier task's record is gone:
+  # a fresh spawn now refuses a worktree another living record still names
+  # (test_record_held_pool_worktree_refuses_spawn), so the repeat models the
+  # earlier task torn down and the pool handing its copy out again.
+  rm -f "$HOME_DIR/state/pool-current-base-r1.meta"
   id='pool-current-base-repeat-r1'
   fm_test_spawn_brief "$HOME_DIR" "$id"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
@@ -528,6 +536,10 @@ strand_submodule_pin_via_spawn() {  # <seed-id>
     || fail "the first spawn did not move the pooled base across the moved submodule pin"
   [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN1" ] \
     || fail "the first spawn did not strand the submodule on the pin the old base recorded"
+  # The stranded slot is residue of a task that has since been torn down, so
+  # its record goes with it: the next spawn reuses the copy, and a fresh spawn
+  # now refuses a worktree a living record still names.
+  rm -f "$HOME_DIR/state/$id.meta"
 }
 
 test_stale_submodule_pin_explains_itself() {
@@ -743,8 +755,202 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
   pass "a Treehouse slot claim names the launched task, refuses when unclaimable, and is dropped by a locked abort"
 }
 
+# A pool hands a slot out on process-liveness evidence: a worker that already
+# exited leaves the slot looking free while that task's durable record still
+# owns it, and the holder may be recorded in another local home. Spawn must
+# refuse such a worktree rather than start a second task inside the same copy -
+# the same task-metadata scan teardown runs before returning a slot - and it
+# must still launch when no record names the assigned path.
+test_record_held_pool_worktree_refuses_spawn() {
+  local rec id other out status second_home
+
+  # The assigned slot is recorded as another living task's worktree=.
+  id='pool-held-worktree-r14'
+  other='pool-holder-worktree-r14'
+  rec=$(make_case record-held-worktree "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  fm_write_meta "$HOME_DIR/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$POOL_DIR" "project=$PROJECT_DIR" "kind=ship"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched into a worktree another task's record still holds"
+  assert_contains "$out" "$other" "refusal did not name the task holding the worktree"
+  assert_contains "$out" "recorded worktree" "refusal did not name the metadata evidence"
+  assert_contains "$out" "same copy" "refusal did not explain why two tasks cannot share it"
+  assert_contains "$out" "fm-teardown.sh $other" "refusal gave no remediation"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "refused spawn published task metadata"
+  [ ! -e "$SLOT_CLAIM" ] || fail "refused spawn claimed a slot another record holds"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+    || fail "refused spawn refreshed the held worktree before stopping"
+  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$other.meta" \
+    "refusal disturbed the record that owns the worktree"
+
+  # The same collision carried on a secondmate record's home= field is the
+  # same held path and refuses the same way.
+  id='pool-held-home-r14'
+  other='pool-holder-home-r14'
+  rec=$(make_case record-held-home "$id")
+  read_case_record "$rec"
+  fm_write_meta "$HOME_DIR/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$CASE_DIR/mate-workspace" "home=$POOL_DIR" \
+    "project=$PROJECT_DIR" "kind=secondmate"
+  mkdir -p "$CASE_DIR/mate-workspace"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched into a worktree a secondmate record's home= still holds"
+  assert_contains "$out" "$other" "home= refusal did not name the task holding the worktree"
+  assert_contains "$out" "recorded home" "home= refusal did not name the colliding field"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "home= refused spawn published task metadata"
+
+  # The holding record can live in a registered local secondmate home: the
+  # scan walks every local home, not only the spawning one.
+  id='pool-held-cross-r14'
+  other='pool-holder-cross-r14'
+  rec=$(make_case record-held-cross "$id")
+  read_case_record "$rec"
+  second_home="$CASE_DIR/secondmate-home"
+  mkdir -p "$second_home/state" "$second_home/data" "$second_home/projects"
+  printf '%s\n' "- mate - fixture (home: $second_home; scope: test; projects: project; added 2026-01-01)" \
+    > "$HOME_DIR/data/secondmates.md"
+  fm_write_meta "$second_home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$POOL_DIR" "project=$PROJECT_DIR" "kind=ship"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched into a worktree another home's task record still holds"
+  assert_contains "$out" "$other" "cross-home refusal did not name the task holding the worktree"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "cross-home refused spawn published task metadata"
+
+  # No collision: a neighbouring task's record on its OWN worktree does not
+  # name the assigned slot, so the spawn launches and publishes normally.
+  id='pool-unheld-r14'
+  rec=$(make_case record-unheld "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/neighbour-copy"
+  fm_write_meta "$HOME_DIR/state/pool-neighbour-r14.meta" \
+    "window=firstmate:fm-pool-neighbour-r14" "endpoint_task_id=pool-neighbour-r14" \
+    "worktree=$CASE_DIR/neighbour-copy" "project=$PROJECT_DIR" "kind=ship"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" \
+    "spawn should launch when no record names the assigned worktree"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "the unheld spawn did not report success"
+  assert_grep "worktree=$POOL_DIR" "$HOME_DIR/state/$id.meta" \
+    "the unheld spawn did not publish its assigned worktree"
+  pass "spawn refuses a worktree held by another task record - same-home, home=, or cross-home - and launches on an unheld one"
+}
+
+# The exclusion that skips the caller's own record has to compare spellings the
+# way the scan does. A home reached through a symlink enumerates its own state
+# dir under the canonical path while the exclusion carries the spelled path, so
+# a re-spawn of an id whose own record names the assigned slot would be told it
+# is its own holder. A genuine other record on the same slot still refuses
+# through that spelling, and the refusal names the endpoint still holding it.
+test_own_record_is_not_a_conflict_under_a_spelled_home() {
+  local rec id other out status linked_home spawn_home
+
+  id='pool-own-record-r15'
+  rec=$(make_case own-record "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  fm_write_meta "$HOME_DIR/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$POOL_DIR" "project=$PROJECT_DIR" "kind=ship"
+
+  linked_home="$CASE_DIR/home-link"
+  ln -s "$HOME_DIR" "$linked_home"
+  spawn_home="$CASE_DIR/spawn-user-home"
+  mkdir -p "$spawn_home"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" HOME="$spawn_home" \
+    CLAUDE_CONFIG_DIR='' \
+    FM_STATE_OVERRIDE="$linked_home/state" FM_DATA_OVERRIDE="$linked_home/data" \
+    FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$POOL_DIR" TMUX="fake,1,0" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$PROJECT_DIR" --scout 2>&1)
+  status=$?
+  expect_code 0 "$status" \
+    "a spawn reusing its own recorded worktree through a spelled home refused itself"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "the re-spawn through a spelled home did not report success"
+
+  # A second task's record on the same slot is a real collision and still
+  # refuses, through the same spelled home, naming the endpoint to inspect.
+  other='pool-other-holder-r15'
+  rec=$(make_case own-record-other "$other")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  fm_test_spawn_brief "$HOME_DIR" 'pool-other-spawn-r15'
+  fm_write_meta "$HOME_DIR/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$POOL_DIR" "project=$PROJECT_DIR" "kind=ship"
+  linked_home="$CASE_DIR/home-link"
+  ln -s "$HOME_DIR" "$linked_home"
+  spawn_home="$CASE_DIR/spawn-user-home"
+  mkdir -p "$spawn_home"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$linked_home" HOME="$spawn_home" \
+    CLAUDE_CONFIG_DIR='' \
+    FM_STATE_OVERRIDE="$linked_home/state" FM_DATA_OVERRIDE="$linked_home/data" \
+    FM_PROJECTS_OVERRIDE="$linked_home/projects" FM_CONFIG_OVERRIDE="$linked_home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$POOL_DIR" TMUX="fake,1,0" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" 'pool-other-spawn-r15' "$PROJECT_DIR" --scout 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched into a worktree another task holds under a spelled home"
+  assert_contains "$out" "$other" "the spelled-home refusal did not name the task holding the worktree"
+  assert_contains "$out" "inspect window" "the spelled-home refusal did not point at the endpoint holding the slot"
+  pass "a spelled home skips its own record but still refuses another task's, naming the endpoint"
+}
+
+# The root home's default state dir can be a symlink while the effective state
+# root is the real directory it points at (FM_STATE_OVERRIDE names the real one,
+# which is the path lifecycle access validates). The enumeration then reaches the
+# same meta file through <home>/state and through the real directory. If it
+# canonicalizes one but appends the other, the caller's own record is reported
+# as its own holder. The re-spawn must launch.
+test_own_record_is_not_a_conflict_under_a_symlinked_default_state_dir() {
+  local rec id out status spawn_home
+
+  id='pool-own-record-symstate-r15'
+  rec=$(make_case own-record-symstate "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  mv "$HOME_DIR/state" "$HOME_DIR/state-real"
+  ln -s state-real "$HOME_DIR/state"
+  fm_write_meta "$HOME_DIR/state-real/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$POOL_DIR" "project=$PROJECT_DIR" "kind=ship"
+
+  spawn_home="$CASE_DIR/spawn-user-home"
+  mkdir -p "$spawn_home"
+
+  out=$(FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" HOME="$spawn_home" \
+    CLAUDE_CONFIG_DIR='' \
+    FM_STATE_OVERRIDE="$HOME_DIR/state-real" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$POOL_DIR" TMUX="fake,1,0" \
+    PATH="$FAKEBIN_DIR:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$PROJECT_DIR" --scout 2>&1)
+  status=$?
+  expect_code 0 "$status" \
+    "a spawn whose home state dir is a symlink refused its own recorded worktree"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "the symlinked-state re-spawn did not report success"
+  pass "a symlinked default state dir does not make a task its own worktree holder"
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_pool_slot_claim_follows_the_spawn_outcome
+test_record_held_pool_worktree_refuses_spawn
+test_own_record_is_not_a_conflict_under_a_spelled_home
+test_own_record_is_not_a_conflict_under_a_symlinked_default_state_dir
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching

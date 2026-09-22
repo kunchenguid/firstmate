@@ -112,6 +112,63 @@ $1
 EOF
 }
 
+# A batch re-execs one spawn per pair, and a real pool hands each its own
+# slot. The stock tmux stub answers one FM_FAKE_PANE_PATH for every window,
+# which would park both pairs' task records on the same copy - a collision a
+# fresh spawn now refuses. This stub gives each new-window a distinct @N id
+# and answers pane_current_path from FM_FAKE_PANE_PATH_<N> (falling back to
+# FM_FAKE_PANE_PATH), so a batch test lays out one worktree per pair.
+make_batch_pane_tmux() {
+  local fakebin=$1
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"#{pane_current_path}"*)
+    target=''
+    prev=''
+    for a in "$@"; do
+      [ "$prev" = "-t" ] && target=$a
+      prev=$a
+    done
+    case "$target" in
+      @1) printf '%s\n' "${FM_FAKE_PANE_PATH_1:-${FM_FAKE_PANE_PATH:-}}" ;;
+      @2) printf '%s\n' "${FM_FAKE_PANE_PATH_2:-${FM_FAKE_PANE_PATH:-}}" ;;
+      *) printf '%s\n' "${FM_FAKE_PANE_PATH:-}" ;;
+    esac
+    exit 0
+    ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  new-window)
+    n=0
+    [ -f "${FM_FAKE_WINCOUNT:?countfile unset}" ] && n=$(cat "$FM_FAKE_WINCOUNT")
+    n=$((n + 1))
+    printf '%s\n' "$n" > "$FM_FAKE_WINCOUNT"
+    printf '@%s\n' "$n"
+    exit 0
+    ;;
+  has-session|new-session|kill-window|set-window-option) exit 0 ;;
+  send-keys)
+    if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      prev=
+      for a in "$@"; do
+        if [ "$prev" = "-l" ]; then
+          printf '%s\n' "$a" >> "$FM_FAKE_LAUNCH_LOG"
+        fi
+        prev=$a
+      done
+    fi
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+}
+
 assert_meta_profile() {
   local meta=$1 harness=$2 model=$3 effort=$4
   assert_grep "harness=$harness" "$meta" "meta missing harness=$harness"
@@ -227,6 +284,10 @@ test_home_defaults_preserve_absolute_or_resolve_relative_paths() {
   assert_contains "$launch" "< '$home_real/data/$relative_id/launch-brief.md'" \
     "relative FM_HOME leaked into the default cross-process brief path"
 
+  # The second spawn reuses the same copy, so the earlier task's record must
+  # be gone first: a fresh spawn now refuses a worktree another living record
+  # still names.
+  rm -f "$HOME_DIR/state/$relative_id.meta"
   linked_home="$CASE_DIR/home-link"
   ln -s "$HOME_DIR" "$linked_home"
   : > "$LAUNCH_LOG"
@@ -709,11 +770,18 @@ test_native_pi_ultra_is_explicit_and_model_scoped() {
 }
 
 test_batch_preserves_native_ultra() {
-  local rec id1=ultra-batch-a id2=ultra-batch-b out launch
+  local rec id1=ultra-batch-a id2=ultra-batch-b out launch wt2
   rec=$(make_spawn_case ultra-batch pi "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  # Each batch child claims its own slot: a fresh spawn refuses a worktree
+  # another living task record still names, so the pairs need distinct copies.
+  wt2="$CASE_DIR/wt2"
+  git -C "$PROJ_DIR" worktree add --quiet -b ultra-batch-b "$wt2"
+  make_batch_pane_tmux "$FAKEBIN_DIR"
+  out=$(FM_FAKE_PANE_PATH_1="$WT_DIR" FM_FAKE_PANE_PATH_2="$wt2" \
+    FM_FAKE_WINCOUNT="$CASE_DIR/wincount" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness pi --model codex-native/gpt-6-astra --effort ultra)
   expect_code 0 "$?" "native Ultra batch failed: $out"
   assert_meta_profile "$HOME_DIR/state/$id1.meta" pi codex-native/gpt-6-astra ultra
@@ -901,14 +969,21 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status wt2
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+  # Each batch child claims its own slot: a fresh spawn refuses a worktree
+  # another living task record still names, so the pairs need distinct copies.
+  wt2="$CASE_DIR/wt2"
+  git -C "$PROJ_DIR" worktree add --quiet -b profile-batch-b "$wt2"
+  make_batch_pane_tmux "$FAKEBIN_DIR"
+  out=$(FM_FAKE_PANE_PATH_1="$WT_DIR" FM_FAKE_PANE_PATH_2="$wt2" \
+    FM_FAKE_WINCOUNT="$CASE_DIR/wincount" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
     "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
   status=$?
   expect_code 0 "$status" "batch spawn with shared profile flags should succeed"

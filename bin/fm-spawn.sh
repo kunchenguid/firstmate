@@ -221,6 +221,14 @@
 #   behavior suite from the repository primary checkout while that marker is
 #   set (its header owns the refusal). A secondmate runs in its own home and is
 #   not marked.
+#   A fresh ship or scout also refuses when the worktree it was assigned is
+#   already recorded as another task's worktree= or home= in any local
+#   firstmate home - a pool slot Treehouse reads as free can still belong to a
+#   task whose worker exited but whose record was never torn down, and two
+#   tasks must never work in the same copy. The check is the same task-metadata
+#   scan bin/fm-teardown.sh runs before returning a slot (bin/fm-wake-lib.sh
+#   owns it), applied before the slot is claimed or refreshed; a scan that
+#   cannot prove the slot unowned refuses the same way.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch, and resets to its tip. When none
@@ -2942,6 +2950,35 @@ validate_spawn_worktree() { # <source> <inspect-target>
   fi
 }
 
+# An assigned worktree is only free when no living task still holds it. The
+# pane-driven `treehouse get` hands out whatever Treehouse believes is free,
+# and its evidence is a process lease - a slot whose previous worker already
+# exited reads free while that task's durable record still owns it, and a pool
+# slot may also be held by a task recorded in another local home. The task
+# records every local home publishes are the ownership proof (a state/<id>.meta
+# lives exactly as long as its task), so one naming this path is the collision
+# itself, whichever record is stale. This is the same metadata scan teardown
+# runs before returning a slot (bin/fm-wake-lib.sh), run here before the claim
+# below and before any refresh, so a second worker can never start inside a
+# copy another task still owns. A scan that cannot run fails closed the same
+# way: without it the slot cannot be proved unowned.
+spawn_refuse_record_held_worktree() { # <worktree> <inspect-target>
+  local worktree=$1 inspect_target=$2 slot conflict other_id field
+  slot=$(fm_canonical_existing_dir "$worktree") || {
+    echo "error: assigned worktree $worktree cannot be resolved; refusing to launch" >&2
+    return 1
+  }
+  fm_collect_local_firstmate_states "$STATE" "refusing to launch" || return 1
+  conflict=$(fm_task_record_conflicts_on_path "$slot" "$STATE/$ID.meta") || return 1
+  conflict=${conflict%%$'\n'*}
+  [ -n "$conflict" ] || return 0
+  other_id=$(printf '%s' "$conflict" | cut -f1)
+  field=$(printf '%s' "$conflict" | cut -f2)
+  echo "error: assigned worktree $worktree is already task $other_id's recorded $field; launching would put two tasks in the same copy; inspect window $inspect_target" >&2
+  echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $other_id), or tear that task down if it is finished (bin/fm-teardown.sh $other_id), then re-run the spawn" >&2
+  return 1
+}
+
 # A pooled slot whose only deviation is a submodule gitlink is stale, not dirty:
 # an earlier refresh moved the superproject and left the submodule checkout on
 # the pin the previous base recorded. The refusal still stands and this gate
@@ -3849,6 +3886,8 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+
+  spawn_refuse_record_held_worktree "$WT" "$T" || exit 1
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable

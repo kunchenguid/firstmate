@@ -1554,13 +1554,6 @@ inspectable_git_worktree() {
   git -C "$top" rev-parse --git-dir >/dev/null 2>&1
 }
 
-canonical_existing_dir() {
-  local target=$1
-  [ -n "$target" ] || return 1
-  [ -d "$target" ] || return 1
-  ( cd "$target" && pwd -P )
-}
-
 retry_wait_secs_is_valid() {
   [[ "$1" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]
 }
@@ -1598,7 +1591,7 @@ worktree_git_lock_path() {
   case "$lock" in
     /*) printf '%s\n' "$lock" ;;
     *)
-      abs_dir=$(canonical_existing_dir "$dir") || return 1
+      abs_dir=$(fm_canonical_existing_dir "$dir") || return 1
       printf '%s/%s\n' "$abs_dir" "$lock"
       ;;
   esac
@@ -2133,11 +2126,11 @@ require_orca_worktree_path_match() {
     echo "REFUSED: cannot resolve Orca worktree id $worktree_id to a path; preserving metadata." >&2
     return 1
   }
-  inspected_abs=$(canonical_existing_dir "$inspected") || {
+  inspected_abs=$(fm_canonical_existing_dir "$inspected") || {
     echo "REFUSED: cannot canonicalize inspected worktree ${inspected:-<missing>}; preserving metadata." >&2
     return 1
   }
-  resolved_abs=$(canonical_existing_dir "$resolved") || {
+  resolved_abs=$(fm_canonical_existing_dir "$resolved") || {
     echo "REFUSED: Orca worktree id $worktree_id resolved to uninspectable path ${resolved:-<missing>}; preserving metadata." >&2
     return 1
   }
@@ -2161,77 +2154,26 @@ require_orca_worktree_path_match_if_present() {
 teardown_live_slot_path() {
   [ "$KIND" != secondmate ] || return 1
   fm_treehouse_pool_slot "$PROJ" "$WT" || return 1
-  canonical_existing_dir "$WT"
+  fm_canonical_existing_dir "$WT"
 }
 
-collect_local_firstmate_states() {
-  local record_state=$1 root home reg line child known existing i=0
-  local -a homes
-  TREEHOUSE_OWNER_STATES=("$record_state")
-  root=$(fm_firstmate_root_home "$FM_HOME") || {
-    echo "REFUSED: cannot resolve the root Firstmate home; nothing was changed" >&2
-    return 1
-  }
-  homes=("$root")
-  while [ "$i" -lt "${#homes[@]}" ]; do
-    home=${homes[$i]}
-    i=$((i + 1))
-    known=0
-    for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
-    done
-    [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
-    reg="$home/data/secondmates.md"
-    [ ! -e "$reg" ] && [ ! -L "$reg" ] && continue
-    [ -f "$reg" ] && [ ! -L "$reg" ] || {
-      echo "REFUSED: local Firstmate registry is unsafe at $reg; nothing was changed" >&2
-      return 1
-    }
-    while IFS= read -r line || [ -n "$line" ]; do
-      case "$line" in
-        "- "*)
-          secondmate_registry_parse_line "$line" || {
-            echo "REFUSED: malformed local Firstmate registry entry in $reg; nothing was changed" >&2
-            return 1
-          }
-          [ "$SECONDMATE_REGISTRY_REMOTE" -eq 0 ] || continue
-          child=$(canonical_existing_dir "$SECONDMATE_REGISTRY_HOME") || {
-            echo "REFUSED: registered local Firstmate home is unavailable: $SECONDMATE_REGISTRY_HOME; nothing was changed" >&2
-            return 1
-          }
-          known=0
-          for existing in "${homes[@]}"; do
-            [ "$existing" != "$child" ] || known=1
-          done
-          [ "$known" = 1 ] || homes+=("$child")
-          ;;
-      esac
-    done < "$reg"
-  done
-}
-
+# No other task record in any local Firstmate home may name this record's live
+# slot in its worktree= or home=. bin/fm-wake-lib.sh owns the home enumeration
+# and the record scan; this wrapper only shapes teardown's refusal.
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
-  slot=$(canonical_existing_dir "$worktree") || return 0
-  collect_local_firstmate_states "$record_state" || return 1
-  for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
-    for other in "$state_dir"/*.meta; do
-      [ -f "$other" ] && [ ! -L "$other" ] || continue
-      [ "$other" != "$record_meta" ] || continue
-      other_id=$(basename "$other" .meta)
-      for field in worktree home; do
-        other_path=$(fm_meta_get "$other" "$field")
-        [ -n "$other_path" ] || continue
-        other_slot=$(canonical_existing_dir "$other_path") || continue
-        [ "$other_slot" = "$slot" ] || continue
-        echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
-        echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
-        echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
-        return 1
-      done
-    done
-  done
+  local slot conflict other_id field
+  slot=$(fm_canonical_existing_dir "$worktree") || return 0
+  fm_collect_local_firstmate_states "$record_state" "nothing was changed" || return 1
+  conflict=$(fm_task_record_conflicts_on_path "$slot" "$record_meta") || return 1
+  conflict=${conflict%%$'\n'*}
+  [ -n "$conflict" ] || return 0
+  other_id=$(printf '%s' "$conflict" | cut -f1)
+  field=$(printf '%s' "$conflict" | cut -f2)
+  echo "REFUSED: task $record_id's recorded worktree $slot is also task $other_id's recorded $field." >&2
+  echo "Returning that pool slot would kill $other_id's processes and reset its copy, so nothing was changed - not even with --force." >&2
+  echo "Reconcile whichever record is wrong (bin/fm-crew-state.sh $record_id; bin/fm-crew-state.sh $other_id), then re-run teardown." >&2
+  return 1
 }
 
 require_exclusive_task_worktree_slot() {
