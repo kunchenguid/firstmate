@@ -419,29 +419,39 @@ The delivery lifecycle is an always-loaded operational contract; referenced scri
 
 ### Validate
 
-For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
-The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run` and `no-mistakes axi respond` call through the next gate or outcome.
-Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
-When the captain adds or changes an ask mid-task, append the captain's words without added speaker labels or direct address to that brief's `## Captain's intent` and relay those words to the worker; Firstmate build constraints stay in `## Firstmate spec` or the steer.
-`bin/fm-dod-lib.sh` owns the worker-side `--intent` contract.
-Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated; however, the smallest downstream changes needed to keep already accepted product or engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate remain within the current task even when they touch files not named at intake, and corrections required to satisfy already accepted intent are not new requirements.
+- For a no-mistakes ship, trigger validation on the same worker after its implementation commit, using the harness invocation owned by `harness-adapters`.
+- The task worker that starts a no-mistakes run drives the pipeline and owns every `no-mistakes axi run`/`no-mistakes axi respond` call through the next gate or outcome.
+  Firstmate never invokes `no-mistakes axi respond` for a crew-owned run.
+- Captain adds/changes an ask mid-task: append the captain's words, without added speaker labels or direct address, to that brief's `## Captain's intent`, and relay those words to the worker.
+  Firstmate build constraints stay in `## Firstmate spec` or the steer.
+  `bin/fm-dod-lib.sh` owns the worker-side `--intent` contract.
+- Once validation starts, prefer routing new requirements to follow-up work rather than expanding the current task, unless a new requirement completely invalidates the work being validated.
+  Exception (stays in the current task even if it touches files not named at intake): the smallest downstream changes needed to keep already-accepted product/engineering behavior correct, add behavioral tests where an executable contract exists, or keep documentation accurate.
+  Corrections required to satisfy already-accepted intent are not new requirements.
 
-Only a current, explicit captain instruction that completely invalidates the work being validated keeps the task with the same worker instead of routing it to follow-up work or handing it to a replacement.
-That worker cancels the active run through no-mistakes axi's supported abort command and confirms through axi status that the run has stopped before changing any code.
-The worker then follows `branch_sync.next_action` from structured axi status: use axi sync's supported guarded recovery only when its code is `recover_custody`, and otherwise proceed only when structured status confirms that branch ownership is already returned and no recovery is required.
-Custody recovery settles branch ownership, not content: the worker must replace the obsolete work from the correct pre-invalidation base rather than building on top of the recovered-but-obsolete head, keeping the obsolete run's own pipeline-fix commits out of what gets validated and shipped.
-Apart from that single supported abort, do not hand-edit, commit, restart, or start a second validation run while the obsolete run still owns the branch.
-Once ownership is settled, validate exactly once against that final head so no obsolete or intermediate head is ever treated as authoritative.
+**Obsoleted validation (a current explicit captain instruction that completely invalidates the work being validated):**
 
-An ask-user finding returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
-Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command, passing `--resolve-key` so the worker's open decision record closes at answer time.
-Require the matching `resolved` event, forbid `--yes`, and require the worker to process every synchronous return until completion or a genuinely new escalation.
-Resume fleet supervision immediately after the decision lands.
+- Only that exact instruction keeps the task with the same worker instead of routing to follow-up work or a replacement.
+- That worker cancels the active run through no-mistakes axi's supported abort command and confirms through axi status that the run stopped, before changing any code.
+- The worker then follows `branch_sync.next_action` from structured axi status: use axi sync's supported guarded recovery ONLY when its code is `recover_custody`; otherwise proceed only when structured status confirms branch ownership is already returned and no recovery is required.
+- Custody recovery settles branch ownership, not content: the worker must replace the obsolete work from the correct pre-invalidation base, NOT build on top of the recovered-but-obsolete head, and keep the obsolete run's own pipeline-fix commits out of what gets validated and shipped.
+- Apart from that single supported abort, do NOT hand-edit, commit, restart, or start a second validation run while the obsolete run still owns the branch.
+- Once ownership is settled, validate exactly once against that final head - no obsolete or intermediate head is ever authoritative.
 
-Judge validation by the currently attributed run step through `bin/fm-crew-state.sh`, not by shell liveness or the last status event.
-Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed exactly as `bin/fm-crew-state.sh` prints it - only that state line reclassifies an orphaned ci monitor after green checks as held-for-merge done, or a run record the `daemon status` probe leaves unverified as unknown, never the raw run record.
-A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above; steer it back to the gate response flow.
-The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
+**Ask-user findings:**
+
+- Returns as `needs-decision`; firstmate loads `ask-user-authority` and either decides or escalates per that skill.
+- Send the same worker one exact decision naming the decision key, step, action, affected finding IDs, instructions where needed, and exact response command, passing `--resolve-key` so the answer closes the decision record at answer time.
+- Require the matching `resolved` event; FORBID `--yes`; require the worker to process every synchronous return until completion or a genuinely new escalation.
+- Resume fleet supervision immediately after the decision lands.
+
+**Judging validation state:**
+
+- Judge by the currently attributed run step through `bin/fm-crew-state.sh` - NEVER by shell liveness or the last status event.
+- Running/fixing/CI = working. Parked approval/fix-review = worker must follow the active gate help. Passed/checks-passed = done. Failed/cancelled = failed, exactly as `bin/fm-crew-state.sh` prints it.
+  Only that state line reclassifies an orphaned CI monitor after green checks as held-for-merge done, or an unverified `daemon status` probe result as unknown - never the raw run record.
+- A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership outside the supersession sequence above - steer it back to the gate response flow.
+- The worker reports the PR when CI first becomes green, not after merge monitoring finishes.
 
 ### PR ready, landing, and teardown
 
