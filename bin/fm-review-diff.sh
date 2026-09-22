@@ -80,21 +80,22 @@ else
   COMPARE_BASE=$DEFAULT
 fi
 
-BRANCH="fm/$ID"
 BRIEF="$DATA/$ID/brief.md"
-RECORDED_BRANCH=
-if [ -f "$BRIEF" ]; then
-  RECORDED_BRANCH=$(fm_brief_crew_branch "$BRIEF")
-fi
+BRANCH=
+RECORDED_BRANCH=$(grep '^crew_branch=' "$META" | tail -1 | cut -d= -f2- || true)
 if [ -n "$RECORDED_BRANCH" ]; then
   BRANCH=$RECORDED_BRANCH
-else
+elif [ -f "$BRIEF" ]; then
+  RECORDED_BRANCH=$(fm_brief_crew_branch "$BRIEF")
+  [ -z "$RECORDED_BRANCH" ] || BRANCH=$RECORDED_BRANCH
+fi
+if [ -z "$BRANCH" ]; then
   BRANCH=$(git -C "$WT" symbolic-ref --quiet HEAD 2>/dev/null || true)
   BRANCH=${BRANCH#refs/heads/}
   [ -n "$BRANCH" ] || { echo "error: task $ID has no Crew branch contract and worktree $WT is detached" >&2; exit 1; }
 fi
 git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 \
-  || { echo "error: $BRIEF records an invalid crew branch: $BRANCH" >&2; exit 1; }
+  || { echo "error: task $ID records an invalid crew branch: $BRANCH" >&2; exit 1; }
 BRANCH_REF="refs/heads/$BRANCH"
 git -C "$WT" rev-parse --verify --quiet "$BRANCH_REF" >/dev/null \
   || { echo "error: recorded crew branch $BRANCH does not exist in $WT" >&2; exit 1; }

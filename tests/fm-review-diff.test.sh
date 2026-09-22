@@ -343,13 +343,17 @@ test_recorded_crew_branch_ignores_parked_head() {
   git -C "$case_dir/wt" add custom.txt
   git -C "$case_dir/wt" commit -qm "custom crew"
   git -C "$case_dir/wt" branch -D fm/task-x1 >/dev/null
+  git -C "$case_dir/wt" checkout -q -b feature/other main
+  printf 'other-crew\n' > "$case_dir/wt/other.txt"
+  git -C "$case_dir/wt" add other.txt
+  git -C "$case_dir/wt" commit -qm "other crew"
   git -C "$case_dir/wt" checkout -q -b scratch main
   printf 'scratch-only\n' > "$case_dir/wt/scratch.txt"
   git -C "$case_dir/wt" add scratch.txt
   git -C "$case_dir/wt" commit -qm scratch
   printf '%s\n' '# Task' 'User text' '# Definition of done' 'Crew branch: branch=main' \
     '# Setup' 'Generated setup' '<!-- fm-generated-contract-boundary -->' '<!-- fm-generated-contract -->' '# Definition of done' \
-    'Crew branch: branch=feature/custom' '<!-- fm-generated-contract-end -->' \
+    'Crew branch: branch=feature/other' '<!-- fm-generated-contract-end -->' \
     > "$case_dir/data/task-x1/brief.md"
   cat >> "$case_dir/data/task-x1/brief.md" <<'EOF'
 
@@ -358,14 +362,16 @@ test_recorded_crew_branch_ignores_parked_head() {
 # Definition of done
 Crew branch: branch=main
 EOF
-  write_task_meta "$case_dir"
+  write_task_meta "$case_dir" "crew_branch=feature/custom"
 
   out=$(run_review_diff "$case_dir" task-x1)
   assert_contains "$out" '+custom-crew' \
     "review diff did not use the recorded custom crew branch"
+  assert_not_contains "$out" '+other-crew' \
+    "review diff followed the mutable brief instead of task metadata"
   assert_not_contains "$out" '+scratch-only' \
     "review diff inferred the parked worktree branch"
-  pass "fm-review-diff uses the recorded crew branch, not parked HEAD"
+  pass "fm-review-diff prefers metadata crew branch over brief and parked HEAD"
 }
 
 test_pr_meta_uses_pr_head_not_stale_local
