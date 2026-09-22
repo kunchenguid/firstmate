@@ -9,6 +9,8 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
+FM_LOCK_STEAL_RETRIES="${FM_LOCK_STEAL_RETRIES:-5}"
+FM_LOCK_STEAL_RETRY_DELAY="${FM_LOCK_STEAL_RETRY_DELAY:-0.01}"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -914,6 +916,7 @@ fm_recovery_marker_reopen_announced() {
 
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner current
+  local steal_pid steal_primary_owner steal_attempt
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
@@ -950,12 +953,33 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  steal_owner=
+  steal_attempt=0
+  while [ "$steal_attempt" -lt "$FM_LOCK_STEAL_RETRIES" ]; do
+    if fm_lock_try_create "$steal"; then
+      steal_owner=${FM_LOCK_OWNER_DIR:-}
+      break
+    fi
+    steal_pid=$(cat "$steal/pid" 2>/dev/null || true)
+    steal_primary_owner=
+    if [ -L "$steal" ]; then
+      steal_primary_owner=$(fm_lock_link_owner "$steal" 2>/dev/null || true)
+    fi
+    if ! fm_lock_mid_acquire_is_fresh "$steal" "$steal_pid" \
+      && ! fm_pid_alive "$steal_pid" \
+      && fm_lock_recheck_stale_owner "$steal" "$steal_primary_owner" "$steal_pid"; then
+      fm_lock_remove_path "$steal" || true
+    fi
+    steal_attempt=$((steal_attempt + 1))
+    [ "$steal_attempt" -lt "$FM_LOCK_STEAL_RETRIES" ] \
+      && sleep "$FM_LOCK_STEAL_RETRY_DELAY"
+  done
+  if [ -z "$steal_owner" ]; then
+    printf 'error: lock steal contention exhausted for %s\n' "$lockdir" >&2
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
     return 1
   fi
-  steal_owner=${FM_LOCK_OWNER_DIR:-}
 
   cur=$(cat "$lockdir/pid" 2>/dev/null || true)
   if fm_pid_alive "$cur"; then

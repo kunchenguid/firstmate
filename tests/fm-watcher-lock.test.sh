@@ -314,6 +314,56 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
   pass "live steal mutex is not reclaimed"
 }
 
+test_lock_steal_contention_is_bounded() {
+  local dir state lockdir dead holder_file holder out rc i
+  dir=$(make_case lock-steal-contention-bounded)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  holder_file="$dir/holder"
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_create "$2.steal" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    sleep 2
+    fm_lock_release "$2.steal"
+  ' _ "$LIB" "$lockdir" "$holder_file" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$holder_file" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$holder_file" ] || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "bounded steal-contention holder did not start"
+  }
+  set +e
+  out=$(FM_LOCK_STEAL_RETRIES=3 FM_LOCK_STEAL_RETRY_DELAY=0.001 FM_LOCK_STALE_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2"
+    ' _ "$LIB" "$lockdir" 2>&1)
+  rc=$?
+  set -e
+  wait "$holder" || fail "bounded steal-contention holder failed"
+  [ "$rc" -ne 0 ] || fail "steal contention unexpectedly acquired the stale lock"
+  [ "${#out}" -lt 512 ] || fail "steal contention produced unbounded output (${#out} bytes): $out"
+  case "$out" in
+    *"lock steal contention exhausted for $lockdir"*) ;;
+    *) fail "bounded steal contention did not name the exhausted lock: $out" ;;
+  esac
+  case "$out" in
+    *"File name too long"*) fail "bounded steal contention still hit filename growth: $out" ;;
+  esac
+  [ ! -e "$lockdir.steal.steal" ] || fail "bounded steal contention created a nested steal path"
+  [ ! -e "$lockdir.steal.steal.steal" ] || fail "bounded steal contention created a deeply nested steal path"
+  pass "steal-lock contention has bounded output and no recursive path growth"
+}
+
 test_lock_does_not_steal_live_lock() {
   local dir state lockdir live out lockpid
   dir=$(make_case lock-live-noop)
@@ -1120,6 +1170,7 @@ test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
+test_lock_steal_contention_is_bounded
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
