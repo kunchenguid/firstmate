@@ -561,7 +561,7 @@ EOF
 
 test_expected_head_rejects_submodule_index_suppression() {
   local rec id out status
-  id=pool-expected-submodule-skip-worktree-r18
+  id='pool-expected-submodule-skip-worktree-r18'
   rec=$(make_submodule_case expected-submodule-skip-worktree "$id")
   read_submodule_case "$rec"
   git -C "$POOL_DIR/ui" update-index --skip-worktree lib.txt
@@ -581,7 +581,7 @@ test_expected_head_rejects_submodule_index_suppression() {
 
 test_expected_head_rejects_hidden_file_mode_changes() {
   local rec id out status
-  id=pool-expected-hidden-file-mode-r19
+  id='pool-expected-hidden-file-mode-r19'
   rec=$(make_case expected-hidden-file-mode "$id")
   read_case_record "$rec"
   git -C "$POOL_DIR" config core.fileMode false
@@ -602,7 +602,7 @@ test_expected_head_rejects_hidden_file_mode_changes() {
 
 test_expected_head_rejects_filtered_worktree_bytes() {
   local rec id out status attributes expected
-  id=pool-expected-filtered-bytes-r21
+  id='pool-expected-filtered-bytes-r21'
   rec=$(make_case expected-filtered-bytes "$id")
   read_case_record "$rec"
   git -C "$POOL_DIR" config filter.review.clean "sed 's/^SMUDGED$/base/'"
@@ -624,7 +624,7 @@ test_expected_head_rejects_filtered_worktree_bytes() {
   [ ! -e "$HOME_DIR/state/$id.meta" ] \
     || fail "filtered-bytes-refused expected head published task metadata"
 
-  id=pool-expected-submodule-filtered-bytes-r21
+  id='pool-expected-submodule-filtered-bytes-r21'
   rec=$(make_submodule_case expected-submodule-filtered-bytes "$id")
   read_submodule_case "$rec"
   expected=$(git -C "$POOL_DIR" rev-parse HEAD)
@@ -695,7 +695,7 @@ EOF
 
 test_expected_head_preserves_ownership_when_endpoint_survives() {
   local rec id out status real_sleep marker pending started retired
-  id=pool-expected-retire-unknown-r10
+  id='pool-expected-retire-unknown-r10'
   rec=$(make_case expected-retire-unknown "$id")
   read_case_record "$rec"
   lay_out_as_pool_slot
@@ -734,7 +734,7 @@ EOF
 
 test_expected_head_ignores_cleanliness_hiding_config() {
   local rec id out status exclude
-  id=pool-expected-hidden-untracked-r11
+  id='pool-expected-hidden-untracked-r11'
   rec=$(make_case expected-hidden-untracked "$id")
   read_case_record "$rec"
   git -C "$POOL_DIR" config status.showUntrackedFiles no
@@ -747,7 +747,7 @@ test_expected_head_ignores_cleanliness_hiding_config() {
   assert_grep 'unreviewed source' "$POOL_DIR/hidden-source.txt" \
     "expected-head refusal discarded hidden untracked source"
 
-  id=pool-expected-hidden-submodule-r11
+  id='pool-expected-hidden-submodule-r11'
   rec=$(make_submodule_case expected-hidden-submodule "$id")
   read_submodule_case "$rec"
   git -C "$POOL_DIR" config submodule.ui.ignore all
@@ -760,7 +760,7 @@ test_expected_head_ignores_cleanliness_hiding_config() {
   assert_grep 'unreviewed submodule source' "$POOL_DIR/ui/hidden-source.txt" \
     "expected-head refusal discarded hidden submodule source"
 
-  id=pool-expected-ignored-source-r14
+  id='pool-expected-ignored-source-r14'
   rec=$(make_case expected-ignored-source "$id")
   read_case_record "$rec"
   exclude=$(git -C "$POOL_DIR" rev-parse --git-path info/exclude)
@@ -774,7 +774,7 @@ test_expected_head_ignores_cleanliness_hiding_config() {
   assert_grep 'unreviewed ignored source' "$POOL_DIR/ignored-source.txt" \
     "expected-head refusal discarded ignored unreviewed source"
 
-  id=pool-expected-ignored-submodule-source-r17
+  id='pool-expected-ignored-submodule-source-r17'
   rec=$(make_submodule_case expected-ignored-submodule-source "$id")
   read_submodule_case "$rec"
   exclude=$(git -C "$POOL_DIR/ui" rev-parse --git-path info/exclude)
@@ -792,7 +792,7 @@ test_expected_head_ignores_cleanliness_hiding_config() {
 
 test_expected_head_cancels_staged_launch_when_enter_fails() {
   local rec id out status pending started
-  id=pool-expected-enter-fail-r15
+  id='pool-expected-enter-fail-r15'
   rec=$(make_case expected-enter-fail "$id")
   read_case_record "$rec"
   pending="$CASE_DIR/pending-launch"
@@ -1111,7 +1111,7 @@ EOF
 
 test_expected_head_converges_initialized_submodules() {
   local rec id out status
-  id=pool-expected-submodule-convergence-r20
+  id='pool-expected-submodule-convergence-r20'
   rec=$(make_submodule_case expected-submodule-convergence "$id")
   read_submodule_case "$rec"
   [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN1" ] \
