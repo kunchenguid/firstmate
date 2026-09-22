@@ -840,6 +840,9 @@ test_secondmate_spawn_refuses_explicit_paseo_only() {
 
   # Ambient Paseo markers alone never select paseo, so with nothing configured
   # the spawn stays on the tmux default and proceeds past backend selection.
+  # Pin the harness so the spawn reaches the home check even without agent
+  # ancestry to detect one from (as on CI runners).
+  printf claude >"$dir/config/secondmate-harness"
   out=$(paseo_secondmate_spawn "$dir" "$dir/config" '')
   assert_not_contains "$out" "does not support --secondmate" \
     "an unconfigured spawn inside Paseo must stay on tmux, not resolve paseo from PASEO_AGENT_ID"
