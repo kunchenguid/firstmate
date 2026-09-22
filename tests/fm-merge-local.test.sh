@@ -94,6 +94,23 @@ test_omitted_crew_branch_uses_fm_id() {
   pass "merge-local retains the fm/<id> crew-branch default"
 }
 
+test_legacy_task_uses_recorded_worktree_branch() {
+  local case_dir project worktree id=task-legacy-worktree
+  case_dir=$(make_case legacy-worktree "$id")
+  project=$case_dir/project
+  worktree=$case_dir/crew-worktree
+  git -C "$project" worktree add --quiet -b feature/legacy "$worktree" main
+  printf '%s\n' 'legacy branch' > "$worktree/legacy.txt"
+  git -C "$worktree" add legacy.txt
+  git -C "$worktree" commit -qm legacy
+  printf '%s\n' "worktree=$worktree" >> "$case_dir/home/state/$id.meta"
+  run_merge "$case_dir" "$id" >/dev/null \
+    || fail "merge-local refused the legacy worktree branch"
+  [ "$(git -C "$project" rev-parse main)" = "$(git -C "$project" rev-parse feature/legacy)" ] \
+    || fail "merge-local did not land the recorded worktree branch"
+  pass "merge-local uses a legacy task's recorded worktree branch"
+}
+
 test_last_recorded_crew_branch_wins() {
   local case_dir project id=task-last
   case_dir=$(make_case last "$id")
@@ -213,6 +230,7 @@ test_diverged_branch_refuses() {
 test_recorded_custom_branch_merges
 test_legacy_recorded_custom_branch_merges
 test_omitted_crew_branch_uses_fm_id
+test_legacy_task_uses_recorded_worktree_branch
 test_last_recorded_crew_branch_wins
 test_metadata_base_is_authoritative
 test_absent_metadata_base_uses_default

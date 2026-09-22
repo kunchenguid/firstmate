@@ -101,6 +101,9 @@ FLEET="$SCRIPT_DIR/fm-fleet-snapshot.sh"
 # shellcheck source=bin/fm-landed-lib.sh
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/fm-landed-lib.sh"  # FM_LANDED_JQ_DEFS: the shared landed selector
+# shellcheck source=bin/fm-brief-contract-lib.sh
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/fm-brief-contract-lib.sh"
 
 # Bounds (overridable for tests / large fleets).
 FM_BEARINGS_LANDED=${FM_BEARINGS_LANDED:-6}
@@ -256,6 +259,11 @@ repo_slug() {  # <url>
   printf '%s' "$1" | sed -n 's#.*github\.com[:/]\([^/]*/[^/]*\)#\1#p' | sed 's#\.git$##; s#/pull/.*$##; s#/$##'
 }
 
+task_meta_value() {  # <meta> <key>
+  [ -f "$1" ] || return 0
+  grep "^$2=" "$1" | tail -n 1 | cut -d= -f2-
+}
+
 # Bounded gh call; prints stdout, non-zero on timeout/failure. gh only.
 # bin/fm-timeout-lib.sh owns the bound itself.
 gh_bounded() {  # <args...>
@@ -267,6 +275,30 @@ if [ "$INCLUDE_PRS" = 1 ]; then
   if ! command -v gh >/dev/null 2>&1; then
     PR_STATUS='unavailable (gh not found)'
   else
+    PR_TASK_MAP='[]'
+    while IFS=$'\t' read -r task_id meta_path worktree_path task_pr_url; do
+      [ -n "$task_id" ] || continue
+      [ -n "$meta_path" ] || meta_path="$STATE/$task_id.meta"
+      crew_branch=$(task_meta_value "$meta_path" crew_branch)
+      if [ -z "$crew_branch" ] && [ -f "$FM_HOME/data/$task_id/brief.md" ]; then
+        crew_branch=$(fm_brief_crew_branch "$FM_HOME/data/$task_id/brief.md")
+      fi
+      [ -n "$crew_branch" ] || crew_branch="fm/$task_id"
+      task_repos='[]'
+      task_pr=$(task_meta_value "$meta_path" pr)
+      [ -n "$task_pr" ] || task_pr=$task_pr_url
+      task_pr_repo=$(repo_slug "$task_pr")
+      [ -z "$task_pr_repo" ] || task_repos=$(jq -cn --argjson repos "$task_repos" --arg repo "$task_pr_repo" '$repos + [$repo] | unique')
+      task_project=$(task_meta_value "$meta_path" project)
+      for task_remote_path in "$task_project" "$worktree_path"; do
+        [ -d "$task_remote_path" ] || continue
+        task_remote=$(git -C "$task_remote_path" remote get-url origin 2>/dev/null || true)
+        task_remote_repo=$(repo_slug "$task_remote")
+        [ -z "$task_remote_repo" ] || task_repos=$(jq -cn --argjson repos "$task_repos" --arg repo "$task_remote_repo" '$repos + [$repo] | unique')
+      done
+      PR_TASK_MAP=$(jq -cn --argjson tasks "$PR_TASK_MAP" --arg id "$task_id" --arg branch "$crew_branch" --argjson repos "$task_repos" '$tasks + [{id:$id,branch:$branch,repos:$repos}]')
+    done < <(printf '%s' "$SNAP" | jq -r '.tasks[] | select(.kind != "secondmate") | [.id, (.paths.meta.path // ""), (.paths.worktree.path // ""), (.pr.url // "")] | @tsv')
+
     # Candidate repos: recorded pr= URLs plus live worktree origins. Deduped.
     repos=""
     while IFS= read -r u; do
@@ -296,11 +328,13 @@ EOF
         --json number,title,url,headRefName,reviewDecision,mergeable,statusCheckRollup 2>/dev/null) \
         || { nwarn=$((nwarn + 1)); continue; }
       [ -n "$out" ] || out='[]'
-      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" '
-        [ .[] | {
+      repo_result=$(printf '%s' "$out" | jq --arg repo "$repo" --argjson limit "$FM_BEARINGS_PR_LIMIT" --argjson task_map "$PR_TASK_MAP" '
+        [ .[] | . as $pr
+          | ($task_map | map(select(.branch == ($pr.headRefName // "") and ((.repos // []) | index($repo) != null))) | .[0].id) as $mapped_task
+          | {
           num:(.number|tostring),
           repo:$repo,
-          task:(if (.headRefName // "" | startswith("fm/")) then (.headRefName | ltrimstr("fm/")) else "-" end),
+          task:($mapped_task // (if (.headRefName // "" | startswith("fm/")) then (.headRefName | ltrimstr("fm/")) else "-" end)),
           url:(.url // "-"),
           review:(.reviewDecision // "none"),
           mergeable:(.mergeable // "UNKNOWN"),

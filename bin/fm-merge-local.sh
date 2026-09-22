@@ -112,6 +112,11 @@ if [ -f "$BRIEF" ]; then
     BRANCH=$recorded_branch
   fi
 fi
+if [ "$BRANCH" = "fm/$ID" ]; then
+  recorded_worktree=$(grep '^worktree=' "$META" | tail -n 1 | cut -d= -f2- || true)
+  worktree_branch=$(git -C "$recorded_worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+  [ -z "$worktree_branch" ] || BRANCH=$worktree_branch
+fi
 BRANCH_REF="refs/heads/$BRANCH"
 git -C "$PROJ" rev-parse --verify --quiet "$BRANCH_REF" >/dev/null || { echo "error: branch $BRANCH does not exist in $PROJ" >&2; exit 1; }
 

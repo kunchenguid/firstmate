@@ -102,6 +102,21 @@ test_custom_crew_branch_never_targets_default() {
   pass "spawn refuses a custom crew branch equal to the project default"
 }
 
+test_custom_crew_branch_is_persisted_for_relaunch() {
+  local rec id out status
+  id='pool-crew-recorded-r1'
+  rec=$(make_case crew-recorded "$id")
+  read_case_record "$rec"
+  scaffold_ship_brief "$id" direct-PR '' feature/custom
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should accept a valid custom crew branch"$'\n'"$out"
+  assert_grep 'crew_branch=feature/custom' "$HOME_DIR/state/$id.meta" \
+    "spawn did not persist the custom crew branch for relaunch"
+  pass "spawn persists the custom crew branch in task metadata"
+}
+
 test_custom_crew_branch_never_targets_requested_base() {
   local rec id out status
   id='pool-crew-base-collision-r1'
@@ -1233,6 +1248,7 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
 }
 
 test_remote_seeded_home_spawns_from_treehouse_pool
+test_custom_crew_branch_is_persisted_for_relaunch
 test_custom_crew_branch_never_targets_requested_base
 test_implicit_crew_branch_never_targets_requested_base
 test_pool_slot_claim_follows_the_spawn_outcome

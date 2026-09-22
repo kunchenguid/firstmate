@@ -57,7 +57,17 @@ if [ "${FAKE_GH_MANY:-0}" = 1 ]; then
   cat <<'JSON'
 [{"number":1,"title":"One","url":"https://github.com/acme/repo/pull/1","headRefName":"fm/one","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":2,"title":"Two","url":"https://github.com/acme/repo/pull/2","headRefName":"fm/two","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]},{"number":3,"title":"Three","url":"https://github.com/acme/repo/pull/3","headRefName":"fm/three","reviewDecision":"","mergeable":"MERGEABLE","statusCheckRollup":[]}]
 JSON
-  exit 0
+exit 0
+fi
+if [ "${FAKE_GH_CUSTOM:-0}" = 1 ]; then
+  case "$*" in
+    *"--repo org/project"*)
+      cat <<'JSON'
+[{"number":21,"title":"Custom branch","url":"https://github.com/org/project/pull/21","headRefName":"feature/custom","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[]}]
+JSON
+      exit 0
+      ;;
+  esac
 fi
 cat <<'JSON'
 [{"number":9,"title":"Ship the thing","url":"https://github.com/kunchenguid/firstmate/pull/9","headRefName":"fm/ship-task","reviewDecision":"APPROVED","mergeable":"MERGEABLE","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}]}]
@@ -1420,6 +1430,31 @@ test_include_prs_is_the_only_fetch_path() {
     .candidate_prs | any(.[]; .num == "9" and .task == "ship-task" and .checks == "passing" and .review == "APPROVED")
   ' >/dev/null || fail "candidate_prs must carry the fetched PR cross-referenced to its task: $json"
   pass "--include-prs is the only path that fetches, and it enriches correctly"
+}
+
+test_include_prs_maps_recorded_custom_branch_and_fork_repo() {
+  local home fakebin json
+  home=$(make_home custom-branch-pr)
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] custom-task - Custom branch task (repo: firstmate) (kind: ship)
+
+## Queued
+
+## Done
+EOF
+  mkdir -p "$home/data/custom-task" "$home/projects/custom-task"
+  fm_write_meta "$home/state/custom-task.meta" \
+    "window=fixture:custom-task" "worktree=$home/projects/custom-task" \
+    "project=firstmate" "harness=claude" "kind=ship" "mode=direct-PR" \
+    "crew_branch=feature/custom" "pr=https://github.com/org/project/pull/21"
+  printf 'working: custom branch\n' > "$home/state/custom-task.status"
+  fakebin=$(make_fakebin "$home"); : > "$home/net.log"
+  json=$(FAKE_GH_CUSTOM=1 run "$home" "$fakebin" --include-prs --json)
+  printf '%s' "$json" | jq -e '
+    .candidate_prs | any(.[]; .repo == "org/project" and .task == "custom-task" and .num == "21")
+  ' >/dev/null || fail "a forked custom-branch PR was not mapped to its task: $json"
+  pass "include-prs maps recorded custom branches across fork repositories"
 }
 
 test_partial_github_failure_degrades() {
@@ -3363,6 +3398,7 @@ test_open_decision_surfaces_end_to_end
 test_report_pointers_surface
 test_queued_item_prose_never_hides_it
 test_include_prs_is_the_only_fetch_path
+test_include_prs_maps_recorded_custom_branch_and_fork_repo
 test_partial_github_failure_degrades
 test_perl_fallback_bounds_github_call
 test_section_caps_and_expansion_flags
