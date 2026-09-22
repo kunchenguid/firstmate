@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for bin/fm-pipeline-spend.sh: a task's no-mistakes pipeline
 # spend reaches Firstmate's own records, attributed to the task, through the
-# script's public show and record commands. Each case seeds a real SQLite state
+# script's public record command, reading back the ledger line it writes. Each case seeds a real SQLite state
 # database shaped like no-mistakes' own (repos, runs, agent_invocations) under
 # a private NM_HOME, a real git task copy whose branch reflog starts at a known
 # time, and a fake no-mistakes CLI that only names the resolved repository.
@@ -104,13 +104,19 @@ db.commit()
 PY
 }
 
-# spend <case-dir> <show|record> [task-id]: run the script against the case's
+# spend <case-dir> <record> [task-id]: run the script against the case's
 # home, NM_HOME, and fake no-mistakes.
 spend() {
   local d=$1
   env -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE FM_HOME="$d/home" NM_HOME="$d/nm" \
     FAKE_NM_REPO="${FAKE_NM_REPO-$d/project}" PATH="$d/fakebin:$PATH" \
     "$SPEND" "$2" "${3:-task}"
+}
+
+# recorded <case-dir>: record the case's task and print the ledger line it
+# appended.
+recorded() {
+  spend "$1" record >/dev/null && tail -1 "$1/home/data/pipeline-spend.jsonl"
 }
 
 field() {  # <json> <jq-filter>
@@ -136,7 +142,7 @@ inv second review cold ok 200 100 200 300 400 100 200 300
 inv sibling review cold ok 1000 1000 1000 1000 1000 1000 1000 1000
 inv foreign review cold ok 1000 1000 1000 1000 1000 1000 1000 1000
 EOF
-  out=$(spend "$d" show) || fail "show failed for a task with recorded spend"
+  out=$(recorded "$d") || fail "record failed for a task with recorded spend"
   assert_equals '"no-mistakes-state"' "$(field "$out" .source)" 'known spend reads from the no-mistakes state'
   assert_equals "\"$d/project\"" "$(field "$out" .repo)" 'the repository is the one no-mistakes resolved'
   assert_equals '"fm/task"' "$(field "$out" .branch)" 'the branch is the task copy branch'
@@ -160,7 +166,7 @@ EOF
   assert_equals '["ci","review","test"]' "$(field "$out" '[.purposes[].purpose]')" 'spend is broken down by pipeline purpose'
   assert_equals '{"total":110,"unknown":0}' "$(field "$out" '.purposes[] | select(.purpose == "review") | .input_tokens')" \
     'the review purpose sums its rounds across runs'
-  assert_absent "$d/home/data/pipeline-spend.jsonl" 'show writes nothing'
+  assert_equals 1 "$(wc -l < "$d/home/data/pipeline-spend.jsonl" | tr -d ' ')" 'the task is recorded as one ledger line'
   pass 'known spend, including failed and cancelled invocations, is attributed to the task that ran it'
 }
 
@@ -177,7 +183,7 @@ inv loop review started ok 10 100 10 50 - 100 10 50
 inv loop review-fix resumed ok 10 250 25 120 - 150 15 70
 inv loop review resumed ok 10 400 40 200 - 150 15 80
 EOF
-  out=$(spend "$d" show) || fail "show failed for a resumed review loop"
+  out=$(recorded "$d") || fail "record failed for a resumed review loop"
   assert_equals '{"total":400,"unknown":0}' "$(field "$out" .total.input_tokens)" \
     'three review rounds count 400 input tokens, not the 750 their cumulative counters add up to'
   assert_equals '{"total":40,"unknown":0}' "$(field "$out" .total.output_tokens)" 'output counts each round once'
@@ -196,7 +202,7 @@ inv loop review started ok 10 5 6 7 8 5 6 7
 inv loop review-fix resumed ok 10 5 6 7 8 5 6 7
 inv loop review resumed ok 10 20 12 14 30 15 6 7
 EOF
-  out=$(spend "$d" show) || fail "show failed for resumed cache writes"
+  out=$(recorded "$d") || fail "record failed for resumed cache writes"
   assert_equals '{"total":16,"unknown":1}' "$(field "$out" .total.cache_creation_tokens)" \
     'cache writes count only where the counters are proven per-invocation'
   assert_equals '{"total":25,"unknown":0}' "$(field "$out" .total.input_tokens)" 'input still sums the per-round deltas'
@@ -212,7 +218,7 @@ repo r1 $d/project
 run sibling r1 fm/other completed 100
 inv sibling review cold ok 10 1 1 1 1 1 1 1
 EOF
-  out=$(spend "$d" show) || fail "show failed for a task with no runs"
+  out=$(recorded "$d") || fail "record failed for a task with no runs"
   assert_equals '"no-mistakes-state"' "$(field "$out" .source)" 'no runs is still a readable source'
   assert_equals '0' "$(field "$out" .total.invocations)" 'a task with no runs spent nothing'
   assert_equals '[]' "$(field "$out" .runs)" 'a task with no runs lists none'
@@ -220,7 +226,7 @@ EOF
   # A repository no-mistakes never initialized: unavailable, with its reason.
   d=$(make_case uninitialized)
   seed_db "$d" current </dev/null
-  out=$(FAKE_NM_REPO='' spend "$d" show) || fail "show failed for an uninitialized repository"
+  out=$(FAKE_NM_REPO='' recorded "$d") || fail "record failed for an uninitialized repository"
   assert_equals '"unavailable"' "$(field "$out" .source)" 'an unresolved repository is unavailable'
   assert_contains "$(field "$out" .reason)" 'repo not initialized' 'the reason quotes the CLI'
   assert_equals 'null' "$(field "$out" .total)" 'an unavailable total is null, not zero'
@@ -228,7 +234,7 @@ EOF
   # A resolved repository whose state database is missing: unavailable, and
   # the read-only open never creates the database.
   d=$(make_case missing-db)
-  out=$(spend "$d" show) || fail "show failed for a missing state database"
+  out=$(recorded "$d") || fail "record failed for a missing state database"
   assert_equals '"unavailable"' "$(field "$out" .source)" 'a missing state database is unavailable'
   assert_contains "$(field "$out" .reason)" 'cannot read no-mistakes state' 'the reason names the unreadable state'
   assert_absent "$d/nm/state.sqlite" 'the read-only open created a state database'
@@ -239,7 +245,7 @@ EOF
 repo r1 $d/project
 run first r1 fm/task completed 100
 EOF
-  out=$(spend "$d" show) || fail "show failed without an invocations table"
+  out=$(recorded "$d") || fail "record failed without an invocations table"
   assert_equals '"unavailable"' "$(field "$out" .source)" 'state without invocation records is unavailable'
   assert_contains "$(field "$out" .reason)" 'agent_invocations' 'the reason names the missing records'
   pass 'absent spend reads as zero only when no run exists, and as unavailable when it cannot be read'
@@ -254,7 +260,7 @@ run old r1 fm/task completed 100
 inv old review cold ok 10 10 20 30 40 - - -
 inv old review-fix resumed ok 10 99 99 99 99 - - -
 EOF
-  out=$(spend "$d" show) || fail "show failed for an older state database"
+  out=$(recorded "$d") || fail "record failed for an older state database"
   assert_equals '{"total":10,"unknown":1}' "$(field "$out" .total.input_tokens)" \
     'a cold row counts its raw counter and a resumed row without a delta is unknown'
   assert_equals '{"total":40,"unknown":1}' "$(field "$out" .total.cache_creation_tokens)" \
@@ -298,7 +304,7 @@ test_refusals() {
   local d rc
   d=$(make_case refusals)
   set +e
-  spend "$d" show missing >/dev/null 2>&1; rc=$?
+  spend "$d" record missing >/dev/null 2>&1; rc=$?
   set -e
   expect_code 1 "$rc" 'a task with no record'
   fm_write_meta "$d/home/state/mate.meta" "kind=secondmate" "worktree=$d/wt"
@@ -308,7 +314,7 @@ test_refusals() {
   expect_code 1 "$rc" 'a secondmate'
   assert_absent "$d/home/data/pipeline-spend.jsonl" 'a refused record wrote the ledger'
   set +e
-  spend "$d" show ../task >/dev/null 2>&1; rc=$?
+  spend "$d" record ../task >/dev/null 2>&1; rc=$?
   set -e
   expect_code 2 "$rc" 'an unsafe task id'
   pass 'missing tasks, secondmates, and unsafe ids are refused'

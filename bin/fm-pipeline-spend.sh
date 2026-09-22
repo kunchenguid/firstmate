@@ -3,20 +3,17 @@
 # task and keep it in Firstmate's own records.
 #
 # Usage:
-#   fm-pipeline-spend.sh show <task-id>
 #   fm-pipeline-spend.sh record <task-id>
 #
-# show prints the task's pipeline spend as one JSON object and writes nothing,
-# so it can be read while the task's runs are still going. record appends that
-# same object as one line to data/pipeline-spend.jsonl, at most once per task
-# incarnation (task id plus the record's spawn_gen): repeating it for an
-# incarnation already in the ledger appends nothing, so a retried cleanup never
-# counts a task twice. bin/fm-teardown.sh calls record for every ship task
+# record appends the task's pipeline spend as one JSON object on one line of
+# data/pipeline-spend.jsonl, at most once per task incarnation (task id plus
+# the record's spawn_gen): repeating it for an incarnation already in the
+# ledger appends nothing, so a retried cleanup never counts a task twice. bin/fm-teardown.sh calls record for every ship task
 # whose local copy it cleans up, before it deletes the task branch this script
 # attributes runs by and before it removes state/<id>.meta. The ledger is
 # private and gitignored with the rest of data/.
-# Exit status: 0 when a record was printed or recorded (including one whose
-# source is unavailable), 1 when the task record is missing, names a
+# Exit status: 0 when a record was recorded or already present (including one
+# whose source is unavailable), 1 when the task record is missing, names a
 # secondmate, or the record could not be built or written, 2 for bad usage.
 #
 # Source. no-mistakes keeps each agent invocation's token usage only in its
@@ -24,9 +21,8 @@
 # environment reference documents those fields, and `no-mistakes stats --run
 # <id>` renders the same rows as a human table. There is no machine-readable
 # export yet, so this script reads the database read-only (mode=ro), located
-# by bin/fm-nm-run-lib.sh's fm_nm_state_db, and bounded by
-# FM_PIPELINE_SPEND_TIMEOUT seconds (default 30) per no-mistakes or database
-# call.
+# by bin/fm-nm-run-lib.sh's fm_nm_state_db, and bounded by 30 seconds per
+# no-mistakes or database call.
 #
 # Attribution. A task's runs are the runs no-mistakes recorded for the task
 # copy's repository and current branch since that branch was created:
@@ -100,14 +96,13 @@ fail() {
 
 case "${1:-}" in
   -h|--help) usage; exit 0 ;;
-  show|record) ACTION=$1 ;;
+  record) ;;
   *) usage >&2; exit 2 ;;
 esac
 [ "$#" -eq 2 ] || { usage >&2; exit 2; }
 ID=$2
 fm_task_id_path_safe "$ID" || { echo "fm-pipeline-spend: invalid task id" >&2; exit 2; }
-TIMEOUT=${FM_PIPELINE_SPEND_TIMEOUT:-30}
-case "$TIMEOUT" in ''|*[!0-9]*) TIMEOUT=30 ;; esac
+TIMEOUT=30
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] && [ ! -L "$META" ] || fail "no task record for $ID"
@@ -148,15 +143,12 @@ else
   fi
 fi
 
-LEDGER=
-if [ "$ACTION" = record ]; then
-  [ -d "$DATA" ] || fail "data directory $DATA is missing"
-  LEDGER="$DATA/pipeline-spend.jsonl"
-fi
+[ -d "$DATA" ] || fail "data directory $DATA is missing"
+LEDGER="$DATA/pipeline-spend.jsonl"
 
 RUN_DIR=$WT
 [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ] || RUN_DIR=$STATE
-fm_nm_bounded "$RUN_DIR" "$TIMEOUT" python3 - "$ACTION" "$LEDGER" "$ID" "$SPAWN_GEN" \
+fm_nm_bounded "$RUN_DIR" "$TIMEOUT" python3 - "$LEDGER" "$ID" "$SPAWN_GEN" \
     "$REPO" "$BRANCH" "$SINCE" "$DB" "$REASON" <<'PY' || fail "could not build the pipeline spend record for $ID"
 import fcntl
 import json
@@ -167,7 +159,7 @@ import time
 from contextlib import closing
 from pathlib import Path
 
-action, ledger, task, spawn_gen, repo, branch, since, database, reason = sys.argv[1:]
+ledger, task, spawn_gen, repo, branch, since, database, reason = sys.argv[1:]
 COUNTERS = ("input", "output", "cache_read")
 TOKENS = tuple(f + "_tokens" for f in COUNTERS) + ("cache_creation_tokens",)
 
@@ -277,10 +269,6 @@ if reason:
 else:
     record.update(spend)
 line = json.dumps(record, separators=(",", ":"))
-
-if action == "show":
-    print(line)
-    sys.exit(0)
 
 try:
     fd = os.open(ledger, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
