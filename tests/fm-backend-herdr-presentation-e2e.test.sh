@@ -992,8 +992,12 @@ CARRY_BACKLOG_WT=$(remember_meta_worktree "$CARRY_BACKLOG_META")
 CARRY_BACKLOG_WSID=$(grep '^herdr_workspace_id=' "$CARRY_BACKLOG_META" | cut -d= -f2-)
 lab workspace close "$CARRY_BACKLOG_WSID" >/dev/null \
   || fail "could not close the task space for carry-backlog"
-# The recovery is this home's first backlog-aware spawn, and the real tasks-axi
-# is shadowed so its dispatch start fails after the carry republishes the record.
+# The recovery is this home's first backlog-aware spawn. A self-contained fake
+# tasks-axi proves compatibility and reports the row Queued so the preflight and
+# the dispatch commit both reach their transition, then fails `start` so the
+# commit fails after the carry republishes the record. The fixture must not
+# depend on an installed tasks-axi: the Herdr lane installs only Herdr and
+# Treehouse.
 cat > "$HOME_DIR/.tasks.toml" <<'EOF'
 backend = "markdown"
 
@@ -1001,17 +1005,29 @@ backend = "markdown"
 path = "data/backlog.md"
 EOF
 printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$HOME_DIR/data/backlog.md"
-tasks-axi add "$CARRY_BACKLOG_ID" 'carried backlog fixture' --kind ship --file "$HOME_DIR/data/backlog.md" >/dev/null
-REAL_TASKS_AXI=$(command -v tasks-axi)
-cat > "$FAKEBIN/tasks-axi" <<SH
+cat > "$FAKEBIN/tasks-axi" <<'SH'
 #!/usr/bin/env bash
-case "\${1:-}" in
+case "${1:-}" in
+  --version)
+    printf 'tasks-axi 0.2.4\n'
+    ;;
+  update)
+    printf 'options:\n  --archive-body\n'
+    ;;
+  mv)
+    printf 'usage: tasks-axi mv [<id>...]\n'
+    ;;
+  show)
+    printf '  state: queued\n'
+    ;;
   start)
     echo 'error: simulated backlog start failure' >&2
     exit 1
     ;;
+  *)
+    exit 0
+    ;;
 esac
-exec "$REAL_TASKS_AXI" "\$@"
 SH
 chmod +x "$FAKEBIN/tasks-axi"
 CARRY_BACKLOG_TREEHOUSE_START=$(wc -l < "$TREEHOUSE_CALL_LOG" | tr -d '[:space:]')

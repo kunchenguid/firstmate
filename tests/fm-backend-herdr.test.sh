@@ -1993,7 +1993,7 @@ test_projection_recovery_classification_uses_journal_workspace() {
   mkdir -p "$dir/responses" "$state" "$proj" "$home"
   log="$dir/log"; resp="$dir/responses"; : > "$log"
   fb=$(make_herdr_fakebin "$dir")
-  child=w-child; parent=w-home
+  child='w-child'; parent='w-home'
   PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
     bash -c '
       . "$0/bin/backends/herdr.sh"
