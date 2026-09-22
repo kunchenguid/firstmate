@@ -305,7 +305,7 @@ test_expected_head_ignores_replacement_objects() {
 }
 
 test_expected_head_refuses_non_origin_commit_and_invalid_input() {
-  local rec id out status local_only
+  local rec id out status local_only origin_tip grafts
   id='pool-expected-local-r1'
   rec=$(make_case expected-local "$id")
   read_case_record "$rec"
@@ -323,6 +323,29 @@ test_expected_head_refuses_non_origin_commit_and_invalid_input() {
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_only" ] \
     || fail "origin-refused expected head moved the clean local-only commit"
 
+  id='pool-expected-graft-r23'
+  rec=$(make_case expected-graft "$id")
+  read_case_record "$rec"
+  printf 'local graft candidate\n' > "$POOL_DIR/local-graft.txt"
+  git -C "$POOL_DIR" add local-graft.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm local-graft
+  local_only=$(git -C "$POOL_DIR" rev-parse HEAD)
+  origin_tip=$(git -C "$CASE_DIR/origin.git" rev-parse HEAD)
+  git -C "$POOL_DIR" fetch --quiet origin
+  grafts=$(git -C "$POOL_DIR" rev-parse --git-path info/grafts)
+  printf '%s %s\n' "$origin_tip" "$local_only" > "$grafts"
+  git -C "$POOL_DIR" merge-base --is-ancestor "$local_only" "$origin_tip" \
+    || fail "graft fixture did not forge origin ancestry"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$local_only")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted origin ancestry forged by Git grafts"
+  assert_contains "$out" "has active Git grafts" \
+    "spawn did not explain that graft metadata blocks exact-head authorization"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "graft-refused expected head published task metadata"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_only" ] \
+    || fail "graft-refused expected head moved the clean local-only commit"
+
   id='pool-expected-invalid-r1'
   fm_test_spawn_brief "$HOME_DIR" "$id"
   out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head origin/main)
@@ -331,7 +354,7 @@ test_expected_head_refuses_non_origin_commit_and_invalid_input() {
   assert_contains "$out" "one full 40-hex commit id" \
     "spawn did not reject an arbitrary ref at its public interface"
   [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "invalid expected head published task metadata"
-  pass "expected-head accepts neither a local-only commit nor an arbitrary ref"
+  pass "expected-head accepts neither local, graft-authorized, nor arbitrary coordinates"
 }
 
 test_expected_head_ignores_ambient_git_redirection() {

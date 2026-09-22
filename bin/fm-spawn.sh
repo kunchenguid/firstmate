@@ -3239,8 +3239,16 @@ expected_head_worktree_status() { # <worktree>
 }
 
 freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
-  local worktree=$1 requested=${2:-} default target expected actual status fetch_head fetched origin_authorized
+  local worktree=$1 requested=${2:-} default target expected actual status fetch_head fetched origin_authorized grafts
   if [ -n "$requested" ]; then
+    grafts=$(git -C "$worktree" rev-parse --git-path info/grafts 2>/dev/null) || {
+      echo "error: could not inspect graft metadata for pooled worktree '$worktree'; refusing to launch" >&2
+      return 1
+    }
+    if [ -s "$grafts" ]; then
+      echo "error: pooled worktree '$worktree' has active Git grafts; refusing exact-head authorization" >&2
+      return 1
+    fi
     status=$(expected_head_worktree_status "$worktree")
   else
     status=$(git -C "$worktree" -c core.quotePath=false status --porcelain)
