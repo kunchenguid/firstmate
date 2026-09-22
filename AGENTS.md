@@ -533,19 +533,19 @@ Fleet supervision is an always-loaded operational contract; `docs/architecture.m
 
 ### Away-mode and quiet-mode stub
 
-Invoke the `/afk` skill when the captain says `/afk`, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-Invoke the `/quiet` skill instead when the captain says `/quiet` or asks for quiet mode, or `state/.afk` already exists in quiet mode (`fm_afk_mode` in `bin/fm-wake-lib.sh`).
-Each skill owns its own daemon procedure, which is otherwise identical; these safety facts remain inline for both:
-
-- Every current daemon injection uses the `away-supervisor` kind from `bin/fm-operational-input.sh` after `FM_OPERATIONAL_PREFIX` (U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), while the `/afk` skill owns legacy bare-marker compatibility.
-- `state/.afk-contract` is the away posture, written only after the captain confirms the read-back of their away words; entry announces hold-for-return only, and the away session acts on those words by its own judgment through the guarded scripts under standing authority, holding for the return on doubt.
-- While `state/.afk` exists, the daemon owns supervision; do not arm a separate watcher.
-  The daemon is never launched on Pi, where the ordinary supervision session continues under the record with main parked: the branch takes every safe actionable wake it can, and only a declined wake (including a broken branch or unsafe scan) or a watcher failure wakes main.
-- A marked message while away or quiet mode is active is internal escalation and does not exit that mode.
-- A message beginning `/afk` refreshes away mode; a message beginning `/quiet` refreshes quiet mode.
-- Any other unmarked message means the captain returned in away mode (load `/afk`, run the return owner, and do not process that message as ordinary work until its durable catch-up gate clears), or, in quiet mode, is simply answered as ordinary work with the flag and daemon left untouched until an explicit `/quiet off`.
-- Away and quiet mode never expand approval authority for merges, ask-user findings, destructive actions, irreversible actions, or security-sensitive choices.
-- Bias ambiguous input toward exit because a present captain takes precedence.
+- Invoke `/afk` when: the captain says `/afk` or says they are going afk; `state/.afk-contract` or `state/.afk` exists; an incoming message starts with `FM_INJECT_MARK`; any `state/.subsuper-*` marker is involved.
+- Invoke `/quiet` when: the captain says `/quiet` or asks for quiet mode; `state/.afk` already exists in quiet mode (`fm_afk_mode` in `bin/fm-wake-lib.sh`).
+- Each skill owns its own daemon procedure, otherwise identical; these safety facts stay inline for both:
+  - Every current daemon injection uses the `away-supervisor` kind from `bin/fm-operational-input.sh` after `FM_OPERATIONAL_PREFIX` (U+2063 INVISIBLE SEPARATOR + `FIRSTMATE_OP: `); `/afk` owns legacy bare-marker compatibility.
+  - `state/.afk-contract` is the away posture, written only after the captain confirms the read-back of their away words.
+    Entry announces hold-for-return only; the away session acts on those words by its own judgment through the guarded scripts under standing authority, holding for the return on doubt.
+  - While `state/.afk` exists, the daemon owns supervision - do not arm a separate watcher.
+    The daemon is never launched on Pi: the ordinary supervision session continues under the record with main parked, the branch takes every safe actionable wake it can, and only a declined wake (including a broken branch or unsafe scan) or a watcher failure wakes main.
+  - A marked message while away/quiet mode is active is internal escalation and does NOT exit that mode.
+  - A message beginning `/afk` refreshes away mode; a message beginning `/quiet` refreshes quiet mode.
+  - Any other unmarked message: in away mode, the captain returned (load `/afk`, run the return owner, do not process that message as ordinary work until its durable catch-up gate clears); in quiet mode, simply answer as ordinary work with the flag and daemon left untouched until an explicit `/quiet off`.
+  - Away and quiet mode NEVER expand approval authority for merges, ask-user findings, destructive actions, irreversible actions, or security-sensitive choices.
+  - Bias ambiguous input toward exit - a present captain takes precedence.
 
 ### Stuck-worker trigger
 
