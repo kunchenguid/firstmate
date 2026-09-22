@@ -105,6 +105,9 @@ test_native_launch_pins_builtin_provider_and_environment() {
   out=$(run_native "$id"); rc=$?
   expect_code 0 "$rc" "native Codex spawn should succeed: $out"
   assert_native_env "$FAKEBIN_DIR/codex-preflight.env"
+  assert_grep 'codex_native_provider=chatgpt' "$HOME_DIR/state/$id.meta" "task metadata did not retain the native billing posture"
+  assert_grep "codex_native_bin=$FAKEBIN_DIR/codex" "$HOME_DIR/state/$id.meta" "task metadata did not retain the pinned Codex executable"
+  assert_grep "codex_native_home=$CODEX_HOME_DIR" "$HOME_DIR/state/$id.meta" "task metadata did not retain the pinned CODEX_HOME"
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "'$FAKEBIN_DIR/codex'" "launch did not bind the absolute preflighted Codex executable"
   assert_contains "$launch" "model_provider=\"openai\"" "launch did not select the built-in OpenAI provider"

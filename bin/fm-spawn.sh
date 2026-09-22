@@ -232,17 +232,21 @@
 #   their existing ownership semantics. Orca is also refused because its
 #   separate worktree lifecycle is not part of this Treehouse-backed contract.
 #   With no flag, behavior is unchanged.
-#   --codex-native-provider is a deliberately narrow billing guard for one
-#   fresh single-task ship or scout launched through the verified Codex
-#   adapter. It requires explicit `--harness codex`, refuses raw commands,
-#   batches, secondmates, relaunches, and Orca before operational mutation,
-#   and binds preflight plus launch to one absolute Codex executable and one
-#   canonical CODEX_HOME. Preflight runs only `codex login status` and requires
-#   exactly `Logged in using ChatGPT`; it never invokes a model. The launch
-#   selects the built-in OpenAI provider, clears any configured OpenAI base URL
-#   so Codex uses its compiled ChatGPT endpoint, forces ChatGPT login, and
-#   scrubs Anthropic/OpenAI API credential and endpoint environment variables.
-#   This is not a provider abstraction and intentionally has no fallback.
+#   --codex-native-provider is a deliberately narrow billing guard selected on
+#   one fresh single-task ship or scout launched through the verified Codex
+#   adapter. It requires explicit `--harness codex` and refuses raw commands,
+#   batches, secondmates, and Orca before operational mutation. The task record
+#   keeps the guard plus its one absolute Codex executable and canonical
+#   CODEX_HOME for the task's lifetime, so an ordinary relaunch automatically
+#   rechecks and reapplies them and refuses a harness switch. Supplying the flag
+#   to relaunch is still refused because relaunch adopts, rather than changes,
+#   the recorded billing posture. Preflight runs only `codex login status` and
+#   requires exactly `Logged in using ChatGPT`; it never invokes a model. Every
+#   launch selects the built-in OpenAI provider, clears any configured OpenAI
+#   base URL so Codex uses its compiled ChatGPT endpoint, forces ChatGPT login,
+#   and scrubs Anthropic/OpenAI API credential and endpoint environment
+#   variables. This is not a provider abstraction and intentionally has no
+#   fallback.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -593,6 +597,7 @@ YOLO=
 TRACEPARENT_ARG=
 EXPECTED_HEAD=
 CODEX_NATIVE_PROVIDER=0
+CODEX_NATIVE_PROVIDER_SET=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -704,11 +709,12 @@ for a in "$@"; do
     EXPECTED_HEAD_SET=1
     ;;
   --codex-native-provider)
-    [ "$CODEX_NATIVE_PROVIDER" -eq 0 ] || {
+    [ "$CODEX_NATIVE_PROVIDER_SET" -eq 0 ] || {
       echo "error: --codex-native-provider may be supplied only once" >&2
       exit 1
     }
     CODEX_NATIVE_PROVIDER=1
+    CODEX_NATIVE_PROVIDER_SET=1
     ;;
   *) POS+=("$a") ;;
   esac
@@ -862,6 +868,22 @@ fi
 
 CODEX_NATIVE_BIN=
 CODEX_NATIVE_HOME=
+codex_native_preflight() {
+  local timeout status status_rc=0
+  timeout=${FM_CODEX_NATIVE_STATUS_TIMEOUT:-10}
+  case "$timeout" in
+  '' | *[!0-9]* | 0*) timeout=10 ;;
+  esac
+  status=$(fm_run_timed "$timeout" env \
+    -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u CODEX_API_KEY \
+    -u CODEX_ACCESS_TOKEN -u OPENAI_BASE_URL \
+    CODEX_HOME="$CODEX_NATIVE_HOME" "$CODEX_NATIVE_BIN" login status 2>&1) \
+    || status_rc=$?
+  if [ "$status_rc" -ne 0 ] || [ "$status" != "Logged in using ChatGPT" ]; then
+    echo "error: Codex native-provider guard requires 'codex login status' to report exactly 'Logged in using ChatGPT'; native launch refused" >&2
+    return 1
+  fi
+}
 if [ "$CODEX_NATIVE_PROVIDER" -eq 1 ]; then
   [ "$RELAUNCH" -eq 0 ] || {
     echo "error: --codex-native-provider supports fresh ship or scout launches only; relaunch is not supported" >&2
@@ -911,30 +933,26 @@ if [ "$CODEX_NATIVE_PROVIDER" -eq 1 ]; then
     exit 1
   }
   CODEX_NATIVE_BIN="$codex_native_bin_dir/$(basename "$CODEX_NATIVE_BIN")"
+  codex_native_bin_bytes=$(fm_backlog_bytes_of_string "$CODEX_NATIVE_BIN") || exit 1
+  fm_backlog_control_bytes_valid 0 "$codex_native_bin_bytes" || {
+    echo "error: --codex-native-provider resolved codex to a path containing an invalid control byte" >&2
+    exit 1
+  }
   codex_native_home_input=${CODEX_HOME:-${HOME:+$HOME/.codex}}
   [ -n "$codex_native_home_input" ] && [ -d "$codex_native_home_input" ] && [ -r "$codex_native_home_input" ] || {
     echo "error: --codex-native-provider requires a readable CODEX_HOME directory (explicit CODEX_HOME or HOME/.codex)" >&2
+    exit 1
+  }
+  codex_native_home_bytes=$(fm_backlog_bytes_of_string "$codex_native_home_input") || exit 1
+  fm_backlog_control_bytes_valid 0 "$codex_native_home_bytes" || {
+    echo "error: --codex-native-provider CODEX_HOME contains an invalid control byte" >&2
     exit 1
   }
   CODEX_NATIVE_HOME=$(CDPATH='' cd -- "$codex_native_home_input" 2>/dev/null && pwd -P) || {
     echo "error: --codex-native-provider could not resolve CODEX_HOME" >&2
     exit 1
   }
-  codex_native_timeout=${FM_CODEX_NATIVE_STATUS_TIMEOUT:-10}
-  case "$codex_native_timeout" in
-  '' | *[!0-9]* | 0*) codex_native_timeout=10 ;;
-  esac
-  codex_native_status=
-  codex_native_status_rc=0
-  codex_native_status=$(fm_run_timed "$codex_native_timeout" env \
-    -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u CODEX_API_KEY \
-    -u CODEX_ACCESS_TOKEN -u OPENAI_BASE_URL \
-    CODEX_HOME="$CODEX_NATIVE_HOME" "$CODEX_NATIVE_BIN" login status 2>&1) \
-    || codex_native_status_rc=$?
-  if [ "$codex_native_status_rc" -ne 0 ] || [ "$codex_native_status" != "Logged in using ChatGPT" ]; then
-    echo "error: --codex-native-provider requires 'codex login status' to report exactly 'Logged in using ChatGPT'; native launch refused" >&2
-    exit 1
-  fi
+  codex_native_preflight || exit 1
 fi
 
 spawn_remote_secondmate() {
@@ -1851,6 +1869,47 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
   }
+  recorded_codex_native_provider=$(fm_meta_get "$RELAUNCH_META" codex_native_provider)
+  case "$recorded_codex_native_provider" in
+  '') ;;
+  chatgpt)
+    [ "$ARG3" = codex ] || {
+      echo "error: task $ID's recorded Codex native-provider guard is a task-lifetime billing posture; refusing to relaunch it on '$ARG3'" >&2
+      exit 1
+    }
+    CODEX_NATIVE_PROVIDER=1
+    CODEX_NATIVE_BIN=$(fm_meta_get "$RELAUNCH_META" codex_native_bin)
+    CODEX_NATIVE_HOME=$(fm_meta_get "$RELAUNCH_META" codex_native_home)
+    case "$CODEX_NATIVE_BIN" in
+    /*) ;;
+    *)
+      echo "error: task $ID's recorded Codex native-provider executable is not an absolute path; refusing relaunch" >&2
+      exit 1
+      ;;
+    esac
+    [ -x "$CODEX_NATIVE_BIN" ] || {
+      echo "error: task $ID's recorded Codex native-provider executable is not executable at '$CODEX_NATIVE_BIN'; refusing relaunch" >&2
+      exit 1
+    }
+    [ -n "$CODEX_NATIVE_HOME" ] && [ -d "$CODEX_NATIVE_HOME" ] && [ -r "$CODEX_NATIVE_HOME" ] || {
+      echo "error: task $ID's recorded Codex native-provider home is not a readable directory at '${CODEX_NATIVE_HOME:-none}'; refusing relaunch" >&2
+      exit 1
+    }
+    codex_native_home_real=$(CDPATH='' cd -- "$CODEX_NATIVE_HOME" 2>/dev/null && pwd -P) || {
+      echo "error: task $ID's recorded Codex native-provider home cannot be resolved; refusing relaunch" >&2
+      exit 1
+    }
+    [ "$codex_native_home_real" = "$CODEX_NATIVE_HOME" ] || {
+      echo "error: task $ID's recorded Codex native-provider home no longer resolves to its pinned path; refusing relaunch" >&2
+      exit 1
+    }
+    codex_native_preflight || exit 1
+    ;;
+  *)
+    echo "error: task $ID records unknown codex_native_provider '$recorded_codex_native_provider'; refusing relaunch" >&2
+    exit 1
+    ;;
+  esac
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
   '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)
@@ -4651,7 +4710,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent codex_native_provider codex_native_bin codex_native_home backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4672,6 +4731,11 @@ preserve_relaunch_meta() {
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   [ -z "$EXPECTED_HEAD" ] || echo "expected_head=$EXPECTED_HEAD"
+  if [ "$CODEX_NATIVE_PROVIDER" -eq 1 ]; then
+    echo "codex_native_provider=chatgpt"
+    echo "codex_native_bin=$CODEX_NATIVE_BIN"
+    echo "codex_native_home=$CODEX_NATIVE_HOME"
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;

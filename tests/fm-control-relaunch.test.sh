@@ -17,6 +17,8 @@
 #   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
 #      flag, an extra positional, or a backend that cannot prove the previous
 #      agent exited.
+#   7. A task's native Codex billing guard survives ordinary relaunches and
+#      refuses a harness switch before the running agent is touched.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -360,6 +362,33 @@ SH
   chmod +x "$dir/fakebin/tasks-axi"
 }
 
+configure_native_codex_guard() {  # <case-dir> <id>
+  local dir=$1 id=$2 native_home="$1/native-codex-home"
+  mkdir -p "$native_home"
+  cat > "$dir/fakebin/codex-native" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = login ] && [ "${2:-}" = status ]; then
+  printf '%s\n' \
+    "CODEX_HOME=${CODEX_HOME-unset}" \
+    "OPENAI_API_KEY=${OPENAI_API_KEY-unset}" \
+    "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY-unset}" \
+    "CODEX_API_KEY=${CODEX_API_KEY-unset}" \
+    "CODEX_ACCESS_TOKEN=${CODEX_ACCESS_TOKEN-unset}" \
+    "OPENAI_BASE_URL=${OPENAI_BASE_URL-unset}" > "$FM_FAKE_DIR/native-preflight.env"
+  printf 'Logged in using ChatGPT\n'
+  exit 0
+fi
+exit 7
+SH
+  chmod +x "$dir/fakebin/codex-native"
+  {
+    echo "codex_native_provider=chatgpt"
+    echo "codex_native_bin=$dir/fakebin/codex-native"
+    echo "codex_native_home=$native_home"
+  } >> "$dir/home/state/$id.meta"
+}
+
 # --- 1. same-harness relaunch -----------------------------------------------
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
@@ -385,6 +414,54 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_native_codex_guard_survives_relaunch_and_blocks_harness_switch() {
+  local dir out rc launch
+  dir=$(new_case native-guard rl78)
+  add_ship_task "$dir" rl78 codex
+  configure_native_codex_guard "$dir" rl78
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+
+  out=$(OPENAI_API_KEY=forbidden-openai ANTHROPIC_API_KEY=forbidden-anthropic \
+    CODEX_API_KEY=forbidden-codex CODEX_ACCESS_TOKEN=forbidden-access \
+    OPENAI_BASE_URL=https://metered.invalid/v1 \
+    run_control "$dir" rl78 relaunch --note "continue under the recorded billing guard"); rc=$?
+  expect_code 0 "$rc" "a guarded Codex task should relaunch with its recorded posture"$'\n'"$out"
+  [ "$(meta_field "$dir" rl78 codex_native_provider)" = chatgpt ] \
+    || fail "relaunch dropped the native Codex billing posture"
+  [ "$(meta_field "$dir" rl78 codex_native_bin)" = "$dir/fakebin/codex-native" ] \
+    || fail "relaunch changed the pinned native Codex executable"
+  [ "$(meta_field "$dir" rl78 codex_native_home)" = "$dir/native-codex-home" ] \
+    || fail "relaunch changed the pinned native CODEX_HOME"
+  assert_grep "CODEX_HOME=$dir/native-codex-home" "$dir/fake/native-preflight.env" \
+    "relaunch did not preflight the recorded native CODEX_HOME"
+  assert_grep 'OPENAI_API_KEY=unset' "$dir/fake/native-preflight.env" \
+    "relaunch preflight inherited an ambient OpenAI API key"
+  assert_grep 'ANTHROPIC_API_KEY=unset' "$dir/fake/native-preflight.env" \
+    "relaunch preflight inherited an ambient Anthropic API key"
+  launch=$(cat "$dir/fake/literal")
+  assert_contains "$launch" "'$dir/fakebin/codex-native'" \
+    "relaunch did not use the recorded native Codex executable"
+  assert_contains "$launch" 'forced_login_method="chatgpt"' \
+    "relaunch did not force ChatGPT authentication"
+  assert_contains "$launch" 'env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u CODEX_API_KEY -u CODEX_ACCESS_TOKEN -u OPENAI_BASE_URL' \
+    "relaunch did not scrub API credentials from the worker"
+
+  dir=$(new_case native-switch rl79)
+  add_ship_task "$dir" rl79 codex
+  configure_native_codex_guard "$dir" rl79
+  printf 'codex' > "$dir/fake/command"
+  out=$(run_control "$dir" rl79 relaunch --harness claude --note "attempt a billing posture change"); rc=$?
+  expect_code 1 "$rc" "a task-lifetime native Codex guard should refuse a harness switch"
+  assert_contains "$out" "task-lifetime billing posture" \
+    "the harness-switch refusal did not name the durable billing guard"
+  [ "$(cat "$dir/fake/command")" = codex ] \
+    || fail "the guarded harness-switch refusal stopped the running Codex agent"
+  [ ! -s "$dir/fake/literal" ] \
+    || fail "the guarded harness-switch refusal sent lifecycle input"
+  pass "fm-control relaunch: native Codex billing posture is durable across the task lifecycle"
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
@@ -2198,6 +2275,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_native_codex_guard_survives_relaunch_and_blocks_harness_switch
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
