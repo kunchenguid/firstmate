@@ -455,29 +455,29 @@ The delivery lifecycle is an always-loaded operational contract; referenced scri
 
 ### PR ready, landing, and teardown
 
-For PR-based ship tasks, the ready signal depends on mode: `no-mistakes` reports `done [at=<epoch>]: PR <url> checks green` after CI is green, while `direct-PR` reports `done [at=<epoch>]: PR <url>` after opening the PR.
-Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from that ready signal - it records `pr=` and the forge's `pr_head=` when available in the task's meta and arms the watcher's merge poll.
-Tell the captain the PR's full `https://...` URL copied from the worker's ready line or the task's `pr=` metadata, a concise outcome summary, and the no-mistakes risk level when applicable.
-A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
-For any custom `state/<id>.check.sh` you write yourself, keep it an ordinary single-link mode-`0700` file, print one line only when firstmate should wake, print nothing otherwise, finish before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
-Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task); never hand-compose an `rm` with `$STATE`/`$ID`.
-
-Tear down a ship task only after landing is confirmed.
-A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
-Never force teardown without explicit discard authority.
-After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
-
-A secondmate is persistent and an empty queue is healthy.
-Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.
+- Ready signal depends on mode: `no-mistakes` reports `done [at=<epoch>]: PR <url> checks green` after CI is green; `direct-PR` reports `done [at=<epoch>]: PR <url>` after opening the PR.
+- Run `bin/fm-pr-check.sh <id> <PR url>` with the URL copied from that ready signal - records `pr=` and the forge's `pr_head=` in the task's meta, arms the watcher's merge poll.
+- Tell the captain: the PR's full `https://...` URL (copied from the worker's ready line or `pr=` metadata), a concise outcome summary, and the no-mistakes risk level when applicable.
+- A captain instruction to merge is explicit authority; `yolo` is the only standing routine merge authority.
+- Custom `state/<id>.check.sh` you write yourself: ordinary single-link mode-`0700` file, prints one line only when firstmate should wake (nothing otherwise), finishes before `FM_CHECK_TIMEOUT`, then bind its current bytes with `bin/fm-check-register.sh <id>` before the watcher may execute it.
+  Retire ONLY through `bin/fm-check-unregister.sh <id>` (or `bin/fm-teardown.sh` for a spawned task) - never hand-compose an `rm` with `$STATE`/`$ID`.
+- Tear down a ship task only after landing is confirmed.
+  A teardown refusal for uncommitted/unlanded work is stop-and-investigate, never an obstacle to bypass.
+  NEVER force teardown without explicit discard authority.
+- After successful teardown: record completion, retain only the configured recent Done history, re-evaluate queued work whose blockers/time gates cleared.
+- A secondmate is persistent; an empty queue is healthy.
+  Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`.
+  Its home must contain no work under way; forced discard still requires explicit captain authority.
 
 ### Scout outcome and promotion
 
-A completed scout must leave a self-contained report before its scratch worktree can be discarded; read and relay its findings, record the report as the Done artifact, and re-evaluate the queue.
-A report may recommend implementation but does not authorize it.
-Before treating the investigation or any visual review as complete, load `captain-hold-lifecycle`; teardown enforces that shared completion gate.
-When a scout's deliverable is a visual artifact the captain will iterate on, keep it alive and follow the crew-hosted Lavish board contract in `docs/configuration.md` rather than arming or polling the board from firstmate.
-When implementation is separately authorized, promote the existing scout through `bin/fm-promote.sh` rather than creating a duplicate task.
-The promoted worker must inventory scratch state, return to a clean default-branch base, carry over only intended fix changes, create the ship branch, and follow the project's selected delivery path while leaving scratch commits and debug edits behind and turning a reproduced bug into the regression test.
+- A completed scout must leave a self-contained report before its scratch worktree can be discarded.
+  Read and relay its findings, record the report as the Done artifact, re-evaluate the queue.
+- A report may recommend implementation but does not authorize it.
+- Before treating the investigation or any visual review as complete, load `captain-hold-lifecycle`; teardown enforces that shared completion gate.
+- Scout deliverable is a visual artifact the captain will iterate on: keep it alive, follow the crew-hosted Lavish board contract in `docs/configuration.md` - do not arm or poll the board from firstmate.
+- When implementation is separately authorized, promote the existing scout through `bin/fm-promote.sh` rather than creating a duplicate task.
+  The promoted worker must: inventory scratch state; return to a clean default-branch base; carry over only intended fix changes; create the ship branch; follow the project's selected delivery path; leave scratch commits and debug edits behind; turn a reproduced bug into the regression test.
 
 ## 8. Supervision protocol
 
