@@ -637,7 +637,7 @@ cat > "$SCHEMA6_HOME" <<'JSON'
     { "provider": "claude", "accountKey": "default", "quotaSemantics": { "status": "unknown", "effectiveAvailability": [] } },
     { "provider": "codex", "accountKey": "codex-home", "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 97, "runway": { "status": "through_reset" }, "selection": { "spendPriority": 0.8 } } ] } },
-    { "provider": "codex", "accountKey": "openai-codex-muller-labs", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+    { "provider": "codex", "accountKey": "openai-codex-work", "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 0, "runway": { "status": "exhausted_now" }, "selection": { "spendPriority": -1.4788 } } ] } },
     { "provider": "cursor", "accountKey": "default", "quotaSemantics": { "status": "known", "effectiveAvailability": [
       { "scope": "all_models", "status": "known", "effectivePercentRemaining": 24, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": 0.3917 } } ] } }
@@ -652,7 +652,7 @@ cat > "$HOME_RULES" <<'JSON'
       "when": "Codex work.",
       "use": [
         { "harness": "pi", "model": "openai-codex/gpt-5.6-sol", "provider": "codex" },
-        { "harness": "pi", "model": "openai-codex-muller-labs/gpt-5.6-luna", "provider": "codex" }
+        { "harness": "pi", "model": "openai-codex-work/gpt-5.6-luna", "provider": "codex" }
       ]
     }
   ]
@@ -664,7 +664,7 @@ TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_HOME" run code out err "$BRIEF
 expect_code 0 "$code" "schema 6 home lane snapshot exits 0"
 assert_contains "$out" '  status: clear' "Pi home lane snapshot resolves"
 assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' "Pi's builtin openai-codex lane binds to codex-home when no exact row exists"
-assert_contains "$out" 'candidate: pi:openai-codex-muller-labs/gpt-5.6-luna  provider=codex  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "the sibling Pi account still binds to its own exhausted row"
+assert_contains "$out" 'candidate: pi:openai-codex-work/gpt-5.6-luna  provider=codex  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "the sibling Pi account still binds to its own exhausted row"
 assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol'" "the healthy home account wins the argmax"
 
 jq '.rules[0].use[0] = {harness: "pi", model: "codex-native/gpt-6-astra", provider: "codex", effort: "ultra"}' "$HOME_RULES" > "$RULES"
@@ -679,7 +679,7 @@ pass "Pi's openai-codex home lane falls back to codex-home; sibling and native l
 # --- schema 6: the openai-codex lane stops at null, never the default row ------
 # With neither an exact openai-codex row nor a codex-home row, Pi's builtin
 # home lane stays unranked even when a healthy codex/default row exists; the
-# default fallback remains for every other lane, shown by the muller-labs
+# default fallback remains for every other lane, shown by the openai-codex-work
 # sibling still binding to it.
 SCHEMA6_DEFAULT_ONLY="$TMP_ROOT/schema6-default-only.json"
 jq '.providers |= map(select(.provider != "codex" or .accountKey == "codex-home") |
@@ -689,8 +689,8 @@ reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_DEFAULT_ONLY" run code out err "$BRIEF"
 expect_code 0 "$code" "default-only snapshot exits 0"
 assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  -> eligible, unranked: provider codex has no quota row for account openai-codex: disclosed uncertainty' "the openai-codex lane stays unranked when neither named row exists"
-assert_contains "$out" 'candidate: pi:openai-codex-muller-labs/gpt-5.6-luna  provider=codex  scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' "every other lane keeps the default-row fallback"
-assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex-muller-labs/gpt-5.6-luna'" "the lane that still falls back to default wins"
+assert_contains "$out" 'candidate: pi:openai-codex-work/gpt-5.6-luna  provider=codex  scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' "every other lane keeps the default-row fallback"
+assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex-work/gpt-5.6-luna'" "the lane that still falls back to default wins"
 cp "$LANE_RULES" "$RULES"
 pass "the openai-codex lane never binds the default row; other lanes keep the fallback"
 
@@ -700,7 +700,7 @@ pass "the openai-codex lane never binds the default row; other lanes keep the fa
 # a schema-5 snapshot of the same live-shaped providers.
 SCHEMA6_BOTH="$TMP_ROOT/schema6-both.json"
 jq '
-  (.providers[] | select(.accountKey == "openai-codex-muller-labs")) as $exhausted |
+  (.providers[] | select(.accountKey == "openai-codex-work")) as $exhausted |
   .providers += [$exhausted | .accountKey = "openai-codex"]
 ' "$SCHEMA6_HOME" > "$SCHEMA6_BOTH"
 cp "$HOME_RULES" "$RULES"
@@ -708,7 +708,7 @@ reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_BOTH" run code out err "$BRIEF"
 expect_code 0 "$code" "both-rows snapshot exits 0"
 assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "exact openai-codex wins over healthy codex-home even when exhausted"
-assert_contains "$out" 'candidate: pi:openai-codex-muller-labs/gpt-5.6-luna  provider=codex  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "the sibling account still binds to its own exhausted row when both named rows exist"
+assert_contains "$out" 'candidate: pi:openai-codex-work/gpt-5.6-luna  provider=codex  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "the sibling account still binds to its own exhausted row when both named rows exist"
 assert_contains "$out" '  status: escalate' "healthy codex-home is not borrowed when the exact row is exhausted"
 assert_contains "$out" '  reason: no rankable eligible candidate' "both Pi lanes stay unranked rather than reading home"
 
@@ -720,7 +720,7 @@ expect_code 0 "$code" "schema 5 live-shaped snapshot exits 0"
 assert_contains "$out" '  status: escalate' "schema 5 live-shaped snapshot still joins by provider alone"
 assert_contains "$out" '  reason: genuine spendPriority tie' "every Codex lane reads the one schema 5 row"
 assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' "Pi openai-codex reads the single schema 5 codex row"
-assert_contains "$out" 'candidate: pi:openai-codex-muller-labs/gpt-5.6-luna  provider=codex  scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' "the sibling Pi account reads that same schema 5 row"
+assert_contains "$out" 'candidate: pi:openai-codex-work/gpt-5.6-luna  provider=codex  scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' "the sibling Pi account reads that same schema 5 row"
 cp "$LANE_RULES" "$RULES"
 pass "exact openai-codex wins over healthy codex-home; schema 5 still joins by provider"
 
