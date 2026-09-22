@@ -978,6 +978,63 @@ rm -rf "$CARRY_ABORT_LAUNCH_DIR"
 rm -f "$CARRY_ABORT_META" "$HOME_DIR/state/$CARRY_ABORT_ID.herdr-presentation"
 pass "real Herdr lab: an aborted carried recovery keeps the task record and durable lease for a rerun"
 
+# A carried recovery whose final backlog dispatch fails must keep the record
+# naming its durable lease: the direct final rollback must honor the same
+# carried-checkout preserve rule as the abort trap rather than removing the
+# record and stranding the lease.
+CARRY_BACKLOG_ID=carry-backlog
+mkdir -p "$HOME_DIR/data/$CARRY_BACKLOG_ID"
+write_ship_brief "$HOME_DIR" "$CARRY_BACKLOG_ID" 'Carried backlog-abort fixture.'
+spawn_task "$CARRY_BACKLOG_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/carry-backlog-first.out" 2> "$TMP_ROOT/carry-backlog-first.err" \
+  || fail "carry-backlog projected spawn failed: $(cat "$TMP_ROOT/carry-backlog-first.err")"
+CARRY_BACKLOG_META="$HOME_DIR/state/$CARRY_BACKLOG_ID.meta"
+CARRY_BACKLOG_WT=$(remember_meta_worktree "$CARRY_BACKLOG_META")
+CARRY_BACKLOG_WSID=$(grep '^herdr_workspace_id=' "$CARRY_BACKLOG_META" | cut -d= -f2-)
+lab workspace close "$CARRY_BACKLOG_WSID" >/dev/null \
+  || fail "could not close the task space for carry-backlog"
+# The recovery is this home's first backlog-aware spawn, and the real tasks-axi
+# is shadowed so its dispatch start fails after the carry republishes the record.
+cat > "$HOME_DIR/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+EOF
+printf '# Backlog\n\n## In flight\n\n## Queued\n\n## Done\n' > "$HOME_DIR/data/backlog.md"
+tasks-axi add "$CARRY_BACKLOG_ID" 'carried backlog fixture' --kind ship --file "$HOME_DIR/data/backlog.md" >/dev/null
+REAL_TASKS_AXI=$(command -v tasks-axi)
+cat > "$FAKEBIN/tasks-axi" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  start)
+    echo 'error: simulated backlog start failure' >&2
+    exit 1
+    ;;
+esac
+exec "$REAL_TASKS_AXI" "\$@"
+SH
+chmod +x "$FAKEBIN/tasks-axi"
+CARRY_BACKLOG_TREEHOUSE_START=$(wc -l < "$TREEHOUSE_CALL_LOG" | tr -d '[:space:]')
+if spawn_task "$CARRY_BACKLOG_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/carry-backlog-resume.out" 2> "$TMP_ROOT/carry-backlog-resume.err"; then
+  fail "carry-backlog recovery unexpectedly succeeded after the armed backlog dispatch failure"
+fi
+[ -e "$CARRY_BACKLOG_META" ] \
+  || fail "aborted carried recovery rolled back the task record that names its lease"
+[ "$(grep '^worktree=' "$CARRY_BACKLOG_META" | cut -d= -f2-)" = "$CARRY_BACKLOG_WT" ] \
+  || fail "aborted carried recovery changed the recorded durable checkout"
+grep -F "retaining carried durable Treehouse worktree $CARRY_BACKLOG_WT" "$TMP_ROOT/carry-backlog-resume.err" >/dev/null 2>&1 \
+  || fail "aborted carried recovery did not report its retained carried lease: $(cat "$TMP_ROOT/carry-backlog-resume.err")"
+CARRY_BACKLOG_RETURNS=$(sed -n "$((CARRY_BACKLOG_TREEHOUSE_START + 1)),\$p" "$TREEHOUSE_CALL_LOG" | awk -F '\t' -v wt="$CARRY_BACKLOG_WT" '$1 == "return" && $NF == wt { print }')
+[ -z "$CARRY_BACKLOG_RETURNS" ] \
+  || fail "aborted carried recovery force-returned the retained lease: $CARRY_BACKLOG_RETURNS"
+CARRY_BACKLOG_PANE=$(grep '^herdr_pane_id=' "$CARRY_BACKLOG_META" | cut -d= -f2-)
+lab pane close "$CARRY_BACKLOG_PANE" >/dev/null 2>&1 || true
+"$REAL_TREEHOUSE" return --force "$CARRY_BACKLOG_WT" >/dev/null 2>&1 || true
+rm -f "$FAKEBIN/tasks-axi" "$HOME_DIR/.tasks.toml" "$HOME_DIR/data/backlog.md" \
+  "$CARRY_BACKLOG_META" "$HOME_DIR/state/$CARRY_BACKLOG_ID.herdr-presentation"
+hash -r 2>/dev/null || true
+pass "real Herdr lab: an aborted carried recovery keeps its record through a backlog dispatch failure"
+
 SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \
   || fail "projected teardown failed: $(cat "$TMP_ROOT/on-teardown.err")"
