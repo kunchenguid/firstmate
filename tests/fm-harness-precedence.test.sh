@@ -127,7 +127,7 @@ named_bin() {  # <dir> <name>
 
 # --- 1. A foreign marker never renames a markerless harness -----------------
 
-# codex, opencode, kimi, muse, and agy publish no identity marker, so before
+# codex, opencode, kimi, muse, agy, and openhands publish no identity marker, so before
 # this boundary existed ANY retained marker renamed them outright. This is the
 # reported live failure, generalized to every markerless adapter and to both
 # foreign markers that can be retained.
@@ -135,7 +135,7 @@ test_markerless_ancestry_outranks_foreign_marker() {
   local dir fakebin bin got name
   dir="$TMP_ROOT/markerless"
   fakebin=$(blind_ancestry_bin "$dir/blind")
-  for name in codex opencode kimi muse-bin-0.1.0 agy; do
+  for name in codex opencode kimi muse-bin-0.1.0 agy openhands; do
     bin=$(named_bin "$dir/$name-tree" "$name")
     local expect=$name
     case "$name" in muse-bin-*) expect=muse ;; esac

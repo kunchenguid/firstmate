@@ -2175,3 +2175,14 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## OpenHands CLI
+
+Crewmate and scout adapter only, verified 2026-09-20 with OpenHands CLI 1.16.0 / SDK v1.21.0 on Linux through tmux.
+The dedicated record at [`docs/verification/openhands.md`](openhands.md) owns the dated commands, pane captures, and remaining gaps.
+Refresh with:
+
+```sh
+bin/fm-test-run.sh tests/fm-openhands-harness.test.sh
+FM_OPENHANDS_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-openhands-signals-live-e2e.test.sh
+```

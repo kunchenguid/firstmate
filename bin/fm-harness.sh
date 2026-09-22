@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|openhands|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -133,7 +133,7 @@ harness_marker() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
-  # codex, opencode, kimi, muse, and agy publish no harness-identity marker at all, so
+  # codex, opencode, kimi, muse, agy, and openhands publish no harness-identity marker at all, so
   # they are never named here and are identified by ancestry alone. That is the
   # whole reason a foreign marker must not outrank ancestry: with markers winning
   # unconditionally, any retained CLAUDECODE would silently rename one of them.
@@ -228,6 +228,13 @@ harness_process_verdict() {  # <pid>
     # inherited launcher value, not an agy identity), so like muse it is
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
+    # openhands (OpenHands CLI) is a Python entrypoint whose live process name
+    # on Linux is still exactly `openhands` (verified, CLI 1.16.0: `ps -o comm=`
+    # reports openhands). Anchored, never *openhands*, so a path containing
+    # `.openhands` cannot be misread as this harness. It publishes no
+    # harness-identity marker of its own, so like agy it is detected by
+    # ancestry alone.
+    openhands) echo "comm openhands"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -241,6 +248,7 @@ harness_process_verdict() {  # <pid>
         *opencode*) echo "args opencode"; return ;;
         *grok*) echo "args grok"; return ;;
         *" pi "*|*/pi) echo "args pi"; return ;;
+        */openhands|*/openhands\ *) echo "args openhands"; return ;;
       esac ;;
   esac
 }

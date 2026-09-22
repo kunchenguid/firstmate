@@ -42,7 +42,7 @@
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
+#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, openhands-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target
 #
@@ -54,14 +54,15 @@
 #   4. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
-#      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
-#      task from its rendered tail, then unknown missing
+#      Grok/Rovo/AGY/OpenHands temporary regex fallbacks classify a grok, rovo,
+#      agy, or openhands task from its rendered tail, then unknown missing
 #   5. malformed, stale, or untrusted records -> unknown, never a fallback
-# Grok, Rovo, and AGY are the ONLY rendered-text classifications that survive the
+# Grok, Rovo, AGY, and OpenHands are the ONLY rendered-text classifications that survive the
 # redesign, because none of their structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
 # path firstmate drives, see references/harness/rovo.md; agy 1.2.0 exposes no
-# hook surface at all, see references/harness/agy.md); each is scoped to
+# hook surface at all, see references/harness/agy.md; OpenHands CLI 1.16.0
+# exposes none firstmate can write, see references/harness/openhands.md); each is scoped to
 # its own harness= and can never classify another adapter. The delivery
 # guards in bin/fm-composer-lib.sh match rendered footers for submit
 # acknowledgement and away-mode supervisor injection only; neither is a
@@ -867,11 +868,25 @@ fm_busy_agy_tail_busy() {
     | grep -qiE 'esc[[:space:]]+to[[:space:]]+cancel'
 }
 
+# fm_busy_openhands_tail_busy: the OpenHands-only temporary rendered-tail
+# fallback. Consumes the tail on stdin; 0 when OpenHands's verified busy
+# signature matches: the `ESC: pause` token in the working status line the TUI
+# pins above the composer while a turn runs (verified live on CLI 1.16.0; the
+# idle status line is blank). The word `Working` beside it is deliberately
+# NOT matched: Pi already owns that word. openhands exposes no firstmate-owned
+# hook writer, so this fallback is the only pane-side source; it is never
+# armed as a semantic writer (fm_busy_sources_for_harness trusts nothing for
+# openhands).
+fm_busy_openhands_tail_busy() {
+  grep -v '^[[:space:]]*$' | tail -12 \
+    | grep -qE 'ESC: pause'
+}
+
 # fm_busy_classify: semantic classification for a task whose endpoint the
 # caller has already established as present. Prints "<verdict> <source>":
 # busy|idle|unknown plus the producing source (see header). Never probes
 # process state. <tail40> is optional pre-captured plain output used only by
-# the grok, rovo, and agy arms; when absent each captures through
+# the grok, rovo, agy, and openhands arms; when absent each captures through
 # fm_backend_capture if available, else reports unknown capture-failed.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
@@ -1013,6 +1028,25 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         printf 'busy agy-regex'
       else
         printf 'unknown agy-regex'
+      fi
+      return 0
+      ;;
+    openhands)
+      if [ -z "$tail40" ]; then
+        if command -v fm_backend_capture >/dev/null 2>&1; then
+          tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || {
+            printf 'unknown capture-failed'
+            return 0
+          }
+        else
+          printf 'unknown capture-failed'
+          return 0
+        fi
+      fi
+      if printf '%s' "$tail40" | fm_busy_openhands_tail_busy; then
+        printf 'busy openhands-regex'
+      else
+        printf 'unknown openhands-regex'
       fi
       return 0
       ;;
