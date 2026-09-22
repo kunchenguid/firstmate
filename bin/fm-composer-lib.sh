@@ -1009,6 +1009,18 @@ EOF
   fi
 }
 
+# The one known non-ASCII glyph a titled bottom border may carry: grok's
+# middle-dot (U+00B7) segment separator (verified live on grok 1.0.34; see
+# docs/verification/runtime-backends.md "2026-09-20 grok 1.0.34 weekly-limit
+# footer through Herdr"). Grok draws it on EITHER side of its "Grok <model>
+# (<effort>)" segment - a leading quota segment only while quota is low
+# ("Weekly limit left: 0% · ..."), and a trailing approval-mode segment
+# always ("... · always-approve", since firstmate never spawns grok without
+# --always-approve). Declared once, exactly like the family dash glyphs
+# below, so it is blanked to a single COLUMN rather than surviving as two raw
+# UTF-8 bytes.
+FM_COMPOSER_TITLE_SEPARATOR='·'
+
 # 0 when a mismatched bottom border reads as a legitimate TITLE: the trimmed
 # inner (corners already stripped) still starts and ends with the family's own
 # rule glyph, so the title is embedded IN the rule rather than replacing it.
@@ -1027,6 +1039,15 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
     *) return 1 ;;
   esac
   spaces=${inner//"$dash"/ }
+  # Blank the one verified non-ASCII title glyph to a single column BEFORE the
+  # all-ASCII gate below: left raw, its multi-byte UTF-8 sequence survives that
+  # gate as non-whitespace bytes and the geometry proof fails even on an
+  # EXACT-width title, regardless of quota state - the defect is identical
+  # with and without an exhausted-quota footer segment, since either way the
+  # trailing approval-mode segment alone already carries the glyph. Any OTHER
+  # non-ASCII glyph still fails the gate below: a future separator must stay
+  # unknown until verified and taught here, never silently pass.
+  spaces=${spaces//"$FM_COMPOSER_TITLE_SEPARATOR"/ }
   spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
   case "$spaces" in
     *[![:space:]]*) return 1 ;;

@@ -841,6 +841,53 @@ test_grok_idle_footer_does_not_confirm_cancellation() {
   pass "fm-control interrupt: grok's idle footer does not confirm cancellation"
 }
 
+# --- grok weekly-limit composer gate (task fm-weekly-limit-classifier) ------
+#
+# The control-plane consequence of the classifier fix in bin/fm-composer-lib.sh
+# (_fm_composer_titled_bottom_ok): a genuinely empty grok composer under its
+# weekly-limit-exhausted footer must reach the SAME allow path as any other
+# proven-empty composer, and pending text under that identical footer must
+# still refuse - exercised end to end through the real classifier (no stub),
+# a fake tmux endpoint, and no live agent.
+
+test_exit_allows_when_grok_composer_reads_empty_under_weekly_limit_footer() {
+  local dir out rc
+  dir=$(new_case grok-weekly-empty)
+  add_task "$dir" t1 grok
+  alive_as "$dir" grok
+  printf '%s\n' \
+    '╭──────────────────────────────────────────────────────────────────╮' \
+    '│ ❯                                                                │' \
+    '╰─────── Weekly limit left: 0% · Grok 4.6 (high) · always-approve ─╯' \
+    > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit must succeed against a genuinely empty grok composer under an exhausted weekly limit"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=grok" \
+    "a proven-empty weekly-limit composer should reach the ordinary stopped outcome"
+  [ "$(literals "$dir")" = /exit ] \
+    || fail "exit should type grok's exit command once the composer proves empty, got: $(literals "$dir")"
+  pass "fm-control exit: a genuinely empty grok composer under its weekly-limit footer is not refused"
+}
+
+test_exit_refuses_when_grok_composer_has_pending_text_under_weekly_limit_footer() {
+  local dir out rc
+  dir=$(new_case grok-weekly-pending)
+  add_task "$dir" t1 grok
+  alive_as "$dir" grok
+  printf '%s\n' \
+    '╭──────────────────────────────────────────────────────────────────╮' \
+    '│ ❯ deploy the fix                                                 │' \
+    '╰─────── Weekly limit left: 0% · Grok 4.6 (high) · always-approve ─╯' \
+    > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit must refuse when the grok composer visibly holds pending text"
+  assert_contains "$out" "composer visibly holds pending text" \
+    "the refusal should name pending text, not an unproved state"
+  [ -z "$(literals "$dir")" ] \
+    || fail "nothing may be typed into a composer that visibly holds pending text"
+  pass "fm-control exit: pending text under grok's weekly-limit footer still refuses"
+}
+
 # --- 6. marker non-regression -----------------------------------------------
 
 test_secondmate_control_command_carries_no_marker() {
@@ -920,5 +967,7 @@ test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
+test_exit_allows_when_grok_composer_reads_empty_under_weekly_limit_footer
+test_exit_refuses_when_grok_composer_has_pending_text_under_weekly_limit_footer
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task

@@ -683,7 +683,9 @@ This guard is the refresh command after an upgrade to any matrix-covered harness
 The 2026-08-23 steering-inbox doorbell run observed grok 1.0.5's idle composer classifying `unknown` (and sometimes pending-family), never `empty`.
 Issue #3436's recorded idle capture reproduced the cause on 2026-09-14: Grok 1.0.5 renders the titled bottom border three columns wider than its aligned top and content rows, so the cursorless Herdr profile rejected the otherwise complete box as ambiguous.
 The classifier now accepts only that exact three-column overhang (`FM_COMPOSER_GROK_TITLE_OVERHANG` in `bin/fm-composer-lib.sh`) carrying a typed `Grok <model> (<effort>)` title; the portable regressions feed the real capture through both the shared Herdr capability profile and `fm_backend_herdr_composer_state`, and prove idle is `empty`, typed content is `pending`, and an unrecognized oversized title remains `unknown`.
-Grok was not installed on the verification machine for this 2026-09-14 change, so the live guard still owes a refresh against the current release rather than treating the portable capture as current live evidence; the three-column width is not live-verified and may need adjustment if Grok's title rendering changes or scales with title length.
+Grok was not installed on the verification machine for this 2026-09-14 change, so the live guard still owed a refresh against the current release rather than treating the portable capture as current live evidence; the three-column width remains un-live-verified against the exact grok 1.0.5 build and may need adjustment if a future Grok release scales its overhang with title length.
+The live guard was refreshed against the current release (grok 1.0.34) by the [2026-09-20 grok 1.0.34 weekly-limit footer through Herdr](#2026-09-20-grok-1034-weekly-limit-footer-through-herdr) entry below, which fixed a separate title-geometry defect the current release exposes (a middle-dot segment separator, not an overhang).
+That release draws its titled bottom border at exactly the box width, so the overhang tolerance above now covers only the older 1.0.5 rendering and is not exercised by the current live guard.
 This closes only #3436's idle-composer-misclassification symptom (Grok/Herdr composer read `unknown` instead of `empty`, blocking away-mode injection). The issue's second symptom - a leftover watcher never yielding and never being taken over or refused at AFK start - is unrelated to composer classification and is tracked separately in #2270, where #3436's reproduction serves as corroborating evidence.
 Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
 
@@ -776,6 +778,31 @@ tests/fm-composer-codex-idle-live-e2e.test.sh
 The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
 The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
 
+### 2026-09-20 grok 1.0.34 weekly-limit footer through Herdr
+
+Verified on 2026-09-20 on Linux 6.6.87.1-microsoft-standard-WSL2 x86_64 against grok 1.0.34 (3736acbc8658, stable) and Herdr 0.8.2.
+`fm_backend_herdr_composer_state` (`bin/backends/herdr.sh`) hardcodes `cursor=0` on both its ANSI and plain capture branches, so a Herdr grok pane always classifies through the shared classifier's cursorless bottom-most-box path (`bin/fm-composer-lib.sh`, `_fm_composer_select_cursorless`).
+Grok's titled bottom border draws a middle dot (U+00B7, `·`) on either side of its `Grok <model> (<effort>)` segment: a leading quota segment only while quota is low (`Weekly limit left: 0% · ...`), and a trailing approval-mode segment always (`... · always-approve`, since firstmate never spawns grok without `--always-approve` and grok 1.0.34 renders that segment by default even without the flag).
+The bottom border's geometry proof (`_fm_composer_titled_bottom_ok`) blanked every ASCII-printable byte to a space before checking the border's width against the top border, but left the middle dot's two-byte UTF-8 sequence untouched; those bytes then failed the all-blank gate and the box read `unknown` regardless of quota state, blocking every safe `fm-control.sh exit`/`relaunch` on an otherwise idle grok composer.
+The fix blanks the one verified separator glyph to a single column (`FM_COMPOSER_TITLE_SEPARATOR` in `bin/fm-composer-lib.sh`) before that gate, matching how the family's own dash glyph is already blanked; any other non-ASCII glyph in a titled bottom border still fails the gate, so a future separator stays `unknown` until verified and taught the same way.
+`test_matrix_grok_weekly_limit_footer` in `tests/fm-composer-lib.test.sh` carries the byte-exact box shape (both with and without the quota segment) across every capability profile, proves the pending guard survives under the identical footer, and proves an untaught separator glyph and a truncated bottom border both stay `unknown`; `test_exit_allows_when_grok_composer_reads_empty_under_weekly_limit_footer` and `test_exit_refuses_when_grok_composer_has_pending_text_under_weekly_limit_footer` in `tests/fm-control.test.sh` carry the same shapes through the real `fm-control.sh exit` case statement against a stubbed endpoint, with no live agent.
+
+The live guard that refreshes this entry is the same one covering every matrix harness (`tests/fm-composer-matrix-live-e2e.test.sh`, `FM_COMPOSER_MATRIX_LIVE=1`): it launches the installed grok idle in an isolated tmux server with no flags, and since grok 1.0.34 renders its `always-approve` footer segment unconditionally, the plain launch already exercises the same titled-bottom-border shape this entry fixes.
+Before the fix that guard's grok check failed:
+
+```text
+not ok - grok (grok 1.0.34 (3736acbc8658) [stable]): idle composer never classified empty (last verdict: pending-unproven)
+```
+
+(the guard's mid-run Escape, sent after the composer never proved empty, opened grok's own quit-confirmation dialog, which is the `pending-unproven` verdict above - a second, independent symptom of the same underlying `unknown` misclassification.)
+After the fix, the same live launch passes:
+
+```text
+ok - grok (grok 1.0.34 (3736acbc8658) [stable]): real idle composer classifies empty
+```
+
+Grok's tmux-cursor path and Herdr's cursorless path share the same bottom-border geometry proof, so this tmux-live result also confirms the Herdr-specific defect described above; the exact Herdr capture shapes remain the byte-for-byte fixtures in `tests/fm-composer-lib.test.sh` rather than a live Herdr session, per this task's scope (no Herdr lifecycle operation was authorized for this change).
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
@@ -798,7 +825,7 @@ ok - muse (Muse Code 0.2.1 (0.2.1-R1215.1)): the doorbell reached a real worker,
 ```
 
 All six installed harnesses honored the doorbell contract with real model turns: each listed the inbox named by the doorbell, read its record, executed the instruction inside it, and acknowledged with the atomic `mv`.
-Two findings from the run shaped the shipped behavior: an OpenCode vendor update modal swallowed the first doorbell and the single re-ring recovered it, which is exactly the watcher ladder's job; and grok 1.0.5's idle composer never classifies `empty` (a classifier drift owned by the [Composer classification matrix](#composer-classification-matrix) guard, whose refresh for grok 1.0.5 is still owed), which is why the ring's advisory pre-check skips only on an exact proven `pending` verdict - a doorbell into an ambiguous composer is a recoverable constant line, while skipping on ambiguity would starve steering for any harness the classifier cannot positively identify.
+Two findings from the run shaped the shipped behavior: an OpenCode vendor update modal swallowed the first doorbell and the single re-ring recovered it, which is exactly the watcher ladder's job; and grok 1.0.5's idle composer never classifies `empty` (a classifier drift owned by the [Composer classification matrix](#composer-classification-matrix) guard; the current grok release's own idle-composer drift, a different title-geometry cause, is fixed and live-refreshed by the [2026-09-20 grok 1.0.34 weekly-limit footer through Herdr](#2026-09-20-grok-1034-weekly-limit-footer-through-herdr) entry), which is why the ring's advisory pre-check skips only on an exact proven `pending` verdict - a doorbell into an ambiguous composer is a recoverable constant line, while skipping on ambiguity would starve steering for any harness the classifier cannot positively identify.
 Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
 This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
 

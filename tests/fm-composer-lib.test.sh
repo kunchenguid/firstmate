@@ -680,6 +680,61 @@ test_matrix_grok_titled_bottom_border() {
   pass "matrix: grok's real oversized titled bottom is empty while typed and unproved panes stay safe"
 }
 
+test_matrix_grok_weekly_limit_footer() {
+  # Real grok 1.0.34 under Herdr 0.8.2, byte-for-byte reproduced at a compact
+  # width (docs/verification/runtime-backends.md "2026-09-20 grok 1.0.34
+  # weekly-limit footer through Herdr"). Herdr hardcodes cursor=0
+  # (bin/backends/herdr.sh, fm_backend_herdr_composer_state), so every grok
+  # pane reads through the cursorless bottom-most-box path, and the titled
+  # bottom border carries a middle dot U+00B7 ("·") EXACT-width separator on
+  # either side of "Grok <model> (<effort>)": a leading quota segment only
+  # while quota is low ("Weekly limit left: 0% · ...") and a trailing
+  # approval-mode segment always ("... · always-approve", since firstmate
+  # never spawns grok without --always-approve, and grok 1.0.34 renders that
+  # segment by default even without the flag). Before the fix, the "·" bytes
+  # survived the bottom border's all-ASCII blanking gate raw, so the box read
+  # `unknown` regardless of quota state - the defect was identical with and
+  # without the exhausted-quota footer, which is why both are asserted here
+  # rather than special-casing the quota screen.
+  local empty_weekly empty_normal pending_weekly unrecognized_sep truncated
+  empty_weekly=$'╭──────────────────────────────────────────────────────────────────╮\n│ ❯                                                                │\n╰─────── Weekly limit left: 0% · Grok 4.6 (high) · always-approve ─╯'
+  empty_normal=$'╭──────────────────────────────────────────────────────────────────╮\n│ ❯                                                                │\n╰─────────────────────────────── Grok 4.6 (high) · always-approve ─╯'
+  pending_weekly=$'╭──────────────────────────────────────────────────────────────────╮\n│ ❯ deploy the fix                                                 │\n╰─────── Weekly limit left: 0% · Grok 4.6 (high) · always-approve ─╯'
+
+  # Positive: an exhausted-quota footer must not be required to reach empty,
+  # and quota state must not be required either (both read the same verdict).
+  assert_screen "grok weekly-limit-exhausted footer on herdr" empty "$CAPS_STYLED" "$empty_weekly"
+  assert_screen "grok weekly-limit-exhausted footer on cmux/orca" empty "$CAPS_PLAIN" "$empty_weekly"
+  assert_screen "grok weekly-limit-exhausted footer on zellij" empty "$CAPS_STYLED_NOID" "$empty_weekly"
+  assert_screen "grok weekly-limit-exhausted footer on tmux" empty "$CAPS_TMUX" "$empty_weekly" 1
+  assert_screen "grok normal footer on herdr" empty "$CAPS_STYLED" "$empty_normal"
+  assert_screen "grok normal footer on tmux" empty "$CAPS_TMUX" "$empty_normal" 1
+
+  # Never regress the pending guard under the SAME footer: real unsubmitted
+  # text next to the exact same weekly-limit title must stay pending, on both
+  # a styled capture (herdr) and a plain one (the box's own content-row proof
+  # does not degrade with styled=0, unlike a bare composer row).
+  assert_screen "grok pending text under weekly-limit footer on herdr" pending "$CAPS_STYLED" "$pending_weekly"
+  assert_screen "grok pending text under weekly-limit footer on plain" pending "$CAPS_PLAIN" "$pending_weekly"
+  assert_screen "grok pending text under weekly-limit footer on tmux" pending "$CAPS_TMUX" "$pending_weekly" 1
+
+  # Loss of the geometry signal: an unrecognized separator glyph (a bullet,
+  # never taught) must stay ambiguous rather than silently passing alongside
+  # the middle dot - version drift stays visible, it is not made permissive.
+  unrecognized_sep=$'╭──────────────────────────────────────────────────────────────────╮\n│ ❯                                                                │\n╰─────── Weekly limit left: 0% • Grok 4.6 (high) • always-approve ─╯'
+  assert_screen "grok footer with an untaught separator glyph" unknown "$CAPS_STYLED" "$unrecognized_sep"
+  assert_screen "grok footer with an untaught separator glyph on tmux" unknown "$CAPS_TMUX" "$unrecognized_sep" 1
+
+  # Loss of the geometry signal again: a clipped/truncated bottom border
+  # (a narrower capture than the box's own top and content rows) must stay
+  # ambiguous, never coerced to empty.
+  truncated=$'╭──────────────────────────────────────────────────────────────────╮\n│ ❯                                                                │\n╰─────── Weekly limit left: 0% · Grok 4.'
+  assert_screen "grok footer truncated mid-title on herdr" unknown "$CAPS_STYLED" "$truncated"
+  assert_screen "grok footer truncated mid-title on tmux" unknown "$CAPS_TMUX" "$truncated" 1
+
+  pass "matrix: grok's weekly-limit footer reads empty from positive structural evidence; pending, untaught glyphs, and truncated captures stay safe"
+}
+
 test_matrix_kimi_bordered_shell_glyph_box() {
   # Kimi's bordered `│ > │` composer - the shape fm-spawn.sh's retired
   # spawn-local regex used to own. Now the shared owner proves it everywhere,
@@ -930,6 +985,7 @@ test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
+test_matrix_grok_weekly_limit_footer
 test_matrix_kimi_bordered_shell_glyph_box
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
