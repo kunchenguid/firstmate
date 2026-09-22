@@ -3,6 +3,32 @@
 # inspection. fm-spawn uses this before launch staging, while the pane-side
 # launch guard uses the same implementation at the actual worker boundary.
 
+exact_head_git() {
+  # Custody reads retain ordinary repository structure and index semantics, but
+  # no config layer or inherited process variable may turn a read into code
+  # execution. Git aliases cannot shadow the built-in subcommands used below;
+  # command-scope overrides neutralize the local execution-capable settings
+  # that still apply after global/system and command-env config are removed.
+  local git_bin=${EXACT_HEAD_GIT_BIN:-}
+  if [ -z "$git_bin" ]; then
+    git_bin=$(command -v git 2>/dev/null) || return 1
+  fi
+  case "$git_bin" in /*) ;; *) return 1 ;; esac
+  [ -x "$git_bin" ] || return 1
+  /usr/bin/env \
+    -u GIT_CONFIG -u GIT_CONFIG_COUNT -u GIT_CONFIG_PARAMETERS \
+    -u GIT_CONFIG_SYSTEM -u GIT_EXTERNAL_DIFF -u GIT_DIFF_OPTS \
+    -u GIT_PAGER -u GIT_EDITOR -u GIT_SEQUENCE_EDITOR \
+    -u GIT_ASKPASS -u SSH_ASKPASS -u GIT_SSH -u GIT_SSH_COMMAND \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
+    GIT_ATTR_NOSYSTEM=1 \
+    "$git_bin" --no-pager \
+      -c core.fsmonitor=false \
+      -c core.hooksPath=/dev/null \
+      -c core.excludesFile=/dev/null \
+      "$@"
+}
+
 expected_head_raw_tree_status() { # <worktree> [<immutable-coordinate>]
   local worktree=$1 coordinate=${2:-HEAD}
   local record metadata mode type object path actual complete=0 producer_status=1
@@ -23,7 +49,7 @@ expected_head_raw_tree_status() { # <worktree> [<immutable-coordinate>]
           printf 'raw tree mismatch: %s\n' "$path"
           continue
         fi
-        actual=$(git -C "$worktree" hash-object --no-filters -- "$worktree/$path" 2>/dev/null) || return 1
+        actual=$(exact_head_git -C "$worktree" hash-object --no-filters -- "$worktree/$path" 2>/dev/null) || return 1
         if [ "$actual" != "$object" ] ||
           { [ "$mode" = 100755 ] && [ ! -x "$worktree/$path" ]; } ||
           { [ "$mode" = 100644 ] && [ -x "$worktree/$path" ]; }; then
@@ -39,19 +65,19 @@ expected_head_raw_tree_status() { # <worktree> [<immutable-coordinate>]
         case "$link_bytes" in ''|*[!0-9]*) return 1 ;; esac
         [ "$link_bytes" -gt 0 ] || return 1
         link_size=$((link_bytes - 1))
-        actual=$(readlink "$worktree/$path" | dd bs=1 count="$link_size" 2>/dev/null | git -C "$worktree" hash-object --stdin) || return 1
+        actual=$(readlink "$worktree/$path" | dd bs=1 count="$link_size" 2>/dev/null | exact_head_git -C "$worktree" hash-object --stdin) || return 1
         [ "$actual" = "$object" ] || printf 'raw tree mismatch: %s\n' "$path"
         ;;
       160000:commit)
-        sub_super=$(git -C "$worktree/$path" rev-parse --show-superproject-working-tree 2>/dev/null || true)
+        sub_super=$(exact_head_git -C "$worktree/$path" rev-parse --show-superproject-working-tree 2>/dev/null || true)
         if [ -n "$sub_super" ]; then
-          sub_head=$(git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+          sub_head=$(exact_head_git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null || true)
           [ "$sub_head" = "$object" ] || printf 'raw tree mismatch: %s\n' "$path"
         fi
         ;;
       *) return 1 ;;
     esac
-  done < <({ git -C "$worktree" ls-tree -r -z --full-tree "$coordinate"; printf '\0%s\0' "$?"; })
+  done < <({ exact_head_git -C "$worktree" ls-tree -r -z --full-tree "$coordinate"; printf '\0%s\0' "$?"; })
   [ "$complete" -eq 1 ] && [ "$producer_status" -eq 0 ]
 }
 
@@ -59,14 +85,14 @@ expected_head_worktree_status() { # <worktree> [<immutable-coordinate>]
   local worktree=$1 coordinate=${2:-HEAD}
   local untracked ignored index raw diff_rc record metadata mode type object path sub_super nested
   local complete=0 producer_status=1
-  untracked=$(git -C "$worktree" ls-files --others --exclude-standard) || return 1
+  untracked=$(exact_head_git -C "$worktree" ls-files --others --exclude-standard) || return 1
   [ -z "$untracked" ] || printf 'untracked: %s\n' "$untracked"
-  ignored=$(git -C "$worktree" ls-files --others --ignored --exclude-standard) || return 1
+  ignored=$(exact_head_git -C "$worktree" ls-files --others --ignored --exclude-standard) || return 1
   [ -z "$ignored" ] || printf 'ignored: %s\n' "$ignored"
-  index=$(git -C "$worktree" -c core.quotePath=true ls-files -v) || return 1
+  index=$(exact_head_git -C "$worktree" -c core.quotePath=true ls-files -v) || return 1
   index=$(printf '%s\n' "$index" | LC_ALL=C grep -E '^[a-zS] ' || true)
   [ -z "$index" ] || printf '%s\n' "$index"
-  if git -C "$worktree" -c core.fileMode=true diff-index --cached --quiet "$coordinate" --; then
+  if exact_head_git -C "$worktree" -c core.fileMode=true diff-index --no-ext-diff --cached --quiet "$coordinate" --; then
     diff_rc=0
   else
     diff_rc=$?
@@ -89,10 +115,10 @@ expected_head_worktree_status() { # <worktree> [<immutable-coordinate>]
     path=${record#*$'\t'}
     read -r mode type object <<<"$metadata"
     [ "$mode:$type" = 160000:commit ] || continue
-    sub_super=$(git -C "$worktree/$path" rev-parse --show-superproject-working-tree 2>/dev/null || true)
+    sub_super=$(exact_head_git -C "$worktree/$path" rev-parse --show-superproject-working-tree 2>/dev/null || true)
     [ -n "$sub_super" ] || continue
     nested=$(expected_head_worktree_status "$worktree/$path" "$object") || return 1
     [ -z "$nested" ] || printf '%s\n%s\n' "$path" "$nested"
-  done < <({ git -C "$worktree" ls-tree -z "$coordinate"; printf '\0%s\0' "$?"; })
+  done < <({ exact_head_git -C "$worktree" ls-tree -z "$coordinate"; printf '\0%s\0' "$?"; })
   [ "$complete" -eq 1 ] && [ "$producer_status" -eq 0 ]
 }

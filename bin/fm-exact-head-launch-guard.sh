@@ -3,7 +3,7 @@
 # reviewed worker command. It writes one atomic receipt under the private launch
 # directory, then returns success only when the requested HEAD and the complete
 # worktree custody scan both pass at this boundary.
-# Usage: fm-exact-head-launch-guard.sh <worktree> <40-hex-head> <receipt>
+# Usage: fm-exact-head-launch-guard.sh <worktree> <40-hex-head> <receipt> <git-bin>
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,6 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 worktree=${1:-}
 expected=${2:-}
 receipt=${3:-}
+EXACT_HEAD_GIT_BIN=${4:-}
+export EXACT_HEAD_GIT_BIN
 
 write_receipt() { # <status> <reason>
   local status=$1 reason=$2 tmp
@@ -33,11 +35,13 @@ refuse() { # <reason>
   exit 1
 }
 
-[ "$#" -eq 3 ] || refuse invalid-arguments
+[ "$#" -eq 4 ] || refuse invalid-arguments
 case "$worktree" in /*) ;; *) refuse invalid-worktree ;; esac
 case "$receipt" in /*) ;; *) refuse invalid-receipt ;; esac
 case "$expected" in *[!0-9a-f]*|'') refuse invalid-expected-head ;; esac
 [ "${#expected}" -eq 40 ] || refuse invalid-expected-head
+case "$EXACT_HEAD_GIT_BIN" in /*) ;; *) refuse invalid-git-bin ;; esac
+[ -x "$EXACT_HEAD_GIT_BIN" ] || refuse invalid-git-bin
 [ -d "$worktree" ] || refuse missing-worktree
 [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || refuse receipt-already-exists
 
@@ -49,7 +53,7 @@ unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
   GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
 export GIT_NO_REPLACE_OBJECTS=1
 
-actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) \
+actual=$(exact_head_git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) \
   || refuse unreadable-head
 [ "$actual" = "$expected" ] || refuse head-mismatch
 
@@ -59,7 +63,7 @@ status=$(expected_head_worktree_status "$worktree" "$expected") || refuse unread
 # A ref race during the full byte scan cannot substitute another commit. Read
 # HEAD again, then run the complete scan once more so a write triggered by that
 # coordinate read is still rejected before the worker command begins.
-actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) \
+actual=$(exact_head_git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) \
   || refuse unreadable-head
 [ "$actual" = "$expected" ] || refuse head-mismatch
 status=$(expected_head_worktree_status "$worktree" "$expected") || refuse unreadable-worktree
@@ -69,7 +73,7 @@ status=$(expected_head_worktree_status "$worktree" "$expected") || refuse unread
 # verified receipt and worker command. Every byte/mode/index derivation above is
 # pinned to the immutable expected object, so a checkout during either scan is
 # dirty; a checkout after the scans is caught here.
-actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) \
+actual=$(exact_head_git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) \
   || refuse unreadable-head
 [ "$actual" = "$expected" ] || refuse head-mismatch
 

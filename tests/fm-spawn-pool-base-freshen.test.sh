@@ -255,7 +255,7 @@ test_expected_head_claude_keeps_control_settings_outside_candidate() {
   [ ! -e "$POOL_DIR/.claude/settings.local.json" ] \
     || fail "Claude exact-head spawn wrote generated control settings into the reviewed worktree"
   launch=$(cat "$launch_log")
-  assert_contains "$launch" '--settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},"hooks":{' \
+  assert_contains "$launch" '"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},"hooks":{' \
     "Claude exact-head launch did not carry Firstmate hooks through the per-launch settings object"
   assert_contains "$launch" '"UserPromptSubmit"' \
     "Claude exact-head launch settings omitted the busy-state opening hook"
@@ -550,6 +550,108 @@ test_expected_head_ignores_ambient_git_config_overrides() {
   pass "only expected-head authorization ignores ambient Git configuration overrides"
 }
 
+test_expected_head_guard_neutralizes_execution_capable_git_config() {
+  local rec id marker hook receipt candidate output status global_config system_config real_git
+  id='pool-expected-git-exec-config-r28'
+  rec=$(make_case expected-git-exec-config "$id")
+  read_case_record "$rec"
+  marker="$CASE_DIR/git-config-executed"
+  hook="$CASE_DIR/fsmonitor-hook"
+  receipt="$CASE_DIR/guard.receipt"
+  global_config="$CASE_DIR/global.gitconfig"
+  system_config="$CASE_DIR/system.gitconfig"
+  real_git=$(type -P git)
+  candidate=$(git -C "$POOL_DIR" rev-parse HEAD)
+  cat >"$hook" <<EOF
+#!/bin/sh
+: >'$marker'
+printf 'builtin:fixture\n'
+EOF
+  chmod +x "$hook"
+  git -C "$POOL_DIR" config core.fsmonitor "$hook"
+  git config --file "$global_config" core.fsmonitor "$hook"
+  git config --file "$system_config" core.fsmonitor "$hook"
+  rm -f "$marker"
+
+  output=$(GIT_CONFIG_GLOBAL="$global_config" GIT_CONFIG_SYSTEM="$system_config" \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0="$hook" \
+    GIT_EXTERNAL_DIFF="$hook" GIT_PAGER="$hook" \
+    "$ROOT/bin/fm-exact-head-launch-guard.sh" \
+      "$POOL_DIR" "$candidate" "$receipt" "$real_git" 2>&1)
+  status=$?
+  expect_code 0 "$status" "exact-head guard should neutralize execution-capable Git config"$'\n'"$output"
+  [ ! -e "$marker" ] || fail "exact-head custody Git executed an ambient or repository-local helper"
+  assert_grep 'status=verified' "$receipt" \
+    "exact-head guard did not produce an honest verified receipt"
+  assert_grep 'reason=clean' "$receipt" \
+    "exact-head guard did not report the clean immutable candidate"
+  pass "exact-head custody Git neutralizes execution-capable ambient and local configuration"
+}
+
+test_expected_head_freezes_worker_environment_and_provider_binary() {
+  local harness rec id evidence daemon_marker daemon_home daemon_bin daemon_env out status expected_home expected_fm_home
+  for harness in claude codex; do
+    id="pool-expected-pane-env-$harness-r28"
+    rec=$(make_case "expected-pane-env-$harness" "$id")
+    read_case_record "$rec"
+    evidence="$CASE_DIR/worker-env"
+    daemon_marker="$CASE_DIR/daemon-provider-ran"
+    daemon_home="$CASE_DIR/daemon-home"
+    daemon_bin="$CASE_DIR/daemon-bin"
+    daemon_env="$CASE_DIR/daemon-env"
+    mkdir -p "$daemon_home" "$daemon_bin"
+    cat >"$FAKEBIN_DIR/$harness" <<EOF
+#!/bin/sh
+{
+  printf 'binary=pinned\n'
+  printf 'HOME=%s\n' "\${HOME-unset}"
+  printf 'FM_HOME=%s\n' "\${FM_HOME-unset}"
+  printf 'OPENAI_API_KEY=%s\n' "\${OPENAI_API_KEY-unset}"
+  printf 'ANTHROPIC_API_KEY=%s\n' "\${ANTHROPIC_API_KEY-unset}"
+  printf 'CODEX_API_KEY=%s\n' "\${CODEX_API_KEY-unset}"
+  printf 'CODEX_ACCESS_TOKEN=%s\n' "\${CODEX_ACCESS_TOKEN-unset}"
+  printf 'OPENAI_BASE_URL=%s\n' "\${OPENAI_BASE_URL-unset}"
+} >'$evidence'
+EOF
+    chmod +x "$FAKEBIN_DIR/$harness"
+    cat >"$daemon_bin/$harness" <<EOF
+#!/bin/sh
+: >'$daemon_marker'
+exit 0
+EOF
+    chmod +x "$daemon_bin/$harness"
+    cat >"$daemon_env" <<EOF
+#!/bin/sh
+exec /usr/bin/env HOME='$daemon_home' PATH='$daemon_bin:/usr/bin:/bin' \
+  OPENAI_API_KEY=daemon-openai ANTHROPIC_API_KEY=daemon-anthropic \
+  CODEX_API_KEY=daemon-codex CODEX_ACCESS_TOKEN=daemon-access \
+  OPENAI_BASE_URL=https://daemon.invalid "\$@"
+EOF
+    chmod +x "$daemon_env"
+
+    out=$(OPENAI_API_KEY=parent-openai ANTHROPIC_API_KEY=parent-anthropic \
+      CODEX_API_KEY=parent-codex CODEX_ACCESS_TOKEN=parent-access \
+      OPENAI_BASE_URL=https://parent.invalid \
+      FM_FAKE_PENDING_LAUNCH="$CASE_DIR/pending-launch" FM_FAKE_EXECUTE_LAUNCH=1 \
+      FM_FAKE_PANE_ENV_COMMAND="$daemon_env" \
+      run_spawn "$id" --mode no-mistakes --yolo off --harness "$harness" \
+        --expected-head "$INITIAL_SHA")
+    status=$?
+    expect_code 0 "$status" "$harness exact-head launch should freeze its worker environment"$'\n'"$out"
+    [ -f "$evidence" ] || fail "$harness pinned provider binary did not run"
+    [ ! -e "$daemon_marker" ] || fail "$harness launch used the daemon-selected provider binary"
+    expected_home=$(cd "$HOME_DIR/user-home" && pwd -P)
+    expected_fm_home=$(cd "$HOME_DIR" && pwd -P)
+    assert_grep 'binary=pinned' "$evidence" "$harness launch did not use the pre-resolved provider binary"
+    assert_grep "HOME=$expected_home" "$evidence" "$harness launch inherited daemon HOME"
+    assert_grep "FM_HOME=$expected_fm_home" "$evidence" "$harness launch lost the approved Firstmate home"
+    for env_name in OPENAI_API_KEY ANTHROPIC_API_KEY CODEX_API_KEY CODEX_ACCESS_TOKEN OPENAI_BASE_URL; do
+      assert_grep "$env_name=unset" "$evidence" "$harness launch inherited $env_name"
+    done
+  done
+  pass "Claude and Codex exact-head launches pin provider binaries and reject pane-daemon environment drift"
+}
+
 test_expected_head_refuses_unsupported_lifecycle_shapes() {
   local rec id out status
   id='pool-expected-shapes-r1'
@@ -635,9 +737,8 @@ test_expected_head_worker_boundary_rejects_final_coordinate_race() {
   cat >"$FAKEBIN_DIR/git" <<EOF
 #!/usr/bin/env bash
 set -eu
-if [ -e '$pending' ] && [ "\${3:-}" = rev-parse ] &&
-  [ "\${4:-}" = --verify ] && [ "\${5:-}" = --quiet ] &&
-  [ "\${6:-}" = HEAD ] && [ ! -e '$race_marker' ]; then
+if [ -e '$pending' ] && [ ! -e '$race_marker' ]; then
+  case " \$* " in *' rev-parse --verify --quiet HEAD '*) ;; *) exec '$real_git' "\$@" ;; esac
   '$real_git' "\$@"
   staged=\$(cat '$pending')
   printf '%s.receipt\n' "\$staged" >'$receipt_path'
@@ -701,9 +802,8 @@ test_expected_head_worker_boundary_rejects_second_scan_checkout() {
     cat >"$FAKEBIN_DIR/git" <<EOF
 #!/usr/bin/env bash
 set -eu
-if [ -e '$pending' ] && [ "\${3:-}" = rev-parse ] &&
-  [ "\${4:-}" = --verify ] && [ "\${5:-}" = --quiet ] &&
-  [ "\${6:-}" = HEAD ]; then
+if [ -e '$pending' ]; then
+  case " \$* " in *' rev-parse --verify --quiet HEAD '*) ;; *) exec '$real_git' "\$@" ;; esac
   count=0
   [ ! -e '$counter' ] || count=\$(cat '$counter')
   count=\$((count + 1))
@@ -1559,6 +1659,8 @@ test_expected_head_refuses_non_origin_commit_and_invalid_input
 test_expected_head_ignores_ambient_git_redirection
 test_expected_head_ignores_ambient_git_namespace
 test_expected_head_ignores_ambient_git_config_overrides
+test_expected_head_guard_neutralizes_execution_capable_git_config
+test_expected_head_freezes_worker_environment_and_provider_binary
 test_expected_head_refuses_unsupported_lifecycle_shapes
 test_expected_head_is_reverified_immediately_before_launch
 test_expected_head_worker_boundary_rejects_final_coordinate_race

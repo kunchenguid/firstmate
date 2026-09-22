@@ -102,6 +102,8 @@ fm_test_fake_gh_axi() {
 # start in FM_FAKE_WORKER_START_LOG, while C-c clears it without starting.
 # FM_FAKE_ENTER_KEY_FAIL makes Enter fail while leaving the staged input intact.
 # FM_FAKE_EXECUTE_LAUNCH runs that staged launch on Enter in the fake pane path.
+# FM_FAKE_PANE_ENV_COMMAND optionally names an executable test shim that receives
+# `/bin/sh <staged>` and models a long-lived pane daemon's inherited environment.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
@@ -174,7 +176,11 @@ case "${1:-}" in
             if [ -e "$FM_FAKE_PENDING_LAUNCH" ]; then
               if [ "${FM_FAKE_EXECUTE_LAUNCH:-0}" = 1 ]; then
                 staged=$(cat "$FM_FAKE_PENDING_LAUNCH")
-                (cd "${FM_FAKE_PANE_PATH:?}" && env -u GIT_NO_REPLACE_OBJECTS /bin/sh "$staged")
+                if [ -n "${FM_FAKE_PANE_ENV_COMMAND:-}" ]; then
+                  (cd "${FM_FAKE_PANE_PATH:?}" && "$FM_FAKE_PANE_ENV_COMMAND" /bin/sh "$staged")
+                else
+                  (cd "${FM_FAKE_PANE_PATH:?}" && env -u GIT_NO_REPLACE_OBJECTS /bin/sh "$staged")
+                fi
               else
                 printf 'started\n' >> "${FM_FAKE_WORKER_START_LOG:?}"
               fi

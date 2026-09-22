@@ -399,6 +399,8 @@ The text is static and never executed or expanded; secondmate charters never tak
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
 With no file, ambient inheritance remains unfiltered: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
 Do not assume every worker inherits the invoking Firstmate process's current environment.
+An exact-head launch is the deliberate exception: it always starts the guard and worker through a cleared environment containing literal values captured from the authorizing Firstmate process, including the explicit `FM_HOME` and task values, while API-key and provider-endpoint variables are omitted.
+Git and the Claude or Codex provider executable are resolved to absolute paths before the command is staged, so a long-lived pane daemon cannot substitute its own `HOME`, `PATH`, credentials, or provider binary at the reviewed-candidate boundary.
 The file is inherited into secondmate homes through the [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md).
 Changes apply to subsequent launches; existing processes keep their environment.
 
@@ -438,7 +440,7 @@ Verify the selected provider login and Git transport after opting in; Firstmate 
 Raw launch commands run under noninteractive POSIX `sh` with this option and must use compatible syntax.
 The filter runs at the worker command boundary, after the terminal daemon and pane shell have started; it does not scrub either of those processes.
 This is not a sandbox: it cannot revoke same-user access to credential files, prevent tools or later shells from loading credentials again, or isolate processes from the same user's other processes.
-Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
+Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh), including adversarial exact-head pane environments in [`tests/fm-spawn-pool-base-freshen.test.sh`](../tests/fm-spawn-pool-base-freshen.test.sh).
 
 Every crewmate, scout, and secondmate Firstmate launches starts with `COMPACT_ADVISER_DISABLE=1` in its environment, on a fresh spawn and on a relaunch alike, so an unattended session never activates the compact adviser.
 This guarantee also covers raw launch commands, remote secondmates, and launches filtered by `config/launch-env-allowlist`; it does not depend on the destination environment already containing the variable.
