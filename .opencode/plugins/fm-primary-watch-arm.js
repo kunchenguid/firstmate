@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
 
@@ -90,11 +90,58 @@ function effectivePaths(root) {
   return { root: fmRoot, home: fmHome, state, config };
 }
 
+function samePath(a, b) {
+  return resolvePath(a) === resolvePath(b);
+}
+
+// Classify the secondmate-home marker at <root>: "valid" for the genuine seeded
+// marker, "invalid" when a marker path exists but is not one, and "absent" when
+// there is no marker at all. The validity rule mirrors
+// bin/fm-primary-scope-lib.sh fm_root_is_secondmate_home: a regular non-symlink
+// file whose whitespace-stripped first line is a non-empty identifier of only
+// [A-Za-z0-9._-].
+function secondmateMarkerState(root) {
+  const marker = `${root}/.fm-secondmate-home`;
+  let stats;
+  try {
+    stats = lstatSync(marker);
+  } catch {
+    return "absent";
+  }
+  if (stats.isSymbolicLink() || !stats.isFile()) return "invalid";
+  let id;
+  try {
+    id = readFileSync(marker, "utf8").split("\n", 1)[0].replace(/[ \t\r\f\v]+/g, "");
+  } catch {
+    return "invalid";
+  }
+  if (!id || !/^[A-Za-z0-9._-]+$/.test(id)) return "invalid";
+  return "valid";
+}
+
 async function isPrimaryRoot(root, home) {
   if (!root) return false;
   if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`)) return false;
-  if (existsSync(`${root}/.fm-secondmate-home`)) return false;
-  if (home && home !== root && existsSync(`${home}/.fm-secondmate-home`)) return false;
+
+  const marker = secondmateMarkerState(root);
+  if (marker === "invalid") return false;
+  if (marker === "valid") {
+    // A genuine secondmate home is armable only when the harness actually
+    // declares the root as this session's home. A pooled crewmate/scout
+    // worktree can inherit a stale marker from its treehouse slot while its
+    // FM_HOME (or FM_ROOT_OVERRIDE) still names the supervising home, and a
+    // pane with no declared home at all must stay inert - so the mere fallback
+    // of paths.home to root is not enough.
+    const declaredHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || "";
+    return declaredHome !== "" && samePath(root, home);
+  }
+
+  // No marker at the root: keep the pre-existing exclusion when the effective
+  // home differs from the root and is itself a marked secondmate home.
+  if (home && !samePath(root, home) && secondmateMarkerState(home) === "valid") return false;
+
+  // A plain checkout is primary; a linked task worktree (git-dir differs from
+  // git-common-dir) is never armable.
   const gitDir = await runProcess("git", ["-C", root, "rev-parse", "--git-dir"]);
   const commonDir = await runProcess("git", ["-C", root, "rev-parse", "--git-common-dir"]);
   if (gitDir.code !== 0 || commonDir.code !== 0) return false;
