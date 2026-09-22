@@ -125,7 +125,14 @@ case "$*" in
   'pr view '*headRefOid,reviewDecision*)
     jq -n --arg head "$(cat "$FORGE/head")" '{headRefOid:$head,reviewDecision:"APPROVED"}' ;;
   'pr view '*headRefOid*) cat "$FORGE/head" ;;
-  'pr view '*state*) printf 'OPEN\n' ;;
+  'pr view '*state*)
+    # A quiet checkpoint armed with quiet_checkpoint_clock ends its watcher at
+    # the merge poll: checks sweep in name order, so contributions finished.
+    if [ -f "$FORGE/quiet-watcher" ]; then
+      touch "$FORGE/quiet-swept"
+      kill -TERM "$(cat "$FORGE/quiet-watcher")"
+    fi
+    printf 'OPEN\n' ;;
   'api repos/o/r/pulls/8')
     jq -n --arg head "$(cat "$FORGE/head")" --arg state "$(cat "$FORGE/state" 2>/dev/null || printf open)" \
       --argjson draft "$(cat "$FORGE/draft")" --slurpfile requested "$FORGE/requested.json" --slurpfile teams "$FORGE/teams.json" '
@@ -310,16 +317,47 @@ test_existing_review_request_is_baseline() { # first|legacy
 test_first_observation_review_request_is_baseline() { test_existing_review_request_is_baseline first; }
 test_legacy_observation_review_request_is_baseline() { test_existing_review_request_is_baseline legacy; }
 
+# A contribution poll still running when a checkpoint's timer fires can outlive
+# the watcher and queue a wake that no later watcher surfaces. This stand-in for
+# timeout(1) makes a quiet checkpoint end at a known point instead: the fake
+# forge stops the watcher once its sweep reaches the merge poll, and the
+# stand-in reports that as the ordinary quiet expiry (124). The real timeout
+# still wraps the watcher's own checks and bounds a watcher that never gets there.
+quiet_checkpoint_clock() {
+  local home=$1 real
+  real=$(command -v timeout) || fail 'timeout(1) is required'
+  mkdir -p "$home/quietbin"
+  cat > "$home/quietbin/timeout" <<SH
+#!/usr/bin/env bash
+case "\${2:-}" in */fm-watch.sh) ;; *) exec $(printf '%q' "$real") "\$@" ;; esac
+seconds=\$1
+shift
+sh -c 'printf "%s\n" "\$\$" > "\$FORGE/quiet-watcher"; exec "\$@"' sh $(printf '%q' "$real") "\$seconds" "\$@" &
+rc=0
+wait "\$!" || rc=\$?
+rm -f "\$FORGE/quiet-watcher"
+if [ -e "\$FORGE/quiet-swept" ]; then
+  rm -f "\$FORGE/quiet-swept"
+  exit 124
+fi
+echo 'quiet checkpoint: the watcher never reached the merge poll' >&2
+[ "\$rc" -ne 124 ] || rc=125
+exit "\$rc"
+SH
+  chmod +x "$home/quietbin/timeout"
+}
+
 test_watcher_surfaces_pull_movement_once() {
   local home out rc
   home=$(new_home watcher-movement)
   forge_home "$home"
+  quiet_checkpoint_clock "$home"
   with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
     || fail 'could not register delivery for watcher movement'
   rc=0
-  with_home "$home" env FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$home/watcher-quiet.out" 2> "$home/watcher-quiet.err" || rc=$?
-  [ "$rc" -eq 124 ] || fail "an unchanged pull request woke the watcher: $(cat "$home/watcher-quiet.out")"
+  with_home "$home" env PATH="$home/quietbin:$home/fakebin:$PATH" FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 60 > "$home/watcher-quiet.out" 2> "$home/watcher-quiet.err" || rc=$?
+  [ "$rc" -eq 124 ] || fail "an unchanged pull request woke the watcher: $(cat "$home/watcher-quiet.out" "$home/watcher-quiet.err")"
   [ "$(queued_wakes "$home")" = 0 ] || fail 'an unchanged pull request queued a durable wake'
   printf '%s\n' "$HEAD_B" > "$home/forge/head"
   out="$home/watcher.out"
@@ -327,7 +365,7 @@ test_watcher_surfaces_pull_movement_once() {
   # A successor continues the quiet watcher's poll loop rather than announcing
   # the checkpoint's own restart.
   with_home "$home" env FM_WATCH_HANDLING_SUCCESSOR=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 5 > "$out" 2> "$home/watcher.err" || rc=$?
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 30 > "$out" 2> "$home/watcher.err" || rc=$?
   [ "$rc" -eq 0 ] || fail "watcher did not surface the replaced head: $(cat "$home/watcher.err")"
   grep -E '^check: contributions delivery [0-9a-f]{64}$' "$out" >/dev/null \
     || fail "watcher did not surface the durable movement wake: $(cat "$out")"
