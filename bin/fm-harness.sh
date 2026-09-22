@@ -19,6 +19,17 @@
 #                                        codex-native/<id>. Other efforts retain
 #                                        their adapter's existing policy. Native
 #                                        Codex validates model support at startup.
+#        fm-harness.sh codex-max-models  print a compact JSON array of the Codex model
+#                                        slugs whose installed catalog entry at
+#                                        ${CODEX_HOME:-~/.codex}/models_cache.json lists
+#                                        max in supported_reasoning_levels[].effort.
+#                                        Exit 1 with an error on stderr and nothing on
+#                                        stdout when the catalog is absent, unreadable,
+#                                        malformed, or jq is missing; callers then treat
+#                                        max as unadvertised for every model. This is the
+#                                        single catalog read behind Codex max validation
+#                                        (fm-dispatch-resolve.sh, fm-bootstrap.sh) and
+#                                        the max launch flag (fm-spawn.sh).
 #        fm-harness.sh ancestry [<pid>] print "<strength> <harness>" for the nearest
 #                                        harness process at or above <pid> (default this
 #                                        process), or nothing when the walk finds none.
@@ -496,8 +507,24 @@ validate_native_effort() {
   return 1
 }
 
+codex_max_models() {
+  local catalog="${CODEX_HOME:-${HOME:-}/.codex}/models_cache.json" out
+  command -v jq >/dev/null 2>&1 || { echo "error: jq required to read the Codex model catalog" >&2; return 1; }
+  [ -f "$catalog" ] && [ -r "$catalog" ] || { echo "error: Codex model catalog not readable: $catalog" >&2; return 1; }
+  out=$(jq -ec '
+    if type == "object" and (.models | type) == "array" then
+      [.models[]
+        | select(type == "object" and (.slug | type) == "string")
+        | select(any(.supported_reasoning_levels[]?; type == "object" and .effort == "max"))
+        | .slug]
+    else error("no models array") end' "$catalog" 2>/dev/null) \
+    || { echo "error: Codex model catalog is malformed: $catalog" >&2; return 1; }
+  printf '%s\n' "$out"
+}
+
 case "${1:-}" in
   validate-native-effort) shift; validate_native_effort "$@" ;;
+  codex-max-models) codex_max_models ;;
   ancestry)
     case "${2:-}" in
       ''|*[!0-9]*) [ -z "${2:-}" ] || { echo "error: ancestry takes a numeric pid" >&2; exit 2; } ;;

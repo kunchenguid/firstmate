@@ -71,6 +71,19 @@ cat > "$BASE_RULES" <<'JSON'
 JSON
 cp "$BASE_RULES" "$RULES"
 
+# Codex max validation reads the installed catalog; pin a fixture so the
+# developer's real ~/.codex never decides a verdict.
+CODEX_FIXTURE="$TMP_ROOT/codex-home"
+mkdir -p "$CODEX_FIXTURE"
+cat > "$CODEX_FIXTURE/models_cache.json" <<'JSON'
+{"models":[
+  {"slug":"gpt-6-sol","supported_reasoning_levels":[{"effort":"xhigh"},{"effort":"max"},{"effort":"ultra"}]},
+  {"slug":"gpt-5.6-terra","supported_reasoning_levels":[{"effort":"xhigh"},{"effort":"max"}]},
+  {"slug":"gpt-5.5","supported_reasoning_levels":[{"effort":"xhigh"}]}
+]}
+JSON
+export CODEX_HOME="$CODEX_FIXTURE"
+
 write_quota() {  # <path> <cursor spendPriority> [<claude all_models spendPriority>]
   local path=$1 cursor=$2 claude=${3:--0.4627}
   cat > "$path" <<JSON
@@ -749,6 +762,31 @@ for bad in \
   assert_contains "$err" "malformed rules file: $RULES - ${bad#*|}" "malformed rules are named: ${bad#*|}"
 done
 assert_absent "$LOG/argv" "configuration errors never reach the network"
+for bad in \
+  '{"rules":[{"when":"x","use":{"harness":"codex","model":"gpt-5.5","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
+  '{"rules":[{"when":"x","use":{"harness":"codex","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"codex","model":"gpt-5.5","effort":"max"}}|each default profile effort must be supported by its harness and model'; do
+  printf '%s\n' "${bad%%|*}" > "$RULES"
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 2 "$code" "codex max without catalog support exits 2: ${bad%%|*}"
+  assert_contains "$err" "malformed rules file: $RULES - ${bad#*|}" "codex max without catalog support is named: ${bad%%|*}"
+done
+for model in gpt-6-sol gpt-5.6-terra; do
+  jq --arg m "$model" '.rules[3].use = {"harness":"codex","model":$m,"effort":"max"} | .default = [{"harness":"codex","model":$m,"effort":"max"}]' "$BASE_RULES" > "$RULES"
+  reset_log
+  write_response "$RESPONSE" rule_4 0.9
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 0 "$code" "codex max for catalog-advertised $model is accepted"
+  assert_not_contains "$err" 'malformed rules file' "codex max for $model passes rules validation"
+  assert_contains "$out" "  profile: --harness 'codex' --model '$model' --effort 'max'" "codex max for $model resolves to its profile"
+done
+printf '%s\n' '{"rules":[{"when":"x","use":{"harness":"codex","model":"gpt-6-sol","effort":"max"}}]}' > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY CODEX_HOME="$TMP_ROOT/no-codex-home" run code out err "$BRIEF"
+expect_code 2 "$code" "codex max without a readable catalog exits 2"
+assert_contains "$err" "malformed rules file: $RULES - each use profile effort must be supported by its harness and model" "codex max without a readable catalog is refused"
+assert_absent "$LOG/argv" "catalog-refused codex max never reaches the network"
+pass "codex max follows the installed catalog: advertised models resolve, others and an unreadable catalog are refused"
 cp "$BASE_RULES" "$RULES"
 for removed in --json --rules --quota; do
   TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" "$removed"
