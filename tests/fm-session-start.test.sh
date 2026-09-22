@@ -687,7 +687,7 @@ install_pi_watch_extension_fixture() {
 write_pi_watch_loaded_marker() {
   local home=$1 root=$2 pid=$3 version
   version=$(hash_file_for_test "$root/.pi/extensions/fm-primary-pi-watch.ts")
-  printf '%s\n%s\n' "$version" "$pid" > "$home/state/.pi-watch-extension-loaded"
+  printf '%s\n%s\ngeneration=1 phase=active\n' "$version" "$pid" > "$home/state/.pi-watch-extension-loaded"
 }
 
 write_pi_turnend_loaded_marker() {
@@ -2548,6 +2548,35 @@ EOF
   pass "session start rejects stale Pi loaded markers"
 }
 
+test_pi_diagnostic_rejects_handoff_generation_marker() {
+  local rec root home fakebin out marker holder_pid
+  rec=$(new_world pi-handoff-generation-marker)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+
+  sleep 300 &
+  holder_pid=$!
+  make_fake_ps_pi_holder "$fakebin" "$holder_pid"
+  install_pi_turnend_extension_fixture "$root"
+  install_pi_watch_extension_fixture "$root"
+  write_pi_loaded_markers "$home" "$root" "$holder_pid"
+  marker="$home/state/.pi-watch-extension-loaded"
+  head -n 2 "$marker" > "$marker.tmp"
+  printf 'generation=1 phase=handoff\n' >> "$marker.tmp"
+  mv "$marker.tmp" "$marker"
+
+  out=$(FM_FAKE_HARNESS=pi run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  kill "$holder_pid" 2>/dev/null || true
+  wait "$holder_pid" 2>/dev/null || true
+
+  assert_contains "$out" "PI_WATCH_EXTENSION: not loaded" \
+    "pi diagnostic trusted a handoff marker left by an absent replacement extension"
+
+  pass "session start rejects a Pi watcher generation left in handoff"
+}
+
 test_pi_diagnostic_accepts_prelock_loaded_marker() {
   local rec root home fakebin out holder_pid
   rec=$(new_world pi-prelock-loaded-marker)
@@ -2709,6 +2738,7 @@ test_next_step_afk_legacy_empty_flag_defaults_away
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker
+test_pi_diagnostic_rejects_handoff_generation_marker
 test_pi_diagnostic_accepts_prelock_loaded_marker
 test_omp_supervision_block_and_diagnostic
 test_omp_diagnostic_accepts_prelock_loaded_marker

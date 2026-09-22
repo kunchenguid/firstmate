@@ -1,7 +1,7 @@
 // Firstmate primary watcher bridge for omp (Oh My Pi).
 //
 // A port of .pi/extensions/fm-primary-pi-watch.ts for the omp fork. The arm,
-// successor, retry, and replacement-handoff logic is the Pi contract verbatim;
+// successor, retry, and replacement-handoff logic follows the Pi contract;
 // the omp-specific differences are stated once here:
 //   - omp auto-discovers this file from <cwd>/.omp/extensions with no trust
 //     gate, so an omp primary or secondmate started inside its home loads it
@@ -14,6 +14,10 @@
 //     session_start, in this process or a later one, replays it. Replaying a
 //     wake main has already drained is harmless (the queue is durable and the
 //     drain is idempotent); losing one across /new is not.
+//   - Replacement shutdown retires the established predecessor arm before the
+//     successor arms; unlike Pi, it is not retained until a distinct active
+//     successor generation commits its own arm, so omp keeps the plain
+//     teardown-and-rearm replacement shape.
 //   - The Pi supervision branch is out of scope for omp: every actionable wake
 //     is delivered to main, so no branch offer is made and no calm presentation
 //     hooks exist.

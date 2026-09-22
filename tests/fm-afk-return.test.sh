@@ -652,6 +652,51 @@ test_unreadable_status_file_keeps_catchup_gated() {
   pass "an unreadable status stays private and gates until a successful reread"
 }
 
+test_statusless_leftover_record_keeps_catchup_gated_until_cleanup() {
+  local dir out rc gate
+  dir="$TMP_ROOT/statusless-leftover"
+  install_runner "$dir"
+  gate="$dir/home/state/.afk-return-catchup"
+  # A long-merged leftover: no window, no spawn_gen, no status file. The
+  # catch-up gate must keep refusing while that record exists, matching the
+  # proven path where writing a readable status file lets return proceed.
+  printf 'kind=ship\npr=https://github.com/example/repo/pull/1\n' \
+    > "$dir/home/state/leftover.meta"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a leftover without a status file should keep catch-up gated (rc=$rc): $out"
+  [ -f "$gate" ] || fail "a leftover without a status file did not retain the return gate"
+  assert_contains "$out" "status file unreadable: $dir/home/state/leftover.status; catch-up stays gated" \
+    "the gate did not name the missing leftover status"
+  assert_contains "$out" 'catch-up must finish before the captain request' \
+    "the visible return block did not name the catch-up gate"
+
+  : > "$dir/home/state/leftover.status"
+  out=$(run_return "$dir" check) || fail "catch-up did not clear after the leftover gained a readable status: $out"
+  assert_contains "$out" 'catch-up clear' "the readable leftover status did not clear catch-up"
+  [ ! -e "$gate" ] || fail "the readable leftover status left the return gate behind"
+  pass "a status-file-less leftover record gates return; a readable status on that same record is the proven path that passes"
+}
+
+test_statusful_leftover_record_lets_catchup_clear() {
+  local dir out
+  dir="$TMP_ROOT/statusful-leftover"
+  install_runner "$dir"
+  printf 'kind=ship\npr=https://github.com/example/repo/pull/1\n' \
+    > "$dir/home/state/leftover.meta"
+  : > "$dir/home/state/leftover.status"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "a leftover with a readable status gated return: $out"
+  assert_contains "$out" 'catch-up clear' "a leftover with a readable status did not let ordinary work proceed"
+  [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "a leftover with a readable status left the return gate behind"
+  pass "a leftover record with a readable status file lets return catch-up clear"
+}
+
 test_return_guard_refuses_while_the_record_exists() {
   local dir out rc
   dir="$TMP_ROOT/guard-record"
@@ -810,6 +855,8 @@ test_missing_epoch_record_stays_required_after_disappearing
 test_unreadable_outcome_store_keeps_catchup_gated
 test_failed_held_listing_keeps_catchup_gated
 test_unreadable_status_file_keeps_catchup_gated
+test_statusless_leftover_record_keeps_catchup_gated_until_cleanup
+test_statusful_leftover_record_lets_catchup_clear
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap

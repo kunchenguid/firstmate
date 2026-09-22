@@ -55,8 +55,10 @@
 #                              background job and record that no terminal exists.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
-#                              wait for it, close the recorded terminal by exact
-#                              id, clear state/.afk, then archive the record last.
+#                              wait for it, close a recorded non-native terminal
+#                              by exact id, clear state/.afk, then archive the
+#                              record last. A Pi or native entry that never
+#                              launched a daemon reports that none was running.
 #   fm-afk-launch.sh reconcile Close a recorded-but-dead daemon terminal by exact
 #                              id and drop the record (recovery after a crash).
 #
@@ -655,7 +657,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result archived
+  local pid pid_identity current_identity result=0 read_result archived closed_daemon_terminal=0
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -691,9 +693,15 @@ fm_afk_launch_stop() {
       return 1
     fi
   fi
-  # (2) Close the daemon's own terminal by exact id.
+  # (2) Close the daemon's own terminal by exact id. A native/none record or
+  # an absent record means no terminal existed for this entry (Pi never
+  # launches one).
   if [ "$read_result" -eq 0 ]; then
+    if [ "$FM_AFK_REC_BACKEND" != none ]; then
+      closed_daemon_terminal=1
+    fi
     fm_afk_launch_close_recorded || result=1
+    [ "$result" -eq 0 ] || closed_daemon_terminal=0
   fi
   # (3) Clear the away-mode flag, then (4) archive the posture record LAST so the
   # posture ends only once every daemon-side artifact is down.
@@ -710,7 +718,11 @@ fm_afk_launch_stop() {
     fi
   fi
   if [ "$result" -eq 0 ]; then
-    fm_afk_launch_log "away mode stopped; daemon terminal torn down, .afk cleared, and the posture record archived"
+    if [ "$closed_daemon_terminal" -eq 1 ]; then
+      fm_afk_launch_log "away mode stopped; daemon terminal torn down, .afk cleared, and the posture record archived"
+    else
+      fm_afk_launch_log "away mode stopped; no daemon terminal was running, .afk cleared, and the posture record archived"
+    fi
   else
     fm_afk_launch_log "away mode stopped; terminal teardown or the record archive remains recorded for retry"
   fi

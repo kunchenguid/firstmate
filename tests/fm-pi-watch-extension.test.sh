@@ -425,6 +425,90 @@ EOF
   pass "Pi actionable close starts one successor before wake delivery settles"
 }
 
+# The arm child can publish its complete actionable line before its process
+# closes while the watcher finishes durable cleanup. The still-open predecessor
+# must never be mistaken for the successor merely because its readiness promise
+# already settled.
+test_pi_actionable_output_waits_for_predecessor_close() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-actionable-before-close-root"
+  home="$TMP_ROOT/pi-actionable-before-close-home"
+  log="$TMP_ROOT/pi-actionable-before-close.log"
+  stop="$TMP_ROOT/pi-actionable-before-close.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'handling-confirmed\n' >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=before-close-%s\n' "$$" "$count"
+if [ "$count" -eq 1 ]; then
+  printf 'actionable-emitted\n' >> "$FM_ARM_LOG"
+  printf 'signal: actionable output before predecessor close\n'
+  sleep 0.5
+  printf 'predecessor-closed\n' >> "$FM_ARM_LOG"
+  exit 0
+fi
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const failNow = (message) => {
+  console.error(message);
+  process.exit(1);
+};
+let tool = null;
+const prompts = [];
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+    writeFileSync(process.env.FM_ARM_LOG, "delivery\n", { flag: "a" });
+  },
+  events: { on() {}, emit() {} },
+};
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("initial-arm", {}, undefined, undefined, {});
+await new Promise((resolve) => setTimeout(resolve, 1200));
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+const armIndexes = rows.map((row, index) => row.startsWith("arm=") ? index : -1).filter((index) => index >= 0);
+const closeIndex = rows.indexOf("predecessor-closed");
+const deliveryIndex = rows.indexOf("delivery");
+if (armIndexes.length !== 2) failNow(`expected a successor after the predecessor close: ${rows.join(" | ")}`);
+if (closeIndex < 0 || deliveryIndex < 0) failNow(`missing close or delivery evidence: ${rows.join(" | ")}`);
+if (armIndexes[1] < closeIndex) failNow(`successor started before predecessor close: ${rows.join(" | ")}`);
+if (deliveryIndex < armIndexes[1]) failNow(`wake was delivered before successor startup: ${rows.join(" | ")}`);
+if (prompts.length !== 1 || !prompts[0].includes("signal: actionable output before predecessor close")) {
+  failNow(`wrong actionable wake: ${prompts.join(" | ")}`);
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi actionable output must wait for predecessor close before successor restoration"
+  [ -z "$out" ] || fail "Pi actionable-before-close test printed output: $out"
+  pass "Pi actionable output waits for predecessor close before successor restoration"
+}
+
 test_pi_branch_offer_owns_actionable_wake() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-branch-offer-root"
@@ -2068,18 +2152,31 @@ EOF
 }
 
 test_pi_session_transition_generation_owner() {
-  local repo home plugin child_pid_file child_marker_file marker_root arm_log out status
+  local repo home plugin child_pid_file child_marker_file marker_root arm_log fail_once out status
   repo="$TMP_ROOT/pi-session-transition-root"
   home="$TMP_ROOT/pi-session-transition-home"
   child_pid_file="$TMP_ROOT/pi-session-transition-child.pid"
   child_marker_file="$TMP_ROOT/pi-session-transition-child.marker"
   marker_root="$TMP_ROOT/pi-session-transition-markers"
   arm_log="$TMP_ROOT/pi-session-transition-arm.log"
+  fail_once="$TMP_ROOT/pi-session-transition-fail-once"
   mkdir -p "$repo/bin" "$home/state" "$home/config" "$marker_root"
   install_pi_watch_extension_fixture "$repo"
   plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
   cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
 #!/usr/bin/env bash
+# Model the real --restart arm taking over from the still-live replacement
+# predecessor only after this successor process has been committed.
+previous=$(cat "${FM_CHILD_PID_FILE:?}" 2>/dev/null || true)
+if [ -n "$previous" ] && kill -0 "$previous" 2>/dev/null; then
+  kill -TERM "$previous" 2>/dev/null || true
+fi
+if [ -f "${FM_FAIL_ONCE:?}" ]; then
+  rm -f "$FM_FAIL_ONCE"
+  printf 'failed-replacement-attempt\n' >> "${FM_ARM_LOG:?}"
+  printf 'watcher: FAILED - simulated replacement launch failure\n' >&2
+  exit 7
+fi
 # The marker identifies this exact process lifetime after its PID is recycled.
 marker=$(mktemp "${FM_MARKER_ROOT:?}/arm.XXXXXX") || exit 1
 cleanup() { rm -f "$marker"; }
@@ -2092,7 +2189,7 @@ printf 'arm pid=%s marker=%s\n' "$$" "$marker" >> "${FM_ARM_LOG:?}"
 while :; do sleep 0.2; done
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
-  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CHILD_PID_FILE="$child_pid_file" FM_CHILD_MARKER_FILE="$child_marker_file" FM_MARKER_ROOT="$marker_root" FM_ARM_LOG="$arm_log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_CHILD_PID_FILE="$child_pid_file" FM_CHILD_MARKER_FILE="$child_marker_file" FM_MARKER_ROOT="$marker_root" FM_ARM_LOG="$arm_log" FM_FAIL_ONCE="$fail_once" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
@@ -2141,6 +2238,15 @@ function currentArm() {
   }
 }
 
+function extensionOwner() {
+  const path = `${process.env.FM_HOME}/state/.pi-watch-extension-loaded`;
+  try {
+    return readFileSync(path, "utf8").trim().split("\n")[2] ?? "";
+  } catch {
+    return "";
+  }
+}
+
 function liveArmPids() {
   if (!existsSync(process.env.FM_ARM_LOG)) return [];
   return readFileSync(process.env.FM_ARM_LOG, "utf8")
@@ -2155,11 +2261,14 @@ function liveArmPids() {
     .map((arm) => arm.pid);
 }
 
-writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 
 const startup = makePi();
 mod.default(startup.pi);
+if (!/^generation=[1-9][0-9]* phase=active$/.test(extensionOwner())) {
+  throw new Error(`extension bind did not publish its pre-lock active generation: ${extensionOwner()}`);
+}
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await startup.handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, {});
 await waitFor(() => {
   const arm = currentArm();
@@ -2167,13 +2276,22 @@ await waitFor(() => {
 }, "startup child");
 const { pid: startupChild, marker: startupMarker } = currentArm();
 if (!pidAlive(startupChild)) throw new Error("startup child was not alive");
+if (!/^generation=[1-9][0-9]* phase=active$/.test(extensionOwner())) {
+  throw new Error(`startup did not publish an active generation owner: ${extensionOwner()}`);
+}
 const staleTool = startup.getTool();
 
 async function replaceSession(previous, reason) {
   const previousArm = currentArm();
+  const previousOwner = extensionOwner();
+  const previousGeneration = /^generation=([1-9][0-9]*) phase=active$/.exec(previousOwner)?.[1];
+  if (!previousGeneration) throw new Error(`${reason} predecessor had no active generation owner: ${previousOwner}`);
   await previous.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason }, {});
-  if (previousArm.marker) {
-    await waitFor(() => !existsSync(previousArm.marker), `${reason} previous child exit`);
+  if (!previousArm.marker || !existsSync(previousArm.marker) || !pidAlive(previousArm.pid)) {
+    throw new Error(`${reason} shutdown retired the old generation before a successor owned recovery`);
+  }
+  if (extensionOwner() !== `generation=${previousGeneration} phase=handoff`) {
+    throw new Error(`${reason} shutdown did not publish its generation handoff: ${extensionOwner()}`);
   }
   const next = makePi();
   mod.default(next.pi);
@@ -2186,6 +2304,12 @@ async function replaceSession(previous, reason) {
     const arm = currentArm();
     return arm.pid && arm.marker && arm.marker !== previousArm.marker && existsSync(arm.marker) && pidAlive(arm.pid) && liveArmPids().includes(arm.pid);
   }, `${reason} replacement child and arm record`);
+  await waitFor(() => !existsSync(previousArm.marker), `${reason} previous child exit after successor claim`);
+  const nextOwner = extensionOwner();
+  const nextGeneration = /^generation=([1-9][0-9]*) phase=active$/.exec(nextOwner)?.[1];
+  if (!nextGeneration || nextGeneration === previousGeneration) {
+    throw new Error(`${reason} successor did not claim a distinct active generation: ${nextOwner}`);
+  }
   const live = liveArmPids();
   if (live.length !== 1) {
     throw new Error(`${reason} expected exactly one live arm child, got ${live.join(",") || "(none)"}`);
@@ -2202,15 +2326,35 @@ current = await replaceSession(current, "resume");
 current = await replaceSession(current, "fork");
 current = await replaceSession(current, "reload");
 
+// A replacement that kills the predecessor but fails before watcher readiness
+// remains generation-owned and reaches its bounded automatic retry.
+writeFileSync(process.env.FM_FAIL_ONCE, "fail once\n");
+current = await replaceSession(current, "resume");
+if (!readFileSync(process.env.FM_ARM_LOG, "utf8").includes("failed-replacement-attempt")) {
+  throw new Error("replacement launch failure did not exercise automatic retry");
+}
+
 // Same bound instance: ordinary shutdown then session_start without a fresh factory.
 const sameInstanceArm = currentArm();
+const sameInstanceGeneration = /^generation=([1-9][0-9]*) phase=active$/.exec(extensionOwner())?.[1];
 await current.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+if (!sameInstanceArm.marker || !existsSync(sameInstanceArm.marker) || !pidAlive(sameInstanceArm.pid)) {
+  throw new Error("same-instance shutdown retired the old generation before its replacement started");
+}
+if (!sameInstanceGeneration || extensionOwner() !== `generation=${sameInstanceGeneration} phase=handoff`) {
+  throw new Error(`same-instance shutdown did not publish its handoff generation: ${extensionOwner()}`);
+}
 await current.handlers.get("session_start")?.({ type: "session_start", reason: "new" }, {});
 await waitFor(() => {
     const arm = currentArm();
     return arm.pid && arm.marker && arm.marker !== sameInstanceArm.marker && existsSync(arm.marker) && pidAlive(arm.pid) && liveArmPids().includes(arm.pid);
 }, "same-instance replacement child and arm record");
 await waitFor(() => !existsSync(sameInstanceArm.marker), "same-instance previous child exit");
+const sameInstanceOwner = extensionOwner();
+const sameInstanceSuccessor = /^generation=([1-9][0-9]*) phase=active$/.exec(sameInstanceOwner)?.[1];
+if (!sameInstanceSuccessor || sameInstanceSuccessor === sameInstanceGeneration) {
+  throw new Error(`same-instance successor did not claim a distinct active generation: ${sameInstanceOwner}`);
+}
 const sameInstanceResult = await current.getTool().execute("same-instance-redundant", {}, undefined, undefined, {});
 if (!sameInstanceResult.details?.ok || !String(sameInstanceResult.details.message).includes("unchanged")) {
   throw new Error(`same-instance replacement lost automatic arm ownership: ${JSON.stringify(sameInstanceResult.details)}`);
@@ -2247,6 +2391,7 @@ for (const reason of ["resume", "fork", "new", "resume"]) {
 const finalArm = currentArm();
 await current.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "quit" }, {});
 await waitFor(() => !existsSync(finalArm.marker), "terminal shutdown child exit");
+if (extensionOwner()) throw new Error(`terminal shutdown left an extension owner: ${extensionOwner()}`);
 const quitArm = await current.getTool().execute("after-quit", {}, undefined, undefined, {});
 if (quitArm.details?.ok !== false || quitArm.details.message !== "watcher: not armed - Pi session is shutting down") {
   throw new Error(`terminal quit must keep the shutting-down refusal: ${JSON.stringify(quitArm.details)}`);
@@ -2787,6 +2932,9 @@ count=0
 [ ! -f "$FM_ARM_COUNT" ] || count=$(cat "$FM_ARM_COUNT")
 count=$((count + 1))
 printf '%s\n' "$count" > "$FM_ARM_COUNT"
+previous=$(cat "$FM_ARM_COUNT.pid" 2>/dev/null || true)
+printf '%s\n' "$$" > "$FM_ARM_COUNT.pid"
+[ -z "$previous" ] || kill -TERM "$previous" 2>/dev/null || true
 late_close() {
   sleep 0.15
   printf 'signal: late retiring actionable outcome\n'
@@ -2892,6 +3040,9 @@ count=0
 [ ! -f "$FM_ARM_COUNT" ] || count=$(cat "$FM_ARM_COUNT")
 count=$((count + 1))
 printf '%s\n' "$count" > "$FM_ARM_COUNT"
+previous=$(cat "$FM_ARM_COUNT.pid" 2>/dev/null || true)
+printf '%s\n' "$$" > "$FM_ARM_COUNT.pid"
+[ -z "$previous" ] || kill -TERM "$previous" 2>/dev/null || true
 late_close() {
   sleep 0.08
   printf 'signal: module-%s late actionable outcome\n' "$count"
@@ -2946,6 +3097,18 @@ for (let moduleIndex = 1; moduleIndex <= 2; moduleIndex += 1) {
   );
   await instance.handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
 }
+// Replacement shutdown deliberately retains the established module-2 arm until
+// a successor commits. Start that successor so both retiring modules publish
+// their late actionable closes under distinct process-wide tokens.
+const collectorMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?token-module=collector`);
+const collector = makePi();
+collectorMod.default(collector.pi);
+const collectorArm = await collector.getTool().execute("arm-collector", {}, undefined, undefined, {});
+if (!collectorArm.details?.ok) throw new Error(`collector arm failed: ${JSON.stringify(collectorArm.details)}`);
+await waitFor(
+  () => existsSync(process.env.FM_ARM_COUNT) && Number(readFileSync(process.env.FM_ARM_COUNT, "utf8").trim()) >= 3,
+  "collector arm",
+);
 const handoffPath = `${process.env.FM_HOME}/state/extensions/pi-primary-watch/session-replacement-actionable.json`;
 await waitFor(() => existsSync(handoffPath), "replacement handoff");
 await waitFor(() => JSON.parse(readFileSync(handoffPath, "utf8")).pending.length === 2, "two distinct handoff outcomes");
@@ -2958,6 +3121,7 @@ for (const moduleIndex of [1, 2]) {
     throw new Error(`module ${moduleIndex} outcome was dropped: ${JSON.stringify(handoff)}`);
   }
 }
+process.exit(0);
 EOF
 )
   status=$?
@@ -2966,7 +3130,7 @@ EOF
   pass "Pi replacement handoff tokens stay unique across fresh modules"
 }
 
-test_pi_replacement_persistence_failure_stops_arm_child() {
+test_pi_replacement_persistence_failure_keeps_predecessor_until_successor() {
   local repo home plugin count marker out status
   repo="$TMP_ROOT/pi-replacement-persistence-failure-root"
   home="$TMP_ROOT/pi-replacement-persistence-failure-home"
@@ -2985,6 +3149,11 @@ if [ "$count" -eq 1 ]; then
   printf 'watcher: started pid=%s\n' "$$"
   printf 'signal: persistence failure actionable outcome\n'
   exit 0
+fi
+previous=$(cat "$FM_CHILD_MARKER" 2>/dev/null || true)
+if [ -n "$previous" ] && kill -0 "$previous" 2>/dev/null; then
+  kill -TERM "$previous" 2>/dev/null || true
+  while kill -0 "$previous" 2>/dev/null; do sleep 0.01; done
 fi
 cleanup() { rm -f "$FM_CHILD_MARKER"; }
 trap cleanup EXIT
@@ -3032,14 +3201,10 @@ const armed = await tool.execute("initial-arm", {}, undefined, undefined, {});
 if (!armed.details?.ok) throw new Error(`initial arm failed: ${JSON.stringify(armed.details)}`);
 await waitFor(() => deliveryStarted && existsSync(process.env.FM_CHILD_MARKER), "blocked delivery and successor child");
 writeFileSync(`${process.env.FM_HOME}/state/extensions`, "block handoff directory\n");
-let shutdownError = null;
-try {
-  await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
-} catch (error) {
-  shutdownError = error;
+await handlers.get("session_shutdown")?.({ type: "session_shutdown", reason: "new" }, {});
+if (!existsSync(process.env.FM_CHILD_MARKER)) {
+  throw new Error("replacement shutdown retired the established predecessor after handoff persistence failed");
 }
-if (!shutdownError) throw new Error("replacement shutdown hid the handoff persistence failure");
-await waitFor(() => !existsSync(process.env.FM_CHILD_MARKER), "successor cleanup after persistence failure");
 const { unlinkSync } = await import("node:fs");
 unlinkSync(`${process.env.FM_HOME}/state/extensions`);
 const replacementMod = await import(`${pathToFileURL(process.env.PLUGIN).href}?replacement=persistence-failure`);
@@ -3057,9 +3222,9 @@ process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi replacement shutdown must stop its arm after handoff persistence fails"
-  [ -z "$out" ] || fail "Pi replacement persistence-failure cleanup test printed output: $out"
-  pass "Pi replacement persistence failure still stops its arm child"
+  expect_code 0 "$status" "Pi replacement persistence failure must keep its predecessor until a successor commits"
+  [ -z "$out" ] || fail "Pi replacement persistence-failure continuity test printed output: $out"
+  pass "Pi replacement persistence failure keeps its predecessor until a successor commits"
 }
 
 test_pi_process_exit_cleanup_listener_lifecycle() {
@@ -4155,6 +4320,7 @@ test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_actionable_output_waits_for_predecessor_close
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
@@ -4181,7 +4347,7 @@ test_pi_streaming_time_delivery_keeps_the_successor_chain
 test_pi_successor_failure_during_delivery_is_retried_after_delivery
 test_pi_late_retiring_actionable_reaches_replacement
 test_pi_replacement_tokens_are_process_unique
-test_pi_replacement_persistence_failure_stops_arm_child
+test_pi_replacement_persistence_failure_keeps_predecessor_until_successor
 test_pi_process_exit_cleanup_listener_lifecycle
 test_pi_process_exit_cleanup_stops_arm_child
 test_opencode_plugin_package_boundary_is_explicit_esm

@@ -123,6 +123,27 @@ unit_pi_never_launches_the_daemon() {
   done
 }
 
+unit_pi_confirm_stop_does_not_claim_a_daemon_terminal() {
+  local st out rc
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-pi-stop.XXXXXX")
+  mkdir -p "$st/state"
+  confirm_posture "$st" || fail "pi stop: could not confirm fixture posture"
+  [ ! -e "$st/state/.afk" ] || fail "pi stop: fixture error: confirm wrote the away flag"
+  [ ! -e "$st/state/.afk-daemon-terminal" ] || fail "pi stop: fixture error: confirm recorded a daemon terminal"
+  [ ! -e "$st/state/.supervise-daemon.log" ] || fail "pi stop: fixture error: a daemon log already existed"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop 2>&1)
+  rc=$?
+  if [ "$rc" -eq 0 ] \
+    && printf '%s' "$out" | grep -F 'no daemon terminal was running' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'daemon terminal torn down' >/dev/null \
+    && [ ! -e "$st/state/.afk-contract" ]; then
+    pass "pi confirm stop: reports that no daemon terminal was running"
+  else
+    fail "pi confirm stop: claimed a daemon teardown or failed (rc=$rc): $out"
+  fi
+  rm -rf "$st"
+}
+
 unit_daemon_entry_requires_confirmation() {
   local st out rc
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-entry-record.XXXXXX")
@@ -742,7 +763,7 @@ unit_tmux_absence_distinguishes_probe_failure() {
 }
 
 unit_native_lifecycle() {
-  local st
+  local st out
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
@@ -755,11 +776,13 @@ unit_native_lifecycle() {
   else
     fail "native lifecycle: state preparation or no-terminal record failed"
   fi
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
-  if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop 2>&1)
+  if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] \
+    && printf '%s' "$out" | grep -F 'no daemon terminal was running' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'daemon terminal torn down' >/dev/null; then
     pass "native lifecycle: uniform stop clears state without closing a terminal"
   else
-    fail "native lifecycle: uniform stop retained state"
+    fail "native lifecycle: uniform stop retained state or claimed a teardown: $out"
   fi
   rm -rf "$st"
 }
@@ -1195,6 +1218,7 @@ e2e_tmux() {
 unit_clear_stale
 unit_propose_confirm_records_the_posture_without_a_daemon
 unit_pi_never_launches_the_daemon
+unit_pi_confirm_stop_does_not_claim_a_daemon_terminal
 unit_daemon_entry_requires_confirmation
 unit_failed_daemon_launch_preserves_confirmed_record
 unit_stop_archives_the_record_last
