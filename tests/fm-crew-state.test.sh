@@ -2701,6 +2701,83 @@ test_missing_meta() {
   pass "missing meta is handled gracefully"
 }
 
+# The fleet snapshot reads every task's current state through captured copies,
+# passing FM_CREW_STATE_META_OVERRIDE / FM_CREW_STATE_STATUS_OVERRIDE so the whole
+# read resolves one task generation. Both directions matter, and the difference
+# is what makes a leaked override diagnosable instead of invisible: an override
+# whose snapshot still exists must resolve to the captured verdict, while an
+# override whose target is GONE must refuse instead of answering with a
+# missing-task verdict. That conflation was the observed incident - one stale
+# override inherited from a cleaned snapshot made every read of every task print
+# "no metadata for <id>" while their real records sat in place.
+run_crew_state_with_overrides() {  # <case-dir> <id> <meta> <status>
+  local d=$1 id=$2 meta=$3 status=$4
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_META_OVERRIDE="$meta" FM_CREW_STATE_STATUS_OVERRIDE="$status" \
+    "$CREW_STATE" "$id"
+}
+
+test_stale_snapshot_override_refuses_instead_of_faking_a_missing_task() {
+  reset_fakes
+  local d id=feat-ovr snap out rc
+  d=$(new_case override)
+  snap="$d/snapshot"; mkdir -p "$snap"
+  make_repo_on_branch "$d/wt" fm/feat-ovr
+  make_fakebin "$d" >/dev/null
+  # The captured generation names a real worktree and a blocked status log; the
+  # LIVE state dir holds nothing for this id, so only the override can resolve it.
+  printf 'window=fm:fm-feat-ovr\nworktree=%s\nkind=ship\nharness=claude\n' "$d/wt" > "$snap/$id.meta"
+  printf 'blocked: waiting on review answer\n' > "$snap/$id.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" "$id"
+
+  # A live override resolves to the captured generation, exactly like the
+  # snapshot composition path depends on.
+  out=$(run_crew_state_with_overrides "$d" "$id" "$snap/$id.meta" "$snap/$id.status"); rc=$?
+  expect_code 0 "$rc" "a live snapshot override must resolve"
+  assert_contains "$out" "state: blocked" "the captured generation supplies the verdict"
+  assert_contains "$out" "source: status-log" "the captured status log supplies the source"
+  assert_not_contains "$out" "no metadata" "a live override must never read as a missing task"
+
+  # Proof the override is what resolved it: without it, this id has no records.
+  out=$(run_crew_state "$d" "$id")
+  assert_contains "$out" "no metadata for $id" \
+    "only the override can resolve this id, so the missing-task path is the control"
+
+  # The same capture with NO status file is the legitimate shape of a task that
+  # has appended no status event yet, in a snapshot directory that exists: it
+  # must resolve rather than be refused as a stale override.
+  rm -f "$snap/$id.status"
+  out=$(run_crew_state_with_overrides "$d" "$id" "$snap/$id.meta" "$snap/$id.status" 2> "$d/statusless.err"); rc=$?
+  expect_code 0 "$rc" "an override in an existing snapshot directory with no status capture must resolve"
+  assert_contains "$out" "state:" "a status-less capture still yields a state line"
+  assert_not_contains "$out" "no metadata" "a status-less capture is not a missing task"
+
+  # The leaked shape: the snapshot directory is gone, so the override is stale.
+  rm -rf "$snap"
+  out=$(run_crew_state_with_overrides "$d" "$id" "$snap/$id.meta" "$snap/$id.status" 2> "$d/stale.err")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a stale snapshot override was answered instead of refused"
+  assert_not_contains "$out" "no metadata" \
+    "a stale override must not be reported as a missing task"
+  assert_not_contains "$out" "state:" "a refused read emits no state verdict"
+  assert_contains "$(cat "$d/stale.err")" "FM_CREW_STATE_META_OVERRIDE" \
+    "the refusal should name the override that went stale"
+  assert_contains "$(cat "$d/stale.err")" "$snap/$id.meta" \
+    "the refusal should name the missing target to inspect"
+
+  # The same refusal for a status override whose directory is gone while the
+  # metadata it belongs to still resolves.
+  printf 'window=fm:fm-feat-ovr\nworktree=%s\nkind=ship\nharness=claude\n' "$d/wt" > "$d/state/$id.meta"
+  out=$(run_crew_state_with_overrides "$d" "$id" "$d/state/$id.meta" "$d/gone-$id/$id.status" 2> "$d/stale-status.err")
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a status override in a removed directory was answered instead of refused"
+  assert_contains "$(cat "$d/stale-status.err")" "FM_CREW_STATE_STATUS_OVERRIDE" \
+    "the refusal should name the status override that went stale"
+  pass "snapshot overrides resolve while they exist and refuse, never fake a missing task, once stale"
+}
+
 # (k) crew_is_provably_working end-to-end over the REAL fm-crew-state.sh (not a
 # canned fake verdict, unlike tests/fm-watch-triage.test.sh's classifier
 # coverage). This is the direct regression pair for the 2026-07-02 herdr
@@ -4935,6 +5012,7 @@ test_remote_alive_idle_is_healthy_not_gone
 test_remote_unreachable_is_unknown_remote_not_dead
 test_remote_dead_reports_remote_verdict
 test_missing_meta
+test_stale_snapshot_override_refuses_instead_of_faking_a_missing_task
 test_provably_working_via_runs_list_fallback
 test_not_provably_working_when_stopped
 test_usage_error

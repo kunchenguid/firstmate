@@ -1645,21 +1645,60 @@ fm_backend_herdr_projection_order_best_effort() {  # <session> <created-workspac
   return 0
 }
 
+# fm_backend_herdr_server_env_scrub: strip firstmate's own environment from the
+# one process whose environment is never transient - the herdr server.
+#
+# Verified: the server outlives its launcher and passes its startup environment
+# to EVERY pane it later opens, so anything left set here becomes the ambient
+# environment of every firstmate session and every crewmate on the machine, for
+# as long as the server lives. An explicit deny-list of the variables we happen
+# to know about is therefore never enough, and missing one is not a small bug:
+# a fleet snapshot's bounded child (its
+# FM_CREW_STATE_META_OVERRIDE/FM_CREW_STATE_STATUS_OVERRIDE name a captured
+# snapshot directory) can reach this function through a crew-state backend probe,
+# leaving those overrides - plus the session-start digest's
+# FM_SESSION_START_STAGE_FILE and the Pi session-start supervisor's
+# FM_SESSIONSTART_SUPERVISOR_PID - in the server, and every later state read for
+# every task then resolved one deleted snapshot path and reported "no metadata".
+#
+# So the rule is a namespace default-deny, not a list: every firstmate-owned
+# variable is dropped unless it is one of THIS adapter's own - FM_HERDR_* and
+# FM_BACKEND_HERDR_*, which its own child reads (FM_BACKEND_HERDR_BIN and
+# FM_BACKEND_HERDR_CLIENT_SESSION select the client binary, and the rest is this
+# adapter's own knob set, none of it exported per-invocation state). Home and
+# session selection, crew-state snapshot overrides, session-start markers, and
+# any namespace added later are therefore closed by default; a NEW name only
+# ever fans out if the adapter itself puts it under its own prefix.
+# CURSOR/CLAUDECODE/PI_CODING_AGENT/GROK_AGENT are the non-FM harness identity
+# markers that would otherwise drag a pane's harness detection into every child.
+# Runs in a subshell, so the caller's own environment is untouched.
+fm_backend_herdr_server_env_scrub() {
+  local name
+  for name in $(compgen -v 2>/dev/null); do
+    case "$name" in
+      FM_HERDR_* | FM_BACKEND_HERDR_*) continue ;;
+      FM_*) unset "$name" 2>/dev/null || true ;;
+    esac
+  done
+  unset CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT GROK_AGENT 2>/dev/null || true
+  return 0
+}
+
 # fm_backend_herdr_server_ensure: start the herdr server for <session>
 # headless (no TUI client) if not already running, mirroring tmux's `tmux
 # has-session || tmux new-session -d`. Verified: a bare socket CLI call does
 # NOT auto-start the server, so this must run before any workspace/tab/pane
 # call. The server outlives its launcher and passes its startup environment to
 # every later pane, so remove home, harness identity, and supervision selection
-# inherited from whichever agent happened to start it. Bounded poll for the
-# server to report running.
+# inherited from whichever agent happened to start it
+# (fm_backend_herdr_server_env_scrub owns what "remove" means and why). Bounded
+# poll for the server to report running.
 fm_backend_herdr_server_ensure() {  # <session>
   local session=$1 running out i
   running=$(fm_backend_herdr_cli "$session" status --json 2>/dev/null | jq -r '.server.running // false' 2>/dev/null)
   [ "$running" = "true" ] && return 0
   (
-    unset FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_PROJECTS_OVERRIDE FM_CONFIG_OVERRIDE \
-      CURSOR_AGENT CURSOR_INVOKED_AS CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT FM_SUPERVISION_MODEL
+    fm_backend_herdr_server_env_scrub
     fm_backend_herdr_cli "$session" server >/dev/null 2>&1 &
   ) || return 1
   for i in $(seq 1 20); do

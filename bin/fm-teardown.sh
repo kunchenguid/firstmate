@@ -86,7 +86,13 @@
 # cleanup step, teardown verifies record exclusivity: no OTHER task record in
 # this home or any locally registered Firstmate home may name the same live path
 # in its worktree= or home=. One live path with two task records is the reuse
-# collision itself, whichever record is stale.
+# collision itself, whichever record is stale. Ownership is decided BEFORE that
+# scan, because a claim naming another task already answers the question the scan
+# is there to settle and the scan would then refuse against records that no
+# longer own anything - an observed production case, where one slot named by
+# three records blocked cleanup for all three. So the exclusivity scan runs for
+# a slot that is still this task's, or that carries no claim at all; a reassigned
+# slot skips it and takes the reassignment path below.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -3229,8 +3235,21 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
+# Slot ownership is determined BEFORE the record scan, because the two guards
+# answer different questions and the scan's answer depends on ownership. A claim
+# naming another task is positive proof this record's slot was reassigned (see
+# require_owned_worktree_slot_record), and in that case the slot is not this
+# task's to return, so the scan's collision with the records that still name the
+# shared path protects nothing and refuses every one of them - an observed
+# shared-slot incident, where one pool slot held three records and no finished
+# task could be retired. Ownership therefore decides first, and only a slot that
+# is still this task's (or carries no claim at all) is held to the unconditional
+# record scan, exactly as before: an absent claim with another open record
+# naming the same path still refuses.
 require_owned_task_worktree_slot || exit 1
+if teardown_owns_worktree; then
+  require_exclusive_task_worktree_slot || exit 1
+fi
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
 
