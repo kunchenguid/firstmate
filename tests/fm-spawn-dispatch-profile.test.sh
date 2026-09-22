@@ -573,6 +573,74 @@ test_codex_profile_refused_for_remote_secondmate() {
   pass "codex --codex-profile is refused for a remote secondmate instead of being dropped"
 }
 
+# A direct fm-spawn --relaunch (no fm-control in front of it) reads the recorded
+# codex_profile= itself, so a codex-to-codex relaunch that omits the flag keeps
+# the provider, while a harness change drops it. The recorded pane is modelled
+# as agent-free (its window exists and its foreground is a shell) so the
+# relaunch adopts it rather than refusing.
+make_dead_pane_tmux() {  # <fakebin>; the pane answers from FM_FAKE_DIR
+  cat > "$1/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+case "${1:-}" in
+  send-keys)
+    shift; literal=0
+    while [ $# -gt 0 ]; do case "$1" in -t) shift 2 ;; -l) literal=1; shift ;; *) break ;; esac; done
+    payload=${1:-}
+    if [ "$literal" = 1 ]; then
+      case "$payload" in ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;; esac
+      printf '%s\n' "$payload" >> "$FM_FAKE_LAUNCH_LOG"
+    fi
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do case "$a" in
+      *cursor_y*) printf '1\n'; exit 0 ;;
+      *pane_current_command*) printf 'zsh\n'; exit 0 ;;
+      *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
+    esac; done
+    printf 'firstmate\n'; exit 0 ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  list-windows) cat "$D/windows"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$1/tmux"
+}
+
+test_codex_profile_carries_forward_on_direct_relaunch() {
+  local rec id out status launch
+  id=profile-codex-direct-relaunch-z4k
+  rec=$(make_spawn_case profile-codex-direct-relaunch codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex --codex-profile deepseek --effort high)
+  status=$?
+  expect_code 0 "$status" "the initial codex spawn with a provider profile should succeed"$'\n'"$out"
+
+  mkdir -p "$CASE_DIR/fake-pane"
+  printf '%s\n' "fm-$id" > "$CASE_DIR/fake-pane/windows"
+  printf '%s' "$WT_DIR" > "$CASE_DIR/fake-pane/cwd"
+  make_dead_pane_tmux "$FAKEBIN_DIR"
+
+  out=$(FM_FAKE_DIR="$CASE_DIR/fake-pane" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --relaunch --harness codex)
+  status=$?
+  expect_code 0 "$status" "a direct codex-to-codex relaunch without the flag should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --profile 'deepseek' --dangerously-bypass-approvals-and-sandbox" \
+    "a direct relaunch must thread the recorded provider profile into the replacement launch"
+  assert_grep "codex_profile=deepseek" "$HOME_DIR/state/$id.meta" "the relaunched record must keep codex_profile=deepseek"
+
+  out=$(FM_FAKE_DIR="$CASE_DIR/fake-pane" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --relaunch --harness claude)
+  status=$?
+  expect_code 0 "$status" "a direct relaunch onto claude should succeed and drop the profile"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--profile" "a relaunch onto claude must carry no --profile"
+  ! grep -q '^codex_profile=' "$HOME_DIR/state/$id.meta" \
+    || fail "a harness change on a direct relaunch must clear codex_profile="
+  pass "a direct fm-spawn --relaunch carries codex_profile= forward on codex and clears it on a harness change"
+}
+
 # Codex parks a crewmate launch forever on its unanswerable hook-trust modal
 # unless the launch turns the hook layer off. These two cases pin the split:
 # a crewmate runs hook-free, a secondmate keeps the project hooks that carry its
@@ -1623,6 +1691,7 @@ test_codex_profile_refused_on_non_codex_harness
 test_codex_without_profile_is_unchanged
 test_codex_profile_named_default_threads_literally
 test_codex_profile_refused_for_remote_secondmate
+test_codex_profile_carries_forward_on_direct_relaunch
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
