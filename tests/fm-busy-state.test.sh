@@ -312,10 +312,10 @@ test_codex_unverified_gate() {
   gen=$("$EV" arm "$state" t1)
   "$EV" apply "$state" t1 busy --gen "$gen" --source codex-hook --event user-prompt-submit
   out=$(fm_busy_classify tmux w1 codex t1 "$state")
-  [ "$out" = "unknown codex-unverified" ] || fail "unverified codex must classify unknown, got '$out'"
+  [ "$out" = "unknown source-mismatch" ] || fail "an untrusted Codex record must preserve its source-mismatch diagnosis, got '$out'"
   [ -z "$(fm_busy_sources_for_harness codex)" ] \
     || fail "codex must trust no semantic source until one is verified"
-  pass "codex classifies unknown until a semantic source passes its verification gate"
+  pass "an untrusted Codex record stays unknown while Codex lifecycle verification is closed"
 }
 
 test_kimi_unverified_gate() {
