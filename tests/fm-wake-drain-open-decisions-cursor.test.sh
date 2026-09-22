@@ -347,7 +347,11 @@ test_previous_fold_cache_is_refolded_under_current_semantics() {
   pass "an old fold cache is rebuilt once before same-version incremental reads resume"
 }
 
-test_terminal_supersession_reaches_cached_drains() {
+# A terminal declaration retires nothing, and no cached fold may make it look
+# like it did (#5203). The cache-migration half is the point here: a drain that
+# answers from a persisted cursor must reach the SAME verdict as a full re-fold,
+# so an old cursor can neither resurrect a closed decision nor hide an open one.
+test_terminal_declarations_never_retire_a_decision_through_caches() {
   local dir state status cursor out kind terminal expected closing ident size span pass_number
   for kind in scout ship secondmate; do
     for terminal in 'done' failed; do
@@ -358,8 +362,7 @@ test_terminal_supersession_reaches_cached_drains() {
       FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$dir/drain.err" || fail "initial blocked drain failed"
       assert_contains "$(cat "$out")" 'task [key=access] blocked: waiting' "initial blocker must surface"
       printf '%s: report saved\nnote: cleanup complete\n' "$terminal" >> "$status"
-      expected=''; closing=$terminal
-      if [ "$kind" = secondmate ]; then expected=$'access\tblocked\twaiting'; closing=blocked; fi
+      expected=$'access\tblocked\twaiting'; closing=blocked
       for pass_number in 1 2; do
         if [ "$pass_number" = 2 ]; then
           ident=$(sed -n 's/^ident=//p' "$cursor")
@@ -367,21 +370,14 @@ test_terminal_supersession_reaches_cached_drains() {
           printf 'version=5\noffset=%s\nident=%s\naccess\tblocked\twaiting' "$size" "$ident" > "$cursor"
         fi
         FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$dir/drain.err" || fail "$kind terminal drain failed"
-        if [ "$kind" = secondmate ]; then
-          assert_contains "$(cat "$out")" 'task [key=access] blocked: waiting' "secondmate blocker must survive $terminal and cache migration"
-        else
-          assert_not_contains "$(cat "$out")" 'OPEN DECISIONS' "$kind pre-terminal blocker resurfaced after $terminal or cache migration"
-        fi
+        assert_contains "$(cat "$out")" 'task [key=access] blocked: waiting' \
+          "$kind blocker did not survive $terminal and cache migration"
         bash -c '. "$1"; [ "$(status_open_decisions "$2")" = "$3" ] && [ "$(status_open_decisions_incremental "$2")" = "$3" ] && [ "$(status_key_closing_verb "$2" access)" = "$4" ]' \
           _ "$ROOT/bin/fm-classify-lib.sh" "$status" "$expected" "$closing" \
-          || fail "$kind whole-file, incremental, and key-history reads disagree with terminal supersession"
+          || fail "$kind whole-file, incremental, and key-history reads disagree after a $terminal line"
       done
       span=$(bash -c '. "$1"; status_span_first_actionable "$2" 0' _ "$ROOT/bin/fm-classify-lib.sh" "$status")
-      if [ "$kind" = secondmate ]; then
-        assert_contains "$span" 'blocked [key=access]: waiting' "secondmate opening must remain actionable"
-      else
-        assert_not_contains "$span" 'waiting' "$kind superseded opening remained actionable in a captured span"
-      fi
+      assert_contains "$span" 'blocked [key=access]: waiting' "$kind opening must remain actionable"
       printf 'blocked [key=access]: reopened\nneeds-decision [key=new]: a new decision\nnote: more cleanup\n' >> "$status"
       FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$dir/drain.err" || fail "reopened drain failed"
       assert_contains "$(cat "$out")" 'task [key=access] blocked: reopened' "post-terminal reopening must surface"
@@ -391,25 +387,25 @@ test_terminal_supersession_reaches_cached_drains() {
       assert_not_contains "$(cat "$out")" 'OPEN DECISIONS' "matching resolutions must close reopened decisions"
     done
   done
-  pass "terminal supersession reaches whole-file reads, incremental drains, old caches, and captured spans"
+  pass "a terminal declaration retires nothing across whole-file reads, incremental drains, old caches, and captured spans"
 }
 
-test_kind_changes_invalidate_folded_decisions() {
+test_task_kind_never_changes_a_folded_decision() {
   local dir state status kind expected
   dir=$(make_case cursor-kind-change); state="$dir/state"; status="$state/task.status"
   printf 'blocked [key=access]: waiting\ndone: report saved\nnote: cleanup complete\n' > "$status"
+  expected=$'access\tblocked\twaiting'
   for kind in unknown ship secondmate scout; do
     [ "$kind" = unknown ] || printf 'kind=%s\n' "$kind" >> "$state/task.meta"
-    case "$kind" in unknown|secondmate) expected=$'access\tblocked\twaiting' ;; *) expected='' ;; esac
     bash -c '. "$1"; [ "$(status_open_decisions_incremental "$2")" = "$3" ] && [ "$(status_open_decisions "$2")" = "$3" ]' \
       _ "$ROOT/bin/fm-classify-lib.sh" "$status" "$expected" \
-      || fail "cached decisions did not follow the current $kind metadata without a status append"
+      || fail "the $kind reading disagreed with a full re-fold without a status append"
   done
-  pass "folded decisions are rebuilt when task-kind evidence changes"
+  pass "a decision open under a terminal line reads the same for every task kind, cached or refolded"
 }
 
-test_terminal_supersession_reaches_cached_drains
-test_kind_changes_invalidate_folded_decisions
+test_terminal_declarations_never_retire_a_decision_through_caches
+test_task_kind_never_changes_a_folded_decision
 test_truncated_log_falls_back_to_a_full_refold_not_a_dropped_decision
 test_same_size_rewrite_is_detected_via_inode_identity
 test_read_failure_preserves_state_for_retry
