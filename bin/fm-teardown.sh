@@ -2869,7 +2869,6 @@ preflight_descendant_treehouse_slots() {
     if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
       continue
     fi
-    teardown_refuse_unproven_pool_slot "$project" "$worktree" "child $task_id's" || return 1
     if ! fm_treehouse_pool_slot "$project" "$worktree"; then
       continue
     fi
@@ -2903,7 +2902,6 @@ preflight_descendant_treehouse_slots() {
     if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
       continue
     fi
-    teardown_refuse_unproven_pool_slot "$project" "$worktree" "child $task_id's" || return 1
     if ! fm_treehouse_pool_slot "$project" "$worktree"; then
       continue
     fi
@@ -3193,9 +3191,6 @@ cleanup_firstmate_home_children() {
       # slot reassigned to another task is not this child's to kill, reset,
       # or return, so only its records are cleaned up. The preflight above
       # already named the reassignment on stderr under the same lock.
-      # An unproven pool path never reaches that determination: preflight
-      # already refused it, and this repeats the refusal before any removal.
-      teardown_refuse_unproven_pool_slot "$child_proj" "$child_wt" "child $child_id's" || return 1
       child_owner_rc=0
       if fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
         require_owned_worktree_slot_record "$child_id" "$child_wt" 2>/dev/null || child_owner_rc=$?
