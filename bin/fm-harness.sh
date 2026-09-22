@@ -142,6 +142,10 @@ harness_marker() {
   # subprocesses is unverified (verified: muse 0.1.0-R708.1). Do NOT promote it
   # to a marker without verifying it reaches children AND that it cannot survive
   # in a multiplexer's stored environment.
+  # Hermes Agent sets HERMES_CLI=1 on its CLI and every tool subprocess (verified
+  # live on hermes-agent). Anchored at the end of the marker layer: it is a
+  # first-class identity marker like CLAUDECODE, not an ancestry-only harness.
+  [ "${HERMES_CLI:-}" = "1" ] && { echo hermes; return; }
   return 0
 }
 
@@ -228,6 +232,11 @@ harness_process_verdict() {  # <pid>
     # inherited launcher value, not an agy identity), so like muse it is
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
+    # Hermes Agent's binary name is `hermes` (verified live). Anchored, never
+    # *hermes*, so unrelated commands cannot be misread as this harness. This
+    # covers the ancestry path for a hermes process that does not carry the
+    # HERMES_CLI marker (e.g. a direct binary invocation without the env wrapper).
+    hermes) echo "comm hermes"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)

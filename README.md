@@ -58,7 +58,7 @@ Full detail on every feature lives in [docs/architecture.md](docs/architecture.m
 
 ### Requirements
 
-- A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Oh My Pi (`omp`), Codex, OpenCode, or Cursor Agent CLI.
+- A verified primary agent harness: Claude Code, Grok, Pi, `pi-signed`, Oh My Pi (`omp`), Codex, OpenCode, Cursor Agent CLI, or Hermes Agent.
 - Git and the GitHub CLI, authenticated through `gh auth login`.
 - The CLI and dependencies for your selected runtime backend; tmux is the reference default.
 
@@ -76,6 +76,7 @@ Oh My Pi (`omp`), a Pi fork, is verified as a primary with the same extension-ow
 Codex and OpenCode are also verified and supported as primary harnesses; Codex uses bounded foreground checkpoints, and OpenCode uses a TUI plugin, so both carry more harness-specific supervision tradeoffs than the three co-primaries.
 Cursor Agent CLI is verified as a primary too, using a tracked project-scope `.cursor/hooks.json` whose `stop` hook parks on the watcher between turns, closest in shape to Claude Code's.
 Launch it with `--trust`, or none of its project hooks load; it also has no turn-end hook in headless `cursor-agent -p`, so run the primary session interactively.
+Hermes Agent is verified as a primary using a firstmate plugin (`~/.hermes/plugins/firstmate/`) for session-start digest injection and bounded turn-end continuation, plus a background watcher for zero-token fleet monitoring. It uses `HERMES_CLI=1` for harness detection and `hermes chat -q` for worker launch.
 
 ### Install and launch
 
@@ -116,6 +117,19 @@ FM_OMP_HARNESS=omp omp
 ```
 
 Start `omp` with this checkout as its working directory: it auto-discovers the tracked `.omp/extensions/*.ts` files with no trust dialog, and naming them with `-e` as well would load each twice.
+
+**Hermes Agent**
+
+```sh
+hermes
+```
+
+Requires the firstmate Hermes plugin at `~/.hermes/plugins/firstmate/` for session-start digest injection and turn-end guard. Install from the firstmate repo:
+
+```sh
+bin/fm-hermes-plugin-install.sh
+hermes plugins enable firstmate
+```
 
 For Grok, `--trust` is needed once per clone so project hooks and the turn-end guard load; `/hooks-trust` inside Grok works too.
 For Pi, approve the project trust prompt once per clone on first launch so the tracked `.pi/extensions/*.ts` files auto-load.

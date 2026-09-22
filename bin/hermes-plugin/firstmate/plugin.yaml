@@ -1,0 +1,8 @@
+name: firstmate
+version: 0.1.0
+description: Bridge firstmate fleet-management into Hermes Agent. Injects session-start digest, guards turn-end while fleet work is active.
+hooks:
+  - on_session_start
+  - on_session_reset
+  - pre_llm_call
+  - pre_verify
