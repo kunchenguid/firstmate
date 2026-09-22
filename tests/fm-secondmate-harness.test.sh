@@ -189,6 +189,11 @@ test_secondmate_per_id_pin() {
   [ "$(q secondmate-effort e3)" = high ] || fail "e3 should get its pinned effort"
   # Unpinned id -> the default line.
   [ "$(q secondmate-model m3)" = claude-fable-5-1 ] || fail "an unpinned id must fall back to the default line"
+  # A pin whose id matches but carries nothing after the colon is no pin: the
+  # id falls through to the file's own default line, never off it.
+  printf '%s\n' 'codex gpt-6-astra' 'e3:' > "$cfg/secondmate-harness"
+  [ "$(q secondmate e3)" = codex ] || fail "an empty pin must fall through to the default harness"
+  [ "$(q secondmate-model e3)" = gpt-6-astra ] || fail "an empty pin must fall through to the default model"
   # A bare single-line file stays fully backward-compatible with an id argument.
   printf 'codex\n' > "$cfg/secondmate-harness"
   [ "$(q secondmate x9)" = codex ] || fail "a bare single line must serve any id (backward-compat)"

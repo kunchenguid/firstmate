@@ -450,6 +450,7 @@ secondmate_line() {
         if [ -n "$want_id" ] && [ "$pin_id" = "$want_id" ]; then
           rest=${line#*:}
           rest="${rest#"${rest%%[![:space:]]*}"}"
+          [ -n "$rest" ] || continue
           printf '%s\n' "$rest"
           return 0
         fi
