@@ -29,7 +29,13 @@ STANDALONE="$FAKE_HOME/.local/share/fm-calm-omp"
 assert_equals "$STANDALONE" "$(readlink "$LINK")" "link target"
 [ -f "$STANDALONE/lib/fm-calm-working-ship.ts" ] || fail "standalone lib missing"
 assert_absent "$STANDALONE/../../.pi" "standalone copy is not nested under firstmate .pi"
-assert_grep "fm-calm-omp" "$FAKE_HOME/.omp/plugins/omp-plugins.lock.json" "lockfile entry"
+jq -e --slurpfile package "$LINK/package.json" '
+  .plugins["fm-calm-omp"] | type == "object"
+  and .version == $package[0].version
+  and .enabled == true
+  and has("enabledFeatures") and .enabledFeatures == null
+' "$FAKE_HOME/.omp/plugins/omp-plugins.lock.json" >/dev/null \
+  || fail "lockfile must register the installed Calm version with all features enabled"
 pass "install links package into user plugin scope"
 
 # Re-running over an existing link is idempotent.
