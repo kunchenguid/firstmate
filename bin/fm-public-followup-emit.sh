@@ -46,7 +46,12 @@
 #                          checks the token is a safe slug.
 #   --deliverable k=v      Repeatable safe deliverable (for example
 #                          pr_url=https://...). tasks-axi owns which keys a given
-#                          expected-final type permits.
+#                          expected-final type permits; a key the outcome never
+#                          carries, or a value in a format tasks-axi refuses (such
+#                          as an absolute report_path), is refused here with the
+#                          key, the value, and the expected format, in both
+#                          destinations. fm-public-followup-lib.sh owns those
+#                          mirrored rules.
 #   --outcome-text ...     Public-safe outcome sentence, from an argument, a
 #                          file, or stdin ("-"). Collapsed to one line; the
 #                          event builder bounds it by codepoint, so control
@@ -183,6 +188,10 @@ while [ "$i" -lt "${#DELIVERABLE_KEYS[@]}" ]; do
   case "${DELIVERABLE_VALUES[$i]}" in
     *[[:cntrl:]]*) die "deliverable '$key' must be single-line text with no control characters" ;;
   esac
+  # A value tasks-axi would refuse is refused here, where the worker can still
+  # correct it, instead of travelling to the owning home to be quarantined.
+  problem=$(fm_pf_deliverable_problem "$OUTCOME" "$key" "${DELIVERABLE_VALUES[$i]}") \
+    || die "$problem"
   i=$((i + 1))
 done
 

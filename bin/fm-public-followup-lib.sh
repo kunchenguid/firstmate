@@ -58,7 +58,11 @@
 #   rejected/<event-id>.json   events tasks-axi refused, kept with a
 #   rejected/<event-id>.reason one-line reason so a refusal is inspectable and
 #                              never retried in a loop.
-#   surfaced                   last surfaced pending-event signature, so the
+#   rejection-wakes/<event-id> one pending wake line per refusal not yet
+#                              surfaced; the relay poll prints it once and
+#                              removes it, so a refusal wakes this home instead
+#                              of sitting silently in rejected/.
+#   surfaced                  last surfaced pending-event signature, so the
 #                              existing relay poll wakes once per new event set
 #                              instead of every cycle.
 #   retired/<obligation-id>    private retirement receipt containing the bounded
@@ -114,6 +118,7 @@ fm_pf_events_dir()   { printf '%s\n' "$1/$FM_PF_DIRNAME/events"; }
 fm_pf_outbox_dir()   { printf '%s\n' "$1/$FM_PF_DIRNAME/outbox"; }
 fm_pf_consumed_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/consumed"; }
 fm_pf_rejected_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/rejected"; }
+fm_pf_rejection_wakes_dir() { printf '%s\n' "$1/$FM_PF_DIRNAME/rejection-wakes"; }
 fm_pf_retired_dir()  { printf '%s\n' "$1/$FM_PF_DIRNAME/retired"; }
 
 fm_pf_retirement_receipt_exists() {
@@ -215,6 +220,89 @@ fm_pf_clean_outcome_text() {
 # as a quarantined event's one-line refusal reason.
 fm_pf_bound_bytes() {
   LC_ALL=C cut -b "1-$1"
+}
+
+# --- deliverable rules ------------------------------------------------------
+#
+# tasks-axi is the authority on deliverables, but it exposes no validation-only
+# command, and its refusal of a bad value names none of it. These helpers mirror
+# the rules its work-event consumer applies - EXPECTED_DELIVERABLES,
+# failureDeliverablesAreSafe, PR_URL_RE (plus its no-credentials URL check),
+# REPORT_PATH_RE, COMMIT_SHA_RE, and SAFE_CODE_RE in tasks-axi's
+# public-followup.js - so a bad value is refused where it is written and a
+# refusal can say which value was wrong. tasks-axi still re-validates at
+# consume; tests/fm-public-followup.test.sh pins these rules against the real
+# consumer, so re-pin both together when tasks-axi changes them.
+
+# fm_pf_deliverable_format <key>: the format tasks-axi accepts for <key>, as one
+# line for a brief or a refusal. Exit 1 for a key with no known format rule.
+fm_pf_deliverable_format() {
+  case "$1" in
+    pr_url) printf '%s\n' 'a full pull request URL such as https://github.com/<owner>/<repo>/pull/<number>, with no query, fragment, or credentials' ;;
+    report_path) printf '%s\n' 'data/<task-id>/report.md, relative to the work home, never an absolute path' ;;
+    commit_sha) printf '%s\n' 'a lowercase hex commit SHA of 7 to 64 characters' ;;
+    error_code) printf '%s\n' 'a lowercase code of at most 64 characters: a letter, then letters, digits, ".", "_", or "-"' ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_pf_outcome_deliverable_keys <outcome>: the deliverable keys a work event
+# with <outcome> may carry, space-separated (empty for none). Exit 1 for an
+# outcome tasks-axi does not accept, which it refuses on its own.
+fm_pf_outcome_deliverable_keys() {
+  case "$1" in
+    pr-merged) printf 'pr_url\n' ;;
+    report-ready) printf 'report_path\n' ;;
+    local-main) printf 'commit_sha\n' ;;
+    failed) printf 'error_code\n' ;;
+    superseded) printf '\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_pf_deliverable_problem <outcome> <key> <value>: silent exit 0 when tasks-axi
+# would accept <key>=<value> on a work event with <outcome>; otherwise print one
+# line naming the key, the bad value, and what was expected, and exit 1.
+fm_pf_deliverable_problem() {
+  local outcome=$1 key=$2 value=$3 allowed re authority format
+  if allowed=$(fm_pf_outcome_deliverable_keys "$outcome"); then
+    case " $allowed " in
+      *" $key "*) ;;
+      *)
+        if [ -n "$allowed" ]; then
+          printf "deliverable '%s' is not one a %s outcome carries; expected %s\n" "$key" "$outcome" "$allowed"
+        else
+          printf "deliverable '%s' is not allowed: a %s outcome carries no deliverables\n" "$key" "$outcome"
+        fi
+        return 1
+        ;;
+    esac
+  fi
+  case "$key" in
+    pr_url) re='^https://[^?#[:space:]]+/pull/[0-9]+$' ;;
+    report_path) re='^data/[A-Za-z0-9][A-Za-z0-9._-]*/report\.md$' ;;
+    commit_sha) re='^[a-f0-9]{7,64}$' ;;
+    error_code) re='^[a-z][a-z0-9._-]{0,63}$' ;;
+    *) return 0 ;;
+  esac
+  format=$(fm_pf_deliverable_format "$key")
+  case "$value" in
+    *[[:cntrl:]]*)
+      printf "deliverable '%s' is not valid: it contains control characters; expected %s\n" "$key" "$format"
+      return 1
+      ;;
+  esac
+  if printf '%s\n' "$value" | LC_ALL=C grep -Eq "$re"; then
+    # tasks-axi also refuses a pull request URL that carries credentials.
+    authority=${value#https://}
+    authority=${authority%%/*}
+    case "$key:$authority" in
+      pr_url:*@*) ;;
+      *) return 0 ;;
+    esac
+  fi
+  printf "deliverable '%s' value '%s' is not valid; expected %s\n" "$key" "$value" "$format"
+  return 1
 }
 
 # --- registry records -------------------------------------------------------

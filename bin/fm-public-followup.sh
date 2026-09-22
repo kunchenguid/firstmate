@@ -48,7 +48,10 @@
 #       Print the exact fm-public-followup-emit.sh command line the bound worker
 #       must run when its work reaches the promised terminal outcome, so the
 #       binding is copied into a brief instead of hand-assembled. The
-#       --deliverable flags name the obligation's actual required keys. For work
+#       --deliverable flags name the obligation's actual required keys, with
+#       every value the binding determines already filled in (report_path is
+#       data/<work-id>/report.md) and every other one left as a named
+#       placeholder followed by the format tasks-axi accepts. For work
 #       bound to a REMOTE secondmate home, the command names that route's own
 #       code root and home with --stage-in, because neither this checkout's path
 #       nor this home's path exists on the machine that worker runs on.
@@ -59,8 +62,11 @@
 #       work-event`, and quarantine what tasks-axi refuses. Prints one
 #       "ready <obligation-id> <request-id> <platform>" line per obligation that
 #       became delivery-ready, and one "rejected <event-id>: <reason>" line per
-#       refusal. Silent when there is nothing to do. Duplicate events and restart
-#       replay are no-ops.
+#       refusal. A refusal's reason names the specific deliverable, outcome, or
+#       missing key at fault where one is identifiable, and each refusal also
+#       queues one wake for this home, which the relay poll raises
+#       (bin/fm-x-poll.sh). Silent when there is nothing to do. Duplicate events
+#       and restart replay are no-ops.
 #       An open loop bound to a REMOTE secondmate home is collected first: its
 #       staged results are pulled over that route into this home's own inbox and
 #       reconciled identically. The staged copy is retired only after this home
@@ -391,6 +397,7 @@ brief_emit_target() {
 
 cmd_brief() {
   local id=${1:-} relation work_home work_home_path work_id generation payload outcome keys key deliverable_flags
+  local value format deliverable_formats
   local emit_target emit_script emit_home_flag closing_note
   [ -n "$id" ] || { usage; exit 2; }
   fm_pf_slug_valid "$id" || die "unsafe obligation id: $id"
@@ -438,14 +445,34 @@ the home above owns the reply.'
             and (map(type == "string" and test("^[a-z0-9_]+$")) | all))
         | .[]' 2>/dev/null) \
     || die "public-followup obligation '$id' has no readable required deliverable keys" 1
+  # Pre-fill every value the binding already determines, so the worker has
+  # nothing to guess; name each remaining one and state the format tasks-axi
+  # accepts for it, so a guess never travels back to be quarantined here.
   deliverable_flags=
+  deliverable_formats=
   while IFS= read -r key; do
     [ -n "$key" ] || continue
-    deliverable_flags="${deliverable_flags}    --deliverable ${key}=<value> \\
+    value=
+    case "$key" in
+      report_path) value="data/$work_id/report.md" ;;
+    esac
+    if [ -n "$value" ] && fm_pf_deliverable_problem "$outcome" "$key" "$value" >/dev/null; then
+      deliverable_flags="${deliverable_flags}    --deliverable ${key}=${value} \\
+"
+      continue
+    fi
+    deliverable_flags="${deliverable_flags}    --deliverable ${key}=<${key}> \\
+"
+    format=$(fm_pf_deliverable_format "$key") || format='the exact value tasks-axi requires for this key'
+    deliverable_formats="${deliverable_formats}  <${key}>: ${format}
 "
   done <<EOF
 $keys
 EOF
+  [ -z "$deliverable_formats" ] || deliverable_formats="
+Replace each placeholder with its exact value; the emit command refuses any
+other format:
+${deliverable_formats}"
 
   cat <<EOF
 When this work reaches its promised terminal outcome, report it as typed data
@@ -460,17 +487,19 @@ When this work reaches its promised terminal outcome, report it as typed data
     --generation $generation \\
     --outcome $outcome \\
 ${deliverable_flags}    --outcome-text '<one bounded public-safe sentence>'
-
+${deliverable_formats}
 $closing_note
 EOF
 }
 
 # --- subcommand: consume ----------------------------------------------------
 
-# reject_event <file> <event-id> <reason>: quarantine one refused event with an
-# inspectable reason so it is never retried in a loop.
+# reject_event <file> <event-id> <reason> [<obligation-id>]: quarantine one
+# refused event with an inspectable reason so it is never retried in a loop, and
+# queue one wake line for this home so the refusal is never silent. The relay
+# poll prints that line once and removes it (bin/fm-x-poll.sh).
 reject_event() {
-  local file=$1 event_id=$2 reason=$3 rejected event_payload
+  local file=$1 event_id=$2 reason=$3 obligation=${4:-unknown} rejected event_payload wakes
   rejected=$(fm_pf_rejected_dir "$STATE")
   fmx_private_artifact_dir_prepare "$rejected" >/dev/null \
     || { printf 'rejected %s: %s (quarantine failed; event retained)\n' "$event_id" "$reason"; return 1; }
@@ -492,7 +521,63 @@ reject_event() {
     printf 'rejected %s: %s (quarantine cleanup failed; event retained)\n' "$event_id" "$reason"
     return 1
   fi
+  wakes=$(fm_pf_rejection_wakes_dir "$STATE")
+  if ! fmx_private_artifact_dir_prepare "$wakes" >/dev/null \
+    || ! printf 'public-followup rejected %s for obligation %s: %s\n' "$event_id" "$obligation" "$reason" \
+      | fmx_private_artifact_publish_stdin "$wakes" "$event_id" 600 2>/dev/null; then
+    printf 'rejected %s: %s (quarantined, but its wake could not be recorded)\n' "$event_id" "$reason"
+    return 1
+  fi
   printf 'rejected %s: %s\n' "$event_id" "$reason"
+}
+
+# event_rejection_detail <payload>: the specific problem behind a tasks-axi
+# refusal, whose own sentence names no key or value. Checks each deliverable
+# against the mirrored rules, then the outcome and required keys against the
+# obligation's expected final. Prints nothing when no specific cause is found.
+event_rejection_detail() {
+  local payload=$1 outcome obligation key value problem expected expected_type expected_outcome
+  outcome=$(pf_field "$payload" '.outcome_type')
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    if ! value=$(printf '%s' "$payload" | jq -er --arg k "$key" \
+        '.deliverables[$k] | select(type == "string")' 2>/dev/null); then
+      printf "deliverable '%s' is not a string\n" "$key"
+      return 0
+    fi
+    if ! problem=$(fm_pf_deliverable_problem "$outcome" "$key" "$value"); then
+      printf '%s\n' "$problem"
+      return 0
+    fi
+  done <<EOF
+$(printf '%s' "$payload" | jq -r '(.deliverables // {}) | keys[]' 2>/dev/null)
+EOF
+
+  obligation=$(pf_field "$payload" '.obligation_id')
+  expected=$(obligation_json "$obligation" 2>/dev/null) || return 0
+  expected_type=$(pf_field "$expected" '.public_followup.expected_final.type')
+  [ -n "$expected_type" ] || return 0
+  case "$outcome" in failed|superseded) return 0 ;; esac
+  case "$expected_type" in
+    failure-outcome) expected_outcome=failed ;;
+    explicit-answer) expected_outcome=local-main ;;
+    *) expected_outcome=$expected_type ;;
+  esac
+  if [ "$outcome" != "$expected_outcome" ]; then
+    printf "outcome '%s' does not match this obligation's expected final '%s', which needs outcome '%s'\n" \
+      "$outcome" "$expected_type" "$expected_outcome"
+    return 0
+  fi
+  while IFS= read -r key; do
+    [ -n "$key" ] || continue
+    printf '%s' "$payload" | jq -e --arg k "$key" '.deliverables[$k] | type == "string"' >/dev/null 2>&1 \
+      && continue
+    printf "required deliverable '%s' is missing; expected %s\n" "$key" \
+      "$(fm_pf_deliverable_format "$key" || printf 'the value tasks-axi requires for it')"
+    return 0
+  done <<EOF
+$(printf '%s' "$expected" | jq -r '.public_followup.expected_final.required_deliverables // [] | .[]' 2>/dev/null)
+EOF
 }
 
 # collect_remote_staged_events: pull every typed terminal result a REMOTE work
@@ -602,7 +687,7 @@ cmd_consume() {
   fi
   require_tools
 
-  local events_dir consumed_dir stderr_file file event_id payload derived out rc reason
+  local events_dir consumed_dir stderr_file file event_id payload derived out rc reason detail
   local consume_rc=$collect_rc
   local obligation delivery request platform
   events_dir=$(fm_pf_events_dir "$STATE")
@@ -677,8 +762,12 @@ cmd_consume() {
     fi
     if [ "$rc" -ne 0 ]; then
       reason=$( { cat "$stderr_file" 2>/dev/null; printf '%s\n' "$out"; } \
-        | grep -v '^[[:space:]]*$' | head -1 | fm_pf_clean_outcome_text | fm_pf_bound_bytes 400)
-      reject_event "$file" "$event_id" "${reason:-tasks-axi refused the event}" || consume_rc=1
+        | grep -v '^[[:space:]]*$' | head -1)
+      reason=${reason:-tasks-axi refused the event}
+      detail=$(event_rejection_detail "$payload")
+      [ -z "$detail" ] || reason="$detail (tasks-axi: $reason)"
+      reason=$(printf '%s' "$reason" | fm_pf_clean_outcome_text | fm_pf_bound_bytes 600)
+      reject_event "$file" "$event_id" "$reason" "$obligation" || consume_rc=1
       continue
     fi
 
