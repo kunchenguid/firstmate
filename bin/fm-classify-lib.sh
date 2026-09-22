@@ -24,6 +24,16 @@
 # observed state alarms once while every unclassified byte remains for recovery.
 # The reported signature includes path type, mode, symlink target, and observable
 # failure kind, so a readability change is a new state that triggers another read.
+# A stat, size, identity, or readlink helper that fails for a path which still
+# exists is a failed observation rather than a state: the signature read fails
+# with no output after one retry, and no marker writer records such a signature,
+# so one transient failure can neither wake the supervisor nor poison the
+# recorded state (status_observed_signature, status_observed_signature_unobservable).
+# The skip is bounded: failed observations of one file are counted in its
+# sidecar at most once per FM_UNOBSERVABLE_MIN_GAP-second window however many
+# sites observe it, and reported once per episode when they reach
+# FM_UNOBSERVABLE_POLLS, so a persistent failure stays loud
+# (status_observation_skipped).
 # A missing, malformed, identity-mismatched, or past-end classified position reads
 # from byte 0, preferring a bounded duplicate over a lost event.
 #
@@ -1005,12 +1015,12 @@ _fm_open_decisions_file_ident() {  # <file> -> strongest available identity
   fi
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     ident=$(LC_ALL=C /usr/bin/stat -f '%d:%i' "$f" 2>/dev/null) || return 1
-    epoch=$(LC_ALL=C /usr/bin/stat -f '%B' "$f" 2>/dev/null) || epoch=0
-    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C /usr/bin/stat -f '%FB' "$f" 2>/dev/null) || birth=''; else birth=''; fi
+    epoch=$(LC_ALL=C /usr/bin/stat -f '%B' "$f" 2>/dev/null) || return 1
+    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C /usr/bin/stat -f '%FB' "$f" 2>/dev/null) || return 1; else birth=''; fi
   else
     ident=$(LC_ALL=C stat -c '%d:%i' "$f" 2>/dev/null) || return 1
-    epoch=$(LC_ALL=C stat -c '%W' "$f" 2>/dev/null) || epoch=0
-    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -c '%w' "$f" 2>/dev/null) || birth=''; else birth=''; fi
+    epoch=$(LC_ALL=C stat -c '%W' "$f" 2>/dev/null) || return 1
+    if [ "$epoch" != 0 ]; then birth=$(LC_ALL=C stat -c '%w' "$f" 2>/dev/null) || return 1; else birth=''; fi
   fi
   case "$ident$birth" in *$'\t'*|*$'\n'*|'') return 1 ;; esac
   if [ -n "$birth" ]; then printf 'strong:%s:%s' "$ident" "$birth"; else printf 'weak:%s' "$ident"; fi
@@ -1380,6 +1390,11 @@ status_daemon_seen_marker_path() {  # <state> <task-id>
   printf '%s/.subsuper-seen-status-%s' "$1" "$(printf '%s' "$2" | tr ':/.' '___')"
 }
 
+# Format check shared by the marker parser and the writers. It deliberately
+# accepts an r1 signature that encodes a failed observation, because a marker
+# an older watcher persisted from one must still parse so its classified
+# position survives until the next successful observation replaces the
+# reported half; refusing failed observations is the writers' job.
 _status_presentation_signature_valid() {
   local value=$1 size ident encoded
   [ "$value" = unverifiable ] && return 0
@@ -1424,6 +1439,10 @@ status_presentation_marker_parse() {
 }
 
 _status_observed_path_state() {
+  if [ -n "${FM_STATUS_PATH_STATE_READER:-}" ]; then
+    "$FM_STATUS_PATH_STATE_READER" "$1"
+    return
+  fi
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     LC_ALL=C /usr/bin/stat -f '%HT:%p' "$1" 2>/dev/null
   else
@@ -1431,14 +1450,26 @@ _status_observed_path_state() {
   fi
 }
 
-status_observed_signature() {
-  local f=$1 size=${2-} ident=${3-} path_state link_target=- access kind encoded
+# One observation of <file>: the six fields the reported signature encodes, in
+# _STATUS_OBSERVED_FIELDS. Returns 0 when they describe a file state and 1 when
+# they describe a failed observation: readlink failed for a symlink, or the
+# stat, size, or identity helper failed for a path that still exists. The same
+# error tokens are a legitimate state only for an absent path, where the helpers
+# cannot succeed. A symlink counts as existing even when its target does not,
+# because all three helpers stat the link itself rather than following it, so an
+# error token on a dangling link is a failed helper and not a state.
+_STATUS_OBSERVED_FIELDS=()
+_status_observe_fields() {  # <file> [<size> <ident>]
+  local f=$1 size=${2-} ident=${3-} path_state link_target=- access kind exists=1 failed=0
+  _STATUS_OBSERVED_FIELDS=()
   path_state=$(_status_observed_path_state "$f") || path_state=stat-error
+  [ -n "$path_state" ] || path_state=stat-error
   if [ -L "$f" ]; then
-    link_target=$(readlink "$f" 2>/dev/null) || link_target=readlink-error
+    link_target=$(readlink "$f" 2>/dev/null) || { link_target=readlink-error; failed=1; }
     kind=symlink
   elif [ ! -e "$f" ]; then
     kind=absent
+    exists=0
   elif [ ! -f "$f" ]; then
     kind=nonregular
   elif [ -r "$f" ]; then
@@ -1456,10 +1487,233 @@ status_observed_signature() {
     [ -n "$ident" ] || ident=identity-error
   fi
   if [ -r "$f" ]; then access=readable; else access=unreadable; fi
-  encoded=$(printf '%s\0%s\0%s\0%s\0%s\0%s' \
-    "$size" "$ident" "$path_state" "$link_target" "$access" "$kind" \
+  if [ "$exists" -eq 1 ]; then
+    case "$path_state" in stat-error) failed=1 ;; esac
+    case "$size" in size-error) failed=1 ;; esac
+    case "$ident" in identity-error) failed=1 ;; esac
+  fi
+  _STATUS_OBSERVED_FIELDS=("$size" "$ident" "$path_state" "$link_target" "$access" "$kind")
+  [ "$failed" -eq 0 ]
+}
+
+# The reported-state signature of <file>, or no output and status 2 when the
+# file could not be observed: a helper that fails for a path that still exists
+# is a momentary inability to run the stat helpers, not a new file state, so
+# the observation is retried once and then abandoned for this poll rather than
+# encoded. A signature this function prints therefore never carries a failed
+# observation, and a caller that receives status 2 leaves every marker alone.
+# A successful observation here is the one predicate that ends a bounded-skip
+# episode, so no caller has to end it separately after reading a signature.
+status_observed_signature() {  # <file> [<size> <ident>]
+  local f=$1 encoded
+  if ! _status_observe_fields "$f" "${2-}" "${3-}"; then
+    _status_observe_fields "$f" "${2-}" "${3-}" || return 2
+  fi
+  encoded=$(printf '%s\0%s\0%s\0%s\0%s\0%s' "${_STATUS_OBSERVED_FIELDS[@]}" \
     | LC_ALL=C od -An -v -tx1 | tr -d ' \n') || return 1
+  [ -n "$encoded" ] || return 1
+  status_observation_succeeded "$f"
   printf 'r1:%s' "$encoded"
+}
+
+# Bounded skip: the one rule every path that skips an unobservable status log
+# applies (the watcher's signal scan, heartbeat backstop, and stale declared-wait
+# paths, and the daemon's catch-all scan). A momentary failure is skipped
+# silently, but a persistent one must not blind every supervisor surface, so
+# each consecutive failed observation of one status file is counted in a private
+# sidecar beside it (state/.unobservable-<task>:
+# "<count>\t<last-failure-epoch>\t<reported>",
+# written only here, a documented exception to the pure-read rule like the
+# cursor), a successful observation empties the sidecar, and the count reaching
+# FM_UNOBSERVABLE_POLLS (default 3, the consecutive-error budget shape of
+# bin/fm-procevent-when.sh's --error-budget) makes status_observation_skipped
+# return 0 so the caller reports it. The error tokens are never a throttle key;
+# only this counter is. An absent and an empty sidecar both mean "no episode in
+# progress".
+#
+# Enqueue before suppress, as everywhere else in this codebase: a due skip keeps
+# returning 0 on every later poll until a caller has durably queued the report
+# and confirmed it with status_observation_reported, which is the only writer of
+# the reported flag. A report that could not be appended therefore leaves the
+# episode owed rather than burning it, and after the flag is set the episode
+# stays silent until the file is observable again and a new one starts.
+#
+# The count measures elapsed supervision time, not calls: the watcher's signal
+# scan, its grace-period rescan, the heartbeat backstop, the stale declared-wait
+# paths and the daemon's wake handling and catch-all scan all share this one
+# sidecar, and several of them observe the same log within one window. A failed
+# observation advances the count only when at least FM_UNOBSERVABLE_MIN_GAP
+# seconds (default 20) have passed since the last one that did, so three drained
+# wake rows in one second, or three observers running at once, count once. A gap
+# of 0 counts every call, which the pure unit tests use.
+#
+# One predicate opens and ends an episode: the same three-helper observation the
+# signature is built from. status_observed_signature ends the episode itself once
+# it has a signature in hand - after the encode, not before it, because the
+# encode forks too and a caller that got no signature is about to count the
+# failure. A caller that proved less than that - a span read, which needs
+# only identity and size - must never claim the reset, or a failure confined to
+# the path-state helper would leave the count oscillating and the bound would
+# never fire. status_observation_check is that predicate for a caller that needs
+# the reset without the signature.
+#
+# Everything here is a bash builtin - parameter expansion for the path, `read`
+# and a redirection for the sidecar - because the failure class this bound exists
+# to escalate is fork/exec pressure that kills the stat helpers while builtins
+# still work. A counter built from dirname/basename/cat/mv would go inert in
+# exactly the episode it must report. A torn write self-heals through the count
+# guard below, so the write needs no temp-and-rename. The clock is read the same
+# way: EPOCHSECONDS, then printf's %(%s)T, and only a shell older than both (the
+# stock macOS bash 3.2) falls back to forking date - off the healthy path, which
+# never reads the clock at all. A clock that cannot be read at all leaves the gap
+# unproven, and an unproven gap counts, so a degraded host stays loud.
+FM_UNOBSERVABLE_POLLS=${FM_UNOBSERVABLE_POLLS:-3}
+FM_UNOBSERVABLE_MIN_GAP=${FM_UNOBSERVABLE_MIN_GAP:-20}
+STATUS_UNOBSERVABLE_COUNT=0
+_STATUS_UNOBSERVABLE_MARKER=
+_STATUS_UNOBSERVABLE_N=0
+_STATUS_UNOBSERVABLE_EPOCH=
+_STATUS_UNOBSERVABLE_REPORTED=0
+_STATUS_UNOBSERVABLE_NOW=
+
+_status_unobservable_marker() {  # <status-file> -> sets _STATUS_UNOBSERVABLE_MARKER
+  local f=$1 dir base
+  case "$f" in */*) dir=${f%/*} ;; *) dir=. ;; esac
+  base=${f##*/}
+  _STATUS_UNOBSERVABLE_MARKER="$dir/.unobservable-${base%.status}"
+}
+
+_status_unobservable_now() {  # -> _STATUS_UNOBSERVABLE_NOW, empty when no clock answers
+  local t=${EPOCHSECONDS:-}
+  if [ -z "$t" ]; then
+    printf -v t '%(%s)T' -1 2>/dev/null || t=''
+  fi
+  case "$t" in
+    ''|*[!0-9]*) t=$(date +%s 2>/dev/null) || t='' ;;
+  esac
+  case "$t" in ''|*[!0-9]*) t='' ;; esac
+  _STATUS_UNOBSERVABLE_NOW=$t
+}
+
+_status_unobservable_read() {  # <status-file> -> sets the marker path and the three sidecar fields
+  local raw='' rest=''
+  _status_unobservable_marker "$1"
+  if [ -r "$_STATUS_UNOBSERVABLE_MARKER" ]; then
+    IFS= read -r raw < "$_STATUS_UNOBSERVABLE_MARKER" || :
+  fi
+  _STATUS_UNOBSERVABLE_N=$raw
+  _STATUS_UNOBSERVABLE_EPOCH=''
+  _STATUS_UNOBSERVABLE_REPORTED=0
+  case "$raw" in
+    *$'\t'*) _STATUS_UNOBSERVABLE_N=${raw%%$'\t'*}; rest=${raw#*$'\t'} ;;
+  esac
+  case "$rest" in
+    *$'\t'*)
+      _STATUS_UNOBSERVABLE_EPOCH=${rest%%$'\t'*}
+      _STATUS_UNOBSERVABLE_REPORTED=${rest#*$'\t'}
+      ;;
+    *) _STATUS_UNOBSERVABLE_EPOCH=$rest ;;
+  esac
+  case "$_STATUS_UNOBSERVABLE_N" in ''|*[!0-9]*) _STATUS_UNOBSERVABLE_N=0 ;; esac
+  case "$_STATUS_UNOBSERVABLE_EPOCH" in *[!0-9]*) _STATUS_UNOBSERVABLE_EPOCH='' ;; esac
+  [ "$_STATUS_UNOBSERVABLE_REPORTED" = 1 ] || _STATUS_UNOBSERVABLE_REPORTED=0
+}
+
+_status_unobservable_write() {  # <count> <epoch> <reported>, into the marker just read
+  { printf '%s\t%s\t%s' "$1" "$2" "$3" > "$_STATUS_UNOBSERVABLE_MARKER"; } 2>/dev/null || :
+}
+
+_status_unobservable_owed() {  # <count> <reported> -> 0 when this episode still owes its report
+  local bound=$FM_UNOBSERVABLE_POLLS
+  case "$bound" in ''|*[!0-9]*|0) bound=3 ;; esac
+  [ "$2" -eq 0 ] && [ "$1" -ge "$bound" ]
+}
+
+status_observation_skipped() {  # <status-file> -> 0 while this episode still owes its report
+  local count reported last now gap
+  _status_unobservable_read "$1"
+  count=$_STATUS_UNOBSERVABLE_N
+  reported=$_STATUS_UNOBSERVABLE_REPORTED
+  last=$_STATUS_UNOBSERVABLE_EPOCH
+  gap=$FM_UNOBSERVABLE_MIN_GAP
+  case "$gap" in ''|*[!0-9]*) gap=20 ;; esac
+  _status_unobservable_now
+  now=$_STATUS_UNOBSERVABLE_NOW
+  if [ "$count" -gt 0 ] && [ -n "$now" ] && [ -n "$last" ] \
+    && [ "$now" -ge "$last" ] && [ $((now - last)) -lt "$gap" ]; then
+    STATUS_UNOBSERVABLE_COUNT=$count
+    _status_unobservable_owed "$count" "$reported"
+    return
+  fi
+  count=$((count + 1))
+  STATUS_UNOBSERVABLE_COUNT=$count
+  _status_unobservable_write "$count" "${now:-$last}" "$reported"
+  _status_unobservable_owed "$count" "$reported"
+}
+
+status_observation_reported() {  # <status-file>: the episode's report is durably queued
+  _status_unobservable_read "$1"
+  [ "$_STATUS_UNOBSERVABLE_N" -gt 0 ] || return 0
+  _status_unobservable_write "$_STATUS_UNOBSERVABLE_N" "$_STATUS_UNOBSERVABLE_EPOCH" 1
+  return 0
+}
+
+status_observation_succeeded() {  # <status-file>: a proven observation ends the episode
+  _status_unobservable_marker "$1"
+  if [ -s "$_STATUS_UNOBSERVABLE_MARKER" ]; then
+    { : > "$_STATUS_UNOBSERVABLE_MARKER"; } 2>/dev/null || :
+  fi
+  return 0
+}
+
+# The episode-ending predicate for a caller that proved less than a signature.
+# 0 when the same three helpers the signature is built from all answer.
+# With no episode open there is nothing to end, and the builtin sidecar test
+# answers that on its own: the three helpers are forked only while an episode is
+# open, so the healthy path adds no load to the fork storm this bound exists for.
+status_observation_check() {  # <status-file>
+  _status_unobservable_marker "$1"
+  [ -s "$_STATUS_UNOBSERVABLE_MARKER" ] || return 0
+  _status_observe_fields "$1" || return 1
+  status_observation_succeeded "$1"
+}
+
+# 0 when an r1 signature encodes a failed observation rather than a file state,
+# by the same rule _status_observe_fields applies: readlink-error anywhere, or a
+# stat, size, or identity error token for a kind that proves the path existed.
+# The size, identity, and path-state helpers all stat the link itself rather
+# than its target, so they succeed for a dangling link exactly as they do for a
+# live one: an error token on a symlink is always a failed observation, never a
+# state, and only an absent path can carry one legitimately. The writers below
+# refuse such a signature, so a marker is never poisoned by one even though
+# status_observed_signature itself no longer emits it.
+status_observed_signature_unobservable() {  # <signature>
+  local hex pair ch field='' fields=() i=0
+  case "$1" in r1:*) hex=${1#r1:} ;; *) return 1 ;; esac
+  case "$hex" in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ $(( ${#hex} % 2 )) -eq 0 ] || return 1
+  while [ "$i" -lt "${#hex}" ]; do
+    pair=${hex:i:2}
+    if [ "$pair" = 00 ]; then
+      fields+=("$field")
+      field=''
+    else
+      printf -v ch '%b' "\\x$pair"
+      field="$field$ch"
+    fi
+    i=$((i + 2))
+  done
+  fields+=("$field")
+  [ "${#fields[@]}" -eq 6 ] || return 1
+  [ "${fields[3]}" != readlink-error ] || return 0
+  case "${fields[5]}" in
+    readable|unreadable|nonregular|symlink) ;;
+    *) return 1 ;;
+  esac
+  case "${fields[0]}" in size-error) return 0 ;; esac
+  case "${fields[1]}" in identity-error) return 0 ;; esac
+  case "${fields[2]}" in stat-error) return 0 ;; esac
+  return 1
 }
 
 status_presentation_marker_reported_matches() {
@@ -1481,9 +1735,14 @@ status_presentation_marker_offset() {
   printf '%s' "$offset"
 }
 
+# The two marker writers. Each refuses a reported signature that encodes a
+# failed observation and leaves the existing marker untouched, so a transient
+# stat failure can never become the recorded state that the next successful
+# observation then differs from.
 status_presentation_marker_report() {
   local marker=$1 reported=$2 raw classified=-
   _status_presentation_signature_valid "$reported" || return 1
+  status_observed_signature_unobservable "$reported" && return 1
   if raw=$(cat "$marker" 2>/dev/null) && status_presentation_marker_parse "$raw"; then
     classified=$STATUS_PRESENTATION_CLASSIFIED
   fi
@@ -1496,6 +1755,7 @@ status_presentation_marker_commit() {
   current=$(_fm_open_decisions_file_ident "$file") || return 1
   [ -n "$ident" ] && [ "$ident" = "$current" ] || return 1
   reported=$(status_observed_signature "$file" "$endpoint" "$ident") || return 1
+  status_observed_signature_unobservable "$reported" && return 1
   classified="${endpoint}@${ident}"
   printf 'v2\t%s\t%s' "$reported" "$classified" > "$marker"
 }
@@ -1520,7 +1780,8 @@ status_retire_presentation_task() {  # <state> <task-id>
     && [ ! -L "$state/.$task.open-decisions-cursor" ] \
     && [ ! -e "$signal_marker" ] && [ ! -L "$signal_marker" ] \
     && [ ! -e "$heartbeat_marker" ] && [ ! -L "$heartbeat_marker" ] \
-    && [ ! -e "$daemon_marker" ] && [ ! -L "$daemon_marker" ]; then
+    && [ ! -e "$daemon_marker" ] && [ ! -L "$daemon_marker" ] \
+    && [ ! -s "$state/.unobservable-$task" ] && [ ! -L "$state/.unobservable-$task" ]; then
     if [ ! -e "$manifest" ] && [ ! -L "$manifest" ]; then
       return 0
     fi
@@ -1567,7 +1828,8 @@ EOF
   fi
   if [ "$rc" -eq 0 ]; then
     rm -f -- "$state/$task.status" "$state/.$task.open-decisions-cursor" \
-      "$signal_marker" "$heartbeat_marker" "$daemon_marker" || rc=1
+      "$signal_marker" "$heartbeat_marker" "$daemon_marker" \
+      "$state/.unobservable-$task" || rc=1
   fi
   fm_lock_release "$lock" || rc=1
   return "$rc"

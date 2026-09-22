@@ -208,6 +208,191 @@ test_stale_masked_event_escalates_at_captured_endpoint() {
   pass "a stale wake escalates a blocker hidden by later progress"
 }
 
+# The daemon's per-wake handling of a status log the stat helpers cannot observe
+# is bounded by the same counter and sidecar the watcher and the catch-all scan
+# use, not by an error-token signature: below the bound a handling escalates
+# nothing and moves no marker, the handling that reaches the bound escalates
+# exactly once per failure episode, later handlings of the same episode stay
+# silent, and a recovered observation ends the episode so the next failure is
+# reported once again.
+test_daemon_unobservable_status_is_bounded_per_episode() {
+  local dir state key marker before f rows
+  dir=$(make_supercase daemon-unobservable); state="$dir/state"
+  f="$state/unobs-r1.status"
+  printf 'blocked: release approval required\n' > "$f"
+  key=$(printf '%s' unobs-r1 | tr ':/.' '___')
+  marker="$state/.subsuper-seen-status-$key"
+  printf '0@%s' "$(_fm_open_decisions_file_ident "$f")" > "$marker"
+  before=$(cat "$marker")
+  make_observe_readers "$dir"
+  (
+    observed_wake() {
+      FM_UNOBSERVABLE_POLLS=3 FM_UNOBSERVABLE_MIN_GAP=0 FM_ESCALATE_BATCH_SECS=999 \
+        FM_STATUS_IDENTITY_READER="$dir/observe-identity" \
+        FM_STATUS_SIZE_READER="$dir/observe-size" \
+        FM_STATUS_PATH_STATE_READER="$dir/observe-path-state" \
+        handle_wake "signal: $f" "$state"
+    }
+    : > "$dir/observe-fail"
+    observed_wake
+    observed_wake
+    [ ! -s "$state/.subsuper-escalations" ] \
+      || fail "a below-bound unobservable log escalated: $(cat "$state/.subsuper-escalations")"
+    observed_wake
+    observed_wake
+    observed_wake
+    rows=$(grep -c 'status log unobservable' "$state/.subsuper-escalations" 2>/dev/null || true)
+    [ "$rows" = 1 ] \
+      || fail "the episode escalated $rows times: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+    grep -F 'unobs-r1.status: status log unobservable' "$state/.subsuper-escalations" >/dev/null \
+      || fail "the escalation did not name the file: $(cat "$state/.subsuper-escalations")"
+    grep -F 'stat helpers failing' "$state/.subsuper-escalations" >/dev/null \
+      || fail "the escalation did not name the reason: $(cat "$state/.subsuper-escalations")"
+    [ "$(cat "$marker")" = "$before" ] \
+      || fail "an unobservable handling moved the daemon seen marker: $(cat "$marker")"
+    # A recovered observation ends the episode. That handling classifies the log
+    # for real, so it legitimately commits its endpoint; the next failure is then
+    # a new episode, reported once again rather than silenced by the old flag.
+    rm -f "$dir/observe-fail"
+    observed_wake
+    [ ! -s "$state/.unobservable-unobs-r1" ] \
+      || fail "a recovered observation did not end the failure episode"
+    before=$(cat "$marker")
+    : > "$state/.subsuper-escalations"
+    : > "$dir/observe-fail"
+    observed_wake
+    observed_wake
+    [ ! -s "$state/.subsuper-escalations" ] \
+      || fail "a new episode escalated before the bound: $(cat "$state/.subsuper-escalations")"
+    observed_wake
+    observed_wake
+    rows=$(grep -c 'status log unobservable' "$state/.subsuper-escalations" 2>/dev/null || true)
+    [ "$rows" = 1 ] \
+      || fail "the new episode escalated $rows times: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+    [ "$(cat "$marker")" = "$before" ] \
+      || fail "the new episode moved the daemon seen marker: $(cat "$marker")"
+    exit 0
+  ) || exit 1
+  pass "the daemon bounds an unobservable status log to one escalation per failure episode"
+}
+
+# Interleaved failures are not consecutive ones. Every daemon path ends a
+# failure episode on a proven successful read, so blips separated by working
+# scans must never accumulate into an escalation claiming N consecutive failed
+# observations.
+test_catchall_success_ends_the_unobservable_episode() {
+  local dir state f
+  dir=$(make_supercase catchall-unobservable-reset); state="$dir/state"
+  f="$state/blip-r1.status"
+  printf 'working: routine progress\n' > "$f"
+  make_observe_readers "$dir"
+  (
+    scan_once() {
+      rm -f "$state/.subsuper-last-scan"
+      FM_UNOBSERVABLE_POLLS=3 FM_UNOBSERVABLE_MIN_GAP=0 FM_ESCALATE_BATCH_SECS=999 FM_STATE_OVERRIDE="$state" \
+        FM_STATUS_IDENTITY_READER="$dir/observe-identity" \
+        FM_STATUS_SIZE_READER="$dir/observe-size" \
+        FM_STATUS_PATH_STATE_READER="$dir/observe-path-state" \
+        housekeeping "$state"
+    }
+    : > "$dir/observe-fail"; scan_once
+    rm -f "$dir/observe-fail"; scan_once
+    : > "$dir/observe-fail"; scan_once
+    rm -f "$dir/observe-fail"; scan_once
+    : > "$dir/observe-fail"; scan_once
+    ! grep -q 'status log unobservable' "$state/.subsuper-escalations" 2>/dev/null \
+      || fail "isolated blips escalated as consecutive failures: $(cat "$state/.subsuper-escalations")"
+    # The bound still fires when the failures really are consecutive.
+    scan_once
+    scan_once
+    grep -F 'blip-r1.status: status log unobservable' "$state/.subsuper-escalations" >/dev/null \
+      || fail "three consecutive failures did not reach the bound: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+    exit 0
+  ) || exit 1
+  pass "a successful catch-all read ends the episode so only consecutive failures reach the bound"
+}
+
+# The wedge enrichment replaces the stale decision, but the capture's
+# UNOBSERVABLE row marks the episode reported as soon as that escalation is
+# appended. The delivered text must therefore still name the unobservable log,
+# or the episode's one report is burned for the daemon and for the watcher that
+# shares the sidecar.
+test_wedge_enriched_stale_keeps_the_unobservable_report() {
+  local dir state f rows
+  dir=$(make_supercase wedge-unobservable); state="$dir/state"
+  f="$state/wedge-r1.status"
+  printf 'working: retrying upload\n' > "$f"
+  make_observe_readers "$dir"
+  (
+    wedge_wake() {
+      FM_UNOBSERVABLE_POLLS=2 FM_UNOBSERVABLE_MIN_GAP=0 FM_ESCALATE_BATCH_SECS=999 \
+        FM_STATUS_IDENTITY_READER="$dir/observe-identity" \
+        FM_STATUS_SIZE_READER="$dir/observe-size" \
+        FM_STATUS_PATH_STATE_READER="$dir/observe-path-state" \
+        handle_wake "stale: sess:fm-wedge-r1 (idle 900s, possible wedge, escalation 2)" "$state"
+    }
+    : > "$dir/observe-fail"
+    wedge_wake
+    wedge_wake
+    grep -F 'wedge-r1.status: status log unobservable' "$state/.subsuper-escalations" >/dev/null \
+      || fail "the wedge enrichment swallowed the episode's one report: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+    grep -F 'idle 900s, possible wedge, escalation 2' "$state/.subsuper-escalations" >/dev/null \
+      || fail "the unobservable report dropped the enriched wedge reason: $(cat "$state/.subsuper-escalations")"
+    wedge_wake
+    wedge_wake
+    rows=$(grep -c 'status log unobservable' "$state/.subsuper-escalations" 2>/dev/null || true)
+    [ "$rows" = 1 ] \
+      || fail "the episode reported $rows times: $(cat "$state/.subsuper-escalations")"
+    exit 0
+  ) || exit 1
+  pass "an enriched wedge stale wake still delivers the unobservable episode report it marks reported"
+}
+
+# A below-bound unobservable stale wake classified nothing: the span read failed
+# and the count has not reached the bound, so it proved neither the log's state
+# nor the pane's. It must leave the declared-wait bookkeeping byte-identical -
+# dropping the pause marker here restarts the mandatory recheck clock and
+# discards the until-due record, so an overdue wait goes quiet for another
+# window and can later re-escalate an extra time.
+test_below_bound_unobservable_stale_leaves_markers_alone() {
+  local dir state key paused until_due before_paused before_due
+  dir=$(make_supercase below-bound-markers); state="$dir/state"
+  printf 'paused: awaiting vendor\n' > "$state/vendor-r1.status"
+  key=$(printf '%s' "vendor-r1" | tr ':/.' '___')
+  paused="$state/.subsuper-paused-$key"
+  until_due="$state/.subsuper-pause-until-due-$key"
+  printf '100\n' > "$paused"
+  printf '200\n' > "$until_due"
+  before_paused=$(cat "$paused"); before_due=$(cat "$until_due")
+  make_observe_readers "$dir"
+  (
+    unobservable_wake() {
+      FM_UNOBSERVABLE_POLLS=3 FM_UNOBSERVABLE_MIN_GAP=0 FM_ESCALATE_BATCH_SECS=999 \
+        FM_STATUS_IDENTITY_READER="$dir/observe-identity" \
+        FM_STATUS_SIZE_READER="$dir/observe-size" \
+        FM_STATUS_PATH_STATE_READER="$dir/observe-path-state" \
+        FM_STATE_OVERRIDE="$state" handle_wake "stale: sess:fm-vendor-r1" "$state"
+    }
+    : > "$dir/observe-fail"
+    unobservable_wake
+    unobservable_wake
+    [ ! -s "$state/.subsuper-escalations" ] \
+      || fail "a below-bound unobservable stale wake escalated: $(cat "$state/.subsuper-escalations")"
+    [ "$(cat "$paused")" = "$before_paused" ] \
+      || fail "a below-bound unobservable stale wake reset the pause marker: $(cat "$paused" 2>/dev/null)"
+    [ "$(cat "$until_due")" = "$before_due" ] \
+      || fail "a below-bound unobservable stale wake dropped the until-due record"
+    [ ! -e "$state/.subsuper-stale-$key" ] \
+      || fail "a below-bound unobservable stale wake recorded a wedge marker"
+    # The bound still escalates, and only then does the wake reach delivery.
+    unobservable_wake
+    grep -F 'vendor-r1.status: status log unobservable' "$state/.subsuper-escalations" >/dev/null \
+      || fail "the bound did not escalate: $(cat "$state/.subsuper-escalations" 2>/dev/null)"
+    exit 0
+  ) || exit 1
+  pass "a below-bound unobservable stale wake changes no declared-wait marker"
+}
+
 test_stale_read_failure_surfaces_without_advancing_seen() {
   local dir state key out
   dir=$(make_supercase stale-unreadable); state="$dir/state"
@@ -255,6 +440,10 @@ EOF
   pass "a recreated status rejects the old captured identity"
 }
 
+# An identity helper that fails for a status log that still exists is a failed
+# observation, not a new file state, so it is bounded like any other: the first
+# handling absorbs it silently and the handling that reaches the bound surfaces
+# it. Either way no marker and no classification position moves.
 test_unverifiable_identity_surfaces_without_marker() {
   local dir state reader key out
   dir=$(make_supercase unverifiable-identity); state="$dir/state"
@@ -263,14 +452,21 @@ test_unverifiable_identity_surfaces_without_marker() {
   printf 'working: routine progress\n' > "$state/unknown-r5.status"
   key=$(printf '%s' unknown-r5 | tr ':/.' '___')
   (
-    FM_STATUS_IDENTITY_READER="$reader" FM_ESCALATE_BATCH_SECS=999 \
-      handle_wake "signal: $state/unknown-r5.status" "$state"
+    unverifiable_wake() {
+      FM_STATUS_IDENTITY_READER="$reader" FM_ESCALATE_BATCH_SECS=999 \
+        FM_UNOBSERVABLE_POLLS=2 FM_UNOBSERVABLE_MIN_GAP=0 \
+        handle_wake "signal: $state/unknown-r5.status" "$state"
+    }
+    unverifiable_wake
+    [ ! -s "$state/.subsuper-escalations" ] \
+      || fail "a first unverifiable identity escalated before the bound: $(cat "$state/.subsuper-escalations")"
+    unverifiable_wake
   )
   out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
-  case "$out" in *"unreadable status span"*) ;; *) fail "an unverifiable identity was silently absorbed" ;; esac
+  case "$out" in *"status log unobservable"*) ;; *) fail "a persistently unverifiable identity was silently absorbed: $out" ;; esac
   [ "$(status_seen_offset "$state" unknown-r5)" = 0 ] \
     || fail "an unverifiable identity advanced the daemon classification position"
-  pass "an unverifiable status identity surfaces without advancing markers"
+  pass "an unverifiable status identity surfaces at its bound without advancing markers"
 }
 
 test_status_read_failure_surfaces_without_advancing_seen() {
@@ -694,7 +890,7 @@ test_enriched_wedge_under_declared_wait_uses_pause_cadence() {
   local dir state fakebin task win pane key reason i escalations
   dir=$(make_supercase enriched-wedge-declared-wait)
   state="$dir/state"; fakebin="$dir/fakebin"
-  task=paused-wedge-w1; win="sess:fm-$task"; pane="$dir/pane.txt"
+  task="paused-wedge-w1"; win="sess:fm-$task"; pane="$dir/pane.txt"
   key=$(printf '%s' "$task" | tr ':/.' '___')
   fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux"
   printf 'working: dispatching the long audit\npaused: the audit engine is running to completion\n' \
@@ -2850,6 +3046,10 @@ test_stale_read_failure_surfaces_without_advancing_seen
 test_recreated_status_rejects_captured_identity
 test_unverifiable_identity_surfaces_without_marker
 test_status_read_failure_surfaces_without_advancing_seen
+test_daemon_unobservable_status_is_bounded_per_episode
+test_catchall_success_ends_the_unobservable_episode
+test_wedge_enriched_stale_keeps_the_unobservable_report
+test_below_bound_unobservable_stale_leaves_markers_alone
 test_catchall_advances_routine_then_surfaces_append
 test_escalation_buffer_failure_retains_wake_and_position
 test_catchall_buffer_failure_preserves_position
