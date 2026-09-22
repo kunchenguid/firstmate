@@ -147,6 +147,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-push-transition-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-github-read-pause-lib.sh
+. "$SCRIPT_DIR/fm-github-read-pause-lib.sh"
 # Only for the arm-time check on FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS below;
 # the per-cycle reconcile itself runs as a separate process.
 # shellcheck source=bin/fm-procevent-lib.sh
@@ -2401,8 +2403,24 @@ while :; do
             triage_log "PR poll for $id changed before its validated check; skipping the stale snapshot"
             continue
           fi
+          github_read_lock_held=0
+          if [ "$provider" = github ]; then
+            fm_lock_acquire_wait "$STATE/.github-read-pause.lock" || exit 1
+            github_read_lock_held=1
+            if fm_github_read_pause_active "$STATE"; then
+              fm_lock_release "$STATE/.github-read-pause.lock" || exit 1
+              github_read_lock_held=0
+              pr_poll_control_release || exit 1
+              continue
+            fi
+          fi
+          check_rc=0
           run_check_capture "$SCRIPT_DIR/fm-pr-poll.sh" --validated \
-            "$provider" "$url" "$host" "$path" "$number" || exit 1
+            "$provider" "$url" "$host" "$path" "$number" || check_rc=$?
+          if [ "$github_read_lock_held" = 1 ]; then
+            fm_lock_release "$STATE/.github-read-pause.lock" || exit 1
+          fi
+          [ "$check_rc" -eq 0 ] || exit 1
           out=$FM_CHECK_RESULT
         elif fm_custom_check_snapshot_prepare "$STATE" "$id"; then
           custom_snapshot=$FM_CUSTOM_CHECK_SNAPSHOT

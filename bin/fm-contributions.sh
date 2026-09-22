@@ -66,6 +66,8 @@
 #
 # arm registers the existing authenticated custom-check path. Startup and PR
 # registration call it; when filing a linked upstream issue, call arm as well.
+# poll and arm serialize with bin/fm-github-read-pause.sh and stay local-only
+# while its durable marker exists, preserving every contribution record.
 # jq_lib receives literal jq programs, not shell expressions.
 # shellcheck disable=SC2016
 set -eu
@@ -79,6 +81,8 @@ export FM_HOME FM_STATE_OVERRIDE="$STATE"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-github-read-pause-lib.sh
+. "$SCRIPT_DIR/fm-github-read-pause-lib.sh"
 
 fail() { printf 'fm-contributions: %s\n' "$*" >&2; exit 1; }
 usage() { sed -n '2,/^set -eu$/s/^# \{0,1\}//p' "$0"; }
@@ -93,7 +97,9 @@ case "$BUDGET" in ''|*[!0-9]*) fail 'invalid poll budget' ;; esac
 [ "$BUDGET" -ge 1 ] && [ "$BUDGET" -le 25 ] || fail 'poll budget must be 1..25 seconds'
 TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-contributions.XXXXXX")
 LOCK_HELD=0
+GITHUB_READ_LOCK_HELD=0
 cleanup() {
+  [ "$GITHUB_READ_LOCK_HELD" = 0 ] || fm_lock_release "$STATE/.github-read-pause.lock" || true
   [ "$LOCK_HELD" = 0 ] || fm_lock_release "$STATE/.contributions.lock" || true
   rm -rf -- "$TMP"
 }
@@ -157,6 +163,16 @@ acquire() {
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$STATE/.contributions.lock" || fail 'observation lock unavailable'
   LOCK_HELD=1
+}
+
+begin_github_read() {
+  fm_lock_acquire_wait "$STATE/.github-read-pause.lock" || fail 'GitHub-read pause lock unavailable'
+  GITHUB_READ_LOCK_HELD=1
+  if fm_github_read_pause_active "$STATE"; then
+    fm_lock_release "$STATE/.github-read-pause.lock" || fail 'GitHub-read pause lock could not be released'
+    GITHUB_READ_LOCK_HELD=0
+    return 1
+  fi
 }
 
 write_record() { # task record-json-file
@@ -329,6 +345,7 @@ poll() {
   local task url old kind error observed
   local -a row
   acquire
+  begin_github_read || return 0
   get_input
   read_saved
   [ "$ERRORS" -eq 0 ] || printf 'contributions: %s unreadable durable record(s)\n' "$ERRORS"
@@ -392,6 +409,7 @@ poll() {
 arm() {
   local device staged
   acquire
+  begin_github_read || return 0
   if [ "${1:-}" = --if-owned ]; then
     get_input; read_saved
     if [ "$ERRORS" -eq 0 ] && ! jq_lib -ne --slurpfile input "$TMP/input.json" \

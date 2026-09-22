@@ -13,6 +13,9 @@
 # draft state does not refuse, matching how the head read below is optional.
 # bin/fm-pr-merge.sh records through this script with FM_PR_CHECK_MERGE=1 and
 # skips this refusal, because its own merge-time draft refusal is authoritative.
+# While bin/fm-github-read-pause.sh's durable marker exists, GitHub registration
+# makes no forge call, preserves a same-URL pr_head, publishes only resumable
+# poll data and registration, and leaves both GitHub reader names absent.
 # Usage: fm-pr-check.sh <task-id> <pr-url>
 set -eu
 
@@ -27,6 +30,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-parent-channel-lib.sh
 . "$SCRIPT_DIR/fm-parent-channel-lib.sh"
+# shellcheck source=bin/fm-github-read-pause-lib.sh
+. "$SCRIPT_DIR/fm-github-read-pause-lib.sh"
 
 if [ "$#" -ne 2 ]; then
   echo "error: invalid PR check request" >&2
@@ -51,6 +56,45 @@ if [ ! -f "$META" ] || [ -L "$META" ] || [ "$(fm_pr_file_link_count "$META")" !=
   exit 1
 fi
 
+META_TMP=
+META_LOCK=
+META_LOCK_HELD=0
+PR_POLL_PUBLISH_LOCK=
+PR_POLL_PUBLISH_LOCK_HELD=0
+GITHUB_READ_LOCK="$STATE/.github-read-pause.lock"
+GITHUB_READ_LOCK_HELD=0
+GITHUB_READ_PAUSED=0
+pr_check_cleanup() {
+  fm_pr_poll_cleanup
+  [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
+  if [ "$PR_POLL_PUBLISH_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$PR_POLL_PUBLISH_LOCK" || true
+    PR_POLL_PUBLISH_LOCK_HELD=0
+  fi
+  if [ "$META_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$META_LOCK" || true
+    META_LOCK_HELD=0
+  fi
+  if [ "$GITHUB_READ_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$GITHUB_READ_LOCK" || true
+    GITHUB_READ_LOCK_HELD=0
+  fi
+}
+trap pr_check_cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+# Serialize every GitHub registration from its first possible forge read through
+# poll publication. The pause owner writes its marker and retires existing
+# readers under this same boundary, so neither side can pass the other halfway.
+if [ "$PROVIDER" = github ]; then
+  fm_lock_acquire_wait "$GITHUB_READ_LOCK" || {
+    echo "error: GitHub-read pause lock is unavailable" >&2
+    exit 1
+  }
+  GITHUB_READ_LOCK_HELD=1
+  fm_github_read_pause_active "$STATE" && GITHUB_READ_PAUSED=1
+fi
+
 # A prior exact merged result may have queued its durable wake immediately
 # before interruption.
 # Finish only its identity-bound receipt before publishing a replacement poll.
@@ -70,7 +114,8 @@ fi
 
 # The draft state is read before anything is recorded or armed. Only a positive
 # draft reading refuses, because an unreadable one must not block arming.
-if [ "$PROVIDER" = github ] && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+if [ "$PROVIDER" = github ] && [ "$GITHUB_READ_PAUSED" = 0 ] \
+  && [ "${FM_PR_CHECK_MERGE:-}" != 1 ] && command -v gh >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   DRAFT_JSON=$(gh pr view "$URL" --json isDraft 2>/dev/null || true)
   if [ "$(fm_pr_json_draft_state "$DRAFT_JSON")" = true ]; then
     echo "error: $URL is a draft pull request; a draft cannot be merged, so merge monitoring would wait for an event that cannot occur - mark it ready for review and arm again, or declare a wait instead of done if the draft is deliberate" >&2
@@ -91,32 +136,19 @@ fi
 # and treats a recorded value that disagrees as stale rather than authoritative.
 WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
 PR_HEAD=
-if [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
+if [ "$PROVIDER" = github ] && [ "$GITHUB_READ_PAUSED" = 1 ]; then
+  EXISTING_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+  EXISTING_HEAD=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+  if [ "$EXISTING_URL" = "$URL" ] && fm_pr_head_valid "$EXISTING_HEAD"; then
+    PR_HEAD=$EXISTING_HEAD
+  fi
+elif [ "$PROVIDER" = github ] && [ -n "$WT" ] && [ -d "$WT" ] && command -v gh >/dev/null 2>&1; then
   if REMOTE_HEAD=$(cd "$WT" && gh pr view "$URL" --json headRefOid -q .headRefOid 2>/dev/null) \
     && fm_pr_head_valid "$REMOTE_HEAD"; then
     PR_HEAD=$REMOTE_HEAD
   fi
 fi
 
-META_TMP=
-META_LOCK=
-META_LOCK_HELD=0
-PR_POLL_PUBLISH_LOCK=
-PR_POLL_PUBLISH_LOCK_HELD=0
-pr_check_cleanup() {
-  fm_pr_poll_cleanup
-  [ -z "$META_TMP" ] || rm -f -- "$META_TMP"
-  if [ "$PR_POLL_PUBLISH_LOCK_HELD" = 1 ]; then
-    fm_lock_release "$PR_POLL_PUBLISH_LOCK" || true
-    PR_POLL_PUBLISH_LOCK_HELD=0
-  fi
-  if [ "$META_LOCK_HELD" = 1 ]; then
-    fm_lock_release "$META_LOCK" || true
-    META_LOCK_HELD=0
-  fi
-}
-trap pr_check_cleanup EXIT
-trap 'exit 1' HUP INT TERM
 fm_pr_poll_prepare "$STATE" "$ID" "$PROVIDER" "$URL" "$HOST" "$PROJECT_PATH" "$NUMBER" "$SCRIPT_DIR/fm-pr-poll.sh" \
   || { echo "error: could not prepare PR poll" >&2; exit 1; }
 
@@ -157,14 +189,24 @@ META_LOCK_HELD=0
 PR_POLL_PUBLISH_LOCK="$STATE/.pr-poll-publish-$ID.lock"
 fm_lock_acquire_wait "$PR_POLL_PUBLISH_LOCK"
 PR_POLL_PUBLISH_LOCK_HELD=1
-if fm_pr_poll_publish_prepared; then
-  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
-  PR_POLL_PUBLISH_LOCK_HELD=0
+PUBLISH_OK=0
+if [ "$GITHUB_READ_PAUSED" = 1 ]; then
+  fm_pr_poll_publish_prepared_retired && PUBLISH_OK=1
 else
-  fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
-  PR_POLL_PUBLISH_LOCK_HELD=0
+  fm_pr_poll_publish_prepared && PUBLISH_OK=1
+fi
+fm_lock_release "$PR_POLL_PUBLISH_LOCK" || exit 1
+PR_POLL_PUBLISH_LOCK_HELD=0
+[ "$PUBLISH_OK" = 1 ] || {
   echo "error: could not publish PR poll" >&2
   exit 1
+}
+# The GitHub registration boundary ends only after the runnable merge-poll name
+# is either published normally or proven absent under the pause. Contribution
+# registration takes the same boundary independently and will observe the marker.
+if [ "$GITHUB_READ_LOCK_HELD" = 1 ]; then
+  fm_lock_release "$GITHUB_READ_LOCK" || exit 1
+  GITHUB_READ_LOCK_HELD=0
 fi
 # The contribution observer uses the same authenticated check mechanism and
 # owns verdict freshness, required actors and external feedback separately from
@@ -179,8 +221,8 @@ fi
 # publish the child's PR-ready line with the canonical URL just recorded, so it
 # reaches the parent whether or not the mate model appends anything
 # (bin/fm-parent-channel-lib.sh). A main home has no channel and this is a
-# silent no-op there. The poll is armed either way; a channel that cannot be
-# written is reported as actionable, and bin/fm-inactive-reconcile.sh still
+# silent no-op there. The poll identity is retained either way; a channel that
+# cannot be written is reported as actionable, and bin/fm-inactive-reconcile.sh still
 # delivers the child's own ready line on the next supervision poll.
 READY_LINE="done [key=child-pr-$ID]: child $ID PR ready: $URL"
 PR_MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -193,4 +235,8 @@ case "$READY_RC" in
   0|1) ;;
   *) printf 'actionable: PR %s is registered but its ready line did not reach the parent channel (rc=%s)\n' "$URL" "$READY_RC" >&2 ;;
 esac
-printf 'armed: state/%s.check.sh\n' "$ID"
+if [ "$GITHUB_READ_PAUSED" = 1 ]; then
+  printf 'recorded: state/%s.pr-poll (GitHub reads paused)\n' "$ID"
+else
+  printf 'armed: state/%s.check.sh\n' "$ID"
+fi

@@ -604,6 +604,56 @@ fm_pr_poll_publish_prepared() {
   fi
 }
 
+# Publish a prepared GitHub poll's durable identity while deliberately leaving
+# its runnable check name absent. This is the paused counterpart of
+# fm_pr_poll_publish_prepared: metadata, sidecar, and registration remain
+# resumable, but the watcher has no executable artifact to discover.
+fm_pr_poll_publish_prepared_retired() {
+  [ -n "$FM_PR_POLL_DATA_TMP" ] && [ -n "$FM_PR_POLL_CHECK_TMP" ] \
+    && [ -n "$FM_PR_POLL_REG_TMP" ] || return 1
+  fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_DATA_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
+  fm_pr_regular_destination_on_device_or_absent "$FM_PR_POLL_REG_DEST" "$FM_PR_POLL_STATE_DEVICE" || return 1
+  [ ! -e "$FM_PR_POLL_CHECK_DEST" ] && [ ! -L "$FM_PR_POLL_CHECK_DEST" ] || return 1
+
+  if ! mv -f -- "$FM_PR_POLL_DATA_TMP" "$FM_PR_POLL_DATA_DEST"; then
+    fm_pr_poll_revoke_final || true
+    return 1
+  fi
+  FM_PR_POLL_DATA_TMP=
+  if ! fm_pr_private_file_valid "$FM_PR_POLL_DATA_DEST" 600 "$FM_PR_POLL_STATE_DEVICE" \
+    || [ "$(fm_pr_file_identity "$FM_PR_POLL_DATA_DEST")" != "$FM_PR_POLL_EXPECT_DATA_IDENTITY" ] \
+    || [ "$(fm_pr_sha256 "$FM_PR_POLL_DATA_DEST")" != "$FM_PR_POLL_EXPECT_DATA_HASH" ]; then
+    fm_pr_poll_revoke_final || true
+    return 1
+  fi
+
+  if ! mv -f -- "$FM_PR_POLL_REG_TMP" "$FM_PR_POLL_REG_DEST"; then
+    fm_pr_poll_revoke_final || true
+    return 1
+  fi
+  FM_PR_POLL_REG_TMP=
+  if ! fm_pr_private_file_valid "$FM_PR_POLL_REG_DEST" 600 "$FM_PR_POLL_STATE_DEVICE" \
+    || ! fm_pr_poll_registration_parse "$FM_PR_POLL_REG_DEST" \
+    || [ "$FM_PR_REG_ID" != "$FM_PR_POLL_EXPECT_ID" ] \
+    || [ "$FM_PR_REG_PROVIDER" != "$FM_PR_POLL_EXPECT_PROVIDER" ] \
+    || [ "$FM_PR_REG_URL" != "$FM_PR_POLL_EXPECT_URL" ] \
+    || [ "$FM_PR_REG_DATA_HASH" != "$FM_PR_POLL_EXPECT_DATA_HASH" ] \
+    || [ "$FM_PR_REG_TEMPLATE_HASH" != "$FM_PR_POLL_EXPECT_TEMPLATE_HASH" ] \
+    || [ "$FM_PR_REG_DATA_IDENTITY" != "$FM_PR_POLL_EXPECT_DATA_IDENTITY" ] \
+    || [ "$FM_PR_REG_CHECK_IDENTITY" != "$FM_PR_POLL_EXPECT_CHECK_IDENTITY" ]; then
+    fm_pr_poll_revoke_final || true
+    return 1
+  fi
+
+  rm -f -- "$FM_PR_POLL_CHECK_TMP" || { fm_pr_poll_revoke_final || true; return 1; }
+  FM_PR_POLL_CHECK_TMP=
+  fm_pr_poll_retired_artifacts_valid "${FM_PR_POLL_CHECK_DEST%/*}" \
+    "$FM_PR_POLL_EXPECT_ID" "$FM_PR_POLL_TEMPLATE" || {
+      fm_pr_poll_revoke_final || true
+      return 1
+    }
+}
+
 fm_pr_poll_artifacts_valid() {
   local state=$1 id=$2 template=$3 data_identity check_identity
   fm_pr_poll_artifacts_content_valid "$state" "$id" "$template" || return 1
@@ -615,6 +665,43 @@ fm_pr_poll_artifacts_valid() {
   # registration is refused.
   [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
   [ "$FM_PR_REG_CHECK_IDENTITY" = "$check_identity" ]
+}
+
+# Validate the deliberately retired form published while GitHub reads are
+# paused. The absent runnable check is the point; the registration still binds
+# the exact sidecar and current template hash needed for deterministic re-arm.
+fm_pr_poll_retired_artifacts_valid() {  # <state> <id> <template>
+  local state=$1 id=$2 template=$3 state_device data registration meta data_hash template_hash data_identity
+  fm_pr_task_id_valid "$id" || return 1
+  [ -d "$state" ] && [ ! -L "$state" ] || return 1
+  [ ! -e "$state/$id.check.sh" ] && [ ! -L "$state/$id.check.sh" ] || return 1
+  state_device=$(fm_pr_file_device "$state") || return 1
+  data="$state/$id.pr-poll"
+  registration="$state/$id.pr-poll-registration"
+  meta="$state/$id.meta"
+  fm_pr_private_file_valid "$data" 600 "$state_device" || return 1
+  fm_pr_private_file_valid "$registration" 600 "$state_device" || return 1
+  [ -f "$meta" ] && [ ! -L "$meta" ] && [ "$(fm_pr_file_link_count "$meta")" = 1 ] || return 1
+  fm_pr_poll_data_parse "$data" || return 1
+  data_hash=$(fm_pr_sha256 "$data") || return 1
+  template_hash=$(fm_pr_sha256 "$template") || return 1
+  data_identity=$(fm_pr_file_identity "$data") || return 1
+  fm_pr_poll_registration_parse "$registration" || return 1
+  [ "$FM_PR_REG_ID" = "$id" ] || return 1
+  [ "$FM_PR_REG_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
+  [ "$FM_PR_REG_URL" = "$FM_PR_DATA_URL" ] || return 1
+  [ "$FM_PR_REG_HOST" = "$FM_PR_DATA_HOST" ] || return 1
+  [ "$FM_PR_REG_PATH" = "$FM_PR_DATA_PATH" ] || return 1
+  [ "$FM_PR_REG_NUMBER" = "$FM_PR_DATA_NUMBER" ] || return 1
+  [ "$FM_PR_REG_DATA_HASH" = "$data_hash" ] || return 1
+  [ "$FM_PR_REG_TEMPLATE_HASH" = "$template_hash" ] || return 1
+  [ "$FM_PR_REG_DATA_IDENTITY" = "$data_identity" ] || return 1
+  fm_pr_metadata_identity_parse "$meta" || return 1
+  [ "$FM_PR_META_PROVIDER" = "$FM_PR_DATA_PROVIDER" ] || return 1
+  [ "$FM_PR_META_URL" = "$FM_PR_DATA_URL" ] || return 1
+  [ "$FM_PR_META_HOST" = "$FM_PR_DATA_HOST" ] || return 1
+  [ "$FM_PR_META_PATH" = "$FM_PR_DATA_PATH" ] || return 1
+  [ "$FM_PR_META_NUMBER" = "$FM_PR_DATA_NUMBER" ]
 }
 
 # Everything fm_pr_poll_artifacts_valid proves except that the registration's
