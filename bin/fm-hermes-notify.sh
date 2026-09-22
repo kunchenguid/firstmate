@@ -560,6 +560,59 @@ parse_telegram_note() {  # <note-file>
   printf '%s\n%s\n' "$chat_id" "$reply"
 }
 
+normalize_inbound_text() {  # <text>
+  printf '%s' "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed "s/’/'/g; s/[^a-z0-9'][^a-z0-9']*/ /g; s/^[[:space:]]*//; s/[[:space:]]*$//"
+}
+
+presence_text_class() {  # <normalized-text>
+  local normalized=$1 mentions_telegram=0 away_now=0 home_now=0 speculative=0
+  case " $normalized " in
+    *' captain away '*|*' firstmate away '*)
+      printf 'AWAY\n'
+      return 0
+      ;;
+    *' captain home '*|*' firstmate home '*)
+      printf 'HOME\n'
+      return 0
+      ;;
+  esac
+  case " $normalized " in
+    *' telegram '*|*' tg '*|*' bot '*|*' message me here '*|*' text me here '*|*' reach me here '*)
+      mentions_telegram=1
+      ;;
+  esac
+  case " $normalized " in
+    *' might '*|*' maybe '*|*' later '*|*' tomorrow '*|*' soon '*|*' if '*|*' when '*)
+      speculative=1
+      ;;
+  esac
+  case " $normalized " in
+    *" i'm heading out "*|*" i am heading out "*|*' heading out '*|*" i'm going out "*|*" i am going out "*|*' going out '*|*" i'm stepping out "*|*" i am stepping out "*|*' stepping out '*|*" i'm away "*|*" i am away "*|*' away from keyboard '*)
+      away_now=1
+      ;;
+  esac
+  case " $normalized " in
+    *" i'm back "*|*" i am back "*|*' back home '*|*' back at my desk '*|*' back at the desk '*|*' at my desk '*|*' at the desk '*|*" i'm home "*|*" i am home "*|*' stop proactive telegram notifications '*|*' stop telegram notifications '*|*' stop telegram '*|*' disable telegram '*)
+      home_now=1
+      ;;
+  esac
+  if [ "$mentions_telegram" -eq 1 ] && [ "$speculative" -eq 0 ] && [ "$away_now" -eq 1 ]; then
+    printf 'AWAY\n'
+    return 0
+  fi
+  if [ "$home_now" -eq 1 ]; then
+    case " $normalized " in
+      *' stop '*telegram*|*' disable '*telegram*|*' proactive '*telegram*|*' back home '*|*" i'm home "*|*" i am home "*|*' back at my desk '*|*' back at the desk '*)
+        printf 'HOME\n'
+        return 0
+        ;;
+    esac
+  fi
+  return 1
+}
+
 cmd_resolve_reply() {
   local note=${1:-}
   [ -n "$note" ] && [ -f "$note" ] || { usage; exit 2; }
@@ -611,7 +664,7 @@ cmd_resolve_reply() {
 }
 
 cmd_inbound() {
-  local note=${1:-} parsed chat_id text normalized acknowledgement correlated rc=0
+  local note=${1:-} parsed chat_id text normalized presence_class acknowledgement correlated rc=0
   [ -n "$note" ] && [ -f "$note" ] || { usage; exit 2; }
   parsed=$(parse_telegram_note "$note") || {
     printf 'fm-hermes-notify: %s does not match the Hermes/Telegram inbound convention\n' "$note" >&2
@@ -620,11 +673,11 @@ cmd_inbound() {
   chat_id=$(printf '%s\n' "$parsed" | sed -n '1p')
   text=$(printf '%s\n' "$parsed" | sed -n '2,$p')
   text=$(flatten "$text")
-  normalized=$(printf '%s' "$text" | tr '[:upper:]' '[:lower:]' \
-    | sed "s/’/'/g; s/^[[:space:]]*//; s/[.!][[:space:]]*$//")
+  normalized=$(normalize_inbound_text "$text")
 
-  case "$normalized" in
-    'captain away'|'i am heading out, use telegram'|'i am heading out use telegram'|"i'm heading out, use telegram"|"i'm heading out use telegram"|'heading out, use telegram'|'use telegram while i am away')
+  presence_class=$(presence_text_class "$normalized" || true)
+  case "$presence_class" in
+    AWAY)
       cmd_presence away >/dev/null || exit 1
       acknowledgement='Captain presence is now AWAY. Proactive Telegram routing is enabled.'
       printf 'mode:AWAY\n'
@@ -637,7 +690,7 @@ cmd_inbound() {
         exit 3
       fi
       ;;
-    'captain home'|'i am back home, stop proactive telegram notifications'|'i am back home stop proactive telegram notifications'|"i'm back home, stop proactive telegram notifications"|"i'm back home stop proactive telegram notifications"|'back home, stop proactive telegram notifications'|'stop proactive telegram notifications')
+    HOME)
       cmd_presence home >/dev/null || exit 1
       acknowledgement='Captain presence is now HOME. Proactive Telegram routing is disabled.'
       printf 'mode:HOME\n'
@@ -650,6 +703,9 @@ cmd_inbound() {
         exit 3
       fi
       ;;
+  esac
+
+  case "$normalized" in
     'status'|'status report'|'send status'|'send me a status report'|'what is the status')
       printf 'request:status\t%s\n' "$text"
       return 0

@@ -577,6 +577,32 @@ test_inbound_mode_and_status_commands_work_in_both_modes() {
   pass "Telegram mode commands and inbound status requests work in HOME and AWAY"
 }
 
+test_inbound_presence_classification_is_semantic_but_conservative() {
+  local home note out
+  home=$(make_home inbound-semantic)
+  configure_hermes "$home" 'telegram:Rajiv [8629896233]'
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Stepping out for dinner; please use Telegram while I'm away"
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") || fail "semantic AWAY command failed"
+  assert_equals "$(printf 'mode:AWAY\nconfirmation:sent')" "$out" \
+    "a clear, non-exact AWAY intent was not classified"
+  rm -f "$home/state/inbox"/*.note
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] I might be away later, maybe use Telegram"
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") || fail "ambiguous away text should fall through as a command"
+  assert_contains "$out" "command:I might be away later, maybe use Telegram" \
+    "ambiguous future AWAY wording should not change presence"
+  assert_equals AWAY "$(run_notify "$home" presence status)" \
+    "ambiguous future AWAY wording unexpectedly changed presence"
+  rm -f "$home/state/inbox"/*.note
+  run_inbox_note "$home" "[Telegram from Rajiv (chat 8629896233)] Back at my desk; stop Telegram notifications"
+  note=$(latest_note "$home")
+  out=$(run_notify "$home" inbound "$note") || fail "semantic HOME command failed"
+  assert_equals "$(printf 'mode:HOME\nconfirmation:sent')" "$out" \
+    "a clear, non-exact HOME intent was not classified"
+  pass "inbound presence classification accepts clear variants and rejects ambiguous future wording"
+}
+
 # The mode change itself (state/captain-presence) must never be rolled back
 # by a failed Telegram acknowledgement, and the caller must be able to tell
 # "mode changed, confirmation failed" apart from "mode change itself failed".
@@ -720,6 +746,7 @@ test_status_reports_absent_and_present_records
 test_presence_defaults_home_and_persists_transitions
 test_home_and_away_route_only_eligible_notifications
 test_inbound_mode_and_status_commands_work_in_both_modes
+test_inbound_presence_classification_is_semantic_but_conservative
 test_inbound_reports_partial_success_when_confirmation_fails
 test_confirm_retry_resends_a_failed_confirmation
 test_confirm_retry_serializes_against_a_concurrent_mode_change
