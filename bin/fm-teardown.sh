@@ -111,6 +111,12 @@
 # absent claim - a slot taken before claims existed, or already returned - keeps
 # exactly the record-scan protection it had before, because refusing it would
 # strand every task in flight across that change on no evidence at all.
+# A pool bound to another home's clone of the same project is still this
+# project's slot: bin/fm-wake-lib.sh proves that by project identity when the
+# git common directories differ, so the same exclusivity and claim checks apply.
+# A path that merely sits in some pool, and cannot be proved to be this
+# project's slot, is refused before any process kill or return. Treating that
+# uncertainty as "not a slot" is what let cleanup reap a live sibling.
 # Why Treehouse's own state cannot answer this for crewmate slots, and why the
 # claim file sits on top of it, is owned by bin/fm-wake-lib.sh's slot-owner
 # claim comment.
@@ -353,6 +359,20 @@ if [ "$FORCE" = --force ] && [ "$(fm_lease_actor)" = branch ]; then
 fi
 fm_lease_guard "$ID" "teardown (fm-teardown)"
 
+# A checkout that sits in a Treehouse pool but cannot be proved to be this
+# project's slot is not an ordinary worktree. Skipping the ownership guards and
+# still reaping it is the cross-home failure: the destructive steps ran with no
+# proof the slot was free. Refusal names that gap and changes nothing.
+teardown_refuse_unproven_pool_slot() {  # <project> <worktree> <whose>
+  local project=$1 worktree=$2 whose=$3
+  [ -n "$worktree" ] && [ -d "$worktree" ] || return 0
+  fm_treehouse_pool_layout "$worktree" || return 0
+  fm_treehouse_pool_slot "$project" "$worktree" && return 0
+  echo "REFUSED: $whose recorded worktree $worktree sits in a Treehouse pool that cannot be proved to belong to project ${project:-<missing>}, so nothing was changed - not even with --force." >&2
+  echo "Its processes were not killed and the slot was not returned." >&2
+  return 1
+}
+
 META="$STATE/$ID.meta"
 TREEHOUSE_PROJECT_LOCK=
 TREEHOUSE_PROJECT_LOCK_HELD=0
@@ -365,6 +385,10 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
   TEARDOWN_LOCK_WT=$(fm_meta_get "$META" worktree)
   TEARDOWN_LOCK_PROJECT=$(fm_meta_get "$META" project)
   if [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
+     && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
+     && ! teardown_refuse_unproven_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT" "task $ID's"; then
+    exit 1
+  elif [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
      && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
      && fm_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
     TREEHOUSE_SLOT_LOCK_REQUIRED=1
@@ -2845,6 +2869,7 @@ preflight_descendant_treehouse_slots() {
     if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
       continue
     fi
+    teardown_refuse_unproven_pool_slot "$project" "$worktree" "child $task_id's" || return 1
     if ! fm_treehouse_pool_slot "$project" "$worktree"; then
       continue
     fi
@@ -2878,6 +2903,7 @@ preflight_descendant_treehouse_slots() {
     if [ "$kind" = secondmate ] || [ "$backend" = orca ]; then
       continue
     fi
+    teardown_refuse_unproven_pool_slot "$project" "$worktree" "child $task_id's" || return 1
     if ! fm_treehouse_pool_slot "$project" "$worktree"; then
       continue
     fi
@@ -3167,6 +3193,9 @@ cleanup_firstmate_home_children() {
       # slot reassigned to another task is not this child's to kill, reset,
       # or return, so only its records are cleaned up. The preflight above
       # already named the reassignment on stderr under the same lock.
+      # An unproven pool path never reaches that determination: preflight
+      # already refused it, and this repeats the refusal before any removal.
+      teardown_refuse_unproven_pool_slot "$child_proj" "$child_wt" "child $child_id's" || return 1
       child_owner_rc=0
       if fm_treehouse_pool_slot "$child_proj" "$child_wt"; then
         require_owned_worktree_slot_record "$child_id" "$child_wt" 2>/dev/null || child_owner_rc=$?
@@ -3229,6 +3258,7 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
+teardown_refuse_unproven_pool_slot "$PROJ" "$WT" "task $ID's" || exit 1
 require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
 

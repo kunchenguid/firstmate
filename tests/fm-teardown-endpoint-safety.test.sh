@@ -473,6 +473,115 @@ test_bare_relative_origin_shares_project_lock_with_clone() {
   pass "Treehouse locking resolves a bare local origin against its source project, matching the provisioned clone"
 }
 
+# Home B records tasks against a pool bound to home A's clone of the same
+# project. The slot's git common dir is A's, so a check that requires equal
+# common dirs never sees a slot and the destructive return used to run anyway.
+bind_pool_to_owning_clone() {  # <case>
+  local dir=$1
+  git -C "$dir/project" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm owning-clone
+  git clone -q --bare "$dir/project" "$dir/origin.git"
+  git -C "$dir/project" remote add origin "$dir/origin.git"
+  rm -rf "$dir/worktree"
+  mkdir -p "$dir/pool/1"
+  git -C "$dir/project" worktree add -q --detach "$dir/pool/1/project" HEAD
+  ln -sfn "pool/1/project" "$dir/worktree"
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' \
+    "$dir/pool/1/project" > "$dir/pool/treehouse-state.json"
+  : > "$dir/worktree/sentinel"
+}
+
+run_home_case() {  # <home> <case> <id>
+  local home=$1 dir=$2 id=$3
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+  FM_RUNTIME_LOG="$dir/runtime.log" PATH="$dir/fakebin:$PATH" \
+    "$TEARDOWN" "$id" --force
+}
+
+test_second_home_pool_bound_to_another_clone_is_guarded() {
+  local dir id=stale-task other=live-task second worker rc
+  local unrelated
+
+  dir=$(make_case second-home-foreign-pool)
+  bind_pool_to_owning_clone "$dir"
+  second="$dir/second-home"
+  mkdir -p "$second/state" "$second/data" "$second/config" "$second/projects"
+  git clone -q "$dir/origin.git" "$second/project"
+  fm_write_meta "$second/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$second/project" "kind=scout"
+  fm_write_meta "$second/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "project=$second/project" "kind=scout"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_home_case "$second" "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "second-home teardown returned a slot a sibling record still holds"
+  kill -0 "$worker" 2>/dev/null \
+    || fail "second-home teardown killed the worker holding the shared slot"
+  assert_present "$dir/worktree/sentinel" "second-home teardown reset the shared slot"
+  assert_present "$second/state/$id.meta" "second-home teardown removed the stale record"
+  assert_present "$second/state/$other.meta" "second-home teardown removed the live record"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "second-home teardown reached the runtime on a contested slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "second-home refusal should name the other task holding the slot"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  # The same home can still clean up a slot it solely holds, and the claim is
+  # released only after the return.
+  dir=$(make_case second-home-sole-slot)
+  bind_pool_to_owning_clone "$dir"
+  second="$dir/second-home"
+  mkdir -p "$second/state" "$second/data" "$second/config"
+  git clone -q "$dir/origin.git" "$second/project"
+  fm_write_meta "$second/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$second/project" "kind=scout"
+  printf 'task=%s\nhome=%s\n' "$id" "$second" > "$dir/pool/1/.fm-slot-owner"
+  run_home_case "$second" "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr" \
+    || fail "second-home teardown of a solely held slot failed: $(cat "$dir/stderr")"
+  assert_absent "$second/state/$id.meta" "sole second-home teardown left the record"
+  assert_absent "$dir/pool/1/.fm-slot-owner" "sole second-home teardown left its spent claim"
+  grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "sole second-home teardown did not return the shared slot: $(cat "$dir/runtime.log")"
+
+  # A pool that is not this project's is never treated as an ordinary worktree.
+  dir=$(make_case unproven-pool-slot)
+  mark_case_as_treehouse_pool "$dir"
+  unrelated="$dir/unrelated"
+  git init -q "$unrelated"
+  git -C "$unrelated" -c user.name=test -c user.email=test@example.invalid \
+    commit --allow-empty -qm unrelated
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$unrelated" "kind=scout"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "teardown returned a pool slot it could not prove was this project's"
+  kill -0 "$worker" 2>/dev/null \
+    || fail "teardown killed a worker in a pool slot it could not prove"
+  assert_present "$dir/worktree/sentinel" "unproven pool teardown reset the slot"
+  assert_present "$dir/home/state/$id.meta" "unproven pool teardown removed the record"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "unproven pool teardown reached the runtime: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "cannot be proved" \
+    "unproven pool refusal should say the slot cannot be proved to belong to the project"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  pass "fm-teardown: a pool bound to another home's clone is guarded, and an unproven pool slot is never reaped"
+}
+
 test_reused_pool_slot_refuses_before_touching_the_other_task() {
   local dir id=stale-task other=live-task worker rc
 
@@ -1384,6 +1493,7 @@ test_already_gone_endpoint_still_completes_without_a_refusal
 test_bare_relative_origin_shares_project_lock_with_clone
 test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
+test_second_home_pool_bound_to_another_clone_is_guarded
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_own_and_absent_slot_claims_still_tear_down
