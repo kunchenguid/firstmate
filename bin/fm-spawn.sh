@@ -3165,14 +3165,14 @@ spawn_worktree_has_origin_config() { # <worktree>
 
 expected_head_worktree_status() { # <worktree>
   local status index
-  status=$(git -C "$1" -c core.quotePath=false status --porcelain \
+  status=$(git -C "$1" -c core.quotePath=false -c core.fileMode=true status --porcelain \
     --untracked-files=all --ignored=matching --ignore-submodules=none) || return 1
   [ -z "$status" ] || printf '%s\n' "$status"
   index=$(git -C "$1" -c core.quotePath=true ls-files -v) || return 1
   index=$(printf '%s\n' "$index" | LC_ALL=C grep -E '^[a-zS] ' || true)
   [ -z "$index" ] || printf '%s\n' "$index"
   git -C "$1" submodule foreach --quiet --recursive '
-    status=$(git -c core.quotePath=false status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none) || exit 1
+    status=$(git -c core.quotePath=false -c core.fileMode=true status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none) || exit 1
     [ -z "$status" ] || printf "%s\n%s\n" "$displaypath" "$status"
     index=$(git -c core.quotePath=true ls-files -v) || exit 1
     index=$(printf "%s\n" "$index" | LC_ALL=C grep -E "^[a-zS] " || true)
@@ -3238,6 +3238,10 @@ freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
     fi
     if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
       echo "error: could not reset pooled worktree '$worktree' to expected head '$expected'; refusing to launch" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" submodule update --checkout --recursive; then
+      echo "error: could not converge initialized submodules in pooled worktree '$worktree' to expected head '$expected'; refusing to launch" >&2
       return 1
     fi
     actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)

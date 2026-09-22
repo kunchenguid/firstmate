@@ -495,6 +495,27 @@ test_expected_head_rejects_submodule_index_suppression() {
   pass "expected-head rejects suppressed index content in initialized submodules"
 }
 
+test_expected_head_rejects_hidden_file_mode_changes() {
+  local rec id out status
+  id=pool-expected-hidden-file-mode-r19
+  rec=$(make_case expected-hidden-file-mode "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" config core.fileMode false
+  chmod +x "$POOL_DIR/README.md"
+  [ -x "$POOL_DIR/README.md" ] || fail "fixture did not change the tracked executable bit"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "fixture did not hide the executable-bit change through repository config"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "expected-head spawn launched with altered tracked file mode"
+  [ -x "$POOL_DIR/README.md" ] \
+    || fail "expected-head refusal discarded the hidden file-mode change"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "file-mode-refused expected head published task metadata"
+  pass "expected-head rejects file-mode changes hidden by repository config"
+}
+
 test_expected_head_retires_endpoint_when_cancel_fails() {
   local rec id out status real_sleep marker pending started retired
   id=pool-expected-cancel-fail-r9
@@ -945,6 +966,26 @@ $1
 EOF
 }
 
+test_expected_head_converges_initialized_submodules() {
+  local rec id out status
+  id=pool-expected-submodule-convergence-r20
+  rec=$(make_submodule_case expected-submodule-convergence "$id")
+  read_submodule_case "$rec"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN1" ] \
+    || fail "fixture did not begin with the initialized submodule on the old pin"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$ADVANCED_SHA")
+  status=$?
+  expect_code 0 "$status" "expected-head spawn should converge initialized submodules"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$ADVANCED_SHA" ] \
+    || fail "expected-head spawn did not converge the superproject"
+  [ "$(git -C "$POOL_DIR/ui" rev-parse HEAD)" = "$SUBPIN2" ] \
+    || fail "expected-head spawn did not converge the initialized submodule pin"
+  assert_grep "expected_head=$ADVANCED_SHA" "$HOME_DIR/state/$id.meta" \
+    "submodule-converged spawn did not record the exact candidate"
+  pass "expected-head converges initialized submodules to reviewed pins"
+}
+
 # The first of two consecutive spawns: it succeeds, resets the superproject onto
 # the base that moved the pin, and leaves the submodule checkout on the pin the
 # old base recorded. That reset is what strands the slot, so every case below
@@ -1188,6 +1229,7 @@ test_expected_head_ignores_ambient_git_config_overrides
 test_expected_head_refuses_unsupported_lifecycle_shapes
 test_expected_head_is_reverified_immediately_before_launch
 test_expected_head_rejects_submodule_index_suppression
+test_expected_head_rejects_hidden_file_mode_changes
 test_expected_head_retires_endpoint_when_cancel_fails
 test_expected_head_preserves_ownership_when_endpoint_survives
 test_expected_head_ignores_cleanliness_hiding_config
@@ -1202,6 +1244,7 @@ test_origin_config_without_url_refuses_pool
 test_empty_origin_config_section_refuses_pool
 test_empty_only_included_origin_config_section_launches_pool
 test_inactive_conditional_origin_include_launches_pool
+test_expected_head_converges_initialized_submodules
 test_stale_submodule_pin_explains_itself
 test_unpushed_submodule_commit_is_still_uncommitted_work
 test_work_inside_submodule_is_still_uncommitted_work
