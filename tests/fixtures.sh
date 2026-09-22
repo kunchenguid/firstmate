@@ -100,6 +100,7 @@ fm_test_fake_gh_axi() {
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
 # FM_FAKE_PENDING_LAUNCH models an unsubmitted staged launch; Enter records a
 # start in FM_FAKE_WORKER_START_LOG, while C-c clears it without starting.
+# FM_FAKE_ENTER_KEY_FAIL makes Enter fail while leaving the staged input intact.
 # FM_FAKE_EXECUTE_LAUNCH runs that staged launch on Enter in the fake pane path.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
@@ -150,6 +151,7 @@ case "${1:-}" in
         fi
         case "$a" in
           Enter|C-m)
+            [ "${FM_FAKE_ENTER_KEY_FAIL:-0}" != 1 ] || [ ! -e "$FM_FAKE_PENDING_LAUNCH" ] || exit 1
             if [ -e "$FM_FAKE_PENDING_LAUNCH" ]; then
               if [ "${FM_FAKE_EXECUTE_LAUNCH:-0}" = 1 ]; then
                 staged=$(cat "$FM_FAKE_PENDING_LAUNCH")

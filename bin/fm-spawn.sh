@@ -3160,11 +3160,15 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
+expected_head_worktree_status() { # <worktree>
+  git -C "$1" -c core.quotePath=false status --porcelain \
+    --untracked-files=all --ignored=matching --ignore-submodules=none
+}
+
 freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
   local worktree=$1 requested=${2:-} default target expected actual status fetch_head fetched origin_authorized
   if [ -n "$requested" ]; then
-    status=$(git -C "$worktree" -c core.quotePath=false status --porcelain \
-      --untracked-files=all --ignore-submodules=none)
+    status=$(expected_head_worktree_status "$worktree")
   else
     status=$(git -C "$worktree" -c core.quotePath=false status --porcelain)
   fi || {
@@ -5129,8 +5133,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 if [ -n "$EXPECTED_HEAD" ]; then
-  expected_status=$(git -C "$WT" -c core.quotePath=false status --porcelain \
-    --untracked-files=all --ignore-submodules=none) || {
+  expected_status=$(expected_head_worktree_status "$WT") || {
     [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
     expected_head_cancel_staged_launch
     echo "error: could not re-inspect expected-head worktree '$WT' immediately before worker launch" >&2
@@ -5150,7 +5153,15 @@ if [ -n "$EXPECTED_HEAD" ]; then
     exit 1
   }
 fi
-spawn_send_key "$T" Enter
+if ! spawn_send_key "$T" Enter; then
+  if [ -n "$EXPECTED_HEAD" ]; then
+    [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
+    expected_head_cancel_staged_launch
+    echo "error: could not submit expected-head launch in endpoint '$T'; refusing to leave staged launch input behind" >&2
+    exit 1
+  fi
+  exit 1
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"

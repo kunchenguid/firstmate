@@ -526,7 +526,7 @@ EOF
 }
 
 test_expected_head_ignores_cleanliness_hiding_config() {
-  local rec id out status
+  local rec id out status exclude
   id=pool-expected-hidden-untracked-r11
   rec=$(make_case expected-hidden-untracked "$id")
   read_case_record "$rec"
@@ -552,7 +552,42 @@ test_expected_head_ignores_cleanliness_hiding_config() {
   [ "$status" -ne 0 ] || fail "expected-head spawn ignored hidden submodule source"
   assert_grep 'unreviewed submodule source' "$POOL_DIR/ui/hidden-source.txt" \
     "expected-head refusal discarded hidden submodule source"
+
+  id=pool-expected-ignored-source-r14
+  rec=$(make_case expected-ignored-source "$id")
+  read_case_record "$rec"
+  exclude=$(git -C "$POOL_DIR" rev-parse --git-path info/exclude)
+  printf 'ignored-source.txt\n' >>"$exclude"
+  printf 'unreviewed ignored source\n' >"$POOL_DIR/ignored-source.txt"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain --untracked-files=all)" ] \
+    || fail "fixture did not hide the ignored source from ordinary status"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "expected-head spawn launched with ignored unreviewed source"
+  assert_grep 'unreviewed ignored source' "$POOL_DIR/ignored-source.txt" \
+    "expected-head refusal discarded ignored unreviewed source"
   pass "expected-head cleanliness overrides untracked and submodule hiding config"
+}
+
+test_expected_head_cancels_staged_launch_when_enter_fails() {
+  local rec id out status pending started
+  id=pool-expected-enter-fail-r15
+  rec=$(make_case expected-enter-fail "$id")
+  read_case_record "$rec"
+  pending="$CASE_DIR/pending-launch"
+  started="$CASE_DIR/worker-started"
+
+  out=$(FM_FAKE_PENDING_LAUNCH="$pending" FM_FAKE_WORKER_START_LOG="$started" \
+    FM_FAKE_ENTER_KEY_FAIL=1 \
+    run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "expected-head spawn reported success after Enter delivery failed"
+  [ ! -e "$pending" ] || fail "failed Enter delivery left staged launch input in the endpoint"
+  [ ! -e "$started" ] || fail "failed Enter delivery started the worker"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "cancelled Enter failure left published task metadata"
+  assert_contains "$out" "could not submit expected-head launch" \
+    "spawn did not report failed expected-head Enter delivery"
+  pass "expected-head Enter failure cancels staged launch input"
 }
 
 make_originless_case() {  # <name> <id>
@@ -1098,6 +1133,7 @@ test_expected_head_is_reverified_immediately_before_launch
 test_expected_head_retires_endpoint_when_cancel_fails
 test_expected_head_preserves_ownership_when_endpoint_survives
 test_expected_head_ignores_cleanliness_hiding_config
+test_expected_head_cancels_staged_launch_when_enter_fails
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
