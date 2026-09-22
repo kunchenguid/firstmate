@@ -63,6 +63,7 @@ Direct executable identities `pi`, `pi-signed`, and `Pi` remain accepted exactly
 Muse is likewise anchored to the exact `muse` launcher identity or the installed `muse-bin-<version>` prefix, so unrelated names such as `musescore` and `amuse` remain ambiguous.
 omp is anchored to the exact `omp` identity for the same reason, so `ompd` and `comp` remain ambiguous.
 AGY is anchored to the exact `agy` identity for the same reason, so unrelated names containing that fragment remain ambiguous.
+OpenHands never names a process at all - its worker is the firstmate-owned `fm-openhands-worker.py` under a venv interpreter - so the foreground probe's argv[0] and the classifier's flattened-args rule carry the verdict through the full driver filename, and any interpreter-named process without it remains ambiguous.
 Cursor is identified from its exact `cursor-agent` identity or versioned install tree in the foreground process path or structured argv[0]; a bare `node` or unrelated `agent` remains ambiguous.
 
 The CI-enforced portable regression and opt-in real-harness drift guard follow the split owned by `.agents/skills/firstmate-coding-guidelines/SKILL.md`.

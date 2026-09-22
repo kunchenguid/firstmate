@@ -165,6 +165,16 @@ fm_quota_provider_for_harness() {
         *)               return 1 ;;
       esac
       ;;
+    # openhands is multi-provider like omp: the SDK takes any litellm
+    # provider/model string, so the provider is read from the model prefix
+    # and an unrecognized prefix is refused rather than guessed.
+    openhands)
+      case "${2:-}" in
+        fireworks_ai/*) printf 'fireworks\n' ;;
+        anthropic/*)    printf 'claude\n' ;;
+        *)              return 1 ;;
+      esac
+      ;;
     claude)       printf 'claude\n' ;;
     codex)        printf 'codex\n' ;;
     opencode)     printf 'codex\n' ;;

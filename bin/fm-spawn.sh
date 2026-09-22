@@ -149,7 +149,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|openhands)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -158,6 +158,18 @@
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
+#   For openhands, fm-spawn resolves the OpenHands SDK interpreter once
+#   (FM_OPENHANDS_PY, then config/openhands-python, then
+#   ~/.config/openhands/venv/bin/python), refuses when it is absent or cannot
+#   import the SDK, and refuses again when the active home's
+#   config/openhands-llm.env does not carry a non-empty LLM_API_KEY and
+#   LLM_MODEL, because an unauthenticated headless driver would wedge where
+#   no operator can see it. The launch runs the firstmate-owned
+#   bin/fm-openhands-worker.py in the pane, which owns the run-log busy
+#   source, the turn-end touch, and the stdin steering surface; it is a
+#   crewmate/scout adapter with no TUI, no trust dialog, and no effort axis
+#   (the effort value stays in task metadata under the record-and-omit
+#   contract).
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
 #   refuses when it is absent. Every omp launch clears the foreign harness
 #   markers (omp publishes none of its own), sets the Firstmate-owned
@@ -310,6 +322,10 @@
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+#     __OPENHANDSPY__, __OPENHANDSDRIVER__, __OPENHANDSENV__, __OPENHANDSLOG__
+#                   resolved venv interpreter, the firstmate-owned driver
+#                   script, the active home's llm.env profile, and the
+#                   per-task run-log sidecar for an openhands launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -342,6 +358,12 @@
 # busy turn - answering the dialog first if it renders anyway - before
 # reporting success (the rovo/kimi launch-then-confirm shape). Its busy state
 # is a screen-scrape fallback like grok and rovo, and it is crewmate/scout only.
+# openhands installs no hook because none is needed: the firstmate-owned driver
+# writes the run-log records the busy fold reads and touches the turn-end
+# marker itself, so the spawn's only wiring duty is truncating the run log.
+# It has no TUI and therefore no dialog, no readiness gate, and no composer;
+# steering is stdin lines the driver sends as follow-up messages. It is
+# crewmate/scout only, like muse.
 # cursor installs no per-task hook either: it writes state/<id>.cursor-session to
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
@@ -1700,7 +1722,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | openhands)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -1807,6 +1829,61 @@ agy_model_validate() {  # <agy-bin> <model>
   fi
   echo "error: agy model '$model' is not listed by 'agy models'; choose a listed id or omit --model" >&2
   return 1
+}
+
+# resolve_openhands_python: the interpreter that can import the OpenHands SDK.
+# Resolution order: FM_OPENHANDS_PY (absolute, executable), then the active
+# home's config/openhands-python file (one absolute path, so a second home can
+# point at its own venv without an environment override), then the conventional
+# ~/.config/openhands/venv/bin/python. Refuses with the search trail so a
+# missing install is a loud spawn refusal, exactly like a missing CLI binary.
+resolve_openhands_python() {
+  local candidate
+  for candidate in "${FM_OPENHANDS_PY:-}" "$(cat "$CONFIG/openhands-python" 2>/dev/null || true)" "$HOME/.config/openhands/venv/bin/python"; do
+    [ -n "$candidate" ] || continue
+    case "$candidate" in /*) ;; *) continue ;; esac
+    [ -x "$candidate" ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  echo "error: no executable OpenHands venv python found; searched FM_OPENHANDS_PY, config/openhands-python, and ~/.config/openhands/venv/bin/python; install the OpenHands SDK venv or select a different verified harness" >&2
+  return 1
+}
+
+# fm_openhands_llm_env_ready: the credential PREFLIGHT. The driver is headless,
+# so an unreadable or incomplete profile does not park on a prompt a human
+# could answer - it fails inside a pane where no operator is watching, which
+# supervision would read as a wedged worker. Refuse before the endpoint exists
+# instead. Checks names only (present and non-empty); the key value is never
+# read into a variable this script could print.
+fm_openhands_llm_env_ready() {  # <llm-env-path>
+  local path=$1 line model=0 api_key=0
+  [ -f "$path" ] && [ -r "$path" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      'LLM_MODEL='?*) model=1 ;;
+      'LLM_API_KEY='?*) api_key=1 ;;
+    esac
+  done < "$path"
+  [ "$model" = 1 ] && [ "$api_key" = 1 ]
+}
+
+# openhands_model_validate: syntactic only. The model is a litellm provider
+# string (for example fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash
+# or anthropic/claude-opus-4-8), and the only authoritative listing is the
+# provider's own API, which this spawn must not call with the crew's key just
+# to validate a name; the driver fails loudly at run start on an unknown id.
+# A string that could not survive argv or the litellm parser is refused here.
+openhands_model_validate() {  # <model>
+  local model=$1
+  [ -n "$model" ] && [ "$model" != default ] || return 0
+  case "$model" in
+    *[!A-Za-z0-9._/-]*|.*|*.|*/|*//*)
+      echo "error: openhands model '$model' is not a valid litellm provider/model string; use provider/model form (for example fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash) or omit --model" >&2
+      return 1
+      ;;
+  esac
+  return 0
 }
 
 # The verified launch command per adapter. The knowledge half of each adapter
@@ -2055,6 +2132,29 @@ launch_template() {
   # when a supported effort is requested, since a second --config-override
   # would silently discard the first (confirmed live).
   rovo) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS __ROVOBIN__ run --yolo __MODELFLAG____ROVOCONFIGOVERRIDE__' ;;
+  # openhands (OpenHands SDK): the pane runs the FIRSTMATE-OWNED driver
+  # bin/fm-openhands-worker.py under the resolved OpenHands venv python, not
+  # a vendor CLI, so every supervision signal is firstmate's own and rides
+  # this launch explicitly: --run-log is the busy source
+  # (bin/fm-busy-lib.sh folds it; the spawn truncates it below so a relaunch
+  # never folds a predecessor's open run), --turn-end is the marker the
+  # driver touches at every run close, and --llm-env is the active home's
+  # credential profile (config/openhands-llm.env, chmod 600, never printed).
+  # The brief rides the launch as the driver's first message, and stdin is
+  # the steering surface afterwards: every typed line is a follow-up message
+  # and the literal /exit (the control plane's exit command, aliased /quit)
+  # stops the worker. The driver takes the workspace from its own cwd - the
+  # pane starts in the isolated worktree - so no workspace flag exists.
+  # FM_OPENHANDS_HARNESS=openhands is the Firstmate-owned detection marker
+  # (omp's shape: precedence only, never evidence on its own), and the
+  # foreign primary markers are cleared because a markerless-identity driver
+  # under a venv interpreter must never read as its launcher. There is no
+  # trust dialog to suppress and no TUI to gate, so no readiness answer and
+  # no effort flag exist; an effort value stays in task metadata under the
+  # record-and-omit contract. __MODELFLAG__ carries the litellm model string
+  # (for example fireworks_ai/accounts/fireworks/models/deepseek-v4p1-flash);
+  # when it is absent the driver defaults to the profile's LLM_MODEL.
+  openhands) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS FM_OPENHANDS_HARNESS=openhands __OPENHANDSPY__ __OPENHANDSDRIVER__ --llm-env __OPENHANDSENV__ --run-log __OPENHANDSLOG__ --turn-end __TURNEND__ __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   *) return 1 ;;
   esac
 }
@@ -2118,7 +2218,11 @@ esac
 # secondmate whose supervision cycle could never be armed.
 # agy has none either: it exposes no hook surface for primary supervision and
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
+# openhands has none either: it is a headless SDK driver with no primary
+# surface at all - no hooks, no wake protocol, no session-start tier - and
+# docs/supervision-protocols/ carries no openhands protocol, so a secondmate
+# could never arm its watch cycle through it.
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = openhands ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2178,6 +2282,24 @@ agy)
     exit 1
   }
   ;;
+openhands)
+  # Two preflights, both before the endpoint exists. The interpreter must be
+  # able to IMPORT the SDK (a venv python without openhands-sdk installed is
+  # the same missing-install state as an absent CLI binary), and the
+  # credential profile must be complete, because a headless driver that
+  # fails inside the pane reads as a wedged worker rather than a missing
+  # credential (the muse META_API_KEY precedent).
+  OPENHANDS_PY=$(resolve_openhands_python) || exit 1
+  if ! fm_run_timed "${FM_OPENHANDS_IMPORT_TIMEOUT:-30}" "$OPENHANDS_PY" -c 'import openhands.sdk, openhands.tools' >/dev/null 2>&1 </dev/null; then
+    echo "error: '$OPENHANDS_PY' cannot import the OpenHands SDK (openhands.sdk/openhands.tools); reinstall the SDK venv or select a different verified harness" >&2
+    exit 1
+  fi
+  OPENHANDS_LLM_ENV="$CONFIG/openhands-llm.env"
+  if ! fm_openhands_llm_env_ready "$OPENHANDS_LLM_ENV"; then
+    echo "error: $OPENHANDS_LLM_ENV must exist (chmod 600) and define non-empty LLM_MODEL and LLM_API_KEY; the key is never printed" >&2
+    exit 1
+  fi
+  ;;
 esac
 
 # config/secondmate-harness may carry optional model/effort tokens alongside the
@@ -2215,6 +2337,9 @@ if [ "$HARNESS" = omp ]; then
 fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
+fi
+if [ "$HARNESS" = openhands ]; then
+  openhands_model_validate "$MODEL" || exit 1
 fi
 
 secondmate_registry_value() {
@@ -2337,7 +2462,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | openhands)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
@@ -4386,6 +4511,17 @@ EOF
     printf 'token=%s\n' "${auth_file##*/}" >"$WT/.fm-kimi-turnend"
     exclude_path '.fm-kimi-turnend'
     ;;
+  openhands*)
+    # The driver IS the writer: it appends the run lifecycle records the busy
+    # fold reads and touches the turn-end marker at every close, so no hook,
+    # no busy-state record, and no binding sidecar are armed here. The one
+    # spawn-side duty is truncation: the driver only appends, so a relaunch
+    # into the same task id must start from an empty log or the fold would
+    # read a predecessor's unmatched run_started as busy forever. A relaunch
+    # AWAY from openhands retires the file through
+    # fm_control_harness_wiring_paths instead.
+    : >"$STATE/$ID.openhands-run"
+    ;;
   esac
 fi
 
@@ -4604,6 +4740,10 @@ sq_piwatch=$(shell_quote "$PROJ_ABS/.pi/extensions/fm-primary-pi-watch.ts")
 sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+sq_openhandspy=$(shell_quote "${OPENHANDS_PY:-}")
+sq_openhandsdriver=$(shell_quote "$FM_ROOT/bin/fm-openhands-worker.py")
+sq_openhandsenv=$(shell_quote "${OPENHANDS_LLM_ENV:-$CONFIG/openhands-llm.env}")
+sq_openhandslog=$(shell_quote "$STATE/$ID.openhands-run")
 sq_worktree=$(shell_quote "$WT")
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
@@ -4625,16 +4765,22 @@ LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OMPWORKERCFG__/$sq_ompcfg}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+LAUNCH=${LAUNCH//__OPENHANDSENV__/$sq_openhandsenv}
+LAUNCH=${LAUNCH//__OPENHANDSLOG__/$sq_openhandslog}
 case "$HARNESS" in
 pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
+openhands)
+  LAUNCH=${LAUNCH//__OPENHANDSPY__/$sq_openhandspy}
+  LAUNCH=${LAUNCH//__OPENHANDSDRIVER__/$sq_openhandsdriver}
+  ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | openhands)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac

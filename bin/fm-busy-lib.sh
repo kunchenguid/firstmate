@@ -43,7 +43,7 @@
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
 #   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
-#   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
+#   cursor-transcript, openhands-run-log, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target
 #
 # Classification (fm_busy_classify): busy | idle | unknown | dead, always
@@ -81,6 +81,19 @@
 # no writer, no arm, and no gen, so nothing is seeded that could never be
 # cleared. See fm_busy_cursor_turn_state for the fold. Cursor's rendered
 # `ctrl+c to stop` footer is deliberately not a state source here.
+#
+# The openhands source is the same fold over a firstmate-OWNED record instead
+# of a vendor one: the driver (bin/fm-openhands-worker.py, the format owner)
+# appends one run_started/run_terminal JSONL pair per run to the
+# state/<id>.openhands-run sidecar and touches the shared turn-end marker at
+# every close, because the driver process is firstmate's own code and needs no
+# hook layer. Both halves of the fold are trusted exactly as muse's are: an
+# unmatched run_started is positive proof a run is in flight, and a trailing
+# run_terminal is idle, including the cancelled close an interrupt writes
+# before the driver exits 130. Nothing is armed as a busy-state record and no
+# gen is seeded; the spawn truncates the sidecar at launch so a relaunch never
+# folds a predecessor's open run. See fm_busy_openhands_run_state for the
+# fold and docs/verification/openhands.md for the evidence.
 #
 # Codex negotiation (fm_busy_codex_appserver_observable,
 # fm_busy_codex_hooks_verified): the approved contract prefers Codex's
@@ -830,6 +843,63 @@ fm_busy_cursor_turn_state() {  # <transcript>
   '
 }
 
+# openhands run-log busy source
+#
+# The sidecar path is pinned by the spawn and the driver only appends, so
+# unlike muse and cursor there is no discovery and no binding sidecar: the
+# fold reads exactly this file. The record format is owned by
+# bin/fm-openhands-worker.py (one run_started/run_terminal JSONL pair per
+# run, terminal completed or cancelled); the trust argument is the header
+# note above. Both halves are trusted: an unmatched run_started is positive
+# proof a run is in flight, and a trailing run_terminal - completed OR the
+# cancelled close an interrupt writes - is idle. Everything else, including a
+# malformed line and a record-free log, is unknown because it proves nothing
+# about the run either way.
+fm_busy_openhands_log_path() {  # <state-dir> <id>
+  printf '%s/%s.openhands-run' "$1" "$2"
+}
+
+# fm_busy_openhands_run_state: fold the run log into busy | settled | none.
+# Events are matched on top-level fields of structurally valid JSON, so run
+# text can never open or close a run. The awk fallback anchors on the same
+# two top-level tokens because the record format is firstmate-owned and
+# carries no free-text fields at all.
+fm_busy_openhands_run_state() {  # <run-log>
+  [ -f "$1" ] || return 1
+  if command -v jq >/dev/null 2>&1; then
+    LC_ALL=C jq -Rr '
+      try (
+        fromjson
+        | if type == "object" and .event? == "run_started" then "open"
+          elif type == "object" and .event? == "run_terminal" then "close"
+          else "other"
+          end
+      ) catch "malformed"
+    ' "$1" | LC_ALL=C awk '
+      $0 == "open" { open = 1; seen = 1; next }
+      $0 == "close" { open = 0; seen = 1; next }
+      $0 == "malformed" { bad = 1; next }
+      END {
+        if (bad) { print "unknown"; exit }
+        if (!seen) { print "none"; exit }
+        print (open ? "busy" : "settled")
+      }
+    '
+  else
+    LC_ALL=C awk '
+      /"event"[[:space:]]*:[[:space:]]*"run_started"/ { open = 1; seen = 1; next }
+      /"event"[[:space:]]*:[[:space:]]*"run_terminal"/ { open = 0; seen = 1; next }
+      /^[[:space:]]*$/ { next }
+      { bad = 1 }
+      END {
+        if (bad) { print "unknown"; exit }
+        if (!seen) { print "none"; exit }
+        print (open ? "busy" : "settled")
+      }
+    ' "$1"
+  fi
+}
+
 # fm_busy_grok_tail_busy: the Grok-only temporary rendered-tail fallback.
 # Consumes the tail on stdin; 0 when Grok's verified busy signature matches.
 # FM_BUSY_REGEX still globally overrides the signature, mirroring the
@@ -904,6 +974,20 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
         busy) printf 'busy cursor-transcript' ;;
         settled) printf 'idle cursor-transcript' ;;
         *) printf 'unknown cursor-transcript' ;;
+      esac
+      return 0
+      ;;
+    openhands*)
+      # Semantic, on demand: fold this task's firstmate-owned run log. An
+      # unmatched run_started is positive proof a run is in flight, and a
+      # trailing run_terminal - completed or the cancelled close an
+      # interrupt writes - is a finished run. Every other outcome, including
+      # no sidecar and a record-free log, is unknown, never idle; see the
+      # source note above.
+      case "$(fm_busy_openhands_run_state "$(fm_busy_openhands_log_path "$state" "$id")" 2>/dev/null)" in
+        busy) printf 'busy openhands-run-log' ;;
+        settled) printf 'idle openhands-run-log' ;;
+        *) printf 'unknown openhands-run-log' ;;
       esac
       return 0
       ;;

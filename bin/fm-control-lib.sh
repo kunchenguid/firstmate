@@ -65,7 +65,7 @@ fm_control_verb_allowed() {  # <verb>
 # section 4's verified-adapter list; an unverified adapter is refused rather
 # than guessed at, exactly as a spawn on it would be.
 fm_control_harnesses() {
-  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy
+  printf '%s\n' claude codex opencode pi pi-signed grok kimi cursor gemini muse rovo omp agy openhands
 }
 
 fm_control_harness_supported() {  # <harness>
@@ -91,6 +91,7 @@ fm_control_harness_family() {  # <recorded-harness>
     pi-signed) printf 'pi-signed' ;;
     omp) printf 'omp' ;;
     agy) printf 'agy' ;;
+    openhands) printf 'openhands' ;;
     claude*) printf 'claude' ;;
     codex*) printf 'codex' ;;
     opencode*) printf 'opencode' ;;
@@ -104,9 +105,9 @@ fm_control_harness_family() {  # <recorded-harness>
   esac
 }
 
-# Which task kinds an adapter is verified to run. muse, gemini, rovo, and agy
-# are crewmate/scout adapters only: none has a primary supervision protocol,
-# and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
+# Which task kinds an adapter is verified to run. muse, gemini, rovo, agy, and
+# openhands are crewmate/scout adapters only: none has a primary supervision
+# protocol, and bin/fm-spawn.sh refuses a --secondmate launch on any of them. The control
 # plane asks this BEFORE it stops anything, so an incompatible relaunch target is
 # refused while the current agent is still running rather than after it has
 # been stopped.
@@ -114,7 +115,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    muse|gemini|rovo|agy) [ "$kind" != secondmate ] || return 1 ;;
+    muse|gemini|rovo|agy|openhands) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
@@ -128,11 +129,15 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
 # with an idle composer and no repollution (verified live, agy 1.2.0 through
 # Herdr). omp (Oh My Pi) shares Pi's single Escape, empty composer
 # afterwards, and /quit exit (verified omp 18.1.2 in a PTY, re-verified 18.1.11
-# through Herdr).
+# through Herdr). openhands is a firstmate-owned batch driver, not a TUI, so
+# its interrupt is the interpreter's SIGINT: a single Ctrl+C cancels the
+# in-flight run (the driver closes its run pair as cancelled and exits 130)
+# and an interrupt at the idle loop exits the worker with the worktree
+# preserved.
 fm_control_interrupt_key() {  # <harness>
   case "${1-}" in
     claude|codex|opencode|pi|pi-signed|omp|kimi|cursor|gemini|muse|rovo|agy) printf 'Escape' ;;
-    grok) printf 'C-c' ;;
+    grok|openhands) printf 'C-c' ;;
     *) return 1 ;;
   esac
 }
@@ -142,7 +147,7 @@ fm_control_interrupt_key() {  # <harness>
 fm_control_interrupt_repeat() {  # <harness>
   case "${1-}" in
     opencode) printf '2' ;;
-    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '1' ;;
+    claude|codex|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy|openhands) printf '1' ;;
     *) return 1 ;;
   esac
 }
@@ -163,7 +168,7 @@ fm_control_interrupt_repeat() {  # <harness>
 fm_control_interrupt_clear_key() {  # <harness>
   case "${1-}" in
     muse) printf 'C-u' ;;
-    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy) ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|rovo|agy|openhands) ;;
     *) return 1 ;;
   esac
 }
@@ -171,6 +176,12 @@ fm_control_interrupt_clear_key() {  # <harness>
 fm_control_interrupt_ack_source() {  # <harness>
   case "${1-}" in
     muse) printf 'muse-session-terminal' ;;
+    # openhands is the one adapter whose cancellation ack is a firstmate-owned
+    # RECORD: the driver itself closes its in-flight run pair with
+    # terminal=cancelled in the run log before exiting 130, so the control
+    # plane can confirm the interrupt against the same fold that owns busy
+    # state (bin/fm-busy-lib.sh), not against a rendered string.
+    openhands) printf 'openhands-run-log' ;;
     # cursor's transcript DOES type an aborted close, but its write latency
     # after an interrupt was measured as variable - sometimes seconds, sometimes
     # not within 20 - so a cancellation claim built on it would be unreliable.
@@ -183,10 +194,12 @@ fm_control_interrupt_ack_source() {  # <harness>
   esac
 }
 
-# The command that exits the agent from its own composer.
+# The command that exits the agent from its own composer. openhands has no
+# composer; /exit is the driver's own stdin command (aliases /quit), honored
+# only at the idle loop so an in-flight run finishes its turn first.
 fm_control_exit_command() {  # <harness>
   case "${1-}" in
-    claude|opencode|grok|kimi|cursor|muse|rovo) printf '/exit' ;;
+    claude|opencode|grok|kimi|cursor|muse|rovo|openhands) printf '/exit' ;;
     codex|pi|pi-signed|omp|gemini|agy) printf '/quit' ;;
     *) return 1 ;;
   esac
@@ -317,6 +330,12 @@ fm_control_harness_wiring_paths() {  # <harness> <worktree> <state-dir> <id>
       printf '%s\n' "$state/$id.muse-session-current"
       ;;
     cursor) printf '%s\n' "$state/$id.cursor-session" ;;
+    # openhands installs no hook: the firstmate-owned driver both writes the
+    # run-log sidecar (its own busy source) and touches the shared turn-end
+    # marker. Retiring the run log on a relaunch away from openhands is what
+    # keeps a predecessor's open run from reading busy forever; the spawn
+    # truncates it when re-arming openhands itself.
+    openhands) printf '%s\n' "$state/$id.openhands-run" ;;
     # gemini's busy-state and turn-end hooks live in a firstmate-owned
     # settings file the launch reaches through GEMINI_CLI_SYSTEM_SETTINGS_PATH,
     # so retiring that one file retires the whole incarnation's wiring. Nothing

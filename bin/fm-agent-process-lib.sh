@@ -17,6 +17,8 @@
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-session-lock-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$(dirname -- "${BASH_SOURCE[0]}")/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-openhands-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-openhands-lib.sh"
 
 # fm_agent_process_classify_name: the single owner of the process-name
 # vocabulary shared by every liveness signal - `agent` for a verified harness,
@@ -100,6 +102,14 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     return 0
   fi
   if [ -n "$args" ] && fm_gemini_args_are_gemini "$args"; then
+    printf 'agent'
+    return 0
+  fi
+  # The openhands driver runs under a venv interpreter, so its name and
+  # argv[0] both read as the interpreter; the firstmate-owned driver filename
+  # in the flattened args is the one surface that names it (the gemini rule's
+  # reason, owned by bin/fm-openhands-lib.sh).
+  if [ -n "$args" ] && fm_openhands_args_are_openhands "$args"; then
     printf 'agent'
     return 0
   fi

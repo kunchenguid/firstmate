@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|openhands|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -66,6 +66,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-openhands-lib.sh
+. "$SCRIPT_DIR/fm-openhands-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -118,6 +120,21 @@ harness_marker() {
     echo omp
     return
   fi
+  # openhands (the OpenHands SDK driver, bin/fm-openhands-worker.py) publishes
+  # no marker of its own: the SDK is a library, not a CLI identity. Like omp,
+  # FM_OPENHANDS_HARNESS=openhands is a Firstmate-OWNED launch marker set by
+  # bin/fm-spawn.sh at the openhands launch boundary (which also clears every
+  # foreign marker). It is a PRECEDENCE override, never evidence on its own:
+  # it wins only when an openhands driver process is genuinely in the
+  # ancestry, so the same variable leaking into another home's worker (whose
+  # ancestry holds no driver) changes nothing. The ancestry evidence for
+  # openhands is args-strength only (a venv python running the firstmate-owned
+  # driver script), never comm strength, because the live process name is the
+  # interpreter's.
+  if [ "${FM_OPENHANDS_HARNESS:-}" = openhands ] && ancestry_names_openhands; then
+    echo openhands
+    return
+  fi
   [ "${CLAUDECODE:-}" = "1" ] && { echo claude; return; }
   if [ "${PI_CODING_AGENT:-}" = "true" ]; then
     if [ "${FM_PI_HARNESS:-}" = pi-signed ]; then echo pi-signed; else echo pi; fi
@@ -153,6 +170,29 @@ ancestry_names_omp() {
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
     [ "$(basename -- "$comm")" = omp ] && return 0
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+  done
+  return 1
+}
+
+# True when the firstmate-owned OpenHands driver sits within eight parents of
+# this one. The driver runs as a venv python interpreter, so the evidence is
+# the firstmate-owned script name in the process arguments, anchored on the
+# full filename so no unrelated command carrying the openhands fragment can
+# match. Kept separate for the same reason as ancestry_names_omp: the marker
+# precedence above demands real process evidence before trusting
+# FM_OPENHANDS_HARNESS.
+ancestry_names_openhands() {
+  local pid=$$ comm args
+  for _ in 1 2 3 4 5 6 7 8; do
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    case "$(basename -- "$comm")" in
+      python*)
+        args=$(ps -o args= -p "$pid" 2>/dev/null || true)
+        fm_openhands_args_are_openhands "$args" && return 0
+        ;;
+    esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -233,6 +273,15 @@ harness_process_verdict() {  # <pid>
       args=$(ps -o args= -p "$pid" 2>/dev/null)
       if fm_gemini_args_are_gemini "$args"; then
         echo "args gemini"
+        return
+      fi
+      # The OpenHands driver is firstmate-owned, so the anchor is its full
+      # filename rather than the openhands fragment: an unrelated python
+      # process carrying the fragment in some argument must not read as this
+      # harness. Args-strength only, never comm, because the live process
+      # name is the interpreter's.
+      if fm_openhands_args_are_openhands "$args"; then
+        echo "args openhands"
         return
       fi
       case "$args" in
