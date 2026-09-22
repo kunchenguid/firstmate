@@ -15,7 +15,14 @@ disable_project_settings: true
 # Only codex, claude, and pi have a verified neutralization knob.
 # This key is honored only from the default-branch copy, so it takes effect after this file merges.
 # It does not take effect on the branch that adds it.
-agent: codex
+#
+# pi, not codex, since 2026-09-22. codex was named here on 21 Sep, hours before the
+# firstmate itself moved onto codex. From that moment the gate that validates the
+# crew's work competed for the same seat as the supervisor that dispatches it, and
+# two lanes blocked on "codex usage limit reached" with their work already committed.
+# pi (0.85.1, on PATH) has the same verified neutralization knob and bills neither
+# the codex nor the claude seat.
+agent: pi
 
 # Trusted documentation placement policy for the Document step.
 # The audience inventory and coding guideline own the detail; keep this as a
