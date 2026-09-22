@@ -67,6 +67,13 @@ cat > "$REMOTE_ROOT/bin/fm-mark-job.sh" <<'SH'
 printf '%s\n' "$1" >> "$2"
 sleep "${3:-0}"
 SH
+# Hold a lane until the test releases it; elapsed wall time is not evidence
+# that another lane can execute independently.
+cat > "$REMOTE_ROOT/bin/fm-held-job.sh" <<'SH'
+#!/bin/bash
+printf '%s\n' "$1" >> "$2"
+while [ ! -f "$3" ]; do sleep 0.05; done
+SH
 cat > "$REMOTE_ROOT/bin/fm-touch-job.sh" <<'SH'
 #!/bin/bash
 printf 'ran\n' > "$1"
@@ -184,21 +191,20 @@ assert_present "$STATE_ROOT/worker.ready" "the worker did not publish its readin
 # stays strictly behind A's running job.
 LOG_A="$TMP_ROOT/log-a"
 LOG_B="$TMP_ROOT/log-b"
-fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_A" fm-mark-job.sh a1 "$LOG_A" 4 < /dev/null > /dev/null
+A_RELEASE="$TMP_ROOT/release-a"
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_A" fm-held-job.sh a1 "$LOG_A" "$A_RELEASE" < /dev/null > /dev/null
 A1=$FM_REMOTE_JOB_ID
 wait_for_state "$A1" running || fail "home A's long job did not begin running"
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_A" fm-mark-job.sh a2 "$LOG_A" 0 < /dev/null > /dev/null
 A2=$FM_REMOTE_JOB_ID
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_EDGE" fm-mark-job.sh b1 "$LOG_B" 0 < /dev/null > /dev/null
 B1=$FM_REMOTE_JOB_ID
-B_BEGAN=$(date +%s)
 fm_remote_job_wait "$ACCOUNT_HOME" "$B1" || fail "$FM_REMOTE_JOB_ERROR"
-B_ELAPSED=$(( $(date +%s) - B_BEGAN ))
 [ "$FM_REMOTE_JOB_EXIT" -eq 0 ] || fail "home B's job behind home A's long job did not complete"
-[ "$B_ELAPSED" -le 3 ] || fail "home B's job waited ${B_ELAPSED}s behind home A's long job"
 [ "$(job_state "$A1")" = running ] || fail "home A's long job should still be running for the FIFO assertion"
 [ "$(cat "$LOG_A")" = a1 ] || fail "home A's queued job ran beside its running job: $(cat "$LOG_A")"
 fm_remote_job_reap "$ACCOUNT_HOME" "$B1" || fail "home B's job could not be reaped"
+touch "$A_RELEASE"
 fm_remote_job_wait "$ACCOUNT_HOME" "$A1" || fail "$FM_REMOTE_JOB_ERROR"
 fm_remote_job_wait "$ACCOUNT_HOME" "$A2" || fail "$FM_REMOTE_JOB_ERROR"
 [ "$(printf '%s' "$(cat "$LOG_A")")" = "$(printf 'a1\na2')" ] \
