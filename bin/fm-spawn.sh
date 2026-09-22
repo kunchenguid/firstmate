@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--expected-head <40-hex-sha>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--expected-head <40-hex-sha>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--expected-head <40-hex-sha>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--codex-native-provider]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--expected-head <40-hex-sha>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--codex-native-provider]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -232,6 +232,17 @@
 #   their existing ownership semantics. Orca is also refused because its
 #   separate worktree lifecycle is not part of this Treehouse-backed contract.
 #   With no flag, behavior is unchanged.
+#   --codex-native-provider is a deliberately narrow billing guard for one
+#   fresh single-task ship or scout launched through the verified Codex
+#   adapter. It requires explicit `--harness codex`, refuses raw commands,
+#   batches, secondmates, relaunches, and Orca before operational mutation,
+#   and binds preflight plus launch to one absolute Codex executable and one
+#   canonical CODEX_HOME. Preflight runs only `codex login status` and requires
+#   exactly `Logged in using ChatGPT`; it never invokes a model. The launch
+#   selects the built-in OpenAI provider, clears any configured OpenAI base URL
+#   so Codex uses its compiled ChatGPT endpoint, forces ChatGPT login, and
+#   scrubs Anthropic/OpenAI API credential and endpoint environment variables.
+#   This is not a provider abstraction and intentionally has no fallback.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -581,6 +592,7 @@ MODE=
 YOLO=
 TRACEPARENT_ARG=
 EXPECTED_HEAD=
+CODEX_NATIVE_PROVIDER=0
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -690,6 +702,13 @@ for a in "$@"; do
   --expected-head=*)
     EXPECTED_HEAD=${a#--expected-head=}
     EXPECTED_HEAD_SET=1
+    ;;
+  --codex-native-provider)
+    [ "$CODEX_NATIVE_PROVIDER" -eq 0 ] || {
+      echo "error: --codex-native-provider may be supplied only once" >&2
+      exit 1
+    }
+    CODEX_NATIVE_PROVIDER=1
     ;;
   *) POS+=("$a") ;;
   esac
@@ -840,6 +859,83 @@ fi
   echo "error: --expected-head applies only to fresh ship or scout spawns, not secondmates" >&2
   exit 1
 }
+
+CODEX_NATIVE_BIN=
+CODEX_NATIVE_HOME=
+if [ "$CODEX_NATIVE_PROVIDER" -eq 1 ]; then
+  [ "$RELAUNCH" -eq 0 ] || {
+    echo "error: --codex-native-provider supports fresh ship or scout launches only; relaunch is not supported" >&2
+    exit 1
+  }
+  [ "$KIND" = ship ] || [ "$KIND" = scout ] || {
+    echo "error: --codex-native-provider supports fresh ship or scout launches only" >&2
+    exit 1
+  }
+  [ "$HARNESS_SET" -eq 1 ] && [ "$HARNESS_ARG" = codex ] || {
+    echo "error: --codex-native-provider requires explicit --harness codex; implicit, positional, raw, and non-Codex harnesses are refused" >&2
+    exit 1
+  }
+  [ "${#POS[@]}" -eq 2 ] || {
+    echo "error: --codex-native-provider requires one task id and one project path; batch and positional-harness forms are refused" >&2
+    exit 1
+  }
+  case "${POS[0]}" in
+  *=*)
+    echo "error: --codex-native-provider does not support batch dispatch" >&2
+    exit 1
+    ;;
+  esac
+  if [ "$BACKEND_SET" -eq 1 ]; then
+    codex_native_backend=$BACKEND_ARG
+  else
+    codex_native_backend=$(fm_backend_name)
+  fi
+  [ "$codex_native_backend" != orca ] || {
+    echo "error: backend=orca does not support --codex-native-provider; the native guard requires Firstmate's Treehouse-backed worktree lifecycle" >&2
+    exit 1
+  }
+  CODEX_NATIVE_BIN=$(type -P codex 2>/dev/null || true)
+  [ -n "$CODEX_NATIVE_BIN" ] && [ -x "$CODEX_NATIVE_BIN" ] || {
+    echo "error: --codex-native-provider requires an executable codex on PATH" >&2
+    exit 1
+  }
+  case "$CODEX_NATIVE_BIN" in
+  /*) ;;
+  *)
+    echo "error: --codex-native-provider could not resolve codex to an absolute executable" >&2
+    exit 1
+    ;;
+  esac
+  codex_native_bin_dir=$(CDPATH='' cd -- "$(dirname "$CODEX_NATIVE_BIN")" 2>/dev/null && pwd -P) || {
+    echo "error: --codex-native-provider could not resolve the codex executable directory" >&2
+    exit 1
+  }
+  CODEX_NATIVE_BIN="$codex_native_bin_dir/$(basename "$CODEX_NATIVE_BIN")"
+  codex_native_home_input=${CODEX_HOME:-${HOME:+$HOME/.codex}}
+  [ -n "$codex_native_home_input" ] && [ -d "$codex_native_home_input" ] && [ -r "$codex_native_home_input" ] || {
+    echo "error: --codex-native-provider requires a readable CODEX_HOME directory (explicit CODEX_HOME or HOME/.codex)" >&2
+    exit 1
+  }
+  CODEX_NATIVE_HOME=$(CDPATH='' cd -- "$codex_native_home_input" 2>/dev/null && pwd -P) || {
+    echo "error: --codex-native-provider could not resolve CODEX_HOME" >&2
+    exit 1
+  }
+  codex_native_timeout=${FM_CODEX_NATIVE_STATUS_TIMEOUT:-10}
+  case "$codex_native_timeout" in
+  '' | *[!0-9]* | 0*) codex_native_timeout=10 ;;
+  esac
+  codex_native_status=
+  codex_native_status_rc=0
+  codex_native_status=$(fm_run_timed "$codex_native_timeout" env \
+    -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u CODEX_API_KEY \
+    -u CODEX_ACCESS_TOKEN -u OPENAI_BASE_URL \
+    CODEX_HOME="$CODEX_NATIVE_HOME" "$CODEX_NATIVE_BIN" login status 2>&1) \
+    || codex_native_status_rc=$?
+  if [ "$codex_native_status_rc" -ne 0 ] || [ "$codex_native_status" != "Logged in using ChatGPT" ]; then
+    echo "error: --codex-native-provider requires 'codex login status' to report exactly 'Logged in using ChatGPT'; native launch refused" >&2
+    exit 1
+  fi
+fi
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
@@ -1939,9 +2035,9 @@ launch_template() {
   # secondmate launch deliberately keeps hooks on.
   codex)
     if [ "$kind" = secondmate ]; then
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' '__CODEXNATIVEPREFIX____CODEXBIN__ __CODEXNATIVEFLAGS____MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' '__CODEXNATIVEPREFIX____CODEXBIN__ __CODEXNATIVEFLAGS____MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -4714,6 +4810,19 @@ EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
+if [ "$HARNESS" = codex ]; then
+  CODEX_BIN_COMMAND=codex
+  CODEX_NATIVE_PREFIX=
+  CODEX_NATIVE_FLAGS=
+  if [ "$CODEX_NATIVE_PROVIDER" -eq 1 ]; then
+    CODEX_BIN_COMMAND=$(shell_quote "$CODEX_NATIVE_BIN")
+    CODEX_NATIVE_PREFIX="env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u CODEX_API_KEY -u CODEX_ACCESS_TOKEN -u OPENAI_BASE_URL CODEX_HOME=$(shell_quote "$CODEX_NATIVE_HOME") "
+    CODEX_NATIVE_FLAGS='-c '\''model_provider="openai"'\'' -c '\''openai_base_url=""'\'' -c '\''forced_login_method="chatgpt"'\'' '
+  fi
+  LAUNCH=${LAUNCH//__CODEXNATIVEPREFIX__/$CODEX_NATIVE_PREFIX}
+  LAUNCH=${LAUNCH//__CODEXBIN__/$CODEX_BIN_COMMAND}
+  LAUNCH=${LAUNCH//__CODEXNATIVEFLAGS__/$CODEX_NATIVE_FLAGS}
+fi
 if [ "$HARNESS" = rovo ]; then
   ROVOCONFIGOVERRIDE=$(rovo_config_override_flag "$EFFORT" "$DATA" "$STATE" "$ID") || {
     echo "error: could not resolve this task's home paths for rovo's allowedExternalPaths grant" >&2
