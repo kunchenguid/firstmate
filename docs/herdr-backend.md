@@ -231,9 +231,13 @@ Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Typed-plane text is typed once; only Enter is retried.
-Before that Enter, the adapter reads the selected composer and continues only when that composer shows the typed payload, or only Claude paste placeholders with no literal remainder.
-A composer that holds a shorter suffix, or a placeholder plus a literal remainder, does not receive Enter, and the submit reports `send-failed`.
-A caller that treats only `empty` as delivered therefore keeps the unsent text.
+When native `agent get` identity is Claude, the adapter types only into an empty composer and, before that Enter, continues only when the selected composer shows the typed payload, or only Claude paste placeholders with no literal remainder.
+A composer that holds a shorter suffix, or a placeholder plus a literal remainder, does not receive Enter.
+The adapter presses Ctrl+U until the shared classifier reads the composer as empty, then reports `send-failed`, so a resend starts from a clean composer.
+Ctrl+C is not used for this, because Claude documents it as interrupting a running operation.
+If the composer cannot be verified empty again, the submit reports `unknown` instead, because text may still be in the composer.
+A Claude composer that already holds text before the send is refused with nothing typed.
+Other harnesses, and panes with no native identity, skip this proof and keep the type-then-Enter path, because their paste placeholders and composer shapes are not live-verified.
 
 On an idle or done native baseline, submit confirmation first waits for `working` or `blocked` across a bounded polling window.
 If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer is delivery, and proven pending text retries Enter.

@@ -3150,11 +3150,13 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
 # (Enter only, never retyped) until native agent-state, a cleared composer, or
-# fm_composer_queued_enter_verdict confirms delivery. Enter is sent only after
-# the selected composer shows that this payload was appended
-# (fm_backend_herdr_composer_observed_append). A missing read, a shorter
-# suffix, or a paste placeholder followed by a literal remainder returns
-# send-failed and does not press Enter. Verified hazard
+# fm_composer_queued_enter_verdict confirms delivery. When native identity is
+# Claude, text is typed only into an empty composer and Enter is sent only
+# after the composer shows the payload (fm_backend_herdr_composer_payload_shown).
+# A missing read, a shorter suffix, or a paste placeholder followed by a
+# literal remainder does not press Enter: the composer is cleared back to
+# empty and the verdict is send-failed, or unknown when the clear cannot be
+# verified. Other harnesses skip this proof. Verified hazard
 # (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
 # `$`-prefixed send opens a completion popup within ~0.1s, exactly like tmux's
 # claude/codex popups, so the caller's <settle> before the first Enter matters
@@ -3278,66 +3280,75 @@ fm_backend_herdr_composer_content() {  # <target> [lines]
   fm_composer_extract_selected_content "$caps" "$cap"
 }
 
-# fm_backend_herdr_composer_payload_appended: 0 when <after> shows that <text>
-# was appended to <before> in the selected composer.
+# fm_backend_herdr_composer_payload_shown: 0 when <after>, read from a
+# composer that was empty before the send, shows <text>.
 # Literal equality ignores whitespace, the same comparison zellij uses, so a
 # wrapped payload still matches. A composer that holds only `[Pasted text #N]`
 # placeholders, with no literal remainder, is the same proof for one fast
 # burst: Claude collapses that burst into the placeholder and expands it on
 # submit. A shorter literal suffix, or a placeholder followed by a literal
 # remainder, is the head-truncation shape and is not proof.
-fm_backend_herdr_composer_payload_appended() {  # <before> <text> <after>
-  local before=$1 text=$2 after=$3 added literal before_cmp text_cmp after_cmp
-  [ -n "$text" ] || return 1
-  fm_composer_normalize_spaces_var before
+fm_backend_herdr_composer_payload_shown() {  # <text> <after>
+  local text=$1 after=$2 literal
   fm_composer_normalize_spaces_var text
   fm_composer_normalize_spaces_var after
-  before_cmp=$before
-  text_cmp=$text
-  after_cmp=$after
-  before_cmp=${before_cmp//[$' \t\r\n\v\f']/}
-  text_cmp=${text_cmp//[$' \t\r\n\v\f']/}
-  after_cmp=${after_cmp//[$' \t\r\n\v\f']/}
-  [ -n "$text_cmp" ] || return 1
-  if [ "$after_cmp" = "${before_cmp}${text_cmp}" ]; then
-    return 0
-  fi
-  added=$after
-  if [ -n "$before" ] && [ "${after#"$before"}" != "$after" ]; then
-    added=${after#"$before"}
-    added=${added#" "}
-  fi
-  literal=$added
-  while [[ $literal =~ \[Pasted\ text\ #[0-9]+\] ]]; do
+  text=${text//[$' \t\r\n\v\f']/}
+  after=${after//[$' \t\r\n\v\f']/}
+  [ -n "$text" ] && [ -n "$after" ] || return 1
+  [ "$after" = "$text" ] && return 0
+  literal=$after
+  while [[ $literal =~ \[Pastedtext#[0-9]+\] ]]; do
     literal=${literal/"${BASH_REMATCH[0]}"/}
   done
-  literal=${literal//[$' \t\r\n\v\f']/}
-  [ -z "$literal" ] && [ -n "${added//[$' \t\r\n\v\f']/}" ]
+  [ -z "$literal" ]
 }
 
-# fm_backend_herdr_composer_observed_append: read the selected composer and
-# require fm_backend_herdr_composer_payload_appended. Failure leaves Enter to
-# the caller; this function never sends a key.
-fm_backend_herdr_composer_observed_append() {  # <target> <before> <text> <lines>
-  local target=$1 before=$2 text=$3 lines=$4 after
-  [ -n "$text" ] || return 1
-  after=$(fm_backend_herdr_composer_content "$target" "$lines") || return 1
-  fm_backend_herdr_composer_payload_appended "$before" "$text" "$after"
+# fm_backend_herdr_composer_clear: after a refused proof, press Ctrl+U until
+# the shared classifier reads the composer as empty. Claude documents Ctrl+U
+# as delete-to-line-start, repeated across lines of a multiline draft; Ctrl+C
+# is not used because it interrupts a running turn. 0 only when the composer
+# is verified empty again.
+fm_backend_herdr_composer_clear() {  # <target> <text>
+  local target=$1 text=$2 newlines presses i=0
+  newlines=${text//[!$'\n']/}
+  presses=$(( ${#newlines} + 2 ))
+  while [ "$i" -lt "$presses" ]; do
+    fm_backend_herdr_send_key "$target" C-u || return 1
+    i=$((i + 1))
+    [ "$(fm_backend_herdr_composer_state "$target")" = empty ] && return 0
+  done
+  return 1
 }
 
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 before proof_lines
+  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 proof_lines content
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
-  # Enter is withheld unless the selected composer shows this payload. A
-  # suffix that then starts a turn must not report empty.
-  proof_lines=$(fm_backend_herdr_proof_lines "$text")
-  before=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
-    || { printf 'send-failed'; return 0; }
+  # Claude on Herdr is the live-verified truncation shape: Enter is withheld
+  # unless the composer, empty before the send, shows this payload. A suffix
+  # that then starts a turn must not report empty. Other harnesses keep the
+  # unproven type-then-Enter path.
+  identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || identity=
+  if [ "${identity%%$'\t'*}" = claude ]; then
+    proof=1
+    proof_lines=$(fm_backend_herdr_proof_lines "$text")
+    content=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
+      || { printf 'send-failed'; return 0; }
+    [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
+  fi
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
-  fm_backend_herdr_composer_observed_append "$target" "$before" "$text" "$proof_lines" \
-    || { printf 'send-failed'; return 0; }
+  if [ "$proof" = 1 ]; then
+    if ! content=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
+      || ! fm_backend_herdr_composer_payload_shown "$text" "$content"; then
+      if fm_backend_herdr_composer_clear "$target" "$text"; then
+        printf 'send-failed'
+      else
+        printf 'unknown'
+      fi
+      return 0
+    fi
+  fi
   raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   baseline=$(fm_backend_herdr_classify_submit_agent_status "$raw_status")
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")
