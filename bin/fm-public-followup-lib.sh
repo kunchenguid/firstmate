@@ -34,8 +34,7 @@
 # public-followup commands):
 #   registry/<obligation-id>   registration record: the bounded private binding
 #                              (obligation, relation, work ref and canonical
-#                              secondmate path, generation, the expected final
-#                              and its required deliverable keys, platform,
+#                              secondmate path, generation, platform,
 #                              request id)
 #                              plus the loop fields that survive delivery (state,
 #                              delivered_at, followup_expires_at,
@@ -387,6 +386,27 @@ fm_pf_deliverable_problem() {
   fi
   printf "deliverable '%s' value '%s' is not valid; expected %s\n" "$key" "$value" "$format"
   return 1
+}
+
+# --- the promised contract --------------------------------------------------
+
+# fm_pf_obligation_json <home> <obligation-id>: the complete typed obligation
+# payload on stdout, empty when that home's backlog simply has no such
+# public-followup item, and a non-zero exit ONLY when the backlog could not be
+# read at all. Callers depend on that distinction to report the right thing, so
+# jq runs without -e here. tasks-axi is the single source of truth for what a
+# promise expects, so every reader of that contract comes through this one call
+# rather than a copy of it. An inherited FM_DATA_OVERRIDE is cleared because a
+# caller such as bound work names the owning home in the argument while its own
+# data override is still in the environment.
+fm_pf_obligation_json() {
+  local home=$1 id=$2 out
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE='' "$_FM_PF_LIB_DIR/fm-tasks-axi.sh" \
+    public-followup list --json 2>/dev/null) || return 1
+  [ -n "$out" ] || return 1
+  printf '%s' "$out" | jq -c --arg id "$id" \
+    '(.public_followups // []) | map(select(.id == $id)) | .[0] // empty' 2>/dev/null \
+    || return 1
 }
 
 # --- registry records -------------------------------------------------------

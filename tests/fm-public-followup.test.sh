@@ -3378,11 +3378,16 @@ pad_run() {
 }
 
 test_emit_rules_agree_with_tasks_axi() {
-  local home n=0 expected required outcome deliverables verdict
-  local emit_verdict axi_verdict obligation out pair pad
-  local -a emit_args
+  local home n=0 expected required outcome deliverables verdict mode
+  local emit_verdict axi_verdict obligation out pair pad staging registry
+  local -a emit_args emit_destination
   home=$(make_home emit-agreement)
-  while IFS='|' read -r expected required outcome deliverables verdict; do
+  # A work home on the far side of a machine boundary, which is the only place
+  # --stage-in is ever used from: it cannot read the obligation record at all.
+  staging="$home/staged-work-home"
+  mkdir -p "$staging/state"
+  printf 'agree\n' > "$staging/.fm-secondmate-home"
+  while IFS='|' read -r expected required outcome deliverables verdict mode; do
     [ -n "$expected" ] || continue
     n=$((n + 1))
     obligation="pf-agree-$n"
@@ -3397,7 +3402,18 @@ test_emit_rules_agree_with_tasks_axi() {
     done
     seed_typed_commitment "$home" "$obligation" "req-agree-$n" "$expected" "$required" \
       main "work-agree-$n"
+    # A registration written before this home recorded anything about the
+    # promise: the contract has to come from tasks-axi for it to be enforced.
+    if [ "$mode" = legacy ]; then
+      registry="$home/state/public-followup/registry/$obligation"
+      grep -v '^expected_final=' "$registry" | grep -v '^required_deliverables=' > "$registry.strip" \
+        || fail "could not rewrite the registration for case $n"
+      mv "$registry.strip" "$registry"
+    fi
 
+    emit_destination=(--home "$home" --source-home main)
+    [ "$mode" != stage-in ] \
+      || emit_destination=(--stage-in "$staging" --source-home secondmate:agree)
     emit_args=()
     while IFS= read -r pair; do
       [ -n "$pair" ] || continue
@@ -3406,11 +3422,12 @@ test_emit_rules_agree_with_tasks_axi() {
 $(printf '%s' "$deliverables" | jq -r 'to_entries[] | "\(.key)=\(.value)"')
 EOF
 
-    if "$EMIT" --home "$home" --obligation "$obligation" --relation rel-code \
-        --source-home main --work-id "work-agree-$n" --generation 1 --outcome "$outcome" \
+    if "$EMIT" "${emit_destination[@]}" --obligation "$obligation" --relation rel-code \
+        --work-id "work-agree-$n" --generation 1 --outcome "$outcome" \
         ${emit_args[@]+"${emit_args[@]}"} --outcome-text 'The work finished.' >/dev/null 2>&1; then
       emit_verdict=accept
       rm -f "$home/state/public-followup/events"/*.json
+      rm -f "$staging/state/public-followup/outbox"/*.json
     else
       emit_verdict=reject
     fi
@@ -3426,7 +3443,7 @@ EOF
     [ "$axi_verdict" = "$verdict" ] \
       || fail "case $n ($expected final, $outcome outcome, $deliverables): tasks-axi says $axi_verdict, the table says $verdict - re-pin the mirrored rule"
     [ "$emit_verdict" = "$axi_verdict" ] \
-      || fail "case $n ($expected final, $outcome outcome, $deliverables): the emitter says $emit_verdict but tasks-axi says $axi_verdict"
+      || fail "case $n ($expected final, $outcome outcome, $deliverables, ${mode:-direct} emit): the emitter says $emit_verdict but tasks-axi says $axi_verdict"
   done <<'CASES'
 pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12"}|accept
 pr-merged|["pr_url"]|report-ready|{"report_path":"data/work-a/report.md"}|reject
@@ -3491,8 +3508,13 @@ report-ready|["report_path"]|report-ready|{"report_path":"data/<pad:485>/report.
 report-ready|["report_path"]|report-ready|{"report_path":"data/<pad:486>/report.md"}|reject
 pr-merged|["pr_url"]|pr-merged|{"9bad":"https://github.com/example/repo/pull/12"}|reject
 pr-merged|["pr_url"]|pr-merged|{"a<pad:64>":"https://github.com/example/repo/pull/12"}|reject
+report-ready|["report_path"]|report-ready|{}|reject|legacy
+report-ready|["report_path"]|report-ready|{}|reject|stage-in
+pr-merged|["pr_url"]|pr-merged|{}|reject|stage-in
+report-ready|["report_path"]|report-ready|{"report_path":"data/work-a/report.md"}|accept|stage-in
+pr-merged|["pr_url"]|failed|{}|accept|stage-in
 CASES
-  [ "$n" -ge 63 ] || fail "the agreement table ran only $n cases"
+  [ "$n" -ge 68 ] || fail "the agreement table ran only $n cases"
   pass "the emitter's work-event rules agree with the real tasks-axi consumer on $n cases"
 }
 

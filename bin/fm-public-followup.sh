@@ -225,20 +225,10 @@ require_tools() {
 # in FM_HOME while its own data override is still in the environment.
 tx() { FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" "$@"; }
 
-# obligation_json <id>: the complete typed obligation payload on stdout, empty
-# when the backlog simply has no such public-followup item, and a non-zero exit
-# ONLY when the backlog could not be read at all. Callers depend on that
-# distinction to report the right thing, so jq runs without -e here. tasks-axi
-# stays the single source of truth; the registration record is never consulted
-# for state.
-obligation_json() {
-  local id=$1 out
-  out=$(tx public-followup list --json 2>/dev/null) || return 1
-  [ -n "$out" ] || return 1
-  printf '%s' "$out" | jq -c --arg id "$id" \
-    '(.public_followups // []) | map(select(.id == $id)) | .[0] // empty' 2>/dev/null \
-    || return 1
-}
+# obligation_json <id>: this home's typed obligation payload, through the shared
+# reader every consumer of the promised contract uses. tasks-axi stays the
+# single source of truth; the registration record is never consulted for state.
+obligation_json() { fm_pf_obligation_json "$FM_HOME" "$1"; }
 
 pf_field() { printf '%s' "$1" | jq -r "$2 // empty" 2>/dev/null; }
 
@@ -312,19 +302,8 @@ cmd_register() {
   [ -n "$request" ] || request=$(pf_field "$payload" '.public_followup.request.request_id')
   [ -z "$request" ] || fm_pf_slug_valid "$request" || die "unsafe request id: $request"
 
-  local followup_expires_at request_json request_context_b64 work_home_path required_deliverables
-  local expected_final
+  local followup_expires_at request_json request_context_b64 work_home_path
   followup_expires_at=$(pf_field "$payload" '.public_followup.request.followup_expires_at')
-  # What this commitment expects, and the keys it cannot be kept without.
-  # Recording them is what lets bound work running against this home be refused
-  # at emit for an outcome or a value tasks-axi would refuse, instead of
-  # publishing an event only this home's consume can reject.
-  expected_final=$(pf_field "$payload" '.public_followup.expected_final.type')
-  fm_pf_expected_outcome "$expected_final" >/dev/null 2>&1 || expected_final=
-  required_deliverables=$(printf '%s' "$payload" \
-    | jq -r '.public_followup.expected_final.required_deliverables // []
-        | select(type == "array" and (map(type == "string" and test("^[a-z][a-z0-9_]{0,63}$")) | all))
-        | join(" ")' 2>/dev/null) || required_deliverables=
   request_json=$(printf '%s' "$payload" | jq -c '.public_followup.request // empty' 2>/dev/null || true)
   request_context_b64=
   if [ -n "$request_json" ]; then
@@ -359,9 +338,9 @@ cmd_register() {
     printf 'already registered %s state=delivered\n' "$id"
     return 0
   fi
-  printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_home_path=%s\nwork_id=%s\ngeneration=%s\nexpected_final=%s\nrequired_deliverables=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
+  printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_home_path=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
     "$id" "$relation" "$work_home" "$work_home_path" "$work_id" "$generation" \
-    "$expected_final" "$required_deliverables" "$platform" "$request" \
+    "$platform" "$request" \
     "$followup_expires_at" "$request_context_b64" \
     | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$id" 600 \
     || die "could not write the registration record" 1

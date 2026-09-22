@@ -59,13 +59,15 @@
 #                          missing a required value is refused here instead of
 #                          being quarantined by the owning home. It is how the
 #                          obligation's required keys reach a staged emit, where
-#                          no registration is readable; `fm-public-followup.sh
-#                          brief` prints one per required key. With --home the
-#                          registration's own required keys are enforced as well,
-#                          whether or not the flag is passed. A failed outcome is
-#                          exempt only from a key it could not carry anyway: a
-#                          promise whose expected final IS the failure still
-#                          needs its error_code.
+#                          that obligation's own record is on another machine;
+#                          `fm-public-followup.sh brief` prints one per required
+#                          key. With --home the obligation's required keys are
+#                          read from tasks-axi and enforced whether or not the
+#                          flag is passed; a staged emit given no flag at all
+#                          still needs the deliverable its own outcome carries.
+#                          A failed outcome is exempt only from a key it could
+#                          not carry anyway: a promise whose expected final IS
+#                          the failure still needs its error_code.
 #   --outcome-text ...     Public-safe outcome sentence, from an argument, a
 #                          file, or stdin ("-"). Collapsed to one line; the
 #                          event builder bounds it by codepoint, so control
@@ -241,6 +243,9 @@ if [ "$HOME_MODE" = owning ]; then
   fm_pf_relay_active "$HOME_DIR" || exit 0
   command -v jq >/dev/null 2>&1 || die "jq is required to build a typed terminal event" 1
 
+  command -v tasks-axi >/dev/null 2>&1 \
+    || die "tasks-axi is required to read what this obligation promised" 1
+
   REGISTRY="$(fm_pf_registry_dir "$STATE")/$OBLIGATION"
   if [ ! -f "$REGISTRY" ] || [ -L "$REGISTRY" ]; then
     die "home '$HOME_DIR' has no public-followup registration for '$OBLIGATION'; the owning home registers a commitment before its work can report one" 1
@@ -266,16 +271,24 @@ else
   command -v jq >/dev/null 2>&1 || die "jq is required to build a typed terminal event" 1
 fi
 
-# The owning home's registration records what this promise expects, so --home
-# applies tasks-axi's own rules against it; a staged emit cannot read that
-# record and is told the required keys by `brief` as --require-deliverable
-# flags.
+# tasks-axi's own obligation record is what this promise expects, so --home
+# applies tasks-axi's rules against it exactly as `brief` reads it, for every
+# registration this home holds. A staged emit is on the other side of a machine
+# boundary from that record and is told the required keys by `brief` as
+# --require-deliverable flags.
 EXPECTED_FINAL=
 if [ "$HOME_MODE" = owning ]; then
-  EXPECTED_FINAL=$(fm_pf_registry_get "$STATE" "$OBLIGATION" expected_final)
-  for key in $(fm_pf_registry_get "$STATE" "$OBLIGATION" required_deliverables); do
+  OBLIGATION_JSON=$(fm_pf_obligation_json "$HOME_DIR" "$OBLIGATION") \
+    || die "could not read public-followup obligation '$OBLIGATION' through tasks-axi" 1
+  [ -n "$OBLIGATION_JSON" ] \
+    || die "public-followup obligation '$OBLIGATION' is missing from tasks-axi" 1
+  EXPECTED_FINAL=$(printf '%s' "$OBLIGATION_JSON" \
+    | jq -r '.public_followup.expected_final.type // empty' 2>/dev/null)
+  fm_pf_expected_outcome "$EXPECTED_FINAL" >/dev/null 2>&1 || EXPECTED_FINAL=
+  for key in $(printf '%s' "$OBLIGATION_JSON" \
+      | jq -r '(.public_followup.expected_final.required_deliverables // []) | .[] | tostring' 2>/dev/null); do
     fm_pf_deliverable_key_valid "$key" \
-      || die "registration for '$OBLIGATION' names an unusable required deliverable key '$key'" 1
+      || die "obligation '$OBLIGATION' names an unusable required deliverable key '$key'" 1
     REQUIRED_KEYS+=("$key")
   done
 fi
@@ -305,6 +318,14 @@ done
 # exempt only from a key it could not carry anyway: a promise whose expected
 # final IS the failure still needs its error_code.
 CARRIED_KEYS=$(fm_pf_deliverable_keys "$EXPECTED_FINAL" "$OUTCOME") || CARRIED_KEYS=
+# A staged emit told nothing about the promise still knows what its own outcome
+# has to carry: a successful terminal result with none of it can only be
+# quarantined by the owning home, so it is refused here instead.
+if [ "$HOME_MODE" = staging ] && [ "${#REQUIRED_KEYS[@]}" -eq 0 ] && [ "$OUTCOME" != failed ]; then
+  for key in $CARRIED_KEYS; do
+    REQUIRED_KEYS+=("$key")
+  done
+fi
 i=0
 while [ "$i" -lt "${#REQUIRED_KEYS[@]}" ]; do
   key=${REQUIRED_KEYS[$i]}
