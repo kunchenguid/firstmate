@@ -66,6 +66,13 @@ Never restart, stop, or update the shared daemon on a crewmate's claim.
 It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
 Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
 
+## A worker parked on a provider quota wall
+
+`bin/fm-crew-state.sh` reports `state: quota` when a live harness is stalled on a provider usage-limit retry modal instead of advancing: the process is alive and painting, but the submitted turn cannot run.
+Treat it as neither a wedge nor a declared external wait.
+The retry modal leaves the composer unreadable, so an in-place `fm-control.sh <task-id> relaunch` cannot fix it and a fresh worker on the same provider would hit the same wall.
+Preserve the worktree and its unlanded work, and bring the work back under a new task id chosen for a provider with headroom rather than relaunching in place; a provider limit is not something the fleet can clear, so escalate it to the captain when it blocks delivery.
+
 ## Live-endpoint escalation
 
 Escalate in order:

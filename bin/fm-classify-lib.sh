@@ -2128,6 +2128,9 @@ crew_absorb_class() {  # <id>
     src=${line#*source: }; src=${src%% *}
     case "$src" in run-step|pane) printf 'working'; return ;; esac
   fi
+  # `quota` (a live harness parked on a provider quota wall) is deliberately
+  # NOT absorbed: the worker is neither advancing nor a declared external wait,
+  # so it surfaces for firstmate to preserve and replace.
   printf 'none'
 }
 

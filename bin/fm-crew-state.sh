@@ -22,7 +22,7 @@
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|quota|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -131,7 +131,11 @@
 #      proven historical head, or kind=scout): fall back to the recorded
 #      backend's pane busy state, then the resolved status declaration
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. A busy pane whose text
+#      shows a provider quota wall reports `quota` instead of working
+#      (bin/fm-busy-lib.sh owns the wall signal): the harness is alive but the
+#      agent is not advancing, so recovery is preserve-and-replace under a new
+#      id, never an in-place relaunch into the same unreadable retry modal.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -294,12 +298,14 @@ pane_readable() {  # <target>
   esac
 }
 # crew_busy_verdict: the crew's semantic busy state from the one contract
-# owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown> <source>". A converted
-# adapter answers from its own lifecycle record; Grok answers from its
-# isolated rendered-tail fallback; a herdr crew's native `busy` is accepted
+# owner (bin/fm-busy-lib.sh), as "<busy|idle|unknown|quota> <source>". A
+# converted adapter answers from its own lifecycle record; Grok answers from
+# its isolated rendered-tail fallback; a herdr crew's native `busy` is accepted
 # when no record exists, but its native `idle` is NOT, because agent.get
 # reports generation state (idle while a crew blocks on its own long-running
-# foreground tool call) rather than turn state.
+# foreground tool call) rather than turn state. A `quota` verdict is a busy
+# record reclassified by the rendered provider-wall signal, which the contract
+# owner captures itself when the caller passes no tail.
 crew_busy_verdict() {  # <target>
   local tail40=''
   case "$HARNESS" in
@@ -1196,13 +1202,15 @@ fi
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
 # state is not meaningful for them; read their state from the status log only.
-# Only an exact busy verdict reports working here, and only an exact idle
-# verdict permits the status-log fallback below. Missing, malformed, stale, or
-# unverified semantic state remains unknown.
+# Only an exact busy verdict reports working here, an exact quota verdict
+# reports quota (a live harness stalled on a provider wall, not advancing), and
+# only an exact idle verdict permits the status-log fallback below. Missing,
+# malformed, stale, or unverified semantic state remains unknown.
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
     busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    quota) emit quota pane "provider quota wall: not advancing (preserve and replace under a new id, not relaunch)" ;;
     idle) ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac

@@ -2175,3 +2175,30 @@ A throwaway scout was spawned through `bin/fm-spawn.sh --scout --harness omp --m
 6. `bin/fm-control.sh <id> exit` stopped the agent and `bin/fm-teardown.sh` returned the worktree and closed the item.
 
 `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence; the worker path above is refreshed by repeating the scout dispatch after any omp upgrade.
+
+## Provider quota-wall classification
+
+A worker parked on a provider quota wall must not read as working: the harness is alive and painting a retry modal while the submitted turn cannot advance.
+`bin/fm-busy-lib.sh` classifies that rendered wall as `quota` over an otherwise-busy task, and `bin/fm-crew-state.sh` surfaces it as `state: quota` (source `pane`) instead of `working`, so supervision sees a stalled worker rather than a healthy one.
+The signal is built from two independent rendered families - a limit phrase and a retry/reset phrase - within the last few non-empty lines, so no single vendor string is load-bearing and ordinary worker output does not match.
+
+Verified on 2026-09-20 with opencode 1.18.31 on Linux, driving the real installed OpenCode TUI against a local 429 stub provider so its own retry modal renders with no model tokens spent:
+
+```sh
+bin/fm-test-run.sh tests/fm-quota-wall-live-e2e.test.sh
+```
+
+Observed output:
+
+```text
+ok - a busy OpenCode worker without a rendered wall reads working
+ok - OpenCode 1.18.31 real 429 quota retry modal classifies as quota, not working
+```
+
+The real modal OpenCode painted for the stub's quota error, captured from the pane:
+
+```text
+⬝⬝⬝⬝■■■■ weekly usage limit reached. It will reset in 1 day 14 hours [retrying attempt #1]            esc interrupt
+```
+
+`tests/fm-crew-state.test.sh` pins the logic portably over a synthetic pane transcript, including the divergence cases where only one family, or ordinary worker prose, never reads `quota`.

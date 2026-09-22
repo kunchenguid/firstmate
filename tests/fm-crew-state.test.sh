@@ -1897,6 +1897,100 @@ test_no_run_busy_pane() {
   pass "no run + a busy semantic record reads working, attributed to its source"
 }
 
+# (f2) A busy record over a rendered provider quota wall reads quota, never
+# working. The wall is recognized from TWO independent rendered families (a
+# limit phrase and a retry/reset phrase), so the near-miss cases below prove
+# neither family alone - and no ordinary worker prose - can carry the verdict.
+# The synthetic transcripts stand in for real captured panes; the live guard
+# (tests/fm-quota-wall-live-e2e.test.sh) proves the same matcher against the
+# real installed OpenCode retry modal.
+test_no_run_busy_quota_wall_reads_quota() {
+  reset_fakes
+  local d; d=$(new_case quota-wall)
+  make_repo_on_branch "$d/wt" fm/feat-q
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-q.meta" "window=fm:fm-feat-q" "worktree=$d/wt" "kind=ship" "harness=opencode"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local label text gen out
+  while IFS='|' read -r label text; do
+    [ -n "$label" ] || continue
+    FM_FAKE_BUSY_TEXT=$text
+    export FM_FAKE_BUSY_TEXT
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-q)
+    "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-q busy --gen "$gen" \
+      --source opencode-plugin --event session-status
+    out=$(run_crew_state "$d" feat-q)
+    assert_contains "$out" "state: quota" "$label wall reads quota"
+    assert_contains "$out" "source: pane" "$label wall is attributed to the pane"
+    assert_not_contains "$out" "state: working" "$label wall never reads working"
+  done <<'EOF'
+opencode-go|weekly usage limit reached. It will reset in 1 day 14 hours [retrying in ~1 day, attempt #1]
+claude|Claude usage limit reached. Your limit will reset at 3pm.
+gemini|You have exhausted your capacity. Your quota will reset after 20h.
+codex|You've hit your usage limit. Please try again later.
+generic-429|429 Too Many Requests: rate limit exceeded, retry after 120 seconds.
+EOF
+  pass "a busy record over any provider quota wall reads quota, not working"
+}
+
+# The two-signal rule, asserted as a divergence so it cannot go quietly vacuous:
+# a pane carrying only ONE family stays busy (working), never quota.
+test_quota_wall_requires_both_signals() {
+  reset_fakes
+  local d; d=$(new_case quota-near-miss)
+  make_repo_on_branch "$d/wt" fm/feat-qn
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-qn.meta" "window=fm:fm-feat-qn" "worktree=$d/wt" "kind=ship" "harness=opencode"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local label text gen out
+  while IFS='|' read -r label text; do
+    [ -n "$label" ] || continue
+    FM_FAKE_BUSY_TEXT=$text
+    export FM_FAKE_BUSY_TEXT
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-qn)
+    "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-qn busy --gen "$gen" \
+      --source opencode-plugin --event session-status
+    out=$(run_crew_state "$d" feat-qn)
+    assert_not_contains "$out" "state: quota" "$label is not a wall"
+    assert_contains "$out" "state: working" "$label stays busy"
+  done <<'EOF'
+limit-only|model weekly usage limit reached
+wait-only|connection lost, retrying in 30s attempt #2
+ordinary-prose|working: refactoring the quota reset path
+code-prose|working: adding a usage-limit retry path
+EOF
+  pass "one family, or ordinary prose, never reads quota"
+}
+
+# The watcher's absorb proof goes through the real reader, so a quota-parked
+# worker must not be provably working - otherwise its stale wake would be
+# swallowed exactly as the measured incident was.
+test_quota_wall_not_provably_working() {
+  reset_fakes
+  local d gen; d=$(new_case quota-not-provable)
+  make_repo_on_branch "$d/wt" fm/feat-qp
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-qp.meta" "window=fm:fm-feat-qp" "worktree=$d/wt" "kind=ship" "harness=opencode"
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<'EOF'
+  running    fm/other-crew aaaaaaa  2026-07-02 22:10
+EOF
+)"
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT='weekly usage limit reached. It will reset in 1 day 14 hours [retrying in 8s attempt #3]'
+  export FM_FAKE_BUSY_TEXT
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-qp)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-qp busy --gen "$gen" \
+    --source opencode-plugin --event session-status
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-qp \
+    && fail "a quota-parked worker must not be absorbed as provably working"
+  pass "crew_is_provably_working surfaces a quota-parked worker"
+}
+
 # A converted adapter must NOT read working from rendered footer text: the
 # redesign removed that dependency, so a pane painting "esc to interrupt" with
 # no semantic record is unknown, never working and never silently idle.
@@ -4875,6 +4969,9 @@ test_terminal_run_without_live_sibling_is_unchanged
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
+test_no_run_busy_quota_wall_reads_quota
+test_quota_wall_requires_both_signals
+test_quota_wall_not_provably_working
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture
