@@ -42,7 +42,10 @@
 #       registration: it creates this home's private public-followup directories
 #       (0700) and the bounded public-safe registration record, which is what
 #       later makes the presence checks O(1) and lets bound work report a typed
-#       terminal result. Refuses when the relay is not active for this home.
+#       terminal result. The record includes the obligation's required
+#       deliverable keys, so work reporting into this home is refused at emit
+#       when it leaves one out. Refuses when the relay is not active for this
+#       home.
 #
 #   fm-public-followup.sh brief <obligation-id>
 #       Print the exact fm-public-followup-emit.sh command line the bound worker
@@ -51,7 +54,9 @@
 #       --deliverable flags name the obligation's actual required keys, with
 #       every value the binding determines already filled in (report_path is
 #       data/<work-id>/report.md) and every other one left as a named
-#       placeholder followed by the format tasks-axi accepts. For work
+#       placeholder followed by the format tasks-axi accepts. The same keys are
+#       repeated as --require-deliverable, so an emit that drops one is refused
+#       where it runs rather than quarantined here. For work
 #       bound to a REMOTE secondmate home, the command names that route's own
 #       code root and home with --stage-in, because neither this checkout's path
 #       nor this home's path exists on the machine that worker runs on.
@@ -307,8 +312,15 @@ cmd_register() {
   [ -n "$request" ] || request=$(pf_field "$payload" '.public_followup.request.request_id')
   [ -z "$request" ] || fm_pf_slug_valid "$request" || die "unsafe request id: $request"
 
-  local followup_expires_at request_json request_context_b64 work_home_path
+  local followup_expires_at request_json request_context_b64 work_home_path required_deliverables
   followup_expires_at=$(pf_field "$payload" '.public_followup.request.followup_expires_at')
+  # The keys this commitment cannot be kept without. Recording them is what lets
+  # bound work running against this home be refused at emit for a missing value,
+  # instead of publishing an event only this home's consume can reject.
+  required_deliverables=$(printf '%s' "$payload" \
+    | jq -r '.public_followup.expected_final.required_deliverables // []
+        | select(type == "array" and (map(type == "string" and test("^[a-z0-9_]+$")) | all))
+        | join(" ")' 2>/dev/null) || required_deliverables=
   request_json=$(printf '%s' "$payload" | jq -c '.public_followup.request // empty' 2>/dev/null || true)
   request_context_b64=
   if [ -n "$request_json" ]; then
@@ -343,8 +355,9 @@ cmd_register() {
     printf 'already registered %s state=delivered\n' "$id"
     return 0
   fi
-  printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_home_path=%s\nwork_id=%s\ngeneration=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
-    "$id" "$relation" "$work_home" "$work_home_path" "$work_id" "$generation" "$platform" "$request" \
+  printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_home_path=%s\nwork_id=%s\ngeneration=%s\nrequired_deliverables=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
+    "$id" "$relation" "$work_home" "$work_home_path" "$work_id" "$generation" \
+    "$required_deliverables" "$platform" "$request" \
     "$followup_expires_at" "$request_context_b64" \
     | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$id" 600 \
     || die "could not write the registration record" 1
@@ -397,7 +410,7 @@ brief_emit_target() {
 
 cmd_brief() {
   local id=${1:-} relation work_home work_home_path work_id generation payload outcome keys key deliverable_flags
-  local value format deliverable_formats
+  local value format deliverable_formats require_flags
   local emit_target emit_script emit_home_flag closing_note
   [ -n "$id" ] || { usage; exit 2; }
   fm_pf_slug_valid "$id" || die "unsafe obligation id: $id"
@@ -447,11 +460,16 @@ the home above owns the reply.'
     || die "public-followup obligation '$id' has no readable required deliverable keys" 1
   # Pre-fill every value the binding already determines, so the worker has
   # nothing to guess; name each remaining one and state the format tasks-axi
-  # accepts for it, so a guess never travels back to be quarantined here.
+  # accepts for it, so a guess never travels back to be quarantined here. Each
+  # key is also named as --require-deliverable, which is how a staged emit
+  # learns what this obligation requires when it cannot read the registration.
   deliverable_flags=
   deliverable_formats=
+  require_flags=
   while IFS= read -r key; do
     [ -n "$key" ] || continue
+    require_flags="${require_flags}    --require-deliverable ${key} \\
+"
     value=
     case "$key" in
       report_path) value="data/$work_id/report.md" ;;
@@ -486,7 +504,7 @@ When this work reaches its promised terminal outcome, report it as typed data
     --work-id $work_id \\
     --generation $generation \\
     --outcome $outcome \\
-${deliverable_flags}    --outcome-text '<one bounded public-safe sentence>'
+${require_flags}${deliverable_flags}    --outcome-text '<one bounded public-safe sentence>'
 ${deliverable_formats}
 $closing_note
 EOF

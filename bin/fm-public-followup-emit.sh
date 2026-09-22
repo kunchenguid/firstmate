@@ -17,7 +17,7 @@
 #     --obligation <obligation-id> --relation <relation-id> \
 #     --source-home <main|secondmate:<id>> --work-id <task-id> \
 #     --generation <n> --outcome <outcome-type> \
-#     [--deliverable <key>=<value>]... \
+#     [--deliverable <key>=<value>]... [--require-deliverable <key>]... \
 #     (--outcome-text <text> | --outcome-text-file <path> | --outcome-text -)
 #
 # Options:
@@ -52,6 +52,17 @@
 #                          key, the value, and the expected format, in both
 #                          destinations. fm-public-followup-lib.sh owns those
 #                          mirrored rules.
+#   --require-deliverable <key>
+#                          Repeatable key this event MUST carry, so an event
+#                          missing a required value is refused here instead of
+#                          being quarantined by the owning home. It is how the
+#                          obligation's required keys reach a staged emit, where
+#                          no registration is readable; `fm-public-followup.sh
+#                          brief` prints one per required key. With --home the
+#                          registration's own required keys are enforced as well,
+#                          whether or not the flag is passed. A key the outcome
+#                          does not carry (error_code on a failed report, say) is
+#                          not required of it.
 #   --outcome-text ...     Public-safe outcome sentence, from an argument, a
 #                          file, or stdin ("-"). Collapsed to one line; the
 #                          event builder bounds it by codepoint, so control
@@ -88,6 +99,7 @@ usage: fm-public-followup-emit.sh (--home <owning-home> | --stage-in <work-home>
          --obligation <id> --relation <id>
          --source-home <main|secondmate:<id>> --work-id <id> --generation <n>
          --outcome <type> [--deliverable <key>=<value>]...
+         [--require-deliverable <key>]...
          (--outcome-text <text> | --outcome-text-file <path> | --outcome-text -)
 EOF
 }
@@ -124,6 +136,7 @@ TEXT_SOURCE=
 TEXT_MODE=
 DELIVERABLE_KEYS=()
 DELIVERABLE_VALUES=()
+REQUIRED_KEYS=()
 
 case "${1:-}" in
   --help|-h) help; exit 0 ;;
@@ -150,6 +163,13 @@ while [ "$#" -gt 0 ]; do
       esac
       DELIVERABLE_KEYS+=("${1%%=*}")
       DELIVERABLE_VALUES+=("${1#*=}")
+      ;;
+    --require-deliverable)
+      shift
+      case "${1:-}" in
+        ''|*[!a-z0-9_]*) die "--require-deliverable needs a lowercase [a-z0-9_] key, got '${1:-}'" ;;
+      esac
+      REQUIRED_KEYS+=("$1")
       ;;
     --help|-h) help; exit 0 ;;
     *) die "unknown argument '$1'" ;;
@@ -255,6 +275,37 @@ else
   # The collecting home applies both, plus tasks-axi, before it accepts anything.
   command -v jq >/dev/null 2>&1 || die "jq is required to build a typed terminal event" 1
 fi
+
+# An event missing a key its obligation requires is as dead on arrival as one
+# carrying a bad value, so it is refused in the same place. The owning home's
+# registration records the required keys, so --home needs nothing from the
+# caller; a staged emit cannot read that record and is told them by `brief` as
+# --require-deliverable flags. Either way the requirement applies only to a key
+# this outcome actually carries.
+if [ "$HOME_MODE" = owning ]; then
+  for key in $(fm_pf_registry_get "$STATE" "$OBLIGATION" required_deliverables); do
+    case "$key" in
+      *[!a-z0-9_]*) die "registration for '$OBLIGATION' names an unusable required deliverable key '$key'" 1 ;;
+    esac
+    REQUIRED_KEYS+=("$key")
+  done
+fi
+OUTCOME_KEYS=$(fm_pf_outcome_deliverable_keys "$OUTCOME") || OUTCOME_KEYS=
+i=0
+while [ "$i" -lt "${#REQUIRED_KEYS[@]}" ]; do
+  key=${REQUIRED_KEYS[$i]}
+  i=$((i + 1))
+  case " $OUTCOME_KEYS " in
+    *" $key "*) ;;
+    *) continue ;;
+  esac
+  j=0
+  while [ "$j" -lt "${#DELIVERABLE_KEYS[@]}" ]; do
+    [ "${DELIVERABLE_KEYS[$j]}" != "$key" ] || break
+    j=$((j + 1))
+  done
+  [ "$j" -lt "${#DELIVERABLE_KEYS[@]}" ] || die "required deliverable '$key' is missing; expected $(fm_pf_deliverable_format "$key" || printf '%s' 'the value tasks-axi requires for it')"
+done
 
 case "$TEXT_MODE" in
   inline) OUTCOME_TEXT=$(printf '%s' "$TEXT_SOURCE" | fm_pf_clean_outcome_text) ;;

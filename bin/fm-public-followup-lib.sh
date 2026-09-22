@@ -34,7 +34,8 @@
 # public-followup commands):
 #   registry/<obligation-id>   registration record: the bounded private binding
 #                              (obligation, relation, work ref and canonical
-#                              secondmate path, generation, platform, request id)
+#                              secondmate path, generation, the required
+#                              deliverable keys, platform, request id)
 #                              plus the loop fields that survive delivery (state,
 #                              delivered_at, followup_expires_at,
 #                              request_context_b64). Presence means the public

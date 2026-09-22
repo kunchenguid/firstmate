@@ -3298,6 +3298,67 @@ test_emit_refuses_a_deliverable_tasks_axi_would_reject() {
   pass "the emitter refuses a deliverable tasks-axi would reject, naming key, value, and format"
 }
 
+# The same mistake with the value left out entirely: an event that never carries
+# the key its obligation requires can only ever be quarantined by the owning
+# home, so the emitter must refuse it before it travels, in both destinations.
+test_emit_refuses_a_missing_required_deliverable() {
+  local home remote out command n=0 expected key format
+  home=$(make_home emit-missing)
+
+  # Writing straight into the owning home: that home's own registration records
+  # what its promise cannot be kept without.
+  while IFS='|' read -r expected key format; do
+    [ -n "$expected" ] || continue
+    n=$((n + 1))
+    seed_typed_commitment "$home" "pf-missing-$n" "req-missing-$n" "$expected" \
+      "[\"$key\"]" main "work-missing-$n"
+    expect_failure "a $expected event carrying no deliverable at all must be refused at emit" \
+      "$EMIT" --home "$home" --obligation "pf-missing-$n" --relation rel-code \
+      --source-home main --work-id "work-missing-$n" --generation 1 \
+      --outcome "$expected" --outcome-text 'The work finished.'
+    assert_contains "$EXPECT_OUT" "$key" "the refusal must name the missing key"
+    assert_contains "$EXPECT_OUT" "$format" "the refusal must state the expected format"
+    [ -z "$(ls -A "$home/state/public-followup/events" 2>/dev/null)" ] \
+      || fail "an event missing $key must publish nothing"
+  done <<'CASES'
+report-ready|report_path|data/<task-id>/report.md
+pr-merged|pr_url|/pull/<number>
+local-main|commit_sha|lowercase hex commit SHA
+CASES
+  [ "$n" -eq 3 ] || fail "the missing-deliverable table ran only $n cases"
+
+  # A failure report is a different terminal outcome that never carries the
+  # promised key, so requiring that key must not block reporting one.
+  "$EMIT" --home "$home" --obligation pf-missing-1 --relation rel-code \
+    --source-home main --work-id work-missing-1 --generation 1 --outcome failed \
+    --deliverable error_code=ci-red --outcome-text 'The work could not finish.' >/dev/null \
+    || fail "a failed outcome must not be held to the promised deliverable key"
+  rm -f "$home"/state/public-followup/events/*.json
+
+  # Staging for a home on another machine: no registration is readable there, so
+  # the requirement travels in the command `brief` prints. Run exactly that
+  # command with its deliverable line dropped, which is the mistake itself.
+  remote_fixture_prepare
+  remote=$(make_remote_route "$home" mini-default)
+  seed_repro_commitment "$home" pf-missing-remote req-missing-remote \
+    secondmate:mini-default work-missing-remote
+  printf 'mini-default\n' > "$remote/.fm-secondmate-home"
+  out=$(run_pf "$home" brief pf-missing-remote) || fail "brief failed: $out"
+  command=$(brief_emit_command "$out")
+  assert_contains "$command" "--require-deliverable report_path" \
+    "a staged brief must carry the obligation's required keys into the emit command"
+  command=${command//<one bounded public-safe sentence>/The remote lane finished its investigation.}
+  command=$(printf '%s\n' "$command" | grep -v '^[[:space:]]*--deliverable ')
+  expect_failure "a staged emit that drops a required deliverable must be refused" \
+    bash -c "$command"
+  assert_contains "$EXPECT_OUT" "report_path" "the staged refusal must name the missing key"
+  assert_contains "$EXPECT_OUT" "data/<task-id>/report.md" \
+    "the staged refusal must state the expected format"
+  [ -z "$(ls -A "$remote/state/public-followup/outbox" 2>/dev/null)" ] \
+    || fail "a staged event missing a required deliverable must stage nothing"
+  pass "the emitter refuses an event missing a required deliverable in both destinations"
+}
+
 # The emitter mirrors tasks-axi's deliverable rules because tasks-axi exposes no
 # validation-only command. Pin the two together: every case runs through the
 # emitter AND, bypassing it, through the real tasks-axi consumer, and both must
@@ -3496,6 +3557,7 @@ test_remote_collection_is_idempotent
 test_stage_in_refuses_ambiguous_or_unusable_homes
 test_brief_prefills_known_deliverables_and_states_formats
 test_emit_refuses_a_deliverable_tasks_axi_would_reject
+test_emit_refuses_a_missing_required_deliverable
 test_emit_deliverable_rules_agree_with_tasks_axi
 test_rejected_event_wakes_owning_home_with_specific_reason
 test_remote_rejected_event_wakes_owning_home
