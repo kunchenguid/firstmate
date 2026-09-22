@@ -295,24 +295,36 @@ SH
   chmod +x "$fakebin/ps"
 }
 
-# make_fake_tmux <fakebin> <live-target>: display-message succeeds only for
-# the given "session:window" target - the exact primitive
-# fm_backend_target_exists uses for a tmux endpoint liveness read.
+# make_fake_tmux <fakebin> <live-target>: models real tmux, where an addressed
+# call is not a presence proof. The given "session:window" is that session's
+# only real window: list-windows answers the true inventory, while
+# display-message resolves ANY window name on a session that exists to the
+# active pane and exits 0 - tmux's silent fallback. Only the inventory can
+# prove a named window is there, so a recorded window that the inventory omits
+# must read as gone even though display-message answered.
 make_fake_tmux() {
-  local fakebin=$1 live=$2
+  local fakebin=$1 live=$2 session=${2%%:*} window=${2#*:}
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 set -u
+session="$session"
+window="$window"
+target=""
+prev=""
+for a in "\$@"; do
+  [ "\$prev" = "-t" ] && target="\$a"
+  prev="\$a"
+done
 case "\${1:-}" in
   display-message)
-    target=""
-    prev=""
-    for a in "\$@"; do
-      [ "\$prev" = "-t" ] && target="\$a"
-      prev="\$a"
-    done
-    [ "\$target" = "$live" ] && { printf '%%1\n'; exit 0; }
+    [ "\${target%%:*}" = "\$session" ] && { printf '%%1\n'; exit 0; }
     exit 1
+    ;;
+  list-windows)
+    # tmux's leading "=" is an exact-match modifier, not part of the name.
+    [ "\${target#=}" = "\$session" ] || exit 1
+    printf '%s\n' "\$window"
+    exit 0
     ;;
 esac
 exit 1
@@ -1340,9 +1352,15 @@ EOF
   printf 'window=fm-sess:live-window\nkind=ship\n' > "$home/state/task-live.meta"
   printf 'window=fm-sess:dead-window\nkind=ship\n' > "$home/state/task-dead.meta"
 
+  # Anti-vacuity: the vanished window really is the silent-fallback shape this
+  # digest must not be fooled by - tmux still answers an addressed call for the
+  # unknown name, so only the session inventory can prove it gone.
+  PATH="$fakebin:$BASE_PATH" tmux display-message -p -t fm-sess:dead-window '#{pane_id}' >/dev/null 2>&1 \
+    || fail "fixture drifted: display-message must still answer for a vanished window name on a live session"
+
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   assert_contains "$out" "endpoint: alive (backend=tmux window=fm-sess:live-window)" "live tmux endpoint not reported alive"
-  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "dead tmux endpoint not reported dead"
+  assert_contains "$out" "endpoint: dead (backend=tmux window=fm-sess:dead-window)" "a vanished window tmux silently resolved must be reported dead"
 
   pass "tmux endpoint liveness is reported per task: alive for a live window, dead for a gone one"
 }

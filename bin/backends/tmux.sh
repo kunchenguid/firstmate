@@ -95,8 +95,9 @@ fm_backend_tmux_container_ensure() {
 # The returned window id lets callers target the window even if its name is ever
 # lost, so worktree discovery cannot fall back to the active client's window.
 fm_backend_tmux_create_task() {  # <session> <window-name> <proj-abs> -> prints window id
-  local ses=$1 wname=$2 proj_abs=$3 wid
-  if tmux list-windows -t "$ses" -F '#{window_name}' | grep -qx "$wname"; then
+  local ses=$1 wname=$2 proj_abs=$3 wid inventory
+  if inventory=$(fm_backend_tmux_window_inventory "$ses") \
+    && printf '%s\n' "$inventory" | grep -Fqx -- "$wname"; then
     echo "error: window $ses:$wname already exists" >&2
     return 1
   fi
@@ -129,9 +130,10 @@ fm_backend_tmux_send_literal() {  # <target> <text>
   tmux send-keys -t "$1" -l "$2"
 }
 
-# fm_backend_tmux_window_inventory: <session-target>'s window names, one per
-# line on stdout, together with a verdict on the READ ITSELF, which is what
-# every caller that must not guess depends on:
+# fm_backend_tmux_window_inventory: <session-target>'s window entries rendered
+# by <format> (window_name when omitted), one per line on stdout, together with
+# a verdict on the READ ITSELF, which is what every caller that must not guess
+# depends on:
 #   0 - the inventory was read; its lines are that session's windows.
 #   2 - tmux answered definitively that the session, or its whole server, is
 #       absent, so no window of that session exists.
@@ -142,10 +144,13 @@ fm_backend_tmux_send_literal() {  # <target> <text>
 #       fm_backend_tmux_kill.
 # The target is passed through exactly as the caller means it, so a caller that
 # requires the exact recorded session asks for `=session` and still gets the
-# same classification.
-fm_backend_tmux_window_inventory() {  # <session-target>
-  local windows
-  if windows=$(LC_ALL=C tmux list-windows -t "$1" -F '#{window_name}' 2>&1); then
+# same classification, and a caller that must read a specific field asks for its
+# format (e.g. '#{window_id}') without opening a second inventory read.
+# LC_ALL=C keeps the output stable regardless of the caller's locale.
+fm_backend_tmux_window_inventory() {  # <session-target> [format]
+  local windows format=${2:-}
+  [ -n "$format" ] || format='#{window_name}'
+  if windows=$(LC_ALL=C tmux list-windows -t "$1" -F "$format" 2>&1); then
     printf '%s\n' "$windows"
     return 0
   fi
@@ -301,6 +306,138 @@ fm_backend_tmux_foreground_argv0s() {  # <target>
       done
 }
 
+# fm_backend_tmux_target_present: cheap, READ-ONLY proof that <target> names an
+# endpoint tmux is really holding, never one tmux silently substituted. Never
+# starts a server or session. tmux has three silent fallbacks that make the
+# addressed call alone untrustworthy, so each shape is proved against tmux's own
+# answer instead:
+#   - an unknown WINDOW NAME resolves to the addressed session's active window
+#     and still exits 0, so a target is proved only from that session's exact
+#     inventory, read in the field the address names - window_name for a
+#     name, window_index for "<session>:<digits>", window_id for
+#     "<session>:@<id>". A trailing ".N" is never read as a pane qualifier, so
+#     tmux's own resolution can never let another window stand in for an absent
+#     recorded one. A leading "=" exact-match modifier on the window field is
+#     stripped before comparison because tmux does not treat it as part of the
+#     name;
+#   - an unknown SESSION NAME resolves to a live session by unique prefix, then
+#     by glob, so a vanished session can still answer an inventory from a
+#     prefix sibling and report an absent endpoint present. The session is
+#     therefore addressed with a leading "=" too, which forces tmux's exact
+#     session match;
+#   - a missing pane id answers an empty pane_id and also exits 0, so a bare
+#     pane address is proved by the id coming back nonempty.
+# A session that answers an inventory omitting the addressed window is
+# authoritative absence, and any read failure - including the inventory's own
+# nonzero verdict - is absence here too, because this is a presence probe;
+# callers that must separate absence from unreadability ask the recovery-grade
+# classifier instead.
+# Shared by bin/fm-backend.sh's fm_backend_target_exists and bin/fm-crew-state.sh's
+# pane_readable, so the two cheap liveness probes cannot drift apart.
+fm_backend_tmux_target_present() {  # <target>
+  local target=$1 session window inventory resolved
+  case "$target" in
+    # A two-colon or empty-part target names no single window.
+    *:*:*|'':*|*:'') return 1 ;;
+    *:*) ;;
+    *)
+      # A bare address with no window spec: the away-mode daemon's $TMUX_PANE
+      # "%N", or a session name. tmux answers a missing pane id with an empty
+      # pane_id, so a nonempty resolved pane is the proof.
+      resolved=$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null) || return 1
+      [ -n "$resolved" ]
+      return
+      ;;
+  esac
+  session=${target%%:*}
+  window=${target#*:}
+  window=${window#=}
+  # tmux would otherwise resolve this session by exact name, then by unique
+  # prefix, then by glob, so a live prefix sibling could stand in for the absent
+  # recorded session. A leading "=" forces the exact match this proof requires.
+  session="=${session#=}"
+  case "$window" in
+    @*) inventory=$(fm_backend_tmux_window_inventory "$session" '#{window_id}') || return 1 ;;
+    *[!0-9]*) inventory=$(fm_backend_tmux_window_inventory "$session" '#{window_name}') || return 1 ;;
+    *) inventory=$(fm_backend_tmux_window_inventory "$session" '#{window_index}') || return 1 ;;
+  esac
+  printf '%s\n' "$inventory" | grep -Fqx -- "$window"
+}
+
+# fm_backend_tmux_explicit_target_present: the explicit-target sibling of
+# fm_backend_tmux_target_present, for a target the OPERATOR typed rather than a
+# window name firstmate recorded. tmux's pane resolution reads a target as
+# `<session>:<window>.<pane>`, splitting at the FIRST dot; when the window part
+# before that dot is absent it falls back to the whole string as the window
+# name. So `<sess>:fm-held.0` can name a window literally called `fm-held.0` -
+# the very string the recorded-window arm treats as one literal name - while
+# `<sess>:mywin.0` asks for pane 0 of window `mywin`. The strict literal rule
+# therefore stays on the recorded-window path (fm_backend_tmux_target_present),
+# and only callers that are given a target by an operator - bin/fm-send.sh's
+# explicit target and the away-mode daemon's supervisor target - use this one.
+# tmux itself resolves the raw target and that answer must name exactly the
+# endpoint it resolved:
+#   - `tmux list-panes -t <target>` is the deliverability proof. It hard-fails
+#     for a window, pane, or session the raw target cannot route, where
+#     `display-message` alone silently answers from the window's active pane
+#     (and, for a pane id that lives in another window, even names that pane);
+#   - the resolved session must be the exact session asked for, so tmux's
+#     unique-prefix session resolution cannot stand a sibling in;
+#   - the requested window field must be one of the exact identities tmux
+#     resolved - its window name, index, or id - optionally joined with the
+#     resolved pane id or index. That accepts a window literally named
+#     `fm-held.0` while still rejecting a request that only prefix-matched a
+#     different window, and it never re-splits the string itself;
+#   - a bare address keeps the shared rule for "%N" pane ids and "@N" window
+#     ids, and requires a bare session name to match exactly.
+# Read-only and cheap: it never starts a server or session. Any read failure is
+# absence, because this is a presence probe.
+fm_backend_tmux_explicit_target_present() {  # <target>
+  local target=$1 session field rw rwi rwid rp rpi resolved
+  case "$target" in
+    # A two-colon or empty-part target names no single window.
+    *:*:*|'':*|*:'') return 1 ;;
+  esac
+  case "$target" in
+    *:*)
+      session=${target%%:*}
+      field=${target#*:}
+      field=${field#=}
+      ;;
+    '%'[0-9]*)
+      resolved=$(tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null) || return 1
+      [ "$target" = "$resolved" ]
+      return
+      ;;
+    @*)
+      resolved=$(tmux display-message -p -t "$target" '#{window_id}' 2>/dev/null) || return 1
+      [ "$target" = "$resolved" ]
+      return
+      ;;
+    *)
+      resolved=$(tmux display-message -p -t "$target" '#{session_name}' 2>/dev/null) || return 1
+      [ "${target#=}" = "$resolved" ]
+      return
+      ;;
+  esac
+  # tmux's own pane resolution is the deliverability proof: it hard-fails for
+  # any target it cannot route, never answering from another pane the way
+  # display-message alone does.
+  LC_ALL=C tmux list-panes -t "$target" -F '#{pane_id}' >/dev/null 2>&1 || return 1
+  resolved=$(LC_ALL=C tmux display-message -p -t "$target" '#{session_name}' 2>/dev/null) || return 1
+  [ "${session#=}" = "$resolved" ] || return 1
+  rw=$(LC_ALL=C tmux display-message -p -t "$target" '#{window_name}' 2>/dev/null) || return 1
+  rwi=$(LC_ALL=C tmux display-message -p -t "$target" '#{window_index}' 2>/dev/null) || return 1
+  rwid=$(LC_ALL=C tmux display-message -p -t "$target" '#{window_id}' 2>/dev/null) || return 1
+  rp=$(LC_ALL=C tmux display-message -p -t "$target" '#{pane_id}' 2>/dev/null) || return 1
+  rpi=$(LC_ALL=C tmux display-message -p -t "$target" '#{pane_index}' 2>/dev/null) || return 1
+  case "$field" in
+    "$rw"|"$rwi"|"$rwid") return 0 ;;
+    "$rw.$rp"|"$rw.$rpi"|"$rwi.$rp"|"$rwi.$rpi"|"$rwid.$rp"|"$rwid.$rpi") return 0 ;;
+  esac
+  return 1
+}
+
 # fm_backend_tmux_agent_state: recovery-grade harness-agent state for one
 # recorded target. See bin/fm-backend.sh's fm_backend_agent_state for the
 # shared state vocabulary and docs/tmux-backend.md "Agent liveness probe" for
@@ -329,6 +466,9 @@ fm_backend_tmux_agent_state() {  # <target>
   esac
   session=${target%%:*}
   window=${target#*:}
+  # Same exact-session rule as fm_backend_tmux_target_present, so the
+  # recovery-grade read cannot accept a prefix sibling as the recorded session.
+  session="=${session#=}"
   windows=$(fm_backend_tmux_window_inventory "$session")
   inventory_status=$?
   if [ "$inventory_status" -ne 0 ]; then

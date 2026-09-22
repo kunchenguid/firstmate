@@ -44,10 +44,22 @@ Verify setup by spawning a small task and confirming its `fm-<id>` window appear
 
 ## Current behavior and safety
 
+### Endpoint presence
+
+The cheap endpoint-presence probe proves an endpoint from tmux's own answer, and it has two arms because a pane-qualified target and a dotted recorded window name are the same string.
+`tmux display-message -t <target>` alone is not a presence proof: tmux resolves an unknown window name to the addressed session's active window and still exits 0, so a vanished worker window used to read as a live endpoint.
+The recorded-window arm (`fm_backend_tmux_target_present`) is what every lane and fleet liveness read uses.
+It proves a `<session>:<window>` endpoint only from the session's window inventory, read in the field the address names: the exact recorded window name, the window index for `<session>:<digits>`, or the window id for `<session>:@<id>`.
+The session is addressed with tmux's leading `=` exact-match modifier, so a vanished session cannot answer an inventory from a live session whose name starts with it through tmux's unique-prefix or glob resolution.
+A pane-qualified form is not accepted here, so a window tmux silently resolved to another one - its active window, or a prefix window when a recorded task id's window name ends in `.N` - never reads as present.
+A bare `%N` pane address is proved by the pane id coming back nonempty, because tmux answers a missing pane id with an empty one.
+The explicit-target arm (`fm_backend_tmux_explicit_target_present`, reached through `fm_backend_explicit_target_exists`) serves the targets an operator supplies: `bin/fm-send.sh`'s explicit target and the away-mode daemon's supervisor target.
+It resolves the raw target through `tmux list-panes`, which hard-fails for a window, pane, or session tmux cannot route, and then requires the resolved identity to name exactly what was asked for: the exact session, and the requested window field as one of the identities tmux itself resolved - the window name, index, or id, optionally joined with the resolved pane id or index.
+That proof keeps a request that only prefix-matched a neighbor absent while accepting a window literally named with a dot when tmux actually routes it, and it never re-splits the target string.
+
 ### Agent liveness probe
 
-A target-existence check proves only that the pane exists.
-The deeper tmux agent-liveness probe first verifies exact window membership, then reads process names to distinguish a running harness from a bare idle shell.
+The deeper tmux agent-liveness probe addresses the session with the same `=` exact-match rule, verifies exact window membership, then reads process names to distinguish a running harness from a bare idle shell.
 It classifies recognized Claude, Codex, OpenCode, Pi, pi-signed, Grok, Kimi, Cursor, Muse, Rovo, and AGY process identities as `alive`, common shells as `dead`, an authoritatively absent window as `missing`, unreadable state as `unreadable`, and every other process as `ambiguous`.
 The process-name vocabulary behind those verdicts is owned by `bin/fm-agent-process-lib.sh` and shared with the Herdr adapter, which proves a registered agent against the same names ([herdr-backend.md](herdr-backend.md) "Restart and liveness behavior").
 Only `dead` and `missing` authorize recovery because a false dead result could launch a duplicate agent.

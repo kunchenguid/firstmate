@@ -363,16 +363,52 @@ test_dead_endpoint_overrides() {
   gen=$("$EV" arm "$state" t1)
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
   fm_backend_target_exists() { return 1; }
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
+  fm_backend_agent_state() { printf 'missing'; }
   out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
   [ "$out" = "dead endpoint-gone" ] || fail "gone endpoint must classify dead, got '$out'"
+  # A bare presence-probe failure is not absence: only the recovery-grade
+  # classifier's positive missing/dead verdict overrides a busy record.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
+  fm_backend_agent_state() { printf 'unreadable'; }
+  out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "an unreadable endpoint must keep its record, got '$out'"
   # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
   fm_backend_target_exists() { return 0; }
   out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
   [ "$out" = "busy fm-spawn" ] || fail "live endpoint must fall through to the record, got '$out'"
   out=$(fm_busy_classify_live tmux '' claude t1 "$state")
   [ "$out" = "unknown no-target" ] || fail "empty target must classify unknown, got '$out'"
-  unset -f fm_backend_target_exists
+  unset -f fm_backend_target_exists fm_backend_agent_state
   pass "endpoint death is the only process-level override and yields dead, never busy"
+}
+
+# A backend with no recovery-grade classifier has only the shared presence probe
+# to go on, and the lane state read (bin/fm-crew-state.sh's no-run fallback)
+# already reports a failed probe as "backend target gone" for the same endpoint.
+# The watcher's busy path must reach the same conclusion, or a removed
+# orca/cmux/zellij endpoint keeps its durable busy record forever and the loss
+# stays hidden - exactly the failure the 2026-09-14 incident exposed.
+test_no_classifier_backend_loses_busy_on_removed_endpoint() {
+  local state gen out
+  state=$(new_state_dir no-classifier)
+  gen=$("$EV" arm "$state" t1)
+  "$EV" apply "$state" t1 busy --gen "$gen" --source fm-spawn --event spawn
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
+  fm_backend_target_exists() { return 1; }
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
+  fm_backend_agent_state() { printf 'unverified'; }
+  out=$(fm_busy_classify_live zellij pane-1 claude t1 "$state")
+  [ "$out" = "dead endpoint-gone" ] \
+    || fail "a removed endpoint on a backend with no classifier must not keep its busy record, got '$out'"
+  # Uncertainty still keeps the record: only a positive verdict may end it.
+  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
+  fm_backend_agent_state() { printf 'unreadable'; }
+  out=$(fm_busy_classify_live zellij pane-1 claude t1 "$state")
+  [ "$out" = "busy fm-spawn" ] \
+    || fail "an unreadable no-classifier endpoint must keep its record, got '$out'"
+  unset -f fm_backend_target_exists fm_backend_agent_state
+  pass "a removed endpoint on a backend with no recovery classifier reads dead, not forever busy"
 }
 
 test_herdr_native_busy_only() {
@@ -479,6 +515,7 @@ test_codex_unverified_gate
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
 test_dead_endpoint_overrides
+test_no_classifier_backend_loses_busy_on_removed_endpoint
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact
 test_boolean_view_never_promotes_unknown
