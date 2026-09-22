@@ -483,7 +483,7 @@ Per rule, `when` and `use` are required; the top-level `rules` array itself may 
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
-An optional profile `profile` field names a codex provider profile (the `codex --profile <name>` file, e.g. DeepSeek's `deepseek.config.toml`); it is valid only on a `codex` profile and tells firstmate which `--codex-profile` to pass `fm-spawn.sh`, which resolves the field itself and reads no JSON.
+An optional profile `profile` field names a codex provider profile (the `codex --profile <name>` file, e.g. DeepSeek's `deepseek.config.toml`); it is valid only on a `codex` profile and tells firstmate which `--codex-profile` to pass; firstmate resolves the field at intake and `fm-spawn.sh` reads no JSON.
 Rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
@@ -538,6 +538,7 @@ Any applicable `exhausted_now` row or known zero bound makes that candidate inel
 Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
 On the opted-in path, duplicate concrete profiles with the same harness, model, effort, and codex profile inside one rule or the default array are configuration errors rather than ties.
 A `clear` line renders a codex profile's `profile` field as `--codex-profile`, and a `profile` field on any other harness is the same configuration error bootstrap reports.
+A codex profile whose `profile` field has no explicit `provider` is never ranked on codex's own quota rows; it stays eligible but unranked with disclosed uncertainty, so declare `provider` to rank it.
 The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor), `escalate` (an approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
 Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
 Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.

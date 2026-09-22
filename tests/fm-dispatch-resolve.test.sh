@@ -589,13 +589,13 @@ pass "native Codex binds to codex-home before default, independently of Pi accou
 
 # A codex dispatch profile's provider profile field is rendered on the emitted
 # line ahead of --model, exactly where fm-spawn threads codex --profile.
-printf '%s\n' '{"rules":[{"when":"deepseek work","use":{"harness":"codex","model":"gpt-5.6-sol","profile":"deepseek"}}]}' > "$RULES"
+printf '%s\n' '{"rules":[{"when":"deepseek work","use":{"harness":"codex","model":"gpt-5.6-sol","profile":"deepseek","provider":"codex"}}]}' > "$RULES"
 reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_NATIVE" run code out err "$BRIEF"
 expect_code 0 "$code" "a codex profile with a provider profile exits 0"
 assert_contains "$out" '  status: clear' "a codex profile with a provider profile resolves"
 assert_contains "$out" "  profile: --harness 'codex' --codex-profile 'deepseek' --model 'gpt-5.6-sol'" "the provider profile is rendered ahead of --model"
-printf '%s\n' '{"rules":[{"when":"deepseek work","use":{"harness":"codex","profile":"deepseek"}}]}' > "$RULES"
+printf '%s\n' '{"rules":[{"when":"deepseek work","use":{"harness":"codex","profile":"deepseek","provider":"codex"}}]}' > "$RULES"
 reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_NATIVE" run code out err "$BRIEF"
 assert_contains "$out" "  profile: --harness 'codex' --codex-profile 'deepseek'" "a provider profile may carry the model itself"
@@ -606,6 +606,29 @@ TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_NATIVE" run code out err "$BRI
 expect_code 0 "$code" "two codex profiles differing only by provider profile are accepted"
 assert_not_contains "$err" 'malformed rules file' "a provider profile distinguishes two codex profiles"
 pass "a codex dispatch profile's provider profile renders as --codex-profile and distinguishes profiles"
+
+# A provider profile selects a provider codex itself does not name, so with no
+# explicit provider the candidate's quota is unknown: it stays eligible but
+# unranked, and an exhausted codex row never disqualifies it. An explicit
+# provider is still ranked on that provider's rows.
+jq '.providers |= map(if .accountKey == "codex-home" then
+    .quotaSemantics.effectiveAvailability |= map(.effectivePercentRemaining = 0 | .runway.status = "exhausted_now")
+    else . end)' "$SCHEMA6_NATIVE" > "$TMP_ROOT/schema6-codex-exhausted.json"
+printf '%s\n' '{"rules":[{"when":"deepseek work","use":{"harness":"codex","model":"gpt-5.6-sol","profile":"deepseek"}}]}' > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-codex-exhausted.json" run code out err "$BRIEF"
+expect_code 0 "$code" "a provider profile with no explicit provider exits 0"
+assert_contains "$out" 'candidate: codex:gpt-5.6-sol  -> eligible, unranked: codex profile deepseek declares no provider: quota unknown: disclosed uncertainty' \
+  "a provider profile with no provider is disclosed as unknown, never scored on codex rows"
+assert_not_contains "$out" 'not eligible' "an exhausted codex row must not disqualify a provider profile with no provider"
+assert_not_contains "$out" 'provider=codex' "a provider profile with no provider must not inherit the codex family"
+assert_contains "$out" '  status: escalate' "an unranked-only candidate set escalates rather than choosing on the wrong quota"
+printf '%s\n' '{"rules":[{"when":"deepseek work","use":{"harness":"codex","model":"gpt-5.6-sol","profile":"deepseek","provider":"codex"}}]}' > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-codex-exhausted.json" run code out err "$BRIEF"
+assert_contains "$out" 'not eligible: runway exhausted_now at all_models' "an explicit provider is still ranked on that provider's rows"
+pass "a codex provider profile without an explicit provider is eligible but unranked, never scored on codex quota"
+cp "$LANE_RULES" "$RULES"
 
 jq '.schemaVersion = 5 | .providers |= map(select(.accountKey != "openai-codex")) | del(.providers[].accountKey)' "$SCHEMA6" > "$SCHEMA5_PAIR"
 reset_log

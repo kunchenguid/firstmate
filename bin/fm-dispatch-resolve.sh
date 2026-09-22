@@ -186,8 +186,8 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
 
 missing_provider=$(jq -r '
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
-  ((.rules // [])[] | profiles(.use)[] | select(has("provider") | not) | "use\t\(.harness)"),
-  (profiles(.default // null)[] | select(has("provider") | not) | "default\t\(.harness)")
+  ((.rules // [])[] | profiles(.use)[] | select((has("provider") or has("profile")) | not) | "use\t\(.harness)"),
+  (profiles(.default // null)[] | select((has("provider") or has("profile")) | not) | "default\t\(.harness)")
 ' "$RULES" | while IFS=$'\t' read -r location harness; do
   if ! fm_quota_single_provider_for_harness "$harness" >/dev/null; then
     printf '%s\t%s\n' "$location" "$harness"
@@ -302,7 +302,9 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), spendPriority: (.selection.spendPriority // null)});
   def evaluate($c):
     (provider_of($c)) as $p | (lane_of($c)) as $lane |
-    if $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
+    if ($c | has("profile")) and (($c | has("provider")) | not) then
+      {profile: $c, eligible: true, unranked: true, unknown: true, reason: "codex profile \($c.profile) declares no provider: quota unknown"}
+    elif $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
     elif prov($p; $lane) == null then
       {profile: $c, provider: $p, eligible: true, unranked: true,
        reason: (if any($q.providers[]; .provider == $p)
@@ -386,7 +388,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       if $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $sel.note, candidates: $cands}
       else $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $best}
         + (if ($unranked | length) > 0 then
-             {unranked_note: "\($unranked | length) eligible candidate(s) unranked (\([$unranked[].provider] | unique | join(", ")))"}
+             {unranked_note: "\($unranked | length) eligible candidate(s) unranked (\([$unranked[] | (.provider // "unknown")] | unique | join(", ")))"}
            else {} end)
       end
     end

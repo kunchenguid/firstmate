@@ -2224,7 +2224,11 @@ if [ -n "$CODEX_PROFILE" ]; then
     exit 1
   fi
   if [ "$RAW_LAUNCH" = 1 ]; then
-    echo "error: --codex-profile requires the canonical --harness codex launch; a raw launch command owns its own flags" >&2
+    if [ "$CODEX_PROFILE_SET" -eq 1 ]; then
+      echo "error: --codex-profile requires the canonical --harness codex launch; a raw launch command owns its own flags" >&2
+    else
+      echo "error: the recorded codex_profile=$CODEX_PROFILE cannot be carried onto a raw launch command, which owns its own flags; restate the profile in the command or relaunch with --harness codex" >&2
+    fi
     exit 1
   fi
 fi
