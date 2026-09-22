@@ -366,7 +366,7 @@ The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For agy crews, `fm-spawn.sh` runs `fm-agy-turnend-hook.sh install`, which writes the hook script `~/.gemini/antigravity-cli/fm-turn-end.sh` and adds exactly one firstmate-owned `firstmate-turn-end` key to the global `~/.gemini/config/hooks.json`, a file shared with the captain's own agy sessions and the Antigravity IDE, preserving every other key.
 Unlike grok and Kimi no pointer is written into the worktree: the per-task parameters live in a private registry token under `~/.gemini/antigravity-cli/fm-turn-end.d/` whose name the launch exports to the agy process, so the installed hook stays inert for every session that does not carry one.
-A raw launch command skips both the install and the token, and teardown removes only the task's own token, deliberately leaving the shared hook installed because another live agy task may still depend on it; a recorded `deny` is the one thing that takes the shared hook back out.
+A raw launch command skips both the install and the token, and teardown removes only the task's own token, deliberately leaving the shared hook installed because another live agy task may still depend on it; a recorded `deny` is the one thing that takes the shared hook and its files back out.
 The agy installer requires `node` and refuses before writing when that `hooks.json` is a symlink, is not owned by this user, or does not hold a JSON object, which is the shape a dotfiles-managed store has; a refusal is not fatal, and the spawn instead warns on its own path and runs that task with no semantic busy state and no turn-end signal, on the retained rendered-tail idle read alone.
 Before it calls the installer at all, `fm-spawn.sh` probes `agy --version` and requires at least the `1.2.6` that first carried the hook surface: an older, unreachable, or unrecognisable version gives the same degraded shape, because a build that never reads `hooks.json` would leave a seeded busy record standing until the watcher's turn bound made the pane look wedged.
 Because that store is the captain's own per-user file, the install also refuses until his one-time consent is recorded in `config/agy-turnend-hook`, and that refusal degrades the spawn the same way; see [agy turn-end hook consent](#agy-turn-end-hook-consent-configagy-turnend-hook) below.
@@ -386,14 +386,17 @@ The [Claude adapter reference](../.agents/skills/harness-adapters/references/har
 
 ## agy turn-end hook consent (config/agy-turnend-hook)
 
-The optional local, gitignored `config/agy-turnend-hook` records the captain's one-time answer to a single question: may Firstmate add its own `firstmate-turn-end` key to `~/.gemini/config/hooks.json`?
+The optional local, gitignored `config/agy-turnend-hook` records the captain's one-time answer to a single question: may Firstmate add its own `firstmate-turn-end` key to `~/.gemini/config/hooks.json` and put its own small turn-end script and token folder beside it under `~/.gemini/antigravity-cli/`?
 That file is the captain's own per-user agy configuration, shared with his own agy sessions and the Antigravity IDE, so `bin/fm-agy-turnend-hook.sh install` will not touch it before he has answered.
 The token is the file's whitespace-trimmed content.
 `allow` permits the write, and every later install in that home proceeds without asking again.
 `deny` refuses it, and is equally durable: a recorded decline is never raised again either, and it also retracts.
-The next install in a home that reads `deny` removes the `firstmate-turn-end` key an earlier `allow` had written, leaving every other key untouched, and then refuses as usual.
-Because a captain who records `deny` usually stops spawning agy crewmates altogether, that install-time retraction could otherwise never fire, so session-start bootstrap runs the same removal whenever this home reads `deny` and the key is still in the store, and reports the one line it takes to do so.
-`bin/fm-agy-turnend-hook.sh remove` is the immediate manual withdrawal for anyone who does not want to wait for either: it is ungated, needs no recorded consent, removes only firstmate's own key, and exits cleanly when no key or no store is present.
+The next install in a home that reads `deny` takes the whole install back out, and then refuses as usual.
+Because a captain who records `deny` usually stops spawning agy crewmates altogether, that install-time retraction could otherwise never fire, so session-start bootstrap runs the same removal whenever this home reads `deny` and the key or its files are still present, and reports the one line it takes to do so.
+That sweep is skipped in a local secondmate home, which holds only an inherited copy of the answer while the primary on the same machine sweeps the same shared store and owns it; a remote secondmate has its own agy tree and keeps sweeping for itself.
+`bin/fm-agy-turnend-hook.sh remove` is the immediate manual withdrawal for anyone who does not want to wait for either: it is ungated, needs no recorded consent, and exits cleanly when no key or no store is present.
+Like the Kimi installer's `remove` above, it excises only Firstmate's own `firstmate-turn-end` key and removes Firstmate's hook files, never touching another key.
+The token folder is deleted only when it is empty, so a registry still holding a live task's token survives the withdrawal and the command says so on stderr rather than reporting a clean sweep.
 A consent that could not be withdrawn would leave the captain's own agy sessions and the Antigravity IDE running two synchronous subprocesses per turn for good.
 Because the key is shared, a `deny` recorded while other agy crewmates are still running takes the hook out from under them too: each one keeps its seeded busy record with nothing left to close it, and reads busy until the watcher's `BUSY_TURN_MAX_SECS` bound ages it out.
 Prefer retracting between tasks when that matters.

@@ -3,8 +3,11 @@
 #
 # This command is the sole owner of the edit to ${HOME}/.gemini/config/hooks.json
 # and of the hook script it installs beside agy's private turn-end registry.
-# install adds or replaces exactly one top-level "firstmate-turn-end" key and
-# preserves every other key; remove deletes only that key. A symlinked store, a
+# install adds or replaces exactly one top-level "firstmate-turn-end" key,
+# preserves every other key, and writes the hook script and its token registry.
+# remove is the exact withdrawal of that install: it excises only firstmate's
+# own key and deletes firstmate's own hook files, leaving a token registry that
+# still holds a live task's token in place and saying so. A symlinked store, a
 # store this uid does not own, and a non-object root are each refused without a
 # write, and a refusal raised after that point removes whatever the run created,
 # so a refused install leaves the home exactly as it found it.
@@ -75,7 +78,7 @@ CONSENT_FILE="$CONFIG/agy-turnend-hook"
 case "${1:-}" in
 install | remove) ACTION=$1 ;;
 -h | --help)
-  sed -n '2,60{s/^# \{0,1\}//;p;}' "$0"
+  sed -n '2,63{s/^# \{0,1\}//;p;}' "$0"
   exit 0
   ;;
 *)
@@ -106,6 +109,25 @@ refuse() {
   rollback_install
   printf 'fm-agy-turnend-hook: refused: %s\n' "$1" >&2
   exit 1
+}
+
+# The withdrawal half of an install: firstmate's own hook script, then the two
+# directories it created, in that order. Never recursive and never forced, so a
+# registry still holding a live task's token and a directory holding anything
+# firstmate did not write both survive the rmdir and are reported rather than
+# taken. rollback_install stays separate because it answers a different
+# question: undo only what THIS run created.
+remove_hook_files() {
+  rm -f "$HOOK_SCRIPT"
+  if ! rmdir "$REGISTRY" 2>/dev/null && [ -d "$REGISTRY" ]; then
+    printf "fm-agy-turnend-hook: '%s' still holds live per-task tokens, so it was left in place.\n" \
+      "$REGISTRY" >&2
+  fi
+  if ! rmdir "$CLI_DIR" 2>/dev/null && [ -d "$CLI_DIR" ]; then
+    printf "fm-agy-turnend-hook: '%s' still holds files firstmate did not write, so it was left in place.\n" \
+      "$CLI_DIR" >&2
+  fi
+  return 0
 }
 
 # The one success exit. A retraction run reached it by completing the remove a
@@ -181,7 +203,7 @@ if [ "$ACTION" = install ]; then
       ;;
     esac
   else
-    refuse "the captain has not been asked about the global agy turn-end hook. ASK THE CAPTAIN ONCE whether firstmate may add its own 'firstmate-turn-end' key to '$STORE', a file agy and the Antigravity IDE share with the captain's own sessions, then record the answer by writing allow or deny to $(consent_recording_location)."
+    refuse "the captain has not been asked about the global agy turn-end hook. ASK THE CAPTAIN ONCE whether firstmate may add its own 'firstmate-turn-end' key to '$STORE', a file agy and the Antigravity IDE share with the captain's own sessions, and put its own small turn-end script '$HOOK_SCRIPT' and token folder '$REGISTRY' beside it, then record the answer by writing allow or deny to $(consent_recording_location)."
   fi
 fi
 
@@ -194,6 +216,7 @@ if [ -e "$STORE" ]; then
   [ -w "$STORE" ] || refuse "'$STORE' is not writable."
 fi
 if [ "$ACTION" = remove ] && [ ! -e "$STORE" ]; then
+  remove_hook_files
   finish
 fi
 if [ -f "$STORE" ] && ! node - "$STORE" <<'NODE'; then
@@ -379,6 +402,10 @@ console.error(`error: ${store} did not retain the firstmate turn-end hook after 
 process.exit(1);
 NODE
   refuse "agy's hooks.json could not be updated safely."
+fi
+
+if [ "$ACTION" = remove ]; then
+  remove_hook_files
 fi
 
 finish

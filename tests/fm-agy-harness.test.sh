@@ -1021,6 +1021,7 @@ if (!foreign || foreign.Stop[0].command !== "echo hi") bad("the foreign hook key
 const own = root["firstmate-turn-end"];
 if (expect === "removed") {
   if (Object.prototype.hasOwnProperty.call(root, "firstmate-turn-end")) bad("the firstmate key is still present");
+  if (fs.existsSync(hook)) bad("the firstmate hook script survived the withdrawal");
   process.exit(0);
 }
 if (!own) bad("the firstmate key is absent");
@@ -1761,6 +1762,107 @@ test_agy_bootstrap_retracts_a_recorded_deny() {
   pass "fm-bootstrap.sh: a recorded deny retracts the global agy key at session start"
 }
 
+# The sweep runs against one shared ~/.gemini/config/hooks.json per machine, so
+# who owns the answer decides who may act on it. A LOCAL secondmate holds only
+# an inherited copy: acting on one convergence has not refreshed yet would take
+# the key out from under the primary's own live agy crewmates, so it stays
+# passive and the primary's identical sweep does the work. A REMOTE secondmate
+# is its own machine with its own agy tree, so it must still retract.
+seed_secondmate_home() {  # <home> <id> <route> <parent-home-or-host>
+  mkdir -p "$1/config" "$1/state" "$1/data" || return 1
+  printf '%s\n' "$2" >"$1/.fm-secondmate-home" || return 1
+  case "$3" in
+  local) printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$4" >"$1/.fm-secondmate-parent" ;;
+  remote) printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=%s\n' "$4" >"$1/.fm-secondmate-parent" ;;
+  esac
+}
+
+test_agy_bootstrap_retraction_is_owned_by_the_home_that_owns_the_answer() {
+  local dir home agyhome store fakebin out
+
+  dir="$TMP_ROOT/consent-bootstrap-route"
+  rm -rf "$dir"
+  agyhome="$dir/agyhome"
+  fakebin=$(fm_fakebin "$dir/fake")
+  mkdir -p "$agyhome/.gemini/config"
+  store="$agyhome/.gemini/config/hooks.json"
+
+  # A local secondmate holding a deny must leave the shared store alone.
+  home="$dir/local-mate"
+  seed_secondmate_home "$home" alpha local "$dir/primary" || fail "could not seed the local secondmate home"
+  printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' >"$store"
+  printf 'allow\n' >"$home/config/agy-turnend-hook"
+  HOME="$agyhome" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install >/dev/null 2>&1 \
+    || fail "the consented install failed before the local secondmate case could run"
+  printf 'deny\n' >"$home/config/agy-turnend-hook"
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
+  assert_not_contains "$out" "AGY_TURNEND_HOOK" "a local secondmate reported a withdrawal its primary owns"
+  assert_agy_hooks_store "$store" installed \
+    "a local secondmate acting on an inherited deny stripped the hook out from under its primary"
+
+  # A remote secondmate owns its own machine's store and must still retract.
+  home="$dir/remote-mate"
+  seed_secondmate_home "$home" bravo remote lab || fail "could not seed the remote secondmate home"
+  printf 'allow\n' >"$home/config/agy-turnend-hook"
+  HOME="$agyhome" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install >/dev/null 2>&1 \
+    || fail "the consented install failed before the remote secondmate case could run"
+  printf 'deny\n' >"$home/config/agy-turnend-hook"
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
+  assert_contains "$out" "AGY_TURNEND_HOOK" "a remote secondmate withdrew the hook without saying so"
+  assert_agy_hooks_store "$store" removed \
+    "a remote secondmate left a withdrawn hook installed in its own agy store"
+  pass "fm-bootstrap.sh: only the home that owns the answer retracts the shared agy hook"
+}
+
+# The withdrawal is the exact inverse of the install, so it takes firstmate's
+# own hook script and token folder as well as the key. It is never recursive:
+# a registry still holding a live task's token, or a directory holding anything
+# firstmate did not write, survives and is reported rather than taken.
+test_agy_withdrawal_takes_back_the_files_but_never_a_live_token() {
+  local home store registry out rc
+
+  home="$TMP_ROOT/turnend-withdraw"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  store="$home/.gemini/config/hooks.json"
+  registry="$home/.gemini/antigravity-cli/fm-turn-end.d"
+  printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' >"$store"
+  agy_turnend_install "$home" >/dev/null || fail "the installer refused a clean store"
+  [ -x "$home/.gemini/antigravity-cli/fm-turn-end.sh" ] || fail "the installer wrote no hook script"
+  [ -d "$registry" ] || fail "the installer created no token registry"
+
+  # A live task's token is still in the registry: the folder must survive.
+  printf 'turnend=/tmp/x\n' >"$registry/fm.aaaaaaaaaaaa"
+  rc=0
+  out=$(HOME="$home" "$ROOT/bin/fm-agy-turnend-hook.sh" remove 2>&1) || rc=$?
+  expect_code 0 "$rc" "remove failed while a live token was present"
+  assert_agy_hooks_store "$store" removed "remove left the key or the hook script behind"
+  [ -f "$registry/fm.aaaaaaaaaaaa" ] || fail "the withdrawal deleted a live task's turn-end token"
+  assert_contains "$out" "left in place" "the withdrawal reported a clean sweep while a token survived"
+
+  # With the last token gone the folder goes too, and so does its parent.
+  rm -f "$registry/fm.aaaaaaaaaaaa"
+  rc=0
+  out=$(HOME="$home" "$ROOT/bin/fm-agy-turnend-hook.sh" remove 2>&1) || rc=$?
+  expect_code 0 "$rc" "a second remove failed on an already-withdrawn install"
+  [ -e "$registry" ] && fail "an empty token registry survived the withdrawal" || true
+  [ -e "$home/.gemini/antigravity-cli" ] \
+    && fail "the emptied antigravity-cli directory survived the withdrawal" || true
+  [ -f "$store" ] || fail "the withdrawal deleted the captain's hooks.json"
+
+  # An absent store must still reach the file cleanup rather than exit early.
+  agy_turnend_install "$home" >/dev/null || fail "the reinstall before the absent-store case failed"
+  rm -f "$store"
+  rc=0
+  HOME="$home" "$ROOT/bin/fm-agy-turnend-hook.sh" remove >/dev/null 2>&1 || rc=$?
+  expect_code 0 "$rc" "remove failed when the captain's store was absent"
+  [ -e "$home/.gemini/antigravity-cli/fm-turn-end.sh" ] \
+    && fail "an absent store left firstmate's hook script in the captain's agy tree" || true
+  pass "fm-agy-turnend-hook.sh: withdrawal takes back its own files and never a live token"
+}
+
 test_agy_ancestry_detects_the_native_command_name
 test_agy_ancestry_rejects_unrelated_mentions
 test_agy_claims_no_inherited_launcher_marker
@@ -1803,6 +1905,8 @@ test_agy_spawn_retracts_the_hook_when_consent_is_withdrawn
 test_agy_consent_is_inherited_locally_and_never_remotely
 test_agy_unasked_secondmate_is_sent_to_the_primary_home
 test_agy_bootstrap_retracts_a_recorded_deny
+test_agy_bootstrap_retraction_is_owned_by_the_home_that_owns_the_answer
+test_agy_withdrawal_takes_back_the_files_but_never_a_live_token
 test_agy_turnend_installer_owns_only_its_own_key
 test_agy_turnend_installer_refuses_a_store_it_does_not_own
 test_agy_turnend_installer_leaves_nothing_behind_when_the_store_edit_fails

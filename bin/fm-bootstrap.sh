@@ -10,6 +10,8 @@
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
+#                 "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny - withdrew firstmate's agy turn-end hook and its files"
+#                 or "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny but firstmate's agy turn-end hook could not be withdrawn - run bin/fm-agy-turnend-hook.sh remove",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
@@ -189,6 +191,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
@@ -1388,20 +1392,34 @@ startup_memory_budget_setup() {
 # gated so it costs one small read when there is nothing to do. Every store
 # refusal stays the installer's own: the key name is literal JSON text, so the
 # grep can only over-trigger into a no-op remove, never miss a key that is
-# there. Local homes act on an inherited deny too, because one machine has one
-# hooks.json and the removal is idempotent.
+# there.
+# A LOCAL secondmate is deliberately passive here, the startup_memory_budget_setup
+# rule: it holds only an inherited copy of the answer, and the primary on that
+# same machine sweeps the same shared hooks.json and owns it. Acting on a copy
+# that convergence has not refreshed yet would strip the key out from under the
+# primary's own live agy crewmates. A remote secondmate is its own machine with
+# its own agy tree, so it keeps retracting, and so does a home with no marker or
+# an unreadable one.
 agy_turnend_consent_retract() {
-  local consent="$CONFIG/agy-turnend-hook" store
+  local consent="$CONFIG/agy-turnend-hook" store script installed=0
   [ -n "${HOME:-}" ] || return 0
+  if fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" \
+    && [ "$FM_SECONDMATE_PARENT_ROUTE" = local ]; then
+    return 0
+  fi
   store="$HOME/.gemini/config/hooks.json"
+  script="$HOME/.gemini/antigravity-cli/fm-turn-end.sh"
   [ -f "$consent" ] && [ ! -L "$consent" ] || return 0
   [ "$(tr -d '[:space:]' <"$consent" 2>/dev/null || true)" = deny ] || return 0
-  [ -f "$store" ] || return 0
-  grep -q 'firstmate-turn-end' "$store" 2>/dev/null || return 0
+  [ -e "$script" ] && installed=1
+  if [ "$installed" -eq 0 ] && [ -f "$store" ]; then
+    grep -q 'firstmate-turn-end' "$store" 2>/dev/null && installed=1
+  fi
+  [ "$installed" -eq 1 ] || return 0
   if "$SCRIPT_DIR/fm-agy-turnend-hook.sh" remove >/dev/null 2>&1; then
-    echo "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny - removed firstmate's key from $store"
+    echo "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny - withdrew firstmate's agy turn-end hook and its files"
   else
-    echo "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny but firstmate's key could not be removed from $store - run bin/fm-agy-turnend-hook.sh remove"
+    echo "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny but firstmate's agy turn-end hook could not be withdrawn - run bin/fm-agy-turnend-hook.sh remove"
   fi
 }
 
