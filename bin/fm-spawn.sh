@@ -321,7 +321,8 @@
 # turn-end hook. Cursor's transcript binding is written for a secondmate the same way
 # as for a crewmate. Muse, gemini, agy, and rovo are refused as secondmates.
 # A claude secondmate gets no Stop busy hook; its home's tracked Stop guard is its
-# only Stop writer, through the .fm-busy-stop pointer in that home.
+# only Stop writer, through the .fm-busy-stop pointer in that home. A home whose
+# guard predates that pointer keeps the ordinary Stop idle hook instead.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog.
@@ -4106,7 +4107,9 @@ BUSY_GEN=
     # Stop hook here: its home's tracked Stop guard (bin/fm-turnend-guard.sh)
     # can block a Stop into a continuation that fires no UserPromptSubmit,
     # and Claude runs Stop hooks in parallel, so the guard is that mate's only
-    # Stop writer, reading this gen from .fm-busy-stop. Every
+    # Stop writer, reading this gen from .fm-busy-stop. A home whose guard
+    # predates .fm-busy-stop would never close the turn, so that launch keeps
+    # the ordinary Stop idle hook, without the parent turn-ended touch. Every
     # hook command tolerates a refused event (|| true) so a stale-gen writer
     # can never break Claude's own lifecycle.
     mkdir -p "$WT/.claude"
@@ -4116,7 +4119,7 @@ BUSY_GEN=
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
     stop_entry=
-    if [ "$KIND" = secondmate ]; then
+    if [ "$KIND" = secondmate ] && grep -qF '.fm-busy-stop' "$WT/bin/fm-turnend-guard.sh" 2>/dev/null; then
       {
         printf 'writer=%s\n' "$FM_ROOT/bin/fm-busy-event.sh"
         printf 'state=%s\n' "$STATE_REAL"
@@ -4125,7 +4128,11 @@ BUSY_GEN=
       } >"$WT/.fm-busy-stop"
       exclude_path '.fm-busy-stop'
     else
-      j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+      stop_turnend=
+      if [ "$busy_notify_turnend" = true ]; then
+        stop_turnend="touch $(shell_quote "$TURNEND"); "
+      fi
+      j_stop=$(json_escape "${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
       stop_entry="\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]}],"
     fi
     cat >"$WT/.claude/settings.local.json" <<EOF
@@ -4160,11 +4167,7 @@ EOF
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source gemini-hook"
       g_before=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event before-agent >/dev/null 2>&1 || true; printf '{}'")
-      after_turnend=
-      if [ "$busy_notify_turnend" = true ]; then
-        after_turnend="touch $(shell_quote "$TURNEND"); "
-      fi
-      g_after=$(json_escape "${after_turnend}$busy_cmd_prefix idle $busy_suffix --event after-agent >/dev/null 2>&1 || true; printf '{}'")
+      g_after=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event after-agent >/dev/null 2>&1 || true; printf '{}'")
       g_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true; printf '{}'")
       cat >"$STATE_REAL/$ID.gemini-settings.json" <<EOF
 {"hooks":{"BeforeAgent":[{"hooks":[{"type":"command","command":"$g_before"}]}],"AfterAgent":[{"hooks":[{"type":"command","command":"$g_after"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$g_sessionend"}]}]}}
