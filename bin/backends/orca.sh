@@ -166,15 +166,15 @@ try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (_) { process.exit(
 if (data.ok === false) process.exit(1);
 const root = data.result || data;
 const rows = root.worktrees || root.items || [];
+const matches = [];
 for (const row of rows) {
   const rowPath = row.path || (row.worktree && row.worktree.path) || "";
   if (rowPath !== path) continue;
   const id = row.id || row.worktreeId || (row.worktree && row.worktree.id) || "";
-  if (!id) continue;
-  process.stdout.write(String(id) + "\t" + String(rowPath));
-  process.exit(0);
+  if (id) matches.push([String(id), String(rowPath)]);
 }
-process.exit(1);
+if (matches.length !== 1) process.exit(1);
+process.stdout.write(matches[0].join("\t"));
 ' "$folder"
 }
 

@@ -50,7 +50,7 @@ FM_SECONDMATE_RESTART_HARNESS=""
 FM_SECONDMATE_RESTART_HOST=""
 FM_SECONDMATE_RESTART_REASON=""
 fm_secondmate_restart_capable() {  # <meta-file>
-  local meta=$1 kind window remote_host backend harness family
+  local meta=$1 kind window remote_host backend harness family orca_mode
   FM_SECONDMATE_RESTART_PLACEMENT=""
   FM_SECONDMATE_RESTART_BACKEND=""
   FM_SECONDMATE_RESTART_HARNESS=""
@@ -86,7 +86,8 @@ fm_secondmate_restart_capable() {  # <meta-file>
     backend=$(fm_backend_of_meta "$meta")
   fi
   FM_SECONDMATE_RESTART_BACKEND=$backend
-  if ! fm_control_backend_state_verified "$backend"; then
+  orca_mode=$(fm_meta_get "$meta" orca_mode)
+  if ! fm_control_backend_state_verified "$backend" "$orca_mode"; then
     FM_SECONDMATE_RESTART_REASON="its runtime cannot prove an agent stopped and came back (backend $backend)"
     return 1
   fi

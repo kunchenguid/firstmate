@@ -1902,16 +1902,26 @@ status_open_activities() {  # <status-file-or-dash>
 window_to_task() {
   local w=$1 state=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}} meta mw mt t
   if [ -n "$state" ]; then
-    for meta in "$state"/*.meta; do
-      [ -e "$meta" ] || continue
-      mw=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-      mt=$(grep '^terminal=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
-      [ "$mw" = "$w" ] || [ "$mt" = "$w" ] || continue
-      t=$(basename "$meta")
-      t=${t%.meta}
-      printf '%s' "$t"
-      return 0
-    done
+    if declare -F fm_backend_meta_for_window >/dev/null 2>&1; then
+      meta=$(fm_backend_meta_for_window "$w" "$state" 2>/dev/null || true)
+      if [ -n "$meta" ]; then
+        t=$(basename "$meta")
+        t=${t%.meta}
+        printf '%s' "$t"
+        return 0
+      fi
+    else
+      for meta in "$state"/*.meta; do
+        [ -e "$meta" ] || continue
+        mw=$(grep '^window=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+        mt=$(grep '^terminal=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+        [ "$mw" = "$w" ] || [ "$mt" = "$w" ] || continue
+        t=$(basename "$meta")
+        t=${t%.meta}
+        printf '%s' "$t"
+        return 0
+      done
+    fi
   fi
   t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
 }

@@ -360,19 +360,6 @@ fm_backend_orca_supervised_worker_read() {  # <dispatch-id> [cursor] [limit]
   fi
 }
 
-fm_backend_orca_supervised_wait() {  # <terminal> <exit|tui-idle> <timeout-ms>
-  local terminal=$1 condition=$2 timeout=${3:-1000}
-  orca terminal wait --terminal "$terminal" --for "$condition" --timeout-ms "$timeout" --json
-}
-
-fm_backend_orca_supervised_send() {  # <run-id> <dispatch-id> <task-id> <body>
-  local run_id=$1 dispatch_id=$2 task_id=$3 body=$4
-  [ -n "$run_id" ] && [ -n "$dispatch_id" ] && [ -n "$task_id" ] && [ -n "$body" ] || return 1
-  fm_backend_orca_run_json orca orchestration send --run "$run_id" --to "dispatch:$dispatch_id" \
-    --subject 'Firstmate task instruction' --body "$body" --type status --task-id "$task_id" \
-    --dispatch-id "$dispatch_id" --json
-}
-
 fm_backend_orca_supervised_abandon() {  # <dispatch-id|dispatch:id>
   local dispatch_id=$1
   case "$dispatch_id" in dispatch:*) dispatch_id=${dispatch_id#dispatch:} ;; esac

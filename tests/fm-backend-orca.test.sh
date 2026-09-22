@@ -159,6 +159,22 @@ EOF
   pass "native Orca worker-start and transcript-first worker-read project stable identities"
 }
 
+test_supervised_worker_start_preserves_partial_receipt() {
+  local out rc
+  orca_case supervised-partial-start
+  cat > "$RESP/1.out" <<'EOF'
+{"ok":true,"result":{"runId":"run-partial","taskId":"task-partial","dispatchId":"dispatch-partial","workerId":"worker-partial","terminal":{"handle":"term-partial"}}}
+EOF
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; if fm_backend_orca_supervised_worker_start run-partial "spec" wt-partial claude; then exit 2; fi; printf "%s:%s:%s" "$FM_ORCA_SUPERVISED_TASK_ID" "$FM_ORCA_SUPERVISED_DISPATCH_ID" "$FM_ORCA_SUPERVISED_TERMINAL"' "$ROOT" )
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "incomplete worker-start receipt should be rejected while retaining returned identities"
+  [ "$out" = task-partial:dispatch-partial:term-partial ] || fail "partial worker-start receipt was not retained: '$out'"
+  pass "native Orca worker-start: incomplete receipts retain identities for abort reconciliation"
+}
+
 test_supervised_worker_read_marks_terminal_fallback() {
   local out
   orca_case supervised-terminal-fallback
@@ -591,6 +607,22 @@ test_worktree_path_resolves_id() {
   pass "fm_backend_orca_worktree_path: resolves an Orca worktree id to its path"
 }
 
+test_existing_worktree_refuses_ambiguous_path() {
+  local folder out status
+  folder="$TMP_ROOT/ambiguous-existing-worktree"
+  orca_case ambiguous-existing-worktree
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"wt-one","path":"%s"},{"worktreeId":"wt-two","path":"%s"}]}}\n' "$folder" "$folder" > "$RESP/1.out"
+  if out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_existing_worktree "$1"' "$ROOT" "$folder" 2>&1 ); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "existing Orca worktree lookup accepted an ambiguous path"
+  [ -z "$out" ] || fail "ambiguous existing worktree lookup should not select an arbitrary id: $out"
+  pass "fm_backend_orca_existing_worktree: refuses duplicate workspace identities for one path"
+}
+
 test_json_get_ignores_undocumented_terminal_id_shapes() {
   local out status wt_id wt_path term
   orca_case parser-pruned-terminal-shapes
@@ -775,6 +807,39 @@ test_spawn_native_mode_falls_back_to_terminal_adapter() {
   assert_not_contains "$(cat "$LOG")" $'orca\x1forchestration\x1fworker-start' \
     "capability failure should not start a native worker"
   pass "fm-spawn.sh --orca-mode supervised: capability failure falls back to terminal supervision"
+}
+
+test_spawn_raw_native_mode_falls_back_without_dropping_command() {
+  local proj wt data state config id out status staged launch
+  id="orcarawfallbackz6"
+  proj="$TMP_ROOT/raw-native-fallback-project"
+  wt="$TMP_ROOT/raw-native-fallback-wt"
+  data="$TMP_ROOT/raw-native-fallback-data"
+  state="$TMP_ROOT/raw-native-fallback-state"
+  config="$TMP_ROOT/raw-native-fallback-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  write_spawn_brief "$data" "$id"
+  touch "$state/.last-watcher-beat"
+  orca_case raw-native-fallback
+  printf '1\n' > "$RESP/1.exit"
+  printf '{"ok":true,"result":{"repo":{"id":"repo-raw-native-fallback"}}}\n' > "$RESP/2.out"
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-raw-native-fallback::/orca/wt-raw-native-fallback","path":"%s"},"terminal":{"handle":"term-raw-native-fallback"}}}\n' "$wt" > "$RESP/3.out"
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" 'claude --flag=keep-me' --mode no-mistakes --yolo off --backend orca --orca-mode supervised 2>&1 )
+  status=$?
+  [ "$status" -eq 0 ] || fail "raw native Orca fallback should succeed through the terminal adapter: $out"
+  assert_contains "$out" "does not accept raw/custom launch commands" \
+    "raw native fallback should explain why the native path was skipped"
+  staged=$(tr '\037' '\n' < "$LOG" | sed -n "s/^\. '\([^']*\)'$/\1/p" | tail -1)
+  [ -n "$staged" ] && [ -f "$staged" ] || fail "raw fallback did not stage its terminal launch"
+  launch=$(cat "$staged")
+  assert_contains "$launch" 'claude --flag=keep-me' \
+    "raw native fallback dropped the custom launch command"
+  rm -rf "/tmp/fm-$id" "$(dirname "$staged")"
+  pass "fm-spawn.sh --orca-mode supervised: raw launch commands use the tested terminal fallback intact"
 }
 
 test_native_orca_relaunch_reuses_durable_task_and_workspace() {
@@ -1119,6 +1184,31 @@ test_crew_state_projects_native_worker_state() {
   pass "fm-crew-state: projects native Orca worker state from exact Dispatch identity"
 }
 
+test_native_dispatch_and_terminal_targets_stay_distinct() {
+  local state id wt meta out
+  id="orcatargetcontractz5"
+  wt="$TMP_ROOT/native-target-contract-wt"
+  state="$TMP_ROOT/native-target-contract-state"
+  mkdir -p "$state"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-native" "worktree=$wt" \
+    "project=$wt" "harness=claude" "kind=scout" "backend=orca" "orca_mode=supervised" \
+    "orca_dispatch_id=dispatch-native"
+  meta="$state/$id.meta"
+  out=$(bash -c '
+    . "$1/bin/fm-backend.sh"
+    . "$1/bin/fm-classify-lib.sh"
+    printf "%s\n" \
+      "$(fm_backend_target_of_meta "$2")" \
+      "$(fm_backend_terminal_target_of_meta "$2")" \
+      "$(basename "$(fm_backend_meta_for_window dispatch:dispatch-native "$3")" .meta)" \
+      "$(window_to_task dispatch:dispatch-native "$3")"
+  ' _ "$ROOT" "$meta" "$state")
+  [ "$out" = $'dispatch:dispatch-native\nterm-native\norcatargetcontractz5\norcatargetcontractz5' ] \
+    || fail "native state and terminal target contracts were not kept distinct: $out"
+  pass "native Orca state targets reverse-resolve without masquerading as terminals"
+}
+
 test_fm_send_uses_native_orca_mailbox_after_inbox_write() {
   local wt state id out status
   id="orcanativesendz4"
@@ -1146,6 +1236,60 @@ test_fm_send_uses_native_orca_mailbox_after_inbox_write() {
   assert_not_contains "$(cat "$LOG")" $'orca\x1fterminal\x1fsend' \
     "native steering should not type a terminal doorbell after mailbox success"
   pass "fm-send: durable Firstmate inbox plus native Orca mailbox steering"
+}
+
+test_fm_send_native_key_uses_terminal_target() {
+  local wt state id out status log_text
+  id="orcanativekeyz6"
+  wt="$TMP_ROOT/native-key-wt"
+  fm_git_init_commit "$wt"
+  state="$TMP_ROOT/native-key-state"; mkdir -p "$state"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-native" "worktree=$wt" \
+    "project=$wt" "harness=claude" "kind=scout" "backend=orca" "orca_mode=supervised" \
+    "orca_dispatch_id=dispatch-native"
+  touch "$state/.last-watcher-beat"
+  orca_case native-key
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ROOT" FM_STATE_OVERRIDE="$state" \
+    "$ROOT/bin/fm-send.sh" "fm-$id" --key C-c 2>&1 )
+  status=$?
+  [ "$status" -eq 0 ] || fail "native Orca key send should succeed: $out"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-native\x1f--interrupt\x1f--json' \
+    "native key delivery should use the recorded terminal handle"
+  assert_not_contains "$log_text" $'--terminal\x1fdispatch:dispatch-native' \
+    "native key delivery must not pass the Dispatch state target to terminal send"
+  pass "fm-send: native Orca key delivery rebinds to the terminal target"
+}
+
+test_fm_send_native_mailbox_failure_uses_terminal_fallback() {
+  local wt state id out status log_text
+  id="orcanativefallbackz7"
+  wt="$TMP_ROOT/native-fallback-send-wt"
+  fm_git_init_commit "$wt"
+  state="$TMP_ROOT/native-fallback-send-state"; mkdir -p "$state"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-native" "worktree=$wt" \
+    "project=$wt" "harness=claude" "kind=scout" "backend=orca" "orca_mode=supervised" \
+    "orca_dispatch_id=dispatch-native"
+  touch "$state/.last-watcher-beat"
+  orca_case native-fallback-send
+  printf '%s\n' '{"ok":false,"error":{"message":"mailbox unavailable"}}' > "$RESP/1.out"
+  printf '%s\n' '{"ok":true,"result":{"terminal":{"tail":[]}}}' > "$RESP/2.out"
+  printf '%s\n' '{"ok":true,"result":{"send":{"accepted":true}}}' > "$RESP/3.out"
+  printf '%s\n' '{"ok":true,"result":{"terminal":{"tail":[]}}}' > "$RESP/4.out"
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$ROOT" FM_STATE_OVERRIDE="$state" FM_SEND_SETTLE=0 \
+    "$ROOT/bin/fm-send.sh" "fm-$id" "fallback hello" 2>&1 )
+  status=$?
+  [ "$status" -eq 0 ] || fail "native Orca mailbox fallback should preserve durable send success: $out"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1fterminal\x1fsend\x1f--terminal\x1fterm-native' \
+    "native mailbox failure should ring the recorded terminal"
+  assert_not_contains "$log_text" $'--terminal\x1fdispatch:dispatch-native' \
+    "native terminal fallback must not pass the Dispatch state target to terminal send"
+  pass "fm-send: native Orca mailbox failure falls back through the terminal target"
 }
 
 test_peek_and_crew_state_fail_closed_on_orca_error_json() {
@@ -1186,6 +1330,50 @@ test_target_exists_rejects_orca_error_json() {
   set -e
   [ "$status" -ne 0 ] || fail "fm_backend_target_exists should reject Orca ok:false read JSON"
   pass "fm_backend_target_exists: Orca ok:false read JSON is not live"
+}
+
+test_native_orca_teardown_stops_before_release() {
+  local proj wt data state config id out rc neutral log_text
+  id="orcanativeteardownz8"
+  proj="$TMP_ROOT/native-teardown-project"
+  wt="$TMP_ROOT/native-teardown-wt"
+  data="$TMP_ROOT/native-teardown-data"
+  state="$TMP_ROOT/native-teardown-state"
+  config="$TMP_ROOT/native-teardown-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-native-teardown" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" "backend=orca" "orca_mode=supervised" \
+    "orca_worktree_id=wt-native-teardown::$wt" "orca_run_id=run-native-teardown" "orca_task_id=task-native-teardown" \
+    "orca_dispatch_id=dispatch-native-teardown" "orca_worker_id=worker-native-teardown" \
+    "orca_terminal_incarnation=inc-native-teardown" "orca_pane_key=pane-native-teardown" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case native-teardown
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-native-teardown::%s","path":"%s"}}}\n' "$wt" "$wt" > "$RESP/1.out"
+  for n in 2 3 5 6; do
+    printf '{"ok":true,"result":{"dispatchId":"dispatch-native-teardown","taskId":"task-native-teardown","runId":"run-native-teardown","workerId":"worker-native-teardown","worktreeId":"wt-native-teardown::%s","worktreePath":"%s","worker":{"state":"%s"},"terminal":{"handle":"term-native-teardown","incarnationId":"inc-native-teardown","paneKey":"pane-native-teardown","worktreeId":"wt-native-teardown::%s"},"observation":{"exactWorker":true},"resource":{"ownedByCoordinator":true}}}\n' "$wt" "$wt" "$([ "$n" -ge 5 ] && echo completed || echo running)" "$wt" > "$RESP/$n.out"
+  done
+  printf '{"ok":true,"result":{"stopped":true}}\n' > "$RESP/4.out"
+  printf '{"ok":true,"result":{"released":true}}\n' > "$RESP/7.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "native Orca teardown should stop before release: $out"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1forchestration\x1fworker-stop\x1f--dispatch\x1fdispatch-native-teardown' \
+    "native teardown should stop a live worker before release"
+  assert_contains "$log_text" $'orca\x1forchestration\x1fworker-release\x1f--dispatch\x1fdispatch-native-teardown' \
+    "native teardown should release only after settlement"
+  assert_not_contains "$log_text" $'orca\x1fterminal\x1fclose' \
+    "native teardown should not close the transient terminal directly"
+  pass "fm-teardown.sh native Orca: proves stop before release and preserves Dispatch ownership"
 }
 
 test_scout_teardown_removes_orca_worktree_via_helper() {
@@ -1561,6 +1749,60 @@ test_teardown_refuses_orca_worktree_without_terminal_handle() {
   pass "fm-teardown.sh backend=orca: refuses incomplete worktree-only endpoint metadata before runtime dispatch"
 }
 
+test_secondmate_force_teardown_settles_native_orca_child() {
+  local home subhome childproj childwt child_id neutral out rc log_text
+  home="$TMP_ROOT/native-orca-child-parent"
+  subhome="$TMP_ROOT/native-orca-child-secondmate"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/native-orca-child-worktree"
+  child_id="orcanativechildz7"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$subhome/projects"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  fm_git_worktree "$childproj" "$childwt" "fm/$child_id"
+  fm_write_meta "$home/state/domain.meta" \
+    "window=firstmate:fm-domain" "worktree=$subhome" "project=$subhome" \
+    "harness=echo" "kind=secondmate" "mode=secondmate" "yolo=off" \
+    "home=$subhome" "projects=alpha"
+  printf '%s\n' "- domain - Native Orca child cleanup (home: $subhome; scope: orca cleanup; projects: alpha; added 2026-07-03)" \
+    > "$home/data/secondmates.md"
+  fm_write_meta "$subhome/state/$child_id.meta" \
+    "window=fm-$child_id" "endpoint_task_id=$child_id" "terminal=term-native-child" \
+    "worktree=$childwt" "project=$childproj" "harness=claude" "kind=ship" \
+    "mode=no-mistakes" "yolo=off" "backend=orca" "orca_mode=supervised" \
+    "orca_worktree_id=wt-native-child::$childwt" "orca_run_id=run-native-child" \
+    "orca_task_id=task-native-child" "orca_dispatch_id=dispatch-native-child" \
+    "orca_worker_id=worker-native-child" "orca_terminal_incarnation=inc-native-child" \
+    "orca_pane_key=pane-native-child"
+  orca_case secondmate-native-child
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-native-child::%s","path":"%s"}}}\n' "$childwt" "$childwt" > "$RESP/1.out"
+  cp "$RESP/1.out" "$RESP/2.out"
+  for n in 3 4 6 7; do
+    printf '{"ok":true,"result":{"dispatchId":"dispatch-native-child","taskId":"task-native-child","runId":"run-native-child","workerId":"worker-native-child","worktreeId":"wt-native-child::%s","worktreePath":"%s","worker":{"state":"%s"},"terminal":{"handle":"term-native-child","incarnationId":"inc-native-child","paneKey":"pane-native-child","worktreeId":"wt-native-child::%s"},"observation":{"exactWorker":true},"resource":{"ownedByCoordinator":true}}}\n' "$childwt" "$childwt" "$([ "$n" -ge 6 ] && echo completed || echo running)" "$childwt" > "$RESP/$n.out"
+  done
+  printf '{"ok":true,"result":{"stopped":true}}\n' > "$RESP/5.out"
+  printf '{"ok":true,"result":{"released":true}}\n' > "$RESP/8.out"
+  printf '{"ok":true,"result":{}}\n' > "$RESP/9.out"
+  add_tmux_fake "$FB"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" "$ROOT/bin/fm-teardown.sh" domain --force 2>&1 )
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "forced secondmate teardown should settle the native Orca child before removal"$'\n'"$out"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1forchestration\x1fworker-stop\x1f--dispatch\x1fdispatch-native-child' \
+    "native child cleanup should stop a live Dispatch"
+  assert_contains "$log_text" $'orca\x1forchestration\x1fworker-release\x1f--dispatch\x1fdispatch-native-child' \
+    "native child cleanup should release the settled Dispatch"
+  assert_not_contains "$log_text" $'orca\x1fterminal\x1fclose' \
+    "native child cleanup should not close a transient terminal directly"
+  assert_contains "$log_text" $'orca\x1fworktree\x1frm\x1f--worktree\x1fid:wt-native-child::' \
+    "native child cleanup should remove the exact Orca worktree after release"
+  assert_absent "$home/state/domain.meta" "parent metadata should be removed after native child cleanup"
+  pass "fm-teardown.sh --force: settles native Orca children before worktree removal"
+}
+
 test_secondmate_force_teardown_removes_orca_child_via_orca() {
   local home subhome childproj childwt child_id neutral out rc
   home="$TMP_ROOT/orca-child-parent"
@@ -1780,6 +2022,7 @@ test_dispatcher_sources_orca_and_routes_primitives() {
 test_supervised_capability_probe_requires_native_command_shape
 test_supervised_capability_keeps_pi_on_terminal_fallback
 test_supervised_worker_start_and_transcript_read
+test_supervised_worker_start_preserves_partial_receipt
 test_supervised_worker_read_marks_terminal_fallback
 test_supervised_state_rebind_and_identity_guards
 test_supervised_worker_state_maps_completion_and_unknown
@@ -1808,6 +2051,7 @@ test_kill_refuses_when_the_orca_cli_is_absent
 test_remove_worktree_refuses_empty_id
 test_remove_worktree_rejects_orca_error_json
 test_worktree_path_resolves_id
+test_existing_worktree_refuses_ambiguous_path
 test_dispatcher_sources_orca_and_routes_primitives
 test_json_get_ignores_undocumented_terminal_id_shapes
 test_worktree_and_terminal_helpers_parse_json
@@ -1815,6 +2059,7 @@ test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
 test_spawn_native_mode_falls_back_to_terminal_adapter
+test_spawn_raw_native_mode_falls_back_without_dropping_command
 test_native_orca_relaunch_reuses_durable_task_and_workspace
 test_native_orca_secondmate_relaunch_rebinds_manager_dispatch
 test_spawn_native_orca_secondmate_reuses_exact_home
@@ -1827,9 +2072,13 @@ test_spawn_preserves_orca_metadata_when_abort_cleanup_fails
 test_spawn_releases_orca_resources_when_metadata_write_fails
 test_peek_send_and_crew_state_route_through_orca_meta
 test_crew_state_projects_native_worker_state
+test_native_dispatch_and_terminal_targets_stay_distinct
 test_fm_send_uses_native_orca_mailbox_after_inbox_write
+test_fm_send_native_key_uses_terminal_target
+test_fm_send_native_mailbox_failure_uses_terminal_fallback
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
+test_native_orca_teardown_stops_before_release
 test_scout_teardown_removes_orca_worktree_via_helper
 test_scout_teardown_refuses_orca_id_path_mismatch
 test_teardown_removes_orca_worktree_when_path_missing
@@ -1841,6 +2090,7 @@ test_ship_teardown_refuses_orca_unresolvable_worktree_id
 test_ship_teardown_refuses_orca_id_path_mismatch
 test_teardown_refuses_orca_missing_worktree_id
 test_teardown_refuses_orca_worktree_without_terminal_handle
+test_secondmate_force_teardown_settles_native_orca_child
 test_secondmate_force_teardown_removes_orca_child_via_orca
 test_secondmate_force_teardown_refuses_orca_child_id_path_mismatch
 test_secondmate_force_teardown_refuses_partial_orca_child

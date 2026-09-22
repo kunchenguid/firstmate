@@ -28,7 +28,7 @@ Routine supervision uses the recorded endpoint through `bin/fm-peek.sh <id>` and
 Enter and Ctrl-C are supported; Escape is not.
 Ordinary ships and scouts may opt into native supervision with `--orca-mode supervised`.
 The native mode is capability-gated. The live evidence covers agent-first Claude and Codex; Cursor is unavailable in this environment and is skipped. Pi is intentionally not in the native set, so ordinary Pi ships and scouts stay on the tested terminal adapter (and a persistent Pi Secondmate refuses rather than claiming native support).
-Persistent Secondmates require native supervision and reuse their exact existing Firstmate home workspace; they never fall back to a raw terminal launch.
+Persistent Secondmates require native supervision and reuse their exact existing Firstmate home workspace; canonical harness launches are native-only, while raw/custom commands are refused rather than changing that home contract. Ordinary raw/custom launches use the tested terminal adapter without dropping their command arguments or environment.
 Firstmate remains authoritative for the Secondmate home, backlog, idle-by-default behavior, child routing, restart, and explicit retirement.
 
 ## Task shape and metadata

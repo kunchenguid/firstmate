@@ -367,6 +367,17 @@ fm_backend_target_of_meta() {  # <meta-file>
   [ -n "$window" ] && printf '%s' "$window"
 }
 
+fm_backend_terminal_target_of_meta() {  # <meta-file>
+  local meta=$1 backend terminal
+  backend=$(fm_backend_of_meta "$meta")
+  if [ "$backend" = orca ]; then
+    terminal=$(fm_meta_get "$meta" terminal)
+    [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
+    return 1
+  fi
+  fm_backend_target_of_meta "$meta"
+}
+
 # fm_backend_validate_task_endpoint: validate a task cleanup record entirely
 # from its durable metadata before any runtime command or cleanup mutation.
 # The validation binds the exact task id, selected backend, target, project,
@@ -587,12 +598,15 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
 }
 
 fm_backend_meta_for_window() {  # <target> <state-dir>
-  local target=$1 state=$2 meta window terminal
+  local target=$1 state=$2 meta window terminal state_target
   for meta in "$state"/*.meta; do
     [ -e "$meta" ] || continue
     window=$(fm_meta_get "$meta" window)
     terminal=$(fm_meta_get "$meta" terminal)
-    { [ -n "$window" ] && [ "$window" = "$target" ]; } || { [ -n "$terminal" ] && [ "$terminal" = "$target" ]; } || continue
+    state_target=$(fm_backend_target_of_meta "$meta" || true)
+    { [ -n "$window" ] && [ "$window" = "$target" ]; } ||
+      { [ -n "$terminal" ] && [ "$terminal" = "$target" ]; } ||
+      { [ -n "$state_target" ] && [ "$state_target" = "$target" ]; } || continue
     printf '%s' "$meta"
     return 0
   done

@@ -1284,31 +1284,32 @@ require_orca_terminal() {
   printf '%s\n' "$terminal"
 }
 
-settle_native_orca_secondmate() {
-  [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ] || return 0
-  [ "$(meta_value "$META" orca_mode)" = supervised ] || return 0
+settle_native_orca_meta() {  # <meta-file> <subject>
+  local meta=$1 subject=$2 dispatch state i=0 max=${FM_ORCA_EXIT_POLLS:-60}
+  [ "$(meta_value "$meta" backend)" = orca ] || return 0
+  [ "$(meta_value "$meta" orca_mode)" = supervised ] || return 0
   fm_backend_source orca || {
-    echo "REFUSED: native Orca adapter is unavailable for secondmate $ID; preserving its home." >&2
+    echo "REFUSED: native Orca adapter is unavailable for $subject; preserving its durable records." >&2
     return 1
   }
-  fm_backend_orca_supervised_owned "$META" || {
-    echo "REFUSED: native Orca Dispatch for secondmate $ID is not proven owned; preserving its home." >&2
+  fm_backend_orca_supervised_owned "$meta" || {
+    echo "REFUSED: native Orca Dispatch for $subject is not proven owned; preserving its durable records." >&2
     return 1
   }
-  local state i=0 max=${FM_ORCA_EXIT_POLLS:-60}
-  state=$(fm_backend_orca_supervised_agent_state "$T")
+  dispatch=$(meta_value "$meta" orca_dispatch_id)
+  state=$(fm_backend_orca_supervised_agent_state "dispatch:$dispatch")
   case "$state" in
     alive)
-      fm_backend_orca_supervised_worker_stop "$T" >/dev/null || {
-        echo "REFUSED: native Orca worker-stop for secondmate $ID was not accepted; preserving its home." >&2
+      fm_backend_orca_supervised_worker_stop "$dispatch" >/dev/null || {
+        echo "REFUSED: native Orca worker-stop for $subject was not accepted; preserving its durable records." >&2
         return 1
       }
       while [ "$i" -lt "$max" ]; do
-        state=$(fm_backend_orca_supervised_agent_state "$T")
+        state=$(fm_backend_orca_supervised_agent_state "dispatch:$dispatch")
         [ "$state" = dead ] && break
         case "$state" in
           ambiguous|unverified|missing)
-            echo "REFUSED: native Orca secondmate $ID became '$state' while stopping; preserving its home and durable records." >&2
+            echo "REFUSED: native Orca $subject became '$state' while stopping; preserving its durable records." >&2
             return 1
             ;;
         esac
@@ -1316,24 +1317,29 @@ settle_native_orca_secondmate() {
         [ "$i" -ge "$max" ] || sleep 0.5
       done
       [ "$state" = dead ] || {
-        echo "REFUSED: native Orca secondmate $ID did not prove stopped; preserving its home and durable records." >&2
+        echo "REFUSED: native Orca $subject did not prove stopped; preserving its durable records." >&2
         return 1
       }
       ;;
     dead) ;;
     ambiguous|unverified|missing)
-      echo "REFUSED: native Orca secondmate $ID reads '$state'; refusing stop/release without a proven process state." >&2
+      echo "REFUSED: native Orca $subject reads '$state'; refusing stop/release without a proven process state." >&2
       return 1
       ;;
     *)
-      echo "REFUSED: native Orca secondmate $ID reads '$state'; preserving its home." >&2
+      echo "REFUSED: native Orca $subject reads '$state'; preserving its durable records." >&2
       return 1
       ;;
   esac
-  fm_backend_orca_supervised_release "$META" || {
-    echo "REFUSED: native Orca Dispatch for secondmate $ID is not settled for release; preserving its home." >&2
+  fm_backend_orca_supervised_release "$meta" || {
+    echo "REFUSED: native Orca Dispatch for $subject is not settled for release; preserving its durable records." >&2
     return 1
   }
+}
+
+settle_native_orca_secondmate() {
+  [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ] || return 0
+  settle_native_orca_meta "$META" "secondmate $ID"
 }
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
@@ -3156,7 +3162,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_native_settled
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3167,6 +3173,7 @@ cleanup_firstmate_home_children() {
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
     child_backend=$(fm_backend_of_meta "$child_meta")
+    child_native_settled=0
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
     else
@@ -3178,7 +3185,11 @@ cleanup_firstmate_home_children() {
         validate_child_worktree_for_removal "$child_wt" "$child_proj" >/dev/null || return 1
       fi
     fi
-    if [ -n "$child_t" ]; then
+    if [ "$child_backend" = orca ] && [ "$(meta_value "$child_meta" orca_mode)" = supervised ]; then
+      settle_native_orca_meta "$child_meta" "child $child_id" || return 1
+      child_native_settled=1
+    fi
+    if [ -n "$child_t" ] && [ "$child_native_settled" -eq 0 ]; then
       if [ "$child_backend" = herdr ]; then
         fm_backend_herdr_parse_target "$child_t" || return 1
         if ! teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
@@ -3535,20 +3546,11 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
-  if [ -n "$T_ORCA" ]; then
-    if [ "$(meta_value "$META" orca_mode)" = supervised ]; then
-      fm_backend_source orca || {
-        echo "REFUSED: native Orca adapter is unavailable for task $ID; preserving task state." >&2
-        exit 1
-      }
-      fm_backend_orca_supervised_release "$META" || {
-        echo "REFUSED: native Orca Dispatch for task $ID is not proven owned and settled; preserving task state." >&2
-        exit 1
-      }
-    else
-      fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
-        || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
-    fi
+  if [ "$(meta_value "$META" orca_mode)" = supervised ]; then
+    settle_native_orca_meta "$META" "task $ID" || exit 1
+  elif [ -n "$T_ORCA" ]; then
+    fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" \
+      || { endpoint_close_refusal "$ID" "$BACKEND" "$T" 0; exit 1; }
   fi
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then

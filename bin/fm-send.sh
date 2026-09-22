@@ -784,9 +784,19 @@ if [ "${1:-}" = "--key" ]; then
       echo "error: key '$key' not sent to remote secondmate $TARGET_REMOTE_ID; completion may be unknown" >&2
       exit 1
     fi
-  elif ! fm_backend_send_key "$TARGET_BACKEND" "$T" "$key" "$EXPECTED_LABEL"; then
+  else
+    key_target=$T
+    if [ -n "$TARGET_META" ]; then
+      key_target=$(fm_backend_terminal_target_of_meta "$TARGET_META" 2>/dev/null || true)
+      [ -n "$key_target" ] || {
+        echo "error: key '$key' cannot resolve a terminal target for $T ($RESOLUTION_TRIED)" >&2
+        exit 1
+      }
+    fi
+    if ! fm_backend_send_key "$TARGET_BACKEND" "$key_target" "$key" "$EXPECTED_LABEL"; then
     echo "error: key '$key' not sent to $T ($TARGET_BACKEND send failed; tried $RESOLUTION_TRIED)" >&2
     exit 1
+    fi
   fi
   fm_send_clear_after_interrupt "$semantic_key" || exit 1
   fm_send_record_interrupt "$semantic_key" || exit 1
@@ -1083,7 +1093,9 @@ else
     # uses Orca mail only as the attention/consumption channel. A native send
     # failure falls back to the existing terminal doorbell; it never changes
     # the inbox delivery result.
+    ring_target=$T
     if [ "$TARGET_BACKEND" = orca ] && [ "$(fm_meta_get "$TARGET_META" orca_mode)" = supervised ]; then
+      ring_target=$(fm_backend_terminal_target_of_meta "$TARGET_META" 2>/dev/null || true)
       if fm_backend_source orca; then
         native_dispatch=$(fm_meta_get "$TARGET_META" orca_dispatch_id)
         native_line=$(fm_task_inbox_doorbell_line "$INBOX_RECORD" || true)
@@ -1091,10 +1103,14 @@ else
           exit 0
         fi
       fi
+      if [ -z "$ring_target" ]; then
+        echo "fm-send: native Orca terminal fallback target is unavailable; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2
+        exit 0
+      fi
       echo "fm-send: native Orca steering was not enqueued; falling back to the terminal doorbell" >&2
     fi
     ring_rc=0
-    fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
+    fm_task_inbox_ring "$TARGET_BACKEND" "$ring_target" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
     case "$ring_rc" in
     1) echo "fm-send: doorbell skipped (composer visibly holds pending text); the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;
     2) echo "fm-send: doorbell did not reach $T; the steer is durably recorded at $INBOX_RECORD and the watcher will re-ring" >&2 ;;

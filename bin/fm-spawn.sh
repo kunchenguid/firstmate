@@ -2238,7 +2238,20 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
 fi
 
 if [ "$BACKEND" = orca ] && [ "$ORCA_MODE" = supervised ]; then
-  if ! fm_backend_orca_supervised_capability_check "$HARNESS"; then
+  if [ "$RAW_LAUNCH" = 1 ]; then
+    # Native worker-start accepts a canonical harness identity, not an
+    # arbitrary shell command. Passing only the parsed basename would silently
+    # drop flags, wrappers, and environment assignments, so preserve ordinary
+    # task launches through the tested terminal adapter instead. A persistent
+    # Secondmate cannot take that fallback without losing its exact-home
+    # contract, so reject it before creating any Orca resource.
+    if [ "$KIND" = secondmate ]; then
+      echo "error: raw/custom launch commands cannot start a persistent Orca Secondmate; use a canonical harness for native supervision" >&2
+      exit 1
+    fi
+    echo "notice: native Orca supervision does not accept raw/custom launch commands; using the tested terminal adapter" >&2
+    ORCA_MODE=terminal
+  elif ! fm_backend_orca_supervised_capability_check "$HARNESS"; then
     if [ "$KIND" = secondmate ]; then
       echo "error: native Orca supervision is required for persistent secondmate $ID ($FM_ORCA_SUPERVISED_REASON); preserving the home" >&2
       exit 1
@@ -4763,39 +4776,49 @@ orca_supervised_meta_publish() {
 if [ "$BACKEND" = orca ] && [ "$ORCA_MODE" = supervised ]; then
   ORCA_SETUP_TERMINAL=$ORCA_TERMINAL
   native_spec=$(cat "$BRIEF_REAL") || exit 1
+  # Arm the abort path before worker-start validates its receipt. Orca can
+  # create a worker and then return an incomplete identity, and that partial
+  # receipt is the only chance to stop/abandon the exact Dispatch.
+  ORCA_ABORT_CLEANUP=1
+  [ "$RELAUNCH" -eq 1 ] && ORCA_ABORT_PRESERVE=1
+  native_start_status=0
   if [ "$RELAUNCH" -eq 1 ]; then
     [ -n "$ORCA_PRIOR_RUN_ID" ] && [ -n "$ORCA_PRIOR_TASK_ID" ] && [ -n "$ORCA_PRIOR_DISPATCH_ID" ] || {
       echo "error: native Orca relaunch for $ID lacks its durable Run, Task, or Dispatch identity" >&2
       exit 1
     }
     ORCA_RUN_ID=$ORCA_PRIOR_RUN_ID
-    if ! fm_backend_orca_supervised_worker_start \
+    fm_backend_orca_supervised_worker_start \
       "$ORCA_RUN_ID" "$native_spec" "$ORCA_WORKTREE_ID" "$HARNESS" "$MODEL" "$EFFORT" \
-      "$ORCA_PRIOR_TASK_ID" "$ORCA_PRIOR_DISPATCH_ID"; then
-      echo "error: native Orca relaunch did not return a usable retry Dispatch; preserving the local copy and prior durable identities" >&2
-      exit 1
-    fi
+      "$ORCA_PRIOR_TASK_ID" "$ORCA_PRIOR_DISPATCH_ID" || native_start_status=$?
   else
     ORCA_RUN_ID=$(fm_backend_orca_supervised_run_create "Firstmate $KIND task $ID") || {
       echo "error: native Orca supervision could not create its Run; preserving the task record" >&2
       exit 1
     }
-    if ! fm_backend_orca_supervised_worker_start \
-      "$ORCA_RUN_ID" "$native_spec" "$ORCA_WORKTREE_ID" "$HARNESS" "$MODEL" "$EFFORT"; then
-      echo "error: native Orca worker-start did not return a usable supervised Dispatch; preserving the task record without launching a terminal fallback" >&2
-      exit 1
-    fi
+    fm_backend_orca_supervised_worker_start \
+      "$ORCA_RUN_ID" "$native_spec" "$ORCA_WORKTREE_ID" "$HARNESS" "$MODEL" "$EFFORT" || native_start_status=$?
   fi
+  # Preserve every identity returned before receipt validation, including a
+  # partial Dispatch that must be reconciled by the abort trap.
+  [ -n "${FM_ORCA_SUPERVISED_RUN_ID:-}" ] && ORCA_RUN_ID=$FM_ORCA_SUPERVISED_RUN_ID
+  [ -n "${FM_ORCA_SUPERVISED_TASK_ID:-}" ] && ORCA_TASK_ID=$FM_ORCA_SUPERVISED_TASK_ID
+  [ -n "${FM_ORCA_SUPERVISED_DISPATCH_ID:-}" ] && ORCA_DISPATCH_ID=$FM_ORCA_SUPERVISED_DISPATCH_ID
+  [ -n "${FM_ORCA_SUPERVISED_WORKER_ID:-}" ] && ORCA_WORKER_ID=$FM_ORCA_SUPERVISED_WORKER_ID
+  [ -n "${FM_ORCA_SUPERVISED_TERMINAL:-}" ] && ORCA_TERMINAL=$FM_ORCA_SUPERVISED_TERMINAL
+  [ -n "${FM_ORCA_SUPERVISED_TERMINAL_INCAR:-}" ] && ORCA_TERMINAL_INCAR=$FM_ORCA_SUPERVISED_TERMINAL_INCAR
+  [ -n "${FM_ORCA_SUPERVISED_PANE_KEY:-}" ] && ORCA_PANE_KEY=$FM_ORCA_SUPERVISED_PANE_KEY
+  [ -n "${FM_ORCA_SUPERVISED_WORKTREE_ID:-}" ] && ORCA_WORKTREE_ID=$FM_ORCA_SUPERVISED_WORKTREE_ID
+  [ "$native_start_status" -eq 0 ] || {
+    # A nonzero receipt is not proof that no worker was created. Preserve the
+    # returned resources and let the abort trap reconcile any Dispatch it did
+    # return instead of closing an unbound terminal or worktree.
+    ORCA_ABORT_PRESERVE=1
+    echo "error: native Orca worker-start did not return a usable supervised Dispatch; preserving the task record without launching a terminal fallback" >&2
+    exit 1
+  }
   # From this point onward every failure must abandon the just-created Dispatch
   # (or retry Dispatch) before the trap may remove ordinary task resources.
-  ORCA_ABORT_CLEANUP=1
-  ORCA_RUN_ID=$FM_ORCA_SUPERVISED_RUN_ID
-  ORCA_TASK_ID=$FM_ORCA_SUPERVISED_TASK_ID
-  ORCA_DISPATCH_ID=$FM_ORCA_SUPERVISED_DISPATCH_ID
-  ORCA_WORKER_ID=$FM_ORCA_SUPERVISED_WORKER_ID
-  ORCA_TERMINAL=$FM_ORCA_SUPERVISED_TERMINAL
-  ORCA_TERMINAL_INCAR=$FM_ORCA_SUPERVISED_TERMINAL_INCAR
-  ORCA_PANE_KEY=$FM_ORCA_SUPERVISED_PANE_KEY
   [ -n "$ORCA_RUN_ID" ] && [ -n "$ORCA_TASK_ID" ] && [ -n "$ORCA_DISPATCH_ID" ] && [ -n "$ORCA_WORKER_ID" ] || {
     echo 'error: native Orca worker omitted a durable Run, Task, Dispatch, or worker identity; preserving task records' >&2
     exit 1
@@ -4803,6 +4826,7 @@ if [ "$BACKEND" = orca ] && [ "$ORCA_MODE" = supervised ]; then
   [ -n "$ORCA_TERMINAL" ] || { echo 'error: native Orca worker omitted its terminal identity; preserving task records' >&2; exit 1; }
   [ -n "$ORCA_TERMINAL_INCAR" ] || { echo 'error: native Orca worker omitted its terminal incarnation; preserving task records' >&2; exit 1; }
   [ -n "$ORCA_PANE_KEY" ] || { echo 'error: native Orca worker omitted its pane identity; preserving task records' >&2; exit 1; }
+  [ "$RELAUNCH" -eq 1 ] || ORCA_ABORT_PRESERVE=0
   T=$ORCA_TERMINAL
   if ! orca_supervised_meta_publish; then
     echo "error: native Orca identities for $ID could not be recorded; preserving the supervised worker and local copy" >&2
