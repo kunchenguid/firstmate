@@ -66,7 +66,12 @@ REAL_GIT_FOR_TEST=$(command -v git)
 export REAL_GIT_FOR_TEST
 REAL_PS_FOR_TEST=$(command -v ps)
 export REAL_PS_FOR_TEST
-REAL_LSOF_FOR_TEST=$(command -v lsof)
+# The leaked-process reap cases drive teardown's real lsof cwd scan against
+# live processes; only the lsof-absent case strips lsof, from its own PATH.
+# A host without lsof would instead run every reap case through that fallback
+# and fail it as a surviving process, so name the missing tool up front.
+REAL_LSOF_FOR_TEST=$(command -v lsof) \
+  || fail "precondition: lsof is not installed; the leaked-process reap cases need a real lsof on PATH (install the lsof package, then re-run)"
 export REAL_LSOF_FOR_TEST
 
 # Build a fresh sandbox for one test case. Sets up:
