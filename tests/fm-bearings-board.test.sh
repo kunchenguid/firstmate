@@ -79,8 +79,19 @@ esac
 file=$1
 shift
 reopen=0
-for arg in "$@"; do [ "$arg" != --reopen ] || reopen=1; done
+no_open=0
+for arg in "$@"; do
+  [ "$arg" != --reopen ] || reopen=1
+  [ "$arg" != --no-open ] || no_open=1
+done
+if [ "${LAVISH_FAKE_REQUIRE_NO_OPEN:-0}" = 1 ] && [ "$no_open" != 1 ]; then
+  printf 'automated artifact establishment must pass --no-open\n' >&2
+  exit 97
+fi
 real=$(cd "$(dirname "$file")" && pwd -P)/$(basename "$file")
+if [ "$no_open" = 0 ]; then
+  : > "$state/browser-open"
+fi
 if [ -e "$state/user-ended" ] && [ "$reopen" = 0 ]; then
   emit "$real" user-ended
   exit 0
@@ -107,6 +118,7 @@ run_board() {  # <home> <args...>
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROCEVENT_CLAIM_ROOT="$home/procevent-claims" \
     LAVISH_FAKE_STATE="$home/lavish-state" \
+    LAVISH_FAKE_REQUIRE_NO_OPEN=1 \
     "$BOARD" "$@"
 }
 
@@ -345,6 +357,36 @@ test_build_injects_binds_then_arms() {
   run_procevent "$home" list | awk 'NR > 1 { print $1 }' | grep -Fxq "$sid" \
     || fail "the board source is not registered after build"
   pass "build injects the payload, binds any-origin, then arms the source"
+}
+
+test_automated_build_suppresses_browser_open_but_explicit_open_does() {
+  local home data board
+  home=$(make_home open-policy)
+  data="$home/payload.json"
+  board="$home/.lavish/bearings-board.html"
+  write_valid_payload "$data"
+
+  run_board "$home" build "$data" >/dev/null \
+    || fail "automated board preparation failed"
+  [ ! -e "$home/lavish-state/browser-open" ] \
+    || fail "automated board preparation opened a browser"
+
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" LAVISH_FAKE_STATE="$home/lavish-state" \
+    lavish-axi "$board" >/dev/null \
+    || fail "an explicit human open failed"
+  [ -e "$home/lavish-state/browser-open" ] \
+    || fail "an explicit human open did not open a browser"
+
+  rm -f "$home/lavish-state/browser-open"
+  end_session_as_captain "$home"
+  PATH="$home/fakebin:$PATH" FM_HOME="$home" LAVISH_FAKE_STATE="$home/lavish-state" \
+    lavish-axi "$board" --reopen >/dev/null \
+    || fail "an explicit human reopen failed"
+  [ -e "$home/lavish-state/browser-open" ] \
+    || fail "an explicit human reopen did not open a browser"
+  [ ! -e "$home/lavish-state/user-ended" ] \
+    || fail "an explicit human reopen did not resume the ended session"
+  pass "automated board preparation stays headless while explicit open and reopen open"
 }
 
 test_registration_cannot_consume_before_any_origin_binding() {
@@ -781,6 +823,7 @@ test_path_is_stable_and_home_scoped
 test_build_refuses_malformed_payloads_before_touching_the_board
 test_charted_kind_is_optional_and_accepts_both_values
 test_build_injects_binds_then_arms
+test_automated_build_suppresses_browser_open_but_explicit_open_does
 test_registration_cannot_consume_before_any_origin_binding
 test_build_does_not_bind_or_arm_when_session_start_fails
 test_rebuild_is_idempotent_and_does_not_double_arm

@@ -14,8 +14,10 @@
 #
 # The captain-ended state is reached through the same server route the browser's
 # End session button calls, so no browser is needed and nothing here depends on
-# a human. The artifact is a scratch page in a temporary directory, and the
-# session it opens is ended again before the guard returns.
+# a human. Every artifact-serving call uses --no-open because this guard needs
+# session state and URLs, not browser focus. The artifact is a scratch page in
+# a temporary directory, and the session it opens is ended again before the
+# guard returns.
 #
 # Standard CI has no lavish-axi, so this reports a capability skip there. The
 # portable counterpart in tests/fm-bearings-board.test.sh pins the build's logic
@@ -74,7 +76,7 @@ JSON
 
 run_board() {
   FM_HOME="$LAB" FM_STATE_OVERRIDE="$LAB/state" FM_DATA_OVERRIDE="$LAB/data" \
-    FM_PROCEVENT_CLAIM_ROOT="$LAB/procevent-claims" \
+    FM_PROCEVENT_CLAIM_ROOT="$LAB/procevent-claims" LAVISH_AXI_NO_OPEN=1 \
     "$ROOT/bin/fm-bearings-board.sh" "$@"
 }
 
@@ -82,7 +84,7 @@ BOARD="$LAB/.lavish/bearings-board.html"
 run_board build "$LAB/payload.json" >/dev/null 2>&1 || fail "the guard board did not build"
 [ -f "$BOARD" ] || fail "the guard board was not published"
 
-url=$(lavish-axi "$BOARD" | sed -n 's/^[[:space:]]*url:[[:space:]]*//p' | head -1 | tr -d '"')
+url=$(lavish-axi "$BOARD" --no-open | sed -n 's/^[[:space:]]*url:[[:space:]]*//p' | head -1 | tr -d '"')
 case "$url" in
   http://*/session/*) ;;
   *) fail "could not read the guard board session url: $url" ;;
@@ -96,7 +98,7 @@ curl -fsS -X POST "$base/api/$key/end" >/dev/null 2>&1 \
 
 # ASSUMPTION UNDER GUARD: this exits 0 while reporting the session is not live.
 set +e
-ended_out=$(lavish-axi "$BOARD" 2>&1)
+ended_out=$(lavish-axi "$BOARD" --no-open 2>&1)
 ended_rc=$?
 set -e
 [ "$ended_rc" -eq 0 ] \
