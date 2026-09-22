@@ -86,6 +86,20 @@
 # regular file, or text carrying its own "Delivery contract: mode=" line (which
 # a later scout promotion could not outrank), stops the scaffold before
 # anything is written. Secondmate charters never take it.
+# A home may also name standing skills every worker loads before task work:
+# config/standing-skills lists one skill name per line, with blank lines and
+# "#" comments ignored. When it names at least one skill, ship and scout
+# scaffolds end their `# Setup` section with one paragraph telling the worker
+# to load each skill with its harness's own skill command (`/<name>`, or
+# `$<name>` on Codex, asking by name where the harness has no verified skill
+# command) and follow it within the brief's boundaries, with the Definition of
+# done and safety rules winning on conflict. It sits in Setup so the skills
+# load before any task work. A secondmate is a firstmate instance and takes
+# the same paragraph at the end of its charter's `# Operating model` section,
+# ahead of any routed work. An absent file, or one naming no skill, changes
+# nothing; a present path that is not a readable regular file, or a name
+# outside [A-Za-z0-9._:-] (starting alphanumeric), stops the scaffold before
+# anything is written.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -218,6 +232,41 @@ if [ "$KIND" != secondmate ] && { [ -e "$BRIEF_INCLUDE_FILE" ] || [ -L "$BRIEF_I
   [ -n "$(printf '%s' "$BRIEF_INCLUDE_BODY" | tr -d '[:space:]')" ] || BRIEF_INCLUDE_BODY=
 fi
 
+# The optional standing-skills list is read before anything is written for the
+# same reason. STANDING_SKILLS_SETUP stays empty unless a skill is named, so an
+# absent or empty list leaves the scaffold byte-identical.
+STANDING_SKILLS_FILE="$CONFIG/standing-skills"
+STANDING_SKILLS_SETUP=
+if [ -e "$STANDING_SKILLS_FILE" ] || [ -L "$STANDING_SKILLS_FILE" ]; then
+  { [ -f "$STANDING_SKILLS_FILE" ] && STANDING_SKILLS_BODY=$(cat "$STANDING_SKILLS_FILE" 2>/dev/null); } || {
+    echo "error: $STANDING_SKILLS_FILE must be a readable regular file" >&2
+    exit 1
+  }
+  slash_forms=
+  dollar_forms=
+  while IFS= read -r skill || [ -n "$skill" ]; do
+    skill=${skill%%#*}
+    skill=${skill#"${skill%%[![:space:]]*}"}
+    skill=${skill%"${skill##*[![:space:]]}"}
+    [ -n "$skill" ] || continue
+    case "$skill" in
+      [!A-Za-z0-9]*|*[!A-Za-z0-9._:-]*)
+        echo "error: $STANDING_SKILLS_FILE names an invalid skill '$skill'; list one bare skill name per line, without a / or \$ prefix" >&2
+        exit 1 ;;
+    esac
+    slash_forms="${slash_forms}${slash_forms:+, }\`/$skill\`"
+    dollar_forms="${dollar_forms}${dollar_forms:+, }\`\$$skill\`"
+  done <<EOF
+$STANDING_SKILLS_BODY
+EOF
+  if [ -n "$slash_forms" ]; then
+    STANDING_SKILLS_SETUP="
+
+Standing skills: before any task work, load each of these skills with your harness's own skill command: $slash_forms, or $dollar_forms on Codex; where your harness has no verified skill command, ask for each skill by name.
+Follow their guidance within this brief's boundaries; this brief's Definition of done and safety rules win on any conflict."
+  fi
+fi
+
 # Append the include as the last section of a ship or scout scaffold.
 append_brief_include() {
   [ -n "$BRIEF_INCLUDE_BODY" ] || return 0
@@ -298,7 +347,7 @@ Delegate project work to your own crewmates with the normal firstmate lifecycle:
 Do not invent a second delegation system.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
-Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.$STANDING_SKILLS_SETUP
 
 # The captain and the parent channel
 Nobody reads this chat: the captain and the main firstmate see only what is appended to $STATUS_FILE, and a captain-facing sentence that is not appended there has not been sent.
@@ -417,7 +466,7 @@ $HERDR_SECTION
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
-The report is the only thing that survives, so anything worth keeping must be in it.
+The report is the only thing that survives, so anything worth keeping must be in it.$STANDING_SKILLS_SETUP
 
 # Rules
 1. Never push to any remote and never open a PR.
@@ -506,7 +555,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked [at=<epoch>]: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2$STANDING_SKILLS_SETUP
 
 # Rules
 $RULE1
