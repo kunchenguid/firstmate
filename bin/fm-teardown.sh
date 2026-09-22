@@ -2209,31 +2209,32 @@ collect_local_firstmate_states() {
   done
 }
 
-require_exclusive_worktree_slot_record() {
-  local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
-  local slot state_dir other other_id field other_path other_slot
-  local claim_retires_claimants=0
+# Reads the claim state determined once by require_owned_worktree_slot_record,
+# never the claim file: one read of the slot's claim decides both what this scan
+# may retire and whether the slot steps run at all.
+#
+# A claim naming another task already skip-slots this record, so no colliding
+# record can be harmed and the scan must not veto. A claim naming THIS task only
+# proves the slot was not taken again through the claim-writing path: crewmate
+# spawns claim (bin/fm-spawn.sh refuses to launch when they cannot), so their
+# colliding records are stale, but secondmate homes take Treehouse's durable
+# lease and never write a claim (bin/fm-wake-lib.sh's slot-owner claim comment),
+# so a secondmate record naming this slot still refuses. A missing claim keeps
+# the conservative refusal for every record.
+require_exclusive_worktree_slot_record() {  # <meta> <worktree> <claim-state>
+  local record_meta=$1 worktree=$2 claim=$3
+  local record_id record_state slot state_dir other other_id field other_path other_slot
+  record_id=${record_meta##*/}
+  record_id=${record_id%.meta}
+  record_state=${record_meta%/*}
+  [ "$claim" != other ] || return 0
   slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
-  # A claim naming another task already skip-slots this record, so no colliding
-  # record can be harmed and the scan must not veto. A claim naming THIS task
-  # only proves the slot was not taken again through the claim-writing path:
-  # crewmate spawns claim (bin/fm-spawn.sh refuses to launch when they cannot),
-  # so their colliding records are stale, but secondmate homes take Treehouse's
-  # durable lease and never write a claim (bin/fm-wake-lib.sh's slot-owner claim
-  # comment), so a secondmate record naming this slot still refuses. A missing
-  # or unreadable claim keeps the conservative refusal for every record.
-  fm_treehouse_slot_owner_state "$slot" "$record_id"
-  case "$FM_TREEHOUSE_SLOT_OWNER" in
-    other) return 0 ;;
-    mine) claim_retires_claimants=1 ;;
-  esac
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
       [ "$other" != "$record_meta" ] || continue
-      if [ "$claim_retires_claimants" = 1 ] \
-         && [ "$(fm_meta_get "$other" kind)" != secondmate ]; then
+      if [ "$claim" = mine ] && [ "$(fm_meta_get "$other" kind)" != secondmate ]; then
         continue
       fi
       other_id=$(basename "$other" .meta)
@@ -2251,17 +2252,11 @@ require_exclusive_worktree_slot_record() {
   done
 }
 
-require_exclusive_task_worktree_slot() {
-  local slot
-  slot=$(teardown_live_slot_path) || return 0
-  require_exclusive_worktree_slot_record "$META" "$ID" "$STATE" "$slot"
-}
-
 # Positive slot ownership, read from the claim the task that took the slot wrote
 # into the slot itself (bin/fm-wake-lib.sh owns the claim and its states).
 #
-# The record scan above refuses a collision unless the slot claim names a
-# specific owner. It still cannot prove that THIS record is not the stale one
+# The record scan above refuses a collision unless this determination's claim
+# state retires it. It still cannot prove that THIS record is not the stale one
 # when no reachable claim exists, because the task that took the slot next may
 # leave no record this scan can reach: its own worker may have exited and its
 # record been cleaned up, or it may belong to a home this machine does not
@@ -2298,9 +2293,10 @@ require_owned_worktree_slot_record() {  # <task-id> <worktree>
   return 1
 }
 
-# The one ownership determination for this task's recorded slot. Every later
-# step that would read or touch $WT consults teardown_owns_worktree, so a
-# reassigned slot is skipped consistently rather than by each step's own guess.
+# The one ownership determination for this task's recorded slot, and the record
+# scan it feeds. Every later step that would read or touch $WT consults
+# teardown_owns_worktree, so a reassigned slot is skipped consistently rather
+# than by each step's own guess.
 TEARDOWN_SLOT_REASSIGNED=0
 TEARDOWN_SLOT_REASSIGNED_TO=
 TEARDOWN_SLOT_REASSIGNED_HOME=
@@ -2309,15 +2305,15 @@ require_owned_task_worktree_slot() {
   slot=$(teardown_live_slot_path) || return 0
   require_owned_worktree_slot_record "$ID" "$slot" || rc=$?
   case "$rc" in
-    0) return 0 ;;
+    0) ;;
     "$TEARDOWN_SLOT_REASSIGNED_RC")
       TEARDOWN_SLOT_REASSIGNED=1
       TEARDOWN_SLOT_REASSIGNED_TO=$FM_TREEHOUSE_SLOT_OWNER_ID
       TEARDOWN_SLOT_REASSIGNED_HOME=$FM_TREEHOUSE_SLOT_OWNER_HOME
-      return 0
       ;;
+    *) return 1 ;;
   esac
-  return 1
+  require_exclusive_worktree_slot_record "$META" "$slot" "$FM_TREEHOUSE_SLOT_OWNER"
 }
 
 teardown_owns_worktree() {
@@ -2841,13 +2837,13 @@ preflight_descendant_treehouse_slots() {
       continue
     fi
     fm_backend_validate_task_endpoint "$meta" "$task_id" || return 1
-    require_exclusive_worktree_slot_record "$meta" "$task_id" "$state" "$worktree" || return 1
     owner_rc=0
     require_owned_worktree_slot_record "$task_id" "$worktree" || owner_rc=$?
     case "$owner_rc" in
       0|"$TEARDOWN_SLOT_REASSIGNED_RC") ;;
       *) return 1 ;;
     esac
+    require_exclusive_worktree_slot_record "$meta" "$worktree" "$FM_TREEHOUSE_SLOT_OWNER" || return 1
   done
 }
 
@@ -3188,7 +3184,6 @@ remove_secondmate_registry_entry() {
   return "$rc"
 }
 
-require_exclusive_task_worktree_slot || exit 1
 require_owned_task_worktree_slot || exit 1
 
 validate_pr_poll_cleanup "$STATE" "$ID" || exit 1
