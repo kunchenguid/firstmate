@@ -526,6 +526,8 @@ if [ -e "$STATE" ] || [ -L "$STATE" ]; then
 fi
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
+# shellcheck source=bin/fm-deploy-branch-lib.sh
+. "$SCRIPT_DIR/fm-deploy-branch-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -2967,7 +2969,7 @@ spawn_worktree_has_origin_config() { # <worktree>
 }
 
 freshen_spawn_worktree_base() { # <worktree>
-  local worktree=$1 default target expected actual status
+  local worktree=$1 default target expected actual status deploy_branch
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2987,14 +2989,29 @@ freshen_spawn_worktree_base() { # <worktree>
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
-    echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
+  # firstmate.deployBranch (bin/fm-deploy-branch-lib.sh) names this clone's real
+  # deploy branch when it differs from the forge's advertised default. When set,
+  # it is authoritative and `remote set-head` is skipped entirely, because that
+  # command rewrites the shared refs/remotes/origin/HEAD of the whole clone (a
+  # treehouse worktree shares its clone's refs) and fm-fleet-sync.sh reads that
+  # same ref as its comparison base - clobbering it here would silently revert
+  # fleet-sync back to comparing against the forge default too.
+  if deploy_branch=$(fm_deploy_branch_configured "$worktree"); then
+    if ! fm_deploy_branch_exists_on_origin "$worktree" "$deploy_branch"; then
+      echo "error: firstmate.deployBranch is set to '$deploy_branch' for pooled worktree '$worktree', but origin has no such branch; refusing to fall back to the forge default" >&2
+      return 1
+    fi
+    default=$deploy_branch
+  else
+    if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+      echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    fi
+    default=$(default_branch "$worktree") || {
+      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+      return 1
+    }
   fi
-  default=$(default_branch "$worktree") || {
-    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-    return 1
-  }
   target="origin/$default"
   if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
     echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2

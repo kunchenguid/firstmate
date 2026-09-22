@@ -89,6 +89,47 @@ advance_origin() {
 
 head_sha() { git -C "$1" rev-parse HEAD; }
 
+# build_pair_with_deploy_branch <home> <name> [forge-default] [deploy-branch]:
+# like build_pair, but origin also carries <deploy-branch>, pushed after the
+# forge default, and the clone is checked out ON <deploy-branch> while
+# origin/HEAD (the forge's advertised default) still names <forge-default> -
+# reproducing a clone whose real deploy branch differs from a stale forge
+# default (e.g. ecstatic-starfish-prod). Echoes the clone path.
+build_pair_with_deploy_branch() {
+  local home=$1 name=$2 forge_default=${3:-main} deploy_branch=${4:-prod} \
+    work remote clone remote_abs
+  work="$home/work-$name"
+  remote="$home/remotes/$name.git"
+  clone="$home/projects/$name"
+  mkdir -p "$home/remotes"
+
+  git init -q "$work"
+  git -C "$work" symbolic-ref HEAD "refs/heads/$forge_default"
+  commit_file "$work" file.txt v0 C0
+
+  git clone --quiet --bare "$work" "$remote"
+  remote_abs=$(cd "$remote" && pwd)
+  git -C "$work" remote add origin "file://$remote_abs"
+  git -C "$work" push -q -u origin "$forge_default"
+
+  git -C "$work" checkout -q -b "$deploy_branch"
+  commit_file "$work" file.txt "$deploy_branch-v0" deploy-branch-initial
+  git -C "$work" push -q -u origin "$deploy_branch"
+
+  git clone --quiet --branch "$deploy_branch" "file://$remote_abs" "$clone"
+  printf '%s\n' "$clone"
+}
+
+# advance_origin_branch <home> <name> <branch> <msg>: push one more commit to
+# <branch> on <name>'s origin via its work repo.
+advance_origin_branch() {
+  local home=$1 name=$2 branch=$3 msg=$4 work
+  work="$home/work-$name"
+  git -C "$work" checkout -q "$branch"
+  commit_file "$work" file.txt "$msg" "$msg"
+  git -C "$work" push -q origin "$branch"
+}
+
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
   local home=$1
@@ -348,6 +389,65 @@ test_diverged_is_stuck_untouched() {
   assert_contains "$out" "commits behind origin/main - needs attention" "STUCK is quantified"
   [ "$(head_sha "$clone")" = "$before" ] || fail "diverged clone was moved"
   pass "diverged default branch is reported STUCK and left untouched"
+}
+
+test_deploy_branch_unset_reports_stuck_against_forge_default() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair_with_deploy_branch "$home" deploy-branch-unset main prod)
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "deploy-branch-unset: STUCK: on branch prod" \
+    "with the key unset, a clone kept on prod while origin/HEAD still names the stale forge default main reports STUCK, reproducing the defect"
+  pass "an unset deploy branch key falls back to the stale forge default exactly as before, reproducing the defect this key fixes"
+}
+
+test_deploy_branch_config_resolves_comparison_base() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair_with_deploy_branch "$home" deploy-branch-configured main prod)
+  git -C "$clone" config firstmate.deployBranch prod
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "deploy-branch-configured: already current" \
+    "a clone on its configured deploy branch, current with origin, reports unchanged instead of STUCK"
+  assert_not_contains "$out" "STUCK" "a correctly-configured deploy branch is not reported STUCK"
+  pass "a configured deploy branch resolves the comparison base instead of the stale forge default"
+}
+
+test_deploy_branch_config_fast_forwards_configured_base() {
+  local home clone out
+  home=$(new_home)
+  clone=$(build_pair_with_deploy_branch "$home" deploy-branch-ff main prod)
+  git -C "$clone" config firstmate.deployBranch prod
+  advance_origin_branch "$home" deploy-branch-ff prod C1
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "deploy-branch-ff: synced" "a configured deploy branch fast-forwards against its own origin advance"
+  assert_not_contains "$out" "STUCK" "fast-forwarding the configured deploy branch is not flagged STUCK"
+  [ "$(head_sha "$clone")" = "$(git -C "$clone" rev-parse origin/prod)" ] \
+    || fail "clone was not fast-forwarded to origin/prod"
+  pass "a configured deploy branch fast-forwards to its own origin advance"
+}
+
+test_deploy_branch_missing_from_origin_fails_loudly() {
+  local home clone out before
+  home=$(new_home)
+  clone=$(build_pair_with_deploy_branch "$home" deploy-branch-missing main prod)
+  git -C "$clone" config firstmate.deployBranch does-not-exist-anywhere
+  before=$(head_sha "$clone")
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "deploy-branch-missing: skipped: firstmate.deployBranch is set to 'does-not-exist-anywhere'" \
+    "refusal names the repo and the configured value"
+  assert_not_contains "$out" "STUCK" "an unresolvable deploy branch is a configuration skip, not a STUCK drift"
+  [ "$(head_sha "$clone")" = "$before" ] \
+    || fail "sync moved the clone after refusing an unresolvable configured deploy branch"
+  pass "a firstmate.deployBranch naming a branch absent from origin fails loudly instead of falling back to the forge default"
 }
 
 test_on_default_clean_behind_fast_forwards() {
@@ -700,6 +800,10 @@ test_detached_clean_ancestor_with_diverged_local_default_is_stuck_untouched
 test_dirty_is_stuck_untouched
 test_non_default_branch_is_stuck_untouched
 test_diverged_is_stuck_untouched
+test_deploy_branch_unset_reports_stuck_against_forge_default
+test_deploy_branch_config_resolves_comparison_base
+test_deploy_branch_config_fast_forwards_configured_base
+test_deploy_branch_missing_from_origin_fails_loudly
 test_on_default_clean_behind_fast_forwards
 test_already_current_unchanged
 test_no_origin_skipped

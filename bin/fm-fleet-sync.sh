@@ -3,6 +3,10 @@
 # origin/<default> when safe, and prune local branches whose upstream tracking
 # branch is gone (the remote branch was deleted, i.e. its PR merged) and that no
 # worktree still needs.
+# <default> is the clone's firstmate.deployBranch git config when set, else
+# origin/HEAD as resolved by default_branch() (bin/fm-deploy-branch-lib.sh owns
+# the shared read); a configured value absent from origin/ fails loudly instead
+# of silently comparing against the forge default.
 # Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
 # no unique commits (it is an ancestor of origin/<default>) and whose <default>
 # branch is free to check out is re-attached and then fast-forwarded ("recovered:").
@@ -40,6 +44,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-deploy-branch-lib.sh
+. "$SCRIPT_DIR/fm-deploy-branch-lib.sh"
 # Inert unless FM_TIMING_LOG names a file; only the deferred network stage sets it.
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
@@ -346,10 +352,22 @@ sync_project() {
 
   prune_gone_branches || true
 
-  DEFAULT=$(default_branch) || {
-    echo "$label: skipped: cannot determine default branch"
-    return 0
-  }
+  # firstmate.deployBranch (bin/fm-deploy-branch-lib.sh) names this clone's real
+  # deploy branch when it differs from origin/HEAD, the forge's advertised
+  # default. When set, it is authoritative over origin/HEAD for the comparison
+  # base below; an unset key falls back to origin/HEAD exactly as before.
+  if deploy_branch=$(fm_deploy_branch_configured "$PROJ"); then
+    if ! fm_deploy_branch_exists_on_origin "$PROJ" "$deploy_branch"; then
+      echo "$label: skipped: firstmate.deployBranch is set to '$deploy_branch', but origin has no such branch; refusing to fall back to the forge default"
+      return 0
+    fi
+    DEFAULT=$deploy_branch
+  else
+    DEFAULT=$(default_branch) || {
+      echo "$label: skipped: cannot determine default branch"
+      return 0
+    }
+  fi
   BASE="origin/$DEFAULT"
   if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
     echo "$label: skipped: $BASE does not exist"

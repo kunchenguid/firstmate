@@ -59,6 +59,57 @@ run_spawn() {
     "$id" "$PROJECT_DIR" "$@"
 }
 
+# make_deploy_branch_case <name> <id> [forge-default] [deploy-branch]
+# Like make_case, but origin also carries <deploy-branch>, pushed from a
+# separate publisher clone with its own marker file, while the forge default
+# stays on <forge-default>. The project clone's firstmate.deployBranch config
+# is set to <deploy-branch>, reproducing a clone whose real deploy branch
+# differs from the forge's advertised default (e.g. ecstatic-starfish-prod).
+make_deploy_branch_case() {
+  local name=$1 id=$2 forge_default=${3:-main} deploy_branch=${4:-prod} \
+    case_dir home project origin pool publisher fakebin initial deploy_tip
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  project="$case_dir/project"
+  origin="$case_dir/origin.git"
+  pool="$case_dir/pool"
+  publisher="$case_dir/publisher"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake")
+
+  mkdir -p "$home/data/$id" "$home/projects" "$home/state" "$home/config"
+  printf 'codex\n' > "$home/config/crew-harness"
+  fm_test_spawn_brief "$home" "$id"
+  touch "$home/state/.last-watcher-beat"
+
+  git init --quiet -b "$forge_default" "$project"
+  printf 'base\n' > "$project/README.md"
+  git -C "$project" add README.md
+  git -C "$project" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm initial
+  git clone --quiet --bare "$project" "$origin"
+  git -C "$project" remote add origin "file://$origin"
+  initial=$(git -C "$project" rev-parse HEAD)
+
+  git clone --quiet "file://$origin" "$publisher"
+  git -C "$publisher" checkout --quiet -b "$deploy_branch"
+  printf 'deploy content\n' > "$publisher/deploy-marker.txt"
+  git -C "$publisher" add deploy-marker.txt
+  git -C "$publisher" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm deploy-branch-commit
+  git -C "$publisher" push --quiet origin "$deploy_branch"
+  deploy_tip=$(git -C "$publisher" rev-parse HEAD)
+
+  git -C "$project" worktree add --quiet --detach "$pool" "$initial"
+  git -C "$project" config firstmate.deployBranch "$deploy_branch"
+
+  printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|$forge_default|$deploy_branch|$deploy_tip"
+}
+
+read_deploy_branch_case_record() {
+  IFS='|' read -r CASE_DIR HOME_DIR PROJECT_DIR POOL_DIR FAKEBIN_DIR INITIAL_SHA \
+    FORGE_DEFAULT DEPLOY_BRANCH DEPLOY_TIP <<EOF
+$1
+EOF
+}
+
 test_remote_seeded_home_spawns_from_treehouse_pool() {
   local rec id out status lock
   id='pool-remote-seeded-r13'
@@ -453,6 +504,80 @@ test_unresolved_remote_default_refuses_pool() {
   pass "an unresolved remote default branch refuses the pooled worktree"
 }
 
+test_deploy_branch_config_overrides_forge_default_without_moving_origin_head() {
+  local rec id out status before after
+  id='pool-deploy-branch-r1'
+  rec=$(make_deploy_branch_case deploy-branch "$id" main prod)
+  read_deploy_branch_case_record "$rec"
+  # Simulate a clone whose refs/remotes/origin/HEAD was already pointed at the
+  # real deploy branch (by a prior fleet sync under this same fix, or a manual
+  # correction): `remote set-head --auto` would revert this to the stale forge
+  # default, which is exactly the regression this test pins.
+  git -C "$POOL_DIR" symbolic-ref refs/remotes/origin/HEAD "refs/remotes/origin/$DEPLOY_BRANCH"
+  before=$(git -C "$POOL_DIR" symbolic-ref -q refs/remotes/origin/HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should launch from the configured deploy branch"$'\n'"$out"
+  assert_contains "$out" "spawned $id" "spawn did not report success for the configured deploy branch"
+
+  after=$(git -C "$POOL_DIR" symbolic-ref -q refs/remotes/origin/HEAD)
+  [ "$after" = "$before" ] \
+    || fail "spawn moved refs/remotes/origin/HEAD from '$before' to '$after' despite a configured deploy branch"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$DEPLOY_TIP" ] \
+    || fail "spawn did not base the pooled worktree on the configured deploy branch's tip"
+  assert_grep 'deploy content' "$POOL_DIR/deploy-marker.txt" \
+    "the pooled worktree is missing content only present on the configured deploy branch"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed deploy-branch spawn: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+    printf '# refs/remotes/origin/HEAD before=%s after=%s\n' "$before" "$after"
+  fi
+  pass "a configured deploy branch resolves the pooled worktree base without moving refs/remotes/origin/HEAD"
+}
+
+test_deploy_branch_unset_still_resolves_forge_default_via_set_head() {
+  local rec id out status
+  id='pool-deploy-branch-unset-r2'
+  rec=$(make_deploy_branch_case deploy-branch-unset "$id" main prod)
+  read_deploy_branch_case_record "$rec"
+  git -C "$PROJECT_DIR" config --unset firstmate.deployBranch
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "spawn should still resolve the forge default with the key unset"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" symbolic-ref -q refs/remotes/origin/HEAD)" = "refs/remotes/origin/$FORGE_DEFAULT" ] \
+    || fail "spawn did not resolve refs/remotes/origin/HEAD to the forge default with the key unset"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+    || fail "spawn did not base the pooled worktree on the forge default with the key unset"
+  [ ! -e "$POOL_DIR/deploy-marker.txt" ] \
+    || fail "an unset deploy branch key still picked up deploy-only content"
+  pass "an unset firstmate.deployBranch key leaves today's forge-default resolution unchanged"
+}
+
+test_deploy_branch_missing_from_origin_fails_loudly() {
+  local rec id out status before
+  id='pool-deploy-branch-missing-r3'
+  rec=$(make_deploy_branch_case deploy-branch-missing "$id" main prod)
+  read_deploy_branch_case_record "$rec"
+  git -C "$PROJECT_DIR" config firstmate.deployBranch does-not-exist-anywhere
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite firstmate.deployBranch naming a branch absent from origin"
+  assert_contains "$out" "firstmate.deployBranch is set to 'does-not-exist-anywhere'" \
+    "refusal did not name the configured value"
+  assert_contains "$out" "$POOL_DIR" "refusal did not name the pooled worktree"
+  assert_not_contains "$out" "spawned $id" "spawn reported success despite an unresolvable deploy branch"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "spawn moved HEAD after refusing an unresolvable configured deploy branch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "the refused spawn published task metadata"
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# observed unresolvable deploy-branch refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
+  fi
+  pass "a firstmate.deployBranch naming a branch absent from origin fails loudly instead of falling back"
+}
+
 # A slot left on a stale submodule pin is the field failure this diagnosis exists
 # for: a refresh moved the superproject and left the submodule behind, so the
 # refusal fires a spawn later, on a slot whose own `git status` looks clean to the
@@ -751,6 +876,9 @@ test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
+test_deploy_branch_config_overrides_forge_default_without_moving_origin_head
+test_deploy_branch_unset_still_resolves_forge_default_via_set_head
+test_deploy_branch_missing_from_origin_fails_loudly
 test_unreachable_origin_refuses_stale_pool_base
 test_originless_pool_launches_without_a_freshness_fetch
 test_originless_dirty_pool_refuses_without_discarding_work
