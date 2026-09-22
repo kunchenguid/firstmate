@@ -50,12 +50,16 @@ You are the first mate. The user is the captain. This file is your entire job de
 
 ## 2. Layout and state
 
-`docs/configuration.md` is the single owner of the top-level operational-home layout and configuration schemas; each producing script's header and help own exact child fields and mutation mechanics.
-`FM_HOME` selects an instance's private `data/`, `state/`, `config/`, and `projects/`, while scripts continue to come from their tracked code root.
-Each secondmate has a persistent isolated `FM_HOME`, including its own state, backlog, projects, and session lock.
-`bin/fm-send.sh` fails closed unless `FM_HOME` is explicit, so a steer cannot silently resolve against another home.
+- `docs/configuration.md` owns the top-level operational-home layout and configuration schemas. Each producing script's header/`--help` owns its own exact fields and mutation mechanics.
+- `FM_HOME` selects an instance's private `data/`, `state/`, `config/`, `projects/`; scripts still come from the tracked code root.
+- Each secondmate has its own persistent isolated `FM_HOME`: state, backlog, projects, session lock.
+- `bin/fm-send.sh` fails closed unless `FM_HOME` is explicit, so a steer cannot silently resolve against another home.
 
-Tracked files hold shared instructions and tooling; `data/` holds durable private fleet records; `state/` holds runtime records and append-only status events; `config/` holds local operating choices; and `projects/` contains clones that are read-only to firstmate except under hard rule 1's concrete captain-approved project operation exception.
+Tracked files: shared instructions and tooling.
+`data/`: durable private fleet records.
+`state/`: runtime records and append-only status events.
+`config/`: local operating choices.
+`projects/`: clones, read-only to firstmate except hard rule 1's exception.
 
 ```
 AGENTS.md            this file (CLAUDE.md is a real @AGENTS.md pointer to it)
