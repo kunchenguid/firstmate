@@ -428,6 +428,39 @@ test_restart_e2e_delivers_exactly_once() {
   pass "restart end-to-end: typed result reconciles from disk and delivers one reply to the original thread"
 }
 
+# A promised-final expecting pr-merged whose bound work ends failed (the only
+# typed outcome a failed or parked lane can report) must still become
+# deliverable, so the owed public reply carries the honest outcome instead of
+# stranding at pending-work with no delivery path. Needs tasks-axi 0.2.6.
+test_failed_work_on_pr_merged_promise_delivers_honest_outcome() {
+  local home log out posts
+  home=$(make_home failed-deliver)
+  log="$home/curl.log"; : > "$log"
+  seed_commitment "$home" pf-failed req-failed discord main work-failed
+  "$EMIT" --home "$home" --obligation pf-failed --relation rel-code --source-home main \
+    --work-id work-failed --generation 1 --outcome failed --deliverable error_code=quota-exhausted \
+    --outcome-text 'This one did not pan out: the worker ran out of quota before it could open a fix.' \
+    >/dev/null || fail "the failed terminal result could not be reported"
+
+  out=$(FAKE_CURL_LOG="$log" run_pf "$home" consume) || fail "reconciliation failed: $out"
+  assert_contains "$out" "ready pf-failed req-failed discord" \
+    "a failed outcome on a pr-merged promise must become delivery-ready"
+  [ "$(delivery_state "$home" pf-failed)" = ready ] \
+    || fail "the failed outcome must move the commitment to ready, got '$(delivery_state "$home" pf-failed)'"
+
+  out=$(FAKE_CURL_LOG="$log" run_pf "$home" deliver pf-failed) || fail "delivery failed: $out"
+  assert_contains "$out" "delivered pf-failed request=req-failed platform=discord" \
+    "delivery must report the original request binding"
+  posts=$(followup_posts "$log")
+  [ "$posts" -eq 1 ] || fail "expected exactly one public reply, got $posts"
+  assert_grep '"request_id":"req-failed"' "$log" "the reply must target the original request"
+  assert_grep 'the worker ran out of quota before it could open a fix' "$log" \
+    "the reply must carry the accepted failed outcome text verbatim"
+  [ "$(task_state "$home" pf-failed)" = 'done' ] \
+    || fail "the commitment must be Done after the posted receipt"
+  pass "failed work on a pr-merged promise delivers its honest outcome exactly once"
+}
+
 # --- 2. idempotency ------------------------------------------------------------
 
 test_duplicate_event_and_replay_are_noops() {
@@ -3147,6 +3180,7 @@ fi
 test_ambient_tasks_axi_env_never_reaches_a_real_backlog
 test_outcome_text_is_bounded_without_corrupting_characters
 test_restart_e2e_delivers_exactly_once
+test_failed_work_on_pr_merged_promise_delivers_honest_outcome
 test_duplicate_event_and_replay_are_noops
 test_invalid_events_are_refused_and_quarantined
 test_relay_failure_holds_without_false_completion

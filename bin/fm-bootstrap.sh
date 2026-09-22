@@ -923,7 +923,7 @@ NO_MISTAKES_MIN=1.46.0
 # tasks-axi feature probes are an independent defense-in-depth concern, not part
 # of its floor.
 GH_AXI_MIN=0.1.29
-LAVISH_AXI_MIN=0.1.46
+LAVISH_AXI_MIN=0.1.77
 
 treehouse_supports_lease() {
   treehouse get --help 2>&1 | grep -Eq '(^|[^[:alnum:]_-])--lease([^[:alnum:]_-]|$)'
