@@ -92,9 +92,10 @@ while [ "$i" -lt 45 ]; do
     blocked)
       # A fresh checkout path stops on Claude's folder-trust prompt, which the
       # pre-send proof would read as a non-empty composer. Accept it and keep
-      # waiting for a real idle composer.
+      # waiting for a real idle composer. The prompt preselects "No, exit", so
+      # move to "Yes" before confirming; a bare Enter quits Claude.
       case "$(lab pane read "$PANE" --source visible 2>/dev/null || true)" in
-        *'Yes, I trust this folder'*) lab pane send-keys "$PANE" enter >/dev/null \
+        *'Yes, I trust this folder'*) lab pane send-keys "$PANE" down enter >/dev/null \
           || fail "could not accept Claude's folder-trust prompt" ;;
       esac
       ;;
