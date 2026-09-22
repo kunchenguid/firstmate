@@ -776,6 +776,9 @@ resolve_relaunch_profile() {
   else
     TARGET_EFFORT=default
   fi
+  if [ "$TARGET_EFFORT" = ultra ]; then
+    "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
+  fi
   # The codex provider profile is a codex-only axis. An explicit --codex-profile
   # for a non-codex target is refused here, on the pre-stop side of the
   # transaction, so the running agent is never stopped for a launch fm-spawn must

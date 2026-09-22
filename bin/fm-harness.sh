@@ -47,7 +47,7 @@
 # non-empty, non-comment line WITHOUT an "<id>:" prefix is the default. Optional
 # per-id pin lines "<id>: <harness> [<model>] [<effort>]" override the default for
 # that one secondmate only; the id is matched against the <id> passed to the
-# secondmate* subcommands (a colon in the first token marks a pin, and harness
+# secondmate* subcommands (a colon-terminated first token marks a pin, and harness
 # names never contain one). Model/effort come ONLY from this file - config/crew-harness
 # stays a bare adapter name and is never parsed for a model.
 # Detection evidence and precedence:

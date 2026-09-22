@@ -534,6 +534,45 @@ test_codex_without_profile_is_unchanged() {
   pass "a codex launch without --codex-profile is unchanged and carries no --profile"
 }
 
+# A profile literally named "default" is an ordinary profile name, not a
+# sentinel: the launch carries it and the record matches what launched.
+test_codex_profile_named_default_threads_literally() {
+  local rec id out status launch
+  id=profile-codex-default-z4i
+  rec=$(make_spawn_case profile-codex-default codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex --codex-profile default --effort high)
+  status=$?
+  expect_code 0 "$status" "codex spawn with a profile named default should succeed"$'\n'"$out"
+  assert_grep "codex_profile=default" "$HOME_DIR/state/$id.meta" "meta missing codex_profile=default"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --profile 'default' -c 'model_reasoning_effort=\"high\"'" \
+    "a profile named default must reach the codex launch as --profile default"
+  pass "codex --codex-profile default threads literally and matches its recorded pin"
+}
+
+# A remote secondmate launch crosses the transport hop without the profile axis,
+# so the flag is refused up front rather than silently dropped on the far side.
+test_codex_profile_refused_for_remote_secondmate() {
+  local rec id out status
+  id=profile-codex-remote-z4j
+  rec=$(make_spawn_case profile-codex-remote codex "$id")
+  read_case_record "$rec"
+  printf -- '- %s - remote domain (host: remote-mac; root: /srv/fm; home: /srv/%s; scope: things; projects: p; added 2026-09-03)\n' \
+    "$id" "$id" > "$HOME_DIR/data/secondmates.md"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --secondmate --harness codex --codex-profile deepseek)
+  status=$?
+  expect_code 1 "$status" "a remote secondmate spawn with --codex-profile should refuse"$'\n'"$out"
+  assert_contains "$out" "a remote secondmate spawn does not yet take --codex-profile" \
+    "the refusal should name the unsupported remote profile axis"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused remote profile spawn must write no task record"
+  [ ! -e "$HOME_DIR/state/.spawn-$id.lock" ] || fail "a refused remote profile spawn must release its spawn lock"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused remote profile spawn must launch nothing"
+  pass "codex --codex-profile is refused for a remote secondmate instead of being dropped"
+}
+
 # Codex parks a crewmate launch forever on its unanswerable hook-trust modal
 # unless the launch turns the hook layer off. These two cases pin the split:
 # a crewmate runs hook-free, a secondmate keeps the project hooks that carry its
@@ -1582,6 +1621,8 @@ test_codex_profile_threads_and_records_without_model
 test_codex_profile_allows_model_override
 test_codex_profile_refused_on_non_codex_harness
 test_codex_without_profile_is_unchanged
+test_codex_profile_named_default_threads_literally
+test_codex_profile_refused_for_remote_secondmate
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

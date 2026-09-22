@@ -349,7 +349,7 @@ When it is absent or contains `default`, crewmates mirror the firstmate's own ha
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents, optionally followed by model and effort tokens on the same line.
 The first non-empty, non-comment line without an `<id>:` prefix is the default, parsed as `<harness> [<model>] [<effort>]` and applied to every secondmate.
 A bare `<harness>` preserves the previous behavior: harness only, with no model or effort launch flag.
-Optional per-id pin lines `<id>: <harness> [<model>] [<effort>]` override the default for that one secondmate; the id is matched against the secondmate being launched, and a colon in the first token marks a pin because harness names never contain one.
+Optional per-id pin lines `<id>: <harness> [<model>] [<effort>]` override the default for that one secondmate; the id is matched against the secondmate being launched, and a colon-terminated first token marks a pin because harness names never contain a colon.
 This keeps one home able to run, say, `e3` on Opus and every other secondmate on Fable from a single file, while a bare single-line file stays fully backward-compatible.
 When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model or effort is read from that file.
 `fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.

@@ -72,7 +72,8 @@
 #   deepseek.config.toml) selects the model and --model becomes optional; passing
 #   --model still overrides the profile's own model. It is refused for any other
 #   harness, recorded as codex_profile= in the task record, and carried forward on
-#   a codex-to-codex relaunch that omits it.
+#   a codex-to-codex relaunch that omits it. A remote secondmate spawn does not
+#   yet carry it over the transport hop and refuses the flag instead.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -895,6 +896,12 @@ spawn_remote_secondmate() {
     return 1
     ;;
   esac
+  if [ "$CODEX_PROFILE_SET" -eq 1 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: a remote secondmate spawn does not yet take --codex-profile" >&2
+    return 1
+  fi
   case "$effort" in
   - | low | medium | high | xhigh | max | ultra) ;;
   *)
@@ -2390,7 +2397,7 @@ model_flag_for_harness() {
 # a profile axis, so its template carries no __PROFILEFLAG__ placeholder.
 profile_flag_for_harness() {
   local harness=$1 profile=$2
-  [ -n "$profile" ] && [ "$profile" != default ] || return 0
+  [ -n "$profile" ] || return 0
   case "$harness" in
   codex) printf -- '--profile %s ' "$(shell_quote "$profile")" ;;
   esac
