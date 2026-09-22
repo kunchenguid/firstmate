@@ -32,12 +32,15 @@
 #
 # poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
-# 1..25). Every read is capped at five seconds. A pull observation has three
-# dependent waves: core, six independent reads, then the closing head read;
-# an issue has two waves. Parallelizing each independent wave bounds either
-# observation to 3 * 5 = 15 seconds. poll reserves min(the configured budget,
-# 15) before starting a URL, so an in-progress normal-budget observation gets
-# all three waves and a later URL waits for the next oldest-checked-first poll.
+# 1..25). That budget is every read's only bound, so a read cut short is always
+# the budget running out and never evidence that the forge is unavailable. A
+# pull observation has three dependent waves: core, six independent reads, then
+# the closing head read; an issue has two waves. Each wave reads in parallel, so
+# a contribution with many pages spends its time on its own slowest page instead
+# of losing it to a fixed share too small to finish. poll reserves min(the
+# configured budget, 15) before starting a URL, so an in-progress normal-budget
+# observation gets all three waves and a later URL waits for the next
+# oldest-checked-first poll.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct URL is
 # observed once per poll and applied to every owner. A final observation applies
@@ -181,18 +184,20 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
+# A read the poll's own clock stopped is time we did not have, not a verdict on
+# the forge. The marker file carries it out of the background reads of a wave.
+time_cut() { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; }
+
 forge() {
-  local remaining bounded=0 rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
+  local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
-  [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
-  if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
+  [ "$remaining" -gt 0 ] || { time_cut; return 1; }
+  # The deadline is the only bound, so every kill is the budget running out.
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  # A read killed at the budget's own deadline is budget exhaustion too.
-  if [ "$rc" -eq 124 ] && [ "$bounded" -eq 1 ]; then
-    BUDGET_EXHAUSTED=1
-    : > "$TMP/budget-exhausted"
+  if [ "$rc" -eq 124 ]; then
+    time_cut
   elif [ "$rc" -ne 0 ]; then
     : > "$TMP/forge-unavailable"
   fi
