@@ -391,6 +391,8 @@ INVALID_URLS=(
   'https://github.com/-owner/r/pull/1'
   'https://github.com/owner-/r/pull/1'
   'https://github.com/owner--name/r/pull/1'
+  'https://github.com/_owner/r/pull/1'
+  'https://github.com/owner_/r/pull/1'
   'https://github.com/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/r/pull/1'
   'https://github.com/o/./pull/1'
   'https://github.com/o/../pull/1'
@@ -478,6 +480,7 @@ test_parser_matrix() {
 https://github.com/a/b/pull/1|a|b|1
 https://github.com/my-org/repo/pull/42|my-org|repo|42
 https://github.com/Owner/repo-name_with.parts/pull/123456|Owner|repo-name_with.parts|123456
+https://github.com/Owner_name/repo/pull/7|Owner_name|repo|7
 EOF
   while IFS='|' read -r url host path number; do
     [ -n "$url" ] || continue
