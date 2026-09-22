@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { encodeFirstmateOperationalInput } from "./lib/fm-operational-input.js";
+import { executionEnded, pluginRoot, subscribeToEvents } from "./lib/fm-v2-plugin.js";
 
 const COORDINATOR_KEY = "__firstmateOpenCodeWatchArm";
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
@@ -23,6 +23,11 @@ let restorationInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
 let armRecovery = new WeakMap();
+let activeGeneration = 0;
+
+function generationIsActive(generation) {
+  return generation === activeGeneration;
+}
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -47,41 +52,6 @@ function waitForArmReady(armChild) {
   });
 }
 
-function runProcess(command, args, options = {}) {
-  return new Promise((resolve) => {
-    const proc = spawn(command, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      ...options,
-    });
-    let stdout = "";
-    let stderr = "";
-    proc.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
-    proc.on("error", (error) => resolve({ code: 127, stdout, stderr: String(error?.message ?? error) }));
-    proc.on("close", (code) => resolve({ code: code ?? 0, stdout, stderr }));
-  });
-}
-
-async function resolveRoot(anchor) {
-  if (!anchor) return "";
-  const result = await runProcess("git", ["-C", anchor, "rev-parse", "--show-toplevel"]);
-  const root = result.stdout.trim();
-  if (result.code === 0 && root) return root;
-  return resolvePath(anchor);
-}
-
-function resolvePath(anchor) {
-  try {
-    return realpathSync(anchor);
-  } catch {
-    return resolve(anchor);
-  }
-}
-
 function effectivePaths(root) {
   const fmRoot = process.env.FM_ROOT_OVERRIDE || root;
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || fmRoot;
@@ -90,15 +60,24 @@ function effectivePaths(root) {
   return { root: fmRoot, home: fmHome, state, config };
 }
 
-async function isPrimaryRoot(root, home) {
+function revParse(root, flag) {
+  const result = spawnSync("git", ["-C", root, "rev-parse", flag], { encoding: "utf8" });
+  if (result.status !== 0) return null;
+  return String(result.stdout || "").trim();
+}
+
+function isPrimaryRoot(root, home) {
   if (!root) return false;
   if (!existsSync(`${root}/AGENTS.md`) || !existsSync(`${root}/bin`)) return false;
   if (existsSync(`${root}/.fm-secondmate-home`)) return false;
   if (home && home !== root && existsSync(`${home}/.fm-secondmate-home`)) return false;
-  const gitDir = await runProcess("git", ["-C", root, "rev-parse", "--git-dir"]);
-  const commonDir = await runProcess("git", ["-C", root, "rev-parse", "--git-common-dir"]);
-  if (gitDir.code !== 0 || commonDir.code !== 0) return false;
-  return gitDir.stdout.trim() === commonDir.stdout.trim();
+  // Synchronous on purpose: OpenCode tears down the turn's process group at the
+  // terminal session.execution.* event, which SIGTERMs an async child mid-read and
+  // would leave this reading empty stdout and declining to arm.
+  const gitDir = revParse(root, "--git-dir");
+  const commonDir = revParse(root, "--git-common-dir");
+  if (gitDir === null || commonDir === null) return false;
+  return gitDir === commonDir;
 }
 
 function shouldArm(paths) {
@@ -111,7 +90,13 @@ function shouldArm(paths) {
   }
 }
 
-async function sessionOwnsLock(paths) {
+function parentPid(pid) {
+  const result = spawnSync("ps", ["-o", "ppid=", "-p", pid], { encoding: "utf8" });
+  if (result.status !== 0) return null;
+  return String(result.stdout || "").trim();
+}
+
+function sessionOwnsLock(paths) {
   let lockPid = "";
   try {
     lockPid = readFileSync(`${paths.state}/.lock`, "utf8").trim();
@@ -122,9 +107,10 @@ async function sessionOwnsLock(paths) {
   let pid = String(process.pid);
   for (let i = 0; i < 8; i += 1) {
     if (pid === lockPid) return true;
-    const result = await runProcess("ps", ["-o", "ppid=", "-p", pid]);
-    if (result.code !== 0) return false;
-    pid = result.stdout.trim();
+    // Synchronous for the same reason as revParse above: the terminal
+    // session.execution.* event tears down the turn's process group, and an
+    // async child SIGTERMed mid-read would decline to arm with no retry.
+    pid = parentPid(pid);
     if (!pid || pid === "1") return false;
   }
   return false;
@@ -184,14 +170,9 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
   }
 }
 
-async function sendPrompt(paths, client, sessionID, text) {
+async function sendPrompt(paths, ctx, sessionID, text) {
   const encoded = await encodeFirstmateOperationalInput(paths.root, "watcher", text);
-  await client.session.promptAsync({
-    path: { id: sessionID },
-    body: {
-      parts: [{ type: "text", text: encoded }],
-    },
-  });
+  await ctx.session.prompt({ sessionID, text: encoded });
 }
 
 function confirmHandlingDelivery(paths, recovery) {
@@ -226,7 +207,8 @@ function confirmHandlingDeliveryWithRetry(paths, recovery) {
   return confirmHandlingDelivery(paths, snapshot());
 }
 
-async function deliverActionableWake(paths, client, sessionID, message, recovery) {
+async function deliverActionableWake(paths, ctx, sessionID, message, recovery, generation) {
+  if (!generationIsActive(generation)) return;
   if (recovery) {
     const confirmed = confirmHandlingDeliveryWithRetry(paths, recovery);
     if (!confirmed.ok) {
@@ -237,19 +219,21 @@ async function deliverActionableWake(paths, client, sessionID, message, recovery
           await retireArm(child);
         }
       }
-      await sendPrompt(paths, client, sessionID, wakePrompt(`${message}\n\n${confirmed.detail}`));
+      if (generationIsActive(generation)) {
+        await sendPrompt(paths, ctx, sessionID, wakePrompt(`${message}\n\n${confirmed.detail}`));
+      }
       return;
     }
   }
-  await sendPrompt(paths, client, sessionID, wakePrompt(message));
+  if (generationIsActive(generation)) await sendPrompt(paths, ctx, sessionID, wakePrompt(message));
 }
 
 function wakePrompt(reason) {
   return `WATCHER FIRED - drain queued wakes with bin/fm-wake-drain.sh and handle the reported wake. Watcher continuity is plugin-owned.\n\n${reason}`;
 }
 
-function surfaceFailure(paths, client, sessionID, reason) {
-  void sendPrompt(paths, client, sessionID, wakePrompt(reason)).catch(() => {
+function surfaceFailure(paths, ctx, sessionID, reason) {
+  void sendPrompt(paths, ctx, sessionID, wakePrompt(reason)).catch(() => {
     // OpenCode owns delivery errors; continuity restoration never waits on prompting.
   });
 }
@@ -287,10 +271,11 @@ function restorationFailure(status) {
   return `watcher: FAILED - OpenCode could not verify a ready successor watcher (${status || "idle"})`;
 }
 
-async function restoreAfterActionableClose(paths, sessionID, client, predecessorArmPid) {
+async function restoreAfterActionableClose(paths, sessionID, ctx, predecessorArmPid, generation) {
   let failure = "";
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
-    const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true);
+    if (!generationIsActive(generation)) return { failure: "", recovery: null };
+    const { status, armChild } = await ensureArm(paths, sessionID, ctx, predecessorArmPid, true, generation);
     if (status === "armed") return { failure: "", recovery: armRecovery.get(armChild) };
     // An actionable line belongs to this arm's close handler.
     // Do not retire it before that handler can start the successor cycle.
@@ -308,32 +293,37 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
   return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries` };
 }
 
-async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid) {
+async function scheduleRetry(paths, sessionID, ctx, reason, predecessorArmPid, generation) {
+  if (!generationIsActive(generation)) return;
   if (child || retryTimer) return;
-  if (!(await sessionOwnsLock(paths))) {
+  if (!sessionOwnsLock(paths)) {
+    if (!generationIsActive(generation)) return;
     setArmStatus("failed");
-    surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock\n${reason}`);
+    surfaceFailure(paths, ctx, sessionID, `watcher: FAILED - OpenCode cannot restore continuity because this session no longer owns the lock\n${reason}`);
     return;
   }
+  if (!generationIsActive(generation)) return;
   retryFailures += 1;
   if (retryFailures > REARM_RETRY_LIMIT) {
     setArmStatus("failed");
-    surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries\n${reason}`);
+    surfaceFailure(paths, ctx, sessionID, `watcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries\n${reason}`);
     return;
   }
   setArmStatus("retrying");
   const timer = setTimeout(() => {
     if (retryTimer === timer) retryTimer = null;
-    void ensureArm(paths, sessionID, client, predecessorArmPid).then((status) => {
+    if (!generationIsActive(generation)) return;
+    void ensureArm(paths, sessionID, ctx, predecessorArmPid, false, generation).then((status) => {
+      if (!generationIsActive(generation)) return;
       if (["armed", "starting", "wake"].includes(status)) return;
-      surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not launch a continuity retry (${status})`);
+      surfaceFailure(paths, ctx, sessionID, `watcher: FAILED - OpenCode could not launch a continuity retry (${status})`);
     });
   }, retryDelay(retryFailures));
   timer.unref();
   retryTimer = timer;
 }
 
-function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
+function spawnArm(paths, sessionID, ctx, predecessorArmPid = "", generation) {
   setArmStatus("starting");
   const env = {
     ...process.env,
@@ -391,25 +381,27 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     releaseChild();
     const classification = classifyArmClose(stdout, stderr, code, signal);
     settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
+    if (!generationIsActive(generation)) return;
     const predecessor = String(armChild.pid ?? "");
     if (classification.kind === "actionable") {
       if (restorationInFlight) return;
       retryFailures = 0;
       setArmStatus("wake");
-      const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
+      const restoration = restoreAfterActionableClose(paths, sessionID, ctx, predecessor, generation);
       restorationInFlight = restoration;
       void restoration.then(async (result) => {
         try {
           const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
-          await deliverActionableWake(paths, client, sessionID, message, result.recovery);
+          await deliverActionableWake(paths, ctx, sessionID, message, result.recovery, generation);
         } finally {
           if (restorationInFlight === restoration) restorationInFlight = null;
         }
       }).catch((error) => {
         if (restorationInFlight === restoration) restorationInFlight = null;
+        if (!generationIsActive(generation)) return;
         surfaceFailure(
           paths,
-          client,
+          ctx,
           sessionID,
           `watcher: FAILED - OpenCode could not deliver an actionable wake\n${String(error?.message ?? error)}`,
         );
@@ -420,7 +412,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       setArmStatus("failed");
       return;
     }
-    void scheduleRetry(paths, sessionID, client, classification.message, predecessor);
+    void scheduleRetry(paths, sessionID, ctx, classification.message, predecessor, generation);
   });
   armChild.on("error", (error) => {
     if (settled) return;
@@ -428,6 +420,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     settleReadiness("failed");
+    if (!generationIsActive(generation)) return;
     if (restorationInFlight) {
       setArmStatus("failed");
       return;
@@ -435,32 +428,37 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     void scheduleRetry(
       paths,
       sessionID,
-      client,
+      ctx,
       `watcher: FAILED - OpenCode arm child failed: ${error.message}`,
       String(armChild.pid ?? ""),
+      generation,
     );
   });
   return armChild;
 }
 
-async function beginArm(paths, sessionID, client, predecessorArmPid) {
+async function beginArm(paths, sessionID, ctx, predecessorArmPid, generation) {
+  if (!generationIsActive(generation)) return { status: "disposed", armChild: null };
   if (!sessionID) return { status: "skipped", armChild: null };
-  if (!(await isPrimaryRoot(paths.root, paths.home))) return { status: "not-primary", armChild: null };
-  if (!(await sessionOwnsLock(paths))) return { status: "read-only", armChild: null };
+  if (!isPrimaryRoot(paths.root, paths.home)) return { status: "not-primary", armChild: null };
+  if (!generationIsActive(generation)) return { status: "disposed", armChild: null };
+  if (!sessionOwnsLock(paths)) return { status: "read-only", armChild: null };
+  if (!generationIsActive(generation)) return { status: "disposed", armChild: null };
   if (child) return { status: "existing", armChild: child };
   if (retryTimer) return { status: "retrying", armChild: null };
   if (!shouldArm(paths)) return { status: "not-needed", armChild: null };
-  return { status: "spawned", armChild: spawnArm(paths, sessionID, client, predecessorArmPid) };
+  return { status: "spawned", armChild: spawnArm(paths, sessionID, ctx, predecessorArmPid, generation) };
 }
 
 function armAttempt(status, armChild, includeArmChild) {
   return includeArmChild ? { status, armChild } : status;
 }
 
-async function ensureArm(paths, sessionID, client, predecessorArmPid = "", includeArmChild = false) {
+async function ensureArm(paths, sessionID, ctx, predecessorArmPid = "", includeArmChild = false, generation = activeGeneration) {
+  if (!generationIsActive(generation)) return armAttempt("disposed", null, includeArmChild);
   let launchResult = null;
   if (!launchInFlight) {
-    const launch = beginArm(paths, sessionID, client, predecessorArmPid);
+    const launch = beginArm(paths, sessionID, ctx, predecessorArmPid, generation);
     launchInFlight = launch;
     try {
       launchResult = await launch;
@@ -477,19 +475,55 @@ async function ensureArm(paths, sessionID, client, predecessorArmPid = "", inclu
   return armAttempt(await waitForArmReady(armChild), armChild, includeArmChild);
 }
 
-export const FmPrimaryWatchArm = async ({ client, directory, worktree }) => {
-  const root = worktree ? resolvePath(worktree) : await resolveRoot(directory);
-  const paths = effectivePaths(root);
-  globalThis[COORDINATOR_KEY] = {
-    ensureArmed: (sessionID, activeClient) => ensureArm(paths, sessionID, activeClient ?? client),
-  };
+async function disposeWatchArm(generation, coordinator) {
+  if (!generationIsActive(generation)) return;
+  activeGeneration += 1;
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = null;
+  retryFailures = 0;
+  launchInFlight = null;
+  restorationInFlight = null;
+  const armChild = child;
+  child = null;
+  setArmStatus("idle");
+  if (globalThis[COORDINATOR_KEY] === coordinator) delete globalThis[COORDINATOR_KEY];
+  await retireArm(armChild);
+  armClose = new WeakMap();
+  armReadiness = new WeakMap();
+  armRecovery = new WeakMap();
+}
 
-  return {
-    event: async ({ event }) => {
-      if (event.type !== "session.idle") return;
-      const sessionID = event.properties?.sessionID;
-      if (!sessionID) return;
-      void ensureArm(paths, sessionID, client);
-    },
+export async function createWatchArmHandler(ctx, generation = ++activeGeneration) {
+  const root = pluginRoot(ctx);
+  const paths = effectivePaths(root);
+  const coordinator = {
+    ensureArmed: (sessionID, activeContext) => ensureArm(paths, sessionID, activeContext ?? ctx, "", false, generation),
   };
+  globalThis[COORDINATOR_KEY] = coordinator;
+
+  const handleEvent = async (event) => {
+    if (!generationIsActive(generation)) return;
+    if (!executionEnded(event)) return;
+    const sessionID = event.data.sessionID;
+    if (!sessionID) return;
+    void ensureArm(paths, sessionID, ctx, "", false, generation);
+  };
+  handleEvent.coordinator = coordinator;
+  handleEvent.generation = generation;
+  return handleEvent;
+}
+
+export default {
+  id: "firstmate.primary-watch-arm",
+  async setup(ctx) {
+    if (activeGeneration) {
+      await disposeWatchArm(activeGeneration, globalThis[COORDINATOR_KEY]);
+    }
+    const handleEvent = await createWatchArmHandler(ctx);
+    const unsubscribe = subscribeToEvents(ctx, handleEvent);
+    return async () => {
+      unsubscribe();
+      await disposeWatchArm(handleEvent.generation, handleEvent.coordinator);
+    };
+  },
 };

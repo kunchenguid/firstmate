@@ -115,8 +115,8 @@ run_ahoy_case() {
   first_out=$(
     cd "$AHOY_PROJECT" &&
       OPENCODE_DB="$db" OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
-        OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
-        opencode run --pure --format json "$preceding"
+        OPENCODE_CONFIG_CONTENT='{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}' \
+        opencode run --standalone --format json "$preceding"
   ) || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode Ahoy $label setup exited $status: $first_out"
   session_id=$(printf '%s\n' "$first_out" | jq -r 'select(.sessionID != null) | .sessionID' | head -1)
@@ -126,8 +126,8 @@ run_ahoy_case() {
   second_out=$(
     cd "$AHOY_PROJECT" &&
       OPENCODE_DB="$db" OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
-        OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
-        opencode run --pure --format json --session "$session_id" "/ahoy"
+        OPENCODE_CONFIG_CONTENT='{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}' \
+        opencode run --standalone --format json --session "$session_id" "/ahoy"
   ) || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode Ahoy $label case exited $status: $second_out"
   assistant_text=$(printf '%s\n' "$second_out" | jq -r 'select(.type == "text") | .part.text' | tail -1)
@@ -153,6 +153,9 @@ run_ahoy_transcript_regressions() {
   cp "$ROOT/.opencode/plugins/fm-primary-sessionstart-nudge.js" \
     "$ROOT/.opencode/plugins/package.json" \
     "$AHOY_PROJECT/.opencode/plugins/"
+  mkdir -p "$AHOY_PROJECT/.opencode/plugins/lib"
+  cp "$ROOT/.opencode/plugins/lib/fm-v2-plugin.js" \
+    "$AHOY_PROJECT/.opencode/plugins/lib/fm-v2-plugin.js"
   cp \
     "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" \
@@ -228,28 +231,28 @@ run_native_ahoy_regressions() {
     cd "$AHOY_PROJECT" &&
       OPENCODE_DB="$first_db" FM_HOME="$first_home" \
         OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
-        OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
-        opencode run --format json --auto "/ahoy"
+        OPENCODE_CONFIG_CONTENT='{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}' \
+        opencode run --standalone --format json --auto "/ahoy"
   ) >/dev/null || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode native first-message Ahoy exited $status"
-  session_id=$(sqlite3 "$first_db" 'select id from session order by time_created desc limit 1;')
+  session_id=$(sqlite3 "$first_db" 'select id from session_v2 order by time_created desc limit 1;')
   startup_text=$(sqlite3 -json "$first_db" \
-    "select json_extract(p.data,'$.text') text from message m join part p on p.message_id=m.id where json_extract(m.data,'$.role')='user' and json_extract(p.data,'$.text') like '%FIRSTMATE_OP:%' order by m.time_created limit 1;" \
+    "select json_extract(m.data,'$.text') text from session_message m where m.type='user' and json_extract(m.data,'$.text') like '%FIRSTMATE_OP:%' order by m.time_created limit 1;" \
     | jq -r '.[0].text')
   [ "$startup_text" = "$CURRENT_START" ] \
     || fail "OpenCode native first-message session stored an unexpected typed startup input: $startup_text"
   assistant_text=$(sqlite3 -json "$first_db" \
-    "select json_extract(p.data,'$.text') text from message m join part p on p.message_id=m.id where json_extract(m.data,'$.role')='assistant' and json_extract(p.data,'$.type')='text' order by m.time_created desc limit 1;" \
+    "select c.value->>'text' text from session_message m, json_each(json_extract(m.data,'$.content')) c where m.type='assistant' and c.value->>'type'='text' order by m.time_created desc, m.seq desc limit 1;" \
     | jq -r '.[0].text')
   printf '%s\n' "$assistant_text" | grep -Fq "AHOY_BEARINGS_BRANCH" \
     || fail "OpenCode native first-message Ahoy did not take Bearings: $assistant_text"
   [ "$(sed -n '1p' "$first_home/state/session-start-count")" = 1 ] \
     || fail "OpenCode native first-message Ahoy did not preserve one session-start execution"
-  session_count=$(sqlite3 "$first_db" 'select count(*) from session;')
+  session_count=$(sqlite3 "$first_db" 'select count(*) from session_v2;')
   [ "$session_count" = 1 ] || fail "OpenCode native first-message Ahoy left the original session"
 
   "$TMUX" -L "$SOCKET" new-session -d -s "$native_session" -c "$AHOY_PROJECT" \
-    "env OPENCODE_DB='$later_db' FM_HOME='$later_home' OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' opencode --auto"
+    "env OPENCODE_DB='$later_db' FM_HOME='$later_home' OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 OPENCODE_CONFIG_CONTENT='{\"permissions\":[{\"action\":\"*\",\"resource\":\"*\",\"effect\":\"allow\"}]}' opencode --standalone --auto"
   i=0
   while [ "$i" -lt 120 ]; do
     "$TMUX" -L "$SOCKET" capture-pane -p -t "$native_session" 2>/dev/null | grep -Fq "$OPENCODE_VERSION" && break
@@ -260,9 +263,9 @@ run_native_ahoy_regressions() {
   "$TMUX" -L "$SOCKET" send-keys -t "$native_session" -l "Respond exactly PRIOR_BOUNDARY_ACK."
   "$TMUX" -L "$SOCKET" send-keys -t "$native_session" Enter
   wait_for_db_count "$later_db" \
-    "select count(*) from message m join part p on p.message_id=m.id where json_extract(m.data,'$.role')='assistant' and json_extract(p.data,'$.type')='text' and json_extract(p.data,'$.text') like '%PRIOR_BOUNDARY_ACK%';" \
+    "select count(*) from session_message m, json_each(json_extract(m.data,'$.content')) c where m.type='assistant' and c.value->>'type'='text' and c.value->>'text' like '%PRIOR_BOUNDARY_ACK%';" \
     1 || fail "OpenCode native later-message setup did not preserve the genuine captain boundary"
-  session_id=$(sqlite3 "$later_db" 'select id from session order by time_created desc limit 1;')
+  session_id=$(sqlite3 "$later_db" 'select id from session_v2 order by time_created desc limit 1;')
   [ "$(sed -n '1p' "$later_home/state/session-start-count")" = 1 ] \
     || fail "OpenCode native later-message setup did not run session start exactly once"
   "$TMUX" -L "$SOCKET" kill-server
@@ -272,18 +275,18 @@ run_native_ahoy_regressions() {
     cd "$AHOY_PROJECT" &&
       OPENCODE_DB="$later_db" FM_HOME="$later_home" \
         OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_DISABLE_LSP_DOWNLOAD=1 \
-        OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' \
-        opencode run --format json --auto --session "$session_id" "/ahoy"
+        OPENCODE_CONFIG_CONTENT='{"permissions":[{"action":"*","resource":"*","effect":"allow"}]}' \
+        opencode run --standalone --format json --auto --session "$session_id" "/ahoy"
   ) >/dev/null || status=$?
   [ "$status" -eq 0 ] || fail "OpenCode native later-message Ahoy exited $status"
   assistant_text=$(sqlite3 -json "$later_db" \
-    "select json_extract(p.data,'$.text') text from message m join part p on p.message_id=m.id where m.session_id='$session_id' and json_extract(m.data,'$.role')='assistant' and json_extract(p.data,'$.type')='text' order by m.time_created desc limit 1;" \
+    "select c.value->>'text' text from session_message m, json_each(json_extract(m.data,'$.content')) c where m.session_id='$session_id' and m.type='assistant' and c.value->>'type'='text' order by m.time_created desc, m.seq desc limit 1;" \
     | jq -r '.[0].text')
   printf '%s\n' "$assistant_text" | grep -Fq "AHOY_BEARINGS_BRANCH" \
     && fail "OpenCode native later-message Ahoy gathered Bearings: $assistant_text"
   [ "$(sed -n '1p' "$later_home/state/session-start-count")" = 1 ] \
     || fail "OpenCode native later-message Ahoy reran session start"
-  session_count=$(sqlite3 "$later_db" 'select count(*) from session;')
+  session_count=$(sqlite3 "$later_db" 'select count(*) from session_v2;')
   [ "$session_count" = 1 ] || fail "OpenCode native later-message Ahoy left the original session"
 }
 
@@ -294,6 +297,7 @@ git clone -q "$ROOT" "$PROJECT"
 mkdir -p "$PROJECT/.opencode/plugins/lib"
 cp "$ROOT/.opencode/plugins/fm-primary-watch-arm.js" "$PROJECT/.opencode/plugins/fm-primary-watch-arm.js"
 cp "$ROOT/.opencode/plugins/lib/fm-operational-input.js" "$PROJECT/.opencode/plugins/lib/fm-operational-input.js"
+cp "$ROOT/.opencode/plugins/lib/fm-v2-plugin.js" "$PROJECT/.opencode/plugins/lib/fm-v2-plugin.js"
 cp "$ROOT/bin/fm-watch-arm.sh" "$PROJECT/bin/fm-watch-arm.sh"
 cp "$ROOT/bin/fm-operational-input.sh" "$PROJECT/bin/fm-operational-input.sh"
 chmod +x "$PROJECT/bin/fm-operational-input.sh"
@@ -303,7 +307,7 @@ printf 'project=fixture\n' > "$HOME_DIR/state/opencode-e2e.meta"
 # shellcheck disable=SC2016 # The model, not this test shell, expands FM_HOME.
 PROMPT='Use the terminal to run `printf ready > "$FM_HOME/state/opencode-model-initial"`, then respond briefly. If a later watcher wake arrives, run bin/fm-wake-drain.sh, then run `printf handled > "$FM_HOME/state/opencode-model-handled"`. Never run or request any watcher arm command.'
 "$TMUX" -L "$SOCKET" new-session -d -s "$SESSION" -c "$PROJECT" \
-  "env OPENCODE_CONFIG_CONTENT='{\"permission\":{\"*\":\"allow\"}}' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; opencode --auto; rc=\$?; printf \"OPENCODE_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
+  "env OPENCODE_CONFIG_CONTENT='{\"permissions\":[{\"action\":\"*\",\"resource\":\"*\",\"effect\":\"allow\"}]}' FM_HOME='$HOME_DIR' FM_ROOT_OVERRIDE='$PROJECT' FM_POLL=1 FM_SIGNAL_GRACE=0 FM_HEARTBEAT=600 bash -lc 'printf \"%s\\n\" \"\$\$\" > \"\$FM_HOME/state/.lock\"; opencode --standalone --auto; rc=\$?; printf \"OPENCODE_EXIT=%s\\n\" \"\$rc\"; sleep 300'"
 
 # Send the initial prompt through the ready composer so this exercises the same
 # persistent TUI path as a primary session.
