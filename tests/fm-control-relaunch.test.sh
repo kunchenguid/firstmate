@@ -918,6 +918,93 @@ test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
   pass "fm-control relaunch: invalid configured effort is ignored before stop"
 }
 
+# A secondmate's own config/secondmate-harness.d/<id> pin wins over the global
+# file on relaunch, and a sibling's pin is never read for it.
+test_secondmate_relaunch_picks_up_its_per_secondmate_pin() {
+  local dir home out rc
+  dir=$(new_case smperpin sm10)
+  home="$dir/home"
+  mkdir -p "$home/config/secondmate-harness.d" "$home/data/sm10"
+  printf 'claude\n' > "$home/config/secondmate-harness"
+  printf 'codex some-model high\n' > "$home/config/secondmate-harness.d/sm10"
+  printf 'grok\n' > "$home/config/secondmate-harness.d/sibling"
+  printf '# secondmate brief\n' > "$home/data/sm10/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm10\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm10"
+    echo "endpoint_task_id=sm10"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm10.meta"
+  printf '%s\n' "fm-sm10" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" sm10 relaunch); rc=$?
+  expect_code 0 "$rc" "a per-secondmate pin should relaunch"$'\n'"$out"
+  [ "$(journal_field "$dir" sm10 to_harness)" = codex ] \
+    || fail "the relaunch should pick up the mate's own pin over the global claude, got '$(journal_field "$dir" sm10 to_harness)'"
+  [ "$(journal_field "$dir" sm10 to_model)" = some-model ] \
+    || fail "the per-secondmate model token should come with the pin"
+  [ "$(journal_field "$dir" sm10 to_effort)" = high ] \
+    || fail "the per-secondmate effort token should come with the pin"
+  [ "$(meta_field "$dir" sm10 harness)" = codex ] \
+    || fail "the durable record should follow the per-secondmate pin"
+  pass "fm-control relaunch: a secondmate relaunch re-resolves its own per-secondmate pin over the global file"
+}
+
+# An unusable per-secondmate pin is refused on the pre-stop side: the agent
+# keeps running, the record is untouched, and neither the global file nor the
+# recorded harness is substituted.
+test_secondmate_relaunch_refuses_invalid_per_secondmate_pin_before_stop() {
+  local dir home out rc
+  dir=$(new_case smbadpin sm11)
+  home="$dir/home"
+  mkdir -p "$home/config/secondmate-harness.d" "$home/data/sm11"
+  printf 'codex\n' > "$home/config/secondmate-harness"
+  printf 'codex some-model high extra\n' > "$home/config/secondmate-harness.d/sm11"
+  printf '# secondmate brief\n' > "$home/data/sm11/brief.md"
+  fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
+  mkdir -p "$dir/smhome/state" "$dir/smhome/data" "$dir/smhome/bin"
+  printf 'sm11\n' > "$dir/smhome/.fm-secondmate-home"
+  printf '# agents\n' > "$dir/smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-sm11"
+    echo "endpoint_task_id=sm11"
+    echo "worktree=$dir/smhome"
+    echo "project=$dir/smhome"
+    echo "harness=claude"
+    echo "kind=secondmate"
+    echo "mode=secondmate"
+    echo "yolo=off"
+    echo "model=default"
+    echo "effort=default"
+    echo "home=$dir/smhome"
+  } > "$home/state/sm11.meta"
+  printf '%s\n' "fm-sm11" > "$dir/fake/windows"
+  printf '%s' "$dir/smhome" > "$dir/fake/cwd"
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" sm11 relaunch); rc=$?
+  expect_code 1 "$rc" "an unusable per-secondmate pin must refuse the relaunch"$'\n'"$out"
+  assert_contains "$out" "config/secondmate-harness.d/sm11" "the refusal must name the pin file"
+  [ "$(cat "$dir/fake/command")" = claude ] \
+    || fail "the refusal must land before the running agent is stopped"
+  assert_no_grep '^/exit$' "$dir/fake/literal" "nothing may be stopped on an unusable pin"
+  [ "$(meta_field "$dir" sm11 harness)" = claude ] \
+    || fail "a refused relaunch must leave the durable record on the recorded harness"
+  assert_absent "$home/state/sm11.control-relaunch" "no transaction may open for an unusable pin"
+  pass "fm-control relaunch: an unusable per-secondmate pin refuses before stop and never falls back to the global file"
+}
+
 # muse is a verified adapter, but only for crewmates and scouts: it has no
 # primary supervision protocol, so bin/fm-spawn.sh refuses it for a secondmate.
 # That refusal alone is not enough here, because the launch owner is reached
@@ -2219,6 +2306,8 @@ test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
+test_secondmate_relaunch_picks_up_its_per_secondmate_pin
+test_secondmate_relaunch_refuses_invalid_per_secondmate_pin_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config

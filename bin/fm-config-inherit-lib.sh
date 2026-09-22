@@ -43,8 +43,9 @@
 # Extensible by design: FM_INHERITABLE_CONFIG is the single declared list of
 # config-dir-relative items the primary propagates. Add an item there and every
 # convergence point inherits it - no other change needed. config/secondmate-harness
-# is deliberately NOT in the list: it is the primary's own setting for launching
-# secondmates, and a secondmate never spawns secondmates, so it must not flow
+# and the per-secondmate pins under config/secondmate-harness.d/ are deliberately
+# NOT in the list: they are the primary's own settings for launching
+# secondmates, and a secondmate never spawns secondmates, so they must not flow
 # downstream.
 #
 # That single declaration is also the ONE owner of the inherited-material

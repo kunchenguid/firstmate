@@ -60,10 +60,13 @@
 #              it refuses.
 #              An explicit `default` model or effort clears that
 #              axis for the replacement. With no explicit axis, a secondmate
-#              re-resolves its durable config/secondmate-harness pin (harness
-#              plus its optional model and effort tokens) exactly as any other
-#              respawn does, while a ship or scout keeps the exact adapter
-#              already recorded for it.
+#              re-resolves its durable launch pin (its own
+#              config/secondmate-harness.d/<id> when present, else
+#              config/secondmate-harness; harness plus the optional model and
+#              effort tokens) exactly as any other respawn does, while a ship
+#              or scout keeps the exact adapter already recorded for it. An
+#              unusable per-secondmate pin refuses before anything is stopped
+#              rather than falling through to the global file.
 #              A prefixed raw-command basename cannot reconstruct its launch
 #              command, so relaunch requires an explicit --harness for it.
 #              --note is required for a ship or scout, whose replacement
@@ -707,17 +710,24 @@ resolve_relaunch_profile() {
     # A secondmate's harness, model, and effort are a durable configured pin
     # that every respawn re-resolves (the secondmate-provisioning contract), so
     # a relaunch with no explicit harness picks up a newly configured one
-    # instead of freezing whatever this incarnation happens to run. Crewmates
-    # and scouts deliberately do NOT resolve config here: their harness comes
-    # from firstmate's own dispatch-profile judgment at intake, and silently
-    # re-resolving it would bypass that consultation.
-    CONFIG_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" secondmate 2>/dev/null || true)
-    CONFIG_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
-    CONFIG_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort 2>/dev/null || true)
+    # instead of freezing whatever this incarnation happens to run. The
+    # resolver consults this mate's own config/secondmate-harness.d/<id> before
+    # the global file, and an unusable per-secondmate pin is a refusal here -
+    # on the pre-stop side of the transaction, with the agent still running -
+    # never a silent fall-through to the global file or the prior harness.
+    # Crewmates and scouts deliberately do NOT resolve config here: their
+    # harness comes from firstmate's own dispatch-profile judgment at intake,
+    # and silently re-resolving it would bypass that consultation.
+    CONFIG_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" secondmate "$ID") \
+      || die "secondmate $ID's launch pin could not be resolved, so relaunching it would have to guess a runtime; fix or remove config/secondmate-harness.d/$ID and retry; the running agent was left untouched"
+    CONFIG_MODEL=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model "$ID") \
+      || die "secondmate $ID's launch pin model could not be resolved; the running agent was left untouched"
+    CONFIG_EFFORT=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort "$ID") \
+      || die "secondmate $ID's launch pin effort could not be resolved; the running agent was left untouched"
     case "$CONFIG_EFFORT" in
       ''|low|medium|high|xhigh|max|ultra) ;;
       *)
-        echo "warning: config/secondmate-harness effort token '$CONFIG_EFFORT' is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2
+        echo "warning: secondmate $ID's launch pin effort token '$CONFIG_EFFORT' (config/secondmate-harness.d/$ID or config/secondmate-harness) is not one of low, medium, high, xhigh, max, ultra; ignoring" >&2
         CONFIG_EFFORT=
         ;;
     esac

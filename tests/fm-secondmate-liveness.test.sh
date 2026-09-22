@@ -540,6 +540,139 @@ test_sweep_noop_with_no_secondmate_meta() {
   pass "sweep: a silent no-op with no kind=secondmate meta present (a secondmate home's own natural scoping)"
 }
 
+# make_per_target_tmux <dir>: like make_liveness_tmux, but each window's
+# foreground command comes from $FM_TEST_MODE_DIR/mode.<window>, so one
+# registered mate can be dead while its sibling is alive in the same sweep.
+# The sweep recovers mates concurrently and the spawn owner refuses to create
+# two tasks in one home at once, so a per-secondmate recovery case must never
+# have two dead mates in one sweep. A killed window leaves the inventory until
+# its replacement is created, exactly as make_liveness_tmux models it.
+make_per_target_tmux() {
+  local dir=$1 fakebin
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+target= name= prev=
+for a in "$@"; do
+  [ "$prev" = -t ] && target=$a
+  [ "$prev" = -n ] && name=$a
+  prev=$a
+done
+win=${target##*:}
+win=${win#=}
+modes=${FM_TEST_MODE_DIR:?}
+case "${1:-}" in
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *pane_current_command*) cat "$modes/mode.$win" 2>/dev/null || printf 'zsh\n'; exit 0 ;;
+      esac
+    done
+    exit 0
+    ;;
+  list-windows)
+    for f in "$modes"/mode.*; do
+      w=${f##*/mode.}
+      [ -e "$modes/killed.$w" ] || printf '%s\n' "$w"
+    done
+    exit 0
+    ;;
+  kill-window)
+    printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
+    : > "$modes/killed.$win"
+    exit 0
+    ;;
+  new-window)
+    printf '%s\n' "$*" >> "${FM_TMUX_CALL_LOG:?}"
+    rm -f "$modes/killed.$name"
+    exit 0
+    ;;
+  has-session) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' "$fakebin"
+}
+
+# Recovery re-resolves each registered secondmate's OWN launch pin: with two
+# mates registered side by side, one pinned through
+# config/secondmate-harness.d/<id> and one on the global file, each comes back
+# on its own runtime and neither receives the other's profile.
+test_sweep_recovers_each_registered_secondmate_on_its_own_pin() {
+  local w fb tmuxfb log out modes meta
+  w=$(new_world sweep-per-secondmate-pin)
+  mkdir -p "$w/home/config/secondmate-harness.d"
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  printf 'pi-signed some-model high\n' > "$w/home/config/secondmate-harness.d/sm1"
+  add_sm_home "$w" sm1 firstmate:fm-sm1 pi-signed
+  add_sm_home "$w" sm2 firstmate:fm-sm2 codex
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_per_target_tmux "$w/per-target-tmux")
+  modes="$w/modes"; mkdir -p "$modes"
+  log="$w/calls.log"; : > "$log"
+
+  # Sweep 1: the pinned mate is dead, its unpinned sibling is alive.
+  printf 'zsh\n' > "$modes/mode.fm-sm1"
+  printf 'codex\n' > "$modes/mode.fm-sm2"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" unused "$log" FM_TEST_MODE_DIR="$modes")
+  assert_not_contains "$out" "respawn failed" "the dead pinned mate should be respawned"$'\n'"$out"
+  [ "$(grep -c new-window "$log")" -eq 1 ] || fail "exactly the dead pinned mate should be relaunched: $(cat "$log")"
+  assert_contains "$(grep new-window "$log")" "fm-sm1" "the relaunch must be the pinned mate's"
+  meta="$w/home/state/sm1.meta"
+  [ "$(grep '^harness=' "$meta" | tail -1)" = harness=pi-signed ] \
+    || fail "recovery must re-resolve sm1's own pin, got '$(grep '^harness=' "$meta" | tail -1)'"
+  [ "$(grep '^model=' "$meta" | tail -1)" = model=some-model ] \
+    || fail "recovery must carry sm1's pinned model, got '$(grep '^model=' "$meta" | tail -1)'"
+  [ "$(grep '^effort=' "$meta" | tail -1)" = effort=high ] \
+    || fail "recovery must carry sm1's pinned effort, got '$(grep '^effort=' "$meta" | tail -1)'"
+  meta="$w/home/state/sm2.meta"
+  [ "$(grep '^harness=' "$meta" | tail -1)" = harness=codex ] || fail "the live sibling's record must be untouched"
+  assert_no_grep '^model=' "$meta" "the live sibling must not receive its pinned sibling's model"
+
+  # Sweep 2: the pinned mate is back and its unpinned sibling has died.
+  : > "$log"
+  printf 'pi-signed\n' > "$modes/mode.fm-sm1"
+  printf 'zsh\n' > "$modes/mode.fm-sm2"
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" unused "$log" FM_TEST_MODE_DIR="$modes")
+  assert_not_contains "$out" "respawn failed" "the dead unpinned mate should be respawned"$'\n'"$out"
+  [ "$(grep -c new-window "$log")" -eq 1 ] || fail "exactly the dead unpinned mate should be relaunched: $(cat "$log")"
+  assert_contains "$(grep new-window "$log")" "fm-sm2" "the relaunch must be the unpinned mate's"
+  meta="$w/home/state/sm2.meta"
+  [ "$(grep '^harness=' "$meta" | tail -1)" = harness=codex ] \
+    || fail "recovery must leave the unpinned sm2 on the global file, got '$(grep '^harness=' "$meta" | tail -1)'"
+  [ "$(grep '^model=' "$meta" | tail -1)" = model=default ] \
+    || fail "the unpinned sm2 must not receive its sibling's model, got '$(grep '^model=' "$meta" | tail -1)'"
+  [ "$(grep '^effort=' "$meta" | tail -1)" = effort=default ] \
+    || fail "the unpinned sm2 must not receive its sibling's effort"
+  meta="$w/home/state/sm1.meta"
+  [ "$(grep '^harness=' "$meta" | tail -1)/$(grep '^model=' "$meta" | tail -1)/$(grep '^effort=' "$meta" | tail -1)" \
+      = "harness=pi-signed/model=some-model/effort=high" ] \
+    || fail "the live pinned mate's record must stay exactly on its own pin"
+  pass "sweep: recovery re-resolves each registered secondmate's own pin and moves nothing else"
+}
+
+# An unusable per-secondmate pin makes that mate's recovery a reported failure
+# naming the pin, never a relaunch on the global file's runtime.
+test_sweep_reports_unusable_per_secondmate_pin() {
+  local w fb tmuxfb log out
+  w=$(new_world sweep-bad-secondmate-pin)
+  mkdir -p "$w/home/config/secondmate-harness.d"
+  printf 'codex\n' > "$w/home/config/secondmate-harness"
+  printf 'codex some-model high extra\n' > "$w/home/config/secondmate-harness.d/sm1"
+  add_sm_home "$w" sm1 firstmate:fm-sm1
+  fb=$(make_toolchain "$w"); tmuxfb=$(make_liveness_tmux "$w")
+  log="$w/calls.log"; : > "$log"
+
+  out=$(run_bootstrap "$tmuxfb:$fb" "$w/home" zsh "$log")
+
+  assert_contains "$out" "SECONDMATE_LIVENESS: secondmate sm1: respawn failed after" \
+    "an unusable pin must surface as a failed respawn"
+  assert_contains "$out" "config/secondmate-harness.d/sm1" "the failure must name the pin"
+  assert_not_contains "$(cat "$log")" "new-window" "no relaunch may happen on the global runtime instead: $(cat "$log")"
+  pass "sweep: an unusable per-secondmate pin is reported and never recovered onto another runtime"
+}
+
 test_tmux_agent_state_classifies
 test_tmux_agent_state_rejects_malformed_targets_before_probe
 test_herdr_agent_state_preserves_husk_classifier
@@ -548,6 +681,8 @@ test_sweep_respawns_confirmed_dead_secondmate
 test_sweep_leaves_alive_secondmate_untouched
 test_sweep_respawns_authoritatively_missing_pi_secondmate
 test_sweep_respawns_authoritatively_missing_pi_signed_secondmate
+test_sweep_recovers_each_registered_secondmate_on_its_own_pin
+test_sweep_reports_unusable_per_secondmate_pin
 test_sweep_never_acts_on_ambiguous_existing_process
 test_sweep_never_acts_on_transient_unreadability
 test_sweep_reports_missing_endpoint_relaunch_failure

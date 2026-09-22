@@ -350,15 +350,25 @@ When it is absent or contains `default`, crewmates mirror the firstmate's own ha
 The first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>]`.
 A bare `<harness>` preserves the previous behavior: harness only, with no model or effort launch flag.
 When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model or effort is read from that file.
-`fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
+`fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from the governing secondmate file; `config/crew-harness` remains a bare adapter-name file.
 Changing this pin affects the next secondmate spawn or control-plane relaunch; the relaunch profile rules are owned by [`docs/agent-control.md`](agent-control.md#transactional-relaunch).
-An explicit harness argument to `fm-spawn.sh` still overrides either config file for that spawn only.
-An explicit `--model` or `--effort` overrides the matching token from `config/secondmate-harness`; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
+
+### Per-secondmate launch pins (config/secondmate-harness.d/<id>)
+
+`config/secondmate-harness.d/<id>` is an optional local, gitignored per-secondmate pin for the secondmate registered as `<id>`: a regular file holding the same `<harness> [<model>] [<effort>]` line, read only when a launch names that id.
+A secondmate launch resolves, in order, the explicit per-spawn harness, model, and effort flags, then `config/secondmate-harness.d/<id>`, then `config/secondmate-harness`, then `config/crew-harness`, then the primary's own harness.
+A `default` harness token at either file level defers to the next level and reads no model or effort from that file, and a home with no per-secondmate file behaves exactly as before the directory existed.
+Every path that launches or relaunches a secondmate re-resolves that same pin for its id: `fm-spawn.sh <id> --secondmate`, the session-start liveness recovery, `fm-control.sh <id> relaunch`, and the `/updatefirstmate` restart pass for local and remote mates alike, so one secondmate can be pinned to its own runtime, model, and effort without moving any other.
+A per-secondmate pin is explicit configuration, so an unusable one refuses the launch or relaunch with the reason instead of falling through to the global file: the id must be a valid task id, the directory and the file must be real entries rather than symlinks, the file must be a regular readable file holding a harness line, and that line may carry at most three tokens.
+An unverified harness token in a per-secondmate pin is refused by the launch and control owners exactly as one in the global file is, and an unrecognized effort token is warned about and ignored exactly as there.
+`fm-harness.sh secondmate <id>`, `fm-harness.sh secondmate-model <id>`, and `fm-harness.sh secondmate-effort <id>` print the values the pin resolves to and exit non-zero with the reason on an invalid pin.
+An explicit harness argument to `fm-spawn.sh` still overrides every one of these config files for that spawn only.
+An explicit `--model` or `--effort` overrides the matching token from the governing file; for a local route, an explicit harness or raw launch command starts with clean model and effort defaults unless those flags are also passed.
 Remote secondmate routes accept verified harness adapters only and reject raw launch commands.
 When `config/crew-dispatch.json` exists, crewmate and scout spawns require an explicit resolved harness instead of automatically falling back to `config/crew-harness`.
 The inherited-local-material contract is owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); its harness-relevant consequence is that a secondmate's own crewmates use the primary's dispatch profiles and static harness value.
 Those inherited values are defaults and rules only; `fm-spawn` still permits a consciously chosen explicit runtime outside the config.
-`config/secondmate-harness` is not inherited because secondmates do not launch secondmates.
+Neither `config/secondmate-harness` nor `config/secondmate-harness.d/` is inherited, because secondmates do not launch secondmates.
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a per-task `.fm-kimi-turnend` pointer in the worktree, and records the matching private registry token for teardown.
 Kimi continues to use the captain's normal Kimi home, including the existing config, skills, and memory; Firstmate does not create an isolated Kimi home.
@@ -454,7 +464,7 @@ Every claude launch's inline `--settings` JSON also carries `"attribution":{"com
 The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
 When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
 Batch spawns satisfy the same requirement with a shared `--harness`.
-Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
+Secondmate spawns are exempt and still resolve through their per-secondmate pin or `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics.
 `AGENTS.md` section 4 owns the always-loaded dispatch intake boundary, and `quota-array-dispatch` owns the completion-aware profile-array selection procedure.
 

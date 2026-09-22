@@ -839,6 +839,69 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
   pass "T16 an already-current mate with an unprovable runtime keeps the honest nudge path"
 }
 
+# --- T8b: a local restart lands on the mate's OWN per-secondmate pin ---------
+test_local_restart_uses_the_per_secondmate_pin() {
+  local dir out rc
+  dir=$(new_case per-pin)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  mkdir -p "$dir/home/config/secondmate-harness.d"
+  printf 'claude\n' > "$dir/home/config/secondmate-harness"
+  printf 'codex\n' > "$dir/home/config/secondmate-harness.d/sm1"
+  printf 'codex' > "$dir/fake/becomes"
+
+  out=$(run_restart "$dir" sm1); rc=$?
+
+  expect_code 0 "$rc" "a per-secondmate pinned local restart should succeed"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1 (codex)" \
+    "the restart should land on the mate's own pin, not the global claude"
+  [ "$(grep '^harness=' "$dir/home/state/sm1.meta" | tail -1)" = "harness=codex" ] \
+    || fail "the durable record did not follow the replacement onto the per-secondmate pin"
+  pass "T8b a local restart re-resolves the mate's own per-secondmate pin over the global file"
+}
+
+# --- T6b: a remote restart carries the mate's OWN pin across the hop ---------
+test_remote_restart_carries_the_per_secondmate_pin() {
+  local dir out rc relaunch_line
+  dir=$(new_case remote-per-pin)
+  setup_remote_case "$dir" sm2 ok
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
+  mkdir -p "$dir/home/config/secondmate-harness.d"
+  printf 'claude\n' > "$dir/home/config/secondmate-harness"
+  printf 'codex big-model high\n' > "$dir/home/config/secondmate-harness.d/sm2"
+  printf 'grok\n' > "$dir/home/config/secondmate-harness.d/other"
+
+  out=$(run_restart "$dir" fm-sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 0 "$rc" "a remote mate with its own pin should restart over its transport hop"$'\n'"$out"
+  assert_contains "$out" "restarted: sm2 on remote-mac (codex)" \
+    "a remote restart should report the mate's own pinned runtime"
+  relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
+    || fail "the host-local relaunch did not carry the mate's own per-secondmate pin: $relaunch_line"
+  pass "T6b a remote restart carries the mate's own per-secondmate pin across the hop, not the global file"
+}
+
+# --- T6c: an unusable per-secondmate pin keeps the mate on the nudge path ----
+test_remote_restart_with_unusable_per_secondmate_pin_is_nudged() {
+  local dir out rc
+  dir=$(new_case remote-bad-pin)
+  setup_remote_case "$dir" sm2 ok
+  mkdir -p "$dir/home/config/secondmate-harness.d"
+  printf 'codex big-model high extra\n' > "$dir/home/config/secondmate-harness.d/sm2"
+
+  out=$(run_restart "$dir" sm2); rc=$?
+
+  expect_code 3 "$rc" "an unusable pin must not be reported as a reload"$'\n'"$out"
+  assert_contains "$out" "nudged: sm2:" "an unusable pin must fall back to the re-read message"
+  assert_contains "$out" "config/secondmate-harness.d/sm2" "the fallback must name the pin that could not be resolved"
+  assert_not_contains "$out" "restarted: sm2" "an unusable pin must never be reported as restarted"
+  assert_no_grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" \
+    "no relaunch may cross the hop when the pin cannot be resolved"
+  pass "T6c an unusable per-secondmate pin keeps a remote mate running and reports the honest nudge"
+}
+
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
@@ -849,6 +912,9 @@ test_refused_restart_falls_back_without_claiming_a_reload
 test_local_restart_uses_the_home_pin_and_reports_what_ran
 test_native_ultra_restart_keeps_local_and_remote_profiles
 test_remote_mate_restarts_over_the_transport_hop
+test_local_restart_uses_the_per_secondmate_pin
+test_remote_restart_carries_the_per_secondmate_pin
+test_remote_restart_with_unusable_per_secondmate_pin_is_nudged
 test_unreachable_host_is_reported_unknown
 test_concurrent_reply_cannot_release_persist_gate
 test_persist_waits_are_polled_together

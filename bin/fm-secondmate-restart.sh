@@ -267,14 +267,22 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
   if [ "${PLACEMENT[i]}" = remote ]; then
     # A local relaunch re-resolves this home's durable secondmate pin on its own,
     # which is the one owner of that resolution. A remote one cannot: it runs in
-    # a home whose config/secondmate-harness is deliberately NOT inherited, so
-    # the file on that host belongs to a different home and re-resolving there
-    # would silently move the mate onto another runtime. Resolve the pin here and
-    # pass it explicitly, so both placements land on the same decision.
-    HARNESS[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate 2>/dev/null || true)
+    # a home whose config/secondmate-harness and per-secondmate
+    # config/secondmate-harness.d/ pins are deliberately NOT inherited, so the
+    # files on that host belong to a different home and re-resolving there
+    # would silently move the mate onto another runtime. Resolve the pin here
+    # for THIS mate's id and pass it explicitly, so both placements land on the
+    # same decision. An unusable per-secondmate pin is a pre-restart capability
+    # failure like any other: the mate keeps its agent and gets the nudge,
+    # never a restart onto a guessed runtime.
+    if ! HARNESS[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate "$id" 2>/dev/null); then
+      REASON[i]="its launch pin config/secondmate-harness.d/$id could not be resolved, so the replacement's runtime could not be chosen"
+      i=$((i + 1))
+      continue
+    fi
     [ -n "${HARNESS[i]}" ] || HARNESS[i]=$FM_SECONDMATE_RESTART_HARNESS
-    MODEL[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model 2>/dev/null || true)
-    EFFORT[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort 2>/dev/null || true)
+    MODEL[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model "$id" 2>/dev/null || true)
+    EFFORT[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort "$id" 2>/dev/null || true)
     case "${EFFORT[i]}" in
       ''|low|medium|high|xhigh|max|ultra) ;;
       *) EFFORT[i]="" ;;
