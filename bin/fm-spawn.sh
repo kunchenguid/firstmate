@@ -229,7 +229,9 @@
 #   expected_head= in task metadata, and rechecks both cleanliness and HEAD
 #   immediately before submitting the worker launch. It refuses origin-less
 #   worktrees, relaunches, secondmates, and batches rather than silently changing
-#   their existing ownership semantics. With no flag, behavior is unchanged.
+#   their existing ownership semantics. Orca is also refused because its
+#   separate worktree lifecycle is not part of this Treehouse-backed contract.
+#   With no flag, behavior is unchanged.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -1582,6 +1584,10 @@ if [ "$RELAUNCH" -eq 0 ]; then
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
+  if [ "$BACKEND" = orca ] && [ "$EXPECTED_HEAD_SET" -eq 1 ]; then
+    echo "error: backend=orca does not support --expected-head; exact candidates require a Treehouse-backed fresh ship or scout spawn" >&2
+    exit 1
+  fi
   if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=orca does not support --secondmate spawns yet" >&2
     exit 1
