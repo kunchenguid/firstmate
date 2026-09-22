@@ -516,6 +516,52 @@ test_secondmate_claude_spawn_arms_busy_for_the_stall_gate() {
   pass "a claude secondmate spawn arms the busy contract the stall gate can see, and Stop does not wake the parent"
 }
 
+run_secondmate_stop_guard() { # <sm-home>
+  printf '{"stop_hook_active":false,"session_id":"sm-guard"}' \
+    | CLAUDECODE=1 FM_ROOT_OVERRIDE="$1" FM_CLAUDE_AUTOARM_SYNC_WAIT_MS=100 \
+      bash "$ROOT/bin/fm-turnend-guard.sh" --claude >/dev/null 2>&1
+}
+
+# The mate home's tracked Stop guard runs beside the busy Stop hook. When it
+# blocks, the forced continuation fires no UserPromptSubmit, so the guard must
+# reopen busy for the same gen; an allowed Stop must leave idle alone.
+test_secondmate_claude_stop_guard_block_reopens_busy() {
+  local case_dir id=sm-claude-guard primary sm state settings out status
+  case_dir="$TMP_ROOT/sm-claude-guard"
+  primary="$case_dir/primary"
+  sm="$case_dir/sm"
+  out=$(spawn_secondmate_harness "$case_dir" "$id" claude) \
+    || fail "claude secondmate spawn failed: $out"
+  state="$primary/state"
+  settings="$sm/.claude/settings.local.json"
+  git -C "$sm" status --porcelain | grep -F '.fm-busy-reopen' >/dev/null \
+    && fail "the secondmate busy reopen pointer is not excluded from the home's git status"
+
+  run_claude_hook "$settings" Stop || fail "secondmate Stop hook failed"
+  : > "$sm/state/child.meta"
+  run_secondmate_stop_guard "$sm"; status=$?
+  expect_code 2 "$status" "the secondmate guard must block a blind Stop with a task in flight"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy claude-hook" ] || fail "a blocked Stop must reopen busy for the continuation, got '$out'"
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" \
+    > "$sm/state/.wake-queue"
+  secondmate_stall_watch "$primary" "$id" "$case_dir/watch-blocked.out"
+  grep -F 'secondmate wake-loop stalled' "$case_dir/watch-blocked.out" >/dev/null \
+    && fail "a secondmate inside a guard-forced continuation was escalated as stalled: $(cat "$case_dir/watch-blocked.out")"
+
+  rm -f "$sm/state/child.meta"
+  run_claude_hook "$settings" Stop || fail "secondmate Stop hook failed"
+  run_secondmate_stop_guard "$sm"; status=$?
+  expect_code 0 "$status" "the secondmate guard must allow a Stop with nothing to supervise"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] || fail "an allowed Stop must keep the idle verdict, got '$out'"
+  sleep 2
+  secondmate_stall_watch "$primary" "$id" "$case_dir/watch-allowed.out" 8
+  grep -F "check: secondmate wake-loop stalled: mate=$id row=7" "$case_dir/watch-allowed.out" >/dev/null \
+    || fail "the frozen queue stayed hidden after an allowed Stop: $(cat "$case_dir/watch-allowed.out")"
+  pass "a claude secondmate's blocked Stop reopens busy for the same gen, and an allowed Stop stays idle"
+}
+
 test_secondmate_pi_extension_reports_busy_without_a_parent_turnend() {
   local case_dir id=sm-pi primary state ext launch out
   case_dir="$TMP_ROOT/sm-pi"
@@ -622,6 +668,7 @@ test_secondmate_codex_and_grok_do_not_arm_a_parent_turnend() {
 }
 
 test_secondmate_claude_spawn_arms_busy_for_the_stall_gate
+test_secondmate_claude_stop_guard_block_reopens_busy
 test_secondmate_pi_extension_reports_busy_without_a_parent_turnend
 test_secondmate_omp_extension_reports_busy_without_a_parent_turnend
 test_secondmate_opencode_plugin_closes_without_a_parent_turnend
