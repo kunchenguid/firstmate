@@ -1507,6 +1507,37 @@ teardown_task "$SLOT_REASSIGN_ID" "$HOME_DIR" > "$TMP_ROOT/slot-reassign-teardow
 "$REAL_TREEHOUSE" return --force "$SLOT_REASSIGN_OLD_WT" >/dev/null 2>&1 || true
 pass "real Herdr lab: a durable slot claim naming another task is never adopted by recovery"
 
+# A nested task whose own task space was closed is no longer rendered as an open
+# worktree child. Its recorded checkout is still this task's own durable slot, so
+# recovery must carry that exact checkout instead of allocating a second one and
+# stranding its parked work.
+CLOSED_SPACE_ID=closed-space
+mkdir -p "$HOME_DIR/data/$CLOSED_SPACE_ID"
+write_ship_brief "$HOME_DIR" "$CLOSED_SPACE_ID" 'Closed task space carry fixture.'
+spawn_task "$CLOSED_SPACE_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/closed-space-first.out" 2> "$TMP_ROOT/closed-space-first.err" \
+  || fail "closed-space projected spawn failed: $(cat "$TMP_ROOT/closed-space-first.err")"
+CLOSED_SPACE_META="$HOME_DIR/state/$CLOSED_SPACE_ID.meta"
+CLOSED_SPACE_OLD_WT=$(remember_meta_worktree "$CLOSED_SPACE_META")
+CLOSED_SPACE_MARKER="$(dirname "$(cd "$CLOSED_SPACE_OLD_WT" && pwd -P)")/.fm-slot-owner"
+CLOSED_SPACE_OLD_WSID=$(grep '^herdr_workspace_id=' "$CLOSED_SPACE_META" | cut -d= -f2-)
+lab workspace close "$CLOSED_SPACE_OLD_WSID" >/dev/null \
+  || fail "could not close the task space for closed-space"
+lab worktree list --workspace "$FIRSTMATE_WSID" | jq -e --arg path "$CLOSED_SPACE_OLD_WT" '
+  ([.result.worktrees[]? | select(.path == $path and .is_linked_worktree == true)] | length) == 1
+  and ([.result.worktrees[]? | select(.path == $path and ((.open_workspace_id // "") | length) > 0)] | length) == 0
+' >/dev/null 2>&1 \
+  || fail "closed-space checkout was not a linked but no longer open worktree"
+spawn_task "$CLOSED_SPACE_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/closed-space-resume.out" 2> "$TMP_ROOT/closed-space-resume.err" \
+  || fail "closed-space recovery failed: $(cat "$TMP_ROOT/closed-space-resume.err")"
+CLOSED_SPACE_NEW_WT=$(remember_meta_worktree "$CLOSED_SPACE_META")
+[ "$CLOSED_SPACE_NEW_WT" = "$CLOSED_SPACE_OLD_WT" ] \
+  || fail "closed-space recovery allocated a second checkout instead of carrying its durable slot"
+teardown_task "$CLOSED_SPACE_ID" "$HOME_DIR" > "$TMP_ROOT/closed-space-teardown.out" 2> "$TMP_ROOT/closed-space-teardown.err" \
+  || fail "closed-space teardown failed: $(cat "$TMP_ROOT/closed-space-teardown.err")"
+[ ! -e "$CLOSED_SPACE_MARKER" ] \
+  || fail "closed-space teardown stranded its durable slot claim"
+pass "real Herdr lab: a nested task whose task space was closed carries its own durable checkout through recovery"
+
 # Missing, renamed, and duplicate tokens are read-only recovery diagnostics.
 # The duplicate case allows flat fallback only when every matching pane is
 # positively agent-free.

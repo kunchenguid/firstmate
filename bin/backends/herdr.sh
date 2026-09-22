@@ -2894,13 +2894,19 @@ fm_backend_herdr_projection_recovery_workspace_is_linked_child() {  # <session> 
 # path under the owning home; both survive an earlier flat-fallback recovery
 # that republished metadata at the home container. An unresolvable recorded
 # checkout refuses only when the journal positively identifies a still-open
-# nested child, so a legacy top-level projection keeps its flat fallback. Sets:
+# nested child, so a legacy top-level projection keeps its flat fallback. A
+# resolvable recorded checkout that a valid listing positively shows is no
+# longer an open linked child is reported separately, because only the caller
+# can prove it is still this task's own durable slot before carrying it. Sets:
 #   FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE    proven checkout path, else empty
+#   FM_BACKEND_HERDR_RECOVERY_NESTED_UNOPENED    resolved recorded checkout that
+#                                                is not currently an open child
 #   FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS   1 when recovery must refuse
 fm_backend_herdr_projection_recovery_classify_nested_worktree() {  # <session> <journal> <task-id> <recorded-worktree> <parent-label> <project>
   local session=$1 journal=$2 id=$3 recorded=$4 parent_label=$5 project=$6
   local resolved parent workspace proof status journal_v2=0
   FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE=""
+  FM_BACKEND_HERDR_RECOVERY_NESTED_UNOPENED=""
   FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS=0
   parent=""
   workspace=""
@@ -2935,6 +2941,9 @@ fm_backend_herdr_projection_recovery_classify_nested_worktree() {  # <session> <
   if [ "$status" -eq 0 ]; then
     # shellcheck disable=SC2034  # caller consumes the recovery-classification globals
     FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE=$proof
+  elif [ "$status" -eq 1 ]; then
+    # shellcheck disable=SC2034  # caller consumes the recovery-classification globals
+    FM_BACKEND_HERDR_RECOVERY_NESTED_UNOPENED=$resolved
   elif [ "$status" -eq 2 ]; then
     # shellcheck disable=SC2034  # caller consumes the recovery-classification globals
     FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS=1

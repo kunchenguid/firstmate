@@ -2017,31 +2017,34 @@ test_projection_recovery_classification_uses_journal_workspace() {
       bash -c '
         . "$0/bin/backends/herdr.sh"
         fm_backend_herdr_projection_recovery_classify_nested_worktree fmtest "$1" "$2" "$3" firstmate "$4"
-        printf "%s|%s\n" "$FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE" "$FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS"
+        printf "%s|%s|%s\n" "$FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE" "$FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS" "$FM_BACKEND_HERDR_RECOVERY_NESTED_UNOPENED"
       ' "$ROOT" "$1" "$2" "$3" "$proj"
   }
   open_json='{"result":{"type":"worktree_list","source":{"source_workspace_id":"'"$parent"'","source_checkout_path":"'"$proj"'"},"worktrees":[{"path":"'"$proj"'","is_linked_worktree":true,"open_workspace_id":"'"$child"'"}]}}'
   not_open_json='{"result":{"type":"worktree_list","source":{"source_workspace_id":"'"$parent"'","source_checkout_path":"'"$proj"'"},"worktrees":[]}}'
   lease_json='{"result":{"type":"worktree_list","source":{"source_workspace_id":"'"$parent"'","source_checkout_path":"'"$proj"'"},"worktrees":[{"path":"'"$proj"'","is_linked_worktree":true,"open_workspace_id":null}]}}'
   out=$(run_classify "$v2journal" task-v2 "$proj" "$open_json"); status=$?
-  [ "$status" -eq 0 ] && [ "$out" = "$proj|0" ] \
+  [ "$status" -eq 0 ] && [ "$out" = "$proj|0|" ] \
     || fail "a version 2 journal workspace must still carry after metadata moved to the flat container: status=$status out=$out"
   out=$(run_classify "$v2journal" task-v2 "$dir/missing-slot" "$open_json"); status=$?
-  [ "$status" -eq 0 ] && [ "$out" = "|1" ] \
+  [ "$status" -eq 0 ] && [ "$out" = "|1|" ] \
     || fail "an unresolvable recorded checkout for a still-open nested version 2 binding must refuse: status=$status out=$out"
   out=$(run_classify "$v2journal" task-v2 "$dir/missing-slot" "$not_open_json"); status=$?
-  [ "$status" -eq 0 ] && [ "$out" = "|0" ] \
+  [ "$status" -eq 0 ] && [ "$out" = "|0|" ] \
     || fail "a legacy top-level version 2 binding with an unresolvable checkout must keep flat fallback: status=$status out=$out"
+  out=$(run_classify "$v2journal" task-v2 "$proj" "$lease_json"); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "|0|$proj" ] \
+    || fail "a version 2 checkout no longer rendered open must be reported for durable-ownership gating: status=$status out=$out"
   out=$(run_classify "$v1journal" task-v1 "$proj" "$open_json"); status=$?
-  [ "$status" -eq 0 ] && [ "$out" = "$proj|0" ] \
+  [ "$status" -eq 0 ] && [ "$out" = "$proj|0|" ] \
     || fail "a version 1 checkout open under its owning parent must carry by path: status=$status out=$out"
   out=$(run_classify "$v1journal" task-v1 "$proj" "$lease_json"); status=$?
-  [ "$status" -eq 0 ] && [ "$out" = "|0" ] \
-    || fail "a legacy process-lease checkout with no open workspace id must not carry: status=$status out=$out"
+  [ "$status" -eq 0 ] && [ "$out" = "|0|$proj" ] \
+    || fail "a version 1 checkout no longer rendered open must be reported for durable-ownership gating: status=$status out=$out"
   out=$(run_classify "$v2journal" task-v2 "$proj" '{"result":{"type":"other"}}'); status=$?
-  [ "$status" -eq 0 ] && [ "$out" = "|1" ] \
+  [ "$status" -eq 0 ] && [ "$out" = "|1|" ] \
     || fail "an unreadable nested-worktree proof must refuse: status=$status out=$out"
-  pass "herdr presentation recovery classification: carries v1 and v2 journal checkouts and keeps legacy flat fallback"
+  pass "herdr presentation recovery classification: carries v1 and v2 journal checkouts, reports unopened checkouts, and keeps legacy flat fallback"
 }
 
 test_projection_recovery_proves_v1_checkout_by_path() {
