@@ -335,19 +335,19 @@ test_recorded_base_branch_without_default() {
   pass "fm-review-diff honors a recorded base when no default branch exists"
 }
 
-test_detached_scout_uses_head_for_review() {
+test_legacy_detached_scout_uses_head_for_review() {
   local case_dir out
   case_dir=$(make_case detached-scout)
   git -C "$case_dir/wt" checkout -q --detach main
   printf 'detached-scout\n' > "$case_dir/wt/detached.txt"
   git -C "$case_dir/wt" add detached.txt
   git -C "$case_dir/wt" commit -qm "detached scout"
-  write_task_meta "$case_dir" "kind=scout"
+  write_task_meta "$case_dir" "kind=scout" "crew_branch=fm/task-x1"
 
   out=$(run_review_diff "$case_dir" task-x1)
   assert_contains "$out" '+detached-scout' \
     "detached scout review did not compare the worktree HEAD"
-  pass "fm-review-diff reviews detached scouts from HEAD"
+  pass "fm-review-diff ignores legacy scout crew metadata"
 }
 
 test_recorded_crew_branch_ignores_parked_head() {
@@ -401,5 +401,5 @@ test_local_only_without_recorded_base_uses_remote_default_ref
 test_local_only_without_remote_default_uses_local_default_ref
 test_scout_recorded_local_base_when_remote_ref_is_absent
 test_recorded_base_branch_without_default
-test_detached_scout_uses_head_for_review
+test_legacy_detached_scout_uses_head_for_review
 test_recorded_crew_branch_ignores_parked_head
