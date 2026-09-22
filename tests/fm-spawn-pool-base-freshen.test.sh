@@ -335,7 +335,7 @@ test_expected_head_ignores_ambient_git_redirection() {
 }
 
 test_expected_head_ignores_ambient_git_config_overrides() {
-  local rec id out status attacker_origin unauthorized worker_evidence pending raw_launch
+  local rec id out status attacker_origin unauthorized worker_evidence pending raw_launch original_url
   id='pool-expected-git-config-r1'
   rec=$(make_case expected-git-config "$id")
   read_case_record "$rec"
@@ -365,6 +365,26 @@ test_expected_head_ignores_ambient_git_config_overrides() {
     || fail "Git-config-refused expected head published task metadata"
   [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
     || fail "Git config override moved the pool during exact-head refusal"
+
+  id='pool-expected-global-git-config-r16'
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  original_url=$(git -C "$POOL_DIR" remote get-url origin)
+  git config --file "$HOME_DIR/user-home/.gitconfig" \
+    "url.file://$attacker_origin.insteadOf" "$original_url"
+  GIT_CONFIG_GLOBAL="$HOME_DIR/user-home/.gitconfig" git -C "$POOL_DIR" ls-remote origin \
+    | grep -Fq "$unauthorized" \
+    || fail "fixture did not redirect origin transport through global Git configuration"
+  out=$(GIT_CONFIG_GLOBAL="$HOME_DIR/user-home/.gitconfig" \
+    run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$unauthorized")
+  status=$?
+  rm -f "$HOME_DIR/user-home/.gitconfig"
+  [ "$status" -ne 0 ] || fail "global Git config redirected exact-head origin authorization"
+  assert_contains "$out" "not an ancestor of any head returned by the origin fetch" \
+    "spawn did not reject the candidate absent from the repository-local origin"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "global-Git-config-refused expected head published task metadata"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+    || fail "global Git config moved the pool during exact-head refusal"
 
   id='pool-default-git-config-r1'
   fm_test_spawn_brief "$HOME_DIR" "$id"
@@ -566,6 +586,20 @@ test_expected_head_ignores_cleanliness_hiding_config() {
   [ "$status" -ne 0 ] || fail "expected-head spawn launched with ignored unreviewed source"
   assert_grep 'unreviewed ignored source' "$POOL_DIR/ignored-source.txt" \
     "expected-head refusal discarded ignored unreviewed source"
+
+  id=pool-expected-ignored-submodule-source-r17
+  rec=$(make_submodule_case expected-ignored-submodule-source "$id")
+  read_submodule_case "$rec"
+  exclude=$(git -C "$POOL_DIR/ui" rev-parse --git-path info/exclude)
+  printf 'generated-source.txt\n' >>"$exclude"
+  printf 'unreviewed ignored submodule source\n' >"$POOL_DIR/ui/generated-source.txt"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none)" ] \
+    || fail "fixture did not hide ignored submodule source from superproject status"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$ADVANCED_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "expected-head spawn launched with ignored source inside a submodule"
+  assert_grep 'unreviewed ignored submodule source' "$POOL_DIR/ui/generated-source.txt" \
+    "expected-head refusal discarded ignored source inside the submodule"
   pass "expected-head cleanliness overrides untracked and submodule hiding config"
 }
 

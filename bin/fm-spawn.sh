@@ -774,8 +774,11 @@ if [ "$EXPECTED_HEAD_SET" -eq 1 ]; then
   # Ambient Git redirection variables would otherwise make those paths advisory.
   unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
     GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
-    GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM \
-    GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
+    GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS \
+    GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT GIT_PROXY_COMMAND GIT_EXEC_PATH
+  export GIT_CONFIG_GLOBAL=/dev/null
+  export GIT_CONFIG_SYSTEM=/dev/null
+  export GIT_CONFIG_NOSYSTEM=1
   export GIT_NO_REPLACE_OBJECTS=1
   EXACT_HEAD_PROVENANCE=1
 fi
@@ -3161,8 +3164,14 @@ spawn_worktree_has_origin_config() { # <worktree>
 }
 
 expected_head_worktree_status() { # <worktree>
-  git -C "$1" -c core.quotePath=false status --porcelain \
-    --untracked-files=all --ignored=matching --ignore-submodules=none
+  local status
+  status=$(git -C "$1" -c core.quotePath=false status --porcelain \
+    --untracked-files=all --ignored=matching --ignore-submodules=none) || return 1
+  [ -z "$status" ] || printf '%s\n' "$status"
+  git -C "$1" submodule foreach --quiet --recursive '
+    status=$(git -c core.quotePath=false status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none) || exit 1
+    [ -z "$status" ] || printf "%s\n%s\n" "$displaypath" "$status"
+  '
 }
 
 freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
