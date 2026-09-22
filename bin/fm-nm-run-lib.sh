@@ -127,22 +127,16 @@ fm_nm_run_status_class() {  # <status_word>
 # toolchain. A capped overview requires an optional Python 3 sqlite3 reader
 # for a read-only same-branch query of NM_HOME/state.sqlite (default:
 # ~/.no-mistakes/state.sqlite; relative NM_HOME resolves from the worktree).
-# The real CLI overview carries a top-level `repo: ` identity line naming the
-# repository `no-mistakes` itself resolved for the exact worktree the overview
-# was captured from (verified against installed v1.75.2; issue #5211 traces a
-# 2026-09-20 capture that lacked it to a truncated fixture, not real CLI
-# behavior). That resolved path is exactly what a pooled worker copy needs: a
-# worker copy's own path is routinely unregistered because `no-mistakes init`
-# registered the primary clone, so the copy's raw path never matches a `repos`
-# row even though `no-mistakes` itself, walking up from that copy, resolves
-# the very same registered repository. Repo identity is therefore looked up by
-# the overview's own `repo: ` path when present, falling back to the task
-# worktree path itself (exactly what `no-mistakes` records as a repo's
-# `working_path` when no `repo: ` line is available); the recorded spelling is
-# matched exactly, so a candidate path that is not absolute, or whose spelling
-# differs from the recorded one, is dropped rather than guessed among
-# candidates, and a repo lookup that still cannot settle on exactly one row
-# reads as unreadable.
+# The overview's top-level `repo: ` path names the repository resolved by the
+# CLI for that worktree. A pooled worker copy may be unregistered while this
+# path names its registered primary clone.
+# The worktree must be absolute; its path and the overview path, when absolute,
+# are matched exactly against repos.working_path without normalizing spelling.
+# Their combined matches must identify exactly one distinct repository:
+# zero matches or conflicting repository IDs make the inventory unreadable.
+# With no usable overview path, only the worktree path can establish identity.
+# tests/fm-crew-state.test.sh's test_capped_overview_worker_copy_repo_line_*
+# cases cover absent and completed runs through the registered primary path.
 # The reader subprocess is bounded by $4 seconds (default 10), so a contended
 # database can never outlast the caller's per-read budget.
 # If that reader or inventory is unavailable, report unknown with available

@@ -28,6 +28,7 @@ No branch in that repository had two recorded live runs at capture time.
 Only the copy's repository `working_path` was relocated to the permitted worktree; no pipeline was initialized or controlled.
 The copy omitted step data and had no daemon, so the unrelated active-run detail from that output is intentionally excluded.
 The retained section demonstrates the actual ten-row cap, row order, quoting, and field layout.
+It is an excerpt: the omitted top-level `repo:` field is not evidence that the CLI omits repository identity.
 Original stdout, source projections, and SHA-256 digests were retained in the test-phase evidence directory under `real-anchors/`.
 
 ## Replay transformations and limits
