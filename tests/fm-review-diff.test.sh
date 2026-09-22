@@ -11,6 +11,16 @@
 #   (d) pr= present but PR head unreachable -> fallback to local branch + warning
 #   (e) pr= + STALE recorded pr_head= + newer remote pull head -> must use fetched head
 #       (this is the class that bit reviewers holding merges over "missing" fixes)
+#
+# The base side has the same failure class: a task launched from a working branch
+# that is not the remote default must be reviewed against that branch, or the
+# branch's own commits are presented as the task's change.
+#   (f) base_branch= recorded -> diff against that branch
+#   (g) base_branch= absent   -> unchanged default-branch resolution
+#   (h) base_branch= recorded but deleted from origin (the ordinary fate of a
+#       working branch once it merges) -> legible fallback to the default branch
+#   (i) base_branch= recorded and origin unreachable -> reported as the fetch
+#       failure it is, never as a deleted branch, and never as a raw git fatal
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -169,8 +179,125 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+# Put a working branch on origin that carries a commit of somebody else's, then
+# branch the task off it, exactly as a slot placed on that branch would. Diffing
+# against the remote default would present that foreign commit as the task's own.
+make_working_branch_case() {
+  local case_dir=$1 branch=$2
+  git clone -q "$case_dir/origin.git" "$case_dir/_pub"
+  git -C "$case_dir/_pub" checkout -q -b "$branch"
+  printf 'billing rewrite\n' > "$case_dir/_pub/foreign.txt"
+  git -C "$case_dir/_pub" add foreign.txt
+  git -C "$case_dir/_pub" -c user.email=t@t -c user.name=t commit -qm "somebody else's commit"
+  git -C "$case_dir/_pub" push -q origin "$branch"
+  rm -rf "$case_dir/_pub"
+
+  git -C "$case_dir/wt" fetch -q origin
+  git -C "$case_dir/wt" reset --hard -q "origin/$branch"
+  printf 'the task change\n' > "$case_dir/wt/task.txt"
+  git -C "$case_dir/wt" add task.txt
+  git -C "$case_dir/wt" commit -qm "the task's own commit"
+}
+
+test_recorded_base_branch_decides_the_review_base() {
+  local case_dir out
+  case_dir=$(make_case recorded-base-branch)
+  make_working_branch_case "$case_dir" develop
+  write_task_meta "$case_dir" "base_branch=develop"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/develop' \
+    "recorded-base-branch: the recorded working branch must be the diff base"
+  assert_contains "$out" '+the task change' \
+    "recorded-base-branch: the diff should show the task's own commit"
+  assert_not_contains "$out" 'billing rewrite' \
+    "recorded-base-branch: the working branch's own commits must not ride along"
+  pass "fm-review-diff diffs against the base branch recorded in the task record"
+}
+
+test_absent_base_branch_keeps_the_default_branch_resolution() {
+  local case_dir out
+  case_dir=$(make_case absent-base-branch)
+  make_working_branch_case "$case_dir" develop
+  write_task_meta "$case_dir"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/main' \
+    "absent-base-branch: a task record naming no base branch must resolve origin/HEAD as before"
+  assert_contains "$out" '+the task change' \
+    "absent-base-branch: the diff should still show the task's own commit"
+  pass "fm-review-diff without base_branch= resolves the default branch exactly as before"
+}
+
+test_recorded_base_branch_deleted_on_origin_falls_back_legibly() {
+  local case_dir out err status
+  case_dir=$(make_case deleted-base-branch)
+  make_working_branch_case "$case_dir" release/2026
+  write_task_meta "$case_dir" "base_branch=release/2026"
+  # The release branch merges and origin drops it while the task is in flight.
+  git -C "$case_dir/origin.git" branch -q -D release/2026
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  status=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  [ "$status" -eq 0 ] \
+    || fail "deleted-base-branch: review should continue against the default branch (exit $status)"
+  assert_contains "$err" 'release/2026' \
+    "deleted-base-branch: the diagnostic did not name the recorded base branch"
+  assert_contains "$err" 'base_branch=' \
+    "deleted-base-branch: the diagnostic did not say where the recorded base came from"
+  assert_contains "$err" "falling back to the project's default branch 'main'" \
+    "deleted-base-branch: the diagnostic did not say it was falling back to the default branch"
+  assert_not_contains "$err" 'fatal:' \
+    "deleted-base-branch: git's own fatal reached the operator"
+  assert_contains "$out" 'diff base: origin/main' \
+    "deleted-base-branch: the diff should continue against the default branch"
+  assert_contains "$out" '+the task change' \
+    "deleted-base-branch: the fallback diff should still show the task's own commit"
+  pass "fm-review-diff falls back legibly when the recorded base branch is gone from origin"
+}
+
+test_unreachable_origin_is_not_reported_as_a_deleted_base_branch() {
+  local case_dir out err status
+  case_dir=$(make_case unreachable-origin)
+  make_working_branch_case "$case_dir" develop
+  write_task_meta "$case_dir" "base_branch=develop"
+  # Origin is still configured and develop still exists on it; only the remote
+  # itself has become unreachable, which must not be read as a deleted branch.
+  git -C "$case_dir/project" remote set-url origin "$case_dir/vanished.git"
+
+  set +e
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+  status=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  [ "$status" -ne 0 ] \
+    || fail "unreachable-origin: review should stop rather than diff against an unverified base"
+  assert_not_contains "$err" 'no longer carries' \
+    "unreachable-origin: an unreachable remote was reported as a deleted branch"
+  assert_not_contains "$err" 'fatal:' \
+    "unreachable-origin: git's own fatal reached the operator"
+  assert_contains "$err" 'develop' \
+    "unreachable-origin: the diagnostic did not name the recorded base branch"
+  assert_contains "$err" 'could not reach origin' \
+    "unreachable-origin: the diagnostic did not say the remote could not be reached"
+  assert_not_contains "$out" 'diff base:' \
+    "unreachable-origin: a diff was produced against an unverified base"
+  pass "fm-review-diff reports an unreachable origin as a fetch failure, not a deleted base branch"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_recorded_base_branch_decides_the_review_base
+test_absent_base_branch_keeps_the_default_branch_resolution
+test_recorded_base_branch_deleted_on_origin_falls_back_legibly
+test_unreachable_origin_is_not_reported_as_a_deleted_base_branch
