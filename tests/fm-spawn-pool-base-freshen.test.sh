@@ -389,6 +389,35 @@ test_expected_head_ignores_ambient_git_redirection() {
   pass "only expected-head verification ignores ambient Git repository redirection"
 }
 
+test_expected_head_ignores_ambient_git_namespace() {
+  local rec id out status local_only fetch_head
+  id='pool-expected-git-namespace-r24'
+  rec=$(make_case expected-git-namespace "$id")
+  read_case_record "$rec"
+  printf 'namespace only\n' > "$POOL_DIR/namespace-only.txt"
+  git -C "$POOL_DIR" add namespace-only.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm namespace-only
+  local_only=$(git -C "$POOL_DIR" rev-parse HEAD)
+  git -C "$POOL_DIR" push --quiet origin \
+    "$local_only:refs/namespaces/hidden/refs/heads/main"
+  GIT_NAMESPACE=hidden git -C "$POOL_DIR" fetch --quiet origin
+  fetch_head=$(git -C "$POOL_DIR" rev-parse --git-path FETCH_HEAD)
+  grep -q "^$local_only" "$fetch_head" \
+    || fail "ambient namespace did not expose the namespace-only candidate through fetch"
+
+  out=$(GIT_NAMESPACE=hidden \
+    run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$local_only")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn authorized a candidate exposed only through an ambient Git namespace"
+  assert_contains "$out" "not an ancestor of any head returned by the origin fetch" \
+    "spawn did not reject the namespace-only candidate as unauthorized"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "namespace-refused expected head published task metadata"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_only" ] \
+    || fail "namespace-refused expected head moved the clean local-only commit"
+  pass "expected-head authorization ignores ambient Git namespaces"
+}
+
 test_expected_head_ignores_ambient_git_config_overrides() {
   local rec id out status attacker_origin unauthorized worker_evidence pending raw_launch original_url
   id='pool-expected-git-config-r1'
@@ -621,16 +650,17 @@ test_expected_head_rejects_filtered_worktree_bytes() {
 }
 
 test_expected_head_retires_endpoint_when_cancel_fails() {
-  local rec id out status real_sleep marker pending started retired
-  id=pool-expected-cancel-fail-r9
-  rec=$(make_case expected-cancel-fail "$id")
-  read_case_record "$rec"
-  marker="$CASE_DIR/mutated-after-launch-staging"
-  pending="$CASE_DIR/pending-launch"
-  started="$CASE_DIR/worker-started"
-  retired="$CASE_DIR/endpoint-retired"
-  real_sleep=$(command -v sleep)
-  cat > "$FAKEBIN_DIR/sleep" <<EOF
+  local rec id out status real_sleep marker pending started retired cancellation cancel_fail cancel_stall
+  for cancellation in failed stalled; do
+    id="pool-expected-cancel-$cancellation-r25"
+    rec=$(make_case "expected-cancel-$cancellation" "$id")
+    read_case_record "$rec"
+    marker="$CASE_DIR/mutated-after-launch-staging"
+    pending="$CASE_DIR/pending-launch"
+    started="$CASE_DIR/worker-started"
+    retired="$CASE_DIR/endpoint-retired"
+    real_sleep=$(command -v sleep)
+    cat > "$FAKEBIN_DIR/sleep" <<EOF
 #!/bin/sh
 if [ -e '$pending' ] && [ ! -e '$marker' ]; then
   printf 'late mutation\n' > '$POOL_DIR/late-untracked.txt'
@@ -638,20 +668,29 @@ if [ -e '$pending' ] && [ ! -e '$marker' ]; then
 fi
 exec '$real_sleep' "\$@"
 EOF
-  chmod +x "$FAKEBIN_DIR/sleep"
+    chmod +x "$FAKEBIN_DIR/sleep"
+    cancel_fail=0
+    cancel_stall=0
+    if [ "$cancellation" = failed ]; then
+      cancel_fail=1
+    else
+      cancel_stall=1
+    fi
 
-  out=$(FM_FAKE_PENDING_LAUNCH="$pending" FM_FAKE_WORKER_START_LOG="$started" \
-    FM_FAKE_CANCEL_KEY_FAIL=1 FM_FAKE_ENDPOINT_RETIRE_LOG="$retired" \
-    run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn launched after cancellation failed"
-  [ -e "$marker" ] || fail "fixture did not mutate the worktree after launch text settled"
-  assert_grep 'kill-window' "$retired" "failed cancellation did not retire the new endpoint"
-  [ ! -e "$pending" ] || fail "retired endpoint retained the staged launch text"
-  [ ! -e "$started" ] || fail "failed cancellation submitted the staged launch"
-  assert_contains "$out" "dirty candidate" "spawn did not report the final-window dirty tree"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "failed cancellation left published task metadata"
-  pass "expected-head refusal retires its endpoint when staged input cannot be cancelled"
+    out=$(FM_FAKE_PENDING_LAUNCH="$pending" FM_FAKE_WORKER_START_LOG="$started" \
+      FM_FAKE_CANCEL_KEY_FAIL="$cancel_fail" FM_FAKE_CANCEL_KEY_STALL="$cancel_stall" \
+      FM_FAKE_ENDPOINT_RETIRE_LOG="$retired" \
+      run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
+    status=$?
+    [ "$status" -ne 0 ] || fail "spawn launched after cancellation was $cancellation"
+    [ -e "$marker" ] || fail "fixture did not mutate the worktree after launch text settled"
+    assert_grep 'kill-window' "$retired" "$cancellation cancellation did not retire the new endpoint"
+    [ ! -e "$pending" ] || fail "retired endpoint retained the staged launch text"
+    [ ! -e "$started" ] || fail "$cancellation cancellation submitted the staged launch"
+    assert_contains "$out" "dirty candidate" "spawn did not report the final-window dirty tree"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$cancellation cancellation left published task metadata"
+  done
+  pass "expected-head refusal retires endpoints unless cancellation is proven"
 }
 
 test_expected_head_preserves_ownership_when_endpoint_survives() {
@@ -1330,6 +1369,7 @@ test_expected_head_hashes_in_candidate_object_format
 test_expected_head_ignores_replacement_objects
 test_expected_head_refuses_non_origin_commit_and_invalid_input
 test_expected_head_ignores_ambient_git_redirection
+test_expected_head_ignores_ambient_git_namespace
 test_expected_head_ignores_ambient_git_config_overrides
 test_expected_head_refuses_unsupported_lifecycle_shapes
 test_expected_head_is_reverified_immediately_before_launch

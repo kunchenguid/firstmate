@@ -774,6 +774,7 @@ if [ "$EXPECTED_HEAD_SET" -eq 1 ]; then
   # Ambient Git redirection variables would otherwise make those paths advisory.
   unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
     GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_NAMESPACE \
     GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS \
     GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT GIT_PROXY_COMMAND GIT_EXEC_PATH
   export GIT_CONFIG_GLOBAL=/dev/null
@@ -3848,7 +3849,7 @@ spawn_send_key() { # <target> <key>
 
 expected_head_cancel_staged_launch() {
   local tab_id=
-  spawn_send_key "$T" C-c && return 0
+  spawn_send_key "$T" C-c || true
   [ "$BACKEND" != zellij ] || tab_id=${ZELLIJ_TAB_ID:-}
   case "$BACKEND" in
     tmux)

@@ -164,7 +164,7 @@ case "${1:-}" in
             ;;
           C-c)
             [ "${FM_FAKE_CANCEL_KEY_FAIL:-0}" != 1 ] || exit 1
-            rm -f "$FM_FAKE_PENDING_LAUNCH"
+            [ "${FM_FAKE_CANCEL_KEY_STALL:-0}" = 1 ] || rm -f "$FM_FAKE_PENDING_LAUNCH"
             ;;
         esac
         prev=$a
