@@ -6,8 +6,10 @@
 #        fm-harness.sh secondmate [<id>] print the harness the PRIMARY uses to launch
 #                                        SECONDMATE agents: config/secondmate-harness.d/<id>
 #                                        (only when <id> is given) -> config/secondmate-harness ->
-#                                        config/crew-harness -> own. "default" or absent
-#                                        at either file level defers to the next one, so an
+#                                        config/crew-harness -> own. An absent per-secondmate
+#                                        pin defers to the global file; a present pin must name
+#                                        a concrete harness. "default" or absence at the global
+#                                        file defers to crew resolution, so an
 #                                        unset secondmate-harness behaves exactly as the crew
 #                                        harness did before this knob existed and a home with
 #                                        no per-secondmate file behaves exactly as before that
@@ -494,10 +496,9 @@ secondmate_pin_path() {
 
 # Print the config line that governs a secondmate launch. With <id>, its
 # per-secondmate pin wins when present and is validated rather than skipped: a
-# pin with no harness line or with more than three tokens fails, and a pin
-# whose harness token is "default" defers to config/secondmate-harness exactly
-# as that file's own "default" defers to the crew resolution. With no id, only
-# config/secondmate-harness is read, exactly as before pins existed.
+# pin with no harness line, a "default" harness token, or more than three tokens
+# fails. With no id, only config/secondmate-harness is read, exactly as before
+# pins existed.
 secondmate_line() {
   local id=${1:-} pin line
   if [ -n "$id" ]; then
@@ -514,10 +515,12 @@ secondmate_line() {
         echo "error: config/$SECONDMATE_PIN_DIR/$id carries $# tokens; a pin line is '<harness> [<model>] [<effort>]' and nothing more" >&2
         return 1
       fi
-      if [ "$1" != default ]; then
-        printf '%s\n' "$line"
-        return 0
+      if [ "$1" = default ]; then
+        echo "error: config/$SECONDMATE_PIN_DIR/$id must name a concrete harness; remove the pin file to fall back to config/secondmate-harness" >&2
+        return 1
       fi
+      printf '%s\n' "$line"
+      return 0
     fi
   fi
   first_config_line "$CONFIG/secondmate-harness"
@@ -558,10 +561,11 @@ secondmate_id_arg() {
 # Resolve the harness the PRIMARY uses to launch SECONDMATE agents: a fallback
 # chain config/secondmate-harness.d/<id> (only with an id) ->
 # config/secondmate-harness -> config/crew-harness -> own. An absent or
-# "default" secondmate-harness token defers to the crew resolution, so an unset
-# secondmate-harness behaves exactly as before this knob existed (a secondmate
-# launched on the crew harness). Both files are the PRIMARY's own setting and
-# are never inherited downstream - secondmates do not spawn secondmates.
+# "default" global secondmate-harness token defers to the crew resolution, so an
+# unset global file behaves exactly as before this knob existed (a secondmate
+# launched on the crew harness). A present per-secondmate pin must name a
+# concrete harness. Both files are the PRIMARY's own setting and are never
+# inherited downstream - secondmates do not spawn secondmates.
 resolve_secondmate() {
   local id sm
   id=$(secondmate_id_arg "$@") || return 1

@@ -125,7 +125,9 @@ git -C "$PARENT/projects/alpha" push -q -u origin main
 cat > "$PARENT/data/projects.md" <<EOF
 - alpha [direct-PR] - alpha project (added 2026-08-02)
 EOF
-printf 'codex\n' > "$PARENT/config/secondmate-harness"
+mkdir -p "$PARENT/config/secondmate-harness.d"
+printf 'claude\n' > "$PARENT/config/secondmate-harness"
+printf 'codex some-model high\n' > "$PARENT/config/secondmate-harness.d/ios"
 printf 'tmux\n' > "$PARENT/config/backend"
 printf 'primary harness defaults\n' > "$PARENT/config/crew-harness"
 
@@ -730,7 +732,13 @@ assert_grep 'remote_host=remote-mac' "$PARENT/state/ios.meta" "parent metadata o
 assert_grep 'remote_backend=herdr' "$PARENT/state/ios.meta" "parent metadata omitted the remote-local backend"
 assert_grep 'remote_herdr_session=fm-remote' "$PARENT/state/ios.meta" "parent metadata omitted the pinned remote Herdr session"
 assert_grep 'remote_target=fm-remote:' "$PARENT/state/ios.meta" "parent metadata did not record an fm-remote endpoint"
+assert_grep 'harness=codex' "$PARENT/state/ios.meta" "remote spawn ignored the mate's own harness pin"
+assert_grep 'model=some-model' "$PARENT/state/ios.meta" "remote spawn ignored the mate's own model pin"
+assert_grep 'effort=high' "$PARENT/state/ios.meta" "remote spawn ignored the mate's own effort pin"
 assert_grep 'herdr_session=fm-remote' "$REMOTE_HOME/state/parent-route/ios.meta" "remote metadata did not record the pinned Herdr session"
+assert_grep 'harness=codex' "$REMOTE_HOME/state/parent-route/ios.meta" "remote launch did not receive the mate's own harness pin"
+assert_grep 'model=some-model' "$REMOTE_HOME/state/parent-route/ios.meta" "remote launch did not receive the mate's own model pin"
+assert_grep 'effort=high' "$REMOTE_HOME/state/parent-route/ios.meta" "remote launch did not receive the mate's own effort pin"
 assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the fm-remote session"
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"
@@ -743,6 +751,21 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh observe ios)" = idle ] \
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
+
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-invalid-pin.meta"
+cp "$HERDR_LOG" "$TMP_ROOT/herdr-before-invalid-pin.log"
+printf 'codex some-model high extra\n' > "$PARENT/config/secondmate-harness.d/ios"
+if remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate > "$TMP_ROOT/spawn-invalid-pin.out" 2>&1; then
+  fail "remote spawn accepted an unusable per-secondmate pin"
+fi
+assert_grep 'config/secondmate-harness.d/ios' "$TMP_ROOT/spawn-invalid-pin.out" \
+  "remote spawn failure did not name the unusable pin"
+cmp -s "$TMP_ROOT/parent-ios-before-invalid-pin.meta" "$PARENT/state/ios.meta" \
+  || fail "remote spawn rewrote metadata after pin resolution failed"
+cmp -s "$TMP_ROOT/herdr-before-invalid-pin.log" "$HERDR_LOG" \
+  || fail "remote spawn reached transport after pin resolution failed"
+printf 'codex some-model high\n' > "$PARENT/config/secondmate-harness.d/ios"
+pass "remote spawn resolves its own per-secondmate profile and rejects an unusable pin before transport"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"

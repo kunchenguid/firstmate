@@ -1047,12 +1047,13 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop() {
   pass "fm-control relaunch: an adapter unverified for this task kind refuses before the agent is stopped"
 }
 
-test_explicit_secondmate_harness_ignores_configured_profile_axes() {
+test_explicit_secondmate_harness_ignores_unusable_configured_profile() {
   local dir home out rc
   dir=$(new_case smexplicit sm4)
   home="$dir/home"
-  mkdir -p "$home/config"
+  mkdir -p "$home/config/secondmate-harness.d"
   printf 'claude opus high\n' > "$home/config/secondmate-harness"
+  printf 'claude opus high extra\n' > "$home/config/secondmate-harness.d/sm4"
   mkdir -p "$home/data/sm4"
   printf '# secondmate brief\n' > "$home/data/sm4/brief.md"
   fm_git_worktree "$dir/proj" "$dir/smhome" sm-branch
@@ -1081,7 +1082,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes() {
     || fail "an explicit secondmate harness must not inherit the configured model"
   [ "$(meta_field "$dir" sm4 effort)" = default ] \
     || fail "an explicit secondmate harness must not inherit the configured effort"
-  pass "fm-control relaunch: explicit secondmate harness resets unnamed profile axes"
+  pass "fm-control relaunch: explicit secondmate harness bypasses an unusable configured profile"
 }
 
 test_ship_relaunch_ignores_the_crew_harness_config() {
@@ -2309,7 +2310,7 @@ test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_picks_up_its_per_secondmate_pin
 test_secondmate_relaunch_refuses_invalid_per_secondmate_pin_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
-test_explicit_secondmate_harness_ignores_configured_profile_axes
+test_explicit_secondmate_harness_ignores_unusable_configured_profile
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_promoted_scout_relaunch_receives_the_current_delivery_contract

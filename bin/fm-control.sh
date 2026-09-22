@@ -706,7 +706,7 @@ resolve_relaunch_profile() {
   CONFIG_HARNESS=
   CONFIG_MODEL=
   CONFIG_EFFORT=
-  if [ "$KIND" = secondmate ]; then
+  if [ "$KIND" = secondmate ] && [ "$HARNESS_SET" = 0 ]; then
     # A secondmate's harness, model, and effort are a durable configured pin
     # that every respawn re-resolves (the secondmate-provisioning contract), so
     # a relaunch with no explicit harness picks up a newly configured one

@@ -2655,8 +2655,8 @@ pin_resolve() {  # <cfg> <subcommand> [<id>...]
 }
 
 # Two registered mates with different pins resolve side by side; an unpinned
-# id, a call with no id, and a per-secondmate "default" all keep the global
-# chain (secondmate-harness -> crew-harness -> own) exactly as before.
+# id and a call with no id keep the global chain
+# (secondmate-harness -> crew-harness -> own) exactly as before.
 test_per_secondmate_pin_resolution() {
   local cfg
   cfg="$TMP_ROOT/pin-resolution/config"
@@ -2665,7 +2665,6 @@ test_per_secondmate_pin_resolution() {
   printf 'pi opus-x medium\n' > "$cfg/secondmate-harness"
   printf 'claude opus high\n' > "$cfg/secondmate-harness.d/2ndmate-claude"
   printf 'grok\n' > "$cfg/secondmate-harness.d/helm"
-  printf '# defers to the global file\n\ndefault ignored-model ignored-effort\n' > "$cfg/secondmate-harness.d/deferring"
 
   [ "$(pin_resolve "$cfg" secondmate 2ndmate-claude)" = claude ] || fail "D1: the pinned mate did not resolve its own harness"
   [ "$(pin_resolve "$cfg" secondmate-model 2ndmate-claude)" = opus ] || fail "D1: the pinned mate did not resolve its own model"
@@ -2679,14 +2678,10 @@ test_per_secondmate_pin_resolution() {
   [ "$(pin_resolve "$cfg" secondmate)" = pi ] || fail "D1: no-id resolution changed"
   [ "$(pin_resolve "$cfg" secondmate-model)" = opus-x ] || fail "D1: no-id model resolution changed"
   [ "$(pin_resolve "$cfg" secondmate-effort)" = medium ] || fail "D1: no-id effort resolution changed"
-  [ "$(pin_resolve "$cfg" secondmate deferring)" = pi ] || fail "D1: a default pin must defer to config/secondmate-harness"
-  [ "$(pin_resolve "$cfg" secondmate-model deferring)" = opus-x ] || fail "D1: a default pin must not carry its own model"
-  [ "$(pin_resolve "$cfg" secondmate-effort deferring)" = medium ] || fail "D1: a default pin must not carry its own effort"
   [ "$(pin_resolve "$cfg" crew)" = codex ] || fail "D1: crew resolution changed"
 
   rm -f "$cfg/secondmate-harness"
   [ "$(pin_resolve "$cfg" secondmate unpinned)" = codex ] || fail "D1: an unpinned id must fall through to crew-harness"
-  [ "$(pin_resolve "$cfg" secondmate deferring)" = codex ] || fail "D1: a default pin must fall through to crew-harness with no global file"
   [ "$(pin_resolve "$cfg" secondmate 2ndmate-claude)" = claude ] || fail "D1: a pinned mate must not depend on the global file"
   rm -f "$cfg/crew-harness"
   [ "$(pin_resolve "$cfg" secondmate unpinned)" = claude ] || fail "D1: an unpinned id must fall through to the own harness"
@@ -2694,7 +2689,7 @@ test_per_secondmate_pin_resolution() {
   printf 'pi opus-x medium\n' > "$cfg/secondmate-harness"
   [ "$(pin_resolve "$cfg" secondmate 2ndmate-claude)" = pi ] || fail "D1: with no pin directory an id must read the global file"
   [ "$(pin_resolve "$cfg" secondmate-model 2ndmate-claude)" = opus-x ] || fail "D1: with no pin directory an id must take the global model"
-  pass "D1 fm-harness.sh secondmate <id>: per-secondmate pins resolve independently while unpinned, default, and no-id calls keep the global chain"
+  pass "D1 fm-harness.sh secondmate <id>: per-secondmate pins resolve independently while unpinned and no-id calls keep the global chain"
 }
 
 # The pin is explicit configuration for one mate, so every shape that could
@@ -2709,6 +2704,7 @@ test_per_secondmate_pin_refuses_invalid() {
   printf 'grok\n' > "$d/outside"
   ln -s ../secondmate-harness "$cfg/secondmate-harness.d/linked"
   printf 'claude opus high extra\n' > "$cfg/secondmate-harness.d/extra-tokens"
+  printf 'default\n' > "$cfg/secondmate-harness.d/default"
   : > "$cfg/secondmate-harness.d/empty"
   printf '# only a comment\n\n' > "$cfg/secondmate-harness.d/comment-only"
   refuse_pin() {  # <label> <id args...>
@@ -2734,6 +2730,8 @@ test_per_secondmate_pin_refuses_invalid() {
   assert_contains "$(cat "$err")" "config/secondmate-harness.d/dir-as-pin is not a regular readable file" "a directory in place of a pin must be named"
   refuse_pin extra-tokens extra-tokens
   assert_contains "$(cat "$err")" "config/secondmate-harness.d/extra-tokens carries 4 tokens" "extra tokens must be named"
+  refuse_pin default default
+  assert_contains "$(cat "$err")" "must name a concrete harness" "default must not alias fallback for a present pin"
   refuse_pin empty empty
   assert_contains "$(cat "$err")" "config/secondmate-harness.d/empty names no harness" "an empty pin must be named"
   refuse_pin comment-only comment-only
@@ -2751,7 +2749,7 @@ test_per_secondmate_pin_refuses_invalid() {
   printf 'claude\n' > "$cfg/secondmate-harness.d"
   refuse_pin dir-as-file good
   assert_contains "$(cat "$err")" "exists but is not a directory" "a file where the pin directory belongs must be named"
-  pass "D2 fm-harness.sh secondmate <id>: unsafe ids, symlinks, irregular files, empty pins, and extra tokens refuse without falling through"
+  pass "D2 fm-harness.sh secondmate <id>: unsafe ids, symlinks, irregular files, empty or default pins, and extra tokens refuse without falling through"
 }
 
 # Two registered secondmates launch on independent pins: the pinned mate on its
