@@ -12,8 +12,18 @@ Verified on 2026-07-27 with Pi and Pi-signed 0.82.0 unless a fact gives another 
 | Interrupt | Single Escape. |
 | Skill invocation | No separate verified form beyond normal command behavior; use natural language when the exact command is uncertain. |
 | Model flag | `--model <model>`. |
-| Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>`; both identities expose the same levels and completed the same model-qualified max-thinking smoke. |
+| Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>`; both identities expose the same levels and completed the same model-qualified max-thinking smoke. Pi 0.85.1 cannot reach `claude-opus-5` or `claude-fable-5` on the `anthropic` provider; see the note below the table. |
 | Model discovery | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
+
+**Pi 0.85.1 effort-level fault (reproduced 2026-09-18, OAuth credential, `pi -ne`).**
+`claude-opus-5` and `claude-fable-5` both return HTTP 400 `Invalid effort level` from the Anthropic API on every request.
+The requested thinking level makes no difference, and omitting `--thinking` makes no difference.
+The two models fail through different branches of `buildParams` in `packages/ai/src/api/anthropic-messages.ts`: `claude-opus-5` carries `supportsMidConvoEffort: true` in Pi's catalog, so `buildParams` hardcodes `output_config = { effort: "high" }` and sends it regardless of the requested level; `claude-fable-5` carries `forceAdaptiveThinking: true` instead, so it takes the neighbouring branch that forwards `output_config = { effort: options.effort }`, which the API also rejects.
+The source read covers both the `main` branch and the `v0.85.1` tag.
+`claude-sonnet-4-6` succeeds on the same credential, confirming the fault is model-specific.
+Behaviour on an API-key credential is untested.
+`claude-fable-5-1` returns HTTP 404 on that account, so its behaviour under this fault is also untested.
+Use `claude-sonnet-4-6` until Pi is patched.
 
 Native Codex sessions may request `ultra` through the native extension flag described by `../../../bin/fm-spawn.sh`; it is separate from Pi's thinking levels.
 Pi has no permission system, so workers are always autonomous.
