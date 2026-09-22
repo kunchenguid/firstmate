@@ -42,6 +42,8 @@
 #   (q3) no-mistakes + squash-merged, same file, different content   -> REFUSE
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
+#   (q6) misconfigured firstmate.deployBranch, work not on that branch  -> REFUSE
+#   (q7) (q6) under local-only, ancestry check against the wrong branch -> REFUSE
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -3730,6 +3732,103 @@ test_parked_run_advanced_head_locally_fetched_is_still_aborted
 test_parked_advanced_run_without_anchor_is_never_aborted
 test_parked_advanced_run_ancestor_anchor_is_never_aborted
 test_parked_terminal_unfetched_row_is_never_aborted
+# A clone whose firstmate.deployBranch names a real but WRONG branch. origin
+# carries two siblings off the same root: "prod" (the project's actual deploy
+# branch, and what origin/HEAD advertises) and "wrong-branch" (unrelated
+# commits, different content). The key is set to wrong-branch, so the key is the
+# ONLY thing that can make teardown resolve wrong-branch - origin/HEAD says prod
+# and a local main exists. The task worktree branches from prod, so its work is
+# absent from wrong-branch by commit AND by tree. refs/remotes/origin/wrong-branch
+# is deliberately left uncreated so a test can prove teardown's own fetch created
+# it, i.e. that the key really drove the comparison. Args: name
+make_wrong_deploy_branch_case() {
+  local name=$1 case_dir pub
+  case_dir=$(make_case "$name")
+  pub="$case_dir/_pub"
+
+  git clone -q "$case_dir/origin.git" "$pub"
+  git -C "$pub" checkout -q -b prod main
+  printf 'root\n' > "$pub/shared.txt"
+  git -C "$pub" add -- shared.txt
+  git -C "$pub" -c user.email=t@t -c user.name=t commit -q -m "prod baseline"
+  git -C "$pub" push -q origin prod
+  git -C "$pub" checkout -q -b wrong-branch main
+  printf 'unrelated\n' > "$pub/wrong-only.txt"
+  git -C "$pub" add -- wrong-only.txt
+  git -C "$pub" -c user.email=t@t -c user.name=t commit -q -m "unrelated work on the wrong branch"
+  git -C "$pub" push -q origin wrong-branch
+  rm -rf "$pub"
+
+  git -C "$case_dir/project" fetch -q origin prod:refs/remotes/origin/prod
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/prod
+  git -C "$case_dir/project" remote set-head origin prod
+  git -C "$case_dir/project" config firstmate.deployBranch wrong-branch
+  # The crewmate branched from the REAL deploy branch, as a correct spawn would.
+  git -C "$case_dir/wt" reset --hard -q origin/prod
+
+  printf '%s\n' "$case_dir"
+}
+
+test_wrong_deploy_branch_never_calls_unlanded_work_landed() {
+  local case_dir rc
+  case_dir=$(make_wrong_deploy_branch_case wrong-deploy-branch-content)
+  write_meta "$case_dir" no-mistakes ship
+  # New work on top of prod: a new file plus a change to a file wrong-branch has
+  # never seen. Its commits are not on wrong-branch and the merged tree cannot
+  # equal wrong-branch's tree, so only a comparison that stopped at "these share
+  # a root" or "the merge had no conflicts" could call this landed.
+  printf 'edited by the crewmate\n' > "$case_dir/wt/shared.txt"
+  git -C "$case_dir/wt" add -- shared.txt
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t commit -q -m "edit shared"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+
+  ! git -C "$case_dir/project" rev-parse --verify --quiet refs/remotes/origin/wrong-branch >/dev/null \
+    || fail "wrong-deploy-branch-content: fixture pre-created origin/wrong-branch, so the fetch proof is vacuous"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "wrong-deploy-branch-content: teardown must refuse work that is not on the configured branch"
+  grep -q "REFUSED: worktree $case_dir/wt has work not on any remote and not landed." "$case_dir/stderr" \
+    || fail "wrong-deploy-branch-content: expected the not-landed refusal, got: $(cat "$case_dir/stderr")"
+  # Only the configured key can have produced this ref: origin/HEAD is prod.
+  git -C "$case_dir/project" rev-parse --verify --quiet refs/remotes/origin/wrong-branch >/dev/null \
+    || fail "wrong-deploy-branch-content: teardown never resolved firstmate.deployBranch, so the refusal proves nothing"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "wrong-deploy-branch-content: teardown discarded task metadata after refusing"
+  assert_present "$case_dir/wt/feature.txt" \
+    "wrong-deploy-branch-content: teardown removed the crewmate's unlanded work"
+  pass "a firstmate.deployBranch naming the wrong branch never turns unlanded work into landed work"
+}
+
+test_wrong_deploy_branch_local_only_ancestry_still_refuses() {
+  local case_dir rc
+  case_dir=$(make_wrong_deploy_branch_case wrong-deploy-branch-local)
+  write_meta "$case_dir" local-only ship
+  # A local wrong-branch so the ancestry check resolves it as a branch and
+  # genuinely compares, rather than refusing because the name does not resolve.
+  git -C "$case_dir/project" fetch -q origin wrong-branch:wrong-branch
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "wrong-deploy-branch-local: teardown must refuse local-only work absent from the configured branch"
+  grep -q "REFUSED: local-only worktree $case_dir/wt has work not yet merged into wrong-branch and not on any remote." "$case_dir/stderr" \
+    || fail "wrong-deploy-branch-local: expected the unmerged refusal naming wrong-branch, got: $(cat "$case_dir/stderr")"
+  grep -q "commits not yet on wrong-branch:" "$case_dir/stderr" \
+    || fail "wrong-deploy-branch-local: refusal did not list the commits missing from the configured branch"
+  grep -q "add feature" "$case_dir/stderr" \
+    || fail "wrong-deploy-branch-local: refusal did not name the crewmate's own unlanded commit"
+  assert_present "$case_dir/wt/feature.txt" \
+    "wrong-deploy-branch-local: teardown removed the crewmate's unlanded work"
+  pass "the local-only ancestry check against a misconfigured deploy branch still refuses unlanded work"
+}
+
 test_parked_run_terminal_newest_row_at_own_head_is_never_aborted
 test_parked_run_behind_diverged_newer_row_is_never_aborted
 test_parked_advanced_run_ambiguous_rows_are_never_aborted
@@ -3750,3 +3849,5 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_wrong_deploy_branch_never_calls_unlanded_work_landed
+test_wrong_deploy_branch_local_only_ancestry_still_refuses

@@ -279,9 +279,6 @@ stuck_state() {
   printf '%s\n' "$s"
 }
 
-# Loud, quantified report for a clone we deliberately leave untouched. Includes
-# how far behind origin/<default> it is, so a chronically-stuck clone is visibly
-# distinct from a benign one-off skip.
 # Echoes a clause naming firstmate.deployBranch as the source of $DEFAULT when
 # this clone's key selected it, so an unresolvable base reads as the config typo
 # it is rather than a missing or renamed upstream branch.
@@ -290,6 +287,9 @@ deploy_branch_note() {
   printf " (firstmate.deployBranch in %s is set to '%s')" "$PROJ" "$DEFAULT"
 }
 
+# Loud, quantified report for a clone we deliberately leave untouched. Includes
+# how far behind origin/<default> it is, so a chronically-stuck clone is visibly
+# distinct from a benign one-off skip.
 report_stuck() {
   local state=$1 behind
   behind=$(git -C "$PROJ" rev-list --count "HEAD..$BASE" 2>/dev/null) || behind="?"
