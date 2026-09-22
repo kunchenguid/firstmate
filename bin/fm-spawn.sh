@@ -1340,7 +1340,9 @@ spawn_abort_cleanup() {
   fi
   if [ "$SPAWN_TREEHOUSE_LEASED" = 1 ] && [ -n "${WT:-}" ]; then
     if [ "$SPAWN_TREEHOUSE_CARRIED_OVER" = 1 ]; then
-      echo "warning: retaining carried durable Treehouse worktree $WT for $ID; its task record at $STATE/$ID.meta names it, so re-run the spawn or run teardown to return the lease" >&2
+      if [ "$status" -ne 0 ]; then
+        echo "warning: retaining carried durable Treehouse worktree $WT for $ID; its task record at $STATE/$ID.meta names it, so re-run the spawn or run teardown to return the lease" >&2
+      fi
     elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
       if [ "$SPAWN_TREEHOUSE_RETURN_SAFE" != 1 ]; then
         echo "warning: leaving preallocated Treehouse worktree $WT leased because the Herdr worktree-open result was ambiguous; its projection journal remains quarantined" >&2
