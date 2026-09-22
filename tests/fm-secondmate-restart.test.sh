@@ -839,6 +839,26 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
   pass "T16 an already-current mate with an unprovable runtime keeps the honest nudge path"
 }
 
+test_native_orca_secondmate_restart_capability_uses_supervised_mode() {
+  local meta out
+  meta="$TMP_ROOT/native-restart-capability.meta"
+  fm_write_meta "$meta" \
+    "window=fm-native-restart" "kind=secondmate" "backend=orca" \
+    "orca_mode=supervised" "harness=claude"
+  out=$(bash -c '
+    . "$1"
+    if fm_secondmate_restart_capable "$2"; then
+      printf "%s:%s:%s" "$FM_SECONDMATE_RESTART_PLACEMENT" \
+        "$FM_SECONDMATE_RESTART_BACKEND" "$FM_SECONDMATE_RESTART_HARNESS"
+    else
+      printf "refused:%s" "$FM_SECONDMATE_RESTART_REASON"
+    fi
+  ' _ "$ROOT/bin/fm-secondmate-restart-lib.sh" "$meta")
+  [ "$out" = local:orca:claude ] \
+    || fail "supervised native Orca Secondmate restart was rejected: $out"
+  pass "native Orca Secondmate restart capability preserves supervised mode"
+}
+
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
@@ -858,5 +878,6 @@ test_unpublished_worker_result_is_accounted_for
 test_result_published_while_reaping_is_honored
 test_already_current_mate_restarts_end_to_end
 test_already_current_unprovable_mate_stays_on_the_nudge_path
+test_native_orca_secondmate_restart_capability_uses_supervised_mode
 
 echo "# all fm-secondmate-restart tests passed"

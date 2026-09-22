@@ -205,6 +205,68 @@ alive_as() {  # <case-dir> <command-name>
   printf '%s' "$2" > "$1/fake/command"
 }
 
+make_orca_supervised_stub() {
+  local dir=$1
+  cat > "$dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+set -u
+log=${FM_ORCA_LOG:?}
+responses=${FM_ORCA_RESPONSES:?}
+count_file=$responses/.count
+n=$(( $(cat "$count_file" 2>/dev/null || echo 0) + 1 ))
+{
+  printf 'orca'
+  for arg in "$@"; do printf '\x1f%s' "$arg"; done
+  printf '\n'
+} >> "$log"
+echo "$n" > "$count_file"
+if [ -f "$responses/$n.exit" ]; then
+  exit "$(cat "$responses/$n.exit")"
+fi
+[ -f "$responses/$n.out" ] && cat "$responses/$n.out"
+exit 0
+SH
+  chmod +x "$dir/fakebin/orca"
+}
+
+add_native_task() {  # <case-dir> <id>
+  local dir=$1 id=$2 meta wt proj
+  add_task "$dir" "$id" claude ship orca
+  meta="$dir/home/state/$id.meta"
+  wt="$dir/wt-$id"
+  proj="$dir/proj-$id"
+  cat > "$meta" <<EOF
+window=fm-$id
+endpoint_task_id=$id
+worktree=$wt
+project=$proj
+harness=claude
+kind=ship
+mode=no-mistakes
+yolo=off
+model=default
+effort=default
+backend=orca
+orca_mode=supervised
+terminal=term-old
+orca_worktree_id=wt-$id::$wt
+orca_run_id=run-$id
+orca_task_id=task-$id
+orca_dispatch_id=dispatch-$id
+orca_worker_id=worker-$id
+orca_terminal_incarnation=inc-$id
+orca_pane_key=pane-$id
+EOF
+}
+
+run_native_control() {
+  local dir=$1; shift
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
+    FM_ORCA_LOG="$dir/fake/orca.log" FM_ORCA_RESPONSES="$dir/fake/orca-responses" \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
+    "$CONTROL" "$@" 2>&1
+}
+
 literals() {  # <case-dir>
   cat "$1/fake/literal"
 }
@@ -438,15 +500,18 @@ test_unverified_state_backends_refuse_stop_verbs() {
   pass "fm-control: a backend that cannot prove an agent stopped refuses exit and relaunch"
 }
 
-test_state_verified_backends_are_exactly_tmux_and_herdr() {
+test_state_verified_backends_require_the_native_orca_mode() {
   fm_control_backend_state_verified tmux || fail "tmux has a recovery-grade classifier"
   fm_control_backend_state_verified herdr || fail "herdr has a recovery-grade classifier"
+  fm_control_backend_state_verified orca supervised || fail "supervised Orca has a recovery-grade classifier"
+  fm_control_backend_state_verified orca \
+    && fail "terminal Orca must not claim a recovery-grade classifier"
   local backend
-  for backend in zellij orca cmux; do
+  for backend in zellij cmux; do
     fm_control_backend_state_verified "$backend" \
       && fail "$backend has no recovery-grade classifier and must not claim one"
   done
-  pass "fm-control-lib: stop-proving verbs are gated on the backends that really classify agent state"
+  pass "fm-control-lib: native Orca state proof requires supervised mode"
 }
 
 # --- 3. exact-id scoping ----------------------------------------------------
@@ -841,7 +906,58 @@ test_grok_idle_footer_does_not_confirm_cancellation() {
   pass "fm-control interrupt: grok's idle footer does not confirm cancellation"
 }
 
-# --- 6. marker non-regression -----------------------------------------------
+# --- 6. native Orca supervision ---------------------------------------------
+
+test_native_orca_exit_stops_owned_dispatch() {
+  local dir out rc log
+  dir=$(new_case native-exit)
+  mkdir -p "$dir/fake/orca-responses"
+  make_orca_supervised_stub "$dir"
+  add_native_task "$dir" nativeexit
+  cat > "$dir/fake/orca-responses/1.out" <<EOF
+{"ok":true,"result":{"dispatchId":"dispatch-nativeexit","taskId":"task-nativeexit","runId":"run-nativeexit","workerId":"worker-nativeexit","worktreeId":"wt-nativeexit::$dir/wt-nativeexit","worktreePath":"$dir/wt-nativeexit","worker":{"state":"running"},"observation":{"exactWorker":true}}}
+EOF
+  cat > "$dir/fake/orca-responses/2.out" <<EOF
+{"ok":true,"result":{"dispatchId":"dispatch-nativeexit","taskId":"task-nativeexit","runId":"run-nativeexit","workerId":"worker-nativeexit","worktreeId":"wt-nativeexit::$dir/wt-nativeexit","worktreePath":"$dir/wt-nativeexit","worker":{"state":"running"},"observation":{"exactWorker":true},"resource":{"ownedByCoordinator":true}}}
+EOF
+  printf '%s\n' '{"ok":true,"result":{"stopped":true}}' > "$dir/fake/orca-responses/3.out"
+  cat > "$dir/fake/orca-responses/4.out" <<EOF
+{"ok":true,"result":{"dispatchId":"dispatch-nativeexit","taskId":"task-nativeexit","runId":"run-nativeexit","workerId":"worker-nativeexit","worktreeId":"wt-nativeexit::$dir/wt-nativeexit","worktreePath":"$dir/wt-nativeexit","worker":{"state":"completed"},"observation":{"exactWorker":true}}}
+EOF
+  out=$(run_native_control "$dir" nativeexit exit); rc=$?
+  expect_code 0 "$rc" "native Orca exit should stop an owned live Dispatch"$'\n'"$out"
+  assert_contains "$out" "stopped nativeexit" "native Orca exit should report stopped"
+  log=$(cat "$dir/fake/orca.log")
+  assert_contains "$log" $'orca\x1forchestration\x1fworker-stop\x1f--dispatch\x1fdispatch-nativeexit\x1f--json' \
+    "native Orca exit did not use worker-stop"
+  assert_not_contains "$log" worker-abandon "native Orca exit must not abandon a known live worker"
+  pass "fm-control native Orca: exits only after owned Dispatch stop reaches dead"
+}
+
+test_native_orca_abandon_only_fences_unknown_dispatch() {
+  local dir out rc log
+  dir=$(new_case native-abandon)
+  mkdir -p "$dir/fake/orca-responses"
+  make_orca_supervised_stub "$dir"
+  add_native_task "$dir" nativeabandon
+  cat > "$dir/fake/orca-responses/1.out" <<EOF
+{"ok":true,"result":{"dispatchId":"dispatch-nativeabandon","taskId":"task-nativeabandon","runId":"run-nativeabandon","workerId":"worker-nativeabandon","worktreeId":"wt-nativeabandon::$dir/wt-nativeabandon","worktreePath":"$dir/wt-nativeabandon","worker":{"state":"mystery"},"observation":{"exactWorker":true}}}
+EOF
+  cat > "$dir/fake/orca-responses/2.out" <<EOF
+{"ok":true,"result":{"dispatchId":"dispatch-nativeabandon","taskId":"task-nativeabandon","runId":"run-nativeabandon","workerId":"worker-nativeabandon","worktreeId":"wt-nativeabandon::$dir/wt-nativeabandon","worktreePath":"$dir/wt-nativeabandon","worker":{"state":"mystery"},"observation":{"exactWorker":true},"resource":{"ownedByCoordinator":true}}}
+EOF
+  printf '%s\n' '{"ok":true,"result":{"abandoned":true}}' > "$dir/fake/orca-responses/3.out"
+  out=$(run_native_control "$dir" nativeabandon abandon); rc=$?
+  expect_code 0 "$rc" "native Orca abandon should fence an unknown owned Dispatch"$'\n'"$out"
+  assert_contains "$out" "abandoned nativeabandon" "native Orca abandon should report abandoned"
+  log=$(cat "$dir/fake/orca.log")
+  assert_contains "$log" $'orca\x1forchestration\x1fworker-abandon\x1f--dispatch\x1fdispatch-nativeabandon\x1f--json' \
+    "native Orca abandon did not use worker-abandon"
+  assert_not_contains "$log" worker-stop "native Orca abandon must not stop an unknown worker"
+  pass "fm-control native Orca: abandons only an unknown owned Dispatch"
+}
+
+# --- 7. marker non-regression -----------------------------------------------
 
 test_secondmate_control_command_carries_no_marker() {
   local dir out rc typed home
@@ -897,7 +1013,7 @@ test_backend_key_capability_matrix
 test_harness_kind_capability
 test_orca_refuses_an_escape_harness_interrupt
 test_unverified_state_backends_refuse_stop_verbs
-test_state_verified_backends_are_exactly_tmux_and_herdr
+test_state_verified_backends_require_the_native_orca_mode
 test_window_label_is_refused_with_the_exact_id
 test_explicit_endpoint_is_refused
 test_unknown_task_is_refused
@@ -920,5 +1036,7 @@ test_exit_accepts_agent_stopped_by_busy_interrupt
 test_agent_that_does_not_stop_fails_closed
 test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
+test_native_orca_exit_stops_owned_dispatch
+test_native_orca_abandon_only_fences_unknown_dispatch
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task

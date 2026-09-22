@@ -733,9 +733,13 @@ secondmate_liveness_one_timed() {  # <meta> <id> <label>
 # secondmate_note_respawned so a concurrent sweep can collect them after wait.
 secondmate_liveness_one() {  # <meta> <id>
   local meta=$1 id=$2
-  local window harness backend target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
+  local window harness backend target kill_target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || return 0
+  if [ "$(fm_meta_get "$meta" cleanup_recovery)" = orca ]; then
+    echo "SECONDMATE_LIVENESS: secondmate $id: skipped: Orca cleanup recovery record; settle it with bin/fm-teardown.sh $id"
+    return 0
+  fi
   harness=$(fm_meta_get "$meta" harness)
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then
@@ -824,7 +828,9 @@ secondmate_liveness_one() {  # <meta> <id>
     dead|missing)
       if [ "$agent_state" = dead ]; then
         cause="confirmed agent absence on existing endpoint"
-        fm_backend_kill "$backend" "$target" 2>/dev/null || true
+        kill_target=$target
+        [ "$backend" != orca ] || kill_target=$(fm_backend_terminal_target_of_meta "$meta" 2>/dev/null || true)
+        [ -z "$kill_target" ] || fm_backend_kill "$backend" "$kill_target" 2>/dev/null || true
       else
         cause="recorded endpoint confidently missing"
       fi

@@ -43,4 +43,22 @@ T=$(fm_backend_resolve_selector "$RAW_TARGET" "$STATE")
 BACKEND=$(fm_backend_of_selector "$RAW_TARGET" "$T" "$STATE")
 EXPECTED_LABEL=$(fm_backend_expected_label_of_selector "$RAW_TARGET" "$STATE")
 
-fm_backend_capture "$BACKEND" "$T" "$N" "$EXPECTED_LABEL"
+META=$(fm_backend_meta_for_selector "$RAW_TARGET" "$STATE" 2>/dev/null || true)
+if [ "$BACKEND" = orca ] && [ -n "$META" ] && [ "$(fm_meta_get "$META" orca_mode)" = supervised ]; then
+  fm_backend_source orca || {
+    echo 'error: native Orca adapter is unavailable; output identity is unknown' >&2
+    exit 1
+  }
+  DISPATCH=$(fm_meta_get "$META" orca_dispatch_id)
+  SHOW=$(fm_backend_orca_supervised_worker_show "$DISPATCH") || {
+    echo "error: native Orca Dispatch $DISPATCH could not be inspected; output identity is unknown" >&2
+    exit 1
+  }
+  fm_backend_orca_supervised_identity_matches "$META" "$SHOW" || {
+    echo "error: native Orca Dispatch $DISPATCH identity does not match task metadata" >&2
+    exit 1
+  }
+  fm_backend_orca_supervised_worker_read "$DISPATCH" '' "$N"
+else
+  fm_backend_capture "$BACKEND" "$T" "$N" "$EXPECTED_LABEL"
+fi

@@ -45,6 +45,9 @@
 #              endpoint, so this verb cannot tell a destroyed window from one on
 #              a tmux server it cannot address, and it will not claim a stop it
 #              cannot see.
+#   abandon    Fence a native Orca Dispatch only when its process state is
+#              unknown and exact worker ownership is still proven. It never
+#              claims the process stopped and never removes the worktree.
 #   relaunch   Transactionally replace the running agent with a new one, in the
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
@@ -103,9 +106,12 @@
 #   - A backend that cannot deliver the harness's interrupt key is refused
 #     (Orca's terminal API has no Escape).
 #   - `exit` and `relaunch` require a backend with a recovery-grade agent-state
-#     classifier (tmux, herdr), because without one the "the agent stopped"
-#     postcondition cannot be proven. zellij, orca, and cmux are refused rather
-#     than reported as successful blind.
+#     classifier (tmux, herdr, or native Orca Dispatch), because without one the
+#     "the agent stopped" postcondition cannot be proven. zellij, raw Orca, and
+#     cmux are refused rather than reported as successful blind.
+#   - `abandon` is native-Orca-only and requires an exact owned Dispatch with an
+#     ambiguous/unverified process outcome; it is never used for a live or dead
+#     worker.
 #   - An ambiguous or unreadable endpoint state refuses; only a positively
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
@@ -120,7 +126,6 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 usage() {
   # The whole leading comment block, ending at the first non-comment line.
@@ -327,6 +332,12 @@ fm_backend_validate_task_endpoint "$META" "$ID" || exit 1
 BACKEND=$FM_BACKEND_VALIDATED_BACKEND
 T=$FM_BACKEND_VALIDATED_TARGET
 LABEL="fm-$ID"
+NATIVE_ORCA=0
+ORCA_DISPATCH_TARGET=
+if [ "$BACKEND" = orca ] && [ "$(fm_meta_get "$META" orca_mode)" = supervised ]; then
+  NATIVE_ORCA=1
+  ORCA_DISPATCH_TARGET=$T
+fi
 RECORDED_HARNESS=$(fm_meta_get "$META" harness)
 KIND=$(fm_meta_get "$META" kind)
 WT=$(fm_meta_get "$META" worktree)
@@ -338,11 +349,23 @@ fm_control_harness_supported "$HARNESS" \
   || die "task $ID records harness '${RECORDED_HARNESS:-none}', which has no verified control mechanics; fm-control refuses to guess an interrupt key or exit command"
 
 fm_backend_validate "$BACKEND" || exit 1
+fm_backend_source "$BACKEND" || die "task $ID's $BACKEND adapter could not be loaded; refusing lifecycle control"
 
 # --- shared helpers ---------------------------------------------------------
 
 agent_state() {
-  fm_backend_agent_state "$BACKEND" "$T"
+  if [ "$NATIVE_ORCA" = 1 ]; then
+    fm_backend_agent_state "$BACKEND" "$ORCA_DISPATCH_TARGET"
+  else
+    fm_backend_agent_state "$BACKEND" "$T"
+  fi
+}
+
+native_orca_rebind_terminal() {
+  [ "$NATIVE_ORCA" = 1 ] || return 0
+  T=$(fm_backend_orca_supervised_rebind_meta "$META") ||
+    die "task $ID's native Orca terminal could not be rebound from its exact Dispatch identity; refusing direct PTY control"
+  [ -n "$T" ] || die "task $ID's native Orca Dispatch did not expose a current terminal handle; refusing direct PTY control"
 }
 
 busy_verdict() {
@@ -371,7 +394,7 @@ wait_agent_state() {  # <timeout> <wanted>...
 }
 
 require_state_verified_backend() {  # <verb>
-  fm_control_backend_state_verified "$BACKEND" && return 0
+  fm_control_backend_state_verified "$BACKEND" "$(fm_meta_get "$META" orca_mode)" && return 0
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
 }
 
@@ -382,6 +405,16 @@ require_state_verified_backend() {  # <verb>
 # composer would make the next submitted line concatenate onto it.
 send_interrupt_keys() {
   local key repeat clear i=0
+  if [ "$NATIVE_ORCA" = 1 ]; then
+    # Native Orca's mailbox is the steering channel; an interrupt is the one
+    # lifecycle action that deliberately attaches to the current PTY. C-c is
+    # the only terminal key Orca exposes, and the Dispatch read below remains
+    # the proof of the resulting state.
+    native_orca_rebind_terminal
+    fm_backend_send_key "$BACKEND" "$T" C-c "$LABEL" \
+      || die "native Orca interrupt was not delivered to task $ID's current terminal"
+    return 0
+  fi
   key=$(fm_control_interrupt_key "$HARNESS")
   repeat=$(fm_control_interrupt_repeat "$HARNESS")
   clear=$(fm_control_interrupt_clear_key "$HARNESS")
@@ -442,11 +475,12 @@ deliver_interrupt() {
 }
 
 verify_interrupt_running() {
-  local proof after
-  fm_backend_target_exists "$BACKEND" "$T" "$LABEL" \
+  local proof after target=$T
+  [ "$NATIVE_ORCA" = 1 ] && target=$ORCA_DISPATCH_TARGET
+  fm_backend_target_exists "$BACKEND" "$target" "$LABEL" \
     || die "task $ID's endpoint disappeared while interrupting it; no further control action is safe"
   proof=endpoint
-  if fm_control_backend_state_verified "$BACKEND"; then
+  if fm_control_backend_state_verified "$BACKEND" "$(fm_meta_get "$META" orca_mode)"; then
     # An interrupt cancels a turn; it must never have stopped the agent. This
     # is the postcondition that separates a landed interrupt from an accident.
     after=$(agent_state)
@@ -474,8 +508,34 @@ retire_busy_incarnation() {
 # `already-stopped`, `endpoint-gone`, or `stopped`.
 do_exit() {
   local state cmd verdict composer_state cancel absence interrupt_result=not-needed
-  require_state_verified_backend exit
   state=$(agent_state)
+  if [ "$NATIVE_ORCA" = 1 ]; then
+    case "$state" in
+      dead)
+        retire_busy_incarnation
+        printf 'already-stopped'
+        return 0
+        ;;
+      alive)
+        fm_backend_orca_supervised_owned "$META" ||
+          die "task $ID's native Orca Dispatch identity or ownership is not proven; refusing worker-stop"
+        fm_backend_orca_supervised_worker_stop "$ORCA_DISPATCH_TARGET" ||
+          die "native Orca worker-stop was not accepted for task $ID; the worker may still be running"
+        state=$(wait_agent_state "$EXIT_WAIT" dead) ||
+          die "native Orca worker-stop was accepted for task $ID, but its Dispatch did not reach dead within ${EXIT_WAIT}s"
+        retire_busy_incarnation
+        printf 'stopped'
+        return 0
+        ;;
+      ambiguous|unverified|missing)
+        die "task $ID's native Orca Dispatch state is '$state'; exit will not stop or abandon a worker whose process state is unknown"
+        ;;
+      *)
+        die "task $ID's native Orca Dispatch reads '$state'; refusing worker-stop without a positively classified state"
+        ;;
+    esac
+  fi
+  require_state_verified_backend exit
   case "$state" in
     dead)
       printf 'already-stopped'
@@ -564,6 +624,27 @@ do_exit() {
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
   printf 'stopped'
+}
+
+# Native Orca is the only backend with an explicit abandon action. It is a
+# recovery action for a known Dispatch whose process outcome cannot be
+# classified, never a shortcut around worker-stop or release.
+do_abandon() {
+  [ "$NATIVE_ORCA" = 1 ] || die "'abandon' is only available for native Orca supervision"
+  local state
+  state=$(agent_state)
+  case "$state" in
+    ambiguous|unverified) ;;
+    alive) die "task $ID's native Orca worker is alive; use exit so worker-stop proves it stopped" ;;
+    dead) die "task $ID's native Orca worker is already dead; abandon is only for unknown process state" ;;
+    missing) die "task $ID's native Orca Dispatch is missing; abandon cannot prove ownership of an absent resource" ;;
+    *) die "task $ID's native Orca Dispatch reads '$state'; abandon requires an unknown process state" ;;
+  esac
+  fm_backend_orca_supervised_owned "$META" ||
+    die "task $ID's native Orca Dispatch identity or ownership is not proven; refusing worker-abandon"
+  fm_backend_orca_supervised_abandon "$ORCA_DISPATCH_TARGET" ||
+    die "native Orca worker-abandon was not accepted for task $ID"
+  printf 'abandoned'
 }
 
 # --- transactional relaunch -------------------------------------------------
@@ -971,6 +1052,10 @@ case "$VERB" in
   exit)
     result=$(do_exit)
     echo "$result $ID harness=$HARNESS backend=$BACKEND endpoint=$T worktree=$WT"
+    ;;
+  abandon)
+    result=$(do_abandon)
+    echo "$result $ID harness=$HARNESS backend=$BACKEND dispatch=$ORCA_DISPATCH_TARGET worktree=$WT"
     ;;
   relaunch)
     do_relaunch

@@ -154,6 +154,30 @@ fm_backend_orca_worktree_create() {  # <project-path> <name>
   [ -z "$terminal" ] || printf '\t%s' "$terminal"
 }
 
+fm_backend_orca_existing_worktree() {  # <folder-path>
+  local folder=$1 out
+  fm_backend_orca_tool_check || return 1
+  out=$(orca worktree ps --json) || return 1
+  printf '%s' "$out" | node -e '
+const fs = require("fs");
+const path = process.argv[1];
+let data;
+try { data = JSON.parse(fs.readFileSync(0, "utf8")); } catch (_) { process.exit(1); }
+if (data.ok === false) process.exit(1);
+const root = data.result || data;
+const rows = root.worktrees || root.items || [];
+const matches = [];
+for (const row of rows) {
+  const rowPath = row.path || (row.worktree && row.worktree.path) || "";
+  if (rowPath !== path) continue;
+  const id = row.id || row.worktreeId || (row.worktree && row.worktree.id) || "";
+  if (id) matches.push([String(id), String(rowPath)]);
+}
+if (matches.length !== 1) process.exit(1);
+process.stdout.write(matches[0].join("\t"));
+' "$folder"
+}
+
 fm_backend_orca_terminal_create() {  # <worktree-id> <title>
   local worktree_id=$1 title=$2 out terminal
   fm_backend_orca_tool_check || return 1
@@ -165,9 +189,13 @@ fm_backend_orca_terminal_create() {  # <worktree-id> <title>
   printf '%s' "$terminal"
 }
 
-fm_backend_orca_send_text_line() {  # <terminal-id> <text>
-  local terminal=$1 text=$2
+fm_backend_orca_send_text_line() {  # <terminal-id|dispatch:id> <text>
+  local terminal=$1 text=$2 dispatch
   fm_backend_orca_tool_check || return 1
+  if dispatch=$(fm_backend_orca_supervised_dispatch_from_target "$terminal" 2>/dev/null); then
+    fm_backend_orca_supervised_send_dispatch "$dispatch" "$text"
+    return $?
+  fi
   fm_backend_orca_run_json orca terminal send --terminal "$terminal" --text "$text" --enter --json
 }
 
@@ -196,9 +224,13 @@ fm_backend_orca_worktree_path() {
   printf '%s' "$path"
 }
 
-fm_backend_orca_capture() {  # <terminal-id> <lines>
-  local terminal=$1 lines=${2:-40} out
+fm_backend_orca_capture() {  # <terminal-id|dispatch:id> <lines>
+  local terminal=$1 lines=${2:-40} out dispatch
   fm_backend_orca_tool_check || return 1
+  if dispatch=$(fm_backend_orca_supervised_dispatch_from_target "$terminal" 2>/dev/null); then
+    fm_backend_orca_supervised_worker_read "$dispatch" '' "$lines"
+    return $?
+  fi
   out=$(orca terminal read --terminal "$terminal" --limit "$lines" --json) || return 1
   fm_backend_orca_json_text "$out"
 }
@@ -245,8 +277,12 @@ fm_backend_orca_composer_caps() {
 # shared verdict out. Every shape (bordered boxes AND the borderless bare-glyph
 # row this adapter never learned, which left every claude/codex/pi/muse steer
 # unconfirmed) lives in bin/fm-composer-lib.sh.
-fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] -> empty|pending|pending-unproven|unknown
+fm_backend_orca_composer_state() {  # <terminal-id|dispatch:id> [expected-label] -> empty|pending|pending-unproven|unknown
   local cap verdict
+  if fm_backend_orca_supervised_dispatch_from_target "$1" >/dev/null 2>&1; then
+    printf 'empty'
+    return 0
+  fi
   cap=$(fm_backend_orca_composer_capture "$1") || { printf 'unknown'; return 0; }
   verdict=$(fm_composer_classify_screen "$(fm_backend_orca_composer_caps)" "$cap")
   [ "$verdict" != need-identity ] || verdict=unknown
@@ -275,9 +311,14 @@ fm_backend_orca_send_key() {  # <terminal-id> <key>
 # fm_composer_submit_retry_core) against the shared composer verdict, so a
 # slash-command popup placeholder fill gets the required second Enter without
 # duplicating text.
-fm_backend_orca_send_text_submit() {  # <terminal-id> <text> <retries> <enter-sleep> <settle>
-  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5
+fm_backend_orca_send_text_submit() {  # <terminal-id|dispatch:id> <text> <retries> <enter-sleep> <settle>
+  local terminal=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 dispatch
   fm_backend_orca_tool_check || { printf 'send-failed'; return 0; }
+  if dispatch=$(fm_backend_orca_supervised_dispatch_from_target "$terminal" 2>/dev/null); then
+    fm_backend_orca_supervised_send_dispatch "$dispatch" "$text" >/dev/null 2>&1 || { printf 'send-failed'; return 0; }
+    printf ''
+    return 0
+  fi
   fm_backend_orca_send_literal "$terminal" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
   fm_composer_submit_retry_core fm_backend_orca_send_key fm_backend_orca_composer_state \
@@ -296,3 +337,6 @@ fm_backend_orca_kill() {  # <terminal-id>
   fm_backend_orca_tool_check || return 1
   orca terminal close --terminal "$1" --json >/dev/null 2>&1 || true
 }
+
+# shellcheck source=bin/backends/orca-supervised.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/orca-supervised.sh"

@@ -1689,19 +1689,28 @@ The real lifecycle smoke proved spawn, metadata, nested-subshell worktree discov
 
 ## Orca
 
-Real readiness was verified against `/usr/local/bin/orca` with `/Applications/Orca.app` bundle version 1.4.116.
+Real readiness and native capability were verified on 2026-09-21 against Orca 1.4.206.
 
 ```sh
+orca --version
 orca status --json
+FM_ORCA_SUPERVISED_LIVE=1 bin/fm-test-run.sh tests/fm-backend-orca.test.sh
 ```
 
-Observed fields:
+Observed live output:
 
 ```text
+1.4.206
 result.runtime.reachable=true
 result.runtime.state=ready
+ok - native Orca 1.4.206 capability gate: claude schema=1 commands=236
+ok - native Orca 1.4.206 capability gate: codex schema=1 commands=236
+# cursor absent, not verified here
 ```
 
+The guard performs a token-free real `agent-context --json` capability probe for every installed supported native harness and names absent harnesses rather than treating them as verified.
+Cursor is absent on this machine and is skipped; Pi is intentionally excluded from the native set, so no native Pi support is claimed. Ordinary Pi Orca tasks use the tested terminal fallback, while persistent Pi Secondmates refuse native launch.
+The required native command shapes include Run creation, worker start/read/show/abandon/stop/list/release, mailbox send/check, terminal wait, and worktree inspection.
 `orca terminal create --json` returned `result.terminal.handle`.
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
 Speculative bare ids and nested terminal fields were deliberately rejected.
@@ -1712,7 +1721,8 @@ tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```
 
-The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, and path-matched release refusal.
+The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, native capability and transcript-first worker-read projections, the Orca sender-terminal gate including a stale handle that `run-current` rejects, worker-show and worker-read response shapes captured from a real Orca 1.4.207, the full launch contract running in the terminal before `worker-start --terminal` attaches, persistent native Secondmate exact-home launch, recovery/release boundaries, and path-matched release refusal.
+No mutating live worker-start/stop/release smoke is claimed here; the portable fake backend is the lifecycle evidence, while the live check remains capability-only.
 
 ## cmux
 
