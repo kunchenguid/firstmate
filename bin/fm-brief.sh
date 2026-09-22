@@ -90,13 +90,16 @@
 # config/standing-skills lists one skill name per line, with blank lines and
 # "#" comments ignored. When it names at least one skill, ship and scout
 # scaffolds end their `# Setup` section with one paragraph telling the worker
-# to load each skill with its harness's own invocation (`/<name>`, or
-# `$<name>` on Codex) and follow it within the brief's boundaries, with the
-# Definition of done and safety rules winning on conflict. It sits in Setup so
-# the skills load before any task work. An absent file, or one naming no skill,
-# changes nothing; a present path that is not a readable regular file, or a
-# name outside [A-Za-z0-9._:-] (starting alphanumeric), stops the scaffold
-# before anything is written. Secondmate charters never take it.
+# to load each skill with its harness's own skill command (`/<name>`, or
+# `$<name>` on Codex, asking by name where the harness has no verified skill
+# command) and follow it within the brief's boundaries, with the Definition of
+# done and safety rules winning on conflict. It sits in Setup so the skills
+# load before any task work. A secondmate is a firstmate instance and takes
+# the same paragraph at the end of its charter's `# Operating model` section,
+# ahead of any routed work. An absent file, or one naming no skill, changes
+# nothing; a present path that is not a readable regular file, or a name
+# outside [A-Za-z0-9._:-] (starting alphanumeric), stops the scaffold before
+# anything is written.
 # Refuses to overwrite an existing brief.
 set -eu
 
@@ -234,7 +237,7 @@ fi
 # absent or empty list leaves the scaffold byte-identical.
 STANDING_SKILLS_FILE="$CONFIG/standing-skills"
 STANDING_SKILLS_SETUP=
-if [ "$KIND" != secondmate ] && { [ -e "$STANDING_SKILLS_FILE" ] || [ -L "$STANDING_SKILLS_FILE" ]; }; then
+if [ -e "$STANDING_SKILLS_FILE" ] || [ -L "$STANDING_SKILLS_FILE" ]; then
   { [ -f "$STANDING_SKILLS_FILE" ] && STANDING_SKILLS_BODY=$(cat "$STANDING_SKILLS_FILE" 2>/dev/null); } || {
     echo "error: $STANDING_SKILLS_FILE must be a readable regular file" >&2
     exit 1
@@ -259,7 +262,7 @@ EOF
   if [ -n "$slash_forms" ]; then
     STANDING_SKILLS_SETUP="
 
-Standing skills: before any task work, load each of these skills with your harness's own skill invocation: $slash_forms on Claude, Grok, Pi, Kimi, Cursor, and Gemini; $dollar_forms on Codex; on any other harness, ask for each skill by name.
+Standing skills: before any task work, load each of these skills with your harness's own skill command: $slash_forms, or $dollar_forms on Codex; where your harness has no verified skill command, ask for each skill by name.
 Follow their guidance within this brief's boundaries; this brief's Definition of done and safety rules win on any conflict."
   fi
 fi
@@ -344,7 +347,7 @@ Delegate project work to your own crewmates with the normal firstmate lifecycle:
 Do not invent a second delegation system.
 You do not generate your own work.
 Act only on tasks the main firstmate routes to you.
-Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.
+Never start a survey, audit, or "find improvements" sweep on your own initiative; that is not your job and it is unwanted.$STANDING_SKILLS_SETUP
 
 # The captain and the parent channel
 Nobody reads this chat: the captain and the main firstmate see only what is appended to $STATUS_FILE, and a captain-facing sentence that is not appended there has not been sent.

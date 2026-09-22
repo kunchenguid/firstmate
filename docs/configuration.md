@@ -399,11 +399,11 @@ The text is static and never executed or expanded; secondmate charters never tak
 
 The optional local, gitignored `config/standing-skills` names skills every worker loads before starting its task, so a captain who wants every worker to use a skill needs no hand-added line in each brief.
 List one bare skill name per line, such as `kun`, without a `/` or `$` prefix; blank lines and `#` comments are ignored.
-When the file names at least one skill, `bin/fm-brief.sh` ends every ship and scout brief's `# Setup` section with one short paragraph telling the worker to load each skill with its harness's own invocation (`/<name>` on Claude, Grok, Pi, Kimi, Cursor, and Gemini; `$<name>` on Codex; by name elsewhere) and follow it within the brief's boundaries, with the brief's Definition of done and safety rules winning on any conflict.
+When the file names at least one skill, `bin/fm-brief.sh` ends every ship and scout brief's `# Setup` section with one short paragraph telling the worker to load each skill with its harness's own skill command (`/<name>`, or `$<name>` on Codex, asking by name where the harness has no verified skill command) and follow it within the brief's boundaries, with the brief's Definition of done and safety rules winning on any conflict.
 An absent file, or one naming no skill, leaves every brief byte-identical, while a present path that is not a readable regular file, or a name outside letters, digits, `.`, `_`, `:`, and `-`, stops the scaffold before anything is written.
-Secondmate charters never take it.
+A secondmate is a firstmate instance, so its charter carries the same paragraph at the end of its `# Operating model` section, ahead of any routed work.
 The file only names skills; it neither installs them nor checks that a harness can discover them.
-It is inherited into secondmate homes through the [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md), so a secondmate's own workers load the same skills.
+It is inherited into secondmate homes through the [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md), so a secondmate and its own workers load the same skills.
 
 ## Worker launch environment (config/launch-env-allowlist)
 

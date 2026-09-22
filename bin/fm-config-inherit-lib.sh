@@ -24,7 +24,7 @@
 # secondmate's own claude crewmates launch on the same permission posture.
 # Primary config/standing-skills names the skills every worker brief tells the
 # worker to load first, a captain-wide preference, so a secondmate's own
-# crewmates are told to load the same skills.
+# crewmates are told to load the same skills its charter names.
 # It also pushes
 # the one primary-authoritative shared captain-preference file,
 # data/captain-shared.md, into each secondmate home's data/ as a read-only copy.

@@ -1090,9 +1090,9 @@ test_home_brief_include_is_appended_last() {
 
 # A home can name standing skills in its gitignored config/standing-skills.
 # An absent or skill-free list must leave every scaffold byte-identical; named
-# skills must reach ship and scout Setup sections with both invocation forms,
-# never a secondmate charter; and an unusable list must stop the scaffold
-# before anything is written.
+# skills must reach ship and scout Setup sections, and the secondmate
+# charter's Operating model, with both invocation forms; and an unusable list
+# must stop the scaffold before anything is written.
 test_standing_skills_render_in_setup() {
   local home config kind id brief setup out rc
   home="$TMP_ROOT/standing-skills-home"
@@ -1124,19 +1124,17 @@ test_standing_skills_render_in_setup() {
     scaffold_standing_skills_kind "$kind" "$id" >/dev/null || fail "$kind scaffold failed with two standing skills"
     brief="$home/data/$id/brief.md"
     if [ "$kind" = secondmate ]; then
-      cmp -s "$home/$kind-absent.md" "$brief" || fail "secondmate charter changed under a standing-skills list"
-      continue
+      setup=$(sed -n '/^# Operating model$/,/^# The captain and the parent channel$/p' "$brief")
+    else
+      setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$brief")
     fi
-    setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$brief")
     # shellcheck disable=SC2016 # Literal backticks and dollar signs are the rendered invocation forms.
-    assert_contains "$setup" '`/kun`, `/plugin:review-kit` on Claude, Grok, Pi, Kimi, Cursor, and Gemini' \
-      "$kind Setup did not name both skills in the slash form"
-    # shellcheck disable=SC2016 # Literal backticks and dollar signs are the rendered invocation forms.
-    assert_contains "$setup" '`$kun`, `$plugin:review-kit` on Codex' \
-      "$kind Setup did not name both skills in the Codex form"
+    assert_contains "$setup" 'skill command: `/kun`, `/plugin:review-kit`, or `$kun`, `$plugin:review-kit` on Codex; where your harness has no verified skill command, ask for each skill by name' \
+      "$kind scaffold did not name both skills in the generic and Codex forms"
+    assert_no_grep 'on Claude' "$brief" "$kind scaffold enumerated harnesses instead of the generic skill command"
     assert_contains "$setup" "Definition of done and safety rules win on any conflict" \
-      "$kind Setup did not keep the brief's contract above the standing skills"
-    [ "$(grep -c 'Standing skills' "$brief")" = 1 ] || fail "$kind brief named its standing skills outside one Setup paragraph"
+      "$kind scaffold did not keep the brief's contract above the standing skills"
+    [ "$(grep -c 'Standing skills' "$brief")" = 1 ] || fail "$kind scaffold named its standing skills outside one paragraph"
   done
 
   printf '%s\n' 'kun' '/lavish' > "$config/standing-skills"
@@ -1151,7 +1149,7 @@ test_standing_skills_render_in_setup() {
   expect_code 1 "$rc" "an unusable standing-skills path must stop the scaffold"
   assert_contains "$out" "standing-skills must be a readable regular file" "unusable standing-skills refusal did not name the file"
   assert_absent "$home/data/standing-unusable" "an unusable standing-skills path left a partial scaffold behind"
-  pass "fm-brief.sh: standing skills reach ship and scout Setup only, and an absent list changes nothing"
+  pass "fm-brief.sh: standing skills reach ship, scout, and secondmate scaffolds, and an absent list changes nothing"
 }
 
 test_worker_role_scope
