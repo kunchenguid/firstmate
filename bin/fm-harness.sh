@@ -461,12 +461,13 @@ first_config_line() {
 # config/secondmate-harness, for that id only.
 SECONDMATE_PIN_DIR=secondmate-harness.d
 
-# Print the path of <id>'s per-secondmate pin when one exists, nothing when the
-# directory or the file is absent, and fail with a diagnostic on anything that
-# could read the wrong file: an id that is not a valid task id (so it cannot
-# name a path outside the directory), a symlinked directory or file, or an
-# entry that is not a regular readable file. The pin is explicit configuration
-# for one mate, so none of those shapes is allowed to fall through silently.
+# Print the path of <id>'s per-secondmate pin when one exists, nothing only when
+# the directory or file is genuinely absent, and fail with a diagnostic on
+# every other inspection result that could read the wrong file: an id that is
+# not a valid task id (so it cannot name a path outside the directory), an
+# inaccessible or symlinked directory or file, or an entry that is not a
+# regular readable file. The pin is explicit configuration for one mate, so
+# none of those failures is allowed to fall through silently.
 secondmate_pin_path() {
   local id=$1 dir path present
   fm_task_id_creation_valid "$id" || {
