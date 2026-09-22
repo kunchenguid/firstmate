@@ -253,6 +253,16 @@ fm_pf_deliverable_format() {
   esac
 }
 
+# fm_pf_deliverable_key_valid <key>: 0 when <key> is a deliverable name tasks-axi
+# accepts (DELIVERABLE_NAME_RE in its public-followup.js): a lowercase letter,
+# then at most 63 more of [a-z0-9_].
+fm_pf_deliverable_key_valid() {
+  case "$1" in
+    ''|[!a-z]*|*[!a-z0-9_]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+
 # fm_pf_expected_outcome <expected-final>: the one outcome_type that satisfies
 # that expected final (eventMatchesExpected in tasks-axi's public-followup.js).
 # A promise is also answerable with 'failed', which reports that it could not be
@@ -323,7 +333,9 @@ fm_pf_pr_url_valid() {
 # 0 when tasks-axi would accept <key>=<value> on a work event with <outcome>
 # against a promise whose expected final is <expected-final> (empty when the
 # caller cannot read one); otherwise print one line naming the key, the bad
-# value, and what was expected, and exit 1.
+# value, and what was expected, and exit 1. The 500-character bound and the
+# single-line rule are safeText's, which tasks-axi applies to every deliverable
+# value whatever its key; the per-key formats follow it.
 fm_pf_deliverable_problem() {
   local expected=$1 outcome=$2 key=$3 value=$4 allowed format re=''
   if allowed=$(fm_pf_deliverable_keys "$expected" "$outcome"); then
@@ -339,17 +351,29 @@ fm_pf_deliverable_problem() {
         ;;
     esac
   fi
+  case "$value" in
+    '')
+      printf "deliverable '%s' has no value; tasks-axi accepts no empty deliverable\n" "$key"
+      return 1
+      ;;
+    ' '*|*' ')
+      printf "deliverable '%s' is not valid: it has leading or trailing whitespace\n" "$key"
+      return 1
+      ;;
+    *[[:cntrl:]]*)
+      printf "deliverable '%s' is not valid: it must be single-line text with no control characters\n" "$key"
+      return 1
+      ;;
+  esac
+  if [ "${#value}" -gt 500 ]; then
+    printf "deliverable '%s' is %s characters long; tasks-axi accepts at most 500\n" "$key" "${#value}"
+    return 1
+  fi
   case "$key" in
     pr_url|report_path|commit_sha|error_code) ;;
     *) return 0 ;;
   esac
   format=$(fm_pf_deliverable_format "$key")
-  case "$value" in
-    *[[:cntrl:]]*)
-      printf "deliverable '%s' is not valid: it contains control characters; expected %s\n" "$key" "$format"
-      return 1
-      ;;
-  esac
   case "$key" in
     pr_url) fm_pf_pr_url_valid "$value" && return 0 ;;
     report_path) re='^data/[A-Za-z0-9][A-Za-z0-9._-]*/report\.md$' ;;

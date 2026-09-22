@@ -323,7 +323,7 @@ cmd_register() {
   fm_pf_expected_outcome "$expected_final" >/dev/null 2>&1 || expected_final=
   required_deliverables=$(printf '%s' "$payload" \
     | jq -r '.public_followup.expected_final.required_deliverables // []
-        | select(type == "array" and (map(type == "string" and test("^[a-z0-9_]+$")) | all))
+        | select(type == "array" and (map(type == "string" and test("^[a-z][a-z0-9_]{0,63}$")) | all))
         | join(" ")' 2>/dev/null) || required_deliverables=
   request_json=$(printf '%s' "$payload" | jq -c '.public_followup.request // empty' 2>/dev/null || true)
   request_context_b64=
@@ -464,7 +464,7 @@ the home above owns the reply.'
   keys=$(printf '%s' "$payload" \
     | jq -er '.public_followup.expected_final.required_deliverables
         | select(type == "array" and length > 0
-            and (map(type == "string" and test("^[a-z0-9_]+$")) | all))
+            and (map(type == "string" and test("^[a-z][a-z0-9_]{0,63}$")) | all))
         | .[]' 2>/dev/null) \
     || die "public-followup obligation '$id' has no readable required deliverable keys" 1
   # Pre-fill every value the binding already determines, so the worker has
@@ -1489,9 +1489,8 @@ cmd_rechain() {
   fi
   local key
   for key in "${deliverable_keys[@]}"; do
-    case "$key" in
-      ''|*[!a-z0-9_]*) die "deliverable key must be lowercase [a-z0-9_], got '$key'" ;;
-    esac
+    fm_pf_deliverable_key_valid "$key" \
+      || die "deliverable key must be a lowercase letter then at most 63 more of [a-z0-9_], got '$key'"
   done
 
   # Claim the delivered baton before publishing its destination. The claim is

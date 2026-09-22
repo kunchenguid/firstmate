@@ -3369,15 +3369,32 @@ CASES
 # it, through the real tasks-axi consumer against a really registered
 # obligation, and both must reach the table's verdict, so neither side can drift
 # from the other silently.
+# pad_run <n>: n repeats of 'x', so a length-boundary case can be written as a
+# short marker in the table below instead of a 500-character line.
+pad_run() {
+  local n=$1 out=''
+  while [ "${#out}" -lt "$n" ]; do out="${out}xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"; done
+  printf '%s' "${out:0:$n}"
+}
+
 test_emit_rules_agree_with_tasks_axi() {
   local home n=0 expected required outcome deliverables verdict
-  local emit_verdict axi_verdict obligation out pair
+  local emit_verdict axi_verdict obligation out pair pad
   local -a emit_args
   home=$(make_home emit-agreement)
   while IFS='|' read -r expected required outcome deliverables verdict; do
     [ -n "$expected" ] || continue
     n=$((n + 1))
     obligation="pf-agree-$n"
+    while :; do
+      case "$deliverables" in
+        *'<pad:'*) ;;
+        *) break ;;
+      esac
+      pad=${deliverables#*<pad:}
+      pad=${pad%%>*}
+      deliverables=${deliverables/"<pad:$pad>"/$(pad_run "$pad")}
+    done
     seed_typed_commitment "$home" "$obligation" "req-agree-$n" "$expected" "$required" \
       main "work-agree-$n"
 
@@ -3468,8 +3485,14 @@ pr-merged|["pr_url"]|pr-merged|{"report_path":"data/work-a/report.md"}|reject
 local-main|["commit_sha"]|local-main|{"commit_sha":"0123ABC"}|reject
 local-main|["commit_sha"]|local-main|{"commit_sha":"012"}|reject
 pr-merged|["pr_url"]|failed|{"error_code":"CI red"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/<pad:465>/pull/12"}|accept
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/<pad:466>/pull/12"}|reject
+report-ready|["report_path"]|report-ready|{"report_path":"data/<pad:485>/report.md"}|accept
+report-ready|["report_path"]|report-ready|{"report_path":"data/<pad:486>/report.md"}|reject
+pr-merged|["pr_url"]|pr-merged|{"9bad":"https://github.com/example/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"a<pad:64>":"https://github.com/example/repo/pull/12"}|reject
 CASES
-  [ "$n" -ge 57 ] || fail "the agreement table ran only $n cases"
+  [ "$n" -ge 63 ] || fail "the agreement table ran only $n cases"
   pass "the emitter's work-event rules agree with the real tasks-axi consumer on $n cases"
 }
 

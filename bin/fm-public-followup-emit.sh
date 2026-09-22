@@ -48,11 +48,12 @@
 #                          still owns the vocabulary.
 #   --deliverable k=v      Repeatable safe deliverable (for example
 #                          pr_url=https://...). A key this promise does not carry
-#                          on this outcome, or a value in a format tasks-axi
-#                          refuses (such as an absolute report_path), is refused
-#                          here with the key, the value, and the expected format,
-#                          in both destinations. fm-public-followup-lib.sh owns
-#                          those mirrored rules.
+#                          on this outcome, or a value tasks-axi refuses - a bad
+#                          format such as an absolute report_path, more than 500
+#                          characters, or anything but safe single-line text - is
+#                          refused here with the key, the value, and the expected
+#                          format, in both destinations. fm-public-followup-lib.sh
+#                          owns those mirrored rules.
 #   --require-deliverable <key>
 #                          Repeatable key this event MUST carry, so an event
 #                          missing a required value is refused here instead of
@@ -168,9 +169,8 @@ while [ "$#" -gt 0 ]; do
       ;;
     --require-deliverable)
       shift
-      case "${1:-}" in
-        ''|*[!a-z0-9_]*) die "--require-deliverable needs a lowercase [a-z0-9_] key, got '${1:-}'" ;;
-      esac
+      fm_pf_deliverable_key_valid "${1:-}" \
+        || die "--require-deliverable needs a lowercase letter then at most 63 more of [a-z0-9_], got '${1:-}'"
       REQUIRED_KEYS+=("$1")
       ;;
     --help|-h) help; exit 0 ;;
@@ -204,20 +204,6 @@ esac
 case "$OUTCOME" in
   superseded) die "a superseded outcome cannot be reported this way: tasks-axi requires a successor obligation for it, which a typed terminal result does not carry" ;;
 esac
-
-i=0
-while [ "$i" -lt "${#DELIVERABLE_KEYS[@]}" ]; do
-  key=${DELIVERABLE_KEYS[$i]}
-  case "$key" in
-    ''|*[!a-z0-9_]*) die "deliverable key must be lowercase [a-z0-9_], got '$key'" ;;
-  esac
-  [ "${#DELIVERABLE_VALUES[$i]}" -le 512 ] \
-    || die "deliverable '$key' exceeds 512 characters"
-  case "${DELIVERABLE_VALUES[$i]}" in
-    *[[:cntrl:]]*) die "deliverable '$key' must be single-line text with no control characters" ;;
-  esac
-  i=$((i + 1))
-done
 
 # Resolve the owning home to a real absolute directory before composing any path
 # under it, so a relative or symlinked argument cannot make the destination
@@ -288,9 +274,8 @@ EXPECTED_FINAL=
 if [ "$HOME_MODE" = owning ]; then
   EXPECTED_FINAL=$(fm_pf_registry_get "$STATE" "$OBLIGATION" expected_final)
   for key in $(fm_pf_registry_get "$STATE" "$OBLIGATION" required_deliverables); do
-    case "$key" in
-      *[!a-z0-9_]*) die "registration for '$OBLIGATION' names an unusable required deliverable key '$key'" 1 ;;
-    esac
+    fm_pf_deliverable_key_valid "$key" \
+      || die "registration for '$OBLIGATION' names an unusable required deliverable key '$key'" 1
     REQUIRED_KEYS+=("$key")
   done
 fi
@@ -303,12 +288,15 @@ if [ -n "$EXPECTED_FINAL" ] && [ "$OUTCOME" != failed ]; then
     || die "outcome '$OUTCOME' cannot satisfy this obligation: its $EXPECTED_FINAL final needs outcome '$EXPECTED_OUTCOME', and only 'failed' may answer it otherwise"
 fi
 
-# A value tasks-axi would refuse is refused here, where the worker can still
-# correct it, instead of travelling to the owning home to be quarantined.
+# A key or a value tasks-axi would refuse is refused here, where the worker can
+# still correct it, instead of travelling to the owning home to be quarantined.
 i=0
 while [ "$i" -lt "${#DELIVERABLE_KEYS[@]}" ]; do
+  key=${DELIVERABLE_KEYS[$i]}
+  fm_pf_deliverable_key_valid "$key" \
+    || die "deliverable key must be a lowercase letter then at most 63 more of [a-z0-9_], got '$key'"
   problem=$(fm_pf_deliverable_problem "$EXPECTED_FINAL" "$OUTCOME" \
-    "${DELIVERABLE_KEYS[$i]}" "${DELIVERABLE_VALUES[$i]}") || die "$problem"
+    "$key" "${DELIVERABLE_VALUES[$i]}") || die "$problem"
   i=$((i + 1))
 done
 
