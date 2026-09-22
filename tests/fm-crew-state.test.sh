@@ -3487,41 +3487,61 @@ PY
 # unreadable" - the SAME id printed as both the sole candidate id and the
 # "last reported run id" - as if the task had never run at all. The bare `axi
 # status` call already holds that run's own terminal record; when the failed
-# same-branch read's own partial candidate-id evidence corroborates that same
-# id, the unknown detail must name what that run itself recorded instead of
-# staying silent about it. The state itself MUST stay unknown - this never
-# asserts exclusive authority over a read the inventory could not complete.
-test_unreadable_inventory_names_a_corroborated_terminal_run() {
-  make_capped_runs_case terminal-corroborated completed cancelled
-  local d=$TMP_ROOT/terminal-corroborated out
+# same-branch read's own partial candidate-id evidence does not name a
+# DIFFERENT run, the unknown detail must name what the last reported run
+# itself recorded instead of staying silent about it. The state itself MUST
+# stay unknown - this never asserts exclusive authority over a read the
+# inventory could not complete.
+test_unreadable_inventory_names_an_uncontradicted_terminal_run() {
+  make_capped_runs_case terminal-uncontradicted completed cancelled
+  local d=$TMP_ROOT/terminal-uncontradicted out
   FM_FAKE_AXI_STATUS="$(run_passed fm/competing | sed 's/01RUN/01NEW/')"
   rm "$NM_HOME/state.sqlite"
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'a corroborated terminal fallback never asserts exclusive authority'
+  assert_contains "$out" 'state: unknown' 'an uncontradicted terminal fallback never asserts exclusive authority'
   assert_contains "$out" 'run ids: 01NEW' 'the failed read keeps its own visible candidate id'
   assert_contains "$out" 'last reported run id: 01NEW' 'the last reported run id is preserved'
-  assert_contains "$out" '(already passed)' 'a corroborated terminal record names its own recorded outcome'
-  assert_not_contains "$out" '01OLD' 'a hidden sibling beyond the visible window is not asserted as corroboration'
-  pass 'a corroborated terminal last-reported run names its own outcome without leaving the honest unknown'
+  assert_contains "$out" '(already passed)' 'an uncontradicted terminal record names its own recorded outcome'
+  pass 'an uncontradicted terminal last-reported run names its own outcome without leaving the honest unknown'
 }
 
-# The safety counterpart: when the last reported run's id is NOT among the
-# failed read's own partial candidate-id evidence (here it is hidden beyond
-# the capped window, exactly like the real repository state this fixture
-# replays), a stale or superseded terminal record must not be described as
-# though it were corroborated - the captured same-branch-inventory replay
-# (test_captured_inventory_replay) is the direct proof that the bare `axi
-# status` answer can be a run a live successor has already superseded.
-test_unreadable_inventory_uncorroborated_terminal_run_stays_silent() {
-  make_capped_runs_case terminal-uncorroborated completed cancelled hidden
-  local d=$TMP_ROOT/terminal-uncorroborated out
+# The captain's exact reported shape: the visible capped window holds NO row
+# at all for this branch (the run has aged out of the CLI's ten-row display,
+# exactly like the real Pi worktree-trust task today), so the failed read's
+# own candidate-id evidence is empty. A run that finished many runs ago is
+# exactly as knowable from the bare `axi status` record as one that finished
+# two runs ago - an empty candidate list contradicts nothing - so this must
+# still name the terminal outcome, not stay silent merely because pagination
+# pushed every row for this branch out of the visible window.
+test_unreadable_inventory_with_no_visible_candidates_still_names_the_run() {
+  make_capped_runs_case terminal-no-candidates completed cancelled hidden
+  local d=$TMP_ROOT/terminal-no-candidates out
   FM_FAKE_AXI_STATUS="$(run_passed fm/competing | sed 's/01RUN/01NEW/')"
   rm "$NM_HOME/state.sqlite"
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'an uncorroborated terminal record keeps the honest unknown'
-  assert_contains "$out" 'last reported run id: 01NEW' 'the last reported run id is still surfaced'
-  assert_not_contains "$out" 'already passed' 'an uncorroborated last-reported run must not be described as its own outcome'
-  pass 'an uncorroborated last-reported terminal run adds no unverified outcome detail'
+  assert_contains "$out" 'state: unknown' 'a run named with no visible candidates never asserts exclusive authority'
+  assert_contains "$out" 'last reported run id: 01NEW' 'the last reported run id is preserved'
+  assert_contains "$out" '(already passed)' 'an empty candidate list is not a contradiction and still names the outcome'
+  pass 'a terminal last-reported run with no visible candidates still names its own outcome'
+}
+
+# The safety counterpart: when the failed read's own partial candidate-id
+# evidence positively names a DIFFERENT run than the one bare `axi status`
+# reports, a stale or superseded terminal record must not be described as
+# though it were the crew's own outcome - the captured same-branch-inventory
+# replay (test_captured_inventory_replay) is the direct proof that the bare
+# `axi status` answer can be a run a live successor has already superseded.
+test_unreadable_inventory_contradicted_terminal_run_stays_silent() {
+  make_capped_runs_case terminal-contradicted completed cancelled
+  local d=$TMP_ROOT/terminal-contradicted out
+  FM_FAKE_AXI_STATUS="$(run_passed fm/competing | sed 's/01RUN/01OLD/')"
+  rm "$NM_HOME/state.sqlite"
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'a contradicted terminal record keeps the honest unknown'
+  assert_contains "$out" 'run ids: 01NEW' 'the visible candidate names a different run entirely'
+  assert_contains "$out" 'last reported run id: 01OLD' 'the last reported run id is still surfaced'
+  assert_not_contains "$out" 'already passed' 'a run contradicted by a different visible candidate must not be described as its own outcome'
+  pass 'a terminal last-reported run contradicted by a different visible candidate adds no unverified outcome detail'
 }
 
 make_no_python_toolbin() {
@@ -4973,8 +4993,9 @@ test_capped_inventory_reader_is_time_bounded
 test_capped_inventory_requires_exact_worktree_path
 test_capped_replacement_keeps_gate_and_inventory_unchanged
 test_capped_inventory_failures_report_unknown
-test_unreadable_inventory_names_a_corroborated_terminal_run
-test_unreadable_inventory_uncorroborated_terminal_run_stays_silent
+test_unreadable_inventory_names_an_uncontradicted_terminal_run
+test_unreadable_inventory_with_no_visible_candidates_still_names_the_run
+test_unreadable_inventory_contradicted_terminal_run_stays_silent
 test_complete_inventory_ignores_unrelated_semantics
 test_requested_branch_has_no_character_whitelist
 test_capped_inventory_ignores_unrelated_semantics
