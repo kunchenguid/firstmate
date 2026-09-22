@@ -33,7 +33,7 @@ make_home() {  # <name>
   cat > "$fakebin/lavish-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1-}" in
-  --version) printf '0.1.61\n' ;;
+  --version) printf '0.1.77\n' ;;
   '')
     printf 'sessions[1]{file,status,url,pending_prompts}:\n'
     [ ! -s "$FM_HOME/lavish-open" ] \
