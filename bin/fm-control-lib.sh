@@ -50,13 +50,14 @@ fm_control_verbs() {
   cat <<'EOF'
 interrupt
 exit
+abandon
 relaunch
 EOF
 }
 
 fm_control_verb_allowed() {  # <verb>
   case "${1-}" in
-    interrupt|exit|relaunch) return 0 ;;
+    interrupt|exit|abandon|relaunch) return 0 ;;
   esac
   return 1
 }
@@ -195,7 +196,9 @@ fm_control_exit_command() {  # <harness>
 # Which named keys a backend adapter can deliver. Every session provider
 # normalizes Enter, Ctrl+C, and the Ctrl+U composer clear; Orca's terminal API
 # exposes only an interrupt and an Enter, so it can deliver neither Escape nor
-# Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key).
+# Ctrl+U (bin/backends/orca.sh's fm_backend_orca_send_key). Native Orca
+# supervision uses that interrupt only after rebinding the worker's current
+# terminal handle; its Dispatch remains the state authority.
 fm_control_backend_supports_key() {  # <backend> <key>
   local backend=${1-} key=${2-}
   case "$backend" in
@@ -209,14 +212,12 @@ fm_control_backend_supports_key() {  # <backend> <key>
   return 1
 }
 
-# Whether <backend> has a recovery-grade agent-state classifier. Only tmux and
-# herdr implement fm_backend_agent_state; zellij, orca, and cmux report
-# `unverified`, so no reading of theirs can prove an agent stopped. The control
-# plane refuses a stop-proving verb there instead of reporting an unprovable
-# transition as success.
-fm_control_backend_state_verified() {  # <backend>
-  case "${1-}" in
-    tmux|herdr) return 0 ;;
+# Whether <backend> has a recovery-grade agent-state classifier. Native Orca
+# projects state from its durable Dispatch; raw terminal Orca remains
+# unverified, as do zellij and cmux.
+fm_control_backend_state_verified() {  # <backend> [native-mode]
+  case "${1-}:${2-}" in
+    tmux:*|herdr:*|orca:supervised) return 0 ;;
   esac
   return 1
 }

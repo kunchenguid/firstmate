@@ -1284,6 +1284,58 @@ require_orca_terminal() {
   printf '%s\n' "$terminal"
 }
 
+settle_native_orca_secondmate() {
+  [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ] || return 0
+  [ "$(meta_value "$META" orca_mode)" = supervised ] || return 0
+  fm_backend_source orca || {
+    echo "REFUSED: native Orca adapter is unavailable for secondmate $ID; preserving its home." >&2
+    return 1
+  }
+  fm_backend_orca_supervised_owned "$META" || {
+    echo "REFUSED: native Orca Dispatch for secondmate $ID is not proven owned; preserving its home." >&2
+    return 1
+  }
+  local state i=0 max=${FM_ORCA_EXIT_POLLS:-60}
+  state=$(fm_backend_orca_supervised_agent_state "$T")
+  case "$state" in
+    alive)
+      fm_backend_orca_supervised_worker_stop "$T" >/dev/null || {
+        echo "REFUSED: native Orca worker-stop for secondmate $ID was not accepted; preserving its home." >&2
+        return 1
+      }
+      while [ "$i" -lt "$max" ]; do
+        state=$(fm_backend_orca_supervised_agent_state "$T")
+        [ "$state" = dead ] && break
+        case "$state" in
+          ambiguous|unverified|missing)
+            echo "REFUSED: native Orca secondmate $ID became '$state' while stopping; preserving its home and durable records." >&2
+            return 1
+            ;;
+        esac
+        i=$((i + 1))
+        [ "$i" -ge "$max" ] || sleep 0.5
+      done
+      [ "$state" = dead ] || {
+        echo "REFUSED: native Orca secondmate $ID did not prove stopped; preserving its home and durable records." >&2
+        return 1
+      }
+      ;;
+    dead) ;;
+    ambiguous|unverified|missing)
+      echo "REFUSED: native Orca secondmate $ID reads '$state'; refusing stop/release without a proven process state." >&2
+      return 1
+      ;;
+    *)
+      echo "REFUSED: native Orca secondmate $ID reads '$state'; preserving its home." >&2
+      return 1
+      ;;
+  esac
+  fm_backend_orca_supervised_release "$META" || {
+    echo "REFUSED: native Orca Dispatch for secondmate $ID is not settled for release; preserving its home." >&2
+    return 1
+  }
+}
+
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
   T_ORCA=$(meta_value "$META" terminal)
@@ -3614,6 +3666,7 @@ if [ "$KIND" != secondmate ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  settle_native_orca_secondmate || exit 1
   handoff_wake_retire_stage \
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
   pending_replies_recovery_validate recheck \

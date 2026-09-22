@@ -352,9 +352,14 @@ fm_backend_of_meta() {  # <meta-file>
 }
 
 fm_backend_target_of_meta() {  # <meta-file>
-  local meta=$1 backend terminal window
+  local meta=$1 backend terminal window mode dispatch
   backend=$(fm_backend_of_meta "$meta")
   if [ "$backend" = orca ]; then
+    mode=$(fm_meta_get "$meta" orca_mode)
+    if [ "$mode" = supervised ]; then
+      dispatch=$(fm_meta_get "$meta" orca_dispatch_id)
+      [ -n "$dispatch" ] && { printf 'dispatch:%s' "$dispatch"; return 0; }
+    fi
     terminal=$(fm_meta_get "$meta" terminal)
     [ -n "$terminal" ] && { printf '%s' "$terminal"; return 0; }
   fi
@@ -539,21 +544,25 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
           return 1
           ;;
       esac
-      [ -n "$terminal" ] || {
-        echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
-        return 1
-      }
       [ -n "$worktree_id" ] || {
         echo "REFUSED: missing orca_worktree_id in $meta; cannot remove Orca worktree; preserving task state." >&2
         return 1
       }
       if [ "$window" != "fm-$id" ] \
-        || ! fm_backend_endpoint_atom_valid "$terminal" \
+        || { [ -n "$terminal" ] && ! fm_backend_endpoint_atom_valid "$terminal"; } \
         || ! fm_backend_orca_worktree_id_valid "$worktree_id"; then
         echo "REFUSED: Orca endpoint metadata for task $id is malformed or inconsistent; preserving task state." >&2
         return 1
       fi
-      window=$terminal
+      if [ "$orca_mode" = supervised ]; then
+        window="dispatch:$orca_dispatch_id"
+      else
+        [ -n "$terminal" ] || {
+          echo "REFUSED: missing terminal in $meta; cannot close Orca endpoint; preserving task state." >&2
+          return 1
+        }
+        window=$terminal
+      fi
       ;;
     cmux)
       [ "$binding" = "$id" ] || {
@@ -943,7 +952,11 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
       ;;
     orca)
       fm_backend_source orca || return 1
-      fm_backend_orca_capture "$target" 1 >/dev/null 2>&1
+      if fm_backend_orca_supervised_dispatch_from_target "$target" >/dev/null 2>&1; then
+        fm_backend_orca_supervised_agent_state "$target" | grep -Eq '^(alive|dead|ambiguous)$'
+      else
+        fm_backend_orca_capture "$target" 1 >/dev/null 2>&1
+      fi
       ;;
     cmux)
       fm_backend_source cmux || return 1
@@ -974,13 +987,21 @@ fm_backend_target_exists() {  # <backend> <target> [expected-label]
 # `dead` here (issue #4115) - then maps a positively stopped session server to
 # `missing` only in this recovery-grade view. Zellij remains unverified because
 # its secondmate ghost-tab and agent-process recovery path has not been
-# empirically validated. Orca and cmux do not support secondmate spawns.
+# empirically validated. Native Orca Dispatches use the typed worker projection;
+# terminal-mode Orca and cmux remain unverified.
 fm_backend_agent_state() {  # <backend> <target>
   local backend=$1 target=$2
   fm_backend_source "$backend" || { printf 'unverified'; return 0; }
   case "$backend" in
     tmux) fm_backend_tmux_agent_state "$target" ;;
     herdr) fm_backend_herdr_agent_state "$target" ;;
+    orca)
+      if fm_backend_orca_supervised_dispatch_from_target "$target" >/dev/null 2>&1; then
+        fm_backend_orca_supervised_agent_state "$target"
+      else
+        printf 'unverified'
+      fi
+      ;;
     *) printf 'unverified' ;;
   esac
 }

@@ -1709,7 +1709,8 @@ ok - native Orca 1.4.206 capability gate: codex schema=1 commands=236
 ```
 
 The guard performs a token-free real `agent-context --json` capability probe for every installed supported agent-first harness and names absent harnesses rather than treating them as verified.
-The required native command shapes include Run creation, worker start/read/show/abandon/list/release, mailbox send/check, terminal wait, and worktree inspection.
+Cursor is absent on this machine and is skipped; Pi is intentionally excluded from the native set, so no native Pi support is claimed. Ordinary Pi Orca tasks use the tested terminal fallback, while persistent Pi Secondmates refuse native launch.
+The required native command shapes include Run creation, worker start/read/show/abandon/stop/list/release, mailbox send/check, terminal wait, and worktree inspection.
 `orca terminal create --json` returned `result.terminal.handle`.
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
 Speculative bare ids and nested terminal fields were deliberately rejected.
@@ -1720,7 +1721,8 @@ tests/fm-backend.test.sh
 tests/fm-bootstrap.test.sh
 ```
 
-The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, native capability and worker-read projections, recovery/release boundaries, and path-matched release refusal.
+The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, native capability and transcript-first worker-read projections, persistent native Secondmate exact-home launch, recovery/release boundaries, and path-matched release refusal.
+No mutating live worker-start/stop/release smoke is claimed here; the portable fake backend is the lifecycle evidence, while the live check remains capability-only.
 
 ## cmux
 

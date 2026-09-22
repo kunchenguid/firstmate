@@ -37,17 +37,32 @@ switch (field) {
   case "pane-key": value = string(first(root.agentTerminalPaneKey, root.terminalPaneKey, terminal.paneKey, terminal.pane_key, terminal.assigneePaneKey, root.paneKey, root.pane_key, dispatch.assigneePaneKey, resource.paneKey, resource.pane_key, resource.endpointPaneKey, resource.endpoint_pane_key, resourceTerminal.paneKey, resourceTerminal.pane_key)); break;
   case "worktree-id": value = string(first(terminal.worktreeId, terminal.worktree_id, terminal.worktree, terminal.worktree && terminal.worktree.id, root.worktreeId, root.worktree_id, root.worktree, root.worktree && root.worktree.id, dispatch.worktreeId, worker.worktreeId, resource.worktreeId, resource.worktree_id, resource.worktree, resourceWorktree.id)); break;
   case "worktree-path": value = string(first(terminal.worktreePath, terminal.path, terminal.worktree && terminal.worktree.path, root.worktreePath, root.path, root.worktree && root.worktree.path, dispatch.worktreePath, worker.worktreePath, resourceWorktree.path)); break;
-  case "exact-worker": value = bool(first(observation.exactWorker, observation.exact_worker, root.exactWorker, projection.exactWorker)); break;
+  case "exact-worker": value = bool(first(observation.exactWorker, observation.exact_worker, root.exactWorker, root.exact_worker, projection.exactWorker, projection.exact_worker)); break;
   case "source": value = string(first(root.source, root.provider)); break;
   case "source-identity": value = string(first(root.sourceIdentity, root.source_identity)); break;
   case "next-cursor": value = string(first(root.nextCursor, root.next_cursor, nested(root, "page", "nextCursor"))); break;
-  case "content-complete": value = bool(first(root.contentComplete, root.content_complete)); break;
-  case "clipping": value = typeof root.clipping === "boolean" ? String(root.clipping) : string(first(root.clipping && root.clipping.clipped, root.clipped)); break;
+  case "content-complete": value = bool(first(root.contentComplete, root.content_complete, root.complete)); break;
+  case "clipping": value = typeof root.clipping === "boolean" ? String(root.clipping) : string(first(root.clipping && root.clipping.clipped, root.clipped, root.truncated)); break;
   case "source-exact": value = bool(first(root.sourceExact, root.source_exact)); break;
-  case "source-changed": value = bool(first(root.sourceChanged, root.source_changed)); break;
-  case "worker-state": value = string(first(worker.state, worker.workerState, root.workerState, root.state)); break;
-  case "dispatch-status": value = string(first(dispatch.status, root.dispatchStatus, root.status)); break;
-  case "liveness": value = string(first(projection.liveness && projection.liveness.state, projection.liveness && projection.liveness.status, projection.liveness, root.liveness && root.liveness.state)); break;
+  case "source-changed": {
+    value = bool(first(root.sourceChanged, root.source_changed));
+    if (value !== "true") {
+      const reason = string(first(root.fallbackReason, root.fallback_reason));
+      const warnings = Array.isArray(root.warnings) ? root.warnings.join(" ") : string(root.warnings);
+      value = /source[ _-]?changed/i.test(`${reason} ${warnings}`) ? "true" : "";
+    }
+    break;
+  }
+  case "worker-state": value = string(first(worker.state, worker.workerState, dispatch.workerState, dispatch.worker_state, root.workerState, root.worker_state, root.state)); break;
+  case "dispatch-status": value = string(first(dispatch.status, dispatch.state, root.dispatchStatus, root.dispatch_status, root.status)); break;
+  case "liveness": value = string(first(
+    projection.liveness && projection.liveness.state,
+    projection.liveness && projection.liveness.status,
+    typeof projection.liveness === "string" ? projection.liveness : undefined,
+    root.liveness && root.liveness.state,
+    root.liveness && root.liveness.status,
+    typeof root.liveness === "string" ? root.liveness : undefined,
+  )); break;
   case "next-action": value = string(first(projection.nextAction, projection.next_action)); break;
   case "observation-status": value = string(first(observation.status, observation.state)); break;
   case "owned": {
@@ -58,7 +73,14 @@ switch (field) {
     }
     break;
   }
-  case "settled": value = /^(succeeded|success|failed|cancelled|completed|settled|done)$/i.test(string(first(worker.state, worker.workerState, dispatch.status, dispatch.outcome, root.status, root.outcome))) ? "true" : "false"; break;
+  case "settled": {
+    const explicit = first(root.settled, dispatch.settled, worker.settled);
+    value = typeof explicit === "boolean" ? String(explicit) :
+      (/^(succeeded|success|failed|cancelled|completed|settled|done)$/i.test(
+        string(first(worker.state, worker.workerState, dispatch.status, dispatch.state, dispatch.outcome, root.status, root.outcome)),
+      ) ? "true" : "false");
+    break;
+  }
   case "has-transcript": value = Array.isArray(root.transcript && root.transcript.messages) && root.transcript.messages.length ? "true" : "false"; break;
   case "text": {
     const transcript = root.transcript || {};

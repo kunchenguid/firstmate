@@ -96,7 +96,7 @@ SH
 
 authoritative_native_context() {
   cat > "$RESP/2.out" <<'EOF'
-{"schemaVersion":1,"commands":[{"path":["orchestration","run-create"],"flags":["objective"]},{"path":["orchestration","worker-start"],"flags":["task","spec","worktree","agent","terminal","run"]},{"path":["orchestration","worker-show"],"flags":["dispatch"]},{"path":["orchestration","worker-read"],"flags":["dispatch","source","cursor","limit"]},{"path":["orchestration","worker-abandon"],"flags":["dispatch"]},{"path":["orchestration","worker-list"],"flags":["run"]},{"path":["orchestration","worker-release"],"flags":["dispatch"]},{"path":["orchestration","send"],"flags":["subject","to","body","dispatch-id"]},{"path":["orchestration","check"],"flags":["run","ack"]},{"path":["terminal","wait"],"flags":["terminal","for","timeout-ms"]},{"path":["worktree","ps"],"flags":[]}]}
+{"schemaVersion":1,"commands":[{"path":["orchestration","run-create"],"flags":["objective"]},{"path":["orchestration","worker-start"],"flags":["task","spec","worktree","agent","terminal","run"]},{"path":["orchestration","worker-show"],"flags":["dispatch"]},{"path":["orchestration","worker-read"],"flags":["dispatch","source","cursor","limit"]},{"path":["orchestration","worker-abandon"],"flags":["dispatch"]},{"path":["orchestration","worker-stop"],"flags":["dispatch"]},{"path":["orchestration","worker-list"],"flags":["run"]},{"path":["orchestration","worker-release"],"flags":["dispatch"]},{"path":["orchestration","send"],"flags":["subject","to","body","dispatch-id"]},{"path":["orchestration","check"],"flags":["run","ack"]},{"path":["terminal","wait"],"flags":["terminal","for","timeout-ms"]},{"path":["worktree","ps"],"flags":[]}]}
 EOF
 }
 
@@ -107,7 +107,7 @@ test_supervised_capability_probe_requires_native_command_shape() {
   authoritative_native_context
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_STATUS_RESPONSE=sequence \
     bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_supervised_capability_check claude; printf "%s" "$FM_ORCA_SUPERVISED_COMMAND_COUNT"' "$ROOT" )
-  [ "$out" = 11 ] || fail "native capability probe should accept the complete command shape, got '$out'"
+  [ "$out" = 12 ] || fail "native capability probe should accept the complete command shape, got '$out'"
   orca_case supervised-capability-schema
   printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n' > "$RESP/1.out"
   printf '{"schemaVersion":2,"commands":[]}\n' > "$RESP/2.out"
@@ -120,6 +120,23 @@ test_supervised_capability_probe_requires_native_command_shape() {
   [ "$status" -ne 0 ] || fail "native capability probe accepted an unsupported agent-context schema"
   [ "$out" = unsupported-schema-2 ] || fail "unsupported schema reason was not preserved, got '$out'"
   pass "native Orca capability probe gates schema and required command shapes"
+}
+
+test_supervised_capability_keeps_pi_on_terminal_fallback() {
+  local out status
+  orca_case supervised-pi-fallback
+  printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n' > "$RESP/1.out"
+  if out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" FM_ORCA_STATUS_RESPONSE=sequence \
+    bash -c '. "$0/bin/backends/orca.sh"; if fm_backend_orca_supervised_capability_check pi; then exit 2; fi; printf "%s" "$FM_ORCA_SUPERVISED_REASON"; exit 1' "$ROOT" ); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "native Orca capability probe must not claim Pi support"
+  [ "$out" = agent-pi-not-supported ] || fail "Pi should be an explicit native capability skip, got '$out'"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1forchestration\x1fagent-context' \
+    "an unsupported Pi capability must not invoke Orca agent-context"
+  pass "native Orca capability gate keeps unverified Pi on the tested terminal adapter"
 }
 
 test_supervised_worker_start_and_transcript_read() {
@@ -155,6 +172,74 @@ EOF
   pass "native Orca worker-read marks terminal or clipped output as non-authoritative evidence"
 }
 
+test_supervised_state_rebind_and_identity_guards() {
+  local out status meta worktree
+  orca_case supervised-rebind
+  worktree="$CASE_DIR/worktree"
+  mkdir -p "$worktree"
+  meta="$CASE_DIR/task.meta"
+  fm_write_meta "$meta" \
+    "endpoint_task_id=task-local" "worktree=$worktree" \
+    "orca_dispatch_id=dispatch-1" "orca_task_id=task-1" \
+    "orca_run_id=run-1" "orca_worker_id=worker-1" "orca_worktree_id=wt-1" \
+    "terminal=term-old" "orca_terminal_incarnation=inc-old" "orca_pane_key=pane-old"
+  cat > "$RESP/1.out" <<EOF
+{"ok":true,"result":{"dispatchId":"dispatch-1","taskId":"task-1","runId":"run-1","workerId":"worker-1","worker":{"state":"running"},"terminal":{"handle":"term-new","incarnationId":"inc-new","paneKey":"pane-new","worktreeId":"wt-1","worktreePath":"$worktree"},"observation":{"exactWorker":true},"resource":{"ownedByCoordinator":true},"projection":{"liveness":"live"}}}
+EOF
+  cp "$RESP/1.out" "$RESP/2.out"
+  cat > "$RESP/3.out" <<EOF
+{"ok":true,"result":{"dispatchId":"dispatch-1","taskId":"task-1","runId":"run-1","workerId":"worker-1","worker":{"state":"running"},"terminal":{"handle":"term-wrong","incarnationId":"inc-wrong","paneKey":"pane-wrong","worktreeId":"wt-1","worktreePath":"$CASE_DIR/wrong"},"observation":{"exactWorker":true},"resource":{"ownedByCoordinator":true}}}
+EOF
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/backends/orca.sh"; s=$(fm_backend_orca_supervised_agent_state dispatch:dispatch-1); t=$(fm_backend_orca_supervised_rebind_meta "$1"); printf "%s:%s:%s" "$s" "$t" "$(fm_meta_get "$1" terminal)"' "$ROOT" "$meta" )
+  [ "$out" = alive:term-new:term-new ] || fail "native state/rebind should project alive state and update routing evidence, got '$out'"
+  if out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/fm-backend.sh"; . "$0/bin/backends/orca.sh"; fm_backend_orca_supervised_rebind_meta "$1"' "$ROOT" "$meta" 2>&1 ); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "native rebind should reject a mismatched worktree path"
+  assert_contains "$(cat "$LOG")" $'orca\x1forchestration\x1fworker-show\x1f--dispatch\x1fdispatch-1' \
+    "native rebind should inspect the durable Dispatch"
+  pass "native Orca state projection rebinds transient terminal evidence only after exact identity checks"
+}
+
+test_supervised_worker_state_maps_completion_and_unknown() {
+  local out
+  orca_case supervised-state-map
+  cat > "$RESP/1.out" <<'EOF'
+{"ok":true,"result":{"dispatchId":"dispatch-1","taskId":"task-1","runId":"run-1","workerId":"worker-1","worker":{"state":"completed"},"observation":{"exactWorker":true}}}
+EOF
+  cat > "$RESP/2.out" <<'EOF'
+{"ok":true,"result":{"dispatchId":"dispatch-1","taskId":"task-1","runId":"run-1","workerId":"worker-1","worker":{"state":"mystery"},"observation":{"exactWorker":true},"projection":{"liveness":"uncertain"}}}
+EOF
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; printf "%s:%s" "$(fm_backend_orca_supervised_agent_state dispatch:dispatch-1)" "$(fm_backend_orca_supervised_agent_state dispatch:dispatch-1)"' "$ROOT" )
+  [ "$out" = dead:ambiguous ] || fail "native state mapping should distinguish settled death from unknown outcome, got '$out'"
+  pass "native Orca state mapping preserves unknown outcomes"
+}
+
+test_supervised_worker_stop_and_source_change_guards() {
+  local out status
+  orca_case supervised-stop-read
+  printf '{"ok":true,"result":{"stopped":true}}\n' > "$RESP/1.out"
+  PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_supervised_worker_stop dispatch-1' "$ROOT"
+  assert_contains "$(cat "$LOG")" $'orca\x1forchestration\x1fworker-stop\x1f--dispatch\x1fdispatch-1' \
+    "worker-stop should use its distinct native lifecycle primitive"
+  orca_case supervised-source-change
+  printf '{"ok":true,"result":{"source":"terminal","fallbackReason":"source_changed","contentComplete":false,"clipping":false,"terminal":{"tail":["stale"]}}}\n' > "$RESP/1.out"
+  if PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    bash -c '. "$0/bin/backends/orca.sh"; fm_backend_orca_supervised_worker_read dispatch-1 cursor-1 8 >/dev/null' "$ROOT"; then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 2 ] || fail "source identity changes should invalidate the existing worker-read cursor"
+  pass "native Orca stop and source-change evidence keep lifecycle and cursor semantics explicit"
+}
+
 test_supervised_release_and_abandon_use_distinct_guards() {
   local out
   orca_case supervised-release
@@ -162,8 +247,8 @@ test_supervised_release_and_abandon_use_distinct_guards() {
     "endpoint_task_id=task-local" "worktree=$CASE_DIR/worktree" \
     "orca_dispatch_id=dispatch-1" "orca_task_id=task-1" \
     "orca_run_id=run-1" "orca_worker_id=worker-1" "orca_worktree_id=wt-1"
-  cat > "$RESP/1.out" <<'EOF'
-{"ok":true,"result":{"dispatchId":"dispatch-1","taskId":"task-1","runId":"run-1","workerId":"worker-1","worktreeId":"wt-1","worker":{"state":"completed"},"resource":{"ownedByCoordinator":true},"observation":{"exactWorker":true}}}
+  cat > "$RESP/1.out" <<EOF
+{"ok":true,"result":{"dispatchId":"dispatch-1","taskId":"task-1","runId":"run-1","workerId":"worker-1","worktreeId":"wt-1","worktreePath":"$CASE_DIR/worktree","worker":{"state":"completed"},"resource":{"ownedByCoordinator":true},"observation":{"exactWorker":true}}}
 EOF
   printf '{"ok":true,"result":{"released":true}}\n' > "$RESP/2.out"
   out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
@@ -692,31 +777,117 @@ test_spawn_native_mode_falls_back_to_terminal_adapter() {
   pass "fm-spawn.sh --orca-mode supervised: capability failure falls back to terminal supervision"
 }
 
-test_spawn_refuses_orca_secondmate_before_home_mutation() {
-  local home subhome data state config id out status
+test_native_orca_relaunch_reuses_durable_task_and_workspace() {
+  local proj wt data state config id out status log_text
+  id="orcarelaunchz1"
+  proj="$TMP_ROOT/native-relaunch-project"
+  wt="$TMP_ROOT/native-relaunch-wt"
+  data="$TMP_ROOT/native-relaunch-data"
+  state="$TMP_ROOT/native-relaunch-state"
+  config="$TMP_ROOT/native-relaunch-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  write_spawn_brief "$data" "$id"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_mode=supervised" "terminal=term-old" \
+    "orca_worktree_id=wt-relaunch::$wt" "orca_run_id=run-relaunch" \
+    "orca_task_id=task-relaunch" "orca_dispatch_id=dispatch-old" \
+    "orca_worker_id=worker-old" "orca_terminal_incarnation=inc-old" \
+    "orca_pane_key=pane-old"
+  orca_case native-relaunch
+  authoritative_native_context
+  printf '{"ok":true,"result":{"dispatchId":"dispatch-old","taskId":"task-relaunch","runId":"run-relaunch","workerId":"worker-old","worktreeId":"wt-relaunch::%s","worktreePath":"%s","worker":{"state":"completed"},"observation":{"exactWorker":true}}}\n' "$wt" "$wt" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"runId":"run-relaunch","taskId":"task-relaunch","dispatchId":"dispatch-new","workerId":"worker-new","terminal":{"handle":"term-new","incarnationId":"inc-new","paneKey":"pane-new","worktreeId":"wt-relaunch::%s"},"worktree":{"id":"wt-relaunch::%s","path":"%s"}}}\n' "$wt" "$wt" "$wt" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"dispatchId":"dispatch-new","taskId":"task-relaunch","runId":"run-relaunch","workerId":"worker-new","worker":{"state":"running"},"terminal":{"handle":"term-new","incarnationId":"inc-new","paneKey":"pane-new","worktreeId":"wt-relaunch::%s","path":"%s"},"worktree":{"id":"wt-relaunch::%s","path":"%s"},"observation":{"exactWorker":true},"resource":{"ownedByCoordinator":true}}}\n' "$wt" "$wt" "$wt" "$wt" > "$RESP/4.out"
+  printf '%s\n' '{"ok":true,"result":{"dispatchId":"dispatch-new","source":"transcript","sourceIdentity":"dispatch-new/transcript","contentComplete":true,"clipping":false,"sourceExact":true,"transcript":{"messages":[{"blocks":[{"text":"replacement consumed"}]}]}}}' > "$RESP/5.out"
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TMP_ROOT/native-relaunch-home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" --relaunch 2>&1 )
+  status=$?
+  [ "$status" -eq 0 ] || fail "native Orca relaunch should replace the worker in the recorded workspace: $out log=$(cat "$LOG" 2>/dev/null || true) response=$(cat "$RESP/1.out" 2>/dev/null || true)"
+  assert_grep "orca_dispatch_id=dispatch-new" "$state/$id.meta" "native relaunch should publish the replacement Dispatch"
+  assert_grep "orca_task_id=task-relaunch" "$state/$id.meta" "native relaunch should preserve the durable Task identity"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1forchestration\x1fworker-start' "native relaunch should start a replacement worker"
+  assert_contains "$log_text" $'--task\x1ftask-relaunch' "native relaunch should reuse the durable Task"
+  assert_contains "$log_text" $'--retry-of\x1fdispatch-old' "native relaunch should link the retry to the prior Dispatch"
+  pass "fm-spawn.sh native Orca relaunch: reuses Run/Task and exact workspace while rebinding Dispatch"
+}
+
+test_spawn_native_orca_secondmate_reuses_exact_home() {
+  local home subhome data state config id out status log_text
   id="orcasmz1"
-  home="$TMP_ROOT/secondmate-refusal-home"
-  subhome="$TMP_ROOT/secondmate-refusal-subhome"
+  home="$TMP_ROOT/secondmate-native-home"
+  subhome="$TMP_ROOT/secondmate-native-subhome"
   data="$home/data"
   state="$home/state"
   config="$home/config"
-  mkdir -p "$data" "$state" "$config" "$subhome/bin" "$subhome/data" "$subhome/state" "$subhome/projects"
+  mkdir -p "$data/$id" "$state" "$config" "$subhome/bin" "$subhome/data/$id" "$subhome/state" "$subhome/projects"
   printf '%s\n' "$id" > "$subhome/.fm-secondmate-home"
   printf 'firstmate\n' > "$subhome/AGENTS.md"
   printf 'claude\n' > "$config/crew-harness"
+  write_spawn_brief "$data" "$id"
   touch "$state/.last-watcher-beat"
-  set +e
-  out=$( FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
-    FM_PROJECTS_OVERRIDE="$home/projects" FM_SPAWN_NO_GUARD=1 \
+  orca_case native-secondmate
+  authoritative_native_context
+  mv "$RESP/2.out" "$RESP/1.out"
+  printf '{"ok":true,"result":{"worktrees":[{"worktreeId":"wt-sm","path":"%s"}]}}\n' "$subhome" > "$RESP/2.out"
+  printf '{"ok":true,"result":{"runId":"run-sm"}}\n' > "$RESP/3.out"
+  printf '{"ok":true,"result":{"runId":"run-sm","taskId":"task-sm","dispatchId":"dispatch-sm","workerId":"worker-sm","terminal":{"handle":"term-sm","incarnationId":"inc-sm","paneKey":"pane-sm","worktreeId":"wt-sm"},"worktree":{"id":"wt-sm","path":"%s"}}}\n' "$subhome" > "$RESP/4.out"
+  printf '{"ok":true,"result":{"dispatchId":"dispatch-sm","taskId":"task-sm","runId":"run-sm","workerId":"worker-sm","worker":{"state":"running"},"terminal":{"handle":"term-sm","incarnationId":"inc-sm","paneKey":"pane-sm","worktreeId":"wt-sm","path":"%s"},"worktree":{"id":"wt-sm","path":"%s"},"observation":{"exactWorker":true},"resource":{"ownedByCoordinator":true}}}\n' "$subhome" "$subhome" > "$RESP/5.out"
+  printf '{"ok":true,"result":{"dispatchId":"dispatch-sm","source":"transcript","sourceIdentity":"dispatch-sm/transcript","contentComplete":true,"clipping":false,"sourceExact":true,"transcript":{"messages":[{"blocks":[{"text":"secondmate charter consumed"}]}]}}}\n' > "$RESP/6.out"
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_SYNC=1 FM_SKIP_SECONDMATE_INHERIT=1 \
     "$ROOT/bin/fm-spawn.sh" "$id" "$subhome" claude --backend orca --secondmate 2>&1 )
   status=$?
-  set +e
-  [ "$status" -ne 0 ] || fail "backend=orca --secondmate should be refused"
-  assert_contains "$out" "backend=orca does not support --secondmate spawns yet" \
-    "orca secondmate refusal should happen at backend selection"
-  assert_absent "$subhome/config/crew-harness" \
-    "orca secondmate refusal should not propagate inherited local material into the secondmate home"
-  pass "fm-spawn.sh --backend orca --secondmate: refuses before secondmate-home mutation"
+  [ "$status" -eq 0 ] || fail "native Orca secondmate should launch against the exact persistent home: $out"
+  assert_contains "$out" "spawned $id harness=claude kind=secondmate" \
+    "native secondmate spawn should report the launched manager"
+  assert_grep "orca_mode=supervised" "$state/$id.meta" "native secondmate metadata should retain supervised mode"
+  assert_grep "orca_dispatch_id=dispatch-sm" "$state/$id.meta" "native secondmate metadata should retain Dispatch identity"
+  assert_grep "worktree=$subhome" "$state/$id.meta" "native secondmate metadata should retain exact home path"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1fworktree\x1fps\x1f--json' \
+    "native secondmate should discover its pre-existing home through worktree ps"
+  assert_not_contains "$log_text" $'orca\x1fworktree\x1fcreate' \
+    "native secondmate should not create a replacement worktree for its persistent home"
+  assert_contains "$log_text" $'orca\x1forchestration\x1fworker-start' \
+    "native secondmate should start a supervised manager"
+  pass "fm-spawn.sh --backend orca --secondmate: supervises a persistent exact home natively"
+}
+
+test_spawn_rejects_terminal_orca_secondmate() {
+  local home subhome data state config id out status
+  id="orcasmterminalz2"
+  home="$TMP_ROOT/secondmate-terminal-home"
+  subhome="$TMP_ROOT/secondmate-terminal-subhome"
+  data="$home/data"
+  state="$home/state"
+  config="$home/config"
+  mkdir -p "$data/$id" "$state" "$config" "$subhome/bin" "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects"
+  printf '%s\n' "$id" > "$subhome/.fm-secondmate-home"
+  write_spawn_brief "$data" "$id"
+  touch "$state/.last-watcher-beat"
+  orca_case native-secondmate-terminal
+  if out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_SYNC=1 FM_SKIP_SECONDMATE_INHERIT=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$subhome" claude --backend orca --secondmate --orca-mode terminal 2>&1 ); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "persistent Orca Secondmate accepted terminal mode"
+  assert_contains "$out" "require --orca-mode supervised" \
+    "terminal Secondmate refusal did not explain the native-only requirement"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1fworktree\x1fcreate' \
+    "terminal Secondmate refusal mutated Orca worktrees"
+  pass "fm-spawn.sh refuses terminal fallback for persistent Orca Secondmates"
 }
 
 test_spawn_refuses_orca_when_runtime_not_ready() {
@@ -968,10 +1139,10 @@ test_fm_send_uses_native_orca_mailbox_after_inbox_write() {
   status=$?
   [ "$status" -eq 0 ] || fail "native Orca send should succeed after durable inbox write: $out"
   [ -f "$state/$id.inbox/001.msg" ] || fail "native Orca send did not write the durable inbox record"
-  assert_contains "$(cat "$LOG")" $'orca\x1forchestration\x1fsend\x1f--run\x1frun-native\x1f--to\x1fdispatch:dispatch-native' \
+  assert_contains "$(cat "$LOG")" $'orca\x1forchestration\x1fsend\x1f--to\x1fdispatch:dispatch-native\x1f--subject\x1fFirstmate task instruction' \
     "native steering did not target the recorded Dispatch mailbox"
-  assert_contains "$(cat "$LOG")" $'--task-id\x1ftask-native\x1f--dispatch-id\x1fdispatch-native' \
-    "native steering did not preserve Firstmate task and Dispatch identity"
+  assert_contains "$(cat "$LOG")" $'--type\x1fdispatch\x1f--dispatch-id\x1fdispatch-native' \
+    "native steering did not preserve Dispatch routing identity"
   assert_not_contains "$(cat "$LOG")" $'orca\x1fterminal\x1fsend' \
     "native steering should not type a terminal doorbell after mailbox success"
   pass "fm-send: durable Firstmate inbox plus native Orca mailbox steering"
@@ -1514,6 +1685,88 @@ test_secondmate_force_teardown_refuses_partial_orca_child() {
   pass "fm-teardown.sh --force: refuses partial Orca secondmate children before runtime dispatch"
 }
 
+test_native_orca_secondmate_relaunch_rebinds_manager_dispatch() {
+  local home subhome data state config id out status log_text
+  id="orcamanagerelaunchz2"
+  home="$TMP_ROOT/native-manager-parent"
+  subhome="$TMP_ROOT/native-manager-home"
+  data="$TMP_ROOT/native-manager-data"
+  state="$TMP_ROOT/native-manager-state"
+  config="$TMP_ROOT/native-manager-config"
+  mkdir -p "$data/$id" "$state" "$config" "$subhome/bin" "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects"
+  printf '%s\n' "$id" > "$subhome/.fm-secondmate-home"
+  printf 'firstmate\n' > "$subhome/AGENTS.md"
+  write_spawn_brief "$data" "$id"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "worktree=$subhome" "project=$subhome" \
+    "harness=claude" "kind=secondmate" "mode=secondmate" "yolo=off" "home=$subhome" \
+    "backend=orca" "orca_mode=supervised" "terminal=term-manager-old" \
+    "orca_worktree_id=wt-manager::$subhome" "orca_run_id=run-manager" \
+    "orca_task_id=task-manager" "orca_dispatch_id=dispatch-manager-old" \
+    "orca_worker_id=worker-manager-old" "orca_terminal_incarnation=inc-manager-old" \
+    "orca_pane_key=pane-manager-old"
+  orca_case native-secondmate-relaunch
+  authoritative_native_context
+  printf '{"ok":true,"result":{"dispatchId":"dispatch-manager-old","taskId":"task-manager","runId":"run-manager","workerId":"worker-manager-old","worktreeId":"wt-manager::%s","worktreePath":"%s","worker":{"state":"completed"},"observation":{"exactWorker":true}}}\n' "$subhome" "$subhome" > "$RESP/1.out"
+  printf '{"ok":true,"result":{"runId":"run-manager","taskId":"task-manager","dispatchId":"dispatch-manager-new","workerId":"worker-manager-new","terminal":{"handle":"term-manager-new","incarnationId":"inc-manager-new","paneKey":"pane-manager-new","worktreeId":"wt-manager::%s"},"worktree":{"id":"wt-manager::%s","path":"%s"}}}\n' "$subhome" "$subhome" "$subhome" > "$RESP/3.out"
+  printf '{"ok":true,"result":{"dispatchId":"dispatch-manager-new","taskId":"task-manager","runId":"run-manager","workerId":"worker-manager-new","worker":{"state":"running"},"terminal":{"handle":"term-manager-new","incarnationId":"inc-manager-new","paneKey":"pane-manager-new","worktreeId":"wt-manager::%s","path":"%s"},"worktree":{"id":"wt-manager::%s","path":"%s"},"observation":{"exactWorker":true},"resource":{"ownedByCoordinator":true}}}\n' "$subhome" "$subhome" "$subhome" "$subhome" > "$RESP/4.out"
+  printf '%s\n' '{"ok":true,"result":{"dispatchId":"dispatch-manager-new","source":"transcript","sourceIdentity":"dispatch-manager-new/transcript","contentComplete":true,"clipping":false,"sourceExact":true,"transcript":{"messages":[{"blocks":[{"text":"manager replacement consumed"}]}]}}}' > "$RESP/5.out"
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_SPAWN_NO_GUARD=1 FM_SKIP_SECONDMATE_SYNC=1 FM_SKIP_SECONDMATE_INHERIT=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" --relaunch 2>&1 )
+  status=$?
+  [ "$status" -eq 0 ] || fail "native Secondmate relaunch should rebind its manager Dispatch in the persistent home: $out"
+  assert_grep "orca_dispatch_id=dispatch-manager-new" "$state/$id.meta" "native Secondmate relaunch should publish the replacement manager Dispatch"
+  assert_grep "orca_task_id=task-manager" "$state/$id.meta" "native Secondmate relaunch should preserve the durable manager Task"
+  assert_grep "home=$subhome" "$state/$id.meta" "native Secondmate relaunch should preserve the persistent home"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'--task\x1ftask-manager' "native Secondmate relaunch should reuse the manager Task"
+  assert_contains "$log_text" $'--retry-of\x1fdispatch-manager-old' "native Secondmate relaunch should link the old manager Dispatch"
+  pass "fm-spawn.sh native Orca Secondmate relaunch: rebinds one manager in its persistent home"
+}
+
+test_native_orca_secondmate_retirement_releases_dispatch_before_home() {
+  local home subhome data state config id neutral out status log_text
+  id="orcamanageretirez3"
+  home="$TMP_ROOT/native-retire-parent"
+  subhome="$TMP_ROOT/native-retire-home"
+  data="$home/data"
+  state="$home/state"
+  config="$home/config"
+  mkdir -p "$data" "$state" "$config" "$home/projects" "$subhome/bin" "$subhome/data" "$subhome/state" "$subhome/config" "$subhome/projects"
+  printf '%s\n' "$id" > "$subhome/.fm-secondmate-home"
+  printf 'firstmate\n' > "$subhome/AGENTS.md"
+  printf '%s\n' "- $id - Native manager retirement (home: $subhome; scope: native; projects: native; added 2026-07-03)" > "$data/secondmates.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "worktree=$subhome" "project=$subhome" \
+    "harness=claude" "kind=secondmate" "mode=secondmate" "yolo=off" "home=$subhome" \
+    "backend=orca" "orca_mode=supervised" "terminal=term-manager" \
+    "orca_worktree_id=wt-manager::$subhome" "orca_run_id=run-manager" \
+    "orca_task_id=task-manager" "orca_dispatch_id=dispatch-manager" \
+    "orca_worker_id=worker-manager" "orca_terminal_incarnation=inc-manager" \
+    "orca_pane_key=pane-manager"
+  orca_case native-secondmate-retirement
+  for n in 1 2 3; do
+    printf '{"ok":true,"result":{"dispatchId":"dispatch-manager","taskId":"task-manager","runId":"run-manager","workerId":"worker-manager","worktreeId":"wt-manager::%s","worktreePath":"%s","worker":{"state":"completed"},"observation":{"exactWorker":true},"resource":{"ownedByCoordinator":true}}}\n' "$subhome" "$subhome" > "$RESP/$n.out"
+  done
+  printf '{"ok":true,"result":{"released":true}}\n' > "$RESP/4.out"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$neutral" FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$home/projects" "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  status=$?
+  [ "$status" -eq 0 ] || fail "native Secondmate retirement should release the settled manager before removing its home: $out"
+  [ ! -e "$subhome" ] || fail "native Secondmate retirement should remove the persistent home after release"
+  assert_absent "$state/$id.meta" "native Secondmate retirement should remove the parent manager record"
+  assert_not_contains "$(cat "$LOG")" $'orca\x1forchestration\x1fworker-stop' "settled native Secondmate retirement should not stop an already-dead manager"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1forchestration\x1fworker-release\x1f--dispatch\x1fdispatch-manager' "native Secondmate retirement should release its exact Dispatch"
+  pass "fm-teardown.sh native Orca Secondmate retirement: release precedes persistent-home removal"
+}
+
 test_dispatcher_sources_orca_and_routes_primitives() {
   local out
   orca_case dispatch
@@ -1525,8 +1778,12 @@ test_dispatcher_sources_orca_and_routes_primitives() {
 }
 
 test_supervised_capability_probe_requires_native_command_shape
+test_supervised_capability_keeps_pi_on_terminal_fallback
 test_supervised_worker_start_and_transcript_read
 test_supervised_worker_read_marks_terminal_fallback
+test_supervised_state_rebind_and_identity_guards
+test_supervised_worker_state_maps_completion_and_unknown
+test_supervised_worker_stop_and_source_change_guards
 test_supervised_release_and_abandon_use_distinct_guards
 test_capture_reads_terminal_tail_json
 test_capture_falls_back_to_text_fields
@@ -1558,7 +1815,11 @@ test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
 test_spawn_native_mode_falls_back_to_terminal_adapter
-test_spawn_refuses_orca_secondmate_before_home_mutation
+test_native_orca_relaunch_reuses_durable_task_and_workspace
+test_native_orca_secondmate_relaunch_rebinds_manager_dispatch
+test_spawn_native_orca_secondmate_reuses_exact_home
+test_spawn_rejects_terminal_orca_secondmate
+test_native_orca_secondmate_retirement_releases_dispatch_before_home
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails

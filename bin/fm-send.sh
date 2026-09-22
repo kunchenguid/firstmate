@@ -1086,10 +1086,8 @@ else
     if [ "$TARGET_BACKEND" = orca ] && [ "$(fm_meta_get "$TARGET_META" orca_mode)" = supervised ]; then
       if fm_backend_source orca; then
         native_dispatch=$(fm_meta_get "$TARGET_META" orca_dispatch_id)
-        native_run=$(fm_meta_get "$TARGET_META" orca_run_id)
-        native_task=$(fm_meta_get "$TARGET_META" orca_task_id)
         native_line=$(fm_task_inbox_doorbell_line "$INBOX_RECORD" || true)
-        if [ -n "$native_line" ] && fm_backend_orca_supervised_send "$native_run" "$native_dispatch" "$native_task" "$native_line"; then
+        if [ -n "$native_line" ] && fm_backend_orca_supervised_send_dispatch "$native_dispatch" "$native_line"; then
           exit 0
         fi
       fi
