@@ -3473,6 +3473,115 @@ test_remote_rejected_event_wakes_owning_home() {
   pass "a rejection collected from a remote secondmate wakes the owning home"
 }
 
+# A promise names the value its public reply needs, so switching to another
+# successful outcome cannot be the way to drop that value. Only failed and
+# superseded are exempt: those two report that the promise could not be kept as
+# promised, and carry nothing it promised.
+test_emit_requires_promised_deliverable_under_any_successful_outcome() {
+  local home staging
+  home=$(make_home emit-outcome-swap)
+  seed_typed_commitment "$home" pf-outcome-swap req-outcome-swap pr-merged '["pr_url"]' \
+    main work-swap
+  staging="$TMP_ROOT/outcome-swap-staging"
+  mkdir -p "$staging/state"
+  printf 'axi-a1\n' > "$staging/.fm-secondmate-home"
+
+  expect_failure "a pr-merged promise reported as report-ready must still carry pr_url" \
+    "$EMIT" --home "$home" --obligation pf-outcome-swap --relation rel-code \
+    --source-home main --work-id work-swap --generation 1 --outcome report-ready \
+    --deliverable report_path=data/work-swap/report.md \
+    --outcome-text 'The report is ready.'
+  assert_contains "$EXPECT_OUT" "pr_url" "the refusal must name the promised key"
+  assert_contains "$EXPECT_OUT" "/pull/<number>" "the refusal must state the expected format"
+  [ -z "$(ls -A "$home/state/public-followup/events" 2>/dev/null)" ] \
+    || fail "an outcome swap that drops the promised key must publish nothing"
+
+  expect_failure "a staged outcome swap must be refused by the same rule" \
+    "$EMIT" --stage-in "$staging" --obligation pf-outcome-swap --relation rel-code \
+    --source-home secondmate:axi-a1 --work-id work-swap --generation 1 \
+    --outcome report-ready --require-deliverable pr_url \
+    --deliverable report_path=data/work-swap/report.md \
+    --outcome-text 'The report is ready.'
+  assert_contains "$EXPECT_OUT" "pr_url" "the staged refusal must name the promised key"
+  assert_absent "$staging/state/public-followup" \
+    "a refused staged outcome swap must stage nothing"
+
+  "$EMIT" --home "$home" --obligation pf-outcome-swap --relation rel-code \
+    --source-home main --work-id work-swap --generation 1 --outcome failed \
+    --deliverable error_code=ci-red --outcome-text 'The work could not finish.' >/dev/null \
+    || fail "a failed outcome must stay reportable without the promised key"
+  "$EMIT" --home "$home" --obligation pf-outcome-swap --relation rel-code \
+    --source-home main --work-id work-swap --generation 1 --outcome superseded \
+    --outcome-text 'This work was superseded.' >/dev/null \
+    || fail "a superseded outcome must stay reportable without the promised key"
+  "$EMIT" --stage-in "$staging" --obligation pf-outcome-swap --relation rel-code \
+    --source-home secondmate:axi-a1 --work-id work-swap --generation 1 --outcome failed \
+    --require-deliverable pr_url --deliverable error_code=ci-red \
+    --outcome-text 'The work could not finish.' >/dev/null \
+    || fail "a staged failed outcome must stay reportable without the promised key"
+  pass "only failed and superseded may report a promise without its required deliverable"
+}
+
+# The pending event is the only thing that brings consume back to a refusal, so
+# it must outlive every step that can still fail. While the wake cannot be
+# recorded, nothing is dropped and the next consume repeats the whole rejection.
+test_rejection_is_retried_until_its_wake_is_recorded() {
+  local home event_id out rc=0 wakes
+  home=$(make_home reject-wake-durable)
+  seed_repro_commitment "$home" pf-wake-durable req-wake-durable main work-wake-durable
+  event_id=$(publish_raw_event "$home/state/public-followup/events" pf-wake-durable main \
+    work-wake-durable report-ready '{"report_path":"/abs/data/work-wake-durable/report.md"}') \
+    || fail "could not publish the raw event"
+
+  # A plain file where the wake directory belongs: the refusal is recordable,
+  # its wake is not.
+  wakes="$home/state/public-followup/rejection-wakes"
+  printf 'not a directory\n' > "$wakes"
+  out=$(run_pf "$home" consume) || rc=$?
+  [ "$rc" -ne 0 ] || fail "consume must fail while a refusal's wake cannot be recorded"
+  assert_contains "$out" "wake could not be recorded" \
+    "consume must say the wake is what could not be recorded"
+  assert_present "$home/state/public-followup/events/$event_id.json" \
+    "the refused event must stay pending while its wake cannot be recorded"
+  assert_not_contains "$(run_poll "$home")" "rejected" \
+    "no rejection wake may be raised before one is recorded"
+
+  rm -f "$wakes"
+  out=$(run_pf "$home" consume) || fail "consume must succeed once the wake can be recorded: $out"
+  assert_contains "$out" "rejected $event_id" "the retried consume must quarantine the event"
+  assert_absent "$home/state/public-followup/events/$event_id.json" \
+    "the retried quarantine must drain the pending event"
+  assert_contains "$(run_poll "$home")" "public-followup rejected $event_id" \
+    "the retried rejection must still wake the owning home"
+  pass "a rejection whose wake cannot be recorded is retried rather than lost"
+}
+
+# The poll's stdout IS the wake, so a poll that could not write its line has
+# woken nobody. The queued wake is this home's only remaining copy of the
+# refusal and must survive that cycle.
+test_rejection_wake_survives_a_poll_that_cannot_write() {
+  local home event_id out
+  home=$(make_home reject-wake-write)
+  seed_repro_commitment "$home" pf-wake-write req-wake-write main work-wake-write
+  event_id=$(publish_raw_event "$home/state/public-followup/events" pf-wake-write main \
+    work-wake-write report-ready '{"report_path":"/abs/data/work-wake-write/report.md"}') \
+    || fail "could not publish the raw event"
+  out=$(run_pf "$home" consume) || true
+  assert_contains "$out" "rejected $event_id" "consume must refuse the absolute report path"
+  assert_present "$home/state/public-followup/rejection-wakes/$event_id" \
+    "a refusal must queue a wake"
+
+  PATH="$home/fakebin:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" "$POLL" >&- 2>/dev/null || true
+  assert_present "$home/state/public-followup/rejection-wakes/$event_id" \
+    "a wake whose line could not be written must stay queued"
+  assert_contains "$(run_poll "$home")" "public-followup rejected $event_id" \
+    "the retained wake must reach the owning home on the next poll"
+  assert_not_contains "$(run_poll "$home")" "rejected" \
+    "a wake already written must not be raised again"
+  pass "a rejection wake survives a poll that could not write its line"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2 empty-lock
 # register regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -3561,3 +3670,6 @@ test_emit_refuses_a_missing_required_deliverable
 test_emit_deliverable_rules_agree_with_tasks_axi
 test_rejected_event_wakes_owning_home_with_specific_reason
 test_remote_rejected_event_wakes_owning_home
+test_emit_requires_promised_deliverable_under_any_successful_outcome
+test_rejection_is_retried_until_its_wake_is_recorded
+test_rejection_wake_survives_a_poll_that_cannot_write

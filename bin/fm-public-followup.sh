@@ -516,6 +516,11 @@ EOF
 # refused event with an inspectable reason so it is never retried in a loop, and
 # queue one wake line for this home so the refusal is never silent. The relay
 # poll prints that line once and removes it (bin/fm-x-poll.sh).
+# The pending event is the only thing that brings consume back to this refusal,
+# so it is removed last, after the wake is durably recorded. A step that fails
+# before that leaves the event in place and the whole quarantine is retried by
+# the next consume; every write here is keyed by the event id, so a retry
+# rewrites the same artifacts rather than adding another.
 reject_event() {
   local file=$1 event_id=$2 reason=$3 obligation=${4:-unknown} rejected event_payload wakes
   rejected=$(fm_pf_rejected_dir "$STATE")
@@ -535,15 +540,15 @@ reject_event() {
     printf 'rejected %s: %s (quarantine failed; event retained)\n' "$event_id" "$reason"
     return 1
   fi
-  if ! rm -f -- "$file" 2>/dev/null; then
-    printf 'rejected %s: %s (quarantine cleanup failed; event retained)\n' "$event_id" "$reason"
-    return 1
-  fi
   wakes=$(fm_pf_rejection_wakes_dir "$STATE")
   if ! fmx_private_artifact_dir_prepare "$wakes" >/dev/null \
     || ! printf 'public-followup rejected %s for obligation %s: %s\n' "$event_id" "$obligation" "$reason" \
       | fmx_private_artifact_publish_stdin "$wakes" "$event_id" 600 2>/dev/null; then
-    printf 'rejected %s: %s (quarantined, but its wake could not be recorded)\n' "$event_id" "$reason"
+    printf 'rejected %s: %s (its wake could not be recorded; event retained)\n' "$event_id" "$reason"
+    return 1
+  fi
+  if ! rm -f -- "$file" 2>/dev/null; then
+    printf 'rejected %s: %s (quarantine cleanup failed; event retained)\n' "$event_id" "$reason"
     return 1
   fi
   printf 'rejected %s: %s\n' "$event_id" "$reason"

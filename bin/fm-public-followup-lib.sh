@@ -61,8 +61,9 @@
 #                              never retried in a loop.
 #   rejection-wakes/<event-id> one pending wake line per refusal not yet
 #                              surfaced; the relay poll prints it once and
-#                              removes it, so a refusal wakes this home instead
-#                              of sitting silently in rejected/.
+#                              removes it only after that line is written, so a
+#                              refusal wakes this home instead of sitting
+#                              silently in rejected/ or vanishing unheard.
 #   surfaced                  last surfaced pending-event signature, so the
 #                              existing relay poll wakes once per new event set
 #                              instead of every cycle.

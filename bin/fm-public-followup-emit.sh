@@ -60,9 +60,9 @@
 #                          no registration is readable; `fm-public-followup.sh
 #                          brief` prints one per required key. With --home the
 #                          registration's own required keys are enforced as well,
-#                          whether or not the flag is passed. A key the outcome
-#                          does not carry (error_code on a failed report, say) is
-#                          not required of it.
+#                          whether or not the flag is passed. Only a failed or
+#                          superseded outcome is exempt; no other outcome type
+#                          excuses a missing required value.
 #   --outcome-text ...     Public-safe outcome sentence, from an argument, a
 #                          file, or stdin ("-"). Collapsed to one line; the
 #                          event builder bounds it by codepoint, so control
@@ -280,8 +280,11 @@ fi
 # carrying a bad value, so it is refused in the same place. The owning home's
 # registration records the required keys, so --home needs nothing from the
 # caller; a staged emit cannot read that record and is told them by `brief` as
-# --require-deliverable flags. Either way the requirement applies only to a key
-# this outcome actually carries.
+# --require-deliverable flags. Only failed and superseded are exempt: those two
+# report that the promise could not be kept as promised, so they never carry
+# what it promised. Every other outcome must, including one that is not the
+# outcome this obligation expects - changing the outcome type is not a way to
+# drop the value the public reply needs.
 if [ "$HOME_MODE" = owning ]; then
   for key in $(fm_pf_registry_get "$STATE" "$OBLIGATION" required_deliverables); do
     case "$key" in
@@ -290,15 +293,11 @@ if [ "$HOME_MODE" = owning ]; then
     REQUIRED_KEYS+=("$key")
   done
 fi
-OUTCOME_KEYS=$(fm_pf_outcome_deliverable_keys "$OUTCOME") || OUTCOME_KEYS=
+case "$OUTCOME" in failed|superseded) REQUIRED_KEYS=() ;; esac
 i=0
 while [ "$i" -lt "${#REQUIRED_KEYS[@]}" ]; do
   key=${REQUIRED_KEYS[$i]}
   i=$((i + 1))
-  case " $OUTCOME_KEYS " in
-    *" $key "*) ;;
-    *) continue ;;
-  esac
   j=0
   while [ "$j" -lt "${#DELIVERABLE_KEYS[@]}" ]; do
     [ "${DELIVERABLE_KEYS[$j]}" != "$key" ] || break

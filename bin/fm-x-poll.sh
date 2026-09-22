@@ -69,15 +69,18 @@ fi
 
 # A terminal result consume refused is a promised reply that will never become
 # ready on its own, so each refusal wakes this home once with its specific
-# reason. The line is removed before it is printed, so a refusal wakes once
-# rather than every cycle.
+# reason. The queued line is removed only once it has actually been written to
+# this poll's stdout, which is the wake: a write that fails leaves the line
+# queued for the next cycle, and a successful one is never repeated.
 PF_WAKES=$(fm_pf_rejection_wakes_dir "$STATE")
 if fm_pf_dir_has_entry "$PF_WAKES"; then
   for PF_WAKE in "$PF_WAKES"/*; do
     [ -f "$PF_WAKE" ] && [ ! -L "$PF_WAKE" ] || continue
     PF_WAKE_LINE=$(sed -n '1p' "$PF_WAKE" 2>/dev/null | fm_pf_bound_bytes 800) || PF_WAKE_LINE=
+    if [ -n "$PF_WAKE_LINE" ]; then
+      printf '%s\n' "$PF_WAKE_LINE" || continue
+    fi
     rm -f -- "$PF_WAKE" 2>/dev/null || continue
-    [ -z "$PF_WAKE_LINE" ] || printf '%s\n' "$PF_WAKE_LINE"
   done
 fi
 
