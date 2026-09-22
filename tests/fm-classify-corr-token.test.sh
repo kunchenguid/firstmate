@@ -730,9 +730,8 @@ test_malformed_event_time_is_ordinary_bytes() {
 # The decision fold reads the head/note separator on the same unstamped copy the
 # note and key readers use, so a worker's mis-spelled time tag cannot decide
 # whether a captain's decision survives. Without that, a readable "[at=17:00]"
-# hands the fold a colon it never wrote: a colonless terminal line closes every
-# open decision, and a colonless declaration opens a phantom one no later line
-# can close.
+# hands the fold a colon it never wrote, and a colonless declaration opens a
+# phantom decision no later line can close.
 test_malformed_event_time_never_moves_the_decision_fold() {
   local dir status tag
   dir=$(make_case fold-malformed-event-time)
@@ -750,14 +749,20 @@ test_malformed_event_time_never_moves_the_decision_fold() {
     [ -z "$(status_open_decisions "$status")" ] \
       || fail "malformed tag $tag opened a phantom decision: [$(status_open_decisions "$status")]"
   done
-  # The real separator still closes, so the tolerance above did not disarm the
-  # terminal rule itself.
+  # A terminal line is not a close (#5203): the decision outlives it, and only
+  # the resolution retires it - through a well-formed stamp, so the tolerance
+  # above did not disarm real transition parsing.
   printf '%s\n%s\n' \
     'needs-decision [key=api-shape] [at=1700000000]: REST or gRPC?' \
     'done [at=1700000001]: finished the audit' > "$status"
+  case "$(status_open_decisions "$status")" in
+    'api-shape'$'\t''needs-decision'$'\t''REST or gRPC?') : ;;
+    *) fail "a terminal event closed an unanswered decision: [$(status_open_decisions "$status")]" ;;
+  esac
+  printf '%s\n' 'resolved [key=api-shape] [at=1700000002]: answered: REST' >> "$status"
   [ -z "$(status_open_decisions "$status")" ] \
-    || fail "a well-formed terminal event stopped closing the decision"
-  pass "malformed event times never open or close a decision"
+    || fail "a well-formed resolution stopped closing the decision"
+  pass "malformed event times never open or close a decision, and only a resolution closes one"
 }
 
 test_captain_override_ignores_event_time

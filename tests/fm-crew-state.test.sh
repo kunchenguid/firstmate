@@ -2287,7 +2287,11 @@ test_newest_open_decision_supplies_the_reported_detail() {
   pass "the most recently opened decision supplies the reported state and detail"
 }
 
-test_single_owner_terminal_declaration_supersedes_stale_decision() {
+# A terminal declaration reports what the worker finished; it does not answer
+# the captain's outstanding question, and #5203 showed the two land on one log
+# routinely. So the crew reading stays on the open decision until that decision
+# is really closed, and only then falls back to the log's latest event.
+test_single_owner_terminal_declaration_keeps_the_open_decision() {
   reset_fakes
   local d kind opener terminal out key expected
   d=$(new_case terminal-stale-decision)
@@ -2300,15 +2304,19 @@ test_single_owner_terminal_declaration_supersedes_stale_decision() {
       for terminal in 'done' failed; do
         printf '%s [key=choice]: an earlier decision\n%s: final outcome\nContinuation prose.\n\n' \
           "$opener" "$terminal" > "$d/state/task.status"
-        out=$(run_crew_state "$d" task)
-        assert_contains "$out" "state: $terminal" "$kind terminal declaration supersedes stale $opener"
-        assert_contains "$out" "final outcome" "the terminal declaration supplies the detail"
-        printf 'note: cleanup complete\n' >> "$d/state/task.status"
-        out=$(run_crew_state "$d" task)
-        assert_contains "$out" "state: unknown" "$kind cleanup note does not revive a pre-terminal $opener"
-        assert_not_contains "$out" "an earlier decision" "superseded decision detail stays absent after cleanup"
         expected=parked
         [ "$opener" != blocked ] || expected=blocked
+        out=$(run_crew_state "$d" task)
+        assert_contains "$out" "state: $expected" "$kind $terminal declaration retired an unanswered $opener"
+        assert_contains "$out" "an earlier decision" "the still-open decision supplies the detail"
+        printf 'note: cleanup complete\n' >> "$d/state/task.status"
+        out=$(run_crew_state "$d" task)
+        assert_contains "$out" "state: $expected" "$kind cleanup note retired an unanswered $opener"
+        # Only the close hands the reading back to the log's latest event.
+        printf 'resolved [key=choice]: answered\n' >> "$d/state/task.status"
+        out=$(run_crew_state "$d" task)
+        assert_contains "$out" "state: unknown" "$kind closed decision did not fall back to the latest event"
+        assert_not_contains "$out" "an earlier decision" "a closed decision must stop supplying the detail"
         for key in choice new-choice; do
           printf '%s [key=%s]: reopened after completion\nnote: more cleanup\n' "$opener" "$key" >> "$d/state/task.status"
           out=$(run_crew_state "$d" task)
@@ -2322,7 +2330,7 @@ test_single_owner_terminal_declaration_supersedes_stale_decision() {
       done
     done
   done
-  pass "ship and scout terminal declarations supersede stale decisions"
+  pass "ship and scout terminal declarations keep an unanswered decision until it is closed"
 }
 
 test_latest_status_preserves_legacy_completions() {
@@ -4863,7 +4871,7 @@ test_ordinary_blocked_over_live_run_keeps_plain_superseded
 test_genuine_daemon_down_reports_blocked
 test_secondmate_open_block_survives_unrelated_append
 test_newest_open_decision_supplies_the_reported_detail
-test_single_owner_terminal_declaration_supersedes_stale_decision
+test_single_owner_terminal_declaration_keeps_the_open_decision
 test_latest_status_preserves_legacy_completions
 test_latest_status_subshell_work_does_not_grow_with_history
 test_genuine_parked_not_superseded

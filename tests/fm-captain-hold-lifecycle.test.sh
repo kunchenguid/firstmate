@@ -1271,7 +1271,13 @@ EOF
   pass "resolved findings and decision-like prose do not create captain-held tasks"
 }
 
-test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
+# The completion gate is the last thing standing between an unanswered captain
+# call and teardown, and it asks the shared fold what is still open. While a
+# terminal line discarded that set, the gate passed vacuously on exactly the
+# logs that needed it (#5203): the worker reported what it finished, the blocker
+# it never resolved went quiet, and --none attested an empty inventory over a
+# question still owed. The gate must refuse until the key is really closed.
+test_terminal_declaration_does_not_satisfy_the_completion_gate() {
   local home id open secondmate
   home=$(make_home stale-terminal-decision)
   id=sample-terminal-review
@@ -1283,11 +1289,21 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   printf '# Terminal sample review\n\nNo unresolved captain choice remains.\n' > "$home/data/$id/report.md"
   open=$(bash -c '. "$1"; status_open_decisions "$2"' _ \
     "$ROOT/bin/fm-classify-lib.sh" "$home/state/$id.status")
-  [ -z "$open" ] || fail "the shared fold retained a pre-terminal blocker"
+  case "$open" in
+    'access'$'\t''blocked'$'\t''waiting') : ;;
+    *) fail "a done: line discarded the unresolved blocker: [$open]" ;;
+  esac
+  if run_captain "$home" complete "$id" --none > "$home/terminal.out" 2> "$home/terminal.err"; then
+    fail "completion attested an empty inventory over a blocker a done: line only hid"
+  fi
+  if run_captain "$home" verify "$id" > "$home/terminal-verify.out" 2> "$home/terminal-verify.err"; then
+    fail "verification passed over a blocker a done: line only hid"
+  fi
+  printf 'resolved [key=access]: answered\n' >> "$home/state/$id.status"
   run_captain "$home" complete "$id" --none >/dev/null \
-    || fail "terminal single-owner stale status decision blocked empty inventory completion"
+    || fail "a resolved blocker still blocked empty inventory completion"
   run_captain "$home" verify "$id" >/dev/null \
-    || fail "terminal single-owner stale status decision blocked inventory verification"
+    || fail "a resolved blocker still blocked inventory verification"
   printf 'blocked [key=access]: reopened\nnote: more cleanup\n' >> "$home/state/$id.status"
   if run_captain "$home" complete "$id" --none > "$home/reopened.out" 2> "$home/reopened.err"; then
     fail "completion accepted a genuinely reopened post-terminal decision"
@@ -1309,7 +1325,7 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
     > "$home/secondmate-terminal.out" 2> "$home/secondmate-terminal.err"; then
     fail "secondmate terminal status decision was incorrectly cleared"
   fi
-  pass "terminal single-owner stale status decisions do not block empty inventory"
+  pass "a terminal declaration never satisfies the completion gate; only a real close does"
 }
 
 test_secondmate_hold_stays_in_authoritative_home() {
@@ -4039,7 +4055,7 @@ test_deferral_leaves_captains_call_until_due
 test_out_of_band_close_is_recordable
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
-test_terminal_single_owner_status_decision_does_not_block_empty_inventory
+test_terminal_declaration_does_not_satisfy_the_completion_gate
 test_secondmate_hold_stays_in_authoritative_home
 test_secondmate_home_publishes_holds_and_answers
 test_secondmate_reconcile_publishes_before_request_retirement
