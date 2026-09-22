@@ -57,6 +57,14 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"# PR identity: copy or abstain"*"copied verbatim from the task's \`done [at=<epoch>]: PR <url>\` status line or its \`pr=\` metadata field"*"Never assemble an owner, repository, host, or number"*"report the identifier you do have"*) ;;
     *) fail "branch prompt lost the copy-or-abstain PR identity rule" ;;
   esac
+  # The 2026-09-22 away window: every landed exemption worker was left sitting
+  # because the prompt granted landed-task cleanup without ever naming the
+  # moment or the command, so the stale wake ended in the recovery playbook's
+  # "nothing to recover".
+  case "$out_a" in
+    *"A worker whose pull request has landed is finished, not stuck"*"\`check: merge landed:\` wake names exactly that moment"*"\`bin/fm-teardown.sh <task>\` with no flags"*"never forced, worked around, or repaired by hand"*) ;;
+    *) fail "branch prompt lost the landed-work cleanup rule" ;;
+  esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
 
