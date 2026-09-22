@@ -1727,7 +1727,8 @@ test_agy_bootstrap_retracts_a_recorded_deny() {
 
   # Nothing recorded yet: bootstrap must not touch the captain's store.
   out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
-  assert_not_contains "$out" "AGY_TURNEND_HOOK" "bootstrap spoke about a consent nobody recorded"
+  assert_not_contains "$out" "config/agy-turnend-hook reads deny" \
+    "bootstrap spoke about a consent nobody recorded"
 
   # Consent given and the key installed, the state a withdrawal starts from.
   printf 'allow\n' >"$home/config/agy-turnend-hook"
@@ -1738,26 +1739,32 @@ test_agy_bootstrap_retracts_a_recorded_deny() {
 
   # An allow left standing is not a withdrawal, so bootstrap leaves it alone.
   out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
-  assert_not_contains "$out" "AGY_TURNEND_HOOK" "bootstrap retracted a consent that still reads allow"
+  assert_not_contains "$out" "config/agy-turnend-hook reads deny" \
+    "bootstrap retracted a consent that still reads allow"
   assert_agy_hooks_store "$store" installed "bootstrap removed a key the captain still allows"
 
   # The captain withdraws and never spawns agy again: bootstrap takes it back.
   printf 'deny\n' >"$home/config/agy-turnend-hook"
   out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
-  assert_contains "$out" "AGY_TURNEND_HOOK" "bootstrap retracted the key without saying so"
+  assert_contains "$out" "BOOTSTRAP_INFO: config/agy-turnend-hook reads deny - withdrew" \
+    "bootstrap retracted the key without reporting it as a completed fact"
+  assert_not_contains "$out" "AGY_TURNEND_HOOK" \
+    "a clean withdrawal travelled under the actionable prefix, which loads the diagnostics playbook for nothing"
   assert_agy_hooks_store "$store" removed \
     "a recorded deny survived session start with firstmate's key still installed"
 
   # Idempotent: with the key already gone there is nothing to say or do.
   out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
-  assert_not_contains "$out" "AGY_TURNEND_HOOK" "bootstrap spoke again about an already-clean store"
+  assert_not_contains "$out" "config/agy-turnend-hook reads deny" \
+    "bootstrap spoke again about an already-clean store"
 
   # Safe when the captain has no agy store at all.
   rm -f "$store"
   rc=0
   out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin") || rc=$?
   expect_code 0 "$rc" "bootstrap failed on a deny with no agy store present"
-  assert_not_contains "$out" "AGY_TURNEND_HOOK" "bootstrap spoke about a store that does not exist"
+  assert_not_contains "$out" "config/agy-turnend-hook reads deny" \
+    "bootstrap spoke about a store that does not exist"
   [ -e "$store" ] && fail "bootstrap created the captain's agy store to retract from it" || true
   pass "fm-bootstrap.sh: a recorded deny retracts the global agy key at session start"
 }
@@ -1797,7 +1804,8 @@ test_agy_bootstrap_retraction_is_owned_by_the_home_that_owns_the_answer() {
     || fail "the consented install failed before the local secondmate case could run"
   printf 'deny\n' >"$home/config/agy-turnend-hook"
   out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
-  assert_not_contains "$out" "AGY_TURNEND_HOOK" "a local secondmate reported a withdrawal its primary owns"
+  assert_not_contains "$out" "config/agy-turnend-hook reads deny" \
+    "a local secondmate reported a withdrawal its primary owns"
   assert_agy_hooks_store "$store" installed \
     "a local secondmate acting on an inherited deny stripped the hook out from under its primary"
 
@@ -1810,16 +1818,17 @@ test_agy_bootstrap_retraction_is_owned_by_the_home_that_owns_the_answer() {
     || fail "the consented install failed before the remote secondmate case could run"
   printf 'deny\n' >"$home/config/agy-turnend-hook"
   out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
-  assert_contains "$out" "AGY_TURNEND_HOOK" "a remote secondmate withdrew the hook without saying so"
+  assert_contains "$out" "BOOTSTRAP_INFO: config/agy-turnend-hook reads deny - withdrew" \
+    "a remote secondmate withdrew the hook without saying so"
   assert_agy_hooks_store "$store" removed \
     "a remote secondmate left a withdrawn hook installed in its own agy store"
   pass "fm-bootstrap.sh: only the home that owns the answer retracts the shared agy hook"
 }
 
 # The withdrawal is the exact inverse of the install, so it takes firstmate's
-# own hook script and token folder as well as the key. It is never recursive:
-# a registry still holding a live task's token, or a directory holding anything
-# firstmate did not write, survives and is reported rather than taken.
+# own hook script and token folder as well as the key, and nothing else: agy's
+# own directory holding them is left alone. It is never recursive, so a registry
+# still holding a live task's token survives and is reported rather than taken.
 test_agy_withdrawal_takes_back_the_files_but_never_a_live_token() {
   local home store registry out rc
 
@@ -1848,8 +1857,8 @@ test_agy_withdrawal_takes_back_the_files_but_never_a_live_token() {
   out=$(HOME="$home" "$ROOT/bin/fm-agy-turnend-hook.sh" remove 2>&1) || rc=$?
   expect_code 0 "$rc" "a second remove failed on an already-withdrawn install"
   [ -e "$registry" ] && fail "an empty token registry survived the withdrawal" || true
-  [ -e "$home/.gemini/antigravity-cli" ] \
-    && fail "the emptied antigravity-cli directory survived the withdrawal" || true
+  [ -d "$home/.gemini/antigravity-cli" ] \
+    || fail "the withdrawal deleted agy's own directory instead of only firstmate's files"
   [ -f "$store" ] || fail "the withdrawal deleted the captain's hooks.json"
 
   # An absent store must still reach the file cleanup rather than exit early.

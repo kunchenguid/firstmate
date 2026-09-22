@@ -111,21 +111,17 @@ refuse() {
   exit 1
 }
 
-# The withdrawal half of an install: firstmate's own hook script, then the two
-# directories it created, in that order. Never recursive and never forced, so a
-# registry still holding a live task's token and a directory holding anything
-# firstmate did not write both survive the rmdir and are reported rather than
-# taken. rollback_install stays separate because it answers a different
-# question: undo only what THIS run created.
+# The withdrawal half of an install: firstmate's own hook script, then its own
+# token registry. Never recursive and never forced, so a registry still holding
+# a live task's token survives the rmdir and is reported rather than taken. The
+# agy directory holding both is agy's own and is never a candidate.
+# rollback_install stays separate because it answers a different question: undo
+# only what THIS run created.
 remove_hook_files() {
   rm -f "$HOOK_SCRIPT"
   if ! rmdir "$REGISTRY" 2>/dev/null && [ -d "$REGISTRY" ]; then
     printf "fm-agy-turnend-hook: '%s' still holds live per-task tokens, so it was left in place.\n" \
       "$REGISTRY" >&2
-  fi
-  if ! rmdir "$CLI_DIR" 2>/dev/null && [ -d "$CLI_DIR" ]; then
-    printf "fm-agy-turnend-hook: '%s' still holds files firstmate did not write, so it was left in place.\n" \
-      "$CLI_DIR" >&2
   fi
   return 0
 }

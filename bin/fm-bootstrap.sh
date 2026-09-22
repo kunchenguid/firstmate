@@ -10,8 +10,7 @@
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
-#                 "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny - withdrew firstmate's agy turn-end hook and its files"
-#                 or "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny but firstmate's agy turn-end hook could not be withdrawn - run bin/fm-agy-turnend-hook.sh remove",
+#                 "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny but firstmate's agy turn-end hook could not be withdrawn - run bin/fm-agy-turnend-hook.sh remove",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
@@ -22,6 +21,7 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
+#                 "BOOTSTRAP_INFO: config/agy-turnend-hook reads deny - withdrew firstmate's agy turn-end hook and its files",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
@@ -1417,7 +1417,7 @@ agy_turnend_consent_retract() {
   fi
   [ "$installed" -eq 1 ] || return 0
   if "$SCRIPT_DIR/fm-agy-turnend-hook.sh" remove >/dev/null 2>&1; then
-    echo "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny - withdrew firstmate's agy turn-end hook and its files"
+    echo "BOOTSTRAP_INFO: config/agy-turnend-hook reads deny - withdrew firstmate's agy turn-end hook and its files"
   else
     echo "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny but firstmate's agy turn-end hook could not be withdrawn - run bin/fm-agy-turnend-hook.sh remove"
   fi
