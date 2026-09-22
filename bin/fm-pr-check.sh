@@ -167,8 +167,9 @@ else
   exit 1
 fi
 # The contribution observer uses the same authenticated check mechanism and
-# owns verdict freshness, required actors and external feedback separately from
-# the exact merged-state poll. Registration is local and performs no forge read.
+# owns verdict freshness, required actors, external feedback and pull-request
+# movement separately from the exact merged-state poll. Registration is local
+# and performs no forge read.
 if command -v jq >/dev/null 2>&1; then
   "$SCRIPT_DIR/fm-contributions.sh" arm >/dev/null \
     || printf 'contributions: observation not armed; coverage is unconfirmed\n' >&2

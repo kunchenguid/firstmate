@@ -115,6 +115,9 @@ forge_home() {
   printf '[]\n' > "$home/forge/inline.json"
   printf '[]\n' > "$home/forge/labels.json"
   printf '[]\n' > "$home/forge/events.json"
+  printf 'false\n' > "$home/forge/draft"
+  printf '[]\n' > "$home/forge/requested.json"
+  printf '[]\n' > "$home/forge/teams.json"
   cat > "$home/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -124,10 +127,12 @@ case "$*" in
   'pr view '*headRefOid*) cat "$FORGE/head" ;;
   'pr view '*state*) printf 'OPEN\n' ;;
   'api repos/o/r/pulls/8')
-    jq -n --arg head "$(cat "$FORGE/head")" --arg state "$(cat "$FORGE/state" 2>/dev/null || printf open)" '
-      {state:(if $state == "open" then "open" else "closed" end),user:{login:"author"},head:{sha:$head},draft:false,
+    jq -n --arg head "$(cat "$FORGE/head")" --arg state "$(cat "$FORGE/state" 2>/dev/null || printf open)" \
+      --argjson draft "$(cat "$FORGE/draft")" --slurpfile requested "$FORGE/requested.json" --slurpfile teams "$FORGE/teams.json" '
+      {state:(if $state == "open" then "open" else "closed" end),user:{login:"author"},head:{sha:$head},draft:$draft,
        mergeable:(if $state == "open" then true else null end),
-       merged_at:(if $state == "merged" then "2026-09-16T07:00:00Z" else null end)}' ;;
+       merged_at:(if $state == "merged" then "2026-09-16T07:00:00Z" else null end),
+       requested_reviewers:$requested[0],requested_teams:$teams[0]}' ;;
   'api repos/o/r/issues/9')
     jq -n --slurpfile labels "$FORGE/labels.json" '{state:"open",user:{login:"author"},labels:$labels[0]}' ;;
   'api repos/o/r/issues/'*'/events?'*) jq -s . "$FORGE/events.json" ;;
@@ -228,6 +233,115 @@ test_comment_wake() { test_incoming_signal comment; }
 test_review_wake() { test_incoming_signal review; }
 test_inline_wake() { test_incoming_signal inline; }
 
+queued_wakes() { # home -> durable check wake count
+  [ -f "$1/state/.wake-queue" ] || { printf '0\n'; return 0; }
+  awk -F '\t' 'NF >= 5 && $3 == "check" { count++ } END { print count + 0 }' "$1/state/.wake-queue"
+}
+
+test_pull_movement_signal() { # head|ready|reviewer|team
+  local kind=$1 home signal body pending message
+  home=$(new_home "movement-$kind")
+  forge_home "$home"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register the owned delivery'
+  registered_checks "$home" >/dev/null
+  [ "$(queued_wakes "$home")" = 0 ] || fail "an unchanged pull request woke before any $kind movement"
+  case "$kind" in
+    head)
+      printf '%s\n' "$HEAD_B" > "$home/forge/head"
+      signal='head'; body="head moved from $HEAD_A to $HEAD_B"
+      message='a replaced pull request head wakes once' ;;
+    ready)
+      printf 'true\n' > "$home/forge/draft"
+      registered_checks "$home" >/dev/null
+      [ "$(queued_wakes "$home")" = 0 ] || fail 'converting to draft woke as if it left draft'
+      printf 'false\n' > "$home/forge/draft"
+      signal='ready-for-review'; body='pull request left draft'
+      message='a pull request leaving draft wakes once' ;;
+    reviewer)
+      printf '[{"login":"reviewer"}]\n' > "$home/forge/requested.json"
+      signal='review-requested'; body='review requested from reviewer'
+      message='a newly requested reviewer wakes once' ;;
+    team)
+      printf '[{"slug":"core","name":"Core"}]\n' > "$home/forge/teams.json"
+      signal='review-requested'; body='review requested from team:core'
+      message='a newly requested review team wakes once' ;;
+  esac
+  registered_checks "$home" >/dev/null
+  pending=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending) || fail 'pending view failed'
+  printf '%s' "$pending" | jq -e --arg type "$signal" --arg body "$body" '
+    length == 1 and .[0].type == $type and .[0].body == $body
+    and .[0].source == "https://github.com/o/r/pull/8"' >/dev/null \
+    || fail "$kind movement did not become exactly one pending signal: $pending"
+  [ "$(queued_wakes "$home")" = 1 ] || fail "$kind movement must enqueue exactly one durable wake"
+  registered_checks "$home" >/dev/null
+  [ "$(queued_wakes "$home")" = 1 ] || fail "an unchanged re-poll after $kind movement woke again"
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 1' >/dev/null \
+    || fail "an unchanged re-poll after $kind movement added a signal"
+  pass "$message and stays pending until acknowledged"
+}
+
+test_head_movement_wake() { test_pull_movement_signal head; }
+test_ready_for_review_wake() { test_pull_movement_signal ready; }
+test_review_request_wake() { test_pull_movement_signal reviewer; }
+test_team_review_request_wake() { test_pull_movement_signal team; }
+
+test_existing_review_request_is_baseline() { # first|legacy
+  local prior=$1 home
+  home=$(new_home "baseline-$prior")
+  forge_home "$home"
+  # legacy keeps the fixture's stored observation, which predates recorded
+  # review requests; first removes it so the poll is the first observation.
+  [ "$prior" = legacy ] || rm "$home/data/delivery/contributions.json"
+  printf '[{"login":"reviewer"}]\n' > "$home/forge/requested.json"
+  printf '[{"slug":"core","name":"Core"}]\n' > "$home/forge/teams.json"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register the owned delivery'
+  registered_checks "$home" >/dev/null
+  registered_checks "$home" >/dev/null
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 0' >/dev/null \
+    || fail "a review request already present at the $prior observation became movement"
+  [ "$(queued_wakes "$home")" = 0 ] || fail "a review request already present at the $prior observation woke"
+  jq -e '.records[0].observation.review_requests == ["reviewer","team:core"]' "$home/data/delivery/contributions.json" >/dev/null \
+    || fail "the $prior observation did not record the current review requests as its baseline"
+  pass "review requests present at the $prior observation are its baseline, not movement"
+}
+
+test_first_observation_review_request_is_baseline() { test_existing_review_request_is_baseline first; }
+test_legacy_observation_review_request_is_baseline() { test_existing_review_request_is_baseline legacy; }
+
+test_watcher_surfaces_pull_movement_once() {
+  local home out rc
+  home=$(new_home watcher-movement)
+  forge_home "$home"
+  with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
+    || fail 'could not register delivery for watcher movement'
+  rc=0
+  with_home "$home" env FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$home/watcher-quiet.out" 2> "$home/watcher-quiet.err" || rc=$?
+  [ "$rc" -eq 124 ] || fail "an unchanged pull request woke the watcher: $(cat "$home/watcher-quiet.out")"
+  [ "$(queued_wakes "$home")" = 0 ] || fail 'an unchanged pull request queued a durable wake'
+  printf '%s\n' "$HEAD_B" > "$home/forge/head"
+  out="$home/watcher.out"
+  rc=0
+  # A successor continues the quiet watcher's poll loop rather than announcing
+  # the checkpoint's own restart.
+  with_home "$home" env FM_WATCH_HANDLING_SUCCESSOR=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 5 > "$out" 2> "$home/watcher.err" || rc=$?
+  [ "$rc" -eq 0 ] || fail "watcher did not surface the replaced head: $(cat "$home/watcher.err")"
+  grep -E '^check: contributions delivery [0-9a-f]{64}$' "$out" >/dev/null \
+    || fail "watcher did not surface the durable movement wake: $(cat "$out")"
+  [ "$(queued_wakes "$home")" = 1 ] || fail 'one replaced head must create exactly one durable wake'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -e 'length == 1 and .[0].type == "head"' >/dev/null \
+    || fail 'the surfaced wake did not leave the head signal pending'
+  rc=0
+  with_home "$home" env FM_WATCH_HANDLING_SUCCESSOR=1 FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=0 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$home/watcher-repeat.out" 2> "$home/watcher-repeat.err" || rc=$?
+  [ "$rc" -eq 124 ] || fail "an already surfaced head re-rang the watcher: $(cat "$home/watcher-repeat.out")"
+  [ "$(queued_wakes "$home")" = 1 ] || fail 'an unchanged head after its wake queued another durable wake'
+  pass 'watcher stays quiet on an unchanged pull request and surfaces its movement once'
+}
+
 test_missing_lane_remains_missing() {
   local home
   home=$(new_home absent-lane)
@@ -300,7 +414,7 @@ test_verdict_retains_judged_head() {
 }
 
 test_observed_replacement_refreshes_verdict() {
-  local home
+  local home token
   home=$(new_home observed-replacement)
   forge_home "$home"
   with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
@@ -308,6 +422,11 @@ test_observed_replacement_refreshes_verdict() {
   registered_checks "$home" >/dev/null
   printf '%s\n' "$HEAD_B" > "$home/forge/head"
   registered_checks "$home" >/dev/null
+  # The replacement is itself a pending signal; triage acknowledges it.
+  token=$(with_home "$home" "$ROOT/bin/fm-contributions.sh" pending | jq -er '.[] | select(.type == "head") | .token') \
+    || fail 'the observed replacement did not become a pending head signal'
+  with_home "$home" "$ROOT/bin/fm-contributions.sh" ack delivery https://github.com/o/r/pull/8 "$token" \
+    || fail 'could not acknowledge the head signal'
   with_home "$home" "$ROOT/bin/fm-contributions.sh" verdict delivery https://github.com/o/r/pull/8 "$HEAD_B" \
     https://github.com/o/r/pull/8#issuecomment-100 maintainer 'awaiting maintainer' \
     || fail 'could not record verdict on the observed replacement'
@@ -829,7 +948,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_head_movement_wake test_ready_for_review_wake test_review_request_wake test_team_review_request_wake test_first_observation_review_request_is_baseline test_legacy_observation_review_request_is_baseline test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_watcher_surfaces_pull_movement_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
