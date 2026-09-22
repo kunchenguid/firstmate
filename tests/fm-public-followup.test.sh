@@ -3593,6 +3593,34 @@ test_rejection_wake_survives_a_poll_that_cannot_write() {
   pass "a rejection wake survives a poll that could not write its line"
 }
 
+# The write is not the only boundary that can silently swallow a wake: a poll
+# that could not READ the queued line has raised nothing either, so the file
+# must survive to be raised once it becomes readable again.
+test_rejection_wake_survives_a_poll_that_cannot_read() {
+  local home event_id out wake
+  home=$(make_home reject-wake-read)
+  seed_repro_commitment "$home" pf-wake-read req-wake-read main work-wake-read
+  event_id=$(publish_raw_event "$home/state/public-followup/events" pf-wake-read main \
+    work-wake-read report-ready '{"report_path":"/abs/data/work-wake-read/report.md"}') \
+    || fail "could not publish the raw event"
+  out=$(run_pf "$home" consume) || true
+  assert_contains "$out" "rejected $event_id" "consume must refuse the absolute report path"
+  wake="$home/state/public-followup/rejection-wakes/$event_id"
+  assert_present "$wake" "a refusal must queue a wake"
+
+  chmod 000 "$wake"
+  out=$(run_poll "$home")
+  chmod 600 "$wake"
+  assert_not_contains "$out" "rejected" "a wake that could not be read must raise nothing"
+  assert_present "$wake" "a wake that could not be read must stay queued"
+
+  assert_contains "$(run_poll "$home")" "public-followup rejected $event_id" \
+    "the retained wake must reach the owning home once its line can be read"
+  assert_not_contains "$(run_poll "$home")" "rejected" \
+    "a raised wake must not be raised again"
+  pass "a rejection wake survives a poll that could not read its line"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2 empty-lock
 # register regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -3684,3 +3712,4 @@ test_remote_rejected_event_wakes_owning_home
 test_emit_requires_promised_deliverable_under_any_successful_outcome
 test_rejection_is_retried_until_its_wake_is_recorded
 test_rejection_wake_survives_a_poll_that_cannot_write
+test_rejection_wake_survives_a_poll_that_cannot_read
