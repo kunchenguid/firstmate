@@ -3284,9 +3284,10 @@ fm_backend_herdr_composer_content() {  # <target> [lines]
 # composer that was empty before the send, shows <text>.
 # Literal equality ignores whitespace, the same comparison zellij uses, so a
 # wrapped payload still matches. A composer that holds only `[Pasted text #N]`
-# placeholders, with no literal remainder, is the same proof for one fast
-# burst: Claude collapses that burst into the placeholder and expands it on
-# submit. A shorter literal suffix, or a placeholder followed by a literal
+# or `[Pasted text #N +M lines]` placeholders (the multi-line form, verified
+# live on Claude 2.1.278), with no literal remainder, is the same proof for one
+# fast burst: Claude collapses that burst into the placeholder and expands it
+# on submit. A shorter literal suffix, or a placeholder followed by a literal
 # remainder, is the head-truncation shape and is not proof.
 fm_backend_herdr_composer_payload_shown() {  # <text> <after>
   local text=$1 after=$2 literal
@@ -3297,7 +3298,7 @@ fm_backend_herdr_composer_payload_shown() {  # <text> <after>
   [ -n "$text" ] && [ -n "$after" ] || return 1
   [ "$after" = "$text" ] && return 0
   literal=$after
-  while [[ $literal =~ \[Pastedtext#[0-9]+\] ]]; do
+  while [[ $literal =~ \[Pastedtext#[0-9]+(\+[0-9]+lines?)?\] ]]; do
     literal=${literal/"${BASH_REMATCH[0]}"/}
   done
   [ -z "$literal" ]
