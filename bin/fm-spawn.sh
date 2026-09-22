@@ -564,6 +564,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-codex-native-lib.sh
+. "$SCRIPT_DIR/fm-codex-native-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -606,6 +608,7 @@ MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
 EXPECTED_HEAD_SET=0
+EXACT_HEAD_PROVENANCE=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -774,6 +777,7 @@ if [ "$EXPECTED_HEAD_SET" -eq 1 ]; then
     GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM \
     GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
   export GIT_NO_REPLACE_OBJECTS=1
+  EXACT_HEAD_PROVENANCE=1
 fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
@@ -871,22 +875,6 @@ fi
 
 CODEX_NATIVE_BIN=
 CODEX_NATIVE_HOME=
-codex_native_preflight() {
-  local timeout status status_rc=0
-  timeout=${FM_CODEX_NATIVE_STATUS_TIMEOUT:-10}
-  case "$timeout" in
-  '' | *[!0-9]* | 0*) timeout=10 ;;
-  esac
-  status=$(fm_run_timed "$timeout" env \
-    -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u CODEX_API_KEY \
-    -u CODEX_ACCESS_TOKEN -u OPENAI_BASE_URL \
-    CODEX_HOME="$CODEX_NATIVE_HOME" "$CODEX_NATIVE_BIN" login status 2>&1) \
-    || status_rc=$?
-  if [ "$status_rc" -ne 0 ] || [ "$status" != "Logged in using ChatGPT" ]; then
-    echo "error: Codex native-provider guard requires 'codex login status' to report exactly 'Logged in using ChatGPT'; native launch refused" >&2
-    return 1
-  fi
-}
 if [ "$CODEX_NATIVE_PROVIDER" -eq 1 ]; then
   [ "$RELAUNCH" -eq 0 ] || {
     echo "error: --codex-native-provider supports fresh ship or scout launches only; relaunch is not supported" >&2
@@ -955,7 +943,7 @@ if [ "$CODEX_NATIVE_PROVIDER" -eq 1 ]; then
     echo "error: --codex-native-provider could not resolve CODEX_HOME" >&2
     exit 1
   }
-  codex_native_preflight || exit 1
+  fm_codex_native_preflight "$CODEX_NATIVE_BIN" "$CODEX_NATIVE_HOME" || exit 1
 fi
 
 spawn_remote_secondmate() {
@@ -1839,6 +1827,20 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
     exit 1
   }
+  recorded_expected_head=$(fm_meta_get "$RELAUNCH_META" expected_head)
+  if [ -n "$recorded_expected_head" ]; then
+    case "$recorded_expected_head" in
+      *[!0-9a-f]*|'')
+        echo "error: task $ID records an invalid expected_head; refusing relaunch" >&2
+        exit 1
+        ;;
+    esac
+    [ "${#recorded_expected_head}" -eq 40 ] || {
+      echo "error: task $ID records an invalid expected_head; refusing relaunch" >&2
+      exit 1
+    }
+    EXACT_HEAD_PROVENANCE=1
+  fi
   if [ "$KIND" = secondmate ]; then
     FIRSTMATE_HOME=$(fm_meta_get "$RELAUNCH_META" home)
     [ -n "$FIRSTMATE_HOME" ] || FIRSTMATE_HOME=$RELAUNCH_WT
@@ -1883,30 +1885,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     CODEX_NATIVE_PROVIDER=1
     CODEX_NATIVE_BIN=$(fm_meta_get "$RELAUNCH_META" codex_native_bin)
     CODEX_NATIVE_HOME=$(fm_meta_get "$RELAUNCH_META" codex_native_home)
-    case "$CODEX_NATIVE_BIN" in
-    /*) ;;
-    *)
-      echo "error: task $ID's recorded Codex native-provider executable is not an absolute path; refusing relaunch" >&2
-      exit 1
-      ;;
-    esac
-    [ -x "$CODEX_NATIVE_BIN" ] || {
-      echo "error: task $ID's recorded Codex native-provider executable is not executable at '$CODEX_NATIVE_BIN'; refusing relaunch" >&2
-      exit 1
-    }
-    [ -n "$CODEX_NATIVE_HOME" ] && [ -d "$CODEX_NATIVE_HOME" ] && [ -r "$CODEX_NATIVE_HOME" ] || {
-      echo "error: task $ID's recorded Codex native-provider home is not a readable directory at '${CODEX_NATIVE_HOME:-none}'; refusing relaunch" >&2
-      exit 1
-    }
-    codex_native_home_real=$(CDPATH='' cd -- "$CODEX_NATIVE_HOME" 2>/dev/null && pwd -P) || {
-      echo "error: task $ID's recorded Codex native-provider home cannot be resolved; refusing relaunch" >&2
-      exit 1
-    }
-    [ "$codex_native_home_real" = "$CODEX_NATIVE_HOME" ] || {
-      echo "error: task $ID's recorded Codex native-provider home no longer resolves to its pinned path; refusing relaunch" >&2
-      exit 1
-    }
-    codex_native_preflight || exit 1
+    fm_codex_native_preflight "$CODEX_NATIVE_BIN" "$CODEX_NATIVE_HOME" || exit 1
     ;;
   *)
     echo "error: task $ID records unknown codex_native_provider '$recorded_codex_native_provider'; refusing relaunch" >&2
@@ -3183,7 +3162,12 @@ spawn_worktree_has_origin_config() { # <worktree>
 
 freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
   local worktree=$1 requested=${2:-} default target expected actual status fetch_head fetched origin_authorized
-  status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
+  if [ -n "$requested" ]; then
+    status=$(git -C "$worktree" -c core.quotePath=false status --porcelain \
+      --untracked-files=all --ignore-submodules=none)
+  else
+    status=$(git -C "$worktree" -c core.quotePath=false status --porcelain)
+  fi || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
   }
@@ -3777,9 +3761,21 @@ expected_head_cancel_staged_launch() {
   local tab_id=
   spawn_send_key "$T" C-c && return 0
   [ "$BACKEND" != zellij ] || tab_id=${ZELLIJ_TAB_ID:-}
-  fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" && return 0
-  echo "error: expected-head launch cancellation failed and endpoint '$T' could not be retired" >&2
-  return 1
+  case "$BACKEND" in
+    tmux)
+      fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" && return 0
+      ;;
+    herdr)
+      fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" || true
+      fm_backend_herdr_endpoint_confirmed_gone "$T" && return 0
+      ;;
+    *)
+      fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" || true
+      ;;
+  esac
+  SPAWN_FRESH_COMMIT_PENDING=0
+  echo "error: expected-head launch cancellation could not prove endpoint '$T' gone; retaining its task record and any Treehouse slot claim for teardown" >&2
+  return 0
 }
 
 kimi_capture() {
@@ -4975,7 +4971,7 @@ fi
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
-if [ -n "$EXPECTED_HEAD" ]; then
+if [ "$EXACT_HEAD_PROVENANCE" -eq 1 ]; then
   LAUNCH="export GIT_NO_REPLACE_OBJECTS=1; $LAUNCH"
 fi
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
@@ -5133,22 +5129,23 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 if [ -n "$EXPECTED_HEAD" ]; then
-  expected_status=$(git -C "$WT" -c core.quotePath=false status --porcelain) || {
+  expected_status=$(git -C "$WT" -c core.quotePath=false status --porcelain \
+    --untracked-files=all --ignore-submodules=none) || {
     [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
-    expected_head_cancel_staged_launch || true
+    expected_head_cancel_staged_launch
     echo "error: could not re-inspect expected-head worktree '$WT' immediately before worker launch" >&2
     exit 1
   }
   [ -z "$expected_status" ] || {
     [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
-    expected_head_cancel_staged_launch || true
+    expected_head_cancel_staged_launch
     echo "error: expected-head worktree '$WT' changed after convergence; refusing to launch from a dirty candidate" >&2
     exit 1
   }
   expected_actual=$(git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   [ "$expected_actual" = "$EXPECTED_HEAD" ] || {
     [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
-    expected_head_cancel_staged_launch || true
+    expected_head_cancel_staged_launch
     echo "error: expected-head worktree '$WT' moved to '${expected_actual:-unknown}' after convergence, not '$EXPECTED_HEAD'; refusing to launch" >&2
     exit 1
   }

@@ -376,7 +376,11 @@ if [ "${1:-}" = login ] && [ "${2:-}" = status ]; then
     "CODEX_API_KEY=${CODEX_API_KEY-unset}" \
     "CODEX_ACCESS_TOKEN=${CODEX_ACCESS_TOKEN-unset}" \
     "OPENAI_BASE_URL=${OPENAI_BASE_URL-unset}" > "$FM_FAKE_DIR/native-preflight.env"
-  printf 'Logged in using ChatGPT\n'
+  if [ -f "$FM_FAKE_DIR/native-status" ]; then
+    cat "$FM_FAKE_DIR/native-status"
+  else
+    printf 'Logged in using ChatGPT\n'
+  fi
   exit 0
 fi
 exit 7
@@ -462,6 +466,46 @@ test_native_codex_guard_survives_relaunch_and_blocks_harness_switch() {
   [ ! -s "$dir/fake/literal" ] \
     || fail "the guarded harness-switch refusal sent lifecycle input"
   pass "fm-control relaunch: native Codex billing posture is durable across the task lifecycle"
+}
+
+test_native_codex_guard_preflights_before_stopping_agent() {
+  local dir out rc mode
+  for mode in executable home auth; do
+    dir=$(new_case "native-preflight-$mode" "rl-native-$mode")
+    add_ship_task "$dir" "rl-native-$mode" codex
+    configure_native_codex_guard "$dir" "rl-native-$mode"
+    printf codex > "$dir/fake/command"
+    case "$mode" in
+      executable) chmod -x "$dir/fakebin/codex-native" ;;
+      home) rmdir "$dir/native-codex-home" ;;
+      auth) printf 'Logged in using an API key\n' > "$dir/fake/native-status" ;;
+    esac
+    out=$(run_control "$dir" "rl-native-$mode" relaunch --note "preflight before stopping"); rc=$?
+    expect_code 1 "$rc" "invalid native Codex $mode should refuse before stopping"
+    [ "$(cat "$dir/fake/command")" = codex ] \
+      || fail "invalid native Codex $mode stopped the running agent"
+    [ ! -s "$dir/fake/literal" ] \
+      || fail "invalid native Codex $mode sent lifecycle input"
+  done
+  pass "fm-control preflights native Codex prerequisites before stopping the agent"
+}
+
+test_exact_head_relaunch_keeps_replace_object_guard() {
+  local dir out rc launch expected
+  dir=$(new_case exact-head-relaunch rl-exact)
+  add_ship_task "$dir" rl-exact codex
+  expected=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'expected_head=%s\n' "$expected" >> "$dir/home/state/rl-exact.meta"
+  printf codex > "$dir/fake/command"
+  printf codex > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl-exact relaunch --note "continue from reviewed source"); rc=$?
+  expect_code 0 "$rc" "exact-head task should relaunch from its existing worktree"$'\n'"$out"
+  launch=$(cat "$dir/fake/literal")
+  assert_contains "$launch" 'export GIT_NO_REPLACE_OBJECTS=1' \
+    "exact-head relaunch dropped replacement-object protection"
+  assert_grep "expected_head=$expected" "$dir/home/state/rl-exact.meta" \
+    "exact-head relaunch dropped reviewed provenance"
+  pass "exact-head relaunch preserves replacement-object protection"
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
@@ -2276,6 +2320,8 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
 test_native_codex_guard_survives_relaunch_and_blocks_harness_switch
+test_native_codex_guard_preflights_before_stopping_agent
+test_exact_head_relaunch_keeps_replace_object_guard
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree

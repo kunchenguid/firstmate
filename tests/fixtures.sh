@@ -116,15 +116,19 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows)
-    if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
+    if [ -n "${FM_FAKE_ENDPOINT_SURVIVES:-}" ] &&
+      [ -n "${FM_FAKE_ENDPOINT_RETIRE_LOG:-}" ] && [ -e "$FM_FAKE_ENDPOINT_RETIRE_LOG" ]; then
+      printf '%s\n' "$FM_FAKE_ENDPOINT_SURVIVES"
+    elif [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
       printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
     fi
     exit 0
     ;;
   has-session|new-session|new-window|set-window-option) exit 0 ;;
   kill-window)
-    [ -z "${FM_FAKE_PENDING_LAUNCH:-}" ] || rm -f "$FM_FAKE_PENDING_LAUNCH"
     [ -z "${FM_FAKE_ENDPOINT_RETIRE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_ENDPOINT_RETIRE_LOG"
+    [ "${FM_FAKE_ENDPOINT_RETIRE_FAIL:-0}" != 1 ] || exit 1
+    [ -z "${FM_FAKE_PENDING_LAUNCH:-}" ] || rm -f "$FM_FAKE_PENDING_LAUNCH"
     exit 0
     ;;
   send-keys)

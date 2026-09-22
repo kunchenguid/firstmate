@@ -486,6 +486,75 @@ EOF
   pass "expected-head refusal retires its endpoint when staged input cannot be cancelled"
 }
 
+test_expected_head_preserves_ownership_when_endpoint_survives() {
+  local rec id out status real_sleep marker pending started retired
+  id=pool-expected-retire-unknown-r10
+  rec=$(make_case expected-retire-unknown "$id")
+  read_case_record "$rec"
+  lay_out_as_pool_slot
+  marker="$CASE_DIR/mutated-after-launch-staging"
+  pending="$CASE_DIR/pending-launch"
+  started="$CASE_DIR/worker-started"
+  retired="$CASE_DIR/endpoint-retire-attempted"
+  real_sleep=$(command -v sleep)
+  cat > "$FAKEBIN_DIR/sleep" <<EOF
+#!/bin/sh
+if [ -e '$pending' ] && [ ! -e '$marker' ]; then
+  printf 'late mutation\n' > '$POOL_DIR/late-untracked.txt'
+  : > '$marker'
+fi
+exec '$real_sleep' "\$@"
+EOF
+  chmod +x "$FAKEBIN_DIR/sleep"
+
+  out=$(FM_FAKE_PENDING_LAUNCH="$pending" FM_FAKE_WORKER_START_LOG="$started" \
+    FM_FAKE_CANCEL_KEY_FAIL=1 FM_FAKE_ENDPOINT_RETIRE_LOG="$retired" \
+    FM_FAKE_ENDPOINT_RETIRE_FAIL=1 FM_FAKE_ENDPOINT_SURVIVES="fm-$id" \
+    run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched after cancellation and endpoint retirement failed"
+  [ -e "$pending" ] || fail "fixture did not retain the staged launch in the surviving endpoint"
+  [ ! -e "$started" ] || fail "failed cancellation submitted the staged launch"
+  assert_grep 'kill-window' "$retired" "spawn did not attempt to retire the new endpoint"
+  assert_grep "expected_head=$INITIAL_SHA" "$HOME_DIR/state/$id.meta" \
+    "spawn removed the durable record naming the surviving endpoint"
+  assert_grep "task=$id" "$SLOT_CLAIM" \
+    "spawn released the surviving endpoint's Treehouse slot claim"
+  assert_contains "$out" "retaining its task record and any Treehouse slot claim for teardown" \
+    "spawn did not report the preserved cleanup ownership"
+  pass "expected-head refusal preserves ownership when endpoint retirement is unproven"
+}
+
+test_expected_head_ignores_cleanliness_hiding_config() {
+  local rec id out status
+  id=pool-expected-hidden-untracked-r11
+  rec=$(make_case expected-hidden-untracked "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" config status.showUntrackedFiles no
+  printf 'unreviewed source\n' > "$POOL_DIR/hidden-source.txt"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "fixture did not hide the untracked source through repository config"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "expected-head spawn ignored hidden untracked source"
+  assert_grep 'unreviewed source' "$POOL_DIR/hidden-source.txt" \
+    "expected-head refusal discarded hidden untracked source"
+
+  id=pool-expected-hidden-submodule-r11
+  rec=$(make_submodule_case expected-hidden-submodule "$id")
+  read_submodule_case "$rec"
+  git -C "$POOL_DIR" config submodule.ui.ignore all
+  printf 'unreviewed submodule source\n' > "$POOL_DIR/ui/hidden-source.txt"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "fixture did not hide submodule dirt through repository config"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$ADVANCED_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "expected-head spawn ignored hidden submodule source"
+  assert_grep 'unreviewed submodule source' "$POOL_DIR/ui/hidden-source.txt" \
+    "expected-head refusal discarded hidden submodule source"
+  pass "expected-head cleanliness overrides untracked and submodule hiding config"
+}
+
 make_originless_case() {  # <name> <id>
   local name=$1 id=$2 case_dir home project pool fakebin initial
   case_dir="$TMP_ROOT/$name"
@@ -1027,6 +1096,8 @@ test_expected_head_ignores_ambient_git_config_overrides
 test_expected_head_refuses_unsupported_lifecycle_shapes
 test_expected_head_is_reverified_immediately_before_launch
 test_expected_head_retires_endpoint_when_cancel_fails
+test_expected_head_preserves_ownership_when_endpoint_survives
+test_expected_head_ignores_cleanliness_hiding_config
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
