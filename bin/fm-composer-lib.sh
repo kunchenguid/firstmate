@@ -1444,7 +1444,8 @@ _fm_composer_select_cursorless() {
   fi
   # A bare composer's WRAP region extends the selection before the veto
   # checks below: typed input continuing on the rows beneath the glyph row is
-  # bounded by blank rows, structural edges, and furniture rows, and the
+  # bounded by structural edges and furniture rows. Blank rows also bound
+  # unframed input; a recognized Muse frame retains internal blank rows. The
   # extended end is what the lone-separator veto measures adjacency against.
   if [ "$FM_COMPOSER_SELECTED_KIND" = bare ]; then
     if [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$FM_COMPOSER_SELECTED_FIRST" ] \

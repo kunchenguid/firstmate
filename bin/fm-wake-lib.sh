@@ -1088,6 +1088,9 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
       return 1
     }
   fi
+  # Remove the helper identity before publishing the caller PID: an interruption
+  # may leave a liveness-only owner, never a caller PID paired with the helper's
+  # identity that a contender could mistake for a stale owner.
   if ! rm -f "$ownerdir/pid-identity" 2>/dev/null \
     || ! mv -f "$ownerdir/handoff-pid" "$ownerdir/pid" 2>/dev/null; then
     fm_lock_release "$lockdir"
@@ -1104,9 +1107,9 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
 # Bounded acquire variant. It preserves the ordinary wait/reclaim behavior
 # until fm-timeout-lib.sh's hard deadline, returns 124 when a live holder still
 # owns the lock, and leaves FM_LOCK_HELD_PID naming that holder.
-# Use it where a caller must refuse rather than block: wake presentation, and
-# the guarded remote link clear, whose whole contract is to return a
-# reconciliation refusal instead of wedging an unattended close.
+# Use it where a caller must refuse rather than block: wake presentation,
+# recovery-marker transitions, and the guarded remote link clear, whose contract
+# is to return a reconciliation refusal instead of wedging an unattended close.
 # Mutation-critical callers that can safely block keep fm_lock_acquire_wait.
 fm_lock_acquire_wait_bounded() {
   local lockdir=$1 seconds=$2 caller_pid rc owner_pid

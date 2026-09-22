@@ -747,9 +747,7 @@ The flag-off session's settled screen, with the preference `on` on disk, drew Cl
 
 ## 2026-09-16 OMP 18.2.0 standalone global plugin verification
 
-The OMP Calm extension ships as the self-contained `extensions/fm-calm-omp` package (including `lib/fm-calm-working-ship.ts`).
-`bin/fm-omp-calm-install.sh` copies it to `~/.local/share/fm-calm-omp` and runs `omp plugin link`, which symlinks that copy into `~/.omp/plugins/node_modules/fm-calm-omp` and records it enabled in `omp-plugins.lock.json`; its `package.json` `omp.extensions` entry then loads in every omp session regardless of working directory.
-OMP de-duplicates extension entries by resolved absolute path rather than realpath, so the package deliberately lives outside `.omp/extensions/` and the installer retires the legacy project-local copy.
+The current installation, migration, and presentation contract is owned by [Calm on OMP](calm.md#omp).
 Verified on this host with OMP 18.2.0: `omp plugin doctor` reported `fm-calm-omp@0.1.0` healthy with no orphan warnings.
 
 ```text

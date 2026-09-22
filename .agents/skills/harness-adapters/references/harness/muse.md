@@ -12,7 +12,7 @@ The router owns Muse's task-kind boundary.
 | Models | `--model <model>`; only provider `meta`. |
 | Busy | Durable session event log folded by `../../../bin/fm-busy-lib.sh`; no hook or plugin writer, arming, or seeded busy record. |
 | Exit | `/exit`, one Enter; prints `To continue this session, run muse resume <session-uuid>`. |
-| Interrupt | Single Escape records `terminal: cancelled` and restores the cancelled prompt as bright text only when the composer was empty at cancel time - fresh typed input survives the interrupt untouched (`../../../../../docs/verification/muse.md`); both interrupt planes follow with `Ctrl+C` only after proving the composer holds the restored prompt, never the captain's typing (`../../../../../docs/agent-control.md`). |
+| Interrupt | Single Escape; [agent control](../../../../../docs/agent-control.md#verbs) owns the guarded composer-clear contract, and [Muse verification](../../../../../docs/verification/muse.md) records the observed cancellation and restoration behavior. |
 | Skill | `/<skill>`, the Claude or Grok form. |
 | Resume | `muse resume --last` or `muse resume <session-uuid>`; bare `muse resume` opens a picker. |
 | Autonomy | `--yolo` disables approval and sandbox and trusts the workspace. |

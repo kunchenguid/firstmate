@@ -69,7 +69,8 @@ An acknowledged episode does not freeze the generation, because the next downtim
 Every presented row is claimed to exactly one actor under the durable queue lock.
 An ordinary presentation drain bounds both its initial queue-lock acquire and its later status-presentation-lock acquire at the deadline owned by the script header.
 A live initial queue-lock holder produces one PID-naming advisory and skips the whole drain before any claim or mutation, while a live status-presentation-lock holder produces one such advisory after raw wake presentation and leaves status annotations, sections, and cursors retriable on the next drain.
-Acknowledgement invocations and every other mutation-critical queue-lock acquire retain blocking semantics, so acknowledgement atomicity is unchanged.
+Acknowledgement invocations retain blocking queue-lock semantics, so acknowledgement atomicity is unchanged.
+Recovery transitions use the bounded acquisition policy owned by `bin/fm-wake-lib.sh`, including the queue lock acquired by the recovery arm check.
 Main records its presented set in `state/.main-eligible-rows`.
 A branch grant is published through `bin/fm-wake-grant.sh` under that same lock in `state/.branch-eligible-rows`, bound to the live branch process and extension generation recorded in `state/.branch-eligible-owner`, and publication is refused if main already claimed any requested row.
 A main drain validates that owner evidence under the queue lock and reclaims the grant when its process is gone or its identity no longer matches.

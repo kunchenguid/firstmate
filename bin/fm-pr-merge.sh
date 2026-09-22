@@ -69,13 +69,10 @@
 # Before either forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
 # unreadable row refuses before that command, so a captain approval must be
-# recorded as an `answer --release` before this entrypoint is invoked. While
-# state/.afk-contract exists any green merge may proceed under away authority:
-# the record's presence is the whole mechanical fact, and which merge the
-# captain's away words meant is the supervision session's reading
-# (bin/fm-branch-prompt.sh "Postures"). An unreadable record refuses rather
-# than being skipped, neither posture releases a captain hold, and away
-# authority lapses when the record is archived.
+# recorded as an `answer --release` before this entrypoint is invoked.
+# bin/fm-merge-authority-lib.sh owns authority resolution, including standing
+# yolo authority and the away-record fallback. No authority releases a captain
+# hold; bin/fm-branch-prompt.sh "Postures" owns interpretation of away words.
 # The authority read and synchronous forge command share the away record's
 # cross-subsystem lock, which bin/fm-afk-contract.sh owns, closing the common
 # live-owner TOCTOU; failure to take it refuses before the forge call. Async and

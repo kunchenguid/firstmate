@@ -28,7 +28,8 @@
 # only after its source identifies that head; otherwise leave it unbound and
 # triage its signal. Formal reviews carry GitHub's own commit_id. Neither kind
 # can grant merge authority. Captain-actor prose requires an existing live hold;
-# an eligible merge remains a captain call, never an automatic forge action.
+# merge authority is resolved by bin/fm-merge-authority-lib.sh, never granted
+# by a contribution verdict or exercised by this observer.
 #
 # poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
@@ -36,10 +37,11 @@
 # up to three attempts with backoff while the deadline allows. A pull
 # observation has three dependent waves: core, six independent reads, then the
 # closing head read; an issue has two waves. Parallelizing each independent
-# wave bounds either observation to 3 * 5 = 15 seconds. poll reserves min(the
-# configured budget, 15) before starting a URL, so an in-progress
-# normal-budget observation gets all three waves and a later URL waits for the
-# next oldest-checked-first poll. A deliberately smaller configured budget
+# wave gives a no-retry read budget of at most 3 * 5 = 15 seconds. poll reserves
+# min(the configured budget, 15) before starting a URL; retries and backoff may
+# use the remaining shared poll budget, without guaranteeing all waves finish.
+# A later URL waits for the next oldest-checked-first poll when that reserve
+# is unavailable. A deliberately smaller configured budget
 # remains bounded and may be unmeasured, rather than being mislabeled
 # unavailable. Each distinct URL is observed once per poll and applied to
 # every owner. A final observation applies to every owner without another
