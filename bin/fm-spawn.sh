@@ -3370,8 +3370,9 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
 
 # Classify whether one recovered task owns a durable Treehouse checkout that
 # Herdr still renders as an open linked worktree child of its owning home. Only
-# that positively proven shape may be carried into the recovered task; a legacy
-# top-level projection whose checkout was a process lease never is. Sets:
+# that positively proven shape, with the durable slot-owner claim still naming
+# this task, may be carried into the recovered task; a legacy top-level
+# projection whose checkout was a process lease never is. Sets:
 #   HERDR_RECOVERY_NESTED_WORKTREE   the proven checkout path, else empty
 #   HERDR_RECOVERY_NESTED_AMBIGUOUS  1 when the exact proof could not be read
 spawn_herdr_recovery_classify_nested_worktree() { # <session> <journal> <meta>
@@ -3381,6 +3382,10 @@ spawn_herdr_recovery_classify_nested_worktree() { # <session> <journal> <meta>
     "$session" "$journal" "$ID" "$recorded" "$HERDR_PARENT_LABEL" "$PROJ_ABS"
   HERDR_RECOVERY_NESTED_WORKTREE=$FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE
   HERDR_RECOVERY_NESTED_AMBIGUOUS=$FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS
+  if [ -n "$HERDR_RECOVERY_NESTED_WORKTREE" ]; then
+    fm_treehouse_slot_owner_state "$HERDR_RECOVERY_NESTED_WORKTREE" "$ID"
+    [ "$FM_TREEHOUSE_SLOT_OWNER" = mine ] || HERDR_RECOVERY_NESTED_WORKTREE=""
+  fi
 }
 
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to

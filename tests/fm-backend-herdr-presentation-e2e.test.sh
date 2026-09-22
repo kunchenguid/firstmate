@@ -1481,6 +1481,32 @@ lab worktree list --workspace "$FIRSTMATE_WSID" | jq -e \
   || fail "nested-resume teardown did not retire its exact worktree child"
 pass "real Herdr lab: a same-project nested checkout is carried across a full restart and returned by teardown"
 
+# A recovered checkout whose durable slot claim now names another task is never
+# adopted; recovery falls back to a fresh checkout instead of sharing it.
+SLOT_REASSIGN_ID=slot-reassign
+mkdir -p "$HOME_DIR/data/$SLOT_REASSIGN_ID"
+write_ship_brief "$HOME_DIR" "$SLOT_REASSIGN_ID" 'Reassigned durable slot fixture.'
+spawn_task "$SLOT_REASSIGN_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/slot-reassign-first.out" 2> "$TMP_ROOT/slot-reassign-first.err" \
+  || fail "slot-reassign projected spawn failed: $(cat "$TMP_ROOT/slot-reassign-first.err")"
+SLOT_REASSIGN_META="$HOME_DIR/state/$SLOT_REASSIGN_ID.meta"
+SLOT_REASSIGN_OLD_WT=$(remember_meta_worktree "$SLOT_REASSIGN_META")
+SLOT_REASSIGN_MARKER="$(dirname "$(cd "$SLOT_REASSIGN_OLD_WT" && pwd -P)")/.fm-slot-owner"
+printf 'task=slot-reassign-usurper\nhome=%s\n' "$HOME_DIR" > "$SLOT_REASSIGN_MARKER" \
+  || fail "could not stage a reassigned durable slot claim"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+  || fail "could not stop the isolated session for slot-reassign"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+  || fail "could not reprovision the isolated session for slot-reassign"
+spawn_task "$SLOT_REASSIGN_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/slot-reassign-resume.out" 2> "$TMP_ROOT/slot-reassign-resume.err" \
+  || fail "slot-reassign recovery failed: $(cat "$TMP_ROOT/slot-reassign-resume.err")"
+SLOT_REASSIGN_NEW_WT=$(remember_meta_worktree "$SLOT_REASSIGN_META")
+[ "$SLOT_REASSIGN_NEW_WT" != "$SLOT_REASSIGN_OLD_WT" ] \
+  || fail "recovery adopted a durable slot whose claim named another task"
+teardown_task "$SLOT_REASSIGN_ID" "$HOME_DIR" > "$TMP_ROOT/slot-reassign-teardown.out" 2> "$TMP_ROOT/slot-reassign-teardown.err" \
+  || fail "slot-reassign teardown failed: $(cat "$TMP_ROOT/slot-reassign-teardown.err")"
+"$REAL_TREEHOUSE" return --force "$SLOT_REASSIGN_OLD_WT" >/dev/null 2>&1 || true
+pass "real Herdr lab: a durable slot claim naming another task is never adopted by recovery"
+
 # Missing, renamed, and duplicate tokens are read-only recovery diagnostics.
 # The duplicate case allows flat fallback only when every matching pane is
 # positively agent-free.

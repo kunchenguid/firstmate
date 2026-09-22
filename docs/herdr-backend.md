@@ -389,6 +389,7 @@ A same-project nested task that owns a durable preallocated checkout reuses that
 Recovery carries it only after proving over `worktree list` on the journal's exact parent, or for a version 1 journal on the owning home, that the recorded checkout is still an open linked worktree for that exact project.
 A version 2 proof is pinned to the journal's own nested workspace id, and a version 1 proof is anchored by the recorded checkout path together with a non-empty open workspace id; both use the journal or the path rather than the current metadata endpoint, so a respawn whose metadata has already moved to the flat home container after an earlier flat-fallback recovery still carries the same lease.
 This prevents adopting a legacy top-level projection whose checkout was only a process lease.
+A carry additionally requires the durable slot-owner claim to still name the recovering task, so a checkout Treehouse has since handed to another task falls back flat and is never adopted or returned.
 The carried checkout is never freshened, reset, or reacquired, metadata keeps naming it, and teardown returns that same lease.
 When a recorded path cannot be resolved, recovery refuses only after positively identifying that same-project journal's own workspace as a still-open nested child; a legacy top-level projection keeps its flat fallback.
 When a resolved same-project checkout cannot be proven exactly, recovery refuses with a clear diagnostic and leaves the durable lease and task record intact rather than allowing the generic path to allocate a second checkout.
