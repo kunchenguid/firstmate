@@ -6,7 +6,9 @@
 # when neither file exists, promotes a real CLAUDE.md file when it is the only
 # file present (unless it is already the canonical pointer), converts a correct
 # CLAUDE.md -> AGENTS.md symlink into the pointer file, and refuses to clobber
-# distinct real files or wrong symlinks.
+# distinct real files or wrong symlinks. During migration, it recognizes the
+# exact sync marker used by the older real-copy fallback, replaces that marked
+# duplicate with the pointer, and strips the marker if promoting it to AGENTS.md.
 # Owns the canonical "## Maintaining this file" self-governance wording for
 # project AGENTS.md files, injecting it idempotently into created skeletons,
 # promoted CLAUDE.md files, and existing AGENTS.md files lacking both the exact
@@ -55,6 +57,7 @@ cd "$DIR"
 
 AGENTS=AGENTS.md
 CLAUDE=CLAUDE.md
+LEGACY_CLAUDE_SYNC_MARKER='<!-- fm-ensure-agents-md: this CLAUDE.md is a synced duplicate of AGENTS.md, written because symlinks are not reliable here; edit AGENTS.md instead, then re-run fm-ensure-agents-md.sh -->'
 
 write_maintenance_section() {
   cat <<'EOF'
@@ -126,6 +129,15 @@ EOF
 is_canonical_claude_pointer() {
   [ -f "$CLAUDE" ] && [ ! -L "$CLAUDE" ] || return 1
   claude_pointer_content | cmp -s - "$CLAUDE"
+}
+
+# Recognize only the exact trailing marker emitted by the former real-copy
+# fallback. A trailing CR is ignored so CRLF checkouts remain migratable.
+has_legacy_claude_sync_marker() {
+  [ -f "$CLAUDE" ] || return 1
+  local last
+  last=$(tail -n 1 "$CLAUDE" 2>/dev/null || true)
+  [ "${last%$'\r'}" = "$LEGACY_CLAUDE_SYNC_MARKER" ]
 }
 
 # Write the canonical pointer as a regular file. Unlink a symlink first so the
@@ -227,6 +239,17 @@ if [ -e "$AGENTS" ]; then
       fi
       exit 0
     fi
+    if has_legacy_claude_sync_marker; then
+      ensure_maintenance_section
+      rm -- "$CLAUDE"
+      install_claude_pointer
+      if [ "$MAINT_INJECTED" -eq 1 ]; then
+        echo "updated: added ## Maintaining this file to AGENTS.md and replaced the legacy CLAUDE.md duplicate with an @AGENTS.md pointer in $DIR"
+      else
+        echo "updated: replaced the legacy CLAUDE.md duplicate with an @AGENTS.md pointer in $DIR"
+      fi
+      exit 0
+    fi
     echo "conflict: both AGENTS.md and CLAUDE.md are real files in $DIR; reconcile them manually" >&2
     exit 1
   fi
@@ -250,6 +273,14 @@ if [ -e "$CLAUDE" ]; then
     if is_canonical_claude_pointer; then
       write_skeleton
       echo "created: AGENTS.md and kept CLAUDE.md @AGENTS.md pointer in $DIR"
+      exit 0
+    fi
+    if has_legacy_claude_sync_marker; then
+      sed '$d' "$CLAUDE" > "$AGENTS"
+      ensure_maintenance_section
+      rm -- "$CLAUDE"
+      install_claude_pointer
+      echo "promoted: copied legacy CLAUDE.md content into AGENTS.md without its sync marker and wrote an @AGENTS.md pointer in $DIR"
       exit 0
     fi
     mv "$CLAUDE" "$AGENTS"

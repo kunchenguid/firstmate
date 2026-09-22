@@ -6,6 +6,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-ensure-agents-md)
+LEGACY_CLAUDE_SYNC_MARKER='<!-- fm-ensure-agents-md: this CLAUDE.md is a synced duplicate of AGENTS.md, written because symlinks are not reliable here; edit AGENTS.md instead, then re-run fm-ensure-agents-md.sh -->'
 
 # Public contract: CLAUDE.md is this exact two-line pointer, never a symlink.
 assert_claude_pointer() {
@@ -97,6 +98,29 @@ test_promoted_claude_md_without_trailing_newline_keeps_blank_separator() {
   pass "fm-ensure-agents-md.sh: newline-less promotion keeps a blank separator line"
 }
 
+test_promoted_legacy_marked_duplicate_strips_marker() {
+  local repo agents
+  repo="$TMP_ROOT/legacy-marked-promotion-project"
+  mkdir -p "$repo"
+  printf '%s\r\n' \
+    '# Existing agent memory' \
+    '' \
+    'Build with the Windows toolchain.' \
+    "$LEGACY_CLAUDE_SYNC_MARKER" > "$repo/CLAUDE.md"
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed promoting a legacy marked CLAUDE.md"
+  agents="$repo/AGENTS.md"
+  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_grep "Build with the Windows toolchain." "$agents" \
+    "legacy marked promotion lost CLAUDE.md content"
+  if grep -Fq 'fm-ensure-agents-md: this CLAUDE.md is a synced duplicate' "$agents"; then
+    fail "legacy marked promotion copied the helper's sync marker into AGENTS.md"
+  fi
+  assert_grep "## Maintaining this file" "$agents" \
+    "legacy marked promotion omitted the self-governance section"
+  pass "fm-ensure-agents-md.sh: promoting a CRLF legacy duplicate strips its sync marker"
+}
+
 test_existing_agents_md_with_symlink_gains_self_governance() {
   local repo agents out count
   repo="$TMP_ROOT/existing-symlinked-project"
@@ -123,6 +147,29 @@ test_existing_agents_md_with_symlink_gains_self_governance() {
   cmp -s "$repo/.claude-after-first" "$repo/CLAUDE.md" \
     || fail "idempotent re-run modified CLAUDE.md"
   pass "fm-ensure-agents-md.sh: existing symlinked AGENTS.md gains the section idempotently"
+}
+
+test_existing_agents_md_replaces_legacy_marked_duplicate() {
+  local repo agents out
+  repo="$TMP_ROOT/legacy-marked-existing-project"
+  mkdir -p "$repo"
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
+    || fail "fm-ensure-agents-md.sh failed creating the initial project memory"
+  agents="$repo/AGENTS.md"
+  printf '\n- Updated authoritative content.\n' >> "$agents"
+  cp "$agents" "$repo/CLAUDE.md"
+  printf '%s\r\n' "$LEGACY_CLAUDE_SYNC_MARKER" >> "$repo/CLAUDE.md"
+  cp "$agents" "$repo/.agents-before"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh refused a legacy marked duplicate"
+  assert_contains "$out" "updated:" "legacy duplicate migration did not report an update"
+  assert_claude_pointer "$repo/CLAUDE.md"
+  cmp -s "$repo/.agents-before" "$agents" \
+    || fail "legacy duplicate migration modified the authoritative AGENTS.md"
+  out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
+    || fail "fm-ensure-agents-md.sh failed on the re-run after legacy duplicate migration"
+  assert_contains "$out" "unchanged:" "pointer migration was not idempotent"
+  pass "fm-ensure-agents-md.sh: a CRLF legacy duplicate becomes the canonical pointer"
 }
 
 test_correct_symlink_migrates_to_pointer_without_clobbering_agents() {
@@ -419,7 +466,9 @@ test_created_agents_md_includes_self_governance
 test_fresh_setup_writes_real_claude_pointer
 test_promoted_claude_md_includes_self_governance
 test_promoted_claude_md_without_trailing_newline_keeps_blank_separator
+test_promoted_legacy_marked_duplicate_strips_marker
 test_existing_agents_md_with_symlink_gains_self_governance
+test_existing_agents_md_replaces_legacy_marked_duplicate
 test_correct_symlink_migrates_to_pointer_without_clobbering_agents
 test_existing_agents_md_without_claude_gains_section_and_pointer
 test_existing_agents_md_with_section_reports_unchanged
