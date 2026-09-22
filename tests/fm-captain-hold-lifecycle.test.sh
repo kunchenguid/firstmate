@@ -21,6 +21,10 @@ command -v tasks-axi >/dev/null 2>&1 || { echo "skip: tasks-axi not found"; exit
 
 make_home() {  # <name>
   local home="$TMP_ROOT/$1" fakebin
+  # Registered with tests/lib.sh, not with a shell array: make_home is called
+  # inside a command substitution, so an array append here never reaches the
+  # caller and every listener run_lavish arms would survive the run.
+  fm_test_track_procevent_home "$home" "$home/procevent-claims"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
   cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
   cat > "$home/data/backlog.md" <<'EOF'
