@@ -51,7 +51,15 @@
 # write waits a bounded interval for that log's lock and then gives up rather
 # than stalling the cycle, but never silently: the skip is reported on stderr
 # under its own prefix, so a missing record is never mistaken for a hand-over
-# that produced no successor. The separate
+# that produced no successor.
+# A successor disposition is not written under that race at all. The successor
+# records its claim in state/.watch-cycle-links with one lock-free atomic append
+# before it touches the ledger, and every later ledger write re-applies whatever
+# is still outstanding while it already holds the log's lock. Contention can
+# therefore delay a link but can never lose it, which is what keeps
+# successor=none meaning "no successor" instead of "a successor whose link lost
+# a race" - and the wait is never lengthened, because waiting longer cannot fix
+# a race the arm is not allowed to block on. The separate
 # state/.watch-triage.log remains exclusively the watcher's absorbed-wake debug
 # log and is never written here.
 #
@@ -118,9 +126,17 @@ CYCLE_LOG_KEEP_LINES=${FM_WATCH_CYCLE_LOG_KEEP_LINES:-1000}
 # inside that retire budget, or contention on a diagnostic log turns a healthy
 # hand-over into a killed successor - the outage this ledger exists to expose.
 CYCLE_LOG_LOCK_WAIT_MS=400
+# Durable successor claims: written without the ledger lock, applied under it.
+CYCLE_LINK="$STATE/.watch-cycle-links"
+CYCLE_LINK_KEEP_LINES=${FM_WATCH_CYCLE_LINK_KEEP_LINES:-200}
+# A claim whose predecessor record never appears (rotated away, or a hand-over
+# that never completed) is retired rather than kept forever.
+CYCLE_LINK_HORIZON_S=${FM_WATCH_CYCLE_LINK_HORIZON_S:-300}
 ARM_PID=${BASHPID:-$$}
 case "$CYCLE_LOG_MAX_BYTES" in ''|*[!0-9]*|0) CYCLE_LOG_MAX_BYTES=262144 ;; esac
 case "$CYCLE_LOG_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LOG_KEEP_LINES=1000 ;; esac
+case "$CYCLE_LINK_KEEP_LINES" in ''|*[!0-9]*|0) CYCLE_LINK_KEEP_LINES=200 ;; esac
+case "$CYCLE_LINK_HORIZON_S" in ''|*[!0-9]*|0) CYCLE_LINK_HORIZON_S=300 ;; esac
 
 # The lifecycle ledger is diagnostic evidence, not a supervision dependency.
 # Writes stay bounded so an observability failure cannot stall an otherwise
@@ -176,15 +192,97 @@ cycle_signal_name() {
 }
 
 cycle_log_lock_acquire() {
-  local what=$1 waited=0
+  local what=$1 verb=${2:-skipped} waited=0
   while ! fm_lock_try_acquire "$CYCLE_LOG_LOCK"; do
     if [ "$waited" -ge "$CYCLE_LOG_LOCK_WAIT_MS" ]; then
-      echo "watcher-ledger: $what skipped - $CYCLE_LOG_LOCK stayed held for ${CYCLE_LOG_LOCK_WAIT_MS}ms" >&2
+      echo "watcher-ledger: $what $verb - $CYCLE_LOG_LOCK stayed held for ${CYCLE_LOG_LOCK_WAIT_MS}ms" >&2
       return 1
     fi
     sleep 0.02
     waited=$((waited + 20))
   done
+}
+
+# Record a successor claim durably, before any ledger lock is contested. A
+# single small O_APPEND write is atomic, so two arms cannot interleave here and
+# no lock is needed on this path.
+cycle_link_claim() {
+  local successor=$1 predecessor=${FM_WATCH_PREDECESSOR_ARM_PID:-}
+  case "$predecessor" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  printf 'predecessor=%s\tsuccessor=%s\tclaimed_at=%s\n' \
+    "$predecessor" "$(cycle_clean_field "$successor")" "$(date +%s)" >> "$CYCLE_LINK" 2>/dev/null || true
+}
+
+# Apply every outstanding claim to the ledger, and retire the ones that are
+# applied or expired. The caller must already hold the ledger lock, so this
+# never waits on anything and never runs on a critical path.
+cycle_link_reconcile() {
+  local log_tmp claim_tmp now
+  [ -s "$CYCLE_LINK" ] || return 0
+  [ -f "$CYCLE_LOG" ] || return 0
+  now=$(date +%s)
+  log_tmp="$CYCLE_LOG.reconcile.$ARM_PID"
+  claim_tmp="$CYCLE_LINK.reconcile.$ARM_PID"
+  if ! awk -v claims="$CYCLE_LINK" -v claimout="$claim_tmp" \
+    -v horizon="$CYCLE_LINK_HORIZON_S" -v now="$now" -v keep="$CYCLE_LINK_KEEP_LINES" '
+    BEGIN {
+      pending = 0
+      while ((getline claim < claims) > 0) {
+        if (claim == "") continue
+        predecessor = ""; successor = ""; claimed_at = 0
+        count = split(claim, part, "\t")
+        for (i = 1; i <= count; i += 1) {
+          if (part[i] ~ /^predecessor=/) predecessor = substr(part[i], 13)
+          else if (part[i] ~ /^successor=/) successor = substr(part[i], 11)
+          else if (part[i] ~ /^claimed_at=/) claimed_at = substr(part[i], 12) + 0
+        }
+        if (predecessor !~ /^[0-9]+$/ || successor == "") continue
+        if (claimed_at > 0 && now - claimed_at > horizon) continue
+        if (!(predecessor in want)) order[++pending] = predecessor
+        want[predecessor] = successor
+        kept[predecessor] = claim
+      }
+      close(claims)
+    }
+    {
+      rows[NR] = $0
+      count = split($0, field, "\t")
+      if (count < 1 || field[1] !~ /^arm_pid=/) next
+      candidate = substr(field[1], 9)
+      if (!(candidate in want)) next
+      for (i = 1; i <= count; i += 1) {
+        if (field[i] == "successor=none") { target[candidate] = NR; break }
+      }
+    }
+    END {
+      for (i = 1; i <= NR; i += 1) {
+        row = rows[i]
+        row_pid = ""
+        count = split(row, field, "\t")
+        if (count >= 1 && field[1] ~ /^arm_pid=/) row_pid = substr(field[1], 9)
+        if (row_pid != "" && target[row_pid] == i) {
+          sub(/\tsuccessor=none$/, "\tsuccessor=" want[row_pid], row)
+          applied[row_pid] = 1
+        }
+        print row
+      }
+      first = pending - keep + 1
+      if (first < 1) first = 1
+      for (i = first; i <= pending; i += 1) {
+        predecessor = order[i]
+        if (applied[predecessor]) continue
+        print kept[predecessor] > claimout
+      }
+      close(claimout)
+    }
+  ' "$CYCLE_LOG" > "$log_tmp" 2>/dev/null; then
+    rm -f "$log_tmp" "$claim_tmp" 2>/dev/null || true
+    return 0
+  fi
+  mv -f "$log_tmp" "$CYCLE_LOG" 2>/dev/null || rm -f "$log_tmp" 2>/dev/null || true
+  mv -f "$claim_tmp" "$CYCLE_LINK" 2>/dev/null || rm -f "$claim_tmp" 2>/dev/null || true
 }
 
 cycle_log_append() {
@@ -195,6 +293,7 @@ cycle_log_append() {
   lock_after=$(lock_snapshot)
 
   cycle_log_lock_acquire 'cycle record' || return 0
+  cycle_link_reconcile
   printf 'arm_pid=%s\twatcher_pid=%s\torigin=%s\tstarted_at=%s\tended_at=%s\texit_code=%s\tsignal=%s\treason=%s\tbeacon_age=%s\tlock_before=%s\tlock_after=%s\tsuccessor=%s\n' \
     "$ARM_PID" \
     "$(cycle_clean_field "$cycle_watcher_pid")" \
@@ -233,31 +332,15 @@ cycle_log_append() {
 # one-record-per-cycle ledger captures the actual successor outcome without an
 # extra synthetic lifecycle row.
 cycle_mark_predecessor_successor() {
-  local successor=$1 predecessor=${FM_WATCH_PREDECESSOR_ARM_PID:-} tmp
+  local successor=$1 predecessor=${FM_WATCH_PREDECESSOR_ARM_PID:-}
   case "$predecessor" in
     ''|*[!0-9]*) return 0 ;;
   esac
+  # Durable first. Losing the lock below can defer the link, never drop it.
+  cycle_link_claim "$successor"
   [ -f "$CYCLE_LOG" ] || return 0
-  cycle_log_lock_acquire 'successor link' || return 0
-  tmp="$CYCLE_LOG.link.$ARM_PID"
-  awk -v target="arm_pid=$predecessor" -v replacement="successor=$(cycle_clean_field "$successor")" '
-    {
-      lines[NR] = $0
-      count = split($0, fields, "\t")
-      if (fields[1] == target) {
-        for (i = 1; i <= count; i += 1) {
-          if (fields[i] == "successor=none") last = NR
-        }
-      }
-    }
-    END {
-      for (i = 1; i <= NR; i += 1) {
-        if (i == last) sub(/\tsuccessor=none$/, "\t" replacement, lines[i])
-        print lines[i]
-      }
-    }
-  ' "$CYCLE_LOG" > "$tmp" 2>/dev/null && mv -f "$tmp" "$CYCLE_LOG" 2>/dev/null
-  rm -f "$tmp" 2>/dev/null || true
+  cycle_log_lock_acquire 'successor link' deferred || return 0
+  cycle_link_reconcile
   fm_lock_release "$CYCLE_LOG_LOCK"
 }
 

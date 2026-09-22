@@ -1029,9 +1029,14 @@ SH
 # dropped here reads exactly like a hand-over that never happened, which is the
 # alarm this ledger exists to raise. So the arm reports the skip on stderr and
 # still starts and confirms its successor.
-test_cycle_successor_link_reports_a_ledger_write_it_gave_up_on() {
+# A verified hand-over must survive a busy lifecycle ledger: the successor can
+# lose the race for the log's lock, and the arm is deliberately not allowed to
+# block on that race past its own retire budget. The disposition is therefore
+# recorded outside the lock first and applied by the next ledger write, so a
+# busy lock can defer a link but never drop it.
+test_cycle_successor_link_survives_a_busy_ledger() {
   local dir state fakebin armout armerr check_file first_arm successor_arm successor_pid holder ready release i
-  dir=$(make_case cycle-ledger-link-abandoned)
+  dir=$(make_case cycle-ledger-link-deferred)
   state="$dir/state"
   fakebin="$dir/fakebin"
   armout="$dir/first-arm.out"
@@ -1091,25 +1096,34 @@ SH
     || fail "abandoned-link successor cycle did not start: $(cat "$armout")"
   i=0
   while [ "$i" -lt 200 ]; do
-    grep -qF 'successor link skipped' "$armerr" 2>/dev/null && break
+    grep -qF 'successor link deferred' "$armerr" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))
   done
-  printf release > "$release"
-  grep -qF 'watcher-ledger: successor link skipped' "$armerr" \
-    || fail "arm dropped a ledger successor link without reporting it: $(cat "$armerr")"
+  grep -qF 'watcher-ledger: successor link deferred' "$armerr" \
+    || fail "arm did not report a ledger successor link it could not write: $(cat "$armerr")"
+  # The race must be real for this test to mean anything: while the lock is held
+  # the predecessor record is still unlinked, so only a disposition recorded
+  # outside that lock can carry the hand-over across it.
+  grep -q "arm_pid=$first_arm.*successor=none" "$state/.watch-cycle-exits.log" \
+    || fail "the successor linked its predecessor despite the held lifecycle ledger lock"
   grep -q '^watcher: FAILED' "$armout" \
-    && fail "an abandoned ledger write must not be reported as a watcher verdict: $(cat "$armout")"
+    && fail "a deferred ledger write must not be reported as a watcher verdict: $(cat "$armout")"
   # The relays that build a repair payload select the arm's verdict lines with
   # ^watcher: over merged stdout+stderr and keep only the first few. A ledger
   # diagnostic that matched that prefix could push the real verdict past the cut.
-  grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$armerr" 2>/dev/null | grep -q 'skipped - ' \
+  grep -E '^(watcher:|signal:|stale:|check:|heartbeat)' "$armerr" 2>/dev/null | grep -q 'deferred - ' \
     && fail "a ledger diagnostic was emitted under a prefix the repair relays select: $(cat "$armerr")"
+  printf release > "$release"
   wait "$holder" || fail "test lifecycle ledger lock holder failed"
+  # The recorded disposition is durable, so the successor's own cycle end applies
+  # it: the hand-over is reported as a started successor, not as a lost chain.
   kill -HUP "$successor_arm" 2>/dev/null || true
   wait "$successor_arm" 2>/dev/null || true
-  drain_and_ack "$state" || fail "recovery drain after abandoned-link successor interruption failed"
-  pass "an abandoned cycle-exit ledger write is reported instead of silently dropped"
+  grep -q "arm_pid=$first_arm.*successor=started:$successor_pid" "$state/.watch-cycle-exits.log" \
+    || fail "a verified successor link was lost while the lifecycle ledger was busy: $(tail -3 "$state/.watch-cycle-exits.log")"
+  drain_and_ack "$state" || fail "recovery drain after deferred-link successor interruption failed"
+  pass "a verified successor link survives a busy lifecycle ledger"
 }
 
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified() {
@@ -1367,5 +1381,5 @@ test_arm_propagates_immediate_wake_before_confirmation
 test_arm_waits_for_peer_beacon_after_child_stands_down
 test_arm_fails_loud_when_no_fresh_watcher_confirmable
 test_cycle_exit_ledger_links_successor_and_stays_bounded
-test_cycle_successor_link_reports_a_ledger_write_it_gave_up_on
+test_cycle_successor_link_survives_a_busy_ledger
 test_stopped_watcher_is_live_but_stale_then_exit_is_classified
