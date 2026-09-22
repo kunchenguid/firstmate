@@ -75,7 +75,11 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [crew-branc
       printf '%s\n' "1. Never push to the default branch (push only your \`$crew_branch\` branch). Never merge a PR."
       ;;
     local-only)
-      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$crew_branch\` branch; firstmate handles the merge into local \`${base_branch:-main}\`."
+      if [ -n "$base_branch" ]; then
+        printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$crew_branch\` branch; firstmate handles the merge into local \`$base_branch\`."
+      else
+        printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$crew_branch\` branch; firstmate handles the merge into the current default branch."
+      fi
       ;;
     no-mistakes)
       printf '%s\n' '1. Never push to the default branch. Never merge a PR.'
@@ -290,11 +294,11 @@ EOF
       if [ -n "$base_branch" ]; then
         local_rebase_target="\`$base_branch\`"
         local_advanced_target='that base'
-        local_landing=$base_branch
+        local_landing="local \`$base_branch\`"
       else
         local_rebase_target='the current default branch'
-        local_advanced_target="\`main\`"
-        local_landing=main
+        local_advanced_target='the current default branch'
+        local_landing='the current default branch'
       fi
       cat <<EOF
 # Definition of done
@@ -303,7 +307,7 @@ This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`$crew_branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 Keep your branch a clean fast-forward onto $local_rebase_target - if $local_advanced_target has advanced, rebase onto it so the eventual merge stays a fast-forward.
 When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $crew_branch\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`$local_landing\` through the guarded fast-forward path.
+The configured merge authority approves the ready branch, then firstmate merges it into $local_landing through the guarded fast-forward path.
 EOF
       ;;
     no-mistakes)
