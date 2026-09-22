@@ -236,6 +236,38 @@ test_expected_head_launches_exact_origin_commit() {
   pass "an expected-head spawn launches and records the exact origin-backed commit instead of the default tip"
 }
 
+test_expected_head_hashes_in_candidate_object_format() {
+  local rec id out status caller candidate path
+  for path in regular symlink; do
+    id="pool-expected-object-format-$path-r22"
+    rec=$(make_case "expected-object-format-$path" "$id")
+    read_case_record "$rec"
+    caller="$CASE_DIR/caller-sha256"
+    git init --quiet --object-format=sha256 "$caller"
+    candidate=$INITIAL_SHA
+    if [ "$path" = symlink ]; then
+      git -C "$PROJECT_DIR" fetch --quiet origin
+      git -C "$PROJECT_DIR" reset --hard origin/main >/dev/null
+      git -C "$PROJECT_DIR" rm -q README.md advanced-main.txt
+      ln -s reviewed-target "$PROJECT_DIR/reviewed-link"
+      git -C "$PROJECT_DIR" add reviewed-link
+      git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+        commit -qm reviewed-symlink
+      git -C "$PROJECT_DIR" push --quiet origin main
+      candidate=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+    fi
+
+    out=$(cd "$caller" && run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$candidate")
+    status=$?
+    expect_code 0 "$status" "expected-head $path hashing should use the candidate repository format"$'\n'"$out"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$candidate" ] \
+      || fail "object-format-safe $path spawn did not converge the reviewed candidate"
+    assert_grep "expected_head=$candidate" "$HOME_DIR/state/$id.meta" \
+      "object-format-safe $path spawn did not record the reviewed candidate"
+  done
+  pass "expected-head hashes regular files and symlinks in candidate format"
+}
+
 test_expected_head_ignores_replacement_objects() {
   local rec id out status replacement worker_evidence launch_log pending raw_launch
   id='pool-expected-replace-r1'
@@ -1271,6 +1303,7 @@ test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_expected_head_launches_exact_origin_commit
+test_expected_head_hashes_in_candidate_object_format
 test_expected_head_ignores_replacement_objects
 test_expected_head_refuses_non_origin_commit_and_invalid_input
 test_expected_head_ignores_ambient_git_redirection

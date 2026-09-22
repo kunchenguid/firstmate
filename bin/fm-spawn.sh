@@ -3182,7 +3182,7 @@ expected_head_raw_tree_status() { # <worktree>
           printf 'raw tree mismatch: %s\n' "$path"
           continue
         fi
-        actual=$(git hash-object --no-filters -- "$worktree/$path" 2>/dev/null) || return 1
+        actual=$(git -C "$worktree" hash-object --no-filters -- "$worktree/$path" 2>/dev/null) || return 1
         if [ "$actual" != "$object" ] ||
           { [ "$mode" = 100755 ] && [ ! -x "$worktree/$path" ]; } ||
           { [ "$mode" = 100644 ] && [ -x "$worktree/$path" ]; }; then
@@ -3198,7 +3198,7 @@ expected_head_raw_tree_status() { # <worktree>
         case "$link_bytes" in ''|*[!0-9]*) return 1 ;; esac
         [ "$link_bytes" -gt 0 ] || return 1
         link_size=$((link_bytes - 1))
-        actual=$(readlink "$worktree/$path" | dd bs=1 count="$link_size" 2>/dev/null | git hash-object --stdin) || return 1
+        actual=$(readlink "$worktree/$path" | dd bs=1 count="$link_size" 2>/dev/null | git -C "$worktree" hash-object --stdin) || return 1
         [ "$actual" = "$object" ] || printf 'raw tree mismatch: %s\n' "$path"
         ;;
       160000:commit)
