@@ -295,14 +295,16 @@
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
-#     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
-#                  written by this script; outside the worktree to avoid pi's trust gate)
+#     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi busy-state extension,
+#                  written by this script; outside the worktree to avoid pi's trust gate;
+#                  a secondmate loads it beside its two primary extensions)
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OMPBIN__   quoted concrete omp executable path resolved from PATH
-#     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (omp busy-state and
-#                  turn-end extension, written by this script; outside the worktree so
-#                  omp's cwd-only auto-discovery cannot load it a second time)
+#     __OMPEXT__   absolute path to state/<task-id>.omp-ext.ts (omp busy-state extension,
+#                  written by this script; outside the worktree so omp's cwd-only
+#                  auto-discovery cannot load it a second time; a secondmate names
+#                  this -e and still does not name its auto-discovered primary extensions)
 #     __OMPWORKERCFG__ absolute path to the tracked .omp/fm-worker-overlay.yml posture overlay
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
 #     __WORKTREE__  absolute path to the task worktree
@@ -311,6 +313,13 @@
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
+# A --secondmate launch arms the same semantic busy contract (bin/fm-busy-lib.sh) in THIS
+# parent home for claude, opencode, pi, pi-signed, and omp, so the parent's active-turn
+# gate can read a busy verdict. Those hooks do not touch the parent's turn-ended marker:
+# a mate's completed turns stay in its own home. Codex stays unknown until a semantic
+# source exists. Grok keeps its rendered-tail fallback and is not given a parent
+# turn-end hook. Cursor's transcript binding is written for a secondmate the same way
+# as for a crewmate. Muse, gemini, agy, and rovo are refused as secondmates.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog.
@@ -1891,7 +1900,10 @@ launch_template() {
   pi | pi-signed)
     printf '%s' '__PIBIN____PITUIMODE__'
     if [ "$kind" = secondmate ]; then
-      printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      # The two primary extensions supervise the mate's own home. __PIEXT__ is
+      # the parent-home busy contract, loaded from outside the home so Pi's
+      # project-trust gate does not fire on it.
+      printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ -e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
       printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
@@ -1907,14 +1919,10 @@ launch_template() {
   # pinned to the worktree because omp's extension discovery is cwd-only. A
   # secondmate loads its two primary extensions by that discovery alone:
   # naming them with -e as well loads each twice (verified), doubling every
-  # session_stop continuation.
+  # session_stop continuation. The busy extension is the exception: it lives
+  # outside the home, so discovery never sees it, and -e is the only load.
   omp)
-    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 __OMPBIN__ --config __OMPWORKERCFG__ --auto-approve --cwd __WORKTREE__'
-    if [ "$kind" = secondmate ]; then
-      printf '%s' ' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
-    else
-      printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
-    fi
+    printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_AGENT -u CURSOR_INVOKED_AS FM_OMP_HARNESS=omp OMP_SKIP_SETUP=1 __OMPBIN__ --config __OMPWORKERCFG__ --auto-approve --cwd __WORKTREE__ __MODELFLAG____EFFORTFLAG__-e __OMPEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     ;;
   # agy (Antigravity CLI): --prompt-interactive "<brief>" starts the supervised
   # interactive session and auto-submits it, so the brief rides the launch
@@ -4003,8 +4011,15 @@ STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
+  # git rev-parse --git-path is relative to the repository, not to this
+  # process's cwd. A caller sitting in another worktree must not mkdir
+  # against its own .git file.
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
   [ -n "$EXCL" ] || return 0
+  case "$EXCL" in
+    /*) ;;
+    *) EXCL="$WT/$EXCL" ;;
+  esac
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >>"$EXCL"
 }
@@ -4023,17 +4038,24 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
-if [ "$KIND" != secondmate ]; then
-  # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
-  # adapter with a verified semantic source. The launch brief sent below IS a
-  # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
-  # embedded into each adapter's wiring so an event from a superseded
-  # incarnation is rejected as stale. Grok and rovo stay on their isolated
-  # rendered-tail fallbacks and standalone Kimi stays unknown until
-  # fm_busy_kimi_verified opens, so none of the three is armed here. Gemini IS
-  # armed: its BeforeAgent / AfterAgent / SessionEnd hooks are a verified
-  # open-close pair.
-  BUSY_GEN=
+# Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
+# adapter with a verified semantic source, including a --secondmate launch.
+# The parent watcher reads this home's record; skipping the arm left a
+# tmux-backed mate's active-turn gate unable to return busy. The launch
+# brief sent below IS a submitted turn, so the seed record is busy/fm-spawn.
+# The minted gen is embedded into each adapter's wiring so an event from a
+# superseded incarnation is rejected as stale. Grok and rovo stay on their
+# isolated rendered-tail fallbacks and standalone Kimi stays unknown until
+# fm_busy_kimi_verified opens, so none of the three is armed here. Gemini IS
+# armed: its BeforeAgent / AfterAgent / SessionEnd hooks are a verified
+# open-close pair. A secondmate's hooks update this record and do not touch
+# the parent's turn-ended marker; parent turn-end wiring for grok and kimi
+# stays on the ordinary-task path below.
+busy_notify_turnend=true
+if [ "$KIND" = secondmate ]; then
+  busy_notify_turnend=false
+fi
+BUSY_GEN=
   case "$HARNESS" in
   codex*)
     if fm_busy_codex_semantic_source; then
@@ -4078,14 +4100,19 @@ if [ "$KIND" != secondmate ]; then
     # never leave a stale busy record. Claude fires no hook for a manual
     # interrupt: fm-control preserves the adapter-owned state, while the
     # legacy fm-send --key Escape path records idle/fm-interrupt. Stop keeps
-    # the turn-ended NOTIFICATION touch for the watcher. Every
+    # the turn-ended NOTIFICATION touch for an ordinary task; a secondmate
+    # omits that touch. Every
     # hook command tolerates a refused event (|| true) so a stale-gen writer
     # can never break Claude's own lifecycle.
     mkdir -p "$WT/.claude"
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
     j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
-    j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+    stop_turnend=
+    if [ "$busy_notify_turnend" = true ]; then
+      stop_turnend="touch $(shell_quote "$TURNEND"); "
+    fi
+    j_stop=$(json_escape "${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
     cat >"$WT/.claude/settings.local.json" <<EOF
@@ -4120,7 +4147,11 @@ EOF
       busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
       busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source gemini-hook"
       g_before=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event before-agent >/dev/null 2>&1 || true; printf '{}'")
-      g_after=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event after-agent >/dev/null 2>&1 || true; printf '{}'")
+      after_turnend=
+      if [ "$busy_notify_turnend" = true ]; then
+        after_turnend="touch $(shell_quote "$TURNEND"); "
+      fi
+      g_after=$(json_escape "${after_turnend}$busy_cmd_prefix idle $busy_suffix --event after-agent >/dev/null 2>&1 || true; printf '{}'")
       g_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true; printf '{}'")
       cat >"$STATE_REAL/$ID.gemini-settings.json" <<EOF
 {"hooks":{"BeforeAgent":[{"hooks":[{"type":"command","command":"$g_before"}]}],"AfterAgent":[{"hooks":[{"type":"command","command":"$g_after"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$g_sessionend"}]}]}}
@@ -4140,6 +4171,7 @@ EOF
 // never clear the worker's busy state. The session.idle touch stays the
 // watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
+const notifyTurnEnd = $busy_notify_turnend;
 const busyEvent = (state, event) =>
   new Promise((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -4170,9 +4202,11 @@ export const FmBusyState = async () => {
           activeSession = null;
           await busyEvent("idle", "session-idle");
         }
-        await new Promise((resolve) => {
-          execFile("touch", ["$TURNEND"], () => resolve());
-        });
+        if (notifyTurnEnd) {
+          await new Promise((resolve) => {
+            execFile("touch", ["$TURNEND"], () => resolve());
+          });
+        }
       }
     },
   };
@@ -4196,6 +4230,7 @@ EOF
 // tool calls) and stays a wake NOTIFICATION touch for the watcher, never
 // current-state truth.
 import { execFile } from "node:child_process";
+const notifyTurnEnd = $busy_notify_turnend;
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -4209,7 +4244,7 @@ export default function (pi: any) {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
     return busyEvent("idle", "agent-settled");
   });
-  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  pi.on("turn_end", () => { if (notifyTurnEnd) execFile("touch", ["$TURNEND"]); });
   // A native harness can make progress inside one Pi turn. This separate
   // marker prevents false wedge alarms without fabricating a completed turn.
   let lastProgress = 0;
@@ -4244,6 +4279,7 @@ EOF
 // inner turn boundary and stays a wake NOTIFICATION touch for the watcher,
 // never current-state truth.
 import { execFile } from "node:child_process";
+const notifyTurnEnd = $busy_notify_turnend;
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -4257,7 +4293,7 @@ export default function (pi: any) {
     if (event && event.willContinue === true) return;
     return busyEvent("idle", "agent-end");
   });
-  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  pi.on("turn_end", () => { if (notifyTurnEnd) execFile("touch", ["$TURNEND"]); });
 }
 EOF
     ;;
@@ -4272,6 +4308,9 @@ EOF
     # the launch command via -c notify=[...] and __TURNEND__.
     ;;
   grok*)
+    # Parent turn-end wiring only. A secondmate already classifies through the
+    # rendered-tail fallback, and a parent turn-ended marker is not its signal.
+    if [ "$KIND" != secondmate ]; then
     # grok fires a Stop hook at every turn boundary (verified, grok 0.2.73), the
     # clean equivalent of codex's notify= and pi's turn_end. But grok only loads
     # PROJECT hooks (<worktree>/.grok/hooks/, <worktree>/.claude/settings.local.json)
@@ -4319,8 +4358,12 @@ EOF
     printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" >"$GROK_HOOKS_DIR/fm-turn-end.json"
     printf 'token=%s\n' "${auth_file##*/}" >"$WT/.fm-grok-turnend"
     exclude_path '.fm-grok-turnend'
+    fi
     ;;
   muse*)
+    # Refused for a secondmate before this point. Kept off that path so a
+    # mate never receives a parent session binding.
+    if [ "$KIND" != secondmate ]; then
     # muse's turn lifecycle is neither a hook nor a launch flag: its plugin
     # engine (the only hook surface) is disabled in the default build, so
     # firstmate reads muse's own durable session event log instead
@@ -4347,6 +4390,7 @@ EOF
 $(fm_busy_muse_matching_logs "$MUSE_SESSIONS_ROOT" "$WT" || true)
 EOF
     } >"$STATE/$ID.muse-session"
+    fi
     ;;
   cursor*)
     # Cursor's turn lifecycle is neither a hook nor a launch flag: it writes
@@ -4372,6 +4416,9 @@ EOF
     } >"$STATE/$ID.cursor-session"
     ;;
   kimi*)
+    # Parent turn-end token only. Kimi is not armed, and a secondmate must
+    # not publish a parent turn-ended marker.
+    if [ "$KIND" != secondmate ]; then
     # Kimi's Stop hook is global, but it is inert unless cwd contains this
     # task's token pointer and the token resolves through Firstmate's private
     # registry. The installer above owns the format-preserving config edit and
@@ -4385,9 +4432,9 @@ EOF
     printf '%s\n' "${auth_file##*/}" >"$STATE/$ID.kimi-turnend-token"
     printf 'token=%s\n' "${auth_file##*/}" >"$WT/.fm-kimi-turnend"
     exclude_path '.fm-kimi-turnend'
+    fi
     ;;
   esac
-fi
 
 # Delivery posture recorded in meta so fm-teardown's safety check and the
 # validate/merge stages can branch on it. A ship task carries the explicit

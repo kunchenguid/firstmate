@@ -422,6 +422,210 @@ test_kimi_and_grok_install_no_unverified_wiring() {
   pass "kimi and grok install no unverified semantic wiring and classify through their own gates"
 }
 
+# A --secondmate launch used to skip the busy arm entirely, so a tmux-backed
+# mate's active-turn gate could never see busy. These cases run the real
+# spawn, drive the generated wiring, and check the stall gate against that
+# record. Parent turn-ended markers stay off this path.
+seed_secondmate_home() { # <home> <id>
+  local home=$1 id=$2
+  mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf 'charter\n' > "$home/data/charter.md"
+  fm_git_init_commit "$home"
+}
+
+spawn_secondmate_harness() { # <case-dir> <id> <harness> [extra fake tools...]
+  local case_dir=$1 id=$2 harness=$3 primary sm fakebin
+  shift 3
+  primary="$case_dir/primary"
+  sm="$case_dir/sm"
+  mkdir -p "$case_dir"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" "$harness" "$@")
+  fm_test_spawn_home "$primary" "$harness"
+  seed_secondmate_home "$sm" "$id"
+  : > "$case_dir/launch.log"
+  FM_BACKEND=tmux FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
+    fm_test_run_spawn "$primary" "$sm" "$fakebin" "$id" "$sm" "$harness" --secondmate
+}
+
+secondmate_stall_watch() { # <primary> <id> <out> [seconds]
+  local primary=$1 id=$2 out=$3 seconds=${4:-4} state window fakebin
+  state="$primary/state"
+  window=$(grep '^window=' "$state/$id.meta" | cut -d= -f2-)
+  fakebin="$primary/watch-fake-$id"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  list-windows) printf '%s\n' '$window' ;;
+  capture-pane) printf 'working\n' ;;
+  display-message) printf '0\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_HOME="$primary" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_BACKEND=tmux \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 \
+    FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds "$seconds" \
+    > "$out" 2>"$out.err" || true
+}
+
+test_secondmate_claude_spawn_arms_busy_for_the_stall_gate() {
+  local case_dir id=sm-claude primary sm state settings out
+  case_dir="$TMP_ROOT/sm-claude"
+  primary="$case_dir/primary"
+  sm="$case_dir/sm"
+  out=$(spawn_secondmate_harness "$case_dir" "$id" claude) \
+    || fail "claude secondmate spawn failed: $out"
+  state="$primary/state"
+  settings="$sm/.claude/settings.local.json"
+  assert_present "$state/$id.busy-state" "claude secondmate spawn did not arm the busy contract"
+  assert_present "$settings" "claude secondmate spawn did not write hook settings"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "seeded secondmate must classify busy fm-spawn, got '$out'"
+  out=$(fm_busy_classify tmux "firstmate:fm-$id" claude "$id" "$state" 'working on the charter')
+  [ "$out" = "busy fm-spawn" ] || fail "a non-empty tail without a record used to stay unknown; got '$out'"
+
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" \
+    > "$sm/state/.wake-queue"
+  secondmate_stall_watch "$primary" "$id" "$case_dir/watch-busy.out"
+  grep -F 'secondmate wake-loop stalled' "$case_dir/watch-busy.out" >/dev/null \
+    && fail "a secondmate inside an armed turn was escalated as a stalled wake loop: $(cat "$case_dir/watch-busy.out")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a secondmate inside an armed turn published a durable stall notification"
+
+  rm -f "$state/$id.turn-ended"
+  run_claude_hook "$settings" Stop || fail "secondmate Stop hook failed"
+  [ ! -e "$state/$id.turn-ended" ] || fail "a secondmate Stop hook touched the parent's turn-ended marker"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] || fail "secondmate Stop must classify idle claude-hook, got '$out'"
+
+  assert_present "$state/.secondmate-wake-progress-$id" \
+    "the stall gate never observed the frozen queue while the mate was busy"
+  # The busy checkpoint writes the progress marker on its first poll and then
+  # leaves it alone. A poll that lands at the end of that window would still
+  # be inside the one-second threshold when the idle checkpoint starts, so
+  # wait out the threshold before asking the same frozen row to surface.
+  sleep 2
+  secondmate_stall_watch "$primary" "$id" "$case_dir/watch-idle.out" 8
+  grep -F "check: secondmate wake-loop stalled: mate=$id row=7" "$case_dir/watch-idle.out" >/dev/null \
+    || fail "the same frozen queue stayed hidden after the secondmate turn ended: $(cat "$case_dir/watch-idle.out")"
+  pass "a claude secondmate spawn arms the busy contract the stall gate can see, and Stop does not wake the parent"
+}
+
+test_secondmate_pi_extension_reports_busy_without_a_parent_turnend() {
+  local case_dir id=sm-pi primary state ext launch out
+  case_dir="$TMP_ROOT/sm-pi"
+  primary="$case_dir/primary"
+  out=$(spawn_secondmate_harness "$case_dir" "$id" pi) \
+    || fail "pi secondmate spawn failed: $out"
+  state="$primary/state"
+  ext="$state/$id.pi-ext.ts"
+  launch=$(cat "$case_dir/launch.log")
+  assert_present "$ext" "pi secondmate spawn did not write the busy extension"
+  assert_contains "$launch" "$ext" "pi secondmate launch did not load the busy extension"
+  assert_contains "$launch" "fm-primary-turnend-guard.ts" "pi secondmate launch dropped its turn-end extension"
+  assert_contains "$launch" "fm-primary-pi-watch.ts" "pi secondmate launch dropped its watch extension"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "pi secondmate seed must be busy fm-spawn, got '$out'"
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_pi_ext "$ext" turn-end) || fail "pi secondmate turn_end drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] || fail "pi secondmate turn_end touched the parent's turn-ended marker"
+  out=$(drive_pi_ext "$ext" settle-idle) || fail "pi secondmate settle drive failed: $out"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "idle pi-ext" ] || fail "pi secondmate settle must classify idle pi-ext, got '$out'"
+  pass "a pi secondmate loads the busy extension beside its primary extensions and does not emit a parent turn-end"
+}
+
+test_secondmate_omp_extension_reports_busy_without_a_parent_turnend() {
+  local case_dir id=sm-omp primary state ext launch out
+  case_dir="$TMP_ROOT/sm-omp"
+  primary="$case_dir/primary"
+  out=$(spawn_secondmate_harness "$case_dir" "$id" omp) \
+    || fail "omp secondmate spawn failed: $out"
+  state="$primary/state"
+  ext="$state/$id.omp-ext.ts"
+  launch=$(cat "$case_dir/launch.log")
+  assert_present "$ext" "omp secondmate spawn did not write the busy extension"
+  assert_contains "$launch" "$ext" "omp secondmate launch did not name the busy extension"
+  assert_contains "$launch" "--cwd" "omp secondmate launch dropped its cwd pin"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "omp secondmate seed must be busy fm-spawn, got '$out'"
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_pi_ext "$ext" turn-end) || fail "omp secondmate turn_end drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] || fail "omp secondmate turn_end touched the parent's turn-ended marker"
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "omp secondmate turn_end must stay a notification, got '$out'"
+  # drive_pi_ext has no agent_end mode. Fire the omp handler through node.
+  EXT_PATH="$ext" node --input-type=module <<'EOF'
+import { pathToFileURL } from "node:url";
+const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
+const handlers = {};
+mod.default({ on: (name, fn) => { handlers[name] = fn; } });
+await handlers["agent_end"]({ willContinue: false }, {});
+EOF
+  out=$(classify omp "$id" "$state")
+  [ "$out" = "idle omp-ext" ] || fail "omp secondmate agent_end must classify idle omp-ext, got '$out'"
+  pass "an omp secondmate names only the out-of-home busy extension and does not emit a parent turn-end"
+}
+
+test_secondmate_opencode_plugin_closes_without_a_parent_turnend() {
+  local case_dir id=sm-oc primary sm state plugin out
+  case_dir="$TMP_ROOT/sm-oc"
+  primary="$case_dir/primary"
+  sm="$case_dir/sm"
+  out=$(spawn_secondmate_harness "$case_dir" "$id" opencode) \
+    || fail "opencode secondmate spawn failed: $out"
+  state="$primary/state"
+  plugin="$sm/.opencode/plugins/fm-busy-state.js"
+  assert_present "$plugin" "opencode secondmate spawn did not write the busy plugin"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "opencode secondmate seed must be busy fm-spawn, got '$out'"
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_oc_plugin "$plugin" "$(oc_status ses_main busy)" "$(oc_idle ses_main)") \
+    || fail "opencode secondmate idle drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] || fail "opencode secondmate session.idle touched the parent's turn-ended marker"
+  out=$(classify opencode "$id" "$state")
+  [ "$out" = "idle opencode-plugin" ] || fail "opencode secondmate idle must classify idle, got '$out'"
+  pass "an opencode secondmate plugin closes the parent busy record without a parent turn-end"
+}
+
+test_secondmate_codex_and_grok_do_not_arm_a_parent_turnend() {
+  local case_dir id state launch out sm
+  case_dir="$TMP_ROOT/sm-codex"
+  id='sm-codex'
+  out=$(spawn_secondmate_harness "$case_dir" "$id" codex) \
+    || fail "codex secondmate spawn failed: $out"
+  state="$case_dir/primary/state"
+  launch=$(cat "$case_dir/launch.log")
+  assert_absent "$state/$id.busy-gen" "codex secondmate must not arm a busy contract with no verified source"
+  assert_not_contains "$launch" "turn-ended" "codex secondmate launch referenced a parent turn-ended signal"
+  assert_not_contains "$launch" "notify=" "codex secondmate launch included the parent turn-end notify hook"
+  out=$(classify codex "$id" "$state")
+  [ "$out" = "unknown codex-unverified" ] || fail "codex secondmate must stay unknown, got '$out'"
+
+  case_dir="$TMP_ROOT/sm-grok"
+  id='sm-grok'
+  sm="$case_dir/sm"
+  out=$(GROK_HOME="$case_dir/grok-home" spawn_secondmate_harness "$case_dir" "$id" grok) \
+    || fail "grok secondmate spawn failed: $out"
+  state="$case_dir/primary/state"
+  assert_absent "$state/$id.busy-gen" "grok secondmate must keep its rendered-tail fallback instead of an armed record"
+  assert_absent "$sm/.fm-grok-turnend" "grok secondmate spawn installed a parent turn-end pointer"
+  assert_absent "$state/$id.grok-turnend-token" "grok secondmate spawn installed a parent turn-end token"
+  out=$(fm_busy_classify tmux "firstmate:fm-$id" grok "$id" "$state" 'Ctrl+c:cancel')
+  [ "$out" = "busy grok-regex" ] || fail "grok secondmate must still classify from its tail, got '$out'"
+  pass "codex and grok secondmates stay on their existing verdicts and do not emit a parent turn-end"
+}
+
+test_secondmate_claude_spawn_arms_busy_for_the_stall_gate
+test_secondmate_pi_extension_reports_busy_without_a_parent_turnend
+test_secondmate_omp_extension_reports_busy_without_a_parent_turnend
+test_secondmate_opencode_plugin_closes_without_a_parent_turnend
+test_secondmate_codex_and_grok_do_not_arm_a_parent_turnend
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected

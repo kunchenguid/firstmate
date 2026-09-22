@@ -361,6 +361,7 @@ family_for_basename() {
     fm-sessionstart-hook-live-e2e.test.sh|fm-sessionstart-instruction-refresh-live-e2e.test.sh|\
     fm-quota-array-dispatch-live-e2e.test.sh|fm-send-secondmate-marker-herdr-e2e.test.sh|\
     fm-send-inbox-doorbell-live-e2e.test.sh|\
+    fm-secondmate-busy-contract-live-e2e.test.sh|\
     fm-calm-claude-mod-plugin.test.sh|fm-calm-claude-mod-live-e2e.test.sh|\
     fm-herdr-submit-confirm-live-e2e.test.sh)
       printf '%s\n' live-harness-optin
@@ -785,6 +786,7 @@ tests/fm-remote-transport-lanes.test.sh 62635
 tests/fm-rovo-harness.test.sh 14322
 tests/fm-rovo-signals-live-e2e.test.sh 48
 tests/fm-secondmate-harness.test.sh 163801
+tests/fm-secondmate-busy-contract-live-e2e.test.sh 90000
 tests/fm-secondmate-lifecycle-e2e.test.sh 9633
 tests/fm-secondmate-liveness.test.sh 10402
 tests/fm-secondmate-reconcile.test.sh 97544
