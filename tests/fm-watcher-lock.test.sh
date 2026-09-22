@@ -1201,10 +1201,12 @@ test_sigterm_during_marker_wait_releases_watch_lock() {
     sleep 0.05
     i=$((i + 1))
   done
-  [ -e "$state/.last-watcher-beat" ] \
+  if ! { [ -e "$state/.last-watcher-beat" ] \
     && [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] \
-    && kill -0 "$wpid" 2>/dev/null \
-    || { kill "$wpid" "$holder_pid" 2>/dev/null || true; fail "watcher never reached trap-ready startup: $(cat "$out")"; }
+    && kill -0 "$wpid" 2>/dev/null; }; then
+    kill "$wpid" "$holder_pid" 2>/dev/null || true
+    fail "watcher never reached trap-ready startup: $(cat "$out")"
+  fi
 
   kill -TERM "$wpid" 2>/dev/null || true
   # Free the marker lock so the cleanup path's bounded publish can finish.
