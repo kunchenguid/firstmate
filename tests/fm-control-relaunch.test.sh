@@ -517,11 +517,13 @@ SH
 }
 
 test_relaunch_keeps_the_armed_pr_poll_authenticated() {
-  local dir id=rl77 url out rc
-  dir=$(new_case pr-poll-relaunch "$id")
+  local driver=$1 trace_mode=$2 dir id=rl77 url out rc attempt traceparent previous_traceparent=
+  dir=$(new_case "pr-poll-relaunch-$driver-$trace_mode" "$id")
   add_ship_task "$dir" "$id" claude
   url="https://github.com/example/repo/pull/77"
   make_relaunch_gh_stub "$dir/fakebin"
+  printf '%s\n' "$$" > "$dir/home/state/.lock"
+  printf '%s %s\n' "$$" "$trace_mode" > "$dir/home/state/.trace-context-effective"
 
   out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
     "$PR_CHECK" "$id" "$url" 2>&1); rc=$?
@@ -530,18 +532,43 @@ test_relaunch_keeps_the_armed_pr_poll_authenticated() {
   fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$PR_POLL" \
     || fail "the freshly armed PR poll does not validate; the fixture itself is broken"
 
-  out=$(run_control "$dir" "$id" relaunch --note "continue after PR review"); rc=$?
-  expect_code 0 "$rc" "relaunch should succeed with an armed PR poll"$'\n'"$out"
-  [ "$(meta_field "$dir" "$id" pr)" = "$url" ] || fail "relaunch must still preserve the task PR"
+  for attempt in 1 2; do
+    : > "$dir/fake/keys"
+    if [ "$driver" = control ]; then
+      out=$(run_control "$dir" "$id" relaunch --note "continue after PR review"); rc=$?
+    else
+      printf 'zsh' > "$dir/fake/command"
+      out=$(run_spawn "$dir" "$id" --relaunch); rc=$?
+    fi
+    expect_code 0 "$rc" "$driver relaunch $attempt with tracing $trace_mode should succeed with an armed PR poll"$'\n'"$out"
+    [ "$(meta_field "$dir" "$id" pr)" = "$url" ] || fail "relaunch must still preserve the task PR"
 
-  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
-    printf '# evidence begin: relaunch vs armed PR poll\n'
-    printf 'post-relaunch key order:\n'; cat "$dir/home/state/$id.meta"
-    printf '# evidence end\n'
+    traceparent=$(meta_field "$dir" "$id" traceparent)
+    if [ "$trace_mode" = on ]; then
+      fm_trace_context_valid "$traceparent" || fail "traced relaunch must record a valid carrier"
+      grep -Fxq "export TRACEPARENT=$traceparent" "$dir/fake/keys" \
+        || fail "the recorded carrier must match the carrier delivered to the replacement"
+      [ -z "$previous_traceparent" ] || [ "$traceparent" = "$previous_traceparent" ] \
+        || fail "repeated relaunch must reuse the task's trace carrier"
+      previous_traceparent=$traceparent
+    else
+      [ -z "$traceparent" ] || fail "untraced relaunch must not record a carrier"
+      assert_no_grep '^export TRACEPARENT=' "$dir/fake/keys" "untraced relaunch must not deliver a carrier"
+    fi
+
+    if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+      printf '# evidence begin: %s relaunch %s with tracing %s vs armed PR poll\n' "$driver" "$attempt" "$trace_mode"
+      printf 'post-relaunch key order:\n'; cat "$dir/home/state/$id.meta"
+      printf '# evidence end\n'
+    fi
+    fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$PR_POLL" \
+      || fail "$driver relaunch $attempt with tracing $trace_mode silently broke the armed PR poll's authentication; the watcher would reject this task's own untampered poll as check: rejected unauthenticated state checks"
+  done
+  printf 'unrecognized=1\n' >> "$dir/home/state/$id.meta"
+  if fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$PR_POLL"; then
+    fail "PR poll authentication must still reject an unrecognized field after the preserved identity"
   fi
-  fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$PR_POLL" \
-    || fail "relaunch silently broke the armed PR poll's authentication (control_relaunch_tx must not land after the preserved pr=/pr_head= keys); the watcher would reject this task's own untampered poll as check: rejected unauthenticated state checks"
-  pass "fm-control relaunch: relaunch keeps an armed PR merge poll authenticated"
+  pass "$driver relaunch with tracing $trace_mode: repeated relaunch keeps an armed PR merge poll authenticated"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2259,7 +2286,10 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
-test_relaunch_keeps_the_armed_pr_poll_authenticated
+test_relaunch_keeps_the_armed_pr_poll_authenticated control off
+test_relaunch_keeps_the_armed_pr_poll_authenticated control on
+test_relaunch_keeps_the_armed_pr_poll_authenticated spawn off
+test_relaunch_keeps_the_armed_pr_poll_authenticated spawn on
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
