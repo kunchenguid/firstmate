@@ -110,9 +110,11 @@ The token is visible in the workspace title because Herdr exposes no verified hi
 The owning parent is the launcher's own exact workspace, resolved from the same identity the flat path uses, and falls back to a unique home-label lookup only for a Firstmate outside Herdr.
 Projected children are never collapsed back into that parent; it is the placement and ordering reference the projection is bound under.
 The normal `fm-<id>` task tab is created in the exact new workspace returned by Herdr.
-Only the exact seeded default tab returned by the same workspace-create response can be pruned.
+Only the exact seeded default tab returned by the same workspace-create response can be pruned, and the prune finishes on that tab id rather than on its root pane, because a plugin can dock a pane into the seeded tab too.
 Before and after create, prune, order, abort cleanup, and normal cleanup, Firstmate verifies exact workspace, tab, pane, and active-focus ids.
 An ambiguous response grants no mutation or cleanup authority.
+A projection has converged when the workspace contains exactly one tab, that tab carries the task-tab id Herdr returned, the returned task pane belongs to it, and the seeded tab is gone.
+The pane census is unrestricted because a docking plugin can add a pane to the task tab; any additional tab still fails convergence.
 
 Protocol 16 exposes `workspace.move` over the named session socket but no CLI subcommand.
 `bin/backends/herdr-workspace-move.py` sends only that whitelisted method and verifies the complete returned workspace order.
@@ -125,7 +127,13 @@ Firstmate does not retry, adopt, reuse, close, delete, or rename anything in res
 The worker remains on the ordinary flat or Herdr-current-order path.
 
 Normal task metadata remains the sole endpoint authority after creation.
-Cleanup closes only the exact recorded task pane and never calls `workspace close`.
+Cleanup closes the exact recorded task pane, then closes that task's exact recorded tab when its durable records establish that the tab is outside any quarantined projection, and never calls `workspace close`.
+Herdr removes a tab only when its last pane closes, so anything else docked into the task tab - a plugin pane such as the herdr-sidebar plugin's, an operator split - kept the tab, and a projected task's whole disposable workspace, alive after the records naming them were gone.
+For an ordinary task tab or an exactly matched current projection, the tab close is unconditional once the recorded tab is still a tab of the recorded workspace: a close conditioned on what sits in the tab restores that residue in exactly the cases where it declines, so a pane parked in a task tab dies with the task.
+When a non-matching presentation journal survives, its recorded session and workspace id decide the boundary rather than its mutable workspace label: a journal naming the task tab's workspace quarantines that projection and leaves its tab untouched, while a journal naming another workspace does not suppress cleanup of the ordinary operator-workspace tab.
+A journal or task record that cannot establish those identities refuses the close and retains every durable task record; if a quarantined projection's recorded tab is already confirmed dead, teardown retires its journal without another workspace mutation.
+It is still focus-preserving - the shared mutation guard refuses while a live foreground client is viewing that tab, and the exact prior tab is restored afterwards - and a close that cannot be proved never relaxes the endpoint proof cleanup requires before removing any durable record.
+An aborted projected attempt closes the exact tabs that attempt created, for the same reason.
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace, while its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last; both behaviors are fixed in Herdr 0.8.0, and the exact rules live in the adapter header of `bin/backends/herdr.sh`.
 Projected cleanup therefore runs under the same session lock, refuses to delete the tab a live foreground client is viewing, and treats a workspace-emptying close as a focus-safe removal: it verifies the close would empty the workspace, repositions the doomed workspace behind the focused one through the verified `workspace.move` transport when needed, proves the pane holds one lone idle shell, and ends that shell so Herdr removes the emptied workspace through its focus-preserving pane-death path.
 The persisted `.focused` pointer is not a live viewer: when `herdr terminal title clear` reports `no_foreground_client`, cleanup proceeds on that tab because no human is attached and skips restoration of the tab it destroys.
@@ -137,10 +145,11 @@ The pane-death signals are pid-exact: the escalation re-reads the pane's process
 A move-plan ambiguity, unsupported or failed move, or unproved shell falls back to the plain explicit close, and exact tab restoration remains the backstop whenever a surviving tab must be preserved, so degraded behavior is never worse than the pre-mitigation sub-second restore.
 Ordinary non-projected task removal serializes through the same session lock, applies the same focus-safe plan when its close would empty a non-focused workspace, keeps the legitimate plain close when the target is the active tab, and refuses an unlocked close if the lock cannot be acquired.
 Task cleanup acquires that session lock before the task's isolated copy is returned, so a contended lock refuses up front while the copy, every durable record, and the endpoint are all intact for a plain rerun.
-Forced secondmate cleanup recursively preflights every Herdr child endpoint and acquires every affected named-session lock before mutating any child, then retains each child's durable identity unless that exact pane returns structured not-found after its close.
-Durable task records are erased only once the exact pane is confirmed gone through its structured presence: after every close path, only a structured not-found response counts as gone, while a present or unknown result retains every record with a visible, retryable error.
+Forced secondmate cleanup recursively preflights every Herdr child endpoint and acquires every affected named-session lock before mutating any child.
+It removes a child home only after the exact pane and recorded tab are confirmed gone and any presentation journal is retired; a surviving quarantined journal, including one whose matching task metadata was already removed, retains the child's records and home so cleanup cannot erase the only durable identity of an untouched tab or workspace.
+Durable task records are erased only once the exact pane is confirmed gone through its structured presence and any required recorded-tab close is confirmed: after every close path, only a structured not-found response counts as gone, while a present or unknown result retains every record with a visible, retryable error.
 Missing or malformed endpoint identity and missing confirmation machinery are ambiguity, never proof of a gone pane, and refuse record removal the same way.
-If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the journal for manual inspection.
+If lock, snapshot, pane identity, or restoration is ambiguous, cleanup warns and preserves the applicable journal and task records for inspection or retry.
 
 Recovery is deliberately conservative and presentation-only.
 An existing journal suppresses another projected create.
@@ -183,6 +192,7 @@ Operational compromises:
 - The visible token is only a restart-stable correlator and never substitutes for the exact binding.
 
 `tests/fm-backend-herdr-presentation-e2e.test.sh` covers multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path.
+`tests/fm-teardown.test.sh` covers recorded-tab focus and presence gates, journal-to-workspace quarantine identity, confirmed-dead retry retirement, and recursive secondmate-home retention for live or journal-only quarantines.
 `tests/fm-herdr-session-cleanup.test.sh` covers every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary.
 `tests/fm-herdr-session-cleanup-e2e.test.sh` covers the restored-shell cleanup in a guarded non-default named lab.
 `tests/fm-backend-herdr-focus-flash-e2e.test.sh` reproduces the raw explicit-close focus steal on the installed release and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval; [`verification/runtime-backends.md`](verification/runtime-backends.md#workspace-removal-focus-safety) owns the active versioned evidence.
@@ -194,8 +204,8 @@ Operational compromises:
 `herdr workspace create` seeds one default tab.
 Firstmate prunes it only after a real task tab exists and only when the same create response supplied the seeded tab id.
 An adopted workspace never supplies that id and can never enter the prune path, regardless of labels or tab count.
-Immediately before close, Firstmate rechecks the exact tab, expected seed label, and native agent state.
-A working seed pane is never closed.
+Immediately before close, Firstmate rechecks the exact tab, expected seed label, and native agent state of every pane in that tab.
+A seeded tab containing any working pane is never closed; otherwise cleanup finishes on the exact seeded tab id so a docked non-working pane cannot keep it alive.
 
 This created-versus-adopted gate is a destructive safety boundary.
 A prior label heuristic could adopt a captain-owned workspace named `firstmate` and close its live seed-shaped tab.
@@ -367,6 +377,7 @@ tests/fm-backend-herdr-workspace-per-home-e2e.test.sh
 tests/fm-backend-herdr-launcher-workspace-e2e.test.sh
 tests/fm-backend-herdr-presentation-e2e.test.sh
 tests/fm-backend-herdr-agent-exit-shell-e2e.test.sh
+tests/fm-backend-herdr-tab-residue-e2e.test.sh
 tests/fm-herdr-pi-stale-registration-live-e2e.test.sh
 tests/fm-backend-herdr-eventwait-smoke.test.sh
 tests/fm-control-herdr-smoke.test.sh

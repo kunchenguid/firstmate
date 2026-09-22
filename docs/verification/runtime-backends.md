@@ -925,6 +925,15 @@ The CLI matrix was checked directly:
 All destructive verification used `bin/fm-herdr-lab.sh` with a non-default `fm-lab-` name and a byte-identical default-session tripwire.
 No ambient `herdr server stop` command is a supported test operation.
 
+### Herdr task-tab residue regression
+
+`tests/fm-backend-herdr-tab-residue-e2e.test.sh` runs the guarded non-default Herdr lab and exercises the public spawn and teardown paths.
+It creates a sibling pane in a recorded task tab, tears the task down, and checks that both the tab and sibling pane are absent while the captain's focus is unchanged.
+It also checks that an agent-bearing sibling does not suppress the recorded-tab close and that abort cleanup leaves no disposable projection workspace behind.
+The projection convergence case passes only when a sibling pane is accepted in the sole task tab; if an installed plugin renames the seeded tab before its prune, the test reports that case as unobservable instead of claiming a verdict.
+`tests/fm-teardown.test.sh` pins the fail-closed cases that do not require a live Herdr server: an unreadable focus snapshot refuses the tab close, recorded workspace identity keeps a renamed quarantined projection untouched without suppressing cleanup of an ordinary operator-workspace tab, and a confirmed-dead tab lets a retry retire its projection journal without another mutation.
+The same fixture pins forced secondmate cleanup: a surviving live or journal-only quarantine retains the child records and home, while a confirmed-dead child tab permits journal retirement and home removal.
+
 ### fm-remote server birth and login-keychain access
 
 Measured 2026-09-09 on macOS 26 (Darwin 25.6.0) aarch64 with Claude Code 2.1.266 and Herdr 0.9.0, the guarantee behind `bin/fm-remote-herdr-guard.sh` and the doctor's `herdr-server` check: login-keychain access follows the audit session a process was born into, never the launch shape or the shell.

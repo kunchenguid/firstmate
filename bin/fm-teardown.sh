@@ -136,11 +136,13 @@
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
-# A Herdr presentation journal never authorizes cleanup. Teardown still closes
-# only the exact task pane from ordinary endpoint metadata and never calls
-# `workspace close`. It retires the non-authoritative journal only when a
-# read-only token correlation agrees with that endpoint and pane closure is
-# confirmed. Otherwise the journal stays quarantined for manual inspection.
+# A Herdr presentation journal never authorizes cleanup. Teardown closes the
+# exact task pane, confirms it gone, then closes the exact recorded tab so any
+# sibling panes in that task container cannot survive record removal. It never
+# calls `workspace close`. A quarantined projected workspace remains untouched;
+# an unreadable recorded identity retains every durable task record.
+# The journal retires only after both recorded endpoint levels are confirmed
+# gone. Otherwise it stays quarantined for manual inspection.
 # Projected closes share the presentation-order lock, refuse to close the
 # captain's active tab, and restore the exact response-derived pre-close tab
 # if Herdr's last-pane cleanup focuses an unrelated neighboring workspace.
@@ -3037,10 +3039,55 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
   return 1
 }
 
+teardown_herdr_recorded_tab() {  # <meta> <id> <subject> <journal> <retire-candidate> <fallback-session>
+  local meta=$1 id=$2 subject=$3 journal=$4 retire_candidate=$5 fallback_session=$6
+  local session workspace tab presence projection_state
+  session=$(meta_value "$meta" herdr_session)
+  [ -n "$session" ] || session=$fallback_session
+  workspace=$(meta_value "$meta" herdr_workspace_id)
+  tab=$(meta_value "$meta" herdr_tab_id)
+  if [ "$retire_candidate" != 1 ] && { [ -e "$journal" ] || [ -L "$journal" ]; }; then
+    projection_state=$(fm_backend_herdr_projection_journal_workspace_state \
+      "$journal" "$id" "$session" "$workspace")
+    case "$projection_state" in
+      projection)
+        presence=$(fm_backend_herdr_tab_presence_state "$session" "$workspace" "$tab")
+        if [ "$presence" = dead ]; then
+          rm -f "$journal"
+        fi
+        return 0
+        ;;
+      ordinary) ;;
+      *)
+        echo "error: herdr presentation journal for $subject cannot establish exact ownership because journal fields session and workspace_id or metadata fields herdr_session and herdr_workspace_id are missing or invalid; retaining every durable task record" >&2
+        return 1
+        ;;
+    esac
+  fi
+  [ -n "$workspace" ] && [ -n "$tab" ] || return 0
+  if ! teardown_herdr_session_lock_held "$session"; then
+    echo "error: herdr session presentation lock is unavailable; retaining every durable task record so $subject's tab close can be retried" >&2
+    return 1
+  fi
+  if ! fm_backend_herdr_recorded_tab_close "$session" "$workspace" "$tab"; then
+    echo "error: herdr tab $tab for $subject is not confirmed gone; retaining every durable task record so a rerun can retry the close" >&2
+    return 1
+  fi
+}
+
 cleanup_firstmate_home_children() {
   local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
+  local child_journal child_journal_id child_retire_candidate child_session child_workspace child_pane
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
+  for child_journal in "$sub_state"/*.herdr-presentation; do
+    { [ -e "$child_journal" ] || [ -L "$child_journal" ]; } || continue
+    child_journal_id=$(basename "$child_journal" .herdr-presentation)
+    if [ ! -e "$sub_state/$child_journal_id.meta" ] && [ ! -L "$sub_state/$child_journal_id.meta" ]; then
+      echo "error: herdr presentation journal for child $child_journal_id has no matching task metadata; retaining the journal-only quarantine record and its home" >&2
+      return 1
+    fi
+  done
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
@@ -3063,13 +3110,38 @@ cleanup_firstmate_home_children() {
     if [ -n "$child_t" ]; then
       if [ "$child_backend" = herdr ]; then
         fm_backend_herdr_parse_target "$child_t" || return 1
-        if ! teardown_herdr_session_lock_held "$FM_BACKEND_HERDR_SESSION"; then
+        child_session=$FM_BACKEND_HERDR_SESSION
+        child_pane=$FM_BACKEND_HERDR_PANE
+        child_workspace=$(meta_value "$child_meta" herdr_workspace_id)
+        child_journal="$sub_state/$child_id.herdr-presentation"
+        child_retire_candidate=0
+        if { [ -e "$child_journal" ] || [ -L "$child_journal" ]; } \
+           && [ -n "$child_workspace" ] \
+           && fm_backend_herdr_projection_endpoint_matches_journal \
+             "$child_session" "$child_workspace" "$child_journal" "$child_id"; then
+          child_retire_candidate=1
+        fi
+        if ! teardown_herdr_session_lock_held "$child_session"; then
           echo "error: herdr session presentation lock is not held for child $child_id; retaining that child's durable identity records and stopping forced cleanup" >&2
           return 1
         fi
-        fm_backend_herdr_kill_serialized "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" 2>/dev/null || true
+        fm_backend_herdr_kill_serialized "$child_session" "$child_pane" 2>/dev/null || true
         if ! fm_backend_herdr_endpoint_confirmed_gone "$child_t"; then
           echo "error: herdr pane $child_t for child $child_id is not confirmed gone; retaining that child's durable identity records and stopping forced cleanup" >&2
+          return 1
+        fi
+        if [ "$child_retire_candidate" != 1 ] \
+           && { [ -e "$child_journal" ] || [ -L "$child_journal" ]; }; then
+          echo "warning: herdr presentation journal for $child_id remains quarantined; no workspace cleanup was attempted" >&2
+        fi
+        teardown_herdr_recorded_tab \
+          "$child_meta" "$child_id" "child $child_id" "$child_journal" "$child_retire_candidate" "$child_session" \
+          || return 1
+        if [ "$child_retire_candidate" = 1 ]; then
+          rm -f "$child_journal"
+        fi
+        if [ -e "$child_journal" ] || [ -L "$child_journal" ]; then
+          echo "error: herdr presentation journal for child $child_id remains quarantined; retaining that child's durable identity records and home" >&2
           return 1
         fi
       elif [ "$child_backend" = zellij ]; then
@@ -3502,9 +3574,7 @@ elif [ "$BACKEND" != orca ]; then
     || endpoint_close_refusal "$ID" "$BACKEND" "$T" 1 || exit 1
 fi
 if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
-  if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" = dead ]; then
-    rm -f "$HERDR_PRESENTATION_JOURNAL"
-  else
+  if [ "$(fm_backend_herdr_pane_agent_state "$HERDR_PRESENTATION_SESSION" "$HERDR_PRESENTATION_PANE")" != dead ]; then
     echo "warning: exact herdr task-pane close could not be confirmed for $ID; retaining the presentation journal and attempting no workspace cleanup" >&2
   fi
 elif [ "$BACKEND" = herdr ] \
@@ -3526,6 +3596,23 @@ if [ "$BACKEND" = herdr ]; then
   if ! fm_backend_herdr_endpoint_confirmed_gone "$T"; then
     echo "error: herdr pane $T for $ID is not confirmed gone after its close was refused, skipped, or failed; retaining every durable task record - rerun teardown once the close can run under the session lock" >&2
     exit 1
+  fi
+fi
+# The task's own pane is proven gone above, but Herdr drops a tab only when its
+# LAST pane closes, so anything else docked into this task's tab - a Herdr
+# plugin pane, an operator split - keeps the whole tab alive, and the records
+# removed below are the last thing that names it. Close the exact recorded tab
+# while the session lock still covers this teardown. A failed close retains the
+# records that name the tab so a plain rerun can retry it. A quarantined journal
+# blocks this close only when its exact session and workspace match the task's
+# recorded workspace; a different operator workspace still has its tab reaped.
+if [ "$BACKEND" = herdr ] && declare -F fm_backend_herdr_recorded_tab_close >/dev/null 2>&1; then
+  if ! teardown_herdr_recorded_tab \
+    "$META" "$ID" "$ID" "$HERDR_PRESENTATION_JOURNAL" "$HERDR_PRESENTATION_RETIRE_CANDIDATE" "$TEARDOWN_HERDR_SESSION"; then
+    exit 1
+  fi
+  if [ "$HERDR_PRESENTATION_RETIRE_CANDIDATE" = 1 ]; then
+    rm -f "$HERDR_PRESENTATION_JOURNAL"
   fi
 fi
 if [ "$KIND" != secondmate ]; then

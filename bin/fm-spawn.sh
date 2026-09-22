@@ -87,8 +87,8 @@
 #   config/herdr-presentation-spaces file can say off to disable it or on to
 #   opt in below that floor; an empty file remains the historical opt-in form.
 #   A clean fresh task first writes state/<id>.herdr-presentation atomically,
-#   then creates a disposable
-#   workspace containing only the ordinary task pane. A successful clean create
+#   then creates a disposable workspace with one ordinary task tab. Herdr
+#   plugins may dock additional panes into that tab. A successful clean create
 #   upgrades its attempt journal with exact home, session, workspace, tab, pane,
 #   parent, and label bindings. On a same-identity restart, that complete binding
 #   plus authoritative metadata may replace one exact agent-free husk in place.
@@ -1114,6 +1114,9 @@ HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
 HERDR_PROJECTION_ABORT_SEEDED_PANE=
+HERDR_PROJECTION_ABORT_WORKSPACE=
+HERDR_PROJECTION_ABORT_TASK_TAB=
+HERDR_PROJECTION_ABORT_SEEDED_TAB=
 HERDR_PRESENTATION_ORDER_LOCK=
 HERDR_PRESENTATION_ORDER_LOCK_HELD=0
 SPAWN_TASK_LOCK=
@@ -1204,7 +1207,10 @@ spawn_abort_cleanup() {
     fm_backend_herdr_projection_cleanup_exact \
       "$HERDR_PROJECTION_ABORT_SESSION" \
       "$HERDR_PROJECTION_ABORT_TASK_PANE" \
-      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" || true
+      "$HERDR_PROJECTION_ABORT_SEEDED_PANE" \
+      "$HERDR_PROJECTION_ABORT_WORKSPACE" \
+      "$HERDR_PROJECTION_ABORT_TASK_TAB" \
+      "$HERDR_PROJECTION_ABORT_SEEDED_TAB" || true
   fi
   if [ "$HERDR_PRESENTATION_ORDER_LOCK_HELD" = 1 ]; then
     HERDR_PRESENTATION_ORDER_LOCK_HELD=0
@@ -3276,6 +3282,9 @@ else
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
             HERDR_PROJECTION_ABORT_SEEDED_PANE=""
+            HERDR_PROJECTION_ABORT_WORKSPACE=$HERDR_WORKSPACE_ID
+            HERDR_PROJECTION_ABORT_TASK_TAB=$HERDR_TAB_ID
+            HERDR_PROJECTION_ABORT_SEEDED_TAB=""
             ;;
           2)
             spawn_herdr_presentation_order_lock_release
@@ -3325,6 +3334,9 @@ else
                 HERDR_PROJECTION_ABORT_SESSION=$FM_BACKEND_HERDR_PROJECTION_SESSION
                 HERDR_PROJECTION_ABORT_TASK_PANE=$FM_BACKEND_HERDR_PROJECTION_PANE_ID
                 HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+                HERDR_PROJECTION_ABORT_WORKSPACE=$FM_BACKEND_HERDR_PROJECTION_WORKSPACE_ID
+                HERDR_PROJECTION_ABORT_TASK_TAB=$FM_BACKEND_HERDR_PROJECTION_TAB_ID
+                HERDR_PROJECTION_ABORT_SEEDED_TAB=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
               fi
               exit 1
             fi
@@ -3338,6 +3350,9 @@ else
             HERDR_PROJECTION_ABORT_SESSION=$HERDR_SES
             HERDR_PROJECTION_ABORT_TASK_PANE=$HERDR_PANE_ID
             HERDR_PROJECTION_ABORT_SEEDED_PANE=$FM_BACKEND_HERDR_PROJECTION_SEEDED_PANE_ID
+            HERDR_PROJECTION_ABORT_WORKSPACE=$HERDR_WORKSPACE_ID
+            HERDR_PROJECTION_ABORT_TASK_TAB=$HERDR_TAB_ID
+            HERDR_PROJECTION_ABORT_SEEDED_TAB=$FM_BACKEND_HERDR_PROJECTION_SEEDED_TAB_ID
             fm_backend_herdr_projection_order_best_effort \
               "$HERDR_SES" "$HERDR_WORKSPACE_ID" "$HERDR_PARENT_LABEL" "$HERDR_PARENT_WORKSPACE_ID"
             HERDR_HOME_ID=$(fm_backend_herdr_projection_home_identity "$HERDR_LABEL_HOME" 2>/dev/null || true)
