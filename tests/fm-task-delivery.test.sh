@@ -324,8 +324,10 @@ STUB
     printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
     FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
       || fail "$mode: scout brief generation should succeed"
+    assert_no_grep "## Destination contribution guidance" "$home/data/$id/brief.md" \
+      "$mode: scout received publication obligations before promotion"
     fill_brief_subsections "$home/data/$id/brief.md" \
-      "Ship the delivery-contract change." "Preserve the selected delivery mode."
+      "Ship the delivery-contract change." "Preserve the selected delivery mode; consult the destination CONTRIBUTING."
     out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" --mode "$mode" --yolo off 2>&1) \
       || fail "$mode: promotion should succeed"
 
@@ -354,6 +356,20 @@ STUB
       "$mode: promoted worker did not receive the Captain's intent subsection"
     assert_grep "## Firstmate spec" "$payload" \
       "$mode: promoted worker did not receive the Firstmate spec subsection"
+
+    assert_grep "Ship the delivery-contract change." "$payload" "$mode: promotion lost literal intent"
+    [ "$(awk '/^## Captain.s intent$/ { emit=1; next } /^## Firstmate spec$/ { emit=0 } emit && NF' "$payload")" = 'Ship the delivery-contract change.' ] \
+      || fail "$mode: promotion mixed repository constraints into literal intent"
+    assert_grep "Treat the scout-time Firstmate spec" "$payload" \
+      "$mode: promotion lost the scout/ship specification boundary"
+    if [ "$mode" = local-only ]; then
+      assert_no_grep "## Destination contribution guidance" "$payload" "$mode: promotion added PR obligations"
+    else
+      [ "$(grep -c '^## Destination contribution guidance$' "$payload")" = 1 ] \
+        || fail "$mode: promotion must deliver destination guidance exactly once"
+      assert_grep "PR destination repository and base separately from the push remote or fork" "$payload" \
+        "$mode: promotion omitted destination/fork distinction"
+    fi
 
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated
