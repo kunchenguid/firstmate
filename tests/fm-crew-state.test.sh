@@ -97,7 +97,19 @@ case "${1:-}" in
           exit "${FM_FAKE_AXI_STATUS_ERROR:-0}"
         fi ;;
       logs)
-        printf '%s\n' "${FM_FAKE_CI_LOGS:-}" ;;
+        shift
+        # The real CLI prints only the last 40 log lines ("lines: 40 of N
+        # total (tail)", verified against v1.79.0) unless --full asks for the
+        # whole log, so a marker older than that is invisible to a plain read.
+        full=0
+        for arg in "$@"; do
+          [ "$arg" = --full ] && full=1
+        done
+        if [ "$full" = 1 ]; then
+          printf '%s\n' "${FM_FAKE_CI_LOGS:-}"
+        else
+          printf '%s\n' "${FM_FAKE_CI_LOGS:-}" | tail -40
+        fi ;;
     esac
     ;;
   runs)
@@ -563,6 +575,20 @@ run:
   pr: "https://github.com/o/r/pull/1"
   findings: none
 outcome: passed
+EOF
+}
+
+run_passed_with_override() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: completed
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/1"
+  findings: none
+outcome: passed-with-override
+ci_override_reason: "live checks not all passed: Lint (fail)"
 EOF
 }
 
@@ -1098,7 +1124,7 @@ test_ci_ready_done_log_beats_monitoring_run() {
 
 # Regression for the PR #252 incident: the crew's own status log never got a
 # "done: ... checks green" line (log_reports_ci_ready above does not apply),
-# but the ci step's log tail shows CI is actually green and only waiting on
+# but the ci step's log shows CI is actually green and only waiting on
 # merge/close. fm-crew-state must surface this as done, not "validating
 # (running)", so a green PR is never silently absorbed as still-in-progress.
 test_ci_monitoring_checks_green_surfaces_done() {
@@ -1152,7 +1178,11 @@ test_ci_monitoring_no_checks_terminal_surfaces_done() {
   pass "terminal no-checks ci-monitor marker surfaces done"
 }
 
-test_ci_monitoring_green_then_rearm_stays_working() {
+# The monitor logs a checks state only when it changes, and a base-branch
+# advance re-arms only its idle timeout, so a green PR on a busy base ends its
+# ci log with re-arm lines (the 2026-09-22 PR #5317 shape: green, then main
+# advanced while it waited for merge). The green marker before them is current.
+test_ci_monitoring_green_then_rearm_stays_green() {
   reset_fakes
   local d; d=$(new_case ci-green-then-rearm)
   make_repo_on_branch "$d/wt" fm/feat-cirearm
@@ -1162,13 +1192,43 @@ test_ci_monitoring_green_then_rearm_stays_working() {
   FM_FAKE_CI_LOGS=$(cat <<'EOF'
 all CI checks passed - still monitoring until merged or closed
 base branch advanced (aaaaaaa..bbbbbbb), re-arming CI monitor timeout
+base branch advanced (bbbbbbb..ccccccc), re-arming CI monitor timeout
 EOF
 )
   local out; out=$(run_crew_state "$d" feat-cirearm)
-  assert_contains "$out" "state: working" "base-advance rearm marker -> working"
-  assert_not_contains "$out" "state: done" "base-advance rearm marker must not read as done"
-  assert_not_contains "$out" "checks green" "base-advance rearm marker must not read as checks green"
-  pass "base-advance rearm after green stays working"
+  assert_contains "$out" "state: done" "a base-advance re-arm after green keeps the PR green"
+  assert_contains "$out" "source: run-step" "re-armed green monitoring stays run-step sourced"
+  assert_contains "$out" "checks green: PR ready for review" "re-armed green monitoring reads held for merge"
+  assert_contains "$out" "https://github.com/o/r/pull/2" "the held-for-merge reading names the run's PR"
+  assert_not_contains "$out" "state: working" "a re-arm line must not read as checks not ready"
+  pass "base-advance re-arm after green stays checks green"
+}
+
+# The same green-then-re-arm shape, but monitored long enough that the base
+# advanced past the CLI's 40-line log tail: `axi logs` without --full would
+# answer with re-arm lines only, hiding the green marker entirely, and the
+# green PR would read as still working for as long as main kept moving.
+test_ci_monitoring_green_before_log_tail_stays_green() {
+  reset_fakes
+  local d; d=$(new_case ci-green-beyond-tail)
+  make_repo_on_branch "$d/wt" fm/feat-citail
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-citail.meta" "window=fm:fm-feat-citail" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-citail)"
+  FM_FAKE_CI_LOGS=$({
+    printf 'monitoring CI for PR #2 (timeout: 4h0m0s)...\n'
+    printf 'all CI checks passed - still monitoring until merged or closed\n'
+    for i in $(seq 1 60); do
+      printf 'base branch advanced (%07d..%07d), re-arming CI monitor timeout\n' "$i" "$((i + 1))"
+    done
+  })
+  local out; out=$(run_crew_state "$d" feat-citail)
+  assert_contains "$out" "state: done" "a green marker older than the log tail still reads green"
+  assert_contains "$out" "source: run-step" "the full-log green reading stays run-step sourced"
+  assert_contains "$out" "checks green: PR ready for review" "the full-log reading is held for merge"
+  assert_contains "$out" "https://github.com/o/r/pull/2" "the full-log reading names the run's PR"
+  assert_not_contains "$out" "state: working" "a truncated ci log must not hide a green PR"
+  pass "a green marker before the ci log tail still surfaces done"
 }
 
 test_ci_monitoring_no_checks_yet_stays_working() {
@@ -1206,7 +1266,7 @@ test_ci_monitoring_still_waiting_stays_working() {
 }
 
 # A later merge-conflict auto-fix round after an earlier green reading must
-# not be masked: the MOST RECENT marker in the log tail wins.
+# not be masked: the MOST RECENT marker in the ci log wins.
 test_ci_monitoring_green_then_new_issue_stays_working() {
   reset_fakes
   local d; d=$(new_case ci-green-then-issue)
@@ -1310,6 +1370,22 @@ test_terminal_passed() {
   assert_contains "$out" "run passed: PR merged" "passed run reports merged only after the PR record says merged"
   assert_not_contains "$out" "merged/closed" "passed merged PR must not keep the old ambiguous label"
   pass "terminal passed run is authoritative"
+}
+
+test_terminal_passed_with_override() {
+  reset_fakes
+  local d; d=$(new_case passed-with-override)
+  make_repo_on_branch "$d/wt" fm/feat-override
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-override.meta" "window=fm:fm-feat-override" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed_with_override fm/feat-override)"
+  local out; out=$(run_crew_state "$d" feat-override)
+  assert_contains "$out" "state: done" "passed-with-override run -> done, not unknown"
+  assert_contains "$out" "source: run-step" "passed-with-override -> run-step source"
+  assert_contains "$out" "run passed: PR merged" "passed-with-override run reports merged only after the PR record says merged"
+  assert_not_contains "$out" "state: unknown" "passed-with-override must not fall through to unknown"
+  assert_not_contains "$out" "outcome: passed-with-override" "passed-with-override must not surface as a raw unmapped outcome detail"
+  pass "terminal passed-with-override run reads done like a clean pass"
 }
 
 test_terminal_passed_uses_matching_retirement_receipt_without_forge() {
@@ -3322,14 +3398,12 @@ test_capped_overview_without_branch_rows_reports_both_ids() {
   pass 'same-branch identity survives both runs falling outside the overview'
 }
 
-# Real `no-mistakes axi` overview truncation carries no `repo: ` identity
-# line at all (tests/captures/no-mistakes-v1.70.1/overview.toon, captured
-# 2026-09-20): only `count:`/`runs[...]:`. A branch with zero rows anywhere
-# in a capped overview must still read as truthfully absent from that real
-# shape, not as an unreadable table.
-test_capped_overview_without_repo_line_and_no_runs_reports_absent() {
+# A branch with zero rows anywhere in a capped overview must read as
+# truthfully absent, not as an unreadable table: the rebuilt zero-row
+# inventory re-parses as `runs[0]`.
+test_capped_overview_with_no_branch_runs_reports_absent() {
   reset_fakes
-  local d; d=$TMP_ROOT/capped-no-repo-line-no-runs
+  local d; d=$TMP_ROOT/capped-no-branch-runs
   mkdir -p "$d/state"
   make_repo_on_branch "$d/wt" fm/orphan-branch
   make_fakebin "$d" >/dev/null
@@ -3338,6 +3412,7 @@ test_capped_overview_without_repo_line_and_no_runs_reports_absent() {
   mkdir -p "$NM_HOME"
   local head; head=$(git -C "$d/wt" rev-parse --short=8 HEAD)
   FM_FAKE_AXI_HOME=$(python3 - "$NM_HOME/state.sqlite" "$d/wt" "$head" <<'PY'
+import json
 import sqlite3
 import sys
 
@@ -3352,7 +3427,7 @@ with sqlite3.connect(database) as db:
     db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
                     [("01OTHER%02d" % i, "repo", "fm/other-%d" % i, "running", head, i)
                      for i in range(11)])
-# Genuine captured shape: no `repo: ` line, ever.
+print("repo: " + json.dumps(worktree))
 print("count: 10 of 11 total")
 print("runs[10]{id,branch,status,head,pr}:")
 for i in range(10):
@@ -3365,14 +3440,14 @@ PY
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" orphan busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
   local out; out=$(run_crew_state "$d" orphan)
-  assert_not_contains "$out" "state: unknown" 'a zero-row branch in a repo-line-free capped overview is absent, not unreadable'
-  assert_not_contains "$out" "unreadable" 'the missing repo: line must not read as an unreadable table'
+  assert_not_contains "$out" "state: unknown" 'a zero-row branch in a capped overview is absent, not unreadable'
+  assert_not_contains "$out" "unreadable" 'a zero-row branch must not read as an unreadable table'
   assert_contains "$out" "state: working" 'absence of a run falls through to the pane/busy verdict'
   assert_contains "$out" "source: pane" 'the working verdict still comes from the pane source'
-  pass 'a capped overview with no repo: line and zero same-branch rows reports absent, not unreadable'
+  pass 'a capped overview with zero same-branch rows reports absent, not unreadable'
 }
 
-# The same real capped shape, but reached through the code path that actually
+# The same capped shape, but reached through the code path that actually
 # consumes the same-branch selection: fm-crew-state only consults the overview
 # once `axi status` answers with a run, so a branch of its own with no run at
 # all is only reported while SOME run exists elsewhere. Pre-fix this read
@@ -3389,6 +3464,7 @@ test_no_branch_run_beside_a_live_run_elsewhere_reads_absent() {
   mkdir -p "$NM_HOME"
   local head; head=$(git -C "$d/wt" rev-parse HEAD)
   FM_FAKE_AXI_HOME=$(python3 - "$NM_HOME/state.sqlite" "$d/wt" "$head" <<'PY'
+import json
 import sqlite3
 import sys
 
@@ -3403,7 +3479,7 @@ with sqlite3.connect(database) as db:
     db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
                    [("01OTHER%02d" % i, "repo", "fm/other-%d" % i, "running", head, i)
                     for i in range(11)])
-# Genuine captured shape: no `repo: ` line, ever.
+print("repo: " + json.dumps(worktree))
 print("count: 10 of 11 total")
 print("runs[10]{id,branch,status,head,pr}:")
 for i in range(10):
@@ -3448,18 +3524,96 @@ SH
   pass 'the capped inventory reader is bounded by the crew read budget'
 }
 
-# Repo identity is looked up by the exact recorded `working_path`; a worktree
-# spelled differently from the registered row is not guessed at, and reads as
-# an unreadable inventory that still names every candidate run id.
-test_capped_inventory_requires_exact_worktree_path() {
+# Repo identity is the overview's own `repo:` line matched exactly against the
+# recorded `working_path`; a spelling the inventory does not record is not
+# guessed at, and reads as an unreadable inventory that still names every
+# candidate run id.
+test_capped_inventory_requires_exact_repo_path() {
   make_capped_runs_case capped-noncanonical running pending hidden
   local d=$TMP_ROOT/capped-noncanonical out
-  fm_write_meta "$d/state/competing.meta" "window=fm:fm-competing" "worktree=$d/wt/./" "kind=ship"
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed "s|^repo: .*|repo: \"$d/wt/./\"|")
   out=$(run_crew_state "$d" competing)
-  assert_contains "$out" 'state: unknown' 'an unmatched worktree spelling cannot establish a verdict'
+  assert_contains "$out" 'state: unknown' 'an unmatched repo spelling cannot establish a verdict'
   assert_contains "$out" 'unreadable' 'an unmatched repo lookup reports the inventory unreadable'
+  assert_contains "$out" '01NEW' 'an unmatched repo lookup still names the candidate run'
   assert_not_contains "$out" 'absent' 'an unmatched repo lookup never reads as a branch without runs'
-  pass 'a worktree spelling the inventory does not record reads unreadable'
+  pass 'a repo spelling the inventory does not record reads unreadable'
+}
+
+# The 2026-09-22 PR #5317 shape on no-mistakes v1.79.0. A task copy is a linked
+# git worktree of its home clone, and the CLI registers the repository once, by
+# the clone's path, which the overview reports as `repo:`. Past ten runs the
+# overview is capped, so selection goes through the inventory reader, which must
+# key on that `repo:` line: keyed on the task worktree path it matched no row and
+# every read reported the inventory unreadable. The run is in ci merge
+# monitoring with every check green, and main advanced while it waited for the
+# merge, so its ci log ends in re-arm lines. It must read as a green PR held for
+# the merge decision, naming the PR, rather than unknown or still validating.
+test_linked_worktree_green_merge_monitoring_reads_held_for_merge() {
+  reset_fakes
+  local d out overview
+  d=$(new_case linked-worktree-green)
+  mkdir -p "$d/clone"
+  git -C "$d/clone" init -q
+  git -C "$d/clone" commit -q --allow-empty -m init
+  git -C "$d/clone" worktree add -q -b fm/feat-green "$d/wt"
+  FM_FAKE_RUN_HEAD=$(git -C "$d/wt" rev-parse HEAD)
+  export FM_FAKE_RUN_HEAD
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-green.meta" "window=fm:fm-feat-green" "worktree=$d/wt" "kind=ship"
+  NM_HOME="$d/nm"
+  mkdir -p "$NM_HOME"
+  overview=$(python3 - "$NM_HOME/state.sqlite" "$d/clone" "$FM_FAKE_RUN_HEAD" <<'PY'
+import json
+import sqlite3
+import sys
+
+database, clone, head = sys.argv[1:]
+pr = "https://github.com/o/r/pull/2"
+with sqlite3.connect(database) as db:
+    db.executescript("""
+        CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
+                           status TEXT NOT NULL, head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
+    """)
+    db.execute("INSERT INTO repos VALUES ('repo', ?)", (clone,))
+    db.execute("INSERT INTO runs VALUES ('01GREEN', 'repo', 'fm/feat-green', 'running', ?, 100)", (head,))
+    db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
+                   [("01DONE%02d" % i, "repo", "fm/done-%d" % i, "completed", head, i)
+                    for i in range(11)])
+print("repo: " + json.dumps(clone))
+print("current_branch: fm/feat-green")
+print("daemon: running")
+print("count: 10 of 12 total")
+print("runs[10]{id,branch,status,head,pr}:")
+print('  "01GREEN",fm/feat-green,running,%s,"%s"' % (head[:8], pr))
+for i in reversed(range(2, 11)):
+    print('  "01DONE%02d",fm/done-%d,completed,%s,""' % (i, i, head[:8]))
+PY
+) || fail 'could not create the linked-worktree run inventory fixture'
+  # Guard the divergence this case exists for, so it cannot go vacuous.
+  [ "$(git -C "$d/wt" rev-parse --show-toplevel)" != "$(git -C "$d/clone" rev-parse --show-toplevel)" ] \
+    || fail 'the fixture task copy must not be the registered clone'
+  assert_contains "$overview" 'count: 10 of 12 total' 'the fixture overview must be capped'
+  FM_FAKE_AXI_HOME=$overview
+  FM_FAKE_AXI_STATUS="$(run_ci_monitoring fm/feat-green | sed 's/01RUN/01GREEN/')"
+  FM_FAKE_AXI_STATUS_RUN=$FM_FAKE_AXI_STATUS
+  FM_FAKE_CI_LOGS=$(cat <<'EOF'
+monitoring CI for PR #2 (timeout: 4h0m0s)...
+CI checks running, waiting for results...
+all CI checks passed - still monitoring until merged or closed
+base branch advanced (f9f74a1d91cc..6f0f139962ea), re-arming CI monitor timeout
+base branch advanced (6f0f139962ea..c5131a33a1b2), re-arming CI monitor timeout
+EOF
+)
+  out=$(run_crew_state "$d" feat-green)
+  assert_not_contains "$out" 'unreadable' 'a linked worktree reads its run through the repo line'
+  assert_not_contains "$out" 'state: unknown' 'a green PR in merge monitoring is never unknown'
+  assert_contains "$out" 'state: done' 'a green PR in merge monitoring reads done'
+  assert_contains "$out" 'source: run-step' 'the green reading comes from the selected run'
+  assert_contains "$out" 'checks green: PR ready for review' 'the reading is held for the merge decision'
+  assert_contains "$out" 'https://github.com/o/r/pull/2' 'the reading names the PR to ask about'
+  pass 'a linked worktree green PR in merge monitoring reads held for merge'
 }
 
 test_capped_replacement_keeps_gate_and_inventory_unchanged() {
@@ -3482,7 +3636,7 @@ test_capped_replacement_keeps_gate_and_inventory_unchanged() {
 
 test_capped_inventory_failures_report_unknown() {
   local mode rc=0 overview
-  for mode in missing corrupt schema repo count; do
+  for mode in missing corrupt schema repo count norepo; do
     (
       make_capped_runs_case "capped-unreadable-$mode" running running
       d=$TMP_ROOT/capped-unreadable-$mode
@@ -3502,6 +3656,7 @@ with sqlite3.connect(sys.argv[1]) as db:
 PY
           ;;
         count) overview=$(printf '%s\n' "$overview" | sed '/^count:/d') ;;
+        norepo) overview=$(printf '%s\n' "$overview" | sed '/^repo:/d') ;;
       esac
       out=$(FM_FAKE_AXI_HOME="$overview" run_crew_state "$d" competing)
       assert_contains "$out" 'state: unknown' "$mode cannot fall back to a confident verdict from capped rows"
@@ -4874,7 +5029,8 @@ test_ci_ready_done_log_beats_monitoring_run
 test_ci_monitoring_checks_green_surfaces_done
 test_top_level_ci_checks_green_surfaces_done
 test_ci_monitoring_no_checks_terminal_surfaces_done
-test_ci_monitoring_green_then_rearm_stays_working
+test_ci_monitoring_green_then_rearm_stays_green
+test_ci_monitoring_green_before_log_tail_stays_green
 test_ci_monitoring_no_checks_yet_stays_working
 test_ci_monitoring_still_waiting_stays_working
 test_ci_monitoring_green_then_new_issue_stays_working
@@ -4883,6 +5039,7 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_terminal_passed_with_override
 test_terminal_passed_uses_matching_retirement_receipt_without_forge
 test_terminal_passed_no_forge_switch_skips_read_but_keeps_receipt
 test_terminal_passed_with_open_pr_does_not_claim_merged
@@ -4959,10 +5116,11 @@ test_no_run_herdr_stale_registration_over_shell_reads_agent_gone
 test_no_run_herdr_stale_working_record_is_never_busy
 test_capped_competing_live_runs_report_both_ids
 test_capped_overview_without_branch_rows_reports_both_ids
-test_capped_overview_without_repo_line_and_no_runs_reports_absent
+test_capped_overview_with_no_branch_runs_reports_absent
 test_no_branch_run_beside_a_live_run_elsewhere_reads_absent
 test_capped_inventory_reader_is_time_bounded
-test_capped_inventory_requires_exact_worktree_path
+test_capped_inventory_requires_exact_repo_path
+test_linked_worktree_green_merge_monitoring_reads_held_for_merge
 test_capped_replacement_keeps_gate_and_inventory_unchanged
 test_capped_inventory_failures_report_unknown
 test_complete_inventory_ignores_unrelated_semantics

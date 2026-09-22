@@ -1657,6 +1657,148 @@ test_self_announced_append_guards() {
   pass "self-announced appends suppress only their own bytes and fail toward waking"
 }
 
+# Two distinct --resolve-key closes after an OPEN DECISIONS fold record their
+# own byte ranges, so the watcher's span classification never reports the
+# answers. The fold alone does not mark the worker's decisions seen, because
+# any actor's drain folds: a folded decision this home has not answered still
+# classifies as a new signal. Once the watcher has classified the worker's
+# decisions and nothing beyond them, only the owned-append ledger can vouch
+# for the two answers sitting past that offset, and a later worker line past
+# the recorded ranges still wakes.
+test_separate_self_announced_answers_after_fold_are_owned() {
+  local dir state status rc events pre_answer ident
+  dir=$(make_case multi-answer-owned)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  {
+    printf 'needs-decision [key=k1]: pick REST or RPC\n'
+    printf 'needs-decision [key=k2]: pick us-east or eu-west\n'
+    printf 'needs-decision [key=k3]: pick a database\n'
+  } > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \
+    || fail "the OPEN DECISIONS fold drain failed"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a fold alone marked unclassified worker decisions as seen"
+
+  pre_answer=$(wc -c < "$status" | tr -d '[:space:]')
+  rc=0
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: REST' || rc=$?
+  [ "$rc" -eq 1 ] || fail "the first answer over unclassified decisions did not fail toward waking (rc=$rc)"
+  rc=0
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k2]: answered: eu-west' || rc=$?
+  [ "$rc" -eq 1 ] || fail "the second answer over unclassified decisions did not fail toward waking (rc=$rc)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "unclassified worker decisions were hidden behind this home's answers"
+
+  events=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; status_span_first_actionable "$2" 0' _ "$ROOT/bin/fm-classify-lib.sh" "$status") \
+    || fail "the unanswered folded decision was not classified as actionable"
+  [ "$events" = 'needs-decision [key=k3]: pick a database' ] \
+    || fail "the span classification reported more than the unanswered decision: $events"
+
+  ident=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"; _fm_open_decisions_file_ident "$2"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$status") \
+    || fail "could not read the status identity"
+  run_wake_lib fm_wake_status_seen_commit "$state" "$status" "$pre_answer" "$ident" \
+    || fail "could not record the watcher classifying the worker's decisions"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "the owned answers past the classified offset were left to re-wake this home"
+
+  printf 'blocked [key=creds]: need staging credentials\n' >> "$status"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a later worker line after two owned answers was swallowed"
+
+  pass "separate self-announced answers after a fold stay owned; worker decisions and later lines still wake"
+}
+
+# The owned ledger only vouches for growth it recorded. A signature change
+# with no growth past the classified offset, such as the log turning
+# unreadable, must still read as unreported, before and after owned growth.
+test_unreadable_status_is_not_owned() {
+  local dir state status
+  dir=$(make_case owned-unreadable)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "unreadable status check skipped: root reads mode-000 files"
+    return 0
+  fi
+  printf 'needs-decision [key=k1]: pick one\n' > "$status"
+  run_wake_lib fm_wake_status_mark_current "$state" "$status" \
+    || fail "could not prime the announced baseline"
+  chmod 000 "$status"
+  if run_wake_lib fm_wake_signal_seen_current "$state" "$status"; then
+    chmod 600 "$status"
+    fail "an unreadable fully classified status read as already seen"
+  fi
+  chmod 600 "$status"
+
+  run_wake_lib fm_wake_status_mark_current "$state" "$status" \
+    || fail "could not re-prime the announced baseline"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: one' \
+    || fail "the owned close was not self-announced"
+  printf 'needs-decision [key=k2]: pick two\n' >> "$status"
+  run_wake_lib fm_wake_status_mark_current "$state" "$status" \
+    || fail "could not record the watcher classifying the worker line"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k2]: answered: two' \
+    || fail "the second owned close was not self-announced"
+  chmod 000 "$status"
+  if run_wake_lib fm_wake_signal_seen_current "$state" "$status"; then
+    chmod 600 "$status"
+    fail "an unreadable status after owned growth read as already seen"
+  fi
+  chmod 600 "$status"
+  pass "an unreadable status still reads as unreported, with or without owned growth"
+}
+
+test_folded_worker_resolved_is_not_owned_lag() {
+  local dir state status rc
+  dir=$(make_case folded-worker-resolved)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  {
+    printf 'needs-decision [key=budget]: approve spend?\n'
+    printf 'needs-decision [key=vendor]: vendor A or B?\n'
+    printf 'resolved [key=vendor]: picked vendor B myself, cheaper\n'
+  } > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \
+    || fail "the OPEN DECISIONS fold drain failed"
+
+  rc=0
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=budget]: answered: approved' || rc=$?
+  [ "$rc" -eq 1 ] || fail "a close over a folded worker resolved did not fail toward waking (rc=$rc)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a worker resolved in the folded span was treated as already owned"
+
+  pass "a worker resolved in fold lag still wakes after this home's close"
+}
+
 # A trap that fires inside a lock's critical section abandons the holding
 # frame, and the exit path then re-acquires the same lock (a TERM inside a
 # recovery-marker section is the reproduced case: the watcher's reap wedged
@@ -1960,6 +2102,49 @@ test_malformed_presentation_lock_reports_acquire_failure() {
   pass "malformed presentation locks report acquire failure instead of contention"
 }
 
+# The owned-append ledger is wake-only: it must never withhold a captain-facing
+# turn-ended annotation. An in-flight watcher classification that commits after
+# this home's own close regresses the classified offset behind the owned bytes -
+# exactly the state the wake scan treats as already owned - so the wake stays
+# suppressed while the historical annotation must still present the line.
+test_owned_growth_still_annotates_turn_ended() {
+  local dir state out err status pre_close ident
+  dir=$(make_case owned-historical)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  status="$state/scout.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  printf 'needs-decision [key=budget]: approve spend?\n' > "$status"
+  prime_status_seen "$state" "$status" || fail "could not prime the scout seen marker"
+  pre_close=$(wc -c < "$status" | tr -d '[:space:]')
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=budget]: answered: approved' \
+    || fail "the answerer close was not self-announced"
+  ident=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"; _fm_open_decisions_file_ident "$2"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$status") \
+    || fail "could not read the status identity"
+  run_wake_lib fm_wake_status_seen_commit "$state" "$status" "$pre_close" "$ident" \
+    || fail "could not replay the stale watcher classification"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "owned-only growth did not suppress the wake"
+
+  : > "$state/scout.turn-ended"
+  append_wake "$state" signal scout.turn-ended "signal: $state/scout.turn-ended" \
+    || fail "turn-ended wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "drain failed"
+  sed -E 's/ \[at=[0-9]+\]//' "$out" | grep -F 'scout.status: resolved [key=budget]: answered: approved' >/dev/null \
+    || fail "owned growth hid this home's own close from the turn-ended annotation: $(cat "$out")"
+  pass "owned growth suppresses the wake without hiding the turn-ended annotation"
+}
+
 # Drain-time historical annotation staleness: a turn-ended-only wake row must
 # not present an already-announced status line as a new update, while a status
 # file with unannounced bytes keeps its annotation and a direct status row is
@@ -2023,6 +2208,10 @@ test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt
 test_self_announced_append_guards
+test_separate_self_announced_answers_after_fold_are_owned
+test_unreadable_status_is_not_owned
+test_folded_worker_resolved_is_not_owned_lag
+test_owned_growth_still_annotates_turn_ended
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher

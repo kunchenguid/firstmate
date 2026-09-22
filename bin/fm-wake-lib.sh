@@ -2141,7 +2141,10 @@ fm_wake_signal_seen_size() {  # <state> <file>
 # that fact.
 # A missing marker or unreadable signature is not a match, so uncertainty reads
 # as an unreported state.
-fm_wake_signal_seen_current() {  # <state> <file>
+# This predicate never consults the owned-append ledger, which is what makes it
+# the safe gate for a captain-facing surface: a line must never be withheld from
+# presentation merely because this home is the writer that appended it.
+fm_wake_signal_reported_current() {  # <state> <file>
   local sig marker
   sig=$(fm_wake_signal_sig "$2") || return 1
   [ -n "$sig" ] || return 1
@@ -2153,6 +2156,28 @@ fm_wake_signal_seen_current() {  # <state> <file>
       ;;
     *) [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] ;;
   esac
+}
+
+# 0 when the state was already reported, or when the file is a readable regular
+# file that grew past the watcher's classified offset and every grown byte is in
+# this home's owned-append ledger. Owned-only growth past the classified offset
+# is this home's own bookkeeping and is not a new signal, so separate
+# --resolve-key answers do not each force a wake. Any other signature change
+# without owned growth is not a match, so uncertainty still reads as unreported.
+# This is the wake-scan predicate and answers only "should this wake the home?".
+# Presentation asks the different question and uses
+# fm_wake_signal_reported_current.
+fm_wake_signal_seen_current() {  # <state> <file>
+  local classified size
+  fm_wake_signal_reported_current "$1" "$2" && return 0
+  case "$2" in *.status) ;; *) return 1 ;; esac
+  _fm_wake_require_classify || return 1
+  classified=$(fm_wake_signal_seen_size "$1" "$2")
+  size=$(_fm_status_file_size "$2") || return 1
+  size=${size//[[:space:]]/}
+  case "$classified:$size" in *[!0-9:]*) return 1 ;; esac
+  [ "$classified" -lt "$size" ] && [ -f "$2" ] && [ -r "$2" ] && [ ! -L "$2" ] || return 1
+  status_home_appends_covers "$2" "$classified" "$size"
 }
 
 fm_wake_status_reported_commit() {  # <state> <status-file> <reported-signature>
@@ -2180,9 +2205,10 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 # in the very turn or tick that writes them (answerer-closes resolved lines, a
 # pending-reply escalation close, captain-held transfers). Such a close must
 # not wake the session that wrote it, so this appends one command's lines
-# together and then advances the watcher's seen marker across the appended
-# bytes and no byte this home has not already read. The advance is
-# provenance-gated and fails toward waking:
+# together, records the exact appended byte range in the home-owned append
+# ledger (bin/fm-classify-lib.sh), and then advances the watcher's seen marker
+# across the appended bytes and no byte this home has not already read. The
+# advance is provenance-gated and fails toward waking:
 #   - the marker advances only when this home already read every pre-append
 #     byte, the post-append size equals that size plus exactly the appended
 #     bytes (no foreign write interleaved), AND the watcher's own span
@@ -2199,10 +2225,13 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 #     side-band;
 #   - on ANY other condition - a missing file, pending foreign bytes, an
 #     interleaved writer, an unreadable size or identity - the lines are still
-#     appended but the marker is left alone, so the watcher surfaces the file
-#     normally.
-# A later, different line from any other writer grows the size past the marker
-# and wakes as before: task identity alone can never suppress new content.
+#     appended and the owned range is still recorded when growth is proven, but
+#     the marker is left alone, so the watcher surfaces the file normally.
+# Later signal scans treat owned ranges as already owned even when the watcher
+# has not caught up, so separate --resolve-key answers do not each force a
+# captain-facing wake. A later, different line from any other writer grows the
+# size past the owned ranges and wakes as before: task identity alone can never
+# suppress new content.
 # Each line is stamped with its emission time on the way in (status_stamp_line,
 # bin/fm-classify-lib.sh), so the appended bytes are the stamped ones, not the
 # caller's: a caller that caps a line first must reserve status_stamp_width,
@@ -2211,7 +2240,8 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 # Returns 0 appended and self-announced, 1 appended but left for the watcher
 # (the safe direction), 2 the append itself failed.
 fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
-  local state=$1 file=$2 line appended=0 pre_size='' pre_ident='' post_size post_ident classified folded lag span_rc=0
+  local state=$1 file=$2 line appended=0 pre_size='' pre_ident='' post_size post_ident
+  local classified folded lag span_rc=0
   local LC_ALL=C stamped=()
   shift 2
   _fm_wake_require_classify || return 1
@@ -2223,12 +2253,14 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
     pre_ident=$(_fm_open_decisions_file_ident "$file") || pre_ident=''
   fi
   printf '%s\n' "${stamped[@]}" >> "$file" || return 2
+  case "$pre_size" in ''|*[!0-9]*) return 1 ;; esac
   post_size=$(_fm_status_file_size "$file") || return 1
   post_ident=$(_fm_open_decisions_file_ident "$file") || return 1
-  case "$pre_size$post_size" in ''|*[!0-9]*) return 1 ;; esac
+  case "$post_size" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ] || return 1
   for line in "${stamped[@]}"; do appended=$((appended + ${#line} + 1)); done
   [ "$post_size" -eq $((pre_size + appended)) ] || return 1
+  status_home_appends_record "$file" "$pre_size" "$post_size" || return 1
   classified=$(fm_wake_signal_seen_size "$state" "$file")
   if [ "$classified" != "$pre_size" ]; then
     folded=$(status_open_decisions_cursor_offset "$file") || folded=0
@@ -2403,7 +2435,7 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
     # existing historical caveat. A direct status row is annotated for every
     # still-unread line since the last drain presentation; already-presented
     # bytes are not replayed.
-    if [ "$mode" = historical ] && fm_wake_signal_seen_current "$STATE" "$path"; then
+    if [ "$mode" = historical ] && fm_wake_signal_reported_current "$STATE" "$path"; then
       continue
     fi
     offset=$(fm_wake_status_cursor_offset "$path") || return 1

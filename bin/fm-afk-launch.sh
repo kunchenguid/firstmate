@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
 # fm-afk-launch.sh - the single owner of away-mode ENTRY and EXIT: the
-# read-back-and-confirm entry that writes the away-posture record through
+# same-turn entry that writes the away-posture record through
 # bin/fm-afk-contract.sh, and the away-mode daemon TERMINAL lifecycle where a
 # daemon still runs: launch it in a NON-VISIBLE tracked terminal per backend,
 # record its exact id, tear it down by that exact id, and reconcile a leaked one
 # after a crash.
 #
-# ENTRY (the posture record). `/afk [words]` is two steps so the captain hears
-# the mandate back before it binds: `propose` records the captain's away words
-# verbatim into a proposal and prints the read-back (bin/fm-afk-contract.sh owns
-# the record schema; the words are the whole mandate and no script parses them);
-# `confirm` promotes it into state/.afk-contract and prints the entry
-# announcement (hold-for-return only: no phone channel exists). The record is
-# the posture in every harness.
+# ENTRY (the posture record). `/afk [words]` is itself the captain's go, because
+# the captain who typed it may not look at the screen again: `enter` records the
+# away words verbatim straight into state/.afk-contract in the same turn, with no
+# separate confirmation step, then prints the entry announcement (hold-for-return
+# only: no phone channel exists) and the read-back, which is informational and
+# never waits for a go (bin/fm-afk-contract.sh owns the record schema; the words
+# are the whole mandate and no script parses them). The record is the posture in
+# every harness.
 # On Pi and pi-signed the entry ENDS there: the away daemon is no longer launched
 # on Pi, the ordinary supervision session keeps running in both postures, and
 # `start` refuses on those harnesses. Every other harness still runs the daemon
-# for now, so `start` and `start-native` require the confirmed record before they
-# launch the daemon.
+# for now, so `start` and `start-native` require the record `enter` wrote before
+# they launch the daemon.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
@@ -38,12 +39,13 @@
 # FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
 #
 # Usage:
-#   fm-afk-launch.sh propose [--words-file <path> | --words <text>]
-#                            [--expected-return <UTC ISO 8601>] [--spend <n>]
-#                              Record the captain's away words verbatim into a
-#                              proposal and print the read-back.
-#   fm-afk-launch.sh confirm   Promote the required proposal and print the entry
-#                              announcement. On Pi this is the whole entry.
+#   fm-afk-launch.sh enter [--words-file <path> | --words <text>]
+#                          [--expected-return <UTC ISO 8601>] [--spend <n>]
+#                              Write the away-posture record now, with no
+#                              separate confirmation, then print the entry
+#                              announcement and the read-back. With no words
+#                              while away it is a refresh; new words replace
+#                              the mandate. On Pi this is the whole entry.
 #   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
 #                              is already running) launch the daemon in a fresh
 #                              non-visible terminal for the detected backend and
@@ -194,7 +196,7 @@ fm_afk_launch_daemon_allowed() {
   harness=$(fm_afk_launch_primary_harness)
   case "$harness" in
     pi|pi-signed)
-      fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh confirm and stop)"
+      fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh enter and stop)"
       return 1 ;;
   esac
   return 0
@@ -212,23 +214,18 @@ fm_afk_launch_record_require() {
   local record
   record=$(fm_afk_contract_path "$FM_AFK_LAUNCH_STATE")
   if ! fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
-    fm_afk_launch_log "a confirmed away-posture record is required; run propose and confirm before starting the daemon"
+    fm_afk_launch_log "an away-posture record is required; run enter before starting the daemon"
     return 1
   fi
-  fm_afk_contract_validate "$record" 1 || {
-    fm_afk_launch_log "the away-posture record is not confirmed; run confirm before starting the daemon"
+  fm_afk_contract_validate "$record" || {
+    fm_afk_launch_log "the away-posture record is unreadable; run enter before starting the daemon"
     return 1
   }
 }
 
-fm_afk_launch_propose() {
+fm_afk_launch_enter() {
   fm_afk_launch_catchup_pending && return 1
-  "$FM_AFK_CONTRACT_CMD" propose "$@"
-}
-
-fm_afk_launch_confirm() {
-  fm_afk_launch_catchup_pending && return 1
-  "$FM_AFK_CONTRACT_CMD" confirm
+  "$FM_AFK_CONTRACT_CMD" enter "$@"
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -741,8 +738,10 @@ fm_afk_launch_main() {
   trap 'exit 143' TERM
   fm_afk_launch_lock_acquire || return 1
   case "${1:-start}" in
-    propose) shift; fm_afk_launch_propose "$@" ;;
-    confirm) fm_afk_launch_confirm ;;
+    enter) shift; fm_afk_launch_enter "$@" ;;
+    propose|confirm)
+      fm_afk_launch_log "'$1' was retired with the wait-for-go gate: /afk is itself the go, so run 'enter' to write the record in the same turn"
+      (exit 2) ;;
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;
     stop) fm_afk_launch_stop ;;
