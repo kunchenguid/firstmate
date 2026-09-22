@@ -877,21 +877,21 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         # that run itself recorded, never RUN_STATE - so a hidden newer run the
         # failed read could not see is a real but distinct risk: the failed
         # read's own partial candidate-id evidence can already CONTRADICT the
-        # known run id by naming only OTHER, different ids (the captured
+        # known run id: that list is newest-first, exactly as the awk selection
+        # above treats it, so a known run id that is not the FIRST (newest)
+        # same-branch candidate is a superseded record (the captured
         # same-branch-inventory replay: bare `axi status` served a SUPERSEDED
-        # cancelled run while the visible candidate list already named only its
-        # live replacement). A non-empty candidate list that also names the
-        # known run id is not a contradiction - an older sibling can sit beside
-        # it in that same partial evidence without displacing it as the newest
-        # (the awk selection above already treats the newest same-branch row as
-        # the candidate; an older row is history, never grounds to distrust a
-        # DIFFERENT terminal record already in hand). An EMPTY candidate list
-        # contradicts nothing either - a run that finished many runs ago is
-        # exactly as knowable as one that finished two runs ago, it has simply
-        # aged out of the CLI's display window. So withhold the annotation only
-        # when the candidate list is non-empty and does not name the known run
-        # id at all; otherwise name what the known run itself recorded instead
-        # of a generic unknown that reads as if the task never ran (observed
+        # cancelled run while the visible candidate list named its live
+        # replacement ahead of it). An OLDER sibling can sit behind the known
+        # run without displacing it - the known run stays first, and an older
+        # row is history, never grounds to distrust the newest terminal record
+        # already in hand. An EMPTY candidate list contradicts nothing either -
+        # a run that finished many runs ago is exactly as knowable as one that
+        # finished two runs ago, it has simply aged out of the CLI's display
+        # window. So withhold the annotation unless the candidate list is empty
+        # or the known run id is the newest candidate; otherwise name what the
+        # known run itself recorded instead of a generic unknown that reads as
+        # if the task never ran (observed
         # 2026-09-21: a task whose run completed long ago, with its PR finished
         # and awaiting upstream, read as "run inventory unreadable" while its
         # own completed run id sat right there).
@@ -903,11 +903,9 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
           if [ -n "$ids_field" ]; then
             contradicted=1
             IFS=',' read -ra candidate_ids_arr <<< "$ids_field"
-            for candidate_id in "${candidate_ids_arr[@]}"; do
-              [ "$(trim "$candidate_id")" = "$known_run_id" ] || continue
+            if [ "$(trim "${candidate_ids_arr[0]}")" = "$known_run_id" ]; then
               contradicted=0
-              break
-            done
+            fi
           fi
           if [ "$contradicted" = 0 ]; then
             known_outcome=$(strip_quotes "$(nm_field outcome)")

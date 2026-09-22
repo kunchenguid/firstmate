@@ -3569,6 +3569,24 @@ test_unreadable_inventory_contradicted_terminal_run_stays_silent() {
   pass 'a terminal last-reported run absent from a non-empty visible candidate list adds no unverified outcome detail'
 }
 
+# The candidate list is newest-first, so a known run that is present but NOT
+# the newest candidate is exactly the superseded shape: a newer same-branch
+# run has displaced it. Merely finding the known id somewhere in the list must
+# not clear the contradiction and misdescribe the stale record as the crew's
+# own outcome.
+test_unreadable_inventory_superseded_known_run_stays_silent() {
+  make_competing_runs_case terminal-superseded completed failed
+  local d=$TMP_ROOT/terminal-superseded out
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/runs\[2\]/runs[3]/')
+  FM_FAKE_AXI_STATUS="$(run_passed fm/competing | sed 's/01RUN/01OLD/')"
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'a superseded known run keeps the honest unknown'
+  assert_contains "$out" 'run ids: 01NEW, 01OLD' 'the failed read keeps both same-branch candidate ids with the newer first'
+  assert_contains "$out" 'last reported run id: 01OLD' 'the last reported run id is still surfaced'
+  assert_not_contains "$out" 'already passed' 'a known run that is not the newest candidate must not be described as its own outcome'
+  pass 'a terminal last-reported run that is not the newest candidate adds no unverified outcome detail'
+}
+
 make_no_python_toolbin() {
   local tb=$1/no-python tool real
   mkdir -p "$tb"
@@ -4867,6 +4885,7 @@ PY
   assert_contains "$out" 'state: unknown' 'a hidden counterfactual live competitor prevents selection'
   assert_contains "$out" "$newer" 'captured ambiguity retains the visible id'
   assert_contains "$out" "$older" 'captured ambiguity retains the hidden id'
+  assert_not_contains "$out" 'already cancelled' 'the superseded known run is not the newest candidate and must not read as its own outcome'
   toolbin=$(make_no_python_toolbin "$d")
   out=$(PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" competing)
   assert_contains "$out" 'state: unknown' 'missing optional lookup cannot imply exclusive authority'
@@ -5021,6 +5040,7 @@ test_capped_inventory_failures_report_unknown
 test_unreadable_inventory_names_an_uncontradicted_terminal_run
 test_unreadable_inventory_with_no_visible_candidates_still_names_the_run
 test_unreadable_inventory_names_a_terminal_run_beside_an_older_sibling
+test_unreadable_inventory_superseded_known_run_stays_silent
 test_unreadable_inventory_contradicted_terminal_run_stays_silent
 test_complete_inventory_ignores_unrelated_semantics
 test_requested_branch_has_no_character_whitelist
