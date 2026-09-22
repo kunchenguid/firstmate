@@ -65,8 +65,9 @@
 #   axes chosen by firstmate at intake. They are only threaded into harnesses whose
 #   installed CLIs were verified to support that axis; unsupported axes are omitted
 #   from that harness's launch rather than guessed. Ultra is the explicit
-#   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
-#   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
+#   exception: bin/fm-harness.sh validate-native-effort owns its harness/model
+#   scope; Muse receives --reasoning-effort ultra, while supported Pi launches
+#   receive --codex-effort ultra and never --thinking ultra.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -544,6 +545,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-muse-lib.sh
+. "$SCRIPT_DIR/fm-muse-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -1109,6 +1112,9 @@ RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SPAWN_MUSE_BIN=
+SPAWN_MUSE_BIN_NAME=
+SPAWN_MUSE_BIN_COMMITTED=0
 
 spawn_fresh_commit_rollback() {
   if fm_backlog_atomic_transition rollback "$STATE/$ID.meta" \
@@ -1138,7 +1144,7 @@ parse_orca_worktree_result() {
 }
 
 spawn_abort_cleanup() {
-  local status=$?
+  local status=$? muse_owner=
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -1229,6 +1235,13 @@ spawn_abort_cleanup() {
       status=1
     fi
   fi
+  if [ -n "$SPAWN_MUSE_BIN" ] && [ "$SPAWN_MUSE_BIN_COMMITTED" != 1 ] &&
+    [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    muse_owner=$(fm_meta_get "$STATE/$ID.meta" muse_bin)
+    if [ "$muse_owner" = "$SPAWN_MUSE_BIN_NAME" ]; then
+      SPAWN_MUSE_BIN_COMMITTED=1
+    fi
+  fi
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
@@ -1263,6 +1276,12 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_CONTROL_LOCK" || true
   fi
   [ -z "$SPAWN_META_TMP" ] || rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  if [ -n "$SPAWN_MUSE_BIN" ] && [ "$SPAWN_MUSE_BIN_COMMITTED" != 1 ]; then
+    if ! rm -f "$SPAWN_MUSE_BIN" 2>/dev/null; then
+      echo "warning: could not retire aborted Muse executable for task $ID; retry will clean $SPAWN_MUSE_BIN" >&2
+      status=1
+    fi
+  fi
   if [ "$CONFIG_INHERIT_LOCK_HELD" = 1 ]; then
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
@@ -2201,12 +2220,12 @@ if [ "$KIND" = secondmate ] && [ -z "$ARG3" ]; then
     fi
   fi
 fi
-# Ultra is an explicit native capability, never a Pi thinking-level alias.
+# Ultra is an explicit native capability, never a generic thinking-level alias.
 # Validate the fully resolved profile before worktree or endpoint provisioning.
 if [ "$EFFORT" = ultra ]; then
   "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$HARNESS" "$MODEL" "$EFFORT" || exit 1
   [ "$RAW_LAUNCH" = 0 ] || {
-    echo "error: --effort ultra requires the canonical --harness pi or pi-signed launch so its native flag cannot be omitted" >&2
+    echo "error: --effort ultra requires the canonical --harness pi or pi-signed launch, or canonical --harness muse launch, so its native flag cannot be omitted" >&2
     exit 1
   }
 fi
@@ -2268,6 +2287,182 @@ resolve_muse_binary() {
   fi
   echo "error: muse executable not found on PATH; install Muse Code or select a different verified harness" >&2
   return 1
+}
+
+muse_install_dir_for_launcher() {
+  local path=$1 dir base target hops=0
+  dir=$(CDPATH='' cd -- "$(dirname -- "$path")" 2>/dev/null && pwd -P) || return 1
+  base=$(basename -- "$path")
+  while [ -L "$dir/$base" ] && [ "$hops" -lt 16 ]; do
+    target=$(readlink -- "$dir/$base") || return 1
+    case "$target" in
+    /*)
+      dir=$(CDPATH='' cd -- "$(dirname -- "$target")" 2>/dev/null && pwd -P) || return 1
+      base=$(basename -- "$target")
+      ;;
+    *)
+      dir=$(CDPATH='' cd -- "$dir/$(dirname -- "$target")" 2>/dev/null && pwd -P) || return 1
+      base=$(basename -- "$target")
+      ;;
+    esac
+    hops=$((hops + 1))
+  done
+  [ ! -L "$dir/$base" ] || return 1
+  printf '%s\n' "$dir"
+}
+
+muse_preserve_executable() {
+  local source=$1 target=$2 system
+  rm -f "$target"
+  if ln "$source" "$target" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$target"
+  system=$(uname -s 2>/dev/null || true)
+  if [ "$system" = Darwin ]; then
+    if cp -c -p "$source" "$target" 2>/dev/null; then
+      return 0
+    fi
+  elif cp --reflink=auto -p "$source" "$target" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$target"
+  cp -p "$source" "$target"
+}
+
+resolve_muse_max_launch() {
+  local launcher=$1 output status version release line_count
+  local mapped_effort install_dir stable stable_output stable_status major remainder minor
+  local lock attempts wait_attempts resolve_attempts task_binary task_name task_stage task_output task_status
+  install_dir=$(muse_install_dir_for_launcher "$launcher") || {
+    echo "error: Muse max effort could not resolve the install directory for launcher '$launcher'" >&2
+    return 1
+  }
+  lock="$install_dir/.muse-update-lock"
+  wait_attempts=${FM_MUSE_UPDATE_LOCK_WAIT_ATTEMPTS:-300}
+  case "$wait_attempts" in
+  '' | *[!0-9]* | 0)
+    echo "error: FM_MUSE_UPDATE_LOCK_WAIT_ATTEMPTS must be a positive integer" >&2
+    return 1
+    ;;
+  esac
+  attempts=0
+  resolve_attempts=0
+  while :; do
+    if output=$(MUSE_SYNC_UPDATE=1 "$launcher" --version 2>&1); then
+      status=0
+    else
+      status=$?
+    fi
+    if [ -e "$lock" ] || [ -L "$lock" ]; then
+      while [ -e "$lock" ] || [ -L "$lock" ]; do
+        if [ -L "$lock" ] || { [ -e "$lock" ] && [ ! -d "$lock" ]; }; then
+          echo "error: Muse max effort found an unsafe update lock at '$lock'" >&2
+          return 1
+        fi
+        [ -d "$lock" ] || break
+        attempts=$((attempts + 1))
+        if [ "$attempts" -gt "$wait_attempts" ]; then
+          echo "error: Muse max effort could not establish a stable version because update lock '$lock' did not clear" >&2
+          return 1
+        fi
+        sleep 0.1
+      done
+      continue
+    fi
+    line_count=$(printf '%s\n' "$output" | wc -l | tr -d ' ')
+    if [ "$status" -ne 0 ] || [ "$line_count" -ne 1 ] || ! printf '%s\n' "$output" | grep -Eq '^Muse Code (0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*) \((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-R[0-9]+(\.[0-9]+)?\)$'; then
+      [ -n "$output" ] || output='<no output>'
+      echo "error: Muse max effort requires Muse Code 0.1.0 or 1.3.0 or later; '$launcher --version' exited $status and reported '$output'" >&2
+      return 1
+    fi
+    version=${output#Muse Code }
+    version=${version%% *}
+    release=${output##*\(}
+    release=${release%\)}
+    case "$release" in
+    "$version"-R*) ;;
+    *)
+      echo "error: Muse max effort requires one stable executable version, but '$launcher --version' reported mismatched version '$output'" >&2
+      return 1
+      ;;
+    esac
+    if [ "$version" = 0.1.0 ]; then
+      mapped_effort=ultra
+    else
+      major=${version%%.*}
+      remainder=${version#*.}
+      minor=${remainder%%.*}
+      if [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -ge 3 ]; }; then
+        mapped_effort=max
+      else
+        echo "error: Muse max effort requires Muse Code 0.1.0 or 1.3.0 or later; '$launcher --version' reported '$output'" >&2
+        return 1
+      fi
+    fi
+    stable="$install_dir/muse-bin-$release"
+    if [ ! -f "$stable" ] || [ -L "$stable" ] || [ ! -x "$stable" ]; then
+      resolve_attempts=$((resolve_attempts + 1))
+      if [ "$resolve_attempts" -lt 3 ]; then
+        sleep 0.1
+        continue
+      fi
+      echo "error: Muse max effort resolved '$output' but its stable executable '$stable' is missing or not executable" >&2
+      return 1
+    fi
+    if stable_output=$("$stable" --version 2>&1); then
+      stable_status=0
+    else
+      stable_status=$?
+    fi
+    if [ "$stable_status" -ne 0 ] || [ "$stable_output" != "$output" ]; then
+      [ -n "$stable_output" ] || stable_output='<no output>'
+      echo "error: Muse max effort resolved '$output' but stable executable '$stable' exited $stable_status and reported '$stable_output'" >&2
+      return 1
+    fi
+    task_stage=$(mktemp "$STATE/.muse-bin-$ID+XXXXXXXXXXXX") || {
+      echo "error: Muse max effort could not allocate a task-owned executable in '$STATE'" >&2
+      return 1
+    }
+    task_name=${task_stage##*/}
+    task_binary="$STATE/${task_name#.}"
+    if ! muse_preserve_executable "$stable" "$task_stage"; then
+      rm -f "$task_stage"
+      if { [ ! -e "$stable" ] && [ ! -L "$stable" ]; } || [ -e "$lock" ] || [ -L "$lock" ]; then
+        resolve_attempts=$((resolve_attempts + 1))
+        if [ "$resolve_attempts" -lt 3 ]; then
+          sleep 0.1
+          continue
+        fi
+      fi
+      echo "error: Muse max effort could not preserve verified executable '$stable' as task-owned '$task_binary'" >&2
+      return 1
+    fi
+    if [ ! -f "$task_stage" ] || [ -L "$task_stage" ] || [ ! -x "$task_stage" ] ||
+      [ -e "$task_binary" ] || [ -L "$task_binary" ] ||
+      ! ln "$task_stage" "$task_binary"; then
+      rm -f "$task_stage"
+      echo "error: Muse max effort could not preserve verified executable '$stable' as task-owned '$task_binary'" >&2
+      return 1
+    fi
+    rm -f "$task_stage"
+    SPAWN_MUSE_BIN=$task_binary
+    SPAWN_MUSE_BIN_NAME=${task_binary##*/}
+    if task_output=$("$task_binary" --version 2>&1); then
+      task_status=0
+    else
+      task_status=$?
+    fi
+    if [ "$task_status" -ne 0 ] || [ "$task_output" != "$output" ]; then
+      [ -n "$task_output" ] || task_output='<no output>'
+      rm -f "$task_binary"
+      echo "error: Muse max effort preserved '$output' but task-owned executable '$task_binary' exited $task_status and reported '$task_output'" >&2
+      return 1
+    fi
+    MUSE_MAX_EFFORT=$mapped_effort
+    MUSE_BIN=$task_binary
+    return 0
+  done
 }
 
 resolve_rovo_binary() {
@@ -2399,17 +2594,12 @@ effort_flag_for_harness() {
     esac
     ;;
   muse)
-    # muse 0.1.0-R708.1 --reasoning-effort accepts none|minimal|low|medium|
-    # high|xhigh|ultra and defaults to high, so low..xhigh map straight across.
-    # ultra is muse's max-CLASS level, so firstmate's max maps onto it - but
-    # only ever as an EXPLICIT captain choice, never as a fallback, because
-    # AGENTS.md section 4 forbids selecting max without captain preference and
-    # the omitted effort here leaves muse on its own high default. muse's extra
-    # none/minimal levels sit below firstmate's shared vocabulary and are
-    # deliberately unreachable rather than remapped onto low.
     case "$effort" in
-    low | medium | high | xhigh) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
-    max) printf -- '--reasoning-effort %s ' "$(shell_quote ultra)" ;;
+    low | medium | high | xhigh | ultra) printf -- '--reasoning-effort %s ' "$(shell_quote "$effort")" ;;
+    max)
+      [ -n "${MUSE_MAX_EFFORT:-}" ] || return 1
+      printf -- '--reasoning-effort %s ' "$(shell_quote "$MUSE_MAX_EFFORT")"
+      ;;
     esac
     ;;
     # rovo has no --effort flag on `run`; its effort mapping rides
@@ -2430,6 +2620,10 @@ effort_flag_for_harness() {
 case "$LAUNCH" in
 *__MUSEBIN__*)
   MUSE_BIN=$(resolve_muse_binary) || exit 1
+  MUSE_MAX_EFFORT=
+  if [ "$EFFORT" = max ]; then
+    resolve_muse_max_launch "$MUSE_BIN" || exit 1
+  fi
   MUSE_CONFIG_HOME=$(resolve_directory_input XDG_CONFIG_HOME "${XDG_CONFIG_HOME:-${HOME:-}/.config}") || exit 1
   MUSE_DATA_HOME=$(resolve_directory_input XDG_DATA_HOME "${XDG_DATA_HOME:-${HOME:-}/.local/share}") || exit 1
   MUSE_AUTH_FILE="$MUSE_CONFIG_HOME/muse/auth.json"
@@ -3264,7 +3458,7 @@ else
     # it stands up a DIFFERENT home's own workspace by design - so it asks for
     # the per-home container instead of inheriting this launcher's.
     HERDR_LABEL_HOME=$FM_HOME
-    HERDR_LAUNCHER_RELATIONSHIP=launcher-home
+    HERDR_LAUNCHER_RELATIONSHIP='launcher-home'
     if [ "$KIND" = secondmate ]; then
       HERDR_LABEL_HOME=$PROJ_ABS
       HERDR_LAUNCHER_RELATIONSHIP=other-home
@@ -3510,6 +3704,30 @@ spawn_send_key() { # <target> <key>
   orca) fm_backend_orca_send_key "$1" "$2" ;;
   cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
+}
+spawn_prepare_launch_composer() {
+  local mode=$1 marker="$STATE/.$ID.launch-ready.${BASHPID:-$$}.$RANDOM" i=0
+  SPAWN_LAUNCH_COMPOSER_ERROR=
+  rm -f -- "$marker" || { SPAWN_LAUNCH_COMPOSER_ERROR="could not clear the prior readiness marker"; return 1; }
+  if [ "$mode" = clear ]; then
+    fm_control_backend_supports_key "$BACKEND" C-c \
+      || { SPAWN_LAUNCH_COMPOSER_ERROR="backend $BACKEND cannot clear shell input"; return 1; }
+    spawn_send_key "$T" C-c \
+      || { SPAWN_LAUNCH_COMPOSER_ERROR="the shell-input clear key was not delivered"; return 1; }
+  fi
+  spawn_send_text_line "$T" "(umask 077; : > $(shell_quote "$marker"))" \
+    || { SPAWN_LAUNCH_COMPOSER_ERROR="the readiness probe was not delivered"; return 1; }
+  while [ "$i" -lt 40 ]; do
+    if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+      rm -f -- "$marker" || return 1
+      return 0
+    fi
+    i=$((i + 1))
+    sleep 0.05
+  done
+  rm -f -- "$marker" 2>/dev/null || true
+  SPAWN_LAUNCH_COMPOSER_ERROR="the shell did not execute its readiness probe"
+  return 1
 }
 
 kimi_capture() {
@@ -3806,6 +4024,16 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+SPAWN_LAUNCH_PREPARE_MODE=
+if [ "$HARNESS" = muse ]; then
+  SPAWN_LAUNCH_PREPARE_MODE="wait"
+  [ "$RELAUNCH" -eq 0 ] || SPAWN_LAUNCH_PREPARE_MODE=clear
+  if ! spawn_prepare_launch_composer "$SPAWN_LAUNCH_PREPARE_MODE"; then
+    echo "error: task $ID launch shell could not be prepared and verified on endpoint $T: $SPAWN_LAUNCH_COMPOSER_ERROR" >&2
+    exit 1
+  fi
+fi
+[ -z "$SPAWN_LAUNCH_PREPARE_MODE" ] || SPAWN_LAUNCH_PREPARE_MODE="wait"
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -4452,7 +4680,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen muse_bin traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4472,6 +4700,7 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  [ -z "$SPAWN_MUSE_BIN_NAME" ] || echo "muse_bin=$SPAWN_MUSE_BIN_NAME"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -4570,6 +4799,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_PUBLISH_STARTED=1
   if ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE"; then
     echo "error: replacement task record for $ID could not be published ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    exit 1
+  fi
+  if [ -n "$SPAWN_MUSE_BIN" ]; then
+    SPAWN_MUSE_BIN_COMMITTED=1
+  fi
+  if ! fm_muse_cleanup_task_binaries "$STATE" "$ID" "$SPAWN_MUSE_BIN_NAME"; then
+    echo "error: could not retire stale pinned Muse executables for task $ID; the replacement record preserves the current identity and a retry will clean the remaining task-owned files" >&2
     exit 1
   fi
   RELAUNCH_REPLACEMENT_PENDING=0
@@ -4833,14 +5069,25 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   echo "error: could not stage the launch command at $LAUNCH_FILE" >&2
   exit 1
 fi
+if [ -n "$SPAWN_LAUNCH_PREPARE_MODE" ] &&
+  ! spawn_prepare_launch_composer "$SPAWN_LAUNCH_PREPARE_MODE"; then
+  echo "error: task $ID launch shell could not be prepared and verified on endpoint $T: $SPAWN_LAUNCH_COMPOSER_ERROR" >&2
+  exit 1
+fi
 sleep 0.3
-spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
+if ! spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"; then
+  echo "error: staged launch for task $ID could not be delivered to endpoint $T" >&2
+  exit 1
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+if ! spawn_send_key "$T" Enter; then
+  echo "error: staged launch for task $ID could not be submitted to endpoint $T" >&2
+  exit 1
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"
@@ -4954,9 +5201,21 @@ if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
     echo "error: task $ID was republished but its backlog item could not be moved to In flight ($FM_BACKLOG_TRANSITION_ERROR); fix the backlog and re-run the relaunch" >&2
   fi
 fi
+if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -eq 0 ] && [ -n "$SPAWN_MUSE_BIN" ]; then
+  SPAWN_MUSE_BIN_COMMITTED=1
+fi
 trap - HUP INT TERM
 if [ "$SPAWN_BACKLOG_COMMIT_STATUS" -ne 0 ]; then
   exit "$SPAWN_BACKLOG_COMMIT_STATUS"
+fi
+if [ -n "$SPAWN_MUSE_BIN" ]; then
+  if ! fm_muse_cleanup_task_binaries "$STATE" "$ID" "$SPAWN_MUSE_BIN_NAME"; then
+    echo "warning: could not retire stale pinned Muse executables for task $ID; task metadata preserves the current identity for retry" >&2
+  fi
+else
+  if ! fm_muse_cleanup_task_binaries "$STATE" "$ID"; then
+    echo "warning: could not retire stale pinned Muse executables for task $ID; their task-owned names remain discoverable for retry" >&2
+  fi
 fi
 if [ -n "$SPAWN_DEFERRED_SIGNAL" ]; then
   case "$SPAWN_DEFERRED_SIGNAL" in

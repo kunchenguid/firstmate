@@ -648,10 +648,12 @@ test_native_effort_validator_keeps_axes_separate() {
     "$ROOT/bin/fm-harness.sh" validate-native-effort "$harness" codex-native/gpt-6-astra ultra \
       || fail "native validator refused supported harness $harness"
   done
+  "$ROOT/bin/fm-harness.sh" validate-native-effort muse default ultra \
+    || fail "native validator refused Muse ultra"
   if "$ROOT/bin/fm-harness.sh" validate-native-effort 'pi:codex-native/forged' '' ultra 2>/dev/null; then
     fail "native validator accepted a model prefix embedded in the harness axis"
   fi
-  pass "native effort validator checks harness and model as separate axes"
+  pass "native effort validator keeps Muse and model-scoped Pi capabilities separate"
 }
 
 test_native_pi_ultra_is_explicit_and_model_scoped() {

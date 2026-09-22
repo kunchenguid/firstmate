@@ -7,8 +7,8 @@ The skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../../.age
 
 | Field | Value |
 |---|---|
-| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12) |
-| Verified | 2026-09-10 |
+| Version | `agy 1.2.0`; the send-confirmation timing below was re-measured on `agy 1.2.1` (2026-09-12), and the worker-state classification below was extended and re-verified live on `agy 1.2.7` (2026-09-21) |
+| Verified | 2026-09-10; worker-state classification re-verified live 2026-09-21 |
 | Binary | `/home/andpod/.local/bin/agy`, an ELF 64-bit Go-compiled single executable |
 | Platform | Linux x64 (Arch, kernel 7.2.3) |
 | Backend | Herdr, in an isolated non-`default` lab session (`fm-lab-firstmate-agy-ad-*` via `bin/fm-herdr-lab.sh`); the live `default` session was unchanged throughout |
@@ -87,30 +87,28 @@ The bare `gemini-3.8-flash` id from this home's previous config is not listed; o
 The listing is a remote fetch (`Fetching available models...`), so the probe runs with stdin detached under the shared hard bound from `bin/fm-timeout-lib.sh` (15 seconds by default, `FM_AGY_MODELS_TIMEOUT`; a non-positive or non-numeric value clamps back to that default, because a non-positive bound is not a bound); a stalled fetch or a sign-in prompt is cut off and falls through to the unvalidated launch instead of blocking the spawn before any pane exists.
 Print mode (`agy -p "Reply with exactly: AGY_PRINT_PROBE_OK" --model gemini-3.8-flash-low`) returned the exact reply with exit 0 in about 8 seconds, proving the credential path without a pane.
 
-## Busy state: the pinned status row, unknown on absence
+## Busy state: the pinned status row, three verdicts
 
-Mid-turn the pane rendered the status row and a spinner line at once:
-
-```
-⣯  Generating...
-└ Tip: When reviewing a file edit, press f to see the full diff.
-...
-esc to cancel                                                           Gemini 3.8 Flash · low
-```
-
-The completed turn showed the reply, then the idle composer:
+The pinned status row the TUI keeps at the bottom of the pane carries three shapes, all observed live on `agy 1.2.7` (2026-09-21, Gemini 3.8 Flash):
 
 ```
->
-──────────────────────────────────────────────────────────────────────────────
-? for shortcuts                                                         Gemini 3.8 Flash · low
+esc to cancel                                     Gemini 3.8 Flash · high                 (a turn is running)
+? for shortcuts                                   Gemini 3.8 Flash · high                 (idle, waiting for input)
+? for shortcuts                                   Gemini 3.8 Flash · high · 1 task(s) · /tasks   (idle, waiting on a background shell job)
 ```
 
-`fm_busy_agy_tail_busy` and the delivery guard in `bin/fm-composer-lib.sh` match the `esc to cancel` token alone: the TUI pins that status row to the bottom of the pane for the whole turn, and the idle row replaces it with `? for shortcuts`.
+Mid-turn the pane rendered the running-row and a free-floating spinner line at once (`⣯  Generating...` above `esc to cancel ... Gemini 3.8 Flash · low`), and the completed turn showed the reply, then the idle composer (a bare `>` above the `? for shortcuts ... Gemini 3.8 Flash · low` row).
+
+`fm_busy_classify`'s agy arm (`bin/fm-busy-lib.sh`) reads that row as positive evidence in both directions:
+
+- `esc to cancel` present (`fm_busy_agy_tail_busy`) -> `busy agy-regex`. The delivery guard in `bin/fm-composer-lib.sh` matches the same token.
+- the pinned `? for shortcuts` row (`fm_busy_agy_status_row`) carrying a non-zero `N task(s)` count (`fm_busy_agy_bg_task`) -> `busy agy-regex`. agy appends that field while a background shell job the worker launched is still running, so the worker is legitimately waiting on its own job, not wedged; before this, such a worker read `unknown` and supervision escalated it as a possible wedge several times an hour.
+- the pinned `? for shortcuts` row with no task count -> `idle agy-regex`. This is the only idle verdict, and it is safe only because `? for shortcuts` is positive evidence on a row the TUI pins to the bottom: it cannot scroll out of the capture the way free output can. The task count is matched only on that row, never anywhere in the tail, so worker output that prints "task(s)" cannot read as busy.
+- neither token present -> `unknown agy-regex`. Absence of the busy marker never means idle on its own; a genuinely unreadable pane still fails closed.
+
 The `Generating...` spinner word is deliberately not a signal: it is a free-floating output line, so ordinary worker output such as `Generating report...` would otherwise classify an idle worker as busy or acknowledge a submit that did not land.
 No busy phase without the status row was observed live; every captured mid-turn frame carried it.
-`fm_busy_classify` reports `unknown agy-regex` when the token is absent, because a long turn can scroll the marker out of the captured tail.
-The signature is hardcoded with no environment override, so a stray variable can never change worker-state classification.
+All three signatures are hardcoded with no environment override, so a stray variable can never change worker-state classification.
 Herdr's own registry agreed throughout: `agent get` reported `agent_status=working` mid-turn and `idle` after, so on Herdr the native verdict carries busy with no new code.
 
 ## Interrupt and exit
@@ -162,9 +160,11 @@ No primary or secondmate behavior was built or tested, and none is claimed.
 
 ## Refreshing this record
 
-Run the portable suite and the live guard after any agy upgrade, because the process name, marker set, trust dialog text, and rendered busy/interrupt text are all vendor-controlled surfaces that the spawn gate and the busy fallback match verbatim:
+Run the portable suite and the live guard after any agy upgrade, because the process name, marker set, trust dialog text, the pinned status row's running/idle/`N task(s)` shapes, and the rendered interrupt text are all vendor-controlled surfaces that the spawn gate and the busy fallback match verbatim:
 
 ```
 bin/fm-test-run.sh tests/fm-agy-harness.test.sh
 FM_AGY_SIGNALS_LIVE=1 bin/fm-test-run.sh tests/fm-agy-signals-live-e2e.test.sh
 ```
+
+The live guard was last run on `agy 1.2.7` (2026-09-21) and passed every assertion, including the two that were added with the status-row split: the settled pane classified `idle agy-regex`, and an agy worker waiting on a background `sleep` job it launched surfaced the `N task(s)` field and classified `busy agy-regex`.

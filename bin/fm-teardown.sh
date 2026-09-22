@@ -295,6 +295,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-muse-lib.sh
+. "$SCRIPT_DIR/fm-muse-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
@@ -381,6 +383,8 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
 fi
 CONTROL_LOCK="$STATE/.control-$ID.lock"
 CONTROL_LOCK_HELD=0
+TASK_LOCK="$STATE/.spawn-$ID.lock"
+TASK_LOCK_HELD=0
 META_LOCK=
 META_LOCK_HELD=0
 DESCENDANT_LOCK_PATHS=()
@@ -414,6 +418,10 @@ teardown_release_locks() {
     fm_lock_release "$META_LOCK" || true
     META_LOCK_HELD=0
   fi
+  if [ "$TASK_LOCK_HELD" = 1 ]; then
+    fm_lock_release "$TASK_LOCK" || true
+    TASK_LOCK_HELD=0
+  fi
   if [ "$CONTROL_LOCK_HELD" = 1 ]; then
     fm_lock_release "$CONTROL_LOCK" || true
     CONTROL_LOCK_HELD=0
@@ -431,6 +439,8 @@ fm_lock_try_acquire "$CONTROL_LOCK" || {
   exit 1
 }
 CONTROL_LOCK_HELD=1
+fm_lock_acquire_wait "$TASK_LOCK"
+TASK_LOCK_HELD=1
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -447,6 +457,13 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused after locking: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+MUSE_BIN_NAME=$(fm_meta_get "$META" muse_bin)
+if [ -n "$MUSE_BIN_NAME" ]; then
+  fm_muse_task_binary_path "$STATE" "$ID" "$MUSE_BIN_NAME" >/dev/null || {
+    echo "error: task $ID has an invalid pinned Muse executable identity in its record" >&2
+    exit 1
+  }
+fi
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
@@ -3104,7 +3121,7 @@ endpoint_close_refusal() {  # <subject> <backend> <target> <honors-force>
 }
 
 cleanup_firstmate_home_children() {
-  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc
+  local home=$1 sub_state child_meta child_id child_t child_wt child_proj child_kind child_home child_backend child_orca_worktree_id child_return_rc child_busy_gen child_owner_rc child_muse_bin_name
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
   for child_meta in "$sub_state"/*.meta; do
@@ -3114,6 +3131,14 @@ cleanup_firstmate_home_children() {
     child_proj=$(meta_value "$child_meta" project)
     child_kind=$(meta_value "$child_meta" kind)
     [ -n "$child_kind" ] || child_kind=ship
+    child_muse_bin_name=$(meta_value "$child_meta" muse_bin)
+    if [ -n "$child_muse_bin_name" ]; then
+      fm_muse_task_binary_path \
+        "$sub_state" "$child_id" "$child_muse_bin_name" >/dev/null || {
+        echo "error: child task $child_id has an invalid pinned Muse executable identity in its record" >&2
+        return 1
+      }
+    fi
     child_backend=$(fm_backend_of_meta "$child_meta")
     if [ "$child_backend" = orca ]; then
       child_t=$(meta_value "$child_meta" terminal)
@@ -3204,12 +3229,15 @@ cleanup_firstmate_home_children() {
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
+    fm_muse_cleanup_task_binaries "$sub_state" "$child_id" || return 1
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
-      "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
+      "$sub_state/muse-bin-$child_id" "$sub_state/$child_id.muse-bin" \
+      "$sub_state/$child_id.cursor-session" \
+      "$sub_state/$child_id.reconcile-nudged" \
       "$sub_state/.$child_id.branch-outcome-index"
   done
 }
@@ -3653,10 +3681,13 @@ fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
+fm_muse_cleanup_task_binaries "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
-  "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
+  "$STATE/$ID.muse-session-current" \
+  "$STATE/muse-bin-$ID" "$STATE/$ID.muse-bin" \
+  "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \

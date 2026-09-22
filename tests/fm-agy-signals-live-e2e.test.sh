@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Live drift guard for the Antigravity CLI adapter's vendor-controlled surface:
-# process name, trust dialog, rendered busy/interrupt/exit behavior.
+# process name, trust dialog, rendered busy/interrupt/exit behavior, and the
+# worker-state classification the pinned status row drives (busy in flight,
+# idle when it shows `? for shortcuts`, and busy again when that row carries a
+# non-zero `N task(s)` background-job count).
 # Opt-in because it submits real prompts (no echo provider exists for agy).
+# Every failure names the harness and its live version.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -9,6 +13,9 @@ set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGY_BIN=$(command -v agy 2>/dev/null || true)
+AGY_VER='unknown-version'
+[ -z "$AGY_BIN" ] || AGY_VER=$("$AGY_BIN" --version 2>/dev/null | head -1 || true)
+[ -n "$AGY_VER" ] || AGY_VER='unknown-version'
 REAL_TMUX=$(command -v tmux 2>/dev/null || true)
 LAB=
 SOCKET="fm-agy-signals-$$"
@@ -136,6 +143,18 @@ printf '%s' "$screen" | grep -v '^[[:space:]]*$' | tail -12 | fm_busy_lines_matc
 printf '%s' "$screen" | fm_busy_agy_tail_busy \
   && fail "the settled agy footer still matches the busy signature" || true
 
+# The settled pane must now classify idle through the full classifier, not
+# merely fail to match the busy footer: the pinned `? for shortcuts` row is
+# positive evidence the worker is waiting for input. This is the signal that
+# stops supervision escalating a waiting agy worker as a possible wedge. The
+# empty state dir forces the tail fallback the supervisor uses when no record
+# exists.
+CLASSIFY_STATE="$LAB/classify"; mkdir -p "$CLASSIFY_STATE"
+verdict=$(fm_busy_classify tmux "$TARGET" agy agy-idle-live "$CLASSIFY_STATE" "$screen")
+[ "$verdict" = "idle agy-regex" ] \
+  || fail "the settled agy pane must classify 'idle agy-regex', got '$verdict' (agy $AGY_VER)"
+pass "the settled agy pane classifies idle agy-regex"
+
 # The dialog can outlive the turn it gated, so a still-rendered dialog must be
 # dismissed before steering anything: typed text would land in it instead of
 # the composer.
@@ -149,6 +168,42 @@ if case "$(capture)" in *"Do you trust the contents of this project?"*) true ;; 
   done
   [ -n "$idle" ] || fail "the agy composer never went idle after the trust answer"
 fi
+
+# The background-job status field is the surface the idle/busy split turns on:
+# a worker waiting on its own background shell job must read busy, not idle, or
+# supervision treats a healthy worker as finished. Drive agy to start one and
+# prove the `N task(s)` field renders on the pinned status row and classifies
+# busy. Whether agy backgrounds a job is model-driven, so a run where the field
+# never renders reports that explicitly instead of passing silently; the
+# portable regression pins the classifier logic against captured fixtures.
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l \
+  "Run this exact shell command as a background task and do not wait for it to finish: sleep 90" \
+  || fail "could not type the agy background-task prompt"
+"$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
+  || fail "could not submit the agy background-task prompt"
+bg_row=
+for _ in $(seq 1 300); do
+  screen=$(capture)
+  bg_row=$(printf '%s' "$screen" | fm_busy_agy_status_row)
+  if [ -n "$bg_row" ] && printf '%s' "$bg_row" | fm_busy_agy_bg_task; then break; fi
+  bg_row=
+  sleep 1
+done
+if [ -n "$bg_row" ]; then
+  verdict=$(fm_busy_classify tmux "$TARGET" agy agy-bg-live "$CLASSIFY_STATE" "$screen")
+  [ "$verdict" = "busy agy-regex" ] \
+    || fail "an agy worker waiting on a background job must classify 'busy agy-regex', got '$verdict' (agy $AGY_VER)"
+  pass "an agy worker waiting on a background job classifies busy agy-regex"
+else
+  printf 'ok - agy surfaced no background-task status field this run (agy %s); the portable regression pins that classifier path\n' "$AGY_VER"
+fi
+
+# Let the pane settle back to an input-ready status row before the interrupt
+# test steers a fresh prompt into it.
+for _ in $(seq 1 120); do
+  case "$(capture)" in *"? for shortcuts"*) break ;; esac
+  sleep 0.5
+done
 
 # Interrupt a genuinely long turn: poll until busy is observed, then send
 # exactly one Escape and wait only for the Interrupted row it prints; a busy

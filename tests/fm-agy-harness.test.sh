@@ -26,6 +26,10 @@
 #      and nothing is armed as busy wiring because no writer could clear it.
 #   6. The busy signature is the pinned `esc to cancel` status row alone; the
 #      free-floating `Generating...` word must never read busy on its own.
+#      Worker state also folds the pinned `? for shortcuts` idle row: it reads
+#      busy when that row carries a non-zero `N task(s)` background-job count,
+#      idle without one, and unknown when neither token is present, with the
+#      task count matched only on the status row so echoed output cannot fake it.
 #   7. Herdr's registry already tracks agy, and exit detection proves the
 #      agent at process level before trusting any registration (the shared
 #      post-#4115 contract in bin/backends/herdr.sh): a registered status plus
@@ -190,16 +194,44 @@ test_agy_busy_signatures_are_harness_scoped() {
   pass "fm-composer-lib: agy delivery signatures never cross harnesses"
 }
 
-test_agy_classify_reports_unknown_when_the_marker_scrolls_out() {
-  local statedir busy idle
+test_agy_classify_splits_busy_bgtask_idle_and_unknown() {
+  local statedir busy bg idle output_noise unknown
   statedir="$TMP_ROOT/classify"; mkdir -p "$statedir"
-  busy=$(fm_busy_classify tmux fake:win agy agy-case-1 "$statedir" 'turn running
-esc to cancel                                                           Gemini 3.8 Flash · low')
+
+  # esc to cancel present -> a turn is running.
+  busy=$(fm_busy_classify tmux fake:win agy agy-case-busy "$statedir" 'turn running
+esc to cancel                                                           Gemini 3.8 Flash · high')
   [ "$busy" = "busy agy-regex" ] || fail "a busy tail must classify busy agy-regex, got '$busy'"
-  idle=$(fm_busy_classify tmux fake:win agy agy-case-2 "$statedir" 'reply landed
-? for shortcuts                                                         Gemini 3.8 Flash · low')
-  [ "$idle" = "unknown agy-regex" ] || fail "a scrolled-out marker must classify unknown, got '$idle'"
-  pass "fm-busy-lib: agy classifies busy on its marker and unknown without it"
+
+  # `? for shortcuts` with a non-zero task count on the status row -> the
+  # worker is waiting on its own background job, which must read busy, not a
+  # wedge. This is the case that produced the false wedge alarms.
+  bg=$(fm_busy_classify tmux fake:win agy agy-case-bg "$statedir" '● [14:20:42] ./gradlew test running
+? for shortcuts                                    Gemini 3.8 Flash · high · 1 task(s) · /tasks')
+  [ "$bg" = "busy agy-regex" ] || fail "a non-zero task count on the status row must classify busy agy-regex, got '$bg'"
+
+  # `? for shortcuts` with no task count -> idle.
+  idle=$(fm_busy_classify tmux fake:win agy agy-case-idle "$statedir" 'reply landed
+? for shortcuts                                                         Gemini 3.8 Flash · high')
+  [ "$idle" = "idle agy-regex" ] || fail "the pinned shortcuts row with no task count must classify idle agy-regex, got '$idle'"
+
+  # Worker OUTPUT that prints "1 task(s)" while the pinned status row is idle
+  # must stay idle: the task count is matched only on the status row.
+  output_noise=$(fm_busy_classify tmux fake:win agy agy-case-noise "$statedir" 'summary: finished 1 task(s) in the run
+? for shortcuts                                                         Gemini 3.8 Flash · high')
+  [ "$output_noise" = "idle agy-regex" ] || fail "a task count in worker output must not read busy, got '$output_noise'"
+
+  # Neither token -> the pane is unreadable; fail closed to unknown.
+  unknown=$(fm_busy_classify tmux fake:win agy agy-case-unknown "$statedir" 'a long scrollback line
+another line with no status row token at all')
+  [ "$unknown" = "unknown agy-regex" ] || fail "a tail with neither token must classify unknown agy-regex, got '$unknown'"
+
+  # Assert the split is genuine: the four verdicts are not all the same value,
+  # so no case can go quietly vacuous by every path returning one verdict.
+  [ "$busy" != "$idle" ] || fail "busy and idle verdicts must differ"
+  [ "$bg" != "$idle" ] || fail "background-task busy and idle verdicts must differ"
+  [ "$idle" != "$unknown" ] || fail "idle and unknown verdicts must differ"
+  pass "fm-busy-lib: agy classifies busy, background-task busy, idle, and unknown distinctly"
 }
 
 test_agy_tmux_names_the_native_binary_an_agent() {
@@ -893,7 +925,7 @@ test_agy_claims_no_inherited_launcher_marker
 test_agy_control_mechanics_are_the_verified_ones
 test_agy_busy_tail_needs_the_pinned_status_row
 test_agy_busy_signatures_are_harness_scoped
-test_agy_classify_reports_unknown_when_the_marker_scrolls_out
+test_agy_classify_splits_busy_bgtask_idle_and_unknown
 test_agy_tmux_names_the_native_binary_an_agent
 test_herdr_done_with_live_registry_stays_live
 test_herdr_registered_status_over_a_shell_only_pane_is_stale_not_live

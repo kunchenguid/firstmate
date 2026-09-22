@@ -644,6 +644,22 @@ assert_contains "$out" '  status: error' "quota-axi failure is an error outcome"
 assert_contains "$out" '  reason: quota-axi --json failed' "quota-axi failure is named"
 pass "quota evidence comes from one quota-axi --json read, and its failure is an error outcome"
 
+# --- Muse's native ultra profile passes intake validation ----------------------
+reset_log
+cat > "$RULES" <<'JSON'
+{"rules":[{"when":"Muse work.","use":{"harness":"muse","effort":"ultra"}}]}
+JSON
+cat > "$RESPONSE" <<'JSON'
+{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.9,"probabilities":{"rule_1":0.9,"default":0.1}}},"usage":{"input_tokens":20,"output_tokens":10}}
+JSON
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "Muse ultra profile passes typed intake validation"
+assert_not_contains "$err" 'malformed rules file' "Muse ultra was rejected as an invalid profile"
+assert_present "$LOG/argv" "Muse ultra profile never reached typed resolution"
+cp "$BASE_RULES" "$RULES"
+write_response "$RESPONSE" rule_4 0.9
+pass "Muse ultra is a valid typed dispatch profile"
+
 # --- API and response failures are error outcomes, exit 0 ----------------------
 reset_log
 run_without_curl code out err "$BRIEF"

@@ -17,7 +17,8 @@ Choose intermediate levels as complexity, uncertainty, blast radius, or open-end
 If an adapter lacks `xhigh`, cap at its highest supported non-`max` level rather than silently omitting the intent.
 Never select `max` through this fallback; only an explicit per-task or standing captain preference permits it.
 
-The explicit native `ultra` value follows the model-scoped refusal contract in `../../../bin/fm-harness.sh validate-native-effort`; it is never silently omitted or mapped to a Pi level.
+The explicit native `ultra` value follows the harness/model-scoped refusal contract in `../../../bin/fm-harness.sh validate-native-effort`; Muse forwards it as `--reasoning-effort ultra`, while Pi requires a `codex-native/<model>` and forwards `--codex-effort ultra`.
+It is never silently omitted or remapped to another level.
 For other values, if requested effort is outside the adapter's accepted set, the spawn records `effort=` in task metadata but emits no effort flag.
 This preserves launch success instead of passing a known-bad value.
 A harness with no verified interactive effort flag follows the same record-and-omit contract.
