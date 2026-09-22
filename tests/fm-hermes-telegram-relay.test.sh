@@ -112,6 +112,14 @@ count_inbox_wakes() {
   fi
 }
 
+note_bodies() {
+  find "$1/state/inbox" -maxdepth 1 -name '*.note' -print 2>/dev/null \
+    | sort \
+    | while IFS= read -r note; do
+        sed -n '/^--$/,$p' "$note" | tail -n +2
+      done
+}
+
 test_away_presence_commands_are_consumed_before_generic_inbox() {
   local home out
   home=$(make_home away-presence)
@@ -179,6 +187,12 @@ test_ambiguous_and_normal_messages_fall_through_once_to_generic_inbox() {
   assert_contains "$out" '"relayed to FirstMate Primary inbox"' "normal text did not fall through to inbox"
   assert_equals 2 "$(count_notes "$home")" "normal text did not create exactly one additional generic note"
   assert_equals 2 "$(count_inbox_wakes "$home")" "normal text did not create exactly one additional inbox wake"
+  assert_contains "$(note_bodies "$home")" "[Telegram from Rajiv (chat 8629896233)] Any updates?" \
+    "normal text was not captured through the real fm-inbox stdin interface"
+  assert_not_contains "$(note_bodies "$home")" "--request-id" \
+    "generic fallback captured the old fm-inbox option syntax instead of the Telegram payload"
+  assert_not_contains "$(cat "$home/state/.wake-queue")" "--request-id" \
+    "generic fallback wake summary exposed the old fm-inbox option syntax"
   [ -s "$home/hermes-send.log" ] && fail "normal text sent a presence confirmation"
   pass "ambiguous and normal Telegram messages fall through once to the generic inbox"
 }
