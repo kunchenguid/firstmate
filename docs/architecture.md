@@ -428,11 +428,12 @@ Relay remains layered on top of the existing check mechanism without changing it
 A promised *final* public reply is a stronger commitment than a milestone follow-up, because forgetting it is publicly visible.
 It is therefore not carried in conversation memory at all: intake turns it into a typed `kind=public-followup` obligation owned by `tasks-axi public-followup`, and every later step reads that obligation from disk.
 The mechanism boundary is deliberately narrow.
-`tasks-axi` owns the obligation state machine and is the only thing that validates a terminal result's source home, work id, generation, schema, outcome, and deliverables.
+`tasks-axi` owns the obligation state machine and the authoritative validation of a terminal result's source home, work id, generation, schema, outcome, and deliverables.
 `state/x-context/` remains the only owner of the private full request context.
 `bin/fm-x-reply.sh` remains the only thing that posts.
 `bin/fm-public-followup.sh` composes those three and adds the activation gate, a private terminal-event inbox, the idempotent delivery sequence, and retained-loop disposition: delivery stamps the registration delivered, `rechain` hands its thread binding to one follow-on obligation, and `retire` is the only close.
 Work routed to another home reports a *typed* terminal result through `bin/fm-public-followup-emit.sh`; firstmate never recovers the source home, work id, outcome, or deliverables by parsing a free-form `done:` sentence, and the child never learns the thread.
+The emitter mirrors `tasks-axi`'s deliverable rules to reject correctable mistakes at their source, while reconciliation still revalidates through `tasks-axi` and turns any refusal into a specific at-least-once wake for the owning home.
 When that home is a remote secondmate, no local path reaches the owning home, so the result is staged where the work runs and the owning home pulls it over the same SSH route with `bin/fm-public-followup-collect.sh`.
 Because a terminal event's id is derived from its identity tuple rather than generated, duplicate reports and restart replay converge without coordination.
 Reconciliation rides the existing relay poll and the session-start digest instead of a new watcher, daemon, or timer, and both are gated on the same `.env` activation contract so a home that never opted into the relay executes none of it.

@@ -51,9 +51,9 @@
 #                          on this outcome, or a value tasks-axi refuses - a bad
 #                          format such as an absolute report_path, more than 500
 #                          characters, or anything but safe single-line text - is
-#                          refused here with the key, the value, and the expected
-#                          format, in both destinations. fm-public-followup-lib.sh
-#                          owns those mirrored rules.
+#                          refused here with the specific problem and applicable
+#                          correction, in both destinations.
+#                          fm-public-followup-lib.sh owns those mirrored rules.
 #   --require-deliverable <key>
 #                          Repeatable key this event MUST carry, so an event
 #                          missing a required value is refused here instead of

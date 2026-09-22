@@ -333,9 +333,9 @@ fm_pf_pr_url_valid() {
 # fm_pf_deliverable_problem <expected-final> <outcome> <key> <value>: silent exit
 # 0 when tasks-axi would accept <key>=<value> on a work event with <outcome>
 # against a promise whose expected final is <expected-final> (empty when the
-# caller cannot read one); otherwise print one line naming the key, the bad
-# value, and what was expected, and exit 1. The 500-character bound and the
-# single-line rule are safeText's, which tasks-axi applies to every deliverable
+# caller cannot read one); otherwise print one line naming the key, the specific
+# problem, and the applicable correction, and exit 1. The 500-character bound
+# and single-line rule are safeText's, which tasks-axi applies to every deliverable
 # value whatever its key; the per-key formats follow it.
 fm_pf_deliverable_problem() {
   local expected=$1 outcome=$2 key=$3 value=$4 allowed format re=''

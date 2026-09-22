@@ -42,10 +42,10 @@
 #       registration: it creates this home's private public-followup directories
 #       (0700) and the bounded public-safe registration record, which is what
 #       later makes the presence checks O(1) and lets bound work report a typed
-#       terminal result. The record includes what the obligation expects and the
-#       deliverable keys it requires, so work reporting into this home is refused
-#       at emit for an outcome or a value tasks-axi would refuse. Refuses when
-#       the relay is not active for this home.
+#       terminal result. A direct emit reads what the obligation expects from
+#       tasks-axi, so work reporting into this home is refused at emit for an
+#       outcome, missing required key, or value tasks-axi would refuse.
+#       Refuses when the relay is not active for this home.
 #
 #   fm-public-followup.sh brief <obligation-id>
 #       Print the exact fm-public-followup-emit.sh command line the bound worker

@@ -263,7 +263,7 @@ So treat second-mate-routed Relay work as a promised final by construction: the 
 2. Register it with `bin/fm-public-followup.sh register <obligation-id> --relation <relation-id> --work-home <main|secondmate:<id>> --work-id <task-id> --generation <n>`.
    This is what makes the commitment reconcilable without you.
 3. Put `bin/fm-public-followup.sh brief <obligation-id>` output straight into the worker's brief.
-   It prints the exact reporting command for that binding, including the obligation's actual required deliverable keys.
+   It prints the exact reporting command for that binding, pre-fills any deliverable value the binding determines, and gives the accepted format for every remaining placeholder.
    When the work is routed to a second mate rather than spawned here, the routed item's own note MUST carry that same `brief` output so it survives the routing and reaches whoever ends up doing the work.
    A header-only routed item loses the emit command.
    Never ask a worker to find the thread or post the reply: only this home holds the relay consent and the thread binding.

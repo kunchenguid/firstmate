@@ -1601,7 +1601,10 @@ SH
   ')
   assert_contains "$command" "--outcome-text" \
     "the exact rechain command must remain continuous through outcome text"
-  command=${command/"$ROOT/bin/fm-public-followup-emit.sh"/"$parent/fakebin/record-emit"}
+  # Bash 3 parses a quoted absolute path in ${value/pattern/replacement} as
+  # slash-delimited pieces. Replace the known first command word by preserving
+  # only the suffix after it, so this executable-interface check is portable.
+  command="  $parent/fakebin/record-emit${command#*"$ROOT/bin/fm-public-followup-emit.sh"}"
   command=${command//<pr_url>/https://github.com/example/repo/pull/99}
   RECORD_ARGS="$command_log" bash -c "$command" \
     || fail "the exact rechain command must execute after filling its deliverable value"
