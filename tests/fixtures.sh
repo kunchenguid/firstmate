@@ -121,7 +121,12 @@ case "${1:-}" in
     fi
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  has-session|new-session|new-window|set-window-option) exit 0 ;;
+  kill-window)
+    [ -z "${FM_FAKE_PENDING_LAUNCH:-}" ] || rm -f "$FM_FAKE_PENDING_LAUNCH"
+    [ -z "${FM_FAKE_ENDPOINT_RETIRE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_ENDPOINT_RETIRE_LOG"
+    exit 0
+    ;;
   send-keys)
     if [ -n "${FM_FAKE_PENDING_LAUNCH:-}" ]; then
       prev=
@@ -151,7 +156,10 @@ case "${1:-}" in
               rm -f "$FM_FAKE_PENDING_LAUNCH"
             fi
             ;;
-          C-c) rm -f "$FM_FAKE_PENDING_LAUNCH" ;;
+          C-c)
+            [ "${FM_FAKE_CANCEL_KEY_FAIL:-0}" != 1 ] || exit 1
+            rm -f "$FM_FAKE_PENDING_LAUNCH"
+            ;;
         esac
         prev=$a
       done

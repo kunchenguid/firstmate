@@ -452,6 +452,40 @@ EOF
   pass "expected-head launch rechecks HEAD and cleanliness after text settles without starting a worker"
 }
 
+test_expected_head_retires_endpoint_when_cancel_fails() {
+  local rec id out status real_sleep marker pending started retired
+  id=pool-expected-cancel-fail-r9
+  rec=$(make_case expected-cancel-fail "$id")
+  read_case_record "$rec"
+  marker="$CASE_DIR/mutated-after-launch-staging"
+  pending="$CASE_DIR/pending-launch"
+  started="$CASE_DIR/worker-started"
+  retired="$CASE_DIR/endpoint-retired"
+  real_sleep=$(command -v sleep)
+  cat > "$FAKEBIN_DIR/sleep" <<EOF
+#!/bin/sh
+if [ -e '$pending' ] && [ ! -e '$marker' ]; then
+  printf 'late mutation\n' > '$POOL_DIR/late-untracked.txt'
+  : > '$marker'
+fi
+exec '$real_sleep' "\$@"
+EOF
+  chmod +x "$FAKEBIN_DIR/sleep"
+
+  out=$(FM_FAKE_PENDING_LAUNCH="$pending" FM_FAKE_WORKER_START_LOG="$started" \
+    FM_FAKE_CANCEL_KEY_FAIL=1 FM_FAKE_ENDPOINT_RETIRE_LOG="$retired" \
+    run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched after cancellation failed"
+  [ -e "$marker" ] || fail "fixture did not mutate the worktree after launch text settled"
+  assert_grep 'kill-window' "$retired" "failed cancellation did not retire the new endpoint"
+  [ ! -e "$pending" ] || fail "retired endpoint retained the staged launch text"
+  [ ! -e "$started" ] || fail "failed cancellation submitted the staged launch"
+  assert_contains "$out" "dirty candidate" "spawn did not report the final-window dirty tree"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "failed cancellation left published task metadata"
+  pass "expected-head refusal retires its endpoint when staged input cannot be cancelled"
+}
+
 make_originless_case() {  # <name> <id>
   local name=$1 id=$2 case_dir home project pool fakebin initial
   case_dir="$TMP_ROOT/$name"
@@ -992,6 +1026,7 @@ test_expected_head_ignores_ambient_git_redirection
 test_expected_head_ignores_ambient_git_config_overrides
 test_expected_head_refuses_unsupported_lifecycle_shapes
 test_expected_head_is_reverified_immediately_before_launch
+test_expected_head_retires_endpoint_when_cancel_fails
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool

@@ -3773,6 +3773,15 @@ spawn_send_key() { # <target> <key>
   esac
 }
 
+expected_head_cancel_staged_launch() {
+  local tab_id=
+  spawn_send_key "$T" C-c && return 0
+  [ "$BACKEND" != zellij ] || tab_id=${ZELLIJ_TAB_ID:-}
+  fm_backend_kill "$BACKEND" "$T" "$tab_id" "fm-$ID" && return 0
+  echo "error: expected-head launch cancellation failed and endpoint '$T' could not be retired" >&2
+  return 1
+}
+
 kimi_capture() {
   fm_backend_capture "$BACKEND" "$T" 120 "$W" 2>/dev/null || true
 }
@@ -5126,20 +5135,20 @@ fi
 if [ -n "$EXPECTED_HEAD" ]; then
   expected_status=$(git -C "$WT" -c core.quotePath=false status --porcelain) || {
     [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
-    spawn_send_key "$T" C-c >/dev/null 2>&1 || true
+    expected_head_cancel_staged_launch || true
     echo "error: could not re-inspect expected-head worktree '$WT' immediately before worker launch" >&2
     exit 1
   }
   [ -z "$expected_status" ] || {
     [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
-    spawn_send_key "$T" C-c >/dev/null 2>&1 || true
+    expected_head_cancel_staged_launch || true
     echo "error: expected-head worktree '$WT' changed after convergence; refusing to launch from a dirty candidate" >&2
     exit 1
   }
   expected_actual=$(git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   [ "$expected_actual" = "$EXPECTED_HEAD" ] || {
     [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
-    spawn_send_key "$T" C-c >/dev/null 2>&1 || true
+    expected_head_cancel_staged_launch || true
     echo "error: expected-head worktree '$WT' moved to '${expected_actual:-unknown}' after convergence, not '$EXPECTED_HEAD'; refusing to launch" >&2
     exit 1
   }
