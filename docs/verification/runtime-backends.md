@@ -601,6 +601,19 @@ Verified 2026-09-22 on this host with Claude Code 2.1.278, OpenCode 1.18.31, Pi 
 A tmux-backed secondmate's active-turn gate reads the parent home's semantic busy record.
 Launches of claude, opencode, pi, pi-signed, and omp arm that record and load the same hook or extension an ordinary worker uses, and those hooks do not touch the parent's turn-ended marker.
 A Claude secondmate is the one exception on Stop: its home's tracked Stop guard is the only Stop writer, recording idle when it allows the Stop and busy when it blocks it into a continuation, because Claude runs Stop hooks in parallel.
+Claude Code 2.1.278 was probed live in a scratch project with logging `UserPromptSubmit` and `Stop` hooks.
+A synchronous Stop hook that exits 2 forced a continuation with no `UserPromptSubmit`, which is why the guard itself records busy when it blocks.
+An `asyncRewake` Stop hook that exited 2 six seconds after the turn ended woke a new turn, and `UserPromptSubmit` fired 45ms after that hook exited.
+So a secondmate turn started by the Stop auto-arm reopens busy through the same `UserPromptSubmit` hook as a typed prompt, and the auto-arm needs no busy writer of its own.
+
+```text
+# asyncRewake probe                # synchronous block probe
+ups    1790092380.194370578        ups   1790092417.676751768
+stop   1790092380.968402195        stop  1790092418.684176531
+rewake 1790092386.979819188        block 1790092418.692480013
+ups    1790092387.025050498        stop  1790092419.717886938
+stop   1790092388.953108486
+```
 Codex stays unverified.
 Grok keeps its rendered-tail verdict and gets no parent turn-end hook.
 Cursor's transcript sidecar is written for a secondmate the same way it is for an ordinary worker, and this host has no Cursor agent binary, so that path was not started.

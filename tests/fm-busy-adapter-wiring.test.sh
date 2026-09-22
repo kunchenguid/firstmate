@@ -597,7 +597,16 @@ test_secondmate_claude_stop_guard_owns_the_stop_verdict() {
   secondmate_stall_watch "$primary" "$id" "$case_dir/watch-allowed.out" 8
   grep -F "check: secondmate wake-loop stalled: mate=$id row=7" "$case_dir/watch-allowed.out" >/dev/null \
     || fail "the frozen queue stayed hidden after an allowed Stop: $(cat "$case_dir/watch-allowed.out")"
-  pass "a claude secondmate's Stop guard records busy on a blocked Stop and idle on an allowed one, in any hook order"
+
+  # An allowed Stop hands the home to the asyncRewake auto-arm. Claude 2.1.278
+  # fires UserPromptSubmit for that wake (docs/verification/runtime-backends.md),
+  # so the mate's own hook must reopen busy for the spawn's gen.
+  run_claude_hook "$settings" UserPromptSubmit || fail "secondmate rewake UserPromptSubmit hook failed"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy claude-hook" ] || fail "a rewake turn after an allowed Stop must classify busy, got '$out'"
+  grep -F "gen=$gen " "$state/$id.busy-state" >/dev/null \
+    || fail "a rewake turn must write the spawn's gen: $(cat "$state/$id.busy-state")"
+  pass "a claude secondmate's Stop guard records busy on a blocked Stop and idle on an allowed one, in any hook order, and a rewake turn reopens busy"
 }
 
 test_secondmate_pi_extension_reports_busy_without_a_parent_turnend() {
