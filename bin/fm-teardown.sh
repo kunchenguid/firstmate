@@ -386,10 +386,6 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
   TEARDOWN_LOCK_PROJECT=$(fm_meta_get "$META" project)
   if [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
      && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
-     && ! teardown_refuse_unproven_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT" "task $ID's"; then
-    exit 1
-  elif [ "$TEARDOWN_LOCK_KIND" != secondmate ] \
-     && [ "$TEARDOWN_LOCK_BACKEND" != orca ] \
      && fm_treehouse_pool_slot "$TEARDOWN_LOCK_PROJECT" "$TEARDOWN_LOCK_WT"; then
     TREEHOUSE_SLOT_LOCK_REQUIRED=1
     TREEHOUSE_PROJECT_LOCK=$(fm_treehouse_project_lock_path "$TEARDOWN_LOCK_PROJECT") || {
