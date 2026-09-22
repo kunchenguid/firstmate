@@ -2225,6 +2225,14 @@ The evidence below was produced on 2026-09-05 against omp 18.1.11 (`~/.local/bin
 omp publishes no harness marker: `PI_CODING_AGENT` is absent from the binary, and the default profile sets neither `PI_CODING_AGENT_DIR` nor `OMP_PROFILE` in the process environment.
 `FM_OMP_HARNESS=omp` is Firstmate's own launch marker and wins over an inherited `CLAUDECODE` only under a real omp ancestor; `tests/fm-omp-harness.test.sh` pins both directions with real processes.
 
+Refreshed 2026-09-22 against omp 18.2.8 (`~/.bun/bin/omp`, a Bun SCRIPT run by the real `bun` interpreter, not a compiled binary as on 18.1.11), macOS 26 arm64, this home's live primary session:
+`ps -o comm=` reports `bun` and `ps -o args=` reports `bun /Users/<u>/.bun/bin/omp`, so the anchored-name arm never sees the session.
+omp now publishes its own marker `OMPCODE=1` on tool subprocesses while still setting the Claude-Code-compatibility marker `CLAUDECODE=1`, so the marker layer tests `OMPCODE` before `CLAUDECODE`.
+The lock lib, `fm-harness.sh`'s two ancestry walks, and the tmux/herdr agent classifier therefore also identify omp from the interpreter shape: the omp script path as a whole component of args[1] only.
+This session itself proved the end-to-end fix: `bin/fm-lock.sh` refused as read-only before the patch and reported `lock acquired: harness pid <pid>` after it, with no other change.
+`bin/fm-spawn.sh` clears `OMPCODE` at every non-omp launch boundary alongside the other foreign markers.
+Portable coverage lives in `tests/fm-omp-harness.test.sh` (detection, lock identity, liveness classification) and `tests/fm-harness-precedence.test.sh` (marker precedence); `FM_OMP_LIVE_E2E=1 tests/fm-omp-primary-live-e2e.test.sh` refreshes the primary evidence after an upgrade.
+
 ### Composer
 
 Under the captain's `unicode` symbol preset the idle screen through Herdr was a bare `❯` (U+276F) row followed directly by the status row:
