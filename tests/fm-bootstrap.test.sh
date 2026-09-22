@@ -381,7 +381,7 @@ ROWS
 
 test_lavish_axi_min_version() {
   local label version mode case_dir fakebin out unavailable n
-  unavailable='PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.46; install: npm install -g lavish-axi && lavish-axi setup hooks) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish'
+  unavailable='PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.46; install: npm install -g lavish-axi) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish'
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue

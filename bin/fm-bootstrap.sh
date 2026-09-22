@@ -878,8 +878,11 @@ install_cmd() {
     cmux) echo "brew install --cask cmux  # or see https://cmux.com" ;;
     treehouse) echo "curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh" ;;
     no-mistakes) echo "curl -fsSL https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh | sh" ;;
-    gh-axi|chrome-devtools-axi|lavish-axi) echo "npm install -g $1 && $1 setup hooks" ;;
-    tasks-axi|quota-axi) echo "npm install -g $1" ;;
+    gh-axi|chrome-devtools-axi) echo "npm install -g $1 && $1 setup hooks" ;;
+    # No `setup hooks` for lavish-axi: it installs a machine-wide SessionStart
+    # hook whose ambient context invites every session to poll boards directly,
+    # which contradicts the crew-hosted board contract (bin/fm-procevent-lavish.sh).
+    tasks-axi|quota-axi|lavish-axi) echo "npm install -g $1" ;;
     *) return 1 ;;
   esac
 }
