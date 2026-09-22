@@ -1088,6 +1088,72 @@ test_home_brief_include_is_appended_last() {
   pass "fm-brief.sh: the home brief include lands last on ship and scout, verbatim, and fails closed"
 }
 
+# A home can name standing skills in its gitignored config/standing-skills.
+# An absent or skill-free list must leave every scaffold byte-identical; named
+# skills must reach ship and scout Setup sections with both invocation forms,
+# never a secondmate charter; and an unusable list must stop the scaffold
+# before anything is written.
+test_standing_skills_render_in_setup() {
+  local home config kind id brief setup out rc
+  home="$TMP_ROOT/standing-skills-home"
+  config="$home/config"
+  mkdir -p "$config"
+
+  scaffold_standing_skills_kind() {  # <kind> <id>
+    case "$1" in
+      ship) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$2" some-proj --mode no-mistakes ;;
+      scout) FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$2" some-proj --scout ;;
+      secondmate) FM_HOME="$home" FM_SECONDMATE_CHARTER='Supervise assigned work.' \
+        "$ROOT/bin/fm-brief.sh" "$2" --secondmate --no-projects ;;
+    esac
+  }
+
+  for kind in ship scout secondmate; do
+    id="standing-$kind"
+    rm -f "$config/standing-skills"
+    scaffold_standing_skills_kind "$kind" "$id" >/dev/null || fail "$kind scaffold failed without standing skills"
+    mv "$home/data/$id/brief.md" "$home/$kind-absent.md"
+    rm -rf "${home:?}/data/$id"
+    printf '%s\n' '# no standing skills yet' '' '   ' > "$config/standing-skills"
+    scaffold_standing_skills_kind "$kind" "$id" >/dev/null || fail "$kind scaffold failed with a skill-free list"
+    cmp -s "$home/$kind-absent.md" "$home/data/$id/brief.md" \
+      || fail "$kind scaffold changed under a skill-free standing-skills list"
+    assert_no_grep 'Standing skills' "$home/$kind-absent.md" "$kind scaffold named standing skills with no list"
+    rm -rf "${home:?}/data/$id"
+    printf '%s\n' '# captain standing skills' 'kun' '  plugin:review-kit   # trailing comment' > "$config/standing-skills"
+    scaffold_standing_skills_kind "$kind" "$id" >/dev/null || fail "$kind scaffold failed with two standing skills"
+    brief="$home/data/$id/brief.md"
+    if [ "$kind" = secondmate ]; then
+      cmp -s "$home/$kind-absent.md" "$brief" || fail "secondmate charter changed under a standing-skills list"
+      continue
+    fi
+    setup=$(sed -n '/^# Setup$/,/^# Rules$/p' "$brief")
+    # shellcheck disable=SC2016 # Literal backticks and dollar signs are the rendered invocation forms.
+    assert_contains "$setup" '`/kun`, `/plugin:review-kit` on Claude, Grok, Pi, Kimi, Cursor, and Gemini' \
+      "$kind Setup did not name both skills in the slash form"
+    # shellcheck disable=SC2016 # Literal backticks and dollar signs are the rendered invocation forms.
+    assert_contains "$setup" '`$kun`, `$plugin:review-kit` on Codex' \
+      "$kind Setup did not name both skills in the Codex form"
+    assert_contains "$setup" "Definition of done and safety rules win on any conflict" \
+      "$kind Setup did not keep the brief's contract above the standing skills"
+    [ "$(grep -c 'Standing skills' "$brief")" = 1 ] || fail "$kind brief named its standing skills outside one Setup paragraph"
+  done
+
+  printf '%s\n' 'kun' '/lavish' > "$config/standing-skills"
+  out=$(scaffold_standing_skills_kind scout standing-invalid 2>&1); rc=$?
+  expect_code 1 "$rc" "an invalid standing skill name must stop the scaffold"
+  assert_contains "$out" "names an invalid skill '/lavish'" "invalid standing skill refusal did not name the entry"
+  assert_absent "$home/data/standing-invalid" "an invalid standing skill left a partial scaffold behind"
+
+  rm -f "$config/standing-skills"
+  mkdir "$config/standing-skills"
+  out=$(scaffold_standing_skills_kind ship standing-unusable 2>&1); rc=$?
+  expect_code 1 "$rc" "an unusable standing-skills path must stop the scaffold"
+  assert_contains "$out" "standing-skills must be a readable regular file" "unusable standing-skills refusal did not name the file"
+  assert_absent "$home/data/standing-unusable" "an unusable standing-skills path left a partial scaffold behind"
+  pass "fm-brief.sh: standing skills reach ship and scout Setup only, and an absent list changes nothing"
+}
+
 test_worker_role_scope
 test_script_parses
 test_no_heredoc_in_command_substitution
@@ -1116,3 +1182,4 @@ test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
 test_home_brief_include_is_appended_last
+test_standing_skills_render_in_setup
