@@ -384,6 +384,12 @@
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
+# Relaunch writes regenerated fields, including control_relaunch_tx=, before
+# preserving fields it does not own in their existing order. A successfully
+# delivered traceparent= is prepended later, so neither write places an
+# unrecognized field after pr=. This preserves an already-armed PR poll's
+# authentication under bin/fm-pr-lib.sh's fm_pr_metadata_identity_parse without
+# relaxing that parser's rejection of unrecognized trailing fields.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -4500,12 +4506,7 @@ preserve_relaunch_meta() {
     echo "home=$PROJ_ABS"
     echo "projects=$SECONDMATE_PROJECTS"
   fi
-  # control_relaunch_tx= is an owned key, but it must be written before
-  # preserve_relaunch_meta rather than after: preserve_relaunch_meta carries
-  # over pr=/pr_head=, and fm_pr_metadata_identity_parse (bin/fm-pr-lib.sh)
-  # rejects any unrecognised key found after pr=, so an owned key landing
-  # after the preserved block would silently break an armed PR merge poll
-  # (firstmate issues #5291, #5135). Preserved identity keys must stay last.
+  # Keep the relaunch metadata ordering documented in this script's header.
   if [ "$SPAWN_CONTROL_PARENT" = 1 ] && [ -n "${FM_CONTROL_RELAUNCH_TX:-}" ]; then
     echo "control_relaunch_tx=$FM_CONTROL_RELAUNCH_TX"
   fi
@@ -4708,6 +4709,7 @@ spawn_record_traceparent() {
     acquired=1
   fi
   SPAWN_META_TMP="$STATE/.$ID.meta.trace.${BASHPID:-$$}"
+  # Prepend the carrier to preserve the header's PR-poll ordering invariant.
   if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
     ! awk -F= -v traceparent="$SPAWN_TRACEPARENT" '
       BEGIN { print "traceparent=" traceparent }
