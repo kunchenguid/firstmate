@@ -27,7 +27,14 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 #                                  is identified by the contract.
 #   quota_row($snapshot; $provider; $lane)
 #                                  the one provider row the candidate binds to,
-#                                  or null; schema 5 ignores $lane.
+#                                  or null; schema 5 ignores $lane. Under
+#                                  schema 6 an unmatched "openai-codex" lane
+#                                  (Pi's builtin home Codex provider id) falls
+#                                  back to the codex-home account row and stops
+#                                  there, never reaching "default"; every other
+#                                  unmatched lane falls back to "default". An
+#                                  exact accountKey row always wins over the
+#                                  fallback.
 # shellcheck disable=SC2016,SC2034  # jq program text, not shell expansion; read by the sourcing consumers
 FM_QUOTA_ROW_JQ='
   def quota_lane($harness; $model):
@@ -41,8 +48,8 @@ FM_QUOTA_ROW_JQ='
       (([$rows[] | select(.accountKey == $lane)] | first) //
        (if $lane == "openai-codex"
         then ([$rows[] | select(.accountKey == "codex-home")] | first)
-        else null end) //
-       ([$rows[] | select(.accountKey == "default")] | first) // null)
+        else ([$rows[] | select(.accountKey == "default")] | first)
+        end) // null)
     else ($rows | first) // null
     end;
 '

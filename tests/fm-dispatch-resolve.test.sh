@@ -674,6 +674,24 @@ assert_contains "$out" "  profile: --harness 'pi' --model 'codex-native/gpt-6-as
 cp "$LANE_RULES" "$RULES"
 pass "Pi's openai-codex home lane falls back to codex-home; sibling and native lanes are unchanged"
 
+# --- schema 6: the openai-codex lane stops at null, never the default row ------
+# With neither an exact openai-codex row nor a codex-home row, Pi's builtin
+# home lane stays unranked even when a healthy codex/default row exists; the
+# default fallback remains for every other lane, shown by the muller-labs
+# sibling still binding to it.
+SCHEMA6_DEFAULT_ONLY="$TMP_ROOT/schema6-default-only.json"
+jq '.providers |= map(select(.provider != "codex" or .accountKey == "codex-home") |
+  if .accountKey == "codex-home" then .accountKey = "default" else . end)' "$SCHEMA6_HOME" > "$SCHEMA6_DEFAULT_ONLY"
+cp "$HOME_RULES" "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_DEFAULT_ONLY" run code out err "$BRIEF"
+expect_code 0 "$code" "default-only snapshot exits 0"
+assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  -> eligible, unranked: provider codex has no quota row for account openai-codex: disclosed uncertainty' "the openai-codex lane stays unranked when neither named row exists"
+assert_contains "$out" 'candidate: pi:openai-codex-muller-labs/gpt-5.6-luna  provider=codex  scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' "every other lane keeps the default-row fallback"
+assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex-muller-labs/gpt-5.6-luna'" "the lane that still falls back to default wins"
+cp "$LANE_RULES" "$RULES"
+pass "the openai-codex lane never binds the default row; other lanes keep the fallback"
+
 jq 'del(.providers[1].accountKey)' "$SCHEMA6" > "$TMP_ROOT/schema6-keyless.json"
 reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-keyless.json" run code out err "$BRIEF"
