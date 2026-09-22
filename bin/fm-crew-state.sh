@@ -22,7 +22,34 @@
 # Output is one stable, parseable, token-tight line firstmate can read every
 # heartbeat:
 #
-#   state: <working|parked|done|blocked|paused|failed|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#   state: <working|parked|done|blocked|paused|failed|unreadable|unknown> · source: <run-step|pane|status-log|remote-endpoint|none> · <detail>
+#
+# Every state word but `unreadable` is a claim about the CREW. `unreadable` is
+# the reader's claim about ITSELF: NO CREW CLAIM COULD BE ESTABLISHED here, and
+# nothing follows about what the crew is doing. That class is wider than a
+# failed read. It covers a source this reader could not read at all, and
+# equally a source it read perfectly that still settled nothing: records that
+# read fine and contradict each other, two live runs that cannot be told apart,
+# a record read whole but not tied to this task copy, a status or outcome word
+# read exactly as written and outside this reader's vocabulary, and a record
+# left unverified because the daemon probe answered down. Its detail always
+# opens with what specifically could not be ESTABLISHED and why - a read that
+# failed says so; a read that succeeded names the thing it could not settle
+# instead of claiming a failure that did not happen - and it never carries a
+# bare verdict. A reader that cannot see has to say so about itself rather than
+# answer for the crew with a confident-sounding `unknown`, and a reader that
+# may report at a coarser grain than it knows must not advertise a precision it
+# does not have.
+# The run-step reader mints it today; the other sources still report `unknown`
+# and are unchanged by that rule.
+# Consumers that act on a CREW claim match `working`, `paused`, `parked`,
+# `done`, or `failed` positively (fm-classify-lib.sh's crew_absorb_class,
+# fm-inactive-reconcile.sh), so `unreadable` is handled exactly as `unknown`
+# was: no absorb, no terminal claim, surface the wake. One consumer instead
+# matches the unreadable verdict itself positively - fm-fleet-snapshot.sh's
+# secondmate home summary, which reports a child whose current state could not
+# be read as `child_current_unavailable` - so it accepts BOTH words, and any
+# new consumer of the unreadable verdict must too.
 #
 # Logic, in order:
 #   1. Resolve worktree + backend target + kind from state/<id>.meta. A meta
@@ -72,7 +99,7 @@
 #      branch-name-only acceptance: an executing `axi status` record is the one
 #      live bind, so a ledger row that cannot be tied to this worktree's head
 #      never answers on branch name alone. A record whose daemon has ANSWERED
-#      down reads unknown and names the dead instrument on exactly ONE route:
+#      down reads unreadable and names the dead instrument on exactly ONE route:
 #      the id-addressed selected run whose head this copy cannot resolve and
 #      whose continuation the ledger anchor proves. The coarse ledger fallback
 #      carries NO such verdict - it reports the same status word for a
@@ -90,7 +117,7 @@
 #      fm_nm_select_run in bin/fm-nm-run-lib.sh owns complete run selection
 #      and ambiguity reporting. The selected run's id-addressed status must
 #      agree on id, branch, and live/terminal class before attribution;
-#      disagreement reports unknown with available candidate ids.
+#      disagreement reports unreadable with available candidate ids.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working
 #      (the id-addressed detail read carries step words the overview does not),
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
@@ -106,7 +133,7 @@
 #      convert the absence of that decision into a failure verdict
 #      (nm_failed_run_is_green_held_ci; 2026-09-05 jr-voice incident). In the
 #      coarse runs-ledger fallback (no steps table, no ci log), a terminal
-#      FAILED record whose daemon an explicit probe proves down reads unknown,
+#      FAILED record whose daemon an explicit probe proves down reads unreadable,
 #      never failed: an instrument failure must not read as work failure
 #      (nm_daemon_probe_down).
 #   3. Reconcile the status log through fm-classify-lib.sh's status_current_line:
@@ -715,7 +742,7 @@ nm_daemon_probe_down() {
 
 # 0 only when the probe ANSWERED and that answer was "down". Suppressing a LIVE
 # record needs this stricter question: `not provably up` above is fail-closed,
-# which is safe when it degrades a terminal record to unknown, but on a live
+# which is safe when it degrades a terminal record to unreadable, but on a live
 # record it would drop a working crew back to a possibly-stale status log every
 # time the probe merely ran slow - the crew would flap between working and
 # failed on probe latency alone. 124 is the bounded call's own did-not-answer
@@ -864,32 +891,41 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     # verdict when its identity and gate cannot be read.
     overview_ok=1
     run_overview=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi) || overview_ok=0
-    [ -n "$run_overview" ] || emit unknown run-step "run inventory unavailable; run id: $(strip_quotes "$(nm_field id)")"
+    [ -n "$run_overview" ] || emit unreadable run-step "could not read the run inventory: \`no-mistakes axi\` returned nothing; run id: $(strip_quotes "$(nm_field id)")"
     run_choice=$(fm_nm_select_run "$CREW_BRANCH" "$run_overview" "$WT" "$NM_TIMEOUT")
-    [ "$overview_ok" = 1 ] || emit unknown run-step "run inventory unreadable; run ids: $(strip_quotes "$(nm_field id)"), ${run_choice##*|}"
+    if [ "$overview_ok" != 1 ]; then
+      case "$run_choice" in
+        *'run ids: '*) overview_ids=${run_choice##*run ids: } ;;
+        selected\|*)   overview_ids=${run_choice##*|} ;;
+        *)             overview_ids="" ;;
+      esac
+      run_ids=$(strip_quotes "$(nm_field id)")
+      [ -z "$overview_ids" ] || run_ids="${run_ids:+$run_ids, }$overview_ids"
+      emit unreadable run-step "could not read the run inventory: \`no-mistakes axi\` failed; run ids: $run_ids"
+    fi
     case "$run_choice" in
       unknown\|*)
         known_run_id=""
         if [ "$(strip_quotes "$(nm_field branch)")" = "$CREW_BRANCH" ]; then
           known_run_id=$(strip_quotes "$(nm_field id)")
         fi
-        emit unknown run-step "${run_choice#*|}${known_run_id:+; last reported run id: $known_run_id}"
+        emit unreadable run-step "${run_choice#*|}${known_run_id:+; last reported run id: $known_run_id}"
         ;;
       selected\|*)
         IFS='|' read -r _ selected_id selected_status candidate_ids <<< "$run_choice"
         RUN_OUT=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi status --run "$selected_id") \
-          || emit unknown run-step "selected run unreadable; run ids: $candidate_ids"
+          || emit unreadable run-step "could not read the selected run: its own status read failed; run ids: $candidate_ids"
         if [ "$(strip_quotes "$(nm_field id)")" != "$selected_id" ] \
           || [ "$(strip_quotes "$(nm_field branch)")" != "$CREW_BRANCH" ]; then
-          emit unknown run-step "selected run unavailable or mismatched; run ids: $candidate_ids"
+          emit unreadable run-step "could not confirm the selected run: it answered with another id or branch; run ids: $candidate_ids"
         fi
         case "$(strip_quotes "$(nm_field status)")" in
           pending|running|fixing|ci|awaiting_approval|fix_review|completed|failed|cancelled) ;;
-          *) emit unknown run-step "selected run status unverified; run ids: $candidate_ids" ;;
+          *) emit unreadable run-step "could not settle the selected run's status: it reports a word this reader does not recognize; run ids: $candidate_ids" ;;
         esac
         if fm_nm_run_is_active "$RUN_OUT"; then current_class=live; else current_class=terminal; fi
         if [ "$(fm_nm_run_status_class "$selected_status")" != "$current_class" ]; then
-          emit unknown run-step "selected run status disagrees with inventory; run ids: $candidate_ids"
+          emit unreadable run-step "could not settle the selected run's status: its own record and the inventory disagree; run ids: $candidate_ids"
         fi
         if nm_run_head_matches_worktree || fm_nm_run_is_pipeline_owned_active "$RUN_OUT" \
           || { fm_nm_run_is_executing "$RUN_OUT" && ! nm_daemon_answered_down; }; then
@@ -902,10 +938,10 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
             # failure, and a parked run keeps its gate and findings.
             HAVE_RUN=1
             if ! fm_nm_run_is_parked "$RUN_OUT" && nm_daemon_answered_down; then
-              RUN_DEAD_DAEMON="no-mistakes daemon unreachable; last run record $(strip_quotes "$(nm_field status)") - unverified"
+              RUN_DEAD_DAEMON="could not verify this run: the no-mistakes daemon is unreachable, so its last record ($(strip_quotes "$(nm_field status)")) is unverified"
             fi
           else
-            emit unknown run-step "selected run code identity unverified; run ids: $candidate_ids"
+            emit unreadable run-step "could not tie the selected run to this task copy: its head is not here and no ledger anchor proves it; run ids: $candidate_ids"
           fi
         fi
         SELECTED_RUN_ID=$selected_id
@@ -931,11 +967,11 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         ledger_status=$(fm_nm_runs_status_for_worktree "$WT" "$CREW_BRANCH" "$(nm_runs_list)")
         if fm_nm_run_is_active "$RUN_OUT"; then
           if [ "$(fm_nm_run_status_class "$ledger_status")" = terminal ]; then
-            emit unknown run-step "run records disagree; run ids: $(strip_quotes "$(nm_field id)"), competing identity unavailable"
+            emit unreadable run-step "could not settle this branch's run: the live record and the ledger disagree and the competing run has no id; run ids: $(strip_quotes "$(nm_field id)"), competing identity unavailable"
           fi
         else
           if [ "$(fm_nm_run_status_class "$ledger_status")" = live ]; then
-            emit unknown run-step "replacement run identity unavailable; run ids: $(strip_quotes "$(nm_field id)"), replacement unavailable"
+            emit unreadable run-step "could not read the replacement run: the ledger reports a live one with no id; run ids: $(strip_quotes "$(nm_field id)"), replacement unavailable"
           elif [ -n "$ledger_status" ] \
             && [ "$ledger_status" != "$(strip_quotes "$(nm_field status)")" ] \
             && [ "$ledger_status" != "$(strip_quotes "$(nm_field outcome)")" ]; then
@@ -977,11 +1013,11 @@ if [ "$HAVE_RUN" = 1 ]; then
     # ONE dead-instrument verdict for every route that reaches one. It is set,
     # not emitted, so the status-log reconciliation below still runs: an
     # unverified record must not silence the crew's own open decision.
-    RUN_STATE=unknown
+    RUN_STATE=unreadable
     RUN_DETAIL=$RUN_DEAD_DAEMON
   elif [ "$RUN_SOURCE" = coarse ]; then
     # No step/gate detail is available from the plain runs list - only ever
-    # working, done, failed, or unknown. Gate detail requires the identity-aware
+    # working, done, failed, or unreadable. Gate detail requires the identity-aware
     # read above. The status event span remains independently available to the
     # supervisor through fm-classify-lib.sh's status_span_first_actionable.
     case "$COARSE_STATUS" in
@@ -993,13 +1029,13 @@ if [ "$HAVE_RUN" = 1 ]; then
         # here. With the daemon provably down, the row is unverified evidence
         # from a dead instrument and must not read as work failure.
         if nm_daemon_probe_down; then
-          RUN_STATE=unknown
-          RUN_DETAIL="no-mistakes daemon unreachable; last ledger record failed - unverified"
+          RUN_STATE=unreadable
+          RUN_DETAIL="could not verify this run: the no-mistakes daemon is unreachable, so its last ledger record (failed) is unverified"
         else
           RUN_STATE=failed; RUN_DETAIL="run failed"
         fi ;;
       cancelled) RUN_STATE=failed;  RUN_DETAIL="run cancelled" ;;
-      *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
+      *)         RUN_STATE=unreadable; RUN_DETAIL="could not settle this run's state: the ledger reports a status this reader does not recognize ($COARSE_STATUS)" ;;
     esac
   else
     status=$(strip_quotes "$(nm_field status)")
@@ -1019,7 +1055,7 @@ if [ "$HAVE_RUN" = 1 ]; then
             RUN_STATE=failed; RUN_DETAIL="run failed"
           fi ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
-        *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
+        *)             RUN_STATE=unreadable; RUN_DETAIL="could not settle this run's outcome: it reports a result this reader does not recognize ($outcome)" ;;
       esac
     elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
       if [ "$has_gate" = 1 ]; then

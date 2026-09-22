@@ -49,7 +49,7 @@
 # fm-crew-state.sh as the sole current-state source.
 # Only a done or failed state is suspicious enough to create a durable terminal
 # outcome record or wake the supervisor.
-# Working, paused, parked, blocked, unknown, persistent secondmates, and
+# Working, paused, parked, blocked, unreadable, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
 #
 # A terminal-outcomes/<fingerprint>.pending record remains until its upstream

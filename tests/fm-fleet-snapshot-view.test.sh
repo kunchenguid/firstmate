@@ -1171,9 +1171,68 @@ EOF
   pass "home-summary excludes kind=secondmate from unowned_current and terminal_in_flight"
 }
 
+# A run-step read that fails reports the READER's own `unreadable` verdict, not a
+# claim about the crew. The home summary has to treat that exactly as it treats
+# `unknown`: the child's current state is unavailable, so the home is not valid
+# and names which child it could not read. Matching only `unknown` here silently
+# promoted an unread child to a clean home.
+test_home_summary_treats_unreadable_child_as_unavailable() {
+  local home fakebin out
+  home=$(make_home summary-unreadable-child)
+  fakebin=$(make_fakebin "$home")
+  fm_git_init_commit "$home/projects/unreadable"
+  git -C "$home/projects/unreadable" checkout -q -b fm/unreadable-child
+  # `axi status` answers with a live run, but the run inventory the reader needs
+  # to tell which run on this branch is current answers nothing at all.
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = axi ] && [ "${2:-}" = status ]; then
+  printf 'id: "01RUNUNREADABLE"\nbranch: "fm/unreadable-child"\nstatus: "running"\n'
+fi
+exit 0
+SH
+  chmod +x "$fakebin/no-mistakes"
+  cat > "$home/data/backlog.md" <<'EOF'
+## In flight
+- [ ] unreadable-child - Ship whose run inventory cannot be read (repo: alpha) (kind: ship) (since 2026-07-11)
+
+## Queued
+
+## Done
+EOF
+  fm_write_meta "$home/state/unreadable-child.meta" \
+    "window=firstmate:fm-unreadable-child" \
+    "worktree=$home/projects/unreadable" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=no-mistakes"
+  record_claude_idle "$home/state" unreadable-child
+  printf 'working: validating\n' > "$home/state/unreadable-child.status"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
+  printf '%s' "$out" | jq -e '
+    .tasks[] | select(.id == "unreadable-child")
+    | .current_state.state == "unreadable"
+      and .current_state.source == "run-step"
+      and (.current_state.detail | startswith("could not read the run inventory"))
+  ' >/dev/null || fail "an unreadable run inventory did not report the reader's own verdict: $out"
+
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary)
+  printf '%s' "$out" | jq -e '
+    .valid == false
+      and .state == "unknown"
+      and .invalidity == {kind:"child_current_unavailable",ids:["unreadable-child"]}
+      and (.reason | contains("child current state unavailable: unreadable-child"))
+  ' >/dev/null || fail "an unreadable child state was not reported as unavailable: $out"
+  pass "home summary reports an unreadable child state as current-state-unavailable"
+}
+
 test_empty_fleet_json
 test_fixture_snapshot_json
 test_home_summary_excludes_secondmate_from_child_inventory
+test_home_summary_treats_unreadable_child_as_unavailable
 test_undated_captain_hold_phrasing_and_aging
 test_hold_buckets_are_total_and_text_blind
 test_main_inventory_orphan_and_unstructured_disclosure
