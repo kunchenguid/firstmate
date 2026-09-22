@@ -507,6 +507,35 @@ fm_git_worktree() {
   git -C "$repo" worktree add --quiet -b "$branch" "$worktree"
 }
 
+# fm_test_seed_converged_clone <root> <dst>: clone <root> into <dst>, detached
+# at <root>'s own resolved default-branch commit - a secondmate home that has
+# already converged (bin/fm-ff-lib.sh's fresh-home convergence guard), the same
+# shape bin/fm-home-seed.sh's `git clone --quiet "$FM_ROOT" ...` produces
+# against a real primary that is always attached to its own default branch.
+# Callers must have already sourced bin/fm-ff-lib.sh for default_branch.
+#
+# <root> here is this suite's own checkout, which under a detached-HEAD
+# checkout (this gate's worktrees, and GitHub Actions' default checkout mode
+# alike) advertises no origin/HEAD symref and no local default-branch ref to a
+# plain `git clone`, so default_branch(<dst>) could never resolve and every
+# launch through <dst> would be refused as unconverged even though it holds
+# the right commit. Landing an explicit local branch of the same name <root>
+# itself resolves to (via its own refs/heads/<default>, present regardless of
+# what <root> has checked out) fixes that without changing which commit <dst>
+# ends up detached at.
+fm_test_seed_converged_clone() {
+  local root=$1 dst=$2 default target
+  default=$(default_branch "$root") \
+    || fail "cannot resolve the primary's default branch for the secondmate home fixture"
+  target=$(git -C "$root" rev-parse --verify --quiet "refs/heads/$default^{commit}") \
+    || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
+  git clone -q "$root" "$dst" || fail "could not clone the primary for the secondmate home fixture"
+  git -C "$dst" branch -f "$default" "$target" \
+    || fail "could not land the default-branch ref in the secondmate home fixture clone"
+  git -C "$dst" checkout -q --detach "$target" \
+    || fail "could not pin the secondmate home fixture clone to the primary's commit"
+}
+
 # --- state/<id>.meta writers ------------------------------------------------
 
 # fm_write_meta <file> <key=val> ...: write the given key=val lines to a meta

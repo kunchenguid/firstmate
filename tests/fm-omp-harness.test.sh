@@ -217,11 +217,9 @@ test_spawn_model_validation_scoped_to_listed_providers() {
 # AGENTS.md is left as the clone's own tracked file rather than overwritten,
 # so the clone stays clean.
 seed_omp_secondmate_home() {
-  local world=$1 home=$2 id=$3 target
+  local world=$1 home=$2 id=$3
   mkdir -p "$world/home/state" "$world/home/data" "$world/home/config"
-  target=$(primary_head_commit "$ROOT") || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
-  git clone -q "$ROOT" "$home"
-  git -C "$home" checkout -q --detach "$target"
+  fm_test_seed_converged_clone "$ROOT" "$home"
   mkdir -p "$home/bin" "$home/data"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter\n' > "$home/data/charter.md"

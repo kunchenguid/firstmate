@@ -124,7 +124,7 @@ node_free_path() {  # <case-dir> -> a bin dir holding the script's own tools but
 # worktree a treehouse lease produces. Both shapes are real homes, so both must
 # be trusted.
 seed_secondmate_home() {
-  local home=$1 id=$2 shape=${3:-clone} src target
+  local home=$1 id=$2 shape=${3:-clone} src default target
   # A fresh secondmate home must launch only once it exactly matches the
   # primary's own tracked default-branch commit (the fresh-home convergence
   # fix). Both shapes below are real clones of the ambient $ROOT pinned there,
@@ -132,16 +132,22 @@ seed_secondmate_home() {
   # could never converge; AGENTS.md is left as the clone's own tracked file
   # (its content is unchecked here) rather than overwritten, so the clone
   # stays clean.
-  target=$(primary_head_commit "$ROOT") || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
   case "$shape" in
     worktree)
+      # A worktree shares refs with its $src clone, so landing the
+      # default-branch ref there (fm_test_seed_converged_clone's rationale)
+      # covers $home too.
+      default=$(default_branch "$ROOT") \
+        || fail "cannot resolve the primary's default branch for the secondmate home fixture"
+      target=$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$default^{commit}") \
+        || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
       src="$home.src"
       git clone -q "$ROOT" "$src"
+      git -C "$src" branch -f "$default" "$target"
       git -C "$src" worktree add --quiet --detach "$home" "$target"
       ;;
     *)
-      git clone -q "$ROOT" "$home"
-      git -C "$home" checkout -q --detach "$target"
+      fm_test_seed_converged_clone "$ROOT" "$home"
       ;;
   esac
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"

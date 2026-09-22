@@ -71,7 +71,7 @@ EOF
 }
 
 phase_seed() {
-  local out target
+  local out target default
   out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
     "$ROOT/bin/fm-home-seed.sh" design "$SUB" alpha beta gamma) \
     || fail "seed failed"
@@ -115,8 +115,15 @@ phase_seed() {
   # its own default branch, so it lands there for free; this suite's FM_ROOT is
   # the ambient checkout running the tests, which may itself be on some other
   # branch, so pin the freshly seeded subhome explicitly to keep this test's
-  # outcome independent of that ambient state.
-  target=$(primary_head_commit "$ROOT") || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
+  # outcome independent of that ambient state. That ambient $ROOT may itself be
+  # a detached-HEAD checkout (this gate's worktrees, and GitHub Actions' default
+  # checkout mode alike), in which case the seed's real clone got no
+  # origin/HEAD symref or local default-branch ref either, so land one
+  # explicitly (fm_test_seed_converged_clone's rationale) alongside the pin.
+  default=$(default_branch "$ROOT") || fail "cannot resolve the primary's default branch for the secondmate home fixture"
+  target=$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$default^{commit}") \
+    || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
+  git -C "$SUB_ABS" branch -f "$default" "$target"
   git -C "$SUB_ABS" checkout -q --detach "$target"
 
   pass "seed: registry scope+projects, charter copied, clones+origins, no-mistakes init in subhome only"

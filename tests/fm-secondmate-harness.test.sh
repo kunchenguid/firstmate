@@ -455,10 +455,8 @@ SH
 # rather than a plain directory with no git history. AGENTS.md is left as the
 # clone's own tracked file rather than overwritten, so the clone stays clean.
 make_seeded_home() {
-  local home=$1 id=$2 target
-  target=$(primary_head_commit "$ROOT") || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
-  git clone -q "$ROOT" "$home"
-  git -C "$home" checkout -q --detach "$target"
+  local home=$1 id=$2
+  fm_test_seed_converged_clone "$ROOT" "$home"
   mkdir -p "$home/bin" "$home/data"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter\n' > "$home/data/charter.md"

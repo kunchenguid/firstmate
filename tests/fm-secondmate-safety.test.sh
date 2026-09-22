@@ -500,7 +500,7 @@ test_home_seed_no_projects_end_to_end() {
   # A domain whose subject is the firstmate repo itself needs no project clones:
   # the deliberate --no-projects signal scaffolds, seeds, registers, and spawns a
   # project-less home end to end with no placeholder clone.
-  local home sub sub_abs fakebin log meta proj_val out target
+  local home sub sub_abs fakebin log meta proj_val out target default
   home="$TMP_ROOT/no-projects-seed-home"
   sub="$TMP_ROOT/no-projects-seed-subhome"
   mkdir -p "$home/projects" "$home/data" "$home/state"
@@ -529,8 +529,15 @@ test_home_seed_no_projects_end_to_end() {
   # default branch, so it lands there for free; this suite's FM_ROOT is the
   # ambient checkout running the tests, which may itself be on some other
   # branch, so pin the freshly seeded subhome explicitly to keep this test's
-  # outcome independent of that ambient state.
-  target=$(primary_head_commit "$ROOT") || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
+  # outcome independent of that ambient state. That ambient $ROOT may itself be
+  # a detached-HEAD checkout (this gate's worktrees, and GitHub Actions' default
+  # checkout mode alike), in which case the seed's real clone got no
+  # origin/HEAD symref or local default-branch ref either, so land one
+  # explicitly (fm_test_seed_converged_clone's rationale) alongside the pin.
+  default=$(default_branch "$ROOT") || fail "cannot resolve the primary's default branch for the secondmate home fixture"
+  target=$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$default^{commit}") \
+    || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
+  git -C "$sub_abs" branch -f "$default" "$target"
   git -C "$sub_abs" checkout -q --detach "$target"
 
   # Spawn tolerates the empty projects field: the home resolves from the registry
@@ -549,7 +556,7 @@ test_home_seed_no_projects_end_to_end() {
 }
 
 test_secondmate_spawn_resolves_punctuated_registry_projects() {
-  local home sub sub_abs fakebin log meta projects target
+  local home sub sub_abs fakebin log meta projects
   home="$TMP_ROOT/punctuated-spawn-home"
   sub="$TMP_ROOT/punctuated-spawn-subhome"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
@@ -557,9 +564,7 @@ test_secondmate_spawn_resolves_punctuated_registry_projects() {
   # primary's own tracked default-branch commit (the fresh-home convergence
   # fix), so this fixture is a real clone pinned there rather than a plain
   # directory tree, exactly like a genuine seed would produce.
-  target=$(primary_head_commit "$ROOT") || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
-  git clone -q "$ROOT" "$sub" || fail "could not create a primary-pinned subhome clone for the punctuated-registry fixture"
-  git -C "$sub" checkout -q --detach "$target"
+  fm_test_seed_converged_clone "$ROOT" "$sub"
   mkdir -p "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
   printf 'punctuated\n' > "$sub/.fm-secondmate-home"
   printf '# Charter\n\nHandled work.\n' > "$sub/data/charter.md"
