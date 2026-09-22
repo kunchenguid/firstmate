@@ -792,6 +792,7 @@ Work routed elsewhere reports a typed terminal result with `bin/fm-public-follow
 When that work lives in a REMOTE secondmate home, delivery clears its bound legacy link after validating the public receipt, while retirement clears the link before closing the loop, and both clears run over that route's SSH transport.
 Readable remote state that proves no link exists succeeds without a write, while a present link is cleared only when its Relay request identity matches the registration and the state is writable; an identity mismatch, unreadable or unsafe state, an unavailable write or lock, an older remote copy, or a host that never confirms the clear leaves the loop retained for reconciliation.
 A terminal event's id is derived from its identity tuple, so a duplicate report, a retry, or a replay after restart resolves to the same event and changes nothing.
+When bound work ends failed or parked, its typed failed result remains deliverable even when the promised final expected a merged pull request, so the owed reply carries the honest failure instead of remaining stranded.
 
 Work bound to a REMOTE secondmate home reports across a machine boundary, where no local path reaches the owning home.
 `bin/fm-public-followup.sh brief` therefore prints that worker the route's own code root and home with `--stage-in`, so the typed result is staged in `outbox/` in the home where the work actually runs rather than written to a path that only exists on the owning machine.
@@ -809,7 +810,7 @@ Unreconciled terminal results ride the existing 30-second relay poll rather than
 The session-start digest separately prints a "Public commitments" subsection from disk when, and only when, this home is relay-active and still holds an open public loop (a reply still owed, or a delivered loop with nothing owed), so compaction and restart are non-events.
 `bin/fm-teardown.sh` refuses to clean up a task while this home still owes a public reply for exactly that work, unless `--force` carries explicit discard approval.
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
-See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind restart recovery, retained-loop disposition, and the relay-disabled zero-overhead guarantee.
+See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind restart recovery, failed terminal outcomes, retained-loop disposition, and the relay-disabled zero-overhead guarantee.
 
 ## Trusted external process-event adapters (config/extensions.d)
 
