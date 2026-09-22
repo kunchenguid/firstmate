@@ -14,6 +14,8 @@ set -u
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$ROOT/bin/fm-ff-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-compact-adviser)
@@ -171,8 +173,8 @@ test_secondmate_launch() {
     read_case "$rec"
     [ "$setting" = absent ] || : > "$HOME_DIR/config/launch-env-allowlist"
     sm="$CASE_DIR/secondmate-home"
+    fm_test_seed_converged_clone "$ROOT" "$sm"
     mkdir -p "$sm/bin" "$sm/data"
-    printf '# Firstmate\n' > "$sm/AGENTS.md"
     printf '%s\n' "sm-$setting" > "$sm/.fm-secondmate-home"
     printf 'charter for sm-%s\n' "$setting" > "$sm/data/charter.md"
     out=$(run_case_spawn "sm-$setting" "$sm" --secondmate)

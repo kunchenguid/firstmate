@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$ROOT/bin/fm-ff-lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
@@ -79,8 +81,8 @@ enable_dispatch_profile() {
 
 make_seeded_secondmate_home() {
   local home=$1 id=$2
+  fm_test_seed_converged_clone "$ROOT" "$home"
   mkdir -p "$home/bin" "$home/data"
-  printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter for %s\n' "$id" > "$home/data/charter.md"
 }
@@ -826,7 +828,11 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
   sm=$(cd "$sm" && pwd -P)
-  cp "$ROOT/AGENTS.md" "$sm/AGENTS.md"
+  # The clone already carries its own pinned commit's AGENTS.md (fresh-home
+  # convergence requires the checkout stay clean at that commit), so the
+  # "unchanged by launch" snapshot must come from the clone itself rather than
+  # from $ROOT's current working tree, which can be a different commit.
+  cp "$sm/AGENTS.md" "$CASE_DIR/agents-before"
   cp "$sm/data/charter.md" "$CASE_DIR/charter-before"
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
@@ -835,7 +841,7 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
   assert_contains "$out" "spawned $id harness=pi-signed kind=secondmate" \
     "pi-signed secondmate spawn did not preserve its runtime identity"
   assert_meta_profile "$HOME_DIR/state/$id.meta" pi-signed default default
-  cmp -s "$ROOT/AGENTS.md" "$sm/AGENTS.md" || fail "secondmate launch rewrote the supervisor contract"
+  cmp -s "$CASE_DIR/agents-before" "$sm/AGENTS.md" || fail "secondmate launch rewrote the supervisor contract"
   cmp -s "$CASE_DIR/charter-before" "$sm/data/charter.md" || fail "secondmate launch rewrote the charter"
   assert_absent "$HOME_DIR/data/$id/launch-brief.md" "secondmate launch received a worker overlay"
   launch=$(cat "$LAUNCH_LOG")

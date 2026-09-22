@@ -41,6 +41,8 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$ROOT/bin/fm-ff-lib.sh"
 
 # Every spawn below states its own launcher identity, so a pane inherited from
 # the terminal this suite was started in must not leak into any of them.
@@ -170,9 +172,21 @@ printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/chart
 
 SM2_ID="lwsm2"
 SM2_HOME="$TMP_ROOT/secondmate-home-2"
+# A fresh secondmate home must converge exactly to the primary's tracked
+# default-branch commit before it is launchable (bin/fm-ff-lib.sh's
+# secondmate_launch_is_fresh), so this fixture is a real clone of $ROOT pinned
+# there rather than a plain directory with no git history.
+SM2_DEFAULT_BRANCH=$(default_branch "$ROOT") \
+  || fail "cannot resolve the primary's default branch for the secondmate home fixture"
+SM2_TARGET=$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$SM2_DEFAULT_BRANCH^{commit}") \
+  || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
+git clone -q "$ROOT" "$SM2_HOME" || fail "could not clone the primary for the secondmate home fixture"
+git -C "$SM2_HOME" branch -f "$SM2_DEFAULT_BRANCH" "$SM2_TARGET" \
+  || fail "could not land the default-branch ref in the secondmate home fixture clone"
+git -C "$SM2_HOME" checkout -q --detach "$SM2_TARGET" \
+  || fail "could not pin the secondmate home fixture clone to the primary's commit"
 mkdir -p "$SM2_HOME/state" "$SM2_HOME/config" "$SM2_HOME/projects" "$SM2_HOME/bin" "$SM2_HOME/data"
 printf 'off\n' > "$SM2_HOME/config/herdr-presentation-spaces"
-printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM2_HOME/AGENTS.md"
 printf '%s\n' "$SM2_ID" > "$SM2_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM2_HOME/data/charter.md"
 

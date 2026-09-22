@@ -25,6 +25,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$ROOT/bin/fm-ff-lib.sh"
 
 # An exported TASKS_AXI_BACKEND would outrank each case's .tasks.toml fixture
 # in fm_tasks_axi_backend, so the backend cases must start from a clean slate.
@@ -2979,8 +2981,8 @@ test_a_persistent_secondmate_is_never_a_backlog_item() {
   id=atomic-mate-b14
   case_dir=$(make_home mate-not-an-item)
   mate="$case_dir/mate-home"
+  fm_test_seed_converged_clone "$ROOT" "$mate"
   mkdir -p "$mate/bin" "$mate/data"
-  printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf 'charter for %s\n' "$id" > "$mate/data/charter.md"
 

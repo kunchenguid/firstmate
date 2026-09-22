@@ -53,6 +53,8 @@ command -v treehouse >/dev/null 2>&1 || { echo "skip: treehouse not found (requi
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$ROOT/bin/fm-ff-lib.sh"
 
 # This suite runs against its own isolated lab session, so a Herdr pane
 # inherited from the terminal it was launched in must not follow spawn into it
@@ -99,9 +101,21 @@ Verify the crewmate uses its primary home's workspace.
 EOF
 
 SM_HOME="$TMP_ROOT/secondmate-home"
+# A fresh secondmate home must converge exactly to the primary's tracked
+# default-branch commit before it is launchable (bin/fm-ff-lib.sh's
+# secondmate_launch_is_fresh), so this fixture is a real clone of $ROOT pinned
+# there rather than a plain directory with no git history.
+SM_DEFAULT_BRANCH=$(default_branch "$ROOT") \
+  || fail "cannot resolve the primary's default branch for the secondmate home fixture"
+SM_TARGET=$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$SM_DEFAULT_BRANCH^{commit}") \
+  || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
+git clone -q "$ROOT" "$SM_HOME" || fail "could not clone the primary for the secondmate home fixture"
+git -C "$SM_HOME" branch -f "$SM_DEFAULT_BRANCH" "$SM_TARGET" \
+  || fail "could not land the default-branch ref in the secondmate home fixture clone"
+git -C "$SM_HOME" checkout -q --detach "$SM_TARGET" \
+  || fail "could not pin the secondmate home fixture clone to the primary's commit"
 mkdir -p "$SM_HOME/state" "$SM_HOME/data/cm2" "$SM_HOME/config" "$SM_HOME/projects" "$SM_HOME/bin"
 printf 'off\n' > "$SM_HOME/config/herdr-presentation-spaces"
-printf '# scratch secondmate home AGENTS.md placeholder\n' > "$SM_HOME/AGENTS.md"
 printf 'e2esm1\n' > "$SM_HOME/.fm-secondmate-home"
 printf 'trivial e2e secondmate charter: nothing to do.\n' > "$SM_HOME/data/charter.md"
 cat > "$SM_HOME/data/cm2/brief.md" <<'EOF'

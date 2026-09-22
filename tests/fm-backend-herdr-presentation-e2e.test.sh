@@ -266,6 +266,8 @@ export FM_BACKEND_HERDR_WORKSPACE_MOVER="$FAKEBIN/herdr-workspace-mover"
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$ROOT/bin/fm-ff-lib.sh"
 # This suite runs against its own isolated lab session, so a Herdr pane
 # inherited from the terminal it was launched in must not follow spawn into it
 # as a cross-session parent identity. Every projection below is anchored on the
@@ -969,24 +971,34 @@ pass "real Herdr lab: three repeated concurrent create/order/cleanup waves have 
 # ------------------------------------------------------------------
 SECOND_HOME_A="$TMP_ROOT/home-2ndmate-alpha"
 SECOND_HOME_B="$TMP_ROOT/home-2ndmate-bravo"
+# SECOND_HOME_A is launched below through a real --secondmate spawn, so as a
+# FRESH home it must converge exactly to the primary's tracked default-branch
+# commit before it is launchable (bin/fm-ff-lib.sh's secondmate_launch_is_fresh);
+# a real clone of $ROOT pinned there gives it that, and also inherits $ROOT's
+# own tracked .gitignore (which already ignores config/), so inheritance may
+# write config/herdr-presentation-spaces without a custom ignore file. SECOND_HOME_B
+# is never itself launched via --secondmate, so a plain git init is still fine.
+SECOND_DEFAULT_BRANCH=$(default_branch "$ROOT") \
+  || fail "cannot resolve the primary's default branch for the secondmate home fixture"
+SECOND_TARGET=$(git -C "$ROOT" rev-parse --verify --quiet "refs/heads/$SECOND_DEFAULT_BRANCH^{commit}") \
+  || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
+git clone -q "$ROOT" "$SECOND_HOME_A" || fail "could not clone the primary for the secondmate home fixture"
+git -C "$SECOND_HOME_A" branch -f "$SECOND_DEFAULT_BRANCH" "$SECOND_TARGET" \
+  || fail "could not land the default-branch ref in the secondmate home fixture clone"
+git -C "$SECOND_HOME_A" checkout -q --detach "$SECOND_TARGET" \
+  || fail "could not pin the secondmate home fixture clone to the primary's commit"
 mkdir -p "$SECOND_HOME_A/state" "$SECOND_HOME_A/config" "$SECOND_HOME_A/data" \
   "$SECOND_HOME_B/state" "$SECOND_HOME_B/config" "$SECOND_HOME_B/data"
 printf 'alpha\n' > "$SECOND_HOME_A/.fm-secondmate-home"
 printf 'bravo\n' > "$SECOND_HOME_B/.fm-secondmate-home"
 touch "$SECOND_HOME_A/state/.last-watcher-beat" "$SECOND_HOME_B/state/.last-watcher-beat"
-# Ensure the secondmate homes look like gitignored firstmate homes so inheritance
-# may write config/herdr-presentation-spaces.
-git -C "$SECOND_HOME_A" init -q
+# Ensure home B looks like a gitignored firstmate home so inheritance may write
+# config/herdr-presentation-spaces.
 git -C "$SECOND_HOME_B" init -q
 printf 'config/herdr-presentation-spaces\nconfig/crew-harness\nconfig/crew-dispatch.json\nconfig/backlog-backend\nconfig/backend\nconfig/startup-memory-budget\n' \
-  > "$SECOND_HOME_A/.gitignore"
-cp "$SECOND_HOME_A/.gitignore" "$SECOND_HOME_B/.gitignore"
-git -C "$SECOND_HOME_A" add .gitignore
+  > "$SECOND_HOME_B/.gitignore"
 git -C "$SECOND_HOME_B" add .gitignore
-git -C "$SECOND_HOME_A" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm init
 git -C "$SECOND_HOME_B" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm init
-mkdir -p "$SECOND_HOME_A/bin"
-printf '# Firstmate secondmate fixture\n' > "$SECOND_HOME_A/AGENTS.md"
 printf 'Secondmate alpha charter.\n' > "$SECOND_HOME_A/data/charter.md"
 
 # Primary setting only; real inheritance must push it into both secondmate homes.
