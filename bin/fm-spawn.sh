@@ -769,7 +769,10 @@ if [ "$EXPECTED_HEAD_SET" -eq 1 ]; then
   EXPECTED_HEAD=$(printf '%s' "$EXPECTED_HEAD" | tr 'A-F' 'a-f')
   # Exact-coordinate repository identity always comes from explicit -C paths.
   # Ambient Git redirection variables would otherwise make those paths advisory.
-  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
+    GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_CONFIG_NOSYSTEM \
+    GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS
   export GIT_NO_REPLACE_OBJECTS=1
 fi
 # A parent-delivered carrier replaces this home's own resolution, so it is

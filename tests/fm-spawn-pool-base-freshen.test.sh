@@ -334,6 +334,56 @@ test_expected_head_ignores_ambient_git_redirection() {
   pass "only expected-head verification ignores ambient Git repository redirection"
 }
 
+test_expected_head_ignores_ambient_git_config_overrides() {
+  local rec id out status attacker_origin unauthorized worker_evidence pending raw_launch
+  id='pool-expected-git-config-r1'
+  rec=$(make_case expected-git-config "$id")
+  read_case_record "$rec"
+  attacker_origin="$CASE_DIR/attacker.git"
+  git -C "$POOL_DIR" fetch --quiet origin
+  git -C "$POOL_DIR" reset --hard origin/main >/dev/null
+  printf 'not served by origin\n' > "$POOL_DIR/unauthorized.txt"
+  git -C "$POOL_DIR" add unauthorized.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm unauthorized
+  unauthorized=$(git -C "$POOL_DIR" rev-parse HEAD)
+  git init --quiet --bare "$attacker_origin"
+  git -C "$POOL_DIR" push --quiet "file://$attacker_origin" HEAD:refs/heads/main
+  git -C "$POOL_DIR" reset --hard "$INITIAL_SHA" >/dev/null
+  [ "$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.url \
+    GIT_CONFIG_VALUE_0="file://$attacker_origin" \
+    git -C "$POOL_DIR" config --get remote.origin.url)" = "file://$attacker_origin" ] \
+    || fail "fixture did not override origin through Git command-scope configuration"
+
+  out=$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=remote.origin.url \
+    GIT_CONFIG_VALUE_0="file://$attacker_origin" \
+    run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$unauthorized")
+  status=$?
+  [ "$status" -ne 0 ] || fail "ambient Git config authorized a candidate absent from the recorded origin"
+  assert_contains "$out" "not an ancestor of any head returned by the origin fetch" \
+    "spawn did not reject the candidate absent from the recorded origin"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "Git-config-refused expected head published task metadata"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+    || fail "Git config override moved the pool during exact-head refusal"
+
+  id='pool-default-git-config-r1'
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  worker_evidence="$CASE_DIR/ordinary-worker-git-config"
+  pending="$CASE_DIR/ordinary-pending-launch"
+  raw_launch="git config --get fixture.ambient > '$worker_evidence'"
+  out=$(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=fixture.ambient \
+    GIT_CONFIG_VALUE_0=preserved FM_FAKE_PENDING_LAUNCH="$pending" \
+    FM_FAKE_EXECUTE_LAUNCH=1 \
+    run_spawn "$id" "$raw_launch" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "ordinary spawn should retain ambient Git config behavior"$'\n'"$out"
+  [ -f "$worker_evidence" ] \
+    || fail "ordinary worker did not record its ambient Git configuration"
+  [ "$(cat "$worker_evidence")" = preserved ] \
+    || fail "ordinary spawn stopped preserving ambient Git configuration"
+  pass "only expected-head authorization ignores ambient Git configuration overrides"
+}
+
 test_expected_head_refuses_unsupported_lifecycle_shapes() {
   local rec id out status
   id='pool-expected-shapes-r1'
@@ -939,6 +989,7 @@ test_expected_head_launches_exact_origin_commit
 test_expected_head_ignores_replacement_objects
 test_expected_head_refuses_non_origin_commit_and_invalid_input
 test_expected_head_ignores_ambient_git_redirection
+test_expected_head_ignores_ambient_git_config_overrides
 test_expected_head_refuses_unsupported_lifecycle_shapes
 test_expected_head_is_reverified_immediately_before_launch
 test_direct_pr_and_scout_refresh_before_launch
