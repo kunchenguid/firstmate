@@ -28,8 +28,12 @@
 // omp emits session_shutdown for ordinary same-process replacements (/new,
 // /resume, /fork) as well as terminal quit. This extension binds one generation
 // per session activation. Only the active live generation may start, stop,
-// rearm, or clear the arm child. An owning replacement session_start (or fresh
-// factory bind) arms its new generation without a model turn. A replacement
+// rearm, or clear the arm child. A session_start that does not yet own the
+// lock does not give up: it waits, bounded to this generation, and arms through
+// the existing path once this process is the verified owner. It never arms
+// while another live session holds the lock, and shutdown or replacement
+// cancels that wait. An owning replacement session_start (or fresh factory
+// bind) still arms its new generation without a model turn. A replacement
 // handoff carries actionable closes that were still pending delivery; its
 // durable state lives at state/extensions/omp-primary-watch/session-replacement-actionable.json.
 // Stale callbacks from a prior generation are no-ops against the active replacement.
@@ -103,6 +107,7 @@ type SessionGeneration = {
   replacement: boolean;
   child: ChildProcess | null;
   retryTimer: ReturnType<typeof setTimeout> | null;
+  lockWaitTimer: ReturnType<typeof setTimeout> | null;
   cleanupTimer: ReturnType<typeof setTimeout> | null;
   retryFailures: number;
   restoring: boolean;
@@ -135,6 +140,11 @@ const extensionVersion = `sha256:${createHash("sha256").update(readFileSync(exte
 const retryBaseMs = positiveInteger("FM_WATCH_REARM_RETRY_BASE_MS", 250);
 const retryMaxMs = positiveInteger("FM_WATCH_REARM_RETRY_MAX_MS", 4000);
 const retryLimit = positiveInteger("FM_WATCH_REARM_RETRY_LIMIT", 5);
+// A new process checks the lock before the session-start child can acquire it.
+// The wait is one deadline, not an open loop: each tick is a single timer, and
+// the deadline, another live owner, or shutdown ends it.
+const lockArmWaitMs = positiveInteger("FM_OMP_LOCK_ARM_WAIT_MS", 30000);
+const lockArmPollMs = positiveInteger("FM_OMP_LOCK_ARM_POLL_MS", 250);
 // 35s on Windows so the budget stays above arm's MSYS confirm default (30s in
 // bin/fm-watch-arm.sh): a slow but successful Git Bash cold start must not be
 // SIGTERMed mid-confirmation. Conditioned on win32 so other platforms keep 12s.
@@ -410,6 +420,7 @@ function createGeneration(): SessionGeneration {
     replacement: false,
     child: null,
     retryTimer: null,
+    lockWaitTimer: null,
     cleanupTimer: null,
     retryFailures: 0,
     restoring: false,
@@ -431,9 +442,11 @@ function generationIsLive(generation: SessionGeneration): boolean {
 
 function stopGeneration(generation: SessionGeneration): ChildProcess | null {
   generation.stopping = true;
-  if (generation.retryTimer) clearTimeout(generation.retryTimer);
-  if (generation.cleanupTimer) clearTimeout(generation.cleanupTimer);
+  clearTimeout(generation.retryTimer);
+  clearTimeout(generation.lockWaitTimer);
+  clearTimeout(generation.cleanupTimer);
   generation.retryTimer = null;
+  generation.lockWaitTimer = null;
   generation.cleanupTimer = null;
   const child = generation.child;
   if (child) child.kill("SIGTERM");
@@ -1032,12 +1045,44 @@ export default function (pi: ExtensionAPI) {
     consumeWake(generation, userMessageText(message.content));
   });
 
+  function clearLockWait(owner: SessionGeneration): void {
+    clearTimeout(owner.lockWaitTimer);
+    owner.lockWaitTimer = null;
+  }
+
+  // One deadline of single-shot timers. A tick that sees another live owner,
+  // the deadline, or a stopped generation ends the wait. It never loops.
+  function scheduleLockOwnedArm(owner: SessionGeneration): void {
+    clearLockWait(owner);
+    const deadline = Date.now() + lockArmWaitMs;
+    const tick = (): void => {
+      owner.lockWaitTimer = null;
+      if (!generationIsLive(owner)) return;
+      const ownership = lockOwnership();
+      if (ownership === "owned") {
+        activateOwnedWatch(owner);
+        return;
+      }
+      if (ownership === "other" || Date.now() >= deadline) return;
+      owner.lockWaitTimer = setTimeout(tick, lockArmPollMs);
+      owner.lockWaitTimer.unref();
+    };
+    owner.lockWaitTimer = setTimeout(tick, lockArmPollMs);
+    owner.lockWaitTimer.unref();
+  }
+
   pi.on?.("session_start", async () => {
     if (generation.stopping) generation = createGeneration();
     activateGeneration(generation);
+    clearLockWait(generation);
     markLoaded();
-    if (lockOwnership() !== "owned") return;
-    activateOwnedWatch(generation);
+    const ownership = lockOwnership();
+    if (ownership === "owned") {
+      activateOwnedWatch(generation);
+      return;
+    }
+    if (ownership === "other") return;
+    scheduleLockOwnedArm(generation);
   });
   pi.on?.("session_shutdown", async () => {
     // omp carries no shutdown reason (verified: `reason` is undefined), so the

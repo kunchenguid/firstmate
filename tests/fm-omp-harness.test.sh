@@ -574,6 +574,165 @@ EOF
   pass ".omp watch extension: fm_watch_arm_omp arms once, repeats as a no-op, and delivers an actionable close as one follow-up"
 }
 
+test_watch_extension_arms_when_lock_becomes_owned() {
+  local repo home out status
+  repo="$TMP_ROOT/autowait/repo"; home="$TMP_ROOT/autowait/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'armed\n' >> "${FM_HOME:?}/state/arm.log"
+printf 'watcher: started pid=%s (beacon 0s) recovery-generation=gen-1\n' "$$"
+sleep 30
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
+    FM_OMP_LOCK_ARM_WAIT_MS=400 FM_OMP_LOCK_ARM_POLL_MS=20 \
+    EXT="$repo/.omp/extensions/fm-primary-omp-watch.ts" node --input-type=module 2>&1 <<'EOF'
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
+import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+
+const home = process.env.FM_HOME;
+const lock = `${home}/state/.lock`;
+const armLog = `${home}/state/arm.log`;
+mkdirSync(`${home}/state`, { recursive: true });
+const handlers = new Map();
+const pi = {
+  on(e, h) { handlers.set(e, h); },
+  registerCommand() {},
+  registerTool() {},
+  sendUserMessage() { return undefined; },
+};
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+const start = handlers.get("session_start");
+const shutdown = handlers.get("session_shutdown");
+if (!start || !shutdown) throw new Error("session handlers were not registered");
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const armCount = () => existsSync(armLog) ? readFileSync(armLog, "utf8").trim().split("\n").filter(Boolean).length : 0;
+const waitForArm = async (want) => {
+  for (let i = 0; i < 40; i += 1) {
+    if (armCount() >= want) return;
+    await delay(25);
+  }
+  throw new Error(`expected at least ${want} automatic arm(s), saw ${armCount()}`);
+};
+const deadPid = async () => {
+  const child = spawn("sleep", ["30"]);
+  const pid = String(child.pid);
+  child.kill("SIGKILL");
+  await new Promise((resolve) => child.once("exit", resolve));
+  return pid;
+};
+
+writeFileSync(lock, `${await deadPid()}\n`);
+await start({ type: "session_start" }, {});
+if (armCount() !== 0) throw new Error("a dead previous lock armed before this process owned it");
+writeFileSync(lock, `${process.pid}\n`);
+await waitForArm(1);
+await shutdown({}, {});
+rmSync(armLog, { force: true });
+
+rmSync(lock, { force: true });
+await start({ type: "session_start" }, {});
+if (armCount() !== 0) throw new Error("a missing lock armed before acquisition");
+writeFileSync(lock, `${process.pid}\n`);
+await waitForArm(1);
+await shutdown({}, {});
+rmSync(armLog, { force: true });
+
+const other = spawn("sleep", ["30"]);
+writeFileSync(lock, `${other.pid}\n`);
+await start({ type: "session_start" }, {});
+await delay(500);
+if (armCount() !== 0) throw new Error("a different live lock owner armed the watcher");
+other.kill("SIGKILL");
+await new Promise((resolve) => other.once("exit", resolve));
+await shutdown({}, {});
+
+rmSync(lock, { force: true });
+await start({ type: "session_start" }, {});
+await shutdown({}, {});
+writeFileSync(lock, `${process.pid}\n`);
+await delay(500);
+if (armCount() !== 0) throw new Error("shutdown did not cancel the lock wait");
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "omp watch extension deferred arm: $out"
+  [ -z "$out" ] || fail "omp watch extension deferred arm printed output: $out"
+  pass ".omp watch extension: a not-yet-owned lock arms only after this process owns it, and never after another owner or shutdown"
+}
+
+test_new_process_resume_without_lock_runs_startup() {
+  local repo home out status
+  repo="$TMP_ROOT/resume-source/repo"; home="$TMP_ROOT/resume-source/home"
+  install_omp_extension_fixture "$repo"
+  mkdir -p "$home/state"
+  # shellcheck disable=SC2016 # $2 expands in the generated runner, not here
+  printf '#!/usr/bin/env bash\nprintf "OMP DIGEST source=%%s\\n" "$2"\n' > "$repo/bin/fm-sessionstart-run.sh"
+  chmod +x "$repo/bin/fm-sessionstart-run.sh"
+  out=$(FM_HOME="$home" EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" node --input-type=module 2>&1 <<'EOF'
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
+const sleeper = spawn("sleep", ["30"]);
+const dead = String(sleeper.pid);
+sleeper.kill("SIGKILL");
+await new Promise((resolve) => sleeper.once("exit", resolve));
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${dead}\n`);
+process.argv = ["node", "omp", "--resume", "01a0c738-4c08-72aa-8193-e9179aa2ce9e"];
+const handlers = new Map();
+const pi = { on(e, h) { handlers.set(e, h); }, sendMessage() {} };
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+const ctx = { sessionManager: { getSessionId: () => "resumed" } };
+handlers.get("session_start")({ type: "session_start" }, ctx);
+const first = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "hi" }, ctx);
+if (!first?.message?.content?.includes("source=startup")) {
+  throw new Error(`a new process --resume with a dead lock did not run startup: ${JSON.stringify(first)}`);
+}
+if (first.message.content.includes("source=resume")) {
+  throw new Error("dead-lock resume still selected the nudge source");
+}
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "omp resume without lock runs startup: $out"
+  [ -z "$out" ] || fail "omp resume source test printed output: $out"
+
+  printf '%s\n' "$$" > "$home/state/.lock"
+  # The shell pid is not the node process. Own the lock from inside the next node process.
+  out=$(FM_HOME="$home" EXT="$repo/.omp/extensions/fm-primary-turnend-guard.ts" node --input-type=module 2>&1 <<'EOF'
+import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
+process.argv = ["node", "omp", "--resume", "01a0c738-4c08-72aa-8193-e9179aa2ce9e"];
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const handlers = new Map();
+const pi = { on(e, h) { handlers.set(e, h); }, sendMessage() {} };
+const mod = await import(pathToFileURL(process.env.EXT).href);
+mod.default(pi);
+const ctx = { sessionManager: { getSessionId: () => "owned" } };
+handlers.get("session_start")({ type: "session_start" }, ctx);
+const owned = await handlers.get("before_agent_start")({ type: "before_agent_start", prompt: "hi" }, ctx);
+if (!owned?.message?.content?.includes("source=resume")) {
+  throw new Error(`an already-owned --resume did not keep the resume path: ${JSON.stringify(owned)}`);
+}
+await handlers.get("session_shutdown")({}, {});
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "omp resume that already owns the lock stays resume: $out"
+  [ -z "$out" ] || fail "omp owned resume source test printed output: $out"
+  pass ".omp turn-end guard: a new --resume without the lock runs startup, and an owned resume keeps the resume path"
+}
+
 test_detection_anchored_name_and_marker_precedence
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
@@ -585,3 +744,5 @@ test_control_composer_and_model_tables
 test_ownership_proof_is_omp_keyed
 test_turnend_guard_extension_compels_one_continuation
 test_watch_extension_arms_and_delivers
+test_watch_extension_arms_when_lock_becomes_owned
+test_new_process_resume_without_lock_runs_startup

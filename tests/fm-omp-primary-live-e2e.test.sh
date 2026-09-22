@@ -218,16 +218,25 @@ omp_real_pid=$(pgrep -P "$OMP_PID" -x omp 2>/dev/null | head -1 || true)
 [ -f "$PROJECT/state/.session-start-complete" ] || fail "session start did not record completion"
 pass "omp $OMP_VERSION: before_agent_start delivered the digest into model context and the lock names the omp process"
 
-# --- 2. watcher arm, successor, and wake delivery ------------------------------
+# --- 2. automatic watcher arm, successor, and wake delivery --------------------
 : > "$PROJECT/state/omp-e2e.meta"
-rpc_send '{"id":"p2","type":"prompt","message":"Call the fm_watch_arm_omp tool exactly once now, then reply with its result text verbatim and nothing else. Never run bin/fm-watch-arm.sh through bash."}'
-wait_for_log "watcher: started omp extension arm child 1" 360 || fail "omp did not render the initial watcher tool result: $(tail -3 "$RPC_ERR")"
-wait_for_agent_ends 2 360 || fail "omp did not finish the arm turn"
+i=0
+while [ "$i" -lt 240 ]; do
+  watcher_pid=$(cat "$PROJECT/state/.watch.lock/pid" 2>/dev/null || true)
+  if [ -n "$watcher_pid" ] && kill -0 "$watcher_pid" 2>/dev/null; then
+    break
+  fi
+  sleep 0.5
+  i=$((i + 1))
+done
 watcher_pid=$(cat "$PROJECT/state/.watch.lock/pid" 2>/dev/null || true)
 if [ -z "$watcher_pid" ] || ! kill -0 "$watcher_pid" 2>/dev/null; then
-  fail "no live watcher holds the lab home lock after fm_watch_arm_omp"
+  fail "the omp extension did not arm a live watcher after startup without fm_watch_arm_omp"
 fi
-pass "omp $OMP_VERSION: fm_watch_arm_omp started a live watcher through the extension"
+pass "omp $OMP_VERSION: the extension armed a live watcher without a model tool call"
+if [ "$(tool_call_count fm_watch_arm_omp)" -ne 0 ]; then
+  fail "startup armed through a model tool call ($(tool_call_count fm_watch_arm_omp))"
+fi
 
 printf 'done: omp live e2e watcher fire\n' > "$PROJECT/state/omp-e2e.status"
 i=0
@@ -239,10 +248,9 @@ done
 grep -Eq 'reason=actionable-signal.*successor=started:[0-9]+' "$PROJECT/state/.watch-cycle-exits.log" 2>/dev/null \
   || fail "omp extension did not start and ledger-link a successor after the actionable close"
 wait_for_log "FIRSTMATE WATCHER WAKE: signal:" 240 || fail "the actionable close was not delivered to main as a watcher follow-up"
-wait_for_agent_ends 3 360 || fail "omp did not finish the wake turn"
+wait_for_agent_ends 2 360 || fail "omp did not finish the wake turn"
 arm_calls=$(tool_call_count fm_watch_arm_omp)
-[ "$arm_calls" -eq 1 ] || fail "the model re-armed from memory instead of the extension (fm_watch_arm_omp call count $arm_calls)"
-pass "omp $OMP_VERSION: an actionable close spawned a ledger-linked successor and woke main exactly once"
+[ "$arm_calls" -eq 0 ] || fail "the model re-armed from memory instead of the extension (fm_watch_arm_omp call count $arm_calls)"
 
 # --- 3. the compelled turn-end guard continuation -------------------------------
 # Freeze the successor watcher (SIGSTOP) so its beacon goes stale past the lab
@@ -277,13 +285,13 @@ grep -q '^rc=2 ' "$GUARD_SPY_LOG" 2>/dev/null || { thaw; fail "the turn-end guar
 grep -q 'stop_hook_active":true' "$GUARD_SPY_LOG" 2>/dev/null || { thaw; fail "omp did not raise the compelled continuation's own stop (spy log: $(cat "$GUARD_SPY_LOG" 2>/dev/null))"; }
 i=0
 while [ "$i" -lt 360 ]; do
-  [ "$(tool_call_count fm_watch_arm_omp)" -ge 2 ] && break
+  [ "$(tool_call_count fm_watch_arm_omp)" -ge 1 ] && break
   sleep 0.5
   i=$((i + 1))
 done
-[ "$(tool_call_count fm_watch_arm_omp)" -ge 2 ] \
+[ "$(tool_call_count fm_watch_arm_omp)" -ge 1 ] \
   || { thaw; fail "the model did not reach for fm_watch_arm_omp after the compelled continuation"; }
-wait_for_agent_ends 4 360 || { thaw; fail "omp did not settle after the compelled continuation"; }
+wait_for_agent_ends 3 360 || { thaw; fail "omp did not settle after the compelled continuation"; }
 thaw
 sleep 3
 repaired_pid=$(cat "$PROJECT/state/.watch.lock/pid" 2>/dev/null || true)

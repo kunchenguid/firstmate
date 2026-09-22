@@ -18,11 +18,14 @@
 // Session-start delivery: omp's session_start payload carries no reason field
 // (verified: keys are `type` only), so the source is derived here, following
 // the Cursor precedent in docs/sessionstart-nudge.md. The first session_start
-// of the process is `startup` (or `resume` when the launch line named
-// --continue/-c or --resume/-r); a later session_start in the same process is
-// an in-process replacement (/new, /resume, /fork) and maps to `clear`, whose
-// wrapper contract re-emits the digest only when this lock owner already
-// completed a full startup; session_compact maps to `compact`.
+// of the process is `startup`, or `resume` only when the launch line named
+// --continue/-c or --resume/-r AND this process already owns the session lock.
+// A new process launched with --resume that does not own the lock uses
+// `startup`, so the runner acquires the lock instead of only nudging. A later
+// session_start in the same process is an in-process replacement (/new,
+// /resume, /fork) and maps to `clear`, whose wrapper contract re-emits the
+// digest only when this lock owner completed a full startup; session_compact
+// maps to `compact`.
 // before_agent_start returning { message } was verified to reach model context
 // on omp 18.1.11 (the model quoted an injected marker back), so omp qualifies
 // for the Run tier.
@@ -101,8 +104,6 @@ type SessionStartContext = {
   };
 };
 
-// The launch line is the only resume evidence omp offers an extension: its
-// session_start payload has no reason and no header timestamp is guaranteed.
 function launchResumeSource(): "resume" | undefined {
   const args = process.argv.slice(2);
   for (const arg of args) {
@@ -112,6 +113,13 @@ function launchResumeSource(): "resume" | undefined {
     ) return "resume";
   }
   return undefined;
+}
+
+// A new process with a resume flag still needs the real startup path unless it
+// already owns the lock. Same-process replacement stays on the later clear path.
+function initialSessionSource(): SessionstartSource {
+  if (launchResumeSource() && lockOwnership() === "owned") return "resume";
+  return "startup";
 }
 const sessionstartTruncatedMarker =
   "\n\nOMP SESSION-START DELIVERY TRUNCATED - the digest exceeded 512 KiB. " +
@@ -540,7 +548,7 @@ export default function (pi: ExtensionAPI) {
   pi.on?.("session_start", (_event, ctx) => {
     sessionStarts += 1;
     const source: SessionstartSource = sessionStarts === 1
-      ? (launchResumeSource() ?? "startup")
+      ? initialSessionSource()
       : "clear";
     markLoaded();
     registerSessionstartExitListener();

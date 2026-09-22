@@ -5,10 +5,11 @@ When this session owns supervision and away mode is not active:
    After handling all emitted wakes and reconciling open decisions and unread status lines, run the exact `--ack-through` command printed as `WAKE_ACK_REQUIRED`; until then the work remains durable for idempotent re-handling after interruption.
 2. Confirm the omp primary auto-loaded both project extensions from `.omp/extensions/`; omp has no project-trust gate, so a plain `omp` started with this home as its working directory loads them with no dialog.
    If `bin/fm-session-start.sh` reported the omp extensions as not loaded, restart omp inside this home; pass `-e __FM_OMP_TURNEND_EXT__ -e __FM_OMP_EXT__` only when omp must start from another directory, because omp loads a file named both ways twice.
-3. Initial process cycle only: make the one required `fm_watch_arm_omp` call; if startup already owned the fleet lock, this is an ownership-based no-op.
+3. The watcher extension arms itself once this process owns the session lock, including after a bounded wait when startup acquires the lock after `session_start`.
+   Do not call `fm_watch_arm_omp` for that initial arm.
    Use `/fm-watch-arm-omp` only as a human-entered fallback.
    Never run `bin/fm-watch-arm.sh` through omp's bash tool because that foreground arm can wedge the agent and bypasses extension-owned cleanup.
-4. If the extension says no live session holds the lock, run `bin/fm-session-start.sh` to reclaim the session lock, then call `fm_watch_arm_omp` again.
+4. If the extension says no live session holds the lock after that wait, run `bin/fm-session-start.sh` to reclaim the session lock; the extension arms when this process becomes the owner, and `fm_watch_arm_omp` remains the repair call only after a later missing, failed, or unhealthy notification.
 5. The extension starts `bin/fm-watch-arm.sh --restart`, keeps the child attached to the live omp process, and owns every later successor launch.
 6. Ordinary same-process session replacement (`/new`, `/resume`, `/fork`) retires only the prior generation; when the replacement owns the fleet lock, its `session_start` arms the new generation without a model turn or another `fm_watch_arm_omp` call.
    The generation-owner contract and in-flight actionable-close handoff live in `.omp/extensions/fm-primary-omp-watch.ts`; because omp reports no shutdown reason, every shutdown with a pending actionable close persists the handoff, and the next owning `session_start` in any process replays it.
