@@ -27,6 +27,11 @@ Wake, watcher, away-mode, and Relay-specific state mechanics remain with their n
 `AGENTS.md` retains the run-once and read-once operator rules, lock-refusal safety, installation consent, and direct-report recovery boundaries because those facts apply at every session start.
 Ordinary dead-direct-report recovery is owned by `stuck-crewmate-recovery`, while persistent-secondmate recovery is owned by `secondmate-provisioning`.
 
+## Project deploy branch (firstmate.deployBranch)
+
+This per-clone git config key names the branch a `projects/<name>` clone really deploys from when that is not the branch its forge advertises as the default, and every firstmate path that needs a base branch reads it, including the base a spawned worktree is prepared on and the base fleet sync compares a clone against.
+The [`bin/fm-deploy-branch-lib.sh` header](../bin/fm-deploy-branch-lib.sh) owns the exact command, the resolution order behind it, and what each caller does when the configured value cannot be resolved, while the [`project-management` skill](../.agents/skills/project-management/SKILL.md) owns the add-or-clone procedure that sets it.
+
 ## Calm preference (config/calm)
 
 The Pi Calm extension and the Claude Code Calm mod share the captain's home-local presentation choice in gitignored `config/calm` under the effective Firstmate home, so one `/calm` choice applies on either harness.
