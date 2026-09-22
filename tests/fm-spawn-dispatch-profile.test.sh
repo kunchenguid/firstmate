@@ -37,6 +37,8 @@ make_spawn_fakebin() {
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+# Match the option shape used by fm-timeout-lib.sh without delaying the test.
+[ "${1:-}" = -k ] && shift 2
 shift
 exec "$@"
 SH
@@ -299,6 +301,262 @@ test_unresolvable_relative_overrides_fail_loudly() {
   assert_contains "$out" "FM_DATA_OVERRIDE directory cannot be resolved: missing-data" \
     "spawn did not name the unresolvable FM_DATA_OVERRIDE"
   pass "unresolvable relative spawn overrides fail with named diagnostics"
+}
+
+prepare_auto_dispatch_fixture() {
+  local home=$1 fakebin=$2 response=$3 quota=$4
+  cat > "$home/config/crew-dispatch.json" <<'JSON'
+{"rules":[{"when":"current events","use":{"harness":"codex","model":"gpt-5","effort":"high"}}]}
+JSON
+  printf 'export TYPESAFE_API_KEY="test-key-for-auto-routing"\n' > "$home/.env"
+  cat > "$response" <<'JSON'
+{"model":"jev-latest","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.95,"probabilities":{"rule_1":0.95,"default":0.05}}},"usage":{"input_tokens":10,"output_tokens":2}}
+JSON
+  cat > "$quota" <<'JSON'
+{"generatedAt":"2030-01-01T00:00:00Z","schemaVersion":5,"providers":[{"provider":"codex","state":{"status":"fresh"},"quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":80,"runway":{"status":"through_reset"},"selection":{"spendPriority":0.5}}]}}]}
+JSON
+  cat > "$fakebin/curl" <<'SH'
+#!/usr/bin/env bash
+set -u
+out=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cp "$FAKE_CURL_RESPONSE" "$out"
+printf '200'
+SH
+  cat > "$fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = --json ] || exit 2
+cat "$QUOTA_AXI_FIXTURE"
+SH
+  chmod +x "$fakebin/curl" "$fakebin/quota-axi"
+}
+
+test_automatic_dispatch_clear_adopts_the_jev_profile() {
+  local rec id out status response quota pane_log
+  id=profile-auto-clear-z10
+  rec=$(make_spawn_case profile-auto-clear codex "$id")
+  read_case_record "$rec"
+  response="$CASE_DIR/jev-response.json"
+  quota="$CASE_DIR/quota.json"
+  pane_log="$CASE_DIR/pane.log"
+  prepare_auto_dispatch_fixture "$HOME_DIR" "$FAKEBIN_DIR" "$response" "$quota"
+
+  out=$(FAKE_CURL_RESPONSE="$response" QUOTA_AXI_FIXTURE="$quota" FM_FAKE_PANE_LOG="$pane_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a clear Jev result should route a fresh spawn: $out"
+  assert_contains "$out" "  status: clear" "automatic routing did not expose the clear resolver result"
+  assert_contains "$out" "spawned $id harness=codex" "automatic routing did not adopt the selected harness"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "test-key-for-auto-routing" "the resolver key reached the worker launch"
+  assert_contains "$(cat "$pane_log")" "unset TYPESAFE_API_KEY" "the resolver key was not removed from the pane shell"
+  pass "fresh crewmate spawns automatically adopt a clear Jev profile without leaking its key"
+}
+
+test_automatic_dispatch_clear_adopts_the_jev_profile_for_scout() {
+  local rec id out status response quota
+  id=profile-auto-scout-z10a
+  rec=$(make_spawn_case profile-auto-scout codex "$id")
+  read_case_record "$rec"
+  response="$CASE_DIR/jev-response.json"
+  quota="$CASE_DIR/quota.json"
+  prepare_auto_dispatch_fixture "$HOME_DIR" "$FAKEBIN_DIR" "$response" "$quota"
+
+  out=$(FAKE_CURL_RESPONSE="$response" QUOTA_AXI_FIXTURE="$quota" \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --scout)
+  status=$?
+  expect_code 0 "$status" "a clear Jev result should route a fresh scout: $out"
+  assert_contains "$out" "  status: clear" "automatic scout routing did not expose the clear resolver result"
+  assert_contains "$out" "spawned $id harness=codex kind=scout" "automatic routing did not adopt the selected scout harness"
+  assert_grep 'kind=scout' "$HOME_DIR/state/$id.meta" "automatic routing did not record the scout kind"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  pass "fresh scouts automatically adopt a clear Jev profile"
+}
+
+test_explicit_profile_bypasses_automatic_dispatch_and_scrubs_an_ambient_key() {
+  local rec id out status response quota marker pane_log
+  id=profile-auto-explicit-z10
+  rec=$(make_spawn_case profile-auto-explicit pi "$id")
+  read_case_record "$rec"
+  response="$CASE_DIR/jev-response.json"
+  quota="$CASE_DIR/quota.json"
+  marker="$CASE_DIR/resolver-called"
+  pane_log="$CASE_DIR/pane.log"
+  prepare_auto_dispatch_fixture "$HOME_DIR" "$FAKEBIN_DIR" "$response" "$quota"
+  cat > "$FAKEBIN_DIR/curl" <<SH
+#!/usr/bin/env bash
+: > "$marker"
+exit 99
+SH
+  chmod +x "$FAKEBIN_DIR/curl"
+
+  out=$(TYPESAFE_API_KEY=ambient-test-key FM_FAKE_PANE_LOG="$pane_log" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --harness pi --model openai-codex/gpt-5.6-luna --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "an explicit profile should bypass automatic routing: $out"
+  assert_absent "$marker" "an explicit profile unexpectedly invoked Jev"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-luna xhigh
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "ambient-test-key" "an ambient resolver key reached an explicit worker launch"
+  assert_contains "$(cat "$pane_log")" "unset TYPESAFE_API_KEY" "an ambient resolver key was not removed from an explicit pane"
+  pass "explicit profiles bypass Jev and still keep the resolver key out of the worker"
+}
+
+test_automatic_dispatch_without_key_keeps_the_existing_refusal_path() {
+  local rec id out status response quota marker
+  id=profile-auto-off-z10b
+  rec=$(make_spawn_case profile-auto-off codex "$id")
+  read_case_record "$rec"
+  response="$CASE_DIR/jev-response.json"
+  quota="$CASE_DIR/quota.json"
+  marker="$CASE_DIR/resolver-called"
+  prepare_auto_dispatch_fixture "$HOME_DIR" "$FAKEBIN_DIR" "$response" "$quota"
+  rm -f "$HOME_DIR/.env"
+  cat > "$FAKEBIN_DIR/curl" <<SH
+#!/usr/bin/env bash
+: > "$marker"
+exit 99
+SH
+  chmod +x "$FAKEBIN_DIR/curl"
+
+  out=$(TYPESAFE_API_KEY='' run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "dispatch without a key should keep the active-profile refusal"
+  assert_contains "$out" "dispatch-resolve: off" "the resolver did not report its opt-in gate as off"
+  assert_contains "$out" "config/crew-dispatch.json is active" "the no-key path changed the existing refusal"
+  assert_absent "$marker" "dispatch-off unexpectedly made a network request"
+  assert_absent "$HOME_DIR/state/$id.meta" "dispatch-off refusal published task metadata"
+  pass "an active dispatch file without a Jev key makes no network call and keeps the safe refusal"
+}
+
+test_no_dispatch_file_keeps_the_crew_fallback() {
+  local rec id out status response quota marker
+  id=profile-auto-no-rules-z10c
+  rec=$(make_spawn_case profile-auto-no-rules claude "$id")
+  read_case_record "$rec"
+  response="$CASE_DIR/jev-response.json"
+  quota="$CASE_DIR/quota.json"
+  marker="$CASE_DIR/resolver-called"
+  prepare_auto_dispatch_fixture "$HOME_DIR" "$FAKEBIN_DIR" "$response" "$quota"
+  rm -f "$HOME_DIR/config/crew-dispatch.json"
+  cat > "$FAKEBIN_DIR/curl" <<SH
+#!/usr/bin/env bash
+: > "$marker"
+exit 99
+SH
+  chmod +x "$FAKEBIN_DIR/curl"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "without dispatch rules the configured crew harness should remain the fallback: $out"
+  assert_contains "$out" "spawned $id harness=claude" "the no-rules fallback did not use config/crew-harness"
+  assert_absent "$marker" "no-rules fallback unexpectedly invoked Jev"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
+  pass "absence of crew-dispatch rules preserves the existing configured-harness fallback"
+}
+
+test_automatic_dispatch_ambiguous_keeps_the_existing_refusal_path() {
+  local rec id out status response quota
+  id=profile-auto-ambiguous-z10d
+  rec=$(make_spawn_case profile-auto-ambiguous codex "$id")
+  read_case_record "$rec"
+  response="$CASE_DIR/jev-response.json"
+  quota="$CASE_DIR/quota.json"
+  prepare_auto_dispatch_fixture "$HOME_DIR" "$FAKEBIN_DIR" "$response" "$quota"
+  cat > "$response" <<'JSON'
+{"model":"jev-latest","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.55,"probabilities":{"rule_1":0.55,"default":0.45}}},"usage":{"input_tokens":10,"output_tokens":2}}
+JSON
+
+  out=$(FAKE_CURL_RESPONSE="$response" QUOTA_AXI_FIXTURE="$quota" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "an ambiguous Jev result should not select a profile"
+  assert_contains "$out" "  status: ambiguous" "the ambiguous resolver result was not surfaced"
+  assert_contains "$out" "config/crew-dispatch.json is active" "ambiguous routing did not keep the explicit-intake backstop"
+  [ ! -s "$LAUNCH_LOG" ] || fail "ambiguous routing delivered a launch command"
+  assert_absent "$HOME_DIR/state/$id.meta" "ambiguous routing published task metadata"
+  pass "an ambiguous Jev result returns to the existing safe intake path"
+}
+
+test_automatic_dispatch_error_keeps_the_existing_refusal_path() {
+  local rec id out status marker
+  id=profile-auto-error-z10e
+  rec=$(make_spawn_case profile-auto-error codex "$id")
+  read_case_record "$rec"
+  marker="$CASE_DIR/resolver-called"
+  printf '%s\n' '{"rules":[{"when":"current events","use":{"harness":"codex","model":"gpt-5","effort":"high"}}]}' > "$HOME_DIR/config/crew-dispatch.json"
+  printf 'export TYPESAFE_API_KEY="test-key-for-auto-routing"\n' > "$HOME_DIR/.env"
+  cat > "$FAKEBIN_DIR/curl" <<SH
+#!/usr/bin/env bash
+: > "$marker"
+printf '503'
+SH
+  chmod +x "$FAKEBIN_DIR/curl"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 1 "$status" "a Jev error should not select a profile"
+  assert_contains "$out" "  status: error" "the resolver error result was not surfaced"
+  assert_contains "$out" "config/crew-dispatch.json is active" "resolver errors did not keep the explicit-intake backstop"
+  assert_present "$marker" "the error case did not exercise the resolver network boundary"
+  [ ! -s "$LAUNCH_LOG" ] || fail "resolver error delivered a launch command"
+  assert_absent "$HOME_DIR/state/$id.meta" "resolver error published task metadata"
+  pass "a Jev error returns to the existing safe intake path without launching"
+}
+
+test_relaunch_with_an_explicit_profile_bypasses_automatic_dispatch() {
+  local rec id out status response quota marker
+  id=profile-auto-relaunch-z10f
+  rec=$(make_spawn_case profile-auto-relaunch codex "$id")
+  read_case_record "$rec"
+  response="$CASE_DIR/jev-response.json"
+  quota="$CASE_DIR/quota.json"
+  marker="$CASE_DIR/resolver-called"
+  prepare_auto_dispatch_fixture "$HOME_DIR" "$FAKEBIN_DIR" "$response" "$quota"
+  out=$(FAKE_CURL_RESPONSE="$response" QUOTA_AXI_FIXTURE="$quota" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+      --harness pi --model openai-codex/gpt-5.6-luna --effort xhigh)
+  expect_code 0 "$?" "the initial explicit profile should spawn: $out"
+
+  cat > "$FAKEBIN_DIR/curl" <<SH
+#!/usr/bin/env bash
+: > "$marker"
+exit 99
+SH
+  chmod +x "$FAKEBIN_DIR/curl"
+  cat > "$FAKEBIN_DIR/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+case "\${1:-}" in
+  list-windows) printf '%s\\n' "fm-$id" ;;
+  display-message)
+    for arg in "\$@"; do
+      case "\$arg" in
+        *pane_current_path*) printf '%s\\n' "$WT_DIR"; exit 0 ;;
+        *pane_current_command*) printf '%s\\n' zsh; exit 0 ;;
+        *cursor_y*) printf '%s\\n' 1; exit 0 ;;
+      esac
+    done
+    printf '%s\\n' firstmate ;;
+  has-session|new-session|new-window|kill-window|set-window-option|send-keys) exit 0 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$FAKEBIN_DIR/tmux"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --relaunch \
+    --harness pi --model openai-codex/gpt-5.6-luna --effort xhigh)
+  status=$?
+  expect_code 0 "$status" "an explicit relaunch profile should succeed: $out"
+  assert_absent "$marker" "relaunch unexpectedly invoked automatic dispatch"
+  assert_contains "$out" "spawned $id harness=pi" "relaunch did not preserve the explicit harness"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" pi openai-codex/gpt-5.6-luna xhigh
+  pass "relaunches preserve explicit profile axes and bypass automatic dispatch"
 }
 
 test_active_dispatch_profile_requires_explicit_harness_for_ship() {
@@ -1488,6 +1746,14 @@ test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
 test_unresolvable_relative_overrides_fail_loudly
+test_automatic_dispatch_clear_adopts_the_jev_profile
+test_automatic_dispatch_clear_adopts_the_jev_profile_for_scout
+test_explicit_profile_bypasses_automatic_dispatch_and_scrubs_an_ambient_key
+test_automatic_dispatch_without_key_keeps_the_existing_refusal_path
+test_no_dispatch_file_keeps_the_crew_fallback
+test_automatic_dispatch_ambiguous_keeps_the_existing_refusal_path
+test_automatic_dispatch_error_keeps_the_existing_refusal_path
+test_relaunch_with_an_explicit_profile_bypasses_automatic_dispatch
 test_active_dispatch_profile_requires_explicit_harness_for_ship
 test_active_dispatch_profile_requires_explicit_harness_for_scout
 test_active_dispatch_profile_allows_explicit_harness

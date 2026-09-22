@@ -406,7 +406,10 @@ TEXT=$(jq -r '
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
       + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
-  (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
+  (if .chosen then "  profile_harness: \(.chosen.profile.harness | flat)"
+      + (if .chosen.profile.model then "\n  profile_model: \(.chosen.profile.model | flat)" else "" end)
+      + (if .chosen.profile.effort then "\n  profile_effort: \(.chosen.profile.effort | flat)" else "" end)
+      + "\n  profile: --harness \(.chosen.profile.harness | shell_arg)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 printf '%s\n' "$TEXT"

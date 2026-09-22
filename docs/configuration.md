@@ -450,10 +450,11 @@ Every claude launch's inline `--settings` JSON also carries `"attribution":{"com
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
-`config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules that firstmate reads before dispatching a crewmate or scout.
-The shell scripts do not match those rules; firstmate chooses the best matching rule with judgment, resolves its profile object or array under the operating contract in `AGENTS.md` section 4 and `quota-array-dispatch`, and passes only concrete `--harness`, `--model`, and `--effort` flags to `fm-spawn.sh`.
-When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate and scout spawns that lack an explicit harness (`--harness`, a positional adapter, or a raw launch command).
-Batch spawns satisfy the same requirement with a shared `--harness`.
+`config/crew-dispatch.json` is an optional local, gitignored file containing natural-language rules for crewmate and scout dispatch.
+On a fresh spawn without an explicit profile, `fm-spawn.sh` invokes `bin/fm-dispatch-resolve.sh`, which lets Jev match the rules and lets the deterministic resolver apply the profile and quota gates.
+A clear result supplies concrete `--harness`, `--model`, and `--effort` axes to that same spawn; an explicit profile is the intentional firstmate bypass when typed routing is off, unavailable, or inapplicable.
+A non-clear result never selects a profile and leaves the existing explicit-intake refusal in place, so a failed resolver cannot silently choose a different worker.
+Batch spawns enter the same per-task automatic path unless a shared explicit profile is supplied.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics.
 `AGENTS.md` section 4 owns the always-loaded dispatch intake boundary, and `quota-array-dispatch` owns the completion-aware profile-array selection procedure.
@@ -524,7 +525,9 @@ Rules come only from the effective home's `config/crew-dispatch.json`; `FM_CONFI
 bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON block on stdout
 ```
 
-Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.
+A normal fresh `fm-spawn.sh` invocation invokes the resolve path automatically after intake arguments are known, without a preflight, when the dispatch file is present and no explicit profile was supplied.
+The resolver is skipped for explicit profiles and relaunches, preserving firstmate's deliberate bypass and the recorded profile across recovery.
+The absent-key off line is handled exactly like every other non-clear outcome, leaving the existing explicit-intake path in control.
 When on and at least one rule exists, the tool sends the project name and the whole brief as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, or approvals.
 An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
 Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, and the numeric `spendPriority` argmax over candidates using each candidate's limiting row.

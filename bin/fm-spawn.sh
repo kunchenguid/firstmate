@@ -143,11 +143,15 @@
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
 #   contention refuses rather than waits.
-#   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
-#   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
-#   spawns require an explicit harness so firstmate cannot silently skip dispatch
-#   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
-#   harness (config/secondmate-harness -> config/crew-harness -> own), so the
+#   With no harness arg, a fresh crewmate/scout spawn consults the active
+#   config/crew-dispatch.json through bin/fm-dispatch-resolve.sh and adopts a
+#   clear concrete profile automatically. A non-clear answer remains a safe
+#   refusal requiring firstmate's existing explicit intake decision; an explicit
+#   harness/model/effort is the intentional bypass for unavailable or inapplicable
+#   typed routing. With no active dispatch file, the CREW harness fallback is
+#   unchanged. Relaunches never re-resolve: they reuse the recorded profile.
+#   A --secondmate spawn is exempt and resolves the SECONDMATE harness
+#   (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
 #   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
@@ -238,10 +242,11 @@
 #   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
-#   If config/crew-dispatch.json exists, shared --harness is required for crewmate
-#   and scout batches. The loop lives here, in bash, so callers never hand-write a
-#   multi-task shell loop (the tool shell is zsh, which does not word-split unquoted
-#   $vars and silently breaks ad-hoc `for ... in $pairs` loops).
+#   Each batch pair enters the same automatic dispatch path as a single task.
+#   An explicit shared profile intentionally bypasses typed routing for every pair.
+#   The loop lives here, in bash, so callers never hand-write a multi-task shell
+#   loop (the tool shell is zsh, which does not word-split unquoted $vars and
+#   silently breaks ad-hoc `for ... in $pairs` loops).
 # Launch delivery:
 #   Every harness and backend receives its complete launch command from a
 #   never-reused 0600 file in a 0700 home-scoped task namespace under /tmp, while
@@ -573,6 +578,7 @@ YOLO=
 TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
+DISPATCH_RESOLVER_RAN=0
 EFFORT_SET=0
 BACKEND_SET=0
 MODE_SET=0
@@ -1337,10 +1343,6 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac then
-  if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
-    echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
-    exit 1
-  fi
   rc=0
   shared_args=()
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
@@ -1720,6 +1722,46 @@ else
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}
 fi
+
+# An active dispatch file is the opt-in boundary for automatic typed routing.
+# Invoke the resolver only for a fresh crewmate/scout without an explicit profile;
+# relaunches and explicit profiles are deliberate firstmate decisions. The
+# resolver owns rule matching, quota evidence, and profile-array selection. This
+# caller only adopts its clear, machine-readable axes and leaves every other
+# outcome on the existing explicit-intake path.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] &&
+  [ -z "$HARNESS_ARG" ] && [ -z "$ARG3" ] &&
+  [ "$MODEL_SET" -eq 0 ] && [ "$EFFORT_SET" -eq 0 ] &&
+  [ -f "$CONFIG/crew-dispatch.json" ]; then
+  DISPATCH_RESOLVER_RAN=1
+  dispatch_project=${PROJ%/}
+  dispatch_project=${dispatch_project##*/}
+  dispatch_output=$("$FM_ROOT/bin/fm-dispatch-resolve.sh" "$DATA/$ID/brief.md" \
+    --project "$dispatch_project" 2>&1)
+  dispatch_rc=$?
+  [ -z "${TYPESAFE_API_KEY:-}" ] || unset TYPESAFE_API_KEY
+  [ -z "$dispatch_output" ] || printf '%s\n' "$dispatch_output" >&2
+  if [ "$dispatch_rc" -ne 0 ]; then
+    echo "error: automatic dispatch resolution could not produce a profile; resolve the dispatch configuration before spawning $ID" >&2
+    exit 1
+  fi
+  dispatch_status=$(printf '%s\n' "$dispatch_output" | sed -n 's/^  status: //p' | tail -n 1)
+  if [ "$dispatch_status" = clear ]; then
+    dispatch_harness=$(printf '%s\n' "$dispatch_output" | sed -n 's/^  profile_harness: //p' | tail -n 1)
+    [ -n "$dispatch_harness" ] || {
+      echo "error: automatic dispatch resolution returned clear without profile_harness" >&2
+      exit 1
+    }
+    HARNESS_ARG=$dispatch_harness
+    HARNESS_SET=1
+    if [ "$MODEL_SET" -eq 0 ] && dispatch_model=$(printf '%s\n' "$dispatch_output" | sed -n 's/^  profile_model: //p' | tail -n 1) && [ -n "$dispatch_model" ]; then
+      MODEL=$dispatch_model
+    fi
+    if [ "$EFFORT_SET" -eq 0 ] && dispatch_effort=$(printf '%s\n' "$dispatch_output" | sed -n 's/^  profile_effort: //p' | tail -n 1) && [ -n "$dispatch_effort" ]; then
+      EFFORT=$dispatch_effort
+    fi
+  fi
+fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
 
 shell_quote() {
@@ -2073,12 +2115,15 @@ case "$ARG3" in
   done
   ;;
 '')
-  # No explicit harness: resolve from config. A secondmate AGENT launches on the
-  # secondmate harness (config/secondmate-harness -> config/crew-harness -> own);
-  # every other kind uses the crew harness only when no dispatch profile file is
-  # active. Resolving here on every spawn is what makes the split DURABLE - a
-  # respawn (recovery, /updatefirstmate, restart) re-resolves, so
-  # config/secondmate-harness keeps governing secondmate launches across restarts.
+  # No explicit harness/profile: resolve from config. A secondmate AGENT launches
+  # on the secondmate harness (config/secondmate-harness -> config/crew-harness ->
+  # own). A fresh crewmate/scout with an active dispatch file reaches this branch
+  # only after the typed resolver returned a non-clear result, so retain the
+  # explicit-profile backstop rather than selecting an untyped default. With no
+  # active dispatch file, resolve the crew harness as before. Resolving here on
+  # every spawn is what makes the split durable - a respawn (recovery,
+  # /updatefirstmate, restart) re-resolves, so config/secondmate-harness keeps
+  # governing secondmate launches across restarts.
   # The launch_template lookup below is the unverified-adapter guard for both
   # kinds: a harness with no template aborts the spawn.
   if [ "$KIND" = secondmate ]; then
@@ -4638,6 +4683,11 @@ claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo 
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
+# A resolver key may have been ambient in the firstmate shell. Automatic routing
+# must never hand that credential to the worker or leave it in the pane shell.
+if [ "$DISPATCH_RESOLVER_RAN" = 1 ] || [ -n "${TYPESAFE_API_KEY:-}" ]; then
+  LAUNCH="env -u TYPESAFE_API_KEY $LAUNCH"
+fi
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
@@ -4725,6 +4775,9 @@ spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # pre-launch channel, so later commands in that shell inherit it too. The launch
 # command independently establishes the value for the agent process itself.
 spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1"
+if [ "$DISPATCH_RESOLVER_RAN" = 1 ] || [ -n "${TYPESAFE_API_KEY:-}" ]; then
+  spawn_send_text_line "$T" "unset TYPESAFE_API_KEY"
+fi
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   spawn_send_text_line "$T" "export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST")"
 fi
