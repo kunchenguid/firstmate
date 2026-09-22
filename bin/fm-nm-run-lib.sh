@@ -124,24 +124,53 @@ fm_nm_run_status_class() {  # <status_word>
   esac
 }
 
+# The primary checkout that owns worktree $1's object store, spelled as git
+# reports it, or empty when git cannot answer or the repository is bare.
+# `no-mistakes` registers a repository under the PRIMARY checkout's path, not
+# under the linked worktree the work happens in (verified 2026-09-21 against
+# no-mistakes v1.72.0: `no-mistakes init` run inside a linked worktree records
+# the primary checkout, and `no-mistakes axi` reports that same path as its
+# `repo:` line), so a crew's task worktree is never the recorded
+# `working_path` and a lookup that asks only for it can never match.
+# `--path-format=absolute` is what makes the answer usable from either kind of
+# checkout: a linked worktree already reports an absolute common dir, while a
+# primary checkout reports a bare relative `.git` without it.
+fm_nm_primary_checkout() {  # <worktree>
+  local common
+  common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+  case "$common" in
+    /*/.git) printf '%s' "${common%/.git}" ;;
+  esac
+}
+
 # Select from a complete `no-mistakes axi` overview with the existing awk
 # toolchain. A capped overview requires an optional Python 3 sqlite3 reader
 # for a read-only same-branch query of NM_HOME/state.sqlite (default:
 # ~/.no-mistakes/state.sqlite; relative NM_HOME resolves from the worktree).
-# Repo identity is the overview's own top-level `repo:` line, which every axi
-# release emits: it is the `working_path` the CLI itself resolved for the
-# queried worktree. That is NOT the task worktree path in general - a linked
-# git worktree resolves to its main clone's registered path (observed
+# The ten-row cap on that overview is the CLI's own (tests/captures/
+# no-mistakes-v1.70.1/README.md; reproduced live against v1.72.0 on
+# 2026-09-21), and the CLI declares it in its own `count: <shown> of <total>
+# total` line - nothing here truncates the table, and this reader must never
+# treat the displayed window as the whole one.
+# Repo identity is asked for in three exact spellings, in order: the overview's
+# own top-level `repo:` line, which every axi release emits and is the
+# `working_path` the CLI itself resolved for the queried worktree; then the task
+# worktree; then the primary checkout that owns it (fm_nm_primary_checkout
+# above). The overview's line leads because a linked git worktree is NOT its own
+# recorded path - it resolves to its main clone's registered path (observed
 # 2026-09-22 on v1.79.0: every task copy of a firstmate home reports
 # `repo: <home clone>`, and looking the repo up by the task worktree path
-# matched no row, so every capped read reported the inventory unreadable).
-# The recorded spelling is matched exactly, so an overview without exactly one
-# absolute `repo:` line, or with one the inventory does not record, reads as
-# unreadable rather than guessed among candidates.
+# matched no row, so every capped read reported the inventory unreadable). The
+# two path candidates follow it, for an overview carrying no usable `repo:`
+# line. Every candidate is matched exactly against the recorded spelling and
+# nothing is guessed among them; a lookup matching none reports WHICH paths it
+# asked for rather than a bare unknown.
 # The reader subprocess is bounded by $4 seconds (default 10), so a contended
 # database can never outlast the caller's per-read budget.
-# If that reader or inventory is unavailable, report unknown with available
-# candidate ids rather than treating the displayed window as complete.
+# If that reader or inventory is unavailable, report what could not be read and
+# why, with available candidate ids, rather than treating the displayed window
+# as complete; a read that SUCCEEDED and still settled nothing opens with
+# `could not settle` instead, so no reason claims a failure that did not happen.
 # Structural completeness applies to the whole table; semantic validation
 # applies only to the requested branch, after complete identity lookup when
 # capped. Branch names are matched exactly without a character whitelist.
@@ -160,7 +189,7 @@ fm_nm_run_status_class() {  # <status_word>
 # structurally truncated tables report unknown, retaining every readable
 # same-branch candidate id.
 fm_nm_select_run() {  # <branch> <axi-overview> <worktree> [timeout_secs]
-  local selection inventory available_ids timeout_secs=${4:-10}
+  local selection inventory available_ids primary_checkout timeout_secs=${4:-10}
   case "$timeout_secs" in ''|*[!0-9]*) timeout_secs=10 ;; esac
   selection=$(printf '%s\n' "$2" | awk -v branch="$1" '
     function scalar(s) {
@@ -221,13 +250,13 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree> [timeout_secs]
     END {
       if (!found) print "unavailable"
       else if (bad || counts != 1 || (seen+0) != (expected+0) || (seen+0) != (shown+0) || (total+0) < (shown+0))
-        print "unknown|unreadable runs table; run ids: " ids
+        print "unknown|could not read the runs table: its rows contradict its own count header; run ids: " ids
       else if ((shown+0) < (total+0)) print "incomplete|" ids
-      else if (invalid_run) print "unknown|unreadable runs table; run ids: " ids
-      else if (unknown_status) print "unknown|unrecognized run status; run ids: " ids
+      else if (invalid_run) print "unknown|could not read the runs table: a same-branch row is malformed or repeats a run id; run ids: " ids
+      else if (unknown_status) print "unknown|could not settle the run status for this branch: the runs table lists a word this reader does not recognize; run ids: " ids
       else if (first == "") print "absent"
       else if ((first_status == "running" || first_status == "pending") && live > 1)
-        print "unknown|competing live runs; run ids: " ids
+        print "unknown|could not tell which run on this branch is current: two are recorded live at once; run ids: " ids
       else print "selected|" first "|" first_status "|" ids
     }
   ')
@@ -235,7 +264,8 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree> [timeout_secs]
     incomplete\|*) available_ids=${selection#*|} ;;
     *) printf '%s\n' "$selection"; return ;;
   esac
-  if ! inventory=$(fm_nm_bounded "$3" "$timeout_secs" python3 - "$1" "$2" "$3" "$available_ids" 2>/dev/null <<'PY'
+  primary_checkout=$(fm_nm_primary_checkout "$3")
+  if ! inventory=$(fm_nm_bounded "$3" "$timeout_secs" python3 - "$1" "$2" "$3" "$primary_checkout" "$available_ids" 2>/dev/null <<'PY'
 import json
 import os
 import re
@@ -244,47 +274,90 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
-branch, overview, worktree, available_ids = sys.argv[1:]
+
+
+class Unreadable(Exception):
+    """Names what this reader could not read, in its own voice."""
+
+
+class Unsettled(Exception):
+    """Names what this reader read whole but still could not settle."""
+
+
+branch, overview, worktree, primary_checkout, available_ids = sys.argv[1:]
 ids = available_ids.split(", ") if available_ids else []
+# The overview's own `repo:` line first - it is the working_path the CLI itself
+# resolved for this worktree - then the task worktree and the primary checkout
+# that owns it, for an overview carrying no usable line. A linked worktree is
+# never its own recorded working_path. All three are exact matches.
+overview_repo = ""
+repos = [line[6:].strip() for line in overview.splitlines() if line.startswith("repo: ")]
+if len(repos) == 1:
+    try:
+        overview_repo = json.loads(repos[0]) if repos[0].startswith('"') else repos[0]
+    except ValueError:
+        overview_repo = ""
+    if not isinstance(overview_repo, str):
+        overview_repo = ""
+candidates = []
+for path in (overview_repo, worktree, primary_checkout):
+    if path and os.path.isabs(path) and path not in candidates:
+        candidates.append(path)
 try:
-    repos = [line[6:].strip() for line in overview.splitlines() if line.startswith("repo: ")]
-    if len(repos) != 1:
-        raise ValueError
-    repo_path = json.loads(repos[0]) if repos[0].startswith('"') else repos[0]
-    if not isinstance(repo_path, str) or not os.path.isabs(repo_path):
-        raise ValueError
+    if not candidates:
+        raise Unreadable("this task copy has no path to look its repository up by")
     root = Path(os.environ.get("NM_HOME") or Path.home() / ".no-mistakes")
     if not root.is_absolute():
         root = Path(worktree) / root
-    with closing(sqlite3.connect((root / "state.sqlite").as_uri() + "?mode=ro", uri=True, timeout=30)) as db:
+    database = root / "state.sqlite"
+    try:
+        connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=30)
+    except (OSError, sqlite3.Error):
+        raise Unreadable("the no-mistakes state database %s could not be opened" % database)
+    with closing(connection) as db:
         db.execute("BEGIN")
-        repo = db.execute("SELECT id FROM repos WHERE working_path = ?", (repo_path,)).fetchall()
-        if len(repo) != 1:
-            raise ValueError
+        repo_id = None
+        for path in candidates:
+            found = db.execute("SELECT id FROM repos WHERE working_path = ?", (path,)).fetchall()
+            if len(found) > 1:
+                raise Unreadable("no-mistakes records more than one repository at %s" % path)
+            if len(found) == 1:
+                repo_id = found[0][0]
+                break
+        if repo_id is None:
+            raise Unreadable("no-mistakes has no repository recorded at " + " or ".join(candidates))
         rows = db.execute(
             "SELECT id, branch, status, head_sha FROM runs WHERE repo_id = ? AND branch = ? "
-            "ORDER BY created_at DESC, id DESC", (repo[0][0], branch)
+            "ORDER BY created_at DESC, id DESC", (repo_id, branch)
         ).fetchall()
     displayed_ids = set(ids)
     for row in rows:
         if isinstance(row[0], str) and re.fullmatch(r"[A-Za-z0-9_-]+", row[0]) and row[0] not in ids:
             ids.append(row[0])
     if not displayed_ids.issubset(row[0] for row in rows):
-        raise ValueError
+        raise Unsettled("the displayed runs table names runs the state database does not have")
     for row in rows:
         if (not all(isinstance(value, str) for value in row)
                 or not re.fullmatch(r"[A-Za-z0-9_-]+", row[0]) or row[1] != branch
                 or not re.fullmatch(r"[a-z_-]+", row[2]) or not re.fullmatch(r"[a-fA-F0-9]{7,40}", row[3])):
-            raise ValueError
+            raise Unreadable("the state database's own run rows for this branch did not validate")
     print("count: %d of %d total" % (len(rows), len(rows)))
     print("runs[%d]{id,branch,status,head,pr}:" % len(rows))
     for row in rows:
         print("  " + ",".join(json.dumps(value, ensure_ascii=False) for value in row) + ',""')
-except (ValueError, OSError, sqlite3.Error):
-    print("unknown|complete same-branch run inventory unreadable; run ids: " + ", ".join(ids))
+except (Unreadable, Unsettled, ValueError, OSError, sqlite3.Error) as error:
+    if isinstance(error, Unsettled):
+        opening, reason = "could not settle", str(error)
+    elif isinstance(error, Unreadable):
+        opening, reason = "could not read", str(error)
+    else:
+        opening = "could not read"
+        reason = "the no-mistakes state database could not be read (%s)" % type(error).__name__
+    print("unknown|%s this branch's run inventory: %s; run ids: %s"
+          % (opening, reason, ", ".join(ids)))
 PY
   ); then
-    printf 'unknown|complete same-branch run inventory reader unavailable; run ids: %s\n' "$available_ids"
+    printf "unknown|could not read this branch's run inventory: the state-database reader (python3) could not be run or did not finish; run ids: %s\n" "$available_ids"
     return
   fi
   case "$inventory" in
@@ -293,7 +366,7 @@ PY
   esac
   case "$selection" in
     selected\|*|unknown\|*|absent) printf '%s\n' "$selection" ;;
-    *) printf 'unknown|complete same-branch run inventory unreadable; run ids: %s\n' "$available_ids" ;;
+    *) printf "unknown|could not read this branch's run inventory: the recovered inventory did not parse; run ids: %s\n" "$available_ids" ;;
   esac
 }
 
