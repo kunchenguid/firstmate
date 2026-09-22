@@ -516,6 +516,55 @@ test_expected_head_rejects_hidden_file_mode_changes() {
   pass "expected-head rejects file-mode changes hidden by repository config"
 }
 
+test_expected_head_rejects_filtered_worktree_bytes() {
+  local rec id out status attributes expected
+  id=pool-expected-filtered-bytes-r21
+  rec=$(make_case expected-filtered-bytes "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" config filter.review.clean "sed 's/^SMUDGED$/base/'"
+  git -C "$POOL_DIR" config filter.review.smudge "sed 's/^base$/SMUDGED/'"
+  attributes=$(git -C "$POOL_DIR" rev-parse --git-path info/attributes)
+  printf 'README.md filter=review\n' >"$attributes"
+  printf 'force checkout\n' >"$POOL_DIR/README.md"
+  git -C "$POOL_DIR" reset --hard "$INITIAL_SHA" >/dev/null
+  [ "$(cat "$POOL_DIR/README.md")" = SMUDGED ] \
+    || fail "fixture did not smudge the tracked worktree bytes"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain)" ] \
+    || fail "fixture did not map the smudged bytes back through the clean filter"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "expected-head spawn launched filtered bytes outside the reviewed blob"
+  [ "$(cat "$POOL_DIR/README.md")" = SMUDGED ] \
+    || fail "expected-head refusal discarded the filtered worktree bytes"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "filtered-bytes-refused expected head published task metadata"
+
+  id=pool-expected-submodule-filtered-bytes-r21
+  rec=$(make_submodule_case expected-submodule-filtered-bytes "$id")
+  read_submodule_case "$rec"
+  expected=$(git -C "$POOL_DIR" rev-parse HEAD)
+  git -C "$POOL_DIR/ui" config filter.review.clean "sed 's/^SMUDGED$/pin one/'"
+  git -C "$POOL_DIR/ui" config filter.review.smudge "sed 's/^pin one$/SMUDGED/'"
+  attributes=$(git -C "$POOL_DIR/ui" rev-parse --git-path info/attributes)
+  printf 'lib.txt filter=review\n' >"$attributes"
+  printf 'force checkout\n' >"$POOL_DIR/ui/lib.txt"
+  git -C "$POOL_DIR/ui" reset --hard "$SUBPIN1" >/dev/null
+  [ "$(cat "$POOL_DIR/ui/lib.txt")" = SMUDGED ] \
+    || fail "fixture did not smudge tracked bytes inside the initialized submodule"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain --ignore-submodules=none)" ] \
+    || fail "fixture did not hide filtered submodule bytes from superproject status"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$expected")
+  status=$?
+  [ "$status" -ne 0 ] || fail "expected-head spawn launched filtered submodule bytes outside the reviewed blob"
+  [ "$(cat "$POOL_DIR/ui/lib.txt")" = SMUDGED ] \
+    || fail "expected-head refusal discarded filtered bytes inside the submodule"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "filtered-submodule-refused expected head published task metadata"
+  pass "expected-head rejects filtered bytes in reviewed trees and submodules"
+}
+
 test_expected_head_retires_endpoint_when_cancel_fails() {
   local rec id out status real_sleep marker pending started retired
   id=pool-expected-cancel-fail-r9
@@ -1230,6 +1279,7 @@ test_expected_head_refuses_unsupported_lifecycle_shapes
 test_expected_head_is_reverified_immediately_before_launch
 test_expected_head_rejects_submodule_index_suppression
 test_expected_head_rejects_hidden_file_mode_changes
+test_expected_head_rejects_filtered_worktree_bytes
 test_expected_head_retires_endpoint_when_cancel_fails
 test_expected_head_preserves_ownership_when_endpoint_survives
 test_expected_head_ignores_cleanliness_hiding_config
