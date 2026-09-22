@@ -620,7 +620,7 @@ Standing `yolo` merge authority is not a substitute for a current explicit capta
 
 ## Agent Tooling & Token Economy Directives
 
-## 1. High-Priority Shell Tools (AXI Protocol)
+### High-Priority Shell Tools (AXI Protocol)
 To preserve context window budget and minimize token spend, you MUST use AXI CLI tools instead of default CLIs or raw JSON outputs.
 
 - **GitHub Operations**: ALWAYS run `gh-axi` instead of `gh`.
@@ -632,7 +632,7 @@ To preserve context window budget and minimize token spend, you MUST use AXI CLI
   - Zero-token writes: Run `tasks-axi claim <id>`, `tasks-axi done <id>`, or `tasks-axi create --title "..."`.
   - Inspection: Run `tasks-axi ready` to find unblocked tasks without scanning the entire backlog.
 
-## 2. Output Formatting (TOON Notation)
+### Output Formatting (TOON Notation)
 - AXI tools output data in TOON format (compact token-efficient lines).
 - Parse these structured headers directly; do NOT rerun commands with `--json` unless deterministic machine validation is strictly required.
 
