@@ -276,6 +276,11 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
+# After Fix 1 and Fix 2, a ship task whose local copy this teardown owns has
+# its no-mistakes pipeline spend recorded by bin/fm-pipeline-spend.sh, which
+# owns the attribution and the ledger. It runs before the task branch it
+# attributes runs by is deleted and before state/<id>.meta is removed, and is
+# best effort: a failure warns and never blocks cleanup.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -3460,6 +3465,11 @@ if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 elif [ "$KIND" != secondmate ]; then
   reap_task_worktree_processes tasktmp "$TASK_TMP"
+fi
+if [ "$KIND" = ship ] && teardown_owns_worktree && [ -d "$WT" ]; then
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+    "$SCRIPT_DIR/fm-pipeline-spend.sh" record "$ID" >/dev/null \
+    || echo "warning: could not record $ID's no-mistakes pipeline spend; cleanup continues" >&2
 fi
 
 # Fix 3 (see script header): sweep remote job workers abandoned by an already
