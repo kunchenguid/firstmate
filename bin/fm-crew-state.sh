@@ -94,10 +94,14 @@
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working
 #      (the id-addressed detail read carries step words the overview does not),
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed/passed-with-override -> done, failed/cancelled ->
-#      failed. passed-with-override is a passing outcome carrying an
-#      explicitly approved Test or CI exception (no-mistakes' own vocabulary),
-#      read identically to a clean passed. EXCEPT: while
+#      passed/checks-passed/passed-with-override/passed-with-skips -> done,
+#      failed/cancelled -> failed. passed-with-override is a passing outcome
+#      carrying an explicitly approved Test or CI exception (no-mistakes' own
+#      vocabulary), read identically to a clean passed. passed-with-skips is
+#      also a passing outcome (publication or CI verification was
+#      automatically skipped, no-mistakes' own vocabulary), read as done but
+#      with that skip kept visible in the detail, unlike a clean passed.
+#      EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a ci-step log-tail check overrides working -> done once checks read
@@ -1016,6 +1020,7 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ -n "$outcome" ]; then
       case "$outcome" in
         passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
+        passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
