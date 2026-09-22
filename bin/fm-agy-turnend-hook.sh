@@ -20,8 +20,8 @@
 # so install is gated on a one-time consent recorded in this home's
 # config/agy-turnend-hook: "allow" permits the write, "deny" refuses it, and an
 # absent file means the captain has not been asked yet. A recorded "deny" also
-# RETRACTS: install runs the remove action instead, taking a key an earlier
-# "allow" wrote back out of the store, and then refuses anyway. Consent that
+# RETRACTS: install runs the remove action instead, taking the key and hook
+# files an earlier "allow" wrote back out, and then refuses anyway. Consent that
 # cannot be withdrawn is not consent. Absent and "deny" both end as ordinary
 # refusals on the existing no-write path, so the spawn degrades to its retained
 # rendered-tail read instead of dying; only the absent case carries the
