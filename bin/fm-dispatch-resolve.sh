@@ -438,6 +438,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     ([$cands[] | select(.unranked)]) as $unranked |
     if ($elig | length) == 0 and ($unranked | length) == 1
        and $unranked[0].eligible and $unranked[0].unknown
+       and all($unranked[0].bounds[]?; .status != "known" or (.spendPriority | type) == "number")
        and (floor_state($unranked[0].profile.floor; $unranked[0].provider; lane_of($unranked[0].profile)) | . == "none" or . == "ok") then
       $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $unranked[0],
              unranked_note: "sole eligible candidate unranked: \($unranked[0].reason); quota uncertainty disclosed"}

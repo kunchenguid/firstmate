@@ -700,7 +700,13 @@ assert_not_contains "$out" '  profile:' "unverifiable rule floor withholds the u
 
 ZERO_QUOTA="$TMP_ROOT/zero-quota.json"
 jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability[].effectivePercentRemaining) = 0' "$QUOTA" > "$ZERO_QUOTA"
-for fixture in "$UNKNOWN_EXHAUSTED" "$ZERO_QUOTA" "$NONNUMERIC"; do
+MIXED_MALFORMED="$TMP_ROOT/mixed-malformed-unknown.json"
+jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability[] |
+  select(.status == "known") | .selection.spendPriority) = "high"' "$PARTIAL_UNKNOWN" > "$MIXED_MALFORMED"
+MIXED_MISSING="$TMP_ROOT/mixed-missing-unknown.json"
+jq 'del(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability[] |
+  select(.status == "known") | .selection.spendPriority)' "$PARTIAL_UNKNOWN" > "$MIXED_MISSING"
+for fixture in "$UNKNOWN_EXHAUSTED" "$ZERO_QUOTA" "$NONNUMERIC" "$MIXED_MALFORMED" "$MIXED_MISSING"; do
   jq '.rules[3].use = [.rules[3].use[1]]' "$BASE_RULES" > "$RULES"
   TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$fixture" run code out err "$BRIEF"
   assert_contains "$out" '  status: escalate' "sole exhausted, zero, or malformed-rank candidate escalates: $fixture"
