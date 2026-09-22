@@ -320,8 +320,8 @@
 # source exists. Grok keeps its rendered-tail fallback and is not given a parent
 # turn-end hook. Cursor's transcript binding is written for a secondmate the same way
 # as for a crewmate. Muse, gemini, agy, and rovo are refused as secondmates.
-# A claude secondmate also gets .fm-busy-reopen in its home, so the home's Stop
-# guard can reopen busy for the same gen when it blocks a Stop.
+# A claude secondmate gets no Stop busy hook; its home's tracked Stop guard is its
+# only Stop writer, through the .fm-busy-stop pointer in that home.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog.
@@ -4102,38 +4102,36 @@ BUSY_GEN=
     # never leave a stale busy record. Claude fires no hook for a manual
     # interrupt: fm-control preserves the adapter-owned state, while the
     # legacy fm-send --key Escape path records idle/fm-interrupt. Stop keeps
-    # the turn-ended NOTIFICATION touch for an ordinary task; a secondmate
-    # omits that touch. Every
+    # the turn-ended NOTIFICATION touch for the watcher. A secondmate gets no
+    # Stop hook here: its home's tracked Stop guard (bin/fm-turnend-guard.sh)
+    # can block a Stop into a continuation that fires no UserPromptSubmit,
+    # and Claude runs Stop hooks in parallel, so the guard is that mate's only
+    # Stop writer, reading this gen from .fm-busy-stop. Every
     # hook command tolerates a refused event (|| true) so a stale-gen writer
     # can never break Claude's own lifecycle.
     mkdir -p "$WT/.claude"
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
     j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
-    stop_turnend=
-    if [ "$busy_notify_turnend" = true ]; then
-      stop_turnend="touch $(shell_quote "$TURNEND"); "
-    fi
-    j_stop=$(json_escape "${stop_turnend}$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
-    cat >"$WT/.claude/settings.local.json" <<EOF
-{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
-EOF
-    exclude_path '.claude/settings.local.json'
+    stop_entry=
     if [ "$KIND" = secondmate ]; then
-      # The home's tracked Stop guard can block a Stop that the hook above
-      # already recorded idle, and the forced continuation fires no
-      # UserPromptSubmit. This pointer lets the guard reopen busy for this
-      # same gen when it blocks (bin/fm-turnend-guard.sh).
       {
         printf 'writer=%s\n' "$FM_ROOT/bin/fm-busy-event.sh"
         printf 'state=%s\n' "$STATE_REAL"
         printf 'id=%s\n' "$ID"
         printf 'gen=%s\n' "$BUSY_GEN"
-      } >"$WT/.fm-busy-reopen"
-      exclude_path '.fm-busy-reopen'
+      } >"$WT/.fm-busy-stop"
+      exclude_path '.fm-busy-stop'
+    else
+      j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+      stop_entry="\"Stop\":[{\"hooks\":[{\"type\":\"command\",\"command\":\"$j_stop\"}]}],"
     fi
+    cat >"$WT/.claude/settings.local.json" <<EOF
+{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],${stop_entry}"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
+EOF
+    exclude_path '.claude/settings.local.json'
     ;;
   gemini)
     if [ "$RAW_LAUNCH" -eq 0 ]; then

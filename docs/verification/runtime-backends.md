@@ -600,6 +600,7 @@ Verified 2026-09-22 on this host with Claude Code 2.1.278, OpenCode 1.18.31, Pi 
 
 A tmux-backed secondmate's active-turn gate reads the parent home's semantic busy record.
 Launches of claude, opencode, pi, pi-signed, and omp arm that record and load the same hook or extension an ordinary worker uses, and those hooks do not touch the parent's turn-ended marker.
+A Claude secondmate is the one exception on Stop: its home's tracked Stop guard is the only Stop writer, recording idle when it allows the Stop and busy when it blocks it into a continuation, because Claude runs Stop hooks in parallel.
 Codex stays unverified.
 Grok keeps its rendered-tail verdict and gets no parent turn-end hook.
 Cursor's transcript sidecar is written for a secondmate the same way it is for an ordinary worker, and this host has no Cursor agent binary, so that path was not started.

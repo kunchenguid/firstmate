@@ -498,8 +498,8 @@ test_secondmate_claude_spawn_arms_busy_for_the_stall_gate() {
     || fail "a secondmate inside an armed turn published a durable stall notification"
 
   rm -f "$state/$id.turn-ended"
-  run_claude_hook "$settings" Stop || fail "secondmate Stop hook failed"
-  [ ! -e "$state/$id.turn-ended" ] || fail "a secondmate Stop hook touched the parent's turn-ended marker"
+  fire_secondmate_stop "$sm" parallel || fail "secondmate Stop was blocked with nothing to supervise"
+  [ ! -e "$state/$id.turn-ended" ] || fail "a secondmate Stop touched the parent's turn-ended marker"
   out=$(classify claude "$id" "$state")
   [ "$out" = "idle claude-hook" ] || fail "secondmate Stop must classify idle claude-hook, got '$out'"
 
@@ -522,11 +522,41 @@ run_secondmate_stop_guard() { # <sm-home>
       bash "$ROOT/bin/fm-turnend-guard.sh" --claude >/dev/null 2>&1
 }
 
-# The mate home's tracked Stop guard runs beside the busy Stop hook. When it
-# blocks, the forced continuation fires no UserPromptSubmit, so the guard must
-# reopen busy for the same gen; an allowed Stop must leave idle alone.
-test_secondmate_claude_stop_guard_block_reopens_busy() {
-  local case_dir id=sm-claude-guard primary sm state settings out status
+run_secondmate_local_stop_hooks() { # <sm-home>
+  local cmd
+  jq -r '.hooks.Stop[]?.hooks[]?.command' "$1/.claude/settings.local.json" \
+    | while IFS= read -r cmd; do sh -c "$cmd" </dev/null; done
+}
+
+# Claude runs the home's settings.local.json Stop hooks beside its tracked Stop
+# guard, in parallel, so their order is not fixed. Fire one Stop event in the
+# given order and return the guard's status.
+fire_secondmate_stop() { # <sm-home> <guard-first|guard-last|parallel>
+  local sm=$1 status
+  case "$2" in
+    guard-first)
+      run_secondmate_stop_guard "$sm"; status=$?
+      run_secondmate_local_stop_hooks "$sm"
+      ;;
+    guard-last)
+      run_secondmate_local_stop_hooks "$sm"
+      run_secondmate_stop_guard "$sm"; status=$?
+      ;;
+    parallel)
+      run_secondmate_local_stop_hooks "$sm" &
+      run_secondmate_stop_guard "$sm"; status=$?
+      wait
+      ;;
+  esac
+  return "$status"
+}
+
+# The mate home's tracked Stop guard can block a Stop into a continuation that
+# fires no UserPromptSubmit. It is the mate's only Stop writer, so a blocked
+# Stop records busy and an allowed Stop records idle for the same gen, whatever
+# order Claude runs the Stop hooks in.
+test_secondmate_claude_stop_guard_owns_the_stop_verdict() {
+  local case_dir id=sm-claude-guard primary sm state settings out status order gen
   case_dir="$TMP_ROOT/sm-claude-guard"
   primary="$case_dir/primary"
   sm="$case_dir/sm"
@@ -534,15 +564,21 @@ test_secondmate_claude_stop_guard_block_reopens_busy() {
     || fail "claude secondmate spawn failed: $out"
   state="$primary/state"
   settings="$sm/.claude/settings.local.json"
-  git -C "$sm" status --porcelain | grep -F '.fm-busy-reopen' >/dev/null \
-    && fail "the secondmate busy reopen pointer is not excluded from the home's git status"
+  gen=$(cat "$state/$id.busy-gen")
+  git -C "$sm" status --porcelain | grep -F '.fm-busy-stop' >/dev/null \
+    && fail "the secondmate Stop pointer is not excluded from the home's git status"
 
-  run_claude_hook "$settings" Stop || fail "secondmate Stop hook failed"
   : > "$sm/state/child.meta"
-  run_secondmate_stop_guard "$sm"; status=$?
-  expect_code 2 "$status" "the secondmate guard must block a blind Stop with a task in flight"
-  out=$(classify claude "$id" "$state")
-  [ "$out" = "busy claude-hook" ] || fail "a blocked Stop must reopen busy for the continuation, got '$out'"
+  for order in guard-first guard-last parallel; do
+    run_claude_hook "$settings" UserPromptSubmit || fail "secondmate UserPromptSubmit hook failed"
+    fire_secondmate_stop "$sm" "$order"; status=$?
+    expect_code 2 "$status" "the secondmate guard must block a blind Stop with a task in flight ($order)"
+    out=$(classify claude "$id" "$state")
+    [ "$out" = "busy claude-hook" ] \
+      || fail "a blocked Stop must leave the continuation busy ($order), got '$out'"
+    grep -F "gen=$gen " "$state/$id.busy-state" >/dev/null \
+      || fail "a blocked Stop must write the spawn's gen ($order): $(cat "$state/$id.busy-state")"
+  done
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" \
     > "$sm/state/.wake-queue"
   secondmate_stall_watch "$primary" "$id" "$case_dir/watch-blocked.out"
@@ -550,16 +586,18 @@ test_secondmate_claude_stop_guard_block_reopens_busy() {
     && fail "a secondmate inside a guard-forced continuation was escalated as stalled: $(cat "$case_dir/watch-blocked.out")"
 
   rm -f "$sm/state/child.meta"
-  run_claude_hook "$settings" Stop || fail "secondmate Stop hook failed"
-  run_secondmate_stop_guard "$sm"; status=$?
-  expect_code 0 "$status" "the secondmate guard must allow a Stop with nothing to supervise"
-  out=$(classify claude "$id" "$state")
-  [ "$out" = "idle claude-hook" ] || fail "an allowed Stop must keep the idle verdict, got '$out'"
+  for order in guard-first guard-last parallel; do
+    run_claude_hook "$settings" UserPromptSubmit || fail "secondmate UserPromptSubmit hook failed"
+    fire_secondmate_stop "$sm" "$order"; status=$?
+    expect_code 0 "$status" "the secondmate guard must allow a Stop with nothing to supervise ($order)"
+    out=$(classify claude "$id" "$state")
+    [ "$out" = "idle claude-hook" ] || fail "an allowed Stop must record idle ($order), got '$out'"
+  done
   sleep 2
   secondmate_stall_watch "$primary" "$id" "$case_dir/watch-allowed.out" 8
   grep -F "check: secondmate wake-loop stalled: mate=$id row=7" "$case_dir/watch-allowed.out" >/dev/null \
     || fail "the frozen queue stayed hidden after an allowed Stop: $(cat "$case_dir/watch-allowed.out")"
-  pass "a claude secondmate's blocked Stop reopens busy for the same gen, and an allowed Stop stays idle"
+  pass "a claude secondmate's Stop guard records busy on a blocked Stop and idle on an allowed one, in any hook order"
 }
 
 test_secondmate_pi_extension_reports_busy_without_a_parent_turnend() {
@@ -668,7 +706,7 @@ test_secondmate_codex_and_grok_do_not_arm_a_parent_turnend() {
 }
 
 test_secondmate_claude_spawn_arms_busy_for_the_stall_gate
-test_secondmate_claude_stop_guard_block_reopens_busy
+test_secondmate_claude_stop_guard_owns_the_stop_verdict
 test_secondmate_pi_extension_reports_busy_without_a_parent_turnend
 test_secondmate_omp_extension_reports_busy_without_a_parent_turnend
 test_secondmate_opencode_plugin_closes_without_a_parent_turnend
