@@ -3015,6 +3015,32 @@ freshen_spawn_worktree_base() { # <worktree>
   fi
 }
 
+herdr_pane_rename() { # <session> <pane_id> <task_id> <proj_dir>
+  local session=$1 pane_id=$2 task_id=$3 proj_dir=${4:-} proj_name="" label="" rc=0
+  [ -n "$session" ] || return 0
+  [ -n "$pane_id" ] || return 0
+  [ -n "$task_id" ] || return 0
+  if [ -n "$proj_dir" ]; then
+    proj_name=$(basename "$proj_dir")
+    case "$proj_name" in
+    .|/|"") proj_name="" ;;
+    esac
+  fi
+  if [ -n "$proj_name" ]; then
+    label="$task_id ($proj_name)"
+  else
+    label="$task_id"
+  fi
+  if command -v fm_backend_herdr_cli >/dev/null 2>&1; then
+    fm_backend_herdr_cli "$session" pane rename "$pane_id" "$label" >/dev/null 2>&1 || rc=$?
+  else
+    herdr pane rename "$pane_id" "$label" --session "$session" >/dev/null 2>&1 || rc=$?
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "warning: herdr pane rename failed for $task_id ($pane_id); continuing" >&2
+  fi
+}
+
 herdr_projection_meta_field_exact() { # <meta> <key>
   local meta=$1 key=$2 count
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -3229,6 +3255,9 @@ EOF
     T="$HERDR_SES:$HERDR_PANE_ID"
     SES=$HERDR_SES
     WT_TARGET=$T
+    if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+      herdr_pane_rename "$HERDR_SES" "$HERDR_PANE_ID" "$ID" "$PROJ_ABS"
+    fi
   fi
 else
   case "$BACKEND" in
@@ -3413,6 +3442,9 @@ EOF
       exit 1
     fi
     T="$HERDR_SES:$HERDR_PANE_ID"
+    if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+      herdr_pane_rename "$HERDR_SES" "$HERDR_PANE_ID" "$ID" "$PROJ_ABS"
+    fi
     ;;
   zellij)
     ZELLIJ_SES=$(fm_backend_zellij_container_ensure) || exit 1

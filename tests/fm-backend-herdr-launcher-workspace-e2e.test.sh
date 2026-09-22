@@ -108,6 +108,10 @@ label_of_workspace() {  # <workspace_id>
     | jq -r --arg id "$1" '.result.workspaces[]? | select(.workspace_id == $id) | .label' 2>/dev/null
 }
 
+label_of_pane() {  # <pane_id>
+  lab pane get "$1" 2>/dev/null | jq -r '.result.pane.label // empty' 2>/dev/null
+}
+
 tab_labels_of_workspace() {  # <workspace_id>
   lab tab list --workspace "$1" 2>/dev/null \
     | jq -r '[.result.tabs[]?.label] | sort | join(",")' 2>/dev/null
@@ -247,6 +251,8 @@ record_worktree "$UNIQB_META"
 UNIQB_PANE=$(grep '^herdr_pane_id=' "$UNIQB_META" | cut -d= -f2-)
 [ "$(workspace_of_pane "$UNIQB_PANE")" = "$WS_PRIMARY" ] \
   || fail "a crewmate launched from the 'firstmate' workspace must stay in it"
+[ "$(label_of_pane "$UNIQB_PANE")" = "uniqB ($(basename "$PROJ"))" ] \
+  || fail "uniqB pane should be labeled 'uniqB ($(basename "$PROJ"))', got '$(label_of_pane "$UNIQB_PANE")'"
 pass "real herdr E2E: the normal unique-label path is unchanged when the launcher's own pane identifies the workspace"
 
 # --- 2b. presentation spaces ON: the projected child is created and bound
@@ -265,6 +271,8 @@ case "$(label_of_workspace "$PRESU_WS")" in
   "└ "*" · p:"*) : ;;
   *) fail "presU's workspace is not a presentation projection: '$(label_of_workspace "$PRESU_WS")'" ;;
 esac
+[ "$(label_of_pane "$PRESU_PANE")" = "presU ($(basename "$PROJ"))" ] \
+  || fail "presU pane should be labeled 'presU ($(basename "$PROJ"))', got '$(label_of_pane "$PRESU_PANE")'"
 PRESU_JOURNAL="$PRES_HOME/state/presU.herdr-presentation"
 [ -f "$PRESU_JOURNAL" ] || fail "a projected spawn did not leave its presentation journal"
 [ "$(journal_field "$PRESU_JOURNAL" version)" = 2 ] \

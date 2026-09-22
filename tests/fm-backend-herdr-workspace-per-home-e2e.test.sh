@@ -154,6 +154,10 @@ CM1_WS_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "
 [ "$CM1_WS_LABEL" = "firstmate" ] || fail "a primary-shaped home's crewmate should land in the 'firstmate' workspace, got '$CM1_WS_LABEL'"
 pass "real herdr E2E: the primary-shaped home's crewmate landed in the 'firstmate' workspace"
 
+CM1_PANE_LABEL=$(herdr pane get "$CM1_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.label // empty')
+[ "$CM1_PANE_LABEL" = "cm1 ($(basename "$PROJ1"))" ] || fail "cm1 pane should be labeled 'cm1 ($(basename "$PROJ1"))', got '$CM1_PANE_LABEL'"
+pass "real herdr E2E: the primary-shaped home's crewmate pane is labeled 'cm1 ($(basename "$PROJ1"))'"
+
 # --- 2. the PRIMARY spawns a secondmate: its tab lands in the SECONDMATE's own space ---
 # (fm-spawn.sh's herdr case arm shadows FM_HOME to the secondmate's home for
 # exactly this call - AGENTS.md task herdr-sm-spaces-k4, requirement 3.)
@@ -181,6 +185,10 @@ SM_WS_LABEL=$(herdr workspace list --session "$SESSION" 2>&1 | jq -r --arg id "$
 [ "$SM_WS_LABEL" = "2ndmate-e2esm1" ] || fail "a --secondmate spawn should land in '2ndmate-<id>', got '$SM_WS_LABEL'"
 pass "real herdr E2E: a --secondmate spawn by the PRIMARY lands in the SECONDMATE's own labeled workspace, distinct from the primary's"
 
+SM_PANE_LABEL=$(herdr pane get "$SM_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.label // empty')
+[ -z "$SM_PANE_LABEL" ] || fail "a --secondmate task pane should not receive a crewmate label, got '$SM_PANE_LABEL'"
+pass "real herdr E2E: a --secondmate task pane does not receive a crewmate label"
+
 # --- 3. a crewmate spawned FROM the secondmate-shaped home lands in the SAME
 # secondmate workspace (this exact path has never run before this test) -----
 
@@ -207,6 +215,10 @@ CM2_WSID=$(herdr pane get "$CM2_PANE" --session "$SESSION" 2>/dev/null | jq -r '
 [ "$CM2_WSID" = "$SM_WSID" ] || fail "a crewmate spawned FROM the secondmate home should land in the SAME workspace as the secondmate's own task ($SM_WSID), got '$CM2_WSID'"
 [ "$CM2_WSID" != "$CM1_WSID" ] || fail "a crewmate spawned FROM the secondmate home must NOT land in the primary's workspace"
 pass "real herdr E2E: a crewmate spawned FROM the secondmate-shaped home lands in the secondmate's OWN workspace - falls out of per-home resolution, no glue needed"
+
+CM2_PANE_LABEL=$(herdr pane get "$CM2_PANE" --session "$SESSION" 2>/dev/null | jq -r '.result.pane.label // empty')
+[ "$CM2_PANE_LABEL" = "cm2 ($(basename "$PROJ2"))" ] || fail "cm2 pane should be labeled 'cm2 ($(basename "$PROJ2"))', got '$CM2_PANE_LABEL'"
+pass "real herdr E2E: the secondmate-shaped home's crewmate pane is labeled 'cm2 ($(basename "$PROJ2"))'"
 
 # --- 4. list-live recovery: each home sees only its own tabs ---------------
 
