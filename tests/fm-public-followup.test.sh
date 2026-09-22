@@ -2878,6 +2878,36 @@ test_remote_work_home_emit_reaches_owning_home() {
   pass "a typed terminal result emitted in a remote work home reaches the owning home"
 }
 
+# Not every promise owes a deliverable: an explicit-answer final is kept by the
+# answer itself, so its required list is empty. That promise must still be
+# briefable, and the command the remote worker is handed must really report the
+# result - the worker has no other way to reach the owning home.
+test_remote_promise_without_deliverables_is_briefable() {
+  local home remote out command staged
+  remote_fixture_prepare
+  home=$(make_home remote-explicit)
+  remote=$(make_remote_route "$home" mini-default)
+  seed_typed_commitment "$home" pf-remote-explicit req-remote-explicit explicit-answer '[]' \
+    secondmate:mini-default work-explicit
+
+  out=$(run_pf "$home" brief pf-remote-explicit) || fail "brief failed: $out"
+  command=$(brief_emit_command "$out")
+  [ -n "$command" ] || fail "a promise that requires no deliverable must still print an emit command"
+  assert_contains "$command" "--stage-in $remote" \
+    "the remote worker must be told to stage its result in its own home"
+  assert_not_contains "$command" "--deliverable" \
+    "a promise that requires no deliverable must not ask the worker to invent one"
+
+  command=${command//<one bounded public-safe sentence>/The question is answered on main.}
+  printf 'mini-default\n' > "$remote/.fm-secondmate-home"
+  bash -c "$command" >/dev/null || fail "the worker's own instructions must run in its home"
+
+  staged=$(run_pf_remote "$home" consume) || fail "consume failed: $staged"
+  assert_contains "$staged" "ready pf-remote-explicit" \
+    "the answer alone must keep a promise that requires no deliverable"
+  pass "a promise that requires no deliverable is briefable and reportable"
+}
+
 # A duplicate report from the other machine must stay a no-op: the staged copy is
 # collected again after a failed retirement, and a replayed emit derives the same
 # event id, so neither can produce a second public reply.
@@ -3368,7 +3398,9 @@ CASES
 # malformed deliverables. Each case runs through the real emitter AND, bypassing
 # it, through the real tasks-axi consumer against a really registered
 # obligation, and both must reach the table's verdict, so neither side can drift
-# from the other silently.
+# from the other silently. A stage-in case is briefed exactly as `brief` briefs
+# a remote worker - one --require-deliverable per key the obligation requires -
+# because that side of a machine boundary knows only what it was told.
 # pad_run <n>: n repeats of 'x', so a length-boundary case can be written as a
 # short marker in the table below instead of a 500-character line.
 pad_run() {
@@ -3379,7 +3411,7 @@ pad_run() {
 
 test_emit_rules_agree_with_tasks_axi() {
   local home n=0 expected required outcome deliverables verdict mode
-  local emit_verdict axi_verdict obligation out pair pad staging registry
+  local emit_verdict axi_verdict obligation out pair key pad staging registry
   local -a emit_args emit_destination
   home=$(make_home emit-agreement)
   # A work home on the far side of a machine boundary, which is the only place
@@ -3415,6 +3447,14 @@ test_emit_rules_agree_with_tasks_axi() {
     [ "$mode" != stage-in ] \
       || emit_destination=(--stage-in "$staging" --source-home secondmate:agree)
     emit_args=()
+    if [ "$mode" = stage-in ]; then
+      while IFS= read -r key; do
+        [ -n "$key" ] || continue
+        emit_args+=(--require-deliverable "$key")
+      done <<EOF
+$(printf '%s' "$required" | jq -r '.[]')
+EOF
+    fi
     while IFS= read -r pair; do
       [ -n "$pair" ] || continue
       emit_args+=(--deliverable "$pair")
@@ -3513,8 +3553,14 @@ report-ready|["report_path"]|report-ready|{}|reject|stage-in
 pr-merged|["pr_url"]|pr-merged|{}|reject|stage-in
 report-ready|["report_path"]|report-ready|{"report_path":"data/work-a/report.md"}|accept|stage-in
 pr-merged|["pr_url"]|failed|{}|accept|stage-in
+report-ready|[]|report-ready|{}|accept
+pr-merged|[]|pr-merged|{}|accept
+explicit-answer|[]|local-main|{}|accept|stage-in
+report-ready|[]|report-ready|{}|accept|stage-in
+report-ready|["report_path"]|report-ready|{"report_path":"/abs/data/work-a/report.md"}|reject|stage-in
+failure-outcome|["error_code"]|failed|{}|reject|stage-in
 CASES
-  [ "$n" -ge 68 ] || fail "the agreement table ran only $n cases"
+  [ "$n" -ge 74 ] || fail "the agreement table ran only $n cases"
   pass "the emitter's work-event rules agree with the real tasks-axi consumer on $n cases"
 }
 
@@ -3896,6 +3942,7 @@ test_remote_retire_accepts_nonwritable_absence
 test_remote_retire_refuses_unacquirable_lock_without_hanging
 test_remote_unconfirmed_clear_is_unknown_completion
 test_remote_work_home_emit_reaches_owning_home
+test_remote_promise_without_deliverables_is_briefable
 test_remote_collection_transport_failure_is_loud
 test_remote_collection_refuses_unreadable_outbox
 test_invalid_registration_fails_remote_collection

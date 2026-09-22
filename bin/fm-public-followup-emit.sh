@@ -63,11 +63,12 @@
 #                          `fm-public-followup.sh brief` prints one per required
 #                          key. With --home the obligation's required keys are
 #                          read from tasks-axi and enforced whether or not the
-#                          flag is passed; a staged emit given no flag at all
-#                          still needs the deliverable its own outcome carries.
-#                          A failed outcome is exempt only from a key it could
-#                          not carry anyway: a promise whose expected final IS
-#                          the failure still needs its error_code.
+#                          flag is passed; a staged emit enforces exactly the
+#                          keys it was given, because the outcome alone cannot
+#                          tell a key this promise requires from one it does
+#                          not. A failed outcome is exempt only from a key it
+#                          could not carry anyway: a promise whose expected
+#                          final IS the failure still needs its error_code.
 #   --outcome-text ...     Public-safe outcome sentence, from an argument, a
 #                          file, or stdin ("-"). Collapsed to one line; the
 #                          event builder bounds it by codepoint, so control
@@ -318,14 +319,6 @@ done
 # exempt only from a key it could not carry anyway: a promise whose expected
 # final IS the failure still needs its error_code.
 CARRIED_KEYS=$(fm_pf_deliverable_keys "$EXPECTED_FINAL" "$OUTCOME") || CARRIED_KEYS=
-# A staged emit told nothing about the promise still knows what its own outcome
-# has to carry: a successful terminal result with none of it can only be
-# quarantined by the owning home, so it is refused here instead.
-if [ "$HOME_MODE" = staging ] && [ "${#REQUIRED_KEYS[@]}" -eq 0 ] && [ "$OUTCOME" != failed ]; then
-  for key in $CARRIED_KEYS; do
-    REQUIRED_KEYS+=("$key")
-  done
-fi
 i=0
 while [ "$i" -lt "${#REQUIRED_KEYS[@]}" ]; do
   key=${REQUIRED_KEYS[$i]}

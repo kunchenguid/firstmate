@@ -440,12 +440,13 @@ the home above owns the reply.'
   # 'failed' and an explicit-answer final with 'local-main'.
   outcome=$(fm_pf_expected_outcome "$expected") \
     || die "public-followup obligation '$id' has an expected final type tasks-axi does not define: $expected" 1
-  keys=$(printf '%s' "$payload" \
-    | jq -er '.public_followup.expected_final.required_deliverables
-        | select(type == "array" and length > 0
-            and (map(type == "string" and test("^[a-z][a-z0-9_]{0,63}$")) | all))
-        | .[]' 2>/dev/null) \
+  printf '%s' "$payload" \
+    | jq -e '.public_followup.expected_final.required_deliverables
+        | type == "array" and (map(type == "string" and test("^[a-z][a-z0-9_]{0,63}$")) | all)' \
+      >/dev/null 2>&1 \
     || die "public-followup obligation '$id' has no readable required deliverable keys" 1
+  keys=$(printf '%s' "$payload" \
+    | jq -r '.public_followup.expected_final.required_deliverables[]' 2>/dev/null) || keys=
   # Pre-fill every value the binding already determines, so the worker has
   # nothing to guess; name each remaining one and state the format tasks-axi
   # accepts for it, so a guess never travels back to be quarantined here. Each
