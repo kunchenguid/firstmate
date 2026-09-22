@@ -1316,6 +1316,10 @@ settle_native_orca_meta() {  # <meta-file> <subject>
     echo "REFUSED: native Orca adapter is unavailable for $subject; preserving its durable records." >&2
     return 1
   }
+  fm_backend_orca_supervised_retry_settle "$meta" || {
+    echo "REFUSED: native Orca retry Dispatch for $subject is not proven abandoned; preserving its durable records." >&2
+    return 1
+  }
   if [ "$(meta_value "$meta" cleanup_recovery)" = orca ] &&
     { [ -z "$(meta_value "$meta" orca_run_id)" ] ||
       [ -z "$(meta_value "$meta" orca_task_id)" ] ||

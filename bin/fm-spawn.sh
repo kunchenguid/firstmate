@@ -1302,6 +1302,10 @@ spawn_abort_cleanup() {
         status=1
         if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
           orca_abort_recovery_record || true
+        elif [ -f "$STATE/$ID.meta" ] && [ "${RELAUNCH:-0}" -eq 1 ] &&
+          { [ -z "$ORCA_TASK_ID" ] || [ -z "$ORCA_WORKER_ID" ] || [ -z "$ORCA_TERMINAL_INCAR" ] || [ -z "$ORCA_PANE_KEY" ]; } &&
+          declare -F orca_retry_meta_record >/dev/null 2>&1; then
+          orca_retry_meta_record || true
         elif [ -f "$STATE/$ID.meta" ] && declare -F orca_supervised_meta_publish >/dev/null 2>&1; then
           orca_supervised_meta_publish || true
         fi
@@ -1656,6 +1660,12 @@ SPAWN_TASK_LOCK_HELD=1
 if [ "$(fm_meta_get "$STATE/$ID.meta" cleanup_recovery)" = orca ]; then
   echo "error: task $ID has an Orca cleanup recovery record; run bin/fm-teardown.sh $ID to settle its native Dispatch before spawning it again" >&2
   exit 1
+fi
+if [ -n "$(fm_meta_get "$STATE/$ID.meta" orca_retry_dispatch_id)" ]; then
+  fm_backend_source orca && fm_backend_orca_supervised_retry_settle "$STATE/$ID.meta" || {
+    echo "error: task $ID records an unsettled native Orca retry Dispatch that could not be proven and abandoned; preserving its record" >&2
+    exit 1
+  }
 fi
 PROJ=
 ARG3=
@@ -4629,7 +4639,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend orca_mode orca_run_id orca_task_id orca_dispatch_id orca_worker_id orca_terminal_incarnation orca_pane_key herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend orca_mode orca_run_id orca_task_id orca_dispatch_id orca_worker_id orca_terminal_incarnation orca_pane_key herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id orca_retry_dispatch_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4802,6 +4812,22 @@ orca_supervised_meta_publish() {
     printf 'orca_terminal_incarnation=%s\n' "$ORCA_TERMINAL_INCAR"
     printf 'orca_pane_key=%s\n' "$ORCA_PANE_KEY"
   } >>"$tmp" || ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
+    rm -f "$tmp"
+    fm_lock_release "$lock" || true
+    return 1
+  fi
+  rm -f "$tmp"
+  fm_lock_release "$lock" || return 1
+}
+
+orca_retry_meta_record() {
+  local meta=$STATE/$ID.meta tmp lock
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_acquire_wait "$lock"
+  tmp="$STATE/.$ID.meta.retry.${BASHPID:-$$}"
+  if ! awk -F= '$1 != "orca_retry_dispatch_id"' "$meta" >"$tmp" ||
+    ! printf 'orca_retry_dispatch_id=%s\n' "$ORCA_DISPATCH_ID" >>"$tmp" ||
+    ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
     rm -f "$tmp"
     fm_lock_release "$lock" || true
     return 1

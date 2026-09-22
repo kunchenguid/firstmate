@@ -1187,6 +1187,102 @@ test_native_orca_relaunch_attach_failure_keeps_record_relaunchable() {
   pass "fm-spawn.sh native Orca relaunch: a refused attach keeps the prior identities so the task relaunches again"
 }
 
+test_native_orca_relaunch_partial_retry_receipt_is_abandoned_by_cleanup() {
+  local proj wt data state config id out status log_text show_old show_partial
+  id="orcarelaunchpartialz12"
+  proj="$TMP_ROOT/native-relaunch-partial-project"
+  wt="$TMP_ROOT/native-relaunch-partial-wt"
+  data="$TMP_ROOT/native-relaunch-partial-data"
+  state="$TMP_ROOT/native-relaunch-partial-state"
+  config="$TMP_ROOT/native-relaunch-partial-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  write_spawn_brief "$data" "$id"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_mode=supervised" "terminal=term-old" \
+    "orca_worktree_id=wt-rp::$wt" "orca_run_id=run-rp" \
+    "orca_task_id=task-rp" "orca_dispatch_id=dispatch-old" \
+    "orca_worker_id=worker-old" "orca_terminal_incarnation=inc-old" \
+    "orca_pane_key=pane-old"
+  show_old=$(printf '{"ok":true,"result":{"dispatchId":"dispatch-old","taskId":"task-rp","runId":"run-rp","workerId":"worker-old","worktreeId":"wt-rp::%s","worktreePath":"%s","worker":{"state":"completed"},"observation":{"exactWorker":true},"resource":{"ownedByCoordinator":true}}}' "$wt" "$wt")
+  show_partial=$(printf '{"ok":true,"result":{"dispatchId":"dispatch-partial","taskId":"task-rp","runId":"run-rp","workerId":"worker-partial","worktreeId":"wt-rp::%s","worktreePath":"%s","worker":{"state":"running"},"observation":{"exactWorker":true},"resource":{"ownedByCoordinator":true}}}' "$wt" "$wt")
+
+  orca_case native-relaunch-partial
+  authoritative_native_context 1
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-new"}}}\n' > "$RESP/2.out"
+  printf '%s\n' "$show_old" > "$RESP/orchestration-worker-show.1.out"
+  printf '%s\n' "$show_partial" > "$RESP/orchestration-worker-show.out"
+  printf '{"ok":true,"result":{"runId":"run-rp","taskId":"task-rp","dispatchId":"dispatch-partial","terminal":{"handle":"term-new"},"worktree":{"id":"wt-rp::%s","path":"%s"}}}\n' "$wt" "$wt" > "$RESP/orchestration-worker-start.out"
+  if out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TMP_ROOT/native-relaunch-partial-home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 FM_ORCA_EXIT_POLLS=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" --relaunch 2>&1 ); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -ne 0 ] || fail "a partial native relaunch receipt should fail the relaunch"
+  assert_contains "$(cat "$LOG")" $'orca\x1fterminal\x1fclose\x1f--terminal\x1fterm-new' \
+    "a partial native relaunch receipt left the replacement agent running"
+  assert_grep "orca_dispatch_id=dispatch-old" "$state/$id.meta" "a partial relaunch receipt replaced the prior Dispatch identity"
+  assert_grep "orca_pane_key=pane-old" "$state/$id.meta" "a partial relaunch receipt dropped the prior pane identity"
+  assert_grep "terminal=term-old" "$state/$id.meta" "a partial relaunch receipt dropped the prior terminal"
+  assert_grep "orca_retry_dispatch_id=dispatch-partial" "$state/$id.meta" "a partial relaunch receipt lost its unsettled retry Dispatch"
+  [ -d "$wt" ] || fail "a partial relaunch receipt removed the preserved relaunch worktree"
+  rm -rf "$state.teardown"
+  cp -R "$state" "$state.teardown"
+
+  orca_case native-relaunch-partial-recover
+  authoritative_native_context 1
+  printf '{"ok":true,"result":{"terminal":{"handle":"term-retry"}}}\n' > "$RESP/2.out"
+  native_attach_responses run-rp task-rp dispatch-retry worker-retry term-retry "wt-rp::$wt" "$wt"
+  printf '%s\n' "$show_partial" > "$RESP/orchestration-worker-show.1.out"
+  printf '%s\n' "$show_old" > "$RESP/orchestration-worker-show.2.out"
+  printf '{"ok":true,"result":{"abandoned":true}}\n' > "$RESP/orchestration-worker-abandon.out"
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$TMP_ROOT/native-relaunch-partial-home" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" --relaunch 2>&1 )
+  status=$?
+  [ "$status" -eq 0 ] || fail "a relaunch over a recorded partial retry Dispatch should recover: $out"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1forchestration\x1fworker-abandon\x1f--dispatch\x1fdispatch-partial' \
+    "relaunch did not abandon the recorded partial retry Dispatch"
+  assert_contains "$log_text" $'--retry-of\x1fdispatch-old' "relaunch did not retry the prior authoritative Dispatch"
+  assert_grep "orca_dispatch_id=dispatch-retry" "$state/$id.meta" "relaunch did not publish its replacement Dispatch"
+  assert_no_grep "orca_retry_dispatch_id=" "$state/$id.meta" "relaunch kept the abandoned retry Dispatch in the record"
+
+  state="$state.teardown"
+  orca_case native-relaunch-partial-teardown
+  printf '{"ok":true,"result":{"worktree":{"id":"wt-rp::%s","path":"%s"}}}\n' "$wt" "$wt" > "$RESP/1.out"
+  cp "$RESP/1.out" "$RESP/2.out"
+  printf '%s\n' "$show_partial" > "$RESP/orchestration-worker-show.1.out"
+  printf '%s\n' "$show_old" > "$RESP/orchestration-worker-show.out"
+  printf '{"ok":true,"result":{"abandoned":true}}\n' > "$RESP/orchestration-worker-abandon.out"
+  printf '{"ok":true,"result":{"released":true}}\n' > "$RESP/orchestration-worker-release.out"
+  if out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$(neutral_fm_root "$CASE_DIR/neutral")" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" --force 2>&1 ); then
+    status=0
+  else
+    status=$?
+  fi
+  [ "$status" -eq 0 ] || fail "teardown should settle a record carrying a partial retry Dispatch: $out"
+  log_text=$(cat "$LOG")
+  assert_contains "$log_text" $'orca\x1forchestration\x1fworker-abandon\x1f--dispatch\x1fdispatch-partial' \
+    "teardown did not abandon the recorded partial retry Dispatch"
+  assert_not_contains "$log_text" $'worker-abandon\x1f--dispatch\x1fdispatch-old' \
+    "teardown abandoned the prior Dispatch whose exit was proven"
+  assert_contains "$log_text" $'orca\x1forchestration\x1fworker-release\x1f--dispatch\x1fdispatch-old' \
+    "teardown did not release the prior authoritative Dispatch"
+  assert_absent "$state/$id.meta" "teardown kept the record after settling both Dispatches"
+  rm -rf "/tmp/fm-$id" "/tmp/fm-$id+"*
+  pass "fm-spawn.sh native Orca relaunch: a partial retry receipt keeps the prior record and relaunch or teardown abandons the retry Dispatch"
+}
+
 partial_attach_receipt() {  # <run> <task> <dispatch> <terminal>: worker-start omits worker and pane identity
   printf '{"ok":true,"result":{"runId":"%s","taskId":"%s","dispatchId":"%s","terminal":{"handle":"%s"}}}\n' \
     "$1" "$2" "$3" "$4" > "$RESP/orchestration-worker-start.out"
@@ -2688,6 +2784,7 @@ test_native_orca_relaunch_reuses_durable_task_and_workspace
 test_spawn_native_attach_failure_closes_launched_terminal
 test_spawn_native_unsettled_dispatch_keeps_recovery_record
 test_native_orca_relaunch_attach_failure_keeps_record_relaunchable
+test_native_orca_relaunch_partial_retry_receipt_is_abandoned_by_cleanup
 test_teardown_settles_partial_native_receipt_recovery
 test_teardown_settles_recovery_record_missing_task_id
 test_native_secondmate_partial_receipt_recovery_keeps_home

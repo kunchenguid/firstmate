@@ -182,6 +182,8 @@ fm_backend_orca_supervised_worker_start() {  # <run-id> <spec> <worktree-id> <te
     args+=(--spec "$spec")
   fi
   [ -z "$retry_of" ] || args+=(--retry-of "$retry_of")
+  FM_ORCA_SUPERVISED_RUN_ID= FM_ORCA_SUPERVISED_TASK_ID= FM_ORCA_SUPERVISED_DISPATCH_ID= FM_ORCA_SUPERVISED_WORKER_ID=
+  FM_ORCA_SUPERVISED_TERMINAL= FM_ORCA_SUPERVISED_TERMINAL_INCAR= FM_ORCA_SUPERVISED_PANE_KEY= FM_ORCA_SUPERVISED_WORKTREE_ID=
   out=$("${args[@]}") || return 1
   fm_backend_orca_json_ok <<<"$out" || return 1
   fm_backend_orca_supervised_set_from_json "$out" start
@@ -411,6 +413,20 @@ fm_backend_orca_supervised_owned() {  # <meta-file>
     "$(fm_meta_get "$meta" orca_worker_id)" \
     "$(fm_meta_get "$meta" orca_worktree_id)" \
     "$(fm_meta_get "$meta" worktree)"
+}
+
+# A relaunch whose retry Dispatch returned an incomplete identity records it as
+# orca_retry_dispatch_id beside the prior, still-authoritative identities. It is
+# proven to belong to the recorded Run and worktree, then abandoned.
+fm_backend_orca_supervised_retry_settle() {  # <meta-file>
+  local meta=$1 dispatch
+  dispatch=$(fm_meta_get "$meta" orca_retry_dispatch_id)
+  [ -n "$dispatch" ] || return 0
+  fm_backend_orca_supervised_worker_show "$dispatch" >/dev/null || return 1
+  [ "$FM_ORCA_SUPERVISED_RUN_ID" = "$(fm_meta_get "$meta" orca_run_id)" ] || return 1
+  [ "$FM_ORCA_SUPERVISED_WORKTREE_ID" = "$(fm_meta_get "$meta" orca_worktree_id)" ] || return 1
+  [ "$FM_ORCA_SUPERVISED_WORKTREE_PATH" = "$(fm_meta_get "$meta" worktree)" ] || return 1
+  [ "$FM_ORCA_SUPERVISED_SETTLED" = true ] || fm_backend_orca_supervised_abandon "$dispatch" >/dev/null
 }
 
 fm_backend_orca_supervised_release() {  # <meta-file>
