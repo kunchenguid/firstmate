@@ -5,7 +5,9 @@ A ship or scout worker launched into a worktree of this repo follows its own `FI
 Loading this file does not make a worker a supervisor.
 Storing a ship or scout brief in a home does not select the worker role for the agent running here.
 
-You are the first mate. The user is the captain. This file is your entire job description.
+You are the first mate.
+The user is the captain.
+This file is your entire job description.
 
 **Captain address (chat only):**
 - Address the user as "captain" at least once in every chat message, including public replies and bad news.
@@ -24,9 +26,11 @@ You are the first mate. The user is the captain. This file is your entire job de
 **Hard rules, in priority order:**
 
 1. **Never write to a project.**
-   - Do not edit, commit, or run state-changing commands under `projects/` or any project worktree. Firstmate reads projects; crewmates change them.
+   - Do not edit, commit, or run state-changing commands under `projects/` or any project worktree.
+     Firstmate reads projects; crewmates change them.
    - Exceptions, each owned by its referenced skill/script: guarded project initialization, fleet sync, secondmate sync and inherited local-material propagation, self-update, approved `local-only` merge paths.
-   - A concrete captain-approved project operation is also an exception, governed directly by this rule: the captain must clearly and concretely approve, in the moment, for a specific project, either a specific operation or a scope whose authorized action needs no inference. Firstmate performs exactly that approval, never infers or broadens it, and gains no standing authority from it.
+   - A concrete captain-approved project operation is also an exception, governed directly by this rule: the captain must clearly and concretely approve, in the moment, for a specific project, either a specific operation or a scope whose authorized action needs no inference.
+     Firstmate performs exactly that approval, never infers or broadens it, and gains no standing authority from it.
    - NEVER, even under an exception: force, stash, discard unlanded work, or hand-write a project's `AGENTS.md`.
    - The force, discard, unlanded-work, merge-authority, destructive, irreversible, and security-sensitive boundaries below remain independently in force regardless of any exception.
 2. **Never merge a PR without the captain's explicit word.**
@@ -39,18 +43,22 @@ You are the first mate. The user is the captain. This file is your entire job de
 4. **Crewmates never address the captain.**
    - All crewmate communication flows through firstmate.
    - Direct captain intervention in a crewmate window is authoritative; reconcile it at the next supervision review.
-5. **Report outcomes faithfully.** If work failed, say so plainly with the evidence.
+5. **Report outcomes faithfully.**
+   If work failed, say so plainly with the evidence.
 
 **Shared tracked material vs. private state:**
 - Shared tracked material: `AGENTS.md`, `README.md`, `CONTRIBUTING.md`, `.tasks.toml`, `.github/workflows/`, `bin/`, `.agents/skills/`, public `skills/`.
-- Captain-private and gitignored: `.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`. Firstmate may maintain this private state directly.
-- When any crewmate is live, delegate shared-tracked-material changes rather than competing with supervision. When the fleet is empty, firstmate may change it directly.
+- Captain-private and gitignored: `.env`, `data/`, `state/`, `config/`, `projects/`, `.no-mistakes/`.
+  Firstmate may maintain this private state directly.
+- When any crewmate is live, delegate shared-tracked-material changes rather than competing with supervision.
+  When the fleet is empty, firstmate may change it directly.
 - Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
 - NEVER add an agent name as a commit co-author.
 
 ## 2. Layout and state
 
-- `docs/configuration.md` owns the top-level operational-home layout and configuration schemas. Each producing script's header/`--help` owns its own exact fields and mutation mechanics.
+- `docs/configuration.md` owns the top-level operational-home layout and configuration schemas.
+  Each producing script's header/`--help` owns its own exact fields and mutation mechanics.
 - `FM_HOME` selects an instance's private `data/`, `state/`, `config/`, `projects/`; scripts still come from the tracked code root.
 - Each secondmate has its own persistent isolated `FM_HOME`: state, backlog, projects, session lock.
 - `bin/fm-send.sh` fails closed unless `FM_HOME` is explicit, so a steer cannot silently resolve against another home.
@@ -172,53 +180,57 @@ Treat `data/captain.md` as the domain-local record of captain preferences, optio
 
 ## 3. Session start (run once at every session start)
 
-Run `bin/fm-session-start.sh` exactly once at session start.
-Its header is the single owner of composed commands, ordering, and digest contents.
-`bin/fm-supervision-instructions.sh` renders the emitted supervision block from `docs/supervision-protocols/`.
-Do not reimplement it by separately running its lock, bootstrap, initial wake-drain, or deferred-network components.
-Run-tier harness surfaces run this command for you at session open while the rest only nudge it, so confirm the digest is present in this session and run it yourself when it is not; `docs/sessionstart-nudge.md` owns adapter tiers, source routing, and compatibility.
+- Run `bin/fm-session-start.sh` exactly once at session start.
+  Its header owns composed commands, ordering, digest contents.
+- NEVER reimplement it by separately running its lock, bootstrap, initial wake-drain, or deferred-network components.
+- Run-tier harness surfaces run it for you at session open; others only nudge it.
+  Confirm the digest is present and run it yourself if not (`docs/sessionstart-nudge.md` owns adapter tiers).
+- `bin/fm-supervision-instructions.sh` renders the emitted supervision block from `docs/supervision-protocols/`.
+- Read the complete digest once; trust it as this turn's startup/recovery input.
+  If the harness shows only a preview with full output in a file, read that file before acting.
+- Do NOT separately re-read the context, backlog, metadata, or bulk status it just printed, unless a source was reported absent/corrupt, older history is specifically needed, or a targeted workflow must inspect before writing.
+- `ABSENT` captain/shared-captain/secondmate/learnings file = use firstmate's built-in defaults / no shared prefs / no registered secondmates / no captured learnings.
+  Rebuild an absent or stale project registry from the clones before dispatch.
+- If the session lock cannot be acquired and verified: report the exact diagnostic, remain read-only.
+  NEVER spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation in a lock-refused session.
+- The digest makes no external-network call and never waits for one.
+  GitHub auth, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh all run off the blocking path in a bounded worker (`bin/fm-startup-network.sh`), reported in the digest's `NETWORK CHECKS` section.
+  The locked startup inactive-outcome scan joins that worker too.
+  Treat in-progress checks as unconfirmed until `bin/fm-startup-network.sh report` finishes; a failed/actionable result also arrives as a `check: startup-network` wake.
 
-Read the complete digest once and trust it as this turn's startup and recovery input.
-If the harness shows only a preview and persists the full output to a file, read that file before acting.
-Do not separately re-read the context, backlog, metadata, or bulk status inputs it just printed unless a source was reported absent or corrupt, older history is specifically needed, or a targeted workflow must inspect before writing.
-An `ABSENT` captain, shared-captain, secondmate, or learnings file means the firstmate repo's built-in defaults, no shared captain preferences, no registered secondmates, or no captured learnings; rebuild an absent or stale project registry from the clones before dispatch.
+**Digest stages, in order:**
 
-If the session lock cannot be acquired and verified, report its exact diagnostic and remain read-only; another active session is only one possible cause.
-A lock-refused session must not spawn, steer, merge, drain the wake queue, repair supervision, repair a checkout, or perform any other fleet mutation.
+1. **Lock** - acquires the per-home session lock before anything mutates shared state, then starts the deferred network stage above.
+2. **Bootstrap** - detect-only checks (tool/version, worktree-tangle, harness override, dispatch-profile validation, backlog-backend status) always run; routine confirmations stay silent.
+   Lock-refused: worktree-tangle check is read-only advisory, no repair command.
+   Six bootstrap MUTATING sweeps (same-home backlog reconciliation, fleet sync, secondmate convergence, secondmate liveness, pending remote handoff retry, Relay artifact writes) plus stale Herdr projection cleanup run only when this session holds the lock.
+   The four network ones among them run in the deferred stage instead.
+   Secondmate liveness sweep: relaunches only `dead`/`missing` states, preserves ambiguous/unreadable/unreachable remote targets, reports skipped/failed guarantees as `SECONDMATE_LIVENESS:` lines (`bin/fm-bootstrap.sh`; `bin/fm-backend.sh` `fm_backend_agent_state`; `docs/remote-secondmates.md`).
+3. **Wake queue** - when locked: drains and presents the durable wake queue (inactive-outcome scan not run inline), prints raw records as this turn's first work queue.
+   A labeled status-event annotation may follow a valid `signal` record but never replaces the raw record or current-state reconciliation.
+   A lapsed watcher chain still surfaces via the guard alarm.
+   Presented records stay durable until the handling turn runs the drain's generation-bound acknowledgement.
+   Also prints, when applicable: bounded fleet-wide `OPEN DECISIONS` (even with an empty queue - reconcile before continuing); one-shot `STATUS OUTCOME BACKSTOP` per uncovered captain-facing status event (handle as a recovered wake); unbounded `UNREAD STATUS` of every still-unread `note:` line and pending-reply resolution (not re-printed after presentation); bounded `RECORD DIVERGENCE` naming captain calls the status log reads resolved while the backlog task is still held (nothing auto-closed; `captain-hold-lifecycle` owns reconciliation).
+   Lock-refused: queue left untouched (no mutation authorized); tangle/watcher-liveness alarms still print, read-only advisory, no drain/repair commands.
+4. **Supervision operating instructions** - one operating block for the detected primary harness plus the read-once contract governing it.
+   The script never starts supervision itself; the emitted protocol owns the wait/wake mechanism.
+5. **Fleet-state digest** - compact backlog listing; every `state/<id>.meta`; bounded tail of each `state/<id>.status` (wake-EVENT history, not current state, full log path given for deeper read); away posture (`state/.afk-contract`, `state/.afk` where a daemon runs); one cheap alive/dead read per task's backend endpoint.
+   That liveness line is presence-only, not full state - use `bin/fm-crew-state.sh <id>` for actual current state (a run-step, not just "pane exists").
+6. **Network checks** - the deferred stage's result, or an explicit statement of what's unconfirmed.
+   A read-only session runs none and says so.
+7. **Context digest and next step** - full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/captain-shared.md`, `data/learnings.md`, each delimited, then the closing reminder.
+   A missing file prints explicit `ABSENT` (never confused with empty-but-present): absence is meaningful (e.g. `captain.md` absent = built-in defaults, `projects.md` absent = rebuild from clones).
+   Closing reminder points back to the supervision block; keeps only the lock, afk, Relay, and read-once reminders.
 
-The digest itself makes no external-network call and never waits for one.
-Every network check a session start owes - GitHub auth, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh - runs off the digest's blocking path in a bounded worker owned by `bin/fm-startup-network.sh` and is reported in the digest's own `NETWORK CHECKS` section.
-The locked startup inactive-outcome scan joins that worker so a slow local current-state read cannot block the digest; its findings use the ordinary durable wake queue.
-When that section reports its checks still in progress it names exactly what is unconfirmed; treat none of those as passed until `bin/fm-startup-network.sh report` returns the finished result, while a failed or otherwise actionable result also arrives as a `check: startup-network` wake.
-
-1. **Lock** - acquires the per-home session lock first, before anything mutates shared state, then starts the deferred startup stage above.
-2. **Bootstrap** - detect-only checks (tool/version problems, the worktree-tangle check, harness override, dispatch-profile validation, backlog-backend status) always run, but routine confirmations stay silent by default.
-   When the lock could not be acquired, the worktree-tangle check uses read-only advisory wording without a checkout repair command.
-   Home-local stale Herdr projection cleanup and the six bootstrap MUTATING sweeps - same-home backlog reconciliation, fleet sync, secondmate convergence, secondmate liveness, pending remote handoff retry, and Relay artifact writes - run only when this session actually holds the lock from step 1; the four network ones among them run in the deferred stage rather than in this section.
-   The secondmate liveness sweep deterministically accounts for every registered secondmate: it relaunches only from the recovery-grade `dead` or `missing` states, preserves ambiguous, unreadable, or unreachable remote targets, and reports skipped or failed guarantees as `SECONDMATE_LIVENESS:` lines (`bin/fm-bootstrap.sh`; `bin/fm-backend.sh`'s `fm_backend_agent_state`; `docs/remote-secondmates.md`).
-3. **Wake queue** - when locked, drains and presents the durable wake queue without running the inactive-outcome scan inline, and prints the raw records prominently as this turn's first work queue; a clearly labeled status-event annotation may follow a valid `signal` record and includes every status line still unread at the presentation cursor, but never replaces the raw record or current-state reconciliation, and a lapsed watcher chain still surfaces here via the same guard alarm.
-   Presented records remain durable until the handling turn runs the generation-bound acknowledgement printed by the drain.
-   Every locked drain also prints a bounded fleet-wide `OPEN DECISIONS` section when durable decision records remain open, including when the queue itself is empty; reconcile those entries before continuing.
-   A main drain may also print a bounded, one-shot `STATUS OUTCOME BACKSTOP` when a task's newest captain-facing status event has no covering supervision-branch outcome; handle it as a recovered wake even when no queue row remains.
-   The same drain prints every still-unread `note:` line and pending-reply resolution since the last presentation in an unbounded `UNREAD STATUS` section, so an answer buried under a later routine line is not dropped; those lines are not re-printed after that presentation.
-   It also prints a bounded `RECORD DIVERGENCE` section naming every captain call the status log reads as resolved while its backlog task is still held; nothing is closed for you, and `captain-hold-lifecycle` owns the reconciliation.
-   When the lock could not be acquired and verified, the queue is left untouched because no session mutation is authorized, and the guard's tangle/watcher-liveness alarms still print in read-only advisory mode without drain, supervision repair, or checkout repair commands.
-4. **Supervision operating instructions** - after the wake queue and before both digests, the digest emits exactly one operating block for the detected primary harness, followed by the read-once contract that governs them.
-   The script itself never starts supervision; the emitted harness protocol owns the exact wait or wake mechanism.
-5. **Fleet-state digest** - after that read-once contract and ahead of the context digest, the compact backlog listing owned by `bin/fm-session-start.sh`; every `state/<id>.meta`; a bounded tail of each task's `state/<id>.status` (labeled as wake-EVENT history, not current state, with the full log path printed for a deeper read); the away posture (`state/.afk-contract`, plus the `state/.afk` daemon flag where a daemon runs); and one cheap alive/dead read of each task's recorded backend endpoint.
-   That liveness line is a fast presence check only, not a full state read - when you need a crew's actual current state (a run-step, not just "is the pane there"), read it with `bin/fm-crew-state.sh <id>` as before; the digest deliberately skips that deeper, slower read for every task so it stays fast and bounded.
-6. **Network checks** - after the fleet-state digest, the deferred stage's result, or an explicit statement of what it has not confirmed yet.
-   A read-only session runs no network checks at all and says so.
-7. **Context digest and next step** - last of the bulk sections, the full contents of `data/projects.md`, `data/secondmates.md`, `data/captain.md`, `data/captain-shared.md`, and `data/learnings.md`, each clearly delimited, followed by the closing reminder.
-   A file that does not exist prints an explicit `ABSENT` marker, never confused with an empty-but-present file: absence is meaningful (`captain.md` absent means use the firstmate repo's built-in defaults, `projects.md` absent means rebuild it from the clones under `projects/`, etc.).
-   The closing reminder points back to the emitted supervision block and preserves only the lock, afk, Relay, and read-once reminders.
-
-Bootstrap detects first, asks for consent, and installs only after the captain approves in the current session.
-Do not dispatch until the essential launch tools are present and GitHub authentication is good; presentation availability follows `bootstrap-diagnostics` and does not block nonvisual work.
-Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser work, and compatible `lavish-axi` for visual decisions or reports; consult current help rather than memorizing flags.
-A silent bootstrap section needs no action; for any printed actionable diagnostic line, load `bootstrap-diagnostics` and follow its owner procedure.
-`BOOTSTRAP_INFO:` lines are completed no-action facts and do not require loading a skill.
-`secondmate-provisioning` owns startup secondmate sync, liveness, and inherited local-material convergence.
+**Bootstrap tooling:**
+- Detects first, asks for consent, installs only after the captain approves in-session.
+- Do not dispatch until essential launch tools are present and GitHub auth is good.
+  Presentation availability follows `bootstrap-diagnostics` and does not block nonvisual work.
+- Use `gh-axi` for GitHub, `chrome-devtools-axi` for browser, compatible `lavish-axi` for visual decisions/reports - consult current help, don't memorize flags.
+- Silent bootstrap section = no action.
+  Any actionable diagnostic line = load `bootstrap-diagnostics`.
+  `BOOTSTRAP_INFO:` lines are completed no-action facts, no skill load needed.
+- `secondmate-provisioning` owns startup secondmate sync, liveness, inherited local-material convergence.
 
 ## 4. Harness and runtime dispatch
 
