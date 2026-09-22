@@ -1897,6 +1897,40 @@ test_no_run_busy_pane() {
   pass "no run + a busy semantic record reads working, attributed to its source"
 }
 
+# A launch pinned at the fm-spawn seed (no hook has posted yet) whose pane
+# renders a recognized interactive prompt must read unknown, never working -
+# this is the load-bearing link the launch-prompt backstop depends on:
+# fm-watch.sh's pause_state_class absorbs a stale pane as "provably working"
+# whenever THIS script reports `state: working · source: pane`, so if this
+# authoritative read still said working, the watcher would silently swallow
+# the wake even though bin/fm-busy-lib.sh's own classifier had already flipped
+# to unknown launch-prompt. crew_busy_verdict must therefore capture a real
+# tail for every harness, not only grok, so the backstop's own tail-based
+# check ever runs here at all.
+test_no_run_launch_prompt_parked_is_not_working() {
+  reset_fakes
+  local d; d=$(new_case launch-prompt)
+  make_repo_on_branch "$d/wt" fm/feat-lp
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-lp.meta" "window=fm:fm-feat-lp" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT='Quick safety check: Is this a project you created or one you trust? ...
+> No, exit
+  Yes, I trust this folder
+Enter to confirm . Esc to cancel'
+  export FM_FAKE_BUSY_TEXT
+  # arm only, never apply: the launch turn has never advanced past the seed
+  # fm-spawn.sh writes at spawn time.
+  "$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-lp >/dev/null
+  local out; out=$(run_crew_state "$d" feat-lp)
+  assert_not_contains "$out" "state: working" "a launch parked on its trust dialog must never read working"
+  assert_contains "$out" "state: unknown" "a parked launch reads unknown, not busy or idle"
+  assert_contains "$out" "launch-prompt" "the unknown verdict names the launch-prompt backstop as its source"
+  pass "a launch parked on a recognized interactive prompt never reads working, closing the absorb path a stale watcher poll depends on"
+}
+
 # A converted adapter must NOT read working from rendered footer text: the
 # redesign removed that dependency, so a pane painting "esc to interrupt" with
 # no semantic record is unknown, never working and never silently idle.
@@ -4875,6 +4909,7 @@ test_terminal_run_without_live_sibling_is_unchanged
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
+test_no_run_launch_prompt_parked_is_not_working
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture

@@ -508,6 +508,92 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+## Launch-prompt backstop signatures
+
+`bin/fm-busy-lib.sh`'s launch-prompt backstop (`fm_busy_launch_prompt_parked`) reclassifies a launch whose busy record is still pinned at the fm-spawn seed as `unknown launch-prompt`, rather than `busy fm-spawn`, when the captured pane matches that harness's own recognized trust, sign-in, or first-run dialog.
+Each signature below was live-verified against the real installed binary through `tests/fm-launch-prompt-signals-live-e2e.test.sh` (`FM_LAUNCH_PROMPT_SIGNALS_LIVE=1`), which is what refreshes this record after an upgrade.
+
+An initial Pi signature sourced only from the installed binary's own UI strings ("Project trust", the internal panel-title component, never the dialog's own rendered heading) was wrong and never matched the real screen.
+This guard's first live run caught that before it shipped, which is the evidence for why this class of check must be driven end to end rather than read off strings or a component name.
+
+Verified 2026-09-22 on Claude Code 2.1.278, pi 0.86.1, and gemini 0.60.0.
+
+```sh
+FM_LAUNCH_PROMPT_SIGNALS_LIVE=1 bash tests/fm-launch-prompt-signals-live-e2e.test.sh
+```
+
+```
+# live claude version: 2.1.278 (Claude Code)
+ok - claude: a real launch parked on its own rendered trust dialog surfaces through the watcher gate
+# live pi version: 0.86.1
+ok - pi, pi-signed, omp: a real Pi-engine launch parked on its own rendered trust dialog surfaces through the watcher gate
+# live gemini version: 0.60.0
+ok - gemini: a real launch parked on its own rendered auth or trust dialog surfaces through the watcher gate
+# checked 3 launch-prompt signature(s) against real installed binaries
+```
+
+Claude, launched `--dangerously-skip-permissions` into a brand-new worktree under the operator's own already-onboarded config (the shape a real crewmate spawn produces):
+
+```
+ Accessing workspace:
+
+ /tmp/fm-launch-prompt-claude.XXXXXX/wt
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this
+ folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel
+```
+
+Pi, launched into a fresh worktree carrying a project-local `.pi/extensions/` file (the trust-requiring resource that actually gates the dialog) under an isolated `HOME`:
+
+```
+ Trust project folder?
+ /tmp/fm-launch-prompt-pi.XXXXXX/wt
+
+ This allows pi to load .pi settings and resources, install missing project packages, and execute project extensions.
+
+ → Trust
+   Trust parent folder (/tmp/fm-launch-prompt-pi.XXXXXX)
+   Trust (this session only)
+   Do not trust
+   Do not trust (this session only)
+
+ ↑↓ navigate  enter select  escape/ctrl+c cancel
+```
+
+Gemini, launched `GEMINI_CLI_TRUST_WORKSPACE=true gemini -y` with no `GEMINI_API_KEY` and no prior OAuth credential:
+
+```
+ ? Get started
+
+   How would you like to authenticate for this project?
+
+   ● 1. Sign in with Google
+     2. Use Gemini API Key
+     3. Vertex AI
+
+   No authentication method selected.
+
+   (Use Enter to select)
+
+   Terms of Services and Privacy Notice for Gemini CLI
+
+   https://geminicli.com/docs/resources/tos-privacy/
+```
+
+The real pane renders this inside a bordered box, omitted here for readability; that border is exactly what proves the point below.
+
+That capture demonstrated why each signature function matches the FULL captured tail rather than the Grok/Rovo/AGY busy-footer convention of the last 12 non-blank lines: a bordered dialog box renders many short lines of pure border and padding (`│  ...  │`) that are NOT whitespace-only, so the 12-line reduction pushed this exact heading text out of the window and silently defeated the match on the first attempt.
+None of these three runs ever answered its dialog (Escape only, never Enter), so no credential store was written to and no model tokens were spent.
+
 ## Codex hook trust
 
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.

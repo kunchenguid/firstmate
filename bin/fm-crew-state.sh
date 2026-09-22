@@ -299,12 +299,15 @@ pane_readable() {  # <target>
 # isolated rendered-tail fallback; a herdr crew's native `busy` is accepted
 # when no record exists, but its native `idle` is NOT, because agent.get
 # reports generation state (idle while a crew blocks on its own long-running
-# foreground tool call) rather than turn state.
+# foreground tool call) rather than turn state. The tail is captured
+# unconditionally (not just for Grok) so this authoritative read also sees
+# fm_busy_lib's launch-prompt backstop: without it, a launch parked on a
+# recognized interactive prompt would report `working` here while the
+# watcher's own poll (which always captures a tail) already classifies it
+# unknown - the exact split issue #1792 describes for a different cause.
 crew_busy_verdict() {  # <target>
-  local tail40=''
-  case "$HARNESS" in
-    grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
-  esac
+  local tail40
+  tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40=''
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
 
