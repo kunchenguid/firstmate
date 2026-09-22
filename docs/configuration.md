@@ -347,8 +347,10 @@ When pi-signed is selected, Firstmate preserves `FM_PI_HARNESS=pi-signed` and re
 Plain Pi launches set `FM_PI_HARNESS=pi`, so a signed primary's environment cannot relabel a plain Pi worker.
 When it is absent or contains `default`, crewmates mirror the firstmate's own harness.
 `config/secondmate-harness` is a separate local, gitignored file containing the adapter the primary uses to launch secondmate agents, optionally followed by model and effort tokens on the same line.
-The first non-empty, non-comment line is parsed as `<harness> [<model>] [<effort>]`.
+The first non-empty, non-comment line without an `<id>:` prefix is the default, parsed as `<harness> [<model>] [<effort>]` and applied to every secondmate.
 A bare `<harness>` preserves the previous behavior: harness only, with no model or effort launch flag.
+Optional per-id pin lines `<id>: <harness> [<model>] [<effort>]` override the default for that one secondmate; the id is matched against the secondmate being launched, and a colon in the first token marks a pin because harness names never contain one.
+This keeps one home able to run, say, `e3` on Opus and every other secondmate on Fable from a single file, while a bare single-line file stays fully backward-compatible.
 When the harness token is absent or `default`, secondmate launch falls back through `config/crew-harness` and then the primary's own harness, and no model or effort is read from that file.
 `fm-harness.sh secondmate-model` and `fm-harness.sh secondmate-effort` expose only the optional tokens from `config/secondmate-harness`; `config/crew-harness` remains a bare adapter-name file.
 Changing this pin affects the next secondmate spawn or control-plane relaunch; the relaunch profile rules are owned by [`docs/agent-control.md`](agent-control.md#transactional-relaunch).
@@ -481,6 +483,7 @@ Per rule, `when` and `use` are required; the top-level `rules` array itself may 
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
+An optional profile `profile` field names a codex provider profile (the `codex --profile <name>` file, e.g. DeepSeek's `deepseek.config.toml`); it is valid only on a `codex` profile and tells firstmate which `--codex-profile` to pass `fm-spawn.sh`, which resolves the field itself and reads no JSON.
 Rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
@@ -506,7 +509,7 @@ Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPA
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`; its Pi default declares the `claude` provider required for typed resolution of that Anthropic model.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
+Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, an effort value unsupported by that harness, or a `profile` field on a non-codex harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
 While typed resolution is active, malformed `approval`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
 Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.

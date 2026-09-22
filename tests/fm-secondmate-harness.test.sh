@@ -172,6 +172,30 @@ ROWS
   pass "C1 fm-harness.sh secondmate-model/secondmate-effort resolve the optional tokens; bare harness stays empty (backward-compat)"
 }
 
+# C2) Per-id pin lines override the bare default for one secondmate only.
+test_secondmate_per_id_pin() {
+  local cfg out
+  cfg="$TMP_ROOT/perid/config"
+  mkdir -p "$cfg"
+  printf '%s\n' '# default for all' 'claude claude-fable-5-1' 'e3: claude claude-opus-4-8 high' > "$cfg/secondmate-harness"
+  q() { PATH="$BLIND_BIN:$BASE_PATH" CLAUDECODE=1 FM_CONFIG_OVERRIDE="$cfg" "$ROOT/bin/fm-harness.sh" "$@"; }
+  # No id -> the bare default line.
+  [ "$(q secondmate)" = claude ] || fail "no-id secondmate should be the default harness"
+  [ "$(q secondmate-model)" = claude-fable-5-1 ] || fail "no-id model should be the default"
+  [ -z "$(q secondmate-effort)" ] || fail "no-id effort should be empty for the default line"
+  # Pinned id -> its own line.
+  [ "$(q secondmate e3)" = claude ] || fail "e3 harness should resolve"
+  [ "$(q secondmate-model e3)" = claude-opus-4-8 ] || fail "e3 should get its pinned model"
+  [ "$(q secondmate-effort e3)" = high ] || fail "e3 should get its pinned effort"
+  # Unpinned id -> the default line.
+  [ "$(q secondmate-model m3)" = claude-fable-5-1 ] || fail "an unpinned id must fall back to the default line"
+  # A bare single-line file stays fully backward-compatible with an id argument.
+  printf 'codex\n' > "$cfg/secondmate-harness"
+  [ "$(q secondmate x9)" = codex ] || fail "a bare single line must serve any id (backward-compat)"
+  [ -z "$(q secondmate-model x9)" ] || fail "a bare single line yields no model for any id"
+  pass "C2 a per-id pin overrides the bare default for one secondmate; a bare file stays backward-compatible"
+}
+
 # ===========================================================================
 # A/C) pi-signed process identity and shared Pi marker behavior
 # ===========================================================================
@@ -2634,6 +2658,7 @@ SH
 test_harness_resolution
 test_cursor_marker_detection
 test_secondmate_model_effort_tokens
+test_secondmate_per_id_pin
 test_pi_signed_detection_and_session_lock_identity
 test_dash_leading_process_names_are_basename_operands
 test_propagate_lib

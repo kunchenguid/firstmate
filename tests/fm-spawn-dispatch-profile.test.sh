@@ -455,6 +455,85 @@ test_codex_omits_max_effort_for_unsupported_model() {
   pass "codex omits max for models without the catalog capability"
 }
 
+# --codex-profile threads codex --profile ahead of --model, records the pin in
+# meta, and lets a provider profile carry the model so --model can be omitted.
+test_codex_profile_threads_and_records_without_model() {
+  local rec id out status launch
+  id=profile-codex-deepseek-z4e
+  rec=$(make_spawn_case profile-codex-deepseek codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex --codex-profile deepseek --effort high)
+  status=$?
+  expect_code 0 "$status" "codex spawn with a provider profile and no model should succeed"$'\n'"$out"
+  assert_grep "codex_profile=deepseek" "$HOME_DIR/state/$id.meta" "meta missing codex_profile=deepseek"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --profile 'deepseek' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread --profile ahead of the effort config with no model"
+  assert_not_contains "$launch" "--model" "an omitted model must leave --model out of the codex launch"
+  pass "codex --codex-profile threads --profile, records the pin, and omits --model when unset"
+}
+
+# An explicit --model still overrides the profile's model and sits after --profile.
+test_codex_profile_allows_model_override() {
+  local rec id out status launch
+  id=profile-codex-deepseek-model-z4f
+  rec=$(make_spawn_case profile-codex-deepseek-model codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex --codex-profile deepseek --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "codex spawn with a profile and an explicit model should succeed"$'\n'"$out"
+  assert_grep "codex_profile=deepseek" "$HOME_DIR/state/$id.meta" "meta missing codex_profile=deepseek"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --profile 'deepseek' --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not place --profile ahead of the overriding --model"
+  pass "codex --codex-profile keeps --model as an override placed after --profile"
+}
+
+# The profile axis is codex-only: any other harness refuses it, before writing a
+# task record.
+test_codex_profile_refused_on_non_codex_harness() {
+  local rec id out status
+  id=profile-codex-nonharness-z4g
+  rec=$(make_spawn_case profile-codex-nonharness claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --codex-profile deepseek)
+  status=$?
+  expect_code 1 "$status" "a non-codex --codex-profile spawn should refuse"
+  assert_contains "$out" "codex-profile applies only to the codex harness" \
+    "the refusal should name the codex-only axis"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused profile spawn must write no task record"
+  pass "codex --codex-profile is refused for any other harness before a record is written"
+}
+
+# Without the flag, a codex launch is byte-identical to today's, so the axis is
+# inert until used.
+test_codex_without_profile_is_unchanged() {
+  local rec id out status launch expected
+  id=profile-codex-unchanged-z4h
+  rec=$(make_spawn_case profile-codex-unchanged codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex --model gpt-6-astra --effort high)
+  status=$?
+  expect_code 0 "$status" "a plain codex spawn should succeed"$'\n'"$out"
+  assert_grep "harness=codex" "$HOME_DIR/state/$id.meta" "meta missing harness=codex"
+  ! grep -q '^codex_profile=' "$HOME_DIR/state/$id.meta" \
+    || fail "a spawn without --codex-profile must write no codex_profile= line"
+  launch=$(cat "$LAUNCH_LOG")
+  # The codex core is unchanged and carries no --profile: the axis is inert until
+  # used. (The env prefix is shared with every codex launch and pinned by the
+  # other codex cases.)
+  assert_contains "$launch" "codex --model 'gpt-6-astra' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox --disable hooks" \
+    "plain codex launch core changed"
+  assert_not_contains "$launch" "--profile" "a codex launch without the flag must carry no --profile"
+  pass "a codex launch without --codex-profile is unchanged and carries no --profile"
+}
+
 # Codex parks a crewmate launch forever on its unanswerable hook-trust modal
 # unless the launch turns the hook layer off. These two cases pin the split:
 # a crewmate runs hook-free, a secondmate keeps the project hooks that carry its
@@ -1499,6 +1578,10 @@ test_codex_threads_model_and_max_effort
 test_codex_omits_max_effort_for_unsupported_model
 test_codex_crewmate_launch_disables_the_hook_layer
 test_codex_secondmate_launch_keeps_the_hook_layer
+test_codex_profile_threads_and_records_without_model
+test_codex_profile_allows_model_override
+test_codex_profile_refused_on_non_codex_harness
+test_codex_without_profile_is_unchanged
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

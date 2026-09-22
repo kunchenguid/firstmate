@@ -1157,6 +1157,7 @@ crew_dispatch_validate() {
     def malformed_optional_fields($items):
       ($items | any(has("model") and (((.model | type) != "string") or (.model | length) == 0)))
       or ($items | any(has("effort") and (((.effort | type) != "string") or (.effort | length) == 0)))
+      or ($items | any(has("profile") and (((.profile | type) != "string") or (.profile | length) == 0)))
       or ($typed and ($items | any(has("provider") and (provider_id(.provider) | not))));
     # A quota floor, on a rule or a profile: bin/fm-dispatch-resolve.sh applies
     # it in code against one quota-axi row, so scope and min_percent must be
@@ -1179,6 +1180,15 @@ crew_dispatch_validate() {
       | map(select(. as $p | effort_ok($p.h; $p.m; $p.e) | not))
       | map("\(.h):\(.e)")
       | unique;
+    # profile is a codex-only axis: it names the codex --profile fm-spawn passes,
+    # so it is meaningless on any other harness.
+    def bad_profiles:
+      configured_profiles
+      | map(select(has("profile")))
+      | map(select((.harness | type) == "string" and verified(.harness)))
+      | map(select(.harness != "codex"))
+      | map(.harness)
+      | unique;
     if type != "object" then "top-level value must be an object"
     elif has("rules") and (.rules | type) != "array" then "rules must be an array"
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
@@ -1188,8 +1198,8 @@ crew_dispatch_validate() {
     elif [(.rules // [])[]? | profiles(.use?)[]? | select(type != "object")] | length > 0 then "each use profile must be an object"
     elif [(.rules // [])[]? | profiles(.use?)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length > 0 then "each use profile needs harness"
     elif malformed_optional_fields([(.rules // [])[]? | profiles(.use?)[]?]) then
-      if $typed then "use profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
-      else "use profile model and effort must be non-empty strings when present"
+      if $typed then "use profile model, effort, and codex profile must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
+      else "use profile model, effort, and codex profile must be non-empty strings when present"
       end
     elif $typed and malformed_profile_floors([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile floor needs scope and min_percent 0..100"
     elif $typed and ([(.rules // [])[]? | select(has("approval") and .approval != "captain")] | length > 0) then "approval must be \"captain\" when present"
@@ -1202,8 +1212,8 @@ crew_dispatch_validate() {
     elif has("default") and ([profiles(.default)[]? | select(type != "object")] | length) > 0 then "each default profile must be an object"
     elif has("default") and ([profiles(.default)[]? | select((.harness? | type) != "string" or (.harness | length) == 0)] | length) > 0 then "each default profile needs harness"
     elif has("default") and malformed_optional_fields([profiles(.default)[]?]) then
-      if $typed then "default profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
-      else "default profile model and effort must be non-empty strings when present"
+      if $typed then "default profile model, effort, and codex profile must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
+      else "default profile model, effort, and codex profile must be non-empty strings when present"
       end
     elif $typed and has("default") and malformed_profile_floors([profiles(.default)[]?]) then "default profile floor needs scope and min_percent 0..100"
     else
@@ -1214,6 +1224,7 @@ crew_dispatch_validate() {
         | unique) as $bad_harnesses
       | if ($bad_harnesses | length) > 0 then "unverified harness: " + ($bad_harnesses | join(", "))
         elif (bad_efforts | length) > 0 then "invalid effort: " + (bad_efforts | join(", "))
+        elif (bad_profiles | length) > 0 then "profile applies only to the codex harness: " + (bad_profiles | join(", "))
         else empty
         end
     end

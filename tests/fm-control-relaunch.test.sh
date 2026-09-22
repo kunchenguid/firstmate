@@ -734,6 +734,53 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
 }
 
+test_same_harness_codex_relaunch_carries_the_provider_profile() {
+  local dir out rc
+  dir=$(new_case codexprofile rl-cp1)
+  add_ship_task "$dir" rl-cp1 codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+  printf 'codex_profile=deepseek\n' >> "$dir/home/state/rl-cp1.meta"
+  out=$(run_control "$dir" rl-cp1 relaunch --note "same runtime"); rc=$?
+  expect_code 0 "$rc" "a same-harness codex relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl-cp1 codex_profile)" = deepseek ] \
+    || fail "a codex-to-codex relaunch must carry the recorded provider profile forward"
+  [ "$(journal_field "$dir" rl-cp1 to_codex_profile)" = deepseek ] \
+    || fail "the journal should record the carried-forward provider profile"
+  pass "fm-control relaunch: a codex-to-codex relaunch never silently drops the provider profile"
+}
+
+test_harness_switch_clears_the_codex_profile() {
+  local dir out rc
+  dir=$(new_case codexprofileswitch rl-cp2)
+  add_ship_task "$dir" rl-cp2 codex
+  printf 'codex' > "$dir/fake/command"
+  printf 'claude' > "$dir/fake/becomes"
+  printf 'codex_profile=deepseek\n' >> "$dir/home/state/rl-cp2.meta"
+  out=$(run_control "$dir" rl-cp2 relaunch --harness claude --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "a codex-to-claude switch should succeed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl-cp2 codex_profile)" ] \
+    || fail "a harness switch away from codex must not carry the provider profile"
+  pass "fm-control relaunch: switching off codex clears the provider profile"
+}
+
+test_explicit_codex_profile_refused_on_non_codex_relaunch() {
+  local dir out rc meta
+  dir=$(new_case codexprofilerefuse rl-cp3)
+  add_ship_task "$dir" rl-cp3 claude
+  meta="$dir/home/state/rl-cp3.meta"
+  cp "$meta" "$dir/meta.before"
+  out=$(run_control "$dir" rl-cp3 relaunch --codex-profile deepseek --note "no"); rc=$?
+  expect_code 1 "$rc" "a --codex-profile relaunch onto a non-codex target should refuse"
+  assert_contains "$out" "codex-profile applies only to the codex harness" \
+    "the refusal should name the codex-only axis"
+  cmp -s "$meta" "$dir/meta.before" \
+    || fail "a refused --codex-profile relaunch must leave metadata byte-identical"
+  [ ! -e "$dir/home/state/rl-cp3.control-relaunch" ] \
+    || fail "a refused --codex-profile relaunch must not create a durable journal"
+  pass "fm-control relaunch: --codex-profile is refused for a non-codex target before anything is stopped"
+}
+
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   local dir out rc id=rl-ultra
   dir=$(new_case native-ultra "$id")
@@ -2211,6 +2258,9 @@ test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
+test_same_harness_codex_relaunch_carries_the_provider_profile
+test_harness_switch_clears_the_codex_profile
+test_explicit_codex_profile_refused_on_non_codex_relaunch
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
