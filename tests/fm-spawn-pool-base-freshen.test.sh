@@ -621,6 +621,59 @@ EOF
   pass "expected-head launch rechecks HEAD and cleanliness after text settles without starting a worker"
 }
 
+test_expected_head_worker_boundary_rejects_final_coordinate_race() {
+  local rec id out status real_git race_marker observed pending receipt_path receipt
+  id='pool-expected-worker-boundary-r27'
+  rec=$(make_case expected-worker-boundary "$id")
+  read_case_record "$rec"
+  real_git=$(command -v git)
+  race_marker="$CASE_DIR/final-coordinate-raced"
+  observed="$CASE_DIR/worker-observed"
+  pending="$CASE_DIR/pending-launch"
+  receipt_path="$CASE_DIR/receipt-path"
+
+  cat >"$FAKEBIN_DIR/git" <<EOF
+#!/usr/bin/env bash
+set -eu
+if [ -e '$pending' ] && [ "\${3:-}" = rev-parse ] &&
+  [ "\${4:-}" = --verify ] && [ "\${5:-}" = --quiet ] &&
+  [ "\${6:-}" = HEAD ] && [ ! -e '$race_marker' ]; then
+  '$real_git' "\$@"
+  staged=\$(cat '$pending')
+  printf '%s.receipt\n' "\$staged" >'$receipt_path'
+  printf 'changed after final parent verification\n' >'$POOL_DIR/README.md'
+  : >'$race_marker'
+  exit 0
+fi
+exec '$real_git' "\$@"
+EOF
+  chmod +x "$FAKEBIN_DIR/git"
+  cat >"$FAKEBIN_DIR/codex" <<EOF
+#!/usr/bin/env bash
+printf 'head=%s\n' "\$('${real_git}' rev-parse HEAD)" >'$observed'
+printf 'bytes=%s\n' "\$(cat README.md)" >>'$observed'
+EOF
+  chmod +x "$FAKEBIN_DIR/codex"
+
+  out=$(FM_FAKE_PENDING_LAUNCH="$pending" FM_FAKE_EXECUTE_LAUNCH=1 \
+    run_spawn "$id" --mode no-mistakes --yolo off --harness codex \
+      --expected-head "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "exact-head spawn reported success after the final coordinate read raced with unreviewed bytes"
+  [ -e "$race_marker" ] || fail "fixture did not mutate the candidate after the parent final coordinate read"
+  [ ! -e "$observed" ] || fail "worker began after the worker-boundary guard observed raced candidate bytes"
+  [ ! -e "$pending" ] || fail "worker-boundary refusal left a staged launch command in the endpoint"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "worker-boundary refusal left dishonest live task metadata"
+  [ -f "$receipt_path" ] || fail "fixture did not record the worker-boundary receipt path"
+  receipt=$(cat "$receipt_path")
+  [ -f "$receipt" ] && [ ! -L "$receipt" ] || fail "worker-boundary refusal left no durable regular receipt"
+  assert_grep 'status=refused' "$receipt" "worker-boundary receipt did not record refusal"
+  assert_grep 'reason=dirty-worktree' "$receipt" "worker-boundary receipt did not name the raced bytes"
+  assert_contains "$out" "worker-boundary verification refused" \
+    "spawn did not report the worker-boundary refusal to its caller"
+  pass "worker-boundary verification rejects a deterministic write after the parent final coordinate read"
+}
+
 test_expected_head_rejects_submodule_index_suppression() {
   local rec id out status
   id='pool-expected-submodule-skip-worktree-r18'
@@ -1436,6 +1489,7 @@ test_expected_head_ignores_ambient_git_namespace
 test_expected_head_ignores_ambient_git_config_overrides
 test_expected_head_refuses_unsupported_lifecycle_shapes
 test_expected_head_is_reverified_immediately_before_launch
+test_expected_head_worker_boundary_rejects_final_coordinate_race
 test_expected_head_rejects_submodule_index_suppression
 test_expected_head_rejects_hidden_file_mode_changes
 test_expected_head_rejects_filtered_worktree_bytes

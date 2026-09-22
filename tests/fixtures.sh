@@ -133,19 +133,38 @@ case "${1:-}" in
     exit 0
     ;;
   send-keys)
+    if [ "${FM_FAKE_EXECUTE_LAUNCH:-0}" != 1 ]; then
+      prev=
+      for a in "$@"; do
+        if [ "$prev" = "-l" ]; then
+          case "$a" in
+            ". '"*"'")
+              staged=${a#". '"}
+              staged=${staged%"'"}
+              if grep -Fq 'fm-exact-head-launch-guard.sh' "$staged"; then
+                expected=$(grep -Eo '[0-9a-f]{40}' "$staged" | head -n 1)
+                {
+                  printf 'schema=fm-exact-head-launch.v1\n'
+                  printf 'status=verified\n'
+                  printf 'expected_head=%s\n' "$expected"
+                  printf 'reason=clean\n'
+                } >"$staged.receipt"
+              fi
+              ;;
+          esac
+        fi
+        prev=$a
+      done
+    fi
     if [ -n "${FM_FAKE_PENDING_LAUNCH:-}" ]; then
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
           case "$a" in
             ". '"*"'")
-              if [ "${FM_FAKE_EXECUTE_LAUNCH:-0}" = 1 ]; then
-                staged=${a#". '"}
-                staged=${staged%"'"}
-                printf '%s\n' "$staged" > "$FM_FAKE_PENDING_LAUNCH"
-              else
-                : > "$FM_FAKE_PENDING_LAUNCH"
-              fi
+              staged=${a#". '"}
+              staged=${staged%"'"}
+              printf '%s\n' "$staged" > "$FM_FAKE_PENDING_LAUNCH"
               ;;
           esac
         fi

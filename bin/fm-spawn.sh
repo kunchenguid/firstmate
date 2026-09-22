@@ -227,9 +227,12 @@
 #   scout. It replaces default-branch convergence with an origin fetch that
 #   must authorize the commit, resets the clean isolated worktree and initialized
 #   submodules to their recorded pins, and records expected_head= in task
-#   metadata. Immediately before submitting the worker launch it proves HEAD,
-#   tracked bytes and modes, recursive initialized-submodule trees, and the
-#   absence of index suppression, untracked files, and ignored files. A
+#   metadata. It proves HEAD, tracked bytes and modes, recursive initialized-
+#   submodule trees, and the absence of index suppression, untracked files, and
+#   ignored files both before submission and again inside the pane immediately
+#   before the worker command. The pane-side gate writes an atomic receipt under
+#   the private staged-launch directory; spawn reports success only after that
+#   receipt proves the exact coordinate and clean candidate. A
 #   verified Claude exact-head launch carries Firstmate's generated lifecycle
 #   hooks in Claude's official per-launch --settings JSON instead of writing an
 #   ignored control file into the reviewed worktree. If a
@@ -573,6 +576,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-codex-native-lib.sh
 . "$SCRIPT_DIR/fm-codex-native-lib.sh"
+# shellcheck source=bin/fm-exact-head-lib.sh
+. "$SCRIPT_DIR/fm-exact-head-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -3175,82 +3180,6 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
-expected_head_raw_tree_status() { # <worktree>
-  local worktree=$1 record metadata mode type object path actual complete=0 producer_status=1
-  local link_bytes link_size sub_super sub_head nested
-  while IFS= read -r -d '' record; do
-    if [ -z "$record" ]; then
-      IFS= read -r -d '' producer_status || return 1
-      complete=1
-      break
-    fi
-    case "$record" in *$'\t'*) ;; *) return 1 ;; esac
-    metadata=${record%%$'\t'*}
-    path=${record#*$'\t'}
-    read -r mode type object <<<"$metadata"
-    case "$mode:$type" in
-      100644:blob|100755:blob)
-        if [ ! -f "$worktree/$path" ] || [ -L "$worktree/$path" ]; then
-          printf 'raw tree mismatch: %s\n' "$path"
-          continue
-        fi
-        actual=$(git -C "$worktree" hash-object --no-filters -- "$worktree/$path" 2>/dev/null) || return 1
-        if [ "$actual" != "$object" ] ||
-          { [ "$mode" = 100755 ] && [ ! -x "$worktree/$path" ]; } ||
-          { [ "$mode" = 100644 ] && [ -x "$worktree/$path" ]; }; then
-          printf 'raw tree mismatch: %s\n' "$path"
-        fi
-        ;;
-      120000:blob)
-        if [ ! -L "$worktree/$path" ]; then
-          printf 'raw tree mismatch: %s\n' "$path"
-          continue
-        fi
-        link_bytes=$(readlink "$worktree/$path" | wc -c | tr -d '[:space:]') || return 1
-        case "$link_bytes" in ''|*[!0-9]*) return 1 ;; esac
-        [ "$link_bytes" -gt 0 ] || return 1
-        link_size=$((link_bytes - 1))
-        actual=$(readlink "$worktree/$path" | dd bs=1 count="$link_size" 2>/dev/null | git -C "$worktree" hash-object --stdin) || return 1
-        [ "$actual" = "$object" ] || printf 'raw tree mismatch: %s\n' "$path"
-        ;;
-      160000:commit)
-        sub_super=$(git -C "$worktree/$path" rev-parse --show-superproject-working-tree 2>/dev/null || true)
-        if [ -n "$sub_super" ]; then
-          sub_head=$(git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null || true)
-          if [ "$sub_head" != "$object" ]; then
-            printf 'raw tree mismatch: %s\n' "$path"
-          else
-            nested=$(expected_head_raw_tree_status "$worktree/$path") || return 1
-            [ -z "$nested" ] || printf '%s\n' "$nested"
-          fi
-        fi
-        ;;
-      *) return 1 ;;
-    esac
-  done < <({ git -C "$worktree" ls-tree -r -z --full-tree HEAD; printf '\0%s\0' "$?"; })
-  [ "$complete" -eq 1 ] && [ "$producer_status" -eq 0 ]
-}
-
-expected_head_worktree_status() { # <worktree>
-  local status index raw
-  status=$(git -C "$1" -c core.quotePath=false -c core.fileMode=true status --porcelain \
-    --untracked-files=all --ignored=matching --ignore-submodules=none) || return 1
-  [ -z "$status" ] || printf '%s\n' "$status"
-  index=$(git -C "$1" -c core.quotePath=true ls-files -v) || return 1
-  index=$(printf '%s\n' "$index" | LC_ALL=C grep -E '^[a-zS] ' || true)
-  [ -z "$index" ] || printf '%s\n' "$index"
-  # shellcheck disable=SC2016 # The submodule foreach shell expands these variables.
-  git -C "$1" submodule foreach --quiet --recursive '
-    status=$(git -c core.quotePath=false -c core.fileMode=true status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none) || exit 1
-    [ -z "$status" ] || printf "%s\n%s\n" "$displaypath" "$status"
-    index=$(git -c core.quotePath=true ls-files -v) || exit 1
-    index=$(printf "%s\n" "$index" | LC_ALL=C grep -E "^[a-zS] " || true)
-    [ -z "$index" ] || printf "%s\n%s\n" "$displaypath" "$index"
-  ' || return 1
-  raw=$(expected_head_raw_tree_status "$1") || return 1
-  [ -z "$raw" ] || printf '%s\n' "$raw"
-}
-
 freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
   local worktree=$1 requested=${2:-} default target expected actual status fetch_head fetched origin_authorized grafts
   if [ -n "$requested" ]; then
@@ -5221,9 +5150,20 @@ if ! (umask 077 && mkdir "$LAUNCH_DIR") 2>/dev/null; then
 fi
 LAUNCH_FILE="$LAUNCH_DIR/launch.$SPAWN_GEN.sh"
 LAUNCH_STAGE="$LAUNCH_DIR/.launch.$SPAWN_GEN.tmp"
+EXACT_HEAD_LAUNCH_RECEIPT=
 if [ -e "$LAUNCH_FILE" ] || [ -L "$LAUNCH_FILE" ]; then
   echo "error: task launch file $LAUNCH_FILE already exists; refusing to replace it" >&2
   exit 1
+fi
+if [ -n "$EXPECTED_HEAD" ]; then
+  EXACT_HEAD_LAUNCH_RECEIPT="$LAUNCH_FILE.receipt"
+  if [ -e "$EXACT_HEAD_LAUNCH_RECEIPT" ] || [ -L "$EXACT_HEAD_LAUNCH_RECEIPT" ]; then
+    echo "error: exact-head launch receipt $EXACT_HEAD_LAUNCH_RECEIPT already exists; refusing to reuse it" >&2
+    exit 1
+  fi
+  exact_head_guard_command="$(shell_quote "$FM_ROOT/bin/fm-exact-head-launch-guard.sh") $(shell_quote "$WT") $(shell_quote "$EXPECTED_HEAD") $(shell_quote "$EXACT_HEAD_LAUNCH_RECEIPT")"
+  LAUNCH="if ! $exact_head_guard_command; then return 0 2>/dev/null || exit 0; fi
+$LAUNCH"
 fi
 if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   chmod 0600 "$LAUNCH_STAGE" && mv -f "$LAUNCH_STAGE" "$LAUNCH_FILE"); then
@@ -5267,6 +5207,33 @@ if ! spawn_send_key "$T" Enter; then
     exit 1
   fi
   exit 1
+fi
+if [ -n "$EXPECTED_HEAD" ]; then
+  exact_head_receipt_attempt=0
+  while [ "$exact_head_receipt_attempt" -lt 300 ] &&
+    [ ! -e "$EXACT_HEAD_LAUNCH_RECEIPT" ] && [ ! -L "$EXACT_HEAD_LAUNCH_RECEIPT" ]; do
+    sleep 0.1
+    exact_head_receipt_attempt=$((exact_head_receipt_attempt + 1))
+  done
+  if [ ! -f "$EXACT_HEAD_LAUNCH_RECEIPT" ] || [ -L "$EXACT_HEAD_LAUNCH_RECEIPT" ]; then
+    [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
+    expected_head_cancel_staged_launch
+    echo "error: exact-head worker-boundary verification produced no trusted receipt; refusing to report launch success" >&2
+    exit 1
+  fi
+  exact_head_receipt_schema=$(sed -n 's/^schema=//p' "$EXACT_HEAD_LAUNCH_RECEIPT")
+  exact_head_receipt_status=$(sed -n 's/^status=//p' "$EXACT_HEAD_LAUNCH_RECEIPT")
+  exact_head_receipt_expected=$(sed -n 's/^expected_head=//p' "$EXACT_HEAD_LAUNCH_RECEIPT")
+  exact_head_receipt_reason=$(sed -n 's/^reason=//p' "$EXACT_HEAD_LAUNCH_RECEIPT")
+  if [ "$exact_head_receipt_schema" != fm-exact-head-launch.v1 ] ||
+    [ "$exact_head_receipt_expected" != "$EXPECTED_HEAD" ] ||
+    [ "$exact_head_receipt_status" != verified ] ||
+    [ "$exact_head_receipt_reason" != clean ]; then
+    [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
+    expected_head_cancel_staged_launch
+    echo "error: exact-head worker-boundary verification refused or returned a malformed receipt (status=${exact_head_receipt_status:-missing}, reason=${exact_head_receipt_reason:-missing}); no worker was launched" >&2
+    exit 1
+  fi
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
