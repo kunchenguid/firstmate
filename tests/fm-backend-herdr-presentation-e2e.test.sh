@@ -949,6 +949,12 @@ CARRY_ABORT_LAUNCH_DIR=$(carry_abort_launch_dir "$HOME_DIR")
   || fail "carry-abort first spawn did not stage its launch directory at $CARRY_ABORT_LAUNCH_DIR"
 lab workspace close "$CARRY_ABORT_WSID" >/dev/null \
   || fail "could not close the task space for carry-abort"
+# The close above is the external task-space removal under test; Herdr's own
+# close steers focus to the closed space's neighbor. Re-baseline the captain's
+# focus so the recovery and later teardowns are judged on their own behavior.
+lab tab focus "$SECOND_TWO_TAB" >/dev/null \
+  || fail "could not restore the captain tab after removing the carry-abort task space"
+assert_focus_is "$CAPTAIN_FOCUS" "carry-abort task-space removal"
 chmod 777 "$CARRY_ABORT_LAUNCH_DIR" \
   || fail "could not arm the launch-directory refusal for carry-abort"
 CARRY_ABORT_TREEHOUSE_START=$(wc -l < "$TREEHOUSE_CALL_LOG" | tr -d '[:space:]')
@@ -992,6 +998,9 @@ CARRY_BACKLOG_WT=$(remember_meta_worktree "$CARRY_BACKLOG_META")
 CARRY_BACKLOG_WSID=$(grep '^herdr_workspace_id=' "$CARRY_BACKLOG_META" | cut -d= -f2-)
 lab workspace close "$CARRY_BACKLOG_WSID" >/dev/null \
   || fail "could not close the task space for carry-backlog"
+lab tab focus "$SECOND_TWO_TAB" >/dev/null \
+  || fail "could not restore the captain tab after removing the carry-backlog task space"
+assert_focus_is "$CAPTAIN_FOCUS" "carry-backlog task-space removal"
 # The recovery is this home's first backlog-aware spawn. A self-contained fake
 # tasks-axi proves compatibility and reports the row Queued so the preflight and
 # the dispatch commit both reach their transition, then fails `start` so the
@@ -1066,6 +1075,9 @@ CLOSED_SPACE_MARKER="$(dirname "$(cd "$CLOSED_SPACE_OLD_WT" && pwd -P)")/.fm-slo
 CLOSED_SPACE_OLD_WSID=$(grep '^herdr_workspace_id=' "$CLOSED_SPACE_META" | cut -d= -f2-)
 lab workspace close "$CLOSED_SPACE_OLD_WSID" >/dev/null \
   || fail "could not close the task space for closed-space"
+lab tab focus "$SECOND_TWO_TAB" >/dev/null \
+  || fail "could not restore the captain tab after removing the closed-space task space"
+assert_focus_is "$CAPTAIN_FOCUS" "closed-space task-space removal"
 lab worktree list --workspace "$FIRSTMATE_WSID" | jq -e --arg path "$CLOSED_SPACE_OLD_WT" '
   ([.result.worktrees[]? | select(.path == $path and .is_linked_worktree == true)] | length) == 1
   and ([.result.worktrees[]? | select(.path == $path and ((.open_workspace_id // "") | length) > 0)] | length) == 0
