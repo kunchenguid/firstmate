@@ -401,7 +401,7 @@ Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm
 Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
-After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
+After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work through section 8's admission step.
 
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.
@@ -432,12 +432,13 @@ Treat any `UNREAD STATUS` section as newly surfaced status that must be read thi
 Treat any `RECORD DIVERGENCE` section as a contradiction between two records of one captain call, never as proof the captain ruled; load `captain-hold-lifecycle` and reconcile it in whichever direction the evidence supports.
 After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD STATUS sections, run the exact generation-bound `--ack-through` command printed as `WAKE_ACK_REQUIRED`; interruption before that acknowledgement deliberately leaves the work durable for idempotent re-handling.
 
-Then, in that same turn, run the admission step on every wake, including one whose own record changed nothing.
-Count dispatchable rows: queued work items in this home's backlog that are not held for the captain, have no unfinished blocked-by dependency, and have no future time gate.
-Measure headroom against this home's own capacity limits (any resource floor this home records in `data/captain.md`, provider quota through the section 4 intake, and any serial slot a section 7 serialization or captain limit reserves), and admit dispatchable rows in backlog priority order up to that headroom through the ordinary section 7 intake and `bin/fm-spawn.sh`.
+When this session holds the fleet lock and owns supervision, then in that same turn run the admission step on every wake, including one whose own record changed nothing; a lock-refused read-only session never admits.
+Count this home's dispatchable rows (queued, not held for the captain, not blocked, and past any time gate), measure headroom against the resource floor, provider quota, and counted slots (an unmeasurable term is disclosed and counts as headroom, never as zero), and admit rows in backlog priority order up to that headroom through the ordinary section 7 intake and `bin/fm-spawn.sh`.
+Run section 4 intake per row in that order and keep each row's required reasoning class; when that class cannot proceed within headroom, stop and report rather than downgrade to fill.
 Emit exactly one line per wake: `dispatchable=N admitted=M bound=<headroom|quota|slots|none>`, naming the limit that stopped admission, or `none` when every dispatchable row was admitted.
-A wake with dispatchable rows and remaining headroom that admits nothing is a failure: state its concrete cause in that turn, never treat it as a quiet hold.
-Admission stays inside existing authority: it adds no scheduler, and a row whose intake needs a captain decision is escalated or held under section 10, not counted as admitted.
+A wake with dispatchable rows and remaining headroom that admits nothing without stating its concrete binding cause in that turn is a failure.
+A turn that escalates or holds a row under section 10, or stops and reports under section 4's reasoning-class rule, and states that cause, satisfies this rule.
+Load `wake-admission` for the actor in away posture and secondmate homes, the headroom owners and unknown-headroom rule, and the summary's vocabulary and channel.
 
 A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
 A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed.
@@ -590,6 +591,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi default TOON.
+- `wake-admission` - load before the first section 8 admission step of a session and whenever a headroom term, its measurement, or the bound to report is unclear.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
 - `project-management` - load before adding, creating, removing, or initializing a project.

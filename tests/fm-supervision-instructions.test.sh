@@ -218,6 +218,16 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_every_harness_renders_admission_step() {
+  local harness out
+  for harness in claude codex cursor grok omp opencode pi pi-signed not-real; do
+    out=$("$RENDER" --harness "$harness")
+    assert_contains "$out" "WAKE_ACK_REQUIRED" "$harness block lost the acknowledgement step"
+    assert_contains "$out" "AGENTS.md section 8's admission step" "$harness block does not point at the per-wake admission step"
+  done
+  pass "every harness supervision block points at the per-wake admission step"
+}
+
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
@@ -228,3 +238,4 @@ test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path
+test_every_harness_renders_admission_step
