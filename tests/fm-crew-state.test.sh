@@ -3525,12 +3525,31 @@ test_unreadable_inventory_with_no_visible_candidates_still_names_the_run() {
   pass 'a terminal last-reported run with no visible candidates still names its own outcome'
 }
 
+# The captain's second named instance (the Herdr nesting task): the failed
+# read's own partial candidate-id evidence is non-empty AND still names the
+# known run id, alongside an older SAME-branch sibling - exactly the awk
+# selection's own "newest row is the candidate, older rows are history" shape
+# above it. An older sibling sitting beside the known run in that partial
+# evidence is not grounds to distrust it: name its outcome.
+test_unreadable_inventory_names_a_terminal_run_beside_an_older_sibling() {
+  make_competing_runs_case terminal-with-sibling completed cancelled
+  local d=$TMP_ROOT/terminal-with-sibling out
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/runs\[2\]/runs[3]/')
+  FM_FAKE_AXI_STATUS="$(run_passed fm/competing | sed 's/01RUN/01NEW/')"
+  out=$(run_crew_state "$d" competing)
+  assert_contains "$out" 'state: unknown' 'a run named beside an older sibling never asserts exclusive authority'
+  assert_contains "$out" 'run ids: 01NEW, 01OLD' 'the failed read keeps both same-branch candidate ids'
+  assert_contains "$out" 'last reported run id: 01NEW' 'the last reported run id is preserved'
+  assert_contains "$out" '(already passed)' 'a known run named alongside an older sibling still names its own outcome'
+  pass 'a terminal last-reported run named beside an older sibling still names its own outcome'
+}
+
 # The safety counterpart: when the failed read's own partial candidate-id
-# evidence positively names a DIFFERENT run than the one bare `axi status`
-# reports, a stale or superseded terminal record must not be described as
-# though it were the crew's own outcome - the captured same-branch-inventory
-# replay (test_captured_inventory_replay) is the direct proof that the bare
-# `axi status` answer can be a run a live successor has already superseded.
+# evidence is non-empty and does NOT name the known run id at all, a stale or
+# superseded terminal record must not be described as though it were the
+# crew's own outcome - the captured same-branch-inventory replay
+# (test_captured_inventory_replay) is the direct proof that the bare `axi
+# status` answer can be a run a live successor has already superseded.
 test_unreadable_inventory_contradicted_terminal_run_stays_silent() {
   make_capped_runs_case terminal-contradicted completed cancelled
   local d=$TMP_ROOT/terminal-contradicted out
@@ -3538,10 +3557,10 @@ test_unreadable_inventory_contradicted_terminal_run_stays_silent() {
   rm "$NM_HOME/state.sqlite"
   out=$(run_crew_state "$d" competing)
   assert_contains "$out" 'state: unknown' 'a contradicted terminal record keeps the honest unknown'
-  assert_contains "$out" 'run ids: 01NEW' 'the visible candidate names a different run entirely'
+  assert_contains "$out" 'run ids: 01NEW' 'the visible candidate list does not name the known run at all'
   assert_contains "$out" 'last reported run id: 01OLD' 'the last reported run id is still surfaced'
-  assert_not_contains "$out" 'already passed' 'a run contradicted by a different visible candidate must not be described as its own outcome'
-  pass 'a terminal last-reported run contradicted by a different visible candidate adds no unverified outcome detail'
+  assert_not_contains "$out" 'already passed' 'a run absent from a non-empty visible candidate list must not be described as its own outcome'
+  pass 'a terminal last-reported run absent from a non-empty visible candidate list adds no unverified outcome detail'
 }
 
 make_no_python_toolbin() {
@@ -4995,6 +5014,7 @@ test_capped_replacement_keeps_gate_and_inventory_unchanged
 test_capped_inventory_failures_report_unknown
 test_unreadable_inventory_names_an_uncontradicted_terminal_run
 test_unreadable_inventory_with_no_visible_candidates_still_names_the_run
+test_unreadable_inventory_names_a_terminal_run_beside_an_older_sibling
 test_unreadable_inventory_contradicted_terminal_run_stays_silent
 test_complete_inventory_ignores_unrelated_semantics
 test_requested_branch_has_no_character_whitelist
