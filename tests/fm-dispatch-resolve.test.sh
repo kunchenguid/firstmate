@@ -622,6 +622,58 @@ done
 cp "$LANE_RULES" "$RULES"
 pass "Pi native adapters bind to codex-home with existing fallbacks and schema 5 compatibility"
 
+# --- schema 6: Pi's builtin openai-codex home lane falls back to codex-home ----
+# quota-axi keys this home's Codex account as codex-home while Pi's builtin
+# home provider id is openai-codex; with no exact openai-codex row the lane
+# reads codex-home, and the exact row in SCHEMA6 above still wins when it exists.
+SCHEMA6_HOME="$TMP_ROOT/schema6-home.json"
+cat > "$SCHEMA6_HOME" <<'JSON'
+{
+  "generatedAt": "2030-01-01T00:00:00Z",
+  "schemaVersion": 6,
+  "providers": [
+    { "provider": "claude", "accountKey": "default", "quotaSemantics": { "status": "unknown", "effectiveAvailability": [] } },
+    { "provider": "codex", "accountKey": "codex-home", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 97, "runway": { "status": "through_reset" }, "selection": { "spendPriority": 0.8 } } ] } },
+    { "provider": "codex", "accountKey": "openai-codex-muller-labs", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 0, "runway": { "status": "exhausted_now" }, "selection": { "spendPriority": -1.4788 } } ] } },
+    { "provider": "cursor", "accountKey": "default", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 24, "runway": { "status": "projected_exhaustion" }, "selection": { "spendPriority": 0.3917 } } ] } }
+  ]
+}
+JSON
+HOME_RULES="$TMP_ROOT/home-rules.json"
+cat > "$HOME_RULES" <<'JSON'
+{
+  "rules": [
+    {
+      "when": "Codex work.",
+      "use": [
+        { "harness": "pi", "model": "openai-codex/gpt-5.6-sol", "provider": "codex" },
+        { "harness": "pi", "model": "openai-codex-muller-labs/gpt-5.6-luna", "provider": "codex" }
+      ]
+    }
+  ]
+}
+JSON
+cp "$HOME_RULES" "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_HOME" run code out err "$BRIEF"
+expect_code 0 "$code" "schema 6 home lane snapshot exits 0"
+assert_contains "$out" '  status: clear' "Pi home lane snapshot resolves"
+assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' "Pi's builtin openai-codex lane binds to codex-home when no exact row exists"
+assert_contains "$out" 'candidate: pi:openai-codex-muller-labs/gpt-5.6-luna  provider=codex  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "the sibling Pi account still binds to its own exhausted row"
+assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex/gpt-5.6-sol'" "the healthy home account wins the argmax"
+
+jq '.rules[0].use[0] = {harness: "pi", model: "codex-native/gpt-6-astra", provider: "codex", effort: "ultra"}' "$HOME_RULES" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_HOME" run code out err "$BRIEF"
+expect_code 0 "$code" "schema 6 native adapter home snapshot exits 0"
+assert_contains "$out" 'candidate: pi:codex-native/gpt-6-astra  provider=codex  scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' "the codex-native adapter still binds to codex-home"
+assert_contains "$out" "  profile: --harness 'pi' --model 'codex-native/gpt-6-astra' --effort 'ultra'" "codex-native keeps winning on codex-home"
+cp "$LANE_RULES" "$RULES"
+pass "Pi's openai-codex home lane falls back to codex-home; sibling and native lanes are unchanged"
+
 jq 'del(.providers[1].accountKey)' "$SCHEMA6" > "$TMP_ROOT/schema6-keyless.json"
 reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-keyless.json" run code out err "$BRIEF"
