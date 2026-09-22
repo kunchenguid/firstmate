@@ -431,6 +431,14 @@ Treat any `OPEN DECISIONS` section from the drain as actionable reconciliation i
 Treat any `UNREAD STATUS` section as newly surfaced status that must be read this turn; those lines are not re-printed after this presentation.
 Treat any `RECORD DIVERGENCE` section as a contradiction between two records of one captain call, never as proof the captain ruled; load `captain-hold-lifecycle` and reconcile it in whichever direction the evidence supports.
 After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD STATUS sections, run the exact generation-bound `--ack-through` command printed as `WAKE_ACK_REQUIRED`; interruption before that acknowledgement deliberately leaves the work durable for idempotent re-handling.
+
+Then, in that same turn, run the admission step on every wake, including one whose own record changed nothing.
+Count dispatchable rows: queued work items in this home's backlog that are not held for the captain, have no unfinished blocked-by dependency, and have no future time gate.
+Measure headroom against this home's own capacity limits (any resource floor this home records in `data/captain.md`, provider quota through the section 4 intake, and any serial slot a section 7 serialization or captain limit reserves), and admit dispatchable rows in backlog priority order up to that headroom through the ordinary section 7 intake and `bin/fm-spawn.sh`.
+Emit exactly one line per wake: `dispatchable=N admitted=M bound=<headroom|quota|slots|none>`, naming the limit that stopped admission, or `none` when every dispatchable row was admitted.
+A wake with dispatchable rows and remaining headroom that admits nothing is a failure: state its concrete cause in that turn, never treat it as a quiet hold.
+Admission stays inside existing authority: it adds no scheduler, and a row whose intake needs a captain decision is escalated or held under section 10, not counted as admitted.
+
 A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
 A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed.
 
@@ -538,7 +546,7 @@ A decision is simply a task held for the captain: create the task with `bin/fm-t
 When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item and hold it through that wrapper.
 Captain calls discovered by investigations or visual reviews follow `captain-hold-lifecycle`, which owns their completion gate and recorded-answer rules.
 When the automatic transition gate applies, dispatch and completion move the item themselves - `bin/fm-spawn.sh` and `bin/fm-teardown.sh` own those transitions and refuse rather than report success without them - so what remains yours is filing the item before dispatch, recording decisions, and keeping notes current; `docs/configuration.md` owns gate applicability and the manual-backend exception.
-Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.
+Re-evaluate queued work on every wake through section 8's admission step, dispatching items only when dependencies and time gates have cleared.
 
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.
 Use compatible `tasks-axi` when the configured backend selects it, always through `bin/fm-tasks-axi.sh` so the call reaches this home's backlog from any directory, and the documented manual path otherwise; keep only the configured recent Done entries.
