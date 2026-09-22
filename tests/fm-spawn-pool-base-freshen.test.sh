@@ -432,7 +432,7 @@ test_expected_head_refuses_unsupported_lifecycle_shapes() {
 
 test_expected_head_is_reverified_immediately_before_launch() {
   local rec id out status real_sleep marker mutation launch_log pending started
-  for mutation in head dirty; do
+  for mutation in head dirty assume; do
     id="pool-expected-race-$mutation-r2"
     rec=$(make_case "expected-race-$mutation" "$id")
     read_case_record "$rec"
@@ -446,6 +446,9 @@ test_expected_head_is_reverified_immediately_before_launch() {
 if [ -e '$pending' ] && [ ! -e '$marker' ]; then
   if [ '$mutation' = head ]; then
     git -C '$POOL_DIR' reset --hard 'origin/main' >/dev/null
+  elif [ '$mutation' = assume ]; then
+    git -C '$POOL_DIR' update-index --assume-unchanged README.md
+    printf 'late suppressed mutation\n' > '$POOL_DIR/README.md'
   else
     printf 'late mutation\n' > '$POOL_DIR/late-untracked.txt'
   fi
@@ -465,11 +468,31 @@ EOF
     [ ! -e "$started" ] || fail "$mutation refusal submitted the staged launch and started a worker"
     case "$mutation" in
       head) assert_contains "$out" "moved to" "spawn did not report the final-window HEAD mismatch" ;;
-      dirty) assert_contains "$out" "dirty candidate" "spawn did not report the final-window dirty tree" ;;
+      dirty|assume) assert_contains "$out" "dirty candidate" "spawn did not report the final-window dirty tree" ;;
     esac
     [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$mutation refusal left published task metadata"
   done
   pass "expected-head launch rechecks HEAD and cleanliness after text settles without starting a worker"
+}
+
+test_expected_head_rejects_submodule_index_suppression() {
+  local rec id out status
+  id=pool-expected-submodule-skip-worktree-r18
+  rec=$(make_submodule_case expected-submodule-skip-worktree "$id")
+  read_submodule_case "$rec"
+  git -C "$POOL_DIR/ui" update-index --skip-worktree lib.txt
+  printf 'suppressed submodule mutation\n' >"$POOL_DIR/ui/lib.txt"
+  [ -z "$(git -C "$POOL_DIR" status --porcelain --ignore-submodules=none)" ] \
+    || fail "fixture did not hide the skip-worktree submodule mutation"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$ADVANCED_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "expected-head spawn launched with skip-worktree content inside a submodule"
+  assert_grep 'suppressed submodule mutation' "$POOL_DIR/ui/lib.txt" \
+    "expected-head refusal discarded skip-worktree content inside the submodule"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] \
+    || fail "skip-worktree-refused expected head published task metadata"
+  pass "expected-head rejects suppressed index content in initialized submodules"
 }
 
 test_expected_head_retires_endpoint_when_cancel_fails() {
@@ -1164,6 +1187,7 @@ test_expected_head_ignores_ambient_git_redirection
 test_expected_head_ignores_ambient_git_config_overrides
 test_expected_head_refuses_unsupported_lifecycle_shapes
 test_expected_head_is_reverified_immediately_before_launch
+test_expected_head_rejects_submodule_index_suppression
 test_expected_head_retires_endpoint_when_cancel_fails
 test_expected_head_preserves_ownership_when_endpoint_survives
 test_expected_head_ignores_cleanliness_hiding_config

@@ -3164,13 +3164,19 @@ spawn_worktree_has_origin_config() { # <worktree>
 }
 
 expected_head_worktree_status() { # <worktree>
-  local status
+  local status index
   status=$(git -C "$1" -c core.quotePath=false status --porcelain \
     --untracked-files=all --ignored=matching --ignore-submodules=none) || return 1
   [ -z "$status" ] || printf '%s\n' "$status"
+  index=$(git -C "$1" -c core.quotePath=true ls-files -v) || return 1
+  index=$(printf '%s\n' "$index" | LC_ALL=C grep -E '^[a-zS] ' || true)
+  [ -z "$index" ] || printf '%s\n' "$index"
   git -C "$1" submodule foreach --quiet --recursive '
     status=$(git -c core.quotePath=false status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none) || exit 1
     [ -z "$status" ] || printf "%s\n%s\n" "$displaypath" "$status"
+    index=$(git -c core.quotePath=true ls-files -v) || exit 1
+    index=$(printf "%s\n" "$index" | LC_ALL=C grep -E "^[a-zS] " || true)
+    [ -z "$index" ] || printf "%s\n%s\n" "$displaypath" "$index"
   '
 }
 
