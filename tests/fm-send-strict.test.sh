@@ -300,26 +300,47 @@ test_muse_interrupt_requires_cancellation() {
 }
 
 test_muse_interrupt_normalizes_multiline_prompt() {
-  local dir fb home log screen err rc sample expected content
+  local dir fb home log screen err rc sample expected content prompt
   dir="$TMP_ROOT/muse-multiline"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home musemultiline); log="$dir/tmux.log"; err="$dir/send.err"
-  for sample in complete partial mismatched; do
+  for sample in complete partial mismatched wrapped-url wrapped-path wrapped-words changed-space truncated-url unconfirmed-wrap fresh-wrap; do
     : > "$log"
-    screen=$(muse_clobber_fixture "$dir" "$home" $'first  line\n\n  second\tline')
+    prompt=$'first  line\n\n  second\tline'
     case "$sample" in
       complete) content=$'first  line\n\n  second\tline' ;;
       partial) content=$'line\n\n  second line' ;;
       mismatched) content=$'first line\n\n  different line' ;;
+      wrapped-url|truncated-url|unconfirmed-wrap|fresh-wrap)
+        prompt='review https://example.com/very/long/resource/path'
+        content=$'review https://example.com/very/\nlong/resource/path'
+        [ "$sample" != truncated-url ] || content=$'review https://example.com/very/\nlong/resource'
+        ;;
+      wrapped-path)
+        prompt='review /workspace/long/directory/file.ts now'
+        content=$'review /workspace/long/di\nrectory/file.ts now'
+        ;;
+      wrapped-words)
+        prompt='review this work now'
+        content=$'review this\nwork now'
+        ;;
+      changed-space)
+        prompt='review https://example.com/very/long/resource/path'
+        content=$'review https://example.com/very/\nlong/resource/ path'
+        ;;
     esac
+    screen=$(muse_clobber_fixture "$dir" "$home" "$prompt")
     printf '── Voice input (⌥ + v to start) ─────\n❯ %s\n────────────────────────\n  echo · /ws · YOLO\n' "$content" > "$screen.restore"
     printf '── Voice input (⌥ + v to start) ─────\n❯\n────────────────────────\n  echo · /ws · YOLO\n' > "$screen"
+    [ "$sample" != unconfirmed-wrap ] || rm "$screen.runlog"
+    [ "$sample" != fresh-wrap ] || cp "$screen.restore" "$screen"
     PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
       FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
       "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
     expect_code 0 "$rc" "multiline prompt interrupt should be delivered"
     assert_contains "$(cat "$log")" "arg=Escape" "the interrupt should be delivered"
     expected="$(cat "$log")"
-    if [ "$sample" = complete ]; then
+    if [ "$sample" = complete ] || [ "$sample" = wrapped-url ] \
+       || [ "$sample" = wrapped-path ] || [ "$sample" = wrapped-words ]; then
       assert_contains "$expected" "arg=C-c" "complete framed multiline restored prompt should be cleared"
     else
       assert_not_contains "$expected" "arg=C-c" "$sample multiline content must not be cleared"

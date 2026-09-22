@@ -680,7 +680,7 @@ fm_busy_muse_interrupt_snapshot() {
 
 fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [label] [wait-secs]
   local state=$1 id=$2 backend=$3 target=$4 label=${5:-} wait=${6:-2}
-  local log prompt content last='' readable=0 failed=0 stable=0 i terminal
+  local log prompt content last='' readable=0 failed=0 stable=0 i terminal row remaining
   local run=${7:-}
   case "$run" in
     other|unprovable:*) printf '%s' "$run"; return 0 ;;
@@ -715,7 +715,7 @@ fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [
   i=$((wait * 5)); [ "$i" -gt 0 ] || i=1
   content=
   while [ "$i" -gt 0 ]; do
-    if content=$(fm_backend_composer_content "$backend" "$target" "$label" 2>/dev/null); then
+    if content=$(FM_COMPOSER_CONTENT_ROWS=1 fm_backend_composer_content "$backend" "$target" "$label" 2>/dev/null); then
       readable=1
     else
       failed=1
@@ -749,8 +749,16 @@ fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [
     return 0
   fi
   fm_composer_normalize_spaces_var content
-  content=$(printf '%s\n' "$content" | tr '\n' ' ' | LC_ALL=C awk '{$1=$1; printf "%s", $0}')
-  if [ "$prompt" = "$content" ]; then
+  remaining=$prompt
+  while IFS= read -r row; do
+    case "$remaining" in
+      "$row"*) remaining=${remaining#"$row"}; remaining=${remaining# } ;;
+      *) printf 'other'; return 0 ;;
+    esac
+  done <<EOF
+$content
+EOF
+  if [ -z "$remaining" ]; then
     printf 'restored'
   else
     printf 'other'

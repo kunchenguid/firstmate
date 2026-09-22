@@ -1536,7 +1536,8 @@ _fm_composer_select_cursorless() {
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
-  local leading_blank=1 placeholder_position=0 prompt_is_shell=0
+  local leading_blank=1 placeholder_position=0 prompt_is_shell=0 separator=' '
+  [ "${FM_COMPOSER_CONTENT_ROWS:-0}" = 1 ] && separator=$'\n'
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
@@ -1604,10 +1605,14 @@ EOF
       row=$((row + 1))
       continue
     fi
-    joined="${joined}${joined:+ }$content"
+    joined="${joined}${joined:+$separator}$content"
     row=$((row + 1))
   done
-  printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
+  if [ "${FM_COMPOSER_CONTENT_ROWS:-0}" = 1 ]; then
+    printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; print}'
+  else
+    printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
+  fi
 }
 
 fm_composer_classify_screen() {  # <caps> <screen> [cursor_row] [identity]
