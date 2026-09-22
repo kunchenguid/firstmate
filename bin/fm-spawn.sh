@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--expected-head <40-hex-sha>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--expected-head <40-hex-sha>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -223,6 +223,13 @@
 #   fetching or resetting its base. An unreachable detected origin, unresolved
 #   default branch, or non-clean worktree refuses a fresh spawn rather than
 #   risking a PR based on stale history or discarding local work.
+#   --expected-head accepts only one full 40-hex commit id on a fresh ship or
+#   scout. It replaces default-branch convergence with an origin fetch that
+#   must authorize the commit, resets the clean isolated worktree to it, records
+#   expected_head= in task metadata, and rechecks both cleanliness and HEAD
+#   immediately before submitting the worker launch. It refuses origin-less
+#   worktrees, relaunches, secondmates, and batches rather than silently changing
+#   their existing ownership semantics. With no flag, behavior is unchanged.
 #   A slot whose only deviation is a stale submodule gitlink is refused by that
 #   same clean check, but is reported as a stale checkout naming each submodule
 #   and both pins; nothing is converged or removed, and no remedy is suggested.
@@ -398,6 +405,11 @@
 #   Local spawns never pass it and resolve their own carrier exactly as before.
 set -eu
 
+# Repository identity in this entrypoint always comes from explicit -C paths.
+# Ambient Git redirection variables would otherwise make those paths advisory,
+# including the exact candidate verification immediately before launch.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
@@ -571,6 +583,7 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+EXPECTED_HEAD=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
@@ -578,6 +591,7 @@ BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
 TRACEPARENT_SET=0
+EXPECTED_HEAD_SET=0
 RELAUNCH=0
 POS=()
 want_value=
@@ -585,7 +599,7 @@ for a in "$@"; do
   if [ -n "$want_value" ]; then
     case "$a" in
     --*)
-      echo "error: --$want_value requires a value" >&2
+      echo "error: --${want_value//_/-} requires a value" >&2
       exit 1
       ;;
     esac
@@ -618,8 +632,12 @@ for a in "$@"; do
       TRACEPARENT_ARG=$a
       TRACEPARENT_SET=1
       ;;
+    expected_head)
+      EXPECTED_HEAD=$a
+      EXPECTED_HEAD_SET=1
+      ;;
     *)
-      echo "error: internal parser state for --$want_value" >&2
+      echo "error: internal parser state for --${want_value//_/-}" >&2
       exit 1
       ;;
     esac
@@ -671,11 +689,16 @@ for a in "$@"; do
     TRACEPARENT_ARG=${a#--traceparent=}
     TRACEPARENT_SET=1
     ;;
+  --expected-head) want_value=expected_head ;;
+  --expected-head=*)
+    EXPECTED_HEAD=${a#--expected-head=}
+    EXPECTED_HEAD_SET=1
+    ;;
   *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || {
-  echo "error: --$want_value requires a value" >&2
+  echo "error: --${want_value//_/-} requires a value" >&2
   exit 1
 }
 [ "$HARNESS_SET" -eq 0 ] || [ -n "$HARNESS_ARG" ] || {
@@ -706,6 +729,23 @@ done
   echo "error: --traceparent requires a non-empty value" >&2
   exit 1
 }
+[ "$EXPECTED_HEAD_SET" -eq 0 ] || [ -n "$EXPECTED_HEAD" ] || {
+  echo "error: --expected-head requires a non-empty value" >&2
+  exit 1
+}
+if [ "$EXPECTED_HEAD_SET" -eq 1 ]; then
+  case "$EXPECTED_HEAD" in
+    *[!0-9a-fA-F]*)
+      echo "error: --expected-head must be one full 40-hex commit id" >&2
+      exit 1
+      ;;
+  esac
+  [ "${#EXPECTED_HEAD}" -eq 40 ] || {
+    echo "error: --expected-head must be one full 40-hex commit id" >&2
+    exit 1
+  }
+  EXPECTED_HEAD=$(printf '%s' "$EXPECTED_HEAD" | tr 'A-F' 'a-f')
+fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -732,6 +772,10 @@ esac
 # task's own durable record below. Contradicting it on the command line is a
 # refusal rather than a silently-ignored flag.
 if [ "$RELAUNCH" -eq 1 ]; then
+  [ "$EXPECTED_HEAD_SET" -eq 0 ] || {
+    echo "error: --relaunch reuses the task's recorded worktree; --expected-head cannot override it" >&2
+    exit 1
+  }
   [ "$BACKEND_SET" -eq 0 ] || {
     echo "error: --relaunch reuses the task's recorded backend; --backend cannot override it" >&2
     exit 1
@@ -791,6 +835,10 @@ else
     }
   fi
 fi
+[ "$KIND" != secondmate ] || [ "$EXPECTED_HEAD_SET" -eq 0 ] || {
+  echo "error: --expected-head applies only to fresh ship or scout spawns, not secondmates" >&2
+  exit 1
+}
 
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
@@ -1337,6 +1385,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart"
   exit 1
 fi
 if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in */*) false ;; *) true ;; esac then
+  [ "$EXPECTED_HEAD_SET" -eq 0 ] || {
+    echo "error: batch dispatch does not support --expected-head; bind each fresh ship or scout explicitly" >&2
+    exit 1
+  }
   if [ "$KIND" != secondmate ] && [ -z "$HARNESS_ARG" ] && [ -f "$CONFIG/crew-dispatch.json" ]; then
     echo "error: config/crew-dispatch.json is active - pass an explicit harness resolved from the dispatch rules (the consultation backstop, so the rules are never silently skipped)." >&2
     exit 1
@@ -2966,8 +3018,8 @@ spawn_worktree_has_origin_config() { # <worktree>
   return 1
 }
 
-freshen_spawn_worktree_base() { # <worktree>
-  local worktree=$1 default target expected actual status
+freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
+  local worktree=$1 requested=${2:-} default target expected actual status fetch_head fetched origin_authorized
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2981,6 +3033,52 @@ freshen_spawn_worktree_base() { # <worktree>
     return 1
   fi
   if ! spawn_worktree_has_origin_config "$worktree"; then
+    if [ -n "$requested" ]; then
+      echo "error: --expected-head requires an origin-backed pooled worktree; '$worktree' has no origin configuration" >&2
+      return 1
+    fi
+    return 0
+  fi
+  if [ -n "$requested" ]; then
+    if ! git -C "$worktree" fetch --quiet --prune origin; then
+      echo "error: could not fetch origin while resolving expected head '$requested' for pooled worktree '$worktree'; refusing to launch" >&2
+      return 1
+    fi
+    expected=$(git -C "$worktree" rev-parse --verify --quiet "$requested^{commit}" 2>/dev/null) || {
+      echo "error: expected head '$requested' is not a fetched commit for pooled worktree '$worktree'; refusing to launch" >&2
+      return 1
+    }
+    if [ "$expected" != "$requested" ]; then
+      echo "error: expected head '$requested' resolved as '$expected' for pooled worktree '$worktree'; refusing to launch" >&2
+      return 1
+    fi
+    fetch_head=$(git -C "$worktree" rev-parse --git-path FETCH_HEAD 2>/dev/null || true)
+    origin_authorized=0
+    if [ -n "$fetch_head" ] && [ -f "$fetch_head" ]; then
+      while IFS=$'\t' read -r fetched _; do
+        case "$fetched" in
+          *[!0-9a-fA-F]* | '') continue ;;
+        esac
+        [ "${#fetched}" -eq 40 ] || continue
+        if git -C "$worktree" merge-base --is-ancestor "$expected" "$fetched" 2>/dev/null; then
+          origin_authorized=1
+          break
+        fi
+      done < "$fetch_head"
+    fi
+    if [ "$origin_authorized" -ne 1 ]; then
+      echo "error: expected head '$requested' is not an ancestor of any head returned by the origin fetch for pooled worktree '$worktree'; refusing to launch" >&2
+      return 1
+    fi
+    if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
+      echo "error: could not reset pooled worktree '$worktree' to expected head '$expected'; refusing to launch" >&2
+      return 1
+    fi
+    actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+    if [ "$actual" != "$expected" ]; then
+      echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not expected head '$expected'; refusing to launch" >&2
+      return 1
+    fi
     return 0
   fi
   if ! git -C "$worktree" fetch --quiet origin; then
@@ -3922,7 +4020,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
-  freshen_spawn_worktree_base "$WT" || exit 1
+  freshen_spawn_worktree_base "$WT" "$EXPECTED_HEAD" || exit 1
 fi
 
 # Pre-register Claude's workspace trust for the directory this launch starts in,
@@ -4472,6 +4570,7 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  [ -z "$EXPECTED_HEAD" ] || echo "expected_head=$EXPECTED_HEAD"
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -4834,6 +4933,21 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   exit 1
 fi
 sleep 0.3
+if [ -n "$EXPECTED_HEAD" ]; then
+  expected_status=$(git -C "$WT" -c core.quotePath=false status --porcelain) || {
+    echo "error: could not re-inspect expected-head worktree '$WT' immediately before worker launch" >&2
+    exit 1
+  }
+  [ -z "$expected_status" ] || {
+    echo "error: expected-head worktree '$WT' changed after convergence; refusing to launch from a dirty candidate" >&2
+    exit 1
+  }
+  expected_actual=$(git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  [ "$expected_actual" = "$EXPECTED_HEAD" ] || {
+    echo "error: expected-head worktree '$WT' moved to '${expected_actual:-unknown}' after convergence, not '$EXPECTED_HEAD'; refusing to launch" >&2
+    exit 1
+  }
+fi
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then

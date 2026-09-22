@@ -215,6 +215,129 @@ test_non_main_default_branch_refreshes_before_branching() {
   pass "a stale pooled worktree resolves and refreshes a non-main default branch"
 }
 
+test_expected_head_launches_exact_origin_commit() {
+  local rec id out status
+  id='pool-expected-head-r1'
+  rec=$(make_case expected-head "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
+  status=$?
+  expect_code 0 "$status" "spawn should launch from the exact origin-backed candidate"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+    || fail "spawn did not reset the pooled worktree to the exact requested candidate"
+  [ "$(git -C "$POOL_DIR" rev-parse origin/main)" != "$INITIAL_SHA" ] \
+    || fail "fixture did not distinguish the requested candidate from the current default tip"
+  assert_grep "expected_head=$INITIAL_SHA" "$HOME_DIR/state/$id.meta" \
+    "spawn did not bind the exact candidate in task metadata"
+  pass "an expected-head spawn launches and records the exact origin-backed commit instead of the default tip"
+}
+
+test_expected_head_refuses_non_origin_commit_and_invalid_input() {
+  local rec id out status local_only
+  id='pool-expected-local-r1'
+  rec=$(make_case expected-local "$id")
+  read_case_record "$rec"
+  printf 'local only\n' > "$POOL_DIR/local-only.txt"
+  git -C "$POOL_DIR" add local-only.txt
+  git -C "$POOL_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm local-only
+  local_only=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$local_only")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a commit that origin does not serve"
+  assert_contains "$out" "not an ancestor of any head returned by the origin fetch" \
+    "spawn did not explain that the exact candidate lacks origin authority"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "origin-refused expected head published task metadata"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$local_only" ] \
+    || fail "origin-refused expected head moved the clean local-only commit"
+
+  id='pool-expected-invalid-r1'
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head origin/main)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted an arbitrary ref as --expected-head"
+  assert_contains "$out" "one full 40-hex commit id" \
+    "spawn did not reject an arbitrary ref at its public interface"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "invalid expected head published task metadata"
+  pass "expected-head accepts neither a local-only commit nor an arbitrary ref"
+}
+
+test_expected_head_ignores_ambient_git_redirection() {
+  local rec id out status attacker
+  id='pool-expected-git-env-r1'
+  rec=$(make_case expected-git-env "$id")
+  read_case_record "$rec"
+  attacker="$CASE_DIR/attacker"
+  git init --quiet -b main "$attacker"
+  printf 'unrelated\n' > "$attacker/unrelated.txt"
+  git -C "$attacker" add unrelated.txt
+  git -C "$attacker" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm unrelated
+
+  out=$(GIT_DIR="$attacker/.git" GIT_WORK_TREE="$attacker" \
+    run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
+  status=$?
+  expect_code 0 "$status" "ambient Git redirection must not replace the explicit candidate worktree"$'\n'"$out"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$INITIAL_SHA" ] \
+    || fail "ambient Git redirection displaced exact candidate convergence"
+  assert_grep "expected_head=$INITIAL_SHA" "$HOME_DIR/state/$id.meta" \
+    "ambient Git redirection displaced the metadata binding"
+  pass "expected-head verification ignores ambient Git repository redirection"
+}
+
+test_expected_head_refuses_unsupported_lifecycle_shapes() {
+  local rec id out status
+  id='pool-expected-shapes-r1'
+  rec=$(make_case expected-shapes "$id")
+  read_case_record "$rec"
+
+  out=$(run_spawn "$id" --relaunch --expected-head "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "relaunch accepted --expected-head"
+  assert_contains "$out" "--expected-head cannot override it" \
+    "relaunch did not explain its expected-head refusal"
+
+  out=$(run_spawn "$id" --secondmate --expected-head "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "secondmate accepted --expected-head"
+  assert_contains "$out" "not secondmates" \
+    "secondmate did not explain its expected-head refusal"
+
+  out=$(run_spawn "$id=$PROJECT_DIR" --scout --expected-head "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "batch dispatch accepted --expected-head"
+  assert_contains "$out" "batch dispatch does not support --expected-head" \
+    "batch dispatch did not explain its expected-head refusal"
+  pass "relaunch, secondmate, and batch dispatch refuse expected-head contradictions"
+}
+
+test_expected_head_is_reverified_immediately_before_launch() {
+  local rec id out status real_sleep marker
+  id='pool-expected-race-r1'
+  rec=$(make_case expected-race "$id")
+  read_case_record "$rec"
+  marker="$CASE_DIR/moved-after-publication"
+  real_sleep=$(command -v sleep)
+  cat > "$FAKEBIN_DIR/sleep" <<EOF
+#!/bin/sh
+if [ -f '$HOME_DIR/state/$id.meta' ] && [ ! -e '$marker' ]; then
+  git -C '$POOL_DIR' reset --hard 'origin/main' >/dev/null
+  : > '$marker'
+fi
+exec '$real_sleep' "\$@"
+EOF
+  chmod +x "$FAKEBIN_DIR/sleep"
+
+  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn launched after the exact candidate moved"
+  [ -e "$marker" ] || fail "fixture did not move HEAD after metadata publication"
+  assert_contains "$out" "moved to" \
+    "spawn did not report its immediate pre-launch expected-head mismatch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "pre-launch coordinate refusal left published task metadata"
+  pass "an expected-head spawn rechecks the candidate immediately before worker launch"
+}
+
 make_originless_case() {  # <name> <id>
   local name=$1 id=$2 case_dir home project pool fakebin initial
   case_dir="$TMP_ROOT/$name"
@@ -748,6 +871,11 @@ test_pool_slot_claim_follows_the_spawn_outcome
 test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
+test_expected_head_launches_exact_origin_commit
+test_expected_head_refuses_non_origin_commit_and_invalid_input
+test_expected_head_ignores_ambient_git_redirection
+test_expected_head_refuses_unsupported_lifecycle_shapes
+test_expected_head_is_reverified_immediately_before_launch
 test_direct_pr_and_scout_refresh_before_launch
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
