@@ -16,11 +16,24 @@
 # per affected clone with:
 #   git -C <clone> config firstmate.deployBranch <branch>
 # An unset key is the normal case and leaves resolution exactly as it was.
-# When the key names a branch that does not resolve, callers refuse on their
-# own existing unresolvable-base paths and name the key as the source, so a
-# typo reads as a configuration error rather than a network failure. Nothing
-# ever falls back from a set key to the forge default: that silent fallback is
-# the exact defect this key exists to prevent.
+# Nothing ever falls back from a set key to the forge default: that silent
+# fallback is the exact defect this key exists to prevent.
+#
+# This resolver does NOT validate the configured branch - it echoes the key's
+# value as given, so a value naming a branch that does not resolve surfaces at
+# each caller, and only three of the six attribute it to the key:
+#   - fm-spawn.sh, fm-fleet-sync.sh and fm-review-diff.sh refuse and name both
+#     firstmate.deployBranch and its value, so a typo reads as the
+#     configuration error it is rather than as a network failure.
+#   - fm-merge-local.sh refuses with "expected default branch '<value>'" and
+#     fm-teardown.sh refuses fail-safe ("has work not on any remote and not
+#     landed", or "cannot inspect ... for commits not on <value>"). Both quote
+#     the value but neither names the key, and teardown's remedy line offers
+#     --force, which discards work, for what may be only a typo.
+#   - fm-tangle-lib.sh does not refuse at all: an unresolvable value makes a
+#     healthy primary checkout read as a worktree tangle, reported against that
+#     value as though it were the default branch.
+# So verify the branch exists on the clone's origin before setting the key.
 # Usage: . bin/fm-deploy-branch-lib.sh
 
 # fm_deploy_branch_configured <dir>

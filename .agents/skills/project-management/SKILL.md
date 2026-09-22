@@ -59,7 +59,9 @@ Clone into `projects/<name>` and add the registry entry only after the destinati
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
-When a clone's real deploy branch differs from the forge's advertised default (`origin/HEAD`), set `firstmate.deployBranch` on that clone so the one shared base-branch resolver in `bin/fm-deploy-branch-lib.sh` - which every firstmate path uses, including spawn's pooled-worktree base, fleet sync's comparison base, the review diff base, local merge's target, teardown's work-safety check, and the worktree-tangle guard - resolves the real branch instead of the stale forge default; that lib owns the exact command and failure behavior.
+Set the deploy branch as a step of every add or clone whose project keeps its real deploy branch somewhere other than the forge's advertised default (`origin/HEAD`): confirm that branch exists on `origin`, then set `firstmate.deployBranch` on the clone using the command in `bin/fm-deploy-branch-lib.sh`, which owns that key's exact command, resolution order, and failure behavior for every firstmate path that needs a base branch - spawn's pooled-worktree base, fleet sync's comparison base, the review diff base, local merge's target, teardown's work-safety check, and the worktree-tangle guard.
+This key is per-clone git config that nothing in the repository restores, so a clone that is removed and cloned again silently reverts to the stale forge default and reintroduces the stale-base fault; re-set it as part of re-creating any clone.
+A value naming a branch that does not resolve is corrected nowhere and is not uniformly diagnosed, so verify it rather than assuming a wrong value will be caught.
 
 ## Create a project
 
