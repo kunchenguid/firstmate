@@ -166,10 +166,7 @@ def _try_presence_inbound(note: str) -> tuple[bool, str]:
 
 
 def _queue_inbox(note: str, request_id: str | None) -> bool:
-    command = [_FM_INBOX, "note"]
-    if request_id is not None:
-        command.extend(["--request-id", request_id])
-    command.append("-")
+    command = [_FM_INBOX, "note", "-"]
     try:
         result = _run(command, input_text=note)
     except Exception:
