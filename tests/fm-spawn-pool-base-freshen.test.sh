@@ -573,7 +573,7 @@ EOF
   git config --file "$system_config" core.fsmonitor "$hook"
   rm -f "$marker"
 
-  output=$(GIT_CONFIG_GLOBAL="$global_config" GIT_CONFIG_SYSTEM="$system_config" \
+  output=$(cd "$POOL_DIR" && GIT_CONFIG_GLOBAL="$global_config" GIT_CONFIG_SYSTEM="$system_config" \
     GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0="$hook" \
     GIT_EXTERNAL_DIFF="$hook" GIT_PAGER="$hook" \
     "$ROOT/bin/fm-exact-head-launch-guard.sh" \
@@ -585,7 +585,57 @@ EOF
     "exact-head guard did not produce an honest verified receipt"
   assert_grep 'reason=clean' "$receipt" \
     "exact-head guard did not report the clean immutable candidate"
-  pass "exact-head custody Git neutralizes execution-capable ambient and local configuration"
+
+  fm_fake_exit0 "$FAKEBIN_DIR" codex
+  rm -f "$marker"
+  output=$(GIT_CONFIG_GLOBAL="$global_config" GIT_CONFIG_SYSTEM="$system_config" \
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0="$hook" \
+    GIT_EXTERNAL_DIFF="$hook" GIT_PAGER="$hook" \
+    FM_FAKE_PENDING_LAUNCH="$CASE_DIR/pending-launch" FM_FAKE_EXECUTE_LAUNCH=1 \
+    run_spawn "$id" --mode no-mistakes --yolo off --harness codex \
+      --expected-head "$candidate")
+  status=$?
+  expect_code 0 "$status" "full exact-head spawn should neutralize execution-capable Git config"$'\n'"$output"
+  [ ! -e "$marker" ] || fail "full exact-head freshness/reset path executed a configured Git helper"
+
+  id='pool-expected-filter-config-r29'
+  rec=$(make_case expected-filter-config "$id")
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" fetch --quiet origin
+  git -C "$PROJECT_DIR" reset --hard origin/main >/dev/null
+  printf '*.probe filter=attack\n' >"$PROJECT_DIR/.gitattributes"
+  printf 'reviewed bytes\n' >"$PROJECT_DIR/reviewed.probe"
+  git -C "$PROJECT_DIR" add .gitattributes reviewed.probe
+  git -C "$PROJECT_DIR" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm filtered-candidate
+  git -C "$PROJECT_DIR" push --quiet origin main
+  candidate=$(git -C "$PROJECT_DIR" rev-parse HEAD)
+  marker="$CASE_DIR/filter-command-executed"
+  hook="$CASE_DIR/filter-command"
+  cat >"$hook" <<EOF
+#!/bin/sh
+printf '%s\n' "\${1:-unknown}" >>'$marker'
+cat
+EOF
+  chmod +x "$hook"
+  git -C "$POOL_DIR" config filter.attack.clean "$hook clean"
+  git -C "$POOL_DIR" config filter.attack.smudge "$hook smudge"
+  rm -f "$marker"
+  fm_fake_exit0 "$FAKEBIN_DIR" codex
+
+  output=$(FM_FAKE_PENDING_LAUNCH="$CASE_DIR/pending-launch" FM_FAKE_EXECUTE_LAUNCH=1 \
+    run_spawn "$id" --mode no-mistakes --yolo off --harness codex \
+      --expected-head "$candidate")
+  status=$?
+  [ "$status" -ne 0 ] || fail "full exact-head spawn accepted execution-capable clean/smudge filters"
+  [ ! -e "$marker" ] || fail "full exact-head spawn executed a configured clean or smudge filter before refusal"
+  assert_contains "$output" 'execution-capable Git config' \
+    "exact-head filter refusal did not identify the unsafe Git configuration"
+  assert_contains "$output" 'filter.attack.clean' \
+    "exact-head filter refusal did not name the configured clean driver"
+  assert_contains "$output" 'filter.attack.smudge' \
+    "exact-head filter refusal did not name the configured smudge driver"
+  pass "exact-head full-spawn Git neutralizes safe config and refuses command filters without execution"
 }
 
 test_expected_head_freezes_worker_environment_and_provider_binary() {
@@ -650,6 +700,49 @@ EOF
     done
   done
   pass "Claude and Codex exact-head launches pin provider binaries and reject pane-daemon environment drift"
+}
+
+test_expected_head_rebinds_stale_pane_cwd_before_provider() {
+  local rec id other evidence daemon_env out status expected_cwd expected_sha other_sha
+  id='pool-expected-pane-cwd-r29'
+  rec=$(make_case expected-pane-cwd "$id")
+  read_case_record "$rec"
+  other="$CASE_DIR/other"
+  evidence="$CASE_DIR/worker-cwd"
+  daemon_env="$CASE_DIR/stale-pane-cwd"
+  git init --quiet -b main "$other"
+  printf 'other\n' >"$other/README.md"
+  git -C "$other" add README.md
+  git -C "$other" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' commit -qm other
+  other_sha=$(git -C "$other" rev-parse HEAD)
+  cat >"$FAKEBIN_DIR/codex" <<EOF
+#!/bin/sh
+{
+  printf 'cwd=%s\n' "\$(pwd -P)"
+  printf 'head=%s\n' "\$(git rev-parse --verify HEAD)"
+} >'$evidence'
+EOF
+  chmod +x "$FAKEBIN_DIR/codex"
+  cat >"$daemon_env" <<EOF
+#!/bin/sh
+cd '$other'
+exec "\$@"
+EOF
+  chmod +x "$daemon_env"
+
+  out=$(FM_FAKE_PENDING_LAUNCH="$CASE_DIR/pending-launch" FM_FAKE_EXECUTE_LAUNCH=1 \
+    FM_FAKE_PANE_ENV_COMMAND="$daemon_env" \
+    run_spawn "$id" --mode no-mistakes --yolo off --harness codex \
+      --expected-head "$INITIAL_SHA")
+  status=$?
+  expect_code 0 "$status" "exact-head launch should bind a stale pane to its verified worktree"$'\n'"$out"
+  [ -f "$evidence" ] || fail "exact-head provider did not record its launch directory"
+  expected_cwd=$(cd "$POOL_DIR" && pwd -P)
+  expected_sha=$(git -C "$POOL_DIR" rev-parse HEAD)
+  assert_grep "cwd=$expected_cwd" "$evidence" "provider launched outside the verified exact-head worktree"
+  assert_grep "head=$expected_sha" "$evidence" "provider launched from a repository at the wrong coordinate"
+  assert_no_grep "head=$other_sha" "$evidence" "provider retained the stale pane repository coordinate"
+  pass "exact-head launch rebinds stale pane CWD before the provider starts"
 }
 
 test_expected_head_refuses_unsupported_lifecycle_shapes() {
@@ -1661,6 +1754,7 @@ test_expected_head_ignores_ambient_git_namespace
 test_expected_head_ignores_ambient_git_config_overrides
 test_expected_head_guard_neutralizes_execution_capable_git_config
 test_expected_head_freezes_worker_environment_and_provider_binary
+test_expected_head_rebinds_stale_pane_cwd_before_provider
 test_expected_head_refuses_unsupported_lifecycle_shapes
 test_expected_head_is_reverified_immediately_before_launch
 test_expected_head_worker_boundary_rejects_final_coordinate_race

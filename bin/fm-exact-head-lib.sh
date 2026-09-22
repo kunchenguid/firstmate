@@ -29,6 +29,39 @@ exact_head_git() {
       "$@"
 }
 
+expected_head_execution_config_status() { # <worktree>
+  # Some local Git settings name arbitrary commands and cannot be wildcard-
+  # disabled without changing how reviewed bytes materialize. Exact-head mode
+  # refuses those settings before fetch/reset/submodule operations rather than
+  # executing them. Settings safely neutralized by exact_head_git (fsmonitor,
+  # hooks, external diff/pager, and global/system config) remain supported.
+  local worktree=$1 record key value complete=0 producer_status=2
+  while IFS= read -r -d '' record; do
+    if [ -z "$record" ]; then
+      IFS= read -r -d '' producer_status || return 1
+      complete=1
+      break
+    fi
+    case "$record" in *$'\n'*) ;; *) return 1 ;; esac
+    key=${record%%$'\n'*}
+    value=${record#*$'\n'}
+    case "$key" in
+      filter.*.clean | filter.*.smudge | filter.*.process | diff.*.command | merge.*.driver)
+        printf '%s\n' "$key"
+        ;;
+      submodule.*.update)
+        case "$value" in !*) printf '%s\n' "$key" ;; esac
+        ;;
+    esac
+  done < <({
+    exact_head_git -C "$worktree" config --local --null --get-regexp \
+      '^(filter\..*\.(clean|smudge|process)|diff\..*\.command|merge\..*\.driver|submodule\..*\.update)$'
+    printf '\0%s\0' "$?"
+  })
+  [ "$complete" -eq 1 ] || return 1
+  case "$producer_status" in 0 | 1) return 0 ;; *) return 1 ;; esac
+}
+
 expected_head_raw_tree_status() { # <worktree> [<immutable-coordinate>]
   local worktree=$1 coordinate=${2:-HEAD}
   local record metadata mode type object path actual complete=0 producer_status=1

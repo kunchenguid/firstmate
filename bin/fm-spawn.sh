@@ -599,6 +599,32 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+
+resolve_absolute_executable() { # <name>
+  local name=$1 candidate dir
+  candidate=$(type -P "$name" 2>/dev/null || true)
+  [ -n "$candidate" ] && [ -x "$candidate" ] || return 1
+  case "$candidate" in
+    /*) ;;
+    *)
+      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || return 1
+      candidate="$dir/$(basename "$candidate")"
+      ;;
+  esac
+  printf '%s\n' "$candidate"
+}
+
+spawn_git() {
+  # Once exact-head provenance is known, every repository operation in this
+  # process shares the pinned, execution-neutralized custody path. Ordinary
+  # launches retain their existing Git/config behavior.
+  if [ "${EXACT_HEAD_PROVENANCE:-0}" = 1 ]; then
+    exact_head_git "$@"
+  else
+    git "$@"
+  fi
+}
+
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -626,6 +652,7 @@ YOLO_SET=0
 TRACEPARENT_SET=0
 EXPECTED_HEAD_SET=0
 EXACT_HEAD_PROVENANCE=0
+EXACT_HEAD_GIT_BIN=
 RELAUNCH=0
 POS=()
 want_value=
@@ -798,6 +825,10 @@ if [ "$EXPECTED_HEAD_SET" -eq 1 ]; then
   export GIT_CONFIG_SYSTEM=/dev/null
   export GIT_CONFIG_NOSYSTEM=1
   export GIT_NO_REPLACE_OBJECTS=1
+  EXACT_HEAD_GIT_BIN=$(resolve_absolute_executable git) || {
+    echo "error: expected-head launch requires an executable Git binary resolved before repository inspection" >&2
+    exit 1
+  }
   EXACT_HEAD_PROVENANCE=1
 fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
@@ -1859,6 +1890,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
     esac
     [ "${#recorded_expected_head}" -eq 40 ] || {
       echo "error: task $ID records an invalid expected_head; refusing relaunch" >&2
+      exit 1
+    }
+    EXACT_HEAD_GIT_BIN=$(resolve_absolute_executable git) || {
+      echo "error: exact-head relaunch requires an executable Git binary resolved before repository inspection" >&2
       exit 1
     }
     EXACT_HEAD_PROVENANCE=1
@@ -3083,7 +3118,7 @@ spawn_worktree_isolated() { # <path>
     SPAWN_WT_REASON="it is not a readable directory"
     return 1
   fi
-  SPAWN_WT_TOP=$(git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)
+  SPAWN_WT_TOP=$(spawn_git -C "$path" rev-parse --show-toplevel 2>/dev/null || true)
   # A path in no repository leaves the toplevel empty, and that empty value must
   # never reach `cd`: bash before 5.3 accepts `cd ""` as a successful no-op, so
   # it would resolve to fm-spawn's OWN cwd and report the path as a subdirectory
@@ -3107,9 +3142,9 @@ spawn_worktree_isolated() { # <path>
   # The primary checkout uses the repository's common git dir as its own git
   # dir. A linked spawning home has a different top-level, but the same common
   # dir, so comparing only the two working directories cannot protect primary.
-  wt_git_dir=$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null) &&
+  wt_git_dir=$(spawn_git -C "$path" rev-parse --absolute-git-dir 2>/dev/null) &&
     wt_git_dir=$(cd "$wt_git_dir" 2>/dev/null && pwd -P) || wt_git_dir=
-  proj_common=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+  proj_common=$(spawn_git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
     proj_common=$(cd "$proj_common" 2>/dev/null && pwd -P) || proj_common=
   if [ -z "$wt_git_dir" ] || [ -z "$proj_common" ]; then
     SPAWN_WT_REASON="its git directory could not be resolved"
@@ -3152,16 +3187,18 @@ validate_spawn_worktree() { # <source> <inspect-target>
 # judgement that can be fooled could cost them that commit, so the remedy is left
 # to the operator, who can see the whole picture.
 describe_stale_submodule_pins() { # <worktree> <status>
-  local worktree=$1 status=$2 line path want have unpushed lines=
+  local worktree=$1 status=$2 line path want have unpushed lines='' staged sub_status
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     case $line in ' M '*) path=${line#' M '} ;; *) return 1 ;; esac
-    [ "$(git -C "$worktree" ls-files --stage -- "$path" 2>/dev/null | cut -c1-6)" = 160000 ] || return 1
-    [ -z "$(git -C "$worktree/$path" status --porcelain 2>/dev/null)" ] || return 1
-    want=$(git -C "$worktree" rev-parse --verify --quiet "HEAD:$path" 2>/dev/null) || return 1
-    have=$(git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null) || return 1
+    staged=$(spawn_git -C "$worktree" ls-files --stage -- "$path" 2>/dev/null) || return 1
+    sub_status=$(spawn_git -C "$worktree/$path" status --porcelain 2>/dev/null) || return 1
+    want=$(spawn_git -C "$worktree" rev-parse --verify --quiet "HEAD:$path" 2>/dev/null) || return 1
+    have=$(spawn_git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null) || return 1
+    [ "$(printf '%s\n' "$staged" | cut -c1-6)" = 160000 ] || return 1
+    [ -z "$sub_status" ] || return 1
     [ "$want" != "$have" ] || return 1
-    unpushed=$(git -C "$worktree/$path" log --format=%H --max-count=1 "$have" --not --remotes -- 2>/dev/null) || return 1
+    unpushed=$(spawn_git -C "$worktree/$path" log --format=%H --max-count=1 "$have" --not --remotes -- 2>/dev/null) || return 1
     [ -z "$unpushed" ] || return 1
     lines+="error: submodule '$path' is checked out at $have, but this base records $want"$'\n'
   done <<EOF
@@ -3174,21 +3211,29 @@ EOF
 spawn_worktree_has_origin_config() { # <worktree>
   # Resolved remote.origin.* variables cover Git's effective include/includeIf chain; raw headers are also detected in the worktree config and any included file Git names through another variable. Git cannot enumerate a variable-less included file, so an empty origin section that is its only content remains indistinguishable from absence and intentionally proceeds rather than reimplementing Git's config parser.
   local worktree=$1 config origin key seen=$'\n'
-  git -C "$worktree" config --get-regexp '^remote\.origin\.' >/dev/null 2>&1 && return 0
+  spawn_git -C "$worktree" config --get-regexp '^remote\.origin\.' >/dev/null 2>&1 && return 0
   while IFS=$'\t' read -r origin key; do
     case $origin in file:*) config=${origin#file:} ;; *) continue ;; esac
     [ -f "$config" ] || continue
     case $seen in *$'\n'"$config"$'\n'*) continue ;; esac
     seen+="$config"$'\n'
     awk '/^[[:space:]]*\[[[:space:]]*[Rr][Ee][Mm][Oo][Tt][Ee][[:space:]]+"origin"[[:space:]]*\][[:space:]]*([#;].*)?$/ || /^[[:space:]]*\[[[:space:]]*[Rr][Ee][Mm][Oo][Tt][Ee]\.origin[[:space:]]*\][[:space:]]*([#;].*)?$/ { found=1 } END { exit !found }' "$config" && return 0
-  done < <(git -C "$worktree" config --list --show-origin 2>/dev/null || true)
+  done < <(spawn_git -C "$worktree" config --list --show-origin 2>/dev/null || true)
   return 1
 }
 
 freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
-  local worktree=$1 requested=${2:-} default target expected actual status fetch_head fetched origin_authorized grafts
+  local worktree=$1 requested=${2:-} default target expected actual status fetch_head fetched origin_authorized grafts unsafe_config
   if [ -n "$requested" ]; then
-    grafts=$(git -C "$worktree" rev-parse --git-path info/grafts 2>/dev/null) || {
+    unsafe_config=$(expected_head_execution_config_status "$worktree") || {
+      echo "error: could not inspect execution-capable Git config for pooled worktree '$worktree'; refusing exact-head materialization" >&2
+      return 1
+    }
+    if [ -n "$unsafe_config" ]; then
+      echo "error: pooled worktree '$worktree' has execution-capable Git config ($unsafe_config); refusing exact-head materialization without executing it" >&2
+      return 1
+    fi
+    grafts=$(exact_head_git -C "$worktree" rev-parse --git-path info/grafts 2>/dev/null) || {
       echo "error: could not inspect graft metadata for pooled worktree '$worktree'; refusing to launch" >&2
       return 1
     }
@@ -3198,7 +3243,7 @@ freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
     fi
     status=$(expected_head_worktree_status "$worktree")
   else
-    status=$(git -C "$worktree" -c core.quotePath=false status --porcelain)
+    status=$(spawn_git -C "$worktree" -c core.quotePath=false status --porcelain)
   fi || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -3219,11 +3264,19 @@ freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
     return 0
   fi
   if [ -n "$requested" ]; then
-    if ! git -C "$worktree" fetch --quiet origin; then
+    unsafe_config=$(expected_head_execution_config_status "$worktree") || {
+      echo "error: could not re-inspect execution-capable Git config for pooled worktree '$worktree'; refusing exact-head authorization" >&2
+      return 1
+    }
+    [ -z "$unsafe_config" ] || {
+      echo "error: pooled worktree '$worktree' gained execution-capable Git config ($unsafe_config); refusing exact-head authorization without executing it" >&2
+      return 1
+    }
+    if ! exact_head_git -C "$worktree" fetch --quiet origin; then
       echo "error: could not fetch origin while resolving expected head '$requested' for pooled worktree '$worktree'; refusing to launch" >&2
       return 1
     fi
-    expected=$(git -C "$worktree" rev-parse --verify --quiet "$requested^{commit}" 2>/dev/null) || {
+    expected=$(exact_head_git -C "$worktree" rev-parse --verify --quiet "$requested^{commit}" 2>/dev/null) || {
       echo "error: expected head '$requested' is not a fetched commit for pooled worktree '$worktree'; refusing to launch" >&2
       return 1
     }
@@ -3231,7 +3284,7 @@ freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
       echo "error: expected head '$requested' resolved as '$expected' for pooled worktree '$worktree'; refusing to launch" >&2
       return 1
     fi
-    fetch_head=$(git -C "$worktree" rev-parse --git-path FETCH_HEAD 2>/dev/null || true)
+    fetch_head=$(exact_head_git -C "$worktree" rev-parse --git-path FETCH_HEAD 2>/dev/null || true)
     origin_authorized=0
     if [ -n "$fetch_head" ] && [ -f "$fetch_head" ]; then
       while IFS=$'\t' read -r fetched _; do
@@ -3239,7 +3292,7 @@ freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
           *[!0-9a-fA-F]* | '') continue ;;
         esac
         [ "${#fetched}" -eq 40 ] || continue
-        if git -C "$worktree" merge-base --is-ancestor "$expected" "$fetched" 2>/dev/null; then
+        if exact_head_git -C "$worktree" merge-base --is-ancestor "$expected" "$fetched" 2>/dev/null; then
           origin_authorized=1
           break
         fi
@@ -3249,26 +3302,34 @@ freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
       echo "error: expected head '$requested' is not an ancestor of any head returned by the origin fetch for pooled worktree '$worktree'; refusing to launch" >&2
       return 1
     fi
-    if ! git -C "$worktree" reset --hard "$expected" >/dev/null; then
+    unsafe_config=$(expected_head_execution_config_status "$worktree") || {
+      echo "error: could not re-inspect execution-capable Git config for pooled worktree '$worktree'; refusing exact-head reset" >&2
+      return 1
+    }
+    [ -z "$unsafe_config" ] || {
+      echo "error: pooled worktree '$worktree' gained execution-capable Git config ($unsafe_config); refusing exact-head reset without executing it" >&2
+      return 1
+    }
+    if ! exact_head_git -C "$worktree" reset --hard "$expected" >/dev/null; then
       echo "error: could not reset pooled worktree '$worktree' to expected head '$expected'; refusing to launch" >&2
       return 1
     fi
-    if ! git -C "$worktree" submodule update --checkout --recursive; then
+    if ! exact_head_git -C "$worktree" submodule update --checkout --recursive; then
       echo "error: could not converge initialized submodules in pooled worktree '$worktree' to expected head '$expected'; refusing to launch" >&2
       return 1
     fi
-    actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+    actual=$(exact_head_git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
     if [ "$actual" != "$expected" ]; then
       echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not expected head '$expected'; refusing to launch" >&2
       return 1
     fi
     return 0
   fi
-  if ! git -C "$worktree" fetch --quiet origin; then
+  if ! spawn_git -C "$worktree" fetch --quiet origin; then
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
+  if ! spawn_git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
     echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
@@ -3277,19 +3338,19 @@ freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
     return 1
   }
   target="origin/$default"
-  if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
+  if ! spawn_git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
     echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
+  expected=$(spawn_git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {
     echo "error: '$target' is not a commit for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   }
-  if ! git -C "$worktree" reset --hard "$target" >/dev/null; then
+  if ! spawn_git -C "$worktree" reset --hard "$target" >/dev/null; then
     echo "error: could not reset pooled worktree '$worktree' to '$target'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  actual=$(spawn_git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   if [ "$actual" != "$expected" ]; then
     echo "error: pooled worktree '$worktree' is at '${actual:-unknown}', not current '$target' ('$expected'); refusing to launch" >&2
     return 1
@@ -4305,7 +4366,7 @@ STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
 exclude_path() {
   local rel=$1 EXCL
-  EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
+  EXCL=$(spawn_git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
   [ -n "$EXCL" ] || return 0
   mkdir -p "$(dirname "$EXCL")"
   grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >>"$EXCL"
@@ -4918,27 +4979,8 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
-resolve_absolute_executable() { # <name>
-  local name=$1 candidate dir
-  candidate=$(type -P "$name" 2>/dev/null || true)
-  [ -n "$candidate" ] && [ -x "$candidate" ] || return 1
-  case "$candidate" in
-    /*) ;;
-    *)
-      dir=$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P) || return 1
-      candidate="$dir/$(basename "$candidate")"
-      ;;
-  esac
-  printf '%s\n' "$candidate"
-}
-
-EXACT_HEAD_GIT_BIN=
 EXACT_HEAD_PROVIDER_BIN=
 if [ -n "$EXPECTED_HEAD" ]; then
-  EXACT_HEAD_GIT_BIN=$(resolve_absolute_executable git) || {
-    echo "error: expected-head launch requires an executable Git binary resolved before pane delivery" >&2
-    exit 1
-  }
   case "$HARNESS" in
   claude | codex)
     EXACT_HEAD_PROVIDER_BIN=$(resolve_absolute_executable "$HARNESS") || {
@@ -5233,7 +5275,8 @@ if [ -n "$EXPECTED_HEAD" ]; then
     exit 1
   fi
   exact_head_guard_command="$(shell_quote "$FM_ROOT/bin/fm-exact-head-launch-guard.sh") $(shell_quote "$WT") $(shell_quote "$EXPECTED_HEAD") $(shell_quote "$EXACT_HEAD_LAUNCH_RECEIPT") $(shell_quote "$EXACT_HEAD_GIT_BIN")"
-  exact_head_launch_payload="if ! $exact_head_guard_command; then exit 0; fi
+  exact_head_launch_payload="cd $(shell_quote "$WT") 2>/dev/null || true
+if ! $exact_head_guard_command; then exit 0; fi
 $LAUNCH"
   LAUNCH="$EXACT_HEAD_ENV_PREFIX /bin/sh -c $(shell_quote "$exact_head_launch_payload")"
 fi
@@ -5263,7 +5306,7 @@ if [ -n "$EXPECTED_HEAD" ]; then
     echo "error: expected-head worktree '$WT' changed after convergence; refusing to launch from a dirty candidate" >&2
     exit 1
   }
-  expected_actual=$(git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  expected_actual=$(exact_head_git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null || true)
   [ "$expected_actual" = "$EXPECTED_HEAD" ] || {
     [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
     expected_head_cancel_staged_launch

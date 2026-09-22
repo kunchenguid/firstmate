@@ -400,7 +400,10 @@ The optional local, gitignored `config/launch-env-allowlist` limits the ambient 
 With no file, ambient inheritance remains unfiltered: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
 Do not assume every worker inherits the invoking Firstmate process's current environment.
 An exact-head launch is the deliberate exception: it always starts the guard and worker through a cleared environment containing literal values captured from the authorizing Firstmate process, including the explicit `FM_HOME` and task values, while API-key and provider-endpoint variables are omitted.
-Git and the Claude or Codex provider executable are resolved to absolute paths before the command is staged, so a long-lived pane daemon cannot substitute its own `HOME`, `PATH`, credentials, or provider binary at the reviewed-candidate boundary.
+Git is resolved to an absolute path before exact-head repository inspection and every subsequent authorization, materialization, dirty diagnostic, and launch-boundary Git operation uses the execution-neutralized custody wrapper.
+Exact-head materialization also refuses repository-local clean, smudge, and process filters, external diff or merge drivers, and command-form submodule update settings before they can execute; ordinary non-exact launches retain the repository's configured Git behavior.
+The Claude or Codex provider executable is likewise resolved before staging, so repository configuration or a long-lived pane daemon cannot substitute executable helpers, `HOME`, `PATH`, credentials, or a provider binary at the reviewed-candidate boundary.
+The staged shell changes to the verified worktree before the final guard, and that guard requires the shell's physical current directory and repository coordinate to match the reviewed worktree before the provider starts.
 The file is inherited into secondmate homes through the [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md).
 Changes apply to subsequent launches; existing processes keep their environment.
 

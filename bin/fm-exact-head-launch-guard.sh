@@ -45,6 +45,13 @@ case "$EXACT_HEAD_GIT_BIN" in /*) ;; *) refuse invalid-git-bin ;; esac
 [ -d "$worktree" ] || refuse missing-worktree
 [ ! -e "$receipt" ] && [ ! -L "$receipt" ] || refuse receipt-already-exists
 
+# The worker inherits this process's directory. Binding only `git -C` would
+# verify the reviewed worktree while a stale terminal pane launches the provider
+# somewhere else, so require the physical launch directory to be that same tree.
+actual_cwd=$(pwd -P 2>/dev/null) || refuse unreadable-cwd
+worktree_cwd=$(cd "$worktree" 2>/dev/null && pwd -P) || refuse unreadable-worktree
+[ "$actual_cwd" = "$worktree_cwd" ] || refuse cwd-mismatch
+
 # Repository/ref resolution at the worker boundary must not inherit ambient Git
 # redirection or replacement-object state from the pane shell.
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
