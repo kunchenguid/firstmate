@@ -1120,6 +1120,17 @@ The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and sche
 - An expanded provider with no matching account row leaves the candidate eligible but unranked.
 - Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
 
+An expanded provider with no matching account row leaves the candidate eligible but unranked.
+Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
+Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
+Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
+When exactly one eligible candidate remains and it is unranked because quota is unknown, it needs no comparative ranking: the resolver clears it with an explicit uncertainty note, provided its account-specific profile floor is absent or verified. Multiple unranked candidates, malformed ranking evidence, known exhaustion, unverifiable floors, low confidence and approval gates retain their existing outcomes. This exception does not establish authentication or provider availability.
+On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
+The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor), `escalate` (an approval-gated rule, unverifiable rule floor, no selectable candidate, or a genuine tie), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
+Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
+Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
+Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
+
 **Confidence and fallback rules**
 
 - A rule that declares `min_confidence` is checked against that rule's own probability, whether it is the picked option or a runner-up, so a runner-up never needs weaker support than it would as the pick.
@@ -1154,6 +1165,7 @@ Every result above exits 0.
 - Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 
 **Firstmate retains the dispatch decision**
+
 
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.

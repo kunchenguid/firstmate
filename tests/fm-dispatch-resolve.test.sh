@@ -646,6 +646,74 @@ assert_contains "$out" '-> not eligible: runway exhausted_now' "exhausted candid
 pass "no rankable candidate: the tool escalates instead of guessing"
 
 # --- schema 6: rows keyed by provider + accountKey bind per account ----------------
+# --- a sole eligible unknown-quota candidate needs no ranking -----------------
+reset_log
+SINGLE_UNKNOWN='{"harness":"pi","model":"antigravity/gemini","provider":"antigravity"}'
+for choice in rule_4 default; do
+  jq --argjson profile "$SINGLE_UNKNOWN" '.rules[3].use = $profile | .default = [$profile]' "$BASE_RULES" > "$RULES"
+  write_response "$RESPONSE" "$choice" 0.9
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 0 "$code" "sole missing-provider candidate exits 0: $choice"
+  assert_contains "$out" '  status: clear' "sole missing-provider candidate clears: $choice"
+  assert_contains "$out" "  profile: --harness 'pi' --model 'antigravity/gemini'" "sole unknown profile is selected: $choice"
+  assert_contains "$out" '  note: sole eligible candidate unranked: provider antigravity not in the quota snapshot; quota uncertainty disclosed' "missing quota is disclosed: $choice"
+done
+
+write_response "$RESPONSE" rule_4 0.9
+for fixture in "$QUOTA" "$NO_APPLICABLE" "$PARTIAL_UNKNOWN"; do
+  if [ "$fixture" = "$QUOTA" ]; then
+    jq '.rules[3].use = {"harness":"kimi","model":"kimi-code/k3"}' "$BASE_RULES" > "$RULES"
+  else
+    jq '.rules[3].use = [.rules[3].use[1]]' "$BASE_RULES" > "$RULES"
+  fi
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$fixture" run code out err "$BRIEF"
+  assert_contains "$out" '  status: clear' "sole unknown evidence clears: $fixture"
+  assert_contains "$out" '  note: sole eligible candidate unranked:' "sole unknown evidence has a note: $fixture"
+done
+
+jq --argjson profile "$SINGLE_UNKNOWN" '.rules[3].use = [$profile, .rules[3].use[2]]' "$BASE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "multiple unranked candidates escalate"
+assert_not_contains "$out" '  profile:' "multiple unranked candidates never guess"
+
+jq --argjson profile "$SINGLE_UNKNOWN" '.rules[3].use = [$profile, .rules[3].use[1]]' "$BASE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$UNKNOWN_EXHAUSTED" run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "sole eligible unknown candidate clears beside an ineligible candidate"
+assert_contains "$out" "  profile: --harness 'pi' --model 'antigravity/gemini'" "ineligible alternative is never selected"
+
+# Missing, unmeasured, and absent-row evidence cannot bypass a profile floor.
+for provider in antigravity kimi cursor; do
+  jq --arg provider "$provider" '.rules[3].use = {"harness":"pi","model":"example","provider":$provider,"floor":{"scope":"model:missing","min_percent":20}}' "$BASE_RULES" > "$RULES"
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  assert_contains "$out" '  status: escalate' "unverifiable sole profile floor escalates: $provider"
+  assert_not_contains "$out" '  profile:' "unverifiable sole profile floor emits no profile: $provider"
+done
+
+jq --argjson profile "$SINGLE_UNKNOWN" '.rules[3].use = $profile | .rules[3].approval = "captain"' "$BASE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "sole unknown candidate cannot bypass approval"
+assert_not_contains "$out" '  profile:' "approval still withholds the unknown profile"
+jq --argjson profile "$SINGLE_UNKNOWN" '.rules[3].use = $profile | .rules[3].floor = {"provider":"antigravity","scope":"all_models","min_percent":20}' "$BASE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "sole unknown candidate cannot bypass a rule floor"
+assert_not_contains "$out" '  profile:' "unverifiable rule floor withholds the unknown profile"
+
+ZERO_QUOTA="$TMP_ROOT/zero-quota.json"
+jq '(.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability[].effectivePercentRemaining) = 0' "$QUOTA" > "$ZERO_QUOTA"
+for fixture in "$UNKNOWN_EXHAUSTED" "$ZERO_QUOTA" "$NONNUMERIC"; do
+  jq '.rules[3].use = [.rules[3].use[1]]' "$BASE_RULES" > "$RULES"
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$fixture" run code out err "$BRIEF"
+  assert_contains "$out" '  status: escalate' "sole exhausted, zero, or malformed-rank candidate escalates: $fixture"
+  assert_not_contains "$out" '  profile:' "sole exhausted, zero, or malformed-rank candidate has no profile: $fixture"
+done
+jq '.rules[3].use = .rules[1].use[1]' "$BASE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "sole below-floor candidate escalates"
+assert_contains "$out" 'not eligible: profile floor all_models below 50%' "sole below-floor candidate retains evidence"
+assert_not_contains "$out" '  profile:' "sole below-floor candidate is never selected"
+cp "$BASE_RULES" "$RULES"
+pass "sole unknown quota clears with disclosure without bypassing eligibility, approval, floors, or ranking validity"
+
 # quota-axi emits schema 6 once a provider expands to several accounts; every
 # row then carries accountKey and one provider id may appear on several rows.
 # Native Codex and Pi lanes bind to their own account rows, with no row
@@ -728,6 +796,30 @@ reset_log
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/schema6-default.json" run code out err "$BRIEF"
 assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "native Codex falls back to the default row when codex-home is absent"
 pass "native Codex binds to codex-home before default, independently of Pi accounts and row order"
+
+# A sole unknown candidate must use its own account when checking a floor.
+# Other known accounts cannot supply evidence for an absent or unknown one.
+SOLE_LANE_UNKNOWN="$TMP_ROOT/sole-lane-unknown.json"
+jq '(.providers[] | select(.accountKey == "openai-codex-work") | .quotaSemantics.effectiveAvailability) +=
+  [{"scope":"model:gpt-5.6-terra","status":"unknown"}]' "$SCHEMA6" > "$SOLE_LANE_UNKNOWN"
+for minimum in 10 20; do
+  jq --argjson minimum "$minimum" '.rules[0].use = [.rules[0].use[0] |
+    .floor = {"scope":"all_models","min_percent":$minimum}]' "$LANE_RULES" > "$RULES"
+  TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SOLE_LANE_UNKNOWN" run code out err "$BRIEF"
+  if [ "$minimum" -eq 10 ]; then
+    assert_contains "$out" '  status: clear' "sole unknown candidate honors its verified account floor"
+    assert_contains "$out" '  note: sole eligible candidate unranked:' "account-bound quota uncertainty is disclosed"
+  else
+    assert_contains "$out" '  status: escalate' "sole unknown cannot bypass its own below-floor account"
+    assert_not_contains "$out" '  profile:' "below-floor account never emits a profile"
+  fi
+done
+jq '.rules[0].use = [.rules[0].use[2] | .floor = {"scope":"all_models","min_percent":10}]' "$LANE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6" run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "sole missing-account candidate cannot borrow another account floor"
+assert_not_contains "$out" '  profile:' "unverifiable missing-account floor emits no profile"
+cp "$LANE_RULES" "$RULES"
+pass "sole unknown candidates preserve account-specific floor enforcement"
 
 jq '.schemaVersion = 5 | .providers |= map(select(.accountKey != "openai-codex")) | del(.providers[].accountKey)' "$SCHEMA6" > "$SCHEMA5_PAIR"
 reset_log

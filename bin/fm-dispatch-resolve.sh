@@ -29,9 +29,12 @@
 #   bin/fm-quota-axi-lib.sh, so a Pi lane such as openai-codex-work/...
 #   reads its own account's row and an expanded provider with no row for the
 #   candidate is unmeasured, never blocked), and the spendPriority argmax over
-#   the eligible candidates. The model never sees quota, catalogs, approvals,
-#   confidence floors, `why`, or `use`. With no rules, it returns a non-clear
-#   result so firstmate keeps using the existing intake.
+#   the eligible candidates. A sole eligible candidate with unknown quota needs
+#   no ranking: clear it with uncertainty disclosed only if its floor is absent
+#   or verified. Approval, confidence and known exhaustion gates still apply.
+#   The model never sees quota, catalogs, approvals, confidence floors, `why`,
+#   or `use`. With no rules, it returns a non-clear result so firstmate keeps
+#   using the existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
 #   "Typed dispatch resolution" owns this tool's operator contract.
 #
@@ -45,7 +48,7 @@
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
-#   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
+#   escalate  -> captain approval, no selectable candidate, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
@@ -334,7 +337,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     (provider_of($c)) as $p | (lane_of($c)) as $lane |
     if $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
     elif prov($p; $lane) == null then
-      {profile: $c, provider: $p, eligible: true, unranked: true,
+      {profile: $c, provider: $p, eligible: true, unranked: true, unknown: true,
        reason: (if any($q.providers[]; .provider == $p)
                 then "provider \($p) has no quota row for account \(if $lane == "" then "default" else $lane end)"
                 else "provider \($p) not in the quota snapshot" end)}
@@ -433,7 +436,12 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     ($sel.use | map(evaluate(.))) as $cands |
     ([$cands[] | select(.eligible and ((.unranked // false) | not))]) as $elig |
     ([$cands[] | select(.unranked)]) as $unranked |
-    if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
+    if ($elig | length) == 0 and ($unranked | length) == 1
+       and $unranked[0].eligible and $unranked[0].unknown
+       and (floor_state($unranked[0].profile.floor; $unranked[0].provider; lane_of($unranked[0].profile)) | . == "none" or . == "ok") then
+      $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $unranked[0],
+             unranked_note: "sole eligible candidate unranked: \($unranked[0].reason); quota uncertainty disclosed"}
+    elif ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
     else
       ($elig | max_by(.spendPriority)) as $best |
       ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
