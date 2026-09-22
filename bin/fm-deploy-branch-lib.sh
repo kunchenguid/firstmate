@@ -2,7 +2,8 @@
 # The one implementation of "which branch is this clone's base?", shared by
 # every firstmate path that needs it (spawn's pooled-worktree base, fleet
 # sync's comparison base, review diff's base, local merge's target, teardown's
-# work-safety check, and the worktree-tangle guard).
+# work-safety check, the fast-forward machinery in fm-ff-lib.sh, and the
+# worktree-tangle guard).
 #
 # Resolution order:
 #   1. firstmate.deployBranch, a per-clone git config key naming the project's
@@ -21,7 +22,7 @@
 #
 # This resolver does NOT validate the configured branch - it echoes the key's
 # value as given, so a value naming a branch that does not resolve surfaces at
-# each caller, and only three of the six attribute it to the key:
+# each of the seven callers, and only three of them attribute it to the key:
 #   - fm-spawn.sh, fm-fleet-sync.sh and fm-review-diff.sh refuse and name both
 #     firstmate.deployBranch and its value, so a typo reads as the
 #     configuration error it is rather than as a network failure.
@@ -30,6 +31,12 @@
 #     landed", or "cannot inspect ... for commits not on <value>"). Both quote
 #     the value but neither names the key, and teardown's remedy line offers
 #     --force, which discards work, for what may be only a typo.
+#   - fm-ff-lib.sh does not refuse: ff_target reports "<label>: skipped:
+#     origin/<value> does not exist", sets FF_STATUS=skipped and returns 0, so
+#     a caller that branches only on FF_STATUS=updated (bin/fm-update.sh) does
+#     nothing and still exits zero - firstmate's own self-update stops
+#     silently. primary_head_commit returns 1, which its callers treat as
+#     "no primary commit to follow".
 #   - fm-tangle-lib.sh does not refuse at all: an unresolvable value makes a
 #     healthy primary checkout read as a worktree tangle, reported against that
 #     value as though it were the default branch.
