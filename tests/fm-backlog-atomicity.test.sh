@@ -51,20 +51,6 @@ pin_markdown_backend() {  # <addressing-root>
   printf '%s\n' 'backend = "markdown"' > "$1/.tasks.toml"
 }
 
-# Bounds a command at <seconds> with a SIGKILL follow-up where coreutils
-# timeout exists (as timeout or gtimeout), else a perl SIGALRM watchdog, so the
-# hang guards below also run on a stock macOS host.
-bounded_run() {  # <seconds> <command...>
-  local secs=$1; shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout -k 5 "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout -k 5 "$secs" "$@"
-  else
-    perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "$secs" "$@"
-  fi
-}
-
 # A home with a real backlog, a real project clone with an origin, a pooled
 # worktree, and stubs for every tool the spawn path shells out to.
 make_home() {  # <name> [task-id...]
@@ -319,7 +305,7 @@ if [ "\${1:-}" = start ]; then
     kill -TERM "\$spawn_pid"
     exit 0
   fi
-  exec sleep 300
+  sleep 300
 fi
 exec "$real" "\$@"
 SH
@@ -1489,18 +1475,18 @@ test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
 
   # The read-back's own `start` never answers, so the spawn must bound it
   # (FM_TASKS_AXI_TIMEOUT=3), print the attempted wording naming the timeout,
-  # and exit - the outer 30s bound only turns a regression back into
+  # and exit - the outer `timeout -k 5 30` only turns a regression back into
   # the lock-held-forever hang it exists to catch.
   mkdir -p "$case_dir/user-home"
   out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
     HOME="$case_dir/user-home" FM_SPAWN_NO_GUARD=1 \
     FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" CLAUDE_CONFIG_DIR='' \
     FM_TASKS_AXI_TIMEOUT=3 PATH="$case_dir/fakebin:$PATH" \
-    bounded_run 30 "$SPAWN" "$id" "$case_dir/project" \
+    timeout -k 5 30 "$SPAWN" "$id" "$case_dir/project" \
     --mode no-mistakes --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
   case "$rc" in
-    124|137|142) fail "the verification hung on the unresponsive start instead of timing out: $out" ;;
+    124|137) fail "the verification hung on the unresponsive start instead of timing out: $out" ;;
   esac
   assert_contains "$out" "preservation could not be verified" \
     "a timed-out verification did not report the preservation as attempted, not verified"
@@ -2793,10 +2779,8 @@ test_spawn_refuses_a_special_file_tasks_config() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
-    bounded_run 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
-  case "$rc" in
-    124|137|142) fail "spawn hung reading a special-file tasks-axi config" ;;
-  esac
+    timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
+  [ "$rc" -ne 124 ] || fail "spawn hung reading a special-file tasks-axi config"
   [ "$rc" -ne 0 ] || fail "spawn accepted a special-file tasks-axi config"
   assert_contains "$out" "tasks-axi config is not a regular file" \
     "spawn did not identify the unsafe tasks-axi config"
