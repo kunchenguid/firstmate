@@ -10,6 +10,7 @@
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
+#                 "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny but firstmate's agy turn-end hook could not be withdrawn - run bin/fm-agy-turnend-hook.sh remove",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
@@ -20,6 +21,7 @@
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
+#                 "BOOTSTRAP_INFO: config/agy-turnend-hook reads deny - withdrew firstmate's agy turn-end hook and its files",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
@@ -189,6 +191,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
@@ -1381,6 +1385,44 @@ startup_memory_budget_setup() {
   fi
 }
 
+# A recorded deny must take the global agy turn-end key back out even when no
+# further agy spawn ever runs in this home, which is the likeliest sequence: the
+# captain writes deny precisely so firstmate stops touching his agy, and the
+# install path's retraction then never fires. This is the SAME remove action,
+# gated so it costs one small read when there is nothing to do. Every store
+# refusal stays the installer's own: the key name is literal JSON text, so the
+# grep can only over-trigger into a no-op remove, never miss a key that is
+# there.
+# A LOCAL secondmate is deliberately passive here, the startup_memory_budget_setup
+# rule: it holds only an inherited copy of the answer, and the primary on that
+# same machine sweeps the same shared hooks.json and owns it. Acting on a copy
+# that convergence has not refreshed yet would strip the key out from under the
+# primary's own live agy crewmates. A remote secondmate is its own machine with
+# its own agy tree, so it keeps retracting, and so does a home with no marker or
+# an unreadable one.
+agy_turnend_consent_retract() {
+  local consent="$CONFIG/agy-turnend-hook" store script installed=0
+  [ -n "${HOME:-}" ] || return 0
+  if fm_secondmate_parent_record_parse "$FM_HOME/.fm-secondmate-parent" \
+    && [ "$FM_SECONDMATE_PARENT_ROUTE" = local ]; then
+    return 0
+  fi
+  store="$HOME/.gemini/config/hooks.json"
+  script="$HOME/.gemini/antigravity-cli/fm-turn-end.sh"
+  [ -f "$consent" ] && [ ! -L "$consent" ] || return 0
+  [ "$(tr -d '[:space:]' <"$consent" 2>/dev/null || true)" = deny ] || return 0
+  [ -e "$script" ] && installed=1
+  if [ "$installed" -eq 0 ] && [ -f "$store" ]; then
+    grep -q 'firstmate-turn-end' "$store" 2>/dev/null && installed=1
+  fi
+  [ "$installed" -eq 1 ] || return 0
+  if "$SCRIPT_DIR/fm-agy-turnend-hook.sh" remove >/dev/null 2>&1; then
+    echo "BOOTSTRAP_INFO: config/agy-turnend-hook reads deny - withdrew firstmate's agy turn-end hook and its files"
+  else
+    echo "AGY_TURNEND_HOOK: config/agy-turnend-hook reads deny but firstmate's agy turn-end hook could not be withdrawn - run bin/fm-agy-turnend-hook.sh remove"
+  fi
+}
+
 if [ "${1:-}" = "lavish-compatible" ]; then
   tool_version_at_least lavish-axi "$LAVISH_AXI_MIN"
   exit
@@ -1446,6 +1488,7 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
     fi
   fi
   startup_memory_budget_setup
+  agy_turnend_consent_retract
   if backlog_record_reconcile; then
     :
   else

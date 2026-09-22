@@ -22,8 +22,11 @@
 #      ready on an unregistered path until the dialog has been answered (the
 #      Herdr native-busy-before-dialog race), and fails the spawn with endpoint
 #      cleanup when the brief cannot be confirmed to run in the worktree.
-#   5. agy is a crewmate/scout adapter only: a secondmate launch is refused,
-#      and nothing is armed as busy wiring because no writer could clear it.
+#   5. agy is a crewmate/scout adapter only and a secondmate launch is refused.
+#      Its turn-end hook is GLOBAL, so the spawn arms a busy generation and
+#      attributes a firing through a private per-task token: the hook must be
+#      inert for every session that token does not name, and a forged token
+#      must never escape the registry directory.
 #   6. The busy signature is the pinned `esc to cancel` status row alone; the
 #      free-floating `Generating...` word must never read busy on its own.
 #   7. Herdr's registry already tracks agy, and exit detection proves the
@@ -50,6 +53,8 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
 . "$ROOT/bin/fm-busy-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-config-inherit-lib.sh"
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -157,7 +162,26 @@ test_agy_control_mechanics_are_the_verified_ones() {
   [ -z "$(fm_control_interrupt_clear_key agy)" ] || fail "agy must need no clear key"
   [ "$(fm_control_interrupt_ack_source agy)" = none ] || fail "agy must have no ack source"
   [ "$(fm_control_exit_command agy)" = /quit ] || fail "agy must exit on /quit"
-  pass "fm-control-lib: agy mechanics are Escape once, no clear key, and /quit"
+  # agy's Stop hook does not fire on a manual interrupt and agy has no
+  # session-end event, so firstmate must close the record itself. The adapters
+  # that DO close their own must stay out, or firstmate would overwrite a
+  # verdict their own hook already recorded.
+  fm_control_interrupt_clears_busy agy     || fail "agy must have its busy record closed by firstmate on interrupt"
+  fm_control_interrupt_clears_busy claude     && fail "claude closes its own interrupt state and must not be overwritten here" || true
+  fm_control_interrupt_clears_busy gemini     && fail "gemini's AfterAgent fires on interrupt, so firstmate must not overwrite it" || true
+  pass "fm-control-lib: agy mechanics are Escape once, no clear key, /quit, and a firstmate-closed interrupt"
+}
+
+test_agy_turnend_registry_paths_are_scoped_to_agy() {
+  local token_path auth_path
+  token_path=$(fm_control_harness_turnend_token_path agy /st t9)
+  [ "$token_path" = "/st/t9.agy-turnend-token" ]     || fail "agy's turn-end token sidecar path is wrong: $token_path"
+  auth_path=$(fm_control_harness_turnend_auth_path agy fm.aaaaaaaaaaaa)
+  [ "$auth_path" = "$HOME/.gemini/antigravity-cli/fm-turn-end.d/fm.aaaaaaaaaaaa" ]     || fail "agy's turn-end registry path is wrong: $auth_path"
+  # A token carrying a separator must never resolve to a path at all.
+  [ -z "$(fm_control_harness_turnend_auth_path agy '../escape')" ]     || fail "a traversal token resolved to an agy registry path"
+  [ -z "$(fm_control_harness_turnend_auth_path agy '')" ]     || fail "an empty token resolved to an agy registry path"
+  pass "fm-control-lib: agy's turn-end token and registry paths are scoped and traversal-safe"
 }
 
 test_agy_busy_tail_needs_the_pinned_status_row() {
@@ -446,7 +470,9 @@ test_agy_trust_refuses_out_of_scope_paths() {
 # of where the turn runs);
 # FM_FAKE_AGY_RACE=1 models Herdr's native busy verdict rendering one capture
 # before the dialog paints; FM_FAKE_AGY_ANSWER=stuck models a dialog whose
-# answer never turns into a busy turn.
+# answer never turns into a busy turn; FM_FAKE_AGY_NEVER_BUSY=1 models a
+# pre-trusted pane that takes the launch line and then renders nothing, the
+# shape a launch that died on start leaves behind.
 make_agy_fakebin() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
@@ -509,7 +535,9 @@ case "${1:-}" in
       *' Enter '*)
         case "$state" in
           launched)
-            if fake_path_trusted; then
+            if [ "${FM_FAKE_AGY_NEVER_BUSY:-0}" = 1 ]; then
+              :
+            elif fake_path_trusted; then
               printf 'busy\n' > "$FM_FAKE_AGY_STATE"
             elif [ "${FM_FAKE_AGY_RACE:-0}" = 1 ]; then
               printf 'racing\n' > "$FM_FAKE_AGY_STATE"
@@ -535,6 +563,12 @@ SH
   cat > "$fakebin/agy" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = --version ]; then
+  # FM_FAKE_AGY_VERSION=none models a build whose --version fails outright.
+  [ "${FM_FAKE_AGY_VERSION:-1.2.6}" = none ] && exit 4
+  printf '%s\n' "${FM_FAKE_AGY_VERSION:-1.2.6}"
+  exit 0
+fi
 if [ "${1:-}" = models ]; then
   if [ "${FM_FAKE_AGY_MODELS_FAIL:-0}" = 1 ]; then exit 3; fi
   if [ "${FM_FAKE_AGY_MODELS_HANG:-0}" = 1 ]; then cat > /dev/null; sleep 30; exit 0; fi
@@ -568,6 +602,10 @@ Exercise Antigravity dispatch.
 Verify launch and delivery behavior.
 EOF
   printf 'agy\n' > "$home/config/crew-harness"
+  # The global hook installer refuses until the captain's one-time consent is
+  # recorded, so every spawn case stands for a home that has already answered.
+  # test_agy_unconsented_hook_degrades_the_spawn_visibly removes it again.
+  printf 'allow\n' > "$home/config/agy-turnend-hook"
   mkdir -p "$home/.gemini/antigravity-cli"
   printf '%s\n' '{"model":"Gemini 3.8 Flash (High)","trustedWorkspaces":["/home/someone/elsewhere"]}' \
     > "$home/.gemini/antigravity-cli/settings.json"
@@ -590,8 +628,15 @@ EOF
 # which runners do not keep in the system bin dirs. Carry the directory the
 # invoking environment resolves node from, the fm-kimi-harness shape.
 NODE_BIN=$(command -v node) || fail "test needs node"
-NODE_BIN_DIR=$(dirname "$NODE_BIN")
-BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
+# Carry node WITHOUT carrying its whole directory: agy installs to ~/.local/bin,
+# which is also where many runners resolve node from, so putting that directory
+# on the base PATH leaks the host's real agy into cases that must see none - the
+# missing-binary case then found it and the spawn correctly refused to refuse.
+# A shim holding only node keeps the fixture's agy the only agy on PATH.
+NODE_SHIM_DIR="$TMP_ROOT/node-shim"
+mkdir -p "$NODE_SHIM_DIR"
+ln -sf "$NODE_BIN" "$NODE_SHIM_DIR/node"
+BASE_PATH=${FM_TEST_BASE_PATH:-$NODE_SHIM_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 run_agy_spawn() {
   local case_dir=$1 home=$2 proj=$3 wt=$4 fakebin=$5 id=$6
@@ -606,10 +651,12 @@ run_agy_spawn() {
     FM_FAKE_AGY_SETTINGS="$home/.gemini/antigravity-cli/settings.json" \
     FM_FAKE_AGY_MODELS_FAIL="${FM_FAKE_AGY_MODELS_FAIL:-0}" \
     FM_FAKE_AGY_MODELS_HANG="${FM_FAKE_AGY_MODELS_HANG:-0}" \
+    FM_FAKE_AGY_VERSION="${FM_FAKE_AGY_VERSION:-1.2.6}" \
     FM_FAKE_AGY_IGNORE_TRUST="${FM_FAKE_AGY_IGNORE_TRUST:-0}" \
     FM_FAKE_AGY_ASSUME_TRUSTED="${FM_FAKE_AGY_ASSUME_TRUSTED:-0}" \
     FM_FAKE_AGY_RACE="${FM_FAKE_AGY_RACE:-0}" \
     FM_FAKE_AGY_ANSWER="${FM_FAKE_AGY_ANSWER:-works}" \
+    FM_FAKE_AGY_NEVER_BUSY="${FM_FAKE_AGY_NEVER_BUSY:-0}" \
     FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 FM_AGY_MODELS_TIMEOUT=${FM_AGY_MODELS_TIMEOUT:-1} \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness agy --mode no-mistakes --yolo off "$@" 2>&1
@@ -869,28 +916,967 @@ test_agy_secondmate_is_refused() {
   pass "fm-spawn: agy cannot be launched as a secondmate"
 }
 
-test_agy_spawn_arms_no_busy_wiring() {
-  local id rec out rc statedir
-  id="agy-nowiring-z7-$$"
-  rec=$(make_agy_spawn_case nowiring "$id")
+# A raw launch mints no token, so its hook firing could never resolve one. The
+# global store is shared with the captain's own agy sessions and the Antigravity
+# IDE, so writing the key there would only add two synchronous subprocesses to
+# every one of their turns for a task that can never use them.
+test_agy_raw_launch_installs_no_global_hook() {
+  local id rec out rc
+  id="agy-rawlaunch-z16-$$"
+  rec=$(make_agy_spawn_case rawlaunch "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(HOME="$HOME_DIR" FM_ROOT_OVERRIDE='' FM_HOME="$HOME_DIR" \
+    FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    FM_PROJECTS_OVERRIDE="$HOME_DIR/projects" FM_CONFIG_OVERRIDE="$HOME_DIR/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$WT_DIR" TMUX="fake,1,0" \
+    FM_FAKE_LAUNCH_LOG="$CASE_DIR/launch.log" \
+    FM_FAKE_TMUX_CALL_LOG="$CASE_DIR/tmux-calls.log" \
+    FM_FAKE_AGY_STATE="$CASE_DIR/agy.state" \
+    FM_FAKE_AGY_SETTINGS="$HOME_DIR/.gemini/antigravity-cli/settings.json" \
+    FM_AGY_READY_POLLS=4 FM_AGY_POLL_INTERVAL=0 \
+    PATH="$FAKEBIN_DIR:$BASE_PATH" \
+    "$SPAWN" "$id" "$PROJ_DIR" "agy --prompt-interactive hi" --mode no-mistakes --yolo off 2>&1) || rc=$?
+  expect_code 0 "$rc" "a raw agy launch should spawn"
+  assert_contains "$out" "spawned $id harness=agy" "the raw agy launch did not report its harness"
+  [ ! -e "$HOME_DIR/.gemini/config/hooks.json" ] \
+    || fail "a raw agy launch wrote firstmate's key into the shared global hooks store"
+  assert_agy_home_untouched "$HOME_DIR" "raw launch"
+  [ ! -e "$HOME_DIR/state/$id.busy-gen" ] \
+    || fail "a raw agy launch armed a busy generation no hook could ever clear"
+  [ ! -e "$HOME_DIR/state/$id.agy-turnend-token" ] \
+    || fail "a raw agy launch minted a turn-end token no hook could ever read"
+  pass "fm-spawn: a raw agy launch installs no global hook and arms no wiring"
+}
+
+test_agy_spawn_arms_the_turnend_wiring() {
+  local id rec out rc statedir token auth launch
+  id="agy-wiring-z7-$$"
+  rec=$(make_agy_spawn_case wiring "$id")
   read_agy_spawn_record "$rec"
   out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
     --model gemini-3.8-flash-low)
   rc=$?
   expect_code 0 "$rc" "agy spawn should succeed"
   statedir="$HOME_DIR/state"
-  [ -e "$statedir/$id.busy-gen" ] && fail "agy spawn armed a busy generation nothing could clear" || true
-  for sidecar in "$statedir/$id.agy-"*; do
-    [ -e "$sidecar" ] || continue
-    fail "agy spawn left an adapter sidecar behind: $sidecar"
+  [ -s "$statedir/$id.busy-gen" ] || fail "agy spawn did not arm a busy generation for its hook to clear"
+  [ -s "$statedir/$id.agy-turnend-token" ] || fail "agy spawn did not record its turn-end token sidecar"
+  IFS= read -r token <"$statedir/$id.agy-turnend-token"
+  case "$token" in
+  fm.????????????) ;;
+  *) fail "agy turn-end token '$token' is not a registry-minted name" ;;
+  esac
+  auth="$HOME_DIR/.gemini/antigravity-cli/fm-turn-end.d/$token"
+  [ -f "$auth" ] || fail "agy spawn did not mint its private turn-end registry entry"
+  assert_grep "gen=" "$auth" "the agy turn-end token carries no busy generation"
+  assert_grep "id=$id" "$auth" "the agy turn-end token names the wrong task"
+  assert_grep "turnend=" "$auth" "the agy turn-end token carries no turn-end marker path"
+  assert_grep "busy_event=" "$auth" "the agy turn-end token carries no busy-state writer path"
+  # The whole point of the env route: nothing is written into the project.
+  for stray in "$WT_DIR"/.fm-agy*; do
+    [ -e "$stray" ] || continue
+    fail "agy spawn wrote a pointer into the worktree: $stray"
   done
-  pass "fm-spawn: agy arms no busy wiring and writes no sidecar"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_not_contains "$launch" "FM_TASK_ID=" \
+    "the inline launch prefix must carry only the token the allowlist cannot pass; FM_TASK_ID already reaches the pane through the launch environment"
+  assert_contains "$launch" "FM_AGY_TURNEND_TOKEN='$token'" "agy launch did not export its turn-end token"
+  assert_not_contains "$launch" "__AGYTOKEN__" "agy launch left its token placeholder unsubstituted"
+  pass "fm-spawn: agy arms busy wiring and exports its token without touching the worktree"
+}
+
+# The installed hook is global and shared with the captain's own agy sessions
+# and the Antigravity IDE, so these cases pin the two properties that keep that
+# safe: it edits only its own key, and it is inert without a registry-backed
+# token. They exercise the real installer and the real generated hook script.
+# The cases below exercise the store edit rather than the consent gate, so the
+# helper records the captain's answer in a throwaway firstmate home beside the
+# agy HOME. test_agy_turnend_install_needs_the_captains_consent owns the gate.
+agy_turnend_install() {  # <home>
+  local fm_home="$1.fmhome"
+  mkdir -p "$fm_home/config" || return 1
+  printf 'allow\n' >"$fm_home/config/agy-turnend-hook" || return 1
+  HOME="$1" FM_CONFIG_OVERRIDE="$fm_home/config" "$ROOT/bin/fm-agy-turnend-hook.sh" install
+}
+
+# hooks.json is agy's own machine-read configuration, so these assertions parse
+# it and check the meaning agy acts on - which handler runs which command, under
+# which timeout - rather than matching text that could sit anywhere in the file.
+agy_registered_command() {  # <store> <event>
+  node -e 'const fs=require("node:fs");const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));const h=r["firstmate-turn-end"];if(!h||!h[process.argv[2]])process.exit(1);process.stdout.write(h[process.argv[2]][0].command);' \
+    "$1" "$2"
+}
+
+assert_agy_hooks_store() {  # <store> <expect: installed|removed> <detail>
+  node - "$1" "$2" <<'NODE' || fail "$3"
+const fs = require("node:fs");
+const path = require("node:path");
+const [store, expect] = process.argv.slice(2);
+const root = JSON.parse(fs.readFileSync(store, "utf8"));
+const bad = (m) => { console.error(m); process.exit(1); };
+const hook = path.join(path.dirname(path.dirname(store)), "antigravity-cli", "fm-turn-end.sh");
+if (root === null || typeof root !== "object" || Array.isArray(root)) bad("root is not an object");
+const foreign = root["someone-elses-hook"];
+if (!foreign || foreign.Stop[0].command !== "echo hi") bad("the foreign hook key did not survive intact");
+const own = root["firstmate-turn-end"];
+if (expect === "removed") {
+  if (Object.prototype.hasOwnProperty.call(root, "firstmate-turn-end")) bad("the firstmate key is still present");
+  if (fs.existsSync(hook)) bad("the firstmate hook script survived the withdrawal");
+  process.exit(0);
+}
+if (!own) bad("the firstmate key is absent");
+if (Object.keys(root).length !== 2) bad(`expected exactly 2 hook keys, found ${Object.keys(root).length}`);
+for (const [event, arg] of [["PreInvocation", "pre-invocation"], ["Stop", "stop"]]) {
+  const handlers = own[event];
+  if (!Array.isArray(handlers) || handlers.length !== 1) bad(`${event} is not a single handler`);
+  const h = handlers[0];
+  if (h.type !== "command") bad(`${event} is not a command handler`);
+  const want = `'${hook}' ${arg}`;
+  if (h.command !== want) bad(`${event} runs ${JSON.stringify(h.command)}, not ${JSON.stringify(want)}`);
+  if (h.timeout !== 5) bad(`${event} carries timeout ${h.timeout}, not the bounded 5`);
+}
+NODE
+}
+
+# The spawn seeds this task's own busy record before the launch line is typed,
+# so the readiness gate must not answer from the semantic classifier: doing so
+# reports a launch that never started as ready. Here the pane is pre-trusted
+# (no dialog) and takes the launch line but never renders a turn, which is the
+# exact shape a dead launch leaves, and the gate must refuse it.
+test_agy_pre_trusted_pane_that_never_renders_a_turn_fails_the_spawn() {
+  local id rec out rc
+  id="agy-deadlaunch-z14-$$"
+  rec=$(make_agy_spawn_case deadlaunch "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_NEVER_BUSY=1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  [ "$rc" -ne 0 ] || fail "a pre-trusted pane that never renders a turn must fail the readiness gate, not pass on the spawn's own seeded busy record"
+  assert_contains "$out" "did not start processing its brief in the pre-trusted worktree" \
+    "the failure did not name the unproven pre-trusted launch"
+  assert_not_contains "$out" "spawned $id" "a launch that never started still reported a successful spawn"
+  assert_contains "$(cat "$CASE_DIR/tmux-calls.log")" "kill-window" \
+    "a failed agy readiness gate left its launched endpoint running"
+  pass "fm-spawn: a pre-trusted agy pane that never renders a turn fails the gate"
+}
+
+# A hooks.json firstmate does not own is the dotfiles-managed shape. The
+# installer refuses it without a write, and the spawn must degrade to the
+# unwired shape rather than die: no busy arm, no token, the rendered-tail read
+# alone - and it must say so, because the supervisor cannot see it otherwise.
+test_agy_refused_hook_install_degrades_the_spawn_visibly() {
+  local id rec out rc launch
+  id="agy-unwired-z15-$$"
+  rec=$(make_agy_spawn_case unwired "$id")
+  read_agy_spawn_record "$rec"
+  mkdir -p "$HOME_DIR/.gemini/config" "$HOME_DIR/elsewhere"
+  printf '%s\n' '{}' >"$HOME_DIR/elsewhere/hooks.json"
+  ln -s "$HOME_DIR/elsewhere/hooks.json" "$HOME_DIR/.gemini/config/hooks.json"
+  rc=0
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "a refused turn-end hook install must not kill the agy spawn"
+  assert_contains "$out" "spawned $id" "the degraded agy spawn did not report success"
+  assert_contains "$out" "is a symlink" "the degradation did not carry the installer's own refusal reason"
+  assert_contains "$out" "rendered-tail idle read" \
+    "the spawn did not tell the supervisor this worker runs on the weaker detection"
+  # The installer must not have written through the symlink.
+  assert_contains "$(cat "$HOME_DIR/elsewhere/hooks.json")" "{}" \
+    "the refused installer wrote through the symlink it refused"
+  [ -e "$HOME_DIR/state/$id.busy-gen" ] \
+    && fail "an unwired agy spawn armed a busy generation no hook could ever clear" || true
+  [ -e "$HOME_DIR/state/$id.agy-turnend-token" ] \
+    && fail "an unwired agy spawn minted a turn-end token no hook could ever read" || true
+  assert_agy_home_untouched "$HOME_DIR" "refused install on the spawn path"
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_not_contains "$launch" "FM_AGY_TURNEND_TOKEN" "an unwired agy launch still exported a turn-end token"
+  assert_not_contains "$launch" "__AGYTOKEN__" "an unwired agy launch left its token placeholder unsubstituted"
+  pass "fm-spawn: a refused agy hook install degrades the spawn visibly instead of killing it"
+}
+
+# hooks.json is the captain's own per-user file, shared with his agy sessions
+# and the Antigravity IDE, so the install is gated on his one-time answer in
+# config/agy-turnend-hook. This pins the three properties the gate exists for:
+# no answer means no write at all, the refusal that carries the instruction to
+# ask appears ONLY while no answer is recorded, and a recorded answer of either
+# kind is never asked about again. remove stays ungated because it only takes
+# back a write this installer made.
+agy_consent_install() {  # <agy-home> <fm-config-dir>
+  HOME="$1" FM_CONFIG_OVERRIDE="$2" "$ROOT/bin/fm-agy-turnend-hook.sh" install 2>&1
+}
+
+test_agy_turnend_install_needs_the_captains_consent() {
+  local home store config before out rc ASK_MARKER
+  # The exact instruction firstmate acts on; its presence IS the ask.
+  ASK_MARKER="ASK THE CAPTAIN ONCE"
+  home="$TMP_ROOT/turnend-consent"
+  config="$TMP_ROOT/turnend-consent-config"
+  rm -rf "$home" "$config"
+  mkdir -p "$home/.gemini/config" "$config"
+  store="$home/.gemini/config/hooks.json"
+  printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' >"$store"
+  before=$(cat "$store")
+
+  # No answer recorded: refuse, tell firstmate to ask, and write nothing.
+  rc=0
+  out=$(agy_consent_install "$home" "$config") || rc=$?
+  [ "$rc" -ne 0 ] || fail "the installer wrote the captain's hooks.json without his consent"
+  assert_contains "$out" "$ASK_MARKER" \
+    "an unasked home did not tell firstmate to ask the captain"
+  assert_contains "$out" "agy-turnend-hook" \
+    "the refusal did not name the file that records the captain's answer"
+  [ "$(cat "$store")" = "$before" ] || fail "an unconsented install changed the captain's hooks.json"
+  assert_agy_home_untouched "$home" "unconsented install"
+
+  # Answer recorded as a refusal: still no write, and never asked again.
+  printf 'deny\n' >"$config/agy-turnend-hook"
+  rc=0
+  out=$(agy_consent_install "$home" "$config") || rc=$?
+  [ "$rc" -ne 0 ] || fail "the installer wrote the store after the captain declined"
+  assert_not_contains "$out" "$ASK_MARKER" \
+    "a recorded decline still asked the captain again"
+  [ "$(cat "$store")" = "$before" ] || fail "a declined install changed the captain's hooks.json"
+  assert_agy_home_untouched "$home" "declined install"
+
+  # A value that is neither answer is a configuration error, not a silent write.
+  printf 'sometimes\n' >"$config/agy-turnend-hook"
+  rc=0
+  out=$(agy_consent_install "$home" "$config") || rc=$?
+  [ "$rc" -ne 0 ] || fail "the installer accepted an unrecognised consent value"
+  assert_contains "$out" "accepted values are: allow, deny" \
+    "an unrecognised consent value did not name the accepted answers"
+  [ "$(cat "$store")" = "$before" ] || fail "an unrecognised consent value still changed the store"
+
+  # Consent recorded: the ordinary install, and never asked again.
+  printf 'allow\n' >"$config/agy-turnend-hook"
+  rc=0
+  out=$(agy_consent_install "$home" "$config") || rc=$?
+  expect_code 0 "$rc" "the installer refused a store the captain consented to"
+  assert_not_contains "$out" "$ASK_MARKER" "a consented install still asked the captain"
+  assert_agy_hooks_store "$store" installed \
+    "the consented install did not register the bounded firstmate handlers beside the foreign key"
+
+  # A later spawn in the same home neither asks again nor changes the answer.
+  rc=0
+  out=$(agy_consent_install "$home" "$config") || rc=$?
+  expect_code 0 "$rc" "a second consented install refused"
+  assert_not_contains "$out" "$ASK_MARKER" "a second install asked the captain a second time"
+
+  # remove is not gated: it only takes back the write consent authorised.
+  rm -f "$config/agy-turnend-hook"
+  HOME="$home" FM_CONFIG_OVERRIDE="$config" "$ROOT/bin/fm-agy-turnend-hook.sh" remove \
+    || fail "remove was refused for want of a consent it does not need"
+  assert_agy_hooks_store "$store" removed \
+    "ungated remove did not leave the store with the foreign key alone"
+  pass "fm-agy-turnend-hook.sh: install needs the captain's one-time consent and asks at most once"
+}
+
+# The same degrade must cover the unasked captain, not just a store firstmate
+# cannot own: no consent means no global write, and the worker still launches on
+# the weaker detection with the supervisor told why.
+test_agy_unconsented_hook_degrades_the_spawn_visibly() {
+  local id rec out rc launch
+  id="agy-unconsented-z16-$$"
+  rec=$(make_agy_spawn_case unconsented "$id")
+  read_agy_spawn_record "$rec"
+  rm -f "$HOME_DIR/config/agy-turnend-hook"
+  rc=0
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "an unconsented turn-end hook must not kill the agy spawn"
+  assert_contains "$out" "spawned $id" "the degraded agy spawn did not report success"
+  assert_contains "$out" "ASK THE CAPTAIN ONCE" \
+    "the degradation did not carry the installer's instruction to ask the captain"
+  assert_contains "$out" "rendered-tail idle read" \
+    "the spawn did not tell the supervisor this worker runs on the weaker detection"
+  [ -e "$HOME_DIR/.gemini/config/hooks.json" ] \
+    && fail "an unconsented spawn wrote the captain's global hooks.json" || true
+  assert_agy_home_untouched "$HOME_DIR" "unconsented install on the spawn path"
+  [ -e "$HOME_DIR/state/$id.busy-gen" ] \
+    && fail "an unconsented agy spawn armed a busy generation no hook could ever clear" || true
+  [ -e "$HOME_DIR/state/$id.agy-turnend-token" ] \
+    && fail "an unconsented agy spawn minted a turn-end token no hook could ever read" || true
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_not_contains "$launch" "FM_AGY_TURNEND_TOKEN" "an unconsented agy launch still exported a turn-end token"
+  pass "fm-spawn: an unconsented agy hook install degrades the spawn visibly instead of killing it"
+}
+
+test_agy_turnend_installer_owns_only_its_own_key() {
+  local home store
+  home="$TMP_ROOT/turnend-install"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  store="$home/.gemini/config/hooks.json"
+  printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' >"$store"
+  agy_turnend_install "$home" || fail "the agy turn-end installer refused a clean store"
+  assert_agy_hooks_store "$store" installed "the installed hooks.json does not register the bounded firstmate handlers beside the foreign key"
+  [ -x "$home/.gemini/antigravity-cli/fm-turn-end.sh" ] || fail "the installer did not install an executable hook script"
+  # Installing twice must converge rather than duplicate.
+  agy_turnend_install "$home" || fail "the agy turn-end installer is not idempotent"
+  assert_agy_hooks_store "$store" installed "installing twice did not converge on one bounded firstmate entry"
+  HOME="$home" "$ROOT/bin/fm-agy-turnend-hook.sh" remove || fail "the agy turn-end installer could not remove its key"
+  assert_agy_hooks_store "$store" removed "remove did not leave the store with the foreign key alone"
+  pass "fm-agy-turnend-hook.sh: owns only its own key and installs idempotently"
+}
+
+# The header's contract is that each refusal happens WITHOUT a write, so every
+# refusal below also asserts the home is exactly as the installer found it: no
+# hook script and no registry directory left for the next spawn to rewrite.
+assert_agy_home_untouched() {  # <home> <detail>
+  [ ! -e "$1/.gemini/antigravity-cli/fm-turn-end.sh" ] \
+    || fail "$2: a refused install left its hook script behind"
+  [ ! -e "$1/.gemini/antigravity-cli/fm-turn-end.d" ] \
+    || fail "$2: a refused install left its token registry behind"
+}
+
+test_agy_turnend_installer_refuses_a_store_it_does_not_own() {
+  local home store rc before after
+  home="$TMP_ROOT/turnend-refuse"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  store="$home/.gemini/config/hooks.json"
+  printf '%s\n' '["not","an","object"]' >"$store"
+  before=$(cat "$store")
+  rc=0
+  agy_turnend_install "$home" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "the installer accepted a non-object hooks.json root"
+  after=$(cat "$store")
+  [ "$before" = "$after" ] || fail "the installer rewrote a store it should have refused"
+  assert_agy_home_untouched "$home" "non-object root"
+  printf '%s\n' '{}' >"$TMP_ROOT/turnend-refuse-target.json"
+  rm -f "$store"
+  ln -s "$TMP_ROOT/turnend-refuse-target.json" "$store"
+  rc=0
+  agy_turnend_install "$home" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "the installer followed a symlinked hooks.json"
+  assert_agy_home_untouched "$home" "symlinked store"
+  pass "fm-agy-turnend-hook.sh: refuses a non-object root and a symlinked store without writing"
+}
+
+# The ownership guards refuse before any write, but the store edit itself can
+# still fail once they pass - a config directory this uid cannot write is the
+# reachable shape, because the writability guard only runs when the store
+# already exists. That refusal must leave the home as it found it too.
+test_agy_turnend_installer_leaves_nothing_behind_when_the_store_edit_fails() {
+  local home rc
+  if [ "$(id -u)" = 0 ]; then
+    pass "fm-agy-turnend-hook.sh: a failed store edit leaves nothing behind (skipped as root)"
+    return 0
+  fi
+  home="$TMP_ROOT/turnend-edit-fails"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  chmod 500 "$home/.gemini/config"
+  rc=0
+  agy_turnend_install "$home" >/dev/null 2>&1 || rc=$?
+  chmod 700 "$home/.gemini/config"
+  [ "$rc" -ne 0 ] || fail "the installer reported success against a hooks.json directory it cannot write"
+  [ ! -e "$home/.gemini/config/hooks.json" ] || fail "a refused store edit still left a store behind"
+  assert_agy_home_untouched "$home" "failed store edit"
+  pass "fm-agy-turnend-hook.sh: a failed store edit leaves no hook script or registry behind"
+}
+
+# agy runs a hook `command` through `sh -c`, so the registered string is the
+# real interface, not the script path. This runs the string the installer wrote
+# exactly as agy would, from a home whose path contains a space: an unquoted
+# path resolves to a nonexistent binary and the record silently never moves.
+test_agy_turnend_command_fires_from_a_home_whose_path_has_a_space() {
+  local home store statedir gen token auth cmd record
+  home="$TMP_ROOT/turnend space home"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  agy_turnend_install "$home" >/dev/null || fail "the installer refused a home whose path contains a space"
+  store="$home/.gemini/config/hooks.json"
+  statedir="$TMP_ROOT/turnend-space-state"
+  rm -rf "$statedir"
+  mkdir -p "$statedir"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$statedir" t1) || fail "could not arm a busy generation"
+  token="fm.bbbbbbbbbbbb"
+  auth="$home/.gemini/antigravity-cli/fm-turn-end.d/$token"
+  {
+    printf 'turnend=%s\n' "$statedir/t1.turn-ended"
+    printf 'busy_event=%s\n' "$ROOT/bin/fm-busy-event.sh"
+    printf 'state=%s\n' "$statedir"
+    printf 'id=%s\n' t1
+    printf 'gen=%s\n' "$gen"
+  } >"$auth"
+
+  cmd=$(agy_registered_command "$store" Stop) || fail "could not read the registered Stop command"
+  printf '{}' | FM_AGY_TURNEND_TOKEN="$token" sh -c "$cmd" >/dev/null \
+    || fail "agy's registered Stop command exited non-zero"
+  record=$(cat "$statedir/t1.busy-state")
+  assert_contains "$record" "state=idle" \
+    "the registered Stop command did not close the turn from a home whose path contains a space"
+  [ -f "$statedir/t1.turn-ended" ] \
+    || fail "the registered Stop command did not touch the watcher's turn-end marker"
+
+  cmd=$(agy_registered_command "$store" PreInvocation) || fail "could not read the registered PreInvocation command"
+  printf '{}' | FM_AGY_TURNEND_TOKEN="$token" sh -c "$cmd" >/dev/null \
+    || fail "agy's registered PreInvocation command exited non-zero"
+  assert_contains "$(cat "$statedir/t1.busy-state")" "state=busy" \
+    "the registered PreInvocation command did not open the turn"
+  pass "fm-agy-turnend-hook.sh: the registered command fires through sh -c from a spaced home"
+}
+
+test_agy_turnend_hook_is_inert_without_a_registry_token() {
+  local home hook out rc bad
+  home="$TMP_ROOT/turnend-inert"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  agy_turnend_install "$home" >/dev/null || fail "installer setup failed"
+  hook="$home/.gemini/antigravity-cli/fm-turn-end.sh"
+  rc=0
+  out=$(printf '{}' | "$hook" stop) || rc=$?
+  expect_code 0 "$rc" "the agy hook must exit 0 with no token"
+  [ "$out" = '{"decision":"stop"}' ] || fail "the agy hook did not answer Stop with agy's required JSON: $out"
+  rc=0
+  out=$(printf '{}' | "$hook" pre-invocation) || rc=$?
+  expect_code 0 "$rc" "the agy hook must exit 0 on PreInvocation with no token"
+  [ "$out" = '{}' ] || fail "the agy hook did not answer PreInvocation with an empty JSON object: $out"
+  # A forged token must never resolve outside the registry directory.
+  for bad in "../escape" "/etc/passwd" "fm.short" "fm.WAYTOOLONGTOKEN" "fm.abc/../def"; do
+    rc=0
+    out=$(printf '{}' | FM_AGY_TURNEND_TOKEN="$bad" "$hook" stop) || rc=$?
+    expect_code 0 "$rc" "the agy hook must exit 0 for forged token '$bad'"
+    [ "$out" = '{"decision":"stop"}' ] || fail "forged token '$bad' changed the agy hook's answer: $out"
+  done
+  pass "fm-agy-turnend-hook.sh: the installed hook is inert without a registry-backed token"
+}
+
+test_agy_turnend_hook_records_both_turn_boundaries() {
+  local home hook reg statedir gen token auth record
+  home="$TMP_ROOT/turnend-record"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  agy_turnend_install "$home" >/dev/null || fail "installer setup failed"
+  hook="$home/.gemini/antigravity-cli/fm-turn-end.sh"
+  reg="$home/.gemini/antigravity-cli/fm-turn-end.d"
+  statedir="$TMP_ROOT/turnend-record-state"
+  rm -rf "$statedir"
+  mkdir -p "$statedir"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$statedir" t1) || fail "could not arm a busy generation"
+  token="fm.aaaaaaaaaaaa"
+  auth="$reg/$token"
+  {
+    printf 'turnend=%s\n' "$statedir/t1.turn-ended"
+    printf 'busy_event=%s\n' "$ROOT/bin/fm-busy-event.sh"
+    printf 'state=%s\n' "$statedir"
+    printf 'id=%s\n' t1
+    printf 'gen=%s\n' "$gen"
+  } >"$auth"
+
+  printf '{}' | FM_AGY_TURNEND_TOKEN="$token" "$hook" stop >/dev/null || fail "the agy Stop hook exited non-zero"
+  record=$(cat "$statedir/t1.busy-state")
+  assert_contains "$record" "state=idle" "agy's Stop hook did not close the turn"
+  assert_contains "$record" "source=agy-hook" "agy's Stop hook did not record its own source"
+  [ -f "$statedir/t1.turn-ended" ] || fail "agy's Stop hook did not touch the watcher's turn-end marker"
+
+  printf '{}' | FM_AGY_TURNEND_TOKEN="$token" "$hook" pre-invocation >/dev/null || fail "the agy PreInvocation hook exited non-zero"
+  record=$(cat "$statedir/t1.busy-state")
+  assert_contains "$record" "state=busy" "agy's PreInvocation hook did not open the turn"
+  assert_contains "$record" "source=agy-hook" "agy's PreInvocation hook did not record its own source"
+
+  # A superseded incarnation must fail closed rather than rewrite the record.
+  printf 'turnend=%s\nbusy_event=%s\nstate=%s\nid=%s\ngen=%s\n' \
+    "$statedir/t1.turn-ended" "$ROOT/bin/fm-busy-event.sh" "$statedir" t1 "g-stale" >"$auth"
+  printf '{}' | FM_AGY_TURNEND_TOKEN="$token" "$hook" stop >/dev/null || fail "the agy hook exited non-zero on a stale generation"
+  assert_contains "$(cat "$statedir/t1.busy-state")" "state=busy" \
+    "a stale generation was allowed to rewrite the agy busy record"
+
+  # The token name is validated before the registry is read, but the values
+  # inside a token are data too. fm-spawn only ever writes absolute paths.
+  printf 'turnend=%s\nbusy_event=%s\nstate=%s\nid=%s\ngen=%s\n' \
+    "relative/turn-ended" "relative/fm-busy-event.sh" "relative/state" t1 "$gen" >"$auth"
+  printf '{}' | FM_AGY_TURNEND_TOKEN="$token" "$hook" stop >/dev/null \
+    || fail "the agy hook exited non-zero on a relative-path token"
+  assert_contains "$(cat "$statedir/t1.busy-state")" "state=busy" \
+    "a relative-path token was allowed to rewrite the agy busy record"
+  pass "fm-agy-turnend-hook.sh: PreInvocation opens and Stop closes, and a stale generation or relative path is refused"
+}
+
+# The hook surface was only established on agy 1.2.6; 1.2.0, the version this
+# adapter was first verified against, reads no hooks.json at all. Arming one of
+# those would seed a busy record neither PreInvocation nor Stop could ever
+# clear, so the pane would read busy until BUSY_TURN_MAX_SECS turned it into a
+# wedge suspect. The spawn must therefore take the unwired path for a stale
+# build, ask the captain for nothing, and demand positive evidence: an
+# unreadable version fails closed rather than being trusted.
+test_agy_stale_build_is_never_armed() {
+  local id rec out rc launch
+
+  # Below the floor: no global write, no arm, no token, and the reason is named.
+  id="agy-stale-z17-$$"
+  rec=$(make_agy_spawn_case stale "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_VERSION=1.2.0 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "an agy too old for the hook surface must not kill the spawn"
+  assert_contains "$out" "spawned $id" "the degraded agy spawn did not report success"
+  assert_contains "$out" "agy 1.2.0 is older than 1.2.6" \
+    "the degradation did not name the version it refused to trust"
+  assert_contains "$out" "rendered-tail idle read" \
+    "the spawn did not tell the supervisor this worker runs on the weaker detection"
+  [ -e "$HOME_DIR/.gemini/config/hooks.json" ] \
+    && fail "a stale agy build still wrote the captain's global hooks.json" || true
+  assert_agy_home_untouched "$HOME_DIR" "stale build"
+  [ -e "$HOME_DIR/state/$id.busy-gen" ] \
+    && fail "a stale agy build armed a busy generation no hook could ever clear" || true
+  [ -e "$HOME_DIR/state/$id.agy-turnend-token" ] \
+    && fail "a stale agy build minted a turn-end token no hook could ever read" || true
+  launch=$(cat "$CASE_DIR/launch.log")
+  assert_not_contains "$launch" "FM_AGY_TURNEND_TOKEN" \
+    "a stale agy launch still exported a turn-end token"
+
+  # An unreadable version is not evidence of anything, so it fails closed.
+  id="agy-noversion-z18-$$"
+  rec=$(make_agy_spawn_case noversion "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_VERSION=none run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "an unreadable agy version must not kill the spawn"
+  assert_contains "$out" "is unreachable" "the degradation did not name the unreadable version probe"
+  [ -e "$HOME_DIR/state/$id.busy-gen" ] \
+    && fail "an unprobeable agy version armed a busy generation anyway" || true
+  [ -e "$HOME_DIR/.gemini/config/hooks.json" ] \
+    && fail "an unprobeable agy version still wrote the captain's global hooks.json" || true
+
+  # The floor is a numeric comparison, not a string one: 1.10.0 is above 1.2.6.
+  id="agy-newer-z19-$$"
+  rec=$(make_agy_spawn_case newer "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_VERSION=1.10.0 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "a newer agy spawn should succeed"
+  assert_not_contains "$out" "older than" "a version above the floor was compared as a string"
+  [ -s "$HOME_DIR/state/$id.busy-gen" ] \
+    || fail "a version above the hook-surface floor was left unarmed"
+  [ -s "$HOME_DIR/state/$id.agy-turnend-token" ] \
+    || fail "a version above the hook-surface floor minted no turn-end token"
+
+  # A prerelease or build suffix is a real release shape, so it must be read as
+  # its release core rather than dropped into the unrecognised-version branch,
+  # which would leave a build that does carry the hook surface unarmed.
+  id="agy-prerelease-z22-$$"
+  rec=$(make_agy_spawn_case prerelease "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_VERSION=1.3.0-rc.1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "a prerelease agy spawn should succeed"
+  assert_not_contains "$out" "no recognisable version" \
+    "a prerelease release core was not recognised as a version at all"
+  [ -s "$HOME_DIR/state/$id.busy-gen" ] \
+    || fail "a prerelease above the hook-surface floor was left unarmed"
+
+  id="agy-build-z23-$$"
+  rec=$(make_agy_spawn_case build "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_VERSION=1.2.8+build7 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "a build-suffixed agy spawn should succeed"
+  [ -s "$HOME_DIR/state/$id.busy-gen" ] \
+    || fail "a build-suffixed version above the hook-surface floor was left unarmed"
+
+  # The suffix must not promote a release core that is still below the floor.
+  id="agy-oldrc-z24-$$"
+  rec=$(make_agy_spawn_case oldrc "$id")
+  read_agy_spawn_record "$rec"
+  rc=0
+  out=$(FM_FAKE_AGY_VERSION=1.2.5-rc.1 run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" \
+    "$FAKEBIN_DIR" "$id" --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "a below-floor prerelease must not kill the spawn"
+  assert_contains "$out" "older than 1.2.6" \
+    "a below-floor prerelease was not compared on its release core"
+  [ -e "$HOME_DIR/state/$id.busy-gen" ] \
+    && fail "a prerelease below the hook-surface floor was armed anyway" || true
+  pass "fm-spawn: agy arms only on a build proven to carry the turn-end hook surface"
+}
+
+# Consent that cannot be withdrawn is not consent. A recorded deny must take
+# back the key an earlier allow wrote - otherwise the captain's own agy
+# sessions and the Antigravity IDE keep running two synchronous subprocesses
+# per turn for good - while still refusing the install it was asked for.
+test_agy_withdrawn_consent_retracts_the_installed_hook() {
+  local home store config out rc
+
+  home="$TMP_ROOT/turnend-retract"
+  config="$TMP_ROOT/turnend-retract-config"
+  rm -rf "$home" "$config"
+  mkdir -p "$home/.gemini/config" "$config"
+  store="$home/.gemini/config/hooks.json"
+  printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' >"$store"
+
+  printf 'allow\n' >"$config/agy-turnend-hook"
+  agy_consent_install "$home" "$config" >/dev/null \
+    || fail "the consented install failed before the retraction case could run"
+  assert_agy_hooks_store "$store" installed "the consented install did not register the firstmate handlers"
+
+  # The captain changes his mind: the next install retracts, then refuses.
+  printf 'deny\n' >"$config/agy-turnend-hook"
+  rc=0
+  out=$(agy_consent_install "$home" "$config") || rc=$?
+  [ "$rc" -ne 0 ] || fail "a withdrawn consent still reported a successful install"
+  assert_not_contains "$out" "ASK THE CAPTAIN ONCE" "a recorded decline asked the captain again"
+  assert_agy_hooks_store "$store" removed \
+    "a withdrawn consent left its key in the captain's shared hooks.json"
+
+  # Idempotent, and still safe once there is no store left to edit at all.
+  rc=0
+  agy_consent_install "$home" "$config" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a second declined install reported success"
+  assert_agy_hooks_store "$store" removed "a second declined install disturbed the store"
+  rm -f "$store"
+  rc=0
+  agy_consent_install "$home" "$config" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a declined install with no store at all reported success"
+  [ -e "$store" ] && fail "a declined install created the captain's store to remove from it" || true
+  pass "fm-agy-turnend-hook.sh: a withdrawn consent retracts the installed key and still refuses"
+}
+
+# The same retraction through the real spawn path, which is where a captain who
+# changes his mind actually meets it: the next agy spawn in that home removes
+# the key and drops that worker to the unwired shape.
+test_agy_spawn_retracts_the_hook_when_consent_is_withdrawn() {
+  local id first rec out rc store
+
+  first="agy-retract-z20-$$"
+  id=$first
+  rec=$(make_agy_spawn_case retract "$id")
+  read_agy_spawn_record "$rec"
+  store="$HOME_DIR/.gemini/config/hooks.json"
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low)
+  rc=$?
+  expect_code 0 "$rc" "the consented agy spawn should succeed"
+  [ -f "$store" ] || fail "the consented agy spawn installed no global hook to retract"
+  [ -n "$(agy_registered_command "$store" Stop)" ] \
+    || fail "the consented agy spawn registered no Stop handler"
+
+  # The captain changes his mind between two spawns in the same home.
+  printf 'deny\n' >"$HOME_DIR/config/agy-turnend-hook"
+  id="agy-retract-z21-$$"
+  mkdir -p "$HOME_DIR/data/$id"
+  cp "$HOME_DIR/data/$first/brief.md" "$HOME_DIR/data/$id/brief.md"
+  : > "$CASE_DIR/agy.state"
+  rc=0
+  out=$(run_agy_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" \
+    --model gemini-3.8-flash-low) || rc=$?
+  expect_code 0 "$rc" "a withdrawn consent must not kill the agy spawn"
+  assert_contains "$out" "spawned $id" "the degraded agy spawn did not report success"
+  assert_contains "$out" "rendered-tail idle read" \
+    "the spawn did not tell the supervisor this worker runs on the weaker detection"
+  agy_registered_command "$store" Stop >/dev/null 2>&1 \
+    && fail "a spawn after a withdrawn consent left the firstmate key installed" || true
+  [ -e "$HOME_DIR/state/$id.busy-gen" ] \
+    && fail "a spawn after a withdrawn consent armed a busy generation" || true
+  pass "fm-spawn: the next agy spawn after a withdrawn consent removes the global key"
+}
+
+# The consent is to touch ONE machine's ~/.gemini/config/hooks.json. A local
+# secondmate runs under the same uid and therefore shares that very file, so it
+# must inherit the answer instead of asking the captain twice; a remote
+# secondmate is a different machine's home, so the answer must never travel
+# there. These assertions run the real propagation and the real remote
+# receiver rather than reading either one's source.
+test_agy_consent_is_inherited_locally_and_never_remotely() {
+  local dir src dest item found rc out
+
+  dir="$TMP_ROOT/consent-inherit"
+  rm -rf "$dir"
+  mkdir -p "$dir/src/config" "$dir/dest/config"
+  src="$dir/src/config"
+  dest="$dir/dest/config"
+  printf 'allow\n' >"$src/agy-turnend-hook"
+
+  propagate_inheritable_config "$src" "$dest" \
+    || fail "local propagation of the captain's agy consent failed"
+  [ "$(cat "$dest/agy-turnend-hook" 2>/dev/null)" = allow ] \
+    || fail "a local secondmate home did not inherit the captain's recorded agy consent"
+
+  # The remote transfer set is derived from the same declaration and must not
+  # carry it, so one machine's consent can never land on another machine.
+  found=0
+  while IFS= read -r item; do
+    [ "$item" = "config/agy-turnend-hook" ] && found=1
+  done <<EOF
+$(fm_config_inherit_items)
+EOF
+  [ "$found" -eq 0 ] \
+    || fail "the remote inherited-material set carries one machine's agy consent to another"
+  printf '%s\n' "$(fm_config_inherit_items)" | grep -q '^config/crew-harness$' \
+    || fail "excluding the local-only item also dropped the ordinary remote inherited material"
+
+  # The receiver refuses it by derivation, which is what makes the two ends agree.
+  rc=0
+  out=$(FM_HOME="$dir/dest" FM_CONFIG_OVERRIDE="$dest" \
+    "$ROOT/bin/fm-remote-inherit.sh" put config/agy-turnend-hook 6 \
+    "$(printf 'allow\n' | shasum -a 256 | awk '{print $1}')" 1 </dev/null 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the remote receiver accepted one machine's agy consent"
+  assert_contains "$out" "not inherited material" \
+    "the remote receiver refused the agy consent for the wrong reason"
+  # Positive control: an ordinary inherited item is still recognised material,
+  # so the refusal above is the allowlist and not a broken receiver.
+  rc=0
+  out=$(FM_HOME="$dir/dest" FM_CONFIG_OVERRIDE="$dest" \
+    "$ROOT/bin/fm-remote-inherit.sh" put config/crew-harness 6 nothexadecimal 1 </dev/null 2>&1) || rc=$?
+  assert_not_contains "$out" "not inherited material" \
+    "the remote receiver stopped recognising ordinary inherited material"
+  pass "fm-config-inherit-lib.sh: the agy consent is inherited locally and refused across machines"
+}
+
+# One recording place per machine. A LOCAL secondmate shares the primary's one
+# hooks.json and inherits the primary's answer, so anything it recorded itself
+# would be erased by the next primary-authoritative convergence and asked
+# again; its refusal must therefore send the answer to the primary home. A
+# REMOTE secondmate is a different machine that never receives the item, so it
+# stays its own recording place. Neither may write anything while unasked.
+test_agy_unasked_secondmate_is_sent_to_the_primary_home() {
+  local dir home agyhome primary out rc
+
+  dir="$TMP_ROOT/consent-ownership"
+  rm -rf "$dir"
+  primary="$dir/primary"
+  agyhome="$dir/agyhome"
+  mkdir -p "$primary/config" "$agyhome/.gemini/config"
+  printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' \
+    >"$agyhome/.gemini/config/hooks.json"
+
+  # A local secondmate home: marker plus a local parent binding naming the primary.
+  home="$dir/local-mate"
+  mkdir -p "$home/config"
+  printf 'alpha\n' >"$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$primary" \
+    >"$home/.fm-secondmate-parent"
+  rc=0
+  out=$(HOME="$agyhome" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unasked local secondmate installed the hook anyway"
+  assert_contains "$out" "ASK THE CAPTAIN ONCE" "the local secondmate refusal dropped the ask marker"
+  assert_contains "$out" "$primary/config/agy-turnend-hook" \
+    "an unasked local secondmate did not send the answer to the primary home"
+  assert_not_contains "$out" "$home/config/agy-turnend-hook" \
+    "an unasked local secondmate offered its own config as the recording place"
+  [ -e "$home/config/agy-turnend-hook" ] \
+    && fail "a local secondmate recorded a consent of its own" || true
+  assert_agy_home_untouched "$agyhome" "unasked local secondmate"
+
+  # A remote secondmate is another machine: it never receives the inherited
+  # item, so being sent to a primary it cannot inherit from would strand it.
+  home="$dir/remote-mate"
+  mkdir -p "$home/config"
+  printf 'bravo\n' >"$home/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=lab\n' \
+    >"$home/.fm-secondmate-parent"
+  rc=0
+  out=$(HOME="$agyhome" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unasked remote secondmate installed the hook anyway"
+  assert_contains "$out" "$home/config/agy-turnend-hook" \
+    "a remote secondmate was not left as its own recording place"
+  assert_not_contains "$out" "$primary/config/agy-turnend-hook" \
+    "a remote secondmate was sent to another machine's primary home"
+
+  # A secondmate marker with no readable parent binding still must not name its
+  # own file as the place to record; it names the primary home in words.
+  home="$dir/orphan-mate"
+  mkdir -p "$home/config"
+  printf 'charlie\n' >"$home/.fm-secondmate-home"
+  rc=0
+  out=$(HOME="$agyhome" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unasked secondmate with no parent binding installed the hook anyway"
+  assert_contains "$out" "primary firstmate home" \
+    "a secondmate with no parent binding did not name the primary home at all"
+  assert_not_contains "$out" "$home/config/agy-turnend-hook" \
+    "a secondmate with no parent binding offered its own config as the recording place"
+
+  # The primary home's own refusal is unchanged: it names its own file.
+  rc=0
+  out=$(HOME="$agyhome" FM_HOME="$primary" FM_CONFIG_OVERRIDE="$primary/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "an unasked primary home installed the hook anyway"
+  assert_contains "$out" "$primary/config/agy-turnend-hook" \
+    "the primary home's refusal stopped naming its own recording place"
+  pass "fm-agy-turnend-hook.sh: only the primary home records a machine's agy consent"
+}
+
+# A captain who records deny stops spawning agy, so a retraction reachable only
+# from install would never fire and the key would keep running two synchronous
+# subprocesses per turn in his own sessions. Session-start bootstrap therefore
+# runs the same remove, and stays silent when there is nothing to take back.
+run_bootstrap_home() {  # <fm-home> <agy-home> <fakebin>
+  PATH="$3:$BASE_PATH" HOME="$2" FM_HOME="$1" FM_ROOT_OVERRIDE="$1" \
+    FM_BOOTSTRAP_NETWORK_PHASE=skip "$ROOT/bin/fm-bootstrap.sh" 2>&1
+}
+
+test_agy_bootstrap_retracts_a_recorded_deny() {
+  local dir home agyhome store fakebin out rc
+
+  dir="$TMP_ROOT/consent-bootstrap"
+  rm -rf "$dir"
+  home="$dir/home"
+  agyhome="$dir/agyhome"
+  mkdir -p "$home/config" "$home/state" "$home/data" "$agyhome/.gemini/config"
+  fakebin=$(fm_fakebin "$dir/fake")
+  store="$agyhome/.gemini/config/hooks.json"
+  printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' >"$store"
+
+  # Nothing recorded yet: bootstrap must not touch the captain's store.
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
+  assert_not_contains "$out" "config/agy-turnend-hook reads deny" \
+    "bootstrap spoke about a consent nobody recorded"
+
+  # Consent given and the key installed, the state a withdrawal starts from.
+  printf 'allow\n' >"$home/config/agy-turnend-hook"
+  HOME="$agyhome" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install >/dev/null 2>&1 \
+    || fail "the consented install failed before the retraction case could run"
+  assert_agy_hooks_store "$store" installed "the consented install registered no firstmate handlers"
+
+  # An allow left standing is not a withdrawal, so bootstrap leaves it alone.
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
+  assert_not_contains "$out" "config/agy-turnend-hook reads deny" \
+    "bootstrap retracted a consent that still reads allow"
+  assert_agy_hooks_store "$store" installed "bootstrap removed a key the captain still allows"
+
+  # The captain withdraws and never spawns agy again: bootstrap takes it back.
+  printf 'deny\n' >"$home/config/agy-turnend-hook"
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
+  assert_contains "$out" "BOOTSTRAP_INFO: config/agy-turnend-hook reads deny - withdrew" \
+    "bootstrap retracted the key without reporting it as a completed fact"
+  assert_not_contains "$out" "AGY_TURNEND_HOOK" \
+    "a clean withdrawal travelled under the actionable prefix, which loads the diagnostics playbook for nothing"
+  assert_agy_hooks_store "$store" removed \
+    "a recorded deny survived session start with firstmate's key still installed"
+
+  # Idempotent: with the key already gone there is nothing to say or do.
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
+  assert_not_contains "$out" "config/agy-turnend-hook reads deny" \
+    "bootstrap spoke again about an already-clean store"
+
+  # Safe when the captain has no agy store at all.
+  rm -f "$store"
+  rc=0
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin") || rc=$?
+  expect_code 0 "$rc" "bootstrap failed on a deny with no agy store present"
+  assert_not_contains "$out" "config/agy-turnend-hook reads deny" \
+    "bootstrap spoke about a store that does not exist"
+  [ -e "$store" ] && fail "bootstrap created the captain's agy store to retract from it" || true
+  pass "fm-bootstrap.sh: a recorded deny retracts the global agy key at session start"
+}
+
+# The sweep runs against one shared ~/.gemini/config/hooks.json per machine, so
+# who owns the answer decides who may act on it. A LOCAL secondmate holds only
+# an inherited copy: acting on one convergence has not refreshed yet would take
+# the key out from under the primary's own live agy crewmates, so it stays
+# passive and the primary's identical sweep does the work. A REMOTE secondmate
+# is its own machine with its own agy tree, so it must still retract.
+seed_secondmate_home() {  # <home> <id> <route> <parent-home-or-host>
+  mkdir -p "$1/config" "$1/state" "$1/data" || return 1
+  printf '%s\n' "$2" >"$1/.fm-secondmate-home" || return 1
+  case "$3" in
+  local) printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$4" >"$1/.fm-secondmate-parent" ;;
+  remote) printf 'schema=fm-secondmate-parent.v1\nroute=remote\nparent_host=%s\n' "$4" >"$1/.fm-secondmate-parent" ;;
+  esac
+}
+
+test_agy_bootstrap_retraction_is_owned_by_the_home_that_owns_the_answer() {
+  local dir home agyhome store fakebin out
+
+  dir="$TMP_ROOT/consent-bootstrap-route"
+  rm -rf "$dir"
+  agyhome="$dir/agyhome"
+  fakebin=$(fm_fakebin "$dir/fake")
+  mkdir -p "$agyhome/.gemini/config"
+  store="$agyhome/.gemini/config/hooks.json"
+
+  # A local secondmate holding a deny must leave the shared store alone.
+  home="$dir/local-mate"
+  seed_secondmate_home "$home" alpha local "$dir/primary" || fail "could not seed the local secondmate home"
+  printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' >"$store"
+  printf 'allow\n' >"$home/config/agy-turnend-hook"
+  HOME="$agyhome" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install >/dev/null 2>&1 \
+    || fail "the consented install failed before the local secondmate case could run"
+  printf 'deny\n' >"$home/config/agy-turnend-hook"
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
+  assert_not_contains "$out" "config/agy-turnend-hook reads deny" \
+    "a local secondmate reported a withdrawal its primary owns"
+  assert_agy_hooks_store "$store" installed \
+    "a local secondmate acting on an inherited deny stripped the hook out from under its primary"
+
+  # A remote secondmate owns its own machine's store and must still retract.
+  home="$dir/remote-mate"
+  seed_secondmate_home "$home" bravo remote lab || fail "could not seed the remote secondmate home"
+  printf 'allow\n' >"$home/config/agy-turnend-hook"
+  HOME="$agyhome" FM_HOME="$home" FM_CONFIG_OVERRIDE="$home/config" \
+    "$ROOT/bin/fm-agy-turnend-hook.sh" install >/dev/null 2>&1 \
+    || fail "the consented install failed before the remote secondmate case could run"
+  printf 'deny\n' >"$home/config/agy-turnend-hook"
+  out=$(run_bootstrap_home "$home" "$agyhome" "$fakebin")
+  assert_contains "$out" "BOOTSTRAP_INFO: config/agy-turnend-hook reads deny - withdrew" \
+    "a remote secondmate withdrew the hook without saying so"
+  assert_agy_hooks_store "$store" removed \
+    "a remote secondmate left a withdrawn hook installed in its own agy store"
+  pass "fm-bootstrap.sh: only the home that owns the answer retracts the shared agy hook"
+}
+
+# The withdrawal is the exact inverse of the install, so it takes firstmate's
+# own hook script and token folder as well as the key, and nothing else: agy's
+# own directory holding them is left alone. It is never recursive, so a registry
+# still holding a live task's token survives and is reported rather than taken.
+test_agy_withdrawal_takes_back_the_files_but_never_a_live_token() {
+  local home store registry out rc
+
+  home="$TMP_ROOT/turnend-withdraw"
+  rm -rf "$home"
+  mkdir -p "$home/.gemini/config"
+  store="$home/.gemini/config/hooks.json"
+  registry="$home/.gemini/antigravity-cli/fm-turn-end.d"
+  printf '%s\n' '{"someone-elses-hook":{"Stop":[{"type":"command","command":"echo hi"}]}}' >"$store"
+  agy_turnend_install "$home" >/dev/null || fail "the installer refused a clean store"
+  [ -x "$home/.gemini/antigravity-cli/fm-turn-end.sh" ] || fail "the installer wrote no hook script"
+  [ -d "$registry" ] || fail "the installer created no token registry"
+
+  # A live task's token is still in the registry: the folder must survive.
+  printf 'turnend=/tmp/x\n' >"$registry/fm.aaaaaaaaaaaa"
+  rc=0
+  out=$(HOME="$home" "$ROOT/bin/fm-agy-turnend-hook.sh" remove 2>&1) || rc=$?
+  expect_code 0 "$rc" "remove failed while a live token was present"
+  assert_agy_hooks_store "$store" removed "remove left the key or the hook script behind"
+  [ -f "$registry/fm.aaaaaaaaaaaa" ] || fail "the withdrawal deleted a live task's turn-end token"
+  assert_contains "$out" "left in place" "the withdrawal reported a clean sweep while a token survived"
+
+  # With the last token gone the folder goes too, and so does its parent.
+  rm -f "$registry/fm.aaaaaaaaaaaa"
+  rc=0
+  out=$(HOME="$home" "$ROOT/bin/fm-agy-turnend-hook.sh" remove 2>&1) || rc=$?
+  expect_code 0 "$rc" "a second remove failed on an already-withdrawn install"
+  [ -e "$registry" ] && fail "an empty token registry survived the withdrawal" || true
+  [ -d "$home/.gemini/antigravity-cli" ] \
+    || fail "the withdrawal deleted agy's own directory instead of only firstmate's files"
+  [ -f "$store" ] || fail "the withdrawal deleted the captain's hooks.json"
+
+  # An absent store must still reach the file cleanup rather than exit early.
+  agy_turnend_install "$home" >/dev/null || fail "the reinstall before the absent-store case failed"
+  rm -f "$store"
+  rc=0
+  HOME="$home" "$ROOT/bin/fm-agy-turnend-hook.sh" remove >/dev/null 2>&1 || rc=$?
+  expect_code 0 "$rc" "remove failed when the captain's store was absent"
+  [ -e "$home/.gemini/antigravity-cli/fm-turn-end.sh" ] \
+    && fail "an absent store left firstmate's hook script in the captain's agy tree" || true
+  pass "fm-agy-turnend-hook.sh: withdrawal takes back its own files and never a live token"
 }
 
 test_agy_ancestry_detects_the_native_command_name
 test_agy_ancestry_rejects_unrelated_mentions
 test_agy_claims_no_inherited_launcher_marker
 test_agy_control_mechanics_are_the_verified_ones
+test_agy_turnend_registry_paths_are_scoped_to_agy
 test_agy_busy_tail_needs_the_pinned_status_row
 test_agy_busy_signatures_are_harness_scoped
 test_agy_classify_reports_unknown_when_the_marker_scrolls_out
@@ -916,4 +1902,23 @@ test_agy_unregistered_path_without_a_dialog_fails_the_spawn
 test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
-test_agy_spawn_arms_no_busy_wiring
+test_agy_spawn_arms_the_turnend_wiring
+test_agy_raw_launch_installs_no_global_hook
+test_agy_pre_trusted_pane_that_never_renders_a_turn_fails_the_spawn
+test_agy_refused_hook_install_degrades_the_spawn_visibly
+test_agy_unconsented_hook_degrades_the_spawn_visibly
+test_agy_turnend_install_needs_the_captains_consent
+test_agy_stale_build_is_never_armed
+test_agy_withdrawn_consent_retracts_the_installed_hook
+test_agy_spawn_retracts_the_hook_when_consent_is_withdrawn
+test_agy_consent_is_inherited_locally_and_never_remotely
+test_agy_unasked_secondmate_is_sent_to_the_primary_home
+test_agy_bootstrap_retracts_a_recorded_deny
+test_agy_bootstrap_retraction_is_owned_by_the_home_that_owns_the_answer
+test_agy_withdrawal_takes_back_the_files_but_never_a_live_token
+test_agy_turnend_installer_owns_only_its_own_key
+test_agy_turnend_installer_refuses_a_store_it_does_not_own
+test_agy_turnend_installer_leaves_nothing_behind_when_the_store_edit_fails
+test_agy_turnend_command_fires_from_a_home_whose_path_has_a_space
+test_agy_turnend_hook_is_inert_without_a_registry_token
+test_agy_turnend_hook_records_both_turn_boundaries
