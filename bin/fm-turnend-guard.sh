@@ -189,6 +189,30 @@ budget_reset() {
   fm_lock_release "$BUDGET_LOCK"
 }
 
+# A Claude secondmate's busy Stop hook (bin/fm-spawn.sh) records idle in the
+# parent home on the same Stop this guard blocks, and the forced continuation
+# fires no UserPromptSubmit. Reopen busy for that same gen, so the parent's
+# active-turn gate sees the continuation. An allowed Stop keeps idle.
+reopen_parent_busy() {
+  local pointer="$FM_ROOT/.fm-busy-reopen" key value writer='' state='' id='' gen=''
+  [ "$CLAUDE_MODE" -eq 1 ] || return 0
+  [ -f "$pointer" ] && [ ! -L "$pointer" ] || return 0
+  while IFS='=' read -r key value; do
+    case "$key" in
+      writer) writer=$value ;;
+      state) state=$value ;;
+      id) id=$value ;;
+      gen) gen=$value ;;
+    esac
+  done < "$pointer"
+  [ -n "$state" ] && [ -n "$id" ] && [ -n "$gen" ] && [ -x "$writer" ] || return 0
+  "$writer" apply "$state" "$id" busy --gen "$gen" --source claude-hook --event stop-blocked >/dev/null 2>&1 || true
+}
+exit_blocked() {
+  reopen_parent_busy
+  exit 2
+}
+
 fm_supervision_status "$STATE" "$GRACE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
@@ -199,7 +223,7 @@ fi
 allow_supervised_stop() {
   [ "$CLAUDE_MODE" -eq 1 ] || exit 0
   fm_failure_episode_reset "$STATE" && exit 0
-  exit 2
+  exit_blocked
 }
 
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
@@ -251,7 +275,7 @@ block_stop() {
     printf '●  %s\n' "$reason"
     printf '●%s\n' "$rule"
   } >&2
-  exit 2
+  exit_blocked
 }
 
 # Another verified live session owns the home lock under the shared
@@ -490,7 +514,7 @@ i=0
 while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
   if autoarm_owns_recovery; then
     if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-      fm_failure_episode_reset "$STATE" || exit 2
+      fm_failure_episode_reset "$STATE" || exit_blocked
     fi
     exit 0
   fi
@@ -499,7 +523,7 @@ while [ "$i" -lt $((SYNC_WAIT_MS / 100)) ]; do
 done
 if autoarm_owns_recovery; then
   if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
-    fm_failure_episode_reset "$STATE" || exit 2
+    fm_failure_episode_reset "$STATE" || exit_blocked
   fi
   exit 0
 fi

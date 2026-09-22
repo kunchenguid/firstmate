@@ -320,6 +320,8 @@
 # source exists. Grok keeps its rendered-tail fallback and is not given a parent
 # turn-end hook. Cursor's transcript binding is written for a secondmate the same way
 # as for a crewmate. Muse, gemini, agy, and rovo are refused as secondmates.
+# A claude secondmate also gets .fm-busy-reopen in its home, so the home's Stop
+# guard can reopen busy for the same gen when it blocks a Stop.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
 # Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog.
@@ -4119,6 +4121,19 @@ BUSY_GEN=
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
     exclude_path '.claude/settings.local.json'
+    if [ "$KIND" = secondmate ]; then
+      # The home's tracked Stop guard can block a Stop that the hook above
+      # already recorded idle, and the forced continuation fires no
+      # UserPromptSubmit. This pointer lets the guard reopen busy for this
+      # same gen when it blocks (bin/fm-turnend-guard.sh).
+      {
+        printf 'writer=%s\n' "$FM_ROOT/bin/fm-busy-event.sh"
+        printf 'state=%s\n' "$STATE_REAL"
+        printf 'id=%s\n' "$ID"
+        printf 'gen=%s\n' "$BUSY_GEN"
+      } >"$WT/.fm-busy-reopen"
+      exclude_path '.fm-busy-reopen'
+    fi
     ;;
   gemini)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
@@ -4361,9 +4376,6 @@ EOF
     fi
     ;;
   muse*)
-    # Refused for a secondmate before this point. Kept off that path so a
-    # mate never receives a parent session binding.
-    if [ "$KIND" != secondmate ]; then
     # muse's turn lifecycle is neither a hook nor a launch flag: its plugin
     # engine (the only hook surface) is disabled in the default build, so
     # firstmate reads muse's own durable session event log instead
@@ -4390,7 +4402,6 @@ EOF
 $(fm_busy_muse_matching_logs "$MUSE_SESSIONS_ROOT" "$WT" || true)
 EOF
     } >"$STATE/$ID.muse-session"
-    fi
     ;;
   cursor*)
     # Cursor's turn lifecycle is neither a hook nor a launch flag: it writes
