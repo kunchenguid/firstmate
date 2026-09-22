@@ -3288,11 +3288,13 @@ test_capped_overview_without_branch_rows_reports_both_ids() {
   pass 'same-branch identity survives both runs falling outside the overview'
 }
 
-# Real `no-mistakes axi` overview truncation carries no `repo: ` identity
-# line at all (tests/captures/no-mistakes-v1.70.1/overview.toon, captured
-# 2026-09-20): only `count:`/`runs[...]:`. A branch with zero rows anywhere
-# in a capped overview must still read as truthfully absent from that real
-# shape, not as an unreadable table.
+# A capture that carries no `repo: ` identity line at all - the
+# tests/captures/no-mistakes-v1.70.1/overview.toon fixture (captured
+# 2026-09-20) is truncated to only `count:`/`runs[...]:`, and issue #5211
+# later showed the real CLI does print the line, so treat this shape as the
+# older/degenerate case the reader must still tolerate, not the common one.
+# A branch with zero rows anywhere in a capped overview must still read as
+# truthfully absent from that degenerate shape, not as an unreadable table.
 test_capped_overview_without_repo_line_and_no_runs_reports_absent() {
   reset_fakes
   local d; d=$TMP_ROOT/capped-no-repo-line-no-runs
@@ -3318,7 +3320,7 @@ with sqlite3.connect(database) as db:
     db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
                     [("01OTHER%02d" % i, "repo", "fm/other-%d" % i, "running", head, i)
                      for i in range(11)])
-# Genuine captured shape: no `repo: ` line, ever.
+# Degenerate shape under test: no `repo: ` line.
 print("count: 10 of 11 total")
 print("runs[10]{id,branch,status,head,pr}:")
 for i in range(10):
@@ -3338,8 +3340,9 @@ PY
   pass 'a capped overview with no repo: line and zero same-branch rows reports absent, not unreadable'
 }
 
-# The same real capped shape, but reached through the code path that actually
-# consumes the same-branch selection: fm-crew-state only consults the overview
+# The same degenerate no-`repo: `-line capped shape, but reached through the
+# code path that actually consumes the same-branch selection: fm-crew-state
+# only consults the overview
 # once `axi status` answers with a run, so a branch of its own with no run at
 # all is only reported while SOME run exists elsewhere. Pre-fix this read
 # `unknown - complete same-branch run inventory unreadable`, which is the
@@ -3369,7 +3372,7 @@ with sqlite3.connect(database) as db:
     db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
                    [("01OTHER%02d" % i, "repo", "fm/other-%d" % i, "running", head, i)
                     for i in range(11)])
-# Genuine captured shape: no `repo: ` line, ever.
+# Degenerate shape under test: no `repo: ` line.
 print("count: 10 of 11 total")
 print("runs[10]{id,branch,status,head,pr}:")
 for i in range(10):
@@ -3414,18 +3417,140 @@ SH
   pass 'the capped inventory reader is bounded by the crew read budget'
 }
 
-# Repo identity is looked up by the exact recorded `working_path`; a worktree
-# spelled differently from the registered row is not guessed at, and reads as
-# an unreadable inventory that still names every candidate run id.
+# Without an overview `repo: ` line to fall back on (an older CLI, or a
+# genuinely stripped overview), repo identity is looked up by the exact
+# recorded `working_path`; a worktree spelled differently from the registered
+# row is not guessed at, and reads as an unreadable inventory that still names
+# every candidate run id. See test_capped_overview_worker_copy_repo_line_* for
+# the case this guard must NOT swallow: the overview's own `repo: ` line
+# resolving a pooled worker copy to its registered primary clone.
 test_capped_inventory_requires_exact_worktree_path() {
   make_capped_runs_case capped-noncanonical running pending hidden
   local d=$TMP_ROOT/capped-noncanonical out
+  FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | grep -v '^repo: ')
   fm_write_meta "$d/state/competing.meta" "window=fm:fm-competing" "worktree=$d/wt/./" "kind=ship"
   out=$(run_crew_state "$d" competing)
   assert_contains "$out" 'state: unknown' 'an unmatched worktree spelling cannot establish a verdict'
   assert_contains "$out" 'unreadable' 'an unmatched repo lookup reports the inventory unreadable'
   assert_not_contains "$out" 'absent' 'an unmatched repo lookup never reads as a branch without runs'
-  pass 'a worktree spelling the inventory does not record reads unreadable'
+  pass 'a worktree spelling the inventory does not record reads unreadable without a repo: line'
+}
+
+# Issue #5211: `no-mistakes init` registers the primary clone's path, while a
+# ship task validates in a pooled worker copy, so the copy's own path never
+# matches a `repos.working_path` row and the capped-overview lookup used to
+# report the whole inventory unreadable. The overview's own `repo: ` line
+# names the repository `no-mistakes` actually resolved for that worker copy;
+# a branch with no recorded run of its own must fall through to absent, same
+# as a worktree registered directly.
+test_capped_overview_worker_copy_repo_line_reports_absent() {
+  reset_fakes
+  local d; d=$TMP_ROOT/capped-worker-copy-absent
+  mkdir -p "$d/state"
+  make_repo_on_branch "$d/wt" fm/worker-branch
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/worker.meta" "window=fm:fm-worker" "worktree=$d/wt" "kind=ship" "harness=claude"
+  NM_HOME="$d/nm"
+  mkdir -p "$NM_HOME"
+  local head; head=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  local primary="$d/primary-clone"
+  FM_FAKE_AXI_HOME=$(python3 - "$NM_HOME/state.sqlite" "$primary" "$head" <<'PY'
+import sqlite3
+import sys
+
+database, primary, head = sys.argv[1:]
+with sqlite3.connect(database) as db:
+    db.executescript("""
+        CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
+                           status TEXT NOT NULL, head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
+    """)
+    db.execute("INSERT INTO repos VALUES ('repo', ?)", (primary,))
+    db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
+                    [("01OTHER%02d" % i, "repo", "fm/other-%d" % i, "running", head, i)
+                     for i in range(11)])
+# Registered under the primary clone, not this worker copy's own path - the
+# overview names the resolved repository on its own `repo: ` line, unquoted,
+# exactly as the real CLI prints it.
+print("repo: " + primary)
+print("count: 10 of 11 total")
+print("runs[10]{id,branch,status,head,pr}:")
+for i in range(10):
+    print('  "01OTHER%02d",fm/other-%d,running,%s,""' % (i, i, head))
+PY
+)
+  FM_FAKE_AXI_STATUS=$(run_running fm/other-0)
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" worker)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" worker busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  local out; out=$(run_crew_state "$d" worker)
+  assert_not_contains "$out" "unreadable" 'the worker-copy repo: line must resolve the inventory'
+  assert_not_contains "$out" "state: unknown" 'a healthy worker copy does not report itself untrustworthy'
+  assert_contains "$out" "state: working" 'absence of a same-branch run falls through to the pane verdict'
+  assert_contains "$out" "source: pane" 'the working verdict still comes from the pane source'
+  pass 'a worker copy with no recorded run of its own reads absent via the overview repo: line'
+}
+
+# Same worker-copy identity gap, but the branch's own newest run already
+# completed and sits outside the ten shown rows: it must be selected as
+# completed, not buried under a false unreadable verdict.
+test_capped_overview_worker_copy_repo_line_reports_completed_outside_window() {
+  reset_fakes
+  local d; d=$TMP_ROOT/capped-worker-copy-completed
+  mkdir -p "$d/state"
+  make_repo_on_branch "$d/wt" fm/worker-branch
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/worker.meta" "window=fm:fm-worker" "worktree=$d/wt" "kind=ship" "harness=claude"
+  NM_HOME="$d/nm"
+  mkdir -p "$NM_HOME"
+  local head; head=$(git -C "$d/wt" rev-parse --short=8 HEAD)
+  local primary="$d/primary-clone"
+  FM_FAKE_AXI_HOME=$(python3 - "$NM_HOME/state.sqlite" "$primary" "$head" <<'PY'
+import sqlite3
+import sys
+
+database, primary, head = sys.argv[1:]
+with sqlite3.connect(database) as db:
+    db.executescript("""
+        CREATE TABLE repos (id TEXT PRIMARY KEY, working_path TEXT NOT NULL UNIQUE);
+        CREATE TABLE runs (id TEXT PRIMARY KEY, repo_id TEXT NOT NULL, branch TEXT NOT NULL,
+                           status TEXT NOT NULL, head_sha TEXT NOT NULL, created_at INTEGER NOT NULL);
+    """)
+    db.execute("INSERT INTO repos VALUES ('repo', ?)", (primary,))
+    # The branch's own run is the OLDEST row, so it sits outside the ten most
+    # recently created rows the real CLI shows.
+    db.execute("INSERT INTO runs VALUES ('01COMPLETED', 'repo', 'fm/worker-branch', 'completed', ?, 0)", (head,))
+    db.executemany("INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
+                    [("01OTHER%02d" % i, "repo", "fm/other-%d" % i, "running", head, i + 1)
+                     for i in range(10)])
+print("repo: " + primary)
+print("count: 10 of 11 total")
+print("runs[10]{id,branch,status,head,pr}:")
+for i in reversed(range(10)):
+    print('  "01OTHER%02d",fm/other-%d,running,%s,""' % (i, i, head))
+PY
+)
+  FM_FAKE_AXI_STATUS=$(run_running fm/other-9)
+  FM_FAKE_AXI_STATUS_RUN=$(cat <<EOF
+run:
+  id: "01COMPLETED"
+  branch: fm/worker-branch
+  status: completed
+  head: "$FM_FAKE_RUN_HEAD"
+  pr: ""
+  findings: none
+outcome: passed
+EOF
+)
+  FM_FAKE_RUNS_LIST=""
+  local out; out=$(run_crew_state "$d" worker)
+  assert_not_contains "$out" "unreadable" 'the worker-copy repo: line must resolve the completed run'
+  assert_not_contains "$out" "state: unknown" 'a completed run outside the shown rows must not read unknown'
+  assert_contains "$out" "state: done" 'the completed run outside the window is selected as done'
+  assert_contains "$out" "source: run-step" 'the completed verdict is attributed to the run, not the pane'
+  pass 'a worker copy reads a completed run outside the shown rows via the overview repo: line'
 }
 
 test_capped_replacement_keeps_gate_and_inventory_unchanged() {
@@ -4928,6 +5053,8 @@ test_capped_overview_without_repo_line_and_no_runs_reports_absent
 test_no_branch_run_beside_a_live_run_elsewhere_reads_absent
 test_capped_inventory_reader_is_time_bounded
 test_capped_inventory_requires_exact_worktree_path
+test_capped_overview_worker_copy_repo_line_reports_absent
+test_capped_overview_worker_copy_repo_line_reports_completed_outside_window
 test_capped_replacement_keeps_gate_and_inventory_unchanged
 test_capped_inventory_failures_report_unknown
 test_complete_inventory_ignores_unrelated_semantics

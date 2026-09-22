@@ -127,13 +127,22 @@ fm_nm_run_status_class() {  # <status_word>
 # toolchain. A capped overview requires an optional Python 3 sqlite3 reader
 # for a read-only same-branch query of NM_HOME/state.sqlite (default:
 # ~/.no-mistakes/state.sqlite; relative NM_HOME resolves from the worktree).
-# The real CLI overview never carries a `repo: ` identity line (observed
-# 2026-09-20: a truncated overview with zero rows for this task's branch has
-# only `count:`/`runs[...]:`), so repo identity is looked up by the task
-# worktree path itself, which is exactly what `no-mistakes` records as a
-# repo's `working_path`; the recorded spelling is matched exactly, so a task
-# worktree that is not absolute, or whose spelling differs from the recorded
-# one, reads as unreadable rather than guessed among candidates.
+# The real CLI overview carries a top-level `repo: ` identity line naming the
+# repository `no-mistakes` itself resolved for the exact worktree the overview
+# was captured from (verified against installed v1.75.2; issue #5211 traces a
+# 2026-09-20 capture that lacked it to a truncated fixture, not real CLI
+# behavior). That resolved path is exactly what a pooled worker copy needs: a
+# worker copy's own path is routinely unregistered because `no-mistakes init`
+# registered the primary clone, so the copy's raw path never matches a `repos`
+# row even though `no-mistakes` itself, walking up from that copy, resolves
+# the very same registered repository. Repo identity is therefore looked up by
+# the overview's own `repo: ` path when present, falling back to the task
+# worktree path itself (exactly what `no-mistakes` records as a repo's
+# `working_path` when no `repo: ` line is available); the recorded spelling is
+# matched exactly, so a candidate path that is not absolute, or whose spelling
+# differs from the recorded one, is dropped rather than guessed among
+# candidates, and a repo lookup that still cannot settle on exactly one row
+# reads as unreadable.
 # The reader subprocess is bounded by $4 seconds (default 10), so a contended
 # database can never outlast the caller's per-read budget.
 # If that reader or inventory is unavailable, report unknown with available
@@ -231,7 +240,9 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree> [timeout_secs]
     incomplete\|*) available_ids=${selection#*|} ;;
     *) printf '%s\n' "$selection"; return ;;
   esac
-  if ! inventory=$(fm_nm_bounded "$3" "$timeout_secs" python3 - "$1" "$3" "$available_ids" 2>/dev/null <<'PY'
+  local repo_path
+  repo_path=$(fm_nm_strip_quotes "$(printf '%s\n' "$2" | sed -n 's/^repo:[[:space:]]*//p' | head -1)")
+  if ! inventory=$(fm_nm_bounded "$3" "$timeout_secs" python3 - "$1" "$3" "$available_ids" "$repo_path" 2>/dev/null <<'PY'
 import json
 import os
 import re
@@ -240,7 +251,7 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
-branch, worktree, available_ids = sys.argv[1:]
+branch, worktree, available_ids, repo_path = sys.argv[1:]
 ids = available_ids.split(", ") if available_ids else []
 try:
     if not os.path.isabs(worktree):
@@ -248,9 +259,15 @@ try:
     root = Path(os.environ.get("NM_HOME") or Path.home() / ".no-mistakes")
     if not root.is_absolute():
         root = Path(worktree) / root
+    candidates = [worktree]
+    if repo_path and repo_path != worktree and os.path.isabs(repo_path):
+        candidates.append(repo_path)
     with closing(sqlite3.connect((root / "state.sqlite").as_uri() + "?mode=ro", uri=True, timeout=30)) as db:
         db.execute("BEGIN")
-        repo = db.execute("SELECT id FROM repos WHERE working_path = ?", (worktree,)).fetchall()
+        placeholders = ",".join("?" * len(candidates))
+        repo = db.execute(
+            "SELECT DISTINCT id FROM repos WHERE working_path IN (%s)" % placeholders, candidates
+        ).fetchall()
         if len(repo) != 1:
             raise ValueError
         rows = db.execute(
