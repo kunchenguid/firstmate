@@ -870,7 +870,41 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
         if [ "$(strip_quotes "$(nm_field branch)")" = "$CREW_BRANCH" ]; then
           known_run_id=$(strip_quotes "$(nm_field id)")
         fi
-        emit unknown run-step "${run_choice#*|}${known_run_id:+; last reported run id: $known_run_id}"
+        # The identity-aware same-branch inventory could not be read, but the
+        # bare `axi status` call above already reported this branch's last
+        # known run in full detail, still sitting unmodified in $RUN_OUT. This
+        # never asserts the crew's own state - a hidden newer or competing run
+        # the failed read could not see must not be silently overridden by a
+        # stale terminal record (the captured same-branch-inventory replay:
+        # bare `axi status` served a SUPERSEDED cancelled run while the true
+        # newest replacement existed only in the inventory the read could not
+        # complete). So corroborate the known run id against the failed read's
+        # own partial candidate-id evidence, and when it is terminal AND
+        # corroborated there, only enrich the detail with what that run itself
+        # recorded, never upgrade state away from unknown: a generic unknown
+        # that reads as if the task never ran becomes one that names the
+        # completed run (observed 2026-09-21: a task whose run completed long
+        # ago, with its PR finished and awaiting upstream, read as "run
+        # inventory unreadable" while its own completed run id sat right
+        # there).
+        known_detail=""
+        if [ -n "$known_run_id" ] && ! fm_nm_run_is_active "$RUN_OUT"; then
+          ids_field=${run_choice##*run ids: }
+          [ "$ids_field" != "$run_choice" ] || ids_field=""
+          corroborated=0
+          IFS=',' read -ra candidate_ids_arr <<< "$ids_field"
+          for candidate_id in "${candidate_ids_arr[@]}"; do
+            [ "$(trim "$candidate_id")" = "$known_run_id" ] || continue
+            corroborated=1
+            break
+          done
+          if [ "$corroborated" = 1 ]; then
+            known_outcome=$(strip_quotes "$(nm_field outcome)")
+            [ -n "$known_outcome" ] || known_outcome=$(strip_quotes "$(nm_field status)")
+            [ -z "$known_outcome" ] || known_detail=" (already $known_outcome)"
+          fi
+        fi
+        emit unknown run-step "${run_choice#*|}${known_run_id:+; last reported run id: $known_run_id}${known_detail}"
         ;;
       selected\|*)
         IFS='|' read -r _ selected_id selected_status candidate_ids <<< "$run_choice"
