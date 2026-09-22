@@ -3378,8 +3378,7 @@ spawn_herdr_recovery_classify_nested_worktree() { # <session> <journal> <meta>
   local session=$1 journal=$2 meta=$3 recorded
   recorded=$(herdr_projection_meta_field_exact "$meta" worktree 2>/dev/null) || recorded=""
   fm_backend_herdr_projection_recovery_classify_nested_worktree \
-    "$session" "$journal" "$ID" "$recorded" "$HERDR_RECOVERY_WORKSPACE_ID" \
-    "$HERDR_PARENT_LABEL" "$PROJ_ABS"
+    "$session" "$journal" "$ID" "$recorded" "$HERDR_PARENT_LABEL" "$PROJ_ABS"
   HERDR_RECOVERY_NESTED_WORKTREE=$FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE
   HERDR_RECOVERY_NESTED_AMBIGUOUS=$FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS
 }

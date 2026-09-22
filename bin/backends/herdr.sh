@@ -2798,23 +2798,34 @@ fm_backend_herdr_projection_parent_sources_project() {  # <session> <parent-work
 }
 
 # fm_backend_herdr_projection_recovery_nested_worktree: read-only proof that
-# one recorded projected <workspace-id> is still an open linked worktree of the
-# exact source <parent-workspace-id> for the exact physical <project>, sitting
-# at the exact durable <checkout-path>. This is the same shape
-# fm_backend_herdr_projection_create_task proves at creation, and it is what
-# separates a carried durable lease from a legacy top-level process lease.
+# one recorded durable <checkout-path> is still an open linked worktree of the
+# exact source <parent-workspace-id> for the exact physical <project>. This is
+# the same shape fm_backend_herdr_projection_create_task proves at creation,
+# and it is what separates a carried durable lease from a legacy top-level
+# process lease: an interactive Treehouse slot is a linked worktree but is never
+# opened as a Herdr workspace, so it has no open workspace id.
+# A non-empty <workspace-id> additionally pins the proof to that exact open
+# workspace; an empty one proves by path alone, which is how a version 1 journal
+# with no recorded workspace id still carries its checkout after metadata has
+# moved to the flat home container.
 # Prints the canonical checkout path when proven.
 # Returns 0 = proven, 1 = a valid listing positively shows it is not such a
 # child, 2 = the proof could not be read or is ambiguous.
-fm_backend_herdr_projection_recovery_nested_worktree() {  # <session> <parent-workspace-id> <workspace-id> <checkout-path> <project-path>
+fm_backend_herdr_projection_recovery_nested_worktree() {  # <session> <parent-workspace-id> <workspace-id-or-empty> <checkout-path> <project-path>
   local session=$1 parent=$2 workspace=$3 recorded=$4 project=$5 out
-  [ -n "$session" ] && [ -n "$parent" ] && [ -n "$workspace" ] \
+  [ -n "$session" ] && [ -n "$parent" ] \
     && [ -n "$recorded" ] && [ -n "$project" ] || return 2
   project=$(cd "$project" 2>/dev/null && pwd -P) || return 2
   recorded=$(cd "$recorded" 2>/dev/null && pwd -P) || return 2
   out=$(fm_backend_herdr_cli "$session" worktree list --workspace "$parent" 2>/dev/null | jq -r \
     --arg parent "$parent" --arg workspace "$workspace" \
     --arg path "$recorded" --arg project "$project" '
+      def linked_open:
+        (.is_linked_worktree == true)
+        and (.open_workspace_id | type) == "string"
+        and (.open_workspace_id | length) > 0;
+      def matches_workspace:
+        ($workspace == "") or (.open_workspace_id == $workspace);
       if (.result.type == "worktree_list"
           and .result.source.source_workspace_id == $parent)
       then
@@ -2822,8 +2833,8 @@ fm_backend_herdr_projection_recovery_nested_worktree() {  # <session> <parent-wo
           "none"
         else
           ([.result.worktrees[]?
-            | select(.open_workspace_id == $workspace)
-            | select(.is_linked_worktree == true)
+            | select(linked_open)
+            | select(matches_workspace)
             | select(.path == $path)] | length) as $count
           | if $count == 1 then "match" else "none" end
         end
@@ -2838,23 +2849,61 @@ fm_backend_herdr_projection_recovery_nested_worktree() {  # <session> <parent-wo
   esac
 }
 
+# fm_backend_herdr_projection_recovery_workspace_is_linked_child: read-only
+# proof that <workspace-id> is itself an open linked worktree child of the exact
+# source <parent-workspace-id> for the exact physical <project>. Unlike the
+# path proof above this names no checkout path, so it positively identifies a
+# nested version 2 journal whose recorded path can no longer be resolved and a
+# legacy top-level projection can never satisfy it.
+# Returns 0 = proven, 1 = a valid listing positively shows it is not such a
+# child, 2 = unreadable or ambiguous.
+fm_backend_herdr_projection_recovery_workspace_is_linked_child() {  # <session> <parent-workspace-id> <workspace-id> <project-path>
+  local session=$1 parent=$2 workspace=$3 project=$4 out
+  [ -n "$session" ] && [ -n "$parent" ] \
+    && [ -n "$workspace" ] && [ -n "$project" ] || return 2
+  project=$(cd "$project" 2>/dev/null && pwd -P) || return 2
+  out=$(fm_backend_herdr_cli "$session" worktree list --workspace "$parent" 2>/dev/null | jq -r \
+    --arg parent "$parent" --arg workspace "$workspace" --arg project "$project" '
+      if (.result.type == "worktree_list"
+          and .result.source.source_workspace_id == $parent)
+      then
+        if .result.source.source_checkout_path != $project then
+          "none"
+        else
+          ([.result.worktrees[]?
+            | select(.is_linked_worktree == true)
+            | select(.open_workspace_id == $workspace)] | length) as $count
+          | if $count == 1 then "match" else "none" end
+        end
+      else
+        "ambiguous"
+      end
+    ' 2>/dev/null) || return 2
+  case "$out" in
+    match) return 0 ;;
+    none) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 # fm_backend_herdr_projection_recovery_classify_nested_worktree: decide whether
 # one recovered task owns a durable Treehouse checkout that Herdr still renders
-# as an open linked worktree child of its owning home. A version 2 journal is
-# classified against its own recorded nested workspace, so an earlier
-# flat-fallback recovery that republished metadata at the home container still
-# carries the same lease. An unresolvable recorded checkout for a version 2
-# same-project binding is ambiguous and must refuse recovery rather than let the
-# generic path allocate a replacement. Sets:
+# as an open linked worktree child of its owning home, and carry that exact
+# checkout when it does. A version 2 journal is pinned to its own recorded
+# nested workspace, while a version 1 journal is proven by its recorded checkout
+# path under the owning home; both survive an earlier flat-fallback recovery
+# that republished metadata at the home container. An unresolvable recorded
+# checkout refuses only when the journal positively identifies a still-open
+# nested child, so a legacy top-level projection keeps its flat fallback. Sets:
 #   FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE    proven checkout path, else empty
-#   FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS   1 when the proof could not be read
-fm_backend_herdr_projection_recovery_classify_nested_worktree() {  # <session> <journal> <task-id> <recorded-worktree> <meta-workspace> <parent-label> <project>
-  local session=$1 journal=$2 id=$3 recorded=$4 meta_workspace=$5 parent_label=$6 project=$7
+#   FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS   1 when recovery must refuse
+fm_backend_herdr_projection_recovery_classify_nested_worktree() {  # <session> <journal> <task-id> <recorded-worktree> <parent-label> <project>
+  local session=$1 journal=$2 id=$3 recorded=$4 parent_label=$5 project=$6
   local resolved parent workspace proof status journal_v2=0
   FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE=""
   FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS=0
   parent=""
-  workspace=$meta_workspace
+  workspace=""
   if fm_backend_herdr_projection_journal_snapshot "$journal" "$id"; then
     if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
       journal_v2=1
@@ -2862,22 +2911,23 @@ fm_backend_herdr_projection_recovery_classify_nested_worktree() {  # <session> <
       workspace=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
     fi
   fi
+  if [ -z "$parent" ]; then
+    parent=$(fm_backend_herdr_projection_parent_workspace_exact \
+      "$session" "$parent_label" 2>/dev/null || true)
+  fi
+  [ -n "$parent" ] || return 0
   resolved=""
   if [ -n "$recorded" ]; then
     resolved=$(cd "$recorded" 2>/dev/null && pwd -P) || resolved=""
   fi
   if [ -z "$resolved" ]; then
-    if [ "$journal_v2" = 1 ] && [ -n "$parent" ] &&
-      fm_backend_herdr_projection_parent_sources_project "$session" "$parent" "$project"; then
+    if [ "$journal_v2" = 1 ] &&
+      fm_backend_herdr_projection_recovery_workspace_is_linked_child \
+        "$session" "$parent" "$workspace" "$project"; then
       FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS=1
     fi
     return 0
   fi
-  if [ -z "$parent" ]; then
-    parent=$(fm_backend_herdr_projection_parent_workspace_exact \
-      "$session" "$parent_label" 2>/dev/null || true)
-  fi
-  [ -n "$workspace" ] && [ -n "$parent" ] || return 0
   proof=""
   status=0
   proof=$(fm_backend_herdr_projection_recovery_nested_worktree \
