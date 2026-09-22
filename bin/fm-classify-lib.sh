@@ -615,10 +615,17 @@ EOF
 # Fold ONE status line into an existing "<key>\t<verb>\t<note>\n"-per-line open
 # set, applying the same needs-decision/blocked-opens, resolved/captain-held-closes
 # rule status_open_decisions documents above. Pure text transform, no file I/O.
-# This is the ONE place the per-line open/resolved rule is written; both the
-# whole-file fold (status_open_decisions) and the incremental cursor-backed fold
-# (status_open_decisions_incremental) below call this instead of re-deriving the
-# rule, so the two consumption strategies can never drift apart on semantics.
+# This is the ONE bash statement of the per-line open/resolved rule; the
+# incremental cursor-backed fold (status_open_decisions_incremental below) and
+# status_key_closing_verb call it per candidate line, where the per-line cost is
+# already bounded to new appends or pre-selected transitions. The whole-file
+# folds (status_open_decisions, _fm_status_open_decision_origins) instead run a
+# single-pass awk statement of the same rule (_fm_open_decisions_awk below),
+# because folding a whole lifetime log with a subshell fork per line grew past
+# the watcher's heartbeat grace on large logs. The awk and this bash rule are
+# pinned byte-for-byte against each other by tests/fm-open-decisions-fold.test.sh
+# and by fm-classify-decision-key.test.sh's whole-file-vs-incremental assertion,
+# so the two statements can never drift apart on semantics.
 # Reserved decision-key namespaces, and the rule that makes them mean something.
 #
 # A key like `pending-reply-<id>` names a decision that one library raises and is
@@ -722,6 +729,237 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   printf '%s' "$open"
 }
 
+# Single-pass awk statement of the _fm_decision_fold_line rule, shared by the two
+# whole-file readers below. It folds a whole append-only status log in one awk
+# process - no per-line subshell fork, no O(n^2) rescan of a growing open-set
+# string - so a large log (a long-lived task can accumulate thousands of status
+# lines) folds in milliseconds instead of the tens of seconds the per-line bash
+# fold cost, which on the busiest home grew past the watcher's heartbeat grace and
+# made the still-alive watcher report itself down. The bash _fm_decision_fold_line
+# above stays the owner used by the incremental fold and status_key_closing_verb,
+# where per-line cost is already bounded; this awk restates the identical rule for
+# the whole-file path and is pinned to it byte-for-byte by
+# tests/fm-open-decisions-fold.test.sh. LC_ALL=C keeps the byte-wise index/substr
+# and POSIX-class matching identical to the bash parameter-expansion parse.
+# <mode> is "open" (prints "<key>\t<verb>\t<note>" per still-open decision) or
+# "origins" (prints "<key>\t<opening-line-number>"), both most-recently-opened-last
+# and with no trailing newline, matching the bash folds they replace.
+_fm_open_decisions_awk() {  # <status-file> <kind> <mode>
+  local f=$1 kind=$2 mode=$3 resolve held reserved
+  [ -r "$f" ] || return 0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+  reserved=${FM_CLASSIFY_RESERVED_KEY_PREFIXES:-$FM_CLASSIFY_RESERVED_KEY_PREFIXES_DEFAULT}
+  LC_ALL=C awk -v resolve="$resolve" -v held="$held" -v kind="$kind" \
+    -v reserved="$reserved" -v mode="$mode" '
+function ltrim(s) { sub(/^[[:space:]]+/, "", s); return s }
+function rtrim(s) { sub(/[[:space:]]+$/, "", s); return s }
+# _fm_status_unstamped: strip every [at=...] run while nothing before it holds a
+# colon, joining the kept pieces with the byte after the run, dropping one space
+# before each stripped run - the exact head-boundary rule the bash reader uses.
+function unstamped(s,   keep, rest, before, p, q) {
+  keep = ""; rest = s
+  while (1) {
+    p = index(rest, "[at=")
+    if (p == 0) break
+    q = index(substr(rest, p + 4), "]")
+    if (q == 0) break
+    before = substr(rest, 1, p - 1)
+    if (index(before, ":") > 0) break
+    if (before != "" && substr(before, length(before), 1) == " ")
+      before = substr(before, 1, length(before) - 1)
+    keep = keep before
+    rest = substr(rest, p + 4)
+    q = index(rest, "]")
+    rest = substr(rest, q + 1)
+  }
+  return keep rest
+}
+function firstword(s) {
+  if (match(s, /[[:space:]]/)) return substr(s, 1, RSTART - 1)
+  return s
+}
+# The exact "corr=" + 16 hex whole-word token bin/fm-pending-reply-lib.sh writes;
+# the classes are spelled out literally, the same deliberate choice the bash
+# _fm_classify_is_corr_token makes so a variable glob is never re-read as a pattern.
+function is_corr(w) {
+  return (w ~ /^corr=[0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f]$/)
+}
+# status_line_verb: the leading verb word off the RAW line, ending at the first
+# colon or "[" tag, with recognised correlation tokens dropped after the first word.
+function verb(s,   v, p, out, word) {
+  p = index(s, ":"); if (p > 0) v = substr(s, 1, p - 1); else v = s
+  p = index(v, "[");  if (p > 0) v = substr(v, 1, p - 1)
+  v = rtrim(ltrim(v))
+  if (index(v, "corr=") == 0) return v
+  word = firstword(v); out = word
+  v = ltrim(substr(v, length(word) + 1))
+  while (v != "") {
+    word = firstword(v)
+    v = ltrim(substr(v, length(word) + 1))
+    if (is_corr(word)) continue
+    out = out " " word
+  }
+  return out
+}
+function has_key_token(u,   p) {
+  p = index(u, "[key=")
+  if (p == 0) return 0
+  return (index(substr(u, p + 5), "]") > 0)
+}
+function key_before_colon(u,   head, p) {
+  p = index(u, ":"); if (p > 0) head = substr(u, 1, p - 1); else head = u
+  p = index(head, "[key=")
+  if (p == 0) return 0
+  return (index(substr(head, p + 5), "]") > 0)
+}
+function slug_before_colon(u,   head, p) {
+  p = index(u, ":"); if (p > 0) head = substr(u, 1, p - 1); else head = u
+  p = index(head, "[key="); head = substr(head, p + 5)
+  p = index(head, "]"); if (p > 0) head = substr(head, 1, p - 1)
+  return head
+}
+# _fm_key_at_note_head: the raw slug of a complete "[key=...]" token at the head
+# of the note; sets nh_found so an absent token is told apart from an empty slug.
+function note_head_slug(u,   p, rest) {
+  nh_found = 0
+  p = index(u, ":"); if (p == 0) return ""
+  rest = ltrim(substr(u, p + 1))
+  if (substr(rest, 1, 5) != "[key=") return ""
+  if (index(substr(rest, 6), "]") == 0) return ""
+  rest = substr(rest, 6)
+  p = index(rest, "]")
+  nh_found = 1
+  return substr(rest, 1, p - 1)
+}
+function slug_ok(s) {
+  if (s == "") return 0
+  return (s ~ /^[A-Za-z0-9._-]+$/)
+}
+# _fm_decision_key: the before-colon token wins, else a note-head token, else
+# "default"; a stated-but-malformed slug sets key_fail so the fold skips the line.
+function decision_key(u,   k) {
+  key_fail = 0
+  if (key_before_colon(u)) {
+    k = slug_before_colon(u)
+  } else {
+    k = note_head_slug(u)
+    if (!nh_found) return "default"
+  }
+  if (!slug_ok(k)) { key_fail = 1; return "" }
+  return k
+}
+# status_line_note: the trimmed text after the first colon, with a consumed
+# note-head key token stripped so both stated-key positions yield the same note.
+function note(u,   n, p, k, tok) {
+  p = index(u, ":")
+  if (p == 0) return u
+  n = ltrim(substr(u, p + 1))
+  if (!key_before_colon(u)) {
+    k = note_head_slug(u)
+    if (nh_found && slug_ok(k)) {
+      tok = "[key=" k "]"
+      if (substr(n, 1, length(tok)) == tok) n = substr(n, length(tok) + 1)
+      n = ltrim(n)
+    }
+  }
+  return n
+}
+# _fm_decision_key_transition_allowed: a reserved-prefix key only opens or closes
+# on a note that speaks its own "<prefix>...:" vocabulary.
+function transition_allowed(k, n,   i, pre, rem) {
+  for (i = 1; i <= nreserved; i++) {
+    pre = reserved_arr[i]
+    if (substr(k, 1, length(pre)) == pre) {
+      if (substr(n, 1, length(pre)) != pre) return 0
+      rem = substr(n, length(pre) + 1)
+      return (index(rem, ":") > 0)
+    }
+  }
+  return 1
+}
+function isort(karr, rarr, m,   i, j, tk, tr) {
+  for (i = 2; i <= m; i++) {
+    tk = karr[i]; tr = rarr[i]; j = i - 1
+    while (j >= 1 && rarr[j] > tr) { karr[j + 1] = karr[j]; rarr[j + 1] = rarr[j]; j-- }
+    karr[j + 1] = tk; rarr[j + 1] = tr
+  }
+}
+BEGIN {
+  n0 = split(reserved, tmp, /[[:space:]]+/)
+  nreserved = 0
+  for (i = 1; i <= n0; i++) if (tmp[i] != "") reserved_arr[++nreserved] = tmp[i]
+  openseq = 0; origseq = 0; nopen = 0
+}
+{
+  u = unstamped($0)
+  hascolon = (index(u, ":") > 0)
+  v = verb($0)
+  # The _fm_decision_fold_line rule, resolved to one action per line.
+  action = "none"; fk = ""; fn = ""
+  if (hascolon || has_key_token(u)) {
+    if (hascolon && (v == "done" || v == "failed") && (kind == "ship" || kind == "scout")) {
+      action = "clearall"
+    } else if (v == "needs-decision" || v == "blocked" || v == resolve || v == held) {
+      fk = decision_key(u)
+      if (!key_fail) {
+        fn = note(u)
+        if (transition_allowed(fk, fn)) {
+          if (v == "needs-decision" || v == "blocked") action = "open"
+          else action = "close"
+        }
+      }
+    }
+  }
+  if (action == "clearall") {
+    split("", openverb); split("", opennote); split("", openrank); nopen = 0
+  } else if (action == "open") {
+    if (!(fk in openverb)) nopen++
+    openverb[fk] = v; opennote[fk] = fn; openrank[fk] = ++openseq
+  } else if (action == "close") {
+    if (fk in openverb) { delete openverb[fk]; delete opennote[fk]; delete openrank[fk]; nopen-- }
+  }
+  # Origins: the line that established each still-open record, mirroring
+  # _fm_status_open_decision_origins including its whole-set reset when nothing
+  # is open. openrank[key] == openseq is the "record is last in the set" test the
+  # bash origins reader makes with its end-anchored case pattern.
+  if (mode == "origins") {
+    if (nopen == 0) { split("", origline); split("", origrank) }
+    ok = decision_key(u)
+    if (!key_fail) {
+      if (v == "needs-decision" || v == "blocked") {
+        on = note(u)
+        if ((ok in openverb) && openverb[ok] == v && opennote[ok] == on && openrank[ok] == openseq) {
+          origline[ok] = NR; origrank[ok] = ++origseq
+        }
+      } else if (v == resolve || v == held) {
+        if (!(ok in openverb)) { delete origline[ok]; delete origrank[ok] }
+      }
+    }
+  }
+}
+END {
+  m = 0; out = ""
+  if (mode == "origins") {
+    for (kk in origrank) { m++; keys[m] = kk; ranks[m] = origrank[kk] }
+    isort(keys, ranks, m)
+    for (i = 1; i <= m; i++) {
+      rec = keys[i] "\t" origline[keys[i]]
+      out = (i == 1) ? rec : out "\n" rec
+    }
+  } else {
+    for (kk in openrank) { m++; keys[m] = kk; ranks[m] = openrank[kk] }
+    isort(keys, ranks, m)
+    for (i = 1; i <= m; i++) {
+      rec = keys[i] "\t" openverb[keys[i]] "\t" opennote[keys[i]]
+      out = (i == 1) ? rec : out "\n" rec
+    }
+  }
+  printf "%s", out
+}
+' "$f"
+}
+
 # Fold the WHOLE status stream into the set of decisions still open. Prints one
 # TAB-separated "<key>\t<verb>\t<summary>" line per still-open decision, in
 # most-recently-opened-last order; prints nothing when none are open. Reads the
@@ -729,7 +967,9 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # when the caller passes no <kind>; no globals beyond the optional
 # FM_CLASSIFY_RESOLVE_VERB override. This is the durable open-set the fleet
 # snapshot and any point-in-time consumer must use instead of trusting the last
-# status line.
+# status line. The fold runs through _fm_open_decisions_awk above (a single-pass
+# awk statement of the _fm_decision_fold_line rule) so a whole-lifetime log folds
+# in milliseconds.
 # The scan_open_decisions wrapper below enumerates a whole directory rather than
 # a single caller-chosen path, so a status file that is itself a symlink (e.g.
 # escaping the state directory) is rejected outright with a plain [ -L ] check
@@ -737,20 +977,10 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
 # subprocess read, which exists for that function's much narrower payload-driven
 # path resolution rather than this directory-local glob.
 status_open_decisions() {  # <status-file> [<kind>]
-  local f=$1 kind=${2:-} line resolve held open='' verb
+  local f=$1 kind=${2:-}
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   kind=$(_fm_status_kind "$f" "$kind")
-  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
-  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-  while IFS= read -r line || [ -n "$line" ]; do
-    status_line_verb "$line" verb
-    case "$verb" in
-      needs-decision|blocked|done|failed|"$resolve"|"$held")
-        open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
-        ;;
-    esac
-  done < "$f"
-  printf '%s' "$open"
+  _fm_open_decisions_awk "$f" "$kind" open
 }
 
 # Resolve the log's current declaration at one boundary for crew-state consumers.
@@ -913,17 +1143,18 @@ EOF
 # --- incremental (cursor-backed) open-decisions fold ------------------------
 #
 # status_open_decisions above re-reads and re-folds a status file's ENTIRE
-# lifetime on every call, so its cost grows with total log size. A per-drain
-# fleet-wide scan using that whole-file function would pay that cost for every
-# task on every wake, which grows unbounded as tasks run longer and accumulate
-# status history. status_open_decisions_incremental and scan_open_decisions_incremental
-# below are the bounded-cost siblings used for that per-drain path: each call
-# reads only the bytes appended to a status file since its own last call (a
-# persisted per-file byte cursor) and folds just those new lines into a
-# persisted running open-set, via the exact same _fm_decision_fold_line rule
-# status_open_decisions uses - so the two strategies can never disagree on what
-# is open. Cost is bounded by NEW appends since the last drain, not by the
-# status file's total lifetime size.
+# lifetime on every call. Its single-pass awk fold makes that cheap even on a
+# large log, but it is still O(total log size). A per-drain fleet-wide scan would
+# pay that whole-file cost for every task on every wake, which grows unbounded as
+# tasks run longer and accumulate status history. status_open_decisions_incremental
+# and scan_open_decisions_incremental below are the bounded-cost siblings used for
+# that per-drain path: each call reads only the bytes appended to a status file
+# since its own last call (a persisted per-file byte cursor) and folds just those
+# new lines into a persisted running open-set, via the bash _fm_decision_fold_line
+# rule. That rule and the awk statement status_open_decisions uses are pinned
+# byte-for-byte to each other by the tests, so the two strategies can never
+# disagree on what is open. Cost is bounded by NEW appends since the last drain,
+# not by the status file's total lifetime size.
 #
 # Correctness invariant (unchanged from the whole-file fold): cursor advancement,
 # age, and being buried under later appends never drop an open decision - the
@@ -1916,6 +2147,19 @@ window_to_task() {
   t="${w##*:}"; t="${t#fm-}"; printf '%s' "$t"
 }
 
+# Prints "<key>\t<opening-line-number>" for each still-open decision, in the same
+# most-recently-opened-last order as status_open_decisions, where the line number
+# is the 1-based status-log line whose accepted needs-decision/blocked transition
+# established the record the fold still holds open for that key. The signal path
+# (status_span_first_actionable_record) uses it to test whether a line in a new
+# span is the live opener of an open decision. It runs the same single-pass awk
+# statement of the fold rule that status_open_decisions uses, in "origins" mode.
+_fm_status_open_decision_origins() {  # <status-file> [<kind>]
+  local f=$1 kind
+  kind=$(_fm_status_kind "$f" "${2:-}")
+  _fm_open_decisions_awk "$f" "$kind" origins
+}
+
 # Capture the bytes of an append-only status log at or after <start-offset> under
 # one size-and-identity snapshot.
 # The record form produces `<endpoint>\t<identity>\t<events>` and returns 0 when
@@ -1940,50 +2184,6 @@ window_to_task() {
 # status_open_decisions remains the single owner of open/closed semantics,
 # including same-key reopening and reserved-key handling.
 # Every other captain-relevant event is terminal and always actionable.
-_fm_decision_origin_drop() {  # <origins> <key>
-  local origin
-  while IFS= read -r origin; do
-    case "$origin" in "$2"$'\t'*) ;; *) [ -n "$origin" ] && printf '%s\n' "$origin" ;; esac
-  done <<EOF
-$1
-EOF
-}
-
-_fm_status_open_decision_origins() {  # <status-file> [<kind>]
-  local f=$1 line open='' after key verb note number=0 origins=''
-  local resolve held kind
-  kind=$(_fm_status_kind "$f" "${2:-}")
-  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
-  held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
-  while IFS= read -r line || [ -n "$line" ]; do
-    number=$((number + 1))
-    after=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held" "$kind")
-    [ -n "$after" ] || origins=''
-    key=$(_fm_decision_key "$line") || { open=$after; continue; }
-    verb=$(status_line_verb "$line")
-    note=$(status_line_note "$line")
-    case "$verb" in
-      needs-decision|blocked)
-        if _fm_open_set_has "$after" "$key" \
-          && [ "$(_fm_open_set_verb "$after" "$key")" = "$verb" ]; then
-          case "$after" in
-            "$key"$'\t'"$verb"$'\t'"$note"|*$'\n'"$key"$'\t'"$verb"$'\t'"$note")
-              origins=$(_fm_decision_origin_drop "$origins" "$key")
-              [ -n "$origins" ] && origins="${origins}"$'\n'
-              origins="${origins}${key}"$'\t'"${number}"
-              ;;
-          esac
-        fi
-        ;;
-      "$resolve"|"$held")
-        _fm_open_set_has "$after" "$key" || origins=$(_fm_decision_origin_drop "$origins" "$key")
-        ;;
-    esac
-    open=$after
-  done < "$f"
-  printf '%s' "$origins"
-}
-
 status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
   local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file full_file prefix_file result
   local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
