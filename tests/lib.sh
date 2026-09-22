@@ -63,6 +63,15 @@ unset FM_TASK_ID
 # against an ambient override sets TASKS_AXI_FILE itself.
 unset TASKS_AXI_FILE TASKS_AXI_BACKEND
 
+# Exempt every test from opportunistically activating the real per-worker
+# memory-scope wrapper (bin/fm-agent-memory-lib.sh) just because the CI/test
+# host happens to have a real systemd --user session. Without this, any
+# spawn-driving test whose fixtures assert on the literal launch text would
+# break the moment it runs on such a host - the wrapper changes the captured
+# string, but those tests have no reason to expect it. tests/fm-agent-memory-*
+# explicitly clear this to exercise the real wrapper.
+export FM_AGENT_MEMORY_DISABLE=1
+
 # Resolve the repo root from this library's own location. Consumed by sourcing
 # test files, not by this library, so it reads as "unused" here.
 # shellcheck disable=SC2034
