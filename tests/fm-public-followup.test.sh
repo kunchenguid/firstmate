@@ -507,7 +507,7 @@ test_invalid_events_are_refused_and_quarantined() {
   expect_failure "a wrong source home must be refused" \
     "$EMIT" --home "$home" --obligation pf-refuse --relation rel-code \
     --source-home secondmate:other --work-id work-real --generation 1 \
-    --outcome pr-merged --deliverable pr_url=https://example.invalid/pull/1 \
+    --outcome pr-merged --deliverable pr_url=https://example.invalid/example/repo/pulls/1 \
     --outcome-text 'x'
   assert_contains "$EXPECT_OUT" "does not match this home's registration" \
     "the refusal must name the mismatch"
@@ -515,12 +515,12 @@ test_invalid_events_are_refused_and_quarantined() {
   expect_failure "a wrong work id must be refused" \
     "$EMIT" --home "$home" --obligation pf-refuse --relation rel-code \
     --source-home main --work-id work-other --generation 1 \
-    --outcome pr-merged --deliverable pr_url=https://example.invalid/pull/1 \
+    --outcome pr-merged --deliverable pr_url=https://example.invalid/example/repo/pulls/1 \
     --outcome-text 'x'
   expect_failure "a stale generation must be refused" \
     "$EMIT" --home "$home" --obligation pf-refuse --relation rel-code \
     --source-home main --work-id work-real --generation 0 \
-    --outcome pr-merged --deliverable pr_url=https://example.invalid/pull/1 \
+    --outcome pr-merged --deliverable pr_url=https://example.invalid/example/repo/pulls/1 \
     --outcome-text 'x'
 
   events="$home/state/public-followup/events"
@@ -3249,8 +3249,10 @@ test_brief_prefills_known_deliverables_and_states_formats() {
   assert_not_contains "$out" "<value>" "a pr-merged brief must not print a bare value placeholder"
   assert_contains "$out" "--deliverable pr_url=<pr_url>" \
     "a value the brief cannot know keeps a named placeholder"
-  assert_contains "$out" "https://github.com/<owner>/<repo>/pull/<number>" \
-    "the brief must state the pull request URL format tasks-axi accepts"
+  assert_contains "$out" "https://github.com/<owner>/<repo>/pull/<n>" \
+    "the brief must state the GitHub pull request URL shape tasks-axi accepts"
+  assert_contains "$out" "https://<host>/<owner>/<repo>/pulls/<n>" \
+    "the brief must state the Forgejo pull request URL shape tasks-axi accepts"
   pass "brief pre-fills the report path and states the format of every value it cannot know"
 }
 
@@ -3322,7 +3324,7 @@ test_emit_refuses_a_missing_required_deliverable() {
       || fail "an event missing $key must publish nothing"
   done <<'CASES'
 report-ready|report_path|data/<task-id>/report.md
-pr-merged|pr_url|/pull/<number>
+pr-merged|pr_url|/pull/<n>
 local-main|commit_sha|lowercase hex commit SHA
 CASES
   [ "$n" -eq 3 ] || fail "the missing-deliverable table ran only $n cases"
@@ -3407,6 +3409,15 @@ pr-merged|pr-merged|["pr_url"]|pr_url|http://github.com/example/repo/pull/12|rej
 pr-merged|pr-merged|["pr_url"]|pr_url|https://user@github.com/example/repo/pull/12|reject
 pr-merged|pr-merged|["pr_url"]|pr_url|https://github.com/example/repo/pull/12/files|reject
 pr-merged|pr-merged|["pr_url"]|pr_url|github.com/example/repo/pull/12|reject
+pr-merged|pr-merged|["pr_url"]|pr_url|https://git.example.com/acme/repo/pulls/12|accept
+pr-merged|pr-merged|["pr_url"]|pr_url|https://git.example.com/acme/repo/pull/12|reject
+pr-merged|pr-merged|["pr_url"]|pr_url|https://github.com/example/repo/pulls/12|reject
+pr-merged|pr-merged|["pr_url"]|pr_url|https://github.com/example/repo/pull/01|reject
+pr-merged|pr-merged|["pr_url"]|pr_url|https://GitHub.com/example/repo/pull/12|reject
+pr-merged|pr-merged|["pr_url"]|pr_url|https://github.com/example/repo/pull/12/|reject
+pr-merged|pr-merged|["pr_url"]|pr_url|https://github.com/org/example/repo/pull/12|reject
+pr-merged|pr-merged|["pr_url"]|pr_url|https://git.example.com/../repo/pulls/12|reject
+pr-merged|pr-merged|["pr_url"]|pr_url|https://git.example.com:8443/acme/repo/pulls/12|reject
 pr-merged|pr-merged|["pr_url"]|report_path|data/work-a/report.md|reject
 local-main|local-main|["commit_sha"]|commit_sha|0123abc|accept
 local-main|local-main|["commit_sha"]|commit_sha|0123ABC|reject
@@ -3414,7 +3425,7 @@ local-main|local-main|["commit_sha"]|commit_sha|012|reject
 pr-merged|failed|["pr_url"]|error_code|ci-red|accept
 pr-merged|failed|["pr_url"]|error_code|CI red|reject
 CASES
-  [ "$n" -ge 17 ] || fail "the agreement table ran only $n cases"
+  [ "$n" -ge 26 ] || fail "the agreement table ran only $n cases"
   pass "the emitter's deliverable rules agree with the real tasks-axi consumer on $n cases"
 }
 
@@ -3492,7 +3503,7 @@ test_emit_requires_promised_deliverable_under_any_successful_outcome() {
     --deliverable report_path=data/work-swap/report.md \
     --outcome-text 'The report is ready.'
   assert_contains "$EXPECT_OUT" "pr_url" "the refusal must name the promised key"
-  assert_contains "$EXPECT_OUT" "/pull/<number>" "the refusal must state the expected format"
+  assert_contains "$EXPECT_OUT" "/pull/<n>" "the refusal must state the expected format"
   [ -z "$(ls -A "$home/state/public-followup/events" 2>/dev/null)" ] \
     || fail "an outcome swap that drops the promised key must publish nothing"
 

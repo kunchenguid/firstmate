@@ -229,18 +229,19 @@ fm_pf_bound_bytes() {
 # tasks-axi is the authority on deliverables, but it exposes no validation-only
 # command, and its refusal of a bad value names none of it. These helpers mirror
 # the rules its work-event consumer applies - EXPECTED_DELIVERABLES,
-# failureDeliverablesAreSafe, PR_URL_RE (plus its no-credentials URL check),
-# REPORT_PATH_RE, COMMIT_SHA_RE, and SAFE_CODE_RE in tasks-axi's
-# public-followup.js - so a bad value is refused where it is written and a
-# refusal can say which value was wrong. tasks-axi still re-validates at
-# consume; tests/fm-public-followup.test.sh pins these rules against the real
-# consumer, so re-pin both together when tasks-axi changes them.
+# failureDeliverablesAreSafe, REPORT_PATH_RE, COMMIT_SHA_RE, and SAFE_CODE_RE in
+# tasks-axi's public-followup.js, and isPrUrl in tasks-axi's pr-url.js, which is
+# the seam public-followup.js classifies pr_url through - so a bad value is
+# refused where it is written and a refusal can say which value was wrong.
+# tasks-axi still re-validates at consume; tests/fm-public-followup.test.sh pins
+# these rules against the real consumer, so re-pin both together when tasks-axi
+# changes them.
 
 # fm_pf_deliverable_format <key>: the format tasks-axi accepts for <key>, as one
 # line for a brief or a refusal. Exit 1 for a key with no known format rule.
 fm_pf_deliverable_format() {
   case "$1" in
-    pr_url) printf '%s\n' 'a full pull request URL such as https://github.com/<owner>/<repo>/pull/<number>, with no query, fragment, or credentials' ;;
+    pr_url) printf '%s\n' 'a canonical pull request URL: https://github.com/<owner>/<repo>/pull/<n> (GitHub) or https://<host>/<owner>/<repo>/pulls/<n> (Forgejo), with <n> a positive number without leading zeros and no trailing slash, query, fragment, credentials, or port' ;;
     report_path) printf '%s\n' 'data/<task-id>/report.md, relative to the work home, never an absolute path' ;;
     commit_sha) printf '%s\n' 'a lowercase hex commit SHA of 7 to 64 characters' ;;
     error_code) printf '%s\n' 'a lowercase code of at most 64 characters: a letter, then letters, digits, ".", "_", or "-"' ;;
@@ -262,11 +263,39 @@ fm_pf_outcome_deliverable_keys() {
   esac
 }
 
+# fm_pf_pr_url_valid <url>: 0 when <url> is byte-for-byte a canonical pull
+# request URL. Mirrors isPrUrl in tasks-axi's pr-url.js: exactly
+# https://github.com/<owner>/<repo>/pull/<n> on github.com, or
+# https://<lowercase-dns-host>/<owner>/<repo>/pulls/<n> on any other host, with
+# <n> positive and without leading zeros. The route and the host decide each
+# other, so a singular route off github.com and a plural route on it are both
+# refused, as are an owner or repo of "." or "..".
+fm_pf_pr_url_valid() {
+  local url=$1 rest host owner repo route
+  local label='[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?'
+  local segment='[A-Za-z0-9._-]+'
+  printf '%s\n' "$url" | LC_ALL=C grep -Eq \
+    "^https://${label}(\\.${label})*/${segment}/${segment}/(pull|pulls)/[1-9][0-9]*\$" \
+    || return 1
+  rest=${url#https://}
+  host=${rest%%/*}; rest=${rest#*/}
+  owner=${rest%%/*}; rest=${rest#*/}
+  repo=${rest%%/*}; rest=${rest#*/}
+  route=${rest%%/*}
+  case "$owner" in .|..) return 1 ;; esac
+  case "$repo" in .|..) return 1 ;; esac
+  if [ "$route" = pull ]; then
+    [ "$host" = github.com ]
+  else
+    [ "$host" != github.com ]
+  fi
+}
+
 # fm_pf_deliverable_problem <outcome> <key> <value>: silent exit 0 when tasks-axi
 # would accept <key>=<value> on a work event with <outcome>; otherwise print one
 # line naming the key, the bad value, and what was expected, and exit 1.
 fm_pf_deliverable_problem() {
-  local outcome=$1 key=$2 value=$3 allowed re authority format
+  local outcome=$1 key=$2 value=$3 allowed format re=''
   if allowed=$(fm_pf_outcome_deliverable_keys "$outcome"); then
     case " $allowed " in
       *" $key "*) ;;
@@ -281,10 +310,7 @@ fm_pf_deliverable_problem() {
     esac
   fi
   case "$key" in
-    pr_url) re='^https://[^?#[:space:]]+/pull/[0-9]+$' ;;
-    report_path) re='^data/[A-Za-z0-9][A-Za-z0-9._-]*/report\.md$' ;;
-    commit_sha) re='^[a-f0-9]{7,64}$' ;;
-    error_code) re='^[a-z][a-z0-9._-]{0,63}$' ;;
+    pr_url|report_path|commit_sha|error_code) ;;
     *) return 0 ;;
   esac
   format=$(fm_pf_deliverable_format "$key")
@@ -294,14 +320,14 @@ fm_pf_deliverable_problem() {
       return 1
       ;;
   esac
-  if printf '%s\n' "$value" | LC_ALL=C grep -Eq "$re"; then
-    # tasks-axi also refuses a pull request URL that carries credentials.
-    authority=${value#https://}
-    authority=${authority%%/*}
-    case "$key:$authority" in
-      pr_url:*@*) ;;
-      *) return 0 ;;
-    esac
+  case "$key" in
+    pr_url) fm_pf_pr_url_valid "$value" && return 0 ;;
+    report_path) re='^data/[A-Za-z0-9][A-Za-z0-9._-]*/report\.md$' ;;
+    commit_sha) re='^[a-f0-9]{7,64}$' ;;
+    error_code) re='^[a-z][a-z0-9._-]{0,63}$' ;;
+  esac
+  if [ -n "$re" ] && printf '%s\n' "$value" | LC_ALL=C grep -Eq "$re"; then
+    return 0
   fi
   printf "deliverable '%s' value '%s' is not valid; expected %s\n" "$key" "$value" "$format"
   return 1
