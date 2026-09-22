@@ -46,6 +46,15 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
     # single binary, comm=agy with argv[0]=agy), and a glob would claim
     # unrelated commands containing that fragment.
     agy) printf 'agent' ;;
+    # kiro (Kiro CLI) is anchored for the same reason as muse, omp, and agy: its
+    # live foreground process name is the bare word `kiro-cli` (verified,
+    # kiro-cli 2.21.4: a toolbox/aim-sandbox wrapper whose comm reads kiro-cli,
+    # with the compiled binary a descendant), and a glob would claim unrelated
+    # commands containing that fragment. comm and argv[0] are the fields this
+    # classifier gets; tmux's #{pane_current_command} carries the launcher's name
+    # where kiro-cli sits behind a wrapper, so it is not a dependable kiro
+    # identity (docs/verification/kiro.md).
+    kiro-cli) printf 'agent' ;;
     zsh|bash|sh|dash|ash|ksh|mksh|tcsh|csh|fish) printf 'shell' ;;
     *)
       if fm_harness_path_name "$path" >/dev/null || fm_harness_path_name "$argv0" >/dev/null; then

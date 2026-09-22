@@ -30,7 +30,7 @@ Rovo CLI: 202609.1.2
 `fm-spawn.sh` builds `env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS <rovo-bin> run --yolo <model/effort flags>` - BARE, with no positional brief - wrapped by the shared `env -u CURSOR_AGENT -u CURSOR_INVOKED_AS` prefix every non-cursor harness gets.
 The brief is then typed in after the TUI comes up, the same launch-then-send shape kimi uses, through the same shared readers (`fm_backend_capture`, `fm_backend_composer_state`, `fm_backend_send_text_submit`):
 
-1. `rovo_wait_for_ready` polls for the `Welcome to Rovo!` banner (primary) or a composer-empty verdict (weaker fallback, see the composer-ghost-text gap below).
+1. `rovo_wait_for_ready` polls for the `Welcome to Rovo!` banner (primary, because it proves a fresh launch outright where composer-empty only proves the composer is clear) or a composer-empty verdict (fallback; the idle placeholder chip strips as ghost text, see "Composer ghost text" below).
 2. The pointer `Read the brief at <absolute-path> and follow it exactly.` is submitted via `fm_backend_send_text_submit`.
 3. `rovo_wait_for_delivery` confirms composer-empty AND either the echoed `Read the brief at` text or a nonzero `Context:` percentage (`context:[^%]*[1-9][^%]*%`, tolerant of the footer's bar glyph but anchored before the `%` so the `.../922K` denominator cannot false-positive).
 
@@ -66,7 +66,7 @@ Enter to queue, Ctrl+Enter to steer
 This is a rendered-tail fallback exactly like Grok's, not a semantic source: rovo's `eventHooks` (`~/.rovo/config.yml`) fire at tool granularity (`on_tool_start`/`on_tool_end`) only, never at turn-end, so no writer is armed and none is seeded.
 Grok was previously the only rendered-text arm the redesigned busy contract allowed; this task extends that same documented exception to rovo, scoped to `harness=rovo` exactly like Grok is scoped to `harness=grok`, and neither can classify the other (`tests/fm-rovo-harness.test.sh`'s isolation case).
 
-## Composer ghost text: measured, deliberately left unfixed
+## Composer ghost text: measured, now fixed by chromaticity
 
 A live idle-composer capture over a raw PTY located the inline placeholder chip inside the actual bordered content row, not merely in a suggestion list below it:
 
@@ -77,11 +77,16 @@ row 12  ╰───────────────────────
 ```
 
 Real typed text in the same row, captured separately, renders at `38;2;206;207;210` (luminance ~207).
-Both values sit above `bin/fm-composer-lib.sh`'s default `FM_COMPOSER_GHOST_LUMA_MAX` of 128, so `fm_composer_strip_ghost` leaves the placeholder unstripped and a fresh rovo composer can misclassify as `pending` rather than `empty`.
+Both values sit above `bin/fm-composer-lib.sh`'s default `FM_COMPOSER_GHOST_LUMA_MAX` of 128, so `fm_composer_strip_ghost` left the placeholder unstripped and a fresh rovo composer misclassified as `pending` rather than `empty`.
 Raising the shared default was considered and rejected: muse's own real, must-not-be-stripped prompt glyph measures luminance ~149.9 (`muse.md`), below rovo's ghost luminance of ~163, so no single global threshold can keep muse's glyph real while dropping rovo's ghost chip.
-This is recorded as a known gap rather than patched, because the safe fix needs a harness-scoped signal the shared composer classifier does not carry today, and a threshold change risks regressing muse's already-credentialed behavior for a rovo-scoped fix.
+
+This is now fixed by chromaticity rather than by a harness-scoped signal.
+`fm_composer_strip_ghost` applies a higher ceiling, `FM_COMPOSER_GHOST_GRAY_LUMA_MAX` (default 180), only to a NEAR-ACHROMATIC truecolor run, and keeps the 128 default for anything more saturated.
+Rovo's ghost chip is near-gray at spread 3 and strips; rovo's real typed text is also near-gray but is separated by luminance alone at ~207 and is kept; muse's glyph is strongly chromatic at spread 165 and cannot be reached by any luminance ceiling.
+The signal is intrinsic to the run rather than attached to a harness, which is why no argument had to be threaded through the shared composer entry points.
+`tests/fm-composer-lib.test.sh` pins all four measured cases, including rovo's real text and muse's glyph as explicit non-regression assertions.
 The blast radius is bounded to composer-emptiness consumers such as steering delivery, which already retries through the doorbell ladder on a non-`empty` read.
-It does not block readiness: readiness leads with the `Welcome to Rovo!` banner, so the ghost chip is never the deciding signal there. Delivery, however, requires composer-empty as one conjunct (alongside the echoed pointer or a nonzero `Context:` percentage), and on the herdr backend this conjunct may fail to settle within its poll window (the composer read non-empty even mid-turn in the live herdr run below), so `rovo_wait_for_delivery` can fail the gate and tear the pane down there. tmux delivery is separately verified working (see the tmux backend-liveness section below). This is a known limitation whose fix is tracked as a separate follow-up, not fixed in this change.
+It does not block readiness: readiness leads with the `Welcome to Rovo!` banner, so the ghost chip is never the deciding signal there. Delivery, however, requires composer-empty as one conjunct (alongside the echoed pointer or a nonzero `Context:` percentage), and on the herdr backend this conjunct may fail to settle within its poll window (the composer read non-empty even mid-turn in the live herdr run below), so `rovo_wait_for_delivery` can fail the gate and tear the pane down there. tmux delivery is separately verified working (see the tmux backend-liveness section below). That herdr poll-window behaviour is a separate limitation from the ghost chip and is NOT what the chromaticity fix above addresses: it was observed with the composer reading non-empty mid-turn, when real output is present, so it is not established that stripping the idle chip settles it. It remains a known limitation whose fix is tracked as a separate follow-up.
 
 ## Interrupt: confirmed under real tmux
 
@@ -201,7 +206,8 @@ $ herdr pane list --workspace w1 --session fm-lab-...
 
 A rovo pane was placed in that isolated workspace, launched bare (the same `env -u ... rovo run --yolo` template documented above), and `rovo_wait_for_ready` returned success on the `Welcome to Rovo!` banner.
 The typed pointer (`Read the brief at <path> and follow it exactly.`) was echoed into the pane, and rovo read a trivial no-op brief, ran a real `sleep 15` bash tool call, and replied `PONG` - the same launch-then-send shape already verified over tmux and a raw PTY, now also confirmed live over Herdr.
-`fm_backend_herdr_capture` correctly rendered the `Rovo is thinking...` busy line during the tool call (`fm_busy_rovo_tail_busy` matches that captured text), and the pane read idle with `PONG` visible once the tool call finished; `rovo_wait_for_delivery`'s own composer-empty conjunct did not settle within its poll window, consistent with the already-documented composer-ghost-text gap below rather than a new defect.
+`fm_backend_herdr_capture` correctly rendered the `Rovo is thinking...` busy line during the tool call (`fm_busy_rovo_tail_busy` matches that captured text), and the pane read idle with `PONG` visible once the tool call finished; `rovo_wait_for_delivery`'s own composer-empty conjunct did not settle within its poll window.
+That is the herdr poll-window limitation recorded under "Composer ghost text" above rather than a new defect, and the idle placeholder chip is not its cause, because the composer read non-empty mid-turn when real output is present, so the chromaticity fix does not address it.
 
 `fm_backend_agent_state` is the one signal this run disproves rather than confirms: it reported `dead` throughout - at the ready banner, mid-tool-call busy, and idle-with-`PONG` alike - even though rovo was demonstrably alive and responding the whole time.
 The cause is on Herdr's side, not firstmate's: `fm_backend_herdr_pane_agent_state` calls `herdr agent get <pane>`, which returned `{"error":{"code":"agent_not_found","message":"agent target w1:p1 not found"}}` for the live rovo pane, because `herdr integration status` lists no `rovo` entry at all (only `pi`, `omp`, `claude`, `codex`, `copilot`, `devin`, `droid`, `kimi`, `opencode`, `kilo`, `hermes`, `qodercli`, `qwen`, `cursor`, `mastracode`, `antigravity-cli`, and `grok` are known integrations on the installed Herdr build).
