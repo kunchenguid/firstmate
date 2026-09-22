@@ -79,11 +79,7 @@ esac
 exit 0
 SH
   chmod +x "$fb/tmux"
-  cat > "$fb/sleep" <<'SH'
-#!/usr/bin/env bash
-exit 0
-SH
-  chmod +x "$fb/sleep"
+  fm_fake_exit0 "$fb" sleep
   # Stub ssh transport for the remote-secondmate legs, selected via FM_SSH_BIN.
   # Records the full remote invocation and exits FM_FAKE_SSH_RC (default 0).
   cat > "$fb/fake-ssh" <<'SH'
