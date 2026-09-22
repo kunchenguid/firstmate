@@ -378,6 +378,26 @@ test_matrix_muse_bottom_rule_keeps_bare_composer() {
   out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen")
   [ "$out" = 'second turn to interrupt' ] \
     || fail "muse 1.3.0 restored prompt did not extract, got '$out'"
+  screen=$'── Voice input (⌥ + v to start) ─────\n❯ first line\n\n  second line\n────────────────────────\n  echo · /ws · YOLO'
+  assert_screen "framed Muse multiline prompt on herdr" pending "$CAPS_STYLED" "$screen"
+  assert_screen "framed Muse multiline prompt on zellij" pending "$CAPS_STYLED_NOID" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen") \
+    || fail "framed Muse multiline prompt was unreadable"
+  [ "$out" = 'first line second line' ] \
+    || fail "framed Muse extraction lost rows or included footer: '$out'"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" $'────────────────────────\ntranscript\n'"$screen") \
+    || fail "an earlier transcript separator hid the framed multiline composer"
+  [ "$out" = 'first line second line' ] \
+    || fail "an earlier transcript separator changed Muse extraction: '$out'"
+  screen=$'── Voice input (⌥ + v to start) ─────\n❯\n\n  second line\n────────────────────────\n  echo · /ws · YOLO'
+  assert_screen "framed Muse input after blank rows" pending "$CAPS_STYLED" "$screen"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$screen") \
+    || fail "framed Muse input after blank rows was unreadable"
+  [ "$out" = 'second line' ] || fail "framed Muse continuation was lost: '$out'"
+  screen=$'transcript\n❯ first line\n\n  second line\n────────────────────────'
+  if fm_composer_extract_selected_content "$CAPS_STYLED" "$screen" >/dev/null; then
+    fail "unframed blank-separated rows were accepted as a multiline composer"
+  fi
   pass "matrix: muse 1.3.0's bottom rule is its own composer edge, not a separator veto"
 }
 

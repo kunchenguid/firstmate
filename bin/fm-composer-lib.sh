@@ -1402,7 +1402,7 @@ _fm_composer_locate_footer_zone() {  # <plain>
 }
 
 _fm_composer_select_cursorless() {
-  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0
+  local plain=$1 generic=-1 next boundary raw trimmed glyph bare footer=0 framed_end=-1
   FM_COMPOSER_SELECTED_KIND=
   FM_COMPOSER_SELECTED_FIRST=-1
   FM_COMPOSER_SELECTED_LAST=-1
@@ -1447,12 +1447,24 @@ _fm_composer_select_cursorless() {
   # bounded by blank rows, structural edges, and furniture rows, and the
   # extended end is what the lone-separator veto measures adjacency against.
   if [ "$FM_COMPOSER_SELECTED_KIND" = bare ]; then
+    if [ "$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR" -gt "$FM_COMPOSER_SELECTED_FIRST" ] \
+       && [ "$FM_COMPOSER_SELECTED_FIRST" -gt 0 ]; then
+      trimmed=$(_fm_composer_screen_row "$((FM_COMPOSER_SELECTED_FIRST - 1))" "$plain")
+      fm_composer_normalize_trim_var trimmed
+      case "$trimmed" in
+        '──'*'──')
+          if ! _fm_composer_pi_separator_row "$trimmed"; then
+            framed_end=$FM_COMPOSER_SCAN_PI_LAST_SEPARATOR
+          fi
+          ;;
+      esac
+    fi
     next=$((FM_COMPOSER_SELECTED_LAST + 1))
     while :; do
       raw=$(_fm_composer_screen_row "$next" "$plain")
       trimmed=$raw
       fm_composer_normalize_trim_var trimmed
-      [ -n "$trimmed" ] || break
+      [ -n "$trimmed" ] || [ "$next" -lt "$framed_end" ] || break
       fm_composer_row_has_edge "$trimmed" && break
       _fm_composer_row_is_omp_status "$trimmed" && break
       _fm_composer_row_is_braille_furniture "$trimmed" && break

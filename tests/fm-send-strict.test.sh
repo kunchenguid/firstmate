@@ -300,29 +300,33 @@ test_muse_interrupt_requires_cancellation() {
 }
 
 test_muse_interrupt_normalizes_multiline_prompt() {
-  local dir fb home log screen err rc sample expected
+  local dir fb home log screen err rc sample expected content
   dir="$TMP_ROOT/muse-multiline"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); home=$(setup_home musemultiline); log="$dir/tmux.log"; err="$dir/send.err"
-  screen=$(muse_clobber_fixture "$dir" "$home" $'first  line\n\n  second\tline')
-  for sample in 'first line second line' 'line second line' 'first linesecond line'; do
+  for sample in complete partial mismatched; do
     : > "$log"
     screen=$(muse_clobber_fixture "$dir" "$home" $'first  line\n\n  second\tline')
-    printf 'transcript row\n\xe2\x9d\xaf %s\n' "$sample" > "$screen.restore"
-    printf 'transcript row\n\xe2\x9d\xaf\n' > "$screen"
+    case "$sample" in
+      complete) content=$'first  line\n\n  second\tline' ;;
+      partial) content=$'line\n\n  second line' ;;
+      mismatched) content=$'first line\n\n  different line' ;;
+    esac
+    printf '── Voice input (⌥ + v to start) ─────\n❯ %s\n────────────────────────\n  echo · /ws · YOLO\n' "$content" > "$screen.restore"
+    printf '── Voice input (⌥ + v to start) ─────\n❯\n────────────────────────\n  echo · /ws · YOLO\n' > "$screen"
     PATH="$fb:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" FM_TMUX_LOG="$log" \
       FM_SEND_SETTLE=0 FM_SEND_RESTORE_WAIT=1 FM_FAKE_TMUX_CAPTURE="$screen" \
       "$SEND" muse-clobber --key Escape >/dev/null 2>"$err"; rc=$?
     expect_code 0 "$rc" "multiline prompt interrupt should be delivered"
     assert_contains "$(cat "$log")" "arg=Escape" "the interrupt should be delivered"
     expected="$(cat "$log")"
-    if [ "$sample" != 'first line second line' ]; then
-      assert_not_contains "$expected" "arg=C-c" "fresh joined words must not match a newline boundary"
-      assert_contains "$(cat "$err")" "left untouched" "fresh input should be preserved"
+    if [ "$sample" = complete ]; then
+      assert_contains "$expected" "arg=C-c" "complete framed multiline restored prompt should be cleared"
     else
-      assert_contains "$expected" "arg=C-c" "complete multiline restored prompt should be cleared"
+      assert_not_contains "$expected" "arg=C-c" "$sample multiline content must not be cleared"
+      assert_contains "$(cat "$err")" "left untouched" "$sample multiline content should be preserved"
     fi
   done
-  pass "fm-send --key Escape: multiline prompt boundaries normalize without joining words"
+  pass "fm-send --key Escape: framed multiline restoration clears only complete matching content"
 }
 
 test_muse_interrupt_preserves_fresh_input() {
@@ -414,6 +418,11 @@ test_muse_interrupt_unreadable_composer_warns() {
   assert_contains "$(cat "$err")" "left untouched" "the skipped clear should say the composer was left untouched"
   pass "fm-send --key Escape: an unreadable muse composer skips the clear with a warning"
 }
+
+if [ "${1:-}" = --muse-multiline ]; then
+  test_muse_interrupt_normalizes_multiline_prompt
+  exit 0
+fi
 
 test_exact_lane_id_send_still_works
 test_key_send_exit_status_follows_delivery
