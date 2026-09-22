@@ -387,9 +387,10 @@ The reclaim path never moves, closes, deletes, or renames a workspace and never 
 A failed replacement rolls back only the exact response-derived new pane when focus-safe verification permits it.
 A same-project nested task that owns a durable preallocated checkout reuses that exact recorded checkout across recovery instead of acquiring a second one.
 Recovery carries it only after proving over `worktree list` on the journal's exact parent, or for a version 1 journal on the owning home, that the journal's workspace is still an open linked worktree at that exact recorded checkout.
+A version 2 proof uses the journal's own nested workspace id rather than the current metadata endpoint, so a respawn whose metadata has already moved to the flat home container after an earlier flat-fallback recovery still carries the same lease.
 This prevents adopting a legacy top-level projection whose checkout was only a process lease.
 The carried checkout is never freshened, reset, or reacquired, metadata keeps naming it, and teardown returns that same lease.
-When such a same-project checkout cannot be proven exactly, recovery refuses with a clear diagnostic and leaves the durable lease and task record intact rather than allowing the generic path to allocate a second checkout.
+When such a same-project checkout cannot be proven exactly, or its recorded path cannot be resolved at all, recovery refuses with a clear diagnostic and leaves the durable lease and task record intact rather than allowing the generic path to allocate a second checkout.
 A proven same-project checkout whose exact projection cannot be reclaimed is still reused through the flat layout rather than reacquired.
 
 These cases fall back flat without mutating the old projection when duplicate-agent risk is positively absent:

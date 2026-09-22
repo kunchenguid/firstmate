@@ -3375,36 +3375,13 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
 #   HERDR_RECOVERY_NESTED_WORKTREE   the proven checkout path, else empty
 #   HERDR_RECOVERY_NESTED_AMBIGUOUS  1 when the exact proof could not be read
 spawn_herdr_recovery_classify_nested_worktree() { # <session> <journal> <meta>
-  local session=$1 journal=$2 meta=$3 recorded parent workspace proof status
-  HERDR_RECOVERY_NESTED_WORKTREE=""
-  HERDR_RECOVERY_NESTED_AMBIGUOUS=0
-  recorded=$(herdr_projection_meta_field_exact "$meta" worktree 2>/dev/null) || return 0
-  [ -n "$recorded" ] || return 0
-  recorded=$(cd "$recorded" 2>/dev/null && pwd -P) || return 0
-  workspace=$HERDR_RECOVERY_WORKSPACE_ID
-  [ -n "$workspace" ] || return 0
-  parent=""
-  if fm_backend_herdr_projection_journal_snapshot "$journal" "$ID"; then
-    if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
-      parent=$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID
-      [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$workspace" ] || workspace=""
-    fi
-  fi
-  if [ -z "$parent" ]; then
-    parent=$(fm_backend_herdr_projection_parent_workspace_exact \
-      "$session" "$HERDR_PARENT_LABEL" 2>/dev/null || true)
-  fi
-  [ -n "$workspace" ] && [ -n "$parent" ] || return 0
-  set +e
-  proof=$(fm_backend_herdr_projection_recovery_nested_worktree \
-    "$session" "$parent" "$workspace" "$recorded" "$PROJ_ABS")
-  status=$?
-  set -e
-  case "$status" in
-  0) HERDR_RECOVERY_NESTED_WORKTREE=$proof ;;
-  1) : ;;
-  2) HERDR_RECOVERY_NESTED_AMBIGUOUS=1 ;;
-  esac
+  local session=$1 journal=$2 meta=$3 recorded
+  recorded=$(herdr_projection_meta_field_exact "$meta" worktree 2>/dev/null) || recorded=""
+  fm_backend_herdr_projection_recovery_classify_nested_worktree \
+    "$session" "$journal" "$ID" "$recorded" "$HERDR_RECOVERY_WORKSPACE_ID" \
+    "$HERDR_PARENT_LABEL" "$PROJ_ABS"
+  HERDR_RECOVERY_NESTED_WORKTREE=$FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE
+  HERDR_RECOVERY_NESTED_AMBIGUOUS=$FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS
 }
 
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to

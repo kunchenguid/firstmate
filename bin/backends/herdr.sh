@@ -2838,6 +2838,59 @@ fm_backend_herdr_projection_recovery_nested_worktree() {  # <session> <parent-wo
   esac
 }
 
+# fm_backend_herdr_projection_recovery_classify_nested_worktree: decide whether
+# one recovered task owns a durable Treehouse checkout that Herdr still renders
+# as an open linked worktree child of its owning home. A version 2 journal is
+# classified against its own recorded nested workspace, so an earlier
+# flat-fallback recovery that republished metadata at the home container still
+# carries the same lease. An unresolvable recorded checkout for a version 2
+# same-project binding is ambiguous and must refuse recovery rather than let the
+# generic path allocate a replacement. Sets:
+#   FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE    proven checkout path, else empty
+#   FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS   1 when the proof could not be read
+fm_backend_herdr_projection_recovery_classify_nested_worktree() {  # <session> <journal> <task-id> <recorded-worktree> <meta-workspace> <parent-label> <project>
+  local session=$1 journal=$2 id=$3 recorded=$4 meta_workspace=$5 parent_label=$6 project=$7
+  local resolved parent workspace proof status journal_v2=0
+  FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE=""
+  FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS=0
+  parent=""
+  workspace=$meta_workspace
+  if fm_backend_herdr_projection_journal_snapshot "$journal" "$id"; then
+    if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
+      journal_v2=1
+      parent=$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID
+      workspace=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
+    fi
+  fi
+  resolved=""
+  if [ -n "$recorded" ]; then
+    resolved=$(cd "$recorded" 2>/dev/null && pwd -P) || resolved=""
+  fi
+  if [ -z "$resolved" ]; then
+    if [ "$journal_v2" = 1 ] && [ -n "$parent" ] &&
+      fm_backend_herdr_projection_parent_sources_project "$session" "$parent" "$project"; then
+      FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS=1
+    fi
+    return 0
+  fi
+  if [ -z "$parent" ]; then
+    parent=$(fm_backend_herdr_projection_parent_workspace_exact \
+      "$session" "$parent_label" 2>/dev/null || true)
+  fi
+  [ -n "$workspace" ] && [ -n "$parent" ] || return 0
+  proof=""
+  status=0
+  proof=$(fm_backend_herdr_projection_recovery_nested_worktree \
+    "$session" "$parent" "$workspace" "$resolved" "$project") || status=$?
+  if [ "$status" -eq 0 ]; then
+    # shellcheck disable=SC2034  # caller consumes the recovery-classification globals
+    FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE=$proof
+  elif [ "$status" -eq 2 ]; then
+    # shellcheck disable=SC2034  # caller consumes the recovery-classification globals
+    FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS=1
+  fi
+}
+
 # fm_backend_herdr_projection_live_binding_matches: verify one exact projected
 # workspace, its single task tab/pane, its unique token label, and its current
 # position inside the exact parent workspace's contiguous child block.

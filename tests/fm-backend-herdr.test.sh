@@ -1986,6 +1986,50 @@ test_projection_recovery_proves_only_open_linked_worktree() {
   pass "herdr presentation recovery: only a child positively open as a linked worktree is carried, and ambiguity refuses"
 }
 
+test_projection_recovery_classification_uses_journal_workspace() {
+  local dir state log resp fb proj home child parent journal out status open_json not_open_json
+  dir="$TMP_ROOT/projection-recovery-classify"; state="$dir/state"
+  proj="$dir/project"; home="$dir/home"
+  mkdir -p "$dir/responses" "$state" "$proj" "$home"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  child=w-child; parent=w-home
+  PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      token=$(fm_backend_herdr_projection_journal_create "$1" task-nested) || exit 1
+      label=$(fm_backend_herdr_projection_workspace_label task-nested "$token")
+      fm_backend_herdr_projection_journal_bind "$1/task-nested.herdr-presentation" task-nested "$2" fmtest "$3" "$3:t1" "$3:p1" "$4" firstmate "$label" fm-task-nested
+    ' "$ROOT" "$state" "$home" "$child" "$parent" \
+    || fail "could not publish the recovery classification fixture journal"
+  journal="$state/task-nested.herdr-presentation"
+  run_classify() {  # <recorded-path> <meta-workspace> <response-json>
+    rm -f "$resp/.count"
+    printf '%s\n' "$3" > "$resp/1.out"
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '
+        . "$0/bin/backends/herdr.sh"
+        fm_backend_herdr_projection_recovery_classify_nested_worktree fmtest "$1" task-nested "$2" "$3" firstmate "$4"
+        printf "%s|%s\n" "$FM_BACKEND_HERDR_RECOVERY_NESTED_WORKTREE" "$FM_BACKEND_HERDR_RECOVERY_NESTED_AMBIGUOUS"
+      ' "$ROOT" "$journal" "$1" "$2" "$proj"
+  }
+  open_json='{"result":{"type":"worktree_list","source":{"source_workspace_id":"'"$parent"'","source_checkout_path":"'"$proj"'"},"worktrees":[{"path":"'"$proj"'","is_linked_worktree":true,"open_workspace_id":"'"$child"'"}]}}'
+  not_open_json='{"result":{"type":"worktree_list","source":{"source_workspace_id":"'"$parent"'","source_checkout_path":"'"$proj"'"},"worktrees":[]}}'
+  out=$(run_classify "$proj" "$parent" "$open_json"); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "$proj|0" ] \
+    || fail "a version 2 journal workspace must still carry after metadata moved to the flat container: status=$status out=$out"
+  out=$(run_classify "$dir/missing-slot" "$parent" "$not_open_json"); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "|1" ] \
+    || fail "an unresolvable recorded checkout for a same-project version 2 binding must refuse: status=$status out=$out"
+  out=$(run_classify "$proj" "$child" "$not_open_json"); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "|0" ] \
+    || fail "a top-level projection that is not an open linked worktree must not carry: status=$status out=$out"
+  out=$(run_classify "$proj" "$parent" '{"result":{"type":"other"}}'); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "|1" ] \
+    || fail "an unreadable nested-worktree proof must refuse: status=$status out=$out"
+  pass "herdr presentation recovery classification: carries the journal workspace and refuses an unresolvable durable checkout"
+}
+
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   local dir state log resp fb out token journal proj
   dir="$TMP_ROOT/projection-create"; state="$dir/state"; proj="$dir/proj"
@@ -5839,6 +5883,7 @@ test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_parent_sources_only_its_exact_project
 test_projection_recovery_proves_only_open_linked_worktree
+test_projection_recovery_classification_uses_journal_workspace
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_worktree_open_refuses_reused_or_mismatched_response
 test_projection_create_never_closes_a_concurrent_same_label_tab
