@@ -2752,6 +2752,30 @@ test_per_secondmate_pin_refuses_invalid() {
   pass "D2 fm-harness.sh secondmate <id>: unsafe ids, symlinks, irregular files, empty or default pins, and extra tokens refuse without falling through"
 }
 
+# A genuinely absent pin directory keeps the global fallback, while an
+# unsearchable directory refuses instead of making every pin look absent.
+test_per_secondmate_pin_inspection_errors_refuse() {
+  local cfg d err out rc
+  d="$TMP_ROOT/pin-inspection"
+  cfg="$d/config"
+  err="$d/unsearchable.err"
+  mkdir -p "$cfg"
+  printf 'codex\n' > "$cfg/secondmate-harness"
+
+  out=$(pin_resolve "$cfg" secondmate pinned)
+  [ "$out" = codex ] || fail "D2b: an absent pin directory must fall back to the global harness"
+
+  mkdir "$cfg/secondmate-harness.d"
+  chmod 000 "$cfg/secondmate-harness.d"
+  out=$(LC_ALL=C pin_resolve "$cfg" secondmate pinned 2>"$err"); rc=$?
+  chmod 700 "$cfg/secondmate-harness.d"
+  [ "$rc" -ne 0 ] || fail "D2b: an unsearchable pin directory must refuse resolution"
+  [ -z "$out" ] || fail "D2b: an unsearchable pin directory printed the fallback harness '$out'"
+  assert_contains "$(cat "$err")" "$cfg/secondmate-harness.d/pinned" "D2b: the inspection refusal must name the pin path"
+  assert_contains "$(cat "$err")" "Permission denied" "D2b: the inspection refusal must report the access error"
+  pass "D2b fm-harness.sh secondmate <id>: only absent pin paths fall back"
+}
+
 # Two registered secondmates launch on independent pins: the pinned mate on its
 # own harness, model, and effort, the unpinned one on the global file, and a
 # respawn re-resolves each for its own id so moving the global file moves only
@@ -2878,6 +2902,7 @@ test_spawned_secondmate_uses_its_harness_supervision_model
 test_spawn_fallback_chain_and_crew_scout_unaffected
 test_per_secondmate_pin_resolution
 test_per_secondmate_pin_refuses_invalid
+test_per_secondmate_pin_inspection_errors_refuse
 test_spawn_two_secondmates_with_independent_pins
 test_spawn_explicit_flags_override_per_secondmate_pin
 test_spawn_invalid_per_secondmate_pin_refuses_without_fallback

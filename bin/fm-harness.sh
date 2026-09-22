@@ -78,6 +78,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
@@ -466,7 +468,7 @@ SECONDMATE_PIN_DIR=secondmate-harness.d
 # entry that is not a regular readable file. The pin is explicit configuration
 # for one mate, so none of those shapes is allowed to fall through silently.
 secondmate_pin_path() {
-  local id=$1 dir path
+  local id=$1 dir path present
   fm_task_id_creation_valid "$id" || {
     echo "error: secondmate id '$id' is not a valid task id, so no config/$SECONDMATE_PIN_DIR/<id> pin can be resolved for it" >&2
     return 1
@@ -476,7 +478,8 @@ secondmate_pin_path() {
     echo "error: config/$SECONDMATE_PIN_DIR is a symlink; per-secondmate pins are read only from a real directory" >&2
     return 1
   fi
-  [ -e "$dir" ] || return 0
+  present=$(fm_config_source_present "$dir") || return 1
+  [ "$present" = 1 ] || return 0
   if [ ! -d "$dir" ]; then
     echo "error: config/$SECONDMATE_PIN_DIR exists but is not a directory" >&2
     return 1
@@ -486,7 +489,8 @@ secondmate_pin_path() {
     echo "error: config/$SECONDMATE_PIN_DIR/$id is a symlink; a per-secondmate pin must be a regular file" >&2
     return 1
   fi
-  [ -e "$path" ] || return 0
+  present=$(fm_config_source_present "$path") || return 1
+  [ "$present" = 1 ] || return 0
   if [ ! -f "$path" ] || [ ! -r "$path" ]; then
     echo "error: config/$SECONDMATE_PIN_DIR/$id is not a regular readable file" >&2
     return 1
