@@ -8,10 +8,11 @@
 # record appends the task's pipeline spend as one JSON object on one line of
 # data/pipeline-spend.jsonl, at most once per task incarnation (task id plus
 # the record's spawn_gen): repeating it for an incarnation already in the
-# ledger appends nothing, so a retried cleanup never counts a task twice. bin/fm-teardown.sh calls record for every ship task
-# whose local copy it cleans up, before it deletes the task branch this script
-# attributes runs by and before it removes state/<id>.meta. The ledger is
-# private and gitignored with the rest of data/.
+# ledger appends nothing, so a retried cleanup never counts a task twice.
+# bin/fm-teardown.sh calls record for every ship task whose local copy it
+# cleans up, before it deletes the task branch this script attributes runs by
+# and before it removes state/<id>.meta. The ledger is private and gitignored
+# with the rest of data/.
 # Exit status: 0 when a record was recorded or already present (including one
 # whose source is unavailable), 1 when the task record is missing, names a
 # secondmate, or the record could not be built or written, 2 for bad usage.
