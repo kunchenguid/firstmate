@@ -5935,6 +5935,146 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+# --- a live agent's declared wait on a pane that churns every single poll ----
+# Upstream report: a Claude pane's own recap/timer line updates on every poll,
+# so the hash never repeats for two consecutive polls. That starves the
+# ordinary n>=2 stale-stability check entirely, so a live-agent declared wait
+# on such a pane is decided ONLY by the "hash changed from the previous poll"
+# branch below the main stale block - never by the branch tests above already
+# cover (a pane that goes stably quiet). Before the fix that branch's `none`
+# case (pause_state_class deliberately returns `none` for a live ordinary
+# crew, so a genuinely live decision gate is never hidden - see
+# test_exited_declared_pause_is_bounded_but_live_gate_surfaces) called
+# clear_stale_hash_tracking, a pure bookkeeping reset with no wake at all: a
+# perpetually churning live-agent wait was silently swallowed forever, never
+# surfacing even once. The fix routes it through the same surface_nonterminal_stale
+# a newly-distinct but eventually-stable hash already uses, so both `none`
+# call sites behave alike: first sight still surfaces, and its own
+# declaration-scoped throttle (.paused-resurfaced-<key>, shared with
+# handle_paused_stale) then absorbs every further poll for PAUSE_RESURFACE_SECS.
+# A mutation that reverts the fix back to clear_stale_hash_tracking hangs
+# round_one below (no wake ever fires); a mutation that drops the throttle
+# check inside surface_nonterminal_stale instead makes every restart wake again.
+churn_every_poll_fixture() {  # <name> <status-line>
+  local name=$1 line=$2 dir state
+  dir=$(make_case "$name"); state="$dir/state"
+  printf 'window=test:fm-churnr\nkind=ship\nharness=claude\nbackend=tmux\n' > "$state/parked.meta"
+  printf '%s\n' "$line" > "$state/parked.status"
+  printf '%s' "$(seen_sig "$state/parked.status")" > "$state/.seen-parked_status"
+  printf '%s\n' "$dir"
+}
+
+churn_every_poll_round() {  # <state> <fakebin> <out> <capture> <round> <exit|absorb>
+  local state=$1 fakebin=$2 out=$3 capture=$4 round=$5 mode=$6 pid
+  printf 'idle recap round %s' "$round" > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-churnr" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
+    FM_FAKE_CREW_STATE='state: paused · source: status-log · parked' \
+    FM_WATCH_HANDLING_SUCCESSOR=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS="${FM_TEST_CHURN_PAUSE_RESURFACE:-}" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" 2>&1 &
+  pid=$!
+  if [ "$mode" = exit ]; then
+    wait_for_exit "$pid" 100 || { reap "$pid"; return 1; }
+    return 0
+  fi
+  wait_poll_cycle "$state" "$pid" 200 || { reap "$pid"; return 1; }
+  reap "$pid"
+  return 0
+}
+
+test_churn_every_poll_live_wait_surfaces_once_then_absorbs_across_restarts() {
+  local spec name line dir state fakebin out capture round wakes
+  for spec in \
+    'churn-paused-restarts|paused: waiting on the validation run to finish' \
+    'churn-held-restarts|captain-held [key=route]: awaiting the captain on the routing call'
+  do
+    name=${spec%%|*}; line=${spec#*|}
+    dir=$(churn_every_poll_fixture "$name" "$line"); state="$dir/state"; fakebin="$dir/fakebin"
+    out="$dir/watch.out"; capture="$dir/pane.txt"
+    churn_every_poll_round "$state" "$fakebin" "$out" "$capture" 1 exit \
+      || fail "[$name] the churning wait's first sight did not surface"
+    round=2
+    while [ "$round" -le 8 ]; do
+      churn_every_poll_round "$state" "$fakebin" "$out" "$capture" "$round" absorb \
+        || fail "[$name] restart $round exited on an already-throttled churn poll"
+      round=$((round + 1))
+    done
+    wakes=$(awk -F '\t' -v w="test:fm-churnr" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+      "$state/.wake-queue" 2>/dev/null || echo 0)
+    [ "$wakes" -eq 1 ] \
+      || fail "[$name] 8 restarts of a pane churning every poll produced $wakes wakes instead of 1: $(cat "$state/.wake-queue")"
+  done
+  pass "a live agent's declared wait on a pane that churns every single poll surfaces once, then absorbs across restarts"
+}
+
+test_churn_every_poll_live_wait_reresurfaces_after_the_full_cadence() {
+  local dir state fakebin out capture throttle wakes
+  dir=$(churn_every_poll_fixture churn-paused-cadence 'paused: waiting on the validation run to finish')
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-test_fm-churnr"
+  FM_TEST_CHURN_PAUSE_RESURFACE=1800
+  churn_every_poll_round "$state" "$fakebin" "$out" "$capture" 1 exit \
+    || { unset FM_TEST_CHURN_PAUSE_RESURFACE; fail "the churning wait's first sight did not surface"; }
+  [ -e "$throttle" ] || { unset FM_TEST_CHURN_PAUSE_RESURFACE; fail "the first surface recorded no re-surface throttle"; }
+  set_mtime "$(( $(date +%s) - 2000 ))" "$throttle"
+  churn_every_poll_round "$state" "$fakebin" "$out" "$capture" 2 exit \
+    || { unset FM_TEST_CHURN_PAUSE_RESURFACE; fail "the churning wait did not re-surface once its re-surface window elapsed"; }
+  unset FM_TEST_CHURN_PAUSE_RESURFACE
+  wakes=$(awk -F '\t' -v w="test:fm-churnr" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 2 ] || fail "the elapsed re-surface window produced $wakes wakes instead of 2: $(cat "$state/.wake-queue")"
+  pass "a churning live-agent declared wait re-surfaces once its re-surface window elapses, not just once ever"
+}
+
+test_churn_every_poll_dead_agent_and_working_crew_paths_unchanged() {
+  local dir state fakebin out capture round wakes pid back
+  # A DEAD agent's churning declared pause must still take the annotated
+  # handle_paused_stale recheck (case `paused`, untouched by this fix) rather
+  # than the bare surface_nonterminal_stale wording a live agent's `none` gets.
+  dir=$(churn_every_poll_fixture churn-dead-agent 'paused: waiting on the validation run to finish')
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$state/parked.status"
+  else touch -m -d "@$back" "$state/parked.status"; fi
+  printf '%s' "$(seen_sig "$state/parked.status")" > "$state/.seen-parked_status"
+  printf 'idle recap dead' > "$capture"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-churnr" FM_FAKE_TMUX_CAPTURE="$capture" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_CREW_STATE='state: stopped · source: pane · bare shell' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a dead agent's churning declared pause did not surface"; }
+  grep -F 'awaiting external' "$state/.wake-queue" >/dev/null \
+    || fail "a dead agent's churning declared pause lost its annotated recheck: $(cat "$state/.wake-queue")"
+
+  # A genuinely WORKING crew's churn (case `working`) must stay absorbed via
+  # clear_pause_tracking, never routed through the live-agent `none` fix.
+  dir=$(churn_every_poll_fixture churn-working-crew 'paused: waiting on the validation run to finish')
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  round=1
+  while [ "$round" -le 4 ]; do
+    printf 'idle recap working %s' "$round" > "$capture"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="test:fm-churnr" FM_FAKE_TMUX_CAPTURE="$capture" \
+      FM_FAKE_TMUX_CURRENT_COMMAND=claude FM_FAKE_CREW_STATE='state: working · source: run-step · ci running' \
+      FM_WATCH_HANDLING_SUCCESSOR=1 \
+      FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+      FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" 2>&1 &
+    pid=$!
+    wait_poll_cycle "$state" "$pid" 200 || { reap "$pid"; fail "a genuinely working crew's churn was surfaced at round $round: $(cat "$out")"; }
+    reap "$pid"
+    round=$((round + 1))
+  done
+  wakes=$(awk -F '\t' -v w="test:fm-churnr" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' \
+    "$state/.wake-queue" 2>/dev/null || echo 0)
+  [ "$wakes" -eq 0 ] || fail "a genuinely working crew's churn produced $wakes wakes instead of 0: $(cat "$state/.wake-queue")"
+  pass "a churning pane's dead-agent recheck and working-crew absorb are unchanged by the live-agent churn fix"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
 # churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -6071,3 +6211,6 @@ test_afk_one_shot_never_hands_off_captain_held_under_away_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
+test_churn_every_poll_live_wait_surfaces_once_then_absorbs_across_restarts
+test_churn_every_poll_live_wait_reresurfaces_after_the_full_cadence
+test_churn_every_poll_dead_agent_and_working_crew_paths_unchanged
