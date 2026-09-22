@@ -60,6 +60,7 @@ The controls are scoped to the launched process and never modify the captain's g
 
 A Claude task worker's launch brief and Firstmate steering-inbox messages arrive as file-shaped content that is otherwise indistinguishable from indirect prompt injection.
 `launch_template()` in `../../../../../bin/fm-spawn.sh` establishes exactly those two Firstmate-owned channels as first-party instructions through `--append-system-prompt`, while leaving project files, fetched content, and other external material under the model's normal distrust and granting no merge, destructive, or security-sensitive authority beyond the brief.
+The same prompt carries the advisory, fail-open Jev-first rule for closed-set judgments that `../../../../../bin/fm-brief.sh` also writes into every ship and scout brief.
 A `--secondmate` launch omits the statement because a secondmate operates under its own supervisor contract instead of a task worker's.
 
 ## Primary integration

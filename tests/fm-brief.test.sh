@@ -819,6 +819,34 @@ test_ship_and_scout_teach_validation_round_pause() {
   pass "fm-brief.sh: ship and scout scaffolds teach validation-round pauses"
 }
 
+# Every ship mode and the scout scaffold carry the same advisory Jev-first rule
+# that bin/fm-spawn.sh appends to a Claude task worker's system prompt, including
+# its fail-open clause, so no brief turns a missing Jev surface into a blocker.
+test_ship_and_scout_carry_advisory_jev_rule() {
+  local home kind id brief
+  home="$TMP_ROOT/advisory-jev-home"
+  mkdir -p "$home/data"
+
+  for kind in no-mistakes direct-PR local-only scout; do
+    id="brief-advisory-jev-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode "$kind" >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "prefer one batched typed Jev call when the installed TypeSafe surface makes one available" "$brief" \
+      "$kind brief did not carry the Jev-first rule"
+    assert_grep "use your own judgment and never block on it" "$brief" \
+      "$kind brief did not keep the Jev-first rule advisory"
+    assert_grep "never secrets, credentials, API keys, or tokens" "$brief" \
+      "$kind brief did not bound the state sent to Jev"
+    assert_grep "stay in code, because Jev has no filesystem or tools" "$brief" \
+      "$kind brief did not keep deterministic operations in code"
+  done
+  pass "fm-brief.sh: ship and scout scaffolds carry the advisory Jev-first rule"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -944,6 +972,7 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
+test_ship_and_scout_carry_advisory_jev_rule
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor

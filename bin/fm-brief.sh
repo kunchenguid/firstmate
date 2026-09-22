@@ -413,6 +413,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. $(fm_jev_first_rule)
 
 $INBOX_SECTION
 
@@ -502,6 +503,7 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+8. $(fm_jev_first_rule)
 
 $INBOX_SECTION
 
