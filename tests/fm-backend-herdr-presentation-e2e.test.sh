@@ -920,6 +920,64 @@ rm -rf "$POST_CREATE_ABORT_CONTROL"
 rm -f "$HOME_DIR/state/abort-a.herdr-presentation" "$HOME_DIR/state/abort-b.herdr-presentation"
 pass "real Herdr lab: concurrent post-create abort cleanup stays serialized with exact focus restoration"
 
+# An aborted recovery that is carrying a durable checkout must keep the task
+# record that names that lease and must never force-return it: the parked work
+# is preserved for a rerun, and the operator is told the real reason instead of
+# the ambiguous worktree-open wording that only applies to a fresh create. The
+# abort is forced after the record is republished, at the launch-directory
+# guard, so the provisional-record rollback would otherwise remove it.
+CARRY_ABORT_ID=carry-abort
+carry_abort_launch_dir() {  # <home>
+  local home=$1 root hash
+  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
+  else
+    hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
+  fi
+  printf '/tmp/fm-%s+%s' "$CARRY_ABORT_ID" "$hash"
+}
+mkdir -p "$HOME_DIR/data/$CARRY_ABORT_ID"
+write_ship_brief "$HOME_DIR" "$CARRY_ABORT_ID" 'Carried recovery abort fixture.'
+spawn_task "$CARRY_ABORT_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/carry-abort-first.out" 2> "$TMP_ROOT/carry-abort-first.err" \
+  || fail "carry-abort projected spawn failed: $(cat "$TMP_ROOT/carry-abort-first.err")"
+CARRY_ABORT_META="$HOME_DIR/state/$CARRY_ABORT_ID.meta"
+CARRY_ABORT_WT=$(remember_meta_worktree "$CARRY_ABORT_META")
+CARRY_ABORT_WSID=$(grep '^herdr_workspace_id=' "$CARRY_ABORT_META" | cut -d= -f2-)
+CARRY_ABORT_LAUNCH_DIR=$(carry_abort_launch_dir "$HOME_DIR")
+[ -d "$CARRY_ABORT_LAUNCH_DIR" ] \
+  || fail "carry-abort first spawn did not stage its launch directory at $CARRY_ABORT_LAUNCH_DIR"
+lab workspace close "$CARRY_ABORT_WSID" >/dev/null \
+  || fail "could not close the task space for carry-abort"
+chmod 777 "$CARRY_ABORT_LAUNCH_DIR" \
+  || fail "could not arm the launch-directory refusal for carry-abort"
+CARRY_ABORT_TREEHOUSE_START=$(wc -l < "$TREEHOUSE_CALL_LOG" | tr -d '[:space:]')
+if spawn_task "$CARRY_ABORT_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/carry-abort-resume.out" 2> "$TMP_ROOT/carry-abort-resume.err"; then
+  fail "carry-abort recovery unexpectedly succeeded after the armed launch-directory refusal"
+fi
+[ -e "$CARRY_ABORT_META" ] \
+  || fail "aborted carried recovery rolled back the task record that names its lease"
+[ "$(grep '^worktree=' "$CARRY_ABORT_META" | cut -d= -f2-)" = "$CARRY_ABORT_WT" ] \
+  || fail "aborted carried recovery changed the recorded durable checkout"
+grep -F "retaining carried durable Treehouse worktree $CARRY_ABORT_WT" "$TMP_ROOT/carry-abort-resume.err" >/dev/null 2>&1 \
+  || fail "aborted carried recovery did not report its retained carried lease: $(cat "$TMP_ROOT/carry-abort-resume.err")"
+if grep -F "worktree-open result was ambiguous" "$TMP_ROOT/carry-abort-resume.err" >/dev/null 2>&1; then
+  fail "aborted carried recovery used the fresh-create ambiguity wording for a carry"
+fi
+CARRY_ABORT_RETURNS=$(sed -n "$((CARRY_ABORT_TREEHOUSE_START + 1)),\$p" "$TREEHOUSE_CALL_LOG" | awk -F '\t' -v wt="$CARRY_ABORT_WT" '$1 == "return" && $NF == wt { print }')
+[ -z "$CARRY_ABORT_RETURNS" ] \
+  || fail "aborted carried recovery force-returned the retained lease: $CARRY_ABORT_RETURNS"
+# The retained lease and flat pane are cleaned up by hand so later fixtures
+# are unaffected; the record has already proven it names the lease.
+CARRY_ABORT_PANE=$(grep '^herdr_pane_id=' "$CARRY_ABORT_META" | cut -d= -f2-)
+[ -n "$CARRY_ABORT_PANE" ] \
+  || fail "aborted carried recovery record did not name its flat task pane"
+"$REAL_TREEHOUSE" return --force "$CARRY_ABORT_WT" >/dev/null 2>&1 || true
+lab pane close "$CARRY_ABORT_PANE" >/dev/null 2>&1 || true
+rm -rf "$CARRY_ABORT_LAUNCH_DIR"
+rm -f "$CARRY_ABORT_META" "$HOME_DIR/state/$CARRY_ABORT_ID.herdr-presentation"
+pass "real Herdr lab: an aborted carried recovery keeps the task record and durable lease for a rerun"
+
 SHAPE_CLEANUP_AUDIT_START=$(focus_audit_line_count)
 teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-teardown.err" \
   || fail "projected teardown failed: $(cat "$TMP_ROOT/on-teardown.err")"

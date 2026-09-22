@@ -1311,7 +1311,9 @@ spawn_abort_cleanup() {
     fm_lock_release "$SPAWN_TASK_LOCK" || true
   fi
   if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
-    if ! spawn_fresh_commit_rollback; then
+    if [ "$SPAWN_TREEHOUSE_CARRIED_OVER" = 1 ]; then
+      SPAWN_FRESH_COMMIT_PENDING=0
+    elif ! spawn_fresh_commit_rollback; then
       status=1
     fi
   fi
@@ -1336,21 +1338,24 @@ spawn_abort_cleanup() {
       echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
     fi
   fi
-  if [ "$SPAWN_TREEHOUSE_LEASED" = 1 ] && [ -n "${WT:-}" ] &&
-    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
-    if [ "$SPAWN_TREEHOUSE_RETURN_SAFE" != 1 ]; then
-      echo "warning: leaving preallocated Treehouse worktree $WT leased because the Herdr worktree-open result was ambiguous; its projection journal remains quarantined" >&2
-      status=1
-    elif [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
-      if (cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null 2>&1); then
-        SPAWN_TREEHOUSE_LEASED=0
+  if [ "$SPAWN_TREEHOUSE_LEASED" = 1 ] && [ -n "${WT:-}" ]; then
+    if [ "$SPAWN_TREEHOUSE_CARRIED_OVER" = 1 ]; then
+      echo "warning: retaining carried durable Treehouse worktree $WT for $ID; its task record at $STATE/$ID.meta names it, so re-run the spawn or run teardown to return the lease" >&2
+    elif [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+      if [ "$SPAWN_TREEHOUSE_RETURN_SAFE" != 1 ]; then
+        echo "warning: leaving preallocated Treehouse worktree $WT leased because the Herdr worktree-open result was ambiguous; its projection journal remains quarantined" >&2
+        status=1
+      elif [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+        if (cd "$PROJ_ABS" && treehouse return --force "$WT" >/dev/null 2>&1); then
+          SPAWN_TREEHOUSE_LEASED=0
+        else
+          echo "warning: could not return preallocated Treehouse worktree $WT after aborted Herdr projection; its durable lease is retained" >&2
+          status=1
+        fi
       else
-        echo "warning: could not return preallocated Treehouse worktree $WT after aborted Herdr projection; its durable lease is retained" >&2
+        echo "warning: leaving preallocated Treehouse worktree $WT leased after aborted Herdr projection because its project lock is no longer held" >&2
         status=1
       fi
-    else
-      echo "warning: leaving preallocated Treehouse worktree $WT leased after aborted Herdr projection because its project lock is no longer held" >&2
-      status=1
     fi
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then

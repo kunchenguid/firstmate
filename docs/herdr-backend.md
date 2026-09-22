@@ -392,6 +392,7 @@ A version 2 proof is pinned to the journal's own nested workspace id, and a vers
 This prevents adopting a legacy top-level projection whose checkout was only a process lease.
 A carry additionally requires the durable slot-owner claim to still name the recovering task, so a checkout Treehouse has since handed to another task falls back flat and is never adopted or returned.
 The carried checkout is never freshened, reset, or reacquired, metadata keeps naming it, and teardown returns that same lease.
+An abort after a carried recovery republished the task record keeps both that record and the lease instead of rolling the record back or force-returning the checkout, so the parked work stays recoverable by a rerun or teardown.
 When a recorded path cannot be resolved, recovery refuses only after positively identifying that same-project journal's own workspace as a still-open nested child; a legacy top-level projection keeps its flat fallback.
 When a resolved same-project checkout cannot be proven exactly, recovery refuses with a clear diagnostic and leaves the durable lease and task record intact rather than allowing the generic path to allocate a second checkout.
 A proven same-project checkout whose exact projection cannot be reclaimed is still reused through the flat layout rather than reacquired.
