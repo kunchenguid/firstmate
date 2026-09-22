@@ -20,8 +20,8 @@
 # every action it took under them (each outcome-store row from the window whose
 # summary opens with the "per your away instructions:" marker the branch prompt
 # in bin/fm-branch-prompt.sh requires), then what is waiting on the captain,
-# then what was tried and failed or could not be fixed, then the landed work
-# whose worker is still up (a live task record whose recorded PR carries the
+# then what was tried and failed or could not be fixed, then landed work whose
+# task record is still live (the recorded PR carries the
 # merge-notification marker bin/fm-pr-lib.sh owns, read from durable records
 # only, never the forge - finished work that owes an ordinary teardown, which
 # is fleet work and so waits for the gate rather than holding it), then what
@@ -523,9 +523,9 @@ EOF
   done
   [ "$count" -gt 0 ] || printf '  (nothing)\n'
 
-  # 5. landed, cleanup due: finished work whose worker is still up. Listing it
-  # here is what keeps a landed worker from sitting past the return; the
-  # cleanup itself is ordinary fleet work and waits for the gate.
+  # 5. landed, cleanup due: finished work whose task record is still live.
+  # Listing it keeps a landed task that remains live past the return from being
+  # overlooked. The cleanup itself is ordinary fleet work and waits for the gate.
   printf 'Landed, cleanup due:\n'
   count=0
   while IFS="$(printf '\t')" read -r task url; do
