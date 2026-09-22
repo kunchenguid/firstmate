@@ -44,6 +44,12 @@ worktree=<absolute Orca worktree path>
 `terminal=` and `orca_worktree_id=` are the backend authority used by operation and cleanup paths.
 Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the worktree path, and cleanup validation requires both halves rather than treating the value as a simple name.
 
+Because a hand restart issues a fresh terminal handle while `window=` (the Orca worktree name) stays stable, a recorded `terminal=` can go stale and refuse every send.
+The submit and send-key cores therefore re-resolve `window=` at send time through Orca's native `orca terminal list --worktree name:<window>` selector and deliver to the live handle Orca reports now.
+Resolution is read-only against `state/<id>.meta` - producer-owned fields are never written - and runs only after Orca rejects a send with an endpoint-identity error, so a healthy terminal keeps its exact recorded command sequence and a rejected write can never duplicate text.
+Whenever the window cannot be resolved, the recorded-handle failure surfaces unchanged: the steer stays durably recorded with the doorbell refusal, and the watcher's re-ring ladder owns delivery from there.
+[`bin/backends/orca.sh`](../bin/backends/orca.sh) owns the exact mechanics.
+
 ## Current lifecycle and safety
 
 Spawn registers the repository, creates an independent worktree, reuses only the verified `result.terminal.handle` returned by Orca or creates a terminal explicitly, installs harness hooks, records metadata, and launches the selected harness.

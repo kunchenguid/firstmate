@@ -1903,6 +1903,15 @@ result.runtime.state=ready
 `orca worktree create` returned `result.worktree.id` and `result.worktree.path`.
 Speculative bare ids and nested terminal fields were deliberately rejected.
 
+Send-time window resolution was verified on 2026-09-22 against the Orca 1.4.206 runtime with a window that had been restarted by hand: the recorded `term_*` handle read back `result.terminal.status=exited`, and every `orca terminal send` on it failed with `error.code=terminal_not_writable`, while the same worktree's live terminal was a different `term_*` handle.
+
+```sh
+orca terminal list --worktree name:<window> --json
+```
+
+Returned `result.terminals[0]` with the fresh handle, `writable=true`, `connected=true` for the recorded `window=`; the bare name without the `name:` prefix was refused with `selector_not_found`, and `path:<absolute worktree path>` resolved the same pane.
+The accepted selector forms Orca reports are `id:<repo-id>::<absolute-path>` and `path:<absolute path>`; `name:<worktree name>` is accepted live.
+
 ```sh
 tests/fm-backend-orca.test.sh
 tests/fm-backend.test.sh
