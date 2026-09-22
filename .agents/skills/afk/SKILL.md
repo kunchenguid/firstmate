@@ -2,7 +2,7 @@
 name: afk
 description: >-
   Enter the away posture when the captain invokes /afk, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It records the captain's away words verbatim as the whole mandate, reads them back in plain sentences, writes the durable away-posture record after their go, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (on Pi the supervision branch acts on the words by its own judgment and takes every safe actionable wake with main parked; the daemon still delivers batched digests on the other harnesses for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes.
+  It records the captain's away words verbatim as the whole mandate, reads them back in plain sentences, writes the durable away-posture record after their go, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (on Pi the supervision branch acts on the words by its own judgment and takes every safe actionable wake with main parked; the daemon still delivers batched digests on the other harnesses for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes, except that `/quiet off` with an existing Pi record requires confirmation first.
 user-invocable: true
 metadata:
   internal: true
@@ -60,7 +60,9 @@ Hold-for-return is the default and the only reach profile this release records: 
 
 ## How to exit: the return
 
-No `/back` is needed. The first genuine message is the return signal:
+No `/back` is needed. The first genuine message is the return signal.
+On `pi` and `pi-signed`, `/quiet off` with a live `state/.afk-contract` is the one exception: follow `/quiet`'s ask-once rule.
+Treat the next captain reply only as that confirmation decision; archive on explicit confirmation, and preserve the record on a decline or any other reply instead of applying the ordinary unmarked-return rule.
 
 - A message **without** the current operational prefix or a legacy bare marker, and **not** starting with `/afk` -> the captain is back.
   Run `bin/fm-afk-return.sh` before acting on the message that brought the captain back.
@@ -74,7 +76,7 @@ No `/back` is needed. The first genuine message is the return signal:
 - A message **with** the current operational prefix (`FM_OPERATIONAL_PREFIX`, U+2063 INVISIBLE SEPARATOR followed by `FIRSTMATE_OP: `), or a legacy bare `FM_INJECT_MARK` daemon escalation -> stay away and process it.
 - Re-invoking `/afk` while already away -> stay away (refresh); this does **not** trigger an exit.
 
-Bias ambiguous cases toward exit: a present captain beats token savings, and a false exit is self-correcting (the captain re-runs `/afk`).
+Except for the Pi `/quiet off` confirmation flow above, bias ambiguous cases toward exit: a present captain beats token savings, and a false exit is self-correcting (the captain re-runs `/afk`).
 When the captain wants this same token-saving supervision while staying present and chatting - ordinary messages should NOT exit it - that is `/quiet` (kunchenguid/firstmate#2356), not `/afk`.
 
 ## Orthogonal to approval authority

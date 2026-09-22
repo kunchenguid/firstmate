@@ -2,7 +2,9 @@
 name: quiet
 description: >-
   Enter quiet supervision mode when the captain invokes /quiet or asks for quiet mode, quiet-while-present, or fewer routine wake turns while they stay in the session.
-  It sets the same durable away/quiet-mode flag as /afk, in `quiet` mode, so the sub-supervisor daemon self-handles routine wakes and escalates captain-relevant events exactly as away mode does, but ordinary captain chat does NOT exit it - only an explicit `/quiet off` does.
+  Outside `pi` and `pi-signed` it reuses the confirmed afk posture.
+  Ordinary chat does not end that posture.
+  Only the exact `/quiet off` command does.
 user-invocable: true
 metadata:
   internal: true
@@ -10,69 +12,50 @@ metadata:
 
 # quiet
 
-Quiet supervision mode (kunchenguid/firstmate#2356): the same token-saving
-daemon tradeoff as `/afk`, made explicit for a captain who is staying,
-watching the session, and does not want to exit the mode just by chatting.
+Quiet supervision mode (kunchenguid/firstmate#2356) is the afk presentation policy for a captain who stays in the session and does not want ordinary chat to end the mode.
 
 This skill is a thin wrapper.
-Every mechanism below - the daemon, its injection, its busy/composer guards,
-its classification policy, its reliability properties - is owned once by the
-`afk` skill and is IDENTICAL in quiet mode; nothing here restates it.
-The only things quiet mode changes are which mode the flag declares and what
-exits it.
+The `afk` skill owns the non-Pi posture record, daemon lifecycle, guards, classification policy, and reliability properties.
+Quiet mode changes only the non-Pi flag mode and the exit signal.
 
-## What it does
+## Entering quiet mode
 
-1. **Enter the lifecycle through `bin/fm-afk-launch.sh`, exactly as `/afk`
-   does, with `FM_AFK_MODE=quiet` set first.**
-   Follow the `afk` skill's "What it does" steps 1-3 verbatim (terminal-
-   backed vs harness-native entry, daemon-already-running refresh, never
-   arming a separate `fm-watch.sh`) with one addition: export
-   `FM_AFK_MODE=quiet` in the shell that invokes `bin/fm-afk-launch.sh start`
-   (or `start-native`), so `state/.afk`'s first line reads `quiet` instead of
-   `away`.
-   Leaving `FM_AFK_MODE` unset on a bare refresh of an already-running quiet
-   daemon is also correct and does nothing wrong: `fm_afk_flag_write`
-   preserves the on-disk mode when no explicit mode is given, so a plain
-   `/afk`-shaped refresh call never resets quiet back to away underneath the
-   captain.
-
-2. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, quiet mode is
-   active; I will batch routine updates and surface only decisions, failures,
-   credentials, or review-ready work - ordinary chat will not exit this, say
-   `/quiet off` when you want normal per-wake responses back."
+1. Determine the current harness before creating an afk record.
+2. On `pi` and `pi-signed`, make no file or lifecycle change and continue to the acknowledgement.
+   The attended supervision branch already keeps routine wakes out of this conversation.
+   Do not run `propose`, `confirm`, `start`, or `start-native`; `state/.afk-contract` would switch Pi to the away posture and relocate branch authority.
+3. On every other harness, follow steps 1 through 3 in [`afk` entry](../afk/SKILL.md#entering-afk-words) to create the confirmed `state/.afk-contract` before any daemon command.
+   Plain `/quiet` carries no away mandate, so use the no-words entry that `afk` permits and run `propose` and `confirm` back to back.
+4. Follow the matching non-Pi harness branch in step 4 of [`afk` entry](../afk/SKILL.md#entering-afk-words).
+   Set `FM_AFK_MODE=quiet` in the shell that invokes `bin/fm-afk-launch.sh start` or `start-native`, so `state/.afk` records `quiet`.
+   Leave `FM_AFK_MODE` unset only when refreshing an already-running quiet daemon; `fm_afk_flag_write` then preserves the recorded mode.
+   Do not arm a separate `fm-watch.sh`.
+5. Acknowledge in `AGENTS.md` section 9 language: "Captain, quiet mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work - ordinary chat will not exit this, say `/quiet off` when you want normal per-wake responses back."
 
 ## How to exit quiet mode
 
-Unlike `/afk`, ordinary chat is never the exit signal - that is the entire
-point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
+Unlike `/afk`, ordinary chat is never the exit signal.
+`AGENTS.md` section 8 owns this always-loaded distinction.
 
-- Only an explicit `/quiet off` (or the captain plainly asking to leave quiet
-  mode / resume normal supervision) exits it: run `bin/fm-afk-return.sh`
-  unchanged, exactly the procedure `/afk`'s "How to exit afk" section
-  documents for its own return path (correct-ordered daemon shutdown,
-  durable wake presentation and acknowledgement, escalation/wedge evidence,
-  and the return-catch-up gate).
-  That script does not read or care about the flag's mode, so it needs no
-  quiet-specific variant.
-- A marked daemon escalation, or a message beginning `/quiet` while already
-  in quiet mode (refresh, not exit) -> stay in quiet mode and process it, the
-  same two carve-outs `/afk` documents for away mode.
-- Every other message while in quiet mode is simply answered as ordinary
-  work; the flag and daemon are left untouched.
+- Only the exact `/quiet off` command exits quiet mode.
+  On `pi` and `pi-signed`, first check for `state/.afk-contract`.
+  If the record exists, its origin is ambiguous: it may be a legacy quiet record or a genuine away posture.
+  Ask once whether the captain wants to end and archive the current away posture, and treat the captain's next reply only as the answer to that question.
+  Follow [`afk` return](../afk/SKILL.md#how-to-exit-the-return) only after explicit confirmation.
+  A decline or any other reply preserves the record and its authority; do not process that reply as an ordinary afk return or acknowledge restored supervision.
+  If no record exists, acknowledge restored normal supervision without running an afk command or changing a file.
+  On every other harness, run `bin/fm-afk-return.sh` through the same procedure; it stops the daemon before archiving the confirmed posture record.
+- A marked daemon escalation stays in quiet mode and processes the message.
+- Any message beginning with `/quiet` other than the exact `/quiet off` command refreshes quiet mode.
+- Every other message, including a plain request to resume normal supervision, receives an ordinary answer while quiet mode remains active.
 
 ## Orthogonal to approval authority
 
-Identical to `/afk`: quiet mode changes how aggressively firstmate surfaces
-things, never who approves what.
-A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and
-a needs-decision finding keeps the `ask-user-authority` policy.
+As in `/afk`, quiet mode changes which events firstmate surfaces and never changes approval authority.
+A PR ready for merge keeps the merge authority from `AGENTS.md` section 7, and a needs-decision finding keeps the `ask-user-authority` policy.
 
 ## Must not hide a decision or a failure
 
-Per the issue's own author triage: quiet mode is presentation only.
-Progress, retries, and internal mechanics stay below deck exactly as in away
-mode, but review-ready work, findings, decisions, failures, and credentials
-escalate every time, through the same classification policy `/afk` owns.
-Quiet mode is opt-in and never the unconsented default; only an explicit
-`/quiet` invocation enters it.
+The issue's author triage defines quiet mode as presentation only.
+Progress, retries, and internal mechanics do not surface, but review-ready work, findings, decisions, failures, and credentials always escalate through the classification policy that `/afk` owns.
+Quiet mode is opt-in and never the default; only an explicit request for quiet mode enters it.
