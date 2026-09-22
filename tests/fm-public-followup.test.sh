@@ -2280,6 +2280,7 @@ test_x_request_teardown_warns_when_final_unposted() {
     "project=$home/projects/sample" \
     "kind=ship" \
     "mode=local-only" \
+    "base_branch=main" \
     "spawn_gen=public-followup-legacy-link" \
     "x_request=req-legacy-final"
   rc=0
