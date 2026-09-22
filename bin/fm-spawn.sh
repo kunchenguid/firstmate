@@ -3955,7 +3955,29 @@ claude*)
   if [ "$KIND" = secondmate ]; then
     spawn_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
   else
-    spawn_trust_args=("$WT" "$PROJ_ABS")
+    # $PROJ_ABS is the project registered for THIS spawn's own home, but a
+    # pooled worktree is not necessarily linked to it: a Treehouse pool is
+    # keyed by the project's resolved origin and shared by every local clone
+    # of that origin (bin/fm-wake-lib.sh's fm_treehouse_project_lock_path:
+    # "separate clones of one origin share a single lock"), so an existing
+    # pool can already be anchored to a DIFFERENT home's clone of the same
+    # origin - whichever one Treehouse handed the pool's worktrees out from
+    # first. Passing $PROJ_ABS in that case asserts a primary checkout $WT is
+    # not actually linked to, and bin/fm-claude-trust.sh's structural scope
+    # test correctly refuses it. $WT's own git common dir names its REAL
+    # primary checkout - the common dir's parent, in git's standard non-bare
+    # layout, the same derivation bin/fm-claude-trust.sh itself falls back to
+    # for a linked <project> argument - so resolve it from $WT directly
+    # rather than trusting the home's own registration. This is a no-op
+    # whenever the pool already is anchored to $PROJ_ABS, which stays the
+    # fallback whenever $WT's common dir cannot be resolved at all.
+    trust_project=$PROJ_ABS
+    wt_pool_common=$(git -C "$WT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || wt_pool_common=
+    if [ -n "$wt_pool_common" ]; then
+      wt_pool_owner=$(cd -P -- "$(dirname -- "$wt_pool_common")" 2>/dev/null && pwd -P) || wt_pool_owner=
+      [ -z "$wt_pool_owner" ] || trust_project=$wt_pool_owner
+    fi
+    spawn_trust_args=("$WT" "$trust_project")
   fi
   if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2

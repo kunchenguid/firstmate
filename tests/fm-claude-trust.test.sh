@@ -657,6 +657,50 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
   pass "fm-spawn.sh: a claude spawn pre-trusts its worktree and launches with the brief"
 }
 
+# A Treehouse pool is keyed by a project's resolved origin, not by which local
+# clone asked for it (bin/fm-wake-lib.sh's fm_treehouse_project_lock_path:
+# "separate clones of one origin share a single lock"), and Treehouse itself
+# hands out worktrees from whichever clone's pool already exists on disk. So a
+# second home that clones the same origin into its OWN projects/<name>
+# directory can still be handed a pool worktree linked to a DIFFERENT home's
+# clone - the one that happened to create the shared pool first. Reproducing
+# that needs no real Treehouse pool: a worktree linked to a sibling clone of
+# the spawning project's own origin is the same structural shape. Before the
+# fix, fm-spawn.sh asserted its OWN registered project as the worktree's
+# primary checkout regardless, and bin/fm-claude-trust.sh's structural scope
+# test correctly refused that false assertion.
+test_claude_spawn_trusts_a_worktree_pooled_against_a_sibling_clone() {
+  local case_dir home other_clone proj wt config fakebin launch_log out
+  case_dir="$TMP_ROOT/spawn-pooled-sibling"
+  home="$case_dir/home"
+  other_clone="$case_dir/other-clone"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  config="$case_dir/claude-config"
+  launch_log="$case_dir/launch.log"
+  mkdir -p "$config"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+  fm_test_spawn_home "$home" claude
+  # other_clone is a stand-in for a DIFFERENT home's own clone of the same
+  # origin; the pool worktree links to it, exactly as Treehouse's shared,
+  # origin-keyed pool would if that other home created the pool first.
+  fm_git_worktree "$other_clone" "$wt" wt-pooled-sibling
+  git clone --quiet "$other_clone.origin.git" "$proj"
+  fm_test_spawn_brief "$home" trustpooled
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$config" FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" trustpooled "$proj" claude \
+    --mode no-mistakes --yolo off)
+  expect_code 0 $? "a claude spawn into a worktree pooled against a sibling clone of its project's own origin must succeed: $out"
+  assert_trusted "$config/.claude.json" "$wt" \
+    "the claude spawn did not pre-register trust for the pooled worktree"
+  assert_trusted "$config/.claude.json" "$other_clone" \
+    "the claude spawn did not pre-register trust for the worktree's actual primary checkout"
+  assert_not_trusted "$config/.claude.json" "$proj" \
+    "the claude spawn wrongly trusted its own registered project clone instead of the worktree's real primary checkout"
+  assert_present "$launch_log" "the claude spawn sent no launch command"
+  pass "fm-spawn.sh: a claude spawn trusts a worktree pooled against a sibling clone of its project's own origin"
+}
+
 # A secondmate home is the second directory a claude launch starts in, and it is
 # as unseen by Claude as a fresh worktree. The standalone-clone shape is the one
 # that wedged in production: the trust step was skipped for every secondmate, so
@@ -838,6 +882,7 @@ test_corrupt_store_fails_closed
 test_missing_node_is_refused
 test_scope_refusal_stays_fail_closed_without_node
 test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief
+test_claude_spawn_trusts_a_worktree_pooled_against_a_sibling_clone
 test_refused_spawn_leaves_no_task_state
 test_secondmate_standalone_clone_home_is_trusted
 test_secondmate_leased_worktree_home_is_trusted

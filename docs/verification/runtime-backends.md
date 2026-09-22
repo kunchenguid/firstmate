@@ -508,6 +508,49 @@ The lab home was deleted and the test entry was removed from the store and verif
 That automated spawn case runs against a fake claude, so it asserts the store entry and the launch command and nothing more; the live arms above are what establish that the entry actually suppresses the dialog.
 The composer-classification record below observes the same gate from the other side, where an untrusted worktree left Claude, Grok, and Muse unverified because the guard reads a first-launch trust dialog as an unreadable composer.
 
+### Pooled worktree shared by another home's clone
+
+Verified 2026-09-20 on this machine's live fleet (read-only inspection, no project or secondmate-home file touched) plus the automated regression in `tests/fm-claude-trust.test.sh`.
+A secondmate home reported `refusing to pre-register Claude trust: '<pool-worktree>' is not a worktree of project '<home>/projects/maker'` on every claude spawn attempt, after `treehouse get` had already handed it an isolated worktree.
+Live inspection of two firstmate homes that both clone the same `maker` origin explained why, using only `git rev-parse`:
+
+```sh
+git -C <home-1>/projects/maker remote get-url origin
+git -C <home-2>/projects/maker remote get-url origin
+git -C ~/.treehouse/maker-<hash>/1/maker rev-parse --git-common-dir
+```
+
+```text
+https://github.com/<org>/maker.git      # home-1's own clone
+https://github.com/<org>/maker.git      # home-2's own clone: same origin, different local clone
+<home-1>/projects/maker/.git            # every pool worktree's common dir, always home-1's clone
+```
+
+`bin/fm-wake-lib.sh`'s `fm_treehouse_project_lock_path` already documents that "separate clones of one origin share a single lock".
+The live evidence shows Treehouse's pool sharing goes further than the lock alone - the pool itself is handed out from whichever clone created it first, regardless of which home's own `projects/maker` asks next.
+`bin/fm-spawn.sh` asserted its own home's clone as the worktree's primary checkout regardless, so `bin/fm-claude-trust.sh`'s structural scope test correctly refused the false assertion.
+The test itself needed no change.
+
+The fault was reproduced as a portable regression before any fix, with a worktree linked to a sibling clone standing in for the cross-home pool shape (no real Treehouse pool is needed to exercise the same structural mismatch):
+
+```sh
+bin/fm-test-run.sh tests/fm-claude-trust.test.sh
+```
+
+Before the fix:
+
+```text
+not ok - a claude spawn into a worktree pooled against a sibling clone of its project's own origin must succeed: ...
+error: refusing to pre-register Claude trust: '<tmp>/wt' is not a worktree of project '<tmp>/project'
+error: could not pre-register Claude workspace trust for <tmp>/wt; refusing to launch a claude worker that would wedge on the trust dialog
+```
+
+After `bin/fm-spawn.sh` was changed to derive the claude-trust `<project>` argument from the acquired worktree's own git common dir (falling back to the registered project only when that cannot be resolved), the same run and the full existing suite passed, including every prior worktree- and secondmate-home-mode case in `tests/fm-claude-trust.test.sh`:
+
+```text
+ok - fm-spawn.sh: a claude spawn trusts a worktree pooled against a sibling clone of its project's own origin
+```
+
 ## Codex hook trust
 
 Verified 2026-09-16 on codex-cli 0.151.0, macOS arm64, in a fresh linked worktree of this repository.
