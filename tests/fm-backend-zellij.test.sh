@@ -747,6 +747,37 @@ test_current_path_ignores_tilde_prefixed_banner_lines() {
   pass "fm_backend_zellij_current_path: never picks up a ~-prefixed banner line as the answer"
 }
 
+test_target_state_requires_tab_absence() {
+  local dir fb out
+  dir="$TMP_ROOT/target-state-tab-present"; mkdir -p "$dir/responses"
+  printf '[]\n' > "$dir/responses/1.out"
+  zellij_tab_response "$dir" 2 3 other
+  fb=$(make_zellij_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_target_state firstmate:7 3 fm-zghost' "$ROOT")
+  [ "$out" = present ] || fail "target_state treated a surviving recorded tab as absent: '$out'"
+
+  dir="$TMP_ROOT/target-state-label-present"; mkdir -p "$dir/responses"
+  printf '[]\n' > "$dir/responses/1.out"
+  zellij_tab_response "$dir" 2 4 fm-zghost
+  fb=$(make_zellij_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_target_state firstmate:7 3 fm-zghost' "$ROOT")
+  [ "$out" = present ] || fail "target_state treated a replacement task-labeled tab as absent: '$out'"
+
+  dir="$TMP_ROOT/target-state-tab-absent"; mkdir -p "$dir/responses"
+  printf '[]\n' > "$dir/responses/1.out"
+  printf '[]\n' > "$dir/responses/2.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$(PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_target_state firstmate:7 3 fm-zghost' "$ROOT")
+  [ "$out" = absent ] || fail "target_state did not prove pane and tab absence: '$out'"
+  pass "fm_backend_zellij_target_state proves both recorded pane and tab absence"
+}
+
 test_kill_resolves_tab_and_closes_by_id() {
   local dir fb
   dir="$TMP_ROOT/kill"; mkdir -p "$dir/responses"
@@ -762,6 +793,22 @@ test_kill_resolves_tab_and_closes_by_id() {
   assert_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''3' \
     "kill did not resolve the owning tab id and call close-tab-by-id (verified: close-pane alone leaves an empty ghost tab)"
   pass "fm_backend_zellij_kill: resolves the owning tab id fresh and calls close-tab-by-id (never a bare close-pane)"
+}
+
+test_kill_propagates_close_tab_failure() {
+  local dir fb status=0
+  dir="$TMP_ROOT/kill-close-failure"; mkdir -p "$dir/responses"
+  zellij_pane_response "$dir" 1 7 3
+  printf '1\n' > "$dir/responses/2.exit"
+  fb=$(make_zellij_fakebin "$dir")
+  PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST=firstmate \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_kill firstmate:7' "$ROOT" \
+    || status=$?
+  expect_code 1 "$status" "kill must propagate a close-tab-by-id failure"
+  assert_contains "$(cat "$dir/log")" $'\x1f''close-tab-by-id'$'\x1f''3' \
+    "kill did not attempt the recorded tab close"
+  pass "fm_backend_zellij_kill propagates close-tab-by-id failures"
 }
 
 test_kill_falls_back_to_close_pane_when_tab_lookup_empty() {
@@ -850,6 +897,7 @@ test_teardown_passes_recorded_tab_id_to_zellij_kill() {
     "decision_keys="
   printf '[]\n' > "$dir/responses/1.out"
   printf '[{"tab_id":3,"name":"fm-zghost"}]\n' > "$dir/responses/2.out"
+  printf '[]\n' > "$dir/responses/4.out"
   fb=$(make_zellij_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
     FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" FM_ZELLIJ_SESSION_LIST="firstmate" \
@@ -1333,7 +1381,9 @@ test_expected_label_allows_matching_task_tab
 test_expected_label_rejects_reused_pane_id
 test_current_path_probes_with_marker_and_ignores_prompt_paths
 test_current_path_ignores_tilde_prefixed_banner_lines
+test_target_state_requires_tab_absence
 test_kill_resolves_tab_and_closes_by_id
+test_kill_propagates_close_tab_failure
 test_kill_falls_back_to_close_pane_when_tab_lookup_empty
 test_kill_closes_recorded_tab_when_pane_already_gone
 test_kill_skips_recorded_tab_when_label_mismatches

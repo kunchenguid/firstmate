@@ -108,6 +108,8 @@ init_changed_fixture_repo() {
     fm-backend-herdr-smoke.test.sh \
     fm-secondmate-safety.test.sh \
     fm-session-start.test.sh \
+    fm-sessionstart-nudge.test.sh \
+    fm-host-root-mode.test.sh \
     fm-afk-pi-herdr-return-e2e.test.sh \
     fm-backend.test.sh \
     fm-pr-merge.test.sh \
@@ -127,6 +129,8 @@ init_changed_fixture_repo() {
   : >"$repo/tests/lib.sh"
   : >"$repo/tests/fm-backend-herdr-eventwait.test.py"
   : >"$repo/bin/fm-supervisor-target-lib.sh"
+  : >"$repo/bin/fm-spawn.sh"
+  : >"$repo/bin/fm-host-root-lib.sh"
   : >"$repo/bin/fm-control-lib.sh"
   : >"$repo/bin/fm-timeout-lib.sh"
   : >"$repo/bin/fm-procevent-quota.sh"
@@ -159,13 +163,22 @@ init_changed_fixture_repo() {
   mkdir -p \
     "$repo/.agents/skills/example" \
     "$repo/.agents/skills/harness-adapters/references/common" \
-    "$repo/.claude" "$repo/.pi/extensions" "$repo/docs" "$repo/src"
+    "$repo/.claude" "$repo/.pi/extensions" "$repo/.opencode/plugins" \
+    "$repo/docs" "$repo/src"
   : >"$repo/.agents/skills/example/SKILL.md"
   : >"$repo/.agents/skills/harness-adapters/SKILL.md"
   : >"$repo/.agents/skills/harness-adapters/references/common/dispatch.md"
   : >"$repo/.claude/settings.json"
   : >"$repo/.pi/extensions/fm-primary-pi-watch.ts"
   : >"$repo/.pi/extensions/fm-primary-turnend-guard.ts"
+  for script in \
+    fm-primary-cd-check.js \
+    fm-primary-pretool-check.js \
+    fm-primary-sessionstart-nudge.js \
+    fm-primary-turnend-guard.js \
+    fm-primary-watch-arm.js; do
+    : >"$repo/.opencode/plugins/$script"
+  done
   mkdir -p "$repo/.pi/extensions/lib"
   : >"$repo/.pi/extensions/lib/fm-operational-input.ts"
   : >"$repo/docs/fm-test-isolation-proof.md"
@@ -306,7 +319,7 @@ test_shell_line_ending_policy_selects_runner_contract() {
 }
 
 test_changed_dependency_selection_and_unmapped_failure() {
-  local tmp repo listed rc
+  local tmp repo listed rc script
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-changed.XXXXXX")
   repo="$tmp/repo"
   init_changed_fixture_repo "$repo"
@@ -353,6 +366,25 @@ test_changed_dependency_selection_and_unmapped_failure() {
     "turn-end extension selects native-Windows shell coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  printf '\n' >>"$repo/bin/fm-spawn.sh"
+  printf '\n' >>"$repo/bin/fm-host-root-lib.sh"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/fm-secondmate-safety.test.sh" \
+    "spawn source selects SecondMate recovery coverage"
+  assert_contains "$listed" "tests/fm-host-root-mode.test.sh" \
+    "host-root authority source selects host-root behavior coverage"
+  git -C "$repo" add bin/fm-spawn.sh bin/fm-host-root-lib.sh
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm lifecycle-source-change
+
+  for script in "$repo"/.opencode/plugins/fm-primary-*.js; do
+    printf '\n' >>"$script"
+    listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+    assert_contains "$listed" "tests/fm-sessionstart-nudge.test.sh" \
+      "$(basename "$script") selects shared target-worker activation coverage"
+    git -C "$repo" add "$script"
+    git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm "$(basename "$script")-change"
+  done
 
   printf '\n' >>"$repo/.pi/extensions/lib/fm-operational-input.ts"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)

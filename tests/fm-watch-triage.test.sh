@@ -300,6 +300,8 @@ test_stale_is_terminal_classifier() {
   fm_write_meta "$state/herdr-term.meta" "window=default:w1:p2" "backend=herdr"
   printf 'done: ready in branch fm/herdr\n' > "$state/herdr-term.status"
   stale_is_terminal "default:w1:p2" "$state" || fail "terminal herdr stale status not resolved through metadata"
+  printf 'done: ready in branch fm/prefixed\n' > "$state/fm-prefixed.status"
+  stale_is_terminal "fm-prefixed" "$state" "fm-prefixed" || fail "terminal stale status lost an explicit fm-prefixed task id"
   printf 'working: compiling\n' > "$state/nonterm.status"
   stale_is_terminal "sess:fm-nonterm" "$state" && fail "non-terminal stale classified terminal"
   printf 'paused: waiting on upstream PR #123 to land\nOnce it is merged I will rebase and continue.\n' > "$state/prose-pause.status"
@@ -5707,6 +5709,42 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+test_host_tmux_socket_collisions_stay_task_scoped() {
+  local dir state fakebin log out
+  dir=$(make_case host-tmux-socket-collision)
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  log="$dir/tmux.log"
+  fm_write_meta "$state/one.meta" \
+    'window=@1' 'host_root=/host/one' 'tmux_socket_path=/one.sock' 'tmux_window_marker=one'
+  fm_write_meta "$state/two.meta" \
+    'window=@1' 'host_root=/host/two' 'tmux_socket_path=/two.sock' 'tmux_window_marker=two'
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+socket=ambient
+if [ "${1:-}" = -S ]; then
+  socket=$2
+  shift 2
+fi
+printf '%s\n' "$socket" >> "$FM_SOCKET_LOG"
+[ "${1:-}" = capture-pane ] && printf '%s\n' "$socket"
+SH
+  chmod +x "$fakebin/tmux"
+  out=$(PATH="$fakebin:$PATH" FM_SOCKET_LOG="$log" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1/bin/fm-watch.sh"
+    while IFS=$(printf "\t") read -r ref task window; do
+      pane=$( ( window_bind_context "$window" "$task" \
+        && fm_backend_capture "$(window_backend "$window" "$task")" "$window" 1 ) )
+      printf "%s|%s\n" "$ref" "$pane"
+      window_is_busy "$window" "$pane" "$task" || true
+    done < <(recorded_windows)
+  ' _ "$ROOT")
+  assert_contains "$out" 'one|/one.sock' "watcher did not bind the first colliding task to its socket"
+  assert_contains "$out" 'two|/two.sock' "watcher did not bind the second colliding task to its socket"
+  assert_no_grep '^ambient$' "$log" "watcher probed ambient tmux for colliding host tasks"
+  pass "watcher keys colliding host tmux windows by task and creating socket"
+}
+
 # --- the away-posture record: captain-held items are never rechecked ----------
 # While state/.afk-contract exists (bin/fm-afk-contract.sh) nobody is there to
 # answer a captain-held item and the return brief lists it, so every stale path
@@ -6064,6 +6102,7 @@ test_beacon_stays_fresh_while_absorbing
 test_afk_signal_records_heartbeat_endpoint
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_host_tmux_socket_collisions_stay_task_scoped
 test_captain_held_never_rechecked_while_away_record_exists
 test_live_captain_held_first_sight_silenced_by_away_record
 test_backlog_hold_never_rechecked_while_away_record_exists

@@ -17,17 +17,49 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-busy-adapter-wiring)
 
+# Host-root aware spawn-world tmux stub: a host-root spawn resolves the creating
+# tmux socket (display-message -p '#{socket_path}') and captures the new window's
+# stable id, so the stub answers both and swallows the -S fm_tmux_cli then
+# prefixes. Extra args are additional exit-0 tools (gemini, ...).
+make_spawn_fakebin() {  # <dir> [extra-exit0-tool...]
+  local dir=$1 fakebin
+  shift
+  fakebin=$(fm_fakebin "$dir")
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" != -S ] || shift 2
+case "$*" in
+  *"#{socket_path}"*) printf '/tmp/fm-busy-adapter-wiring.tmux\n'; exit 0 ;;
+  *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+esac
+case "${1:-}" in
+  display-message) printf 'firstmate\n'; exit 0 ;;
+  list-windows) exit 0 ;;
+  new-window) printf '@1\n'; exit 0 ;;
+  has-session|new-session|set-window-option|kill-window|send-keys) exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  fm_fake_exit0 "$fakebin" treehouse "$@"
+  printf '%s\n' "$fakebin"
+}
+
 make_spawn_case() {  # <name> <harness> <id>
-  local name=$1 harness=$2 id=$3 case_dir home proj wt fakebin
+  local name=$1 harness=$2 id=$3 case_dir home host proj wt fakebin
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
+  host="$case_dir/host"
   proj="$case_dir/project"
   wt="$case_dir/wt"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
   fm_test_spawn_home "$home" "$harness"
+  mkdir -p "$host"
+  touch "$host/AGENTS.md"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   fm_test_spawn_brief "$home" "$id"
-  printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
+  printf '%s\n' "$case_dir|$home|$host|$proj|$wt|$fakebin"
 }
 
 run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
@@ -40,9 +72,16 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@" --mode no-mistakes --yolo off
 }
 
+run_host_spawn() {  # <host> <home> <wt> <fakebin> <spawn-args...>
+  local host=$1 home=$2 wt=$3 fakebin=$4 id=$5
+  shift 4
+  printf '%s\n' '<!-- firstmate-execution-mode: host-root -->' >> "$home/data/$id/brief.md"
+  (cd "$host" && FM_HOST_ROOT="$host" run_spawn "$home" "$wt" "$fakebin" "$@")
+}
+
 read_case_record() {
   # shellcheck disable=SC2034 # CASE_DIR is part of the shared record shape
-  IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
+  IFS='|' read -r CASE_DIR HOME_DIR HOST_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
 $1
 EOF
 }
@@ -69,7 +108,7 @@ switch (process.env.MODE) {
     await handlers["agent_settled"]({}, ctx);
     await handlers["agent_start"]({}, ctx);
     break;
-  case "turn-end": await handlers["turn_end"]({}, ctx); break;
+  case "turn-end": if (handlers["turn_end"]) await handlers["turn_end"]({}, ctx); break;
   case "progress": await handlers["codex-native:progress"]({ type: "commandExecution", phase: "completed" }); break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }
@@ -99,11 +138,18 @@ test_pi_extension_semantic_lifecycle() {
   out=$(classify pi "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "native progress changed semantic state: $out"
   out=$(drive_pi_ext "$ext" turn-end) || fail "turn_end drive failed: $out"
-  [ -f "$state/$id.turn-ended" ] || fail "turn_end no longer touches the notification marker"
+  [ -f "$state/$id.turn-ended" ] || fail "non-host turn_end no longer touches the notification marker"
   out=$(classify pi "$id" "$state")
   [ "$out" = "busy fm-spawn" ] || fail "turn_end must stay a notification, not a state edge, got '$out'"
 
+  rm -f "$state/$id.turn-ended"
+  out=$(drive_pi_ext "$ext" settle-continuing) || fail "continuing settle drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] || fail "non-host agent_settled unexpectedly emitted a notification"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "a settle while another run continues must stay busy, got '$out'"
+
   out=$(drive_pi_ext "$ext" settle-idle) || fail "agent_settled drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] || fail "non-host agent_settled changed the notification boundary"
   out=$(classify pi "$id" "$state")
   [ "$out" = "idle pi-ext" ] || fail "agent_settled with isIdle must classify 'idle pi-ext', got '$out'"
 
@@ -111,14 +157,43 @@ test_pi_extension_semantic_lifecycle() {
   out=$(classify pi "$id" "$state")
   [ "$out" = "busy pi-ext" ] || fail "agent_start must classify 'busy pi-ext', got '$out'"
 
-  out=$(drive_pi_ext "$ext" settle-continuing) || fail "continuing settle drive failed: $out"
+  out=$(drive_pi_ext "$ext" settle-continuing) || fail "second continuing settle drive failed: $out"
   out=$(classify pi "$id" "$state")
-  [ "$out" = "busy pi-ext" ] || fail "a settle while another run continues must stay busy, got '$out'"
+  [ "$out" = "busy pi-ext" ] || fail "a continuing run must stay busy, got '$out'"
 
   out=$(drive_pi_ext "$ext" settle-idle) || fail "final settle drive failed: $out"
   out=$(classify pi "$id" "$state")
   [ "$out" = "idle pi-ext" ] || fail "the final settle must classify idle, got '$out'"
-  pass "pi extension reports agent_start busy, settles idle only via ctx.isIdle(), and keeps turn_end a notification"
+  pass "non-host pi extension preserves per-turn notification behavior"
+}
+
+test_host_pi_extension_notifies_only_after_idle_write() {
+  local rec id=busy-pi-host out state ext
+  rec=$(make_spawn_case pi-host pi "$id")
+  read_case_record "$rec"
+  out=$(run_host_spawn "$HOST_DIR" "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "host-root pi spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.pi-ext.ts"
+
+  out=$(drive_pi_ext "$ext" turn-end) || fail "host-root turn_end drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] || fail "host-root inner turn boundary woke the supervisor"
+
+  out=$(drive_pi_ext "$ext" settle-continuing) || fail "host-root continuing settle drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] || fail "host-root queued continuation notified the supervisor"
+
+  out=$(drive_pi_ext "$ext" settle-idle) || fail "host-root idle settle drive failed: $out"
+  [ -f "$state/$id.turn-ended" ] || fail "host-root settled worker did not notify the supervisor"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "idle pi-ext" ] || fail "host-root settled worker must classify idle before notification, got '$out'"
+
+  rm -f "$state/$id.turn-ended"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" "$id" >/dev/null
+  out=$(drive_pi_ext "$ext" settle-idle) || fail "host-root stale settle drive failed: $out"
+  [ ! -e "$state/$id.turn-ended" ] || fail "a rejected host-root idle write emitted a false notification"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "busy fm-spawn" ] || fail "a stale host-root extension event must not change state, got '$out'"
+  pass "host-root pi extension notifies only after a successful semantic idle write"
 }
 
 test_pi_extension_serializes_settle_before_next_start() {
@@ -423,6 +498,7 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 }
 
 test_pi_extension_semantic_lifecycle
+test_host_pi_extension_notifies_only_after_idle_write
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring

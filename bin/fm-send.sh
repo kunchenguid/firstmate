@@ -78,6 +78,9 @@
 # default to 20 for agy's late busy render) / FM_SEND_SLEEP (0.4). Slash
 # commands, and codex `$...` skill invocations resolved through harness meta,
 # get a longer pre-Enter settle so completion popups do not swallow Enter.
+# A recorded task binds to its physical host_root= metadata before task-data
+# reads, supervision repair, or endpoint mutation; ambient host authority cannot
+# override that ownership.
 # A remote secondmate target has no typed text plane at all:
 # every remote text steer rides the inbox (a marked secondmate request already
 # reaches the harness as marker-prefixed chat rather than a parser command, so
@@ -222,9 +225,11 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
+# shellcheck source=bin/fm-host-root-lib.sh
+. "$SCRIPT_DIR/fm-host-root-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never steer
 # a crewmate (see bin/fm-gate-refuse-lib.sh).
-fm_refuse_if_gate_agent
+fm_refuse_if_gate_agent "$FM_ROOT"
 
 if [ -z "${FM_HOME+x}" ] || [ -z "${FM_HOME:-}" ]; then
   echo "error: FM_HOME is not set; fm-send refuses to resolve targets without an explicit firstmate home" >&2
@@ -260,9 +265,7 @@ fi
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 
-FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
-
-fm_send_id_from_meta() { # <meta-file>
+fm_send_id_from_meta() {  # <meta-file>
   local base
   base=${1##*/}
   printf '%s' "${base%.meta}"
@@ -352,6 +355,10 @@ fm_send_resolve_target() { # <raw-target>
 
   meta=$(fm_backend_meta_for_selector "$raw" "$STATE" 2>/dev/null || true)
   if [ -n "$meta" ]; then
+    if [ "$meta" != "${BOUND_META:-}" ]; then
+      fm_host_root_assert_task_cwd "$FM_ROOT" "$meta" || return $?
+      BOUND_META=$meta
+    fi
     if [ -n "$(fm_meta_get "$meta" remote_host)" ]; then
       id=$(fm_send_id_from_meta "$meta")
       RESOLVED_TARGET="remote:$id"
@@ -396,6 +403,10 @@ fm_send_resolve_target() { # <raw-target>
 
   pane_meta=$(fm_send_meta_for_key_value "$STATE" herdr_pane_id "$raw" 2>/dev/null || true)
   if [ -n "$pane_meta" ]; then
+    if [ "$pane_meta" != "${BOUND_META:-}" ]; then
+      fm_host_root_assert_task_cwd "$FM_ROOT" "$pane_meta" || return $?
+      BOUND_META=$pane_meta
+    fi
     session=$(fm_meta_get "$pane_meta" herdr_session)
     hint="${session:-<herdr-session>}:$raw"
     id=$(fm_send_id_from_meta "$pane_meta")
@@ -403,8 +414,21 @@ fm_send_resolve_target() { # <raw-target>
     return 1
   fi
 
-  meta=$(fm_backend_meta_for_window "$raw" "$STATE" 2>/dev/null || true)
+  if meta=$(fm_backend_meta_for_target "$raw" "$STATE" 2>/dev/null); then
+    :
+  else
+    status=$?
+    [ "$status" -ne 2 ] || {
+      echo "error: backend target '$raw' matches multiple task records" >&2
+      return 2
+    }
+    meta=
+  fi
   if [ -n "$meta" ]; then
+    if [ "$meta" != "${BOUND_META:-}" ]; then
+      fm_host_root_assert_task_cwd "$FM_ROOT" "$meta" || return $?
+      BOUND_META=$meta
+    fi
     target=$(fm_backend_target_of_meta "$meta")
     if [ -z "$target" ]; then
       echo "error: no backend target recorded in $meta (tried explicit target '$raw' via recorded window/terminal; backend=from-meta)" >&2
@@ -442,7 +466,21 @@ fm_send_resolve_target() { # <raw-target>
 }
 
 RAW_TARGET=$1
-fm_send_resolve_target "$RAW_TARGET" || exit 1
+CANDIDATE_META=
+BOUND_META=
+if [ -f "$STATE/$RAW_TARGET.meta" ]; then
+  CANDIDATE_META="$STATE/$RAW_TARGET.meta"
+elif [ "${RAW_TARGET#fm-}" != "$RAW_TARGET" ] && [ -f "$STATE/${RAW_TARGET#fm-}.meta" ]; then
+  CANDIDATE_META="$STATE/${RAW_TARGET#fm-}.meta"
+fi
+if [ -n "$CANDIDATE_META" ]; then
+  fm_host_root_assert_task_cwd "$FM_ROOT" "$CANDIDATE_META" || exit $?
+  BOUND_META=$CANDIDATE_META
+fi
+fm_send_resolve_target "$RAW_TARGET" || exit $?
+if [ -z "$TARGET_META" ]; then
+  fm_host_root_assert_session_cwd "$FM_ROOT" || exit $?
+fi
 T=$RESOLVED_TARGET
 shift
 
@@ -519,8 +557,11 @@ while :; do
   esac
 done
 
+# The recorded host binding is established before this guard can repair state.
+FM_GUARD_CONTINUE_LINE='This is a supervision warning only; the requested message WILL still be sent.' "$SCRIPT_DIR/fm-guard.sh" || true
 if [ "$TARGET_BACKEND" != remote ]; then
   fm_backend_validate "$TARGET_BACKEND" || exit 1
+  [ -z "$TARGET_META" ] || fm_backend_assert_recorded_endpoint_identity "$TARGET_META" || exit $?
 fi
 
 # Classify a from-firstmate -> secondmate request. Only a task selector resolved

@@ -43,6 +43,7 @@
 #
 # Both ids are relay/firstmate slugs that compose a filename, so they are guarded
 # against path traversal even though they come from trusted callers.
+# Host-root tasks bind to their recorded physical host cwd before metadata mutation.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,6 +57,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-host-root-lib.sh
+. "$SCRIPT_DIR/fm-host-root-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 
@@ -182,6 +185,7 @@ if [ ! -f "$META" ]; then
   fi
   exit 1
 fi
+fm_host_root_assert_task_cwd "$FM_ROOT" "$META" || exit $?
 
 command -v jq >/dev/null 2>&1 || { echo "fm-x-link: jq not found" >&2; exit 1; }
 fmx_load_config

@@ -49,6 +49,25 @@ omp publishes no marker of its own; `FM_OMP_HARNESS=omp` is Firstmate's launch m
 `../../../bin/fm-spawn.sh` re-resolves on every spawn, and an explicit per-spawn argument wins for that spawn.
 A new adapter's verified marker and command name must land in `../../../bin/fm-harness.sh`.
 
+## Host-root task integration
+
+When `FM_HOST_ROOT` is set, only the primary supervisor starts from that physical host root.
+Ordinary ship and scout harnesses start from their isolated `FM_TARGET_WORKTREE`, so the target repository's instructions and lifecycle adapters load natively while the host context stays out of focused worker sessions.
+FirstMate retains one task completion signal per harness and passes the host and target identities for supervision and recovery without changing the worker cwd:
+
+| Harness | Task completion signal in host-root mode |
+|---|---|
+| claude | A state-owned settings file passed with `--settings`; target project settings still load from the worker cwd. |
+| codex | The existing per-launch `notify` command. |
+| opencode | A state-owned task plugin named through `OPENCODE_CONFIG_CONTENT`; target project plugins load from the worker cwd. |
+| pi | The existing explicit state-owned `-e` task extension; target project extensions remain subject to target trust. |
+| grok | The guarded global FirstMate Stop hook reads a per-process `FM_GROK_TURNEND_TOKEN`. |
+| kimi | The guarded global FirstMate Stop hook reads a per-process `FM_KIMI_TURNEND_TOKEN`. |
+
+Secondmate launches explicitly clear inherited `FM_HOST_ROOT` and `FM_TARGET_WORKTREE` and retain their isolated-home adapters.
+
+[`docs/verification/supervision.md`](../../../docs/verification/supervision.md#host-root-task-integration) owns the dated lifecycle evidence and current live-verification limits for these task adapters.
+
 ## Operation-to-reference matrix
 
 Every emitted plan appends the selected or recorded harness reference after the named common references.

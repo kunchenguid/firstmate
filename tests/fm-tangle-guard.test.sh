@@ -202,7 +202,18 @@ test_spawn_isolation_abort() {
   expect_code 0 "$status" "spawn into a genuine isolated worktree should succeed"
   assert_contains "$out" "spawned ok-isolated-ff6" "isolated spawn did not report success"
   assert_not_contains "$out" "isolated worktree" "isolated spawn wrongly tripped the guard"
-  pass "fm-spawn: aborts unless the resolved worktree is a genuine, isolated worktree"
+
+  # A real Treehouse shell may briefly traverse a non-repository container
+  # directory before entering the linked worktree. Keep polling that transient
+  # cwd instead of treating the first project-external path as final.
+  mkdir -p "$TMP_ROOT/transient-container"
+  printf '%s\n%s\n' "$TMP_ROOT/transient-container" "$TMP_ROOT/spawn-wt" > "$TMP_ROOT/pane-sequence"
+  status=0
+  out=$(FM_FAKE_PANE_SEQUENCE="$TMP_ROOT/pane-sequence" FM_WORKTREE_CWD_ATTEMPTS=3 \
+    run_spawn "$home" transient-isolated-gg7 "$proj" "$TMP_ROOT/spawn-wt" "$fakebin"); status=$?
+  expect_code 0 "$status" "spawn should poll past a transient non-worktree cwd"
+  assert_contains "$out" "spawned transient-isolated-gg7" "transient cwd recovery did not complete the spawn"
+  pass "fm-spawn: requires a genuine isolated worktree and polls past transient container cwd values"
 }
 
 # --- GUARD 1c: fm-spawn tmux window construction ----------------------------

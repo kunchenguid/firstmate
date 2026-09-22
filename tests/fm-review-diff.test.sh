@@ -169,8 +169,49 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+test_host_mode_scopes_every_git_command_to_worktree() {
+  local case_dir host fake_root fb git_log real_git out
+  case_dir=$(make_case host-scoped)
+  host="$case_dir/host"
+  fake_root="$case_dir/fake-root"
+  fb="$case_dir/fakebin"
+  git_log="$case_dir/git.log"
+  real_git=$(command -v git)
+  mkdir -p "$host" "$fake_root/bin" "$fb"
+  : > "$host/AGENTS.md"
+  cat > "$fake_root/bin/fm-guard.sh" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fake_root/bin/fm-guard.sh"
+  cat > "$fb/git" <<'SH'
+#!/usr/bin/env bash
+printf 'git' >> "$FM_GIT_LOG"
+for arg in "$@"; do printf '\037%s' "$arg" >> "$FM_GIT_LOG"; done
+printf '\n' >> "$FM_GIT_LOG"
+exec "$FM_REAL_GIT" "$@"
+SH
+  chmod +x "$fb/git"
+  printf 'host-scoped\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "host scoped review"
+  write_task_meta "$case_dir" "host_root=$host"
+
+  out=$(cd "$host" && PATH="$fb:$PATH" FM_REAL_GIT="$real_git" FM_GIT_LOG="$git_log" \
+    FM_ROOT_OVERRIDE="$fake_root" FM_STATE_OVERRIDE="$case_dir/state" FM_HOST_ROOT="$host" \
+    "$REVIEW_DIFF" task-x1 --stat)
+
+  assert_contains "$out" "feature.txt" "host-scoped review did not inspect the task branch"
+  assert_contains "$(cat "$git_log")" $'git\x1f-C\x1f'"$case_dir/wt" \
+    "host-scoped review issued no Git command against the target worktree"
+  assert_not_contains "$(cat "$git_log")" $'git\x1f-C\x1f'"$case_dir/project" \
+    "host-scoped review issued a Git command against the primary project checkout"
+  pass "fm-review-diff scopes every host-mode Git command to the target worktree"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_host_mode_scopes_every_git_command_to_worktree

@@ -549,6 +549,8 @@ const cleanupOnProcessExit = () => {
 process.once("exit", cleanupOnProcessExit);
 
 export default function (pi: ExtensionAPI) {
+  if (process.env.FM_TARGET_WORKTREE) return;
+
   let generation = createGeneration();
   activateGeneration(generation);
 

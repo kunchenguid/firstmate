@@ -21,6 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-host-root-lib.sh
+. "$SCRIPT_DIR/fm-host-root-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
@@ -51,6 +53,14 @@ META="$STATE/$ID.meta"
 fm_lease_forbid_branch "local-only landing (fm-merge-local)"
 
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+fm_host_root_assert_task_cwd "$FM_ROOT" "$META" || exit $?
+if grep -q '^host_root=.' "$META"; then
+  echo "error: local-only merge is unavailable for host-root task $ID" >&2
+  exit 1
+fi
+# The recorded host binding is established before this guard can repair state.
+"$FM_ROOT/bin/fm-guard.sh" || true
+
 if ! fm_backlog_meta_spawn_gen_optional "$META" "$STATE"; then
   echo "error: local merge refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1

@@ -60,6 +60,7 @@
 # The window is FMX_FOLLOWUP_MAX_AGE_SECS (default 604800, 7 days). The cap is
 # FMX_FOLLOWUP_MAX_COUNT (default 3). FMX_NOW_OVERRIDE pins "now" for
 # deterministic tests. Meta read/write lives in fm-x-lib.sh.
+# Host-root tasks bind to their recorded physical host cwd before metadata or post activity.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -68,8 +69,12 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-x-lib.sh
 . "$SCRIPT_DIR/fm-x-lib.sh"
+# shellcheck source=bin/fm-host-root-lib.sh
+. "$SCRIPT_DIR/fm-host-root-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-host-root-lib.sh
+. "$SCRIPT_DIR/fm-host-root-lib.sh"
 
 usage() {
   echo "usage: fm-x-followup.sh --check <task-id> | --clear <task-id> [--expect-request <request-id>] | <task-id> [--image <path>] [--final] --text-file <path> | <task-id> [--image <path>] [--final] -" >&2
@@ -171,6 +176,9 @@ META="$STATE/$ID.meta"
 if [ -e "$META" ] || [ -L "$META" ]; then
   fm_backlog_record_present "$META" "task record" "$STATE" \
     || { echo "fm-x-followup: unsafe task record in state/$ID.meta" >&2; exit 1; }
+  fm_host_root_assert_task_cwd "$FM_ROOT" "$META" || exit $?
+else
+  fm_host_root_assert_session_cwd "$FM_ROOT" || exit $?
 fi
 if [ "$MODE" = clear ]; then
   if [ "$EXPECT_REQUEST_SET" -eq 1 ]; then
