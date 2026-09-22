@@ -1245,6 +1245,55 @@ test_housekeeping_pause_marker_transitions_to_clear() {
   pass "housekeeping clears tracking when a crew leaves pause"
 }
 
+test_daemon_rechecks_live_run_step_health() {
+  local dir state win pane marker result round reason
+  dir=$(make_supercase live-run-step-health); state="$dir/state"
+  win=sess:fm-health; pane="$dir/pane.txt"; marker="$state/.subsuper-stale-health"
+  fm_write_meta "$state/health.meta" "window=$win" 'backend=tmux' 'harness=codex' 'kind=ship'
+  printf 'working: validating\n' > "$state/health.status"
+  printf 'unchanged Codex pane\n' > "$pane"
+  make_fake_crew_state "$dir/fakebin" >/dev/null
+  local PATH="$dir/fakebin:$PATH"
+  (
+    export PATH FM_HOME="$dir" FM_STATE_OVERRIDE="$state" LOG="$dir/daemon.log"
+    export FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" FM_ESCALATE_BATCH_SECS=999999
+    export FM_STALE_ESCALATE_SECS=240 FM_MAX_DEFER_SECS=999999
+    stale_window_is_busy "$win" "$state" && fail "the Codex fixture unexpectedly has semantic busy proof"
+    for result in idle finished unknown unreadable; do
+      export FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh"
+      export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+      : > "$state/.subsuper-escalations"
+      handle_wake "stale: $win" "$state"
+      for round in 1 2; do
+        printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
+        housekeeping "$state"
+        [ ! -s "$state/.subsuper-escalations" ] || fail "$result: live Codex run escalated at threshold $round"
+        [ "$(cat "$marker")" -gt "$(( $(date +%s) - 240 ))" ] \
+          || fail "$result: live Codex run did not restart the existing stale timer"
+      done
+      reason="stale: $win (idle 500s, possible wedge, escalation 3, demand-deep-inspection: inspect)"
+      handle_wake "$reason" "$state"
+      [ ! -s "$state/.subsuper-escalations" ] || fail "$result: an enriched wake overrode current live run-step proof"
+      case "$result" in
+        idle) FM_FAKE_CREW_STATE='state: idle · source: pane · prompt ready' ;;
+        finished) FM_FAKE_CREW_STATE='state: done · source: run-step · run passed' ;;
+        unknown) FM_FAKE_CREW_STATE='state: unknown · source: run-step · run inventory unavailable' ;;
+        unreadable) FM_CREW_STATE_BIN="$dir/missing-reader" ;;
+      esac
+      printf '%s\n' "$(( $(date +%s) - 500 ))" > "$marker"
+      housekeeping "$state"
+      grep -F 'possible wedge' "$state/.subsuper-escalations" >/dev/null \
+        || fail "$result: losing live proof did not restore the daemon wedge alert"
+      [ ! -e "$marker" ] || fail "$result: the delivered wedge alert retained its stale timer"
+      : > "$state/.subsuper-escalations"
+      handle_wake "$reason" "$state"
+      grep -F 'possible wedge, escalation 3' "$state/.subsuper-escalations" >/dev/null \
+        || fail "$result: an enriched wedge stayed suppressed without live proof"
+    done
+  ) || fail "daemon live run-step health regression failed"
+  pass "daemon thresholds and enriched wakes re-read live Codex run evidence and escalate once it disappears"
+}
+
 test_housekeeping_persistent_stale_escalates() {
   local dir state fakebin win pane key
   dir=$(make_supercase stale-persistent)
@@ -2802,6 +2851,7 @@ test_housekeeping_migrates_watcher_pause_marker
 test_housekeeping_migrates_watcher_unpaused_marker_to_clear
 test_housekeeping_seeds_pause_marker_from_status
 test_housekeeping_persistent_stale_escalates
+test_daemon_rechecks_live_run_step_health
 test_housekeeping_resumed_stale_cleared
 test_housekeeping_paused_resurfaces_and_resets
 test_housekeeping_captain_held_resurfaces_and_resets

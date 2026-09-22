@@ -303,6 +303,33 @@ fm_busy_record_read() {  # <state-dir> <id>
   printf '%s %s %s %s' "$r_state" "$r_source" "$r_event" "$r_seq"
 }
 
+# fm_busy_record_busy_since: the ts of a valid, current-incarnation `busy`
+# record, which is when its harness last reported the turn busy - the event that
+# opened the turn, or a later busy re-assertion from the same source. It dates
+# the turn a busy verdict belongs to; it is never itself a state signal, so the
+# watcher uses it only to age a busy verdict it already has. Nonzero for every
+# record fm_busy_record_read refuses, for a non-busy record, and when the record
+# was replaced between the two reads (the seq must match), so a caller keeps its
+# older anchor rather than trusting a torn read.
+fm_busy_record_busy_since() {  # <state-dir> <id> -> epoch on stdout
+  local state=$1 id=$2 verdict line f seq='' ts=''
+  local -a v fields
+  verdict=$(fm_busy_record_read "$state" "$id") || return 1
+  IFS=' ' read -r -a v <<< "$verdict"
+  [ "${v[0]:-}" = busy ] || return 1
+  IFS= read -r line < "$(fm_busy_record_path "$state" "$id")" 2>/dev/null || return 1
+  IFS=' ' read -r -a fields <<< "$line"
+  for f in "${fields[@]:1}"; do
+    case "$f" in
+      seq=*) seq=${f#seq=} ;;
+      ts=*) ts=${f#ts=} ;;
+    esac
+  done
+  [ "$seq" = "${v[3]:-}" ] || return 1
+  case "$ts" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$ts"
+}
+
 # ---------------------------------------------------------------------------
 # muse session-log busy source
 #

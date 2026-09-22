@@ -41,10 +41,8 @@
 #     drain and acknowledges it only after routing completes.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane without a declared wait is escalated
-#     only after it has been idle for STALE_ESCALATE_SECS
-#     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
+#   - Wedge suppression and recheck semantics follow docs/architecture.md's
+#     "Event-driven supervision" contract. A declared wait - either a
 #     paused: external wait or a verified captain-held transfer, per
 #     fm-classify-lib.sh's combined predicate - instead gets its own longer
 #     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, whether its pane
@@ -93,8 +91,8 @@
 #                                   disables. Use sparingly: it overrides the
 #                                   captain-relevant escalation for matching
 #                                   kinds.
-#          FM_STALE_ESCALATE_SECS   idle seconds before a stale pane escalates
-#                                   as a possible wedge (default 240)
+#          FM_STALE_ESCALATE_SECS   idle seconds before rechecking a stale pane
+#                                   for a possible wedge (default 240)
 #          FM_PAUSE_RESURFACE_SECS  seconds a declared wait stays declared,
 #                                   idle or busy, before it re-surfaces as a
 #                                   recheck (default 14400, four hours); an
@@ -491,6 +489,14 @@ stale_marker_remove() {  # <window> <state>
   local win=$1 state=$2 key
   key=$(_stale_key "$(window_to_task "$win" "$state")")
   rm -f "$state/.subsuper-stale-$key"
+}
+
+stale_health_absorb() {
+  local win=$1 state=$2 task
+  task=$(window_to_task "$win" "$state")
+  crew_readable_health "$task" "$state" || return 1
+  _now > "$state/.subsuper-stale-$(_stale_key "$task")"
+  return 0
 }
 
 # Pause marker: state/.subsuper-paused-<key> holds the epoch a declared wait (a
@@ -1012,7 +1018,8 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
-#     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
+#     re-read shared health evidence, then re-peek the pane; unexplained idle
+#     escalates as a wedge.
 #  2b) pause re-surface: for each declared-wait marker past PAUSE_RESURFACE_SECS,
 #     re-peek; gone -> clear; still declaring the wait, on an idle OR a busy pane
 #     -> escalate a recheck digest naming which human the wait is on, and reset
@@ -1073,6 +1080,7 @@ housekeeping() {  # <state>
     fi
     age=$(( now - $(cat "$marker" 2>/dev/null || echo "$now") ))
     [ "$age" -ge "${FM_STALE_ESCALATE_SECS:-$STALE_ESCALATE_SECS_DEFAULT}" ] || continue
+    stale_health_absorb "$win" "$state" && continue
     stale_window_is_busy "$win" "$state"
     case "$?" in
       0) rm -f "$marker" ;;
@@ -1384,8 +1392,9 @@ handle_wake() {  # <reason> <state>
               fi
               # An enriched wedge reason carries the watcher's own escalation count
               # and its "do not re-absorb on the run-step/pane state alone" demand,
-              # so it outranks this daemon's cheaper status-log absorption - EXCEPT
-              # under a current declared wait. A `pause` verdict is not run-step or
+              # so it outranks this daemon's cheaper status-log absorption unless
+              # shared health evidence or a current declared wait accounts for it.
+              # A `pause` verdict is not run-step or
               # pane state at all: it is the crew's own declaration that this pane
               # waits by design, which is the one question the wedge timer cannot
               # answer for itself. Overriding it escalated healthy declared waits
@@ -1397,8 +1406,13 @@ handle_wake() {  # <reason> <state>
                 *) case "$stale_detail" in
                      idle\ *s,\ possible\ wedge,\ escalation\ *)
                        last=$(last_status_line "$state/$task.status")
-                       status_is_paused_or_captain_held "$last" \
-                         || decision="escalate|${reason#stale: }"
+                       if ! status_is_paused_or_captain_held "$last"; then
+                         if stale_health_absorb "$arg" "$state"; then
+                           [ "${decision%%|*}" = escalate ] || decision="healthy|readable health evidence: $arg"
+                         else
+                           decision="escalate|${reason#stale: }"
+                         fi
+                       fi
                        ;;
                    esac ;;
               esac ;;
@@ -1415,6 +1429,9 @@ handle_wake() {  # <reason> <state>
     reconcile_pause_tracking "$arg" "$state" "$last"
   fi
   case "$action" in
+    healthy)
+      log "self-handle (healthy): $reason -> $distilled"
+      ;;
     escalate)
       log "escalate: $reason -> $distilled"
       if escalate_add "$state" "$distilled"; then
@@ -1470,7 +1487,7 @@ handle_wake() {  # <reason> <state>
       log "self-handle: $reason -> $distilled"
       ;;
   esac
-  if [ "$action" = self ] && { [ "$kind" = signal ] || [ "$kind" = stale ]; }; then
+  if { [ "$action" = self ] || [ "$action" = healthy ]; } && { [ "$kind" = signal ] || [ "$kind" = stale ]; }; then
     mark_escalated_seen "$state" "$capture" || classification_failed=1
   fi
   rm -f "$capture"

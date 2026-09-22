@@ -2133,8 +2133,8 @@ crew_absorb_class() {  # <id>
 
 # 0 if crew <id> shows POSITIVE evidence it is still working (crew_absorb_class
 # reports `working`). This is the "provably working" predicate at the heart of
-# absorb-only-on-positive-evidence. This is the sole proof for stale wakes and the
-# shared authoritative proof for no-verb signals. Where a home opts in, fm-watch.sh
+# absorb-only-on-positive-evidence. This is the proof for initial stale absorption
+# and the shared authoritative proof for no-verb signals. Where a home opts in, fm-watch.sh
 # may additionally absorb a bare turn-end on bounded pane churn, while every other
 # failed verdict surfaces
 # because the crew may be done, waiting on a decision, or wedged. For stale panes
@@ -2143,6 +2143,18 @@ crew_absorb_class() {  # <id>
 # working/paused/none decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
+}
+
+# Shared escalation-boundary predicate; docs/architecture.md's "Event-driven
+# supervision" owns the health-evidence contract for both supervisors.
+crew_readable_health() {
+  local task=$1 state=$2 evidence
+  [ -n "$task" ] || return 1
+  evidence=$(FM_STATE_OVERRIDE="$state" "$FM_CREW_STATE_BIN" "$task" 2>/dev/null) || return 1
+  case "$evidence" in
+    'state: working · source: run-step · '*) return 0 ;;
+  esac
+  return 1
 }
 
 # 0 if crew <id>'s authoritative current state is a declared external-wait pause.
