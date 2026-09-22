@@ -3524,31 +3524,16 @@ else
   fi
 fi
 
-# Every landed/discard-work refusal above has now passed (or --force skipped
-# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
-# --force, and before ANY destructive step below - a still-parked run or a
-# leaked process can own live work in this exact worktree. Not for
-# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
-# dedicated process-event and firstmate-home removal machinery further below,
-# not by task-worktree cleanup.
-if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
-  conclude_task_no_mistakes_run "$WT"
-  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
-elif [ "$KIND" != secondmate ]; then
-  reap_task_worktree_processes tasktmp "$TASK_TMP"
-fi
-
-# Fix 3 (see script header): sweep remote job workers abandoned by an already
-# pruned code root. Best effort - a sweep failure never blocks this teardown.
-"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
-
-# Bind a projected Herdr endpoint to its journal before returning its checkout.
-# A nested worktree workspace may disappear as a consequence of Treehouse
-# returning that checkout, so waiting until after the return would turn an
-# exact, cleanup-safe binding into an ambiguous missing endpoint and strand the
-# journal. This remains a read-only candidate check: the exact task pane is the
-# only Herdr object any cleanup below may close, and retirement still requires
-# that exact pane to be confirmed gone afterward.
+# Bind a projected Herdr endpoint to its journal before any reap or checkout
+# return below can remove the workspace it names. reap_task_worktree_processes
+# kills every process whose cwd is under the task worktree, and a nested
+# projection's task pane shell runs with its cwd inside the checkout, so the
+# reap itself can make Herdr drop the workspace; Treehouse returning the
+# checkout can too. Losing it after the fact would turn an exact, cleanup-safe
+# binding into an ambiguous missing endpoint and strand the journal. This
+# remains a read-only candidate check: the exact task pane is the only Herdr
+# object any cleanup below may close, and retirement still requires that exact
+# pane to be confirmed gone afterward.
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
 HERDR_PRESENTATION_RETIRE_CANDIDATE=0
 HERDR_PRESENTATION_SESSION=
@@ -3569,6 +3554,24 @@ if [ "$BACKEND" = herdr ] \
     HERDR_PRESENTATION_RETIRE_CANDIDATE=1
   fi
 fi
+
+# Every landed/discard-work refusal above has now passed (or --force skipped
+# them). Fix 1 and Fix 2 (see script header) run here, unconditionally on
+# --force, and before ANY destructive step below - a still-parked run or a
+# leaked process can own live work in this exact worktree. Not for
+# kind=secondmate: a secondmate home's own runtime lifecycle is owned by the
+# dedicated process-event and firstmate-home removal machinery further below,
+# not by task-worktree cleanup.
+if [ "$KIND" != secondmate ] && teardown_owns_worktree; then
+  conclude_task_no_mistakes_run "$WT"
+  reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
+elif [ "$KIND" != secondmate ]; then
+  reap_task_worktree_processes tasktmp "$TASK_TMP"
+fi
+
+# Fix 3 (see script header): sweep remote job workers abandoned by an already
+# pruned code root. Best effort - a sweep failure never blocks this teardown.
+"$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then

@@ -1582,6 +1582,14 @@ done
 assert_focus_is "$CAPTAIN_FOCUS" "multi-home teardown"
 pass "real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority"
 
+# The deliberately interleaved legacy seed above is not adjacent to its owning
+# home, so the documented ordering behavior skips placement while it is present
+# and a later nested child stays outside its parent's block, where no exact
+# restart binding can be published. Its own assertions have passed; remove it so
+# the restart fixture below starts from an unambiguous layout.
+lab workspace close "$LEGACY_WSID" >/dev/null \
+  || fail "could not remove the interleaved legacy seed before the nested restart fixture"
+
 # A same-project nested task carries its durable preallocated checkout across a
 # full restart instead of acquiring a second one, and teardown returns that same
 # lease.
