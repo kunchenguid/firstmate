@@ -242,8 +242,8 @@
 #   to relaunch is still refused because relaunch adopts, rather than changes,
 #   the recorded billing posture. Preflight runs only `codex login status` and
 #   requires exactly `Logged in using ChatGPT`; it never invokes a model. Every
-#   launch selects the built-in OpenAI provider, clears any configured OpenAI
-#   base URL so Codex uses its compiled ChatGPT endpoint, forces ChatGPT login,
+#   launch selects the built-in OpenAI provider, pins its ChatGPT Codex endpoint,
+#   forces ChatGPT login,
 #   and scrubs Anthropic/OpenAI API credential and endpoint environment
 #   variables. This is not a provider abstraction and intentionally has no
 #   fallback.
@@ -4884,7 +4884,7 @@ if [ "$HARNESS" = codex ]; then
   if [ "$CODEX_NATIVE_PROVIDER" -eq 1 ]; then
     CODEX_BIN_COMMAND=$(shell_quote "$CODEX_NATIVE_BIN")
     CODEX_NATIVE_PREFIX="env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY -u CODEX_API_KEY -u CODEX_ACCESS_TOKEN -u OPENAI_BASE_URL CODEX_HOME=$(shell_quote "$CODEX_NATIVE_HOME") "
-    CODEX_NATIVE_FLAGS='-c '\''model_provider="openai"'\'' -c '\''openai_base_url=""'\'' -c '\''forced_login_method="chatgpt"'\'' '
+    CODEX_NATIVE_FLAGS='-c '\''model_provider="openai"'\'' -c '\''openai_base_url="https://chatgpt.com/backend-api/codex"'\'' -c '\''forced_login_method="chatgpt"'\'' '
   fi
   LAUNCH=${LAUNCH//__CODEXNATIVEPREFIX__/$CODEX_NATIVE_PREFIX}
   LAUNCH=${LAUNCH//__CODEXBIN__/$CODEX_BIN_COMMAND}

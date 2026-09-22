@@ -60,6 +60,28 @@ printf '%s\n' \
   "CODEX_API_KEY=${CODEX_API_KEY-unset}" \
   "CODEX_ACCESS_TOKEN=${CODEX_ACCESS_TOKEN-unset}" \
   "OPENAI_BASE_URL=${OPENAI_BASE_URL-unset}" > "$fixture_dir/codex-launch.env"
+model_provider=metered
+openai_base_url=https://metered.invalid/v1
+forced_login_method=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -c ]; then
+    shift
+    [ "$#" -gt 0 ] || exit 64
+    config_value=${1#*=}
+    config_value=${config_value#\"}
+    config_value=${config_value%\"}
+    case "$1" in
+      model_provider=*) model_provider=$config_value ;;
+      openai_base_url=*) openai_base_url=$config_value ;;
+      forced_login_method=*) forced_login_method=$config_value ;;
+    esac
+  fi
+  shift
+done
+[ "$model_provider" = openai ] || exit 65
+[ "$forced_login_method" = chatgpt ] || exit 66
+[ "$openai_base_url" = https://chatgpt.com/backend-api/codex ] || exit 67
+printf '%s/responses\n' "$openai_base_url" > "$fixture_dir/codex-request-url"
 SH
   chmod +x "$fakebin/codex"
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin"
@@ -111,7 +133,7 @@ test_native_launch_pins_builtin_provider_and_environment() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "'$FAKEBIN_DIR/codex'" "launch did not bind the absolute preflighted Codex executable"
   assert_contains "$launch" "model_provider=\"openai\"" "launch did not select the built-in OpenAI provider"
-  assert_contains "$launch" "openai_base_url=\"\"" "launch did not clear a configured OpenAI base URL"
+  assert_contains "$launch" "openai_base_url=\"https://chatgpt.com/backend-api/codex\"" "launch did not pin the ChatGPT Codex endpoint"
   assert_contains "$launch" "forced_login_method=\"chatgpt\"" "launch did not force ChatGPT authentication"
   OPENAI_API_KEY=launch-openai ANTHROPIC_API_KEY=launch-anthropic \
     CODEX_API_KEY=launch-codex CODEX_ACCESS_TOKEN=launch-access \
@@ -120,8 +142,9 @@ test_native_launch_pins_builtin_provider_and_environment() {
       || fail "captured native Codex launch did not execute"
   assert_native_env "$FAKEBIN_DIR/codex-launch.env"
   assert_grep 'model_provider="openai"' "$FAKEBIN_DIR/codex-launch.argv" "executed launch lost provider pin"
-  assert_grep 'openai_base_url=""' "$FAKEBIN_DIR/codex-launch.argv" "executed launch lost endpoint reset"
+  assert_grep 'openai_base_url="https://chatgpt.com/backend-api/codex"' "$FAKEBIN_DIR/codex-launch.argv" "executed launch lost ChatGPT endpoint pin"
   assert_grep 'forced_login_method="chatgpt"' "$FAKEBIN_DIR/codex-launch.argv" "executed launch lost ChatGPT auth pin"
+  assert_grep 'https://chatgpt.com/backend-api/codex/responses' "$FAKEBIN_DIR/codex-request-url" "native Codex did not construct a ChatGPT-backed request"
   pass "Codex native launch overrides malicious provider config and scrubs API credential surfaces"
 }
 
