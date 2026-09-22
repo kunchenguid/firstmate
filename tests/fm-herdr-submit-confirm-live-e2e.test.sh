@@ -87,7 +87,18 @@ idle=0
 i=0
 while [ "$i" -lt 45 ]; do
   st=$(lab agent get "$PANE" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
-  case "$st" in idle|done|blocked) idle=1; break ;; esac
+  case "$st" in
+    idle|done) idle=1; break ;;
+    blocked)
+      # A fresh checkout path stops on Claude's folder-trust prompt, which the
+      # pre-send proof would read as a non-empty composer. Accept it and keep
+      # waiting for a real idle composer.
+      case "$(lab pane read "$PANE" --source visible 2>/dev/null || true)" in
+        *'Yes, I trust this folder'*) lab pane send-keys "$PANE" enter >/dev/null \
+          || fail "could not accept Claude's folder-trust prompt" ;;
+      esac
+      ;;
+  esac
   i=$((i + 1))
   sleep 1
 done

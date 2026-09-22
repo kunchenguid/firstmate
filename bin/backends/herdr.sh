@@ -3306,12 +3306,13 @@ fm_backend_herdr_composer_payload_shown() {  # <text> <after>
 # fm_backend_herdr_composer_clear: after a refused proof, press Ctrl+U until
 # the shared classifier reads the composer as empty. Claude documents Ctrl+U
 # as delete-to-line-start, repeated across lines of a multiline draft; Ctrl+C
-# is not used because it interrupts a running turn. 0 only when the composer
-# is verified empty again.
+# is not used because it interrupts a running turn. Live Claude deletes one
+# wrapped screen row per press, so a single-line leftover can need several
+# presses. The press count is bounded by the rows the proof capture covers.
+# 0 only when the composer is verified empty again.
 fm_backend_herdr_composer_clear() {  # <target> <text>
-  local target=$1 text=$2 newlines presses i=0
-  newlines=${text//[!$'\n']/}
-  presses=$(( ${#newlines} + 2 ))
+  local target=$1 text=$2 presses i=0
+  presses=$(fm_backend_herdr_proof_lines "$text")
   while [ "$i" -lt "$presses" ]; do
     fm_backend_herdr_send_key "$target" C-u || return 1
     i=$((i + 1))
