@@ -426,9 +426,10 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 # mate's active-turn gate could never see busy. These cases run the real
 # spawn, drive the generated wiring, and check the stall gate against that
 # record. Parent turn-ended markers stay off this path.
-seed_secondmate_home() { # <home> <id>
-  local home=$1 id=$2
+seed_secondmate_home() { # <home> <id> [home Stop guard]
+  local home=$1 id=$2 guard=${3:-$ROOT/bin/fm-turnend-guard.sh}
   mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  cp "$guard" "$home/bin/fm-turnend-guard.sh"
   printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter\n' > "$home/data/charter.md"
@@ -443,7 +444,7 @@ spawn_secondmate_harness() { # <case-dir> <id> <harness> [extra fake tools...]
   mkdir -p "$case_dir"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" "$harness" "$@")
   fm_test_spawn_home "$primary" "$harness"
-  seed_secondmate_home "$sm" "$id"
+  seed_secondmate_home "$sm" "$id" "${SECONDMATE_HOME_GUARD:-}"
   : > "$case_dir/launch.log"
   FM_BACKEND=tmux FM_FAKE_LAUNCH_LOG="$case_dir/launch.log" \
     fm_test_run_spawn "$primary" "$sm" "$fakebin" "$id" "$sm" "$harness" --secondmate
@@ -609,6 +610,34 @@ test_secondmate_claude_stop_guard_owns_the_stop_verdict() {
   pass "a claude secondmate's Stop guard records busy on a blocked Stop and idle on an allowed one, in any hook order, and a rewake turn reopens busy"
 }
 
+# A leased home can lag the parent. Its older Stop guard never reads
+# .fm-busy-stop, so the launch keeps the ordinary Stop idle hook, or an idle
+# mate would read busy until SessionEnd.
+test_secondmate_claude_older_home_guard_keeps_the_stop_idle_hook() {
+  local case_dir id=sm-claude-old primary sm state settings out old_guard
+  case_dir="$TMP_ROOT/sm-claude-old"
+  primary="$case_dir/primary"
+  sm="$case_dir/sm"
+  old_guard="$case_dir/old-guard.sh"
+  mkdir -p "$case_dir"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$old_guard"
+  out=$(SECONDMATE_HOME_GUARD="$old_guard" spawn_secondmate_harness "$case_dir" "$id" claude) \
+    || fail "claude secondmate spawn failed: $out"
+  state="$primary/state"
+  settings="$sm/.claude/settings.local.json"
+
+  run_claude_hook "$settings" UserPromptSubmit || fail "secondmate UserPromptSubmit hook failed"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "busy claude-hook" ] || fail "UserPromptSubmit must open busy, got '$out'"
+  rm -f "$state/$id.turn-ended"
+  run_claude_hook "$settings" Stop || fail "secondmate Stop hook command failed"
+  out=$(classify claude "$id" "$state")
+  [ "$out" = "idle claude-hook" ] \
+    || fail "an older home guard cannot close the turn, so the Stop hook must record idle, got '$out'"
+  [ ! -e "$state/$id.turn-ended" ] || fail "a secondmate Stop touched the parent's turn-ended marker"
+  pass "a claude secondmate whose home guard predates .fm-busy-stop keeps the Stop idle hook"
+}
+
 test_secondmate_pi_extension_reports_busy_without_a_parent_turnend() {
   local case_dir id=sm-pi primary state ext launch out
   case_dir="$TMP_ROOT/sm-pi"
@@ -716,6 +745,7 @@ test_secondmate_codex_and_grok_do_not_arm_a_parent_turnend() {
 
 test_secondmate_claude_spawn_arms_busy_for_the_stall_gate
 test_secondmate_claude_stop_guard_owns_the_stop_verdict
+test_secondmate_claude_older_home_guard_keeps_the_stop_idle_hook
 test_secondmate_pi_extension_reports_busy_without_a_parent_turnend
 test_secondmate_omp_extension_reports_busy_without_a_parent_turnend
 test_secondmate_opencode_plugin_closes_without_a_parent_turnend
