@@ -825,6 +825,123 @@ test_cursorless_container_rejects_contiguous_lower_activity() {
   pass "fm_composer_classify_screen: cursorless containers reject only contiguous unclaimed activity"
 }
 
+test_opencode_status_below_floor_is_furniture() {
+  # THE ORIGINAL FAILURE (2026-09-20, OpenCode 1.18.31 on Herdr): a genuinely
+  # idle, genuinely empty composer classified `unknown` because OpenCode draws
+  # its status chrome on the row immediately under the `╹▀` floor, with no
+  # blank separator. The cursorless invalidation then rejected the left-bar.
+  # This is the live layout, compacted; the `ctrl+p commands` keybind cell is
+  # the status signal, and it sits on both the idle and the busy row.
+  local idle pending busy left_path out
+  idle=$'┃\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)                                                               ~/Projects/firstmate:main\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n /home/bemsas/Projects/firstmate                                            40.1K (4%)  ctrl+p commands    • OpenCode 1.18.31'
+  assert_screen "opencode 1.18.31 idle empty on herdr with status under the floor" empty "$CAPS_STYLED" "$idle"
+  assert_screen "opencode 1.18.31 idle empty on zellij with status under the floor" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "opencode 1.18.31 idle empty on plain backends with status under the floor" empty "$CAPS_PLAIN" "$idle"
+
+  pending=$'┃\n┃  please stop\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n /home/bemsas/Projects/firstmate                                            40.1K (4%)  ctrl+p commands    • OpenCode 1.18.31'
+  assert_screen "opencode typed draft still pending with status under the floor" pending "$CAPS_STYLED" "$pending"
+  assert_screen "opencode typed draft on tmux with status under the floor" pending "$CAPS_TMUX" "$pending" 1
+
+  busy=$'┃\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                                                    63.4K (6%)  ctrl+p commands    • OpenCode 1.18.31'
+  assert_screen "opencode busy chrome under the floor is still an empty composer" empty "$CAPS_STYLED" "$busy"
+
+  left_path=$'┃\n┃  ~/Projects/foo\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀'
+  assert_screen "opencode left-aligned path is pending typed text" pending "$CAPS_STYLED" "$left_path"
+
+  # Live OpenCode 1.18.31 on Herdr draws the hint and its rotating quoted
+  # suggestion as ONE span, so the two are always styled alike. This fixture is
+  # the case where that span is ghost: stripping takes the whole row with it and
+  # the run reads empty through the blank-row path, never through the idle rule.
+  remnant=$'┃\n┃  '"${ESC}[2mAsk anything… \"Fix a TODO in the codebase\"${ESC}[0m"$'\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n tab agents  ctrl+p commands'
+  assert_screen "opencode hint row styled ghost end to end is empty" empty "$CAPS_STYLED" "$remnant"
+  # Herdr's ANSI 20-row tail can drop the leading blank bar, putting the idle
+  # hint on the first left-bar row (placeholder_position=0).
+  first_idle=$'┃  Ask anything… "Fix a TODO in the codebase"\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n tab agents  ctrl+p commands'
+  assert_screen "opencode idle hint on the first left-bar row is empty" empty "$CAPS_STYLED" "$first_idle"
+
+  # One idle set owns the hint, and it is end-anchored apart from the rotating
+  # QUOTED suggestion, so a human line that merely opens with the placeholder's
+  # words is typed text wherever it sits in the run - at placeholder position
+  # (a blank bar row above it) as well as on the run's first row.
+  local typed_tail_at_placeholder typed_tail_first_row
+  typed_tail_at_placeholder=$'┃\n┃  Ask anything… please investigate the crash\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀\n /home/bemsas 40.1K (4%)  ctrl+p commands'
+  assert_screen "a typed line opening with the hint stays pending at placeholder position" \
+    pending "$CAPS_STYLED" "$typed_tail_at_placeholder"
+  typed_tail_first_row=$'┃  Ask anything… please investigate the crash\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀\n /home/bemsas 40.1K (4%)  ctrl+p commands'
+  assert_screen "a typed line opening with the hint stays pending on the first row" \
+    pending "$CAPS_STYLED" "$typed_tail_first_row"
+  # The rotating suggestion is ONE quoted run, so the optional group stops at
+  # its closing quote. A draft that opens with the hint and carries quotes of
+  # its own is typed text, and it must still be extractable - the zellij send
+  # path proves what it typed by reading this content back.
+  local quoted_draft extracted
+  quoted_draft=$'┃  Ask anything… "a" and also "b"\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀\n /home/bemsas 40.1K (4%)  ctrl+p commands'
+  assert_screen "a draft carrying its own quotes stays pending" pending "$CAPS_STYLED" "$quoted_draft"
+  extracted=$(fm_composer_extract_selected_content "$CAPS_STYLED" "$quoted_draft")
+  [ "$extracted" = 'Ask anything… "a" and also "b"' ] \
+    || fail "a quoted draft must remain extractable user content, got '$extracted'"
+
+  out=$(fm_composer_classify_screen "$CAPS_STYLED" "$idle")
+  [ "$out" = empty ] || fail "the original idle-empty OpenCode-on-Herdr failure must now read empty, got '$out'"
+  pass "fm_composer_classify_screen: OpenCode status under the floor is furniture; pending drafts still pending"
+}
+
+test_status_row_is_furniture_only_under_a_left_bar_floor() {
+  # The exemption is scoped to the one layout the live record covers: OpenCode's
+  # keybind row under its `╹▀` floor. Every other container keeps the
+  # unclaimed-activity rule it had, so a status row directly under a BOX still
+  # proves that box stale, and omp's status row is furniture only where it
+  # always was - bounding a bare composer's wrap region, never exempting a
+  # container.
+  local box_below_opencode box_below_omp bare_below_omp
+  box_below_opencode=$'╭────────────╮\n│ ❯          │\n╰────────────╯\n ctrl+p commands'
+  assert_screen "a box above opencode's status row is still stale" unknown "$CAPS_STYLED" "$box_below_opencode"
+  box_below_omp=$'╭────────────╮\n│ ❯          │\n╰────────────╯\n π  · Kimi K3 · ~/proj · ◫ 4.0%/40K ⟲'
+  assert_screen "a box above omp's status row is still stale" unknown "$CAPS_STYLED" "$box_below_omp"
+  # omp's own verified layout is untouched: its status row still bounds the
+  # bare composer above it rather than reading as typed input.
+  bare_below_omp=$'transcript line\n\n❯'"$NBSP"$'\n π  · Kimi K3 · ~/proj · ◫ 4.0%/40K ⟲'
+  assert_screen "omp status still bounds a bare composer" empty "$CAPS_STYLED" "$bare_below_omp"
+  # The live record covers the status row under a `╹▀` floor. A left-bar run
+  # with no floor drawn is a layout nobody has observed, so the row below it is
+  # unclaimed activity again and the container is not accepted.
+  local floorless floored
+  floorless=$'┃\n┃\n┃  Build · Kimi K3\n /home/x 40.1K (4%)  ctrl+p commands • OpenCode 1.18.31'
+  assert_screen "a floorless left-bar above the status row is not accepted" unknown "$CAPS_STYLED" "$floorless"
+  floored=$'┃\n┃\n┃  Build · Kimi K3\n╹▀▀▀▀▀▀▀▀\n /home/x 40.1K (4%)  ctrl+p commands • OpenCode 1.18.31'
+  assert_screen "the same rows with the floor drawn are the verified layout" empty "$CAPS_STYLED" "$floored"
+  pass "fm_composer_classify_screen: the status-row exemption is scoped to the left-bar floor"
+}
+
+test_classifier_and_extractor_agree_on_the_left_bar_idle_hint() {
+  # The zellij send path reads the SAME capture twice: once through
+  # fm_backend_zellij_composer_state (the classifier) to decide whether it may
+  # type, and once through fm_composer_extract_selected_content to prove what
+  # it typed landed. A screen the classifier calls empty while the extractor
+  # reports the idle hint as user content makes that proof fail, and the worker
+  # this change was written to stop cannot be stopped on zellij.
+  local screen verdict extracted
+  # Herdr's and zellij's 20-row tail can drop the leading blank bar, leaving the
+  # hint on the run's first row.
+  screen=$'┃  Ask anything… "Fix a TODO in the codebase"\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n tab agents  ctrl+p commands'
+  verdict=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$screen")
+  [ "$verdict" = empty ] \
+    || fail "the idle hint on the first left-bar row must classify empty, got '$verdict'"
+  extracted=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ -z "$extracted" ] \
+    || fail "the same screen must extract no user content, got '$extracted'"
+  # And the divergence must not be bought by dropping real drafts: a typed line
+  # in the same position stays pending AND stays extractable.
+  screen=$'┃  please stop\n┃\n┃  Build · Kimi K3 Kimi For Coding (kimi.ai)\n╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\n tab agents  ctrl+p commands'
+  verdict=$(fm_composer_classify_screen "$CAPS_STYLED_NOID" "$screen")
+  [ "$verdict" = pending ] \
+    || fail "a typed draft on the first left-bar row must stay pending, got '$verdict'"
+  extracted=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  [ "$extracted" = 'please stop' ] \
+    || fail "a typed draft must remain extractable user content, got '$extracted'"
+  pass "fm_composer_classify_screen/extract_selected_content: one rule for the left-bar idle hint"
+}
+
 test_bottom_most_candidate_wins() {
   # The one ranking rule: the live composer is bottom-anchored, so a stale
   # decorative box (codex's startup banner) can never outrank the real row
@@ -938,6 +1055,9 @@ test_contiguous_transcript_reanchors_on_live_prompt
 test_lower_dead_shell_invalidates_cursorless_candidate
 test_cursorless_bare_wrap_region_classifies
 test_cursorless_container_rejects_contiguous_lower_activity
+test_opencode_status_below_floor_is_furniture
+test_status_row_is_furniture_only_under_a_left_bar_floor
+test_classifier_and_extractor_agree_on_the_left_bar_idle_hint
 test_bottom_most_candidate_wins
 test_incomplete_lower_box_invalidates_stale_candidate
 test_titled_bottom_requires_matching_width
