@@ -42,6 +42,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$ROOT/bin/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$ROOT/bin/fm-ff-lib.sh"
 
 HARNESS="$ROOT/bin/fm-harness.sh"
 TMP_ROOT=$(fm_test_tmproot fm-omp-harness)
@@ -208,6 +210,23 @@ test_spawn_model_validation_scoped_to_listed_providers() {
   pass "fm-spawn: omp model validation is scoped to providers the listing can prove"
 }
 
+# seed_omp_secondmate_home <world> <home> <id>: a secondmate home fixture that
+# ACTUALLY converges to the primary's tracked default-branch commit (the
+# fresh-home convergence fix), by cloning the ambient $ROOT and pinning there,
+# rather than an unrelated or absent git history that could never converge.
+# AGENTS.md is left as the clone's own tracked file rather than overwritten,
+# so the clone stays clean.
+seed_omp_secondmate_home() {
+  local world=$1 home=$2 id=$3 target
+  mkdir -p "$world/home/state" "$world/home/data" "$world/home/config"
+  target=$(primary_head_commit "$ROOT") || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
+  git clone -q "$ROOT" "$home"
+  git -C "$home" checkout -q --detach "$target"
+  mkdir -p "$home/bin" "$home/data"
+  printf '%s\n' "$id" > "$home/.fm-secondmate-home"
+  printf 'charter\n' > "$home/data/charter.md"
+}
+
 test_secondmate_launch_relies_on_discovery() {
   # A seeded secondmate home, launched for real through fm-spawn on omp: the
   # launch must carry the posture overlay and pin --cwd to the home, and must
@@ -216,10 +235,7 @@ test_secondmate_launch_relies_on_discovery() {
   local world home fakebin launchlog out status launch
   world="$TMP_ROOT/secondmate"
   home="$world/sm"
-  mkdir -p "$world/home/state" "$world/home/data" "$world/home/config" "$home/bin" "$home/data"
-  printf '# Firstmate\n' > "$home/AGENTS.md"
-  printf 'sm\n' > "$home/.fm-secondmate-home"
-  printf 'charter\n' > "$home/data/charter.md"
+  seed_omp_secondmate_home "$world" "$home" sm
   fakebin=$(make_spawn_fakebin "$world/fake" claude)
   make_fake_omp "$fakebin"
   launchlog="$world/launch.log"
@@ -254,10 +270,7 @@ test_secondmate_config_pinned_model_is_validated() {
   local world home fakebin launchlog out status
   world="$TMP_ROOT/secondmate-config-model"
   home="$world/sm"
-  mkdir -p "$world/home/state" "$world/home/data" "$world/home/config" "$home/bin" "$home/data"
-  printf '# Firstmate\n' > "$home/AGENTS.md"
-  printf 'sm\n' > "$home/.fm-secondmate-home"
-  printf 'charter\n' > "$home/data/charter.md"
+  seed_omp_secondmate_home "$world" "$home" sm
   printf 'omp openai-codex/gpt-nope\n' > "$world/home/config/secondmate-harness"
   fakebin=$(make_spawn_fakebin "$world/fake" claude)
   make_fake_omp "$fakebin"

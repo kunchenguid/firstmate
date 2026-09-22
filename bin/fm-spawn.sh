@@ -198,7 +198,13 @@
 #   provisioned firstmate home; the default is kind=ship.
 #   Before a secondmate launch, the home is fast-forwarded to the primary's
 #   default-branch commit when safe: directly for a local home, or through the
-#   configured host for a remote home. Skipped syncs warn and launch unchanged.
+#   configured host for a remote home. A skipped sync warns and launches
+#   unchanged for an ESTABLISHED home (one with a prior state/<id>.meta record),
+#   preserving its own intentional local work; a FRESH home (no prior record,
+#   local or remote - fm-ff-lib.sh's secondmate_launch_is_fresh) instead refuses
+#   the launch outright rather than run code that has not converged to the
+#   primary's current revision (AGENTS.md task lifecycle; docs/herdr-backend.md
+#   "Presentation spaces").
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from both the spawning project and its repository's
 #   primary checkout, including when the spawning project is a linked worktree.
@@ -795,7 +801,7 @@ fi
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
-  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc
+  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc secondmate_fresh
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || {
@@ -889,6 +895,8 @@ spawn_remote_secondmate() {
     return 1
   fi
   meta="$STATE/$id.meta"
+  secondmate_fresh=0
+  secondmate_launch_is_fresh "$STATE" "$id" && secondmate_fresh=1
   if [ -e "$meta" ] || [ -L "$meta" ]; then
     if ! fm_backlog_record_present "$meta" "task record" "$STATE" ||
       [ "$(fm_meta_get "$meta" kind)" != secondmate ] ||
@@ -925,16 +933,36 @@ spawn_remote_secondmate() {
   # Pre-launch sync, the remote twin of the local-HEAD sync below: this home
   # follows THIS primary's default-branch commit, not the Firstmate copy on that
   # host, so the commit is resolved here and handed over for the host to import
-  # and fast-forward to. A skipped sync warns and launches the home unchanged.
+  # and fast-forward to. cmd_sync only ever succeeds by landing exactly on that
+  # commit (fm-remote-secondmate-control.sh), so a skipped sync warns and
+  # launches the home unchanged for an ESTABLISHED home, preserving its own
+  # intentional local work, but this parent-side preflight refuses a FRESH
+  # home (secondmate_fresh=1, fm-ff-lib.sh's secondmate_launch_is_fresh)
+  # outright before ever requesting the host-local launch below, so an
+  # incompatible fresh home can never launch its own legacy ordinary-worker
+  # workspaces. Nothing about this launch has been published yet at this
+  # point, so refusing here is a clean no-op rollback.
   if sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
     if sync_out=$("$SCRIPT_DIR/fm-on.sh" "$id" fm-remote-secondmate-control.sh sync "$id" \
       "$sm_primary_head" </dev/null 2>&1); then
       :
     else
       sync_rc=$?
+      if [ "$secondmate_fresh" = 1 ]; then
+        fm_lock_release "$registry_lock" || true
+        fm_lock_release "$SPAWN_TASK_LOCK" || true
+        echo "error: remote secondmate $id is a freshly provisioned home that has not converged to the primary's current revision ($(remote_sync_failure_reason "$sync_rc" "$sync_out")); refusing to launch stale or diverged code" >&2
+        return 1
+      fi
       echo "warning: remote secondmate $id sync skipped before launch: $(remote_sync_failure_reason "$sync_rc" "$sync_out")" >&2
     fi
   else
+    if [ "$secondmate_fresh" = 1 ]; then
+      fm_lock_release "$registry_lock" || true
+      fm_lock_release "$SPAWN_TASK_LOCK" || true
+      echo "error: remote secondmate $id is a freshly provisioned home and the primary's current revision could not be resolved; refusing to launch until convergence can be verified" >&2
+      return 1
+    fi
     echo "warning: remote secondmate $id sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
   remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id")
@@ -2621,7 +2649,9 @@ validate_firstmate_operational_dirs() {
   done
 }
 
+SECONDMATE_FRESH=0
 if [ "$KIND" = secondmate ]; then
+  secondmate_launch_is_fresh "$STATE" "$ID" && SECONDMATE_FRESH=1
   if [ -z "$FIRSTMATE_HOME" ] && { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
     fm_backlog_record_present "$STATE/$ID.meta" "task record" "$STATE" || {
       echo "error: secondmate task record is unsafe: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -2654,12 +2684,19 @@ if [ "$KIND" = secondmate ]; then
   # spawn section). Purely local - no fetch: the home is a worktree of this same
 # repo and already holds the commit. The same guarded path can reconcile a clean
 # divergence already present at the target; a dirty, uniquely diverged, or
-# wrong-branch home is left untouched and launches as-is. The agent re-reads
+# wrong-branch ESTABLISHED home is left untouched and launches as-is with a
+# warning. A FRESH home (SECONDMATE_FRESH=1, fm-ff-lib.sh's
+# secondmate_launch_is_fresh) gets no such leniency: it has no local work of
+# its own to preserve, so an unconverged sync refuses the launch outright
+# rather than risk running stale or diverged code that could violate the
+# current Herdr presentation contract - nothing about this launch has been
+# published yet, so refusing here is a clean no-op rollback. The agent re-reads
   # AGENTS.md fresh on launch, so no nudge is needed here.
   # On a remote host this spawn is the host-local leg of a launch whose parent has
   # already synced the home to ITS primary commit, and $FM_ROOT here is only that
   # host's own Firstmate copy; syncing again would target the wrong checkout, so
-  # the caller turns this step off (bin/fm-remote-secondmate-control.sh).
+  # the caller turns this step off (bin/fm-remote-secondmate-control.sh). The
+  # parent already ran this same fresh-home refusal before requesting that launch.
   if [ "${FM_SKIP_SECONDMATE_SYNC:-0}" = 1 ]; then
     :
   elif sm_primary_head=$(primary_head_commit "$FM_ROOT"); then
@@ -2669,10 +2706,18 @@ if [ "$KIND" = secondmate ]; then
       sm_ff_line=$(first_line "$sm_ff_out")
       sm_ff_prefix="secondmate $ID: skipped: "
       sm_ff_reason=${sm_ff_line#"$sm_ff_prefix"}
+      if [ "$SECONDMATE_FRESH" = 1 ]; then
+        echo "error: secondmate $ID is a freshly provisioned home that has not converged to the primary's current revision ($sm_ff_reason); refusing to launch stale or diverged code" >&2
+        exit 1
+      fi
       echo "warning: secondmate $ID sync skipped before launch: $sm_ff_reason" >&2
       ;;
     esac
   else
+    if [ "$SECONDMATE_FRESH" = 1 ]; then
+      echo "error: secondmate $ID is a freshly provisioned home and the primary's current revision could not be resolved; refusing to launch until convergence can be verified" >&2
+      exit 1
+    fi
     echo "warning: secondmate $ID sync skipped before launch: primary default-branch commit cannot be resolved" >&2
   fi
   mkdir -p "$PROJ_ABS/state" || {

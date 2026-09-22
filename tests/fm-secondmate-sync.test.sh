@@ -790,7 +790,12 @@ SH
   pass "T10 spawn fast-forwards a secondmate worktree to the primary's local HEAD before launch"
 }
 
-# --- T11: spawn warns when pre-launch sync is skipped ------------------------
+# --- T11: spawn warns when pre-launch sync is skipped for an ESTABLISHED home -
+# A prior state/sm.meta task record is the authoritative evidence that this
+# secondmate has already launched before, so the skip-and-warn leniency (which
+# exists to preserve an established home's own intentional local work) still
+# applies here; see T15-T17 below for the FRESH home refusal this leniency does
+# NOT extend to.
 test_spawn_warns_when_sync_skipped_before_launch() {
   local w c1 before fakebin err
   w=$(new_world spawn-skip)
@@ -799,6 +804,12 @@ test_spawn_warns_when_sync_skipped_before_launch() {
   printf 'sm\n' > "$w/sm/.fm-secondmate-home"
   mkdir -p "$w/sm/data"
   printf 'charter\n' > "$w/sm/data/charter.md"
+  {
+    printf 'window=firstmate:fm-sm\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=codex\n'
+    printf 'home=%s/sm\n' "$w"
+  } > "$w/home/state/sm.meta"
   bump_primary "$w" instr
   printf 'uncommitted local edit\n' >> "$w/sm/AGENTS.md"
   before=$(head_of "$w/sm")
@@ -824,7 +835,145 @@ SH
     "spawn warning reports the skipped sync reason"
   [ "$(head_of "$w/sm")" = "$before" ] || fail "dirty spawn home HEAD moved"
   grep -q 'uncommitted local edit' "$w/sm/AGENTS.md" || fail "dirty spawn edit was discarded"
-  pass "T11 spawn warns when pre-launch sync is skipped"
+  pass "T11 spawn warns when pre-launch sync is skipped for an established home"
+}
+
+# --- T15: a FRESH home (no prior state/<id>.meta) refuses to launch dirty ----
+test_spawn_refuses_fresh_home_with_dirty_sync() {
+  local w c1 before fakebin err rc
+  w=$(new_world spawn-fresh-dirty)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  printf 'sm\n' > "$w/sm/.fm-secondmate-home"
+  mkdir -p "$w/sm/data"
+  printf 'charter\n' > "$w/sm/data/charter.md"
+  bump_primary "$w" instr
+  printf 'uncommitted local edit\n' >> "$w/sm/AGENTS.md"
+  before=$(head_of "$w/sm")
+
+  fakebin="$w/fakebin"
+  err="$w/spawn.err"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$BASE_PATH" TMUX='' \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>"$err"
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "a fresh dirty secondmate home should refuse to launch"
+  assert_contains "$(cat "$err")" \
+    "error: secondmate sm is a freshly provisioned home that has not converged" \
+    "spawn refusal names the fresh-home convergence requirement"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "dirty fresh spawn home HEAD moved"
+  grep -q 'uncommitted local edit' "$w/sm/AGENTS.md" || fail "dirty fresh spawn edit was discarded"
+  [ ! -e "$w/home/state/sm.meta" ] || fail "a refused fresh launch must not publish a task record"
+  pass "T15 spawn refuses a fresh dirty secondmate home instead of launching stale code"
+}
+
+# --- T16: a FRESH home with its own unique commit also refuses --------------
+test_spawn_refuses_fresh_home_with_diverged_sync() {
+  local w c1 before fakebin err rc
+  w=$(new_world spawn-fresh-diverged)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  printf 'sm\n' > "$w/sm/.fm-secondmate-home"
+  mkdir -p "$w/sm/data"
+  printf 'charter\n' > "$w/sm/data/charter.md"
+  printf 'fork work\n' > "$w/sm/AGENTS.md"
+  git -C "$w/sm" add -A
+  git -C "$w/sm" commit -qm local-work
+  before=$(head_of "$w/sm")
+  bump_primary "$w" instr
+
+  fakebin="$w/fakebin"
+  err="$w/spawn.err"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$BASE_PATH" TMUX='' \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>"$err"
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "a fresh diverged secondmate home should refuse to launch"
+  assert_contains "$(cat "$err")" \
+    "error: secondmate sm is a freshly provisioned home that has not converged" \
+    "spawn refusal names the fresh-home convergence requirement"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "diverged fresh spawn home HEAD moved (unlanded work at risk)"
+  [ ! -e "$w/home/state/sm.meta" ] || fail "a refused fresh launch must not publish a task record"
+  pass "T16 spawn refuses a fresh diverged secondmate home instead of launching stale code"
+}
+
+# --- T17: a refused fresh launch publishes nothing, and a converged retry ----
+# recovers cleanly - the transactional-rollback and no-endpoint-after-failure
+# guarantees. Nothing this launch does happens before the convergence check, so
+# refusing it is a clean no-op: no backend call, no task record, and the home
+# is left exactly as it was for a later retry.
+test_spawn_fresh_refusal_publishes_nothing_and_retry_recovers() {
+  local w c1 c2 before fakebin log err rc
+  w=$(new_world spawn-fresh-rollback)
+  c1=$(head_of "$w/main")
+  git -C "$w/main" worktree add -q --detach "$w/sm" "$c1"
+  printf 'sm\n' > "$w/sm/.fm-secondmate-home"
+  mkdir -p "$w/sm/data"
+  printf 'charter\n' > "$w/sm/data/charter.md"
+  bump_primary "$w" instr
+  c2=$(head_of "$w/main")
+  printf 'uncommitted local edit\n' >> "$w/sm/AGENTS.md"
+  before=$(head_of "$w/sm")
+
+  fakebin="$w/fakebin"
+  log="$w/tmux.log"
+  err="$w/spawn.err"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$log'
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+
+  PATH="$fakebin:$BASE_PATH" TMUX='' \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>"$err"
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "a fresh dirty secondmate home should refuse to launch"
+  [ ! -f "$log" ] || fail "a refused fresh launch must never touch the backend to publish a route or endpoint: $(cat "$log")"
+  [ ! -e "$w/home/state/sm.meta" ] || fail "a refused fresh launch must not publish a task record"
+  [ "$(head_of "$w/sm")" = "$before" ] || fail "refused fresh spawn home HEAD moved"
+
+  # Rollback proof: once the home can converge, a retry succeeds cleanly with
+  # no leftover residue from the refused attempt.
+  git -C "$w/sm" checkout -q -- AGENTS.md
+  PATH="$fakebin:$BASE_PATH" TMUX='' \
+    FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" \
+    FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
+    FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
+    FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm "$w/sm" codex --secondmate >/dev/null 2>"$w/spawn2.err" || true
+
+  [ "$(head_of "$w/sm")" = "$c2" ] || fail "retry after clearing the dirt did not converge and launch (err: $(cat "$w/spawn2.err"))"
+  [ -f "$w/home/state/sm.meta" ] || fail "a converged retry should publish the task record"
+  pass "T17 a refused fresh launch publishes no route or endpoint and leaves the home retriable"
 }
 
 # --- T12: a freshly seeded home reads clean once the primary ignores the marker -
@@ -1342,6 +1491,50 @@ test_remote_launch_does_not_retarget_host_copy() {
   pass "R9 a remote launch leaves the home on the parent's commit while an ordinary spawn follows its own checkout"
 }
 
+# --- R11: the parent refuses to launch a FRESH remote home it could not sync ---
+# The same fresh-home refusal as T15-T17, driven through the real parent
+# orchestrator (bin/fm-spawn.sh <id> --secondmate, spawn_remote_secondmate) so
+# the preflight is proven before the host is ever asked to launch anything: no
+# parent task record and no host endpoint record are published.
+test_remote_spawn_refuses_fresh_home_when_sync_cannot_converge() {
+  local w c1 c2 home fakebin out rc
+  w=$(new_remote_world remote-fresh-refuse)
+  # fm-on.sh only routes commands this primary checkout genuinely tracks.
+  cp "$ROOT"/bin/fm-remote-*.sh "$w/main/bin/"
+  git -C "$w/main" add -A
+  git -C "$w/main" commit -qm "primary tooling"
+  git -C "$w/main" push -q origin main
+  c1=$(head_of "$w/main")
+  add_remote_home "$w" sm "$w/coderoot" "$c1"
+  bump_primary "$w" instr          # never pushed, never given to the host copy
+  c2=$(head_of "$w/main")
+
+  home="$w/home"
+  mkdir -p "$home/config" "$home/projects" "$home/state" "$home/data"
+  printf -- '- sm - remote fixture (host: host-sm; root: %s; home: %s; scope: remote work; projects: alpha; added 2026-08-02)\n' \
+    "$w/coderoot" "$w/sm" > "$home/data/secondmates.md"
+  # No prior state/sm.meta: this is a genuinely FRESH secondmate that has never
+  # completed a spawn from this primary.
+
+  fakebin=$(make_remote_leg_ssh_stub "$w")
+  fm_fake_exit0 "$fakebin" gh treehouse tmux node
+
+  out=$(PATH="$fakebin:$BASE_PATH" \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$w/main" \
+    FM_SSH_BIN="$fakebin/fake-ssh" FM_REMOTE_CODE_ROOT="$w/coderoot" \
+    FM_TEST_REPO_ROOT="$ROOT" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" sm --secondmate --harness codex 2>&1)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || fail "a fresh unconverged remote home should refuse to launch (out: $out)"
+  assert_contains "$out" "remote secondmate sm is a freshly provisioned home that has not converged" \
+    "the refusal names the fresh-home convergence requirement"
+  [ ! -e "$home/state/sm.meta" ] || fail "a refused fresh remote launch must not publish a parent task record"
+  [ ! -e "$w/sm/state/parent-route/sm.meta" ] || fail "a refused fresh remote launch must not publish a host endpoint record"
+  [ "$(head_of "$w/sm")" != "$c2" ] || fail "precondition invalid: the home should not already hold the unreachable target"
+  pass "R11 the parent refuses to launch a fresh unconverged remote home before asking the host to launch anything"
+}
+
 test_ff_updated
 test_ff_current
 test_ff_dirty
@@ -1360,6 +1553,9 @@ test_nudge_retry_uses_fresh_herdr_endpoint_after_respawn
 test_bootstrap_sweep_surfaces_skipped_home
 test_spawn_fast_forwards_before_launch
 test_spawn_warns_when_sync_skipped_before_launch
+test_spawn_refuses_fresh_home_with_dirty_sync
+test_spawn_refuses_fresh_home_with_diverged_sync
+test_spawn_fresh_refusal_publishes_nothing_and_retry_recovers
 test_seed_marker_clean_when_gitignored
 test_seed_marker_converges_existing_home
 test_seed_marker_does_not_mask_real_dirt
@@ -1374,5 +1570,6 @@ test_remote_sync_without_target_follows_host_copy
 test_bootstrap_syncs_remote_home_to_primary_commit
 test_bootstrap_reports_outdated_host_actionably
 test_remote_launch_does_not_retarget_host_copy
+test_remote_spawn_refuses_fresh_home_when_sync_cannot_converge
 
 echo "# all fm-secondmate-sync tests passed"

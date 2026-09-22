@@ -9,6 +9,8 @@ set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$ROOT/bin/fm-ff-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-safety)
 export FM_BACKEND=tmux
@@ -498,7 +500,7 @@ test_home_seed_no_projects_end_to_end() {
   # A domain whose subject is the firstmate repo itself needs no project clones:
   # the deliberate --no-projects signal scaffolds, seeds, registers, and spawns a
   # project-less home end to end with no placeholder clone.
-  local home sub sub_abs fakebin log meta proj_val out
+  local home sub sub_abs fakebin log meta proj_val out target
   home="$TMP_ROOT/no-projects-seed-home"
   sub="$TMP_ROOT/no-projects-seed-subhome"
   mkdir -p "$home/projects" "$home/data" "$home/state"
@@ -521,6 +523,16 @@ test_home_seed_no_projects_end_to_end() {
   [ -z "$(ls -A "$sub/projects" 2>/dev/null)" ] || fail "project-less seed cloned a project"
   FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed after project-less seed"
 
+  # A fresh secondmate home must launch only once it exactly matches the
+  # primary's own tracked default-branch commit (the fresh-home convergence
+  # fix). A real seed always clones directly from a primary already on its own
+  # default branch, so it lands there for free; this suite's FM_ROOT is the
+  # ambient checkout running the tests, which may itself be on some other
+  # branch, so pin the freshly seeded subhome explicitly to keep this test's
+  # outcome independent of that ambient state.
+  target=$(primary_head_commit "$ROOT") || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
+  git -C "$sub_abs" checkout -q --detach "$target"
+
   # Spawn tolerates the empty projects field: the home resolves from the registry
   # and the projects meta is recorded empty rather than breaking the launch.
   : > "$log"
@@ -537,12 +549,18 @@ test_home_seed_no_projects_end_to_end() {
 }
 
 test_secondmate_spawn_resolves_punctuated_registry_projects() {
-  local home sub sub_abs fakebin log meta projects
+  local home sub sub_abs fakebin log meta projects target
   home="$TMP_ROOT/punctuated-spawn-home"
   sub="$TMP_ROOT/punctuated-spawn-subhome"
   mkdir -p "$home/data" "$home/state" "$home/config" "$home/projects"
+  # A fresh secondmate home must launch only once it exactly matches the
+  # primary's own tracked default-branch commit (the fresh-home convergence
+  # fix), so this fixture is a real clone pinned there rather than a plain
+  # directory tree, exactly like a genuine seed would produce.
+  target=$(primary_head_commit "$ROOT") || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
+  git clone -q "$ROOT" "$sub" || fail "could not create a primary-pinned subhome clone for the punctuated-registry fixture"
+  git -C "$sub" checkout -q --detach "$target"
   mkdir -p "$sub/data" "$sub/state" "$sub/config" "$sub/projects"
-  mark_firstmate_home "$sub"
   printf 'punctuated\n' > "$sub/.fm-secondmate-home"
   printf '# Charter\n\nHandled work.\n' > "$sub/data/charter.md"
   sub_abs=$(cd "$sub" && pwd -P)

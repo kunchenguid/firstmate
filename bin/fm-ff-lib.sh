@@ -36,6 +36,23 @@
 # fast-forward advances HEAD only and never moves the shared default branch or
 # any other worktree's checkout. A standalone remote home may instead advance
 # its checked-out default branch under the same guard.
+#
+# A FRESH secondmate home - one that has never completed a spawn from this
+# primary, local or remote - gets no leniency from the skip guards above: they
+# exist to preserve an established home's own intentional local work, which a
+# freshly seeded home by definition does not have yet. Both spawn call sites
+# (the local launch and the remote parent preflight in bin/fm-spawn.sh) must
+# refuse to launch a fresh home whose sync could not land it exactly on the
+# primary's current commit, rather than warning and launching stale or
+# diverged code that could violate the current Herdr presentation contract
+# (docs/herdr-backend.md "Presentation spaces"). secondmate_launch_is_fresh
+# below is the single owner of what counts as "fresh": the authoritative
+# provisioning/launch evidence is the ABSENCE of a prior state/<id>.meta
+# record for that id in this primary's own state directory, the same signal
+# bin/fm-spawn.sh already reads to resolve a secondmate's home. A clean git
+# checkout is never this evidence on its own - an established home can be
+# clean between edits, and treating "clean" as "fresh" would wrongly refuse an
+# established home's own legitimate divergence.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
@@ -72,6 +89,16 @@ primary_head_commit() {
   local root=$1 default
   default=$(default_branch "$root") || return 1
   git -C "$root" rev-parse --verify --quiet "refs/heads/$default^{commit}" 2>/dev/null || return 1
+}
+
+# True when secondmate <id> has never completed a spawn recorded in this
+# primary's own <state> directory - see this file's header for why that
+# record, not a clean-looking checkout, is the authoritative freshness
+# signal. Both a local task record and a remote route's task record live at
+# the same state/<id>.meta path, so one check covers both spawn call sites.
+secondmate_launch_is_fresh() { # <state> <id>
+  local state=$1 id=$2
+  [ ! -e "$state/$id.meta" ] && [ ! -L "$state/$id.meta" ]
 }
 
 resolve_path() {

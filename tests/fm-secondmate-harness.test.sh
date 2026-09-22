@@ -449,10 +449,17 @@ SH
 # A minimal seeded secondmate home (validate_firstmate_home_for_spawn needs the
 # seed marker, AGENTS.md, bin/, and a charter to launch). config/ is intentionally
 # left absent so the spawn's propagation is what creates it.
+# A fresh secondmate home must launch only once it exactly matches the
+# primary's own tracked default-branch commit (the fresh-home convergence
+# fix), so this fixture is a real clone of the ambient $ROOT pinned there
+# rather than a plain directory with no git history. AGENTS.md is left as the
+# clone's own tracked file rather than overwritten, so the clone stays clean.
 make_seeded_home() {
-  local home=$1 id=$2
+  local home=$1 id=$2 target
+  target=$(primary_head_commit "$ROOT") || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
+  git clone -q "$ROOT" "$home"
+  git -C "$home" checkout -q --detach "$target"
   mkdir -p "$home/bin" "$home/data"
-  printf '# Firstmate\n' > "$home/AGENTS.md"
   printf '%s\n' "$id" > "$home/.fm-secondmate-home"
   printf 'charter\n' > "$home/data/charter.md"
 }
@@ -460,8 +467,9 @@ make_seeded_home() {
 # spawn_secondmate <world> <id> <home> [explicit-harness]
 # Runs fm-spawn.sh in secondmate mode. FM_ROOT is the real repo (so fm-harness.sh
 # resolves), the primary config dir is <world>/home/config, and CLAUDECODE over a
-# blinded ancestry walk pins detect_own. stderr is discarded (the local-HEAD ff sync harmlessly skips a
-# non-worktree home). Inspect <world>/home/state/<id>.meta and <home>/config after.
+# blinded ancestry walk pins detect_own. The home is a real clone pinned to the
+# primary's commit (make_seeded_home), so the local-HEAD ff sync converges
+# cleanly rather than skipping.
 spawn_secondmate() {
   local world=$1 id=$2 home=$3 harness=${4:-} fakebin
   mkdir -p "$world/home/state" "$world/home/data"

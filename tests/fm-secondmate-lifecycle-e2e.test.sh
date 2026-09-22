@@ -26,6 +26,8 @@ set -u
 
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
+# shellcheck source=bin/fm-ff-lib.sh
+. "$ROOT/bin/fm-ff-lib.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-lifecycle)
 export FM_BACKEND=tmux
@@ -69,7 +71,7 @@ EOF
 }
 
 phase_seed() {
-  local out
+  local out target
   out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" \
     "$ROOT/bin/fm-home-seed.sh" design "$SUB" alpha beta gamma) \
     || fail "seed failed"
@@ -106,6 +108,16 @@ phase_seed() {
   [ "$(FM_HOME="$SUB" "$ROOT/bin/fm-project-mode.sh" beta)" = "direct-PR off" ] \
     || fail "beta delivery mode not preserved in the subhome"
   FM_HOME="$HOME_DIR" "$ROOT/bin/fm-home-seed.sh" validate >/dev/null || fail "registry validation failed after seed"
+
+  # A fresh secondmate home must launch only once it exactly matches the
+  # primary's own tracked default-branch commit (the fresh-home convergence
+  # fix). A real seed always clones directly from a primary that is already on
+  # its own default branch, so it lands there for free; this suite's FM_ROOT is
+  # the ambient checkout running the tests, which may itself be on some other
+  # branch, so pin the freshly seeded subhome explicitly to keep this test's
+  # outcome independent of that ambient state.
+  target=$(primary_head_commit "$ROOT") || fail "cannot resolve the primary's default-branch commit for the secondmate home fixture"
+  git -C "$SUB_ABS" checkout -q --detach "$target"
 
   pass "seed: registry scope+projects, charter copied, clones+origins, no-mistakes init in subhome only"
 }
