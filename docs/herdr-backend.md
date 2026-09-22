@@ -237,7 +237,7 @@ A composer that holds a shorter suffix, or a placeholder plus a literal remainde
 The adapter presses Ctrl+U until the shared classifier reads the composer as empty, then reports `send-failed`, so a resend starts from a clean composer.
 Ctrl+C is not used for this, because Claude documents it as interrupting a running operation.
 If the composer cannot be verified empty again, the submit reports `unknown` instead, because text may still be in the composer.
-A Claude composer that already holds text before the send is refused with nothing typed.
+A Claude composer that already holds text, or cannot be read, before the send is refused with nothing typed.
 Other harnesses, and panes with no native identity, skip this proof and keep the type-then-Enter path, because their paste placeholders and composer shapes are not live-verified.
 
 On an idle or done native baseline, submit confirmation first waits for `working` or `blocked` across a bounded polling window.
