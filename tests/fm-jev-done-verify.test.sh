@@ -64,15 +64,20 @@ exit 0
 SH
 chmod +x "$FAKEBIN/fm-teardown.sh"
 
+# The strength answer mirrors the documented Score answer: score is the
+# probability-weighted level index across the five criteria levels (0..4).
 write_response() {
   local choice=$1
   local conf=${2:-0.82}
+  local score=${3:-3.6}
   cat > "$RESPONSE" <<JSON
 { "model": "jev-1.13.0",
   "answers": {
     "claim": { "type": "choice", "choice": "$choice", "confidence": $conf,
       "probabilities": { "evidenced": 0.8, "not_evidenced": 0.1, "need_human": 0.1 } },
-    "strength": { "type": "score", "score": 0.91, "confidence": 0.8 } },
+    "strength": { "type": "score", "score": $score, "confidence": 0.8,
+      "legend": { "0": "Guess", "1": "Weak", "2": "Moderate", "3": "Strong", "4": "Clear" },
+      "probabilities": { "0": 0.0, "1": 0.0, "2": 0.1, "3": 0.2, "4": 0.7 } } },
   "usage": { "input_tokens": 40, "output_tokens": 12 } }
 JSON
 }
@@ -149,6 +154,37 @@ test_evidenced_logs_without_annotate_or_close() {
   assert_contains "$body" 'Healthy now is not repaired' "state/instructions carry the HacksonClark note"
   assert_not_contains "$body" "$TS_KEY" "key is absent from the request body"
   pass "evidenced at floor logs shadow-only and offers need_human"
+}
+
+# docs.typesafe.ai/api.md "Score": criteria is an ordered array of 2-10 level
+# descriptions; a min/max shape is rejected with 422 (criteria: Field required).
+test_strength_score_uses_documented_criteria_shape() {
+  local code out err body line
+  write_response evidenced 0.82 3.6
+  TYPESAFE_API_KEY=$TS_KEY run_verify code out err "$TASK_ID" --done-line "$DONE_LINE"
+  expect_code 0 "$code" "criteria-shape verify exits 0"
+  body=$(cat "$LOG/body")
+  printf '%s' "$body" | jq -e '
+    .questions.strength
+    | .type == "score"
+      and (.criteria | type == "array" and length >= 2 and length <= 10)
+      and all(.criteria[]; type == "string" and length > 0)
+      and (has("min") | not) and (has("max") | not)
+  ' >/dev/null || fail "strength Score must send an ordered criteria array of 2-10 levels and no min/max"
+  printf '%s' "$body" | jq -e '
+    .questions.strength.criteria | (.[0] | startswith("Guess")) and (.[-1] | startswith("Clear"))
+  ' >/dev/null || fail "strength levels must run weakest to strongest"
+  assert_contains "$out" 'strength: 0.9' "level index 3.6 of 0..4 prints as 0.9"
+  line=$(cat "$HOME_DIR/state/${TASK_ID}.jev-done.jsonl")
+  printf '%s' "$line" | jq -e '.strength == 0.9' >/dev/null \
+    || fail "log strength must be the level index divided by the top level, got $line"
+  write_response evidenced 0.82 7
+  TYPESAFE_API_KEY=$TS_KEY run_verify code out err "$TASK_ID" --done-line "$DONE_LINE"
+  line=$(cat "$HOME_DIR/state/${TASK_ID}.jev-done.jsonl")
+  printf '%s' "$line" | jq -e '.strength == null and .verdict == "evidenced"' >/dev/null \
+    || fail "an out-of-range score must log a null strength without dropping the verdict, got $line"
+  write_response evidenced 0.82
+  pass "strength Score sends documented criteria levels and logs a 0..1 strength"
 }
 
 test_not_evidenced_at_floor_annotates() {
@@ -548,6 +584,7 @@ test_drain_empty_env_keys_allow_later_scoring
 
 test_usage_requires_task_and_done_line
 test_evidenced_logs_without_annotate_or_close
+test_strength_score_uses_documented_criteria_shape
 test_not_evidenced_at_floor_annotates
 test_need_human_at_floor_annotates
 test_below_floor_does_not_annotate

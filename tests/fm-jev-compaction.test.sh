@@ -109,4 +109,52 @@ FM_HOME="$HOME_DIR" "$SCRIPT" \
 [ -f "$PARK3/index.jsonl" ] || fail "presence flag should park under state/<id>/trace-park"
 pass "config/jev-compaction presence flag enables"
 
+# 6. Jev path: the keep_value Score sends the documented ordered criteria
+# array (docs.typesafe.ai/api.md "Score"), and the answer's level index is
+# divided by the top level so the 0..1 threshold keeps its meaning.
+rm -f "$HOME_DIR/config/jev-compaction"
+FAKEBIN="$TMP/fakebin"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/curl" <<'SH'
+#!/usr/bin/env bash
+out=''
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+body=$(cat)
+printf '%s\n' "$body" >> "${FAKE_CURL_BODIES:?}"
+case "$(printf '%s' "$body" | jq -r '.state | tostring')" in
+  *noise*) score=0.4 ;;
+  *) score=3.2 ;;
+esac
+printf '{"model":"jev-1.13.0","answers":{"keep_value":{"type":"score","score":%s,"confidence":0.8,"legend":{"0":"Safe to park","1":"Probably parkable","2":"Uncertain","3":"Probably keep","4":"Must keep"},"probabilities":{"0":0.2,"1":0.2,"2":0.2,"3":0.2,"4":0.2}}}}' "$score" > "$out"
+printf '200'
+SH
+chmod +x "$FAKEBIN/curl"
+BODIES="$TMP/bodies.jsonl"
+PARK4="$TMP/park-jev"
+PATH="$FAKEBIN:$PATH" FAKE_CURL_BODIES="$BODIES" TYPESAFE_API_KEY=test-key-not-real \
+  FM_JEV_COMPACTION=on "$SCRIPT" \
+  --task jev \
+  --trace "$FIXTURE_TRACE" \
+  --park-dir "$PARK4" \
+  --out "$TMP/from-jev.jsonl" || fail "Jev-scored compaction should succeed"
+[ -s "$BODIES" ] || fail "Jev path should POST keep_value questions"
+jq -se '
+  length > 0 and all(.[];
+    .questions.keep_value
+    | .type == "score"
+      and (.criteria | type == "array" and length >= 2 and length <= 10)
+      and all(.criteria[]; type == "string" and length > 0)
+      and (.criteria[0] | startswith("Safe to park"))
+      and (.criteria[-1] | startswith("Must keep"))
+      and (has("min") | not) and (has("max") | not))
+' "$BODIES" >/dev/null || fail "keep_value Score must send ordered park -> keep criteria and no min/max"
+jev_parked="$(jq -rs 'map("\(.id)=\(.keep_value)") | join(",")' "$PARK4/index.jsonl")"
+[ "$jev_parked" = "s4=0.1,s5=0.1" ] || fail "Jev level 0.4 of 0..4 should park as 0.1, got $jev_parked"
+pass "keep_value Score sends documented criteria and normalizes the level index"
+
 printf 'all tests passed\n'

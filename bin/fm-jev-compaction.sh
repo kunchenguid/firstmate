@@ -17,6 +17,10 @@
 #
 # Scoring uses a Jev Score keep_value question through bin/fm-jev-lib.sh
 # unless --scores supplies a JSON object of segment id -> keep_value.
+# The Score has five ordered criteria levels, park -> keep; the answer's level
+# index (0..4) is divided by 4 so keep_value stays on the 0 (park) .. 1 (keep)
+# scale the threshold and --scores use. The middle level (uncertain) maps to
+# 0.5 and is therefore kept at the default threshold.
 #
 # Park policy: copy low keep_value segments under
 # $FM_HOME/state/<id>/trace-park/ (files plus index.jsonl) and omit them
@@ -95,9 +99,12 @@ fm_jev_compaction_score_jev() {
   if ! compact="$(fm_jev_compact_state "$state")"; then
     compact="$state"
   fi
-  questions='{"keep_value":{"type":"score","instructions":"Keep-value of this crew-harness trace segment for the live prompt. 1 means must keep. 0 means safe to park on disk.","min":0,"max":1}}'
+  questions='{"keep_value":{"type":"score","instructions":"How much does the live prompt still need this crew-harness trace segment, versus parking it on disk?","criteria":["Safe to park: noise or output nothing later relies on.","Probably parkable: low value and unlikely to be needed again.","Uncertain: it might be referenced again.","Probably keep: the live prompt likely still needs it.","Must keep: the live prompt depends on it."]}}'
   resp="$(fm_jev_decide "$compact" "$questions")" || return 1
-  score="$(printf '%s' "$resp" | jq -r '.answers.keep_value.score // .answers.keep_value.value // empty')"
+  score="$(printf '%s' "$resp" | jq -r --argjson q "$questions" '
+    (($q.keep_value.criteria | length) - 1) as $top
+    | .answers.keep_value.score
+    | if type == "number" and . >= 0 and . <= $top then . / $top else empty end')"
   if [ -z "$score" ] || [ "$score" = "null" ]; then
     printf '1\n'
     return 0

@@ -27,9 +27,20 @@
 #   An unfinished case cannot be labeled. Shadow never writes a launch overlay.
 #
 # Live retains state/<task-id>.jev-skills.json under $FM_HOME, reused for the
-#   same task without another request, including relaunches. It offers the first
-#   24 sorted ids plus none and search_external, selects up to --max (default 3),
-#   and uses a 0.7 confidence floor. --status-note opts into a task status note.
+#   same task without another request, including relaunches. It offers every
+#   collected skill id. A skill whose SKILL.md digest is approved in
+#   $FM_HOME/config/jev-skill-public.json (the shadow approval list) is described
+#   by its front-matter description (first 400 characters); any other skill is
+#   offered as "Installed skill <id>", so no unapproved description reaches Jev.
+#   The API caps a Choice at 255 options, so the id-sorted roster is split into
+#   Choices of at most 253 skills (keys skill, skill_2, ...), each with none and
+#   search_external, all in one request. The primary is the highest-probability
+#   skill pick at or above the 0.7 confidence floor across those Choices; with
+#   none there, the highest-probability pick below the floor is recorded as
+#   uncertain, and with no skill pick at all the most confident Choice's none or
+#   search_external stands. Extras (up to --max, default 3) rank the remaining
+#   skills by probability across every Choice. --status-note opts into a task
+#   status note.
 #   Publishing a fresh launch overlay resets live_loaded while preserving the
 #   cached selection; an eligible relaunch rechecks readability before injection.
 #
@@ -60,7 +71,9 @@ FM_HOME="${FM_HOME:-$FM_ROOT}"
 CONFIDENCE_FLOOR=0.7
 SHADOW_CONFIDENCE_FLOOR=0.8
 DEFAULT_MAX=3
-CATALOG_MAX=24
+CHOICE_OPTIONS_MAX=255
+CHOICE_SKILLS_MAX=$((CHOICE_OPTIONS_MAX - 2))
+DESCRIPTION_MAX=400
 SHADOW_MODEL=jev-1.13.0
 SHADOW_STATE_MAX=30000
 LIVE_CONFIRM="${FM_JEV_SKILL_SELECT_LIVE_CONFIRM:-$FM_HOME/config/jev-skill-select-live}"
@@ -467,6 +480,48 @@ add_skill() {
   printf '%s\n' "$id" >> "$CATALOG"
 }
 
+# Digests of approved public skill files; empty when absent or malformed, so
+# every skill then falls back to id-only candidate text.
+APPROVED_DIGESTS=$(jq -c 'if type == "array" and all(.[]; type == "string") then . else [] end' \
+  "$FM_HOME/config/jev-skill-public.json" 2>/dev/null) || APPROVED_DIGESTS='[]'
+[ -n "$APPROVED_DIGESTS" ] || APPROVED_DIGESTS='[]'
+
+# "<digest>  <path>" for each listed SKILL.md, hashed in one process.
+skill_digests() {
+  if command -v shasum >/dev/null 2>&1; then
+    tr '\n' '\0' | xargs -0 shasum -a 256
+  elif command -v sha256sum >/dev/null 2>&1; then
+    tr '\n' '\0' | xargs -0 sha256sum
+  fi
+}
+
+# "<path><TAB><description>" for each listed SKILL.md, parsed in one process.
+# Flattens plain, quoted, and folded (>, >-, |) front-matter descriptions with
+# indented continuation; the character cap is applied later by jq, which counts
+# characters rather than bytes and so never splits a multibyte sequence.
+skill_descriptions() {
+  # shellcheck disable=SC2016 # The single-quoted text is an awk program.
+  tr '\n' '\0' | xargs -0 awk '
+    function flush() {
+      if (file != "") {
+        sub(/^[>|][-+]?/, "", buf)
+        gsub(/[ \t\r]+/, " ", buf)
+        sub(/^ /, "", buf); sub(/ $/, "", buf)
+        if (buf ~ /^".*"$/ || buf ~ /^\047.*\047$/) buf = substr(buf, 2, length(buf) - 2)
+        printf "%s\t%s\n", file, buf
+      }
+      buf = ""; found = 0; done = 0
+    }
+    FNR == 1 { flush(); file = FILENAME; if ($0 !~ /^---[[:space:]]*$/) done = 1; next }
+    done { next }
+    /^---[[:space:]]*$/ { done = 1; next }
+    found && /^[ \t]+[^ \t]/ { buf = buf " " $0; next }
+    found { done = 1; next }
+    /^description:/ { sub(/^description:[ \t]*/, ""); buf = $0; found = 1 }
+    END { flush() }
+  ' 2>/dev/null
+}
+
 : > "$CATALOG"
 for dir in ${SKILLS_DIRS+"${SKILLS_DIRS[@]}"}; do
   [ -d "$dir" ] || die "skills dir not a directory: $dir"
@@ -496,28 +551,61 @@ if [ -s "$CATALOG" ]; then
 fi
 
 SKILLS_JSON=$(jq -Rsc 'split("\n") | map(select(length > 0))' < "$CATALOG")
-SKILL_COUNT=$(jq 'length' <<<"$SKILLS_JSON")
+# The full roster is always offered, split across Choices when it is large.
 TRUNCATED=false
-if [ "$SKILL_COUNT" -gt "$CATALOG_MAX" ]; then
-  TRUNCATED=true
-fi
 
-QUESTIONS=$(jq -n --argjson skills "$SKILLS_JSON" --argjson max "$CATALOG_MAX" '
-  def take: $skills[:$max];
-  def criteria:
-    (take | map({key: ., value: ("Installed skill " + .)}) | from_entries)
-    + {
-        none: "Load no extra skill this session.",
-        search_external: "A useful skill is missing from the installed list."
-      };
-  {
-    skill: {
-      type: "choice",
-      instructions: "Once for this worker session, pick the single most useful installed skill to load. Prefer none when the brief is enough. Prefer search_external only when a missing skill would materially help.",
-      criteria: criteria
-    }
-  }
+# Candidates: every collected id, described only when its file is approved.
+: > "$TMPDIR/files.tsv"
+: > "$TMPDIR/approved.list"
+: > "$TMPDIR/descriptions.tsv"
+while IFS= read -r id; do
+  [ -n "$id" ] || continue
+  skill_file=''
+  for dir in ${SKILLS_DIRS+"${SKILLS_DIRS[@]}"}; do
+    if [ -f "$dir/$id/SKILL.md" ] && [ -r "$dir/$id/SKILL.md" ]; then
+      skill_file="$dir/$id/SKILL.md"
+      break
+    fi
+  done
+  printf '%s\t%s\n' "$id" "$skill_file" >> "$TMPDIR/files.tsv"
+done < "$CATALOG"
+if [ "$APPROVED_DIGESTS" != '[]' ] && awk -F '\t' '$2 != "" { found = 1 } END { exit !found }' "$TMPDIR/files.tsv"; then
+  jq -r '.[]' <<<"$APPROVED_DIGESTS" > "$TMPDIR/approved.digests"
+  awk -F '\t' '$2 != "" { print $2 }' "$TMPDIR/files.tsv" | skill_digests \
+    | awk 'NR == FNR { ok[$1] = 1; next } ($1 in ok) { sub(/^[^ ]+  /, ""); print }' \
+      "$TMPDIR/approved.digests" - > "$TMPDIR/approved.list"
+  [ -s "$TMPDIR/approved.list" ] && skill_descriptions < "$TMPDIR/approved.list" > "$TMPDIR/descriptions.tsv"
+fi
+CANDIDATES_JSON=$(jq -nc --argjson chars "$DESCRIPTION_MAX" \
+  --rawfile files "$TMPDIR/files.tsv" --rawfile descriptions "$TMPDIR/descriptions.tsv" '
+  ($descriptions | split("\n") | map(select(length > 0) | split("\t")
+    | {key: .[0], value: (.[1:] | join(" "))}) | from_entries) as $desc
+  | $files | split("\n") | map(select(length > 0) | split("\t")
+    | {id: .[0], description: (($desc[.[1:] | join("\t")] // "") | .[:$chars])})
+  | sort_by(.id)
+  | map({id, description: (if .description == "" then "Installed skill " + .id else .description end)})
+') || die "could not build skill candidates"
+OFFERED_JSON=$(jq -c 'map(.id)' <<<"$CANDIDATES_JSON")
+
+QUESTIONS=$(jq -n --argjson candidates "$CANDIDATES_JSON" --argjson size "$CHOICE_SKILLS_MAX" '
+  [range(0; [($candidates | length), 1] | max; $size) as $o | $candidates[$o:$o + $size]] as $chunks
+  | ($chunks | length) as $n
+  | [$chunks | to_entries[] | {
+      key: (if .key == 0 then "skill" else "skill_\(.key + 1)" end),
+      value: {
+        type: "choice",
+        instructions: ("Once for this worker session, pick the single most useful installed skill to load. Prefer none when the brief is enough. Prefer search_external only when a missing skill would materially help."
+          + (if $n > 1 then " This question lists part \(.key + 1) of \($n) of the installed skills; answer none when no skill in this part fits." else "" end)),
+        criteria: ((.value | map({key: .id, value: .description}) | from_entries)
+          + {
+              none: "Load no extra skill this session.",
+              search_external: "A useful skill is missing from the installed list."
+            })
+      }
+    }]
+  | from_entries
 ') || die "could not build Jev questions"
+CHUNK_KEYS=$(jq -c 'keys_unsorted' <<<"$QUESTIONS")
 
 SUMMARY_TEXT=$SUMMARY
 [ -n "$SUMMARY_TEXT" ] || SUMMARY_TEXT='(none)'
@@ -602,35 +690,67 @@ fi
 fm_jev_log_call "$(jq -nc --arg purpose skill-select --arg task "$TASK_ID" --arg harness "$HARNESS" \
   '{purpose:$purpose,task:$task,harness:$harness}')" >/dev/null 2>&1 || true
 
-CHOICE=$(jq -r '.answers.skill.choice // empty' <<<"$RESPONSE")
-CONFIDENCE=$(jq -r '.answers.skill.confidence // empty' <<<"$RESPONSE")
-PROBS=$(jq -c '.answers.skill.probabilities // empty' <<<"$RESPONSE")
+# Every Choice must be well formed before any of them is trusted.
+while IFS= read -r key; do
+  CHOICE=$(jq -r --arg k "$key" '.answers[$k].choice // empty' <<<"$RESPONSE")
+  CONFIDENCE=$(jq -r --arg k "$key" '.answers[$k].confidence // empty' <<<"$RESPONSE")
+  PROBS=$(jq -c --arg k "$key" '.answers[$k].probabilities // empty' <<<"$RESPONSE")
 
-if [ -z "$CHOICE" ] || [ -z "$CONFIDENCE" ] || [ -z "$PROBS" ] || [ "$PROBS" = 'null' ]; then
-  write_record error '' 0 '{}' '[]' 'malformed Jev skill answer' false
-  maybe_status_note error none 0
-  exit 0
-fi
+  if [ -z "$CHOICE" ] || [ -z "$CONFIDENCE" ] || [ -z "$PROBS" ] || [ "$PROBS" = 'null' ]; then
+    write_record error '' 0 '{}' '[]' 'malformed Jev skill answer' false
+    maybe_status_note error none 0
+    exit 0
+  fi
 
-if ! jq -e --arg choice "$CHOICE" '
-    .answers.skill.probabilities | type == "object" and has($choice)
-  ' <<<"$RESPONSE" >/dev/null; then
-  write_record error '' 0 '{}' '[]' 'choice missing from probabilities' false
-  maybe_status_note error none 0
-  exit 0
-fi
+  if ! jq -e --arg k "$key" --arg choice "$CHOICE" '
+      .answers[$k].probabilities | type == "object" and has($choice)
+    ' <<<"$RESPONSE" >/dev/null; then
+    write_record error '' 0 '{}' '[]' 'choice missing from probabilities' false
+    maybe_status_note error none 0
+    exit 0
+  fi
 
-if ! fm_jev_probabilities_sum_ok "$PROBS"; then
-  write_record error "$CHOICE" 0 "$PROBS" '[]' 'probabilities do not sum to 1' false
-  maybe_status_note error "$CHOICE" 0
-  exit 0
-fi
+  if ! fm_jev_probabilities_sum_ok "$PROBS"; then
+    write_record error "$CHOICE" 0 "$PROBS" '[]' 'probabilities do not sum to 1' false
+    maybe_status_note error "$CHOICE" 0
+    exit 0
+  fi
 
-if ! jq -e --arg conf "$CONFIDENCE" '$conf | tonumber | . == .' >/dev/null 2>&1 <<<"{}"; then
-  write_record error "$CHOICE" 0 "$PROBS" '[]' 'confidence is not a number' false
-  maybe_status_note error "$CHOICE" 0
-  exit 0
-fi
+  if ! jq -e --arg conf "$CONFIDENCE" '$conf | tonumber | . == .' >/dev/null 2>&1 <<<"{}"; then
+    write_record error "$CHOICE" 0 "$PROBS" '[]' 'confidence is not a number' false
+    maybe_status_note error "$CHOICE" 0
+    exit 0
+  fi
+
+  if ! jq -e --arg k "$key" --arg choice "$CHOICE" '.questions[$k].criteria | has($choice)' \
+    <<<"{\"questions\":$QUESTIONS}" >/dev/null; then
+    write_record error "$CHOICE" "$(jq -n --arg c "$CONFIDENCE" '$c | tonumber')" "$PROBS" '[]' \
+      'choice is not an offered option' false
+    maybe_status_note error "$CHOICE" "$CONFIDENCE"
+    exit 0
+  fi
+done < <(jq -r '.[]' <<<"$CHUNK_KEYS")
+
+# Primary across Choices: the likeliest skill pick at or above the floor, else
+# the likeliest skill pick below it, else the most confident none/search_external.
+WINNER=$(jq -r --argjson keys "$CHUNK_KEYS" --argjson floor "$CONFIDENCE_FLOOR" '
+  . as $r
+  | [$keys | to_entries[] | .value as $k | $r.answers[$k] as $a
+      | {i: .key, key: $k, choice: $a.choice, confidence: ($a.confidence | tonumber),
+         p: $a.probabilities[$a.choice]}]
+  | map(select(.choice != "none" and .choice != "search_external")) as $picks
+  | ($picks | map(select(.confidence >= $floor))) as $clear
+  | if ($clear | length) > 0 then $clear | sort_by(-.p, .i) | .[0].key
+    elif ($picks | length) > 0 then $picks | sort_by(-.p, .i) | .[0].key
+    else sort_by(-.confidence, .i) | .[0].key
+    end
+' <<<"$RESPONSE") || WINNER=skill
+CHOICE=$(jq -r --arg k "$WINNER" '.answers[$k].choice' <<<"$RESPONSE")
+CONFIDENCE=$(jq -r --arg k "$WINNER" '.answers[$k].confidence' <<<"$RESPONSE")
+PROBS=$(jq -c --arg k "$WINNER" '.answers[$k].probabilities' <<<"$RESPONSE")
+ALL_PROBS=$(jq -c --argjson keys "$CHUNK_KEYS" '
+  . as $r | [$keys[] | $r.answers[.].probabilities | del(.none, .search_external)] | add // {}
+' <<<"$RESPONSE")
 
 CONF_JSON=$(jq -n --arg c "$CONFIDENCE" '$c | tonumber')
 
@@ -641,19 +761,11 @@ if ! fm_jev_choice_confidence_ok "$CONFIDENCE" "$CONFIDENCE_FLOOR"; then
   REASON="confidence below $CONFIDENCE_FLOOR"
 fi
 
-CRITERIA_HAS=$(jq -n -r --arg choice "$CHOICE" --argjson q "$QUESTIONS" \
-  'if $q.skill.criteria | has($choice) then "yes" else "no" end')
-if [ "$CRITERIA_HAS" != yes ]; then
-  write_record error "$CHOICE" "$CONF_JSON" "$PROBS" '[]' 'choice is not an offered option' false
-  maybe_status_note error "$CHOICE" "$CONFIDENCE"
-  exit 0
-fi
-
 SKILLS_OUT='[]'
 if [ "$CHOICE" != none ] && [ "$CHOICE" != search_external ]; then
-  SKILLS_OUT=$(jq -n --argjson probs "$PROBS" --arg primary "$CHOICE" --argjson max "$MAX" \
-    --argjson catalog "$SKILLS_JSON" --argjson cap "$CATALOG_MAX" '
-      def offered: ($catalog[:$cap]);
+  SKILLS_OUT=$(jq -n --argjson probs "$ALL_PROBS" --arg primary "$CHOICE" --argjson max "$MAX" \
+    --argjson offered_ids "$OFFERED_JSON" '
+      def offered: $offered_ids;
       def extras:
         ($probs
           | to_entries

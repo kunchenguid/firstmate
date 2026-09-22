@@ -18,7 +18,9 @@
 #
 # Questions (via bin/fm-jev-lib.sh):
 #   claim    Choice {evidenced, not_evidenced, need_human}
-#   strength Score 0..1
+#   strength Score over five ordered criteria levels, guess -> clear; the
+#            answer's level index (0..4) is divided by 4 so the logged
+#            strength keeps its 0 (guess) .. 1 (clear) scale.
 # Floor 0.7 (fm_jev_choice_confidence_ok / JEV_CONFIDENCE_FLOOR).
 # need_human is required: healthy now is not repaired.
 #
@@ -156,9 +158,14 @@ questions=$(jq -nc '{
   },
   strength: {
     type: "score",
-    instructions: "How strongly is that verdict supported, from 0 (guess) to 1 (clear match or mismatch).",
-    min: 0,
-    max: 1
+    instructions: "How strongly does the supplied evidence support that verdict?",
+    criteria: [
+      "Guess: the evidence barely bears on the verdict.",
+      "Weak: the evidence leans toward the verdict but leaves it open.",
+      "Moderate: the evidence supports the verdict with notable gaps.",
+      "Strong: the evidence supports the verdict with only minor gaps.",
+      "Clear: the evidence plainly matches or plainly contradicts the claim."
+    ]
   }
 }') || die "jq is required"
 
@@ -173,7 +180,10 @@ response=$(fm_jev_decide "$compacted" "$questions") || decide_code=$?
 if [ "$decide_code" -eq 0 ] && [ -n "$response" ]; then
   choice=$(printf '%s' "$response" | jq -r '.answers.claim.choice // empty')
   confidence=$(printf '%s' "$response" | jq -r '.answers.claim.confidence // empty')
-  strength=$(printf '%s' "$response" | jq -r '.answers.strength.score // .answers.strength.value // empty')
+  strength=$(printf '%s' "$response" | jq -r --argjson q "$questions" '
+    (($q.strength.criteria | length) - 1) as $top
+    | .answers.strength.score
+    | if type == "number" and . >= 0 and . <= $top then . / $top else empty end')
   case "$choice" in
     evidenced|not_evidenced|need_human)
       verdict=$choice

@@ -399,6 +399,100 @@ test_codex_overlay_uses_dollar_form() {
   pass "Codex overlay uses the dollar skill form"
 }
 
+# Live candidates are the full collected roster, each approved skill described
+# by its own SKILL.md front matter, so a late skill such as typesafe-ai (slot 102
+# here) stays selectable instead of falling past a fixed first-N id cut.
+test_live_full_roster_offers_described_late_skill() {
+  local code out err i old_skills=$SKILLS_DIR
+  SKILLS_DIR="$TMP_ROOT/live-roster/.agents/skills"
+  mkdir -p "$SKILLS_DIR"
+  for i in $(seq -w 1 101); do
+    mkdir -p "$SKILLS_DIR/skill-$i"
+    printf '%s\n' '---' "name: skill-$i" "description: Handle workflow $i." '---' 'Body.' > "$SKILLS_DIR/skill-$i/SKILL.md"
+  done
+  mkdir -p "$SKILLS_DIR/typesafe-ai"
+  printf '%s\n' '---' 'name: typesafe-ai' 'description: >-' '  Build AI-powered software' '  with TypeSafe typed questions.' '---' 'Body.' \
+    > "$SKILLS_DIR/typesafe-ai/SKILL.md"
+  fresh_home
+  mkdir -p "$SKILLS_DIR/unreviewed"
+  printf '%s\n' '---' 'name: unreviewed' 'description: Unreviewed local notes skill.' '---' 'Body.' \
+    > "$SKILLS_DIR/unreviewed/SKILL.md"
+  : > "$HOME_DIR/config/jev-skill-select-live"
+  python3 - "$RESPONSE" <<'PYTHON'
+import json, sys
+p = {f'skill-{i:03}': 0 for i in range(1, 102)}
+p['unreviewed'] = 0
+p.update({'typesafe-ai': .9, 'none': .05, 'search_external': .05})
+json.dump({'model': 'jev-1.13.0', 'answers': {'skill': {'type': 'choice', 'choice': 'typesafe-ai', 'confidence': .9, 'probabilities': p}}}, open(sys.argv[1], 'w'))
+PYTHON
+  FM_JEV_SKILL_SELECT=live TYPESAFE_API_KEY=$TS_KEY run_select code out err \
+    --harness claude --task-id t-live-roster --skills-dir "$SKILLS_DIR"
+  expect_code 0 "$code" "live full-roster select succeeds: $err"
+  jq -e '.questions.skill.criteria | length == 105' "$LOG/body" >/dev/null \
+    || fail "live must offer all 103 installed skills plus none and search_external"
+  jq -e '.questions.skill.criteria.unreviewed == "Installed skill unreviewed"' "$LOG/body" >/dev/null \
+    || fail "a skill outside config/jev-skill-public.json must stay offered with id-only text"
+  assert_not_contains "$(cat "$LOG/body")" 'Unreviewed local notes' \
+    "an unapproved skill description must never reach Jev"
+  jq -e '.questions.skill.criteria["typesafe-ai"] == "Build AI-powered software with TypeSafe typed questions."' "$LOG/body" >/dev/null \
+    || fail "live candidate must carry the flattened front-matter description"
+  jq -e '.questions.skill.criteria["skill-001"] == "Handle workflow 001."' "$LOG/body" >/dev/null \
+    || fail "every live candidate must carry its own description"
+  jq -e '.status == "clear" and .primary == "typesafe-ai" and .catalog_truncated == false
+      and (.skills | index("typesafe-ai") != null) and .live_loaded == false' \
+    "$HOME_DIR/state/t-live-roster.jev-skills.json" >/dev/null \
+    || fail "a late described skill must be selectable without changing live_loaded"
+  SKILLS_DIR=$old_skills
+  write_response "$RESPONSE"
+  pass "live offers the full described roster and a late skill stays selectable"
+}
+
+# The API accepts at most 255 Choice options, so a larger roster is split into
+# Choices of at most 253 skills (plus none and search_external) in one request.
+# The primary is the likeliest skill pick that clears the floor in any Choice.
+test_live_roster_chunks_past_choice_ceiling() {
+  local code out err i old_skills=$SKILLS_DIR
+  SKILLS_DIR="$TMP_ROOT/live-ceiling/.agents/skills"
+  mkdir -p "$SKILLS_DIR"
+  for i in $(seq -w 1 256); do
+    mkdir -p "$SKILLS_DIR/skill-$i"
+    printf '%s\n' '---' "name: skill-$i" "description: Handle workflow $i." '---' > "$SKILLS_DIR/skill-$i/SKILL.md"
+  done
+  for i in 1 2 3 4; do
+    mkdir -p "$SKILLS_DIR/bare-$i"
+    printf 'No front matter.\n' > "$SKILLS_DIR/bare-$i/SKILL.md"
+  done
+  fresh_home
+  : > "$HOME_DIR/config/jev-skill-select-live"
+  python3 - "$RESPONSE" <<'PYTHON'
+import json, sys
+first = {'none': .3, 'search_external': .1, 'skill-010': .6}
+second = {'none': .4, 'search_external': .05, 'skill-256': .55}
+json.dump({'model': 'jev-1.13.0', 'answers': {
+  'skill': {'type': 'choice', 'choice': 'skill-010', 'confidence': .5, 'probabilities': first},
+  'skill_2': {'type': 'choice', 'choice': 'skill-256', 'confidence': .85, 'probabilities': second}}}, open(sys.argv[1], 'w'))
+PYTHON
+  FM_JEV_SKILL_SELECT=live TYPESAFE_API_KEY=$TS_KEY run_select code out err \
+    --harness pi --task-id t-live-ceiling --skills-dir "$SKILLS_DIR"
+  expect_code 0 "$code" "live chunked select succeeds: $err"
+  jq -e '.questions | keys_unsorted == ["skill", "skill_2"]
+      and (.skill.criteria | length == 255) and (.skill_2.criteria | length == 9)
+      and all(.[]; .type == "choice" and (.criteria | has("none") and has("search_external")))' "$LOG/body" >/dev/null \
+    || fail "260 skills must split into Choices of 253 and 7 skills, each within the 255-option ceiling"
+  jq -e '[.questions[] | .criteria | keys[] | select(. != "none" and . != "search_external")] | length == 260' "$LOG/body" >/dev/null \
+    || fail "every installed skill must be enumerated exactly once"
+  jq -e '.questions.skill.criteria["bare-1"] == "Installed skill bare-1"
+      and .questions.skill_2.criteria["skill-256"] == "Handle workflow 256."' "$LOG/body" >/dev/null \
+    || fail "undescribed skills must stay offered with id-only text"
+  jq -e '.status == "clear" and .primary == "skill-256" and .confidence == 0.85
+      and .skills[0:2] == ["skill-256", "skill-010"] and .catalog_truncated == false' \
+    "$HOME_DIR/state/t-live-ceiling.jev-skills.json" >/dev/null \
+    || fail "a clearing pick in a later Choice must beat a likelier pick below the floor"
+  SKILLS_DIR=$old_skills
+  write_response "$RESPONSE"
+  pass "live roster past the Choice ceiling is chunked in one request with no skill cut"
+}
+
 test_public_roster_uses_descriptions() {
   local code out err body
   fresh_home
@@ -630,6 +724,8 @@ test_shadow_overlay_does_not_change_launch
 test_none_overlay_leaves_launch_unchanged
 test_jev_failure_does_not_rewrite_overlay
 test_codex_overlay_uses_dollar_form
+test_live_full_roster_offers_described_late_skill
+test_live_roster_chunks_past_choice_ceiling
 test_public_roster_uses_descriptions
 test_none_choice_records_empty_skills
 
