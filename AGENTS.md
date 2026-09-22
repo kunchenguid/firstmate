@@ -370,42 +370,52 @@ The delivery lifecycle is an always-loaded operational contract; referenced scri
 
 ### Dispatch and supervision handoff
 
-Spawn only through `bin/fm-spawn.sh` after the profile and backend checks in section 4.
-The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
-When the configured tasks-axi backlog gate applies, the spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for, so recording the dispatch is never a separate step to remember; a manual-backend home retains the hand-editing contract in `docs/configuration.md`.
-After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.
-A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
+- Spawn only through `bin/fm-spawn.sh`, after the profile and backend checks in section 4.
+  The spawn must resolve a genuine isolated task worktree distinct from the primary checkout; a failed isolation assertion stops the task.
+- When the configured tasks-axi backlog gate applies, the spawn itself moves the work item to In flight and refuses rather than dispatching work this home has no item for - recording dispatch is never a separate step to remember.
+  A manual-backend home retains the hand-editing contract in `docs/configuration.md`.
+- After spawning, confirm the worker is processing the brief and handle any trust dialog through `harness-adapters`.
+- A persistent secondmate is recorded in the secondmate registry and runtime state, never as a backlog work item.
 
-Steer a worker with ordinary text through fail-closed `fm-send`: the message becomes a durable record in the task's steering inbox (multi-line text is legal, local and remote alike) and the worker's terminal receives only a constant doorbell line, with the watcher re-ringing an unacknowledged local message and escalating a stuck one (`bin/fm-task-inbox-lib.sh`; `bin/fm-send.sh` owns the typed-plane carve-outs).
-A remote secondmate steer rides the same durable-inbox model through the remote transport; after an unconfirmed delivery, only the exact `FM_PENDING_REPLY_EXISTING_CORR=<id>` resend command printed by `fm-send` is safe because it preserves the request body for remote enqueue deduplication (`bin/fm-send.sh` header).
-When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--resolve-key` so the answer itself closes that decision record at answer time, identically for local and remote workers (contract: `bin/fm-send.sh` header).
-`fm-send` is the data plane for text the worker should read; never use its key or text paths for interrupt, exit, or other lifecycle control, because routing-marked lifecycle text becomes chat the worker reasons about instead of executing.
-Drive a worker's lifecycle through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the per-runtime mechanics, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](docs/agent-control.md)).
-A secondmate's routed reply returns through status or a document pointer, not by firstmate peeking into its chat.
-For the parent-owned correlation, recovery, and escalation contract on marked secondmate requests, see `bin/fm-pending-reply-lib.sh`.
-Supervise all live work under section 8.
+**Steering a live worker - NEVER type into its pane:**
+
+- Steer a worker with ordinary text ONLY through fail-closed `fm-send`.
+  The message becomes a durable record in the task's steering inbox (multi-line text legal, local and remote alike); the worker's terminal receives only a constant doorbell line.
+  The watcher re-rings an unacknowledged local message and escalates a stuck one (`bin/fm-task-inbox-lib.sh`; `bin/fm-send.sh` owns the typed-plane carve-outs).
+- A remote secondmate steer rides the same durable-inbox model through the remote transport.
+  After an unconfirmed delivery, ONLY the exact `FM_PENDING_REPLY_EXISTING_CORR=<id>` resend command printed by `fm-send` is safe - it preserves the request body for remote enqueue deduplication (`bin/fm-send.sh` header).
+- When a steer answers an open keyed decision or blocker, pass `fm-send`'s `--resolve-key` so the answer closes that decision record at answer time, identically for local and remote workers (`bin/fm-send.sh` header).
+- `fm-send` is the data plane for text the worker should read.
+  NEVER use its key or text paths for interrupt, exit, or other lifecycle control - routing-marked lifecycle text becomes chat the worker reasons about instead of executing.
+- Drive a worker's lifecycle ONLY through `bin/fm-control.sh <task-id> interrupt|exit|relaunch`, which owns the per-runtime mechanics, verifies each action, and never tears down or discards anything ([`docs/agent-control.md`](docs/agent-control.md)).
+- A secondmate's routed reply returns through status or a document pointer - never by firstmate peeking into its chat.
+  Parent-owned correlation, recovery, and escalation contract on marked secondmate requests: `bin/fm-pending-reply-lib.sh`.
+- Supervise all live work under section 8.
 
 ### Selected delivery path and merge authority
 
-The selected delivery path owns its own rigor.
-When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, and CI; otherwise follow the faster path without adding an independent reviewer.
-Never hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer authority for one from security, architecture, or risk alone.
-A separate review or audit is allowed only when the captain explicitly requests that deliverable or the authorized task is a knowledge-only review; one named question remains scoped to that question.
-If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
-The path's worker, automated gates, and captain approval remain authoritative:
+- The selected delivery path owns its own rigor.
+  When no-mistakes is selected, no-mistakes alone owns review, fixes, tests, documentation, push, PR, CI; otherwise follow the faster path without adding an independent reviewer.
+- NEVER hold work outside no-mistakes for a manual clean verdict, stack serial manual reviews, or infer review authority from security, architecture, or risk alone.
+- A separate review or audit is allowed only when the captain explicitly requests that deliverable, or the authorized task is a knowledge-only review scoped to one named question.
+- If fast-path risk needs more rigor, escalate whether to use no-mistakes instead of inventing a manual gate.
+- The path's worker, automated gates, and captain approval remain authoritative:
+  - **no-mistakes** - full pipeline through a PR, then waits for configured merge authority.
+  - **direct-PR** - worker pushes and opens a PR without the no-mistakes pipeline, then waits for configured merge authority.
+  - **local-only** - worker stops with a clean ready branch, then waits for configured merge authority before firstmate uses the guarded fast-forward merge path.
 
-- **no-mistakes** runs the full pipeline through a PR, then waits for the configured merge authority.
-- **direct-PR** has the worker push and open a PR without the no-mistakes pipeline, then waits for the configured merge authority.
-- **local-only** has the worker stop with a clean ready branch, then waits for the configured merge authority before firstmate uses the guarded fast-forward merge path.
+**Merge authority (delivery mode and `yolo` are orthogonal):**
 
-Delivery mode and `yolo` are orthogonal.
-`yolo` governs merge authority only: with it off, the captain approves every PR merge and every local-only landing; with it on, firstmate merges green, in-scope work itself.
-Never merge a red PR under either setting unless a current explicit captain instruction names the single GitHub check waived through `fm-pr-merge.sh --allow-red`; that attended-only waiver still requires every other check green.
-Destructive, irreversible, and security-sensitive merges still escalate.
-Without a current explicit captain instruction that states the concrete merge, the green default stands, and standing `yolo` cannot authorize a red merge; section 1 owns when such an instruction overrides a Firstmate-written standing rule within its exact scope.
-Load `ask-user-authority` before deciding any ask-user finding; the implementation worker never answers its own finding.
-Use `bin/fm-pr-merge.sh` for every task PR merge so merge metadata is recorded and an unproved merge is refused instead of reported as landed, and use `bin/fm-merge-local.sh` for approved local-only landing; never call a lower-level merge command around their guards.
-After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
+- `yolo` governs merge authority only.
+  Off: captain approves every PR merge and every local-only landing.
+  On: firstmate merges green, in-scope work itself.
+- NEVER merge a red PR under either setting, unless a current explicit captain instruction names the single GitHub check waived through `fm-pr-merge.sh --allow-red` (attended-only waiver; every other check must still be green).
+- Destructive, irreversible, and security-sensitive merges still escalate regardless of `yolo`.
+- Without a current explicit captain instruction stating the concrete merge, the green default stands - standing `yolo` cannot authorize a red merge (section 1 owns instruction-override scope).
+- Load `ask-user-authority` before deciding any ask-user finding; the implementation worker never answers its own finding.
+- Use `bin/fm-pr-merge.sh` for every task PR merge (records merge metadata, refuses an unproved merge instead of reporting it landed) and `bin/fm-merge-local.sh` for approved local-only landing.
+  NEVER call a lower-level merge command around their guards.
+- After an autonomous merge, give the captain a one-line full-URL or local-main outcome.
 
 ### Validate
 
