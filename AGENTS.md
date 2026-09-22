@@ -628,10 +628,9 @@ To preserve context window budget and minimize token spend, you MUST use AXI CLI
   - Truncation: Do not request full bodies unless necessary. Use `--full` only when you must inspect full error logs or complete diffs.
   - Fallback: Only use standard `gh` if a specialized command is absent from `gh-axi`.
 
-- **Task & Backlog Management**: ALWAYS use `tasks-axi` instead of catting/editing `backlog.md` directly.
+- **Task & Backlog Management**: ALWAYS use `tasks-axi` instead of catting/editing `backlog.md` directly, always through `bin/fm-tasks-axi.sh` so the call reaches this home's backlog from any directory (section 10).
   - Zero-token writes: Run `tasks-axi claim <id>`, `tasks-axi done <id>`, or `tasks-axi create --title "..."`.
   - Inspection: Run `tasks-axi ready` to find unblocked tasks without scanning the entire backlog.
-  - Avoid editing task markdown files directly with text editors; allow `tasks-axi` to mutate state in place.
 
 ## 2. Output Formatting (TOON Notation)
 - AXI tools output data in TOON format (compact token-efficient lines).
