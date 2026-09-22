@@ -336,6 +336,24 @@ fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
 }
+
+scout_completion_retirement_parent_safe() { # <state-dir>
+  local state_dir=$1 directory owner
+  directory="$state_dir/scout-completions"
+  [ -e "$directory" ] || [ -L "$directory" ] || return 0
+  [ -d "$directory" ] && [ ! -L "$directory" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    owner=$(/usr/bin/stat -f %u "$directory" 2>/dev/null) || return 1
+  else
+    owner=$(stat -c %u -- "$directory" 2>/dev/null) || return 1
+  fi
+  [ "$owner" = "$(id -u)" ]
+}
+
+scout_completion_retirement_parent_safe "$STATE" || {
+  echo "REFUSED: unsafe scout completion evidence directory; preserving task state." >&2
+  exit 1
+}
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # Supervision lease guard: post-landing cleanup is overlap territory between
@@ -2896,6 +2914,10 @@ validate_firstmate_home_children_removal() {
   local home=$1 sub_state child_meta child_id child_wt child_proj child_kind child_home child_backend child_orca_worktree_id
   sub_state="$home/state"
   [ -d "$sub_state" ] || return 0
+  scout_completion_retirement_parent_safe "$sub_state" || {
+    echo "REFUSED: unsafe child scout completion evidence directory; preserving secondmate state." >&2
+    return 1
+  }
   for child_meta in "$sub_state"/*.meta; do
     [ -e "$child_meta" ] || continue
     child_id=$(basename "$child_meta" .meta)
@@ -2950,7 +2972,7 @@ FMEOF
 
 teardown_herdr_require_prerequisites() {  # <task-id>
   local task_id=$1 prerequisite
-  if ! fm_backend_source herdr; then
+  if [ ! -r "$FM_BACKEND_LIB_DIR/backends/herdr.sh" ] || ! fm_backend_source herdr; then
     echo "error: herdr teardown prerequisites are unavailable for $task_id; nothing was changed - restore the adapter and rerun teardown" >&2
     return 1
   fi
@@ -3205,12 +3227,17 @@ cleanup_firstmate_home_children() {
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
     status_retire_presentation_task "$sub_state" "$child_id" || return 1
     fm_backlog_atomic_transition remove "$sub_state/$child_id.meta" "task record" "$sub_state" || return 1
+    scout_completion_retirement_parent_safe "$sub_state" || {
+      echo "REFUSED: unsafe child scout completion evidence directory; preserving its evidence record." >&2
+      return 1
+    }
     rm -f "$sub_state/$child_id.turn-ended" "$sub_state/$child_id.progress" \
       "$sub_state/$child_id.pi-ext.ts" "$sub_state/$child_id.omp-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
-      "$sub_state/.$child_id.branch-outcome-index"
+      "$sub_state/.$child_id.branch-outcome-index" \
+      "$sub_state/scout-completions/$child_id.evidence"
   done
 }
 
@@ -3653,6 +3680,10 @@ fi
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
+scout_completion_retirement_parent_safe "$STATE" || {
+  echo "REFUSED: unsafe scout completion evidence directory; preserving its evidence record." >&2
+  exit 1
+}
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
@@ -3660,7 +3691,7 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
-  "$STATE/.$ID.branch-outcome-index"
+  "$STATE/.$ID.branch-outcome-index" "$STATE/scout-completions/$ID.evidence"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.

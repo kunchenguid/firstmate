@@ -1492,7 +1492,7 @@ SH
 # digest returned and not by how fast the host was.
 test_inactive_reconcile_never_blocks_the_digest() {
   local rec root home fakebin world worktree crew_state calls out waited=0
-  local release_gate read_finished
+  local release_gate read_finished status_size status_ident
   rec=$(new_world inactive-reconcile-deferred)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1544,11 +1544,19 @@ SH
 
   fm_write_meta "$home/state/slow-child.meta" \
     'window=firstmate:fm-slow-child' "worktree=$worktree" 'project=firstmate' \
-    'harness=pi' 'kind=scout' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=slow-child.1'
-  printf '%s\n' 'working: validating' > "$home/state/slow-child.status"
+    'harness=pi' 'kind=scout' 'mode=no-mistakes' 'yolo=off' 'spawn_gen=slow-child.1' \
+    'status_boundary=0' 'status_identity=absent'
+  printf '%s\n' 'done: validation complete' > "$home/state/slow-child.status"
   : > "$home/state/slow-child.turn-ended"
   touch -t 202001010000 "$home/state/slow-child.meta" \
     "$home/state/slow-child.status" "$home/state/slow-child.turn-ended"
+  status_size=$(wc -c < "$home/state/slow-child.status" | tr -d '[:space:]')
+  status_ident=$(bash -c '. "$1"; _fm_open_decisions_file_ident "$2"' \
+    _ "$root/bin/fm-classify-lib.sh" "$home/state/slow-child.status")
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    "$root/bin/fm-inactive-reconcile.sh" observe-status \
+    "$home/state/slow-child.status" "$status_size" "$status_ident" \
+    || fail "the scout completion fixture could not publish watcher evidence"
 
   out=$(FM_BACKEND=tmux FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     FM_FAKE_NM_CALLS="$calls" FM_FAKE_NM_RELEASE="$release_gate" \

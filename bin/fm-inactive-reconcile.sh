@@ -3,6 +3,7 @@
 #
 # Usage:
 #   fm-inactive-reconcile.sh scan [--startup]
+#   fm-inactive-reconcile.sh observe-status <status-file> <captured-end> <captured-identity>
 #   fm-inactive-reconcile.sh report <task-id>
 #   fm-inactive-reconcile.sh acknowledge <fingerprint>
 #
@@ -51,6 +52,24 @@
 # outcome record or wake the supervisor.
 # Working, paused, parked, blocked, unknown, persistent secondmates, and
 # captain-held work retain their existing supervision semantics.
+# A done scout whose task record survives is a separate cleanup obligation.
+# The watcher records each newly classified scout lifecycle span in
+# state/scout-completions/<id>.evidence before it queues that status wake. The
+# record binds the status file's exact spawn boundary and identity to spawn_gen,
+# advances only across complete newline-terminated events in a bounded stable
+# byte span, preserves done across decision-only resolved/note events, and
+# records later lifecycle states as the current nonterminal verdict.
+# Reconciliation accepts only a complete, matching
+# evidence record whose cursor still equals the current status endpoint. Legacy
+# metadata without the boundary fails closed. The first outcome names guarded
+# cleanup and later scans requeue one
+# `scout-cleanup:<fingerprint>` reminder per cadence until teardown removes the
+# task metadata. fm-crew-state.sh and a terminal ledger line never substitute
+# for that incarnation-bound completion proof, although a positive current
+# nonterminal state vetoes it. The reminder never performs cleanup itself;
+# bin/fm-teardown.sh remains
+# the sole owner of report, captain-call, lease, unlanded-work, and destructive
+# safety gates.
 #
 # A terminal-outcomes/<fingerprint>.pending record remains until its upstream
 # receipt is durable.
@@ -83,7 +102,9 @@ export LC_ALL=C
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 OUTCOME_DIR="$STATE/terminal-outcomes"
+SCOUT_COMPLETION_DIR="$STATE/scout-completions"
 SCAN_MARKER="$STATE/.inactive-outcome-reconcile"
 SCAN_LOCK="$STATE/.inactive-outcome-reconcile.lock"
 CREW_STATE_BIN="${FM_INACTIVE_CREW_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}"
@@ -255,6 +276,24 @@ queue_presentation() { # <record> <fingerprint> <payload>
   publish_actionable "inactive-outcome:$fingerprint" "$payload"
 }
 
+scout_cleanup_payload() { # <task>
+  local task=$1 report payload
+  report="$DATA/$task/report.md"
+  payload="completed scout still has live task records and needs guarded cleanup: child=$task"
+  if [ -f "$report" ] && [ ! -L "$report" ] && [ -r "$report" ]; then
+    payload="$payload report=data/$task/report.md"
+  else
+    payload="$payload report=missing-or-unreadable"
+  fi
+  printf '%s\n' "$payload; MAIN must complete the captain-call inventory, then run bin/fm-teardown.sh $task, which must pass every cleanup safety check"
+}
+
+queue_scout_cleanup_reminder() { # <task> <fingerprint>
+  local task=$1 fingerprint=$2 payload
+  payload=$(scout_cleanup_payload "$task") || return 1
+  publish_actionable "scout-cleanup:$fingerprint" "$payload"
+}
+
 last_activity_age() { # <meta> <status> <turn-ended>
   local meta=$1 status=$2 turn=$3 now m newest=0 file
   now=$(reconcile_now)
@@ -309,6 +348,246 @@ meta_incarnation() { # <meta>
     identity="$(meta_field "$meta" window)|$(meta_field "$meta" worktree)"
   fi
   printf 'legacy-%s\n' "$(sha256_text "$identity")"
+}
+
+scout_evidence_path() { # <task>
+  printf '%s/%s.evidence\n' "$SCOUT_COMPLETION_DIR" "$1"
+}
+
+scout_completion_dir_trusted() {
+  local owner
+  [ -d "$SCOUT_COMPLETION_DIR" ] && [ ! -L "$SCOUT_COMPLETION_DIR" ] || return 1
+  if [ "$(uname)" = Darwin ]; then
+    owner=$(/usr/bin/stat -f %u "$SCOUT_COMPLETION_DIR" 2>/dev/null) || return 1
+  else
+    owner=$(stat -c %u -- "$SCOUT_COMPLETION_DIR" 2>/dev/null) || return 1
+  fi
+  [ "$owner" = "$(id -u)" ]
+}
+
+SCOUT_EVIDENCE_TASK=
+SCOUT_EVIDENCE_INCARNATION=
+SCOUT_EVIDENCE_STATUS_IDENTITY=
+SCOUT_EVIDENCE_BOUNDARY=
+SCOUT_EVIDENCE_CURSOR=
+SCOUT_EVIDENCE_LIFECYCLE=
+SCOUT_EVIDENCE_DONE_CURSOR=
+scout_evidence_parse() { # <record>
+  local record=$1 bytes line key value schema_seen=0
+  SCOUT_EVIDENCE_TASK=
+  SCOUT_EVIDENCE_INCARNATION=
+  SCOUT_EVIDENCE_STATUS_IDENTITY=
+  SCOUT_EVIDENCE_BOUNDARY=
+  SCOUT_EVIDENCE_CURSOR=
+  SCOUT_EVIDENCE_LIFECYCLE=
+  SCOUT_EVIDENCE_DONE_CURSOR=
+  [ -f "$record" ] && [ -r "$record" ] && [ ! -L "$record" ] || return 1
+  bytes=$(LC_ALL=C wc -c < "$record" 2>/dev/null) || return 1
+  bytes=${bytes//[[:space:]]/}
+  case "$bytes" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$bytes" -le 4096 ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in *=*) key=${line%%=*}; value=${line#*=} ;; *) return 1 ;; esac
+    case "$value" in *$'\t'*|*$'\r'*|*$'\n'*) return 1 ;; esac
+    case "$key" in
+      schema) [ "$schema_seen" -eq 0 ] && [ "$value" = fm-scout-completion.v1 ] || return 1; schema_seen=1 ;;
+      task_id) [ -z "$SCOUT_EVIDENCE_TASK" ] || return 1; SCOUT_EVIDENCE_TASK=$value ;;
+      incarnation) [ -z "$SCOUT_EVIDENCE_INCARNATION" ] || return 1; SCOUT_EVIDENCE_INCARNATION=$value ;;
+      status_identity) [ -z "$SCOUT_EVIDENCE_STATUS_IDENTITY" ] || return 1; SCOUT_EVIDENCE_STATUS_IDENTITY=$value ;;
+      boundary) [ -z "$SCOUT_EVIDENCE_BOUNDARY" ] || return 1; SCOUT_EVIDENCE_BOUNDARY=$value ;;
+      cursor) [ -z "$SCOUT_EVIDENCE_CURSOR" ] || return 1; SCOUT_EVIDENCE_CURSOR=$value ;;
+      lifecycle) [ -z "$SCOUT_EVIDENCE_LIFECYCLE" ] || return 1; SCOUT_EVIDENCE_LIFECYCLE=$value ;;
+      done_cursor) [ -z "$SCOUT_EVIDENCE_DONE_CURSOR" ] || return 1; SCOUT_EVIDENCE_DONE_CURSOR=$value ;;
+      *) return 1 ;;
+    esac
+  done < "$record"
+  [ "$schema_seen" -eq 1 ] || return 1
+  valid_id "$SCOUT_EVIDENCE_TASK" && valid_id "$SCOUT_EVIDENCE_INCARNATION" || return 1
+  case "$SCOUT_EVIDENCE_STATUS_IDENTITY" in ''|*$'\t'*|*$'\n'*) return 1 ;; esac
+  case "$SCOUT_EVIDENCE_BOUNDARY:$SCOUT_EVIDENCE_CURSOR:$SCOUT_EVIDENCE_DONE_CURSOR" in
+    *[!0-9:]*) return 1 ;;
+  esac
+  [ "$SCOUT_EVIDENCE_BOUNDARY" -le "$SCOUT_EVIDENCE_CURSOR" ] \
+    && [ "$SCOUT_EVIDENCE_DONE_CURSOR" -le "$SCOUT_EVIDENCE_CURSOR" ] || return 1
+  case "$SCOUT_EVIDENCE_LIFECYCLE" in
+    unknown|working|paused|blocked|needs-decision|failed|captain-held|done) ;;
+    *) return 1 ;;
+  esac
+}
+
+scout_evidence_publish() { # <record> <task> <incarnation> <identity> <boundary> <cursor> <lifecycle> <done-cursor>
+  local record=$1 task=$2 incarnation=$3 identity=$4 boundary=$5 cursor=$6 lifecycle=$7 done_cursor=$8 tmp
+  mkdir -p "$SCOUT_COMPLETION_DIR" || return 1
+  scout_completion_dir_trusted || return 1
+  chmod 700 "$SCOUT_COMPLETION_DIR" 2>/dev/null || return 1
+  [ ! -e "$record" ] || { [ -f "$record" ] && [ ! -L "$record" ]; } || return 1
+  tmp=$(umask 077; mktemp "$SCOUT_COMPLETION_DIR/.evidence.XXXXXX") || return 1
+  {
+    printf 'schema=fm-scout-completion.v1\n'
+    printf 'task_id=%s\n' "$task"
+    printf 'incarnation=%s\n' "$incarnation"
+    printf 'status_identity=%s\n' "$identity"
+    printf 'boundary=%s\n' "$boundary"
+    printf 'cursor=%s\n' "$cursor"
+    printf 'lifecycle=%s\n' "$lifecycle"
+    printf 'done_cursor=%s\n' "$done_cursor"
+  } > "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$record" || { rm -f "$tmp"; return 1; }
+}
+
+# Observe exactly one watcher-captured status endpoint. The task metadata lock
+# serializes this proof with supported relaunch publication. Every read is
+# identity checked before and after, and one invocation reads at most 64 KiB;
+# an unexpectedly larger gap fails closed and leaves the status wake for MAIN.
+observe_scout_status() { # <status-file> <captured-end> <captured-identity>
+  local status=$1 endpoint=$2 identity=$3 id meta lock kind incarnation boundary meta_identity record
+  local start lifecycle=unknown done_cursor=0 span tmp prev_tmp line verb size after_identity
+  local evidence_current=0 discard_first=0 processed_cursor line_bytes
+  case "$endpoint" in ''|*[!0-9]*) return 1 ;; esac
+  id=$(basename "$status"); id=${id%.status}
+  valid_id "$id" || return 1
+  [ "$status" = "$STATE/$id.status" ] || return 1
+  meta="$STATE/$id.meta"
+  if [ -f "$meta" ] && [ ! -L "$meta" ]; then
+    kind=$(meta_field "$meta" kind)
+    [ -z "$kind" ] || [ "$kind" = scout ] || return 0
+  fi
+  lock=$(fm_meta_lock_path "$meta") || return 1
+  fm_lock_try_acquire "$lock" || return 1
+  if [ ! -f "$meta" ] || [ -L "$meta" ] || [ "$(meta_field "$meta" kind)" != scout ] \
+    || [ ! -f "$status" ] || [ -L "$status" ] || [ ! -r "$status" ]; then
+    fm_lock_release "$lock"
+    return 0
+  fi
+  incarnation=$(meta_field "$meta" spawn_gen)
+  boundary=$(meta_field "$meta" status_boundary)
+  meta_identity=$(meta_field "$meta" status_identity)
+  if ! valid_id "$incarnation"; then fm_lock_release "$lock"; return 1; fi
+  case "$boundary" in ''|*[!0-9]*) fm_lock_release "$lock"; return 1 ;; esac
+  case "$meta_identity" in '') fm_lock_release "$lock"; return 1 ;; esac
+  [ "$boundary" -le "$endpoint" ] || { fm_lock_release "$lock"; return 1; }
+  [ "$meta_identity" = absent ] || [ "$meta_identity" = "$identity" ] \
+    || { fm_lock_release "$lock"; return 1; }
+  [ "$meta_identity" != absent ] || [ "$boundary" -eq 0 ] \
+    || { fm_lock_release "$lock"; return 1; }
+  size=$(_fm_status_file_size "$status" 2>/dev/null) || { fm_lock_release "$lock"; return 1; }
+  size=${size//[[:space:]]/}
+  after_identity=$(_fm_open_decisions_file_ident "$status" 2>/dev/null) \
+    || { fm_lock_release "$lock"; return 1; }
+  [ "$size" = "$endpoint" ] && [ "$after_identity" = "$identity" ] \
+    || { fm_lock_release "$lock"; return 1; }
+  record=$(scout_evidence_path "$id")
+  start=$boundary
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    scout_completion_dir_trusted \
+      || { fm_lock_release "$lock"; return 1; }
+    scout_evidence_parse "$record" \
+      || { fm_lock_release "$lock"; return 1; }
+    [ "$SCOUT_EVIDENCE_TASK" = "$id" ] \
+      || { fm_lock_release "$lock"; return 1; }
+    if [ "$SCOUT_EVIDENCE_INCARNATION" = "$incarnation" ]; then
+      [ "$SCOUT_EVIDENCE_STATUS_IDENTITY" = "$identity" ] \
+        && [ "$SCOUT_EVIDENCE_BOUNDARY" = "$boundary" ] \
+        && [ "$SCOUT_EVIDENCE_CURSOR" -le "$endpoint" ] \
+        || { fm_lock_release "$lock"; return 1; }
+      start=$SCOUT_EVIDENCE_CURSOR
+      lifecycle=$SCOUT_EVIDENCE_LIFECYCLE
+      done_cursor=$SCOUT_EVIDENCE_DONE_CURSOR
+      evidence_current=1
+    fi
+  fi
+  span=$((endpoint - start))
+  [ "$span" -le 65536 ] || { fm_lock_release "$lock"; return 1; }
+  # A relaunch with no current-incarnation event must leave old evidence stale,
+  # not relabel it as current. The first newly appended event after the exact
+  # boundary is the only producer-authorized replacement.
+  if [ "$span" -eq 0 ] && [ "$SCOUT_EVIDENCE_INCARNATION" != "$incarnation" ]; then
+    fm_lock_release "$lock"
+    return 0
+  fi
+  if [ "$span" -gt 0 ]; then
+    mkdir -p "$SCOUT_COMPLETION_DIR" || { fm_lock_release "$lock"; return 1; }
+    scout_completion_dir_trusted || { fm_lock_release "$lock"; return 1; }
+    chmod 700 "$SCOUT_COMPLETION_DIR" 2>/dev/null \
+      || { fm_lock_release "$lock"; return 1; }
+    if [ "$evidence_current" -eq 0 ] && [ "$boundary" -gt 0 ]; then
+      prev_tmp=$(umask 077; mktemp "$SCOUT_COMPLETION_DIR/.previous-byte.XXXXXX") \
+        || { fm_lock_release "$lock"; return 1; }
+      _fm_status_read_span "$status" "$((boundary - 1))" 1 > "$prev_tmp" 2>/dev/null \
+        || { rm -f "$prev_tmp"; fm_lock_release "$lock"; return 1; }
+      if ! IFS= read -r line < "$prev_tmp"; then
+        discard_first=1
+      fi
+      rm -f "$prev_tmp"
+    fi
+    tmp=$(umask 077; mktemp "$SCOUT_COMPLETION_DIR/.span.XXXXXX") \
+      || { fm_lock_release "$lock"; return 1; }
+    _fm_status_read_span "$status" "$start" "$span" > "$tmp" 2>/dev/null \
+      || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
+    processed_cursor=$start
+    while IFS= read -r line; do
+      line_bytes=${#line}
+      processed_cursor=$((processed_cursor + line_bytes + 1))
+      if [ "$discard_first" -eq 1 ]; then
+        discard_first=0
+        continue
+      fi
+      verb=$(status_line_verb "$line")
+      case "$verb" in
+        done) lifecycle='done'; done_cursor=$processed_cursor ;;
+        working|paused|blocked|needs-decision|failed|captain-held) lifecycle=$verb ;;
+        resolved|note|'') ;;
+      esac
+    done < "$tmp"
+    rm -f "$tmp"
+    start=$processed_cursor
+  fi
+  size=$(_fm_status_file_size "$status" 2>/dev/null) || size=''
+  size=${size//[[:space:]]/}
+  after_identity=$(_fm_open_decisions_file_ident "$status" 2>/dev/null) || after_identity=''
+  [ "$size" = "$endpoint" ] && [ "$after_identity" = "$identity" ] \
+    && [ "$(meta_field "$meta" spawn_gen)" = "$incarnation" ] \
+    && [ "$(meta_field "$meta" status_boundary)" = "$boundary" ] \
+    && [ "$(meta_field "$meta" status_identity)" = "$meta_identity" ] \
+    || { fm_lock_release "$lock"; return 1; }
+  if [ "$evidence_current" -eq 1 ] || [ "$start" -gt "$boundary" ]; then
+    scout_evidence_publish "$record" "$id" "$incarnation" "$identity" \
+      "$boundary" "$start" "$lifecycle" "$done_cursor" \
+      || { fm_lock_release "$lock"; return 1; }
+  fi
+  fm_lock_release "$lock"
+}
+
+# Return 0 only for current-incarnation done evidence that covers the complete
+# current status file. Return 2 for an unsafe/corrupt artifact so reconciliation
+# can surface a diagnostic; missing, stale, or nonterminal evidence returns 1.
+scout_evidence_current_done() { # <task> <meta> <status>
+  local task=$1 meta=$2 status=$3 record incarnation boundary meta_identity size identity
+  record=$(scout_evidence_path "$task")
+  if [ ! -e "$record" ] && [ ! -L "$record" ]; then return 1; fi
+  scout_completion_dir_trusted || return 2
+  scout_evidence_parse "$record" || return 2
+  incarnation=$(meta_field "$meta" spawn_gen)
+  boundary=$(meta_field "$meta" status_boundary)
+  meta_identity=$(meta_field "$meta" status_identity)
+  valid_id "$incarnation" || return 1
+  case "$boundary" in ''|*[!0-9]*) return 1 ;; esac
+  [ -n "$meta_identity" ] || return 1
+  [ -f "$status" ] && [ -r "$status" ] && [ ! -L "$status" ] || return 2
+  size=$(_fm_status_file_size "$status" 2>/dev/null) || return 2
+  size=${size//[[:space:]]/}
+  identity=$(_fm_open_decisions_file_ident "$status" 2>/dev/null) || return 2
+  [ "$SCOUT_EVIDENCE_TASK" = "$task" ] \
+    && [ "$SCOUT_EVIDENCE_INCARNATION" = "$incarnation" ] \
+    && [ "$SCOUT_EVIDENCE_STATUS_IDENTITY" = "$identity" ] \
+    && [ "$SCOUT_EVIDENCE_BOUNDARY" = "$boundary" ] \
+    && [ "$SCOUT_EVIDENCE_CURSOR" = "$size" ] \
+    && [ "$SCOUT_EVIDENCE_LIFECYCLE" = 'done' ] \
+    && [ "$SCOUT_EVIDENCE_DONE_CURSOR" -gt "$boundary" ] \
+    || return 1
+  [ "$meta_identity" = absent ] || [ "$meta_identity" = "$identity" ] || return 1
+  [ "$meta_identity" != absent ] || [ "$boundary" -eq 0 ] || return 1
 }
 
 # The task's delivered PR. Recorded meta pr= is the only authoritative source;
@@ -478,7 +757,7 @@ report_child() { # <id>
 }
 
 reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeout>
-  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind state_rc=0
+  local id=$1 meta=$2 self=${3:-} timeout=$4 status turn last age state_line state pr incarnation fingerprint outcome_key payload kind ledger_line='' ledger_rc=1 state_rc=0 evidence_rc=1
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
   kind=$(meta_field "$meta" kind)
   [ "$kind" = secondmate ] && return 0
@@ -486,10 +765,16 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   turn="$STATE/$id.turn-ended"
   last=$(last_status_line "$status")
   status_line_verb "$last" | grep -Fx captain-held >/dev/null 2>&1 && return 0
-  # A ledger that states its own outcome is the ledger-first path's to deliver.
+  # A non-scout terminal ledger stays on the ledger-first fast path. A scout's
+  # append-only ledger is historical evidence, so cleanup must wait for the
+  # authoritative current-state read below.
   if [ -n "$self" ]; then
-    child_terminal_ledger_line "$status" >/dev/null
-    case "$?" in 0|2) return 0 ;; esac
+    ledger_rc=0
+    ledger_line=$(child_terminal_ledger_line "$status") || ledger_rc=$?
+    case "$ledger_rc" in
+      0) [ "$kind" = scout ] || return 0 ;;
+      2) return 0 ;;
+    esac
   fi
   age=$(last_activity_age "$meta" "$status" "$turn")
   [ "$age" -ge "$FM_INACTIVE_RECONCILE_SECS" ] || return 0
@@ -498,24 +783,62 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
   [ "$state_rc" -ne 124 ] || return 3
   last=$(last_status_line "$status")
   if [ -n "$self" ]; then
-    child_terminal_ledger_line "$status" >/dev/null
-    case "$?" in 0|2) return 0 ;; esac
+    ledger_rc=0
+    ledger_line=$(child_terminal_ledger_line "$status") || ledger_rc=$?
+    case "$ledger_rc" in
+      0) [ "$kind" = scout ] || return 0 ;;
+      2) return 0 ;;
+    esac
   fi
-  case "$state_line" in
-    'state: done '*) state='done' ;;
-    'state: failed '*) state='failed' ;;
-    *) return 0 ;;
-  esac
+  if [ "$kind" = scout ]; then
+    evidence_rc=0
+    scout_evidence_current_done "$id" "$meta" "$status" || evidence_rc=$?
+    if [ "$evidence_rc" -eq 2 ]; then
+      publish_actionable "inactive-reconcile-diagnostic:scout-completion:$id" \
+        "scout completion evidence is unsafe or corrupt: child=$id; inspect state/scout-completions/$id.evidence before cleanup" || true
+      return 0
+    fi
+    [ "$evidence_rc" -eq 0 ] || return 0
+    case "$state_line" in
+      'state: working '*|'state: paused '*|'state: parked '*|'state: blocked '*|\
+      'state: needs-decision '*|'state: failed '*) return 0 ;;
+    esac
+    state='done'
+  else
+    case "$state_line" in
+      'state: done '*) state='done' ;;
+      'state: failed '*) state='failed' ;;
+      *) return 0 ;;
+    esac
+  fi
   pr=$(pr_for_task "$meta")
   incarnation=$(meta_incarnation "$meta")
-  fingerprint=$(sha256_text "$incarnation|$id|$state|$pr|$(clean_field "$last")")
+  if [ -n "$ledger_line" ]; then
+    if [ "$kind" = scout ] && [ "$state" = 'done' ]; then
+      fingerprint=$(sha256_text "$incarnation|$id|done|status|$SCOUT_EVIDENCE_DONE_CURSOR")
+      queue_scout_cleanup_reminder "$id" "$fingerprint" || true
+    fi
+    return 0
+  fi
+  if [ "$kind" = scout ] && [ "$state" = 'done' ]; then
+    fingerprint=$(sha256_text "$incarnation|$id|done|status|$SCOUT_EVIDENCE_DONE_CURSOR")
+  else
+    fingerprint=$(sha256_text "$incarnation|$id|$state|$pr|$(clean_field "$last")")
+  fi
   if [ -n "$self" ]; then
     outcome_key="inactive-outcome-$self-$id-$state"
   else
     outcome_key="inactive-outcome-main-$id-$state"
   fi
   ensure_record "$fingerprint" "$id" "$incarnation" "$state" "$outcome_key" direct "upstream" "$pr" "$(sha256_text "$last")" || return 1
-  [ -n "$RECORD_PENDING" ] || return 0
+  if [ -z "$RECORD_PENDING" ]; then
+    if [ "$kind" = scout ] && [ "$state" = 'done' ] \
+       && { { [ -f "$RECORD_PRESENTED" ] && [ ! -L "$RECORD_PRESENTED" ]; } \
+         || { [ -f "$RECORD_REPORTED" ] && [ ! -L "$RECORD_REPORTED" ]; }; }; then
+      queue_scout_cleanup_reminder "$id" "$fingerprint" || true
+    fi
+    return 0
+  fi
   if [ -n "$self" ]; then
     if report_to_parent "$id" "$state" "$outcome_key" "$fingerprint" "$pr"; then
       mark_reported "$RECORD_PENDING" || return 1
@@ -523,11 +846,18 @@ reconcile_direct_child_locked() { # <id> <meta> <secondmate-id-or-empty> <timeou
       notice_parent_report_failed "$RECORD_PENDING" "$fingerprint" \
         "inactive terminal outcome needs parent report: child=$id state=$state"
     fi
+    if [ "$kind" = scout ] && [ "$state" = 'done' ]; then
+      queue_scout_cleanup_reminder "$id" "$fingerprint" || true
+    fi
     return 0
   fi
   record_phase_set "$RECORD_PENDING" presentation || return 1
-  payload="inactive terminal outcome awaiting captain presentation: child=$id state=$state"
-  [ -z "$pr" ] || payload="$payload pr=$pr"
+  if [ "$kind" = scout ] && [ "$state" = 'done' ]; then
+    payload=$(scout_cleanup_payload "$id") || return 1
+  else
+    payload="inactive terminal outcome awaiting captain presentation: child=$id state=$state"
+    [ -z "$pr" ] || payload="$payload pr=$pr"
+  fi
   queue_presentation "$RECORD_PENDING" "$fingerprint" "$payload" || true
 }
 
@@ -658,6 +988,13 @@ case "$mode" in
     trap 'fm_lock_release "$SCAN_LOCK"' EXIT
     scan "$2"
     ;;
+  observe-status)
+    [ "$#" -eq 4 ] || {
+      printf 'usage: fm-inactive-reconcile.sh observe-status <status-file> <captured-end> <captured-identity>\n' >&2
+      exit 2
+    }
+    observe_scout_status "$2" "$3" "$4"
+    ;;
   report)
     if [ "$#" -ne 2 ] || ! valid_id "$2"; then
       printf 'usage: fm-inactive-reconcile.sh report <task-id>\n' >&2
@@ -682,6 +1019,7 @@ case "$mode" in
     ;;
   *)
     printf 'usage: fm-inactive-reconcile.sh scan [--startup]\n' >&2
+    printf '       fm-inactive-reconcile.sh observe-status <status-file> <captured-end> <captured-identity>\n' >&2
     printf '       fm-inactive-reconcile.sh acknowledge <fingerprint>\n' >&2
     exit 2
     ;;

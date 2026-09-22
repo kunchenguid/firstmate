@@ -1980,6 +1980,47 @@ test_local_only_force_overrides_unpushed() {
   pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
 }
 
+test_scout_completion_evidence_retirement_is_parent_safe_and_task_scoped() {
+  local case_dir rc external
+  case_dir=$(make_case evidence-parent-symlink)
+  write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/state/scout-completions"
+  printf 'task evidence\n' > "$case_dir/state/scout-completions/task-x1.evidence"
+  external="$case_dir/external-evidence"
+  mv "$case_dir/state/scout-completions" "$external"
+  ln -s "$external" "$case_dir/state/scout-completions"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "evidence-parent-symlink: teardown followed an unsafe evidence parent"
+  assert_grep 'task evidence' "$external/task-x1.evidence" \
+    "evidence-parent-symlink: teardown altered the external target"
+
+  case_dir=$(make_case evidence-task-scoped)
+  write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/state/scout-completions"
+  printf 'task evidence\n' > "$case_dir/state/scout-completions/task-x1.evidence"
+  printf 'other evidence\n' > "$case_dir/state/scout-completions/other-task.evidence"
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "evidence-task-scoped: guarded teardown failed"
+  assert_absent "$case_dir/state/scout-completions/task-x1.evidence" \
+    "evidence-task-scoped: retired task evidence survived"
+  assert_grep 'other evidence' "$case_dir/state/scout-completions/other-task.evidence" \
+    "evidence-task-scoped: another task's evidence was altered"
+
+  case_dir=$(make_case evidence-shared-directory)
+  write_meta "$case_dir" local-only ship
+  mkdir -p "$case_dir/state/scout-completions"
+  printf 'task evidence\n' > "$case_dir/state/scout-completions/task-x1.evidence"
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "evidence-shared-directory: guarded teardown failed"
+  [ -d "$case_dir/state/scout-completions" ] \
+    || fail "evidence-shared-directory: teardown removed the shared publication directory"
+  [ ! -e "$case_dir/state/scout-completions/task-x1.evidence" ] \
+    || fail "evidence-shared-directory: retired task evidence survived"
+  pass "scout completion evidence retirement is parent-safe and task-scoped"
+}
+
 # Mark the case's home as a secondmate home bound to a parent: teardown and
 # fm-pr-check run with FM_HOME="$case_dir/home" so the parent-channel
 # publishers resolve that binding while the task state stays in $case_dir/state.
@@ -3841,6 +3882,7 @@ test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
+test_scout_completion_evidence_retirement_is_parent_safe_and_task_scoped
 test_secondmate_pr_registration_publishes_ready_line
 test_secondmate_home_teardown_delivers_final_line_or_refuses
 test_teardown_missing_busy_sidecar_completes

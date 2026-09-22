@@ -4442,6 +4442,32 @@ if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
 fi
+# Bind each scout incarnation to the exact byte boundary of the append-only
+# status log before its metadata is published. A supported scout relaunch
+# therefore cannot inherit lifecycle evidence from bytes written by its
+# predecessor. Identity is retained when the file already exists; a fresh
+# absent file is represented by the only valid zero/absent pair and is bound to
+# its identity by the watcher on the first append. Unsafe existing path shapes
+# refuse the scout spawn.
+SPAWN_STATUS_BOUNDARY=
+SPAWN_STATUS_IDENTITY=
+if [ "$KIND" = scout ]; then
+  SPAWN_STATUS="$STATE/$ID.status"
+  if [ -e "$SPAWN_STATUS" ] || [ -L "$SPAWN_STATUS" ]; then
+    if [ ! -f "$SPAWN_STATUS" ] || [ -L "$SPAWN_STATUS" ] || [ ! -r "$SPAWN_STATUS" ]; then
+      echo "error: status boundary for $ID is not a readable regular non-symlink file; refusing to publish an unprovable incarnation" >&2
+      exit 1
+    fi
+    SPAWN_STATUS_BOUNDARY=$(_fm_status_file_size "$SPAWN_STATUS") || exit 1
+    SPAWN_STATUS_BOUNDARY=${SPAWN_STATUS_BOUNDARY//[[:space:]]/}
+    case "$SPAWN_STATUS_BOUNDARY" in ''|*[!0-9]*) exit 1 ;; esac
+    SPAWN_STATUS_IDENTITY=$(_fm_open_decisions_file_ident "$SPAWN_STATUS") || exit 1
+    [ -n "$SPAWN_STATUS_IDENTITY" ] || exit 1
+  else
+    SPAWN_STATUS_BOUNDARY=0
+    SPAWN_STATUS_IDENTITY=absent
+  fi
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_TMP="$STATE/.$ID.meta.relaunch.${BASHPID:-$$}"
 else
@@ -4452,7 +4478,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen status_boundary status_identity traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4472,6 +4498,10 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  if [ "$KIND" = scout ]; then
+    echo "status_boundary=$SPAWN_STATUS_BOUNDARY"
+    echo "status_identity=$SPAWN_STATUS_IDENTITY"
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
