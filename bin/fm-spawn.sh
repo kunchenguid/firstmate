@@ -5179,7 +5179,7 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 if [ -n "$EXPECTED_HEAD" ]; then
-  expected_status=$(expected_head_worktree_status "$WT") || {
+  expected_status=$(expected_head_worktree_status "$WT" "$EXPECTED_HEAD") || {
     [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
     expected_head_cancel_staged_launch
     echo "error: could not re-inspect expected-head worktree '$WT' immediately before worker launch" >&2

@@ -3,9 +3,10 @@
 # inspection. fm-spawn uses this before launch staging, while the pane-side
 # launch guard uses the same implementation at the actual worker boundary.
 
-expected_head_raw_tree_status() { # <worktree>
-  local worktree=$1 record metadata mode type object path actual complete=0 producer_status=1
-  local link_bytes link_size sub_super sub_head nested
+expected_head_raw_tree_status() { # <worktree> [<immutable-coordinate>]
+  local worktree=$1 coordinate=${2:-HEAD}
+  local record metadata mode type object path actual complete=0 producer_status=1
+  local link_bytes link_size sub_super sub_head
   while IFS= read -r -d '' record; do
     if [ -z "$record" ]; then
       IFS= read -r -d '' producer_status || return 1
@@ -45,36 +46,53 @@ expected_head_raw_tree_status() { # <worktree>
         sub_super=$(git -C "$worktree/$path" rev-parse --show-superproject-working-tree 2>/dev/null || true)
         if [ -n "$sub_super" ]; then
           sub_head=$(git -C "$worktree/$path" rev-parse --verify --quiet HEAD 2>/dev/null || true)
-          if [ "$sub_head" != "$object" ]; then
-            printf 'raw tree mismatch: %s\n' "$path"
-          else
-            nested=$(expected_head_raw_tree_status "$worktree/$path") || return 1
-            [ -z "$nested" ] || printf '%s\n' "$nested"
-          fi
+          [ "$sub_head" = "$object" ] || printf 'raw tree mismatch: %s\n' "$path"
         fi
         ;;
       *) return 1 ;;
     esac
-  done < <({ git -C "$worktree" ls-tree -r -z --full-tree HEAD; printf '\0%s\0' "$?"; })
+  done < <({ git -C "$worktree" ls-tree -r -z --full-tree "$coordinate"; printf '\0%s\0' "$?"; })
   [ "$complete" -eq 1 ] && [ "$producer_status" -eq 0 ]
 }
 
-expected_head_worktree_status() { # <worktree>
-  local status index raw
-  status=$(git -C "$1" -c core.quotePath=false -c core.fileMode=true status --porcelain \
-    --untracked-files=all --ignored=matching --ignore-submodules=none) || return 1
-  [ -z "$status" ] || printf '%s\n' "$status"
-  index=$(git -C "$1" -c core.quotePath=true ls-files -v) || return 1
+expected_head_worktree_status() { # <worktree> [<immutable-coordinate>]
+  local worktree=$1 coordinate=${2:-HEAD}
+  local untracked ignored index raw diff_rc record metadata mode type object path sub_super nested
+  local complete=0 producer_status=1
+  untracked=$(git -C "$worktree" ls-files --others --exclude-standard) || return 1
+  [ -z "$untracked" ] || printf 'untracked: %s\n' "$untracked"
+  ignored=$(git -C "$worktree" ls-files --others --ignored --exclude-standard) || return 1
+  [ -z "$ignored" ] || printf 'ignored: %s\n' "$ignored"
+  index=$(git -C "$worktree" -c core.quotePath=true ls-files -v) || return 1
   index=$(printf '%s\n' "$index" | LC_ALL=C grep -E '^[a-zS] ' || true)
   [ -z "$index" ] || printf '%s\n' "$index"
-  # shellcheck disable=SC2016 # The submodule foreach shell expands these variables.
-  git -C "$1" submodule foreach --quiet --recursive '
-    status=$(git -c core.quotePath=false -c core.fileMode=true status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none) || exit 1
-    [ -z "$status" ] || printf "%s\n%s\n" "$displaypath" "$status"
-    index=$(git -c core.quotePath=true ls-files -v) || exit 1
-    index=$(printf "%s\n" "$index" | LC_ALL=C grep -E "^[a-zS] " || true)
-    [ -z "$index" ] || printf "%s\n%s\n" "$displaypath" "$index"
-  ' || return 1
-  raw=$(expected_head_raw_tree_status "$1") || return 1
+  if git -C "$worktree" -c core.fileMode=true diff-index --cached --quiet "$coordinate" --; then
+    diff_rc=0
+  else
+    diff_rc=$?
+  fi
+  case "$diff_rc" in
+    0) ;;
+    1) printf 'index tree mismatch\n' ;;
+    *) return 1 ;;
+  esac
+  raw=$(expected_head_raw_tree_status "$worktree" "$coordinate") || return 1
   [ -z "$raw" ] || printf '%s\n' "$raw"
+  while IFS= read -r -d '' record; do
+    if [ -z "$record" ]; then
+      IFS= read -r -d '' producer_status || return 1
+      complete=1
+      break
+    fi
+    case "$record" in *$'\t'*) ;; *) return 1 ;; esac
+    metadata=${record%%$'\t'*}
+    path=${record#*$'\t'}
+    read -r mode type object <<<"$metadata"
+    [ "$mode:$type" = 160000:commit ] || continue
+    sub_super=$(git -C "$worktree/$path" rev-parse --show-superproject-working-tree 2>/dev/null || true)
+    [ -n "$sub_super" ] || continue
+    nested=$(expected_head_worktree_status "$worktree/$path" "$object") || return 1
+    [ -z "$nested" ] || printf '%s\n%s\n' "$path" "$nested"
+  done < <({ git -C "$worktree" ls-tree -z "$coordinate"; printf '\0%s\0' "$?"; })
+  [ "$complete" -eq 1 ] && [ "$producer_status" -eq 0 ]
 }

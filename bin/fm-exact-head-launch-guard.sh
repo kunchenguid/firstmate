@@ -53,7 +53,7 @@ actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) \
   || refuse unreadable-head
 [ "$actual" = "$expected" ] || refuse head-mismatch
 
-status=$(expected_head_worktree_status "$worktree") || refuse unreadable-worktree
+status=$(expected_head_worktree_status "$worktree" "$expected") || refuse unreadable-worktree
 [ -z "$status" ] || refuse dirty-worktree
 
 # A ref race during the full byte scan cannot substitute another commit. Read
@@ -62,7 +62,15 @@ status=$(expected_head_worktree_status "$worktree") || refuse unreadable-worktre
 actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) \
   || refuse unreadable-head
 [ "$actual" = "$expected" ] || refuse head-mismatch
-status=$(expected_head_worktree_status "$worktree") || refuse unreadable-worktree
+status=$(expected_head_worktree_status "$worktree" "$expected") || refuse unreadable-worktree
 [ -z "$status" ] || refuse dirty-worktree
+
+# This coordinate read is deliberately the final custody operation before the
+# verified receipt and worker command. Every byte/mode/index derivation above is
+# pinned to the immutable expected object, so a checkout during either scan is
+# dirty; a checkout after the scans is caught here.
+actual=$(git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) \
+  || refuse unreadable-head
+[ "$actual" = "$expected" ] || refuse head-mismatch
 
 write_receipt verified clean || refuse receipt-write-failed

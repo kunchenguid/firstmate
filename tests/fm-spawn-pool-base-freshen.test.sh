@@ -613,7 +613,7 @@ EOF
     [ ! -e "$pending" ] || fail "$mutation refusal left the staged launch text in the pane"
     [ ! -e "$started" ] || fail "$mutation refusal submitted the staged launch and started a worker"
     case "$mutation" in
-      head) assert_contains "$out" "moved to" "spawn did not report the final-window HEAD mismatch" ;;
+      head) assert_contains "$out" "dirty candidate" "spawn did not reject the final-window HEAD/tree mismatch" ;;
       dirty|assume) assert_contains "$out" "dirty candidate" "spawn did not report the final-window dirty tree" ;;
     esac
     [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$mutation refusal left published task metadata"
@@ -672,6 +672,78 @@ EOF
   assert_contains "$out" "worker-boundary verification refused" \
     "spawn did not report the worker-boundary refusal to its caller"
   pass "worker-boundary verification rejects a deterministic write after the parent final coordinate read"
+}
+
+test_expected_head_worker_boundary_rejects_second_scan_checkout() {
+  local kind rec id out status real_git counter observed pending receipt_path receipt
+  local alternate tree expected_reason
+  for kind in same-tree changed-tree; do
+    id="pool-expected-second-scan-$kind-r28"
+    rec=$(make_case "expected-second-scan-$kind" "$id")
+    read_case_record "$rec"
+    real_git=$(command -v git)
+    tree=$(git -C "$POOL_DIR" rev-parse "$INITIAL_SHA^{tree}")
+    if [ "$kind" = same-tree ]; then
+      alternate=$(printf 'same tree, different coordinate\n' | git -C "$POOL_DIR" \
+        -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+        commit-tree "$tree" -p "$INITIAL_SHA")
+      expected_reason=head-mismatch
+    else
+      alternate=$(git --git-dir "$CASE_DIR/origin.git" rev-parse main)
+      expected_reason=dirty-worktree
+    fi
+    [ "$alternate" != "$INITIAL_SHA" ] || fail "$kind fixture did not create a distinct alternate coordinate"
+    counter="$CASE_DIR/coordinate-read-count"
+    observed="$CASE_DIR/worker-observed"
+    pending="$CASE_DIR/pending-launch"
+    receipt_path="$CASE_DIR/receipt-path"
+
+    cat >"$FAKEBIN_DIR/git" <<EOF
+#!/usr/bin/env bash
+set -eu
+if [ -e '$pending' ] && [ "\${3:-}" = rev-parse ] &&
+  [ "\${4:-}" = --verify ] && [ "\${5:-}" = --quiet ] &&
+  [ "\${6:-}" = HEAD ]; then
+  count=0
+  [ ! -e '$counter' ] || count=\$(cat '$counter')
+  count=\$((count + 1))
+  printf '%s\n' "\$count" >'$counter'
+  '$real_git' "\$@"
+  if [ "\$count" = 3 ]; then
+    staged=\$(cat '$pending')
+    printf '%s.receipt\n' "\$staged" >'$receipt_path'
+    '$real_git' -C '$POOL_DIR' reset --hard '$alternate' >/dev/null
+  fi
+  exit 0
+fi
+exec '$real_git' "\$@"
+EOF
+    chmod +x "$FAKEBIN_DIR/git"
+    cat >"$FAKEBIN_DIR/codex" <<EOF
+#!/usr/bin/env bash
+printf 'head=%s\n' "\$('${real_git}' rev-parse HEAD)" >'$observed'
+printf 'bytes=%s\n' "\$(cat README.md)" >>'$observed'
+EOF
+    chmod +x "$FAKEBIN_DIR/codex"
+
+    out=$(FM_FAKE_PENDING_LAUNCH="$pending" FM_FAKE_EXECUTE_LAUNCH=1 \
+      run_spawn "$id" --mode no-mistakes --yolo off --harness codex \
+        --expected-head "$INITIAL_SHA")
+    status=$?
+    [ "$status" -ne 0 ] || fail "$kind second-scan checkout launched a worker at the alternate coordinate"
+    [ "$(cat "$counter")" -ge 3 ] || fail "$kind fixture did not race the guard's second coordinate read"
+    [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$alternate" ] \
+      || fail "$kind fixture did not leave the alternate coordinate checked out"
+    [ ! -e "$observed" ] || fail "$kind second-scan checkout reached the worker command"
+    [ ! -e "$pending" ] || fail "$kind second-scan refusal left staged launch input"
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$kind second-scan refusal left dishonest live metadata"
+    receipt=$(cat "$receipt_path")
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || fail "$kind second-scan refusal left no durable receipt"
+    assert_grep 'status=refused' "$receipt" "$kind second-scan receipt did not record refusal"
+    assert_grep "reason=$expected_reason" "$receipt" \
+      "$kind second-scan receipt did not bind custody to the expected coordinate"
+  done
+  pass "worker-boundary verification rejects same-tree and changed-tree checkouts during its second scan"
 }
 
 test_expected_head_rejects_submodule_index_suppression() {
@@ -1490,6 +1562,7 @@ test_expected_head_ignores_ambient_git_config_overrides
 test_expected_head_refuses_unsupported_lifecycle_shapes
 test_expected_head_is_reverified_immediately_before_launch
 test_expected_head_worker_boundary_rejects_final_coordinate_race
+test_expected_head_worker_boundary_rejects_second_scan_checkout
 test_expected_head_rejects_submodule_index_suppression
 test_expected_head_rejects_hidden_file_mode_changes
 test_expected_head_rejects_filtered_worktree_bytes
