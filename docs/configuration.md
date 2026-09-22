@@ -381,9 +381,10 @@ The [Claude adapter reference](../.agents/skills/harness-adapters/references/har
 ## Lavish server address (config/lavish-axi-host)
 
 The optional local, gitignored `config/lavish-axi-host` contains one non-empty address without whitespace for the per-machine Lavish server.
-`fm-spawn.sh` exports that address into every new worker and relaunch, the process-event adapter reads it before each `lavish-axi` invocation, and the file is inherited into secondmate homes through the primary-authoritative configuration contract.
+`fm-spawn.sh` exports that address into every new worker and relaunch for opening boards, and the file is inherited into secondmate homes through the primary-authoritative configuration contract.
+Once a board exists, the process-event adapter derives the polling address from that board's own saved Lavish session instead; its header owns the lookup contract.
 When the file is absent, worker launches do not add a board address and retain the existing ambient-environment behavior.
-Malformed or unreadable values refuse the launch before the worker starts, while the adapter refuses the same malformed value before polling.
+Malformed or unreadable values refuse the launch before the worker starts.
 The address selects the existing shared server; it does not authorize starting or stopping the server, and the Lavish startup crash remains a vendor-tool concern.
 
 ## Home brief include (config/brief-include.md)
