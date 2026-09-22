@@ -1128,6 +1128,25 @@ Observed 2026-08-19:
 ok - live Herdr submit confirm: Claude Code (2.1.236 (Claude Code)) on herdr 0.8.0 reports empty for a landed idle steer
 ```
 
+### Skipped-doorbell recovery
+
+Measured 2026-09-21 against Herdr 0.8.2 and Claude Code 2.1.278 in an isolated `fm-lab-` session, replaying the 2026-09-20 maker-home incident end to end: a real doorbell line typed into the worker's composer without submitting it, a later `fm-send` steer whose ring skipped on that pending text, and `fm-control.sh <task> unblock` submitting the stuck text with a verified Enter so the same previously-skipped steer landed and was acknowledged with the `mv` - no relaunch, the agent never stopped.
+
+Refresh the live proof with (spends a small number of real model tokens):
+
+```sh
+FM_UNBLOCK_DOORBELL_LIVE=1 tests/fm-unblock-doorbell-herdr-live-e2e.test.sh
+```
+
+Observed 2026-09-21:
+
+```text
+ok - live arc step 1-2: Claude Code (2.1.278 (Claude Code)) on herdr 0.8.2 holds the unsubmitted doorbell, and a later steer skips its ring durably
+ok - live Herdr unblock recovery: Claude Code (2.1.278 (Claude Code)) on herdr 0.8.2 - the stuck doorbell was submitted, the same skipped steer landed, and the worker acknowledged it, with no relaunch
+```
+
+The harness-independent halves - the ring's skip on proven pending text, the ladder's outcome-carrying escalation, and the unblock verb's verdict and refusal logic on the reference tmux backend - are pinned portably by `tests/fm-task-inbox.test.sh`, `tests/fm-send-strict.test.sh`, and `tests/fm-control.test.sh`, and against real Herdr without model tokens by `tests/fm-control-herdr-smoke.test.sh`.
+
 ### Prune and respawn
 
 The real label-collision reproduction is owned by:

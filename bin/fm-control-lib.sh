@@ -49,6 +49,7 @@
 fm_control_verbs() {
   cat <<'EOF'
 interrupt
+unblock
 exit
 relaunch
 EOF
@@ -56,7 +57,7 @@ EOF
 
 fm_control_verb_allowed() {  # <verb>
   case "${1-}" in
-    interrupt|exit|relaunch) return 0 ;;
+    interrupt|unblock|exit|relaunch) return 0 ;;
   esac
   return 1
 }

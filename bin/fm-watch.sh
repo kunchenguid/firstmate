@@ -437,7 +437,11 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # policy owner) reports a due action, a busy pane just waits - the record is
 # durable and the worker will reach a turn boundary - an idle pane gets one
 # delivery attempt, and a spent attempt budget surfaces as an ordinary stale
-# wake for stuck-crewmate-recovery, and a pane whose agent is positively dead
+# wake for stuck-crewmate-recovery whose reason names WHY the doorbell never
+# landed: an outcome of skipped-pending is the distinct cannot-receive-messages
+# condition (the worker's composer holds unsubmitted text, so every ring was
+# skipped), reported with its own recovery path rather than as an idle-pane
+# wedge. A pane whose agent is positively dead
 # or missing skips the ladder altogether: it is never typed into and surfaces
 # as that same stale wake exactly once. If the attempt's ladder write fails while
 # its record remains unhandled, that unwritable state surfaces through the same
@@ -448,14 +452,18 @@ inbox_steer_escalate_unavailable() {  # <window> <task> <record>
 # too: their pane-staleness exemption is about quiet panes being healthy,
 # while an unacknowledged instruction past the ladder is a stuck steer.
 inbox_steer_check() {  # <window> <task>
-  local w=$1 task=$2 action verb rec count tail40 reason ring_rc backend agent_state
+  local w=$1 task=$2 action verb rec count outcome ring_rc ring_outcome='' backend agent_state reason
+  local tail40
   action=$(fm_task_inbox_due_action "$STATE" "$task") || return 0
   verb=${action%% *}
   [ "$verb" != quiet ] || return 0
   rec=${action#* }
   count=
+  outcome=
   case "$verb" in
     escalate)
+      outcome=${rec##* }
+      rec=${rec% *}
       count=${rec##* }
       rec=${rec% *}
       ;;
@@ -480,7 +488,18 @@ inbox_steer_check() {  # <window> <task>
         inbox_steer_escalate_unavailable "$w" "$task" "$rec"
         return 0
       fi
-      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec"; then
+      case "$ring_rc" in
+        0)
+          case "$FM_TASK_INBOX_RING_VERDICT" in
+            empty) ring_outcome=rang ;;
+            pending) ring_outcome=skipped-pending ;;
+            *) ring_outcome= ;;
+          esac
+          ;;
+        1) ring_outcome=skipped-pending ;;
+        *) ring_outcome= ;;
+      esac
+      if ! fm_task_inbox_record_ring "$STATE" "$task" "$rec" "$ring_outcome"; then
         if [ ! -f "$rec" ]; then
           fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
           return 0
@@ -494,7 +513,20 @@ inbox_steer_check() {  # <window> <task>
       triage_log "steer-inbox delivery attempt: $task ${rec##*/} result=$ring_rc"
       ;;
     escalate)
-      reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
+      # The outcome names WHY the budget was spent, which separates the two
+      # opposite supervisor responses an escalation must distinguish: a worker
+      # that cannot receive messages (skipped-pending - its composer holds
+      # unsubmitted text, so every doorbell was skipped; the fix is the control
+      # plane's unblock verb, in place, no relaunch) from a quiet worker that
+      # was rung and never acknowledged (inspect or recover the worker).
+      case "$outcome" in
+        skipped-pending)
+          reason="stale: $w (unread firstmate instruction: $rec is unhandled and the worker cannot receive messages: its input line holds unsubmitted text, so every doorbell delivery attempt was skipped. It is not an idle-pane wedge. Restore steerability in place with bin/fm-control.sh $task unblock, which submits the stuck text and re-rings without stopping the agent)"
+          ;;
+        *)
+          reason="stale: $w (unread firstmate instruction: $rec still unhandled after $count doorbell delivery attempts with an idle pane; inspect the worker)"
+          ;;
+      esac
       if [ ! -d "${rec%/*}" ] || [ ! -f "$rec" ]; then
         fm_task_inbox_due_action "$STATE" "$task" >/dev/null || true
         return 0

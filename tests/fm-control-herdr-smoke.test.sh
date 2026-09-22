@@ -207,13 +207,24 @@ pass "real herdr: interrupt refuses when herdr's own agent registry reports no a
 # A registration alone no longer proves an agent (issue #4115): the adapter
 # verifies the pane's processes through the real `pane process-info` view. So
 # the registered agent is backed by a real agent-named foreground process - a
-# symlink to a long-running system binary named `claude`, the same construction
-# tests/fm-tmux-agent-liveness.test.sh uses (a copied platform binary fails code
-# signing on macOS arm64; the symlink name is what the kernel records as argv[0]).
+# wrapper that re-execs bash with argv[0]=claude, which
+# fm_agent_process_classify reads from process-info's .argv[0] exactly as it
+# reads a symlink's argv[0] on macOS (where this test originally used a sleep
+# symlink). The symlink construction breaks on systems whose coreutils is a
+# cargo multi-call binary - invoked as `claude` it exits "coreutils: unknown
+# program" - so the wrapper keeps the same identity surface without depending
+# on how the platform's sleep dispatches. The trap tears the sleep down with
+# the wrapper so a test kill cannot strand it.
 AGENT_BIN="$SCRATCH/agentbin"
 mkdir -p "$AGENT_BIN"
-SLEEP_BIN=$(command -v sleep) || fail "sleep not found"
-ln -s "$SLEEP_BIN" "$AGENT_BIN/claude"
+cat > "$AGENT_BIN/claude" <<'WRAP'
+#!/usr/bin/env bash
+# The sleep runs in the background with an interruptible `wait` so a TERM to
+# this process runs the trap immediately (a foreground sleep would defer the
+# trap until it exits, and the kill below would never be observed).
+exec -a claude /bin/bash -c 'trap "kill 0" EXIT INT TERM; sleep 900 & wait'
+WRAP
+chmod +x "$AGENT_BIN/claude"
 printf -v AGENT_Q '%q' "$AGENT_BIN/claude"
 
 wait_process_state() {  # <expected> <tries>
@@ -324,4 +335,178 @@ case "$OUT" in
 esac
 pass "real herdr: an agent behind an unproven composer fails closed instead of typing an exit command into it"
 
+# --- the skipped-doorbell recovery arc, against real herdr ---------------------
+#
+# The 2026-09-20 incident shape, replayed deterministically on a real herdr
+# pane (no real harness - the live-harness proof lives in
+# tests/fm-unblock-doorbell-herdr-live-e2e.test.sh): a composer holding typed
+# but unsubmitted text makes every steering-inbox doorbell skip, and the
+# control plane's unblock verb must submit that text with a verified Enter and
+# land the skipped doorbell - no relaunch, nothing discarded.
+#
+# The pane runs the same single-char composer loop technique as
+# tests/fm-afk-inject-herdr-e2e.test.sh: it draws a bare claude-glyph composer
+# row, logs every SUBMITTED line (so assertions read submitted content, not
+# pane appearance), and registers itself as a real herdr agent with
+# idle->working->idle cycles around submissions so the herdr adapter's
+# native agent-state submit confirmation is exercised for real.
+USMOKE_DIR="$SCRATCH/usmoke"
+mkdir -p "$USMOKE_DIR"
+USMOKE_TASK_IDS=$(fm_backend_herdr_create_task "$CONTAINER" "fm-usmoke" "$SCRATCH" "$SEEDED_TAB_ID") \
+  || fail "create_task for the unblock smoke pane failed"
+read -r USMOKE_TAB_ID USMOKE_PANE_ID <<EOF
+$USMOKE_TASK_IDS
+EOF
+[ -n "$USMOKE_PANE_ID" ] || fail "create_task did not return a pane id for the unblock smoke pane"
+{
+  echo "window=$SESSION:$USMOKE_PANE_ID"
+  echo "endpoint_task_id=usmoke"
+  echo "worktree=$WT"
+  echo "project=$PROJ"
+  echo "harness=claude"
+  echo "kind=ship"
+  echo "mode=no-mistakes"
+  echo "yolo=off"
+  echo "model=default"
+  echo "effort=default"
+  echo "backend=herdr"
+  echo "herdr_session=$SESSION"
+  echo "herdr_workspace_id=$WORKSPACE_ID"
+  echo "herdr_tab_id=$USMOKE_TAB_ID"
+  echo "herdr_pane_id=$USMOKE_PANE_ID"
+} > "$HOME_DIR/state/usmoke.meta"
+
+USMOKE_LOG="$USMOKE_DIR/submitted.log"
+: > "$USMOKE_LOG"
+USMOKE_LOOP="$USMOKE_DIR/composer-loop.sh"
+# The loop re-execs itself with argv[0]=claude before doing anything, so the
+# pane's foreground process carries an agent identity through process-info
+# (the same surface the wrapper above uses) while staying plain bash - without
+# that, pane_agent_state would read the pane shell-only and unblock would
+# correctly refuse to act on it.
+cat > "$USMOKE_LOOP" <<'LOOP'
+#!/usr/bin/env bash
+if [ "${1:-}" != fm-agent-named ]; then
+  exec -a claude /bin/bash "$0" fm-agent-named "${1:-}"
+fi
+LOG=$2
+report_agent_state() {  # <idle|working>
+  herdr pane report-agent "$HERDR_PANE_ID" --source fm-usmoke --agent fm-usmoke --state "$1" --session "$HERDR_SESSION" >/dev/null 2>&1
+}
+OLD_STTY=$(stty -g 2>/dev/null || true)
+[ -z "$OLD_STTY" ] || stty -echo -icanon min 1 time 0 2>/dev/null || true
+cleanup() {
+  [ -z "$OLD_STTY" ] || stty "$OLD_STTY" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+report_agent_state idle
+_buf=
+redraw() {
+  local avail=40 shown tail_n
+  if [ "${#_buf}" -gt "$avail" ]; then
+    tail_n=$((avail - 3))
+    shown="...${_buf: -$tail_n}"
+  else
+    shown="$_buf"
+  fi
+  printf '\r\033[K\xe2\x9d\xaf %s' "$shown"
+}
+submit_line() {
+  local _line=$_buf _hex
+  _hex=$(printf '%s' "$_line" | od -An -tx1 | tr -d ' \n')
+  printf '%s\t%s\tuser\n' "$_hex" "$_line" >> "$LOG"
+  _buf=
+  printf '\r\033[K\n'
+  redraw
+  report_agent_state working
+  sleep 0.4
+  report_agent_state idle
+}
+redraw
+while IFS= read -r -n 1 _ch; do
+  if [ -z "$_ch" ]; then
+    submit_line
+    continue
+  fi
+  case "$_ch" in
+    $'\r'|$'\n') submit_line ;;
+    $'\177'|$'\b') _buf=${_buf%?}; redraw ;;
+    *) _buf="${_buf}${_ch}"; redraw ;;
+  esac
+done
+LOOP
+chmod +x "$USMOKE_LOOP"
+fm_backend_herdr_send_text_line "$SESSION:$USMOKE_PANE_ID" "bash '$USMOKE_LOOP' '$USMOKE_LOG'" \
+  || fail "could not start the composer loop in the unblock smoke pane"
+
+wait_usmoke_agent_idle() {
+  local i=0 status
+  while [ "$i" -lt 50 ]; do
+    status=$(herdr agent get "$USMOKE_PANE_ID" --session "$SESSION" 2>/dev/null \
+      | jq -r '.result.agent.agent_status // empty')
+    [ "$status" = idle ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+wait_usmoke_agent_idle || fail "the composer loop never registered as an idle herdr agent"
+[ "$(fm_backend_agent_state herdr "$SESSION:$USMOKE_PANE_ID")" = alive ] \
+  || fail "the composer loop's pane did not classify alive, got '$(fm_backend_agent_state herdr "$SESSION:$USMOKE_PANE_ID")'"
+
+# Drive the pane into the incident state: type a line WITHOUT submitting it.
+fm_backend_herdr_send_literal "$SESSION:$USMOKE_PANE_ID" 'a steer typed but never submitted' \
+  || fail "could not type the stuck composer text"
+sleep 0.3
+[ "$(fm_backend_herdr_composer_state "$SESSION:$USMOKE_PANE_ID")" = pending ] \
+  || fail "the smoke pane's composer did not read pending after the unsubmitted literal, got '$(fm_backend_herdr_composer_state "$SESSION:$USMOKE_PANE_ID")'"
+
+# A steer now records durably but its doorbell skips.
+USMOKE_ERR="$USMOKE_DIR/send.err"
+if ! env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 \
+  "$ROOT/bin/fm-send.sh" usmoke "a steer the worker cannot receive" >/dev/null 2> "$USMOKE_ERR"; then
+  fail "fm-send should still succeed when its doorbell skips: $(cat "$USMOKE_ERR")"
+fi
+grep -qF 'doorbell skipped' "$USMOKE_ERR" \
+  || fail "fm-send should report the skipped doorbell: $(cat "$USMOKE_ERR")"
+[ -f "$HOME_DIR/state/usmoke.inbox/001.msg" ] || fail "the skipped send must leave the durable record"
+[ ! -s "$USMOKE_LOG" ] || fail "nothing may be submitted while the doorbell skips: $(cat "$USMOKE_LOG")"
+pass "real herdr: a steer to a pending composer records durably and skips its doorbell"
+
+# The recovery: submit the stuck text with a verified Enter and land the doorbell.
+# This loop consumes typed input even while it reports working, so ring=rang is
+# a genuinely observed outcome here - it does NOT cover a harness that swallows
+# the re-ring's Enter mid-turn, which tests/fm-control.test.sh owns.
+OUT=$(env FM_HOME="$HOME_DIR" HERDR_SESSION="$SESSION" FM_SPAWN_NO_GUARD=1 \
+  FM_CONTROL_POLL=0.3 "$ROOT/bin/fm-control.sh" usmoke unblock 2>&1) \
+  || fail "unblock should recover the pending composer on real herdr: $OUT"
+case "$OUT" in
+  "unblocked usmoke harness=claude backend=herdr composer=submitted ring=rang"*) : ;;
+  *) fail "unblock should report a verified submit and a landed re-ring, got: $OUT" ;;
+esac
+[ "$(fm_backend_herdr_composer_state "$SESSION:$USMOKE_PANE_ID")" = empty ] \
+  || fail "the composer was not verified empty after the recovery"
+USMOKE_WAIT=0
+while [ "$USMOKE_WAIT" -lt 40 ]; do
+  grep -qF 'a steer typed but never submitted' "$USMOKE_LOG" && break
+  sleep 0.1
+  USMOKE_WAIT=$((USMOKE_WAIT + 1))
+done
+grep -qF 'a steer typed but never submitted' "$USMOKE_LOG" \
+  || fail "the recovery's Enter did not submit the stuck text: $(cat "$USMOKE_LOG")"
+USMOKE_WAIT=0
+while [ "$USMOKE_WAIT" -lt 40 ]; do
+  grep -qF 'Firstmate instruction waiting' "$USMOKE_LOG" && break
+  sleep 0.1
+  USMOKE_WAIT=$((USMOKE_WAIT + 1))
+done
+grep -qF 'Firstmate instruction waiting' "$USMOKE_LOG" \
+  || fail "the recovery's re-ring never landed as a submitted doorbell: $(cat "$USMOKE_LOG")"
+[ "$(grep -cF 'Firstmate instruction waiting' "$USMOKE_LOG")" = 1 ] \
+  || fail "the recovery should land exactly one doorbell: $(cat "$USMOKE_LOG")"
+herdr pane get "$USMOKE_PANE_ID" --session "$SESSION" >/dev/null 2>&1 \
+  || fail "the recovery must never remove the endpoint"
+pass "real herdr: unblock submits the stuck text, verifies the composer clear, and lands the skipped doorbell"
+
+fm_backend_herdr_kill "$SESSION:$USMOKE_PANE_ID" 2>/dev/null || true
 fm_backend_herdr_kill "$SESSION:$PANE_ID" 2>/dev/null || true

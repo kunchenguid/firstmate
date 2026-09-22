@@ -15,7 +15,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
 
 `bin/fm-control-lib.sh` is the single executable owner of three capability tables, which have no side effects, so they can be read as a contract:
 
-- The **verb allowlist**: `interrupt`, `exit`, `relaunch`.
+- The **verb allowlist**: `interrupt`, `unblock`, `exit`, `relaunch`.
   There is no arbitrary-text and no generic raw-key entry point.
   A caller either names an allowlisted verb or is refused.
 - **Per-harness mechanics**: the key that cancels a running turn, how many times it must be delivered, whether the composer needs clearing afterwards, the command that exits the agent, and which task kinds the adapter is verified to run.
@@ -33,6 +33,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | Verb | Effect | Postcondition |
 | --- | --- | --- |
 | `interrupt` | Deliver the harness's verified interrupt sequence while leaving the agent running. | Delivery succeeds while the endpoint still exists and the agent is still alive where the backend can classify that; cancellation is confirmed only from an adapter-owned acknowledgement and otherwise reports `cancel=unconfirmed`. |
+| `unblock` | Restore steerability of a worker whose input line holds unsubmitted text - the skipped-doorbell condition, where every doorbell ring skips to protect that text and the worker cannot receive messages. Submits the pending text with a verified Enter, then re-rings the steering-inbox doorbell so a skipped steer can land. The agent keeps running; nothing is restarted and no work is discarded. | The stuck text is proven submitted: the composer read `empty` after the Enter. The re-ring that follows reports its own outcome, and only `ring=rang` - the submit verdict read exactly `empty` - proves it landed. `ring=skipped` means the re-rung doorbell is itself sitting unsubmitted and the ladder recorded `skipped-pending`; `ring=unproven` means the submit could not be read either way; `ring=failed` means the keystrokes never reached the pane; `ring=endpoint-gone` means the endpoint died between the submit and the ring; `ring=none` means no unhandled record was left to re-ring. None of those clears the input line or the attempt history. Only the exact `pending` verdict - the one the doorbell ring itself skips on - is typed into: `pending-unproven`, `unknown`, and an unreadable read all refuse without typing anything, and a composer that still holds the text after the Enter budget fails loudly rather than reporting an assumed recovery. An already-empty composer is idempotent success: it re-rings and records that attempt on the ladder, but it never restarts the ladder, because nothing was ever blocked - only a composer proven `pending` and actually unblocked clears the attempt history, and it does so only on `ring=rang`. |
 | `exit` | Stop the agent, preserving the endpoint, the worktree, and every uncommitted change. | The backend's recovery-grade classifier reports the agent gone. Already-stopped is idempotent success. An endpoint reading `missing` goes through the same [absence proof](#reclaiming-a-task-whose-endpoint-is-gone) the reclaim uses before anything is claimed about it, and only Herdr can supply one: proven gone reports `endpoint-gone` (the agent went with it, and the endpoint this verb normally preserves did not survive), a pane that turns out to be there and idle is the ordinary `already-stopped`, one whose agent is back takes the ordinary interrupt-then-exit path. A tmux `missing` always refuses rather than claim a stop it cannot see. |
 | `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
 
@@ -46,6 +47,19 @@ muse is the one verified adapter that restores the cancelled prompt back into it
 The clear is refused before anything is sent when the recorded backend cannot deliver it.
 
 `exit` reads the composer's state before typing the exit command and requires the exact `empty` verdict; a `pending` verdict refuses by naming the pending text, and any other verdict (`unknown`, `pending-unproven`, or an unreadable read) refuses as not proven empty, matching the fail-safe contract every other consumer that can overwrite composer input follows.
+
+## The skipped-doorbell condition and its recovery
+
+A worker whose input line holds typed but unsubmitted text - a doorbell whose Enter was swallowed, most often - cannot receive messages: every later doorbell ring is skipped to protect that text from being concatenated onto, while the steers themselves stay durable in the steering inbox ( [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) ).
+The condition is reported as itself, never as a quiet worker: `bin/fm-send.sh` names the skip on its own stderr, and the watcher's re-ring ladder escalates naming the recorded outcome (`skipped-pending`) and pointing at `unblock`, rather than the generic idle-pane wording that reads as a possible wedge.
+Each delivery attempt takes that outcome from the ring's own submit verdict, so an attempt whose doorbell Enter was swallowed records `skipped-pending` exactly like an attempt the composer pre-check skipped.
+An attempt that proves nothing - an unreadable verdict or a failed send - keeps whatever outcome an earlier attempt established instead of erasing it, so a spent ladder still names the condition it last proved.
+Those are opposite conditions with opposite responses - one needs `unblock` in place, the other needs inspection or recovery - so the wake must distinguish them.
+
+`unblock` is the rung below `relaunch` for exactly this state, where relaunch is the wrong answer because it discards the conversation while the work is intact.
+It types no new text: it sends Enter, re-reads the composer, and retries the Enter only, so a partially-stuck line is never duplicated.
+When the pending text is itself a doorbell line, the submit lands that doorbell directly and the re-ring lands any later records; when the text is something else, the worker still receives it as chat and the doorbell lands afterwards.
+The verification live-proofs this arc end to end against real Claude Code on real Herdr ( [`tests/fm-unblock-doorbell-herdr-live-e2e.test.sh`](../tests/fm-unblock-doorbell-herdr-live-e2e.test.sh); see [`docs/verification/runtime-backends.md`](verification/runtime-backends.md) "Skipped-doorbell recovery" for the dated result and the command that refreshes it).
 
 **Teardown and discard are not verbs and will not become verbs.**
 `exit` stops an agent and preserves everything else.
@@ -145,7 +159,7 @@ The worktree and the task's records are unaffected either way.
 - A remotely placed secondmate is refused by name.
   Its agent runs on another host, so none of the postconditions this plane verifies could be read for it here; local endpoint validation would refuse the record regardless, because `window=remote:<id>` can never match a local backend's required shape.
   Drive that lifecycle on its own host and reconcile it through the secondmate recovery path.
-  For `relaunch` that host-side drive is `bin/fm-on.sh <id> fm-remote-secondmate-control.sh relaunch ...`, whose host-local leg runs this same plane against a record that is ordinary and local there, so every checkpoint, journal, rollback, and postcondition below applies unchanged ([`docs/remote-secondmates.md`](remote-secondmates.md)); `interrupt` and `exit` have no such route.
+  For `relaunch` that host-side drive is `bin/fm-on.sh <id> fm-remote-secondmate-control.sh relaunch ...`, whose host-local leg runs this same plane against a record that is ordinary and local there, so every checkpoint, journal, rollback, and postcondition below applies unchanged ([`docs/remote-secondmates.md`](remote-secondmates.md)); `interrupt`, `unblock`, and `exit` have no such route.
 - An unverified harness is refused rather than guessed at.
 - An implicit relaunch from a prefixed raw-command basename is refused before the agent or durable state is touched because its original launch command cannot be reconstructed.
 - An adapter that is not verified for this task's kind is refused **before** the running agent is stopped, not after.
