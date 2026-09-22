@@ -1,6 +1,8 @@
 ---
 name: firstmate-orca
-description: Agent-only operator checklist for Firstmate's Orca runtime backend. Use when switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
+description: >-
+  Agent-only checklist for Firstmate's Orca runtime backend.
+  Use before Orca-backed task work or when choosing between Firstmate helpers and the `orca-cli` skill.
 user-invocable: false
 metadata:
   internal: true
@@ -16,10 +18,14 @@ The runtime backend owns the task endpoint and, for Orca, the task worktree.
 The harness is the agent process launched inside that endpoint, such as `claude`, `codex`, `opencode`, `pi`, `pi-signed`, `grok`, or `kimi`.
 Load `harness-adapters` for harness-specific launch, interrupt, resume, trust-dialog, and skill-invocation facts.
 
-Implementation details, metadata fields, teardown guarantees, and limitations live in `docs/orca-backend.md`.
+Implementation details, metadata fields, cleanup guarantees, and limitations live in `docs/orca-backend.md`.
 `docs/verification/runtime-backends.md` "Orca" owns active smoke evidence.
-Prefer the `bin/fm-*` helpers over raw `orca` commands.
-Use raw `orca` only when the helper surface cannot answer the inspection question, and keep the recorded firstmate metadata as the task identity.
+This skill owns tasks that Firstmate records and supervises through the Orca runtime backend.
+Use the `bin/fm-*` helpers for those tasks.
+The `orca-cli` skill owns direct Orca worktree, terminal, repository, handoff, and embedded-browser operations outside the Firstmate lifecycle.
+If a direct Orca command is necessary, load `orca-cli` and follow the version-matched guide from the selected Orca binary.
+Never use remembered Orca flags.
+Never create direct Orca state and then patch it into Firstmate records.
 
 ## Preflight
 
@@ -32,7 +38,7 @@ Before switching or spawning against Orca:
 - Confirm the Orca app is running and the backend readiness checks pass before expecting spawn to work.
 - Inspect active `state/*.meta` records before changing backend selection.
 - Treat a backend switch as affecting future spawns only; existing tasks keep their recorded backend.
-- Reconcile watcher wakes before unrelated work, especially if Orca tasks are already in flight.
+- If Orca tasks are active, follow the session's emitted supervision protocol before unrelated work.
 
 ## Spawn
 
@@ -44,7 +50,8 @@ After spawn, check the task with firstmate helpers:
 - `bin/fm-peek.sh fm-<id>` for launch failures, trust dialogs, or first output.
 - `state/<id>.meta` for `backend=orca`, `terminal=`, `orca_worktree_id=`, and `worktree=`.
 - `bin/fm-crew-state.sh <id>` when the current run state matters.
-- `bin/fm-watch.sh` whenever there are tasks in flight and this session owns supervision.
+- If tasks are active, follow the current session's emitted supervision protocol.
+- Do not start `bin/fm-watch.sh` directly.
 
 Do not manually create the Orca worktree or terminal for a normal firstmate task.
 Do not manually patch metadata to make an externally-created Orca terminal look like a firstmate task.
