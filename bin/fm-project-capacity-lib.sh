@@ -34,8 +34,8 @@
 #   - is not a secondmate, which is a persistent home rather than a worker,
 #   - names the same project identity, meaning its project resolves to the same
 #     shared project lock path (fm_treehouse_project_lock_path), which is keyed
-#     by the project's resolved origin, so separate clones of one origin share
-#     one capacity, and
+#     by the project's resolved origin, so workers in any clone of that origin
+#     are counted, and
 #   - has no recorded PR handoff: the pr= line bin/fm-pr-check.sh records when a
 #     worker's PR is ready, after which the worker waits on review or merge and
 #     no longer uses local resources.
@@ -43,6 +43,11 @@
 # task is cleaned up and its record removed. A local-only ship and a scout have
 # no recorded handoff and hold their place until cleanup. A worker that is
 # steered back into work after its PR handoff is not counted again.
+# The declaration is matched by the spawning clone's directory name, so clones
+# of one origin share the cap only when they use that same directory name. A
+# clone of that origin under a different directory name finds no declaration
+# and is not capped, though its workers still count as holders for a
+# same-origin clone that is capped.
 # A record whose project directory no longer exists cannot be matched and holds
 # no place. Remote homes are never walked, because their workers run on another
 # machine.
