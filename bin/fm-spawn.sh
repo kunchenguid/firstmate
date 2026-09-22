@@ -3007,11 +3007,12 @@ freshen_spawn_worktree_base() { # <worktree>
   }
   target="origin/$default"
   if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    # Name the key when it chose this branch: otherwise a typo'd deploy branch
-    # reads as a network or permissions failure and sends the operator looking
-    # in the wrong place.
+    # Name where the branch value came from, so a typo'd deploy branch does not
+    # send the operator looking at the network. The fetch failing does not
+    # establish WHY, so both live causes are offered rather than asserting the
+    # branch is absent.
     if [ "$(fm_deploy_branch_configured "$worktree" || true)" = "$default" ]; then
-      echo "error: could not fetch '$target' for pooled worktree '$worktree'; firstmate.deployBranch is set to '$default' in that clone but origin has no such branch; refusing to launch from a potentially stale base" >&2
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; firstmate.deployBranch is set to '$default' in that clone - that branch may not exist on origin, or origin may be unreachable; refusing to launch from a potentially stale base" >&2
     else
       echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     fi

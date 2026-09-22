@@ -123,10 +123,11 @@ if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<default> stale on some Git versions and only refresh FETCH_HEAD.
   if ! git -C "$WT" fetch origin "+refs/heads/$DEFAULT:refs/remotes/origin/$DEFAULT" --quiet; then
-    # Name the key when it chose this branch: otherwise a typo'd deploy branch
-    # reads as a network or permissions failure.
+    # Name where the branch value came from, so a typo'd deploy branch does not
+    # read as a pure network failure. The fetch failing does not establish WHY,
+    # so both live causes are offered rather than asserting the branch is absent.
     if [ "$(fm_deploy_branch_configured "$PROJ" || true)" = "$DEFAULT" ]; then
-      echo "error: could not fetch 'origin/$DEFAULT' for $PROJ; firstmate.deployBranch is set to '$DEFAULT' but origin has no such branch" >&2
+      echo "error: could not fetch 'origin/$DEFAULT' for $PROJ; firstmate.deployBranch is set to '$DEFAULT' - that branch may not exist on origin, or origin may be unreachable" >&2
     else
       echo "error: could not fetch 'origin/$DEFAULT' for $PROJ" >&2
     fi

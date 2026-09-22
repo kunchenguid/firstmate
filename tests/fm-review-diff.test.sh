@@ -253,6 +253,33 @@ test_deploy_branch_missing_from_origin_fails_loudly() {
   pass "fm-review-diff refuses a firstmate.deployBranch that origin does not have, naming the key"
 }
 
+test_unreachable_origin_never_claims_the_deploy_branch_is_missing() {
+  local case_dir status err
+  case_dir=$(make_deploy_branch_case deploy-branch-offline)
+  git -C "$case_dir/project" config firstmate.deployBranch prod
+  write_task_meta "$case_dir"
+  # Positive control: the configured branch really is on origin, so any refusal
+  # below is about reachability and nothing else. Without this the test could
+  # pass on a fixture where the branch was genuinely absent.
+  git -C "$case_dir/project" rev-parse --verify --quiet refs/remotes/origin/prod >/dev/null \
+    || fail "deploy-branch-offline: fixture lacks origin/prod, so the test would be vacuous"
+  # The host can no longer reach origin at all; the branch is untouched.
+  git -C "$case_dir/project" remote set-url origin "$case_dir/origin-went-away.git"
+
+  set +e
+  run_review_diff "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  status=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  [ "$status" -ne 0 ] || fail "deploy-branch-offline: review diff succeeded against an unreachable origin"
+  assert_contains "$err" "firstmate.deployBranch is set to 'prod'" \
+    "deploy-branch-offline: refusal must still name where the branch value came from"
+  assert_not_contains "$err" "no such branch" \
+    "deploy-branch-offline: refusal asserts the branch is absent when the real fault is an unreachable origin"
+  pass "an unreachable origin never produces an absence claim about the configured deploy branch"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
@@ -261,3 +288,4 @@ test_unreachable_pr_head_falls_back_with_warning
 test_deploy_branch_unset_diffs_against_the_stale_forge_default
 test_deploy_branch_config_sets_the_review_base
 test_deploy_branch_missing_from_origin_fails_loudly
+test_unreachable_origin_never_claims_the_deploy_branch_is_missing
