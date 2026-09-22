@@ -8,6 +8,21 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-spawn-launch-delivery)
+LAUNCH_DIRS=(
+  "/tmp/fm-launch-delivery-raw-a1"
+  "/tmp/fm-launch-delivery-raw-a1+"* "/tmp/fm-launch-delivery-raw-a1."
+  "/tmp/fm-launch-delivery-claude-b1"
+  "/tmp/fm-launch-delivery-claude-b1+"* "/tmp/fm-launch-delivery-claude-b1."
+)
+
+fm_launch_delivery_cleanup() {
+  local d
+  for d in "${LAUNCH_DIRS[@]}"; do
+    rm -rf -- "$d" 2>/dev/null
+  done
+  rm -rf "$TMP_ROOT"
+}
+trap fm_launch_delivery_cleanup EXIT INT TERM HUP QUIT
 
 shell_quote_py() {  # <text>
   python3 - "$1" <<'PY'
