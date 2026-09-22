@@ -596,8 +596,15 @@ relay.resolve_credentials = fake
 async def take(cache, count):
     return [await cache.get() for _ in range(count)]
 
+def new_cache(kind, profile):
+    # Credentials binds its asyncio.Lock in __init__, and Python 3.9 refuses that
+    # outside a running loop, so every cache below is born inside one.
+    async def build():
+        return kind(profile)
+    return asyncio.run(build())
+
 # Three sessions, one resolution: the second and third turns pay nothing.
-cache = relay.Credentials("a-profile")
+cache = new_cache(relay.Credentials, "a-profile")
 got = asyncio.run(take(cache, 3))
 check(len(calls) == 1, "three sessions resolved credentials %d times" % len(calls))
 check([c["aws_access_key_id"] for c in got] == ["AK1"] * 3,
@@ -612,7 +619,7 @@ check(asyncio.run(take(cache, 1))[0]["aws_access_key_id"] == "AK1",
 # running outlives them and a dead credential is a dead session.
 del calls[:]
 stamp[0] = iso(time.time() + relay.Credentials.REFRESH_MARGIN - 1)
-cache = relay.Credentials("a-profile")
+cache = new_cache(relay.Credentials, "a-profile")
 asyncio.run(take(cache, 2))
 check(len(calls) == 2,
       "credentials near expiry should be refreshed, resolved %d times" % len(calls))
@@ -626,7 +633,7 @@ class Bounded(relay.Credentials):
 
 del calls[:]
 stamp[0] = "expires some time on Tuesday"
-cache = Bounded("a-profile")
+cache = new_cache(Bounded, "a-profile")
 asyncio.run(take(cache, 2))
 check(len(calls) == 1,
       "an unreadable expiry should still be reused within the margin: %d" % len(calls))
@@ -638,7 +645,7 @@ check(len(calls) == 2,
 # An absent expiry keeps meaning what it says: this credential does not expire.
 del calls[:]
 stamp[0] = ""
-cache = Bounded("a-profile")
+cache = new_cache(Bounded, "a-profile")
 asyncio.run(take(cache, 1))
 time.sleep(0.1)
 asyncio.run(take(cache, 1))
@@ -689,7 +696,7 @@ os.environ["AWS_SECRET_ACCESS_KEY"] = "s3cret"
 os.environ["AWS_SESSION_TOKEN"] = "stale-token"
 os.environ.pop("AWS_CREDENTIAL_EXPIRATION", None)
 
-cache = Bounded("a-profile")
+cache = new_cache(Bounded, "a-profile")
 first = asyncio.run(cache.get())
 check(first["aws_session_token"] == "stale-token",
       "usable ambient credentials should be preferred: %r" % first)
@@ -709,7 +716,7 @@ check(len(exports) == 1,
 # re-read instead: the keys may be stale, which is between AWS and whoever
 # exported them, but the conversation survives.
 del exports[:]
-cache = Bounded("")
+cache = new_cache(Bounded, "")
 kept = [asyncio.run(cache.get())]
 for _ in range(3):
     time.sleep(0.1)
@@ -722,12 +729,12 @@ check(exports == [], "and must not try to export from a profile it does not have
 # reason: there is no fresher source, so refusing is a dead relay rather than a
 # safer one.
 os.environ["AWS_CREDENTIAL_EXPIRATION"] = iso(time.time() - 60)
-cache = Bounded("")
+cache = new_cache(Bounded, "")
 past = asyncio.run(cache.get())
 check(past["aws_session_token"] == "stale-token",
       "an expired ambient credential is still the only answer available: %r" % past)
 # With a profile, that same credential is abandoned for it, as before.
-cache = Bounded("a-profile")
+cache = new_cache(Bounded, "a-profile")
 check(asyncio.run(cache.get())["aws_access_key_id"] == "FROM-PROFILE",
       "an expired ambient credential should be abandoned when a profile exists")
 os.environ.pop("AWS_CREDENTIAL_EXPIRATION", None)
@@ -749,7 +756,7 @@ os.environ["AWS_SECRET_ACCESS_KEY"] = "s3cret"
 os.environ["AWS_SESSION_TOKEN"] = "still-held-token"
 os.environ.pop("AWS_CREDENTIAL_EXPIRATION", None)
 
-cache = Bounded("a-profile")
+cache = new_cache(Bounded, "a-profile")
 check(asyncio.run(cache.get())["aws_session_token"] == "still-held-token",
       "usable ambient credentials should be preferred while they hold")
 kept = []
@@ -770,7 +777,7 @@ for name in AWS_VARS:
 relay.profile_credentials = real_profile
 refused = None
 try:
-    asyncio.run(Bounded("").get())
+    asyncio.run(new_cache(Bounded, "").get())
 except relay.CredentialError as exc:
     refused = str(exc)
 check(refused is not None, "no credentials anywhere should refuse")
@@ -849,8 +856,15 @@ async def drive(session, items):
             break
     return session, serving, down
 
+def new_stub(*args, **kwargs):
+    # Stub binds an asyncio.Event in __init__, and Python 3.9 refuses that outside
+    # a running loop, so every stub below is born inside one.
+    async def build():
+        return Stub(*args, **kwargs)
+    return asyncio.run(build())
+
 # The ordinary path is unchanged: the frames reach the session in order.
-good = Stub()
+good = new_stub()
 session, serving, down = asyncio.run(drive(good, [
     (frame.TALK_START, b""), (frame.AUDIO, b"1234"), (frame.TALK_END, b"")]))
 check(good.calls == ["talk_start", "audio:4", "talk_end"],
@@ -861,7 +875,7 @@ check(down.notices == [], "a good turn should not announce a failure")
 
 # A model failure mid-turn: the captain is told what happened, the relay stays
 # up, and the session is marked spent so nothing reuses a dead stream.
-broken = Stub(raises=RuntimeError("ThrottlingException"))
+broken = new_stub(raises=RuntimeError("ThrottlingException"))
 session, serving, down = asyncio.run(drive(broken, [(frame.AUDIO, b"1234")]))
 check(serving, "a failed turn must not stop the relay")
 check(session is broken and broken.failed,
@@ -877,7 +891,7 @@ check("ThrottlingException" in down.notices[0].get("error", ""),
 # stderr, so reporting each one would put ten identical lines a second in front of
 # the captain while they are still speaking, and would keep calling into a session
 # that is already gone.
-held = Stub(raises=RuntimeError("ValidationException"))
+held = new_stub(raises=RuntimeError("ValidationException"))
 frames = [(frame.TALK_START, b"")] + [(frame.AUDIO, b"x" * 3200)] * 30
 frames.append((frame.TALK_END, b""))
 session, serving, down = asyncio.run(drive(held, frames))
@@ -891,7 +905,7 @@ check(held.calls == ["talk_start"],
 # And the next talk key rebuilds instead of reusing it, which is what marking it
 # spent is for.
 renewed = []
-fresh = Stub()
+fresh = new_stub()
 real_renew = relay.renew
 
 async def fake_renew(session, options, down):
@@ -910,7 +924,7 @@ async def failing_renew(session, options, down):
     raise RuntimeError("EndpointConnectionError")
 
 relay.renew = failing_renew
-spent = Stub()
+spent = new_stub()
 spent.replies = 1
 session, serving, down = asyncio.run(drive(spent, [(frame.TALK_START, b"")]))
 check(serving, "a failed reconnect must not stop the relay")
@@ -920,7 +934,7 @@ check([n["event"] for n in down.notices] == ["turn-failed"],
 check(spent.calls == [], "a session whose reconnect failed must not be spoken to")
 
 # Quit still ends the loop, so the relay exits when the client says so.
-session, serving, down = asyncio.run(drive(Stub(), [(frame.QUIT, b"")]))
+session, serving, down = asyncio.run(drive(new_stub(), [(frame.QUIT, b"")]))
 check(not serving, "quit must end the loop")
 
 # A reconnect that fails part way must not strand the session it was building.
