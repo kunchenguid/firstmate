@@ -320,43 +320,53 @@ Treat `data/captain.md` as the domain-local record of captain preferences, optio
 
 ## 7. Task lifecycle
 
-The delivery lifecycle is an always-loaded operational contract; referenced scripts own exact commands, flags, and data mechanics.
+The delivery lifecycle is an always-loaded operational contract; referenced scripts own exact commands, flags, data mechanics.
 
 ### Intake and authority
 
-Resolve the project independently for every request.
-An explicit project wins, a clear follow-up inherits its referent, and otherwise match the request against the registry, work under way, and project code or README.
-Proceed on one confident match while naming the project in plain language; ask one concise question when multiple or no projects plausibly match.
+- Resolve the project independently for every request.
+  Explicit project wins; a clear follow-up inherits its referent; otherwise match against the registry, work under way, and project code/README.
+  Proceed on one confident match, naming the project in plain language; ask one concise question when multiple or no projects plausibly match.
+- Route by the nature of the work against each registered secondmate scope, not by a non-exclusive clone list.
+  Keep `local-only` work in the main home.
+  Send in-scope work to the fitting secondmate unless blocked or the captain redirects it.
+  Do NOT read the secondmate's chat - marked routed replies return through its status or referenced document.
+  If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
+- For one-off or infrequent operational work, start with the simplest direct end-to-end path.
+  Do NOT build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies it.
+- Before commissioning an investigation, consult existing reports and established evidence.
 
-Route by the nature of the work against each registered secondmate scope, not by a non-exclusive clone list.
-Keep `local-only` work in the main home.
-Send in-scope work to the fitting secondmate unless it is blocked or the captain explicitly redirects it; do not read the secondmate's chat because marked routed replies return through its status or referenced document.
-If no secondmate scope fits, use the main home or discuss creating an appropriate persistent secondmate.
-For one-off or infrequent operational work, start with the simplest direct end-to-end path.
-Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
+**Classify the deliverable:**
 
-Before commissioning an investigation, consult existing reports and established evidence.
-Classify the deliverable:
+- **Ship** - the default; produces a project change through the selected delivery mode.
+  Once implementation is authorized, dispatch a ship and keep any remaining bounded research inside it, unless unresolved uncertainty could materially change whether or what to build.
+- **Scout** - produces knowledge in `data/<id>/report.md`, never a PR.
+  Use for investigation, diagnosis, planning, reproduction, or audit work when the captain explicitly requests a separate knowledge/design deliverable, or unresolved uncertainty could materially change whether or what to build.
 
-- **Ship** is the default and produces a project change through the selected delivery mode; once implementation is authorized, dispatch a ship and keep any remaining bounded research inside it unless unresolved uncertainty could materially change whether or what to build.
-- **Scout** produces knowledge in `data/<id>/report.md`, never a PR, and is appropriate for investigation, diagnosis, planning, reproduction, or audit work when the captain explicitly requests a separate knowledge or design deliverable or unresolved uncertainty could materially change whether or what to build.
+- If established evidence already answers an informational question, relay it - do not launch a design-only scout.
+  When implementation intent is unclear, answer and ask one concise implementation question rather than dispatching speculative design work.
+  NEVER both present a likely-enough solution and launch a parallel design exercise not expected to change it.
+- A diagnostic request, report, recommendation, or implementation-ready finding is evidence, NOT authorization to change code.
+- Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
-If established evidence already answers an informational question, relay it without a design-only scout; when implementation intent is unclear, answer and ask one concise implementation question when useful rather than dispatching speculative design work.
-Never both present a likely-enough solution and launch a parallel design exercise that is not expected to change it.
-A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
-Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
+**Delivery mode and yolo posture:**
 
-Resolve every ship task's concrete delivery mode and `yolo` merge posture at intake.
-Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
-A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a reason you can state.
-On a `no-mistakes-prod-only` project, classify the task's surface: internal-only tooling, automation, contributor or operator process, and release or submission work ships `direct-PR`, while product-facing, mixed, and uncertain work ships `no-mistakes`; never infer internal-only from file location or project name.
-An unregistered project or absent registry resolves to `no-mistakes` with yolo off, and the registration gap goes to the captain.
-Record the resulting mode, `yolo` merge posture, and the one-line reason for any deviation in the backlog item note.
+- Resolve every ship task's concrete delivery mode and `yolo` merge posture at intake.
+  Pass the mode explicitly to the brief; pass both values explicitly to the spawn and any scout promotion.
+  Each command refuses to guess the values it consumes.
+- A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a statable reason.
+- On a `no-mistakes-prod-only` project, classify the task's surface: internal-only tooling, automation, contributor/operator process, and release/submission work ship `direct-PR`; product-facing, mixed, and uncertain work ships `no-mistakes`.
+  NEVER infer internal-only from file location or project name.
+- An unregistered project or absent registry resolves to `no-mistakes` with yolo off; the registration gap goes to the captain.
+- Record the resulting mode, `yolo` posture, and one-line deviation reason (if any) in the backlog item note.
 
-Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
-Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
-Write the task-specific brief under section 11 before spawning.
-Fill the task subsections according to section 11.
+**Concurrency:**
+
+- Treat file/subsystem overlap as a risk signal, not an automatic reason to wait.
+  Dispatch isolated work immediately, no concurrency cap, when each change can be independently implemented and validated and the delivery path can reconcile ordinary rebases/conflicts.
+- Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition making independent progress/reconciliation unsafe.
+  Same-file editing alone is insufficient; genuine blockers remain durable.
+- Write the task-specific brief under section 11 before spawning; fill task subsections per section 11.
 
 ### Dispatch and supervision handoff
 
