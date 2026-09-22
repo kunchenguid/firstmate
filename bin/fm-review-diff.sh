@@ -89,14 +89,18 @@ elif [ -f "$BRIEF" ]; then
   RECORDED_BRANCH=$(fm_brief_crew_branch "$BRIEF")
   [ -z "$RECORDED_BRANCH" ] || BRANCH=$RECORDED_BRANCH
 fi
-if [ -z "$BRANCH" ]; then
+if [ -z "$BRANCH" ] && [ "$KIND" = scout ]; then
+  BRANCH_REF=HEAD
+elif [ -z "$BRANCH" ]; then
   BRANCH=$(git -C "$WT" symbolic-ref --quiet HEAD 2>/dev/null || true)
   BRANCH=${BRANCH#refs/heads/}
   [ -n "$BRANCH" ] || { echo "error: task $ID has no Crew branch contract and worktree $WT is detached" >&2; exit 1; }
 fi
-git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 \
-  || { echo "error: task $ID records an invalid crew branch: $BRANCH" >&2; exit 1; }
-BRANCH_REF="refs/heads/$BRANCH"
+if [ -n "$BRANCH" ]; then
+  git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 \
+    || { echo "error: task $ID records an invalid crew branch: $BRANCH" >&2; exit 1; }
+  BRANCH_REF="refs/heads/$BRANCH"
+fi
 git -C "$WT" rev-parse --verify --quiet "$BRANCH_REF" >/dev/null \
   || { echo "error: recorded crew branch $BRANCH does not exist in $WT" >&2; exit 1; }
 
