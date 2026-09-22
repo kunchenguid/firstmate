@@ -1,0 +1,18 @@
+{
+  "name": "graphify-viewer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build"
+  },
+  "dependencies": {
+    "graphology": "0.25.4",
+    "graphology-layout-forceatlas2": "0.10.1",
+    "sigma": "3.0.0",
+    "svelte": "4.2.19"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "3.1.2",
+    "vite": "5.4.10"
+  }
+}
