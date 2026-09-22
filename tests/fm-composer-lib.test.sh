@@ -142,8 +142,11 @@ test_real_text_is_pending() {
 # Fixtures are the audit's byte-level captures of six REAL idle harnesses:
 # claude 2.1.226 (bare `❯` + U+00A0 NO-BREAK SPACE), codex 0.146.0 (bold `›`
 # + SGR-2 dim hint), codex 0.154.0 (the same `›` amid a braille starfield over
-# a status footer, captured through Herdr on 2026-09-15), muse (truecolor `⟩`, 38;2;90;160;255), pi (blank row
-# between solid `─` rules), opencode 1.14.46 (left-bar `┃` rows), and grok
+# a status footer, captured through Herdr on 2026-09-15), muse (truecolor `⟩`, 38;2;90;160;255), pi 0.86.1
+# (a blank row between solid `─` rules, plus its real prompt-glyph composer row
+# `>` carrying the reverse-video cursor cell, with the `↳ <last submitted
+# prompt>` echo row BELOW the pair, captured through Herdr on 2026-09-20),
+# opencode 1.14.46 (left-bar `┃` rows), and grok
 # 1.0.0 (bordered box with a TITLED bottom border), plus claude captured
 # inside zellij through `dump-screen --ansi` (`ESC[m` `❯` U+00A0).
 #
@@ -619,6 +622,46 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+test_matrix_pi_prompt_glyph_row_is_empty() {
+  # Real idle pi 0.86.1 through herdr (captured 2026-09-20): pi draws its OWN
+  # prompt glyph `>` plus the reverse-video cursor cell in the composer, and its
+  # `↳ <last submitted prompt>` echo row sits BELOW the bottom rule. The raw
+  # capture read `pending` here while the pane's own identity reported `done`,
+  # which silently defeated every relaunch - the only way to revive a worker
+  # whose model login had died. Only the glyph row is composer input; the echo
+  # row below the pair and pi's queue furniture above the status line are not.
+  local rule prompt_row echo_row idle queued draft pi_idle continuation
+  rule='────────────────────────'
+  prompt_row="${ESC}[0m${ESC}[38;2;200;200;200m>${ESC}[0m ${ESC}[0m${ESC}[7m ${ESC}[0m"
+  echo_row="  ${ESC}[0m${ESC}[38;5;244m↳${ESC}[0m ${ESC}[0m${ESC}[38;5;244mFIRSTMATE_OP: v1 launch-brief: teach the worker${ESC}[0m"
+  pi_idle=$(printf 'pi\tidle')
+  idle=$(printf '%s\n' 'transcript line' "$rule" "$prompt_row" "$rule" "$echo_row")
+  assert_screen "pi prompt-glyph composer reads empty on herdr" empty "$CAPS_STYLED" "$idle" '' "$pi_idle"
+  assert_screen "pi prompt-glyph composer reads empty on tmux" empty "$CAPS_TMUX" "$idle" 2 "$pi_idle"
+  # The echo row is below the pair and pi's queue rows are above it, so a pane
+  # that has queued or submitted prompts still proves an empty composer.
+  queued=$(printf '%s\n' 'transcript line' '  Steering: second message' \
+    '  ↳ alt+up to edit all queued messages' '  ⠴ Working' \
+    "$rule" "$prompt_row" "$rule" "$echo_row")
+  assert_screen "pi queued prompts stay outside the pair on herdr" empty "$CAPS_STYLED" "$queued" '' "$pi_idle"
+  assert_screen "pi queued prompts stay outside the pair on tmux" empty "$CAPS_TMUX" "$queued" 5 "$pi_idle"
+  # Real typed input after the glyph is still pending, so the refusal to
+  # clobber genuinely unsent text is unchanged.
+  draft=$(printf '%s\n' 'transcript line' "$rule" \
+    "${ESC}[0m${ESC}[38;2;200;200;200m>${ESC}[0m fix the flaky test" "$rule" "$echo_row")
+  assert_screen "pi prompt glyph with a real draft stays pending" pending "$CAPS_STYLED" "$draft" '' "$pi_idle"
+  assert_screen "pi prompt glyph with a real draft on tmux" pending "$CAPS_TMUX" "$draft" 2 "$pi_idle"
+  for continuation in $'  >' $'  \n  >'; do
+    draft=$(printf '%s\n' 'transcript line' "$rule" "$prompt_row" "$continuation" "$rule" "$echo_row")
+    assert_screen "pi blank first input row followed by literal > stays pending" pending "$CAPS_STYLED" "$draft" '' "$pi_idle"
+    assert_screen "pi literal > on a continuation row stays pending on tmux" pending "$CAPS_TMUX" "$draft" 3 "$pi_idle"
+  done
+  # Only an idle/done identity proves emptiness; a working pi still defers.
+  assert_screen "working pi with a prompt-glyph composer defers" unknown \
+    "$CAPS_STYLED" "$idle" '' "$(printf 'pi\tworking')"
+  pass "matrix: pi's own prompt-glyph row is the empty composer; only the pair is input"
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -928,6 +971,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
+test_matrix_pi_prompt_glyph_row_is_empty
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

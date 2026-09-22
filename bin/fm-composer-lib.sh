@@ -68,7 +68,20 @@
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
 #   separated  - pi: content rows between two solid horizontal `─` rules, no
-#                glyph and no side border. Provable only with a live agent
+#                side border. Apart from the first-row prompt, composer rows
+#                are REAL INPUT ONLY. The
+#                composer's own first row carries pi's prompt glyph `>`
+#                (declared once below as FM_COMPOSER_PI_PROMPT_GLYPHS), so a
+#                pair with only that glyph on its first row - with or without
+#                the reverse-video cursor cell - and otherwise blank rows is
+#                EMPTY. A literal `>` on any subsequent row is pending input,
+#                as are other glyphs or text anywhere inside the pair.
+#                Everything pi draws
+#                about its own state stays OUTSIDE the pair: queued
+#                `Steering:`/`Follow-up:` messages and the
+#                `↳ <key> to edit all queued messages` hint render above the
+#                status line, and the `↳ <last submitted prompt>` echo row
+#                renders below the bottom rule. Provable only with a live agent
 #                identity reporting an idle/done pi (herdr `agent
 #                get`; the tmux foreground-process probe), because a blank
 #                region between two transcript rules is otherwise exactly the
@@ -118,10 +131,12 @@
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
-# genuine empty agent composer ONLY inside a bordered container. On a bare row
+# genuine empty agent composer inside a bordered container, with the narrower
+# Pi separated-shape exception defined above. On a bare row
 # it is a dead-shell prompt and classifies `unknown` (never a safe injection
 # target). The AGENT glyphs `❯` (claude), `›` (codex), `⟩` (U+27E9, muse),
-# and `→` (U+2192, cursor) are a genuine empty agent composer either way.
+# and `→` (U+2192, cursor) are a genuine empty agent composer in a bordered
+# box or on a bare prompt row; Pi's separated shape uses its own rule above.
 # Both glyph sets are declared
 # exactly once below; every decision reaches them through the declarations.
 #
@@ -442,13 +457,15 @@ fm_busy_lines_match() {  # [harness]
 }
 
 # The prompt glyphs, each declared exactly once (see THE SAFETY RULE above).
-# AGENT glyphs are a genuine empty agent composer on any row, bordered or bare.
-# SHELL glyphs are one only INSIDE a composer container; on a bare row they are
-# a dead-shell prompt and must never read `empty`. Newline-separated and
+# Newline-separated and
 # consumed by `read` rather than word splitting, so `$`, `%`, and `#` stay
 # literal and no entry is ever exposed to pathname expansion.
 FM_COMPOSER_AGENT_PROMPT_GLYPHS=$(printf '%s\n' '❯' '›' '⟩' '→')
 FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
+
+# Keep Pi's prompt set separate from the shell set so additions to the latter
+# cannot widen the separated-shape exception documented above.
+FM_COMPOSER_PI_PROMPT_GLYPHS=$(printf '%s\n' '>')
 
 # The ONE fleet-wide idle-placeholder set: composer text a harness renders in
 # an EMPTY composer that a plain capture cannot tell from typed text. Grok's
@@ -1739,6 +1756,8 @@ fm_composer_queued_enter_verdict() {  # <composer-state> <busy|idle|unknown>
   fi
 }
 
+# The separated-shape contract above is pinned by
+# test_matrix_pi_prompt_glyph_row_is_empty in tests/fm-composer-lib.test.sh.
 _fm_composer_classify_pi_rows() {  # <screen> <styled>
   local screen=$1 styled=$2 row raw content
   row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
@@ -1746,7 +1765,9 @@ _fm_composer_classify_pi_rows() {  # <screen> <styled>
     raw=$(_fm_composer_screen_row "$row" "$screen")
     content=$(_fm_composer_row_content "$raw" "$styled")
     fm_composer_normalize_trim_var content
-    if [ -n "$content" ]; then
+    if [ -n "$content" ] \
+       && { [ "$row" -ne "$((FM_COMPOSER_SCAN_PI_OPEN + 1))" ] \
+         || ! _fm_composer_is_prompt_glyph "$content" "$FM_COMPOSER_PI_PROMPT_GLYPHS"; }; then
       printf 'pending'
       return 0
     fi

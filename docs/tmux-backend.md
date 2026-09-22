@@ -75,7 +75,7 @@ The tmux reader is a thin adapter over the fleet-wide classifier in `bin/fm-comp
 Real text in an identified shape is pending, while only positively proven emptiness reads empty.
 A blank or otherwise unidentified cursor row is `unknown` and every consumer defers, except that a foreground process proven to be Cursor is re-read cursorlessly because Cursor parks its terminal cursor below its footer.
 That identity-gated exception preserves the strict container-proof rule for every other pane, so a modal dialog, a dead shell between stale rules, or a mid-redraw pane is never an injection target.
-The shared classifier accepts a shell glyph as an empty agent composer only inside a bordered container.
+The [shared classifier's safety rule](../bin/fm-composer-lib.sh) owns prompt-glyph handling, including Pi's separated composer exception.
 A bare shell prompt is `unknown`, so away-mode escalation is never injected into a dead shell.
 
 Busy state is not read from rendered text on this backend.
