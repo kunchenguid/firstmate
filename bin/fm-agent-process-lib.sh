@@ -84,7 +84,7 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
 #   [pid]    when given, lets the Gemini rule read argv boundaries from the
 #            live process instead of the flattened line.
 fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|other
-  local name=${1:-} argv0=${2:-} args=${3:-} pid=${4:-} by_name by_argv0
+  local name=${1:-} argv0=${2:-} args=${3:-} pid=${4:-} by_name by_argv0 arg1
   by_name=$(fm_agent_process_classify_name "$name" "$argv0")
   [ "$by_name" != agent ] || { printf 'agent'; return 0; }
   if [ -n "$argv0" ]; then
@@ -103,6 +103,19 @@ fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|othe
     printf 'agent'
     return 0
   fi
+  # omp 18.2.8 ships as a Bun script: a live session reports the interpreter
+  # name (bun, or node) with the omp script path as its first argument, so the
+  # name and argv[0] surfaces above both miss it. Only args[1] counts - an omp
+  # path in a later argument is not the script being run.
+  case "$name" in
+    bun|node)
+      if [ -n "$args" ]; then
+        arg1=${args#* }
+        arg1=${arg1%% *}
+        [ "$(basename -- "$arg1")" = omp ] && { printf 'agent'; return 0; }
+      fi
+      ;;
+  esac
   if [ "$by_name" = shell ] && [ "$by_argv0" = shell ]; then
     printf 'shell'
   else
