@@ -479,6 +479,43 @@ test_crew_absorb_class_classifier() {
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
+# crew_is_ci_waiting: the narrower question the wedge threshold asks on top of
+# crew_absorb_class - not "is this crew working" but "is the step it is on a
+# STRUCTURALLY external one", which is the only kind a silent pane is the
+# expected shape of. Every local step and every pane-sourced verdict must answer
+# no, or the wedge detector would stop covering the panes it exists for.
+test_crew_is_ci_waiting_classifier() {
+  local dir fakebin
+  dir=$(make_case ci-waiting-class); fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+  FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  crew_is_ci_waiting a || fail "an active ci step was not recognized"
+  # Trailing segments fm-crew-state.sh appends to the same line must not defeat it.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · ci running · run: 0f3a91'
+  crew_is_ci_waiting a || fail "a ci step carrying a run id was not recognized"
+  # Still `working`, so the existing absorb class is unchanged by the narrower read.
+  [ "$(crew_absorb_class a)" = working ] || fail "a ci step stopped being classed working"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  ! crew_is_ci_waiting a || fail "a local running step was treated as an external wait"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing)'
+  ! crew_is_ci_waiting a || fail "a local fixing step was treated as an external wait"
+  FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  ! crew_is_ci_waiting a || fail "a busy pane was treated as an external wait"
+  # A finished ci monitor reads done, not working, and must not hold the absorb open.
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+  ! crew_is_ci_waiting a || fail "a finished ci monitor was treated as still waiting"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at ci'
+  ! crew_is_ci_waiting a || fail "a parked gate mentioning ci was treated as an external wait"
+  FM_FAKE_CREW_STATE='state: working · source: status-log · working: ci running'
+  ! crew_is_ci_waiting a || fail "a status-log line quoting ci running was treated as an external wait"
+  FM_FAKE_CREW_STATE='no such crew'
+  ! crew_is_ci_waiting a || fail "an unparseable verdict was treated as an external wait"
+  ! crew_is_ci_waiting "" || fail "an empty id was treated as an external wait"
+  unset FM_FAKE_CREW_STATE
+  pass "crew_is_ci_waiting: only an active run-step ci verdict matches, and it stays working for crew_absorb_class"
+}
+
 # The wedge detector's third liveness input: writes inside the crew's own recorded
 # worktree. Every negative outcome must report "no evidence" so the caller keeps
 # its existing escalation schedule, and a supervisor-side git read (which touches
@@ -2064,8 +2101,11 @@ test_nonterminal_stale_provably_working_absorbed_then_escalated() {
   pane_hash=$(hash_text "idle building output")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  # The crew's pipeline is actively running: a static pane is normal (waiting on CI).
-  export FM_FAKE_CREW_STATE='state: working · source: run-step · ci running'
+  # The crew's pipeline is actively running a LOCAL step (fixing/running), so a
+  # static pane is normal for a while but is still a wedge suspect once the idle
+  # window elapses. The externally-paced `ci` step is deliberately not used here:
+  # it has its own absorb, covered by test_wedge_threshold_defers_to_a_ci_step.
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
   # Phase A: a high escalation threshold means the first sighting is absorbed.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -2673,7 +2713,7 @@ wedge_reported_wait_secs() {  # <watch-out>
 
 test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict() {
   local dir state fakebin out capture window key n past reported
-  local working='state: working · source: run-step · ci running'
+  local working='state: working · source: run-step · validating (running)'
 
   dir=$(wedge_threshold_fixture declared-wait-working \
     'paused: final validation at step 6/6 - clean whole-assembly baseline (~20 min)' 0)
@@ -2758,7 +2798,7 @@ test_wedge_threshold_defers_to_a_declared_wait_under_a_working_verdict() {
 # absorber makes exactly this distinction, and a lane routed here must not lose it.
 test_wedge_threshold_recheck_names_the_captain_for_a_held_lane() {
   local dir state fakebin out capture window key n armed_timer
-  local working='state: working · source: run-step · ci running'
+  local working='state: working · source: run-step · validating (running)'
 
   dir=$(wedge_threshold_fixture captain-held-wait \
     'captain-held: which retention window wins' 2000)
@@ -3010,7 +3050,7 @@ working: still parked at that gate'
   pass "a gate awaiting firstmate's decision for its own run is rechecked on the long cadence in either posture, while a crewmate-owed gate, an unrelated open decision and a runless verdict keep the unchanged ladder"
 }
 
-# --- an unconfigured home behaves exactly as it did before this evidence -----
+# --- an unconfigured home keeps the parked-gate escalation ladder ------------
 # The parked-gate record is the one wait here that is not the worker's own
 # declaration about its own silence: it is derived from a pipeline's gate state,
 # so a home decides for itself whether a lane may give up the escalation ladder
@@ -3018,8 +3058,9 @@ working: still parked at that gate'
 # otherwise defers - human-owed gate, open decision keyed to that run, every
 # signal the armed cases assert on - must escalate on the unchanged schedule
 # with the unchanged reason and demand-deep-inspection wording, and the evidence
-# arm must not even be reached: no current-state read is spent and no recheck
-# throttle is written. The fixture is byte-identical to the armed case above
+# arm must not even be reached: only the independent CI-step probe spends a
+# current-state read per threshold, and no recheck throttle is written.
+# The fixture is byte-identical to the armed case above
 # except for the flag, so the difference is attributable to the flag alone.
 test_wedge_threshold_parked_gate_is_off_until_armed() {
   local dir state fakebin out capture window key n unarmed_probes armed_probes
@@ -3052,13 +3093,12 @@ working: still parked at that gate'
   unarmed_probes=$(wc -l < "$FM_FAKE_CREW_STATE_LOG" | tr -d ' ')
   unset FM_FAKE_CREW_STATE_LOG
 
-  [ "$unarmed_probes" -eq 0 ] \
-    || fail "an unarmed home spent $unarmed_probes current-state read(s) on a parked gate over three thresholds"
+  [ "$unarmed_probes" -eq 3 ] \
+    || fail "an unarmed home spent $unarmed_probes current-state read(s) over three thresholds; expected one CI-step probe per threshold"
 
-  # The same fixture with only the flag added, counted the same way, so the
-  # zero above is the flag's doing rather than a fixture that could never have
-  # reached the reader: one armed threshold must spend a read. A guard placed
-  # after the consult instead of before it would make both counts nonzero.
+  # With only the flag added, one parked-gate read defers the lane before the
+  # CI-step probe. The unarmed case above would spend two reads per threshold
+  # if the parked-gate guard moved after its consult.
   dir=$(wedge_threshold_fixture parked-gate-armed-probe-count "$escalated" 2000)
   arm_parked_gate "$dir"
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
@@ -3069,9 +3109,9 @@ working: still parked at that gate'
   ack_stopped_cycle "$state" || fail "could not acknowledge the armed control recheck"
   armed_probes=$(wc -l < "$FM_FAKE_CREW_STATE_LOG" | tr -d ' ')
   unset FM_FAKE_CREW_STATE_LOG
-  [ "$armed_probes" -gt 0 ] \
-    || fail "the armed control spent no current-state read, so the probe count proves nothing"
-  pass "with config/wedge-defer-parked-gate absent a parked gate keeps the unchanged ladder, wording and reads"
+  [ "$armed_probes" -eq 1 ] \
+    || fail "the armed control spent $armed_probes current-state read(s); expected one parked-gate probe"
+  pass "with config/wedge-defer-parked-gate absent a parked gate keeps the unchanged ladder and wording with one CI-step probe per threshold"
 }
 
 # --- a parked human-owed gate also needs the human to still owe an answer ----
@@ -3227,6 +3267,174 @@ test_wedge_defer_refuses_a_half_filled_wait_record() {
 }
 
 
+# --- the wedge threshold consults the run STEP for a structurally-external wait -
+# Reported against lane fm-uiq-4xx-recon: four wedge escalations in one night
+# against a ship lane that was healthy and advancing. It was parked in
+# no-mistakes' `ci` step waiting on the forge's checks - a legitimately long,
+# externally-paced wait with no local pane activity to show for it - and the
+# 240-second wedge threshold is crossed by every such lane, so the ladder climbed
+# and each escalation cost a supervising turn.
+#
+# bin/fm-crew-state.sh already classified that step correctly (`working` /
+# `run-step` / `ci running`); nothing downstream asked. The worker cannot declare
+# the wait itself either: it is synchronously blocked inside the `no-mistakes axi`
+# call for the whole of it and has no turn in which to append a `paused:` line, so
+# this pane state had no route into the long-cadence absorb at all.
+#
+# Both directions are pinned, for the reason the declared-wait cases above give:
+# a bound proved only in the quiet direction is indistinguishable from deleting
+# wedge detection. Here the control is a LOCAL active step (`validating
+# (running)`) under the identical fixture, so the difference is attributable to
+# the step alone and not to the pane, the status line, or the endpoint.
+test_wedge_threshold_defers_to_a_ci_step() {
+  local dir state fakebin out capture window key n reported
+  local ci='state: working · source: run-step · ci running'
+  local ci_with_run='state: working · source: run-step · ci running · run: 0f3a91'
+  local local_step='state: working · source: run-step · validating (running)'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # The reported shape: idle past the threshold, repeatedly, with the last status
+  # line an ordinary non-captain-relevant `working:` append - no declaration of
+  # any kind - and nothing but the run step to explain the quiet.
+  dir=$(wedge_threshold_fixture ci-step-quiet 'working: implementation committed' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  n=1
+  while [ "$n" -le 4 ]; do
+    if [ "$n" -eq 1 ]; then
+      wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$ci" exit \
+        || fail "a ci-step lane did not emit its initial recheck"
+      ack_stopped_cycle "$state" || fail "could not acknowledge the initial ci recheck"
+    else
+      wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$ci" absorb \
+        || fail "a ci-step lane woke inside the recheck cadence: $(cat "$out")"
+    fi
+    n=$((n + 1))
+  done
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a ci-step lane queued a wedge wake: $(cat "$state/.wake-queue")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "a ci-step lane was reported as a possible wedge: $(cat "$out")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "a ci-step lane counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+  grep -F 'demand-deep-inspection' "$out" >/dev/null \
+    && fail "a ci-step lane reached the demand-deep-inspection wording"
+
+  # Absorbed is not swallowed: once the lane has been quiet past the recheck
+  # cadence it re-surfaces, on the long cadence and worded as the external step it
+  # is, never as a wedge. The recheck names the forge's checks, because no human
+  # clears them - asking the captain to confirm or release a wait would point them
+  # at an action that does not exist here.
+  dir=$(wedge_threshold_fixture ci-step-aged 'working: implementation committed' 2000)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$ci" exit \
+    || fail "a ci-step lane quieter than the recheck cadence was never rechecked: $(cat "$out")"
+  grep -F 'ci running, awaiting the forge checks' "$out" >/dev/null \
+    || fail "the ci recheck did not name its evidence as the ci step: $(cat "$out")"
+  grep -F 'confirm the checks are still running' "$out" >/dev/null \
+    || fail "the ci recheck did not name the action that ends the wait: $(cat "$out")"
+  grep -F 'rechecked on a long cadence not a wedge' "$out" >/dev/null \
+    || fail "the ci recheck was not published on the long cadence: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "the ci recheck was worded as a possible wedge: $(cat "$out")"
+  grep -F 'awaiting the captain' "$out" >/dev/null \
+    && fail "the ci recheck borrowed the captain-held wording: $(cat "$out")"
+  grep -F 'confirm the wait still holds' "$out" >/dev/null \
+    && fail "the ci recheck borrowed the declared-wait action: $(cat "$out")"
+  reported=$(sed -n 's/.*quiet \([0-9][0-9]*\)s.*/\1/p' "$out" | head -1)
+  [ -z "$reported" ] \
+    || fail "the ci recheck invented a quiet duration from the status age: $(cat "$out")"
+  [ -z "$(wedge_reported_wait_secs "$out")" ] \
+    || fail "the ci recheck published its age as a wait on CI, which the status file cannot date: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the ci recheck"
+
+  # Trailing detail segments (the run id, a superseded status-log clause) are part
+  # of the same authoritative line and must not defeat the match.
+  dir=$(wedge_threshold_fixture ci-step-run-id 'working: implementation committed' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$ci_with_run" exit \
+    || fail "a ci-step lane carrying a run id wedge-escalated: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "a ci-step lane carrying a run id was reported as a possible wedge: $(cat "$out")"
+
+  # The load-bearing direction. The SAME fixture, the same silent pane, the same
+  # undeclared status line - but a local active step - escalates exactly as it did
+  # before, with the count climbing and the demand-deep-inspection wording intact.
+  dir=$(wedge_threshold_fixture ci-step-control 'working: implementation committed' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  n=1
+  while [ "$n" -le 3 ]; do
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$local_step" exit \
+      || fail "a locally-working lane stopped escalating at threshold $n: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge local-step escalation $n"
+    grep -F "possible wedge, escalation $n" "$out" >/dev/null \
+      || fail "a locally-working lane did not reach escalation $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
+    || fail "a locally-working lane lost the demand-deep-inspection wording: $(cat "$out")"
+  pass "a lane parked at the ci step is rechecked on the long cadence instead of wedge-escalating, while a locally-working lane keeps the unchanged ladder"
+}
+
+test_ci_transition_at_shared_wedge_boundary() {
+  local scenario dir state fakebin out capture window key
+  local local_step='state: working · source: run-step · validating (running)'
+  local ci='state: working · source: run-step · ci running'
+  window='test:fm-wedge'; key=test_fm-wedge
+  for scenario in ordinary terminal busy; do
+    dir=$(wedge_threshold_fixture "ci-transition-$scenario" 'working: implementation committed' 7200)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    rm -f "$state/.stale-$key"
+    if [ "$scenario" = terminal ]; then
+      printf 'done: implementation committed\n' > "$state/wedge.status"
+      printf '%s' "$(seen_sig "$state/wedge.status")" > "$state/.seen-wedge_status"
+    elif [ "$scenario" = busy ]; then
+      printf 'window=%s\nkind=ship\nharness=pi\nbackend=tmux\n' "$window" > "$state/wedge.meta"
+      record_pi_busy "$state" wedge
+      set_mtime "$(( $(date +%s) - 7200 ))" "$state/wedge.meta"
+      export FM_BUSY_TURN_MAX_SECS=1
+    fi
+    FM_TEST_STALE_ESCALATE=999 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$local_step" absorb \
+      || fail "$scenario lane failed to start its local-work idle window"
+    [ -s "$state/.stale-since-$key" ] || fail "$scenario lane never armed its timer"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the local-work stop"
+    printf '%s\n' "$(( $(date +%s) - 500 ))" > "$state/.stale-since-$key"
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$ci" exit \
+      || fail "$scenario transition into ci never rechecked"
+    grep -F 'ci running, awaiting the forge checks' "$out" >/dev/null \
+      || fail "$scenario transition into ci missed the external wait: $(cat "$out")"
+    [ ! -e "$state/.wedge-escalations-$key" ] || fail "$scenario transition into ci escalated"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the transition recheck"
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$ci" absorb \
+      || fail "$scenario ci wait ignored the recheck throttle"
+    unset FM_BUSY_TURN_MAX_SECS
+  done
+  pass "unchanged ordinary, terminal, and busy panes detect a transition into ci at threshold"
+}
+
+# The ordering guarantee behind reading the run step LAST. A `ci` step is a fact
+# about the pipeline, not about the pane: the ledger can still show it pending
+# while the agent that started it is gone. The dead-endpoint report must therefore
+# still win, or the absorb would hide exactly the lanes the once-only report was
+# added for.
+test_ci_step_does_not_hide_a_gone_endpoint() {
+  local dir state fakebin out capture window key
+  local ci='state: working · source: run-step · ci running'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(wedge_threshold_fixture ci-step-gone 'working: implementation committed' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  gone_endpoint_env dead; export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+
+  wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$ci" exit \
+    || fail "a gone endpoint under a running ci step was never reported: $(cat "$out")"
+  grep -F 'agent dead' "$out" >/dev/null \
+    || fail "a gone endpoint under a running ci step was absorbed behind the step: $(cat "$out")"
+  [ -s "$state/.dead-reported-$key" ] || fail "the gone report under a ci step left no once-record"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the gone report under a ci step"
+  unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  pass "a proven-dead endpoint is still reported once even while its ci step is pending"
+}
+
+
 # --- a record whose agent is GONE reports once, instead of alarming forever ---
 # Observed on a live fleet: two finished lanes reached 226 and 203 CONSECUTIVE
 # wedge escalations, one alarm roughly every FM_STALE_ESCALATE_SECS, indefinitely -
@@ -3303,7 +3511,7 @@ test_gone_endpoint_reports_once_instead_of_escalating_forever() {
 # schedule, reason and count, because neither shows the agent is gone.
 test_live_and_unproven_endpoints_still_wedge_escalate() {
   local dir state fakebin out capture window key spec verdict comm inventory
-  local working='state: working · source: run-step · ci running'
+  local working='state: working · source: run-step · validating (running)'
   window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
   for spec in 'alive|grok|fm-wedge' 'ambiguous|node|fm-wedge' 'unreadable||fm-wedge'; do
     verdict=${spec%%|*}; comm=${spec#*|}; inventory=${comm#*|}; comm=${comm%%|*}
@@ -3338,7 +3546,7 @@ test_live_and_unproven_endpoints_still_wedge_escalate() {
 test_gone_report_rearms_when_the_endpoint_comes_back() {
   local dir state fakebin out capture window key
   local failed='state: failed · source: run-step · run failed'
-  local working='state: working · source: run-step · ci running'
+  local working='state: working · source: run-step · validating (running)'
   window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
   dir=$(wedge_threshold_fixture gone-rearm 'working: still compiling' 0)
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
@@ -3385,7 +3593,7 @@ test_gone_report_rearms_when_the_endpoint_comes_back() {
 test_second_death_after_a_same_window_relaunch_reports_in_full() {
   local dir state fakebin out capture window key
   local failed='state: failed · source: run-step · run failed'
-  local working='state: working · source: run-step · ci running'
+  local working='state: working · source: run-step · validating (running)'
   window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
   dir=$(wedge_threshold_fixture gone-relaunch-swallow 'working: still compiling' 0)
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
@@ -5950,6 +6158,7 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_crew_is_ci_waiting_classifier
 test_crew_worktree_written_since_classifier
 test_empty_write_prune_widens_the_probe
 test_empty_write_prune_from_the_environment_widens_the_probe
@@ -6030,6 +6239,9 @@ test_wedge_threshold_defers_to_a_parked_gate_awaiting_a_human
 test_wedge_threshold_parked_gate_needs_an_unanswered_decision
 test_wedge_threshold_parked_gate_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
+test_wedge_threshold_defers_to_a_ci_step
+test_ci_step_does_not_hide_a_gone_endpoint
+test_ci_transition_at_shared_wedge_boundary
 test_open_captain_call_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle

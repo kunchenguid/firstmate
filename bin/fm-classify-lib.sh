@@ -2200,6 +2200,36 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
   printf '%s\n' "$run"
 }
 
+# 0 when crew <id>'s authoritative current state is an actively-running CI step:
+# bin/fm-crew-state.sh reports `working`, attributed to the run step, with its
+# `ci running` detail. That step is a STRUCTURALLY external wait - the pipeline
+# has handed the branch to the forge and is doing nothing locally until the
+# checks report back - so a quiet pane is the expected shape of it, for however
+# long the checks take, and no local activity exists to prove liveness with.
+#
+# Deliberately narrower than crew_absorb_class's `working` token, which covers
+# every active run step and a busy pane alike: only the `ci` step is external in
+# this sense. Local validation, fixing, or a verdict sourced from the pane is
+# work the crew is doing HERE, so a silent pane during one stays a wedge suspect
+# on the unchanged schedule. The classifier resolves the effective step even
+# when the run's top-level status is `running`.
+#
+# Matched on the exact current-state line rather than re-derived, so this reads
+# the one authoritative classifier instead of becoming a second one. Trailing
+# detail segments (the run id, a superseded status-log clause) are allowed after
+# it. NOT a pure read for the same reason crew_absorb_class is not: it may make a
+# bounded no-mistakes call, so callers run it only where they already budget one.
+crew_is_ci_waiting() {  # <id>
+  local id=$1 line
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || return 1
+  case "$line" in
+    "state: working · source: run-step · ci running") return 0 ;;
+    "state: working · source: run-step · ci running · "*) return 0 ;;
+  esac
+  return 1
+}
+
 # Directories excluded from the worktree write probe below, and the depth it walks.
 # The excluded set is everything a supervisor read or a package manager can write
 # without the crew doing any work - .git first, so firstmate's own read-only git

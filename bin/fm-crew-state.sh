@@ -1056,6 +1056,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         CI_STEP_STATUS=$(nm_effective_ci_step_status)
         case "$CI_STEP_STATUS" in
           running)
+            RUN_DETAIL="ci running"
             CI_LOG_STATE=$(nm_ci_checks_state)
             if [ "$CI_LOG_STATE" = green ]; then
               RUN_STATE="done"
