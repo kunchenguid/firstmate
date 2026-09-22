@@ -2225,7 +2225,9 @@ SH
       "$ROOT/bin/fm-config-push.sh" > "$first_out" 2>&1
   ) &
   first_pid=$!
-  for _ in $(seq 1 100); do
+  # The loop leaves as soon as the push reaches its first send, so a generous
+  # bound costs nothing on a fast host; a slow one needs several seconds.
+  for _ in $(seq 1 1500); do
     [ -e "$entered" ] && break
     sleep 0.02
   done
