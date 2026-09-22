@@ -115,15 +115,19 @@
 #   config/herdr-presentation-spaces file can say off to disable it or on to
 #   opt in below that floor; an empty file remains the historical opt-in form.
 #   A clean fresh task first writes state/<id>.herdr-presentation atomically,
-#   then creates a disposable
-#   workspace containing only the ordinary task pane. A successful clean create
-#   upgrades its attempt journal with exact home, session, workspace, tab, pane,
-#   parent, and label bindings. On a same-identity restart, that complete binding
-#   plus authoritative metadata may replace one exact agent-free husk in place.
-#   The journal, visible token, and labels alone are never endpoint or ownership
-#   authority, and every ambiguous recovery stays on the flat fallback after
-#   duplicate-agent risk is independently absent. Treehouse allocation and task
-#   metadata are unchanged.
+#   then creates its one-task presentation workspace containing only the
+#   ordinary task pane. When the launcher's exact workspace is the source
+#   workspace for the task's own project, Firstmate preallocates the task's
+#   durable Treehouse lease and opens that linked checkout as a real Herdr
+#   worktree child beneath the launcher, so the task renders one level below its
+#   owner; otherwise the established top-level disposable workspace path is
+#   unchanged. A successful clean create upgrades its attempt journal with exact
+#   home, session, workspace, tab, pane, parent, and label bindings. On a
+#   same-identity restart, that complete binding plus authoritative metadata may
+#   replace one exact agent-free husk in place. The journal, visible token, and
+#   labels alone are never endpoint or ownership authority, and every ambiguous
+#   recovery stays on the flat fallback after duplicate-agent risk is
+#   independently absent.
 #   A clean projected create or exact resume makes one bounded attempt to hold
 #   the one session-scoped presentation-order lock (keyed by named session plus
 #   canonical socket, outside any home's state/) through launch handoff. Lock
@@ -3376,10 +3380,12 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
 }
 
 # Classify whether one recovered task owns a durable Treehouse checkout that
-# Herdr still renders as an open linked worktree child of its owning home. Only
-# that positively proven shape, or a recorded checkout the durable slot-owner
-# claim still names this task for, may be carried into the recovered task; a
-# legacy top-level projection whose checkout was a process lease never is. Sets:
+# Herdr still renders as an open linked worktree child of its owning home, or
+# that the durable slot-owner claim still names this task for even though the
+# listing no longer renders it open. Either proof may carry the checkout into
+# the recovered task, and a claim naming a different task means reassignment and
+# is never carried; docs/herdr-backend.md "Presentation spaces" owns the full
+# carry rule. Sets:
 #   HERDR_RECOVERY_NESTED_WORKTREE   the proven or owned checkout path, else empty
 #   HERDR_RECOVERY_NESTED_AMBIGUOUS  1 when the exact proof could not be read
 spawn_herdr_recovery_classify_nested_worktree() { # <session> <journal> <meta>

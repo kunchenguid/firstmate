@@ -328,7 +328,7 @@ fm_backend_herdr_presentation_default_supported() {  # <state-dir> [<session>]
 
 # fm_backend_herdr_presentation_enabled <config-dir> [<state-dir>]: the one gate
 # bin/fm-spawn.sh consults before projecting this home's children into
-# disposable one-task workspaces (docs/herdr-backend.md "Presentation spaces"
+# one-task presentation workspaces (docs/herdr-backend.md "Presentation spaces"
 # owns the full contract). An explicit "off" or "on" is obeyed as written; a
 # home that configured nothing is projected only at or above the version floor,
 # and otherwise falls back to the flat layout with one warning. Sets
@@ -2551,8 +2551,9 @@ EOF
   printf '%s %s' "$tab_id" "$pane_id"
 }
 
-# fm_backend_herdr_projection_create_task: create one disposable presentation
-# workspace and its normal fm-<id> task tab without looking up, adopting, or
+# fm_backend_herdr_projection_create_task: create one presentation workspace
+# (the top-level disposable one, or a same-project worktree child) and its
+# normal fm-<id> task tab without looking up, adopting, or
 # reusing any existing workspace. With optional <parent-workspace-id>, <cwd>
 # must be an already allocated linked checkout and is opened through that exact
 # repository-source parent as a Herdr worktree child. Without it, the existing
