@@ -236,6 +236,68 @@ test_expected_head_launches_exact_origin_commit() {
   pass "an expected-head spawn launches and records the exact origin-backed commit instead of the default tip"
 }
 
+test_expected_head_claude_keeps_control_settings_outside_candidate() {
+  local rec id out status launch_log pending started launch exclude real_sleep marker
+  id='pool-expected-claude-settings-r26'
+  rec=$(make_case expected-claude-settings "$id")
+  read_case_record "$rec"
+  launch_log="$CASE_DIR/launch.log"
+  pending="$CASE_DIR/pending-launch"
+  started="$CASE_DIR/worker-started"
+
+  out=$(FM_FAKE_LAUNCH_LOG="$launch_log" FM_FAKE_PENDING_LAUNCH="$pending" \
+    FM_FAKE_WORKER_START_LOG="$started" \
+    run_spawn "$id" --mode no-mistakes --yolo off --harness claude \
+      --expected-head "$INITIAL_SHA")
+  status=$?
+  expect_code 0 "$status" "Claude exact-head spawn should keep Firstmate control settings out of the candidate"$'\n'"$out"
+  [ -e "$started" ] || fail "Claude exact-head spawn did not cross the worker launch boundary"
+  [ ! -e "$POOL_DIR/.claude/settings.local.json" ] \
+    || fail "Claude exact-head spawn wrote generated control settings into the reviewed worktree"
+  launch=$(cat "$launch_log")
+  assert_contains "$launch" '--settings '\''{"feedbackDrafts":"off","attribution":{"commit":"","pr":"","sessionUrl":false},"hooks":{' \
+    "Claude exact-head launch did not carry Firstmate hooks through the per-launch settings object"
+  assert_contains "$launch" '"UserPromptSubmit"' \
+    "Claude exact-head launch settings omitted the busy-state opening hook"
+  assert_contains "$launch" '"StopFailure"' \
+    "Claude exact-head launch settings omitted the failure-closing hook"
+
+  id='pool-expected-claude-adjacent-ignored-r26'
+  rec=$(make_case expected-claude-adjacent-ignored "$id")
+  read_case_record "$rec"
+  launch_log="$CASE_DIR/launch.log"
+  pending="$CASE_DIR/pending-launch"
+  started="$CASE_DIR/worker-started"
+  marker="$CASE_DIR/ignored-attacker-created"
+  mkdir -p "$POOL_DIR/.claude"
+  exclude=$(git -C "$POOL_DIR" rev-parse --git-path info/exclude)
+  printf '.claude/attacker.json\n' >>"$exclude"
+  real_sleep=$(command -v sleep)
+  cat >"$FAKEBIN_DIR/sleep" <<EOF
+#!/bin/sh
+if [ -e '$pending' ] && [ ! -e '$marker' ]; then
+  printf 'ignored attacker bytes\n' >'$POOL_DIR/.claude/attacker.json'
+  : >'$marker'
+fi
+exec '$real_sleep' "\$@"
+EOF
+  chmod +x "$FAKEBIN_DIR/sleep"
+
+  out=$(FM_FAKE_LAUNCH_LOG="$launch_log" FM_FAKE_PENDING_LAUNCH="$pending" \
+    FM_FAKE_WORKER_START_LOG="$started" \
+    run_spawn "$id" --mode no-mistakes --yolo off --harness claude \
+      --expected-head "$INITIAL_SHA")
+  status=$?
+  [ "$status" -ne 0 ] || fail "Claude exact-head spawn launched beside an ignored attacker file"
+  [ -e "$marker" ] || fail "fixture did not create the adjacent ignored attacker file at the final boundary"
+  assert_grep 'ignored attacker bytes' "$POOL_DIR/.claude/attacker.json" \
+    "Claude exact-head refusal discarded the adjacent ignored attacker file"
+  [ ! -e "$started" ] || fail "Claude exact-head spawn started a worker beside an ignored attacker file"
+  assert_contains "$out" "dirty candidate" \
+    "Claude exact-head spawn did not report the adjacent ignored attacker file"
+  pass "Claude exact-head settings stay outside the candidate while adjacent ignored files still fail closed"
+}
+
 test_expected_head_hashes_in_candidate_object_format() {
   local rec id out status caller candidate path
   for path in regular symlink; do
@@ -1365,6 +1427,7 @@ test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_expected_head_launches_exact_origin_commit
+test_expected_head_claude_keeps_control_settings_outside_candidate
 test_expected_head_hashes_in_candidate_object_format
 test_expected_head_ignores_replacement_objects
 test_expected_head_refuses_non_origin_commit_and_invalid_input
