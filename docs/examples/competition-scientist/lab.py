@@ -267,6 +267,8 @@ def render_candidate(values: dict[str, Any], *, break_syntax: bool = False) -> s
 def validate_proposal(proposal: Any, task: str) -> dict[str, Any]:
     if not isinstance(proposal, dict):
         raise LabError("proposal-not-object")
+    if "parse_error" in proposal:
+        raise LabError("proposal-unparseable")
     required = {"id", "hypothesis", "changes"}
     allowed = required | {"falsifier", "branch", "token_cost", "planning_tokens"}
     missing = sorted(required - set(proposal))
@@ -446,6 +448,9 @@ def limited_preexec(cpu_seconds: int, memory_mb: int) -> None:
         resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
 
 
+EVALUATOR_POLL_SECONDS = 0.25
+
+
 def resident_memory_mb(pid: int) -> float:
     try:
         output = subprocess.check_output(
@@ -540,17 +545,22 @@ def run_bounded_evaluator(workspace: Path, candidate: Path, split: str) -> dict[
             "wall_seconds": round(time.monotonic() - started, 6),
         })
     failure_class = ""
-    while proc.poll() is None:
-        elapsed = time.monotonic() - started
-        if elapsed >= caps["wall_seconds"]:
+    sample_memory = sys.platform == "darwin"
+    while True:
+        remaining = caps["wall_seconds"] - (time.monotonic() - started)
+        if remaining <= 0:
             failure_class = "timeout"
             stop_process_group(proc)
             break
-        if resident_memory_mb(proc.pid) > caps["memory_mb"]:
+        try:
+            proc.wait(timeout=min(remaining, EVALUATOR_POLL_SECONDS))
+            break
+        except subprocess.TimeoutExpired:
+            pass
+        if sample_memory and resident_memory_mb(proc.pid) > caps["memory_mb"]:
             failure_class = "oom"
             stop_process_group(proc)
             break
-        time.sleep(0.01)
     stdout, stderr = proc.communicate()
     elapsed = round(time.monotonic() - started, 6)
     if failure_class:
@@ -566,7 +576,12 @@ def run_bounded_evaluator(workspace: Path, candidate: Path, split: str) -> dict[
         result["wall_seconds"] = elapsed
         result["stderr"] = stderr[-2000:]
         return finish_result(result)
-    failure = "oom" if proc.returncode in (-signal.SIGKILL, 137) else "runtime"
+    if proc.returncode in (-signal.SIGXCPU, 128 + signal.SIGXCPU):
+        failure = "cpu-limit"
+    elif proc.returncode in (-signal.SIGKILL, 137):
+        failure = "oom"
+    else:
+        failure = "runtime"
     return finish_result({
         "ok": False,
         "failure_class": failure,
@@ -853,6 +868,7 @@ def archive_candidate(workspace: Path, candidate: Path, result: dict[str, Any]) 
 
 
 def policy_reject(workspace: Path, proposal: Any, failure_class: str) -> dict[str, Any]:
+    manifest = verify_frozen(workspace)
     state = load_state(workspace)
     proposal_text = canonical_json(proposal)
     proposal_sha = sha256_bytes(proposal_text.encode("utf-8"))
@@ -863,8 +879,8 @@ def policy_reject(workspace: Path, proposal: Any, failure_class: str) -> dict[st
         "schema": SCHEMA_VERSION,
         "seq": state["attempts_used"],
         "kind": "policy-reject",
-        "task": verify_frozen(workspace)["task"],
-        "controller": verify_frozen(workspace)["controller"],
+        "task": manifest["task"],
+        "controller": manifest["controller"],
         "branch": proposal.get("branch", "") if isinstance(proposal, dict) else "",
         "parent_sha256": "",
         "candidate_sha256": "",
@@ -933,11 +949,13 @@ def evaluate_and_record(workspace: Path, proposal: dict[str, Any], *, baseline: 
                 state["branches"][branch] = state["global_best_sha256"]
         elif branch not in state["branches"]:
             state["branches"][branch] = state["global_best_sha256"]
+        save_state(workspace, state)
 
         normalized_hypothesis = " ".join(proposal["hypothesis"].lower().split())
         if normalized_hypothesis in state["hypotheses"]:
             return policy_reject(workspace, proposal, "duplicate-hypothesis")
         state["hypotheses"].append(normalized_hypothesis)
+        save_state(workspace, state)
         parent_sha = state["branches"].get(branch) or state["global_best_sha256"]
         parent_candidate = workspace / "artifacts" / parent_sha / "candidate.py"
         values = parse_candidate(parent_candidate)
@@ -1174,7 +1192,7 @@ def load_proposals(path: Path) -> list[Any]:
             try:
                 proposals.append(json.loads(line))
             except json.JSONDecodeError as exc:
-                proposals.append({"id": f"invalid-line-{line_number}", "hypothesis": "", "changes": {}, "parse_error": str(exc)})
+                proposals.append({"parse_error": f"line {line_number}: {exc}"})
     except OSError as exc:
         raise LabError(f"cannot read proposals: {exc}") from exc
     return proposals
@@ -1223,12 +1241,6 @@ def fixture_proposals(task: str, controller: str) -> list[dict[str, Any]]:
 
 def run_attempt(workspace: Path, proposal: Any) -> dict[str, Any]:
     try:
-        manifest = verify_frozen(workspace)
-        state = load_state(workspace)
-        if state["complete"]:
-            raise LabError("search already complete")
-        if state["attempts_used"] >= manifest["caps"]["attempts"]:
-            raise LabError("attempt-budget-exhausted")
         return evaluate_and_record(workspace, proposal)
     except LabError as exc:
         if workspace.exists() and (workspace / ".run" / "state.json").exists():

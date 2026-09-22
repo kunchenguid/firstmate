@@ -174,7 +174,7 @@ Every row carries:
 `.run/final.json` alone contains the post-search sealed score.
 No sealed dataset file exists in the proposer-visible workspace before finalization.
 
-Failure classes include immutable or undeclared-surface refusal, duplicate or confounded proposal, budget refusal, syntax, timeout, OOM, network denial, runtime failure, and nondeterministic replay.
+Failure classes include immutable or undeclared-surface refusal, unparseable, duplicate, or confounded proposal, budget refusal, syntax, timeout, CPU-limit kill, OOM, network denial, runtime failure, and nondeterministic replay.
 A failure restores the branch incumbent and leaves its evidence reachable.
 
 ## Full A/B budget

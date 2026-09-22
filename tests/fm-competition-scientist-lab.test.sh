@@ -251,7 +251,7 @@ test_branch_and_planning_limits() {
 test_duplicate_confounded_and_budget_rejections() {
   local workspace output
   workspace="$TMP_ROOT/proposals"
-  init_workspace "$workspace" nonlinear-regression linear 7 2
+  init_workspace "$workspace" nonlinear-regression linear 8 2
 
   write_proposal "$TMP_ROOT/one.json" one "try one bias shift" main '{"REGRESSION_BIAS":0.5}'
   $LAB attempt "$workspace" --proposal "$TMP_ROOT/one.json" >/dev/null
@@ -262,6 +262,10 @@ test_duplicate_confounded_and_budget_rejections() {
   write_proposal "$TMP_ROOT/duplicate-candidate.json" three "reach the same candidate another way" main '{"REGRESSION_BIAS":0.5}'
   output=$($LAB attempt "$workspace" --proposal "$TMP_ROOT/duplicate-candidate.json")
   assert_contains "$output" "duplicate-candidate" "duplicate candidate should be rejected"
+
+  write_proposal "$TMP_ROOT/reused-hypothesis.json" four "reach the same candidate another way" main '{"REGRESSION_BIAS":0.25}'
+  output=$($LAB attempt "$workspace" --proposal "$TMP_ROOT/reused-hypothesis.json")
+  assert_contains "$output" "duplicate-hypothesis" "a hypothesis registered before a duplicate-candidate rejection should stay registered"
 
   write_proposal "$TMP_ROOT/confounded.json" confounded "change two controls together" main '{"REGRESSION_SCALE":0.8,"REGRESSION_BIAS":0.1}'
   output=$($LAB attempt "$workspace" --proposal "$TMP_ROOT/confounded.json")
@@ -276,6 +280,13 @@ JSON
   write_proposal "$TMP_ROOT/tokens.json" tokens "exceed the token budget" main '{"REGRESSION_SCALE":0.7}' 48001 0
   output=$($LAB attempt "$workspace" --proposal "$TMP_ROOT/tokens.json")
   assert_contains "$output" "token-budget-exceeded" "token overrun should be rejected"
+
+  workspace="$TMP_ROOT/unparseable"
+  printf '%s\n' '{"id":"good","hypothesis":"shift the bias upward","falsifier":"f","changes":{"REGRESSION_BIAS":0.5},"branch":"main","token_cost":0,"planning_tokens":0}' '{not json' \
+    > "$TMP_ROOT/unparseable.jsonl"
+  output=$($LAB run --workspace "$workspace" --task nonlinear-regression --controller linear \
+    --proposals "$TMP_ROOT/unparseable.jsonl" --attempts 4 --wall-seconds 2 --cpu-seconds 2 --memory-mb 512)
+  assert_contains "$output" "class=proposal-unparseable" "a malformed proposal line should be classed as unparseable"
   pass "competition scientist: duplicate, confounded, self-verdict, and token-overrun proposals are rejected"
 }
 
