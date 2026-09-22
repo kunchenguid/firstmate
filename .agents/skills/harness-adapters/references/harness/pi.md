@@ -22,7 +22,7 @@ The two models fail through different branches of `buildParams` in `packages/ai/
 The source read covers both the `main` branch and the `v0.85.1` tag.
 `claude-sonnet-4-6` succeeds on the same credential, confirming the fault is model-specific.
 Behaviour on an API-key credential is untested.
-`claude-fable-5-1` returns HTTP 404 on that account, so its behaviour under this fault is also untested.
+`claude-fable-5-1`, `claude-sonnet-5`, `claude-opus-4-5`, and `claude-sonnet-4-5` all return HTTP 404 on that account, so their behaviour under this fault is also untested.
 Use `claude-sonnet-4-6` until Pi is patched.
 
 Native Codex sessions may request `ultra` through the native extension flag described by `../../../bin/fm-spawn.sh`; it is separate from Pi's thinking levels.
