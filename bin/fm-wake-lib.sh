@@ -428,6 +428,8 @@ fm_lock_clean_known_files() {
     "$lockdir/pid" \
     "$lockdir/fm-home" \
     "$lockdir/pid-identity" \
+    "$lockdir/handoff-pid" \
+    "$lockdir/handoff-identity" \
     "$lockdir/role" \
     "$lockdir/watcher-path" \
     2>/dev/null || true
@@ -636,7 +638,7 @@ fm_lock_recheck_stale_owner() {
   if fm_lock_mid_acquire_is_fresh "$lockdir" "$actual_pid"; then
     return 1
   fi
-  return 0
+  [ "$(cat "$lockdir/pid" 2>/dev/null || true)" = "$expected_pid" ]
 }
 
 FM_RECOVERY_MARKER_TOKEN=
@@ -1076,20 +1078,23 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
   fm_current_pid current || { fm_lock_release "$lockdir"; return 1; }
   back=$(cat "$ownerdir/pid" 2>/dev/null || true)
   if [ "$back" != "$current" ] \
-    || ! printf '%s\n' "$caller_pid" > "$ownerdir/pid" 2>/dev/null \
-    || [ "$(cat "$ownerdir/pid" 2>/dev/null || true)" != "$caller_pid" ]; then
+    || ! printf '%s\n' "$caller_pid" > "$ownerdir/handoff-pid" 2>/dev/null; then
     fm_lock_release "$lockdir"
     return 1
   fi
-  # The pid record now names the caller, so the identity record must too:
-  # leaving the helper's identity would let the next contender read a foreign
-  # holder and steal a live lock. An uncomputable caller identity drops the
-  # record instead, falling back to the liveness-only verdict.
-  if ! { fm_pid_identity "$caller_pid" > "$ownerdir/pid-identity"; } 2>/dev/null; then
-    if ! rm -f "$ownerdir/pid-identity" 2>/dev/null; then
+  if ! { fm_pid_identity "$caller_pid" > "$ownerdir/handoff-identity"; } 2>/dev/null; then
+    rm -f "$ownerdir/handoff-identity" 2>/dev/null || {
       fm_lock_release "$lockdir"
       return 1
-    fi
+    }
+  fi
+  if ! rm -f "$ownerdir/pid-identity" 2>/dev/null \
+    || ! mv -f "$ownerdir/handoff-pid" "$ownerdir/pid" 2>/dev/null; then
+    fm_lock_release "$lockdir"
+    return 1
+  fi
+  if [ -f "$ownerdir/handoff-identity" ]; then
+    mv -f "$ownerdir/handoff-identity" "$ownerdir/pid-identity" 2>/dev/null || return 1
   fi
   trap - TERM INT
 }
@@ -1126,7 +1131,8 @@ fm_lock_acquire_wait_bounded() {
   fi
 
   owner_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
-  if [ "$owner_pid" = "$caller_pid" ]; then
+  if [ "$rc" -eq 0 ] && [ "$owner_pid" = "$caller_pid" ] \
+    && fm_lock_holder_alive "$lockdir" "$owner_pid"; then
     return 0
   fi
   [ "$rc" -ne 0 ] || rc=1

@@ -282,15 +282,6 @@ fm_send_id_from_meta() { # <meta-file>
 # of it and submits both as one garbled message. Ctrl-C clears the complete composer
 # (verified), so the interrupt is not complete until the composer is proven
 # free of the restored prompt.
-# The clear is PROOF-GATED: it fires only when the composer's extracted content
-# is provably the restored prompt (a suffix of the cancelled run's recorded
-# started prompt - a suffix because a long prompt can outgrow the bounded
-# capture window). A wake that lands while the captain is typing leaves the
-# composer holding fresh input, not the restored prompt, and an unconditional
-# C-c would clobber it; a mismatch, an unreadable composer, or an unprovable
-# restored prompt therefore skips the clear with a warning instead. A failed
-# clear delivery is still loud rather than silent, because the alternative is a
-# corrupted steer.
 # The proof polls the composer for up to FM_SEND_RESTORE_WAIT seconds
 # (default 2) for the restored prompt to land and stabilize.
 # WHICH adapters need that clear, and which key clears them, comes from the one
@@ -324,7 +315,7 @@ fm_send_clear_restored_prompt() { # <family> <clear-key>
     return 0
   }
   id=$(fm_send_id_from_meta "$TARGET_META")
-  verdict=$(fm_busy_muse_restored_prompt_verdict "$STATE" "$id" "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" "${FM_SEND_RESTORE_WAIT:-2}")
+  verdict=$(fm_busy_muse_restored_prompt_verdict "$STATE" "$id" "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL" "${FM_SEND_RESTORE_WAIT:-2}" "${MUSE_INTERRUPT_SNAPSHOT:-}")
   case "$verdict" in
     restored) ;;
     empty) return 0 ;;
@@ -822,6 +813,11 @@ if [ "${1:-}" = "--key" ]; then
   esac
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
+  MUSE_INTERRUPT_SNAPSHOT=
+  if [ "$semantic_key" = Escape ] && [ "$TARGET_BACKEND" != remote ] \
+    && [ "$(fm_control_harness_family "$TARGET_HARNESS" 2>/dev/null)" = muse ] && [ -n "$TARGET_META" ]; then
+    MUSE_INTERRUPT_SNAPSHOT=$(fm_busy_muse_interrupt_snapshot "$STATE" "$(fm_send_id_from_meta "$TARGET_META")" "$TARGET_BACKEND" "$T" "$EXPECTED_LABEL")
+  fi
   if [ "$TARGET_BACKEND" = remote ]; then
     FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}
     case "$FM_SEND_REMOTE_BUDGET" in

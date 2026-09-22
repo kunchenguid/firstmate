@@ -478,6 +478,14 @@ case "${1:-}" in
     shift
     printf '%s\n' "$*" >> "$FM_FAKE_KEY_LOG"
     [ "${FM_FAKE_KEY_FAIL:-}" = "$*" ] && exit 1
+    case "$*" in
+      *Escape|*escape|*Esc|*esc)
+        if [ -f "${FM_FAKE_PANE:-}.restore" ]; then
+          cp "$FM_FAKE_PANE.restore" "$FM_FAKE_PANE"
+          printf '%s\n' '{"payload":{"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"cancelled"}}}' >> "$(cat "$FM_FAKE_PANE.runlog")"
+        fi
+        ;;
+    esac
     exit 0
     ;;
 esac
@@ -504,10 +512,12 @@ muse_session_fixture() {
   printf '%s\n' \
     "{\"schema_version\":1,\"payload_type\":\"runtime.session.metadata\",\"payload\":{\"kind\":\"metadata\",\"record\":{\"workspace_root\":\"$case_dir\"}}}" \
     "{\"schema_version\":1,\"payload_type\":\"runtime.session\",\"payload\":{\"kind\":\"run\",\"run_id\":\"run-1\",\"event\":{\"kind\":\"started\",\"prompt\":$(printf '%s' "$prompt" | jq -Rsa .)}}}" \
-    '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"cancelled","reason":null}}}' > "$log"
+    > "$log"
   printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=test\n' \
     "$root" "$case_dir" > "$home/state/$id.muse-session"
-  printf 'transcript row\n\342\235\257 %s\n' "$prompt" > "$pane"
+  printf 'transcript row\n\342\235\257 %s\n' "$prompt" > "$pane.restore"
+  printf 'transcript row\n\342\235\257\n' > "$pane"
+  printf '%s\n' "$log" > "$pane.runlog"
   printf '%s\n' "$pane"
 }
 

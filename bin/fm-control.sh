@@ -391,6 +391,10 @@ send_interrupt_keys() {
     || die "harness $HARNESS interrupts with $key, which the $BACKEND backend cannot deliver; refusing to send a different key"
   [ -z "$clear" ] || fm_control_backend_supports_key "$BACKEND" "$clear" \
     || die "harness $HARNESS needs $clear to clear its composer after an interrupt, which the $BACKEND backend cannot deliver; refusing to leave the cancelled prompt where the next submitted line would concatenate onto it"
+  MUSE_INTERRUPT_SNAPSHOT=
+  if [ "$(fm_control_harness_family "$HARNESS")" = muse ]; then
+    MUSE_INTERRUPT_SNAPSHOT=$(fm_busy_muse_interrupt_snapshot "$STATE" "$ID" "$BACKEND" "$T" "$LABEL")
+  fi
   while [ "$i" -lt "$repeat" ]; do
     fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
       || die "interrupt key $key was not delivered to task $ID on $BACKEND"
@@ -416,7 +420,7 @@ send_interrupt_clear() { # <clear-key>
   family=$(fm_control_harness_family "$HARNESS" 2>/dev/null || true)
   [ "$family" = muse ] \
     || die "harness $HARNESS needs $clear to clear its composer after an interrupt, but this plane cannot prove the restored prompt for that adapter; refusing to leave the composer unverified - clear it before the next lifecycle action"
-  verdict=$(fm_busy_muse_restored_prompt_verdict "$STATE" "$ID" "$BACKEND" "$T" "$LABEL" "${FM_CONTROL_RESTORE_WAIT:-2}")
+  verdict=$(fm_busy_muse_restored_prompt_verdict "$STATE" "$ID" "$BACKEND" "$T" "$LABEL" "${FM_CONTROL_RESTORE_WAIT:-2}" "${MUSE_INTERRUPT_SNAPSHOT:-}")
   case "$verdict" in
     restored) ;;
     empty) return 0 ;;

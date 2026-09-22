@@ -1793,6 +1793,65 @@ SH
   pass "bounded acquire hands ownership to the waiting caller after contention"
 }
 
+test_bounded_lock_interrupted_handoff() {
+  local dir state lock
+  dir=$(make_case interrupted-lock-handoff)
+  state="$dir/state"
+  lock="$state/.fixture.lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lib=$1 lock=$2
+    fm_current_pid caller
+    export FM_TEST_CALLER="$caller"
+    fm_run_timed() {
+      bash -c '\''
+        . "$1"
+        printf() {
+          builtin printf "$@"
+          if [ "$#" -eq 2 ] && [ "$2" = "$FM_TEST_CALLER" ]; then
+            kill -TERM "$$"
+          fi
+        }
+        _fm_lock_acquire_wait_handoff "$2" "$FM_TEST_CALLER"
+      '\'' _ "$lib" "$lock"
+      return 124
+    }
+    eval "$(declare -f fm_lock_try_acquire | sed "1s/fm_lock_try_acquire/fm_test_real_acquire/")"
+    first=true
+    fm_lock_try_acquire() {
+      if [ "$first" = true ]; then first=false; return 1; fi
+      fm_test_real_acquire "$@"
+    }
+    fm_lock_acquire_wait_bounded "$lock" 2 || exit 10
+    [ "$(cat "$lock/pid")" = "$caller" ] || exit 11
+    fm_lock_holder_alive "$lock" "$caller" || exit 12
+    bash -c '\''. "$1"; ! fm_lock_try_acquire "$2"'\'' _ "$lib" "$lock" || exit 13
+    fm_lock_release "$lock"
+    [ ! -e "$lock" ] && [ ! -L "$lock" ] || exit 14
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" || fail "interrupted handoff exposed a stealable successful acquisition"
+  pass "interrupted bounded handoff recovers a complete caller ownership record"
+}
+
+test_stale_recheck_rejects_handoff_during_identity_read() {
+  local dir state lock
+  dir=$(make_case stale-recheck-handoff)
+  state="$dir/state"
+  lock="$state/.fixture.lock"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    lock=$2
+    mkdir "$lock"
+    printf "12345\n" > "$lock/pid"
+    fm_lock_holder_alive() {
+      printf "%s\n" "$$" > "$1/pid"
+      fm_pid_identity "$$" > "$1/pid-identity"
+      return 1
+    }
+    ! fm_lock_recheck_stale_owner "$lock" "" 12345
+  ' _ "$ROOT/bin/fm-wake-lib.sh" "$lock" || fail "stale recheck accepted ownership changed during identity inspection"
+  pass "stale recheck refuses ownership changed during identity inspection"
+}
+
 # A live-but-stuck presentation lock must not strand the executable drain. The
 # presentation remains retriable on the next pass, while the separate queue
 # mutation lock keeps its blocking all-or-nothing acknowledgement contract.
@@ -2077,9 +2136,18 @@ test_historical_annotation_skips_announced_status() {
   pass "historical annotations replay nothing already announced and keep everything new"
 }
 
+if [ "${1:-}" = --lock-handoff ]; then
+  test_bounded_lock_handoff_after_contention
+  test_bounded_lock_interrupted_handoff
+  test_stale_recheck_rejects_handoff_during_identity_read
+  exit 0
+fi
+
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
+test_bounded_lock_interrupted_handoff
+test_stale_recheck_rejects_handoff_during_identity_read
 test_lock_records_pid_identity_and_reclaims_foreign_holder
 test_live_presentation_holder_is_deadlined_without_weakening_ack
 test_malformed_presentation_lock_reports_acquire_failure

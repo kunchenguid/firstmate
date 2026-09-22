@@ -7,7 +7,7 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-fm_live_gate default-on FM_OMP_CALM_INSTALL_TEST omp
+fm_live_gate default-on FM_OMP_CALM_INSTALL_TEST omp jq
 
 TMP_ROOT=$(fm_test_tmproot fm-omp-calm-install)
 trap 'fm_test_cleanup' EXIT
@@ -90,6 +90,7 @@ chmod 755 "$RETIRE_FM_HOME/.omp/extensions"
 pass "failed legacy removal aborts before linking"
 
 # The linked package's manifest entry resolves to the tracked extension.
-assert_grep "fm-calm-omp.ts" "$LINK/package.json" "manifest declares extension entry"
-assert_present "$LINK/fm-calm-omp.ts" "extension resolves through link"
+EXTENSION=$(jq -er '.omp.extensions | select(type == "array" and length == 1) | .[0] | select(. == "./fm-calm-omp.ts")' "$LINK/package.json") \
+  || fail "manifest must declare the Calm extension as its sole extension entry"
+assert_present "$LINK/$EXTENSION" "declared extension resolves through link"
 pass "manifest entry resolves through link"

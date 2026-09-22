@@ -636,7 +636,7 @@ fm_busy_muse_run_terminal() {  # <session-log> <run-id>
 fm_busy_muse_last_run_prompt() {  # <session-log>
   [ -f "$1" ] || return 1
   command -v node >/dev/null 2>&1 || return 1
-  node - "$1" <<'NODE'
+  node - "$1" "${2:-}" <<'NODE'
 const fs = require("fs");
 let prompt = "";
 try {
@@ -645,7 +645,7 @@ try {
     let record;
     try { record = JSON.parse(line); } catch { continue; }
     const event = record?.payload?.event;
-    if (record?.payload?.kind === "run" && event?.kind === "started" && typeof event.prompt === "string") {
+    if (record?.payload?.kind === "run" && (!process.argv[3] || record.payload.run_id === process.argv[3]) && event?.kind === "started" && typeof event.prompt === "string") {
       prompt = event.prompt;
     }
   }
@@ -657,39 +657,48 @@ process.stdout.write(prompt);
 NODE
 }
 
-# fm_busy_muse_restored_prompt_verdict: whether the composer of <target> on
-# <backend> provably holds the prompt muse restored after an interrupt. Prints
-# exactly one verdict line:
-#   restored            a stable composer read whose content, normalized
-#                       exactly like the recorded prompt (whitespace runs
-#                       collapsed and line boundaries joined to spaces, so a
-#                       wrapped multiline restore still proves), is a suffix
-#                       of the last run's recorded started prompt (a suffix
-#                       because a long prompt can outgrow the bounded
-#                       capture window)
-#   other               composer provably holds text that is NOT the restored
-#                       prompt - fresh input survives an interrupt
-#                       (docs/verification/muse.md), so this is the captain's
-#                       typing and must never be cleared
-#   empty               composer provably holds nothing; no clear needed
-#   unprovable: <why>   the restored prompt cannot be proven (no session log,
-#                       no recorded prompt or an empty one, or a composer
-#                       that is unreadable, never stabilizes, or mixes
-#                       readable and failed samples)
-# Callers decide the consequence: fm-send warns and skips the clear, while
-# fm-control dies rather than leave a possibly-restored prompt where the next
-# lifecycle line would concatenate onto it.
-# Requires fm_backend_composer_content (bin/fm-backend.sh) and
-# fm_composer_normalize_spaces_var (bin/fm-composer-lib.sh) to be sourced by
-# the caller; both are already on every plane that delivers an interrupt.
-fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [label] [wait-secs]
-  local state=$1 id=$2 backend=$3 target=$4 label=${5:-} wait=${6:-2}
-  local log prompt content last='' readable=0 failed=0 stable=0 i
+fm_busy_muse_interrupt_snapshot() {
+  local state=$1 id=$2 backend=$3 target=$4 label=${5:-} log run content
   log=$(fm_busy_muse_session_log "$state" "$id" 2>/dev/null) || {
     printf 'unprovable: no muse session log resolves for %s' "$id"
     return 0
   }
-  prompt=$(fm_busy_muse_last_run_prompt "$log" 2>/dev/null) || {
+  content=$(fm_backend_composer_content "$backend" "$target" "$label" 2>/dev/null) || {
+    printf 'unprovable: the composer for %s is unreadable before interrupt' "$target"
+    return 0
+  }
+  if [ -n "$content" ]; then
+    printf 'other'
+    return 0
+  fi
+  run=$(fm_busy_muse_active_run_id "$log" 2>/dev/null) || {
+    printf 'empty'
+    return 0
+  }
+  printf '%s' "$run"
+}
+
+fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [label] [wait-secs]
+  local state=$1 id=$2 backend=$3 target=$4 label=${5:-} wait=${6:-2}
+  local log prompt content last='' readable=0 failed=0 stable=0 i terminal
+  local run=${7:-}
+  case "$run" in
+    other|unprovable:*) printf '%s' "$run"; return 0 ;;
+    empty)
+      if content=$(fm_backend_composer_content "$backend" "$target" "$label" 2>/dev/null); then
+        if [ -n "$content" ]; then printf 'other'; else printf 'empty'; fi
+      else
+        printf 'unprovable: the composer for %s is unreadable after interrupt' "$target"
+      fi
+      return 0
+      ;;
+    '') printf 'unprovable: no pre-interrupt composer observation'; return 0 ;;
+  esac
+  log=$(fm_busy_muse_session_log "$state" "$id" 2>/dev/null) || {
+    printf 'unprovable: no muse session log resolves for %s' "$id"
+    return 0
+  }
+  prompt=$(fm_busy_muse_last_run_prompt "$log" "$run" 2>/dev/null) || {
     printf 'unprovable: no run prompt is recorded in %s' "$log"
     return 0
   }
@@ -714,7 +723,8 @@ fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [
       [ "$i" -gt 0 ] && sleep 0.2
       continue
     fi
-    if [ -n "$content" ] && [ "$content" = "$last" ]; then
+    terminal=$(fm_busy_muse_run_terminal "$log" "$run" 2>/dev/null || true)
+    if [ "$terminal" = cancelled ] && [ -n "$content" ] && [ "$content" = "$last" ]; then
       stable=1
       break
     fi
@@ -740,10 +750,11 @@ fm_busy_muse_restored_prompt_verdict() { # <state-dir> <id> <backend> <target> [
   fi
   fm_composer_normalize_spaces_var content
   content=$(printf '%s\n' "$content" | tr '\n' ' ' | LC_ALL=C awk '{$1=$1; printf "%s", $0}')
-  case "$prompt" in
-    *"$content") printf 'restored' ;;
-    *) printf 'other' ;;
-  esac
+  if [ "$prompt" = "$content" ]; then
+    printf 'restored'
+  else
+    printf 'other'
+  fi
 }
 
 # cursor conversation-transcript busy source

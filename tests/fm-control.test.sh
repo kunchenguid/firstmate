@@ -107,6 +107,9 @@ case "${1:-}" in
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
       fi
+      if [ "$payload" = Escape ] && [ -f "$D/pane.restore" ]; then
+        cp "$D/pane.restore" "$D/pane"
+      fi
       if [ "$payload" = Escape ] && [ -n "${FM_FAKE_MUSE_LOG:-}" ]; then
         if [ -n "${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" ]; then
           : > "$D/muse-ack-pending"
@@ -783,7 +786,8 @@ test_muse_interrupt_clears_proven_restored_prompt() {
     "$root" "$dir/wt-t1" > "$dir/home/state/t1.muse-session"
   # The pane shows the restored prompt in the composer: a transcript row
   # above a muse glyph row holding exactly the recorded prompt.
-  printf 'transcript row\n\342\235\257 work\n' > "$dir/fake/pane"
+  printf 'transcript row\n\342\235\257 work\n' > "$dir/fake/pane.restore"
+  printf 'transcript row\n\342\235\257\n' > "$dir/fake/pane"
   out=$(FM_FAKE_MUSE_LOG="$log" FM_CONTROL_RESTORE_WAIT=2 run_control "$dir" t1 interrupt); rc=$?
   expect_code 0 "$rc" "a proven restored prompt should still be cleared"$'\n'"$out"
   [ "$(keys_sent "$dir")" = "$(printf 'Escape\nC-c')" ] \
@@ -801,12 +805,13 @@ test_muse_interrupt_preserves_fresh_input() {
   mkdir -p "$(dirname "$log")"
   printf '%s\n' \
     "{\"schema_version\":1,\"payload_type\":\"runtime.session.metadata\",\"payload\":{\"kind\":\"metadata\",\"record\":{\"workspace_root\":\"$dir/wt-t1\"}}}" \
-    '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"started","prompt":"work"}}}' > "$log"
+    '{"schema_version":1,"payload_type":"runtime.session","payload":{"kind":"run","run_id":"run-1","event":{"kind":"started","prompt":"review this work"}}}' > "$log"
   printf 'sessions_root=%s\nworkspace_root=%s\nbinding_id=test\n' \
     "$root" "$dir/wt-t1" > "$dir/home/state/t1.muse-session"
   # The composer holds fresh typed input, not the restored prompt: the clear
   # must be skipped so the captain's text survives the interrupt.
-  printf 'transcript row\n\342\235\257 fresh captain typing\n' > "$dir/fake/pane"
+  printf 'transcript row\n\342\235\257 work\n' > "$dir/fake/pane"
+  printf '%s\n' '{"payload":{"kind":"run","run_id":"run-1","event":{"kind":"terminal","terminal":"cancelled"}}}' >> "$log"
   out=$(FM_FAKE_MUSE_LOG="$log" FM_CONTROL_RESTORE_WAIT=2 run_control "$dir" t1 interrupt); rc=$?
   expect_code 0 "$rc" "the interrupt itself was delivered, so the verb still succeeds"$'\n'"$out"
   [ "$(keys_sent "$dir")" = "Escape" ] \

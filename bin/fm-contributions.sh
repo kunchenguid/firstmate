@@ -185,7 +185,8 @@ write_record() { # task record-json-file
 }
 
 forge() {
-  local remaining bounded rc=0 attempt delay forge_err=${FORGE_ERR:-$TMP/forge.err}
+  local remaining bounded rc=0 attempt delay forge_out forge_err=${FORGE_ERR:-$TMP/forge.err}
+  forge_out=$(mktemp "$TMP/forge-output.XXXXXX") || return 1
   # One transient failure does not fail the whole observation: each call gets
   # three attempts with 1s then 2s backoff, bounded by the same deadline.
   for attempt in 1 2 3; do
@@ -196,13 +197,16 @@ forge() {
     if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
     rc=0
     fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
-      gh "$@" 2> "$forge_err" || rc=$?
+      gh "$@" > "$forge_out" 2> "$forge_err" || rc=$?
     # A read killed at the budget's own deadline is budget exhaustion too.
     if [ "$rc" -eq 124 ] && [ "$bounded" -eq 1 ]; then
       BUDGET_EXHAUSTED=1
       : > "$TMP/budget-exhausted"
     fi
-    [ "$rc" -eq 0 ] && return 0
+    if [ "$rc" -eq 0 ]; then
+      cat "$forge_out"
+      return $?
+    fi
     [ "$attempt" -lt 3 ] || break
     delay=$attempt
     # A retry that cannot fit its backoff plus one bounded call fails fast
