@@ -188,7 +188,10 @@ if [ "$USE_LOCAL_BASE" -eq 1 ]; then
 elif git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
   # Update the remote-tracking ref itself; a bare single-branch fetch can leave
   # origin/<base> stale on some Git versions and only refresh FETCH_HEAD.
-  git -C "$WT" fetch origin "+refs/heads/$COMPARE_BASE:refs/remotes/origin/$COMPARE_BASE" --quiet
+  if ! git -C "$WT" fetch origin "+refs/heads/$COMPARE_BASE:refs/remotes/origin/$COMPARE_BASE" --quiet; then
+    echo "error: could not fetch origin/$COMPARE_BASE for review" >&2
+    exit 1
+  fi
   BASE="origin/$COMPARE_BASE"
   BASE_REF="refs/remotes/origin/$COMPARE_BASE"
 else

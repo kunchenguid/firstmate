@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Perform the approved local merge for a local-only ship task: fast-forward the
 # landing branch to the crewmate's recorded branch.
-# The crew branch is the last `Crew branch: branch=<name>` in
-# data/<id>/brief.md (written by bin/fm-brief.sh --branch-name). The landing
-# branch is state/<id>.meta's base_branch=. Missing values retain the historical
-# fm/<id> crew branch and default landing branch.
+# The crew branch is state/<id>.meta's crew_branch= when present, with the last
+# `Crew branch: branch=<name>` in data/<id>/brief.md retained for legacy records.
+# The landing branch is state/<id>.meta's base_branch=. Missing values retain
+# the historical fm/<id> crew branch and default landing branch.
 #
 # This is firstmate's merge gate-action (the captain's merge authority applied
 # locally instead of via a GitHub PR). It is the one sanctioned exception to hard
@@ -101,8 +101,15 @@ default_branch() {
 }
 
 BRIEF="$DATA/$ID/brief.md"
-BRANCH="fm/$ID"
-if [ -f "$BRIEF" ]; then
+BRANCH=
+recorded_branch=$(grep '^crew_branch=' "$META" | tail -n 1 | cut -d= -f2- || true)
+if [ -n "$recorded_branch" ]; then
+  git check-ref-format --branch "$recorded_branch" >/dev/null 2>&1 || {
+    echo "error: $META records an invalid crew branch: $recorded_branch" >&2
+    exit 1
+  }
+  BRANCH=$recorded_branch
+elif [ -f "$BRIEF" ]; then
   recorded_branch=$(fm_brief_crew_branch "$BRIEF")
   if [ -n "$recorded_branch" ]; then
     git check-ref-format --branch "$recorded_branch" >/dev/null 2>&1 || {
@@ -112,7 +119,8 @@ if [ -f "$BRIEF" ]; then
     BRANCH=$recorded_branch
   fi
 fi
-if [ "$BRANCH" = "fm/$ID" ]; then
+if [ -z "$BRANCH" ]; then
+  BRANCH="fm/$ID"
   recorded_worktree=$(grep '^worktree=' "$META" | tail -n 1 | cut -d= -f2- || true)
   worktree_branch=$(git -C "$recorded_worktree" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   [ -z "$worktree_branch" ] || BRANCH=$worktree_branch

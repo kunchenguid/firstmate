@@ -43,16 +43,20 @@ test_recorded_custom_branch_merges() {
   case_dir=$(make_case custom "$id")
   project=$case_dir/project
   commit_on "$project" feature/custom custom.txt
+  commit_on "$project" feature/other other.txt
   git -C "$project" checkout -q main
+  printf '%s\n' 'crew_branch=feature/custom' >> "$case_dir/home/state/$id.meta"
   printf '%s\n' '# Task' 'User text' '# Definition of done' 'Crew branch: branch=main' \
     '# Setup' 'Generated setup' '<!-- fm-generated-contract-boundary -->' '<!-- fm-generated-contract -->' '# Definition of done' \
-    'Crew branch: branch=feature/custom' '<!-- fm-generated-contract-end -->' \
+    'Crew branch: branch=feature/other' '<!-- fm-generated-contract-end -->' \
     > "$case_dir/home/data/$id/brief.md"
   run_merge "$case_dir" "$id" >/dev/null \
-    || fail "merge-local refused the recorded custom crew branch"
+    || fail "merge-local refused the metadata-recorded custom crew branch"
   [ "$(git -C "$project" rev-parse main)" = "$(git -C "$project" rev-parse feature/custom)" ] \
-    || fail "merge-local did not land the recorded custom crew branch"
-  pass "merge-local lands the crew branch recorded by the brief"
+    || fail "merge-local did not land the metadata-recorded custom crew branch"
+  [ "$(git -C "$project" rev-parse main)" != "$(git -C "$project" rev-parse feature/other)" ] \
+    || fail "merge-local followed the mutable brief instead of task metadata"
+  pass "merge-local prefers the metadata-recorded crew branch over the brief"
 }
 
 test_legacy_recorded_custom_branch_merges() {
