@@ -48,14 +48,7 @@ Compare the final explanation against the proven path and show why the proposed 
 Treat a database connection as shared state whenever a pooler, connection pool, or reusable client can return it to another caller.
 Keep read-only protection inside one explicit transaction and finish that transaction before releasing the connection.
 
-Use one of these forms, keeping every diagnostic query on the same transaction client:
-
-```sql
-BEGIN READ ONLY;
-SET LOCAL statement_timeout = '60s';
--- diagnostic queries
-ROLLBACK;
-```
+Use this form, keeping every diagnostic query on the same transaction client:
 
 ```sql
 BEGIN;
