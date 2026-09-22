@@ -774,7 +774,7 @@ assert_block_equals() {
 seed_public_commitment() {
   local home=$1 obligation=$2 work_home=$3 work_id=$4
   printf 'FMX_PAIRING_TOKEN=test-token\n' > "$home/.env"
-  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cp "$ROOT/.tasks.toml.example" "$home/.tasks.toml"
   jq -n '{request_id:"req-handoff", platform:"x",
           context_binding:{version:"ctx1", value:"ctx1_req-handoff"},
           public_safe_summary:"looking into the sign-in redirect",
