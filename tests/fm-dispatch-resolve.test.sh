@@ -573,6 +573,7 @@ TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_NATIVE" run code out err "$BRI
 expect_code 0 "$code" "native Codex schema 6 snapshot exits 0"
 assert_contains "$out" '  status: clear' "native Codex headroom resolves despite exhausted Pi and default rows"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=80%  spendPriority=0.8  runway=through_reset  -> eligible' "native Codex reads codex-home"
+assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "exact openai-codex row wins even when exhausted beside a healthy codex-home row"
 assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "native Codex headroom is chosen"
 
 jq '.providers |= reverse' "$SCHEMA6_NATIVE" > "$TMP_ROOT/schema6-reversed.json"
@@ -593,6 +594,7 @@ TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA5_PAIR" run code out err "$BRIEF
 assert_contains "$out" '  status: escalate' "schema 5 keeps joining by provider alone"
 assert_contains "$out" '  reason: genuine spendPriority tie' "every codex profile reads the one schema 5 codex row"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=11%  spendPriority=-5.6819  runway=projected_exhaustion  -> eligible' "a schema 5 row never needs accountKey"
+assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=11%  spendPriority=-5.6819  runway=projected_exhaustion  -> eligible' "Pi openai-codex still joins schema 5 by provider alone"
 
 SCHEMA6_PI_NATIVE="$TMP_ROOT/schema6-pi-native.json"
 jq '.providers |= map(select(.provider != "codex" or .accountKey != "default"))' "$SCHEMA6_NATIVE" > "$SCHEMA6_PI_NATIVE"
@@ -691,6 +693,36 @@ assert_contains "$out" 'candidate: pi:openai-codex-muller-labs/gpt-5.6-luna  pro
 assert_contains "$out" "  profile: --harness 'pi' --model 'openai-codex-muller-labs/gpt-5.6-luna'" "the lane that still falls back to default wins"
 cp "$LANE_RULES" "$RULES"
 pass "the openai-codex lane never binds the default row; other lanes keep the fallback"
+
+# --- live-evidence rows: exact row vs home, neither named row, schema 5 ------
+# SCHEMA6_DEFAULT_ONLY above already covers neither named row. The remaining
+# two rows the live account layout cannot emit: both named rows at once, and
+# a schema-5 snapshot of the same live-shaped providers.
+SCHEMA6_BOTH="$TMP_ROOT/schema6-both.json"
+jq '
+  (.providers[] | select(.accountKey == "openai-codex-muller-labs")) as $exhausted |
+  .providers += [$exhausted | .accountKey = "openai-codex"]
+' "$SCHEMA6_HOME" > "$SCHEMA6_BOTH"
+cp "$HOME_RULES" "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA6_BOTH" run code out err "$BRIEF"
+expect_code 0 "$code" "both-rows snapshot exits 0"
+assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "exact openai-codex wins over healthy codex-home even when exhausted"
+assert_contains "$out" 'candidate: pi:openai-codex-muller-labs/gpt-5.6-luna  provider=codex  scope=all_models  remaining=0%  spendPriority=-  runway=exhausted_now  -> not eligible: runway exhausted_now at all_models' "the sibling account still binds to its own exhausted row when both named rows exist"
+assert_contains "$out" '  status: escalate' "healthy codex-home is not borrowed when the exact row is exhausted"
+assert_contains "$out" '  reason: no rankable eligible candidate' "both Pi lanes stay unranked rather than reading home"
+
+SCHEMA5_HOME="$TMP_ROOT/schema5-home.json"
+jq '.schemaVersion = 5 | .providers |= unique_by(.provider) | del(.providers[].accountKey)' "$SCHEMA6_HOME" > "$SCHEMA5_HOME"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$SCHEMA5_HOME" run code out err "$BRIEF"
+expect_code 0 "$code" "schema 5 live-shaped snapshot exits 0"
+assert_contains "$out" '  status: escalate' "schema 5 live-shaped snapshot still joins by provider alone"
+assert_contains "$out" '  reason: genuine spendPriority tie' "every Codex lane reads the one schema 5 row"
+assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' "Pi openai-codex reads the single schema 5 codex row"
+assert_contains "$out" 'candidate: pi:openai-codex-muller-labs/gpt-5.6-luna  provider=codex  scope=all_models  remaining=97%  spendPriority=0.8  runway=through_reset  -> eligible' "the sibling Pi account reads that same schema 5 row"
+cp "$LANE_RULES" "$RULES"
+pass "exact openai-codex wins over healthy codex-home; schema 5 still joins by provider"
 
 jq 'del(.providers[1].accountKey)' "$SCHEMA6" > "$TMP_ROOT/schema6-keyless.json"
 reset_log
