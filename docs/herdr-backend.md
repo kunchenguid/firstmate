@@ -385,10 +385,16 @@ The replacement tab and pane are created and verified before the old pane is rec
 Then the journal advances atomically to the replacement endpoint before metadata publication.
 The reclaim path never moves, closes, deletes, or renames a workspace and never touches a parent, sibling, captain, or foreign pane.
 A failed replacement rolls back only the exact response-derived new pane when focus-safe verification permits it.
+A same-project nested task that owns a durable preallocated checkout reuses that exact recorded checkout across recovery instead of acquiring a second one.
+Recovery carries it only after proving over `worktree list` on the journal's exact parent, or for a version 1 journal on the owning home, that the journal's workspace is still an open linked worktree at that exact recorded checkout.
+This prevents adopting a legacy top-level projection whose checkout was only a process lease.
+The carried checkout is never freshened, reset, or reacquired, metadata keeps naming it, and teardown returns that same lease.
+When such a same-project checkout cannot be proven exactly, recovery refuses with a clear diagnostic and leaves the durable lease and task record intact rather than allowing the generic path to allocate a second checkout.
+A proven same-project checkout whose exact projection cannot be reclaimed is still reused through the flat layout rather than reacquired.
 
 These cases fall back flat without mutating the old projection when duplicate-agent risk is positively absent:
 
-- Version 1 journals.
+- Version 1 journals with no proven durable checkout.
 - Dead or missing panes.
 - Duplicate or absent tokens.
 - Renamed or detached spaces.

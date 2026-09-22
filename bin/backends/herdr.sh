@@ -2797,6 +2797,47 @@ fm_backend_herdr_projection_parent_sources_project() {  # <session> <parent-work
     ' >/dev/null 2>&1
 }
 
+# fm_backend_herdr_projection_recovery_nested_worktree: read-only proof that
+# one recorded projected <workspace-id> is still an open linked worktree of the
+# exact source <parent-workspace-id> for the exact physical <project>, sitting
+# at the exact durable <checkout-path>. This is the same shape
+# fm_backend_herdr_projection_create_task proves at creation, and it is what
+# separates a carried durable lease from a legacy top-level process lease.
+# Prints the canonical checkout path when proven.
+# Returns 0 = proven, 1 = a valid listing positively shows it is not such a
+# child, 2 = the proof could not be read or is ambiguous.
+fm_backend_herdr_projection_recovery_nested_worktree() {  # <session> <parent-workspace-id> <workspace-id> <checkout-path> <project-path>
+  local session=$1 parent=$2 workspace=$3 recorded=$4 project=$5 out
+  [ -n "$session" ] && [ -n "$parent" ] && [ -n "$workspace" ] \
+    && [ -n "$recorded" ] && [ -n "$project" ] || return 2
+  project=$(cd "$project" 2>/dev/null && pwd -P) || return 2
+  recorded=$(cd "$recorded" 2>/dev/null && pwd -P) || return 2
+  out=$(fm_backend_herdr_cli "$session" worktree list --workspace "$parent" 2>/dev/null | jq -r \
+    --arg parent "$parent" --arg workspace "$workspace" \
+    --arg path "$recorded" --arg project "$project" '
+      if (.result.type == "worktree_list"
+          and .result.source.source_workspace_id == $parent)
+      then
+        if .result.source.source_checkout_path != $project then
+          "none"
+        else
+          ([.result.worktrees[]?
+            | select(.open_workspace_id == $workspace)
+            | select(.is_linked_worktree == true)
+            | select(.path == $path)] | length) as $count
+          | if $count == 1 then "match" else "none" end
+        end
+      else
+        "ambiguous"
+      end
+    ' 2>/dev/null) || return 2
+  case "$out" in
+    match) printf '%s' "$recorded"; return 0 ;;
+    none) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 # fm_backend_herdr_projection_live_binding_matches: verify one exact projected
 # workspace, its single task tab/pane, its unique token label, and its current
 # position inside the exact parent workspace's contiguous child block.

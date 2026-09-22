@@ -1953,6 +1953,39 @@ test_projection_parent_sources_only_its_exact_project() {
   pass "herdr presentation placement: only the exact parent-owned project is eligible for worktree nesting"
 }
 
+test_projection_recovery_proves_only_open_linked_worktree() {
+  local dir log resp fb proj other out status
+  dir="$TMP_ROOT/projection-recovery-nested"; proj="$dir/project"; other="$dir/other"
+  mkdir -p "$dir/responses" "$proj" "$other"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  fb=$(make_herdr_fakebin "$dir")
+  run_recovery_proof() {  # <response-json>
+    rm -f "$resp/.count"
+    printf '%s\n' "$1" > "$resp/1.out"
+    PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '
+        . "$0/bin/backends/herdr.sh"
+        fm_backend_herdr_projection_recovery_nested_worktree fmtest w1 w9 "$1" "$1"
+      ' "$ROOT" "$proj"
+  }
+  out=$(run_recovery_proof '{"result":{"type":"worktree_list","source":{"source_workspace_id":"w1","source_checkout_path":"'"$proj"'"},"worktrees":[{"path":"'"$proj"'","is_linked_worktree":true,"open_workspace_id":"w9"}]}}'); status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "$proj" ] \
+    || fail "proven open linked worktree was not returned as the exact carried checkout: status=$status out=$out"
+  out=$(run_recovery_proof '{"result":{"type":"worktree_list","source":{"source_workspace_id":"w1","source_checkout_path":"'"$proj"'"},"worktrees":[]}}'); status=$?
+  [ "$status" -eq 1 ] \
+    || fail "a valid listing without the open linked child should positively not carry: status=$status out=$out"
+  out=$(run_recovery_proof '{"result":{"type":"worktree_list","source":{"source_workspace_id":"w1","source_checkout_path":"'"$other"'"},"worktrees":[{"path":"'"$proj"'","is_linked_worktree":true,"open_workspace_id":"w9"}]}}'); status=$?
+  [ "$status" -eq 1 ] \
+    || fail "a parent that sources another project must positively not carry: status=$status out=$out"
+  out=$(run_recovery_proof '{"result":{"type":"other","workspaces":[]}}'); status=$?
+  [ "$status" -eq 2 ] \
+    || fail "an unreadable worktree listing must stay ambiguous: status=$status out=$out"
+  out=$(run_recovery_proof '{"bogus":true}'); status=$?
+  [ "$status" -eq 2 ] \
+    || fail "a malformed worktree listing must stay ambiguous: status=$status out=$out"
+  pass "herdr presentation recovery: only a child positively open as a linked worktree is carried, and ambiguity refuses"
+}
+
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane() {
   local dir state log resp fb out token journal proj
   dir="$TMP_ROOT/projection-create"; state="$dir/state"; proj="$dir/proj"
@@ -5805,6 +5838,7 @@ test_presentation_preference_reports_three_distinct_states
 test_projection_journal_is_atomic_and_uses_128_bit_token
 test_projection_journal_v2_binds_and_advances_exact_endpoint
 test_projection_parent_sources_only_its_exact_project
+test_projection_recovery_proves_only_open_linked_worktree
 test_projection_create_uses_exact_response_ids_and_leaves_one_task_pane
 test_projection_worktree_open_refuses_reused_or_mismatched_response
 test_projection_create_never_closes_a_concurrent_same_label_tab

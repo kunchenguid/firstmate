@@ -1433,6 +1433,54 @@ done
 assert_focus_is "$CAPTAIN_FOCUS" "multi-home teardown"
 pass "real Herdr lab: multi-home exact-pane teardowns restore captain focus without workspace close authority"
 
+# A same-project nested task carries its durable preallocated checkout across a
+# full restart instead of acquiring a second one, and teardown returns that same
+# lease.
+NESTED_RESUME_ID=nested-resume
+mkdir -p "$HOME_DIR/data/$NESTED_RESUME_ID"
+write_ship_brief "$HOME_DIR" "$NESTED_RESUME_ID" 'Same-project nested projection restart fixture.'
+spawn_task "$NESTED_RESUME_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/nested-resume-first.out" 2> "$TMP_ROOT/nested-resume-first.err" \
+  || fail "nested-resume projected spawn failed: $(cat "$TMP_ROOT/nested-resume-first.err")"
+NESTED_RESUME_META="$HOME_DIR/state/$NESTED_RESUME_ID.meta"
+NESTED_RESUME_OLD_WT=$(remember_meta_worktree "$NESTED_RESUME_META")
+NESTED_RESUME_OLD_WSID=$(grep '^herdr_workspace_id=' "$NESTED_RESUME_META" | cut -d= -f2-)
+NESTED_RESUME_OLD_PANE=$(grep '^herdr_pane_id=' "$NESTED_RESUME_META" | cut -d= -f2-)
+NESTED_RESUME_JOURNAL="$HOME_DIR/state/$NESTED_RESUME_ID.herdr-presentation"
+[ "$(grep '^version=' "$NESTED_RESUME_JOURNAL")" = version=2 ] \
+  || fail "nested-resume fresh projection did not publish an exact restart binding"
+lab worktree list --workspace "$FIRSTMATE_WSID" | jq -e \
+  --arg child "$NESTED_RESUME_OLD_WSID" --arg path "$NESTED_RESUME_OLD_WT" '
+    ([.result.worktrees[]?
+      | select(.open_workspace_id == $child)
+      | select(.path == $path and .is_linked_worktree == true)] | length) == 1
+  ' >/dev/null 2>&1 \
+  || fail "nested-resume fresh fixture was not an exact nested durable worktree child"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" stop "$HERDR_LAB_SESSION" >/dev/null \
+  || fail "could not stop the isolated session for nested-resume"
+PATH="$HERDR_ORIGINAL_PATH" "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION" \
+  || fail "could not reprovision the isolated session for nested-resume"
+spawn_task "$NESTED_RESUME_ID" "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/nested-resume-reclaim.out" 2> "$TMP_ROOT/nested-resume-reclaim.err" \
+  || fail "nested-resume reclaim failed: $(cat "$TMP_ROOT/nested-resume-reclaim.err")"
+NESTED_RESUME_NEW_WT=$(remember_meta_worktree "$NESTED_RESUME_META")
+NESTED_RESUME_NEW_WSID=$(grep '^herdr_workspace_id=' "$NESTED_RESUME_META" | cut -d= -f2-)
+NESTED_RESUME_NEW_PANE=$(grep '^herdr_pane_id=' "$NESTED_RESUME_META" | cut -d= -f2-)
+[ "$NESTED_RESUME_NEW_WT" = "$NESTED_RESUME_OLD_WT" ] \
+  || fail "nested-resume reclaim acquired a second checkout instead of carrying its durable lease"
+[ "$NESTED_RESUME_NEW_WSID" = "$NESTED_RESUME_OLD_WSID" ] \
+  || fail "nested-resume reclaim changed nested workspace identity"
+[ "$NESTED_RESUME_NEW_PANE" != "$NESTED_RESUME_OLD_PANE" ] \
+  || fail "nested-resume reclaim reused the old husk pane"
+teardown_task "$NESTED_RESUME_ID" "$HOME_DIR" > "$TMP_ROOT/nested-resume-teardown.out" 2> "$TMP_ROOT/nested-resume-teardown.err" \
+  || fail "nested-resume teardown failed: $(cat "$TMP_ROOT/nested-resume-teardown.err")"
+[ ! -e "$NESTED_RESUME_JOURNAL" ] \
+  || fail "nested-resume exact teardown did not retire its journal"
+lab worktree list --workspace "$FIRSTMATE_WSID" | jq -e \
+  --arg child "$NESTED_RESUME_OLD_WSID" '
+    ([.result.worktrees[]? | select(.open_workspace_id == $child)] | length) == 0
+  ' >/dev/null 2>&1 \
+  || fail "nested-resume teardown did not retire its exact worktree child"
+pass "real Herdr lab: a same-project nested checkout is carried across a full restart and returned by teardown"
+
 # Missing, renamed, and duplicate tokens are read-only recovery diagnostics.
 # The duplicate case allows flat fallback only when every matching pane is
 # positively agent-free.

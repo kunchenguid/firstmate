@@ -1183,6 +1183,7 @@ SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
 SPAWN_TREEHOUSE_LEASED=0
 SPAWN_TREEHOUSE_RETURN_SAFE=0
+SPAWN_TREEHOUSE_CARRIED_OVER=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -3367,6 +3368,45 @@ herdr_projection_existing_meta_allows_flat() { # <meta>
   esac
 }
 
+# Classify whether one recovered task owns a durable Treehouse checkout that
+# Herdr still renders as an open linked worktree child of its owning home. Only
+# that positively proven shape may be carried into the recovered task; a legacy
+# top-level projection whose checkout was a process lease never is. Sets:
+#   HERDR_RECOVERY_NESTED_WORKTREE   the proven checkout path, else empty
+#   HERDR_RECOVERY_NESTED_AMBIGUOUS  1 when the exact proof could not be read
+spawn_herdr_recovery_classify_nested_worktree() { # <session> <journal> <meta>
+  local session=$1 journal=$2 meta=$3 recorded parent workspace proof status
+  HERDR_RECOVERY_NESTED_WORKTREE=""
+  HERDR_RECOVERY_NESTED_AMBIGUOUS=0
+  recorded=$(herdr_projection_meta_field_exact "$meta" worktree 2>/dev/null) || return 0
+  [ -n "$recorded" ] || return 0
+  recorded=$(cd "$recorded" 2>/dev/null && pwd -P) || return 0
+  workspace=$HERDR_RECOVERY_WORKSPACE_ID
+  [ -n "$workspace" ] || return 0
+  parent=""
+  if fm_backend_herdr_projection_journal_snapshot "$journal" "$ID"; then
+    if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
+      parent=$FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID
+      [ "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" = "$workspace" ] || workspace=""
+    fi
+  fi
+  if [ -z "$parent" ]; then
+    parent=$(fm_backend_herdr_projection_parent_workspace_exact \
+      "$session" "$HERDR_PARENT_LABEL" 2>/dev/null || true)
+  fi
+  [ -n "$workspace" ] && [ -n "$parent" ] || return 0
+  set +e
+  proof=$(fm_backend_herdr_projection_recovery_nested_worktree \
+    "$session" "$parent" "$workspace" "$recorded" "$PROJ_ABS")
+  status=$?
+  set -e
+  case "$status" in
+  0) HERDR_RECOVERY_NESTED_WORKTREE=$proof ;;
+  1) : ;;
+  2) HERDR_RECOVERY_NESTED_AMBIGUOUS=1 ;;
+  esac
+}
+
 # Backlog preflight (bin/fm-backlog-transition-lib.sh). This spawn is about to
 # become the sole owner of the row's In-flight transition, so prove the row is
 # transitionable BEFORE any endpoint, worktree, or record exists: a refusal here
@@ -3559,12 +3599,25 @@ else
         fi
         fm_backend_herdr_projection_recovery_allows_flat \
           "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" || exit 1
+        HERDR_RECOVERY_NESTED_WORKTREE=""
+        HERDR_RECOVERY_NESTED_AMBIGUOUS=0
+        if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ] &&
+          { [ -e "$STATE/$ID.meta" ] || [ -L "$STATE/$ID.meta" ]; }; then
+          spawn_herdr_recovery_classify_nested_worktree \
+            "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$STATE/$ID.meta"
+        fi
+        if [ "$HERDR_RECOVERY_NESTED_AMBIGUOUS" = 1 ]; then
+          echo "error: could not confirm the recorded durable Treehouse checkout for $ID; refusing recovery so its durable lease and task record stay intact" >&2
+          exit 1
+        fi
         if [ "${HERDR_RECOVERY_BACKEND:-}" = herdr ]; then
+          HERDR_RECLAIM_CWD=$PROJ_ABS
+          [ -z "$HERDR_RECOVERY_NESTED_WORKTREE" ] || HERDR_RECLAIM_CWD=$HERDR_RECOVERY_NESTED_WORKTREE
           set +e
           FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_projection_reclaim_task \
             "$HERDR_SES" "$HERDR_PRESENTATION_JOURNAL" "$ID" "$HERDR_LABEL_HOME" \
             "$HERDR_RECOVERY_WORKSPACE_ID" "$HERDR_RECOVERY_TAB_ID" "$HERDR_RECOVERY_PANE_ID" \
-            "$HERDR_PARENT_LABEL" "$W" "$PROJ_ABS"
+            "$HERDR_PARENT_LABEL" "$W" "$HERDR_RECLAIM_CWD"
           HERDR_RECLAIM_STATUS=$?
           set -e
           case "$HERDR_RECLAIM_STATUS" in
@@ -3584,6 +3637,11 @@ else
             ;;
           *) exit 1 ;;
           esac
+          if [ -n "$HERDR_RECOVERY_NESTED_WORKTREE" ]; then
+            WT=$HERDR_RECOVERY_NESTED_WORKTREE
+            SPAWN_TREEHOUSE_LEASED=1
+            SPAWN_TREEHOUSE_CARRIED_OVER=1
+          fi
         else
           spawn_herdr_presentation_order_lock_release
         fi
@@ -3706,7 +3764,7 @@ else
       HERDR_SEEDED_DEFAULT_TAB_ID=${HERDR_CONTAINER_RAW#*$'\t'}
       HERDR_SES=${CONTAINER%%:*}
       HERDR_WORKSPACE_ID=${CONTAINER#*:}
-      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "$PROJ_ABS" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
+      HERDR_TASK_IDS=$(FM_HOME="$HERDR_LABEL_HOME" fm_backend_herdr_create_task "$CONTAINER" "$W" "${HERDR_RECOVERY_NESTED_WORKTREE:-$PROJ_ABS}" "$HERDR_SEEDED_DEFAULT_TAB_ID") || exit 1
       read -r HERDR_TAB_ID HERDR_PANE_ID <<EOF
 $HERDR_TASK_IDS
 EOF
@@ -4243,7 +4301,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" = herdr ] && [ "$SPAWN_TREEHOUSE_
   fi
   validate_spawn_worktree "treehouse get --lease" "$T"
 fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+if [ "$RELAUNCH" -eq 0 ] && [ "$SPAWN_TREEHOUSE_CARRIED_OVER" != 1 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
