@@ -337,6 +337,18 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/examples/competition-scientist/README.md",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/competition-scientist/baseline_candidate.py",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/competition-scientist/lab.py",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
       "audience": "operator-example"
     },
@@ -450,6 +462,10 @@
     },
     {
       "path": "docs/verification/agy.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/competition-scientist-lab.md",
       "audience": "maintainer-verification"
     },
     {
