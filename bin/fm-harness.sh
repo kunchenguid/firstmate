@@ -23,11 +23,13 @@
 #                                        slugs whose installed catalog entry at
 #                                        ${CODEX_HOME:-~/.codex}/models_cache.json lists
 #                                        max in supported_reasoning_levels[].effort.
-#                                        Exit 1 with an error on stderr and nothing on
-#                                        stdout when the catalog is absent, unreadable,
-#                                        malformed, or jq is missing; callers then treat
-#                                        max as unadvertised for every model. This is the
-#                                        single catalog read behind Codex max validation
+#                                        Exit 1 with an error naming the catalog on
+#                                        stderr and nothing on stdout when the catalog is
+#                                        absent, unreadable, malformed, or jq is missing;
+#                                        validators then accept Codex max and relay that
+#                                        error as a diagnostic, and the launch records max
+#                                        without passing it. This is the single catalog
+#                                        read behind Codex max validation
 #                                        (fm-dispatch-resolve.sh, fm-bootstrap.sh) and
 #                                        the max launch flag (fm-spawn.sh).
 #        fm-harness.sh ancestry [<pid>] print "<strength> <harness>" for the nearest

@@ -1124,15 +1124,20 @@ test_crew_dispatch_codex_max_follows_catalog() {
   [ "$out" = "CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max" ] \
     || fail "codex max the catalog does not advertise should be flagged, got: $out"
 
-  for catalog in missing malformed; do
+  for catalog in "missing|not readable" "malformed|is malformed"; do
     rm -f "$case_dir/codex-home/models_cache.json"
-    [ "$catalog" = missing ] || printf '%s\n' '{"models":[' > "$case_dir/codex-home/models_cache.json"
+    [ "${catalog%%|*}" = missing ] || printf '%s\n' '{"models":[' > "$case_dir/codex-home/models_cache.json"
     out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
       CODEX_HOME="$case_dir/codex-home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-    [ "$out" = "CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max" ] \
-      || fail "codex max with a $catalog catalog should be flagged, got: $out"
+    [ "$out" = "BOOTSTRAP_INFO: crew dispatch codex max: Codex model catalog ${catalog#*|}: $case_dir/codex-home/models_cache.json; max is recorded but not passed to codex until the catalog is readable" ] \
+      || fail "codex max with a ${catalog%%|*} catalog should be accepted with one catalog fact, got: $out"
   done
-  pass "bootstrap accepts codex max only where the installed catalog advertises it"
+  rm -f "$case_dir/codex-home/models_cache.json"
+  printf '%s\n' '{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-6-sol","effort":"xhigh"}}]}' > "$case_dir/home/config/crew-dispatch.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    CODEX_HOME="$case_dir/codex-home" FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "an unreadable catalog without a codex max profile should be silent, got: $out"
+  pass "bootstrap rejects codex max only where a readable catalog omits it and reports an unreadable catalog as a fact"
 }
 
 test_crew_dispatch_validation() {

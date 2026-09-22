@@ -780,13 +780,26 @@ for model in gpt-6-sol gpt-5.6-terra; do
   assert_not_contains "$err" 'malformed rules file' "codex max for $model passes rules validation"
   assert_contains "$out" "  profile: --harness 'codex' --model '$model' --effort 'max'" "codex max for $model resolves to its profile"
 done
-printf '%s\n' '{"rules":[{"when":"x","use":{"harness":"codex","model":"gpt-6-sol","effort":"max"}}]}' > "$RULES"
+mkdir -p "$TMP_ROOT/malformed-codex-home"
+printf '%s\n' '{"models":[' > "$TMP_ROOT/malformed-codex-home/models_cache.json"
+for catalog in "no-codex-home|not readable" "malformed-codex-home|is malformed"; do
+  jq '.rules[3].use = {"harness":"codex","model":"gpt-6-sol","effort":"max"} | .default = [{"harness":"codex","model":"gpt-6-sol","effort":"max"}]' "$BASE_RULES" > "$RULES"
+  reset_log
+  write_response "$RESPONSE" rule_4 0.9
+  TYPESAFE_API_KEY=$KEY CODEX_HOME="$TMP_ROOT/${catalog%%|*}" run code out err "$BRIEF"
+  expect_code 0 "$code" "codex max with a ${catalog%%|*} catalog is accepted"
+  assert_not_contains "$err" 'malformed rules file' "codex max with a ${catalog%%|*} catalog is not a config defect"
+  assert_contains "$err" "dispatch-resolve: notice: Codex model catalog ${catalog#*|}: $TMP_ROOT/${catalog%%|*}/models_cache.json; codex max profiles are accepted, and max is recorded but not passed to codex until the catalog is readable" "codex max with a ${catalog%%|*} catalog names the catalog once"
+  [ "$(printf '%s\n' "$err" | grep -c 'dispatch-resolve: notice:')" = 1 ] || fail "codex max with a ${catalog%%|*} catalog should print one notice, got: $err"
+  assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-6-sol' --effort 'max'" "codex max with a ${catalog%%|*} catalog resolves to its profile"
+done
+cp "$BASE_RULES" "$RULES"
 reset_log
+write_response "$RESPONSE" rule_4 0.9
 TYPESAFE_API_KEY=$KEY CODEX_HOME="$TMP_ROOT/no-codex-home" run code out err "$BRIEF"
-expect_code 2 "$code" "codex max without a readable catalog exits 2"
-assert_contains "$err" "malformed rules file: $RULES - each use profile effort must be supported by its harness and model" "codex max without a readable catalog is refused"
-assert_absent "$LOG/argv" "catalog-refused codex max never reaches the network"
-pass "codex max follows the installed catalog: advertised models resolve, others and an unreadable catalog are refused"
+expect_code 0 "$code" "an unreadable catalog without a codex max profile exits 0"
+assert_not_contains "$err" 'dispatch-resolve: notice:' "an unreadable catalog without a codex max profile is silent"
+pass "codex max follows the installed catalog: advertised models resolve, unadvertised ones are refused, an unreadable catalog is accepted with one notice"
 cp "$BASE_RULES" "$RULES"
 for removed in --json --rules --quota; do
   TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" "$removed"
