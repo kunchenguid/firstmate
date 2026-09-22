@@ -66,6 +66,10 @@ fm_secondmate_restart_capable() {  # <meta-file>
     FM_SECONDMATE_RESTART_REASON="the durable record is not a second mate's"
     return 1
   fi
+  if [ "$(fm_meta_get "$meta" cleanup_recovery)" = orca ]; then
+    FM_SECONDMATE_RESTART_REASON="the durable record is an Orca cleanup recovery record; settle it with teardown before any restart"
+    return 1
+  fi
   window=$(fm_meta_get "$meta" window)
   if [ -z "$window" ]; then
     FM_SECONDMATE_RESTART_REASON="the durable record names no endpoint, so there is no agent to replace"

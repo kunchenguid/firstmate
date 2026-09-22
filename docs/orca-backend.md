@@ -27,8 +27,10 @@ Open the Orca app to watch a task's terminal.
 Routine supervision uses the recorded endpoint through `bin/fm-peek.sh <id>` and `FM_HOME=<home> bin/fm-send.sh <id> '<text>'`.
 Enter and Ctrl-C are supported; Escape is not.
 Ordinary ships and scouts may opt into native supervision with `--orca-mode supervised`.
-The native mode is capability-gated. The live evidence covers agent-first Claude and Codex; Cursor is unavailable in this environment and is skipped. Pi is intentionally not in the native set, so ordinary Pi ships and scouts stay on the tested terminal adapter (and a persistent Pi Secondmate refuses rather than claiming native support).
-Persistent Secondmates require native supervision and reuse their exact existing Firstmate home workspace; canonical harness launches are native-only, while raw/custom commands are refused rather than changing that home contract. Ordinary raw/custom launches use the tested terminal adapter without dropping their command arguments or environment.
+The native mode is capability-gated. The live evidence covers the Claude and Codex capability probe; Cursor is unavailable in this environment and is skipped. Pi is intentionally not in the native set, so ordinary Pi ships and scouts stay on the tested terminal adapter (and a persistent Pi Secondmate refuses rather than claiming native support).
+Orca binds a native Run to the coordinator's own Orca terminal, so native mode also requires running Firstmate inside a live Orca terminal (`ORCA_TERMINAL_HANDLE` set and accepted by `orca orchestration run-current`). Outside one, or with a stale inherited handle, ordinary ships and scouts fall back to the terminal adapter before launch, and a persistent Secondmate refuses.
+Native mode never asks Orca to launch its own agent. Firstmate runs its complete launch in the task's Orca terminal first, exactly as terminal mode does, and only then attaches supervision to that terminal. Canonical and raw/custom launches keep every argument and environment assignment.
+Persistent Secondmates require native supervision and reuse their exact existing Firstmate home workspace.
 Firstmate remains authoritative for the Secondmate home, backlog, idle-by-default behavior, child routing, restart, and explicit retirement.
 
 ## Task shape and metadata
@@ -56,7 +58,7 @@ Orca returns `orca_worktree_id=` as that composite of the Orca repo id and the w
 ## Current lifecycle and safety
 
 Spawn registers the repository, creates an independent worktree, reuses only the verified `result.terminal.handle` returned by Orca or creates a terminal explicitly, installs harness hooks, records metadata, and launches the selected harness.
-With `--orca-mode supervised`, it creates a Run, starts the worker through Orca's native supervised-worker command, verifies the returned Run/Task/Dispatch/worker/worktree identities, and requires a complete exact transcript observation from `worker-read` before considering launch consumption proven.
+With `--orca-mode supervised`, the full launch runs in the terminal first. Spawn then creates a Run, attaches the running agent with `orchestration worker-start --terminal <handle> --worktree id:<worktree-id>`, verifies that the returned Run/Task/Dispatch/worker/worktree identities and terminal handle match, and requires a complete exact transcript observation from `worker-read` before it treats launch consumption as proven.
 Exact command flags and response parsing are owned by `bin/backends/orca.sh`, `bin/backends/orca-supervised.sh`, and script help.
 
 `fm-peek.sh` reads native workers with transcript-first `worker-read` source/cursor/clipping semantics and marks terminal fallback or clipped output as incomplete evidence.
@@ -77,7 +79,7 @@ A scout still requires its report and completed decision inventory.
 A ship still refuses dirty or unlanded work.
 Before release, cleanup resolves the recorded Orca worktree id and verifies its path matches the recorded worktree path.
 A missing, unreadable, or mismatched identity preserves metadata and stops rather than deleting anything.
-After those checks, terminal mode closes the exact terminal, while native mode settles and releases the exact Dispatch.
+After those checks, terminal mode closes the exact terminal. Native mode settles and releases the exact Dispatch, then closes the terminal Firstmate launched, because Orca keeps attached terminals open on release.
 Ordinary tasks then release the exact worktree with Orca's worktree command.
 Secondmate retirement releases its native Dispatch and removes the Firstmate-owned home; it never removes a persistent home as a side effect of a worker-stop.
 It never raw-deletes an Orca worktree.
@@ -89,7 +91,9 @@ Reinstall the CLI and rerun; [`verification/runtime-backends.md`](verification/r
 - Orca is macOS-only and explicit-only.
 - The app must be running and report ready.
 - Native Secondmate launch requires an exact existing workspace row from `orca worktree ps`; missing or ambiguous workspace identity refuses launch.
-- Native Secondmate restart reuses the durable Run/Task relationship with `--retry-of` and rebinds terminal evidence.
+- Native relaunch, including Secondmate restart, runs the full launch in a fresh terminal in the recorded workspace, attaches it with `--task` and `--retry-of`, and closes the settled prior terminal only after the replacement is attached. A recorded native task never falls back to terminal mode: if the capability probe fails, relaunch refuses and keeps the record.
+- If a fresh attach fails after the launch, spawn closes the launched terminal so no agent runs outside task control, then releases the worktree along with the unpublished record. A failed relaunch attach keeps the recorded worktree.
+- If a fresh native spawn cannot settle a Dispatch it was given, including one from a partial receipt with no worker or pane identity, spawn writes a `cleanup_recovery=orca` record. It does this for Secondmates too. That record only needs a Dispatch id. When the Run, Task, worker, incarnation, or pane identity is missing, teardown proves the Dispatch belongs to the recorded workspace, abandons it, releases it only when full ownership is proven, and closes its terminal. A record with complete identity goes through the ordinary stop, poll, and release settlement instead. For a ship, teardown then removes the worktree. For a Secondmate it removes only the record, the task temp root, and the launch namespace, and keeps the persistent home. Spawn and relaunch refuse to write over a recovery record. The session-start liveness sweep and the Secondmate restart gate skip it. Ordinary supervised records still need every native identity.
 - Escape is unsupported.
 - Native supervision requires agent-context schema 1 and the required command shapes, while terminal supervision continues to use runtime readiness as its compatibility gate.
 - Pi native supervision is unverified and deliberately excluded; ordinary Pi tasks use terminal fallback and persistent Pi Secondmates refuse launch.

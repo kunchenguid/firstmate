@@ -434,7 +434,6 @@ CONTROL_LOCK_HELD=1
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never tear
 # down a worktree (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
-FM_LOCK_LOG_PREFIX=teardown
 
 fm_backlog_record_present "$META" "task record" "$STATE" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -1284,14 +1283,48 @@ require_orca_terminal() {
   printf '%s\n' "$terminal"
 }
 
+settle_native_orca_recovery() {  # <meta-file> <subject>
+  local meta=$1 subject=$2 dispatch terminal
+  dispatch=$(meta_value "$meta" orca_dispatch_id)
+  if ! fm_backend_orca_supervised_worker_show "$dispatch" >/dev/null ||
+    [ "$FM_ORCA_SUPERVISED_WORKTREE_ID" != "$(meta_value "$meta" orca_worktree_id)" ] ||
+    [ "$FM_ORCA_SUPERVISED_WORKTREE_PATH" != "$(meta_value "$meta" worktree)" ]; then
+    echo "REFUSED: native Orca recovery Dispatch for $subject is not proven to belong to its recorded workspace; preserving its durable records." >&2
+    return 1
+  fi
+  if [ "$FM_ORCA_SUPERVISED_SETTLED" != true ]; then
+    fm_backend_orca_supervised_abandon "$dispatch" >/dev/null || {
+      echo "REFUSED: native Orca worker-abandon for $subject was not accepted; preserving its durable records." >&2
+      return 1
+    }
+  fi
+  if fm_backend_orca_supervised_owned "$meta" >/dev/null 2>&1; then
+    fm_backend_orca_supervised_release "$meta" >/dev/null || {
+      echo "REFUSED: native Orca Dispatch for $subject is not settled for release; preserving its durable records." >&2
+      return 1
+    }
+  fi
+  terminal=$(meta_value "$meta" terminal)
+  [ -z "$terminal" ] || fm_backend_orca_kill "$terminal" || true
+}
+
 settle_native_orca_meta() {  # <meta-file> <subject>
-  local meta=$1 subject=$2 dispatch state i=0 max=${FM_ORCA_EXIT_POLLS:-60}
+  local meta=$1 subject=$2 dispatch state terminal i=0 max=${FM_ORCA_EXIT_POLLS:-60}
   [ "$(meta_value "$meta" backend)" = orca ] || return 0
   [ "$(meta_value "$meta" orca_mode)" = supervised ] || return 0
   fm_backend_source orca || {
     echo "REFUSED: native Orca adapter is unavailable for $subject; preserving its durable records." >&2
     return 1
   }
+  if [ "$(meta_value "$meta" cleanup_recovery)" = orca ] &&
+    { [ -z "$(meta_value "$meta" orca_run_id)" ] ||
+      [ -z "$(meta_value "$meta" orca_task_id)" ] ||
+      [ -z "$(meta_value "$meta" orca_worker_id)" ] ||
+      [ -z "$(meta_value "$meta" orca_terminal_incarnation)" ] ||
+      [ -z "$(meta_value "$meta" orca_pane_key)" ]; }; then
+    settle_native_orca_recovery "$meta" "$subject"
+    return
+  fi
   fm_backend_orca_supervised_owned "$meta" || {
     echo "REFUSED: native Orca Dispatch for $subject is not proven owned; preserving its durable records." >&2
     return 1
@@ -1335,12 +1368,45 @@ settle_native_orca_meta() {  # <meta-file> <subject>
     echo "REFUSED: native Orca Dispatch for $subject is not settled for release; preserving its durable records." >&2
     return 1
   }
+  terminal=$(meta_value "$meta" terminal)
+  [ -z "$terminal" ] || fm_backend_orca_kill "$terminal" || true
 }
 
 settle_native_orca_secondmate() {
   [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ] || return 0
   settle_native_orca_meta "$META" "secondmate $ID"
 }
+
+teardown_launch_home_token() {
+  local home=$1 root hash
+  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
+  else
+    return 1
+  fi
+  case "$hash" in
+    *[!0-9a-fA-F]*|'') return 1 ;;
+  esac
+  printf '%s' "$hash"
+}
+
+if [ "$CLEANUP_RECOVERY" = orca ] && [ "$KIND" = secondmate ]; then
+  settle_native_orca_meta "$META" "secondmate $ID" || exit 1
+  [ -z "$TASK_TMP" ] || rm -rf "$TASK_TMP"
+  LAUNCH_HOME_TOKEN=$(teardown_launch_home_token "$FM_HOME") || LAUNCH_HOME_TOKEN=
+  [ -z "$LAUNCH_HOME_TOKEN" ] || rm -rf "/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"
+  if ! fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE"; then
+    echo "error: $ID's native Orca recovery Dispatch is settled, but its task record could not be removed ($FM_BACKLOG_TRANSITION_ERROR)" >&2
+    exit 1
+  fi
+  fm_lock_release "$META_LOCK"
+  META_LOCK_HELD=0
+  echo "teardown $ID complete (Orca recovery record settled; secondmate home $WT retained)"
+  exit 0
+fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   ORCA_WORKTREE_ID=$(require_orca_worktree_id "$META") || exit 1
@@ -3697,21 +3763,6 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 # Retire only this Firstmate home's launch namespace. Its never-reused per-spawn
 # files leave the equal task-id namespace of every other home untouched.
-teardown_launch_home_token() {
-  local home=$1 root hash
-  root=$(cd "$home" 2>/dev/null && pwd -P) || root=$home
-  if command -v shasum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | shasum -a 256 | awk '{print $1}')
-  elif command -v sha256sum >/dev/null 2>&1; then
-    hash=$(printf '%s' "$root" | sha256sum | awk '{print $1}')
-  else
-    return 1
-  fi
-  case "$hash" in
-    *[!0-9a-fA-F]*|'') return 1 ;;
-  esac
-  printf '%s' "$hash"
-}
 LAUNCH_HOME_TOKEN=$(teardown_launch_home_token "$FM_HOME") || LAUNCH_HOME_TOKEN=
 if [ -n "$LAUNCH_HOME_TOKEN" ]; then
   rm -rf "/tmp/fm-$ID+$LAUNCH_HOME_TOKEN"

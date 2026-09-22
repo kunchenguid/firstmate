@@ -736,6 +736,10 @@ secondmate_liveness_one() {  # <meta> <id>
   local window harness backend target kill_target agent_state out cause remote_host remote_rc readiness_reason route_out remote_backend
   window=$(fm_meta_get "$meta" window)
   [ -n "$window" ] || return 0
+  if [ "$(fm_meta_get "$meta" cleanup_recovery)" = orca ]; then
+    echo "SECONDMATE_LIVENESS: secondmate $id: skipped: Orca cleanup recovery record; settle it with bin/fm-teardown.sh $id"
+    return 0
+  fi
   harness=$(fm_meta_get "$meta" harness)
   remote_host=$(fm_meta_get "$meta" remote_host)
   if [ -n "$remote_host" ]; then

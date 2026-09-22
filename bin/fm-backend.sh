@@ -543,7 +543,12 @@ fm_backend_validate_task_endpoint() {  # <meta-file> <task-id>
           orca_pane=$(fm_backend_meta_exact_value "$meta" orca_pane_key) || orca_pane=
           for native_id in "$orca_run_id" "$orca_task_id" "$orca_dispatch_id" "$orca_worker_id" "$orca_incar" "$orca_pane"; do
             case "$native_id" in
-              ''|*$'\n'*|*$'\r'*|*$'\t'*)
+              '')
+                [ "$(fm_meta_get "$meta" cleanup_recovery)" = orca ] && [ -n "$orca_dispatch_id" ] && continue
+                echo "REFUSED: native Orca identity metadata for task $id is missing or malformed; preserving task state." >&2
+                return 1
+                ;;
+              *$'\n'*|*$'\r'*|*$'\t'*)
                 echo "REFUSED: native Orca identity metadata for task $id is missing or malformed; preserving task state." >&2
                 return 1
                 ;;

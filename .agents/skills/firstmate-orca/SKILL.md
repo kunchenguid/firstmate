@@ -57,7 +57,7 @@ Keep initial scope in the task brief; a temporary file remains useful when the i
 
 When supervising, treat `state/<id>.meta` as the routing record and Orca's own ids as backend implementation details.
 The stable firstmate alias is `fm-<id>`.
-The recorded `terminal=` and `orca_worktree_id=` fields are what backend helpers use under the hood.
+Backend helpers route through the recorded Orca fields; `docs/orca-backend.md` "Task shape and metadata" owns which fields are authoritative for terminal and native supervised tasks.
 
 If an ordinary steer fails to enqueue, or a typed-plane `fm-send` fails to submit, do not immediately repeat the instruction.
 Read the reported failure and peek first, then decide whether the record exists or the target is busy, waiting on a prompt, stuck behind a popup, or genuinely wedged.
@@ -69,7 +69,7 @@ For a messy Orca-backed task:
 
 1. Read `state/<id>.meta` and the relevant status tail first.
 2. Confirm the task is actually Orca-backed before using Orca-specific assumptions.
-3. Use the recorded `terminal=`, `orca_worktree_id=`, and `worktree=` as the task identity.
+3. Use the recorded metadata as the task identity; for a native supervised task the Run, Task, Dispatch, and worker ids outrank the rebindable `terminal=`.
 4. Prefer firstmate helpers for peek, send, state, and teardown.
 5. Avoid raw deletion of Orca worktrees or manual branch cleanup.
 6. Stop and inspect if the recorded worktree path, Orca worktree id, or project checkout no longer matches expectations.

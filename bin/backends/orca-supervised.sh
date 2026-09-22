@@ -29,6 +29,14 @@ fm_backend_orca_supervised_capability_check() {  # <harness>
     *" $harness "*) ;;
     *) FM_ORCA_SUPERVISED_REASON="agent-$harness-not-supported"; return 1 ;;
   esac
+  # Orca binds a Run to the sender terminal it runs in; outside one, or with
+  # a stale inherited handle, run-create refuses with no_active_sender_terminal
+  # after launch. The read-only run-current proves the handle is live first.
+  if [ -z "${ORCA_TERMINAL_HANDLE:-}" ] ||
+    [ "$(orca orchestration run-current --json 2>/dev/null | fm_backend_orca_supervised_control_value error-code 2>/dev/null)" = no_active_sender_terminal ]; then
+    FM_ORCA_SUPERVISED_REASON='no-orca-sender-terminal'
+    return 1
+  fi
   context=$(orca agent-context --json 2>/dev/null) || {
     FM_ORCA_SUPERVISED_REASON='agent-context-unavailable'
     return 1
@@ -50,7 +58,7 @@ const r = d.result || d;
 const commands = Array.isArray(r.commands) ? r.commands : [];
 const wanted = {
   "orchestration run-create": ["objective"],
-  "orchestration worker-start": ["task", "spec", "worktree", "agent", "terminal", "run"],
+  "orchestration worker-start": ["task", "spec", "worktree", "terminal", "run"],
   "orchestration worker-show": ["dispatch"],
   "orchestration worker-read": ["dispatch", "source", "cursor", "limit"],
   "orchestration worker-abandon": ["dispatch"],
@@ -164,17 +172,16 @@ fm_backend_orca_supervised_run_create() {  # <objective>
   printf '%s' "$run_id"
 }
 
-fm_backend_orca_supervised_worker_start() {  # <run-id> <spec> <worktree-id> <agent> [model] [effort] [task-id] [retry-of]
-  local run_id=$1 spec=$2 worktree_id=$3 agent=$4 model=${5:-} effort=${6:-} task_id=${7:-} retry_of=${8:-} out
-  local -a args=(orca orchestration worker-start --worktree "id:$worktree_id" --agent "$agent" --run "$run_id" --setup skip --json)
+fm_backend_orca_supervised_worker_start() {  # <run-id> <spec> <worktree-id> <terminal> [task-id] [retry-of]
+  local run_id=$1 spec=$2 worktree_id=$3 terminal=$4 task_id=${5:-} retry_of=${6:-} out
+  [ -n "$terminal" ] || { echo 'error: native Orca attach requires the launched terminal handle' >&2; return 1; }
+  local -a args=(orca orchestration worker-start --worktree "id:$worktree_id" --terminal "$terminal" --run "$run_id" --json)
   if [ -n "$task_id" ]; then
     args+=(--task "$task_id")
   else
     args+=(--spec "$spec")
   fi
   [ -z "$retry_of" ] || args+=(--retry-of "$retry_of")
-  [ -z "$model" ] || args+=(--model "$model")
-  [ -z "$effort" ] || { [ -n "$model" ] || { echo 'error: native Orca effort requires a model' >&2; return 1; }; args+=(--effort "$effort"); }
   out=$("${args[@]}") || return 1
   fm_backend_orca_json_ok <<<"$out" || return 1
   fm_backend_orca_supervised_set_from_json "$out" start
@@ -182,7 +189,8 @@ fm_backend_orca_supervised_worker_start() {  # <run-id> <spec> <worktree-id> <ag
   [ -n "${FM_ORCA_SUPERVISED_DISPATCH_ID:-}" ] || return 1
   [ -n "${FM_ORCA_SUPERVISED_RUN_ID:-}" ] || FM_ORCA_SUPERVISED_RUN_ID=$run_id
   [ -n "${FM_ORCA_SUPERVISED_RUN_ID:-}" ] || return 1
-  [ -n "${FM_ORCA_SUPERVISED_TERMINAL:-}" ] || return 1
+  [ -n "${FM_ORCA_SUPERVISED_TERMINAL:-}" ] || FM_ORCA_SUPERVISED_TERMINAL=$terminal
+  [ "$FM_ORCA_SUPERVISED_TERMINAL" = "$terminal" ] || return 1
   [ -n "${FM_ORCA_SUPERVISED_TERMINAL_INCAR:-}" ] || return 1
   [ -n "${FM_ORCA_SUPERVISED_PANE_KEY:-}" ] || return 1
   [ -n "${FM_ORCA_SUPERVISED_WORKTREE_ID:-}" ] || FM_ORCA_SUPERVISED_WORKTREE_ID=$worktree_id

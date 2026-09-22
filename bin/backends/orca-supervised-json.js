@@ -6,7 +6,7 @@ const input = fs.readFileSync(0, "utf8");
 let data;
 try {
   data = JSON.parse(input);
-} catch (_) {
+} catch {
   process.exit(1);
 }
 const root = data.result || data;
@@ -27,11 +27,12 @@ const bool = (value) => typeof value === "boolean" ? String(value) : "";
 const nested = (object, ...keys) => keys.reduce((value, key) => value && value[key], object);
 let value = "";
 switch (field) {
+  case "error-code": value = string(nested(data, "error", "code")); break;
   case "schema-version": value = string(first(root.schemaVersion, data.schemaVersion)); break;
   case "run-id": value = string(first(root.runId, root.run_id, dispatch.runId, dispatch.run_id, worker.runId, worker.run_id, nested(root, "run", "id"), nested(dispatch, "run", "id"))); break;
   case "task-id": value = string(first(root.taskId, root.task_id, dispatch.taskId, dispatch.task_id, worker.taskId, worker.task_id, nested(root, "task", "id"), nested(dispatch, "task", "id"))); break;
   case "dispatch-id": value = string(first(root.dispatchId, root.dispatch_id, dispatch.dispatchId, dispatch.id, worker.dispatchId, worker.dispatch_id)); break;
-  case "worker-id": value = string(first(root.workerId, root.worker_id, worker.workerId, worker.id, resource.workerId, resource.worker_id)); break;
+  case "worker-id": value = string(first(root.workerId, root.worker_id, worker.workerId, worker.id, resource.workerId, resource.worker_id, worker.dispatchId)); break;
   case "terminal-handle": value = string(first(root.agentTerminalHandle, root.terminalHandle, terminal.handle, worker.agentTerminalHandle, resource.terminalHandle, resource.handle, resourceTerminal.handle)); break;
   case "terminal-incarnation": value = string(first(root.agentTerminalIncarnation, root.terminalIncarnation, terminal.incarnationId, terminal.incarnation_id, terminal.processIncarnation, root.incarnationId, root.incarnation_id, resource.incarnationId, resource.incarnation_id, resource.endpointIncarnation, resource.endpoint_incarnation, resourceTerminal.incarnationId, resourceTerminal.incarnation_id, resourceTerminal.endpointIncarnation, dispatch.processIncarnation)); break;
   case "pane-key": value = string(first(root.agentTerminalPaneKey, root.terminalPaneKey, terminal.paneKey, terminal.pane_key, terminal.assigneePaneKey, root.paneKey, root.pane_key, dispatch.assigneePaneKey, resource.paneKey, resource.pane_key, resource.endpointPaneKey, resource.endpoint_pane_key, resourceTerminal.paneKey, resourceTerminal.pane_key)); break;
@@ -40,9 +41,10 @@ switch (field) {
   case "exact-worker": value = bool(first(observation.exactWorker, observation.exact_worker, root.exactWorker, root.exact_worker, projection.exactWorker, projection.exact_worker)); break;
   case "source": value = string(first(root.source, root.provider)); break;
   case "source-identity": value = string(first(root.sourceIdentity, root.source_identity)); break;
-  case "next-cursor": value = string(first(root.nextCursor, root.next_cursor, nested(root, "page", "nextCursor"))); break;
+  case "next-cursor": value = string(first(root.nextCursor, root.next_cursor, nested(root, "page", "nextCursor"), root.cursor)); break;
   case "content-complete": value = bool(first(root.contentComplete, root.content_complete, root.complete)); break;
-  case "clipping": value = typeof root.clipping === "boolean" ? String(root.clipping) : string(first(root.clipping && root.clipping.clipped, root.clipped, root.truncated)); break;
+  case "clipping": value = typeof root.clipping === "boolean" ? String(root.clipping) :
+    Array.isArray(root.clipping) ? String(root.clipping.length > 0) : string(first(root.clipping && root.clipping.clipped, root.clipped, root.truncated)); break;
   case "source-exact": value = bool(first(root.sourceExact, root.source_exact)); break;
   case "source-changed": {
     value = bool(first(root.sourceChanged, root.source_changed));
@@ -58,6 +60,7 @@ switch (field) {
   case "liveness": value = string(first(
     projection.liveness && projection.liveness.state,
     projection.liveness && projection.liveness.status,
+    projection.liveness && projection.liveness.verdict,
     typeof projection.liveness === "string" ? projection.liveness : undefined,
     root.liveness && root.liveness.state,
     root.liveness && root.liveness.status,
@@ -68,7 +71,7 @@ switch (field) {
   case "owned": {
     value = bool(first(resource.ownedByCoordinator, resource.owned_by_coordinator, resource.coordinatorOwned, resource.coordinator_owned));
     if (!value) {
-      const owner = string(first(resource.ownership, resource.owner, terminalResource.ownership));
+      const owner = string(first(resource.ownership, resource.owner, resource.ownershipState, terminalResource.ownership, terminalResource.ownershipState));
       value = /^(coordinator|owned|firstmate)$/i.test(owner) ? "true" : owner ? "false" : "";
     }
     break;

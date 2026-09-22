@@ -1106,9 +1106,19 @@ ORCA_ABORT_CLEANUP=0
 ORCA_ABORT_PRESERVE=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+ORCA_RUN_ID=
+ORCA_TASK_ID=
+ORCA_DISPATCH_ID=
+ORCA_WORKER_ID=
+ORCA_TERMINAL_INCAR=
+ORCA_PANE_KEY=
+ORCA_PRIOR_TERMINAL=
 ORCA_PRIOR_RUN_ID=
 ORCA_PRIOR_TASK_ID=
 ORCA_PRIOR_DISPATCH_ID=
+ORCA_PRIOR_WORKER_ID=
+ORCA_PRIOR_TERMINAL_INCAR=
+ORCA_PRIOR_PANE_KEY=
 HERDR_PROJECTION_ABORT_CLEANUP=0
 HERDR_PROJECTION_ABORT_SESSION=
 HERDR_PROJECTION_ABORT_TASK_PANE=
@@ -1201,6 +1211,45 @@ orca_supervised_abort_reconcile() {
     "$ORCA_WORKTREE_ID" "$WT" >/dev/null
 }
 
+orca_abort_recovery_record() {
+  local rc=0
+  if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
+    spawn_fresh_commit_rollback || rc=1
+    SPAWN_FRESH_COMMIT_PENDING=0
+  fi
+  mkdir -p "$STATE" 2>/dev/null || true
+  if [ -d "$STATE" ]; then
+    SPAWN_META_TMP="$STATE/.$ID.meta.orca-recovery.${BASHPID:-$$}"
+    {
+      echo "window=$W"
+      echo "endpoint_task_id=$ID"
+      echo "cleanup_recovery=orca"
+      echo "worktree=${WT:-}"
+      echo "project=$PROJ_ABS"
+      echo "harness=$HARNESS"
+      echo "kind=$KIND"
+      [ -z "${MODE:-}" ] || echo "mode=$MODE"
+      [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
+      echo "tasktmp=${TASK_TMP:-}"
+      echo "model=${MODEL:-default}"
+      echo "effort=${EFFORT:-default}"
+      echo "backend=orca"
+      echo "orca_mode=${ORCA_MODE:-terminal}"
+      echo "orca_worktree_id=$ORCA_WORKTREE_ID"
+      [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
+      [ -z "${ORCA_RUN_ID:-}" ] || echo "orca_run_id=$ORCA_RUN_ID"
+      [ -z "${ORCA_TASK_ID:-}" ] || echo "orca_task_id=$ORCA_TASK_ID"
+      [ -z "${ORCA_DISPATCH_ID:-}" ] || echo "orca_dispatch_id=$ORCA_DISPATCH_ID"
+      [ -z "${ORCA_WORKER_ID:-}" ] || echo "orca_worker_id=$ORCA_WORKER_ID"
+      [ -z "${ORCA_TERMINAL_INCAR:-}" ] || echo "orca_terminal_incarnation=$ORCA_TERMINAL_INCAR"
+      [ -z "${ORCA_PANE_KEY:-}" ] || echo "orca_pane_key=$ORCA_PANE_KEY"
+    } >"$SPAWN_META_TMP" 2>/dev/null &&
+      fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE" ||
+      true
+  fi
+  return "$rc"
+}
+
 spawn_abort_cleanup() {
   local status=$?
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
@@ -1251,52 +1300,19 @@ spawn_abort_cleanup() {
       if ! orca_supervised_abort_reconcile; then
         ORCA_ABORT_PRESERVE=1
         status=1
-        if [ -f "$STATE/$ID.meta" ] && declare -F orca_supervised_meta_publish >/dev/null 2>&1; then
+        if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
+          orca_abort_recovery_record || true
+        elif [ -f "$STATE/$ID.meta" ] && declare -F orca_supervised_meta_publish >/dev/null 2>&1; then
           orca_supervised_meta_publish || true
         fi
       fi
     fi
-    if [ "$ORCA_ABORT_PRESERVE" = 0 ] && [ -n "${ORCA_TERMINAL:-}" ]; then
+    if [ -n "${ORCA_TERMINAL:-}" ]; then
       fm_backend_kill orca "$ORCA_TERMINAL" 2>/dev/null || true
     fi
     if [ "$ORCA_ABORT_PRESERVE" = 0 ] && [ -n "${ORCA_WORKTREE_ID:-}" ] && [ "${KIND:-}" != secondmate ]; then
       if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
-        if [ "$SPAWN_FRESH_COMMIT_PENDING" = 1 ]; then
-          if ! spawn_fresh_commit_rollback; then
-            status=1
-          fi
-          SPAWN_FRESH_COMMIT_PENDING=0
-        fi
-        mkdir -p "$STATE" 2>/dev/null || true
-        if [ -d "$STATE" ]; then
-          SPAWN_META_TMP="$STATE/.$ID.meta.orca-recovery.${BASHPID:-$$}"
-          {
-            echo "window=$W"
-            echo "endpoint_task_id=$ID"
-            echo "cleanup_recovery=orca"
-            echo "worktree=${WT:-}"
-            echo "project=$PROJ_ABS"
-            echo "harness=$HARNESS"
-            echo "kind=$KIND"
-            [ -z "${MODE:-}" ] || echo "mode=$MODE"
-            [ -z "${YOLO:-}" ] || echo "yolo=$YOLO"
-            echo "tasktmp=${TASK_TMP:-}"
-            echo "model=${MODEL:-default}"
-            echo "effort=${EFFORT:-default}"
-            echo "backend=orca"
-            echo "orca_mode=${ORCA_MODE:-terminal}"
-            echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-            [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-            [ -z "${ORCA_RUN_ID:-}" ] || echo "orca_run_id=$ORCA_RUN_ID"
-            [ -z "${ORCA_TASK_ID:-}" ] || echo "orca_task_id=$ORCA_TASK_ID"
-            [ -z "${ORCA_DISPATCH_ID:-}" ] || echo "orca_dispatch_id=$ORCA_DISPATCH_ID"
-            [ -z "${ORCA_WORKER_ID:-}" ] || echo "orca_worker_id=$ORCA_WORKER_ID"
-            [ -z "${ORCA_TERMINAL_INCAR:-}" ] || echo "orca_terminal_incarnation=$ORCA_TERMINAL_INCAR"
-            [ -z "${ORCA_PANE_KEY:-}" ] || echo "orca_pane_key=$ORCA_PANE_KEY"
-          } >"$SPAWN_META_TMP" 2>/dev/null &&
-            fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$STATE/$ID.meta" "task record" "$STATE" ||
-            true
-        fi
+        orca_abort_recovery_record || status=1
       fi
     fi
   fi
@@ -1637,6 +1653,10 @@ if ! fm_lock_try_acquire "$SPAWN_TASK_LOCK"; then
   exit 1
 fi
 SPAWN_TASK_LOCK_HELD=1
+if [ "$(fm_meta_get "$STATE/$ID.meta" cleanup_recovery)" = orca ]; then
+  echo "error: task $ID has an Orca cleanup recovery record; run bin/fm-teardown.sh $ID to settle its native Dispatch before spawning it again" >&2
+  exit 1
+fi
 PROJ=
 ARG3=
 FIRSTMATE_HOME=
@@ -1689,6 +1709,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
     ORCA_PRIOR_RUN_ID=$(fm_meta_get "$RELAUNCH_META" orca_run_id)
     ORCA_PRIOR_TASK_ID=$(fm_meta_get "$RELAUNCH_META" orca_task_id)
     ORCA_PRIOR_DISPATCH_ID=$(fm_meta_get "$RELAUNCH_META" orca_dispatch_id)
+    ORCA_PRIOR_WORKER_ID=$(fm_meta_get "$RELAUNCH_META" orca_worker_id)
+    ORCA_PRIOR_TERMINAL_INCAR=$(fm_meta_get "$RELAUNCH_META" orca_terminal_incarnation)
+    ORCA_PRIOR_PANE_KEY=$(fm_meta_get "$RELAUNCH_META" orca_pane_key)
   fi
   fm_backend_validate_spawn "$BACKEND" || exit 1
   fm_backend_source "$BACKEND" || exit 1
@@ -2240,11 +2263,10 @@ fi
 if [ "$BACKEND" = orca ] && [ "$ORCA_MODE" = supervised ]; then
   if [ "$RAW_LAUNCH" = 1 ]; then
     # Native worker-start accepts a canonical harness identity, not an
-    # arbitrary shell command. Passing only the parsed basename would silently
-    # drop flags, wrappers, and environment assignments, so preserve ordinary
-    # task launches through the tested terminal adapter instead. A persistent
-    # Secondmate cannot take that fallback without losing its exact-home
-    # contract, so reject it before creating any Orca resource.
+    # arbitrary shell command. Preserve raw/custom task launches through the
+    # tested terminal adapter so flags, wrappers, and environment assignments
+    # are not dropped. A persistent Secondmate cannot use that fallback
+    # without losing its exact-home contract.
     if [ "$KIND" = secondmate ]; then
       echo "error: raw/custom launch commands cannot start a persistent Orca Secondmate; use a canonical harness for native supervision" >&2
       exit 1
@@ -2254,6 +2276,10 @@ if [ "$BACKEND" = orca ] && [ "$ORCA_MODE" = supervised ]; then
   elif ! fm_backend_orca_supervised_capability_check "$HARNESS"; then
     if [ "$KIND" = secondmate ]; then
       echo "error: native Orca supervision is required for persistent secondmate $ID ($FM_ORCA_SUPERVISED_REASON); preserving the home" >&2
+      exit 1
+    fi
+    if [ "$RELAUNCH" -eq 1 ]; then
+      echo "error: native Orca relaunch for $ID refused: supervision unavailable ($FM_ORCA_SUPERVISED_REASON); preserving the task record" >&2
       exit 1
     fi
     echo "notice: native Orca supervision unavailable ($FM_ORCA_SUPERVISED_REASON); using the tested terminal adapter" >&2
@@ -3285,6 +3311,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     # terminal, no second worktree, and every uncommitted change left exactly
     # where the previous agent left it.
     T=$RELAUNCH_TARGET
+    if [ "$BACKEND" = orca ] && [ "$ORCA_MODE" = supervised ]; then
+      ORCA_PRIOR_TERMINAL=$ORCA_TERMINAL
+      ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
+      T=$ORCA_TERMINAL
+    fi
     WT_TARGET=$T
     SES=${T%%:*}
   else
@@ -3599,9 +3630,9 @@ EOF
         exit 1
       fi
       validate_spawn_worktree "orca worktree create" "$W"
-      if [ -z "$ORCA_TERMINAL" ]; then
-        ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
-      fi
+    fi
+    if [ -z "$ORCA_TERMINAL" ]; then
+      ORCA_TERMINAL=$(fm_backend_orca_terminal_create "$ORCA_WORKTREE_ID" "$W") || exit 1
     fi
     T="$ORCA_TERMINAL"
     ;;
@@ -4637,13 +4668,19 @@ preserve_relaunch_meta() {
   if [ "$BACKEND" = orca ]; then
     echo "orca_mode=$ORCA_MODE"
     echo "orca_worktree_id=$ORCA_WORKTREE_ID"
-    echo "terminal=$ORCA_TERMINAL"
-    [ -z "${ORCA_RUN_ID:-}" ] || echo "orca_run_id=$ORCA_RUN_ID"
-    [ -z "${ORCA_TASK_ID:-}" ] || echo "orca_task_id=$ORCA_TASK_ID"
-    [ -z "${ORCA_DISPATCH_ID:-}" ] || echo "orca_dispatch_id=$ORCA_DISPATCH_ID"
-    [ -z "${ORCA_WORKER_ID:-}" ] || echo "orca_worker_id=$ORCA_WORKER_ID"
-    [ -z "${ORCA_TERMINAL_INCAR:-}" ] || echo "orca_terminal_incarnation=$ORCA_TERMINAL_INCAR"
-    [ -z "${ORCA_PANE_KEY:-}" ] || echo "orca_pane_key=$ORCA_PANE_KEY"
+    echo "terminal=${ORCA_PRIOR_TERMINAL:-$ORCA_TERMINAL}"
+    record_run=${ORCA_RUN_ID:-$ORCA_PRIOR_RUN_ID}
+    record_task=${ORCA_TASK_ID:-$ORCA_PRIOR_TASK_ID}
+    record_dispatch=${ORCA_DISPATCH_ID:-$ORCA_PRIOR_DISPATCH_ID}
+    record_worker=${ORCA_WORKER_ID:-$ORCA_PRIOR_WORKER_ID}
+    record_incar=${ORCA_TERMINAL_INCAR:-$ORCA_PRIOR_TERMINAL_INCAR}
+    record_pane=${ORCA_PANE_KEY:-$ORCA_PRIOR_PANE_KEY}
+    [ -z "$record_run" ] || echo "orca_run_id=$record_run"
+    [ -z "$record_task" ] || echo "orca_task_id=$record_task"
+    [ -z "$record_dispatch" ] || echo "orca_dispatch_id=$record_dispatch"
+    [ -z "$record_worker" ] || echo "orca_worker_id=$record_worker"
+    [ -z "$record_incar" ] || echo "orca_terminal_incarnation=$record_incar"
+    [ -z "$record_pane" ] || echo "orca_pane_key=$record_pane"
   fi
   if [ "$BACKEND" = cmux ]; then
     echo "cmux_workspace_id=$CMUX_WORKSPACE_ID"
@@ -4773,93 +4810,8 @@ orca_supervised_meta_publish() {
   fm_lock_release "$lock" || return 1
 }
 
-if [ "$BACKEND" = orca ] && [ "$ORCA_MODE" = supervised ]; then
-  ORCA_SETUP_TERMINAL=$ORCA_TERMINAL
-  native_spec=$(cat "$BRIEF_REAL") || exit 1
-  # Arm the abort path before worker-start validates its receipt. Orca can
-  # create a worker and then return an incomplete identity, and that partial
-  # receipt is the only chance to stop/abandon the exact Dispatch.
-  ORCA_ABORT_CLEANUP=1
-  [ "$RELAUNCH" -eq 1 ] && ORCA_ABORT_PRESERVE=1
-  native_start_status=0
-  if [ "$RELAUNCH" -eq 1 ]; then
-    [ -n "$ORCA_PRIOR_RUN_ID" ] && [ -n "$ORCA_PRIOR_TASK_ID" ] && [ -n "$ORCA_PRIOR_DISPATCH_ID" ] || {
-      echo "error: native Orca relaunch for $ID lacks its durable Run, Task, or Dispatch identity" >&2
-      exit 1
-    }
-    ORCA_RUN_ID=$ORCA_PRIOR_RUN_ID
-    fm_backend_orca_supervised_worker_start \
-      "$ORCA_RUN_ID" "$native_spec" "$ORCA_WORKTREE_ID" "$HARNESS" "$MODEL" "$EFFORT" \
-      "$ORCA_PRIOR_TASK_ID" "$ORCA_PRIOR_DISPATCH_ID" || native_start_status=$?
-  else
-    ORCA_RUN_ID=$(fm_backend_orca_supervised_run_create "Firstmate $KIND task $ID") || {
-      echo "error: native Orca supervision could not create its Run; preserving the task record" >&2
-      exit 1
-    }
-    fm_backend_orca_supervised_worker_start \
-      "$ORCA_RUN_ID" "$native_spec" "$ORCA_WORKTREE_ID" "$HARNESS" "$MODEL" "$EFFORT" || native_start_status=$?
-  fi
-  # Preserve every identity returned before receipt validation, including a
-  # partial Dispatch that must be reconciled by the abort trap.
-  [ -n "${FM_ORCA_SUPERVISED_RUN_ID:-}" ] && ORCA_RUN_ID=$FM_ORCA_SUPERVISED_RUN_ID
-  [ -n "${FM_ORCA_SUPERVISED_TASK_ID:-}" ] && ORCA_TASK_ID=$FM_ORCA_SUPERVISED_TASK_ID
-  [ -n "${FM_ORCA_SUPERVISED_DISPATCH_ID:-}" ] && ORCA_DISPATCH_ID=$FM_ORCA_SUPERVISED_DISPATCH_ID
-  [ -n "${FM_ORCA_SUPERVISED_WORKER_ID:-}" ] && ORCA_WORKER_ID=$FM_ORCA_SUPERVISED_WORKER_ID
-  [ -n "${FM_ORCA_SUPERVISED_TERMINAL:-}" ] && ORCA_TERMINAL=$FM_ORCA_SUPERVISED_TERMINAL
-  [ -n "${FM_ORCA_SUPERVISED_TERMINAL_INCAR:-}" ] && ORCA_TERMINAL_INCAR=$FM_ORCA_SUPERVISED_TERMINAL_INCAR
-  [ -n "${FM_ORCA_SUPERVISED_PANE_KEY:-}" ] && ORCA_PANE_KEY=$FM_ORCA_SUPERVISED_PANE_KEY
-  [ -n "${FM_ORCA_SUPERVISED_WORKTREE_ID:-}" ] && ORCA_WORKTREE_ID=$FM_ORCA_SUPERVISED_WORKTREE_ID
-  [ "$native_start_status" -eq 0 ] || {
-    # A nonzero receipt is not proof that no worker was created. Preserve the
-    # returned resources and let the abort trap reconcile any Dispatch it did
-    # return instead of closing an unbound terminal or worktree.
-    ORCA_ABORT_PRESERVE=1
-    echo "error: native Orca worker-start did not return a usable supervised Dispatch; preserving the task record without launching a terminal fallback" >&2
-    exit 1
-  }
-  # From this point onward every failure must abandon the just-created Dispatch
-  # (or retry Dispatch) before the trap may remove ordinary task resources.
-  [ -n "$ORCA_RUN_ID" ] && [ -n "$ORCA_TASK_ID" ] && [ -n "$ORCA_DISPATCH_ID" ] && [ -n "$ORCA_WORKER_ID" ] || {
-    echo 'error: native Orca worker omitted a durable Run, Task, Dispatch, or worker identity; preserving task records' >&2
-    exit 1
-  }
-  [ -n "$ORCA_TERMINAL" ] || { echo 'error: native Orca worker omitted its terminal identity; preserving task records' >&2; exit 1; }
-  [ -n "$ORCA_TERMINAL_INCAR" ] || { echo 'error: native Orca worker omitted its terminal incarnation; preserving task records' >&2; exit 1; }
-  [ -n "$ORCA_PANE_KEY" ] || { echo 'error: native Orca worker omitted its pane identity; preserving task records' >&2; exit 1; }
-  [ "$RELAUNCH" -eq 1 ] || ORCA_ABORT_PRESERVE=0
-  T=$ORCA_TERMINAL
-  if ! orca_supervised_meta_publish; then
-    echo "error: native Orca identities for $ID could not be recorded; preserving the supervised worker and local copy" >&2
-    exit 1
-  fi
-  native_show=$(fm_backend_orca_supervised_worker_show "$ORCA_DISPATCH_ID") || {
-    echo "error: native Orca worker-show could not inspect Dispatch $ORCA_DISPATCH_ID; preserving the supervised worker and local copy" >&2
-    exit 1
-  }
-  fm_backend_orca_supervised_identity_matches "$STATE/$ID.meta" "$native_show" || {
-    echo "error: native Orca worker identity did not match task $ID; preserving the supervised worker and local copy" >&2
-    exit 1
-  }
-  [ -n "${FM_ORCA_SUPERVISED_WORKTREE_PATH:-}" ] && [ "$FM_ORCA_SUPERVISED_WORKTREE_PATH" = "$WT" ] || {
-    echo 'error: native Orca worker did not return the exact isolated worktree path; preserving task records' >&2
-    exit 1
-  }
-  if ! fm_backend_orca_supervised_wait_first_turn "$ORCA_DISPATCH_ID"; then
-    echo "error: native Orca worker $ORCA_DISPATCH_ID did not prove first-turn transcript consumption; preserving the supervised worker and local copy" >&2
-    exit 1
-  fi
-  if [ -n "$ORCA_SETUP_TERMINAL" ] && [ "$ORCA_SETUP_TERMINAL" != "$ORCA_TERMINAL" ]; then
-    fm_backend_orca_kill "$ORCA_SETUP_TERMINAL" >/dev/null 2>&1 || true
-  fi
-  ORCA_ABORT_CLEANUP=0
-  "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
-else
-  ORCA_ABORT_CLEANUP=0
-fi
+ORCA_ABORT_CLEANUP=0
 
-if [ "$BACKEND" = orca ] && [ "$ORCA_MODE" = supervised ]; then
-  :
-else
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")
 sq_piext=$(shell_quote "$STATE/$ID.pi-ext.ts")
@@ -5174,6 +5126,85 @@ if [ "$KIND" = secondmate ] && [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" != 1 ]; then
     fi
   fi
 fi
+
+if [ "$BACKEND" = orca ] && [ "$ORCA_MODE" = supervised ]; then
+  # Arm the abort path before worker-start validates its receipt. Orca can
+  # create a worker and then return an incomplete identity, and that partial
+  # receipt is the only chance to stop/abandon the exact Dispatch.
+  ORCA_ABORT_CLEANUP=1
+  [ "$RELAUNCH" -eq 1 ] && ORCA_ABORT_PRESERVE=1
+  native_spec=$(printf '%s' "Firstmate $KIND task $ID: continue the Firstmate launch brief this terminal's agent already received at startup ($BRIEF_REAL)." |
+    "$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief) || exit 1
+  native_start_status=0
+  if [ "$RELAUNCH" -eq 1 ]; then
+    [ -n "$ORCA_PRIOR_RUN_ID" ] && [ -n "$ORCA_PRIOR_TASK_ID" ] && [ -n "$ORCA_PRIOR_DISPATCH_ID" ] || {
+      echo "error: native Orca relaunch for $ID lacks its durable Run, Task, or Dispatch identity" >&2
+      exit 1
+    }
+    ORCA_RUN_ID=$ORCA_PRIOR_RUN_ID
+    fm_backend_orca_supervised_worker_start \
+      "$ORCA_RUN_ID" "$native_spec" "$ORCA_WORKTREE_ID" "$T" \
+      "$ORCA_PRIOR_TASK_ID" "$ORCA_PRIOR_DISPATCH_ID" || native_start_status=$?
+  else
+    ORCA_RUN_ID=$(fm_backend_orca_supervised_run_create "Firstmate $KIND task $ID") || {
+      echo "error: native Orca supervision could not create its Run; preserving the task record" >&2
+      exit 1
+    }
+    fm_backend_orca_supervised_worker_start \
+      "$ORCA_RUN_ID" "$native_spec" "$ORCA_WORKTREE_ID" "$T" || native_start_status=$?
+  fi
+  # Preserve every identity returned before receipt validation, including a
+  # partial Dispatch that must be reconciled by the abort trap.
+  [ -n "${FM_ORCA_SUPERVISED_RUN_ID:-}" ] && ORCA_RUN_ID=$FM_ORCA_SUPERVISED_RUN_ID
+  [ -n "${FM_ORCA_SUPERVISED_TASK_ID:-}" ] && ORCA_TASK_ID=$FM_ORCA_SUPERVISED_TASK_ID
+  [ -n "${FM_ORCA_SUPERVISED_DISPATCH_ID:-}" ] && ORCA_DISPATCH_ID=$FM_ORCA_SUPERVISED_DISPATCH_ID
+  [ -n "${FM_ORCA_SUPERVISED_WORKER_ID:-}" ] && ORCA_WORKER_ID=$FM_ORCA_SUPERVISED_WORKER_ID
+  [ -n "${FM_ORCA_SUPERVISED_TERMINAL:-}" ] && ORCA_TERMINAL=$FM_ORCA_SUPERVISED_TERMINAL
+  [ -n "${FM_ORCA_SUPERVISED_TERMINAL_INCAR:-}" ] && ORCA_TERMINAL_INCAR=$FM_ORCA_SUPERVISED_TERMINAL_INCAR
+  [ -n "${FM_ORCA_SUPERVISED_PANE_KEY:-}" ] && ORCA_PANE_KEY=$FM_ORCA_SUPERVISED_PANE_KEY
+  [ -n "${FM_ORCA_SUPERVISED_WORKTREE_ID:-}" ] && ORCA_WORKTREE_ID=$FM_ORCA_SUPERVISED_WORKTREE_ID
+  [ "$native_start_status" -eq 0 ] || {
+    # A nonzero receipt is not proof that no worker was created. The abort
+    # trap reconciles any Dispatch it did return before it closes the terminal
+    # or releases the worktree.
+    echo "error: native Orca worker-start did not attach supervision to terminal $T; closing the launched terminal and releasing its unrecorded resources" >&2
+    exit 1
+  }
+  # From this point onward every failure must abandon the just-created Dispatch
+  # (or retry Dispatch) before the trap may remove ordinary task resources.
+  [ -n "$ORCA_RUN_ID" ] && [ -n "$ORCA_TASK_ID" ] && [ -n "$ORCA_DISPATCH_ID" ] && [ -n "$ORCA_WORKER_ID" ] || {
+    echo 'error: native Orca worker omitted a durable Run, Task, Dispatch, or worker identity; preserving task records' >&2
+    exit 1
+  }
+  [ -n "$ORCA_TERMINAL" ] || { echo 'error: native Orca worker omitted its terminal identity; preserving task records' >&2; exit 1; }
+  [ -n "$ORCA_TERMINAL_INCAR" ] || { echo 'error: native Orca worker omitted its terminal incarnation; preserving task records' >&2; exit 1; }
+  [ -n "$ORCA_PANE_KEY" ] || { echo 'error: native Orca worker omitted its pane identity; preserving task records' >&2; exit 1; }
+  [ "$RELAUNCH" -eq 1 ] || ORCA_ABORT_PRESERVE=0
+  if ! orca_supervised_meta_publish; then
+    echo "error: native Orca identities for $ID could not be recorded; preserving the supervised worker and local copy" >&2
+    exit 1
+  fi
+  native_show=$(fm_backend_orca_supervised_worker_show "$ORCA_DISPATCH_ID") || {
+    echo "error: native Orca worker-show could not inspect Dispatch $ORCA_DISPATCH_ID; preserving the supervised worker and local copy" >&2
+    exit 1
+  }
+  fm_backend_orca_supervised_identity_matches "$STATE/$ID.meta" "$native_show" || {
+    echo "error: native Orca worker identity did not match task $ID; preserving the supervised worker and local copy" >&2
+    exit 1
+  }
+  [ -n "${FM_ORCA_SUPERVISED_WORKTREE_PATH:-}" ] && [ "$FM_ORCA_SUPERVISED_WORKTREE_PATH" = "$WT" ] || {
+    echo 'error: native Orca worker did not return the exact isolated worktree path; preserving task records' >&2
+    exit 1
+  }
+  if ! fm_backend_orca_supervised_wait_first_turn "$ORCA_DISPATCH_ID"; then
+    echo "error: native Orca worker $ORCA_DISPATCH_ID did not prove first-turn transcript consumption; preserving the supervised worker and local copy" >&2
+    exit 1
+  fi
+  if [ -n "$ORCA_PRIOR_TERMINAL" ] && [ "$ORCA_PRIOR_TERMINAL" != "$ORCA_TERMINAL" ]; then
+    fm_backend_orca_kill "$ORCA_PRIOR_TERMINAL" >/dev/null 2>&1 || true
+  fi
+  ORCA_ABORT_CLEANUP=0
+  "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort || true
 fi
 
 # This is the commit point: all endpoint and harness delivery that can reject
