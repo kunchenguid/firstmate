@@ -169,8 +169,95 @@ test_unreachable_pr_head_falls_back_with_warning() {
   pass "fm-review-diff falls back to local branch with a warning when PR head is unreachable"
 }
 
+# make_deploy_branch_case <name>: origin carries a stale forge default (main,
+# still what origin/HEAD advertises) plus the repo's real deploy branch (prod,
+# one commit ahead with prod-only.txt). The task branch is cut from prod, which
+# is where real work lands - the ecstatic-starfish-prod shape. Echoes the case dir.
+make_deploy_branch_case() {
+  local name=$1 case_dir
+  case_dir="$TMP_ROOT/$name"
+  mkdir -p "$case_dir/state"
+
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/main
+  git clone -q "$case_dir/origin.git" "$case_dir/_seed" 2>/dev/null
+  printf 'base\n' > "$case_dir/_seed/feature.txt"
+  git -C "$case_dir/_seed" add feature.txt
+  git -C "$case_dir/_seed" -c user.email=t@t -c user.name=t commit -qm "origin baseline"
+  git -C "$case_dir/_seed" push -q origin main
+  git -C "$case_dir/_seed" checkout -q -b prod
+  printf 'deploy\n' > "$case_dir/_seed/prod-only.txt"
+  git -C "$case_dir/_seed" add prod-only.txt
+  git -C "$case_dir/_seed" -c user.email=t@t -c user.name=t commit -qm "deploy branch moves on"
+  git -C "$case_dir/_seed" push -q origin prod
+  rm -rf "$case_dir/_seed"
+
+  git clone -q "$case_dir/origin.git" "$case_dir/project"
+  git -C "$case_dir/project" remote set-head origin main 2>/dev/null || true
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$case_dir/wt" origin/prod
+  printf 'work\n' > "$case_dir/wt/task.txt"
+  git -C "$case_dir/wt" add task.txt
+  git -C "$case_dir/wt" commit -qm "crewmate work"
+
+  touch "$case_dir/state/.last-watcher-beat"
+  printf '%s\n' "$case_dir"
+}
+
+test_deploy_branch_unset_diffs_against_the_stale_forge_default() {
+  local case_dir out
+  case_dir=$(make_deploy_branch_case deploy-branch-unset)
+  write_task_meta "$case_dir"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/main' \
+    "deploy-branch-unset: with the key unset the base is still origin/HEAD's forge default"
+  assert_contains "$out" 'prod-only.txt' \
+    "deploy-branch-unset: the stale base wrongly surfaces commits the deploy branch already has"
+  pass "fm-review-diff without the key still diffs against origin/HEAD, reproducing the wrong review surface"
+}
+
+test_deploy_branch_config_sets_the_review_base() {
+  local case_dir out
+  case_dir=$(make_deploy_branch_case deploy-branch-set)
+  git -C "$case_dir/project" config firstmate.deployBranch prod
+  write_task_meta "$case_dir"
+
+  out=$(run_review_diff "$case_dir" task-x1 2> "$case_dir/stderr")
+
+  assert_contains "$out" 'diff base: origin/prod' \
+    "deploy-branch-set: the configured deploy branch is the review base"
+  assert_contains "$out" 'task.txt' "deploy-branch-set: the crewmate's own change is reviewed"
+  assert_not_contains "$out" 'prod-only.txt' \
+    "deploy-branch-set: content already on the deploy branch is not part of the review surface"
+  pass "fm-review-diff reviews against the configured deploy branch, not the stale forge default"
+}
+
+test_deploy_branch_missing_from_origin_fails_loudly() {
+  local case_dir err status
+  case_dir=$(make_deploy_branch_case deploy-branch-missing)
+  git -C "$case_dir/project" config firstmate.deployBranch does-not-exist-anywhere
+  write_task_meta "$case_dir"
+
+  set +e
+  run_review_diff "$case_dir" task-x1 > "$case_dir/stdout" 2> "$case_dir/stderr"
+  status=$?
+  set -e
+  err=$(cat "$case_dir/stderr")
+
+  [ "$status" -ne 0 ] || fail "deploy-branch-missing: review diff succeeded on an unresolvable deploy branch"
+  assert_contains "$err" "firstmate.deployBranch is set to 'does-not-exist-anywhere'" \
+    "deploy-branch-missing: refusal must name the key as the source, not read as a network failure"
+  assert_not_contains "$(cat "$case_dir/stdout")" 'diff base: origin/main' \
+    "deploy-branch-missing: must never fall back to the forge default"
+  pass "fm-review-diff refuses a firstmate.deployBranch that origin does not have, naming the key"
+}
+
 test_pr_meta_uses_pr_head_not_stale_local
 test_pr_meta_fetches_pull_head_without_recorded_sha
 test_stale_recorded_pr_head_loses_to_fetched_pull_head
 test_no_pr_meta_uses_local_branch
 test_unreachable_pr_head_falls_back_with_warning
+test_deploy_branch_unset_diffs_against_the_stale_forge_default
+test_deploy_branch_config_sets_the_review_base
+test_deploy_branch_missing_from_origin_fails_loudly

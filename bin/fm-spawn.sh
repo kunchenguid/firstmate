@@ -2969,7 +2969,7 @@ spawn_worktree_has_origin_config() { # <worktree>
 }
 
 freshen_spawn_worktree_base() { # <worktree>
-  local worktree=$1 default target expected actual status deploy_branch
+  local worktree=$1 default target expected actual status
   status=$(git -C "$worktree" -c core.quotePath=false status --porcelain) || {
     echo "error: could not inspect pooled worktree '$worktree' before refreshing its base" >&2
     return 1
@@ -2989,32 +2989,32 @@ freshen_spawn_worktree_base() { # <worktree>
     echo "error: could not fetch origin for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
     return 1
   fi
-  # firstmate.deployBranch (bin/fm-deploy-branch-lib.sh) names this clone's real
-  # deploy branch when it differs from the forge's advertised default. When set,
-  # it is authoritative and `remote set-head` is skipped entirely, because that
-  # command rewrites the shared refs/remotes/origin/HEAD of the whole clone (a
-  # treehouse worktree shares its clone's refs) and fm-fleet-sync.sh reads that
-  # same ref as its comparison base - clobbering it here would silently revert
-  # fleet-sync back to comparing against the forge default too.
-  if deploy_branch=$(fm_deploy_branch_configured "$worktree"); then
-    if ! fm_deploy_branch_exists_on_origin "$worktree" "$deploy_branch"; then
-      echo "error: firstmate.deployBranch is set to '$deploy_branch' for pooled worktree '$worktree', but origin has no such branch; refusing to fall back to the forge default" >&2
-      return 1
-    fi
-    default=$deploy_branch
-  else
+  # `remote set-head --auto` asks the forge for its advertised default and
+  # rewrites refs/remotes/origin/HEAD, a ref shared by the WHOLE clone (a
+  # treehouse worktree shares its clone's refs) that operators and plain `git`
+  # still read. Once firstmate.deployBranch decides this clone's base
+  # (bin/fm-deploy-branch-lib.sh), asking the forge buys nothing and pointing
+  # the shared ref back at the stale forge default is pure damage, so skip it.
+  if ! fm_deploy_branch_configured "$worktree" >/dev/null; then
     if ! git -C "$worktree" remote set-head origin --auto >/dev/null 2>&1; then
       echo "error: could not resolve origin's current default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
       return 1
     fi
-    default=$(default_branch "$worktree") || {
-      echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
-      return 1
-    }
   fi
+  default=$(fm_default_branch "$worktree") || {
+    echo "error: could not determine origin's default branch for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    return 1
+  }
   target="origin/$default"
   if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$default:refs/remotes/origin/$default"; then
-    echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    # Name the key when it chose this branch: otherwise a typo'd deploy branch
+    # reads as a network or permissions failure and sends the operator looking
+    # in the wrong place.
+    if [ "$(fm_deploy_branch_configured "$worktree" || true)" = "$default" ]; then
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; firstmate.deployBranch is set to '$default' in that clone but origin has no such branch; refusing to launch from a potentially stale base" >&2
+    else
+      echo "error: could not fetch '$target' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+    fi
     return 1
   fi
   expected=$(git -C "$worktree" rev-parse --verify --quiet "$target^{commit}" 2>/dev/null) || {

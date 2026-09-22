@@ -59,7 +59,7 @@ Clone into `projects/<name>` and add the registry entry only after the destinati
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
-When a clone's real deploy branch differs from the forge's advertised default (`origin/HEAD`), set `firstmate.deployBranch` on that clone so every spawn and fleet sync resolves the real branch instead of the stale forge default; `bin/fm-deploy-branch-lib.sh` owns the exact command and validation behavior.
+When a clone's real deploy branch differs from the forge's advertised default (`origin/HEAD`), set `firstmate.deployBranch` on that clone so the one shared base-branch resolver in `bin/fm-deploy-branch-lib.sh` - which every firstmate path uses, including spawn's pooled-worktree base, fleet sync's comparison base, the review diff base, local merge's target, teardown's work-safety check, and the worktree-tangle guard - resolves the real branch instead of the stale forge default; that lib owns the exact command and failure behavior.
 
 ## Create a project
 

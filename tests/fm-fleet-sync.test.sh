@@ -442,7 +442,7 @@ test_deploy_branch_missing_from_origin_fails_loudly() {
 
   out=$(run_sync "$home" "$clone")
 
-  assert_contains "$out" "deploy-branch-missing: skipped: firstmate.deployBranch is set to 'does-not-exist-anywhere'" \
+  assert_contains "$out" "deploy-branch-missing: skipped: origin/does-not-exist-anywhere does not exist (firstmate.deployBranch in $clone is set to 'does-not-exist-anywhere')" \
     "refusal names the repo and the configured value"
   assert_not_contains "$out" "STUCK" "an unresolvable deploy branch is a configuration skip, not a STUCK drift"
   [ "$(head_sha "$clone")" = "$before" ] \

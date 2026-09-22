@@ -17,23 +17,8 @@
 # default branch. Detached HEAD on the default is fine; a feature branch in a
 # primary checkout is the alarm.
 
-# Resolve the default branch name of the git repo at <dir>: prefer origin/HEAD,
-# then fall back to a local main/master. Echoes the name, or returns 1.
-fm_default_branch() {
-  local dir=$1 ref branch
-  ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    printf '%s\n' "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
-      printf '%s\n' "$branch"
-      return 0
-    fi
-  done
-  return 1
-}
+# shellcheck source=bin/fm-deploy-branch-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-deploy-branch-lib.sh"
 
 # If the git checkout at <root> is tangled - on a NAMED branch that is not its
 # default branch - echo the offending branch name and return 0. For every healthy

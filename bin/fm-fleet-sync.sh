@@ -3,10 +3,11 @@
 # origin/<default> when safe, and prune local branches whose upstream tracking
 # branch is gone (the remote branch was deleted, i.e. its PR merged) and that no
 # worktree still needs.
-# <default> is the clone's firstmate.deployBranch git config when set, else
-# origin/HEAD as resolved by default_branch() (bin/fm-deploy-branch-lib.sh owns
-# the shared read); a configured value absent from origin/ fails loudly instead
-# of silently comparing against the forge default.
+# <default> is resolved by fm_default_branch() (bin/fm-deploy-branch-lib.sh):
+# the clone's firstmate.deployBranch git config when set, else origin/HEAD, else
+# a local main/master. A configured branch that origin does not have is reported
+# as an unresolvable base naming the key, never silently swapped for the forge
+# default.
 # Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
 # no unique commits (it is an ancestor of origin/<default>) and whose <default>
 # branch is free to check out is re-attached and then fast-forwarded ("recovered:").
@@ -119,22 +120,6 @@ resolve_project_arg() {
       ;;
   esac
   printf '%s\n' "$arg"
-}
-
-default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
 }
 
 first_line() {
@@ -297,6 +282,14 @@ stuck_state() {
 # Loud, quantified report for a clone we deliberately leave untouched. Includes
 # how far behind origin/<default> it is, so a chronically-stuck clone is visibly
 # distinct from a benign one-off skip.
+# Echoes a clause naming firstmate.deployBranch as the source of $DEFAULT when
+# this clone's key selected it, so an unresolvable base reads as the config typo
+# it is rather than a missing or renamed upstream branch.
+deploy_branch_note() {
+  [ "$(fm_deploy_branch_configured "$PROJ" || true)" = "$DEFAULT" ] || return 0
+  printf " (firstmate.deployBranch in %s is set to '%s')" "$PROJ" "$DEFAULT"
+}
+
 report_stuck() {
   local state=$1 behind
   behind=$(git -C "$PROJ" rev-list --count "HEAD..$BASE" 2>/dev/null) || behind="?"
@@ -352,25 +345,13 @@ sync_project() {
 
   prune_gone_branches || true
 
-  # firstmate.deployBranch (bin/fm-deploy-branch-lib.sh) names this clone's real
-  # deploy branch when it differs from origin/HEAD, the forge's advertised
-  # default. When set, it is authoritative over origin/HEAD for the comparison
-  # base below; an unset key falls back to origin/HEAD exactly as before.
-  if deploy_branch=$(fm_deploy_branch_configured "$PROJ"); then
-    if ! fm_deploy_branch_exists_on_origin "$PROJ" "$deploy_branch"; then
-      echo "$label: skipped: firstmate.deployBranch is set to '$deploy_branch', but origin has no such branch; refusing to fall back to the forge default"
-      return 0
-    fi
-    DEFAULT=$deploy_branch
-  else
-    DEFAULT=$(default_branch) || {
-      echo "$label: skipped: cannot determine default branch"
-      return 0
-    }
-  fi
+  DEFAULT=$(fm_default_branch "$PROJ") || {
+    echo "$label: skipped: cannot determine default branch"
+    return 0
+  }
   BASE="origin/$DEFAULT"
   if ! git -C "$PROJ" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
-    echo "$label: skipped: $BASE does not exist"
+    echo "$label: skipped: $BASE does not exist$(deploy_branch_note)"
     return 0
   fi
 

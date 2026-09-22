@@ -273,6 +273,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-deploy-branch-lib.sh
+. "$SCRIPT_DIR/fm-deploy-branch-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -1177,22 +1179,6 @@ elif [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
   PUBLIC_FOLLOWUP_RELAY_ACTIVE=1
 fi
 
-default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
-}
-
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
@@ -1421,7 +1407,7 @@ pr_is_merged() {
 # so the caller refuses rather than guesses.
 content_in_default() {
   local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
+  name=$(fm_default_branch "$PROJ") || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
@@ -1740,7 +1726,7 @@ validate_worktree_teardown_safety() {
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+    DEFAULT=$(fm_default_branch "$PROJ") || { echo "REFUSED: cannot determine default branch for $PROJ; expected firstmate.deployBranch, origin/HEAD, main, or master." >&2; return 1; }
     if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"
