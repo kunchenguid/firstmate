@@ -225,13 +225,16 @@
 #   risking a PR based on stale history or discarding local work.
 #   --expected-head accepts only one full 40-hex commit id on a fresh ship or
 #   scout. It replaces default-branch convergence with an origin fetch that
-#   must authorize the commit, resets the clean isolated worktree to it, records
-#   expected_head= in task metadata, and rechecks both cleanliness and HEAD
-#   immediately before submitting the worker launch. It refuses origin-less
-#   worktrees, relaunches, secondmates, and batches rather than silently changing
-#   their existing ownership semantics. Orca is also refused because its
-#   separate worktree lifecycle is not part of this Treehouse-backed contract.
-#   With no flag, behavior is unchanged.
+#   must authorize the commit, resets the clean isolated worktree and initialized
+#   submodules to their recorded pins, and records expected_head= in task
+#   metadata. Immediately before submitting the worker launch it proves HEAD,
+#   tracked bytes and modes, recursive initialized-submodule trees, and the
+#   absence of index suppression, untracked files, and ignored files. If a
+#   refusal cannot prove the staged launch endpoint gone, it preserves the task
+#   record and Treehouse slot claim for teardown. Origin-less worktrees,
+#   relaunches, secondmates, batches, and Orca are refused rather than silently
+#   changing their existing lifecycle semantics. With no flag, behavior is
+#   unchanged.
 #   --codex-native-provider is a deliberately narrow billing guard selected on
 #   one fresh single-task ship or scout launched through the verified Codex
 #   adapter. It requires explicit `--harness codex` and refuses raw commands,
