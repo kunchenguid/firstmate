@@ -4625,7 +4625,7 @@ preserve_relaunch_meta() {
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   [ -z "${BASE_BRANCH:-}" ] || echo "base_branch=$BASE_BRANCH"
-  [ "$KIND" = secondmate ] || echo "crew_branch=$CREW_BRANCH"
+  [ "$KIND" = ship ] && echo "crew_branch=$CREW_BRANCH"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
