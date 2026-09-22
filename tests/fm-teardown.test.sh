@@ -2120,6 +2120,7 @@ test_teardown_missing_busy_sidecar_completes() {
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$case_dir/state" task-x1)
   printf 'busy_gen=%s\n' "$gen" >> "$case_dir/state/task-x1.meta"
   rm -f "$case_dir/state/task-x1.busy-gen"
+  printf '%s\n' "$(date +%s)" > "$case_dir/state/task-x1.deliberate-stop"
 
   set +e
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -2129,9 +2130,11 @@ test_teardown_missing_busy_sidecar_completes() {
   expect_code 0 "$rc" "missing-busy-sidecar: teardown should treat the incarnation as already retired"
   assert_absent "$case_dir/state/task-x1.busy-state" \
     "missing-busy-sidecar: teardown left the orphan busy record"
+  assert_absent "$case_dir/state/task-x1.deliberate-stop" \
+    "missing-busy-sidecar: teardown left the deliberate-stop marker behind"
   assert_absent "$case_dir/state/task-x1.meta" \
     "missing-busy-sidecar: teardown remained incomplete"
-  pass "teardown completes when an exact busy-state sidecar is already absent"
+  pass "teardown retires the deliberate-stop marker when an exact busy-state sidecar is already absent"
 }
 
 test_herdr_teardown_clears_escalation_marker() {

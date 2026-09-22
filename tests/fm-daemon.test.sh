@@ -1229,6 +1229,130 @@ test_housekeeping_captain_held_stale_marker_transitions_to_pause() {
   pass "housekeeping moves a captain hold's existing stale marker to pause before wedge escalation"
 }
 
+# firstmate issue #5004 at the daemon boundary. The watcher absorbs a deliberately
+# parked task before the away gate, but its durable re-surface wake is drained by
+# the away-mode daemon, and a wedge marker can have been aged before the stop. Both
+# the daemon's classifier and its housekeeping stale recheck must honor the same
+# durable deliberate-stop marker, or a deliberately parked task still wedge-escalates
+# in away mode.
+test_housekeeping_deliberate_stop_marker_never_wedge_escalates() {
+  local dir state fakebin win pane key out reason
+  dir=$(make_supercase stale-to-deliberate-stop)
+  state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-parked-w16"; pane="$dir/pane.txt"
+  printf 'working: investigation in progress\n' > "$state/parked-w16.status"
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "parked-w16" | tr ':/.' '___')
+  # The stop path owns the marker; the daemon reads only its presence.
+  fm_control_deliberate_stop_record "$state" parked-w16
+
+  # classify_stale parks it on the pause action, exactly like a declared wait, so
+  # the wake itself never records a wedge marker.
+  out=$(FM_STATE_OVERRIDE="$state" classify_stale "$win" "$state")
+  case "$out" in pause\|*) ;; *) fail "a deliberately parked task did not classify as pause: $out" ;; esac
+  date +%s > "$state/.subsuper-stale-$key"
+  reason="stale: $win (deliberately stopped 500s ago, rechecked on a long cadence not a wedge; relaunch the worker or clean up the finished task)"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "the deliberate-stop wake left a wedge marker behind"
+
+  # A wedge marker already aged before the stop must be dropped, not escalated.
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-stale-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_ESCALATE_BATCH_SECS=999999 \
+    housekeeping "$state"
+  [ ! -e "$state/.subsuper-stale-$key" ] || fail "a deliberately parked task kept its wedge marker"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a deliberately parked task wedge-escalated: $(cat "$state/.subsuper-escalations")"
+  pass "the away-mode daemon parks a deliberately stopped task instead of wedge-escalating it"
+}
+
+# firstmate issue #5004 at the away-mode re-surface boundary. The watcher absorbs a
+# deliberately parked task and hands the away-mode daemon its bounded recheck wake;
+# the daemon classifies it as a pause and records the pause marker, but the task's
+# last status line is routinely `done:`, not a wait declaration, so the housekeeping
+# pause loop must keep aging that marker off the deliberate-stop marker and emit the
+# recheck digest instead of clearing it un-escalated (which let a parked task rot
+# invisibly in away mode).
+test_housekeeping_deliberate_stop_resurfaces_on_the_pause_cadence() {
+  local dir state fakebin win pane key reason age
+  dir=$(make_supercase deliberate-stop-resurface)
+  state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-parked-w17"; pane="$dir/pane.txt"
+  printf 'done: investigation finished\n' > "$state/parked-w17.status"
+  seen_through "$state" parked-w17
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "parked-w17" | tr ':/.' '___')
+  fm_control_deliberate_stop_record "$state" parked-w17
+
+  # The watcher's bounded recheck wake is drained by the away-mode daemon, which
+  # classifies it as a pause and records the pause marker.
+  reason="stale: $win (deliberately stopped 500s ago, rechecked on a long cadence not a wedge; relaunch the worker or clean up the finished task)"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "the deliberate-stop recheck wake did not record a pause marker"
+
+  # Inside the cadence the marker must neither escalate nor be recreated fresh.
+  echo $(( $(date +%s) - 100 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_PAUSE_RESURFACE_SECS=3600 \
+    housekeeping "$state"
+  [ ! -s "$state/.subsuper-escalations" ] || fail "a deliberate stop re-surfaced inside its cadence: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "a deliberate stop lost its pause marker inside the window"
+
+  # Past the cadence it MUST re-surface a recheck naming the parked task, never a
+  # possible wedge, and reset its window so the cadence repeats.
+  echo $(( $(date +%s) - 5000 )) > "$state/.subsuper-paused-$key"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_PAUSE_RESURFACE_SECS=240 \
+    housekeeping "$state"
+  grep -F "deliberately stopped" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a deliberately parked task did not re-surface on the pause cadence: $(cat "$state/.subsuper-escalations" 2>/dev/null || true)"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    && fail "a deliberately parked task re-surfaced as a possible wedge"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "deliberate-stop pause marker cleared instead of reset for the next window"
+  age=$(( $(date +%s) - $(cat "$state/.subsuper-paused-$key" 2>/dev/null || echo 0) ))
+  [ "$age" -lt 60 ] || fail "deliberate-stop pause marker was not reset to now on re-surface (age ${age}s)"
+
+  # Clearing the deliberate-stop marker (relaunch/teardown) returns the task to
+  # ordinary supervision: the stale pause marker the cadence left must clear.
+  fm_control_deliberate_stop_clear "$state" parked-w17
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_PAUSE_RESURFACE_SECS=240 \
+    housekeeping "$state"
+  [ ! -e "$state/.subsuper-paused-$key" ] || fail "clearing the deliberate-stop marker left the pause marker behind"
+  pass "the away-mode daemon re-surfaces a deliberately stopped task on the bounded pause cadence"
+}
+
+# The deliberate-stop first recheck must be anchored on the stop itself, not on
+# when the away-mode daemon first drained the watcher's wake. Otherwise the
+# daemon starts a second full PAUSE_RESURFACE_SECS window and the parked task
+# first reaches the captain at roughly twice the declared-pause cadence.
+test_housekeeping_deliberate_stop_first_recheck_is_anchored_on_the_stop() {
+  local dir state fakebin win pane key reason stop_epoch
+  dir=$(make_supercase deliberate-stop-first-window)
+  state="$dir/state"; fakebin="$dir/fakebin"; win="sess:fm-parked-w18"; pane="$dir/pane.txt"
+  printf 'done: investigation finished\n' > "$state/parked-w18.status"
+  seen_through "$state" parked-w18
+  printf 'idle prompt $\n' > "$pane"
+  key=$(printf '%s' "parked-w18" | tr ':/.' '___')
+  fm_control_deliberate_stop_record "$state" parked-w18
+  stop_epoch=$(( $(date +%s) - 500 ))
+  fm_touch_epoch "$stop_epoch" "$(fm_control_deliberate_stop_marker "$state" parked-w18)"
+
+  # The watcher's bounded recheck wake reaches the daemon already past the first
+  # window, so the pause marker it records inherits that window.
+  reason="stale: $win (deliberately stopped 500s ago, rechecked on a long cadence not a wedge; relaunch the worker or clean up the finished task)"
+  LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" handle_wake "$reason" "$state"
+  [ -e "$state/.subsuper-paused-$key" ] || fail "the deliberate-stop recheck wake did not record a pause marker"
+
+  # The very next housekeeping tick must re-surface the parked task; a second
+  # full window here is the doubling this test guards against.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 FM_PAUSE_RESURFACE_SECS=240 \
+    housekeeping "$state"
+  grep -F "deliberately stopped" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    || fail "a deliberately parked task did not re-surface in its first window: $(cat "$state/.subsuper-escalations" 2>/dev/null || true)"
+  grep -F "possible wedge" "$state/.subsuper-escalations" >/dev/null 2>&1 \
+    && fail "a deliberately parked task re-surfaced as a possible wedge"
+  pass "the away-mode daemon anchors a deliberate stop's first recheck on the stop itself"
+}
+
 test_housekeeping_pause_marker_transitions_to_clear() {
   local dir state fakebin win pane key
   dir=$(make_supercase paused-to-stale)
@@ -2812,6 +2936,9 @@ test_housekeeping_paused_unpaused_cleared
 test_housekeeping_captain_held_resolved_cleared
 test_housekeeping_stale_marker_transitions_to_pause
 test_housekeeping_captain_held_stale_marker_transitions_to_pause
+test_housekeeping_deliberate_stop_marker_never_wedge_escalates
+test_housekeeping_deliberate_stop_resurfaces_on_the_pause_cadence
+test_housekeeping_deliberate_stop_first_recheck_is_anchored_on_the_stop
 test_housekeeping_pause_marker_transitions_to_clear
 test_housekeeping_herdr_persistent_stale_resolves_meta
 test_housekeeping_herdr_idle_busy_record_clears_stale

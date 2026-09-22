@@ -29,7 +29,11 @@
 #                          external-wait pause or verified captain-held transfer is
 #                          absorbed instead with its own long re-surface cadence,
 #                          never as a wedge, and that recheck reason names which
-#                          human the wait is on. Only when neither absorb class
+#                          human the wait is on. A task whose worker firstmate
+#                          deliberately stopped (the durable state/<id>.deliberate-stop
+#                          marker, owned by bin/fm-control-lib.sh) is parked on that
+#                          same long recheck cadence regardless of its last status
+#                          line, never wedge-escalated. Only when neither absorb class
 #                          applies does the log's latest recognized status event decide:
 #                          terminal (captain-relevant) or non-terminal (no verb),
 #                          both surfaced at once. A provably-working stale past the
@@ -63,8 +67,9 @@
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
 #                          (state/<id>.turn-ended, or the spawn record before any
 #                          turn completes). Past that bound, a declared external
-#                          wait or verified captain-held transfer uses the long
-#                          pause recheck cadence; under daemon-backed afk an
+#                          wait or verified captain-held transfer, or a worker the
+#                          control plane deliberately stopped, uses the long pause
+#                          recheck cadence; under daemon-backed afk an
 #                          external wait is instead handed to the daemon as this
 #                          plain reason once per declaration, while captain-held
 #                          work stays silent until return
@@ -188,6 +193,12 @@ mkdir -p "$STATE"
 # watcher reads only its presence (afk_record_present below).
 # shellcheck source=bin/fm-afk-contract.sh
 . "$SCRIPT_DIR/fm-afk-contract.sh"
+# The durable deliberate-stop marker (state/<id>.deliberate-stop) is owned by
+# bin/fm-control-lib.sh; this watcher reads only its presence
+# (fm_control_deliberate_stop_present) so a deliberately parked worker takes the
+# declared-pause treatment instead of the stale/wedge ladder.
+# shellcheck source=bin/fm-control-lib.sh
+. "$SCRIPT_DIR/fm-control-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -275,7 +286,8 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # non-busy stale - so it escalates via the existing stale reason, escalation
 # counter, and demand-deep-inspection marker for human inspection only, never an
 # automatic interrupt, signal, or restart - unless the crew declared the wait
-# itself, which takes the long pause cadence instead. Set generously above
+# itself or was deliberately stopped by the control plane, either of which takes
+# the long pause cadence instead. Set generously above
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
@@ -405,7 +417,8 @@ window_label() {
 # The ONE derivation of a window's per-window marker key: `:`, `/` and `.` become
 # `_` so a window name is usable as a filename suffix. Every per-window file the
 # watcher keeps is named by it (.hash-, .count-, .stale-, .stale-since-,
-# .wedge-escalations-, .paused-*, .writing-*, .waiting-*), and live homes hold those markers on
+# .wedge-escalations-, .paused-*, .writing-*, .waiting-*,
+# .deliberate-stop-resurfaced-*), and live homes hold those markers on
 # disk under the current format, so the format lives here alone: a second copy is
 # how a future change to it silently orphans a window's markers instead of clearing
 # them. The helpers below take the derived key rather than re-deriving it, so one
@@ -1360,6 +1373,32 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
+# Absorb a stale pane whose task carries the durable deliberate-stop marker
+# (state/<id>.deliberate-stop, owned by bin/fm-control-lib.sh): firstmate stopped
+# this worker on purpose, so an idle endpoint is a parked task, not a wedge
+# suspect. Same bounded recheck cadence as handle_paused_stale - re-surface once
+# per PAUSE_RESURFACE_SECS so a forgotten parked task cannot rot invisibly - and
+# never the wedge ladder. The re-surface age is anchored on the marker's own
+# mtime (when the stop was recorded) rather than the status file or pane hash, so
+# a churny idle pane cannot reset the cadence. Each stop's marker mtime opens
+# its own window, so a re-stop is absorbed on first sight rather than waking at
+# once off the previous stop's throttle. Uses its own .deliberate-stop-*-
+# throttle rather than the .paused-* flag, because the .paused-* machinery is
+# cleared whenever the last status line stops declaring a wait - a deliberately
+# stopped worker's last line is routinely `done:`, not a wait declaration.
+handle_deliberate_stop_stale() {  # <window> <task> <hash>
+  local win=$1 task=$2 h=$3 key marker age
+  key=$(window_key "$win")
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  clear_write_tracking "$key"
+  marker=$(fm_control_deliberate_stop_marker "$STATE" "$task")
+  age=$(age_of "$marker")
+  resurface_absorbed "$win" "$STATE/.deliberate-stop-resurfaced-$key" "$age" \
+    "stale: $win (deliberately stopped ${age}s ago, rechecked on a long cadence not a wedge; relaunch the worker or clean up the finished task)"
+  triage_log "absorbed stale (deliberate stop, age ${age}s): $win"
+}
+
 # Apply the busy-pane completed-turn bound to a window whose bound has already
 # crossed, honoring the worker's OWN declared external wait. Prints/queues
 # nothing itself; it only chooses which absorber owns the crossed bound.
@@ -1368,10 +1407,12 @@ handle_paused_stale() {  # <window> <task> <hash>
 # A busy pane past BUSY_TURN_MAX_SECS is normally a wedge suspect because a hung
 # foreground call can hide behind a busy signature. A `paused:` declaration or
 # verified captain-held transfer instead identifies that live foreground call as
-# the expected external wait. The caller has already confirmed liveness through
-# the busy verdict, so this exception does not suppress undeclared wedges or
-# alter the separate non-busy classification. handle_paused_stale keeps the
-# exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS.
+# the expected external wait, and a worker firstmate deliberately stopped
+# (state/<id>.deliberate-stop) is parked the same way whether its pane reads idle
+# or busy. The caller has already confirmed liveness through the busy verdict, so
+# this exception does not suppress undeclared wedges or alter the separate
+# non-busy classification. handle_paused_stale and handle_deliberate_stop_stale
+# keep the exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS.
 # A pane that declared nothing falls through to the shared wedge timer, which,
 # in a home that armed config/wedge-defer-parked-gate, applies the same rule to
 # the one wait a busy pane cannot declare: a validation gate of its own awaiting
@@ -1385,6 +1426,14 @@ handle_paused_stale() {  # <window> <task> <hash>
 busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
   local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 key statusf declared
   statusf="$STATE/$task.status"
+  if fm_control_deliberate_stop_present "$STATE" "$task"; then
+    # A deliberately stopped worker is parked whether its pane reads idle or busy:
+    # the same bounded recheck the idle path gives it, never the busy-turn wedge
+    # ladder. Handled in both postures, mirroring that path's branch before the
+    # afk gate.
+    handle_deliberate_stop_stale "$win" "$task" "$h"
+    return 0
+  fi
   if status_is_paused_or_captain_held "$(last_status_line "$statusf")"; then
     if afk_present; then
       # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
@@ -2662,6 +2711,14 @@ EOF
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
           esac
+        elif fm_control_deliberate_stop_present "$STATE" "$task"; then
+          # Firstmate stopped this worker on purpose, so its idle endpoint is a
+          # parked task: the declared-pause treatment (bounded recheck, never a
+          # wedge escalation), regardless of whether the last status line is
+          # terminal (`done:`) or non-terminal. Read before the afk gate so a
+          # parked worker stays parked in every supervision shape instead of
+          # depending on the away-mode daemon knowing this control-plane marker.
+          handle_deliberate_stop_stale "$w" "$task" "$h"
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before,
           # except that a captain-held pane is never handed over while the
@@ -2810,7 +2867,9 @@ EOF
         clear_write_tracking "$key"
       fi
       task=$(window_to_task "$w" "$STATE")
-      if ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
+      if [ "$busy_now" -ne 0 ] && fm_control_deliberate_stop_present "$STATE" "$task"; then
+        handle_deliberate_stop_stale "$w" "$task" "$h"
+      elif ! afk_present && status_is_paused_or_captain_held "$(last_status_line "$STATE/$task.status")" && [ "$busy_now" -ne 0 ]; then
         case "$(pause_state_class "$w" "$task")" in
           paused) handle_paused_stale "$w" "$task" "$h" ;;
           # Inconclusive, but the declared wait itself still stands, so only the

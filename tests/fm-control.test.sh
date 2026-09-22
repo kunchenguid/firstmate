@@ -634,6 +634,44 @@ test_already_stopped_exit_is_idempotent() {
   pass "fm-control exit: an already-stopped agent is idempotent success with no bytes sent"
 }
 
+test_exit_records_the_deliberate_stop_marker() {
+  local dir out rc marker gen
+  # A live agent: the ordinary stop path records the marker.
+  dir=$(new_case deliberate-stop-live)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit should succeed"$'\n'"$out"
+  assert_contains "$out" "stopped t1" "exit should report the stop"
+  marker="$dir/home/state/t1.deliberate-stop"
+  [ -f "$marker" ] || fail "exit did not record the deliberate-stop marker"
+  [ -n "$(cat "$marker")" ] || fail "the deliberate-stop marker is empty"
+
+  # An already-stopped agent is still a deliberate stop (idempotent success).
+  dir=$(new_case deliberate-stop-idempotent)
+  add_task "$dir" t1 claude
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$dir/home/state" t1)
+  alive_as "$dir" zsh
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exiting an already-stopped agent should succeed"$'\n'"$out"
+  assert_contains "$out" "already-stopped t1" "the outcome should say it was already stopped"
+  [ -f "$dir/home/state/t1.deliberate-stop" ] \
+    || fail "an already-stopped exit did not record the deliberate-stop marker"
+  [ ! -e "$dir/home/state/t1.busy-gen" ] && [ ! -e "$dir/home/state/t1.busy-state" ] \
+    || fail "an already-stopped exit did not retire busy generation $gen"
+
+  # A refused stop (unprovable endpoint) must NOT record the marker: the agent
+  # was not proven stopped, so it keeps escalating exactly as it always did.
+  dir=$(new_case deliberate-stop-refused)
+  add_task "$dir" t1 claude
+  : > "$dir/fake/windows"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "an unprovable endpoint must refuse"$'\n'"$out"
+  [ ! -e "$dir/home/state/t1.deliberate-stop" ] \
+    || fail "a refused stop recorded a deliberate-stop marker"
+  pass "fm-control exit: a verified stop records the deliberate-stop marker; a refused stop does not"
+}
+
 test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop() {
   local dir out rc
   dir=$(new_case gone)
@@ -908,6 +946,7 @@ test_verb_allowlist_is_closed
 test_resume_is_refused_with_its_reason
 test_relaunch_only_flags_are_rejected_on_other_verbs
 test_already_stopped_exit_is_idempotent
+test_exit_records_the_deliberate_stop_marker
 test_missing_tmux_endpoint_refuses_rather_than_claiming_a_stop
 test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses

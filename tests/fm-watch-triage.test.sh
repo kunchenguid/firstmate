@@ -1984,6 +1984,263 @@ test_terminal_stale_surfaced() {
   pass "a stale pane sitting on a terminal status is surfaced (queue + exit)"
 }
 
+# --- deliberate stop: a parked finished worker is absorbed, never wedge-escalated ---
+# Regression for firstmate issue #5004: a finished worker firstmate stopped on
+# purpose (its task record stays open) has no status-line declaration of the
+# wait, so the stale path kept re-surfacing it as a possible wedge. The durable
+# deliberate-stop marker (state/<id>.deliberate-stop) must give it the same
+# bounded recheck cadence a declared pause gets: absorbed on first sight, then
+# re-surfaced once past PAUSE_RESURFACE_SECS as a recheck, never a wedge.
+test_deliberately_stopped_finished_task_is_parked_not_stale() {
+  local dir state fakebin out drain_out capture_file window key pane_hash sig pid back
+  dir=$(make_case deliberate-stop-parked); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-parked"
+  printf 'finished, deliberately parked' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/parked.meta"
+  # A finished worker: its last status line is terminal (`done:`), not a wait.
+  printf 'done: investigation finished\n' > "$state/parked.status"
+  sig=$(seen_sig "$state/parked.status"); printf '%s' "$sig" > "$state/.seen-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, deliberately parked")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The stop path itself wrote this marker; the watcher only reads its presence.
+  printf '%s\n' "$(date +%s)" > "$state/parked.deliberate-stop"
+
+  # Phase A: a fresh deliberate stop is absorbed - no wake, no wedge timer.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "watcher exited for a deliberately parked finished task (should absorb): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a deliberately parked finished task printed a wake during absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "a deliberately parked finished task enqueued a wake during absorb"
+  [ "$(cat "$state/.stale-$key" 2>/dev/null || true)" = "$pane_hash" ] || fail "stale suppressor not advanced on deliberate-stop absorb"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a deliberate-stop absorb must not start the wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a deliberate-stop absorb must not arm the wedge escalation counter"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional deliberate-stop phase-A watcher stop"
+
+  # Phase B: age the marker past the cadence; the parked task re-surfaces once as
+  # a recheck - never a wedge - so a forgotten parked task cannot rot invisibly.
+  back=$(( $(date +%s) - 500 ))
+  set_mtime "$back" "$state/parked.deliberate-stop"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not re-surface a deliberately parked task past the threshold"
+  grep -F "stale: $window" "$out" >/dev/null || fail "re-surface did not print a stale wake"
+  grep -F "deliberately stopped" "$out" >/dev/null || fail "re-surface was not labeled a deliberate-stop recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a deliberately parked task was mislabeled a possible wedge"
+  [ -e "$state/.deliberate-stop-resurfaced-$key" ] || fail "the deliberate-stop re-surface throttle was not recorded"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a deliberate-stop re-surface must not use the wedge timer"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the deliberate-stop re-surface failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "deliberate-stop re-surface was not queued"
+  pass "a deliberately stopped finished task is parked on the bounded recheck cadence, never wedge-escalated"
+}
+
+# --- deliberate stop: a re-stop absorbs on first sight despite a stale throttle ---
+# Regression: the deliberate-stop absorb passed the marker's stop epoch as the
+# resurface "scope", and resurface_absorbed treats a scope change as an
+# unconditional re-surface. A task re-stopped after an earlier stop had recorded
+# this window's throttle therefore woke on first sight ("deliberately stopped 0s
+# ago") instead of absorbing. The marker's own mtime already opens each stop's
+# window, so the scope is gone and the first sight absorbs again, while the
+# bounded recheck still fires once the marker passes the cadence.
+test_restopped_deliberate_task_absorbs_before_the_recheck_cadence() {
+  local dir state fakebin out capture_file window key pane_hash sig pid now throttle
+  dir=$(make_case deliberate-stop-restop); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-restop"
+  printf 'finished, deliberately parked twice' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/restop.meta"
+  printf 'done: investigation finished\n' > "$state/restop.status"
+  sig=$(seen_sig "$state/restop.status"); printf '%s' "$sig" > "$state/.seen-restop_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, deliberately parked twice")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A prior stop recorded this window's re-surface throttle; the worker was then
+  # relaunched and stopped again, rewriting the marker with a fresh epoch.
+  now=$(date +%s)
+  throttle="$state/.deliberate-stop-resurfaced-$key"
+  printf 'deliberate-stop:%s' "$(( now - 1000 ))" > "$throttle"
+  set_mtime "$(( now - 1000 ))" "$throttle"
+  printf '%s\n' "$now" > "$state/restop.deliberate-stop"
+
+  # The fresh re-stop must be absorbed on first sight: no wake, no wedge timer.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_poll_cycle "$state" "$pid"; then
+    reap "$pid"; fail "a re-stopped task woke on first sight off the previous stop's throttle: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a re-stopped task printed a wake during its first-sight absorb"
+  [ ! -s "$state/.wake-queue" ] || fail "a re-stopped task enqueued a wake during its first-sight absorb"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a re-stop absorb must not start the wedge timer"
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional re-stop absorb watcher stop"
+
+  # Past the cadence the parked task still re-surfaces exactly once, so the scope
+  # removal did not silence the bounded recheck.
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/restop.deliberate-stop"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a re-stopped task did not re-surface past the recheck cadence"; }
+  grep -F "deliberately stopped" "$out" >/dev/null || fail "the re-stop recheck was not labeled a deliberate-stop recheck"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a re-stopped task was mislabeled a possible wedge"
+  pass "a re-stopped deliberate task absorbs on first sight, then still re-surfaces on the bounded cadence"
+}
+
+# --- clearing the deliberate-stop marker returns the task to normal supervision ---
+# Relaunch and cleanup clear the marker (fm-spawn/fm-teardown), and the next stale
+# sighting of the now-marker-less task must take the ordinary path again: a
+# finished worker whose last line is `done:` surfaces as a terminal stale exactly
+# as it did before the marker existed.
+test_deliberate_stop_marker_cleared_resumes_terminal_stale_surfacing() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case deliberate-stop-cleared); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-unparked"
+  printf 'finished, marker cleared' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/unparked.meta"
+  printf 'done: investigation finished\n' > "$state/unparked.status"
+  sig=$(seen_sig "$state/unparked.status"); printf '%s' "$sig" > "$state/.seen-unparked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "finished, marker cleared")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The marker has been cleared by the relaunch/cleanup path; no marker exists.
+  [ ! -e "$state/unparked.deliberate-stop" ] || fail "fixture must start without the deliberate-stop marker"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "watcher did not surface a marker-less finished task as terminal stale"
+  grep -Fx "stale: $window" "$out" >/dev/null || fail "watcher did not print the terminal stale wake after the marker was cleared"
+  pass "clearing the deliberate-stop marker returns the finished task to ordinary terminal-stale supervision"
+}
+
+# --- deliberate stop + busy pane: the busy-turn bound must park, not wedge ---
+# The deliberate-stop marker was honored on the idle stale path but not on the
+# busy-turn path: a stopped worker whose pane still rendered a recognized busy
+# signature, with no completed turn past BUSY_TURN_MAX_SECS, went to
+# wedge_timer_check and escalated as a possible wedge - contradicting the
+# daemon's "parked whether idle or busy" contract. This fixture pins that the
+# busy-turn bound routes it to the same bounded recheck the idle path uses.
+test_busy_deliberate_stop_is_rechecked_not_wedge_escalated() {
+  local dir state fakebin out capture_file window key sig pid
+  dir=$(make_case busy-deliberate-stop); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-parked-busy"
+  printf 'Working... (7200.4s)' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/parked-busy.meta"
+  record_pi_busy "$state" parked-busy
+  printf 'done: investigation finished\n' > "$state/parked-busy.status"
+  sig=$(seen_sig "$state/parked-busy.status"); printf '%s' "$sig" > "$state/.seen-parked-busy_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # No completed turn: age the spawn record itself, past the busy-turn bound.
+  touch -t 200001010000 "$state/parked-busy.meta"
+  printf '%s\n' "$(date +%s)" > "$state/parked-busy.deliberate-stop"
+
+  # Phase A: past the bound, the deliberately stopped busy pane is absorbed on
+  # the long cadence and never starts a wedge.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=1 FM_PAUSE_RESURFACE_SECS=999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a deliberately stopped busy pane was escalated: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a deliberately stopped busy pane printed a wake reason: $(cat "$out")"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a deliberately stopped busy pane started the wedge timer"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a deliberately stopped busy pane incremented the escalation counter"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional busy deliberate-stop phase-A stop"
+
+  # Phase B: age the stop past the cadence; the parked task re-surfaces once as a
+  # deliberate-stop recheck - never a possible wedge.
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/parked-busy.deliberate-stop"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_BUSY_TURN_MAX_SECS=1 FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=240 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a deliberately stopped busy pane did not re-surface past the cadence"; }
+  grep -F "deliberately stopped" "$out" >/dev/null || fail "the busy-turn recheck was not labeled a deliberate-stop recheck: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a deliberately stopped busy pane was mislabeled a possible wedge: $(cat "$out")"
+  [ -e "$state/.deliberate-stop-resurfaced-$key" ] || fail "the deliberate-stop re-surface throttle was not recorded"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a deliberately stopped busy pane used the wedge timer"
+  pass "a deliberately stopped busy pane is parked on the bounded recheck cadence, never wedge-escalated"
+}
+
+# --- deliberate stop: a churning idle pane still gets the bounded recheck ---
+# The deliberate-stop marker was honored only on the stable-hash idle branch. An
+# idle parked pane whose display keeps ticking (a clock, a token counter) changes
+# hash every poll, so it never reaches that branch; the new-hash path must still
+# keep its bounded recheck alive, or the parked task rots invisibly in both
+# postures.
+test_churning_deliberate_stop_still_rechecked() {
+  local dir state fakebin out capture_file window key sig pid churn_pid i tmp
+  dir=$(make_case deliberate-stop-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-churn-parked"
+  printf 'finished, deliberately parked' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/churn-parked.meta"
+  printf 'done: investigation finished\n' > "$state/churn-parked.status"
+  sig=$(seen_sig "$state/churn-parked.status"); printf '%s' "$sig" > "$state/.seen-churn-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The previous poll recorded DIFFERENT pane content, and a background writer
+  # keeps rewriting it, so every poll is a new hash and the pane can never
+  # become a stable stale pane.
+  printf '%s' "$(hash_text 'an earlier tick')" > "$state/.hash-$key"
+  printf '0\n' > "$state/.count-$key"
+  # Age the stop past the cadence so the recheck must fire on this very poll.
+  printf '%s\n' "$(date +%s)" > "$state/churn-parked.deliberate-stop"
+  set_mtime "$(( $(date +%s) - 500 ))" "$state/churn-parked.deliberate-stop"
+  tmp="$capture_file.tmp"
+  (
+    i=0
+    while :; do
+      i=$((i + 1))
+      printf 'finished, footer tick %s' "$i" > "$tmp"
+      mv -f "$tmp" "$capture_file"
+      sleep 0.1
+    done
+  ) &
+  churn_pid=$!
+  sleep 0.2
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_for_exit "$pid" 100; then
+    reap "$pid"; kill "$churn_pid" 2>/dev/null || true; wait "$churn_pid" 2>/dev/null || true
+    fail "a churning deliberately parked task was never rechecked (it rotted invisibly): $(cat "$out")"
+  fi
+  kill "$churn_pid" 2>/dev/null || true
+  wait "$churn_pid" 2>/dev/null || true
+  grep -F "deliberately stopped" "$out" >/dev/null || fail "the churning-pane recheck was not labeled a deliberate-stop recheck: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a churning deliberately parked task was mislabeled a possible wedge: $(cat "$out")"
+  [ -e "$state/.deliberate-stop-resurfaced-$key" ] || fail "the deliberate-stop re-surface throttle was not recorded for the churning pane"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a churning deliberate-stop recheck must not use the wedge timer"
+  pass "a churning deliberately parked task still gets the bounded recheck, never a wedge"
+}
+
 # --- stale pane, STALE terminal status overridden by an active run: absorbed ---
 # Regression for the 2026-07 herdr false-surface incidents: a crew's own status
 # log gets no new entry once firstmate hands it to a no-mistakes validation
@@ -5999,6 +6256,11 @@ test_routine_appends_after_a_classified_event_stay_absorbed
 test_unreadable_status_reports_once_per_file_state
 test_permission_recovery_surfaces_preserved_status
 test_terminal_stale_surfaced
+test_deliberately_stopped_finished_task_is_parked_not_stale
+test_restopped_deliberate_task_absorbs_before_the_recheck_cadence
+test_deliberate_stop_marker_cleared_resumes_terminal_stale_surfacing
+test_busy_deliberate_stop_is_rechecked_not_wedge_escalated
+test_churning_deliberate_stop_still_rechecked
 test_stale_terminal_status_overridden_by_active_run
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold

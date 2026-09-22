@@ -23,7 +23,7 @@ The failure repeated across harnesses and homes, and the workaround (remember to
   `bin/fm-send.sh`'s `--key` path reads the composer-clear table from this owner too, rather than keeping a second copy of it.
 - **Per-backend capability**: which named keys a runtime backend can deliver, and whether it has a recovery-grade agent-state classifier able to prove an agent stopped.
 
-The one thing this file owns that is not a pure table is the [endpoint-absence proof](#reclaiming-a-task-whose-endpoint-is-gone) below, which does run backend reads; sourcing the file is still free.
+The two things this file owns that are not pure tables are the [endpoint-absence proof](#reclaiming-a-task-whose-endpoint-is-gone) below, which does run backend reads, and the `fm_control_deliberate_stop_*` helpers, which read or write exactly one per-task state file (`state/<id>.deliberate-stop`); sourcing the file is still free.
 
 A recorded `harness=` is not always an exact adapter name: a task launched from a raw command records that command's basename instead.
 `fm_control_harness_family` is the one place that prefix rule is stated, and an unrecognized value resolves to no adapter rather than being guessed into one.
@@ -37,6 +37,7 @@ A recorded `harness=` is not always an exact adapter name: a task launched from 
 | `relaunch` | Replace the running agent with a new one in the same worktree - and the same endpoint whenever that endpoint still exists - on the exact recorded adapter or an explicitly chosen harness, model, and effort. | The new agent is alive on the endpoint the task's record now names, and that record names the harness that is actually running. |
 
 An exit that delivers lifecycle input but cannot prove the agent stopped fails with `exit=unconfirmed`, reports the observed agent state and any interrupt cancellation claim, and never claims that nothing changed.
+Every verified `exit` - including the idempotent `already-stopped` outcome - records the durable deliberate-stop marker at `state/<id>.deliberate-stop`, whose presence tells the watcher and the away-mode daemon to park the stopped task on the declared-pause recheck cadence instead of escalating its idle or busy endpoint as a possible wedge; a refused or unconfirmed stop records nothing, and a successful `relaunch` or teardown clears it.
 Interrupt never rewrites busy state as proof of its own success.
 Claude exposes no lifecycle acknowledgement for a manual interrupt, so delivery succeeds with `cancel=unconfirmed` and its adapter-owned busy state remains as observed.
 muse's session log records `terminal=cancelled` for the interrupted run, so the control plane reports `cancel=confirmed` only after observing that exact acknowledgement.
@@ -134,6 +135,7 @@ The worktree and the task's records are unaffected either way.
 
 - A refusal **before** the agent is stopped leaves the durable record and the instructions byte-identical.
 - A launch failure **after** the agent is stopped restores the prior durable record, keeps the progress note so a later recovery still has it, marks the journal `failed:launching`, and reports plainly that no agent is running and where the work is preserved.
+  The deliberate-stop marker the `exit` verb recorded remains, so the task stays parked rather than reviving the stale/wedge ladder until a later relaunch clears it.
 - If the launch owner already published the new record but no running agent can be confirmed, the new record is kept: the task is recorded on the new harness with no agent confirmed, which is exactly what recovery reconciles.
   Rewriting it back to the old harness would be a second, worse inaccuracy.
 

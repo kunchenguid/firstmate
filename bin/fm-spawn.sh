@@ -4914,6 +4914,16 @@ fi
 # This is the commit point: all endpoint and harness delivery that can reject
 # the spawn has succeeded. Re-read and transition while holding the same
 # per-task lock as metadata publication, then and only then report success.
+if [ "$RELAUNCH" -eq 1 ]; then
+  # All launch delivery and the relaunch record publication now succeeded, so
+  # the replacement supersedes the deliberately stopped incarnation. Clear its
+  # parked-task marker only at this commit point: an earlier launch failure
+  # leaves the stopped task parked rather than reviving the stale/wedge ladder.
+  fm_control_deliberate_stop_clear "$STATE_REAL" "$ID" || {
+    echo "error: replacement for $ID was launched, but its deliberate-stop marker could not be cleared" >&2
+    exit 1
+  }
+fi
 if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
   fm_lock_acquire_wait "$SPAWN_META_LOCK"

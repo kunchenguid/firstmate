@@ -470,15 +470,32 @@ retire_busy_incarnation() {
   fi
 }
 
+# finish_stop <outcome>: record the durable deliberate-stop marker and print the
+# stop outcome. The marker is the whole point of the exit verb's "deliberate"
+# guarantee: it lets the watcher treat this parked task as a deliberate stop (a
+# long bounded recheck, never a stale or wedge escalation) instead of a worker
+# that went quiet on its own. Written only here, on the verified success paths,
+# so a refused or failed stop never records one.
+finish_stop() {  # <outcome>
+  # A verified stop ends this busy incarnation even if it was already dead
+  # before the control command arrived.
+  retire_busy_incarnation
+  fm_control_deliberate_stop_record "$STATE" "$ID" \
+    || die "could not record task $ID's deliberate stop"
+  printf '%s' "$1"
+  return 0
+}
+
 # do_exit: stop the running agent, preserving endpoint and worktree. Prints
-# `already-stopped`, `endpoint-gone`, or `stopped`.
+# `already-stopped`, `endpoint-gone`, or `stopped`, and leaves the durable
+# deliberate-stop marker behind on every verified stop (bin/fm-control-lib.sh).
 do_exit() {
   local state cmd verdict composer_state cancel absence interrupt_result=not-needed
   require_state_verified_backend exit
   state=$(agent_state)
   case "$state" in
     dead)
-      printf 'already-stopped'
+      finish_stop already-stopped
       return 0
       ;;
     alive) ;;
@@ -496,7 +513,7 @@ do_exit() {
           # verb normally preserves did not survive. The worktree and every
           # uncommitted change are untouched, and `relaunch` re-creates the
           # endpoint from here.
-          printf 'endpoint-gone'
+          finish_stop endpoint-gone
           return 0
           ;;
         dead)
@@ -504,7 +521,7 @@ do_exit() {
           # no agent - a herdr pane whose session server was merely stopped is
           # the common case. Nothing is gone, so this is the ordinary
           # already-stopped outcome.
-          printf 'already-stopped'
+          finish_stop already-stopped
           return 0
           ;;
         alive)
@@ -525,8 +542,7 @@ do_exit() {
       state=$(agent_state)
       case "$state" in
         dead)
-          retire_busy_incarnation
-          printf 'stopped'
+          finish_stop stopped
           return 0
           ;;
         alive) interrupt_result="delivered verified=agent-alive cancel=$cancel" ;;
@@ -560,10 +576,7 @@ do_exit() {
   state=$(wait_agent_state "$EXIT_WAIT" dead) || {
     die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
   }
-  # The incarnation is over: retire its busy wiring so no stale record or
-  # orphaned generation survives the agent that produced it.
-  retire_busy_incarnation
-  printf 'stopped'
+  finish_stop stopped
 }
 
 # --- transactional relaunch -------------------------------------------------
