@@ -407,11 +407,6 @@
 #   Local spawns never pass it and resolve their own carrier exactly as before.
 set -eu
 
-# Repository identity in this entrypoint always comes from explicit -C paths.
-# Ambient Git redirection variables would otherwise make those paths advisory,
-# including the exact candidate verification immediately before launch.
-unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
@@ -747,6 +742,9 @@ if [ "$EXPECTED_HEAD_SET" -eq 1 ]; then
     exit 1
   }
   EXPECTED_HEAD=$(printf '%s' "$EXPECTED_HEAD" | tr 'A-F' 'a-f')
+  # Exact-coordinate repository identity always comes from explicit -C paths.
+  # Ambient Git redirection variables would otherwise make those paths advisory.
+  unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
 fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
@@ -3046,7 +3044,7 @@ freshen_spawn_worktree_base() { # <worktree> [<expected-head>]
     return 0
   fi
   if [ -n "$requested" ]; then
-    if ! git -C "$worktree" fetch --quiet --prune origin; then
+    if ! git -C "$worktree" fetch --quiet origin; then
       echo "error: could not fetch origin while resolving expected head '$requested' for pooled worktree '$worktree'; refusing to launch" >&2
       return 1
     fi
@@ -4939,26 +4937,32 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   exit 1
 fi
 sleep 0.3
-if [ -n "$EXPECTED_HEAD" ]; then
-  expected_status=$(git -C "$WT" -c core.quotePath=false status --porcelain) || {
-    echo "error: could not re-inspect expected-head worktree '$WT' immediately before worker launch" >&2
-    exit 1
-  }
-  [ -z "$expected_status" ] || {
-    echo "error: expected-head worktree '$WT' changed after convergence; refusing to launch from a dirty candidate" >&2
-    exit 1
-  }
-  expected_actual=$(git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null || true)
-  [ "$expected_actual" = "$EXPECTED_HEAD" ] || {
-    echo "error: expected-head worktree '$WT' moved to '${expected_actual:-unknown}' after convergence, not '$EXPECTED_HEAD'; refusing to launch" >&2
-    exit 1
-  }
-fi
 spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
+fi
+if [ -n "$EXPECTED_HEAD" ]; then
+  expected_status=$(git -C "$WT" -c core.quotePath=false status --porcelain) || {
+    [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
+    spawn_send_key "$T" C-c >/dev/null 2>&1 || true
+    echo "error: could not re-inspect expected-head worktree '$WT' immediately before worker launch" >&2
+    exit 1
+  }
+  [ -z "$expected_status" ] || {
+    [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
+    spawn_send_key "$T" C-c >/dev/null 2>&1 || true
+    echo "error: expected-head worktree '$WT' changed after convergence; refusing to launch from a dirty candidate" >&2
+    exit 1
+  }
+  expected_actual=$(git -C "$WT" rev-parse --verify --quiet HEAD 2>/dev/null || true)
+  [ "$expected_actual" = "$EXPECTED_HEAD" ] || {
+    [ "${HERDR_PROJECTED:-0}" -ne 1 ] || HERDR_PROJECTION_ABORT_CLEANUP=1
+    spawn_send_key "$T" C-c >/dev/null 2>&1 || true
+    echo "error: expected-head worktree '$WT' moved to '${expected_actual:-unknown}' after convergence, not '$EXPECTED_HEAD'; refusing to launch" >&2
+    exit 1
+  }
 fi
 spawn_send_key "$T" Enter
 if [ "$HARNESS" = kimi ]; then

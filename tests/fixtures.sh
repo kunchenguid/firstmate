@@ -98,6 +98,8 @@ fm_test_fake_gh_axi() {
 # is set, each send-keys TEXT-LINE payload (the pre-launch pane exports, which
 # carry no -l) is appended there instead, one per line in send order. Optional
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
+# FM_FAKE_PENDING_LAUNCH models an unsubmitted staged launch; Enter records a
+# start in FM_FAKE_WORKER_START_LOG, while C-c clears it without starting.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
@@ -120,6 +122,24 @@ case "${1:-}" in
     ;;
   has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
   send-keys)
+    if [ -n "${FM_FAKE_PENDING_LAUNCH:-}" ]; then
+      prev=
+      for a in "$@"; do
+        if [ "$prev" = "-l" ]; then
+          case "$a" in ". '"*"'") : > "$FM_FAKE_PENDING_LAUNCH" ;; esac
+        fi
+        case "$a" in
+          Enter|C-m)
+            if [ -e "$FM_FAKE_PENDING_LAUNCH" ]; then
+              printf 'started\n' >> "${FM_FAKE_WORKER_START_LOG:?}"
+              rm -f "$FM_FAKE_PENDING_LAUNCH"
+            fi
+            ;;
+          C-c) rm -f "$FM_FAKE_PENDING_LAUNCH" ;;
+        esac
+        prev=$a
+      done
+    fi
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do

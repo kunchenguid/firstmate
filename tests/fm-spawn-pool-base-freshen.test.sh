@@ -220,6 +220,7 @@ test_expected_head_launches_exact_origin_commit() {
   id='pool-expected-head-r1'
   rec=$(make_case expected-head "$id")
   read_case_record "$rec"
+  git -C "$POOL_DIR" update-ref refs/remotes/origin/stale "$INITIAL_SHA"
 
   out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
   status=$?
@@ -230,6 +231,8 @@ test_expected_head_launches_exact_origin_commit() {
     || fail "fixture did not distinguish the requested candidate from the current default tip"
   assert_grep "expected_head=$INITIAL_SHA" "$HOME_DIR/state/$id.meta" \
     "spawn did not bind the exact candidate in task metadata"
+  git -C "$POOL_DIR" show-ref --verify --quiet refs/remotes/origin/stale \
+    || fail "expected-head authorization pruned an unrelated stale remote-tracking ref"
   pass "an expected-head spawn launches and records the exact origin-backed commit instead of the default tip"
 }
 
@@ -282,7 +285,17 @@ test_expected_head_ignores_ambient_git_redirection() {
     || fail "ambient Git redirection displaced exact candidate convergence"
   assert_grep "expected_head=$INITIAL_SHA" "$HOME_DIR/state/$id.meta" \
     "ambient Git redirection displaced the metadata binding"
-  pass "expected-head verification ignores ambient Git repository redirection"
+
+  id='pool-default-git-env-r1'
+  fm_test_spawn_brief "$HOME_DIR" "$id"
+  fm_test_fake_sleep_noop "$FAKEBIN_DIR"
+  out=$(GIT_DIR="$attacker/.git" GIT_WORK_TREE="$attacker" \
+    run_spawn "$id" --mode no-mistakes --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "ordinary spawn stopped honoring ambient Git redirection"
+  assert_contains "$out" "did not enter an isolated worktree" \
+    "ordinary spawn did not preserve its ambient Git behavior"
+  pass "only expected-head verification ignores ambient Git repository redirection"
 }
 
 test_expected_head_refuses_unsupported_lifecycle_shapes() {
@@ -312,30 +325,45 @@ test_expected_head_refuses_unsupported_lifecycle_shapes() {
 }
 
 test_expected_head_is_reverified_immediately_before_launch() {
-  local rec id out status real_sleep marker
-  id='pool-expected-race-r1'
-  rec=$(make_case expected-race "$id")
-  read_case_record "$rec"
-  marker="$CASE_DIR/moved-after-publication"
-  real_sleep=$(command -v sleep)
-  cat > "$FAKEBIN_DIR/sleep" <<EOF
+  local rec id out status real_sleep marker mutation launch_log pending started
+  for mutation in head dirty; do
+    id="pool-expected-race-$mutation-r2"
+    rec=$(make_case "expected-race-$mutation" "$id")
+    read_case_record "$rec"
+    marker="$CASE_DIR/mutated-after-launch-staging"
+    launch_log="$CASE_DIR/launch.log"
+    pending="$CASE_DIR/pending-launch"
+    started="$CASE_DIR/worker-started"
+    real_sleep=$(command -v sleep)
+    cat > "$FAKEBIN_DIR/sleep" <<EOF
 #!/bin/sh
-if [ -f '$HOME_DIR/state/$id.meta' ] && [ ! -e '$marker' ]; then
-  git -C '$POOL_DIR' reset --hard 'origin/main' >/dev/null
+if [ -e '$pending' ] && [ ! -e '$marker' ]; then
+  if [ '$mutation' = head ]; then
+    git -C '$POOL_DIR' reset --hard 'origin/main' >/dev/null
+  else
+    printf 'late mutation\n' > '$POOL_DIR/late-untracked.txt'
+  fi
   : > '$marker'
 fi
 exec '$real_sleep' "\$@"
 EOF
-  chmod +x "$FAKEBIN_DIR/sleep"
+    chmod +x "$FAKEBIN_DIR/sleep"
 
-  out=$(run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
-  status=$?
-  [ "$status" -ne 0 ] || fail "spawn launched after the exact candidate moved"
-  [ -e "$marker" ] || fail "fixture did not move HEAD after metadata publication"
-  assert_contains "$out" "moved to" \
-    "spawn did not report its immediate pre-launch expected-head mismatch"
-  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "pre-launch coordinate refusal left published task metadata"
-  pass "an expected-head spawn rechecks the candidate immediately before worker launch"
+    out=$(FM_FAKE_LAUNCH_LOG="$launch_log" FM_FAKE_PENDING_LAUNCH="$pending" \
+      FM_FAKE_WORKER_START_LOG="$started" \
+      run_spawn "$id" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
+    status=$?
+    [ "$status" -ne 0 ] || fail "spawn launched after the final-window $mutation mutation"
+    [ -e "$marker" ] || fail "fixture did not apply the $mutation mutation after launch text settled"
+    [ ! -e "$pending" ] || fail "$mutation refusal left the staged launch text in the pane"
+    [ ! -e "$started" ] || fail "$mutation refusal submitted the staged launch and started a worker"
+    case "$mutation" in
+      head) assert_contains "$out" "moved to" "spawn did not report the final-window HEAD mismatch" ;;
+      dirty) assert_contains "$out" "dirty candidate" "spawn did not report the final-window dirty tree" ;;
+    esac
+    [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "$mutation refusal left published task metadata"
+  done
+  pass "expected-head launch rechecks HEAD and cleanliness after text settles without starting a worker"
 }
 
 make_originless_case() {  # <name> <id>
