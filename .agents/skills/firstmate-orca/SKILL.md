@@ -24,7 +24,6 @@ This skill owns tasks that Firstmate records and supervises through the Orca run
 Use the `bin/fm-*` helpers for those tasks.
 The `orca-cli` skill owns direct Orca worktree, terminal, repository, handoff, and embedded-browser operations outside the Firstmate lifecycle.
 If a direct Orca command is necessary, load `orca-cli` and follow the version-matched guide from the selected Orca binary.
-Never use remembered Orca flags.
 
 ## Preflight
 
@@ -49,7 +48,6 @@ After spawn, check the task with firstmate helpers:
 - `bin/fm-peek.sh fm-<id>` for launch failures, trust dialogs, or first output.
 - `state/<id>.meta` for `backend=orca`, `terminal=`, `orca_worktree_id=`, and `worktree=`.
 - `bin/fm-crew-state.sh <id>` when the current run state matters.
-- If tasks are active, follow the current session's emitted supervision protocol.
 - Start `bin/fm-watch.sh` directly only when the emitted supervision protocol explicitly requires it.
 
 Do not manually create the Orca worktree or terminal for a normal firstmate task.
