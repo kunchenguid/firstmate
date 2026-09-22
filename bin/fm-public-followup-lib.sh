@@ -34,8 +34,9 @@
 # public-followup commands):
 #   registry/<obligation-id>   registration record: the bounded private binding
 #                              (obligation, relation, work ref and canonical
-#                              secondmate path, generation, the required
-#                              deliverable keys, platform, request id)
+#                              secondmate path, generation, the expected final
+#                              and its required deliverable keys, platform,
+#                              request id)
 #                              plus the loop fields that survive delivery (state,
 #                              delivered_at, followup_expires_at,
 #                              request_context_b64). Presence means the public
@@ -229,10 +230,13 @@ fm_pf_bound_bytes() {
 # tasks-axi is the authority on deliverables, but it exposes no validation-only
 # command, and its refusal of a bad value names none of it. These helpers mirror
 # the rules its work-event consumer applies - EXPECTED_DELIVERABLES,
-# failureDeliverablesAreSafe, REPORT_PATH_RE, COMMIT_SHA_RE, and SAFE_CODE_RE in
-# tasks-axi's public-followup.js, and isPrUrl in tasks-axi's pr-url.js, which is
-# the seam public-followup.js classifies pr_url through - so a bad value is
-# refused where it is written and a refusal can say which value was wrong.
+# eventMatchesExpected, failureDeliverablesAreSafe, REPORT_PATH_RE,
+# COMMIT_SHA_RE, and SAFE_CODE_RE in tasks-axi's public-followup.js, and isPrUrl
+# in tasks-axi's pr-url.js, which is the seam public-followup.js classifies
+# pr_url through - so a bad value is refused where it is written and a refusal
+# can say which value was wrong. Every rule here is keyed on the promise's
+# expected final and the event's outcome together, because that is the pair
+# tasks-axi keys them on.
 # tasks-axi still re-validates at consume; tests/fm-public-followup.test.sh pins
 # these rules against the real consumer, so re-pin both together when tasks-axi
 # changes them.
@@ -249,16 +253,40 @@ fm_pf_deliverable_format() {
   esac
 }
 
-# fm_pf_outcome_deliverable_keys <outcome>: the deliverable keys a work event
-# with <outcome> may carry, space-separated (empty for none). Exit 1 for an
-# outcome tasks-axi does not accept, which it refuses on its own.
-fm_pf_outcome_deliverable_keys() {
+# fm_pf_expected_outcome <expected-final>: the one outcome_type that satisfies
+# that expected final (eventMatchesExpected in tasks-axi's public-followup.js).
+# A promise is also answerable with 'failed', which reports that it could not be
+# kept as promised rather than satisfying it. Exit 1 for an unknown type.
+fm_pf_expected_outcome() {
   case "$1" in
+    failure-outcome) printf 'failed\n' ;;
+    explicit-answer) printf 'local-main\n' ;;
+    pr-merged|report-ready|local-main) printf '%s\n' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+# fm_pf_deliverable_keys <expected-final> <outcome>: the deliverable keys
+# tasks-axi lets an event with <outcome> carry against a promise whose expected
+# final is <expected-final>, space-separated (empty for none). That is
+# EXPECTED_DELIVERABLES[expected] for the outcome the promise expects, the
+# error_code of failureDeliverablesAreSafe for a failure reported against any
+# other promise, and nothing for superseded. With no <expected-final> - a staged
+# emit cannot read one - the outcome stands in for it, which is the same set
+# whenever the event is the one the promise expects. Exit 1 when neither names a
+# final tasks-axi defines, which it refuses on its own.
+fm_pf_deliverable_keys() {
+  local expected=${1:-$2}
+  case "$2" in
+    superseded) printf '\n'; return 0 ;;
+    failed) [ "$expected" = failure-outcome ] || { printf 'error_code\n'; return 0; } ;;
+  esac
+  case "$expected" in
     pr-merged) printf 'pr_url\n' ;;
     report-ready) printf 'report_path\n' ;;
     local-main) printf 'commit_sha\n' ;;
-    failed) printf 'error_code\n' ;;
-    superseded) printf '\n' ;;
+    failure-outcome) printf 'error_code\n' ;;
+    explicit-answer) printf '\n' ;;
     *) return 1 ;;
   esac
 }
@@ -291,19 +319,21 @@ fm_pf_pr_url_valid() {
   fi
 }
 
-# fm_pf_deliverable_problem <outcome> <key> <value>: silent exit 0 when tasks-axi
-# would accept <key>=<value> on a work event with <outcome>; otherwise print one
-# line naming the key, the bad value, and what was expected, and exit 1.
+# fm_pf_deliverable_problem <expected-final> <outcome> <key> <value>: silent exit
+# 0 when tasks-axi would accept <key>=<value> on a work event with <outcome>
+# against a promise whose expected final is <expected-final> (empty when the
+# caller cannot read one); otherwise print one line naming the key, the bad
+# value, and what was expected, and exit 1.
 fm_pf_deliverable_problem() {
-  local outcome=$1 key=$2 value=$3 allowed format re=''
-  if allowed=$(fm_pf_outcome_deliverable_keys "$outcome"); then
+  local expected=$1 outcome=$2 key=$3 value=$4 allowed format re=''
+  if allowed=$(fm_pf_deliverable_keys "$expected" "$outcome"); then
     case " $allowed " in
       *" $key "*) ;;
       *)
         if [ -n "$allowed" ]; then
-          printf "deliverable '%s' is not one a %s outcome carries; expected %s\n" "$key" "$outcome" "$allowed"
+          printf "deliverable '%s' is not one this promise accepts on a %s outcome; expected %s\n" "$key" "$outcome" "$allowed"
         else
-          printf "deliverable '%s' is not allowed: a %s outcome carries no deliverables\n" "$key" "$outcome"
+          printf "deliverable '%s' is not allowed: this promise accepts no deliverable on a %s outcome\n" "$key" "$outcome"
         fi
         return 1
         ;;

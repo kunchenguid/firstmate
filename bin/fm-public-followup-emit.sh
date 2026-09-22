@@ -41,17 +41,18 @@
 #                          "main" or "secondmate:<stable-id>".
 #   --work-id <id>         This worker's exact task id, exactly as bound.
 #   --generation <n>       The bound relation generation (integer >= 1).
-#   --outcome <type>       Typed outcome. tasks-axi owns the vocabulary and
-#                          refuses anything it does not accept; this script only
-#                          checks the token is a safe slug.
+#   --outcome <type>       Typed outcome. With --home, an outcome that cannot
+#                          satisfy the registered expected final is refused here,
+#                          and so is 'superseded', which tasks-axi takes only
+#                          with a successor this result cannot carry. tasks-axi
+#                          still owns the vocabulary.
 #   --deliverable k=v      Repeatable safe deliverable (for example
-#                          pr_url=https://...). tasks-axi owns which keys a given
-#                          expected-final type permits; a key the outcome never
-#                          carries, or a value in a format tasks-axi refuses (such
-#                          as an absolute report_path), is refused here with the
-#                          key, the value, and the expected format, in both
-#                          destinations. fm-public-followup-lib.sh owns those
-#                          mirrored rules.
+#                          pr_url=https://...). A key this promise does not carry
+#                          on this outcome, or a value in a format tasks-axi
+#                          refuses (such as an absolute report_path), is refused
+#                          here with the key, the value, and the expected format,
+#                          in both destinations. fm-public-followup-lib.sh owns
+#                          those mirrored rules.
 #   --require-deliverable <key>
 #                          Repeatable key this event MUST carry, so an event
 #                          missing a required value is refused here instead of
@@ -60,9 +61,10 @@
 #                          no registration is readable; `fm-public-followup.sh
 #                          brief` prints one per required key. With --home the
 #                          registration's own required keys are enforced as well,
-#                          whether or not the flag is passed. Only a failed or
-#                          superseded outcome is exempt; no other outcome type
-#                          excuses a missing required value.
+#                          whether or not the flag is passed. A failed outcome is
+#                          exempt only from a key it could not carry anyway: a
+#                          promise whose expected final IS the failure still
+#                          needs its error_code.
 #   --outcome-text ...     Public-safe outcome sentence, from an argument, a
 #                          file, or stdin ("-"). Collapsed to one line; the
 #                          event builder bounds it by codepoint, so control
@@ -197,6 +199,12 @@ case "$GENERATION" in
 esac
 [ "$GENERATION" -ge 1 ] || die "generation must be >= 1, got '$GENERATION'"
 
+# tasks-axi accepts a superseded event only with a successor, and a typed
+# terminal result carries none, so such an event could only ever be quarantined.
+case "$OUTCOME" in
+  superseded) die "a superseded outcome cannot be reported this way: tasks-axi requires a successor obligation for it, which a typed terminal result does not carry" ;;
+esac
+
 i=0
 while [ "$i" -lt "${#DELIVERABLE_KEYS[@]}" ]; do
   key=${DELIVERABLE_KEYS[$i]}
@@ -208,10 +216,6 @@ while [ "$i" -lt "${#DELIVERABLE_KEYS[@]}" ]; do
   case "${DELIVERABLE_VALUES[$i]}" in
     *[[:cntrl:]]*) die "deliverable '$key' must be single-line text with no control characters" ;;
   esac
-  # A value tasks-axi would refuse is refused here, where the worker can still
-  # correct it, instead of travelling to the owning home to be quarantined.
-  problem=$(fm_pf_deliverable_problem "$OUTCOME" "$key" "${DELIVERABLE_VALUES[$i]}") \
-    || die "$problem"
   i=$((i + 1))
 done
 
@@ -276,16 +280,13 @@ else
   command -v jq >/dev/null 2>&1 || die "jq is required to build a typed terminal event" 1
 fi
 
-# An event missing a key its obligation requires is as dead on arrival as one
-# carrying a bad value, so it is refused in the same place. The owning home's
-# registration records the required keys, so --home needs nothing from the
-# caller; a staged emit cannot read that record and is told them by `brief` as
-# --require-deliverable flags. Only failed and superseded are exempt: those two
-# report that the promise could not be kept as promised, so they never carry
-# what it promised. Every other outcome must, including one that is not the
-# outcome this obligation expects - changing the outcome type is not a way to
-# drop the value the public reply needs.
+# The owning home's registration records what this promise expects, so --home
+# applies tasks-axi's own rules against it; a staged emit cannot read that
+# record and is told the required keys by `brief` as --require-deliverable
+# flags.
+EXPECTED_FINAL=
 if [ "$HOME_MODE" = owning ]; then
+  EXPECTED_FINAL=$(fm_pf_registry_get "$STATE" "$OBLIGATION" expected_final)
   for key in $(fm_pf_registry_get "$STATE" "$OBLIGATION" required_deliverables); do
     case "$key" in
       *[!a-z0-9_]*) die "registration for '$OBLIGATION' names an unusable required deliverable key '$key'" 1 ;;
@@ -293,11 +294,39 @@ if [ "$HOME_MODE" = owning ]; then
     REQUIRED_KEYS+=("$key")
   done
 fi
-case "$OUTCOME" in failed|superseded) REQUIRED_KEYS=() ;; esac
+
+# Only the outcome this promise expects can satisfy it; 'failed' is the one
+# other answer it takes, reporting that it could not be kept as promised.
+if [ -n "$EXPECTED_FINAL" ] && [ "$OUTCOME" != failed ]; then
+  EXPECTED_OUTCOME=$(fm_pf_expected_outcome "$EXPECTED_FINAL") || EXPECTED_OUTCOME=
+  [ -z "$EXPECTED_OUTCOME" ] || [ "$OUTCOME" = "$EXPECTED_OUTCOME" ] \
+    || die "outcome '$OUTCOME' cannot satisfy this obligation: its $EXPECTED_FINAL final needs outcome '$EXPECTED_OUTCOME', and only 'failed' may answer it otherwise"
+fi
+
+# A value tasks-axi would refuse is refused here, where the worker can still
+# correct it, instead of travelling to the owning home to be quarantined.
+i=0
+while [ "$i" -lt "${#DELIVERABLE_KEYS[@]}" ]; do
+  problem=$(fm_pf_deliverable_problem "$EXPECTED_FINAL" "$OUTCOME" \
+    "${DELIVERABLE_KEYS[$i]}" "${DELIVERABLE_VALUES[$i]}") || die "$problem"
+  i=$((i + 1))
+done
+
+# An event missing a key its obligation requires is as dead on arrival as one
+# carrying a bad value, so it is refused in the same place. A failure report is
+# exempt only from a key it could not carry anyway: a promise whose expected
+# final IS the failure still needs its error_code.
+CARRIED_KEYS=$(fm_pf_deliverable_keys "$EXPECTED_FINAL" "$OUTCOME") || CARRIED_KEYS=
 i=0
 while [ "$i" -lt "${#REQUIRED_KEYS[@]}" ]; do
   key=${REQUIRED_KEYS[$i]}
   i=$((i + 1))
+  if [ "$OUTCOME" = failed ]; then
+    case " $CARRIED_KEYS " in
+      *" $key "*) ;;
+      *) continue ;;
+    esac
+  fi
   j=0
   while [ "$j" -lt "${#DELIVERABLE_KEYS[@]}" ]; do
     [ "${DELIVERABLE_KEYS[$j]}" != "$key" ] || break

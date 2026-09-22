@@ -3290,13 +3290,14 @@ test_emit_refuses_a_deliverable_tasks_axi_would_reject() {
     "a staged refusal must state the expected format"
   assert_absent "$staging/state/public-followup" "a refused staged deliverable must stage nothing"
 
-  expect_failure "a deliverable key the outcome never carries must be refused at emit" \
+  expect_failure "a deliverable key this promise never carries must be refused at emit" \
     "$EMIT" --home "$home" --obligation pf-emit-format --relation rel-code \
-    --source-home main --work-id work-format --generation 1 --outcome pr-merged \
+    --source-home main --work-id work-format --generation 1 --outcome report-ready \
+    --deliverable pr_url=https://github.com/example/repo/pull/12 \
     --deliverable report_path=data/work-format/report.md \
-    --outcome-text 'Wrong key for a merged PR.'
-  assert_contains "$EXPECT_OUT" "pr-merged" "the refusal must name the outcome"
-  assert_contains "$EXPECT_OUT" "pr_url" "the refusal must name the key that outcome carries"
+    --outcome-text 'Wrong key for a report.'
+  assert_contains "$EXPECT_OUT" "report-ready" "the refusal must name the outcome"
+  assert_contains "$EXPECT_OUT" "report_path" "the refusal must name the key this promise carries"
   pass "the emitter refuses a deliverable tasks-axi would reject, naming key, value, and format"
 }
 
@@ -3361,30 +3362,42 @@ CASES
   pass "the emitter refuses an event missing a required deliverable in both destinations"
 }
 
-# The emitter mirrors tasks-axi's deliverable rules because tasks-axi exposes no
-# validation-only command. Pin the two together: every case runs through the
-# emitter AND, bypassing it, through the real tasks-axi consumer, and both must
-# reach the table's verdict, so neither can drift from the other silently.
-test_emit_deliverable_rules_agree_with_tasks_axi() {
-  local home n=0 expected outcome keys key value verdict emit_verdict axi_verdict
-  local obligation deliverables out
+# The emitter mirrors tasks-axi's work-event rules because tasks-axi exposes no
+# validation-only command. Pin the two together across the whole contract:
+# every expected final against every outcome, then missing, extra, and
+# malformed deliverables. Each case runs through the real emitter AND, bypassing
+# it, through the real tasks-axi consumer against a really registered
+# obligation, and both must reach the table's verdict, so neither side can drift
+# from the other silently.
+test_emit_rules_agree_with_tasks_axi() {
+  local home n=0 expected required outcome deliverables verdict
+  local emit_verdict axi_verdict obligation out pair
+  local -a emit_args
   home=$(make_home emit-agreement)
-  while IFS='|' read -r expected outcome keys key value verdict; do
+  while IFS='|' read -r expected required outcome deliverables verdict; do
     [ -n "$expected" ] || continue
     n=$((n + 1))
     obligation="pf-agree-$n"
-    seed_typed_commitment "$home" "$obligation" "req-agree-$n" "$expected" "$keys" main "work-agree-$n"
+    seed_typed_commitment "$home" "$obligation" "req-agree-$n" "$expected" "$required" \
+      main "work-agree-$n"
+
+    emit_args=()
+    while IFS= read -r pair; do
+      [ -n "$pair" ] || continue
+      emit_args+=(--deliverable "$pair")
+    done <<EOF
+$(printf '%s' "$deliverables" | jq -r 'to_entries[] | "\(.key)=\(.value)"')
+EOF
 
     if "$EMIT" --home "$home" --obligation "$obligation" --relation rel-code \
         --source-home main --work-id "work-agree-$n" --generation 1 --outcome "$outcome" \
-        --deliverable "$key=$value" --outcome-text 'The work finished.' >/dev/null 2>&1; then
+        ${emit_args[@]+"${emit_args[@]}"} --outcome-text 'The work finished.' >/dev/null 2>&1; then
       emit_verdict=accept
       rm -f "$home/state/public-followup/events"/*.json
     else
       emit_verdict=reject
     fi
 
-    deliverables=$(jq -nc --arg k "$key" --arg v "$value" '{($k):$v}')
     publish_raw_event "$home/state/public-followup/events" "$obligation" main "work-agree-$n" \
       "$outcome" "$deliverables" >/dev/null || fail "could not publish the raw case $n"
     out=$(run_pf "$home" consume 2>&1) || true
@@ -3394,39 +3407,70 @@ test_emit_deliverable_rules_agree_with_tasks_axi() {
     esac
 
     [ "$axi_verdict" = "$verdict" ] \
-      || fail "case $n ($outcome $key=$value): tasks-axi says $axi_verdict, the table says $verdict - re-pin the mirrored rule"
+      || fail "case $n ($expected final, $outcome outcome, $deliverables): tasks-axi says $axi_verdict, the table says $verdict - re-pin the mirrored rule"
     [ "$emit_verdict" = "$axi_verdict" ] \
-      || fail "case $n ($outcome $key=$value): the emitter says $emit_verdict but tasks-axi says $axi_verdict"
+      || fail "case $n ($expected final, $outcome outcome, $deliverables): the emitter says $emit_verdict but tasks-axi says $axi_verdict"
   done <<'CASES'
-report-ready|report-ready|["report_path"]|report_path|data/work-a/report.md|accept
-report-ready|report-ready|["report_path"]|report_path|/Users/x/home/data/work-a/report.md|reject
-report-ready|report-ready|["report_path"]|report_path|data/work-a/notes.md|reject
-report-ready|report-ready|["report_path"]|report_path|./data/work-a/report.md|reject
-report-ready|report-ready|["report_path"]|report_path|data/.hidden/report.md|reject
-pr-merged|pr-merged|["pr_url"]|pr_url|https://github.com/example/repo/pull/12|accept
-pr-merged|pr-merged|["pr_url"]|pr_url|https://github.com/example/repo/pull/12?x=1|reject
-pr-merged|pr-merged|["pr_url"]|pr_url|http://github.com/example/repo/pull/12|reject
-pr-merged|pr-merged|["pr_url"]|pr_url|https://user@github.com/example/repo/pull/12|reject
-pr-merged|pr-merged|["pr_url"]|pr_url|https://github.com/example/repo/pull/12/files|reject
-pr-merged|pr-merged|["pr_url"]|pr_url|github.com/example/repo/pull/12|reject
-pr-merged|pr-merged|["pr_url"]|pr_url|https://git.example.com/acme/repo/pulls/12|accept
-pr-merged|pr-merged|["pr_url"]|pr_url|https://git.example.com/acme/repo/pull/12|reject
-pr-merged|pr-merged|["pr_url"]|pr_url|https://github.com/example/repo/pulls/12|reject
-pr-merged|pr-merged|["pr_url"]|pr_url|https://github.com/example/repo/pull/01|reject
-pr-merged|pr-merged|["pr_url"]|pr_url|https://GitHub.com/example/repo/pull/12|reject
-pr-merged|pr-merged|["pr_url"]|pr_url|https://github.com/example/repo/pull/12/|reject
-pr-merged|pr-merged|["pr_url"]|pr_url|https://github.com/org/example/repo/pull/12|reject
-pr-merged|pr-merged|["pr_url"]|pr_url|https://git.example.com/../repo/pulls/12|reject
-pr-merged|pr-merged|["pr_url"]|pr_url|https://git.example.com:8443/acme/repo/pulls/12|reject
-pr-merged|pr-merged|["pr_url"]|report_path|data/work-a/report.md|reject
-local-main|local-main|["commit_sha"]|commit_sha|0123abc|accept
-local-main|local-main|["commit_sha"]|commit_sha|0123ABC|reject
-local-main|local-main|["commit_sha"]|commit_sha|012|reject
-pr-merged|failed|["pr_url"]|error_code|ci-red|accept
-pr-merged|failed|["pr_url"]|error_code|CI red|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12"}|accept
+pr-merged|["pr_url"]|report-ready|{"report_path":"data/work-a/report.md"}|reject
+pr-merged|["pr_url"]|local-main|{"commit_sha":"0123abc"}|reject
+pr-merged|["pr_url"]|failed|{"error_code":"ci-red"}|accept
+pr-merged|["pr_url"]|superseded|{}|reject
+report-ready|["report_path"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12"}|reject
+report-ready|["report_path"]|report-ready|{"report_path":"data/work-a/report.md"}|accept
+report-ready|["report_path"]|local-main|{"commit_sha":"0123abc"}|reject
+report-ready|["report_path"]|failed|{"error_code":"ci-red"}|accept
+report-ready|["report_path"]|superseded|{}|reject
+local-main|["commit_sha"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12"}|reject
+local-main|["commit_sha"]|report-ready|{"report_path":"data/work-a/report.md"}|reject
+local-main|["commit_sha"]|local-main|{"commit_sha":"0123abc"}|accept
+local-main|["commit_sha"]|failed|{"error_code":"ci-red"}|accept
+local-main|["commit_sha"]|superseded|{}|reject
+failure-outcome|["error_code"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12"}|reject
+failure-outcome|["error_code"]|report-ready|{"report_path":"data/work-a/report.md"}|reject
+failure-outcome|["error_code"]|local-main|{"commit_sha":"0123abc"}|reject
+failure-outcome|["error_code"]|failed|{"error_code":"ci-red"}|accept
+failure-outcome|["error_code"]|superseded|{}|reject
+explicit-answer|[]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12"}|reject
+explicit-answer|[]|report-ready|{"report_path":"data/work-a/report.md"}|reject
+explicit-answer|[]|local-main|{"commit_sha":"0123abc"}|reject
+explicit-answer|[]|failed|{"error_code":"ci-red"}|accept
+explicit-answer|[]|superseded|{}|reject
+pr-merged|["pr_url"]|pr-merged|{}|reject
+report-ready|["report_path"]|report-ready|{}|reject
+local-main|["commit_sha"]|local-main|{}|reject
+failure-outcome|["error_code"]|failed|{}|reject
+explicit-answer|[]|local-main|{}|accept
+pr-merged|["pr_url"]|failed|{}|accept
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12","report_path":"data/work-a/report.md"}|reject
+pr-merged|["pr_url"]|failed|{"error_code":"ci-red","report_path":"data/work-a/report.md"}|reject
+pr-merged|["pr_url"]|failed|{"pr_url":"https://github.com/example/repo/pull/12"}|reject
+failure-outcome|["error_code"]|failed|{"error_code":"ci-red","report_path":"data/work-a/report.md"}|reject
+report-ready|["report_path"]|report-ready|{"report_path":"/Users/x/home/data/work-a/report.md"}|reject
+report-ready|["report_path"]|report-ready|{"report_path":"data/work-a/notes.md"}|reject
+report-ready|["report_path"]|report-ready|{"report_path":"./data/work-a/report.md"}|reject
+report-ready|["report_path"]|report-ready|{"report_path":"data/.hidden/report.md"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12?x=1"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"http://github.com/example/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://user@github.com/example/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12/files"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"github.com/example/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://git.example.com/acme/repo/pulls/12"}|accept
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://git.example.com/acme/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pulls/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/01"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://GitHub.com/example/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/example/repo/pull/12/"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://github.com/org/example/repo/pull/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://git.example.com/../repo/pulls/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"pr_url":"https://git.example.com:8443/acme/repo/pulls/12"}|reject
+pr-merged|["pr_url"]|pr-merged|{"report_path":"data/work-a/report.md"}|reject
+local-main|["commit_sha"]|local-main|{"commit_sha":"0123ABC"}|reject
+local-main|["commit_sha"]|local-main|{"commit_sha":"012"}|reject
+pr-merged|["pr_url"]|failed|{"error_code":"CI red"}|reject
 CASES
-  [ "$n" -ge 26 ] || fail "the agreement table ran only $n cases"
-  pass "the emitter's deliverable rules agree with the real tasks-axi consumer on $n cases"
+  [ "$n" -ge 57 ] || fail "the agreement table ran only $n cases"
+  pass "the emitter's work-event rules agree with the real tasks-axi consumer on $n cases"
 }
 
 # The reported failure, third part: consume quarantined the event with only
@@ -3497,13 +3541,13 @@ test_emit_requires_promised_deliverable_under_any_successful_outcome() {
   mkdir -p "$staging/state"
   printf 'axi-a1\n' > "$staging/.fm-secondmate-home"
 
-  expect_failure "a pr-merged promise reported as report-ready must still carry pr_url" \
+  expect_failure "a pr-merged promise cannot be answered with a report-ready result" \
     "$EMIT" --home "$home" --obligation pf-outcome-swap --relation rel-code \
     --source-home main --work-id work-swap --generation 1 --outcome report-ready \
     --deliverable report_path=data/work-swap/report.md \
     --outcome-text 'The report is ready.'
-  assert_contains "$EXPECT_OUT" "pr_url" "the refusal must name the promised key"
-  assert_contains "$EXPECT_OUT" "/pull/<n>" "the refusal must state the expected format"
+  assert_contains "$EXPECT_OUT" "pr-merged" "the refusal must name the outcome this promise expects"
+  assert_contains "$EXPECT_OUT" "report-ready" "the refusal must name the outcome that cannot satisfy it"
   [ -z "$(ls -A "$home/state/public-followup/events" 2>/dev/null)" ] \
     || fail "an outcome swap that drops the promised key must publish nothing"
 
@@ -3521,16 +3565,56 @@ test_emit_requires_promised_deliverable_under_any_successful_outcome() {
     --source-home main --work-id work-swap --generation 1 --outcome failed \
     --deliverable error_code=ci-red --outcome-text 'The work could not finish.' >/dev/null \
     || fail "a failed outcome must stay reportable without the promised key"
-  "$EMIT" --home "$home" --obligation pf-outcome-swap --relation rel-code \
+  expect_failure "a superseded outcome cannot be reported from here at all" \
+    "$EMIT" --home "$home" --obligation pf-outcome-swap --relation rel-code \
     --source-home main --work-id work-swap --generation 1 --outcome superseded \
-    --outcome-text 'This work was superseded.' >/dev/null \
-    || fail "a superseded outcome must stay reportable without the promised key"
+    --outcome-text 'This work was superseded.'
+  assert_contains "$EXPECT_OUT" "successor" \
+    "the refusal must say what tasks-axi needs for a superseded event"
   "$EMIT" --stage-in "$staging" --obligation pf-outcome-swap --relation rel-code \
     --source-home secondmate:axi-a1 --work-id work-swap --generation 1 --outcome failed \
     --require-deliverable pr_url --deliverable error_code=ci-red \
     --outcome-text 'The work could not finish.' >/dev/null \
     || fail "a staged failed outcome must stay reportable without the promised key"
-  pass "only failed and superseded may report a promise without its required deliverable"
+  pass "only a failed result may answer a promise without the deliverable it promised"
+}
+
+# The narrow edge of that exemption: when the promise's expected final IS the
+# failure, its error_code is not a deliverable some other outcome would have
+# carried - it is the one the failure itself owes.
+test_emit_requires_error_code_on_a_failure_promise() {
+  local home staging out
+  home=$(make_home emit-failure-promise)
+  seed_typed_commitment "$home" pf-failure-promise req-failure-promise failure-outcome \
+    '["error_code"]' main work-failure
+  staging="$TMP_ROOT/failure-promise-staging"
+  mkdir -p "$staging/state"
+  printf 'axi-a1\n' > "$staging/.fm-secondmate-home"
+
+  expect_failure "a failure promise reported without its error_code must be refused" \
+    "$EMIT" --home "$home" --obligation pf-failure-promise --relation rel-code \
+    --source-home main --work-id work-failure --generation 1 --outcome failed \
+    --outcome-text 'The work could not finish.'
+  assert_contains "$EXPECT_OUT" "error_code" "the refusal must name the missing key"
+  [ -z "$(ls -A "$home/state/public-followup/events" 2>/dev/null)" ] \
+    || fail "a failure promise missing its error_code must publish nothing"
+
+  expect_failure "a staged failure promise must apply the same rule" \
+    "$EMIT" --stage-in "$staging" --obligation pf-failure-promise --relation rel-code \
+    --source-home secondmate:axi-a1 --work-id work-failure --generation 1 --outcome failed \
+    --require-deliverable error_code --outcome-text 'The work could not finish.'
+  assert_contains "$EXPECT_OUT" "error_code" "the staged refusal must name the missing key"
+  assert_absent "$staging/state/public-followup" \
+    "a staged failure promise missing its error_code must stage nothing"
+
+  "$EMIT" --home "$home" --obligation pf-failure-promise --relation rel-code \
+    --source-home main --work-id work-failure --generation 1 --outcome failed \
+    --deliverable error_code=ci-red --outcome-text 'The work could not finish.' >/dev/null \
+    || fail "the failure promise must be reportable once it carries its error_code"
+  out=$(run_pf "$home" consume) || fail "consume failed: $out"
+  assert_contains "$out" "ready pf-failure-promise" \
+    "the error_code the emitter required must be the one tasks-axi accepts"
+  pass "a failure promise keeps needing its own error_code"
 }
 
 # The pending event is the only thing that brings consume back to a refusal, so
@@ -3706,10 +3790,11 @@ test_stage_in_refuses_ambiguous_or_unusable_homes
 test_brief_prefills_known_deliverables_and_states_formats
 test_emit_refuses_a_deliverable_tasks_axi_would_reject
 test_emit_refuses_a_missing_required_deliverable
-test_emit_deliverable_rules_agree_with_tasks_axi
+test_emit_rules_agree_with_tasks_axi
 test_rejected_event_wakes_owning_home_with_specific_reason
 test_remote_rejected_event_wakes_owning_home
 test_emit_requires_promised_deliverable_under_any_successful_outcome
+test_emit_requires_error_code_on_a_failure_promise
 test_rejection_is_retried_until_its_wake_is_recorded
 test_rejection_wake_survives_a_poll_that_cannot_write
 test_rejection_wake_survives_a_poll_that_cannot_read

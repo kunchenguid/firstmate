@@ -42,10 +42,10 @@
 #       registration: it creates this home's private public-followup directories
 #       (0700) and the bounded public-safe registration record, which is what
 #       later makes the presence checks O(1) and lets bound work report a typed
-#       terminal result. The record includes the obligation's required
-#       deliverable keys, so work reporting into this home is refused at emit
-#       when it leaves one out. Refuses when the relay is not active for this
-#       home.
+#       terminal result. The record includes what the obligation expects and the
+#       deliverable keys it requires, so work reporting into this home is refused
+#       at emit for an outcome or a value tasks-axi would refuse. Refuses when
+#       the relay is not active for this home.
 #
 #   fm-public-followup.sh brief <obligation-id>
 #       Print the exact fm-public-followup-emit.sh command line the bound worker
@@ -313,10 +313,14 @@ cmd_register() {
   [ -z "$request" ] || fm_pf_slug_valid "$request" || die "unsafe request id: $request"
 
   local followup_expires_at request_json request_context_b64 work_home_path required_deliverables
+  local expected_final
   followup_expires_at=$(pf_field "$payload" '.public_followup.request.followup_expires_at')
-  # The keys this commitment cannot be kept without. Recording them is what lets
-  # bound work running against this home be refused at emit for a missing value,
-  # instead of publishing an event only this home's consume can reject.
+  # What this commitment expects, and the keys it cannot be kept without.
+  # Recording them is what lets bound work running against this home be refused
+  # at emit for an outcome or a value tasks-axi would refuse, instead of
+  # publishing an event only this home's consume can reject.
+  expected_final=$(pf_field "$payload" '.public_followup.expected_final.type')
+  fm_pf_expected_outcome "$expected_final" >/dev/null 2>&1 || expected_final=
   required_deliverables=$(printf '%s' "$payload" \
     | jq -r '.public_followup.expected_final.required_deliverables // []
         | select(type == "array" and (map(type == "string" and test("^[a-z0-9_]+$")) | all))
@@ -355,9 +359,9 @@ cmd_register() {
     printf 'already registered %s state=delivered\n' "$id"
     return 0
   fi
-  printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_home_path=%s\nwork_id=%s\ngeneration=%s\nrequired_deliverables=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
+  printf 'obligation_id=%s\nrelation_id=%s\nwork_home=%s\nwork_home_path=%s\nwork_id=%s\ngeneration=%s\nexpected_final=%s\nrequired_deliverables=%s\nplatform=%s\nrequest_id=%s\nstate=open\nfollowup_expires_at=%s\nrequest_context_b64=%s\n' \
     "$id" "$relation" "$work_home" "$work_home_path" "$work_id" "$generation" \
-    "$required_deliverables" "$platform" "$request" \
+    "$expected_final" "$required_deliverables" "$platform" "$request" \
     "$followup_expires_at" "$request_context_b64" \
     | fmx_private_artifact_publish_stdin "$(fm_pf_registry_dir "$STATE")" "$id" 600 \
     || die "could not write the registration record" 1
@@ -409,8 +413,8 @@ brief_emit_target() {
 }
 
 cmd_brief() {
-  local id=${1:-} relation work_home work_home_path work_id generation payload outcome keys key deliverable_flags
-  local value format deliverable_formats require_flags
+  local id=${1:-} relation work_home work_home_path work_id generation payload expected keys key deliverable_flags
+  local outcome value format deliverable_formats require_flags
   local emit_target emit_script emit_home_flag closing_note
   [ -n "$id" ] || { usage; exit 2; }
   fm_pf_slug_valid "$id" || die "unsafe obligation id: $id"
@@ -449,9 +453,14 @@ the home above owns the reply.'
     || die "could not read public-followup obligation '$id' through tasks-axi" 1
   [ -n "$payload" ] \
     || die "public-followup obligation '$id' is missing from tasks-axi" 1
-  outcome=$(pf_field "$payload" '.public_followup.expected_final.type')
-  [ -n "$outcome" ] \
+  expected=$(pf_field "$payload" '.public_followup.expected_final.type')
+  [ -n "$expected" ] \
     || die "public-followup obligation '$id' has no expected final type" 1
+  # The command must name the outcome that SATISFIES this final, which is not
+  # always the final's own name: tasks-axi answers a failure-outcome final with
+  # 'failed' and an explicit-answer final with 'local-main'.
+  outcome=$(fm_pf_expected_outcome "$expected") \
+    || die "public-followup obligation '$id' has an expected final type tasks-axi does not define: $expected" 1
   keys=$(printf '%s' "$payload" \
     | jq -er '.public_followup.expected_final.required_deliverables
         | select(type == "array" and length > 0
@@ -474,7 +483,7 @@ the home above owns the reply.'
     case "$key" in
       report_path) value="data/$work_id/report.md" ;;
     esac
-    if [ -n "$value" ] && fm_pf_deliverable_problem "$outcome" "$key" "$value" >/dev/null; then
+    if [ -n "$value" ] && fm_pf_deliverable_problem "$expected" "$outcome" "$key" "$value" >/dev/null; then
       deliverable_flags="${deliverable_flags}    --deliverable ${key}=${value} \\
 "
       continue
@@ -559,8 +568,11 @@ reject_event() {
 # against the mirrored rules, then the outcome and required keys against the
 # obligation's expected final. Prints nothing when no specific cause is found.
 event_rejection_detail() {
-  local payload=$1 outcome obligation key value problem expected expected_type expected_outcome
+  local payload=$1 outcome obligation key value problem expected expected_type expected_outcome carried
   outcome=$(pf_field "$payload" '.outcome_type')
+  obligation=$(pf_field "$payload" '.obligation_id')
+  expected=$(obligation_json "$obligation" 2>/dev/null) || expected=
+  expected_type=$(pf_field "$expected" '.public_followup.expected_final.type')
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     if ! value=$(printf '%s' "$payload" | jq -er --arg k "$key" \
@@ -568,7 +580,7 @@ event_rejection_detail() {
       printf "deliverable '%s' is not a string\n" "$key"
       return 0
     fi
-    if ! problem=$(fm_pf_deliverable_problem "$outcome" "$key" "$value"); then
+    if ! problem=$(fm_pf_deliverable_problem "$expected_type" "$outcome" "$key" "$value"); then
       printf '%s\n' "$problem"
       return 0
     fi
@@ -576,23 +588,23 @@ event_rejection_detail() {
 $(printf '%s' "$payload" | jq -r '(.deliverables // {}) | keys[]' 2>/dev/null)
 EOF
 
-  obligation=$(pf_field "$payload" '.obligation_id')
-  expected=$(obligation_json "$obligation" 2>/dev/null) || return 0
-  expected_type=$(pf_field "$expected" '.public_followup.expected_final.type')
   [ -n "$expected_type" ] || return 0
-  case "$outcome" in failed|superseded) return 0 ;; esac
-  case "$expected_type" in
-    failure-outcome) expected_outcome=failed ;;
-    explicit-answer) expected_outcome=local-main ;;
-    *) expected_outcome=$expected_type ;;
-  esac
-  if [ "$outcome" != "$expected_outcome" ]; then
+  case "$outcome" in superseded) return 0 ;; esac
+  expected_outcome=$(fm_pf_expected_outcome "$expected_type") || return 0
+  if [ "$outcome" != failed ] && [ "$outcome" != "$expected_outcome" ]; then
     printf "outcome '%s' does not match this obligation's expected final '%s', which needs outcome '%s'\n" \
       "$outcome" "$expected_type" "$expected_outcome"
     return 0
   fi
+  carried=$(fm_pf_deliverable_keys "$expected_type" "$outcome") || carried=
   while IFS= read -r key; do
     [ -n "$key" ] || continue
+    if [ "$outcome" = failed ]; then
+      case " $carried " in
+        *" $key "*) ;;
+        *) continue ;;
+      esac
+    fi
     printf '%s' "$payload" | jq -e --arg k "$key" '.deliverables[$k] | type == "string"' >/dev/null 2>&1 \
       && continue
     printf "required deliverable '%s' is missing; expected %s\n" "$key" \
