@@ -85,18 +85,18 @@ Release happens only on explicit retirement or seed rollback, never on routine r
 
 `bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
 It also writes the gitignored `.fm-secondmate-parent` durable binding before the required `.fm-secondmate-home` identity marker; the parser header in [`bin/fm-secondmate-parent-lib.sh`](../../../bin/fm-secondmate-parent-lib.sh) owns the record contract, and both files must remain in place.
-`bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
+`bin/fm-spawn.sh --secondmate` launches it through the id-aware secondmate profile path owned by [`docs/configuration.md`](../../../docs/configuration.md#per-secondmate-launch-pins-configsecondmate-harnessd), unless an explicit per-spawn harness override is passed.
 
 `config/secondmate-harness` may also pin a concrete model and effort for the secondmate agent, in the SAME file rather than a new one: the format is a single whitespace-separated line `<harness> [<model>] [<effort>]`, with only the first non-empty, non-comment line parsed.
 A bare `<harness>` (today's format, e.g. `claude`) behaves exactly as before - harness only, no model/effort flag - so this is fully backward-compatible.
-`bin/fm-harness.sh secondmate-model` and `bin/fm-harness.sh secondmate-effort` print the optional 2nd/3rd tokens (empty when absent, or when the file is absent/`default`/harness-only); they read only `config/secondmate-harness`, never `config/crew-harness`, which stays a bare adapter name.
+`bin/fm-harness.sh secondmate-model [<id>]` and `bin/fm-harness.sh secondmate-effort [<id>]` print the optional 2nd/3rd tokens from the governing secondmate file (empty when absent, or when the global file is absent/`default`/harness-only); they never read model or effort from `config/crew-harness`, which stays a bare adapter name.
 For a `--secondmate` spawn, `bin/fm-spawn.sh` populates `MODEL`/`EFFORT` from those tokens only when the harness itself came from the secondmate config path for that spawn.
 For a local route, an explicit per-spawn `--harness` flag, positional harness arg, or raw launch command starts clean on model and effort too, unless the caller also passes explicit `--model` or `--effort`.
 A remote route accepts only a verified harness adapter and refuses a raw launch command at the host boundary.
 When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` flag always wins over the file's token for that axis.
-Because this resolves from the file on every spawn, the pin is durable across every respawn (recovery, `/updatefirstmate`, restart) exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps a secondmate pinned to Opus even if the primary's own default model later changes.
+Because every configured-profile spawn resolves from the file, the pin is durable across recovery, `/updatefirstmate`, and restart exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps an unpinned secondmate on Opus even if the primary's own default model later changes.
 This is secondmate-only: crewmate/scout model resolution is untouched by this file.
-One secondmate can be pinned on its own through `config/secondmate-harness.d/<id>`, a per-secondmate file in the same line format that wins over `config/secondmate-harness` for that id only, so pinning a new mate never moves an existing one; every launch and recovery path re-resolves it for the mate's id, and an unusable pin refuses rather than falling through.
+One secondmate can be pinned on its own through `config/secondmate-harness.d/<id>`, a per-secondmate file in the same line format that wins over `config/secondmate-harness` for that id only, so pinning a new mate never moves an existing one; every configured-profile launch and recovery path re-resolves it for the mate's id, and an unusable pin refuses rather than falling through.
 [`docs/configuration.md`](../../../docs/configuration.md#per-secondmate-launch-pins-configsecondmate-harnessd) owns that format, the resolution order, and the refusal rules.
 
 This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.

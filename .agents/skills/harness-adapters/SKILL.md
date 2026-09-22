@@ -25,7 +25,7 @@ Operational paths keep the context named by their owner: `config/` and active-ho
 ## Non-negotiable safety
 
 Never dispatch a crewmate or secondmate on an unverified adapter.
-If `config/crew-harness`, `config/secondmate-harness`, or a per-secondmate pin under `config/secondmate-harness.d/` names one, tell the captain under `../../../AGENTS.md` section 9 that the requested worker runtime is not verified, use firstmate's own verified runtime for current work, and ask only whether to verify the requested runtime for future work.
+If `config/crew-harness`, `config/secondmate-harness`, or a per-secondmate pin under `config/secondmate-harness.d/` names one, tell the captain under `../../../AGENTS.md` section 9 that the requested worker runtime is not verified, use firstmate's own verified runtime for current work only through an explicit override that does not treat the configured value as absent, and ask only whether to verify the requested runtime for future work.
 Do not pause current work for that choice.
 
 On `unknown`, ask the captain instead of guessing.
@@ -46,7 +46,7 @@ omp publishes no marker of its own; `FM_OMP_HARNESS=omp` is Firstmate's launch m
 `../../../bin/fm-spawn.sh` owns worker marker establishment, while the README launch command owns the signed-primary boundary.
 `../../../bin/fm-harness.sh crew` resolves `config/crew-harness`, where absent or `default` means firstmate's own harness.
 `../../../bin/fm-harness.sh secondmate [<id>]` resolves `config/secondmate-harness.d/<id>` (only with an id) -> `config/secondmate-harness` -> `config/crew-harness` -> firstmate's own harness, and refuses an unusable per-secondmate pin instead of falling through.
-`../../../bin/fm-spawn.sh` re-resolves on every spawn, and an explicit per-spawn argument wins for that spawn.
+`../../../bin/fm-spawn.sh` re-resolves on every configured-profile spawn, and an explicit per-spawn harness wins without consulting the stored pin.
 A new adapter's verified marker and command name must land in `../../../bin/fm-harness.sh`.
 
 ## Operation-to-reference matrix

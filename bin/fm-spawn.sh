@@ -150,7 +150,7 @@
 #   harness (config/secondmate-harness.d/<id> -> config/secondmate-harness ->
 #   config/crew-harness -> own; bin/fm-harness.sh owns that chain), so the
 #   secondmate-vs-crewmate split and any per-secondmate pin are DURABLE across
-#   every respawn (recovery, /updatefirstmate, restart). An unusable
+#   every configured-profile respawn (recovery, /updatefirstmate, restart). An unusable
 #   per-secondmate pin refuses the spawn before any endpoint exists rather than
 #   falling through to the global file. A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
 #   overrides it for this spawn (either kind). A non-flag string containing
