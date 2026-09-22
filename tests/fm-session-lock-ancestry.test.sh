@@ -1091,8 +1091,29 @@ test_verified_reclaim_keeps_new_sidecar() {
   pass "session-lock: a verified reclaim keeps the new sidecar beside the new pid"
 }
 
+test_copilot_anchored_name_detects_as_harness() {
+  local out
+  out=$(env -u FM_TEST_KILL_RC bash -c "
+    . '$LIB'
+    fm_harness_process_matches copilot '' && printf matched
+  ")
+  [ "$out" = matched ] || fail "a process named 'copilot' must be recognized as a harness"
+  out=$(env -u FM_TEST_KILL_RC bash -c "
+    . '$LIB'
+    fm_harness_process_matches copilothelper '' && printf matched || printf no
+  ")
+  [ "$out" = no ] || fail "'copilothelper' merely contains copilot and must not detect as the harness"
+  out=$(env -u FM_TEST_KILL_RC bash -c "
+    . '$LIB'
+    fm_harness_process_matches gh-copilot '' && printf matched || printf no
+  ")
+  [ "$out" = no ] || fail "'gh-copilot' merely contains copilot and must not detect as the harness"
+  pass "session-lock: the GitHub Copilot CLI's anchored process name 'copilot' is recognized; substrings are not"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
+test_copilot_anchored_name_detects_as_harness
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
