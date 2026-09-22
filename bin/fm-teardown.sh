@@ -89,7 +89,10 @@
 # task. One live path with two task records is the reuse collision itself when
 # no claim can identify the current owner. When the claim names one task,
 # records it does not name are stale for that slot and take the skip-slot path
-# below; the claimed owner's teardown proceeds and returns the slot.
+# below; the claimed owner's teardown proceeds and returns the slot. A claim
+# can only retire records whose slot acquisition writes one: a secondmate home
+# holds its slot on Treehouse's durable lease and never claims it, so a
+# kind=secondmate record naming this slot refuses whatever the claim says.
 # That scan alone cannot prove THIS record is the current owner, because the task
 # that took the slot next may leave no record it can reach - its own worker may
 # have exited and its record been cleaned up, or it may live in a home this
@@ -2209,20 +2212,30 @@ collect_local_firstmate_states() {
 require_exclusive_worktree_slot_record() {
   local record_meta=$1 record_id=$2 record_state=$3 worktree=$4
   local slot state_dir other other_id field other_path other_slot
+  local claim_retires_claimants=0
   slot=$(canonical_existing_dir "$worktree") || return 0
   collect_local_firstmate_states "$record_state" || return 1
-  # A readable claim naming one task identifies the current owner, so this
-  # scan must not veto; require_owned_task_worktree_slot then skip-slots the
-  # stale record or returns the claimed owner's slot. A missing or unreadable
-  # claim keeps the conservative refusal below.
+  # A claim naming another task already skip-slots this record, so no colliding
+  # record can be harmed and the scan must not veto. A claim naming THIS task
+  # only proves the slot was not taken again through the claim-writing path:
+  # crewmate spawns claim (bin/fm-spawn.sh refuses to launch when they cannot),
+  # so their colliding records are stale, but secondmate homes take Treehouse's
+  # durable lease and never write a claim (bin/fm-wake-lib.sh's slot-owner claim
+  # comment), so a secondmate record naming this slot still refuses. A missing
+  # or unreadable claim keeps the conservative refusal for every record.
   fm_treehouse_slot_owner_state "$slot" "$record_id"
   case "$FM_TREEHOUSE_SLOT_OWNER" in
-    mine|other) return 0 ;;
+    other) return 0 ;;
+    mine) claim_retires_claimants=1 ;;
   esac
   for state_dir in "${TREEHOUSE_OWNER_STATES[@]}"; do
     for other in "$state_dir"/*.meta; do
       [ -f "$other" ] && [ ! -L "$other" ] || continue
       [ "$other" != "$record_meta" ] || continue
+      if [ "$claim_retires_claimants" = 1 ] \
+         && [ "$(fm_meta_get "$other" kind)" != secondmate ]; then
+        continue
+      fi
       other_id=$(basename "$other" .meta)
       for field in worktree home; do
         other_path=$(fm_meta_get "$other" "$field")

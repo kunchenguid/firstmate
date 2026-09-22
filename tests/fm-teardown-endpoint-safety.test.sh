@@ -530,6 +530,33 @@ test_reused_pool_slot_refuses_before_touching_the_other_task() {
   [ ! -s "$dir/runtime.log" ] \
     || fail "teardown reached the runtime on a slot held by a secondmate home: $(cat "$dir/runtime.log")"
 
+  # This record's own claim proves only that no CLAIMING task took the slot
+  # again: a secondmate home leases its slot from the same pool and never
+  # writes a claim, so a stale claim naming this task cannot retire that
+  # record. The collision refuses exactly as it does with no claim at all.
+  dir=$(make_case slot-reuse-home-claimed)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$dir/home/state/$other.meta" \
+    "window=firstmate:fm-$other" "endpoint_task_id=$other" \
+    "worktree=$dir/worktree" "home=$dir/worktree" \
+    "project=$dir/project" "kind=secondmate"
+  claim_pool_slot "$dir" "$id"
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a stale own-task claim returned a slot a secondmate home holds"
+  assert_present "$dir/worktree/sentinel" "a stale own-task claim reset a slot a secondmate home holds"
+  assert_present "$dir/home/state/$other.meta" "a stale own-task claim removed the secondmate record"
+  assert_present "$dir/home/state/$id.meta" "a stale own-task claim removed the record before refusing"
+  [ ! -s "$dir/runtime.log" ] \
+    || fail "a stale own-task claim reached the runtime on a leased slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$other" \
+    "the refusal should name the secondmate home holding the slot"
+
   pass "fm-teardown: a pool slot named by a second task record is never returned, killed, or reset"
 }
 
