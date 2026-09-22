@@ -281,8 +281,16 @@ while [ "$i" -lt "${#IDS[@]}" ]; do
       continue
     fi
     [ -n "${HARNESS[i]}" ] || HARNESS[i]=$FM_SECONDMATE_RESTART_HARNESS
-    MODEL[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model "$id" 2>/dev/null || true)
-    EFFORT[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort "$id" 2>/dev/null || true)
+    if ! MODEL[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-model "$id" 2>/dev/null); then
+      REASON[i]="its launch pin config/secondmate-harness.d/$id model axis could not be resolved, so the replacement's model could not be chosen"
+      i=$((i + 1))
+      continue
+    fi
+    if ! EFFORT[i]=$("$SCRIPT_DIR/fm-harness.sh" secondmate-effort "$id" 2>/dev/null); then
+      REASON[i]="its launch pin config/secondmate-harness.d/$id effort axis could not be resolved, so the replacement's effort could not be chosen"
+      i=$((i + 1))
+      continue
+    fi
     case "${EFFORT[i]}" in
       ''|low|medium|high|xhigh|max|ultra) ;;
       *) EFFORT[i]="" ;;
