@@ -33,7 +33,15 @@ if [ -f "$LEGACY" ] || [ -L "$LEGACY" ]; then
     rm -f -- "$LEGACY" || { echo "error: failed to remove $LEGACY" >&2; exit 1; }
     echo "removed identical project-local copy: $LEGACY"
   else
-    mv -- "$LEGACY" "$LEGACY.bak" || { echo "error: failed to move $LEGACY to $LEGACY.bak" >&2; exit 1; }
+    if [ -e "$LEGACY.bak" ] || [ -L "$LEGACY.bak" ]; then
+      echo "error: backup destination already exists: $LEGACY.bak" >&2
+      exit 1
+    fi
+    mv -n -- "$LEGACY" "$LEGACY.bak" || { echo "error: failed to move $LEGACY to $LEGACY.bak" >&2; exit 1; }
+    if [ -e "$LEGACY" ] || [ -L "$LEGACY" ]; then
+      echo "error: failed to move $LEGACY to $LEGACY.bak" >&2
+      exit 1
+    fi
     echo "warning: divergent project-local copy moved to $LEGACY.bak" >&2
   fi
 fi

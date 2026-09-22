@@ -1197,12 +1197,14 @@ test_sigterm_during_marker_wait_releases_watch_lock() {
     "$WATCH" > "$out" 2>&1 &
   wpid=$!
   i=0
-  while [ "$i" -lt 100 ] && [ ! -e "$state/.watch.lock" ]; do
+  while [ "$i" -lt 100 ] && [ ! -e "$state/.last-watcher-beat" ]; do
     sleep 0.05
     i=$((i + 1))
   done
-  [ -e "$state/.watch.lock" ] \
-    || { kill "$wpid" "$holder_pid" 2>/dev/null || true; fail "watcher never acquired its lock: $(cat "$out")"; }
+  [ -e "$state/.last-watcher-beat" ] \
+    && [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$wpid" ] \
+    && kill -0 "$wpid" 2>/dev/null \
+    || { kill "$wpid" "$holder_pid" 2>/dev/null || true; fail "watcher never reached trap-ready startup: $(cat "$out")"; }
 
   kill -TERM "$wpid" 2>/dev/null || true
   # Free the marker lock so the cleanup path's bounded publish can finish.
@@ -1217,6 +1219,11 @@ test_sigterm_during_marker_wait_releases_watch_lock() {
     || fail "watcher left a corpse .watch.lock after TERM during the marker wait"
   pass "TERM during the startup marker wait runs cleanup and releases the watcher lock"
 }
+
+if [ "${1:-}" = --marker-wait-term ]; then
+  test_sigterm_during_marker_wait_releases_watch_lock
+  exit 0
+fi
 
 test_wait_deadline_reaps_a_stopped_child
 test_singleton_start

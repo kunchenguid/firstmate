@@ -60,6 +60,34 @@ assert_absent "$FAKE_FM_HOME/.omp/extensions/fm-calm-omp.ts" "divergent legacy c
 assert_grep "divergent local edit" "$FAKE_FM_HOME/.omp/extensions/fm-calm-omp.ts.bak" "divergent copy preserved"
 pass "divergent legacy copy preserved as .bak"
 
+for BACKUP_KIND in file directory dangling-link; do
+  COLLISION_HOME="$TMP_ROOT/collision-$BACKUP_KIND-home"
+  COLLISION_FM_HOME="$TMP_ROOT/collision-$BACKUP_KIND-fm-home"
+  COLLISION_LEGACY="$COLLISION_FM_HOME/.omp/extensions/fm-calm-omp.ts"
+  mkdir -p "$COLLISION_HOME" "${COLLISION_LEGACY%/*}"
+  printf 'new local edits\n' > "$COLLISION_LEGACY"
+  case "$BACKUP_KIND" in
+    file) printf 'previous local edits\n' > "$COLLISION_LEGACY.bak" ;;
+    directory)
+      mkdir "$COLLISION_LEGACY.bak"
+      printf 'previous local edits\n' > "$COLLISION_LEGACY.bak/fm-calm-omp.ts"
+      ;;
+    dangling-link) ln -s missing-backup "$COLLISION_LEGACY.bak" ;;
+  esac
+  HOME="$COLLISION_HOME" FM_HOME="$COLLISION_FM_HOME" \
+    "$ROOT/bin/fm-omp-calm-install.sh" > "$TMP_ROOT/collision.out" 2> "$TMP_ROOT/collision.err" \
+    && fail "install accepted an occupied backup destination ($BACKUP_KIND)"
+  assert_equals "new local edits" "$(cat "$COLLISION_LEGACY")" "legacy edits retained on backup collision"
+  case "$BACKUP_KIND" in
+    file) assert_equals "previous local edits" "$(cat "$COLLISION_LEGACY.bak")" "existing backup retained" ;;
+    directory) assert_equals "previous local edits" "$(cat "$COLLISION_LEGACY.bak/fm-calm-omp.ts")" "backup directory contents retained" ;;
+    dangling-link) assert_equals "missing-backup" "$(readlink "$COLLISION_LEGACY.bak")" "dangling backup link retained" ;;
+  esac
+  assert_absent "$COLLISION_HOME/.local/share/fm-calm-omp" "no installation after backup collision"
+  assert_absent "$COLLISION_HOME/.omp/plugins/node_modules/fm-calm-omp" "no link after backup collision"
+  pass "occupied backup destination preserves both local versions ($BACKUP_KIND)"
+done
+
 # A retirement step that cannot complete aborts the install before linking,
 # instead of reporting success and leaving the legacy copy to double-load with
 # the linked package in home sessions.
