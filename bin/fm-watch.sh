@@ -57,7 +57,13 @@
 #                          not a wedge and is reported ONCE instead of escalating
 #                          on that cadence forever (wedge_dead_record); only the
 #                          two recovery-grade verdicts license it, and every other
-#                          verdict escalates unchanged.
+#                          verdict escalates unchanged. After those probes, Jev
+#                          classifies the candidate as pipeline_wait, true_wedge,
+#                          or healthy_idle (bin/fm-jev-wake-triage.sh); only
+#                          true_wedge, or Jev unavailable, still escalates.
+#                          pipeline_wait and healthy_idle suppress the wake and
+#                          restart the idle timer. config/jev-wake-triage=off
+#                          disables that gate.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -844,6 +850,13 @@ EOF
     idle=$((now - observed_at))
     [ "$idle" -ge "$threshold" ] || continue
     ! secondmate_in_active_turn "$(fm_backend_target_of_meta "$meta")" "$idle" || continue
+    # Pattern 14: Jev Long-Run Task Activity Prober & Fake-Stall Dampener
+    if [ "${FM_DISABLE_JEV_STALL_GUARD:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-stall-guard.sh" ]; then
+      if "$SCRIPT_DIR/fm-jev-stall-guard.sh" --seat "$task" --suppress >/dev/null 2>&1; then
+        triage_log "dampened fake stall for active seat $task (idle ${idle}s)" 2>/dev/null || true
+        continue
+      fi
+    fi
     receipt="$receipt_dir/$row_key"
     if [ "$(cat "$receipt" 2>/dev/null || true)" = "$row_key" ]; then
       fm_wake_secondmate_stall_marker_write "$task" "$row_key" || return 1
@@ -1224,6 +1237,55 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   wake "$reason"
 }
 
+# Last gate before a possible-wedge wake: Jev classifies pipeline_wait vs
+# true_wedge vs healthy_idle. Escalate only on true_wedge, or when Jev is
+# unavailable (fail-open to today's wake). pipeline_wait and healthy_idle
+# suppress the wake, restart the idle timer, and leave the escalation
+# counter untouched. bin/fm-jev-wake-triage.sh owns the request, telemetry,
+# and calibration log. config/jev-wake-triage=off, or FM_JEV_WAKE_TRIAGE=off,
+# disables this gate. Default on.
+wedge_jev_enabled() {
+  local v=${FM_JEV_WAKE_TRIAGE-}
+  case "$v" in
+    off|0|false|no) return 1 ;;
+    on|1|true|yes) return 0 ;;
+  esac
+  [ -f "$CONFIG/jev-wake-triage" ] || return 0
+  v=$(head -n 1 "$CONFIG/jev-wake-triage" 2>/dev/null || true)
+  v=${v#"${v%%[![:space:]]*}"}
+  v=${v%"${v##*[![:space:]]}"}
+  case "$v" in
+    off|0|false|no) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+wedge_jev_triage() {  # <window> <task> <age> <escalation-count> <since-file> <triage-label>
+  # 0 = suppress; 1 = escalate (including fail-open).
+  local win=$1 task=$2 age=$3 n=$4 since_file=$5 label=$6 kind bin out action choice runner=()
+  wedge_jev_enabled || return 1
+  bin=${FM_JEV_WAKE_TRIAGE_BIN:-$SCRIPT_DIR/fm-jev-wake-triage.sh}
+  [ -e "$bin" ] || return 1
+  if [ -z "${TYPESAFE_API_KEY:-}" ] && [ -x "$SCRIPT_DIR/jev-typesafe-run.py" ] && [ -z "${FM_TEST_LIB_SOURCED:-}" ]; then
+    runner=(sudo -n "$SCRIPT_DIR/jev-typesafe-run.py" --)
+  fi
+  kind=$(window_kind "$win")
+  case "$kind" in ship|scout|secondmate) ;; *) kind=unknown ;; esac
+  out=$("${runner[@]}" bash "$bin" --class "$kind" --age "$age" --escalation-count "$n" \
+    --task "$task" --status-file "$STATE/$task.status" 2>/dev/null) || out='action=unavailable'
+  action=$(printf '%s\n' "$out" | awk -F= '/^action=/{print $2; exit}')
+  case "$action" in
+    suppress)
+      date +%s > "$since_file"
+      choice=$(printf '%s\n' "$out" | awk -F= '/^choice=/{print $2; exit}')
+      [ -n "$choice" ] || choice=jev
+      triage_log "absorbed $label (jev $choice, idle ${age}s): $win"
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
 # absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
 # watcher restart between recording the hash and recording the timer), or
@@ -1243,6 +1305,10 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # runs last of the three, so the two cheaper deferrals keep the panes they
 # already own on their existing bounded cadences and only a pane that would
 # otherwise alarm pays for a backend read.
+# Jev (wedge_jev_triage) runs after those three, still inside this at-threshold
+# branch, so a candidate that already has a cheaper deferral never pays for a
+# model call. Fail-open: a disabled, missing, or unavailable Jev keeps today's
+# escalate path.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -1268,7 +1334,12 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
           return 0
         fi
-        n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
+        n=$(cat "$escalation_file" 2>/dev/null || echo 0)
+        case "$n" in ''|*[!0-9]*) n=0 ;; esac
+        if wedge_jev_triage "$win" "$task" "$age" "$n" "$since_file" "$label"; then
+          return 0
+        fi
+        n=$(( n + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
@@ -2346,6 +2417,160 @@ while :; do
   # generic recovery reason, so give that owner first refusal.
   resurface_after_downtime
 
+  # The deterministic behavior suite exercises each Jev owner directly. Keep
+  # periodic host housekeeping out of unrelated watcher fixtures.
+  if [ -z "${FM_TEST_LIB_SOURCED:-}" ]; then
+  # Pattern 18: Jev Cross-Seat Doorbell & Stale Notification Vacuum
+  if [ "${FM_DISABLE_JEV_DOORBELL_VACUUM:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-doorbell-vacuum.sh" ]; then
+    _vacuum_marker="$STATE/.jev-doorbell-vacuum-last"
+    if [ ! -f "$_vacuum_marker" ] || [ "$(age_of "$_vacuum_marker")" -ge 1800 ]; then
+      touch "$_vacuum_marker"
+      "$SCRIPT_DIR/fm-jev-doorbell-vacuum.sh" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  # Pattern 20: Jev Harness Pane & Completed Seat Auto-Reconciler
+  if [ "${FM_DISABLE_JEV_PANE_REAPER:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-pane-reaper.sh" ]; then
+    _pane_reaper_marker="$STATE/.jev-pane-reaper-last"
+    if [ ! -f "$_pane_reaper_marker" ] || [ "$(age_of "$_pane_reaper_marker")" -ge 1800 ]; then
+      touch "$_pane_reaper_marker"
+      "$SCRIPT_DIR/fm-jev-pane-reaper.sh" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  # Pattern 21: Jev Cross-Seat Asset & Artifact Cache De-Duplicator
+  if [ "${FM_DISABLE_JEV_ARTIFACT_DEDUP:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-artifact-dedup.sh" ]; then
+    _artifact_dedup_marker="$STATE/.jev-artifact-dedup-last"
+    if [ ! -f "$_artifact_dedup_marker" ] || [ "$(age_of "$_artifact_dedup_marker")" -ge 1800 ]; then
+      touch "$_artifact_dedup_marker"
+      "$SCRIPT_DIR/fm-jev-artifact-dedup.sh" >/dev/null 2>&1 || true
+    fi
+  fi
+
+  # Pattern 22: Jev Model Context & Prompt Cache Degradation Watchdog
+  if [ "${FM_DISABLE_JEV_CACHE_WATCHDOG:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-cache-watchdog.sh" ]; then
+    _cache_watchdog_marker="$STATE/.jev-cache-watchdog-last"
+    if [ ! -f "$_cache_watchdog_marker" ] || [ "$(age_of "$_cache_watchdog_marker")" -ge 900 ]; then
+      touch "$_cache_watchdog_marker"
+      "$SCRIPT_DIR/fm-jev-cache-watchdog.sh" --json > "$STATE/.jev-cache-watchdog-telemetry.json" 2>/dev/null || true
+    fi
+  fi
+
+  # Pattern 23: Jev Autonomous CI Runner Health & Shard Load Balancer
+  if [ "${FM_DISABLE_JEV_RUNNER_BALANCER:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-runner-balancer.sh" ]; then
+    _runner_balancer_marker="$STATE/.jev-runner-balancer-last"
+    if [ ! -f "$_runner_balancer_marker" ] || [ "$(age_of "$_runner_balancer_marker")" -ge 900 ]; then
+      touch "$_runner_balancer_marker"
+      "$SCRIPT_DIR/fm-jev-runner-balancer.sh" --repo "ArcsHealth/Portal" --json > "$STATE/.jev-runner-balancer-telemetry.json" 2>/dev/null || true
+    fi
+  fi
+
+  # Pattern 24: Jev Cross-Seat Git Ref & Divergence Auto-Realigner
+  if [ "${FM_DISABLE_JEV_REF_ALIGNER:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-ref-aligner.sh" ]; then
+    _ref_aligner_marker="$STATE/.jev-ref-aligner-last"
+    if [ ! -f "$_ref_aligner_marker" ] || [ "$(age_of "$_ref_aligner_marker")" -ge 1800 ]; then
+      touch "$_ref_aligner_marker"
+      "$SCRIPT_DIR/fm-jev-ref-aligner.sh" --auto-ff --json > "$STATE/.jev-ref-aligner-telemetry.json" 2>/dev/null || true
+    fi
+  fi
+
+  # Pattern 25: Jev Cross-Project Dependency Version Drift Harmonizer
+  if [ "${FM_DISABLE_JEV_DEP_HARMONIZER:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-dep-harmonizer.sh" ]; then
+    _dep_harmonizer_marker="$STATE/.jev-dep-harmonizer-last"
+    if [ ! -f "$_dep_harmonizer_marker" ] || [ "$(age_of "$_dep_harmonizer_marker")" -ge 3600 ]; then
+      touch "$_dep_harmonizer_marker"
+      "$SCRIPT_DIR/fm-jev-dep-harmonizer.sh" --roots "/home/jon/git/Portal,/home/jon/.treehouse/tutti-2b1be6/7/tutti,/opt/ra/firstmate" --json > "$STATE/.jev-dep-harmonizer-telemetry.json" 2>/dev/null || true
+    fi
+  fi
+
+  # Pattern 26: Jev Autonomous Worktree Disk Hygiene & Compaction Reaper
+  if [ "${FM_DISABLE_JEV_DISK_REAPER:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-disk-reaper.sh" ]; then
+    _disk_reaper_marker="$STATE/.jev-disk-reaper-last"
+    if [ ! -f "$_disk_reaper_marker" ] || [ "$(age_of "$_disk_reaper_marker")" -ge 7200 ]; then
+      touch "$_disk_reaper_marker"
+      "$SCRIPT_DIR/fm-jev-disk-reaper.sh" --max-age-hours 4 --json > "$STATE/.jev-disk-reaper-telemetry.json" 2>/dev/null || true
+    fi
+  fi
+
+  # Pattern 27: Jev Cross-Seat Idle Branch & Stale Worktree Pruning Harmonizer
+  if [ "${FM_DISABLE_JEV_WORKTREE_PRUNER:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-worktree-pruner.sh" ]; then
+    _wt_pruner_marker="$STATE/.jev-worktree-pruner-last"
+    if [ ! -f "$_wt_pruner_marker" ] || [ "$(age_of "$_wt_pruner_marker")" -ge 3600 ]; then
+      touch "$_wt_pruner_marker"
+      "$SCRIPT_DIR/fm-jev-worktree-pruner.sh" --json > "$STATE/.jev-worktree-pruner-telemetry.json" 2>/dev/null || true
+    fi
+  fi
+
+  # Pattern 28: Jev Cross-Seat Environment Variable & Credential Drift Validator
+  if [ "${FM_DISABLE_JEV_ENV_VALIDATOR:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-env-validator.sh" ]; then
+    _env_val_marker="$STATE/.jev-env-validator-last"
+    if [ ! -f "$_env_val_marker" ] || [ "$(age_of "$_env_val_marker")" -ge 3600 ]; then
+      touch "$_env_val_marker"
+      "$SCRIPT_DIR/fm-jev-env-validator.sh" --json > "$STATE/.jev-env-validator-telemetry.json" 2>/dev/null || true
+    fi
+  fi
+
+  # Pattern 29: Jev Multi-Agent Memory & DB/Redis Leaked Connection Watchdog
+  if [ "${FM_DISABLE_JEV_REDIS_WATCHDOG:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-redis-watchdog.sh" ]; then
+    _redis_wd_marker="$STATE/.jev-redis-watchdog-last"
+    if [ ! -f "$_redis_wd_marker" ] || [ "$(age_of "$_redis_wd_marker")" -ge 3600 ]; then
+      touch "$_redis_wd_marker"
+      "$SCRIPT_DIR/fm-jev-redis-watchdog.sh" --json > "$STATE/.jev-redis-watchdog-telemetry.json" 2>/dev/null || true
+    fi
+  fi
+
+  # Pattern 30: Jev Host CPU & Memory Pressure Adaptive Throttler
+  if [ "${FM_DISABLE_JEV_LOAD_THROTTLER:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-load-throttler.sh" ]; then
+    _load_throttle_marker="$STATE/.jev-load-throttler-last"
+    if [ ! -f "$_load_throttle_marker" ] || [ "$(age_of "$_load_throttle_marker")" -ge 900 ]; then
+      touch "$_load_throttle_marker"
+      "$SCRIPT_DIR/fm-jev-load-throttler.sh" --json > "$STATE/.jev-load-throttler-telemetry.json" 2>/dev/null || true
+    fi
+  fi
+
+  # Pattern 31: Jev Multi-Agent Database Connection Pool Health Probe
+  if [ "${FM_DISABLE_JEV_DB_POOL_PROBE:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-db-pool-probe.sh" ]; then
+    _db_pool_marker="$STATE/.jev-db-pool-probe-last"
+    if [ ! -f "$_db_pool_marker" ] || [ "$(age_of "$_db_pool_marker")" -ge 1800 ]; then
+      touch "$_db_pool_marker"
+      "$SCRIPT_DIR/fm-jev-db-pool-probe.sh" --json > "$STATE/.jev-db-pool-probe-telemetry.json" 2>/dev/null || true
+    fi
+  fi
+
+  # Pattern 32: Jev Multi-Agent IPC & UNIX Domain Socket Leak Watchdog
+  if [ "${FM_DISABLE_JEV_IPC_WATCHDOG:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-ipc-watchdog.sh" ]; then
+    _ipc_wd_marker="$STATE/.jev-ipc-watchdog-last"
+    if [ ! -f "$_ipc_wd_marker" ] || [ "$(age_of "$_ipc_wd_marker")" -ge 1800 ]; then
+      touch "$_ipc_wd_marker"
+      "$SCRIPT_DIR/fm-jev-ipc-watchdog.sh" --json > "$STATE/.jev-ipc-watchdog-telemetry.json" 2>/dev/null || true
+    fi
+  fi
+
+  # Pattern 33: Jev Cross-Seat Git Index & Rebase State Lock Auto-Healer
+  if [ "${FM_DISABLE_JEV_REBASE_HEALER:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-rebase-healer.sh" ]; then
+    _rebase_healer_marker="$STATE/.jev-rebase-healer-last"
+    if [ ! -f "$_rebase_healer_marker" ] || [ "$(age_of "$_rebase_healer_marker")" -ge 1800 ]; then
+      touch "$_rebase_healer_marker"
+      "$SCRIPT_DIR/fm-jev-rebase-healer.sh" --json > "$STATE/.jev-rebase-healer-telemetry.json" 2>/dev/null || true
+    fi
+  fi
+
+  # Pattern 34: Jev Multi-Agent Stale Log & Crash Core Dump Compaction Sweeper
+  if [ "${FM_DISABLE_JEV_DUMP_SWEEPER:-0}" != 1 ] && [ -x "$SCRIPT_DIR/fm-jev-dump-sweeper.sh" ]; then
+    _dump_sweeper_marker="$STATE/.jev-dump-sweeper-last"
+    if [ ! -f "$_dump_sweeper_marker" ] || [ "$(age_of "$_dump_sweeper_marker")" -ge 1800 ]; then
+      touch "$_dump_sweeper_marker"
+      "$SCRIPT_DIR/fm-jev-dump-sweeper.sh" --json > "$STATE/.jev-dump-sweeper-telemetry.json" 2>/dev/null || true
+    fi
+  fi
+  fi
+
+
+
+
+
+
+
   # The existing poll loop also owns the bounded inactive-outcome cadence.
   # This is mechanical and silent unless a durable terminal-outcome obligation
   # was created, so quiet cycles never wake firstmate or consume model tokens.
@@ -2465,6 +2690,16 @@ EOF
           wake "$reason"
         fi
         pr_poll_control_release || exit 1
+        # Pattern 2: Jev Semantic Alert Correlator to dampen held / duplicate check alerts
+        if [ -x "$FM_ROOT/bin/fm-jev-alert-correlator.sh" ]; then
+          correlator_rc=2
+          "$FM_ROOT/bin/fm-jev-alert-correlator.sh" --alert "$reason" --source "$(basename "$c")" >/dev/null 2>&1 || correlator_rc=$?
+          if [ "$correlator_rc" -eq 0 ]; then
+            triage_log "absorbed alert via Jev alert correlator for $c: $out"
+            touch "$STATE/.last-check"
+            continue
+          fi
+        fi
         fm_wake_append check "$c" "$reason" || exit 1
         touch "$STATE/.last-check"
         wake "$reason"
@@ -2706,12 +2941,36 @@ EOF
               clear_write_tracking "$key"
               triage_log "absorbed stale (open captain call already surfaced for this status): $w"
             else
+              stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
+              last_status=$(last_status_line "$stale_status")
+              if [ -n "$last_status" ] && [ "$(status_line_verb "$last_status")" = "done" ]; then
+                if [ -x "$FM_ROOT/bin/fm-jev-done-verify.sh" ]; then
+                  done_verify_out=
+                  done_verify_rc=0
+                  done_verify_out=$("$FM_ROOT/bin/fm-jev-done-verify.sh" --task "$task" --status-line "$last_status" 2>&1) || done_verify_rc=$?
+                  if [ "$done_verify_rc" -ne 0 ]; then
+                    triage_log "fake-done detected by Jev for $task: $done_verify_out"
+                    fm_wake_append fake-done "$w" "fake-done: $w ($done_verify_out)" || exit 1
+                    stale_wait_record "$key"
+                    printf '%s' "$h" > "$sf"
+                    rm -f "$ssf"
+                    clear_write_tracking "$key"
+                    stale_record=$(status_span_first_actionable_record "$stale_status" 0)
+                    case $? in
+                      0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;
+                      *) stale_end=''; stale_ident='' ;;
+                    esac
+                    mark_surfaced "$stale_status" "$stale_end" "$stale_ident"
+                    wake "fake-done: $w"
+                    continue
+                  fi
+                fi
+              fi
               fm_wake_append stale "$w" "stale: $w" || exit 1
               stale_wait_record "$key"
               printf '%s' "$h" > "$sf"
               rm -f "$ssf"
               clear_write_tracking "$key"
-              stale_status="$STATE/$(window_to_task "$w" "$STATE").status"
               stale_record=$(status_span_first_actionable_record "$stale_status" 0)
               case $? in
                 0|1) stale_end=${stale_record%%$'\t'*}; stale_rest=${stale_record#*$'\t'}; stale_ident=${stale_rest%%$'\t'*} ;;

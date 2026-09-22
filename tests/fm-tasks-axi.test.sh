@@ -39,7 +39,7 @@ empty_backlog() {  # <path>
 make_split() {  # <name>; prints the case directory
   local dir="$TMP_ROOT/$1"
   mkdir -p "$dir/code/data" "$dir/home/data" "$dir/home/state" "$dir/home/config"
-  cp "$ROOT/.tasks.toml" "$dir/code/.tasks.toml"
+  cp "$ROOT/.tasks.toml.example" "$dir/code/.tasks.toml"
   empty_backlog "$dir/home/data/backlog.md"
   ln -s "$dir/home/data/backlog.md" "$dir/code/data/backlog.md"
   printf '%s\n' "$dir"
@@ -104,7 +104,7 @@ test_guard_silent_for_single_home() {
   local dir out
   dir="$TMP_ROOT/single-guard"
   mkdir -p "$dir/data"
-  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  cp "$ROOT/.tasks.toml.example" "$dir/.tasks.toml"
   empty_backlog "$dir/data/backlog.md"
   printf '## Done\n' > "$dir/data/done-archive.md"
   out=$(bootstrap_backlog_lines "$dir")
@@ -208,7 +208,7 @@ test_wrapper_single_home() {
   local dir
   dir="$TMP_ROOT/single-wrapper"
   mkdir -p "$dir/data"
-  cp "$ROOT/.tasks.toml" "$dir/.tasks.toml"
+  cp "$ROOT/.tasks.toml.example" "$dir/.tasks.toml"
   empty_backlog "$dir/data/backlog.md"
   (cd "$dir" && FM_ROOT_OVERRIDE="$dir" "$WRAPPER" add solo-1 "single home" >/dev/null) \
     || fail "add in the single-home layout failed"

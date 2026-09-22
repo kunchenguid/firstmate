@@ -24,7 +24,10 @@ make_home() {  # <name>
   # tests/lib.sh, not with a shell array: make_home runs inside a command
   # substitution, where an array append never reaches the caller.
   fm_test_track_procevent_home "$home" "$home/procevent-claims"
-  mkdir -p "$home/state" "$home/data"
+  # The process-event state-root contract requires a private directory, so the
+  # fixture must not inherit an ambient group-writable umask.
+  (umask 077; mkdir -p "$home/state")
+  mkdir -p "$home/data"
   fakebin=$(fm_fakebin "$home")
   # The build proves the board session is live before it arms anything, so the
   # stub reports the opened shape the real lavish-axi emits. This suite is about

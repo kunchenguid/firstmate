@@ -1251,13 +1251,13 @@ test_forced_secondmate_child_close_failure_still_refuses() {
   set +e
   env -u TMUX -u TMUX_PANE FM_TEST_BLOCK_KILL=1 \
     FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" FM_RUNTIME_LOG="$dir/runtime.log" \
-    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$parent" --force \
+    PATH="$dir/fakebin:$PATH" "$TEARDOWN" "$parent" --force --retire-secondmate "$parent" \
     > "$dir/child.out" 2> "$dir/child.err"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "forced secondmate cleanup continued past a child close that failed: $(cat "$dir/child.err")"
   assert_grep "child $child" "$dir/child.err" \
-    "the refusal did not name the child whose endpoint could not be closed"
+    "the refusal did not name the child whose endpoint could not be closed: $(cat "$dir/child.err")"
   assert_grep "could not be closed" "$dir/child.err" \
     "forced secondmate cleanup swallowed the child close failure"
   assert_no_grep "teardown $parent complete" "$dir/child.out" \

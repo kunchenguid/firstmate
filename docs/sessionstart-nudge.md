@@ -1,6 +1,6 @@
 # Native session-start adapters
 
-AGENTS.md section 3 is the authoritative behavioral contract for session start.
+`AGENTS.md` section 3 owns the lock-refused read-only boundary and the `session-start` load trigger; [`.agents/skills/session-start/SKILL.md`](../.agents/skills/session-start/SKILL.md) owns the session-start runbook.
 This file owns how the tracked native session-open adapters deliver it, and the compatibility limits that force two tiers rather than one.
 
 Firstmate ships two session-open tiers, and the tier is a property of the harness surface, not of the home.

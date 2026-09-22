@@ -212,11 +212,17 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 
 1. **Sweep the session for uncaptured durable knowledge.**
    Look for operational learnings, captain preferences expressed in passing, project-intrinsic facts, standing decisions, and undone next steps.
-2. **Route each finding using AGENTS.md's knowledge-routing table.**
-   AGENTS.md section 6 is the source of truth for destinations.
-   Do not re-derive or duplicate that mapping here.
+2. **Route each finding using this skill's knowledge-routing table.**
+   This skill is the source of truth for destinations:
+   - Home-domain captain preferences and working style belong in `data/captain.md` after inspect-then-update.
+   - Captain preferences shared across secondmate domains belong in the primary home's `data/captain-shared.md` under the `secondmate-provisioning` contract.
+   - Fleet-local operational facts belong in curated, home-local `data/learnings.md`.
+   - Task-scoped notes belong with the backlog item, and investigation findings belong in the scout report.
+   - Knowledge useful to almost every contributor to one project belongs in that project's committed `AGENTS.md`.
+   - Knowledge general to every firstmate user belongs in this repo's shared tracked surface.
+   Do not re-derive a second mapping in `AGENTS.md`.
 3. **Write within the existing boundaries.**
-   - Captain preferences and fleet-local operational facts belong in the destination selected by AGENTS.md after the required whole-file curation pass.
+   - Captain preferences and fleet-local operational facts belong in the destination selected by this skill's knowledge-routing table after the required whole-file curation pass.
      Create `data/learnings.md` only for a genuinely new local learning with no stronger owner.
    - In a primary home, curate shared captain preferences only under the existing primary-authoritative shared-preference contract.
      In a secondmate home, route a newly discovered shared preference to the main firstmate through marked status or a document pointer instead of editing the inherited file.
@@ -229,7 +235,7 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
    - File each undone next step as a queued backlog item with a genuine `blocked-by` dependency when applicable.
 4. **Use inspect-then-update.**
    For every retained fact, ask which current statement it supersedes, whether it can be a one-sentence rewrite, and whether a stale entry should be refreshed, archived, or routed to an existing stronger owner.
-   The only graduation moves are promotion to tracked shared material through a PR, folding a learning into the captain-preference destination selected by AGENTS.md, archiving a stale entry to `data/memory-archive.md`, autonomous offload of an eligible non-pinned conditional entry to an already-existing allowed owner through the reduce flow above, captain-approved offload of a pinned durable conditional entry to a JIT-loaded owner executed through the migration step above, or deletion of an entry that is a duplicate or already preserved through a stronger existing owner.
+   The only graduation moves are promotion to tracked shared material through a PR, folding a learning into the captain-preference destination selected by this skill's knowledge-routing table, archiving a stale entry to `data/memory-archive.md`, autonomous offload of an eligible non-pinned conditional entry to an already-existing allowed owner through the reduce flow above, captain-approved offload of a pinned durable conditional entry to a JIT-loaded owner executed through the migration step above, or deletion of an entry that is a duplicate or already preserved through a stronger existing owner.
    A stale unique fact is never deleted, only archived.
    Do not invent another graduation path.
 

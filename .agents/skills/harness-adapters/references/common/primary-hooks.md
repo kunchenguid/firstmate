@@ -27,7 +27,7 @@ Never generalize Claude tool names or permissions without live evidence.
 
 ## Session start
 
-`../../../AGENTS.md` section 3 remains the behavioral owner.
+[`session-start`](../../../session-start/SKILL.md) owns the session-start runbook; `AGENTS.md` section 3 retains the lock-refused read-only boundary.
 `../../../docs/sessionstart-nudge.md` owns native tier assignment, transport, source routing, runtime bound, and fail-open behavior.
 Read it before changing session-open behavior.
 `../../../docs/verification/supervision.md` under "Native session-start delivery" owns active dated evidence.

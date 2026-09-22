@@ -12,19 +12,25 @@
 # the one site where --force overrides it, and bin/fm-backend.sh's
 # fm_backend_kill owns what each backend can prove about its own close - an
 # already-exited endpoint is not a failure and stays silent.
+# Returning a worktree to its treehouse pool also frees one pool slot, so after
+# a successful return teardown releases the oldest capacity hold recorded for
+# that same pool (bin/fm-capacity-lib.sh owns the reason contract
+# bin/fm-spawn.sh writes when the pool refuses a spawn) and prints which item
+# became ready. The release is best-effort: a failure leaves the hold recorded
+# for the next teardown to retry and never aborts the teardown itself.
 # Removing state/<id>.meta and landing the backlog transition are one step, not
 # two: bin/fm-backlog-transition-lib.sh owns that invariant, and both halves run
 # under the task's own meta lock before this script reports success. Because the
 # completion links (the PR, the report path, a local-main note) live only in the
 # record being removed, the intended transition is recorded in
 # state/<id>.backlog-close first, so a process killed between the halves leaves
-# the next session start enough to finish it; a landed close removes that record.
-# A close that fails is fatal and loud, preserves its pending-close record, and
-# is retried by the next session start. The transition is skipped on a
+# the next session start enough to finish it; a landed transition removes that
+# record. A transition that fails is fatal and loud, preserves its pending-close
+# record, and is retried by the next session start. The transition is skipped on a
 # config/backlog-backend=manual home and in a markdown home that keeps no
-# data/backlog.md; those cases print the manual follow-up. A configured
-# non-markdown adapter remains active without a markdown file; any active
-# automatic backend without compatible tasks-axi refuses before cleanup.
+# configured backlog file; those cases print the manual follow-up. A configured
+# non-markdown adapter remains active without a markdown file; an
+# automatic-backend home without compatible tasks-axi refuses before cleanup.
 # None of this loosens the landed-work gates below: the transition runs only on
 # the paths that already proceed to remove the record.
 # The close - and only the close - is replaced by `tasks-axi reopen` with the
@@ -161,10 +167,16 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--retire-secondmate <task-id>] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
 #   when the captain has explicitly said to discard the work.
+#   --retire-secondmate <task-id> is the per-target authority a kind=secondmate
+#   teardown requires. Its value must equal the task being torn down, so a
+#   cleanup list assembled by a caller cannot retire a persistent home as a side
+#   effect, and passing it for any other kind refuses as a mis-selected target.
+#   --force never substitutes for it: forced discard and choosing which home to
+#   retire are separate decisions.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -175,6 +187,11 @@
 #   an abandoned attempt left behind never counts as a published incarnation:
 #   the record still reads as a legacy record, so the endpoint gate runs again
 #   and the retry still needs --legacy-record.
+# Exactly one target per invocation. Extra task ids are refused before the lock,
+# naming the count and, when any of them is a secondmate, those ids - so a
+# mistaken selection list is caught while every seat is still alive. Choose
+# targets from bin/fm-fleet-view.sh --cleanup-candidates, which labels each live
+# task with its kind, rather than inferring persistence from a worktree path.
 #
 # Transient / stale worktree git lock recovery (teardown-lock-race): a crew process
 # killed mid-git-operation can leave a .git/worktrees/<wt>/index.lock (or, for a
@@ -273,6 +290,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 # shellcheck source=bin/fm-tasks-axi-lib.sh
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-capacity-lib.sh
+. "$SCRIPT_DIR/fm-capacity-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -297,25 +316,73 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
-if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
-  echo "error: invalid teardown request" >&2
-  exit 2
-fi
-ID=$1
+TEARDOWN_TARGETS=()
 FORCE=
+RETIRE_AUTH=
+RETIRE_AUTH_GIVEN=0
 LEGACY_RECORD_GIVEN=0
-shift
+# The target is positional-first (usage above), exactly as it was before this
+# script took options at all. Parsing the first argument as an option would
+# strand any task whose id happens to spell one - fm_task_id_path_safe permits
+# "--force" and "--retire-secondmate" - leaving its worktree and treehouse
+# lease allocated with no way to reach it. So the first argument is always a
+# target, and only the arguments after it are read as options.
+if [ "$#" -gt 0 ]; then
+  TEARDOWN_TARGETS+=("$1")
+  shift
+fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
-    *)
-      echo "error: invalid teardown request" >&2
-      exit 2
+    --retire-secondmate)
+      shift
+      [ "$#" -gt 0 ] || {
+        echo "error: --retire-secondmate needs the exact task id it authorizes" >&2
+        exit 2
+      }
+      RETIRE_AUTH=$1
+      RETIRE_AUTH_GIVEN=1
       ;;
+    --retire-secondmate=*)
+      RETIRE_AUTH=${1#*=}
+      RETIRE_AUTH_GIVEN=1
+      ;;
+    # Anything else is a target, not an unknown option: a task id may
+    # legitimately start with dashes. Same idiom as bin/fm-spawn.sh.
+    *) TEARDOWN_TARGETS+=("$1") ;;
   esac
   shift
 done
+if [ "${#TEARDOWN_TARGETS[@]}" -lt 1 ]; then
+  echo "error: invalid teardown request" >&2
+  exit 2
+fi
+for teardown_target in "${TEARDOWN_TARGETS[@]}"; do
+  fm_task_id_path_safe "$teardown_target" || {
+    echo "error: invalid teardown request" >&2
+    exit 2
+  }
+done
+# Loop-shape refusal. Teardown acts on exactly one target, so a selection list
+# handed to one invocation is a caller mistake, not a request. Answered here,
+# before the lock and before any read that could mutate, so a list that sweeps
+# up persistent homes is caught while every seat is still alive.
+if [ "${#TEARDOWN_TARGETS[@]}" -gt 1 ]; then
+  TEARDOWN_BATCH_SECONDMATES=()
+  for teardown_target in "${TEARDOWN_TARGETS[@]}"; do
+    [ "$(fm_meta_get "$STATE/$teardown_target.meta" kind)" = secondmate ] || continue
+    TEARDOWN_BATCH_SECONDMATES+=("$teardown_target")
+  done
+  echo "error: teardown acts on exactly one task, but ${#TEARDOWN_TARGETS[@]} targets were given: ${TEARDOWN_TARGETS[*]}" >&2
+  if [ "${#TEARDOWN_BATCH_SECONDMATES[@]}" -gt 0 ]; then
+    echo "error: ${#TEARDOWN_BATCH_SECONDMATES[@]} of those targets are persistent secondmate homes, not finished workers: ${TEARDOWN_BATCH_SECONDMATES[*]}" >&2
+    echo "Retiring a secondmate is a per-target decision. Nothing was changed." >&2
+  fi
+  echo "List candidates with their kinds using bin/fm-fleet-view.sh --cleanup-candidates, then act on one target per invocation." >&2
+  exit 2
+fi
+ID=${TEARDOWN_TARGETS[0]}
 fm_backlog_directory_present "$STATE" "state directory" || {
   echo "error: teardown refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
   exit 1
@@ -433,6 +500,30 @@ fm_backlog_record_present "$META" "task record" "$STATE" || {
 }
 TEARDOWN_META_KIND=$(fm_meta_get "$META" kind)
 [ -n "$TEARDOWN_META_KIND" ] || TEARDOWN_META_KIND=ship
+# Per-target authority for a persistent home. A secondmate is retired only by a
+# decision naming that exact home, so a cleanup list a caller assembled - from a
+# path glob, a pane sweep, an idle-looking queue - can never retire one as a
+# side effect. Asked before every destructive step, including the remote
+# retirement path below, and answered from the task's own kind rather than from
+# anything the caller passed in.
+if [ "$TEARDOWN_META_KIND" = secondmate ]; then
+  if [ "$RETIRE_AUTH_GIVEN" != 1 ]; then
+    echo "REFUSED: task $ID is a persistent secondmate home, not a finished worker; nothing was changed." >&2
+    echo "An idle queue is a healthy secondmate's normal state, never evidence it is done." >&2
+    echo "Retiring it takes authority naming that exact home: bin/fm-teardown.sh $ID --retire-secondmate $ID" >&2
+    echo "List candidates with their kinds using bin/fm-fleet-view.sh --cleanup-candidates rather than inferring persistence from a worktree path." >&2
+    exit 1
+  fi
+  if [ "$RETIRE_AUTH" != "$ID" ]; then
+    echo "REFUSED: --retire-secondmate names ${RETIRE_AUTH:-<empty>}, but this teardown targets $ID; nothing was changed." >&2
+    echo "Authority for retiring a persistent home must name that exact home." >&2
+    exit 1
+  fi
+elif [ "$RETIRE_AUTH_GIVEN" = 1 ]; then
+  echo "REFUSED: --retire-secondmate was given for task $ID, which is a $TEARDOWN_META_KIND task and not a secondmate home; nothing was changed." >&2
+  echo "That mismatch means the target was selected wrong; re-check it with bin/fm-fleet-view.sh --cleanup-candidates." >&2
+  exit 1
+fi
 TEARDOWN_CLEANUP_RECOVERY=$(fm_meta_get "$META" cleanup_recovery)
 TEARDOWN_META_SPAWN_GEN=
 TEARDOWN_LEGACY_PENDING=0
@@ -3400,6 +3491,21 @@ fi
 # pruned code root. Best effort - a sweep failure never blocks this teardown.
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
+# Pattern 19: Jev Worktree Stale Prune & Detached Branch Reaper (Fail-Open)
+if [ -z "${FM_TEST_LIB_SOURCED:-}" ] && [ -x "$SCRIPT_DIR/fm-jev-worktree-reaper.sh" ] && [ "${FM_DISABLE_JEV_WORKTREE_REAPER:-0}" != 1 ]; then
+  "$SCRIPT_DIR/fm-jev-worktree-reaper.sh" --repo-dir "${WT:-$PWD}" --dry-run >&2 || true
+fi
+
+# Pattern 20: Jev Harness Pane & Completed Seat Auto-Reconciler (Fail-Open)
+if [ -z "${FM_TEST_LIB_SOURCED:-}" ] && [ -x "$SCRIPT_DIR/fm-jev-pane-reaper.sh" ] && [ "${FM_DISABLE_JEV_PANE_REAPER:-0}" != 1 ]; then
+  "$SCRIPT_DIR/fm-jev-pane-reaper.sh" --dry-run >&2 || true
+fi
+
+# Pattern 21: Jev Cross-Seat Asset & Artifact Cache De-Duplicator (Fail-Open)
+if [ -z "${FM_TEST_LIB_SOURCED:-}" ] && [ -x "$SCRIPT_DIR/fm-jev-artifact-dedup.sh" ] && [ "${FM_DISABLE_JEV_ARTIFACT_DEDUP:-0}" != 1 ]; then
+  "$SCRIPT_DIR/fm-jev-artifact-dedup.sh" --dry-run >&2 || true
+fi
+
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
@@ -3451,6 +3557,29 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # unclaimed until its next holder claims it, and leaves the claim in place
   # whenever the return did not actually happen.
   fm_treehouse_slot_owner_release "$WT" "$ID"
+  # The returned worktree freed exactly one pool slot, so hand it to the oldest
+  # capacity hold recorded for that same pool (bin/fm-capacity-lib.sh owns the
+  # reason contract bin/fm-spawn.sh records): releasing makes the held item
+  # dispatchable again instead of waiting for the next backlog re-evaluation.
+  # Best-effort by design - a failed release leaves the hold recorded for the
+  # next teardown to retry, never aborting this one.
+  if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
+    capacity_pool=$(fm_capacity_pool_of_worktree "$WT" 2>/dev/null || true)
+    if [ -n "$capacity_pool" ]; then
+      fm_capacity_release_oldest "$DATA" "$capacity_pool" || true
+      # Spawn may have had to record its hold under the fallback pool identity
+      # (the canonical project root, as fm_capacity_pool_of_project resolves it
+      # when treehouse cannot answer); when the worktree-derived scan released
+      # nothing, scan that identity too before leaving the hold stranded for a
+      # manual unhold.
+      if [ -z "$FM_CAPACITY_RELEASED_ID" ] && [ -n "$PROJ" ]; then
+        capacity_fallback=$(fm_capacity_canonical_or_raw "$PROJ" 2>/dev/null || true)
+        if [ -n "$capacity_fallback" ] && [ "$capacity_fallback" != "$capacity_pool" ]; then
+          fm_capacity_release_oldest "$DATA" "$capacity_fallback" || true
+        fi
+      fi
+    fi
+  fi
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"
@@ -3593,8 +3722,8 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
-  "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
-  "$STATE/.$ID.branch-outcome-index"
+  "$STATE/$ID.reconcile-nudged" "$STATE/$ID.herdr-task-labels" \
+  "$STATE/$ID.gemini-settings.json" "$STATE/.$ID.branch-outcome-index"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any
 # leftover unhandled steer here is moot rather than unlanded work.

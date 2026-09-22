@@ -10,6 +10,7 @@
 #                 "MISSING_MANUAL: <tool> (instructions: <url>)", "NEEDS_GH_AUTH",
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
+#                 "TASKS_CONFIG: <why this home has no .tasks.toml>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
 #                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
@@ -17,6 +18,8 @@
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
 #                 "BACKLOG_RECONCILE: code-root <file> is not this home's <file>; ...",
 #                 "TANGLE: <remediation>",
+#                 "NO_MISTAKES_MIRROR: <project> remote=<url>|absent
+#                 expected-root=<root>",
 #                 "SECONDMATE_SYNC: secondmate <id>: skipped: <reason>",
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
@@ -69,6 +72,25 @@
 #          quota-axi is required for the agent-owned dispatch-profile array
 #          procedure in AGENTS.md section 4 and
 #          .agents/skills/quota-array-dispatch/SKILL.md.
+#          The locked mutable path copies the tracked .tasks.toml.example into
+#          this home as .tasks.toml when the home has none, so a home that never
+#          customized its backlog config still addresses data/backlog.md instead
+#          of falling back to tasks-axi's built-in defaults. An existing
+#          .tasks.toml is this home's own choice and is never read or rewritten;
+#          only a failed create prints TASKS_CONFIG.
+#          NO_MISTAKES_MIRROR is detect-only drift reporting (never a repair):
+#          a no-mistakes-posture project clone, or this home's own firstmate
+#          checkout, whose "no-mistakes" gate remote is absent or lives outside
+#          <root>/repos/ is pushing its gates to a mirror root no daemon serves.
+#          <root> is resolved exactly as the installed CLI resolves it from
+#          that clone: $NM_HOME when set (non-empty), else ~/.no-mistakes
+#          (verified against no-mistakes v1.60.2: `NM_HOME=/x no-mistakes
+#          doctor` prints "data directory /x", empty NM_HOME falls back to the
+#          default, and `no-mistakes init --help` documents that init sets up a
+#          local bare gate repo and adds or repairs the "no-mistakes" remote).
+#          The operator fix, named in the printed line, is rerunning
+#          `no-mistakes init` inside that clone; bootstrap itself never modifies
+#          a clone and never runs init.
 #          On a primary home, the locked mutable path materializes the visible
 #          default config/startup-memory-budget=7500 when absent. It never
 #          guesses at malformed or unsafe existing files, and secondmate homes
@@ -1369,6 +1391,46 @@ backlog_record_reconcile() {
   done
 }
 
+tasks_config_setup() {
+  # .tasks.toml is per-home local material, so every home materializes its own
+  # from the example that ships beside these scripts in the tracked code root.
+  # An existing file is this home's own customization and stays byte-for-byte
+  # untouched; only a failed create is reported, because a home with no
+  # .tasks.toml silently loses data/backlog.md addressing, its archive path, and
+  # done_keep (see bin/fm-backlog-transition-lib.sh).
+  if [ -e "$FM_HOME/.tasks.toml" ] || [ -L "$FM_HOME/.tasks.toml" ]; then
+    return 0
+  fi
+  local example="$SCRIPT_DIR/../.tasks.toml.example"
+  if [ ! -f "$example" ] || [ -L "$example" ]; then
+    echo "TASKS_CONFIG: this home has no .tasks.toml and $example is missing or not a regular file"
+    return 0
+  fi
+  local tmp
+  tmp=$(mktemp "$FM_HOME/.tasks.toml.XXXXXX" 2>/dev/null) || {
+    echo "TASKS_CONFIG: could not create $FM_HOME/.tasks.toml from $example"
+    return 0
+  }
+  if ! cp "$example" "$tmp" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null
+    echo "TASKS_CONFIG: could not create $FM_HOME/.tasks.toml from $example"
+    return 0
+  fi
+  # Publish with a hard link, not a rename: link creation fails atomically
+  # when the target already exists, so a .tasks.toml created by an overlapping
+  # bootstrap or by the user after the existence check above is never
+  # clobbered by the tracked defaults. The temp file sits beside the target,
+  # so the link stays on one filesystem.
+  if ln "$tmp" "$FM_HOME/.tasks.toml" 2>/dev/null; then
+    rm -f "$tmp" 2>/dev/null
+  else
+    rm -f "$tmp" 2>/dev/null
+    if [ ! -e "$FM_HOME/.tasks.toml" ] && [ ! -L "$FM_HOME/.tasks.toml" ]; then
+      echo "TASKS_CONFIG: could not create $FM_HOME/.tasks.toml from $example"
+    fi
+  fi
+}
+
 startup_memory_budget_setup() {
   # Primary bootstrap owns default publication. A secondmate is deliberately
   # passive here because its setting must converge from the primary through the
@@ -1406,6 +1468,7 @@ fi
 # sessions never touch state, and the deferred network pass never repeats it:
 # the local pass that ran first already closed that window.
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ] && local_phase; then
+  tasks_config_setup
   BOOTSTRAP_BACKLOG_GATE_KIND=secondmate
   if [ -e "$STATE" ] || [ -L "$STATE" ]; then
     if ! fm_backlog_directory_present "$STATE" "state directory"; then
@@ -1493,6 +1556,53 @@ detect_local_tools() {
   fi
 }
 
+# One checkout's no-mistakes gate-remote placement. Silent when the remote
+# sits under <root>/repos/ or the path is not a git work tree (so a non-git
+# FM_ROOT fixture or a plain directory stays inert); one diagnostic line
+# otherwise. The header's NO_MISTAKES_MIRROR paragraph owns the contract.
+check_no_mistakes_mirror_one() {  # <label> <clone> <root>
+  local label=$1 clone=$2 root=$3 url
+  git -C "$clone" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+  url=$(git -C "$clone" remote get-url no-mistakes 2>/dev/null || true)
+  # A bare "/" root must not double the leading slash: "$root"/repos/* would
+  # become //repos/* and never match a healthy /repos/<repo>.git remote, and
+  # re-running no-mistakes init against the same root could never clear it.
+  case "$root" in
+    /) case "$url" in /repos/*) return 0 ;; esac ;;
+    *) case "$url" in "$root"/repos/*) return 0 ;; esac ;;
+  esac
+  [ -n "$url" ] || url=absent
+  echo "NO_MISTAKES_MIRROR: $label remote=$url expected-root=$root (run no-mistakes init inside $clone to point its gate at the active root)"
+}
+
+# Detect-only no-mistakes mirror drift for this home: every registered
+# no-mistakes-posture project clone (bin/fm-project-mode.sh owns the registry
+# posture parse), plus this home's own firstmate checkout, must carry a
+# "no-mistakes" remote under the root the installed CLI would resolve.
+detect_no_mistakes_mirror() {
+  local root name mode clone
+  root=${NM_HOME:-}
+  [ -n "$root" ] || root=$HOME/.no-mistakes
+  # init canonicalizes NM_HOME when it writes the remote, so a trailing-slash
+  # NM_HOME must not poison the <root>/repos/* prefix match below. A bare "/"
+  # root is already canonical and must survive the strip.
+  while [ "$root" != "/" ] && [ "$root" != "${root%/}" ]; do root=${root%/}; done
+  check_no_mistakes_mirror_one firstmate "$FM_ROOT" "$root"
+  [ -f "$DATA/projects.md" ] || return 0
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    mode=$("$SCRIPT_DIR/fm-project-mode.sh" --raw "$name" 2>/dev/null || true)
+    mode=${mode%% *}
+    case "$mode" in
+      no-mistakes|no-mistakes-prod-only) ;;
+      *) continue ;;
+    esac
+    clone="$PROJECTS/$name"
+    [ -d "$clone" ] || continue
+    check_no_mistakes_mirror_one "$name" "$clone" "$root"
+  done < <(awk '$1=="-" && $2!="" { print $2 }' "$DATA/projects.md" 2>/dev/null)
+}
+
 detect_local_config() {
   # Worktree-tangle check: the firstmate primary checkout (FM_ROOT) must sit on its
   # default branch, not a feature branch (see fm-tangle-lib.sh). Scoped to the
@@ -1526,6 +1636,7 @@ detect_local_config() {
   fi
   detect_code_root_backlog_fork
   detect_home_summary_publication
+  detect_no_mistakes_mirror
 }
 
 # Shadow-backlog check. When this home's data directory is not the code root's,

@@ -963,7 +963,7 @@ test_away_branch_spawn_requires_queued_dispatchable_work() {
   git init -q -b main "$root"
   git -C "$root" commit -q --allow-empty -m init
   ln -s "$ROOT/bin" "$root/bin"
-  cp "$ROOT/.tasks.toml" "$home/.tasks.toml"
+  cp "$ROOT/.tasks.toml.example" "$home/.tasks.toml"
   printf 'manual\n' > "$home/config/backlog-backend"
   cat > "$home/data/backlog.md" <<'EOF'
 ## In flight

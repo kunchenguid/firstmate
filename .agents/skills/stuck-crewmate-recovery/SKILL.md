@@ -1,10 +1,7 @@
 ---
 name: stuck-crewmate-recovery
 description: >-
-  Agent-only playbook for stuck or missing ordinary Firstmate direct reports.
-  Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
-  Also use on the inverse case: a live crewmate reporting the no-mistakes pipeline dead, unreachable, or timed out.
-  Reconciles recorded work before escalating from targeted inspection through safe relaunch or failure.
+  Load when an ordinary direct report's endpoint is dead or its metadata has no window, after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer, and when a live worker reports the no-mistakes pipeline dead, unreachable, or timed out.
 user-invocable: false
 metadata:
   internal: true
@@ -13,6 +10,8 @@ metadata:
 # stuck-crewmate-recovery
 
 Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
+On stale-escalation, Jev triage is default-on unless `config/jev-wake-triage` is off; `bin/fm-jev-wake-triage.sh` owns the request, telemetry, and calibration, and `docs/configuration.md` "Jev stale-escalation triage" owns the operator contract.
+Treat a `pipeline_wait` class as a suppressed paging event, not a missed wedge.
 
 Follow the crew-hosted Lavish board contract in [`docs/configuration.md`](../../../docs/configuration.md#crew-hosted-lavish-review-boards) when recovering a worker that hosts a board.
 

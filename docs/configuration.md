@@ -98,7 +98,8 @@ Both choices are local to each Firstmate home and are not part of secondmate inh
 
 ## Backlog backend (.tasks.toml / config/backlog-backend)
 
-The tracked `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+Each home's own gitignored `.tasks.toml` pins the default `tasks-axi` markdown backend to `data/backlog.md`, with `done_keep = 10` and an archive at `data/done-archive.md`.
+Bootstrap copies the tracked `.tasks.toml.example` into a home that has none, so a fresh clone gets those defaults, and it never reads or rewrites a `.tasks.toml` the home already has.
 A home may instead select another tasks-axi adapter such as Beads through its own `.tasks.toml` or `TASKS_AXI_BACKEND`; firstmate still uses only tasks-axi verbs for routine backlog reads and mutations, and the adapter maps `start` and evidence-bearing `done` transitions to its native statuses and evidence fields.
 Captain-hold row creation is owned by [`bin/fm-captain-hold.sh`](../bin/fm-captain-hold.sh) `hold`: when no work item exists, it creates an ordinary backlog row (`--kind captain` metadata; Beads native type `task`) and then applies the captain hold.
 Captain rows have no Beads due semantics, so that create path waives a Beads `due.required` setting rather than passing a synthetic `--due`; `--until` remains the optional hold deferral.
@@ -107,14 +108,16 @@ When the automatic transition gate applies, dispatch and completion are not sepa
 Under that gate, dispatch accepts only an unheld, unblocked Queued or In flight item in this home; a missing, Done, held, or dependency-blocked item is refused before any endpoint or local copy is created.
 Completion refuses to report success until the item is closed, and session start reconciles this home's own books after an interrupted run.
 When a spawn is interrupted after launch delivery began, its exit path re-reads the paired task record and the backlog row under the same per-task lock as the commit, repairs a row the commit believed it had moved, and reports only what was verified or honestly attempted, never intent phrased as outcome ([`bin/fm-spawn.sh`](../bin/fm-spawn.sh); [`tests/fm-backlog-atomicity.test.sh`](../tests/fm-backlog-atomicity.test.sh)).
-Automatic transitions run from the configured data directory's parent, letting that home's effective tasks-axi configuration address its selected adapter while keeping relative scout-report links rooted there.
-A markdown backlog is additionally addressed by an explicit `--file` at `<data>/backlog.md`, so the change lands in the home that owns the task regardless of the caller's working directory.
-Any other configured adapter is addressed by that root alone, because `--file` would override the adapter's own workspace path.
-The gate does not apply to persistent secondmates, manual-backend homes, or markdown homes without a backlog file, preserving their existing persistent-agent, manual, or ad-hoc lifecycle behavior while configured non-markdown adapters remain active without that file.
+Every tasks-axi call a caller makes while holding that lock is bounded by `FM_TASKS_AXI_TIMEOUT`, so an unresponsive tasks-axi cannot hold the lock open and a bound that expires is reported as the timeout it was.
+Automatic transitions run from the configured data directory's parent, letting that home's effective tasks-axi configuration select its adapter while keeping relocated backlog configuration, archives, and relative scout-report links together.
+A markdown home receives an explicit `--file` for its resolved backlog: `[markdown] path` in the root configuration applies when the data directory is `<root>/data`, with relative paths resolved against that root and `<data>/backlog.md` as the default.
+A relocated data directory instead uses `<data>/backlog.md`.
+A non-markdown backend receives no markdown file override and requires no markdown backlog file.
 Migrated-hold resolution on a beads home reads its graph path, binary, and prefix from the root `.tasks.toml` `[beads]` section only, and refuses (rc=2) when the beads backend is selected elsewhere (a `TASKS_AXI_BACKEND` override or user-level config) with no root-level `[beads]` section.
+The gate does not apply to persistent secondmates, manual-backend homes, or markdown homes without a backlog file, preserving their existing persistent-agent, manual, or ad-hoc lifecycle behavior while configured non-markdown adapters remain active without that file.
 On an automatic-backend home, missing or incompatible `tasks-axi`, an unresolvable configured data directory, or one containing a control byte fails lifecycle work before mutation.
 An unreadable backend configuration can refuse lifecycle work before the no-backlog exemption applies; repair the configuration named in the diagnostic ([backend resolution contract](../bin/fm-tasks-axi-lib.sh)).
-Secondmate handoffs bypass that routine-backend choice: `fm-backlog-handoff.sh` keeps only its own fleet-level validation and delegates the item move to `tasks-axi mv`; its [script header](../bin/fm-backlog-handoff.sh) owns route-specific wake outcomes and remote outbox release.
+Secondmate handoffs bypass that routine-backend choice: `fm-backlog-handoff.sh` keeps only its own fleet-level validation, delegates the item move to `tasks-axi mv`, and requires a verified receiver wake after a new move becomes durable; its [script header](../bin/fm-backlog-handoff.sh) owns route-specific wake outcomes and remote outbox release.
 It moves in-scope `## Queued` items only and refuses `## In flight` and historical `## Done` records, which stay with their home for pruning or archiving.
 Handoff item bodies must use at least two leading spaces, and the helper refuses a selected item with a single-space or tab-indented continuation rather than risk orphaning it.
 Because bootstrap requires `tasks-axi` on `PATH` on every profile, that delegation works fleet-wide, and the `config/backlog-backend=manual` knob governs firstmate's own hand-editing of its backlog, not this validated helper.
@@ -124,8 +127,10 @@ Set the local, gitignored `config/backlog-backend` file to `manual` to force man
 A `manual` home owns its backlog file outright: the lifecycle transitions above are skipped there, dispatch and completion never fail over the file's contents, and a completed teardown prints the hand edit that is owed instead.
 Absent or `tasks-axi` selects the tasks-axi path.
 On the default markdown adapter, tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
+On a `beads` backend, every claim, hold, and close in the shared Beads graph is attributed to `BEADS_ACTOR` (bd's audit-trail actor, which otherwise falls back to git identity and collapses a fleet into one name), exported at two boundaries: [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) sets it to the task id - the registered secondmate name for a secondmate - so the dispatch claim, the worker's pane, and every state change the worker drives record who did it, while every firstmate-owned mutation (`bin/fm-teardown.sh`, `bin/fm-captain-hold.sh`, handoffs, and the rest through the resolver in [`bin/fm-tasks-axi-lib.sh`](../bin/fm-tasks-axi-lib.sh)) records `firstmate@<basename of FM_HOME>` when the variable is unset, never overriding an explicitly exported one.
+Read attribution in a home with a beads backlog with `tail -100 .beads/interactions.jsonl | jq -r .actor | sort | uniq -c`.
 
-The tracked `.tasks.toml` paths resolve against the directory tasks-axi runs in, not `FM_HOME`, so a bare `tasks-axi` run from the code root addresses the code root's `data/` whenever the home lives elsewhere.
+The per-home `.tasks.toml` paths resolve against the directory tasks-axi runs in, not `FM_HOME`, so a bare `tasks-axi` run from the code root addresses the code root's `data/` whenever the home lives elsewhere.
 tasks-axi writes by renaming a temp file over its target, which replaces a symlink with a regular file, so linking the code-root copy into the home forks the queue on the first such write rather than keeping the two in step.
 Every routine firstmate backlog command therefore runs through [`bin/fm-tasks-axi.sh`](../bin/fm-tasks-axi.sh), which addresses this home's backlog and archive from any working directory exactly as lifecycle transitions do, and bootstrap reports a code-root `data/backlog.md` or `data/done-archive.md` that is not this home's own file as a `BACKLOG_RECONCILE: code-root ...` line even in a read-only session.
 
@@ -151,7 +156,7 @@ A cmux spawn additionally version-gates against the installed `cmux` binary's ve
 A backend spawn refusal from a missing dependency, version gate, or unauthenticated socket is terminal for that selected backend; firstmate surfaces it as a blocker instead of silently retrying another backend.
 Task meta records `backend=` only for a non-default backend; an absent `backend=` means `tmux`, preserving existing default-path meta files.
 Every new task records `endpoint_task_id=` as the cleanup binding between the metadata filename and its opaque runtime endpoint.
-A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, and `herdr_pane_id=`.
+A herdr task additionally records `herdr_session=`, `herdr_workspace_id=`, `herdr_tab_id=`, `herdr_pane_id=`, and `herdr_task_label=`.
 A zellij task additionally records `zellij_session=`, `zellij_tab_id=`, and `zellij_pane_id=`.
 An Orca task additionally records `orca_worktree_id=` and `terminal=`, with `window=fm-<id>` kept as the shared firstmate alias.
 A cmux task additionally records `cmux_workspace_id=` and `cmux_surface_id=`.
@@ -228,6 +233,20 @@ It stays opt-in because the other evidence is the worker's own declaration about
 With the flag absent the wedge timer spends no fold or current-state read for it, writes no record, and keeps the unchanged escalation schedule, reasons, and `demand-deep-inspection` wording.
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which supervise their own crew and own that trade separately.
 [`architecture.md`](architecture.md) owns the wait-evidence contract and which records may take the ladder away; `bin/fm-watch.sh`'s `wedge_wait_evidence` owns the exact derivation and its fail-closed boundaries.
+
+## Jev stale-escalation triage (config/jev-wake-triage)
+
+The local, gitignored `config/jev-wake-triage` file opts a home out of the default-on Jev classifier on the watcher's stale-escalation path.
+Absent, empty, or `on` keeps the gate; a first line of `off` disables it and the watcher escalates exactly as it did before Jev.
+`FM_JEV_WAKE_TRIAGE` overrides the file: `off`/`0`/`false`/`no` disables, `on`/`1`/`true`/`yes` enables, and unset defers to the file.
+The gate runs only at the moment a provably-working stale pane would otherwise escalate, after the wait, worktree-write, and dead-record probes.
+It asks typesafe.ai's System One model (Jev) to classify `pipeline_wait`, `true_wedge`, or `healthy_idle`, plus a `wedge_probability` Noul, and escalates only on `true_wedge`.
+Any missing key, timeout, HTTP error, or malformed answer fail-opens to today's escalate path and stamps `jev_triage.unavailable`.
+The key is `TYPESAFE_API_KEY` from the watcher process environment only, vault-injected at runtime, never from `.env`.
+Telemetry under `state/.jev-triage-telemetry` records `jev_triage.suppressed|escalated|unavailable` with the task class (`ship`, `scout`, `secondmate`, or `unknown`) and no status content.
+The first 20 decisions append `state/.jev-triage-calibration.jsonl` so the captain can audit precision before the gate becomes load-bearing.
+The flag is a home-local supervision-noise preference and is not inherited by secondmate homes.
+[`architecture.md`](architecture.md) owns the triage contract, `bin/fm-jev-wake-triage.sh`'s header owns the request, output, telemetry, and calibration log, and [`verification/jev-wake-triage.md`](verification/jev-wake-triage.md) records the portable tests.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -456,7 +475,7 @@ When the file exists, `fm-spawn.sh` enforces that contract by refusing crewmate 
 Batch spawns satisfy the same requirement with a shared `--harness`.
 Secondmate spawns are exempt and still resolve through `config/secondmate-harness` and its optional model and effort tokens.
 This section is the single owner of the canonical schema and its per-field semantics.
-`AGENTS.md` section 4 owns the always-loaded dispatch intake boundary, and `quota-array-dispatch` owns the completion-aware profile-array selection procedure.
+`AGENTS.md` section 4 owns the load trigger, unverified-adapter refusal, and malformed-profile refusal; `quota-array-dispatch` owns the completion-aware profile-array selection procedure, including every-candidate accounting, strongest-reasoning, and tie rules.
 
 ```json
 {
@@ -490,7 +509,7 @@ An absent or unknown row or unmeasured provider makes the floor unverifiable and
 A known percentage below the floor makes the tool resolve among `default` profiles instead.
 A profile `provider` optionally names the quota-axi provider family whose rows apply to that profile; when present, profile and rule-floor provider IDs must match the strict whole-string pattern `^[a-z0-9]+(-[a-z0-9]+)*\z`.
 Bootstrap validates resolver-only `approval`, `floor`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
-Typed resolution additively recognizes `gemini` because AGENTS.md section 4 verifies it for crewmate and scout dispatch.
+Typed resolution additively recognizes `gemini` because `harness-adapters` verifies it for crewmate and scout dispatch.
 The opted-in resolver has authoritative single-provider mappings for `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, and `muse`; every other verified harness must declare `provider` explicitly, including multi-provider `pi`, `pi-signed`, `omp`, and `opencode` and unmapped `gemini` and `rovo`.
 Its single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
 The resolver returns an actionable configuration error before any request when such a profile omits it.
@@ -538,7 +557,7 @@ The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambig
 Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
 Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
 Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
-The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
+The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md) owns what firstmate does with each outcome.
 By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
@@ -571,6 +590,7 @@ An absent or incompatible `gh-axi` reports `MISSING: gh-axi (install: npm instal
 An absent or incompatible `lavish-axi` reports `PRESENTATION_UNAVAILABLE` with its required floor, install command, and explicit text fallback; [`bootstrap-diagnostics`](../.agents/skills/bootstrap-diagnostics/SKILL.md) owns the response and compatibility check before visual use.
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
+Bootstrap also reports one `NO_MISTAKES_MIRROR:` line per no-mistakes-posture project clone, and for the home's own firstmate checkout, whose `no-mistakes` gate remote is absent or outside the data root the installed CLI resolves (`NM_HOME` when set non-empty, else `~/.no-mistakes`); the printed `no-mistakes init` fix inside the affected clone is the operator's to run, never bootstrap's.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
 The locked session-start deferred network stage runs bootstrap's best-effort project clone refresh through `fm-fleet-sync.sh`; [`fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the exact clone-refresh overlap, liveness-before-convergence, per-mate concurrency, ordered diagnostic replay, and sequential-fallback contract.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
@@ -652,6 +672,28 @@ A sweep that runs out of budget says which tool it did not reach rather than rep
 The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the watcher kills prints nothing and records nothing and would then repeat that silence on every poll.
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
+
+## Stale-claim sweep (bin/fm-stale-sweep.sh)
+
+The Beads graph a beads-backed home's `.tasks.toml` points at never reclaims an in_progress claim on its own, so a task whose worker endpoint died stays claimed forever and dispatch capacity silently shrinks.
+[`bin/fm-stale-sweep.sh`](../bin/fm-stale-sweep.sh) makes those stale claims reclaim themselves.
+A dry run prints a table (id, home, age, verdict, action, plus the row's own claim-actor and provenance evidence on no-home rows) and a summary with the count it would reclaim; `--apply` performs the reclaims, and `--older-than <hours>` overrides the default 24-hour threshold measured from the row's `updated_at` (the last recorded graph activity).
+For every stale row the sweep resolves the owning home (the registered home holding `state/<id>.meta`, else the row's provenance line), asks that home with `fm-crew-state.sh`, and reclaims only on positive death evidence - a missing or dead endpoint, or a remote dead/missing verdict.
+Anything merely unproven (an unreadable pane, an unreachable remote) is kept.
+A row no local home owns is listed and kept too; `--apply-orphans` additionally reclaims such an orphan row only when it is older than 48 hours, carries no claim actor, and has no landing URL in its description.
+The reclaim appends `reclaimed <date>: endpoint dead, previous claim by <actor>` to the row's body and reopens it through the owning home's tasks-axi, only after re-proving the row is still in flight and unheld.
+The sweep never touches a row whose endpoint is live and never removes a meta, worktree, or pane, so stuck-crewmate recovery can still inspect what died.
+A home whose backlog is not beads-backed has no graph to sweep and the script says so instead of guessing.
+
+Register the daily check with `bin/fm-stale-sweep.sh arm`.
+That writes `state/stale-sweep.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal `FM_CHECK_INTERVAL` cadence and turns its one line into a `check:` wake; no separate schedule is involved.
+The check runs the sweep dry at most once per `FM_STALE_SWEEP_INTERVAL` (default 86400 seconds, `0` disables the gate, otherwise 900 to 604800), stays silent when nothing is reclaimable, and reports one line when dead-endpoint rows are reclaimable so firstmate decides whether to run `--apply`; if `FM_STALE_SWEEP_BUDGET_SECS` was cut to fit `FM_CHECK_TIMEOUT`, that cut is reported on the report line even on polls where nothing is reclaimable, and so is a budget that stopped the sweep before every candidate was probed.
+`FM_STALE_SWEEP_BUDGET_SECS` (default 25, 1 to 3600) bounds one probe and is cut down to what `FM_CHECK_TIMEOUT` allows, exactly like the tool-update check's budget.
+`FM_STALE_SWEEP_STATE_TIMEOUT` (default 90) bounds one home's `fm-crew-state.sh` call, capped to the remaining budget in check mode.
+`FM_STALE_SWEEP_BD_TIMEOUT` (default 120) bounds the `bd list` graph read, also capped to the remaining budget in check mode so a slow graph read fails visibly inside the probe instead of being killed silently.
+`bin/fm-stale-sweep.sh disarm` removes the shim, its trust binding, and the report record.
+
+A full treehouse pool is the sibling condition: [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) detects treehouse's exact `all N worktrees are in use` refusal during the worktree wait, records a load-kind capacity hold whose reason names the pool (`bin/fm-capacity-lib.sh` owns the reason contract), and exits 2 with the item left queued, and [`bin/fm-teardown.sh`](../bin/fm-teardown.sh) releases the oldest capacity hold recorded for the same pool once a worktree is returned to it, printing which item became ready. When the worktree-derived pool scan matches nothing, teardown also scans the project-root fallback identity a spawn may have had to record when treehouse could not answer it, so such a hold is still released instead of stranded.
 
 ## Mail plane (.env)
 
@@ -1156,7 +1198,7 @@ FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainl
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env
 FMX_DRY_RUN=            # truthy previews Relay replies and dismissals to state/x-outbox/ without posting or requiring a token
 FMX_X_REPLY_MAX_CHARS=280   # X reply per-message split budget; values below 50 clamp to 50
-TYPESAFE_API_KEY=       # typed dispatch resolution opt-in, from the environment or .env; absent means bin/fm-dispatch-resolve.sh is off (docs/configuration.md "Typed dispatch resolution")
+TYPESAFE_API_KEY=       # typesafe.ai System One key: typed dispatch resolution opt-in from the environment or .env, and Jev stale-escalation triage from the environment only (docs/configuration.md "Typed dispatch resolution" and "Jev stale-escalation triage")
 FMX_DISCORD_REPLY_MAX_CHARS=1900   # Discord reply per-message split budget; values below 50 clamp to 50, values above 2000 reset to 1900
 FMX_X_THREAD_MAX=25     # maximum messages in one auto-split reply thread
 FMX_FOLLOWUP_MAX_AGE_SECS=604800   # local window for posting Relay completion follow-ups (7 days)
@@ -1188,6 +1230,7 @@ FM_BUSY_TURN_MAX_SECS=3600         # maximum age without a completed turn or exp
 FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, and between repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call; a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait or, where config/wedge-defer-parked-gate arms it, unanswered supervisor-owed validation gate defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state; a captain-held transfer is never rechecked while the away-posture record exists, while an armed validation gate awaiting the supervisor's decision keeps this recheck in either posture
 FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above, declared external-wait pause rows are excluded, and zero or invalid values use 180
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
+FM_JEV_WAKE_TRIAGE=                # override config/jev-wake-triage; off disables the default-on Jev stale-escalation gate, on enables it, unset defers to the file
 FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
 FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
 FM_WORKTREE_WRITE_TIMEOUT=10       # wall-clock seconds that one walk may take, so a worktree on a hung mount cannot stall the watcher poll that started it; hitting the bound reads as no write evidence, which leaves the escalation schedule exactly as it was; a value that is not a positive integer falls back to the default

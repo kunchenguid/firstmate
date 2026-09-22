@@ -147,6 +147,11 @@
 # above those also name individual tests/ files explicitly.
 set -eu
 
+# Pin the runner umask to CI's 022 so suites that create state roots with plain
+# mkdir satisfy the private-directory contract (no group/other write bits)
+# regardless of the invoking lane's umask (e.g. 002 in local agent lanes).
+umask 022
+
 now_ms() {
   if command -v python3 >/dev/null 2>&1; then
     python3 -c 'import time; print(int(time.time() * 1000))'
@@ -736,6 +741,7 @@ tests/fm-herdr-submit-confirm-live-e2e.test.sh 46
 tests/fm-herdr-version-floor-live-e2e.test.sh 72
 tests/fm-home-summary-refresh.test.sh 37264
 tests/fm-inactive-reconcile.test.sh 53178
+tests/fm-jev-wake-triage.test.sh 12000
 tests/fm-kimi-harness.test.sh 19151
 tests/fm-lint-workflows.test.sh 785
 tests/fm-live-gate.test.sh 1755
@@ -841,6 +847,59 @@ tests/fm-watch-checkpoint.test.sh 6076
 tests/fm-watch-recovery-loop.test.sh 58946
 tests/fm-watch-triage.test.sh 697969
 tests/fm-watcher-lock.test.sh 108940
+tests/fm-backlog-row-probe.test.sh 244
+tests/fm-beads-actor.test.sh 4284
+tests/fm-capacity-hold.test.sh 7401
+tests/fm-inbox.test.sh 5801
+tests/fm-jev-alert-correlator.test.sh 165
+tests/fm-jev-alert-silencer.test.sh 332
+tests/fm-jev-artifact-dedup.test.sh 208
+tests/fm-jev-cache-watchdog.test.sh 173
+tests/fm-jev-cert-prober.test.sh 1400
+tests/fm-jev-ci-workflow-guard.test.sh 521
+tests/fm-jev-db-pool-probe.test.sh 136
+tests/fm-jev-decisions.test.sh 199
+tests/fm-jev-dep-harmonizer.test.sh 183
+tests/fm-jev-disk-reaper.test.sh 173
+tests/fm-jev-dns-watchdog.test.sh 208
+tests/fm-jev-done-verify.test.sh 333
+tests/fm-jev-doorbell-vacuum.test.sh 570
+tests/fm-jev-dump-sweeper.test.sh 255
+tests/fm-jev-env-validator.test.sh 143
+tests/fm-jev-fd-guard.test.sh 244
+tests/fm-jev-flake-detector.test.sh 122
+tests/fm-jev-fleet-eval.test.sh 142
+tests/fm-jev-guard.test.sh 470
+tests/fm-jev-inotify-guard.test.sh 258
+tests/fm-jev-ipc-watchdog.test.sh 332
+tests/fm-jev-load-throttler.test.sh 160
+tests/fm-jev-pane-reaper.test.sh 170
+tests/fm-jev-pending-reply-reconciler.test.sh 244
+tests/fm-jev-port-guard.test.sh 206
+tests/fm-jev-pr-triage.test.sh 223
+tests/fm-jev-privacy-guard.test.sh 959
+tests/fm-jev-quarantine.test.sh 424
+tests/fm-jev-quota-prober.test.sh 509
+tests/fm-jev-rebase-healer.test.sh 417
+tests/fm-jev-redis-watchdog.test.sh 152
+tests/fm-jev-ref-aligner.test.sh 1027
+tests/fm-jev-rpc-buffer-guard.test.sh 184
+tests/fm-jev-runner-balancer.test.sh 194
+tests/fm-jev-seat-reconciler.test.sh 241
+tests/fm-jev-shm-guard.test.sh 155
+tests/fm-jev-stall-guard.test.sh 660
+tests/fm-jev-temp-sanitizer.test.sh 142
+tests/fm-jev-token-budget.test.sh 209
+tests/fm-jev-tunnel-watchdog.test.sh 243
+tests/fm-jev-worker-reaper.test.sh 164
+tests/fm-jev-worktree-pruner.test.sh 289
+tests/fm-jev-worktree-reaper.test.sh 502
+tests/fm-jev-worktree-sync.test.sh 360
+tests/fm-route-domain.test.sh 200
+tests/fm-spawn-compact-adviser-disable-remote.test.sh 82730
+tests/fm-spawn-compact-adviser-disable.test.sh 20525
+tests/fm-stale-sweep.test.sh 51340
+tests/jev-typesafe-run.test.sh 150
 EOF
 }
 
@@ -852,7 +911,7 @@ portable_serial_unhinted() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-unhinted.XXXXXX") || return 1
   portable_serial_weight_hints | awk 'NF { print $1 }' | LC_ALL=C sort -u >"$tmp/hinted"
   list_portable_serial | LC_ALL=C sort -u >"$tmp/serial"
-  comm -23 "$tmp/serial" "$tmp/hinted"
+  LC_ALL=C comm -23 "$tmp/serial" "$tmp/hinted"
   rm -rf "$tmp"
 }
 
@@ -1011,8 +1070,8 @@ run_coverage_guard() {
     return 1
   fi
   cat "$tmp/s1" "$tmp/s2" | LC_ALL=C sort -u >"$tmp/shards_union"
-  missing=$(comm -23 "$tmp/proven" "$tmp/shards_union" || true)
-  extra=$(comm -13 "$tmp/proven" "$tmp/shards_union" || true)
+  missing=$(LC_ALL=C comm -23 "$tmp/proven" "$tmp/shards_union" || true)
+  extra=$(LC_ALL=C comm -13 "$tmp/proven" "$tmp/shards_union" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
     log "coverage guard: portable shards must equal the proven-isolated set"
     [ -z "$missing" ] || { log "missing from shards:"; printf '%s\n' "$missing" >&2; }
@@ -1056,8 +1115,8 @@ run_coverage_guard() {
     return 1
   fi
   LC_ALL=C sort -u "$tmp/serial_shards_raw" >"$tmp/serial_shards"
-  missing=$(comm -23 "$tmp/serial" "$tmp/serial_shards" || true)
-  extra=$(comm -13 "$tmp/serial" "$tmp/serial_shards" || true)
+  missing=$(LC_ALL=C comm -23 "$tmp/serial" "$tmp/serial_shards" || true)
+  extra=$(LC_ALL=C comm -13 "$tmp/serial" "$tmp/serial_shards" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
     log "coverage guard: portable serial shards must equal the portable serial lane"
     [ -z "$missing" ] || { log "missing from serial shards:"; printf '%s\n' "$missing" >&2; }
@@ -1069,7 +1128,7 @@ run_coverage_guard() {
   for pair in "shards_union:serial" "shards_union:herdr" "serial:herdr"; do
     a=${pair%%:*}
     b=${pair#*:}
-    comm -12 "$tmp/$a" "$tmp/$b" >"$tmp/overlap"
+    LC_ALL=C comm -12 "$tmp/$a" "$tmp/$b" >"$tmp/overlap"
     if [ -s "$tmp/overlap" ]; then
       log "coverage guard: overlap between $a and $b:"
       cat "$tmp/overlap" >&2
@@ -1087,8 +1146,8 @@ run_coverage_guard() {
     return 1
   fi
   LC_ALL=C sort -u "$tmp/union_raw" >"$tmp/union"
-  missing=$(comm -23 "$tmp/all" "$tmp/union" || true)
-  extra=$(comm -13 "$tmp/all" "$tmp/union" || true)
+  missing=$(LC_ALL=C comm -23 "$tmp/all" "$tmp/union" || true)
+  extra=$(LC_ALL=C comm -13 "$tmp/all" "$tmp/union" || true)
   if [ -n "$missing" ] || [ -n "$extra" ]; then
     log "coverage guard: union of portable shards + portable serial + Herdr must equal tests/*.test.sh"
     [ -z "$missing" ] || { log "missing from union:"; printf '%s\n' "$missing" >&2; }
@@ -1118,7 +1177,7 @@ run_coverage_guard() {
     "$ROOT/bin/fm-test-isolation-proof.sh" --list | LC_ALL=C sort -u >"$tmp/proof_list"
     if ! cmp -s "$tmp/proven" "$tmp/proof_list"; then
       log "coverage guard: embedded proven-isolated set diverges from bin/fm-test-isolation-proof.sh --list"
-      comm -3 "$tmp/proven" "$tmp/proof_list" >&2 || true
+      LC_ALL=C comm -3 "$tmp/proven" "$tmp/proof_list" >&2 || true
       rm -rf "$tmp"
       return 1
     fi
@@ -1600,6 +1659,12 @@ families_for_changed_path() {
     docs/fm-test-portable-shards.md|docs/fm-test-isolation-proof.md|\
     docs/fm-test-isolation-proof.json)
       printf '%s\n' pure-contract-unit
+      ;;
+    .tasks.toml.example)
+      # Bootstrap copies this template into a home that has none, so its bytes
+      # are the backlog config a fresh home actually runs on.
+      printf '%s\n' pure-contract-unit
+      printf '%s\n' session-bootstrap
       ;;
     .github/*|.gitattributes|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
     docs/configuration.md|docs/supervision-protocols/*)

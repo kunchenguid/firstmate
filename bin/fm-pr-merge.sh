@@ -666,6 +666,12 @@ EOF
   fi
   printf 'verified: %s is open and mergeable, with every required check green at head %s\n' \
     "$URL" "$live_head" >&2
+  # Pattern 10: Jev Zero-CI & Workflow Landing Gate Verifier hook
+  if [ -x "$SCRIPT_DIR/fm-jev-ci-workflow-guard.sh" ]; then
+    "$SCRIPT_DIR/fm-jev-ci-workflow-guard.sh" --pr "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>&1 | while IFS= read -r guard_line; do
+      printf 'jev-ci-guard: %s\n' "$guard_line" >&2
+    done || true
+  fi
   FM_PR_MERGE_HEAD=$live_head
   FM_PR_GITHUB_BASE=$base
 }
@@ -1242,3 +1248,22 @@ case "$outcome_rc" in
     printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac
+
+# Pattern 15: Jev Post-Merge Worktree Convergence Audit (Fail-Open)
+if [ -x "$SCRIPT_DIR/fm-jev-worktree-sync.sh" ]; then
+  printf 'jev-worktree-sync: auditing active worktrees for %s...\n' "${PR_REPO:-fleet}"
+  "$SCRIPT_DIR/fm-jev-worktree-sync.sh" --repo-name "${PR_REPO:-}" 2>&1 || true
+fi
+
+# Pattern 19: Jev Post-Merge Stale Worktree & Detached Branch Reaper (Fail-Open)
+if [ -x "$SCRIPT_DIR/fm-jev-worktree-reaper.sh" ] && [ "${FM_DISABLE_JEV_WORKTREE_REAPER:-0}" != 1 ]; then
+  printf 'jev-worktree-reaper: scanning for clean merged worktrees for %s...\n' "${PR_REPO:-fleet}"
+  "$SCRIPT_DIR/fm-jev-worktree-reaper.sh" --repo-name "${PR_REPO:-}" 2>&1 || true
+fi
+
+# Pattern 21: Jev Post-Merge Asset & Artifact Cache De-Duplicator (Fail-Open)
+if [ -x "$SCRIPT_DIR/fm-jev-artifact-dedup.sh" ] && [ "${FM_DISABLE_JEV_ARTIFACT_DEDUP:-0}" != 1 ]; then
+  printf 'jev-artifact-dedup: deduplicating score & artifact caches...\n'
+  "$SCRIPT_DIR/fm-jev-artifact-dedup.sh" 2>&1 || true
+fi
+

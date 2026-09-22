@@ -32,6 +32,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 CAPTAIN_HOLD="$SCRIPT_DIR/fm-captain-hold.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
 usage() {
   awk '
@@ -166,6 +168,7 @@ command_resolve() {
     exit 1
   fi
   rm -f -- "$tmp"
+  fm_tasks_axi_export_actor
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
     if list_has_key "$(normalized_blocked_by "$show")" "$id"; then

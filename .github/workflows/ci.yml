@@ -206,6 +206,16 @@ jobs:
           set -eu
           npm install -g tasks-axi
           tasks-axi --version
+      # The stale-sweep suite drives a real scratch Beads graph through the
+      # real bd 1.2.x CLI; without bd every fixture row fails to create and
+      # the suite fails fast, so the binary is a required serial-lane tool.
+      # @beads/bd's postinstall skips the binary download whenever CI is set,
+      # so unset it for the install (GitHub Actions always exports CI=true).
+      - name: Install beads (bd) for the stale-sweep suite
+        run: |
+          set -eu
+          env -u CI npm install -g @beads/bd
+          bd version
       # The Pi extension tests read the installed Pi package's own types and
       # runtime, so without it they gate-skip and pass silently. It is a public
       # npm package and needs no credential, so CI can hold the real thing.
@@ -439,8 +449,8 @@ jobs:
           snapshot_output=$(/bin/bash tests/fm-fleet-snapshot-view.test.sh)
           printf '%s\n' "$snapshot_output"
           snapshot_count=$(printf '%s\n' "$snapshot_output" | grep -c '^ok - ')
-          [ "$snapshot_count" -eq 18 ] || {
-            echo "::error::expected 18 snapshot/fleet-view tests, got $snapshot_count"
+          [ "$snapshot_count" -eq 19 ] || {
+            echo "::error::expected 19 snapshot/fleet-view tests, got $snapshot_count"
             exit 1
           }
 
@@ -496,7 +506,7 @@ jobs:
       - name: Personal fleet paths must not be tracked
         run: |
           set -eu
-          tracked=$(git ls-files -- data state config projects .no-mistakes)
+          tracked=$(git ls-files -- data state config projects .no-mistakes .tasks.toml)
           if [ -n "$tracked" ]; then
             echo "::error::Personal fleet paths are tracked in git:"
             printf '%s\n' "$tracked"

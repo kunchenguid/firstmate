@@ -64,6 +64,9 @@ SH
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
+  # fm-capacity-lib.sh: teardown sources it for the worktree-pool capacity hold
+  # release scan (the fake root has no capacity state, so the scan is a no-op).
+  ln -s "$ROOT/bin/fm-capacity-lib.sh" "$fake/bin/fm-capacity-lib.sh"
   # Lifecycle serialization, status presentation retirement, and shared adapter
   # ownership are sourced by teardown.
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
@@ -110,10 +113,10 @@ SH
   # path; there is no tasks-axi and no backlog in this fixture.
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 FM_TASKS_AXI_MIN=0.2.4
-fm_tasks_axi_backend() { printf 'markdown\n'; }
 fm_tasks_axi_backend_available() { return 1; }
 fm_tasks_axi_compatible() { return 1; }
 fm_backlog_backend_manual() { return 1; }
+fm_tasks_axi_backend() { printf 'markdown\n'; }
 SH
   ln -s "$ROOT/bin/fm-backlog-transition-lib.sh" "$fake/bin/fm-backlog-transition-lib.sh"
   # Meta with a nonexistent worktree so the dirty/treehouse blocks skip.
@@ -167,6 +170,9 @@ SH
   ln -s "$ROOT/bin/fm-lock-lib.sh" "$fake/bin/fm-lock-lib.sh"
   # fm-lease-lib.sh: teardown sources it for the supervision lease guard.
   ln -s "$ROOT/bin/fm-lease-lib.sh" "$fake/bin/fm-lease-lib.sh"
+  # fm-capacity-lib.sh: teardown sources it for the worktree-pool capacity hold
+  # release scan (the fake root has no capacity state, so the scan is a no-op).
+  ln -s "$ROOT/bin/fm-capacity-lib.sh" "$fake/bin/fm-capacity-lib.sh"
   ln -s "$ROOT/bin/fm-control-lib.sh" "$fake/bin/fm-control-lib.sh"
   ln -s "$ROOT/bin/fm-classify-lib.sh" "$fake/bin/fm-classify-lib.sh"
   # fm-timeout-lib.sh: the shared hard bound fm-classify-lib.sh sources for the
@@ -203,10 +209,10 @@ SH
   chmod +x "$fake/bin/fm-fleet-sync.sh"
   cat > "$fake/bin/fm-tasks-axi-lib.sh" <<'SH'
 FM_TASKS_AXI_MIN=0.2.4
-fm_tasks_axi_backend() { printf 'markdown\n'; }
 fm_tasks_axi_backend_available() { return 1; }
 fm_tasks_axi_compatible() { return 1; }
 fm_backlog_backend_manual() { return 1; }
+fm_tasks_axi_backend() { printf 'markdown\n'; }
 SH
   ln -s "$ROOT/bin/fm-backlog-transition-lib.sh" "$fake/bin/fm-backlog-transition-lib.sh"
   # No tasktmp= line at all.

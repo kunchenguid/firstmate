@@ -1,9 +1,7 @@
 ---
 name: secondmate-provisioning
 description: >-
-  Agent-only reference for persistent secondmate setup and retirement.
-  Use when creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, or when editing data/secondmates.md.
-  Covers local leases, whole-home remote routes, transactional seeding, record intake for an existing or inherited domain, project clone restrictions, secondmate harness pins, inherited local-material push, idle charter, handoff helper, and teardown safety.
+  Load before creating, seeding, validating, launching, recovering, handing backlog to, pushing inherited local material into, or retiring a secondmate home, and before editing data/secondmates.md.
 user-invocable: false
 metadata:
   internal: true
@@ -14,6 +12,7 @@ metadata:
 Use this reference before creating, seeding, validating, launching, handing backlog to, recovering, pushing inherited local material into, or retiring a persistent secondmate, and before editing `data/secondmates.md`.
 
 Keep the always-inline routing rules in `AGENTS.md` authoritative: route by natural-language `scope:`, local-only projects stay with the main firstmate, and secondmates are idle by default.
+An empty queue never authorizes a survey, audit, or self-directed improvement sweep.
 
 ## Routing table
 
@@ -97,7 +96,7 @@ When the file's tokens do apply, an explicit per-spawn `--model` or `--effort` f
 Because this resolves from the file on every spawn, the pin is durable across every respawn (recovery, `/updatefirstmate`, restart) exactly like the harness axis itself - e.g. `config/secondmate-harness` containing `claude opus` keeps a secondmate pinned to Opus even if the primary's own default model later changes.
 This is secondmate-only: crewmate/scout model resolution is untouched by this file.
 
-This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 3 and 4 point here.
+This section is the single owner of the secondmate sync and inherited-local-material propagation contract; `AGENTS.md` sections 5 and 6 point here.
 Before a local launch, `fm-spawn.sh --secondmate` locally fast-forwards the home to the primary firstmate checkout's current default-branch commit when it is safe, or reconciles a clean divergence whose complete local result is already present there (e.g. after a squash merge) with `reset --keep`; dirty, uniquely diverged, or in-flight homes launch unchanged with a warning, and a genuine divergence gets the same durable reconciliation record `bin/fm-ff-lib.sh` writes for `/updatefirstmate`.
 The locked session-start deferred network stage runs the same bootstrap sweep for every live local secondmate home, discovered from `state/<id>.meta` records with `kind=secondmate` (`data/secondmates.md` only backfills `home=` for older records).
 That no-fetch path is a purely local fast-forward or redundant-divergence reconcile of tracked files, never an origin fetch, and it never touches the gitignored operational dirs, so a secondmate's backlog, projects, and in-flight work are never disturbed; a linked worktree advances immediately, while a standalone clone that lacks the target receives firstmate updates through `/updatefirstmate`'s origin refresh.
@@ -239,10 +238,18 @@ It never initiates a survey or audit during recovery.
 
 A secondmate is persistent by default.
 An empty queue is healthy and does not trigger teardown.
-Run `bin/fm-teardown.sh <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent second mate.
+Run `bin/fm-teardown.sh <id> --retire-secondmate <id>` for `kind=secondmate` only when the captain or main firstmate explicitly decides to retire that persistent second mate.
+
+That flag is the decision, and its value must be the exact home being retired.
+Without it teardown refuses and changes nothing, so a cleanup list a caller assembled cannot retire standing homes as a side effect, and `--force` never substitutes for it: discarding work and choosing which home to retire are separate decisions.
+Offering the flag for any other kind also refuses, because that mismatch means the target was selected wrong.
+Teardown acts on one target per invocation; extra task ids are refused before anything is locked, naming the count and any secondmates among them, so a mistaken selection list is caught while every seat is still alive.
+Choose targets from `bin/fm-fleet-view.sh --cleanup-candidates`, which labels every live task with its kind and prints the command that kind takes.
+Never select them by matching a worktree path: a path suffix cannot tell a crewmate worktree of the firstmate project from a secondmate home, and both are laid out the same way.
 
 The safety check is the secondmate's own home.
 Teardown refuses while its `state/*.meta` contains in-flight work.
+An empty queue is not that check and never authorizes retirement; it is a healthy second mate waiting for routed work.
 Non-forced retirement also refuses while any parent pending-reply for that id is still unresolved.
 A remote route delegates the in-flight guard to its configured host and additionally refuses while the primary has a pending handoff outbox.
 SSH exit 255 preserves the route and local records because remote completion is unknown.

@@ -974,11 +974,14 @@ EOF
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
   rm -f "$fakebin/node"
+  # Hermetic node isolation: a host with a real /bin/node would answer through
+  # BASE_PATH and the MISSING: node contract would never fire (CI has no node).
+  no_node_base=$(fm_base_path_without_node "$TMP_ROOT/ordering")
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)")
+  out=$(run_session_start "$home" "$root" "$fakebin:$no_node_base")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -1378,11 +1381,14 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   rm -f "$fakebin/node"
+  # Hermetic node isolation: a host with a real /bin/node would answer through
+  # BASE_PATH and the MISSING: node contract would never fire (CI has no node).
+  no_node_base=$(fm_base_path_without_node "$TMP_ROOT/composition")
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$(fm_test_base_path_sans "$BASE_PATH" node)")
+  out=$(run_session_start "$home" "$root" "$fakebin:$no_node_base")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"

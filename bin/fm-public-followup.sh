@@ -142,6 +142,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-public-followup-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
+# shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
 
 RETRY_BACKOFF=${FM_PF_RETRY_BACKOFF_SECS:-900}
 case "$RETRY_BACKOFF" in ''|*[!0-9]*) RETRY_BACKOFF=900 ;; esac
@@ -211,8 +213,14 @@ require_tools() {
 # Every tasks-axi call addresses $FM_HOME/data, the home whose backlog owns the
 # obligation, through bin/fm-tasks-axi.sh. An inherited FM_DATA_OVERRIDE is
 # cleared because a caller such as a secondmate teardown names the parent home
-# in FM_HOME while its own data override is still in the environment.
-tx() { FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" "$@"; }
+# in FM_HOME while its own data override is still in the environment. The call
+# also scopes the audit-trail actor so adds, bindings, receipts, and
+# retirements record firstmate@<home> (or the worker's own actor when a
+# pane-launched caller already exported one).
+tx() {
+  fm_tasks_axi_export_actor
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" "$@"
+}
 
 # obligation_json <id>: the complete typed obligation payload on stdout, empty
 # when the backlog simply has no such public-followup item, and a non-zero exit
