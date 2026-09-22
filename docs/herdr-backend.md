@@ -231,6 +231,9 @@ Spawn-time fixed commands may use Herdr's atomic run primitive.
 Enter, Escape, and Ctrl-C are supported.
 Typed-plane slash input, and dollar-prefixed skill input for Codex, uses the shared harness-aware settle before the first Enter so a completion popup cannot consume it.
 Typed-plane text is typed once; only Enter is retried.
+Before that Enter, the adapter reads the selected composer and continues only when that composer shows the typed payload, or only Claude paste placeholders with no literal remainder.
+A composer that holds a shorter suffix, or a placeholder plus a literal remainder, does not receive Enter, and the submit reports `send-failed`.
+A caller that treats only `empty` as delivered therefore keeps the unsent text.
 
 On an idle or done native baseline, submit confirmation first waits for `working` or `blocked` across a bounded polling window.
 If native status stays idle, the shared composer verdict is the next positive signal: a cleared composer is delivery, and proven pending text retries Enter.
