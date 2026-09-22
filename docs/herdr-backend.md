@@ -80,7 +80,8 @@ On a `protocol_mismatch` refusal, the adapter:
 2. Adopts the first one the running server reports compatible.
 3. Retries the command on it once.
 
-The choice is reused only for later calls to the same session in that process.
+The choice is reused only for later calls to the same session in that shell.
+A call made inside a command substitution does not keep it.
 Another session starts with the `PATH` default.
 A later mismatch forces selection again, so a changed server can return to that default.
 
@@ -90,7 +91,7 @@ Selection also follows these rules:
 - Status that supplies neither `.server.compatible` nor both client and server protocols leaves compatibility unknown.
 - No other failure triggers a reselection.
 
-`fm-remote-doctor.sh` reports the client selected for the remote session.
+`fm-remote-doctor.sh` reports the client selected for the remote session, and reports a human gap when the running server refuses every client on `PATH`.
 Removing or upgrading the shadowing client is the durable fix.
 `bin/backends/herdr.sh` "client selection" owns the mechanics.
 

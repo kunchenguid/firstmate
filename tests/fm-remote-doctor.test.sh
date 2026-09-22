@@ -13,6 +13,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/herdr-client-pair-fixture.sh
+. "$(dirname "${BASH_SOURCE[0]}")/herdr-client-pair-fixture.sh"
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (the herdr adapter parses its JSON)"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (plistlib parses the owned launch-agent contract)"; exit 0; }
 
@@ -36,6 +38,20 @@ mkdir -p "$TOOLS"
 ln -sf "$(command -v git)" "$TOOLS/git"
 ln -sf "$(command -v jq)" "$TOOLS/jq"
 BASE_PATH="$TOOLS:/usr/bin:/bin:/usr/sbin:/sbin"
+# A herdr installed in a system directory would leak into every fixture, so on
+# such a host the system tools are re-exposed through links that omit it.
+for sys_dir in /usr/bin /bin /usr/sbin /sbin; do
+  [ -x "$sys_dir/herdr" ] || continue
+  SYSBIN="$TMP_ROOT/sysbin"
+  mkdir -p "$SYSBIN"
+  for link_dir in /usr/bin /bin /usr/sbin /sbin; do
+    [ -d "$link_dir" ] || continue
+    find "$link_dir/" -maxdepth 1 ! -name herdr \( -type f -o -type l \) \
+      -exec sh -c 'for f; do ln -s "$f" "$0/" 2>/dev/null; done' "$SYSBIN" {} +
+  done
+  BASE_PATH="$TOOLS:$SYSBIN"
+  break
+done
 
 # Real socket-owner holders for the Darwin birth check: jq blocked on a fifo
 # this test keeps open, with exactly the marker environment each birth needs.
@@ -406,6 +422,52 @@ assert_contains "$DOCTOR_OUT" 'check herdr=human:' "--fix stopped reporting the 
 assert_not_contains "$DOCTOR_OUT" 'fix herdr=applied' "--fix claimed to have installed herdr"
 assert_no_dangerous_calls "the doctor reached for auto-login, FileVault, or the keychain"
 pass "a missing herdr CLI is a human gap that --fix never claims to close"
+
+# --- a herdr client the running server refuses is never reported healthy ----
+#
+# A stale client answers `status` (server running, compatible=false) but every
+# operational command with protocol_mismatch, so a PATH that offers no client
+# the server accepts leaves the host unable to read or ring any pane.
+
+new_case Linux no-herdr no-gui
+PAIR="$CASE_DIR/client-pair"; make_herdr_client_pair "$PAIR"
+mkdir -p "$CASE_HOME/.local/bin"
+cp "$PAIR/stale/herdr" "$CASE_HOME/.local/bin/herdr"
+export FM_HERDR_PAIR_DIR="$PAIR"
+doctor
+expect_code 1 "$DOCTOR_RC" "a host whose only herdr client the running server refuses was reported ready"
+assert_contains "$DOCTOR_OUT" "check herdr=human: $CASE_HOME/.local/bin/herdr" \
+  "a lone incompatible herdr client was not tagged as a human gap naming it"
+assert_contains "$DOCTOR_OUT" 'action: herdr:' "a lone incompatible herdr client came with no operator action"
+pass "a lone herdr client the running server refuses is a human gap"
+
+new_case Linux no-herdr no-gui
+PAIR="$CASE_DIR/client-pair"; make_herdr_client_pair "$PAIR"
+OLDER="$CASE_DIR/older-pair"; make_herdr_client_pair "$OLDER" 0.8.1 19 0.9.0 22
+mkdir -p "$CASE_HOME/.local/bin"
+cp "$PAIR/stale/herdr" "$CASE_HOME/.local/bin/herdr"
+cp "$OLDER/stale/herdr" "$CASE_BIN/herdr"
+export FM_HERDR_PAIR_DIR="$PAIR"
+doctor
+expect_code 1 "$DOCTOR_RC" "a host with no herdr client the running server accepts was reported ready"
+assert_contains "$DOCTOR_OUT" 'check herdr=human:' "several incompatible herdr clients were not tagged as a human gap"
+assert_not_contains "$DOCTOR_OUT" 'check herdr=ok:' "several incompatible herdr clients were reported healthy"
+[ "$(grep -c '^status --json' "$PAIR/stale.log")" -ge 2 ] \
+  || fail "the doctor did not ask every herdr client on PATH for its compatibility: $(cat "$PAIR/stale.log")"
+pass "several herdr clients the running server all refuse are a human gap"
+
+# Control: a compatible client behind the stale one is still selected and healthy.
+new_case Linux no-herdr no-gui
+PAIR="$CASE_DIR/client-pair"; make_herdr_client_pair "$PAIR"
+mkdir -p "$CASE_HOME/.local/bin"
+cp "$PAIR/stale/herdr" "$CASE_HOME/.local/bin/herdr"
+cp "$PAIR/current/herdr" "$CASE_BIN/herdr"
+export FM_HERDR_PAIR_DIR="$PAIR"
+doctor
+assert_contains "$DOCTOR_OUT" "check herdr=ok: $CASE_BIN/herdr (bypassing $CASE_HOME/.local/bin/herdr)" \
+  "a compatible herdr client behind a stale one was not selected"
+unset FM_HERDR_PAIR_DIR
+pass "a compatible herdr client behind a stale one is selected and healthy"
 
 # --- an absent launch agent is a fixable gap that --fix installs -------------
 
