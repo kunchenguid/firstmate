@@ -8,8 +8,9 @@
 # home-shape-aware: a parent-replies.status in a main home, in a local mate, or
 # in any other home shape is an ordinary task log and keeps waking and folding.
 #
-# Covers the watcher scan (scan_signals, the heartbeat fail-safe backstop) and
-# fm-classify-lib.sh's fleet-wide folds (whole-file, incremental,
+# Covers the watcher scan (scan_signals, the heartbeat fail-safe backstop), the
+# away-mode daemon's twin catch-all scan (fm-supervise-daemon.sh housekeeping),
+# and fm-classify-lib.sh's fleet-wide folds (whole-file, incremental,
 # presentation snapshot, unread surface), each against a real remote mate
 # fixture plus the main-home and local-mate negative cases, and the real
 # fm-wake-drain.sh end to end.
@@ -288,6 +289,63 @@ test_watcher_scan_keeps_name_shared_files_outside_remote_mates() {
   pass "scan_signals keeps parent-replies.status outside remote mate homes"
 }
 
+# --- unit: the away-mode daemon's heartbeat catch-all backstop --------------
+
+# The daemon runs the watcher's twin catch-all scan while a home is away, so it
+# needs the same exclusion. Source it in a subshell - its BASH_SOURCE guard
+# skips the main loop, and the isolation keeps its function table from
+# colliding with the watcher already sourced above.
+daemon_heartbeat_scan() {  # <home>
+  local home=$1
+  rm -f "$home/state/.subsuper-last-scan"
+  FM_TEST_LIB_SOURCED=1 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    bash -c '
+      # shellcheck source=/dev/null
+      . "$1/bin/fm-supervise-daemon.sh"
+      housekeeping "$2"
+    ' _ "$ROOT" "$home/state" >/dev/null 2>&1
+}
+
+test_daemon_heartbeat_backstop_skips_channel_in_remote_mate() {
+  local dir buffer
+  dir="$TMP_ROOT/daemon-heartbeat"
+  seed_remote_mate "$dir/home"
+  # A quiet task log keeps the first pass channel-only, so only the excluded
+  # channel could put anything in the escalation buffer.
+  printf 'note: benchmark results are in\n' > "$dir/home/state/real-task.status"
+  daemon_heartbeat_scan "$dir/home"
+  buffer=$(cat "$dir/home/state/.subsuper-escalations" 2>/dev/null || true)
+  case "$buffer" in *parent-replies*|*captain-hold*|*release\ branch*)
+    fail "the channel leaked into the daemon's catch-all scan: $buffer" ;;
+  esac
+  [ -z "$(cat "$dir/home/state/.subsuper-seen-status-parent-replies" 2>/dev/null || true)" ] \
+    || fail "the daemon tracked the channel as a phantom parent-replies task"
+
+  # A genuine task's captain-relevant line must keep reaching the backstop.
+  printf 'blocked [key=wedge]: the crew is stuck\n' >> "$dir/home/state/real-task.status"
+  daemon_heartbeat_scan "$dir/home"
+  buffer=$(cat "$dir/home/state/.subsuper-escalations" 2>/dev/null || true)
+  printf '%s\n' "$buffer" | grep -F 'real-task.status' >/dev/null \
+    || fail "a genuine task's decision must still surface through the daemon backstop: $buffer"
+  case "$buffer" in *parent-replies*)
+    fail "the channel leaked into the daemon's catch-all scan: $buffer" ;;
+  esac
+  pass "the daemon's catch-all scan skips a remote mate's channel and keeps its tasks"
+}
+
+test_daemon_heartbeat_backstop_keeps_name_shared_file_in_a_main_home() {
+  local dir buffer
+  dir="$TMP_ROOT/daemon-heartbeat-main"
+  seed_plain_home "$dir/home"
+  printf 'blocked [key=name-only]: an ordinary task file that shares the name\n' \
+    > "$dir/home/state/parent-replies.status"
+  daemon_heartbeat_scan "$dir/home"
+  buffer=$(cat "$dir/home/state/.subsuper-escalations" 2>/dev/null || true)
+  printf '%s\n' "$buffer" | grep -F 'parent-replies.status' >/dev/null \
+    || fail "a main home's parent-replies.status must keep reaching the daemon backstop: $buffer"
+  pass "the daemon's catch-all scan keeps parent-replies.status outside remote mate homes"
+}
+
 # --- end to end: the real drain over a remote mate home ---------------------
 
 test_drain_presents_no_channel_content_in_remote_mate() {
@@ -350,5 +408,7 @@ test_name_shared_file_folds_in_a_local_mate
 test_watcher_scan_skips_channel_and_keeps_task_in_remote_mate
 test_heartbeat_backstop_skips_channel_in_remote_mate
 test_watcher_scan_keeps_name_shared_files_outside_remote_mates
+test_daemon_heartbeat_backstop_skips_channel_in_remote_mate
+test_daemon_heartbeat_backstop_keeps_name_shared_file_in_a_main_home
 test_drain_presents_no_channel_content_in_remote_mate
 test_drain_ignores_stale_channel_records_from_an_older_watcher
