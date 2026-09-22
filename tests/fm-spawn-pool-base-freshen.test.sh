@@ -236,6 +236,42 @@ test_expected_head_launches_exact_origin_commit() {
   pass "an expected-head spawn launches and records the exact origin-backed commit instead of the default tip"
 }
 
+test_expected_head_ignores_replacement_objects() {
+  local rec id out status replacement worker_evidence launch_log pending raw_launch
+  id='pool-expected-replace-r1'
+  rec=$(make_case expected-replace "$id")
+  read_case_record "$rec"
+  git -C "$POOL_DIR" fetch --quiet origin
+  replacement=$(git -C "$POOL_DIR" rev-parse origin/main)
+  git -C "$POOL_DIR" replace "$INITIAL_SHA" "$replacement"
+  git -C "$POOL_DIR" show "$INITIAL_SHA:advanced-main.txt" >/dev/null \
+    || fail "replacement fixture did not reinterpret the candidate as the replacement tree"
+  ! GIT_NO_REPLACE_OBJECTS=1 git -C "$POOL_DIR" show "$INITIAL_SHA:advanced-main.txt" >/dev/null 2>&1 \
+    || fail "replacement fixture did not distinguish the origin candidate tree"
+  worker_evidence="$CASE_DIR/worker-evidence"
+  launch_log="$CASE_DIR/launch.log"
+  pending="$CASE_DIR/pending-launch"
+  raw_launch="printf '%s\\n' \"\${GIT_NO_REPLACE_OBJECTS:-}\" > '$worker_evidence'; git -C '$POOL_DIR' show HEAD:README.md >> '$worker_evidence'; if [ -e '$POOL_DIR/advanced-main.txt' ]; then printf 'replacement-tree\\n' >> '$worker_evidence'; else printf 'origin-tree\\n' >> '$worker_evidence'; fi"
+
+  out=$(FM_FAKE_LAUNCH_LOG="$launch_log" FM_FAKE_PENDING_LAUNCH="$pending" \
+    FM_FAKE_EXECUTE_LAUNCH=1 \
+    run_spawn "$id" "$raw_launch" --mode no-mistakes --yolo off --expected-head "$INITIAL_SHA")
+  status=$?
+  expect_code 0 "$status" "spawn should ignore local replacement objects for the exact candidate"$'\n'"$out"
+  [ ! -e "$POOL_DIR/advanced-main.txt" ] \
+    || fail "expected-head reset checked out the replacement commit's tree"
+  [ "$(cat "$POOL_DIR/README.md")" = base ] \
+    || fail "expected-head reset did not check out the origin commit's content"
+  [ -f "$worker_evidence" ] || fail "the fake worker did not record exact-head launch evidence"
+  [ "$(sed -n '1p' "$worker_evidence")" = 1 ] \
+    || fail "the launched worker did not inherit GIT_NO_REPLACE_OBJECTS=1"
+  [ "$(sed -n '2p' "$worker_evidence")" = base ] \
+    || fail "the launched worker read replaced content for the recorded candidate"
+  [ "$(sed -n '3p' "$worker_evidence")" = origin-tree ] \
+    || fail "the launched worker observed the replacement tree"
+  pass "expected-head reset and worker Git reads ignore replacement objects"
+}
+
 test_expected_head_refuses_non_origin_commit_and_invalid_input() {
   local rec id out status local_only
   id='pool-expected-local-r1'
@@ -900,6 +936,7 @@ test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_expected_head_launches_exact_origin_commit
+test_expected_head_ignores_replacement_objects
 test_expected_head_refuses_non_origin_commit_and_invalid_input
 test_expected_head_ignores_ambient_git_redirection
 test_expected_head_refuses_unsupported_lifecycle_shapes

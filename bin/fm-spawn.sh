@@ -745,6 +745,7 @@ if [ "$EXPECTED_HEAD_SET" -eq 1 ]; then
   # Exact-coordinate repository identity always comes from explicit -C paths.
   # Ambient Git redirection variables would otherwise make those paths advisory.
   unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+  export GIT_NO_REPLACE_OBJECTS=1
 fi
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
@@ -4788,6 +4789,9 @@ fi
 # `/bin/sh` starts rather than only inside the command that shell runs.
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
+fi
+if [ -n "$EXPECTED_HEAD" ]; then
+  LAUNCH="export GIT_NO_REPLACE_OBJECTS=1; $LAUNCH"
 fi
 LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then

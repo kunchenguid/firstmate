@@ -100,6 +100,7 @@ fm_test_fake_gh_axi() {
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
 # FM_FAKE_PENDING_LAUNCH models an unsubmitted staged launch; Enter records a
 # start in FM_FAKE_WORKER_START_LOG, while C-c clears it without starting.
+# FM_FAKE_EXECUTE_LAUNCH runs that staged launch on Enter in the fake pane path.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
@@ -126,12 +127,27 @@ case "${1:-}" in
       prev=
       for a in "$@"; do
         if [ "$prev" = "-l" ]; then
-          case "$a" in ". '"*"'") : > "$FM_FAKE_PENDING_LAUNCH" ;; esac
+          case "$a" in
+            ". '"*"'")
+              if [ "${FM_FAKE_EXECUTE_LAUNCH:-0}" = 1 ]; then
+                staged=${a#". '"}
+                staged=${staged%"'"}
+                printf '%s\n' "$staged" > "$FM_FAKE_PENDING_LAUNCH"
+              else
+                : > "$FM_FAKE_PENDING_LAUNCH"
+              fi
+              ;;
+          esac
         fi
         case "$a" in
           Enter|C-m)
             if [ -e "$FM_FAKE_PENDING_LAUNCH" ]; then
-              printf 'started\n' >> "${FM_FAKE_WORKER_START_LOG:?}"
+              if [ "${FM_FAKE_EXECUTE_LAUNCH:-0}" = 1 ]; then
+                staged=$(cat "$FM_FAKE_PENDING_LAUNCH")
+                (cd "${FM_FAKE_PANE_PATH:?}" && env -u GIT_NO_REPLACE_OBJECTS /bin/sh "$staged")
+              else
+                printf 'started\n' >> "${FM_FAKE_WORKER_START_LOG:?}"
+              fi
               rm -f "$FM_FAKE_PENDING_LAUNCH"
             fi
             ;;
