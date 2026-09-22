@@ -348,7 +348,7 @@ Ordinary non-projected task removal:
 - Keeps the legitimate plain close when the target is the active tab.
 - Refuses an unlocked close if the lock cannot be acquired.
 
-Task cleanup acquires that session lock and binds the exact projected endpoint to its journal before the task's isolated copy is returned.
+Task cleanup acquires that session lock and binds the exact projected endpoint to its journal before any process reap or checkout return can drop the workspace it names.
 So a contended or ambiguous preflight refuses while the copy, every durable record, and the endpoint are all intact for a plain rerun.
 A linked-worktree workspace can disappear when Treehouse returns its checkout, but the pre-return binding permits retirement only after that same exact pane reports structured not-found; it never grants workspace-close authority.
 
@@ -394,7 +394,7 @@ A carry additionally requires the durable slot-owner claim to still name the rec
 The carried checkout is never freshened, reset, or reacquired, metadata keeps naming it, and teardown returns that same lease.
 An abort after a carried recovery republished the task record keeps both that record and the lease instead of rolling the record back or force-returning the checkout, so the parked work stays recoverable by a rerun or teardown.
 When a recorded path cannot be resolved, recovery refuses only after positively identifying that same-project journal's own workspace as a still-open nested child; a legacy top-level projection keeps its flat fallback.
-When a resolved same-project checkout cannot be proven exactly, recovery refuses with a clear diagnostic and leaves the durable lease and task record intact rather than allowing the generic path to allocate a second checkout.
+When the `worktree list` proof for a resolved same-project checkout cannot be read, is ambiguous, or otherwise cannot prove the exact checkout, recovery refuses with a clear diagnostic and leaves the durable lease and task record intact rather than allowing the generic path to allocate a second checkout.
 A proven same-project checkout whose exact projection cannot be reclaimed is still reused through the flat layout rather than reacquired.
 
 These cases fall back flat without mutating the old projection when duplicate-agent risk is positively absent:
@@ -488,7 +488,7 @@ Any of these preserves the candidate and lets session startup continue with at m
 
 | Test | What it covers |
 | --- | --- |
-| `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
+| `tests/fm-backend-herdr-presentation-e2e.test.sh` | Multi-home ordering, concurrency, lock contention, legacy coexistence, focus preservation, exact same-identity restart replacement, same-project worktree-child projection and durable-checkout recovery, ambiguous bindings and tokens, and exact-pane cleanup through the guarded lab path. |
 | `tests/fm-herdr-session-cleanup.test.sh` | Every discovery, ownership, topology, process, locking, revalidation, focus, retirement, and continue-on-error boundary. |
 | `tests/fm-herdr-session-cleanup-e2e.test.sh` | The restored-shell cleanup in a guarded non-default named lab. |
 | `tests/fm-backend-herdr-focus-flash-e2e.test.sh` | Reproduces the raw explicit-close focus steal on the installed release, and proves the focus-safe emptying-close plan removes a doomed workspace with no wrong-focus interval. |
@@ -500,8 +500,8 @@ Any of these preserves the candidate and lets session startup continue with at m
 
 ## Default-tab prune safety
 
-`herdr workspace create` seeds one default tab.
-Firstmate prunes it only after a real task tab exists and only when the same create response supplied the seeded tab id.
+`herdr workspace create` and the projected `herdr worktree open` each seed one default tab.
+Firstmate prunes it only after a real task tab exists and only when the same create or worktree-open response supplied the seeded tab id.
 An adopted workspace never supplies that id and can never enter the prune path, regardless of labels or tab count.
 Immediately before close, Firstmate rechecks the exact tab, expected seed label, and native agent state.
 A working seed pane is never closed.

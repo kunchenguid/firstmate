@@ -1226,6 +1226,7 @@ ok - real herdr E2E: a --secondmate launch still stands up that secondmate's own
 ok - real herdr E2E: teardown closes only the worker's own pane and leaves the launcher, its workspace, and the same-labeled sibling intact
 ```
 
+The same-project worktree-child placement and the foreign-project top-level guarantee are newer than this recorded run, so its two placement lines no longer match the suite's current assertions; re-run that suite to refresh this record before treating it as current placement evidence.
 That suite's headline case runs `bin/fm-spawn.sh` inside a real Herdr pane, so the parent identity comes from Herdr's own injection rather than a composed environment.
 Cross-session and contradictory bindings are covered deterministically in `tests/fm-backend-herdr.test.sh`, which can script a second server's socket without provisioning one.
 

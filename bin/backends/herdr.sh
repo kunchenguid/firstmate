@@ -16,8 +16,8 @@
 # docs/herdr-backend.md "Default task container shape"): ONE herdr workspace PER
 # FIRSTMATE HOME (the primary, and each secondmate, gets its own), ONE herdr TAB
 # per task inside its home's workspace. The default-on presentation projection
-# creates a disposable workspace for a clean fresh task instead unless the home
-# opts out. When the owning home is the task project's exact source workspace,
+# gives a clean fresh task its own one-task workspace unless the home opts out.
+# When the owning home is the task project's exact source workspace,
 # the task's Treehouse checkout is preallocated and opened as a real Herdr
 # worktree child beneath it; cross-project tasks keep the top-level disposable
 # workspace shape. Either workspace is a non-authoritative visual projection
