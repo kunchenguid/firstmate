@@ -25,7 +25,8 @@ The session-start turn runs the step once after handling its presented queue; th
 
 ## 2. Dispatchable rows
 
-`fm_backlog_row_dispatchable` in `bin/fm-backlog-transition-lib.sh` owns which backlog states can dispatch, and `bin/fm-spawn.sh` refuses any other row.
+Select only queued rows as admission candidates, then apply `fm_backlog_row_dispatchable` in `bin/fm-backlog-transition-lib.sh` for the existing hold and block checks.
+Its acceptance of in-flight rows supports relaunch, not new admission; exclude those rows from this count and walk.
 Exclude as well any row whose section 10 time gate has not yet passed.
 Count those rows in backlog priority order; that count is `dispatchable`.
 
@@ -48,14 +49,16 @@ Each term maps to one `bound` value.
 
 Walk the dispatchable rows in backlog priority order and run the full section 7 intake on each in turn, including section 4 profile resolution.
 Keep each row's required reasoning class.
-When that class cannot proceed within the remaining headroom, stop and report that row rather than downgrading it to fill the headroom.
-A row whose intake needs a captain decision is escalated or held under section 10 and is not counted as admitted.
-Stop at the first limit that binds; that limit is the reported `bound`.
+When that class cannot proceed, stop and report for that row rather than downgrading it, then continue over the remaining eligible rows in priority order.
+A row whose intake needs a captain decision is escalated or held under section 10 and is not counted as admitted; continue over the remaining eligible rows.
+Row-specific holds, escalations, and reasoning-class stops never end the walk.
+End admission before exhausting the walk only when an actual resource-floor, quota, or serial-slot capacity constraint prevents admitting remaining eligible work; report that limit as `bound`.
 
 ## 5. The summary line
 
 Write `dispatchable=N admitted=M bound=<headroom|quota|slots|none>` once in the turn's transcript.
 Never append it to a task status file, because each status append wakes the supervisor.
-Report `bound=none` when every dispatchable row was admitted, including when `dispatchable=0`.
-When `admitted` is below `dispatchable`, name in the same turn the row that stopped admission and why: the bound hit, an unknown headroom figure you disclosed, a section 10 escalation or hold, or a section 4 stop-and-report.
-Stating that cause is what separates a correct zero-admission turn from the failure section 8 names.
+Report `bound=none` when the walk was exhausted without a capacity limit, including when `dispatchable=0`.
+When `admitted` is below `dispatchable`, identify in the same turn any rows skipped for holds, escalations, or reasoning-class stops, separately from any actual capacity bound that ended admission.
+Unknown headroom is disclosed, not a stopping cause; row-specific outcomes likewise never justify ending the walk early.
+With dispatchable rows, a zero-admission turn is acceptable only when it names an actual binding capacity constraint; stating a row-specific cause does not satisfy section 8's failure rule.

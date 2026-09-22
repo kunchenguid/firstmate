@@ -434,10 +434,11 @@ After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD S
 
 When this session holds the fleet lock and owns supervision, then in that same turn run the admission step on every wake, including one whose own record changed nothing; a lock-refused read-only session never admits.
 Count this home's dispatchable rows (queued, not held for the captain, not blocked, and past any time gate), measure headroom against the resource floor, provider quota, and counted slots (an unmeasurable term is disclosed and counts as headroom, never as zero), and admit rows in backlog priority order up to that headroom through the ordinary section 7 intake and `bin/fm-spawn.sh`.
-Run section 4 intake per row in that order and keep each row's required reasoning class; when that class cannot proceed within headroom, stop and report rather than downgrade to fill.
-Emit exactly one line per wake: `dispatchable=N admitted=M bound=<headroom|quota|slots|none>`, naming the limit that stopped admission, or `none` when every dispatchable row was admitted.
-A wake with dispatchable rows and remaining headroom that admits nothing without stating its concrete binding cause in that turn is a failure.
-A turn that escalates or holds a row under section 10, or stops and reports under section 4's reasoning-class rule, and states that cause, satisfies this rule.
+Run section 4 intake per row in that order and keep each row's required reasoning class; when that class cannot proceed, stop and report for that row rather than downgrade, then continue over the remaining eligible rows in priority order.
+A row-specific hold or escalation likewise never ends admission; only an actual resource-floor, quota, or serial-slot capacity constraint on remaining eligible work ends admission before the walk is exhausted.
+Emit exactly one line per wake: `dispatchable=N admitted=M bound=<headroom|quota|slots|none>`, naming the capacity limit that stopped admission, or `none` when the walk was exhausted without a capacity limit.
+A wake with dispatchable rows and remaining headroom that admits nothing is a failure.
+With dispatchable rows, a zero-admission turn is acceptable only when it names an actual binding capacity constraint; a row-specific hold, escalation, or reasoning-class stop-and-report is not an exception.
 Load `wake-admission` for the actor in away posture and secondmate homes, the headroom owners and unknown-headroom rule, and the summary's vocabulary and channel.
 
 A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
