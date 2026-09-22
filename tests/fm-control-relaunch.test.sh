@@ -25,12 +25,16 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 BRIEF="$ROOT/bin/fm-brief.sh"
 X_LINK="$ROOT/bin/fm-x-link.sh"
+PR_CHECK="$ROOT/bin/fm-pr-check.sh"
+PR_POLL="$ROOT/bin/fm-pr-poll.sh"
 # fm_test_tmproot's own cleanup trap fires when its command substitution exits,
 # so recreate the root before resolving it and clean it up from this file's trap.
 TMP_ROOT=$(fm_test_tmproot fm-control-relaunch)
@@ -485,6 +489,59 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+# An armed PR merge poll authenticates itself against state/<id>.meta with
+# fm_pr_metadata_identity_parse, which refuses any unrecognised key found
+# after pr=/pr_head= (firstmate issues #5291, #5135). Preserving pr=/pr_head=
+# byte-for-byte is not enough: relaunch's own meta rewrite must also keep
+# them the LAST durable keys, exactly what the watcher's authenticated check
+# re-validates on every poll (bin/fm-pr-lib.sh's fm_pr_poll_artifacts_valid).
+# This exercises the real arming path (fm-pr-check.sh) and the real relaunch
+# path (fm-control.sh relaunch -> fm-spawn.sh --relaunch), never hand-writing
+# the meta file, so it proves what the watcher itself would accept.
+make_relaunch_gh_stub() {  # <fakebin-dir>
+  cat > "$1/gh" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *" --json isDraft "*) printf '{"isDraft":false}\n' ;;
+      *" --json headRefOid "*) printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+    esac
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$1/gh"
+}
+
+test_relaunch_keeps_the_armed_pr_poll_authenticated() {
+  local dir id=rl77 url out rc
+  dir=$(new_case pr-poll-relaunch "$id")
+  add_ship_task "$dir" "$id" claude
+  url="https://github.com/example/repo/pull/77"
+  make_relaunch_gh_stub "$dir/fakebin"
+
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$PR_CHECK" "$id" "$url" 2>&1); rc=$?
+  expect_code 0 "$rc" "arming a PR poll for a fresh ship task should succeed"$'\n'"$out"
+  [ -f "$dir/home/state/$id.check.sh" ] || fail "arming did not leave a watcher check behind"
+  fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$PR_POLL" \
+    || fail "the freshly armed PR poll does not validate; the fixture itself is broken"
+
+  out=$(run_control "$dir" "$id" relaunch --note "continue after PR review"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed with an armed PR poll"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" pr)" = "$url" ] || fail "relaunch must still preserve the task PR"
+
+  if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
+    printf '# evidence begin: relaunch vs armed PR poll\n'
+    printf 'post-relaunch key order:\n'; cat "$dir/home/state/$id.meta"
+    printf '# evidence end\n'
+  fi
+  fm_pr_poll_artifacts_valid "$dir/home/state" "$id" "$PR_POLL" \
+    || fail "relaunch silently broke the armed PR poll's authentication (control_relaunch_tx must not land after the preserved pr=/pr_head= keys); the watcher would reject this task's own untampered poll as check: rejected unauthenticated state checks"
+  pass "fm-control relaunch: relaunch keeps an armed PR merge poll authenticated"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2202,6 +2259,7 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_the_armed_pr_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
