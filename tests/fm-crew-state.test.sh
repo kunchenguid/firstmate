@@ -906,6 +906,53 @@ test_ordinary_blocked_over_live_run_keeps_plain_superseded() {
   pass "broken-pipe blocker over a live run keeps the plain superseded reading"
 }
 
+# The run-activity component the wedge detector reads (FM_RUN_ACTIVITY_RECENT).
+# It must be published from the pipeline's OWN recency verdict and from nothing
+# else, because the watcher gives up one escalation for it: an active-step table
+# with no `quiet` prefix mints it, and a run gone quiet or publishing no table at
+# all must not, or a frozen pipeline would buy the same silence a working one does.
+test_working_run_publishes_its_activity_recency() {
+  reset_fakes
+  local d out
+  d=$(new_case run-activity-recency)
+  make_repo_on_branch "$d/wt" fm/feat-ra
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ra.meta" "window=fm:fm-feat-ra" "worktree=$d/wt" "kind=ship"
+  : > "$d/state/feat-ra.status"
+
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_recent fm/feat-ra)"
+  out=$(run_crew_state "$d" feat-ra)
+  assert_contains "$out" "state: working" "a fixing run with fresh activity is working"
+  assert_contains "$out" "source: run-step" "the verdict is attributed to the run"
+  assert_contains "$out" "· run activity: recent" \
+    "an advancing step did not publish its recency as its own component"
+
+  # The same run gone quiet. This is the shape a record keeps after the daemon
+  # died under it, so it must publish nothing - the whole point of the component.
+  FM_FAKE_AXI_STATUS="$(run_fixing_active_quiet fm/feat-ra)"
+  out=$(run_crew_state "$d" feat-ra)
+  assert_contains "$out" "state: working" "a quiet fixing record is still reported working"
+  assert_not_contains "$out" "run activity: recent" \
+    "a run whose step has gone quiet published recency it has not earned"
+
+  # No active-step table at all: the pipeline says nothing about recency, which is
+  # absence of evidence, never recency.
+  FM_FAKE_AXI_STATUS="$(run_fixing fm/feat-ra)"
+  out=$(run_crew_state "$d" feat-ra)
+  assert_contains "$out" "state: working" "a fixing run with no active-step table is still working"
+  assert_not_contains "$out" "run activity: recent" \
+    "a run publishing no active-step table was read as recent anyway"
+
+  # A run that is not working must never carry it, whatever its table says: the
+  # component is about a step still executing, and a parked gate is the opposite.
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-ra)"
+  out=$(run_crew_state "$d" feat-ra)
+  assert_contains "$out" "state: parked" "a gated run is parked"
+  assert_not_contains "$out" "run activity: recent" \
+    "a parked run published an advancing-step component"
+  pass "a working run publishes activity recency only on the pipeline's own unquiet verdict"
+}
+
 # The genuine daemon-down case still reaches the supervisor as blocked: the
 # socket refused connections and no run is executing anywhere.
 test_genuine_daemon_down_reports_blocked() {
@@ -4980,5 +5027,6 @@ test_competing_live_runs_report_unknown_with_both_ids
 test_newer_failed_run_is_not_hidden_by_older_live_run
 test_unverifiable_run_selection_reports_unknown
 test_legacy_conflicting_run_records_report_unknown
+test_working_run_publishes_its_activity_recency
 
 echo "all fm-crew-state tests passed"

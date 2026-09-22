@@ -1132,6 +1132,16 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # Publish the pipeline's own recency verdict for a run that is still working,
+  # in its own ${SEP} component for the reason the gate component above is one:
+  # consumers compare a whole component for equality, so no detail text that
+  # happens to contain the words can mint it. Only positive evidence mints it
+  # (nm_run_activity_is_recent), so a run whose active step has gone `quiet`, or
+  # that publishes no active-step table at all, carries nothing here and every
+  # consumer reads it exactly as it reads a run that is not advancing.
+  if [ "$RUN_STATE" = working ] && nm_run_activity_is_recent; then
+    RUN_DETAIL="$RUN_DETAIL${SEP}$FM_RUN_ACTIVITY_RECENT"
+  fi
   [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi

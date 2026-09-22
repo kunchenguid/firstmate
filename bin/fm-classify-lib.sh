@@ -2158,6 +2158,12 @@ crew_is_paused() {  # <id>
 # crew_gate_awaits_human_decision below is its only consumer.
 FM_GATE_HUMAN_DECISION='ask-user: authority decision'
 
+# The one spelling of the verdict component that says the PIPELINE itself reports
+# a still-advancing step. bin/fm-crew-state.sh mints it (nm_run_activity_is_recent
+# owns the derivation: an active-step table with no `quiet`-prefixed
+# last_activity); crew_run_activity_is_fresh below is its only consumer.
+FM_RUN_ACTIVITY_RECENT='run activity: recent'
+
 # 0 if crew <id>'s authoritative current state is a no-mistakes gate whose answer
 # is owed by a human rather than by the crewmate itself.
 #
@@ -2198,6 +2204,54 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
   [ -n "$human" ] && [ -n "$run" ] || return 1
   case "$run" in *[[:space:]]*) return 1 ;; esac
   printf '%s\n' "$run"
+}
+
+# 0 if crew <id>'s authoritative current state is a no-mistakes run that the
+# PIPELINE itself reports as still advancing.
+#
+# This is the fourth liveness input the wedge detector has, after pane
+# quietness, the run step, and worktree writes, and it exists because none of
+# those can see the one lane that is provably working and provably quiet at the
+# same time: a worker that backgrounds its drive call and polls on a long
+# cadence renders nothing between polls, writes nothing between fix rounds, and
+# still carries a run the daemon is actively executing. Its idle stretch then
+# exceeds FM_STALE_ESCALATE_SECS on every single cycle, so the escalation was
+# not an occasional misread but a certainty once the poll cadence was the longer
+# of the two.
+#
+# `working` alone cannot answer this: a run record that merely still says
+# `running` after the daemon exited under it reports working too, and absorbing
+# on that would silence exactly the frozen pipeline this ladder exists to catch.
+# Only the minted component above admits a lane here, and bin/fm-crew-state.sh
+# mints it solely from the pipeline's own recency verdict - an active-step table
+# whose last_activity carries no `quiet` prefix. A run whose step has gone quiet,
+# one that publishes no active-step table at all, and one whose verdict cannot be
+# read are all the same negative outcome, so each keeps the caller's unchanged
+# escalation schedule.
+#
+# The source must be `run-step`: a busy PANE reports working without any
+# pipeline behind it, and this record is about the pipeline. So a task with no
+# no-mistakes run attributed to it can never reach the deferral this feeds, and
+# its escalation schedule is untouched.
+# Same cost and the same caveat as crew_absorb_class: one fm-crew-state.sh read,
+# which may make a bounded no-mistakes call, so callers take it only where they
+# already accept that cost.
+crew_run_activity_is_fresh() {  # <id>
+  local id=$1 line state src rest part
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in state:*) ;; *) return 1 ;; esac
+  state=${line#state: }; state=${state%% *}
+  [ "$state" = working ] || return 1
+  src=${line#*source: }; src=${src%% *}
+  [ "$src" = run-step ] || return 1
+  rest="$line · "
+  while [ -n "$rest" ]; do
+    part=${rest%% · *}
+    rest=${rest#* · }
+    [ "$part" = "$FM_RUN_ACTIVITY_RECENT" ] && return 0
+  done
+  return 1
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.
