@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Live drift guard for the Antigravity CLI adapter's vendor-controlled surface:
-# process name, trust dialog, rendered busy/interrupt/exit behavior.
+# process name, trust dialog, rendered busy/interrupt/exit behavior, and the
+# global turn-end hook: that Stop fires on a completed turn and does NOT fire
+# on a manual interrupt, which is the whole reason fm-control closes the record
+# itself (bin/fm-control-lib.sh's fm_control_interrupt_clears_busy).
 # Opt-in because it submits real prompts (no echo provider exists for agy).
 set -u
 
@@ -50,6 +53,28 @@ mkdir -p "$AGY_HOME" || fail "could not create the throwaway agy HOME"
 [ -d "$HOME/.gemini" ] || fail "no ~/.gemini to stage for the throwaway agy HOME"
 cp -R "$HOME/.gemini" "$AGY_HOME/.gemini" || fail "could not stage the throwaway agy credential copy"
 
+# The turn-end hook is installed into the throwaway HOME by the shipped
+# installer, and attributed by a token minted the way bin/fm-spawn.sh mints one,
+# so this guard exercises the real hook script rather than a reconstruction.
+HOME="$AGY_HOME" "$ROOT/bin/fm-agy-turnend-hook.sh" install \
+  || fail "the agy turn-end hook installer refused the throwaway HOME"
+HOOK_STATE="$LAB/state"
+mkdir -p "$HOOK_STATE" || fail "could not create the agy hook state dir"
+HOOK_GEN=$("$ROOT/bin/fm-busy-event.sh" arm "$HOOK_STATE" live1) \
+  || fail "could not arm a busy generation for the agy hook"
+HOOK_REGISTRY="$AGY_HOME/.gemini/antigravity-cli/fm-turn-end.d"
+HOOK_TOKEN=$(basename "$(mktemp "$HOOK_REGISTRY/fm.XXXXXXXXXXXX")") \
+  || fail "could not mint an agy turn-end token"
+{
+  printf 'turnend=%s\n' "$HOOK_STATE/live1.turn-ended"
+  printf 'busy_event=%s\n' "$ROOT/bin/fm-busy-event.sh"
+  printf 'state=%s\n' "$HOOK_STATE"
+  printf 'id=%s\n' live1
+  printf 'gen=%s\n' "$HOOK_GEN"
+} >"$HOOK_REGISTRY/$HOOK_TOKEN" || fail "could not write the agy turn-end token"
+
+hook_record() { cat "$HOOK_STATE/live1.busy-state" 2>/dev/null || true; }
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
 # shellcheck source=/dev/null
@@ -69,7 +94,7 @@ capture() {
 # reply token would false-positive on the shell echo (including across tmux
 # wrapped rows).
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l \
-  "HOME=\"$AGY_HOME\" $AGY_BIN --prompt-interactive \"Add 12345 and 67890. Reply with exactly the sum and nothing else\" --model gemini-3.8-flash-low --effort low --dangerously-skip-permissions" \
+  "HOME=\"$AGY_HOME\" FM_TASK_ID=live1 FM_AGY_TURNEND_TOKEN=$HOOK_TOKEN $AGY_BIN --prompt-interactive \"Add 12345 and 67890. Reply with exactly the sum and nothing else\" --model gemini-3.8-flash-low --effort low --dangerously-skip-permissions" \
   || fail "could not type the agy launch line"
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" Enter \
   || fail "could not submit the agy launch line"
@@ -129,6 +154,18 @@ for _ in $(seq 1 120); do
   sleep 0.5
 done
 [ -n "$idle_settled" ] || fail "the agy composer never settled to its idle footer after the reply"
+
+# The completed turn must have closed the record through agy's own Stop hook.
+hook_closed=
+for _ in $(seq 1 60); do
+  case "$(hook_record)" in *"state=idle"*"source=agy-hook"*) hook_closed=1; break ;; esac
+  sleep 0.5
+done
+[ -n "$hook_closed" ] \
+  || fail "agy's Stop hook did not close the completed turn: $(hook_record)"
+[ -f "$HOOK_STATE/live1.turn-ended" ] \
+  || fail "agy's Stop hook did not touch the watcher's turn-end marker"
+pass "the real agy Stop hook closes a completed turn and touches the turn-end marker"
 # Scope to the visible tail the same way the owners do: mid-turn busy rows stay
 # in scrollback after the turn settles and must not count as still busy.
 printf '%s' "$screen" | grep -v '^[[:space:]]*$' | tail -12 | fm_busy_lines_match agy \
@@ -176,6 +213,22 @@ for _ in $(seq 1 120); do
 done
 [ -n "$cancelled" ] || fail "a single Escape never cancelled the real agy turn"
 pass "a single Escape cancels the real agy turn"
+
+# The interrupted turn had reopened the record through PreInvocation. agy fires
+# no Stop for a cancelled turn and has no session-end event, so the record must
+# STILL read busy here. This is the fact fm_control_interrupt_clears_busy exists
+# to compensate for: if a future agy release starts firing Stop on an interrupt,
+# this assertion fails and that compensation must be revisited rather than left
+# to overwrite a verdict the adapter now produces itself.
+sleep 5
+case "$(hook_record)" in
+  *"state=busy"*)
+    pass "agy fires no Stop hook for an interrupted turn, so firstmate must close that record itself"
+    ;;
+  *)
+    fail "agy closed the record for an interrupted turn; fm_control_interrupt_clears_busy now double-writes: $(hook_record)"
+    ;;
+esac
 
 "$REAL_TMUX" -L "$SOCKET" send-keys -t "$TARGET" -l "/quit" \
   || fail "could not type the agy exit command"
