@@ -65,7 +65,7 @@
 #                          external wait is instead handed to the daemon as this
 #                          plain reason once per declaration, while captain-held
 #                          work stays silent until return
-#                          (busy_turn_bound_check owns that split);
+#                          (bound_stall_check owns that split);
 #                          every other pane goes through the same wedge timer,
 #                          the dead-record probe above included, and surfaces
 #                          with the identical "stale: ..." reason, escalation
@@ -273,7 +273,7 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # may go without a completed turn or explicit native-harness progress (the
 # marker-selection contract is in busy_turn_over_age below). Once this bound
 # is crossed, busy_turn_over_age routes the pane through
-# busy_turn_bound_check, which hands a crossed bound to the same
+# bound_stall_check, which hands a crossed bound to the same
 # STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
 # non-busy stale - so it escalates via the existing stale reason, escalation
 # counter, and demand-deep-inspection marker for human inspection only, never an
@@ -1194,6 +1194,31 @@ busy_turn_over_age() {  # <task>
   [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
+# worker_stopped_churning: 0 when the window's recorded agent is PROVABLY not
+# working while its pane still changes between polls - a stopped-worker
+# signature the stale path can never see because a stable hash never forms.
+# Verifiable today only on the herdr+devin path: `agent get` reports the
+# registered agent's status as idle|done|blocked (fm_backend_busy_state ->
+# idle) while the pane keeps rendering - Devin's TUI leaves its
+# Thinking/Typing footer animating after the turn has stopped (verified live
+# on the stopped wiki-ingest-router-design worker: agent_status=done for tens
+# of minutes while the spinner and elapsed cell kept ticking, and `4 queued`
+# steers piled up behind the dead turn; a healthy idle Devin pane is static,
+# and a working one reports agent_status=working). Every other backend and
+# harness keeps returning 1 here - an unproven verdict is never "stopped",
+# and a busy-rendered pane never proves a stop. The herdr meta read stays
+# cheap: backend and harness come from the task's own record, so only a
+# recorded herdr+devin window pays for the native probe.
+worker_stopped_churning() {  # <window> <task>
+  local w=$1 task=$2 meta
+  [ -n "$task" ] || return 1
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] || return 1
+  [ "$(fm_meta_get "$meta" backend)" = herdr ] || return 1
+  [ "$(fm_meta_get "$meta" harness)" = devin ] || return 1
+  [ "$(fm_backend_busy_state herdr "$w" 2>/dev/null)" = idle ]
+}
+
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
 # dead-agent captain-held transfer, and re-surface it once every
 # PAUSE_RESURFACE_SECS for a recheck so it cannot rot invisibly. Called on any
@@ -1255,23 +1280,26 @@ handle_paused_stale() {  # <window> <task> <hash>
   triage_log "absorbed stale ($detail, age ${age}s): $win"
 }
 
-# Apply the busy-pane completed-turn bound to a window whose bound has already
-# crossed, honoring the worker's OWN declared external wait. Prints/queues
-# nothing itself; it only chooses which absorber owns the crossed bound.
+# Apply a crossed stall bound to a window, honoring the worker's OWN declared
+# external wait. Prints/queues nothing itself; it only chooses which absorber
+# owns the crossed bound. <triage-label> names the condition that crossed the
+# bound in triage_log output ("busy (no completed turn)" for a provably-working
+# pane, "stopped worker (...)" for the worker_stopped_churning signature).
 # 0 when the declared-pause cadence took the pane, 1 when the wedge timer did.
 #
 # A busy pane past BUSY_TURN_MAX_SECS is normally a wedge suspect because a hung
-# foreground call can hide behind a busy signature. A `paused:` declaration or
-# verified captain-held transfer instead identifies that live foreground call as
-# the expected external wait. The caller has already confirmed liveness through
-# the busy verdict, so this exception does not suppress undeclared wedges or
-# alter the separate non-busy classification. handle_paused_stale keeps the
-# exception bounded by re-surfacing it once per PAUSE_RESURFACE_SECS. Away mode
-# remains daemon-owned and receives the undecorated wake identity for its own
-# classification, which is why the declaration is read before the afk branch
-# rather than after it.
-busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-file>
-  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 key statusf declared
+# foreground call can hide behind a busy signature, and a provably-stopped
+# worker whose pane keeps rendering is the same suspect with the opposite
+# liveness verdict. A `paused:` declaration or verified captain-held transfer
+# instead identifies that wait as the expected external one. The caller has
+# already proven the pane's condition, so this exception does not suppress
+# undeclared wedges or alter the separate non-busy classification.
+# handle_paused_stale keeps the exception bounded by re-surfacing it once per
+# PAUSE_RESURFACE_SECS. Away mode remains daemon-owned and receives the
+# undecorated wake identity for its own classification, which is why the
+# declaration is read before the afk branch rather than after it.
+bound_stall_check() {  # <window> <task> <hash> <since-file> <escalation-file> <triage-label>
+  local win=$1 task=$2 h=$3 since_file=$4 escalation_file=$5 label=$6 key statusf declared
   statusf="$STATE/$task.status"
   if status_is_paused_or_captain_held "$(last_status_line "$statusf")"; then
     if afk_present; then
@@ -1313,7 +1341,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
     handle_paused_stale "$win" "$task" "$h"
     return 0
   fi
-  wedge_timer_check "$win" "$since_file" "busy (no completed turn)" "$escalation_file" "$task" "$h"
+  wedge_timer_check "$win" "$since_file" "$label" "$escalation_file" "$task" "$h"
   return 1
 }
 
@@ -2750,11 +2778,19 @@ EOF
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping,
         # unless a genuinely busy pane has gone too long with no completed turn -
-        # then route it through busy_turn_bound_check, which hands the crossed
+        # then route it through bound_stall_check, which hands the crossed
         # bound to the same wedge timer unless the crew declared the wait itself.
+        # The same bound covers the opposite signature: a worker provably
+        # stopped while its pane keeps rendering (worker_stopped_churning)
+        # never produces a stable hash, so this churn branch is the only place
+        # the wedge timer can ever see it.
         paused_bound=1
         if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
+          bound_stall_check "$w" "$task" "$h" "$ssf" "$ewf" "busy (no completed turn)" && paused_bound=0
+        elif [ "$busy_now" -ne 0 ] && busy_turn_over_age "$task" \
+            && worker_stopped_churning "$w" "$task"; then
+          bound_stall_check "$w" "$task" "$h" "$ssf" "$ewf" \
+            "stopped worker (native idle, pane still rendering)" && paused_bound=0
         else
           rm -f "$ssf" "$ewf"
           clear_write_tracking "$key"
@@ -2771,8 +2807,16 @@ EOF
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
       paused_bound=1
+      # The churning branch is where a provably-stopped worker hiding behind a
+      # still-animating pane (worker_stopped_churning) can ever be seen: the
+      # hash changes on every poll, so the stable-hash stale path above never
+      # runs for it.
       if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        busy_turn_bound_check "$w" "$task" "$h" "$ssf" "$ewf" && paused_bound=0
+        bound_stall_check "$w" "$task" "$h" "$ssf" "$ewf" "busy (no completed turn)" && paused_bound=0
+      elif [ "$busy_now" -ne 0 ] && busy_turn_over_age "$task" \
+          && worker_stopped_churning "$w" "$task"; then
+        bound_stall_check "$w" "$task" "$h" "$ssf" "$ewf" \
+          "stopped worker (native idle, pane still rendering)" && paused_bound=0
       else
         rm -f "$ssf" "$ewf"
         clear_write_tracking "$key"

@@ -153,4 +153,34 @@ WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
 
+# --- worker_stopped_churning: the stopped-Devin signature (2026-09-22) ------
+# A Devin worker's turn can die mid-render: `agent get` reported
+# agent_status=done on the wiki-ingest-router-design pane while the TUI kept
+# animating its Thinking footer, so no stable pane hash ever formed and the
+# stable-hash stale path could never see the stop. Only the exact conjunction
+# - recorded herdr backend, recorded devin harness, native agent-state
+# provably not working - returns 0; every other combination is "cannot prove
+# stopped", never stopped.
+
+reset_state
+fm_write_meta "$STATE_DIR/wedged.meta" "window=default:w9B:p2" "backend=herdr" "harness=devin" "kind=scout"
+fm_write_meta "$STATE_DIR/peer.meta" "window=default:w1:p2" "backend=herdr" "harness=claude" "kind=ship"
+FAKE_BUSY=idle
+# shellcheck disable=SC2329 # Runtime override called by the watcher helper.
+fm_backend_busy_state() { printf '%s' "$FAKE_BUSY"; }
+worker_stopped_churning default:w9B:p2 wedged \
+  || fail "a herdr+devin native-idle pane must read stopped"
+FAKE_BUSY=busy
+! worker_stopped_churning default:w9B:p2 wedged \
+  || fail "a working Devin must never read stopped"
+FAKE_BUSY=unknown
+! worker_stopped_churning default:w9B:p2 wedged \
+  || fail "an unproven Devin verdict must never read stopped"
+FAKE_BUSY=idle
+! worker_stopped_churning default:w1:p2 peer \
+  || fail "a non-Devin herdr pane must never read stopped"
+! worker_stopped_churning default:w9B:p2 missing-task \
+  || fail "an unrecorded window must never read stopped"
+pass "worker_stopped_churning fires only on the recorded herdr+devin native-idle signature"
+
 echo "# fm-supervision-events.test.sh: all assertions passed"

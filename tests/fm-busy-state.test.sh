@@ -386,6 +386,19 @@ test_herdr_native_busy_only() {
   FAKE_NATIVE=idle
   out=$(fm_busy_classify herdr s:p claude t1 "$state")
   [ "$out" = "unknown missing" ] || fail "native idle must NOT classify idle, got '$out'"
+  # Devin is the sole exception (2026-09-22 stopped-worker incident): it arms
+  # no semantic writer, so herdr's native agent-state is its ONLY source and
+  # idle|done|blocked is the agent itself reporting no turn in flight. Reading
+  # that as idle - never busy - is what lets a stopped Devin surface instead of
+  # sitting at "harness state unavailable" with no alarm.
+  out=$(fm_busy_classify herdr s:p devin t1 "$state")
+  [ "$out" = "idle herdr-native" ] || fail "a stopped Devin's native idle must classify idle, got '$out'"
+  FAKE_NATIVE=busy
+  out=$(fm_busy_classify herdr s:p devin t1 "$state")
+  [ "$out" = "busy herdr-native" ] || fail "a working Devin's native busy must classify busy, got '$out'"
+  FAKE_NATIVE=unknown
+  out=$(fm_busy_classify herdr s:p devin t1 "$state")
+  [ "$out" = "unknown missing" ] || fail "an unproven Devin verdict must stay unknown, got '$out'"
   # A valid record outranks the native verdict.
   local gen
   gen=$("$EV" arm "$state" t1)
@@ -394,7 +407,7 @@ test_herdr_native_busy_only() {
   out=$(fm_busy_classify herdr s:p claude t1 "$state")
   [ "$out" = "idle claude-hook" ] || fail "the adapter record must outrank herdr's native verdict, got '$out'"
   unset -f fm_backend_busy_state
-  pass "herdr's native verdict is trusted for busy only, and records outrank it"
+  pass "herdr's native verdict is trusted for busy only - except Devin, whose only source also answers idle - and records outrank it"
 }
 
 # The record parser runs inside sourcing callers (the watcher, the daemon, the

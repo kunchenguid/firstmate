@@ -106,7 +106,10 @@ fm_devin_start "$target" "$BIN" "$FM_HOME/data/probe/brief.md" "$MODEL" dangerou
 fm_backend_herdr_cli "$HERDR_LAB_SESSION" pane wait-output "$pane" --regex '^ INITIAL_DONE$' --timeout 90000 > "$BASE/initial.json"
 [ "$(cat "$BASE/work/detected.txt")" = devin ] || fail "$VERSION tool detection failed"
 fm_backend_herdr_cli "$HERDR_LAB_SESSION" agent wait "$pane" --until idle --timeout 15000 >/dev/null
-[ "$(FM_COMPOSER_HARNESS=devin fm_backend_herdr_composer_state "$target")" = empty ] \
+# The real caller path never sets FM_COMPOSER_HARNESS: the adapter must derive
+# the Devin hint from its own `agent get` probe (2026-09-22 stopped-worker
+# incident, where the hinted call was the only one that worked).
+[ "$(fm_backend_herdr_composer_state "$target")" = empty ] \
   || fail "$VERSION idle Devin composer was not recognized"
 "$ROOT/bin/fm-send.sh" probe 'Run sleep 15, then reply STEER_DONE. Do nothing else.' > "$BASE/send.txt"
 fm_backend_herdr_cli "$HERDR_LAB_SESSION" agent wait "$pane" --until working --timeout 15000 > "$BASE/busy.json"

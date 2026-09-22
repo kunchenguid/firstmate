@@ -3067,10 +3067,19 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # herdr, the plain capture degrades the descriptor to styled=0 rather than
 # letting ghost text be misread as typed input. Identity is fetched lazily,
 # only when the classifier reports the verdict depends on it (a pi separator
-# pair below every other candidate), preserving this adapter's original
-# consult-only-when-needed behavior.
-fm_backend_herdr_composer_state() {  # <target> [harness] -> empty|pending|pending-unproven|unknown
-  local target=$1 harness=${2:-${FM_COMPOSER_HARNESS:-}} cap caps verdict identity
+# pair below every other candidate) or when an unhinted read came back
+# unknown: the probe's agent name is then the classifier's harness hint, the
+# only way this adapter can know which harness-specific composer shapes are
+# legal here. The generic contract's optional argument is an expected label,
+# not a harness - callers pass the task label through it, so a positional
+# harness argument would read that label as a harness name and disable every
+# harness-owned rule (the 2026-09-22 stopped-Devin incident: the real Devin
+# composer stayed `unknown` and exit/relaunch refused to touch it).
+# FM_COMPOSER_HARNESS stays the explicit override for a caller that does know
+# the harness; today only Devin's bare `❭` row plus closing rule consumes the
+# hint, so a probed claude/pi/codex agent classifies identically to no hint.
+fm_backend_herdr_composer_state() {  # <target> [expected-label] -> empty|pending|pending-unproven|unknown
+  local target=$1 harness=${FM_COMPOSER_HARNESS:-} cap caps verdict identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
   if cap=$(fm_backend_herdr_capture_ansi "$target" "$FM_COMPOSER_CAPTURE_LINES" 2>/dev/null); then
     caps=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
@@ -3081,9 +3090,12 @@ fm_backend_herdr_composer_state() {  # <target> [harness] -> empty|pending|pendi
     return 0
   fi
   verdict=$(fm_composer_classify_screen "$caps" "$cap" '' '' "$harness")
-  if [ "$verdict" = need-identity ]; then
+  if [ "$verdict" = need-identity ] || { [ -z "$harness" ] && [ "$verdict" = unknown ]; }; then
     if ! identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || [ -z "$identity" ]; then
       identity=probe-absent
+    fi
+    if [ -z "$harness" ] && [ "$identity" != probe-absent ]; then
+      harness=${identity%%$'\t'*}
     fi
     verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity" "$harness")
     [ "$verdict" != need-identity ] || verdict=unknown

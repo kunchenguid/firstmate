@@ -258,7 +258,9 @@ pane_readable() {  # <target>
 # isolated rendered-tail fallback; a herdr crew's native `busy` is accepted
 # when no record exists, but its native `idle` is NOT, because agent.get
 # reports generation state (idle while a crew blocks on its own long-running
-# foreground tool call) rather than turn state.
+# foreground tool call) rather than turn state - except Devin, which has no
+# semantic writer at all, so its native idle is accepted there (the contract
+# owner gates that exception).
 crew_busy_verdict() {  # <target>
   local tail40=''
   case "$HARNESS" in

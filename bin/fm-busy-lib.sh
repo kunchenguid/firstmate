@@ -929,11 +929,22 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   # No record at all. A native herdr busy verdict is semantic enough to trust
   # for BUSY (streaming means a turn is running); native idle is narrower
   # than turn state (a long foreground tool call reads idle) and stays
-  # unknown here.
+  # unknown here. Devin is the one exception: it arms no semantic writer, so
+  # herdr's native agent-state is its ONLY source, and idle|done|blocked is the
+  # agent itself reporting no turn in flight (verified live: a working Devin
+  # reports agent_status=working; the stopped wiki-ingest-router-design pane
+  # reported done while its footer kept animating). Reporting that as idle -
+  # not unknown - is what lets a stopped Devin read stopped instead of
+  # "harness state unavailable" forever; it never claims work is running, and
+  # every consumer that distinguishes the two already treats idle as not busy.
   if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
     native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
     if [ "$native" = busy ]; then
       printf 'busy herdr-native'
+      return 0
+    fi
+    if [ "$native" = idle ] && [ "$harness" = devin ]; then
+      printf 'idle herdr-native'
       return 0
     fi
   fi

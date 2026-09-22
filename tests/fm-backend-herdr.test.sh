@@ -3939,6 +3939,99 @@ test_composer_state_pi_separator_requires_safe_native_identity() {
   pass "fm_backend_herdr_composer_state: Pi separators never authorize working, non-Pi, unreadable, or over-tall targets"
 }
 
+# Regression coverage for the 2026-09-22 stopped-Devin incident
+# (wiki-ingest-router-design, herdr pane w9B:p2). The generic contract's
+# optional argument is an expected label - fm-control.sh passes the task label
+# through it - but this adapter bound that slot as a harness hint, so a call
+# that named the task disabled every Devin-owned composer rule and the real
+# Devin composer read `unknown` through every caller, blocking fm-send,
+# fm-control interrupt/exit, and relaunch alike. The harness hint now comes
+# from the native `agent get` probe whenever the first pass cannot decide.
+
+test_composer_state_devin_reads_through_expected_label_contract() {
+  local dir log resp fb out calls
+  dir="$TMP_ROOT/composer-devin-label"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The live stopped Devin pane's composer region: a bare `❭` row closed by
+  # one solid rule - the same shape the Pi staleness safeguard guards.
+  printf '%s\n' \
+    ' ✱ Did you know' \
+    '   Type while the agent works to queue messages; press Enter on an empty input to send them now' \
+    '' \
+    '─────────────────────────────────────────────────── (bypass permissions on) ─' \
+    '❭ Ask Devin to build features, fix bugs, or work on your code' \
+    '─────────────────────────────────────────────────────────────────────────' \
+    'SWE-2 Max                                                 Context: 111k / 262k tokens (42%)' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"devin","agent_status":"done"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  # Called through the generic dispatch exactly as fm-control calls it: the
+  # task label sits in the expected-label slot, never a harness name.
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/fm-backend.sh"; fm_backend_composer_state herdr default:w9B:p2 fm-wiki-ingest-router-design' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle Devin composer through the expected-label caller path must read empty, got '$out'"
+  calls=$(grep -c $'\x1f''agent'$'\x1f''get' "$log")
+  [ "$calls" -eq 1 ] || fail "the Devin composer must corroborate harness identity exactly once, made $calls agent calls"
+  pass "fm_backend_herdr_composer_state: a Devin idle composer reads empty through the generic expected-label contract"
+}
+
+test_composer_state_devin_queue_flush_prompt_is_empty() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-devin-queue"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The same pane mid-wedge: an animating Thinking footer, a `── 4 queued ──`
+  # banner, and Devin's queue-flush prompt - all empty-composer furniture.
+  printf '%s\n' \
+    ' ⣀ Thinking · 26m 39s (esc twice to interrupt)' \
+    '── 4 queued ─────────────────────────────────────────────────────────────' \
+    '❭ Press Enter to send queued messages now' \
+    '─────────────────────────────────────────────────────────────────────────' \
+    'SWE-2 Max                                                 Context: 111k / 262k tokens (42%)' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"devin","agent_status":"done"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w9B:p2 fm-wiki-ingest-router-design' "$ROOT" )
+  [ "$out" = empty ] || fail "Devin's queue-flush composer must read empty, got '$out'"
+  pass "fm_backend_herdr_composer_state: the queue-flush Devin composer reads empty"
+}
+
+test_composer_state_devin_typed_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-devin-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  printf '%s\n' \
+    '─────────────────────────────────────────────────── (bypass permissions on) ─' \
+    '❭ split the router into route/policy/filePlan' \
+    '─────────────────────────────────────────────────────────────────────────' \
+    'SWE-2 Max                                                 Context: 111k / 262k tokens (42%)' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"devin","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w9B:p2 some-task-label' "$ROOT" )
+  [ "$out" = pending ] || fail "typed text in a Devin composer must read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: real Devin composer text reads pending"
+}
+
+# The identity probe scopes Devin's shape exception to Devin panes: the very
+# same screen on a non-Devin agent keeps the Pi staleness safeguard and stays
+# unknown, and an unreadable probe can never invent a harness hint.
+test_composer_state_devin_shape_never_leaks_to_other_agents() {
+  local dir log resp fb out case_id
+  for case_id in claude unreadable; do
+    dir="$TMP_ROOT/composer-devin-shape-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    printf '%s\n' \
+      '─────────────────────────────────────────────────── (bypass permissions on) ─' \
+      '❭ Ask Devin to build features, fix bugs, or work on your code' \
+      '─────────────────────────────────────────────────────────────────────────' \
+      'SWE-2 Max                                                 Context: 111k / 262k tokens (42%)' > "$resp/1.out"
+    case "$case_id" in
+      claude)     printf '{"result":{"agent":{"agent":"claude","agent_status":"done"}}}\n' > "$resp/2.out" ;;
+      unreadable) printf '1\n' > "$resp/2.exit" ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2 some-task' "$ROOT" )
+    [ "$out" = unknown ] || fail "a Devin-shaped screen on '$case_id' identity must stay unknown, got '$out'"
+  done
+  pass "fm_backend_herdr_composer_state: the Devin shape exception never leaks past a probed non-Devin identity"
+}
+
 # --- composer_state: unbordered (bare) composer rows -------------------------
 # Regression coverage for the away-mode redelivery-loop incident
 # (docs/herdr-backend.md "Incident (2026-07-07)"): real claude and codex
@@ -5356,6 +5449,10 @@ test_composer_state_pi_separator_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
+test_composer_state_devin_reads_through_expected_label_contract
+test_composer_state_devin_queue_flush_prompt_is_empty
+test_composer_state_devin_typed_text_is_pending
+test_composer_state_devin_shape_never_leaks_to_other_agents
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins

@@ -1036,7 +1036,7 @@ test_housekeeping_paused_resumed_cleared() {
 # on the very next tick, so the window restarted forever and the wait never matured
 # into its one recheck. Away mode makes that terminal: the watcher hands a busy
 # declared wait to the daemon exactly once per declaration (bin/fm-watch.sh's
-# busy_turn_bound_check), so this recheck is the only thing left that can re-surface
+# bound_stall_check), so this recheck is the only thing left that can re-surface
 # the pane at all. Both declaration forms take the same 2b arm, so both are pinned.
 test_housekeeping_busy_declared_wait_matures_its_window() {
   local case_name dir state fakebin task win pane key gen tick age escalations digest

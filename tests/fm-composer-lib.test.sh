@@ -122,7 +122,10 @@ test_idle_placeholder_case_mode_is_explicit() {
 
 test_devin_placeholders_are_harness_scoped() {
   local placeholder harness out
-  for placeholder in 'Ask Devin to build features, fix bugs, or work on your code' 'Guide Devin while it works'; do
+  # `Press Enter to send queued messages now` is Devin's queue-flush composer,
+  # verified live on the stopped wiki-ingest-router-design pane (2026-09-22):
+  # it is empty-composer furniture, never typed input.
+  for placeholder in 'Ask Devin to build features, fix bugs, or work on your code' 'Guide Devin while it works' 'Press Enter to send queued messages now'; do
     out=$(classify 1 "$placeholder" '' sensitive "$placeholder" 1 0 devin)
     [ "$out" = empty ] || fail "Devin placeholder '$placeholder' must read empty for Devin, got '$out'"
     for harness in claude cursor; do
@@ -225,7 +228,12 @@ test_matrix_devin_dim_hint_row() {
   assert_screen "Devin idle on Herdr" empty "$CAPS_STYLED" "$screen" '' probe-absent devin
   typed=$'──────────────── (bypass permissions on) ────────────────\n❭ Guide Devin while it works\n────────────────────────────────────────────────────────────\nSWE-2 High'
   assert_screen "Devin second idle hint on Herdr" empty "$CAPS_STYLED" "$typed" '' probe-absent devin
-  pass "matrix: Devin's ❭ placeholders are empty on Herdr"
+  # The stopped Devin's queue-flush composer (live capture 2026-09-22): a
+  # `── N queued ──` banner and a Thinking footer sit above the same bare `❭`
+  # row + closing rule, and the prompt text is Devin's third placeholder.
+  typed=$'⠀ Thinking · 26m 39s (esc twice to interrupt)\n── 4 queued ────────────────────────────────────────────────────\n❭ Press Enter to send queued messages now\n────────────────────────────────────────────────────────────\nSWE-2 Max'
+  assert_screen "Devin queue-flush composer on Herdr" empty "$CAPS_STYLED" "$typed" '' probe-absent devin
+  pass "matrix: Devin's ❭ placeholders are empty on Herdr, including the queue-flush prompt"
 }
 
 test_matrix_muse_truecolor_glyph_survives_signal_loss() {

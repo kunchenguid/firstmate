@@ -251,7 +251,7 @@ The capture owner requests at least 200 lines from Herdr and trims locally to th
 This generous floor is required for small composer and peek reads.
 
 Herdr's native agent state can read idle while a harness waits on its own long foreground tool.
-The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped; the task's own semantic busy state (`bin/fm-busy-lib.sh`) decides that.
+The shared crew-state path therefore accepts a native `busy` as evidence of activity but never a native `idle` as evidence that a worker has stopped, except for Devin: it arms no semantic writer, so its native `idle`, `done`, or `blocked` is its only worker-state source and is read as `idle herdr-native` (the contract owner is `bin/fm-busy-lib.sh`, and [architecture.md](architecture.md#busy-state-is-semantic-per-adapter) owns its boundaries).
 A human-blocked permission dialog has no busy banner and still surfaces.
 
 ## Composer and injection safety
@@ -261,7 +261,7 @@ The adapter is a thin capture: it hands a bounded ANSI tail plus Herdr's capabil
 Pi emptiness requires native Pi identity and idle/done state; the footer-qualified fallback and its structural guards live in that classifier.
 A blocked Pi is parked on an interactive prompt, so its blank composer region is a menu's and not a free composer's; that state defers instead of proving emptiness.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
-Identity stays a lazy second read, consulted only when a recognized Pi region could change the verdict.
+Identity stays a lazy second read, consulted when a recognized Pi region could change the verdict, or when an unhinted read came back `unknown` and the probed agent name can supply the missing harness hint.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.

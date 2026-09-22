@@ -939,7 +939,7 @@ The CLI matrix was checked directly:
 | Keys | `herdr pane send-keys <pane> enter|escape|ctrl+c --session <name>` | Enter and Escape worked; Ctrl-C interrupted foreground work. |
 | Capture | `herdr pane read <pane> --source recent --lines N` | Small N could return empty below viewport height; a 200-line request plus local trim was stable. |
 | Viewport capture | `herdr pane read <pane> --source visible` | Verified on 2026-09-17 against Herdr 0.8.0 (protocol 19): `herdr pane read --help` documents `--source <SOURCE>` with `[possible values: visible, recent, recent-unwrapped, detection]`; `--source visible` exited 0 and returned 51 lines (the viewport) while `--source recent --lines 200` returned 200. This is the viewport-only read behind `fm_backend_herdr_visible_capture`, which Kimi's trust-dialog gate requires. |
-| Native state | `herdr agent get <pane>` | Working and done transitions were visible on some harnesses; live Claude Code 2.1.236 on Herdr 0.8.0 kept `agent_status=idle` for an entire landed turn, including a multi-second tool call, so submit confirmation falls through to the shared composer verdict. Native `busy` remains positive activity evidence, while native `idle` cannot close a turn and the adapter's semantic lifecycle decides worker state. |
+| Native state | `herdr agent get <pane>` | Working and done transitions were visible on some harnesses; live Claude Code 2.1.236 on Herdr 0.8.0 kept `agent_status=idle` for an entire landed turn, including a multi-second tool call, so submit confirmation falls through to the shared composer verdict. Native `busy` remains positive activity evidence, while native `idle` cannot close a turn. |
 | Restart | guarded named-session stop then start | Workspace, tab, pane, and labels persisted; the agent process and registration did not. |
 | Close | `herdr pane close <pane> --session <name>` | The exact one-pane task tab closed; closing a final tab could remove the workspace. |
 
@@ -1757,6 +1757,12 @@ Direct `agent get <pane>` identified `devin` without an `interactive_ready` fiel
 Double Escape produced `Canceled. What should Devin do?` and an empty composer; a follow-up was accepted, but tool-subprocess cancellation is not claimed.
 The portable guard is `tests/fm-devin-harness.test.sh`, and `tests/fm-herdr-lab.test.sh` proves explicit session selection survives a `--` separator without changing agent arguments.
 The native named-agent startup race is a separate follow-up, not a prerequisite for the verified direct path.
+
+Refreshed 2026-09-22 on the same versions, against the stopped `wiki-ingest-router-design` scout pane `default:w9B:p2` (`swe-2-max`).
+A stopped Devin worker reports `agent_status=done` while its TUI keeps animating a `Thinking · Nm (esc twice to interrupt)` footer and a `── N queued ──` banner over `❭ Press Enter to send queued messages now`.
+A healthy idle pane is static at `❭ Ask Devin to build features, fix bugs, or work on your code`, and a working pane reports `agent_status=working`.
+The wedged pane's capture hash therefore never stabilizes, which is why stable-hash stale detection cannot see the stop and the watcher keys the stopped-worker signature on native idle plus continued churn instead.
+The queue-flush prompt is empty-composer furniture: the wedged pane later drained its four queued steering messages on its own and returned to the static idle composer.
 
 ## Cursor Agent CLI
 

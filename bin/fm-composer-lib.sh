@@ -419,7 +419,10 @@ FM_COMPOSER_SHELL_PROMPT_GLYPHS=$(printf '%s\n' '>' '$' '%' '#')
 # pane is not misread as typed input. FM_COMPOSER_IDLE_RE overrides for an
 # unverified harness; matching is case-insensitive.
 FM_COMPOSER_IDLE_RE_DEFAULT='^Type a message\.\.\.$|^Ask anything(\.\.\.|…)|^Plan, search, build anything$|^Add a follow-up$'
-FM_COMPOSER_IDLE_RE_DEVIN='^Ask Devin to build features, fix bugs, or work on your code$|^Guide Devin while it works$'
+# Devin's `Press Enter to send queued messages now` is the same furniture on a
+# pane whose composer became a queue flush prompt (verified live on the
+# stopped wiki-ingest-router-design Devin, herdr agent_status=done).
+FM_COMPOSER_IDLE_RE_DEVIN='^Ask Devin to build features, fix bugs, or work on your code$|^Guide Devin while it works$|^Press Enter to send queued messages now$'
 
 fm_composer_idle_re_for_harness() {  # [harness]
   local harness=${1:-}
