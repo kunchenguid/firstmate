@@ -143,8 +143,9 @@ fm_nm_run_status_class() {  # <status_word>
 # locates for the worktree.
 # Repo identity is not taken from the overview (observed 2026-09-20: a
 # truncated overview with zero rows for this task's branch had only
-# `count:`/`runs[...]:`), so it is looked up by the task worktree path itself, which is exactly what `no-mistakes` records as a
-# repo's `working_path`; the recorded spelling is matched exactly, so a task
+# `count:`/`runs[...]:`), so it is looked up by the task worktree path
+# itself, which is exactly what `no-mistakes` records as a repo's
+# `working_path`; the recorded spelling is matched exactly, so a task
 # worktree that is not absolute, or whose spelling differs from the recorded
 # one, reads as unreadable rather than guessed among candidates.
 # The reader subprocess is bounded by $4 seconds (default 10), so a contended
