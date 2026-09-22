@@ -65,6 +65,20 @@ fm_nm_strip_quotes() {
   fm_nm_trim "$s"
 }
 
+# Path of no-mistakes' local state database as the CLI would see it from
+# worktree $1: <NM_HOME>/state.sqlite, with NM_HOME defaulting to
+# ~/.no-mistakes and a relative NM_HOME resolving from that worktree. Readers
+# open it with SQLite's mode=ro, so a missing database is never created.
+fm_nm_state_db() {  # <worktree>
+  local root=${NM_HOME:-}
+  [ -n "$root" ] || root="${HOME:-}/.no-mistakes"
+  case "$root" in
+    /*) ;;
+    *) root="$1/$root" ;;
+  esac
+  printf '%s/state.sqlite\n' "$root"
+}
+
 # Scalar value of a TOON key in captured `axi status` output $1.
 fm_nm_field() {  # <toon-output> <key>
   printf '%s\n' "$1" | sed -n "s/^[[:space:]]*$2:[[:space:]]*\(.*\)/\1/p" | head -1
@@ -126,8 +140,8 @@ fm_nm_run_status_class() {  # <status_word>
 
 # Select from a complete `no-mistakes axi` overview with the existing awk
 # toolchain. A capped overview requires an optional Python 3 sqlite3 reader
-# for a read-only same-branch query of NM_HOME/state.sqlite (default:
-# ~/.no-mistakes/state.sqlite; relative NM_HOME resolves from the worktree).
+# for a read-only same-branch query of the state database fm_nm_state_db
+# locates for the worktree.
 # Repo identity is the overview's own top-level `repo:` line, which every axi
 # release emits: it is the `working_path` the CLI itself resolved for the
 # queried worktree. That is NOT the task worktree path in general - a linked
@@ -235,7 +249,7 @@ fm_nm_select_run() {  # <branch> <axi-overview> <worktree> [timeout_secs]
     incomplete\|*) available_ids=${selection#*|} ;;
     *) printf '%s\n' "$selection"; return ;;
   esac
-  if ! inventory=$(fm_nm_bounded "$3" "$timeout_secs" python3 - "$1" "$2" "$3" "$available_ids" 2>/dev/null <<'PY'
+  if ! inventory=$(fm_nm_bounded "$3" "$timeout_secs" python3 - "$1" "$2" "$available_ids" "$(fm_nm_state_db "$3")" 2>/dev/null <<'PY'
 import json
 import os
 import re
@@ -244,7 +258,7 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
-branch, overview, worktree, available_ids = sys.argv[1:]
+branch, overview, available_ids, database = sys.argv[1:]
 ids = available_ids.split(", ") if available_ids else []
 try:
     repos = [line[6:].strip() for line in overview.splitlines() if line.startswith("repo: ")]
@@ -253,10 +267,7 @@ try:
     repo_path = json.loads(repos[0]) if repos[0].startswith('"') else repos[0]
     if not isinstance(repo_path, str) or not os.path.isabs(repo_path):
         raise ValueError
-    root = Path(os.environ.get("NM_HOME") or Path.home() / ".no-mistakes")
-    if not root.is_absolute():
-        root = Path(worktree) / root
-    with closing(sqlite3.connect((root / "state.sqlite").as_uri() + "?mode=ro", uri=True, timeout=30)) as db:
+    with closing(sqlite3.connect(Path(database).as_uri() + "?mode=ro", uri=True, timeout=30)) as db:
         db.execute("BEGIN")
         repo = db.execute("SELECT id FROM repos WHERE working_path = ?", (repo_path,)).fetchall()
         if len(repo) != 1:
