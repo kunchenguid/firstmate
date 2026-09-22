@@ -230,14 +230,21 @@ cycle_mark_predecessor_successor() {
 }
 
 clear_stale_recorded_watcher_lock() {
-  local lock_home lock_path lock_identity
-  lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
-  lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
-  lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
-  [ "$lock_home" = "$FM_HOME" ] || return 0
-  [ "$lock_path" = "$WATCH" ] || return 0
-  [ -n "$lock_identity" ] || return 0
-  fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime
+  local expected_pid=$1 expected_identity=$2 steal="$WATCH_LOCK.steal" rc=0
+  # Use the singleton's existing reclamation lock: publishers honor it. A
+  # failed match is only evidence about the captured owner, never permission
+  # to remove whichever generation happens to occupy the path now.
+  fm_lock_try_acquire "$steal" || return 0
+  if fm_watcher_lock_read_pinned "$STATE" \
+    && [ "$FM_WATCHER_PIN_PID" = "$expected_pid" ] \
+    && [ "$FM_WATCHER_PIN_IDENTITY" = "$expected_identity" ]; then
+    if ! fm_watcher_pinned_lock_matches_pid "$WATCH" "$expected_pid" "$FM_HOME" \
+      && [ "$FM_WATCHER_HEALTH_REASON" = identity-mismatch ]; then
+      fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime || rc=1
+    fi
+  fi
+  fm_lock_release "$steal"
+  return "$rc"
 }
 
 # A watcher is "healthy" iff the lock names a live process that is genuinely THIS
@@ -415,26 +422,27 @@ if [ "$mode" = handling-delivered ]; then
   exit $?
 fi
 
-# Home-scoped stop: only the watcher pid recorded in THIS home's lock. Waits
-# for it to actually exit, so a fresh watcher either takes a released lock or
-# reclaims a now-dead-pid stale lock instead of seeing the dying one as a live
-# holder and no-opping. Sets STOPPED_PID to the pid it stopped.
+# Stop only the pinned watcher generation for this home. A changed generation
+# belongs to its successor and must not be terminated or cleared.
 STOPPED_PID=
 stop_home_watcher() {
-  local lock_pid i
-  lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
-  fm_pid_alive "$lock_pid" || return 0
-  if fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$lock_pid" "$FM_HOME"; then
-    kill -TERM "$lock_pid" 2>/dev/null || true
-    i=0
-    while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
-      sleep 0.1
-      i=$((i + 1))
-    done
-    STOPPED_PID=$lock_pid
-  elif ! clear_stale_recorded_watcher_lock; then
-    echo "watcher: FAILED - stale watcher recovery state could not be persisted" >&2
-    return 1
+  local lock_pid lock_identity i
+  if fm_watcher_lock_read_pinned "$STATE" && fm_pid_alive "$FM_WATCHER_PIN_PID"; then
+    lock_pid=$FM_WATCHER_PIN_PID
+    lock_identity=$FM_WATCHER_PIN_IDENTITY
+    if fm_watcher_pinned_lock_matches_pid "$WATCH" "$lock_pid" "$FM_HOME"; then
+      kill -TERM "$lock_pid" 2>/dev/null || true
+      i=0
+      while [ "$i" -lt 50 ] && fm_pid_alive "$lock_pid"; do
+        sleep 0.1
+        i=$((i + 1))
+      done
+      STOPPED_PID=$lock_pid
+    elif ! clear_stale_recorded_watcher_lock "$lock_pid" "$lock_identity"; then
+      echo "watcher: FAILED - stale watcher recovery state could not be persisted" >&2
+      return 1
+    fi
+
   fi
 }
 
