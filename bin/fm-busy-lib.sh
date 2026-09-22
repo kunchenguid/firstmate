@@ -1015,7 +1015,7 @@ fm_busy_launch_prompt_parked() {  # <harness>
 # at the fm-spawn seed keeps reading busy fm-spawn, unchanged.
 fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   local backend=$1 target=$2 harness=$3 id=$4 state=$5 tail40=${6-}
-  local out rc r_state r_source native log
+  local out rc r_state r_source native raw_native='' log
   case "$harness" in
     kimi*)
       if ! fm_busy_kimi_verified; then
@@ -1074,13 +1074,25 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   # No record at all. A native herdr busy verdict is semantic enough to trust
   # for BUSY (streaming means a turn is running); native idle is narrower
   # than turn state (a long foreground tool call reads idle) and stays
-  # unknown here.
+  # unknown here, except for agy whose native herdr agent_status is tracked
+  # as an interactive worker and allows the status-log fallback on idle.
   if [ "$backend" = herdr ] && command -v fm_backend_busy_state >/dev/null 2>&1; then
     native=$(fm_backend_busy_state "$backend" "$target" 2>/dev/null || true)
     if [ "$native" = busy ]; then
       printf 'busy herdr-native'
       return 0
     fi
+    case "$harness" in
+      agy*)
+        if command -v fm_backend_agent_status_raw >/dev/null 2>&1; then
+          raw_native=$(fm_backend_agent_status_raw "$backend" "$target" agy 2>/dev/null || true)
+        fi
+        if [ "$raw_native" = idle ]; then
+          printf 'idle herdr-native'
+          return 0
+        fi
+        ;;
+    esac
   fi
   case "$harness" in
     muse*)

@@ -47,6 +47,8 @@ unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_IN
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-backend.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-busy-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-composer-lib.sh"
@@ -122,7 +124,17 @@ test_agy_claims_no_inherited_launcher_marker() {
   local fakebin out
   # AGENT=1 was observed on a live agy TUI as inherited launcher state, so it
   # must never promote to an agy identity the way GEMINI_CLI does for gemini.
-  out=$(AGENT=1 "$HARNESS")
+  fakebin=$(fm_fakebin "$TMP_ROOT/anc-agent-marker")
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' bash; exit 0 ;;
+  *"args="*) printf '%s\n' bash; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/ps"
+  out=$(AGENT=1 PATH="$fakebin:$PATH" "$HARNESS")
   [ "$out" != agy ] \
     || fail "an inherited AGENT=1 must never claim the agy identity, got '$out'"
   # Drive the hazard the other way: agy does not clear an inherited CLAUDECODE,
@@ -156,8 +168,8 @@ test_agy_control_mechanics_are_the_verified_ones() {
   [ "$(fm_control_interrupt_repeat agy)" = 1 ] || fail "agy must interrupt on a single press"
   [ -z "$(fm_control_interrupt_clear_key agy)" ] || fail "agy must need no clear key"
   [ "$(fm_control_interrupt_ack_source agy)" = none ] || fail "agy must have no ack source"
-  [ "$(fm_control_exit_command agy)" = /quit ] || fail "agy must exit on /quit"
-  pass "fm-control-lib: agy mechanics are Escape once, no clear key, and /quit"
+  [ "$(fm_control_exit_command agy)" = /exit ] || fail "agy must exit on /exit"
+  pass "fm-control-lib: agy mechanics are Escape once, no clear key, and /exit"
 }
 
 test_agy_busy_tail_needs_the_pinned_status_row() {
@@ -887,6 +899,176 @@ test_agy_spawn_arms_no_busy_wiring() {
   pass "fm-spawn: agy arms no busy wiring and writes no sidecar"
 }
 
+test_agy_raw_herdr_status_boundary() {
+  command -v jq >/dev/null 2>&1 || { pass "agy raw status test skipped without jq"; return; }
+  local dir fb out
+  dir="$TMP_ROOT/agy-herdr-raw-status"
+  fb="$dir/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'EOF'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *"status --json"*) printf '{"server":{"running":true}}\n' ;;
+  *"agent get"*) printf '{"result":{"agent":{"agent":"%s","agent_status":"%s"}}}\n' "${FM_TEST_AGY_AGENT:?}" "${FM_TEST_AGY_STATUS:?}" ;;
+  *"pane process-info"*)
+    case "${FM_TEST_AGY_PROCESS:?}" in
+      live)
+        printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_processes":[{"pid":424243,"name":"agy","argv":["agy"],"argv0":"agy","cmdline":"agy"}]}}}\n' "${FM_TEST_SHELL_PID:?}"
+        ;;
+      foreign)
+        printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_processes":[{"pid":424243,"name":"claude","argv":["claude"],"argv0":"claude","cmdline":"claude"}]}}}\n' "${FM_TEST_SHELL_PID:?}"
+        ;;
+      stale)
+        printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":%s,"foreground_processes":[{"pid":%s,"name":"bash","argv":["bash"],"argv0":"bash","cmdline":"bash"}]}}}\n' "${FM_TEST_SHELL_PID:?}" "${FM_TEST_SHELL_PID:?}"
+        ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+  chmod +x "$fb/herdr"
+  fm_backend_source herdr || fail "could not load herdr backend for agy identity checks"
+
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=agy FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=live FM_TEST_SHELL_PID=$$ \
+    fm_backend_agent_status_raw herdr default:w1:p2 agy)
+  [ "$out" = idle ] || fail "raw herdr status boundary should preserve identity- and process-verified idle, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=agy FM_TEST_AGY_STATUS=blocked FM_TEST_AGY_PROCESS=live FM_TEST_SHELL_PID=$$ \
+    fm_backend_agent_status_raw herdr default:w1:p2 agy)
+  [ "$out" = blocked ] || fail "raw herdr status boundary should preserve identity- and process-verified blocked, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=claude FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=live FM_TEST_SHELL_PID=$$ \
+    fm_backend_agent_status_raw herdr default:w1:p2 agy)
+  [ -z "$out" ] || fail "idle status registered to a foreign agent must be rejected, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=agy FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=foreign FM_TEST_SHELL_PID=$$ \
+    fm_backend_agent_status_raw herdr default:w1:p2 agy)
+  [ -z "$out" ] || fail "stale agy registration over a foreign agent process must be rejected, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=agy FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=stale FM_TEST_SHELL_PID=$$ \
+    fm_backend_agent_status_raw herdr default:w1:p2 agy)
+  [ -z "$out" ] || fail "stale idle registration over a shell-only pane must be rejected, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=agy FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=unreadable FM_TEST_SHELL_PID=$$ \
+    fm_backend_agent_status_raw herdr default:w1:p2 agy)
+  [ -z "$out" ] || fail "idle registration with unreadable process state must be rejected, got '$out'"
+
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=agy FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=live FM_TEST_SHELL_PID=$$ \
+    fm_backend_herdr_composer_identity default:w1:p2)
+  [ "$out" = $'agy\tidle' ] || fail "composer identity should preserve process-verified agy idle, got '$out'"
+  out=$(PATH="$fb:$PATH" FM_TEST_AGY_AGENT=agy FM_TEST_AGY_STATUS=idle FM_TEST_AGY_PROCESS=foreign FM_TEST_SHELL_PID=$$ \
+    fm_backend_herdr_composer_identity default:w1:p2 2>/dev/null || true)
+  [ -z "$out" ] || fail "stale agy composer identity over a foreign process must be rejected, got '$out'"
+
+  pass "fm-backend: raw status and composer identity require a live agy process"
+}
+
+test_agy_busy_classify_herdr_native() {
+  local state out
+  state="$TMP_ROOT/busy-classify-state"
+  mkdir -p "$state"
+
+  fm_backend_busy_state() {
+    local backend=$1 target=$2
+    [ "$backend" = herdr ] || return 1
+    case "$target" in
+      herdr-working:*) printf 'busy' ;;
+      herdr-idle:*|herdr-blocked:*|herdr-done:*) printf 'idle' ;;
+      *) printf 'unknown' ;;
+    esac
+  }
+
+  fm_backend_agent_status_raw() {
+    local backend=$1 target=$2 expected=${3-}
+    [ "$backend" = herdr ] && [ "$expected" = agy ] || return 1
+    case "$target" in
+      herdr-working:*) printf 'working' ;;
+      herdr-idle:*) printf 'idle' ;;
+      herdr-blocked:*) printf 'blocked' ;;
+      herdr-done:*) printf 'done' ;;
+      *) return 1 ;;
+    esac
+  }
+
+  # shellcheck source=/dev/null
+  . "$ROOT/bin/fm-busy-lib.sh"
+
+  out=$(fm_busy_classify herdr herdr-working:p1 agy t1 "$state")
+  [ "$out" = "busy herdr-native" ] || fail "agy on herdr working should classify 'busy herdr-native', got '$out'"
+
+  out=$(fm_busy_classify herdr herdr-idle:p1 agy t1 "$state")
+  [ "$out" = "idle herdr-native" ] || fail "agy on herdr idle should classify 'idle herdr-native', got '$out'"
+
+  out=$(fm_busy_classify herdr herdr-blocked:p1 agy t1 "$state" 'waiting for input')
+  [ "${out%% *}" = unknown ] || fail "agy on herdr blocked must remain unknown, got '$out'"
+
+  out=$(fm_busy_classify herdr herdr-done:p1 agy t1 "$state" 'task stopped')
+  [ "${out%% *}" = unknown ] || fail "agy on herdr done must remain unknown, got '$out'"
+
+  out=$(fm_busy_classify herdr herdr-unreadable:p1 agy t1 "$state" 'status unavailable')
+  [ "${out%% *}" = unknown ] || fail "agy with unreadable herdr status must remain unknown, got '$out'"
+
+  out=$(fm_busy_classify herdr herdr-idle:p1 claude t1 "$state")
+  [ "$out" = "unknown missing" ] || fail "claude on herdr idle without record should classify 'unknown missing', got '$out'"
+
+  pass "bin/fm-busy-lib.sh: agy accepts exact native idle only"
+}
+
+test_agy_exit_submits_retried_enter() {
+  command -v jq >/dev/null 2>&1 || { pass "agy exit test skipped without jq"; return; }
+  local dir resp log fb out
+  dir="$TMP_ROOT/agy-herdr-exit"
+  resp="$dir/resp"
+  log="$dir/log"
+  mkdir -p "$resp"
+  : > "$log"
+
+  # 2: agent get (pre-Enter baseline) -> agent=agy, agent_status=idle
+  printf '{"result":{"agent":{"agent":"agy","agent_status":"idle"}}}\n' > "$resp/2.out"
+  # 4: agent get (post-Enter #1) -> idle (autocomplete menu opened)
+  printf '{"result":{"agent":{"agent":"agy","agent_status":"idle"}}}\n' > "$resp/4.out"
+  # 5: pane capture (composer check after Enter #1) -> shows agy prompt with /exit selected
+  printf 'transcript\n────────────────────────\n> /exit\n────────────────────────\n' > "$resp/5.out"
+  # 6: agent get (composer identity) -> agy idle
+  printf '{"result":{"agent":{"agent":"agy","agent_status":"idle"}}}\n' > "$resp/6.out"
+  # 8: agent get (post-Enter #2) -> working
+  printf '{"result":{"agent":{"agent":"agy","agent_status":"working"}}}\n' > "$resp/8.out"
+
+  fb="$dir/fakebin"
+  mkdir -p "$fb"
+  cat > "$fb/herdr" <<'EOF'
+#!/usr/bin/env bash
+set -u
+LOG="${FM_HERDR_LOG:?}"
+RESP="${FM_HERDR_RESPONSES:?}"
+COUNT_FILE="$RESP/.count"
+next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
+{
+  printf 'HERDR_SESSION=%s' "${HERDR_SESSION:-}"
+  for a in "$@"; do printf '\x1f%s' "$a"; done
+  printf '\n'
+} >> "$LOG"
+if [ "${1:-}" = status ] && [ "${2:-}" = --json ]; then
+  printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
+  exit 0
+fi
+if [ "${1:-}" = pane ] && [ "${2:-}" = process-info ]; then
+  printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":424242,"foreground_processes":[{"pid":424243,"name":"agy","argv":["agy"],"argv0":"agy","cmdline":"agy"}]}}}\n'
+  exit 0
+fi
+n=$next
+echo "$n" > "$COUNT_FILE"
+if [ -f "$RESP/$n.exit" ]; then
+  exit "$(cat "$RESP/$n.exit")"
+fi
+[ -f "$RESP/$n.out" ] && cat "$RESP/$n.out"
+exit 0
+EOF
+  chmod +x "$fb/herdr"
+
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_BACKEND_HERDR_SUBMIT_POLLS=1 \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_send_text_submit default:w1:p2 "/exit" 3 0.01 0.01' "$ROOT" )
+  [ "$out" = empty ] || fail "send_text_submit should report empty after second Enter submits /exit, got '$out'"
+  pass "bin/backends/herdr.sh: agy /exit with autocomplete popup triggers second Enter retry"
+}
+
 test_agy_ancestry_detects_the_native_command_name
 test_agy_ancestry_rejects_unrelated_mentions
 test_agy_claims_no_inherited_launcher_marker
@@ -917,3 +1099,6 @@ test_agy_pre_trusted_path_that_never_turns_busy_fails_the_spawn
 test_agy_missing_binary_refuses_before_pane_creation
 test_agy_secondmate_is_refused
 test_agy_spawn_arms_no_busy_wiring
+test_agy_raw_herdr_status_boundary
+test_agy_busy_classify_herdr_native
+test_agy_exit_submits_retried_enter

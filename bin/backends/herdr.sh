@@ -2085,8 +2085,12 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 #   agent      - a foreground process is a verified harness (any identity
 #                surface: kernel name, argv[0], or a node-bundle argument), or
 #                a verified harness is still a descendant of the pane shell
-#                outside the foreground group (suspended or backgrounded). A
-#                registered agent whose process still exists is never demoted.
+#                outside the foreground group (suspended or backgrounded).
+#                When expected-agent is supplied, only that exact harness can
+#                produce this verdict.
+#   foreign-agent - expected-agent was supplied, but only another verified
+#                harness is present. This never satisfies an identity-sensitive
+#                status or composer read.
 #   shell      - every foreground process is a recognized shell AND no
 #                descendant of the pane shell is a verified harness: positive
 #                proof the pane is shell-only. The descendant walk is what makes
@@ -2114,10 +2118,10 @@ fm_backend_herdr_explicit_close_pane_confirmed() {  # <session> <pane_id>
 # Pi, `zsh` for a shell), `.argv0` the argv[0] basename (`pi`), and `.argv` /
 # `.cmdline` the full command line, so Pi is identified by argv[0] exactly as
 # the tmux probe identifies it from `ps`.
-fm_backend_herdr_pane_process_state() {  # <session> <pane_id>
-  local attempt=0 max_attempts=${FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS:-10} verdict
+fm_backend_herdr_pane_process_state() {  # <session> <pane_id> [expected-agent]
+  local attempt=0 max_attempts=${FM_BACKEND_HERDR_IDLE_SHELL_PROOF_POLLS:-10} verdict expected=${3-}
   while :; do
-    verdict=$(fm_backend_herdr_pane_process_state_sample "$1" "$2")
+    verdict=$(fm_backend_herdr_pane_process_state_sample "$1" "$2" "$expected")
     [ "$verdict" = other ] || break
     attempt=$((attempt + 1))
     [ "$attempt" -lt "$max_attempts" ] || break
@@ -2129,9 +2133,9 @@ fm_backend_herdr_pane_process_state() {  # <session> <pane_id>
 # fm_backend_herdr_pane_process_state_sample: one instantaneous observation
 # for fm_backend_herdr_pane_process_state, which owns the verdict contract and
 # the settle retry.
-fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
-  local session=$1 pane_id=$2 info shell_pid count i pid name argv0 args verdict
-  local others=0 ps_bin rows
+fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id> [expected-agent]
+  local session=$1 pane_id=$2 expected=${3-} info shell_pid count i pid name argv0 args verdict
+  local others=0 foreign_agents=0 ps_bin rows
   info=$(fm_backend_herdr_cli "$session" pane process-info --pane "$pane_id" 2>/dev/null) \
     || { printf 'unreadable'; return 0; }
   printf '%s' "$info" | jq -e --arg pane "$pane_id" '
@@ -2158,7 +2162,13 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
       | $p.cmdline // (($p.argv // []) | join(" ")) // empty' 2>/dev/null)
     verdict=$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")
     case "$verdict" in
-      agent) printf 'agent'; return 0 ;;
+      agent)
+        if [ -z "$expected" ] || fm_agent_process_matches_expected "$expected" "$name" "$argv0" "$args" "$pid"; then
+          printf 'agent'
+          return 0
+        fi
+        foreign_agents=$((foreign_agents + 1))
+        ;;
       shell) ;;
       *) others=$((others + 1)) ;;
     esac
@@ -2182,8 +2192,11 @@ fm_backend_herdr_pane_process_state_sample() {  # <session> <pane_id>
     args=${args#"${args%%[![:space:]]*}"}
     argv0=${args%%[[:space:]]*}
     if [ "$(fm_agent_process_classify "$name" "$argv0" "$args" "$pid")" = agent ]; then
-      printf 'agent'
-      return 0
+      if [ -z "$expected" ] || fm_agent_process_matches_expected "$expected" "$name" "$argv0" "$args" "$pid"; then
+        printf 'agent'
+        return 0
+      fi
+      foreign_agents=$((foreign_agents + 1))
     fi
   done <<EOF
 $(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
@@ -2207,7 +2220,11 @@ $(printf '%s\n' "$rows" | awk -v shell="$shell_pid" '
     }
   }')
 EOF
-  printf 'shell'
+  if [ "$foreign_agents" -gt 0 ]; then
+    printf 'foreign-agent'
+  else
+    printf 'shell'
+  fi
 }
 
 # fm_backend_herdr_pane_agent_state: classify <pane_id> in <session> as one of
@@ -3074,8 +3091,9 @@ fm_backend_herdr_capture_ansi() {  # <target> <lines>
 #
 # These functions are the ONLY herdr-specific composer knowledge left: the
 # ANSI pane capture (with its small-N workaround), the native `agent get`
-# identity probe, and the capability descriptor. Every shape - the bordered
-# box, the bare agent-glyph row, opencode's left-bar, and pi's
+# identity probe, AGY's matching live-process corroboration, and the capability
+# descriptor. Every shape - the bordered
+# box, the bare agent-glyph row, opencode's left-bar, and the Pi/AGY
 # identity-gated separated pair (which this adapter pioneered) - now lives in
 # the shared owner (bin/fm-composer-lib.sh, fm_composer_classify_screen), so
 # a new harness shape is taught there once and every backend learns it in the
@@ -3089,11 +3107,21 @@ fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
 }
 
 # fm_backend_herdr_composer_identity: the native agent identity/state probe
-# backing the shared classifier's separated (pi) shape - the genuine herdr
-# primitive no other backend has natively.
+# backing the shared classifier's separated Pi/AGY shape - the genuine herdr
+# primitive no other backend has natively. AGY additionally requires its
+# registered identity to match the live harness process.
 fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
+  local identity agent
   fm_backend_herdr_parse_target "$1" || return 1
-  fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE"
+  identity=$(fm_backend_herdr_agent_identity_raw \
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || return 1
+  case "$identity" in *$'\t'*) ;; *) return 1 ;; esac
+  agent=${identity%%$'\t'*}
+  if [ "$agent" = agy ] && [ "$(fm_backend_herdr_pane_process_state \
+    "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE" agy)" != agent ]; then
+    return 1
+  fi
+  printf '%s' "$identity"
 }
 
 # fm_backend_herdr_composer_state: thin adapter - capture plus capabilities
@@ -3101,9 +3129,9 @@ fm_backend_herdr_composer_identity() {  # <target> -> "<agent>\t<status>"
 # shared classifier strip ghost/placeholder text); when it fails on an older
 # herdr, the plain capture degrades the descriptor to styled=0 rather than
 # letting ghost text be misread as typed input. Identity is fetched lazily,
-# only when the classifier reports the verdict depends on it (a pi separator
-# pair below every other candidate), preserving this adapter's original
-# consult-only-when-needed behavior.
+# only when the classifier reports the verdict depends on it (a Pi/AGY
+# separator pair below every other candidate), preserving this adapter's
+# original consult-only-when-needed behavior.
 fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   local target=$1 cap caps verdict identity
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }

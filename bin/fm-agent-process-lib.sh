@@ -83,6 +83,18 @@ fm_agent_process_classify_name() {  # <path> [argv0] -> agent|shell|other
 #            harnesses whose identity sits in argv[1] (bin/fm-gemini-lib.sh).
 #   [pid]    when given, lets the Gemini rule read argv boundaries from the
 #            live process instead of the flattened line.
+fm_agent_process_matches_expected() {  # <expected-harness> <name> <argv0> <args> [pid]
+  local expected=${1:-} name=${2:-} argv0=${3:-} name_base argv0_base
+  name_base=${name##*/}
+  name_base=${name_base#-}
+  argv0_base=${argv0##*/}
+  argv0_base=${argv0_base#-}
+  case "$expected" in
+    agy) [ "$name_base" = agy ] || [ "$argv0_base" = agy ] ;;
+    *) return 1 ;;
+  esac
+}
+
 fm_agent_process_classify() {  # <name> <argv0> <args> [pid] -> agent|shell|other
   local name=${1:-} argv0=${2:-} args=${3:-} pid=${4:-} by_name by_argv0
   by_name=$(fm_agent_process_classify_name "$name" "$argv0")

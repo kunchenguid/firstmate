@@ -224,6 +224,7 @@ case "${1:-}" in
         pane=""; args=("$@"); for ((i=0; i<${#args[@]}; i++)); do [ "${args[$i]}" = --pane ] && pane=${args[$((i+1))]:-}; done
         case "${FM_FAKE_HERDR_PROCESS:-agent}" in
           agent) printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":424242,"foreground_processes":[{"pid":424242,"name":"claude","argv0":"claude"}]}}}\n' "$pane" "${FM_FAKE_HERDR_SHELL_PID:-$PPID}" ;;
+          agy) printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":424242,"foreground_processes":[{"pid":424242,"name":"agy","argv0":"agy"}]}}}\n' "$pane" "${FM_FAKE_HERDR_SHELL_PID:-$PPID}" ;;
           shell) printf '{"result":{"type":"pane_process_info","process_info":{"pane_id":"%s","shell_pid":%s,"foreground_process_group_id":%s,"foreground_processes":[{"pid":%s,"name":"zsh","argv0":"zsh","argv":["-zsh"]}]}}}\n' "$pane" "${FM_FAKE_HERDR_SHELL_PID:-$PPID}" "${FM_FAKE_HERDR_SHELL_PID:-$PPID}" "${FM_FAKE_HERDR_SHELL_PID:-$PPID}" ;;
         esac
         exit 0 ;;
@@ -236,7 +237,7 @@ case "${1:-}" in
           exit 0
         fi
         [ -n "${FM_FAKE_HERDR_AGENT_STATUS:-}" ] || exit 1
-        printf '{"result":{"agent":{"agent_status":"%s"}}}\n' "$FM_FAKE_HERDR_AGENT_STATUS"
+        printf '{"result":{"agent":{"agent":"%s","agent_status":"%s"}}}\n' "${FM_FAKE_HERDR_AGENT:-claude}" "$FM_FAKE_HERDR_AGENT_STATUS"
         exit 0 ;;
     esac ;;
 esac
@@ -298,6 +299,7 @@ reset_fakes() {
   FM_FAKE_HERDR_READ_FAIL=0
   FM_FAKE_HERDR_HUSK=0
   FM_FAKE_HERDR_AGENT_STATUS=""
+  FM_FAKE_HERDR_AGENT=claude
   FM_FAKE_HERDR_PROCESS=agent
   FM_FAKE_HERDR_SHELL_PID=$$
   FM_FAKE_CI_LOGS=""
@@ -314,7 +316,7 @@ reset_fakes() {
   FM_FAKE_GLAB_READ_LOG=
   unset FM_FAKE_PR_47_STATE FM_FAKE_PR_47_MERGED FM_FAKE_PR_48_STATE FM_FAKE_PR_48_MERGED
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_UNREADABLE
-  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
+  export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_READ_FAIL FM_FAKE_HERDR_HUSK FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_HERDR_AGENT FM_FAKE_HERDR_PROCESS FM_FAKE_HERDR_SHELL_PID FM_FAKE_CI_LOGS
   export FM_FAKE_DAEMON_DOWN FM_FAKE_DAEMON_TIMEOUT FM_FAKE_DAEMON_PROBE_LOG FM_FAKE_AXI_HOME
   export FM_FAKE_AXI_HOME_ERROR FM_FAKE_AXI_STATUS_RUN_ERROR FM_FAKE_AXI_STATUS_ERROR
   export FM_FAKE_PR_STATE FM_FAKE_PR_MERGED FM_FAKE_PR_READ_FAIL FM_FAKE_PR_READ_LOG FM_FAKE_PR_STATE_AXI
@@ -2212,6 +2214,47 @@ test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle() {
   assert_not_contains "$out" "source: pane" "an idle record must not read as busy"
   assert_contains "$out" "source: status-log" "an idle record falls to the status log"
   pass "an idle record with idle agent_status stays not-busy (no regression for a human-blocked agent)"
+}
+
+test_herdr_agy_agent_status_working_and_idle_status_log() {
+  command -v jq >/dev/null 2>&1 || { pass "herdr agy agent_status skipped without jq"; return; }
+  reset_fakes
+  local d; d=$(new_case herdr-agy-status)
+  make_repo_on_branch "$d/wt" fm/feat-herdr-agy
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-herdr-agy.meta" "window=default:w1:p5" "worktree=$d/wt" "kind=ship" \
+    "backend=herdr" "harness=agy"
+  printf 'done: completed task\n' > "$d/state/feat-herdr-agy.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_TMUX_MISSING=1
+
+  FM_FAKE_HERDR_AGENT=agy
+  FM_FAKE_HERDR_PROCESS=agy
+
+  # 1. Native working outranks status-log done
+  FM_FAKE_HERDR_AGENT_STATUS=working
+  FM_FAKE_HERDR_BUSY=1
+  local out_busy; out_busy=$(run_crew_state "$d" feat-herdr-agy)
+  assert_contains "$out_busy" "state: working" "herdr working agent_status outranks status-log done"
+  assert_contains "$out_busy" "source: pane" "working agent_status sources from pane"
+  assert_contains "$out_busy" "harness busy (herdr-native)" "working agent_status details herdr-native"
+
+  # 2. Native idle falls through to status-log done
+  FM_FAKE_HERDR_AGENT_STATUS=idle
+  FM_FAKE_HERDR_BUSY=0
+  local out_idle; out_idle=$(run_crew_state "$d" feat-herdr-agy)
+  assert_contains "$out_idle" "state: done" "herdr idle agent_status falls through to status-log done"
+  assert_contains "$out_idle" "source: status-log" "idle agent_status sources from status-log"
+  assert_contains "$out_idle" "completed task" "idle agent_status reports status note"
+
+  FM_FAKE_HERDR_AGENT=agy
+  FM_FAKE_HERDR_PROCESS=agent
+  local out_foreign; out_foreign=$(run_crew_state "$d" feat-herdr-agy)
+  assert_contains "$out_foreign" "state: unknown" "foreign live process under a stale agy registration must not inherit agy's completed state"
+  assert_not_contains "$out_foreign" "source: status-log" "foreign live process under a stale agy registration must not unlock agy's status log"
+
+  pass "herdr agy: only identity-matched native idle permits status-log completion"
 }
 
 # (g) no run + idle pane -> the status-log verb, as-is
@@ -4949,6 +4992,7 @@ test_no_run_herdr_alive_with_failed_read_stays_live
 test_no_run_herdr_husk_dead_still_reads_gone
 test_no_run_herdr_idle_agent_status_outranked_by_record
 test_no_run_herdr_idle_agent_status_and_idle_record_stays_idle
+test_herdr_agy_agent_status_working_and_idle_status_log
 test_no_run_idle_pane_uses_log
 test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused

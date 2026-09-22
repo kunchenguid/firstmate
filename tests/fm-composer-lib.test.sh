@@ -619,6 +619,20 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+test_matrix_agy_separated_composer() {
+  local screen typed typed_bare agy_idle agy_working
+  screen=$'transcript\n────────────────────────\n> \n────────────────────────\n footer'
+  agy_idle=$(printf 'agy\tidle'); agy_working=$(printf 'agy\tworking')
+  assert_screen "agy idle with identity on herdr" empty "$CAPS_STYLED" "$screen" '' "$agy_idle"
+  assert_screen "agy working defers" unknown "$CAPS_STYLED" "$screen" '' "$agy_working"
+  typed=$'────────────────────────\n> /exit\n────────────────────────'
+  assert_screen "agy typed /exit with prompt glyph is pending" pending "$CAPS_STYLED" "$typed" '' "$agy_idle"
+  typed_bare=$'────────────────────────\n/exit\n────────────────────────'
+  assert_screen "agy typed /exit bare is pending" pending "$CAPS_STYLED" "$typed_bare" '' "$agy_idle"
+  pass "matrix: agy separated composer recognizes idle prompt and pending text"
+}
+
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -928,6 +942,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
+test_matrix_agy_separated_composer
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
