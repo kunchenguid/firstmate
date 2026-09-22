@@ -595,6 +595,43 @@ fm_write_secondmate_meta() {
     "projects=$projects"
 }
 
+# registry_with_blocks <registry> <id> <keeper-home>: print <registry> with a
+# surviving `keeper` record (and its own indented rule) inserted directly above
+# <id>'s routing line, and an indented hard-rule block - containing a blank
+# line - attached below it. A trailing column-0 note follows <id>'s block.
+registry_with_blocks() {
+  local reg=$1 id=$2 keeper_home=$3
+  awk -v id="$id" -v keeper="$keeper_home" '
+    $0 == "- " id || index($0, "- " id " ") == 1 {
+      print "- keeper - Surviving mate (home: " keeper "; scope: keeper work; projects: alpha; added 2026-06-22)"
+      print "  KEEPER OWN RULE: merge authority is captain-only."
+      print
+      print "  RETIRED MATE RULE: bounded four-condition merge grant."
+      print ""
+      print "  RETIRED MATE SECOND PARAGRAPH."
+      next
+    }
+    { print }
+    END { print "Column-0 trailing note survives." }
+  ' "$reg"
+}
+
+# assert_registry_block_retired <registry> <before> <id>: <id>'s whole record
+# (routing line and indented block) is gone, and every other byte of <before>
+# survives in order - the survivor keeps exactly its own text.
+assert_registry_block_retired() {
+  local reg=$1 before=$2 id=$3 expected
+  # registry_with_blocks attached exactly three lines to the routing line.
+  expected=$(awk -v id="$id" '
+    $0 == "- " id || index($0, "- " id " ") == 1 { skip = 3; next }
+    skip > 0 { skip--; next }
+    { print }
+  ' "$before")
+  assert_no_grep 'RETIRED MATE' "$reg" "retirement left the retired record's indented block behind"
+  assert_grep 'KEEPER OWN RULE' "$reg" "retirement removed the surviving record's own block"
+  assert_equals "$expected" "$(cat "$reg")" "retirement changed registry text outside the retired record"
+}
+
 # --- common assertions ------------------------------------------------------
 
 # assert_equals <expected> <actual> <msg>

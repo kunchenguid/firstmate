@@ -305,6 +305,11 @@ phase_teardown() {
   printf 'confirmed:%s\n' "$corr" > "$HOME_DIR/state/.backlog-handoff-design.wake-pending"
   printf '%s\tattempt\n' "$(date +%s)" > "$HOME_DIR/state/.secondmate-relaunch-design"
   printf '%s\tdead\n' "$(date +%s)" > "$HOME_DIR/state/.secondmate-relaunch-bound-design"
+  # A record owns its indented hard-rule block. Put a surviving record directly
+  # above the retiring one so an orphaned block would read as the survivor's.
+  registry_with_blocks "$HOME_DIR/data/secondmates.md" design "$TMP_ROOT/keeper-home" \
+    > "$TMP_ROOT/registry-before-retire.md"
+  cp "$TMP_ROOT/registry-before-retire.md" "$HOME_DIR/data/secondmates.md"
   : > "$LOG"
   teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
     "$ROOT/bin/fm-teardown.sh" design 2>&1) \
@@ -324,6 +329,7 @@ phase_teardown() {
     "teardown left the liveness lock it took to retire relaunch state"
   assert_absent "$leftover_rec" "teardown left a resolved pending-reply for the retired secondmate"
   assert_no_grep '- design ' "$HOME_DIR/data/secondmates.md" "teardown did not remove the registry route"
+  assert_registry_block_retired "$HOME_DIR/data/secondmates.md" "$TMP_ROOT/registry-before-retire.md" design
   # The parent's source projects are untouched (no write through a parent home).
   assert_present "$HOME_DIR/projects/alpha" "teardown disturbed a parent project"
   pass "teardown: removes the home, then clears meta and the registry route"

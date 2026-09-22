@@ -1041,7 +1041,11 @@ remote_secondmate_teardown() {
   handoff_wake_retire \
     || { echo "error: remote receiver wake cleanup failed; preserving the local route for retry" >&2; return 1; }
   tmp="$SECONDMATE_REG.tmp.$$"
-  grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
+  secondmate_registry_remove_record "$SECONDMATE_REG" "$ID" "$tmp" || {
+    rm -f -- "$tmp"
+    echo "error: remote home retired but its registry record could not be removed cleanly; preserving the local route for retry" >&2
+    return 1
+  }
   mv -f -- "$tmp" "$SECONDMATE_REG"
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
   status_retire_presentation_task "$STATE" "$ID" || return 1
@@ -3299,8 +3303,13 @@ remove_secondmate_registry_entry() {
     acquired=1
   fi
   tmp="$SECONDMATE_REG.tmp.$$"
-  grep -vE "^- $id( |$)" "$SECONDMATE_REG" > "$tmp" || true
-  mv "$tmp" "$SECONDMATE_REG" || rc=$?
+  if secondmate_registry_remove_record "$SECONDMATE_REG" "$id" "$tmp"; then
+    mv "$tmp" "$SECONDMATE_REG" || rc=$?
+  else
+    rm -f -- "$tmp"
+    echo "error: secondmate registry has more than one record for $id; leaving it unchanged" >&2
+    rc=1
+  fi
   [ "$acquired" -eq 0 ] || fm_lock_release "$lock"
   return "$rc"
 }
@@ -3697,7 +3706,7 @@ if [ "$KIND" = secondmate ]; then
     pending_replies_cleanup_for_task "$STATE/pending-replies" "$PENDING_REPLIES_DIR_REAL" \
       || { echo "error: local pending-reply cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
   fi
-  remove_secondmate_registry_entry "$ID"
+  remove_secondmate_registry_entry "$ID" || exit 1
 fi
 remove_grok_turnend_auth "$STATE" "$ID" || exit 1
 remove_kimi_turnend_auth "$STATE" "$ID" || exit 1
