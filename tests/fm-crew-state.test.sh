@@ -3507,32 +3507,38 @@ test_unreadable_inventory_names_an_uncontradicted_terminal_run() {
 
 # The captain's exact reported shape: the visible capped window holds NO row
 # at all for this branch (the run has aged out of the CLI's ten-row display,
-# exactly like the real Pi worktree-trust task today), so the failed read's
-# own candidate-id evidence is empty. A run that finished many runs ago is
-# exactly as knowable from the bare `axi status` record as one that finished
-# two runs ago - an empty candidate list contradicts nothing - so this must
-# still name the terminal outcome, not stay silent merely because pagination
-# pushed every row for this branch out of the visible window.
+# exactly like the real Pi worktree-trust task today - the read-only
+# reproduction against that live task's own state read the identical shape,
+# "run ids: ; last reported run id: 01M2X0DJD2FGQAQPQ4YR70B2SQ"), so the
+# failed read's own candidate-id evidence is empty. A run that finished many
+# runs ago is exactly as knowable from the bare `axi status` record as one
+# that finished two runs ago - an empty candidate list contradicts nothing -
+# so this must still name the terminal outcome, not stay silent merely
+# because pagination pushed every row for this branch out of the visible
+# window. The outcome word itself is the real task's own recorded value.
 test_unreadable_inventory_with_no_visible_candidates_still_names_the_run() {
   make_capped_runs_case terminal-no-candidates completed cancelled hidden
   local d=$TMP_ROOT/terminal-no-candidates out
-  FM_FAKE_AXI_STATUS="$(run_passed fm/competing | sed 's/01RUN/01NEW/')"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/competing | sed 's/01RUN/01NEW/; s/outcome: passed/outcome: passed-with-override/')"
   rm "$NM_HOME/state.sqlite"
   out=$(run_crew_state "$d" competing)
   assert_contains "$out" 'state: unknown' 'a run named with no visible candidates never asserts exclusive authority'
   assert_contains "$out" 'last reported run id: 01NEW' 'the last reported run id is preserved'
-  assert_contains "$out" '(already passed)' 'an empty candidate list is not a contradiction and still names the outcome'
+  assert_contains "$out" '(already passed-with-override)' 'an empty candidate list is not a contradiction and still names the real recorded outcome word'
   pass 'a terminal last-reported run with no visible candidates still names its own outcome'
 }
 
 # The captain's second named instance (the Herdr nesting task): the failed
 # read's own partial candidate-id evidence is non-empty AND still names the
-# known run id, alongside an older SAME-branch sibling - exactly the awk
+# known run id, alongside an older SAME-branch sibling that failed - the real
+# captured overview for that task's own branch names exactly this shape,
+# `01M33HMC...,fm/fm-herdr-space-nesting,running,...` beside an older
+# `01M327JX...,fm/fm-herdr-space-nesting,failed,...` row - exactly the awk
 # selection's own "newest row is the candidate, older rows are history" shape
-# above it. An older sibling sitting beside the known run in that partial
-# evidence is not grounds to distrust it: name its outcome.
+# above it. An older failed sibling sitting beside the known run in that
+# partial evidence is not grounds to distrust it: name its outcome.
 test_unreadable_inventory_names_a_terminal_run_beside_an_older_sibling() {
-  make_competing_runs_case terminal-with-sibling completed cancelled
+  make_competing_runs_case terminal-with-sibling completed failed
   local d=$TMP_ROOT/terminal-with-sibling out
   FM_FAKE_AXI_HOME=$(printf '%s\n' "$FM_FAKE_AXI_HOME" | sed 's/runs\[2\]/runs[3]/')
   FM_FAKE_AXI_STATUS="$(run_passed fm/competing | sed 's/01RUN/01NEW/')"
@@ -3540,8 +3546,8 @@ test_unreadable_inventory_names_a_terminal_run_beside_an_older_sibling() {
   assert_contains "$out" 'state: unknown' 'a run named beside an older sibling never asserts exclusive authority'
   assert_contains "$out" 'run ids: 01NEW, 01OLD' 'the failed read keeps both same-branch candidate ids'
   assert_contains "$out" 'last reported run id: 01NEW' 'the last reported run id is preserved'
-  assert_contains "$out" '(already passed)' 'a known run named alongside an older sibling still names its own outcome'
-  pass 'a terminal last-reported run named beside an older sibling still names its own outcome'
+  assert_contains "$out" '(already passed)' 'a known run named alongside an older failed sibling still names its own outcome'
+  pass 'a terminal last-reported run named beside an older failed sibling still names its own outcome'
 }
 
 # The safety counterpart: when the failed read's own partial candidate-id
