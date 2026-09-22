@@ -80,6 +80,20 @@ tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$WIN" -c "$ROOT" -- codex \
 # the lazy identity pass answered `probe-absent` because no identity probe is
 # needed for a bare composer.
 CAPS_CURSORLESS=$(printf 'styled=1\ncursor=0\nidentity=1\nrows=%s' "$FM_COMPOSER_CAPTURE_LINES")
+capture_cursorless() {
+  local cap last
+  cap=$(tmux capture-pane -e -p -t "$SESSION:$WIN" 2>/dev/null)
+  # `herdr pane read --source recent` is content-bounded: it ends at the
+  # pane's last content row rather than padding to viewport height (verified
+  # live: 14 rows on a 40-row shell pane). `tmux capture-pane` pads to the
+  # full viewport instead, so on a tall pane a content-flow composer such as
+  # codex 0.154.0's - drawn after the banner block, not bottom-anchored -
+  # falls above a raw tail. Drop trailing rows holding no printable content
+  # to mirror the backend contract, then apply the same bounded tail.
+  last=$(printf '%s\n' "$cap" | fm_composer_strip_ansi | awk 'match($0, /[^[:space:]]/) { n = NR } END { print n + 0 }')
+  [ "$last" -gt 0 ] || return 0
+  printf '%s\n' "$cap" | head -n "$last" | tail -n "$FM_COMPOSER_CAPTURE_LINES"
+}
 classify_cursorless() {  # <styled-screen>
   local verdict
   verdict=$(fm_composer_classify_screen "$CAPS_CURSORLESS" "$1")
@@ -95,26 +109,35 @@ i=0
 tmux_verdict=''
 cursorless_verdict=''
 styled=''
-dismissed=0
+dismissals=0
+last_dismissed=''
 while [ "$i" -lt "$budget" ]; do
   tmux_verdict=$(fm_tmux_composer_state "$SESSION:$WIN")
-  styled=$(tmux capture-pane -e -p -t "$SESSION:$WIN" 2>/dev/null | tail -n "$FM_COMPOSER_CAPTURE_LINES")
+  styled=$(capture_cursorless)
   cursorless_verdict=$(classify_cursorless "$styled")
   if [ "$tmux_verdict" = empty ] && [ "$cursorless_verdict" = empty ]; then
     break
   fi
   i=$((i + 1))
-  # A fresh codex may park on a vendor update-available modal (observed live
-  # on codex 0.146.0), which the strict classifier correctly refuses to call a
-  # composer. Dismiss it once, mid-budget, with a single Escape - the one key
-  # that submits nothing. Never Enter: on codex's dialog Enter would RUN the
-  # upgrade. A trust prompt also accepts Escape, but there it exits codex and
-  # erases the actionable failure surface, so it is left alone.
-  if [ "$dismissed" -eq 0 ] && [ "$i" -ge $((budget / 3)) ]; then
-    if ! tmux capture-pane -p -t "$SESSION:$WIN" 2>/dev/null | grep -qi 'trust'; then
-      tmux send-keys -t "$SESSION:$WIN" Escape 2>/dev/null || true
-    fi
-    dismissed=1
+  # Vendor modals queue ahead of the idle composer, and how many appear is
+  # environment state rather than codex behavior: a fresh codex may park on
+  # an update-available modal (observed live on 0.146.0), a hooks-review
+  # dialog raised by this machine's own ~/.codex config (0.154.0), or none at
+  # all. Dismiss them one Escape per poll - the one key that submits nothing;
+  # on codex's update dialog Enter would RUN the upgrade - while the screen
+  # keeps changing underneath, capped so a dialog Escape cannot move fails as
+  # itself instead of looping or ping-ponging. A trust dialog is never
+  # escaped: there the key exits codex and erases the actionable failure
+  # surface. The hooks review is the one dialog allowed to mention trust -
+  # "Trust all and continue" - without being a trust prompt, so it is matched
+  # by name and still dismissed.
+  screen_plain=$(tmux capture-pane -p -t "$SESSION:$WIN" 2>/dev/null)
+  if [ "$dismissals" -lt 6 ] && [ "$screen_plain" != "$last_dismissed" ] \
+    && { ! printf '%s\n' "$screen_plain" | grep -qi 'trust' \
+      || printf '%s\n' "$screen_plain" | grep -qi 'hooks need review'; }; then
+    tmux send-keys -t "$SESSION:$WIN" Escape 2>/dev/null || true
+    last_dismissed=$screen_plain
+    dismissals=$((dismissals + 1))
   fi
   sleep 1
 done

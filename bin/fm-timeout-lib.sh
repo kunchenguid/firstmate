@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# fm-timeout-lib.sh - the single owner of bounded command execution.
+# fm-timeout-lib.sh - the shared owner of bounded command execution.
 #
-# Sourced, never executed. Provides one hard-bound runner so no caller has to
-# re-derive the coreutils/BSD/perl selection, and so every bounded call in this
-# repo agrees on what "the bound was hit" means.
+# Sourced, never executed. Provides one hard-bound runner so callers do not
+# re-derive the coreutils/BSD/perl selection, and so every bounded call through
+# this library agrees on what "the bound was hit" means. A few call sites still
+# select a mechanism inline (for example `fm_tasks_axi`, which needs an
+# exec-preserving shape); each must keep matching this library's process-group
+# kill semantics.
 #
 #   fm_timeout_mechanism
 #       Prints the mechanism fm_run_timed will use on this host: "timeout",

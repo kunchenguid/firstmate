@@ -5,8 +5,9 @@
 # `claude plugin test` suites (tests/*.test.ts inside the mod), which run the hooks
 # module in the engine's own host against a mocked clock, environment, file system,
 # and drawing surface. No model turn is submitted and no credential is spent, so the
-# guard runs by default wherever `claude` is installed; the portable checks that need
-# no Claude Code binary live in tests/fm-calm-claude-mod.test.sh.
+# guard runs by default wherever `claude` is installed on a build that has the mods
+# surface, capability-skipping an older one by name (see the probe below); the
+# portable checks that need no Claude Code binary live in tests/fm-calm-claude-mod.test.sh.
 #
 # The early-access function-hooks surface is default-off; the flag is set on this
 # test's own processes only and never written into any settings file.
@@ -22,6 +23,21 @@ AUTOLOAD_PATH="$ROOT/.claude/skills/firstmate-calm"
 CLAUDE_VERSION=$(claude --version 2>/dev/null || true)
 [ -n "$CLAUDE_VERSION" ] || fail "claude is installed but reports no version"
 TMP_ROOT=$(fm_test_tmproot fm-calm-claude-mod-plugin)
+
+# The guard exercises Claude Code's early-access mods surface: strict
+# validation's capability scan plus `claude plugin test`, first verified on
+# 2.1.272. An installed claude that predates the surface has neither - the
+# command is unknown to it - so it capability-skips like any other absent
+# tool, unless the guard was demanded: an explicit request must fail rather
+# than pass as a skip, the same contract fm_live_gate applies to an absent
+# tool.
+if CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 claude plugin test "$TMP_ROOT/no-such-dir" 2>&1 | grep -q 'unknown command'; then
+  if [ "${FM_CLAUDE_CALM_PLUGIN_TEST:-}" = 1 ] || [ "${FM_LIVE:-}" = 1 ]; then
+    fail "FM_CLAUDE_CALM_PLUGIN_TEST was requested but Claude Code $CLAUDE_VERSION has no mods surface (plugin test unknown)"
+  fi
+  printf 'skip: live: Claude Code %s has no mods surface (plugin test unknown)\n' "$CLAUDE_VERSION"
+  exit 0
+fi
 
 expect_in_report() {
   local report=$1 needle=$2 what=$3

@@ -81,10 +81,24 @@ test_detection_anchored_name_and_marker_precedence() {
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
-  # ...and is inert when it leaks into a worker with no omp ancestor.
+  # ...and is inert when it leaks into a worker with no omp ancestor. The
+  # ancestry walk is pinned to a harness-free chain so the host's real process
+  # tree cannot outrank the worker's own marker: a suite launched under another
+  # harness (a devin ancestor, a tmux-nested claude) would otherwise lend its
+  # comm-strength verdict to a case that is only about the marker.
+  local leakbin
+  leakbin=$(fm_fakebin "$TMP_ROOT/omp-leak")
+  cat > "$leakbin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"comm="*) printf '%s\n' login; exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$leakbin/ps"
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
-    bash -c '"$1"; :' _ "$HARNESS")
+    PATH="$leakbin:$PATH" bash -c '"$1"; :' _ "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
 }

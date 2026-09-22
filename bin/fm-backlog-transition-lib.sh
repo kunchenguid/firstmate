@@ -355,16 +355,21 @@ fm_tasks_axi() {
   elif command -v perl >/dev/null 2>&1; then
     # Fork, run tasks-axi in the child, and poll waitpid(WNOHANG) until the
     # child exits or the bound expires: the same contract as
-    # `timeout $bound tasks-axi ...`. Expiry kills the child with TERM, waits
-    # one further bound of grace, then KILL, and exits 124 so the callers'
-    # timeout plumbing reports it. Polling rather than alarm+die keeps the
-    # bound off perl's platform-dependent syscall-restart signal semantics.
+    # `timeout $bound tasks-axi ...`. The child leads its own process group
+    # and expiry signals the group - GNU timeout's semantics - not the leader
+    # alone, because a wedged tasks-axi child that survives its parent keeps
+    # the caller's capture pipe open and re-creates exactly the unbounded
+    # wait this bound exists to close. Expiry kills the group with TERM,
+    # waits one further bound of grace for the leader, then KILL, and exits
+    # 124 so the callers' timeout plumbing reports it. Polling rather than
+    # alarm+die keeps the bound off perl's platform-dependent
+    # syscall-restart signal semantics.
     exec perl -MPOSIX=WNOHANG -e '
       my $bound = shift;
       exit 127 unless defined $bound && $bound =~ /\A[0-9]+\z/;
       my $pid = fork;
       exit 127 unless defined $pid;
-      if ($pid == 0) { exec @ARGV; exit 127 }
+      if ($pid == 0) { setpgrp(0, 0); exec @ARGV; exit 127 }
       my $step = 0.05;
       my $elapsed = 0;
       while (1) {
@@ -372,7 +377,7 @@ fm_tasks_axi() {
         exit(($? & 127) ? 128 + ($? & 127) : $? >> 8) if $done == $pid;
         exit 127 if $done == -1;
         if ($elapsed >= $bound) {
-          kill "TERM", $pid;
+          kill "TERM", -$pid;
           my $grace = 0;
           my $gone = waitpid $pid, WNOHANG;
           while ($gone == 0 && $grace < $bound) {
@@ -380,7 +385,7 @@ fm_tasks_axi() {
             $grace += $step;
             $gone = waitpid $pid, WNOHANG;
           }
-          kill "KILL", $pid if $gone == 0;
+          kill "KILL", -$pid;
           waitpid $pid, 0;
           exit 124;
         }

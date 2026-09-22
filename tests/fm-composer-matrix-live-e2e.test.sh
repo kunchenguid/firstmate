@@ -75,7 +75,7 @@ harness_version() {  # <binary>
 }
 
 check_harness_idle_empty() {  # <name> <launch-cmd...>
-  local name=$1 win="hx-$1" verdict='' i=0 budget=${FM_COMPOSER_MATRIX_LIVE_POLLS:-45} version dismissed=0 startup_screen
+  local name=$1 win="hx-$1" verdict='' i=0 budget=${FM_COMPOSER_MATRIX_LIVE_POLLS:-45} version dismissals=0 last_dismissed='' startup_screen
   shift
   version=$(harness_version "$1")
   tmux -L "$SOCKET" new-window -d -t "$SESSION:" -n "$win" -c "$ROOT" -- "$@" \
@@ -84,21 +84,26 @@ check_harness_idle_empty() {  # <name> <launch-cmd...>
     verdict=$(fm_tmux_composer_state "$SESSION:$win")
     [ "$verdict" = empty ] && break
     i=$((i + 1))
-    # A fresh harness may park on a vendor update-available modal (observed
-    # live: codex 0.146.0 and opencode 1.14.46), which the strict classifier
-    # correctly refuses to call a composer. Dismiss it once, mid-budget, with
-    # a single Escape - the one key that submits nothing anywhere and is how
-    # the audit declined the same prompts. Never Enter: on codex's dialog
-    # Enter would RUN the upgrade.
-    if [ "$dismissed" -eq 0 ] && [ "$i" -ge $((budget / 3)) ]; then
-      # Trust prompts also accept Escape, but there it exits the harness and
-      # erases the actionable failure surface. Preserve those prompts; only
-      # dismiss a non-trust startup modal.
-      startup_screen=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null || true)
-      if ! printf '%s\n' "$startup_screen" | grep -qi 'trust'; then
-        tmux -L "$SOCKET" send-keys -t "$SESSION:$win" Escape 2>/dev/null || true
-      fi
-      dismissed=1
+    # Vendor modals queue ahead of the idle composer, and how many appear is
+    # environment state rather than harness behavior: a fresh harness may park
+    # on an update-available modal (observed live: codex 0.146.0 and opencode
+    # 1.14.46), a hooks-review dialog raised by the machine's own ~/.codex
+    # config (codex 0.154.0), or none at all. Dismiss them one Escape per
+    # poll - the one key that submits nothing anywhere and is how the audit
+    # declined the same prompts; on codex's update dialog Enter would RUN the
+    # upgrade - while the screen keeps changing underneath, capped so a dialog
+    # Escape cannot move fails as itself instead of looping or ping-ponging.
+    # Trust prompts also accept Escape, but there it exits the harness and
+    # erases the actionable failure surface, so they are preserved; codex's
+    # hooks review is the one dialog allowed to mention trust - "Trust all
+    # and continue" - without being a trust prompt, and is still dismissed.
+    startup_screen=$(tmux -L "$SOCKET" capture-pane -p -t "$SESSION:$win" 2>/dev/null || true)
+    if [ "$dismissals" -lt 6 ] && [ "$startup_screen" != "$last_dismissed" ] \
+      && { ! printf '%s\n' "$startup_screen" | grep -qi 'trust' \
+        || printf '%s\n' "$startup_screen" | grep -qi 'hooks need review'; }; then
+      tmux -L "$SOCKET" send-keys -t "$SESSION:$win" Escape 2>/dev/null || true
+      last_dismissed=$startup_screen
+      dismissals=$((dismissals + 1))
     fi
     sleep 1
   done
