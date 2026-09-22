@@ -93,7 +93,7 @@ test_omitted_crew_branch_uses_fm_id() {
   git -C "$project" checkout -q main
   run_merge "$case_dir" "$id" >/dev/null \
     || fail "merge-local refused the historical fm/<id> branch"
-  [ "$(git -C "$project" rev-parse main)" = "$(git -C "$project" rev-parse fm/$id)" ] \
+  [ "$(git -C "$project" rev-parse main)" = "$(git -C "$project" rev-parse fm/"$id")" ] \
     || fail "merge-local did not land the historical fm/<id> branch"
   pass "merge-local retains the fm/<id> crew-branch default"
 }
@@ -150,7 +150,7 @@ test_metadata_base_is_authoritative() {
     || fail "merge-local refused the metadata-recorded base"
   [ "$(git -C "$project" rev-parse refs/heads/main)" = "$main_before" ] \
     || fail "merge-local moved main instead of the metadata-recorded base"
-  [ "$(git -C "$project" rev-parse refs/heads/develop)" = "$(git -C "$project" rev-parse refs/heads/fm/$id)" ] \
+  [ "$(git -C "$project" rev-parse refs/heads/develop)" = "$(git -C "$project" rev-parse refs/heads/fm/"$id")" ] \
     || fail "merge-local did not land on the metadata-recorded base"
   pass "merge-local treats task metadata as the landing-base authority"
 }
@@ -167,7 +167,7 @@ test_absent_metadata_base_uses_default() {
     > "$case_dir/home/data/$id/brief.md"
   run_merge "$case_dir" "$id" >/dev/null \
     || fail "merge-local refused the default landing base"
-  [ "$(git -C "$project" rev-parse main)" = "$(git -C "$project" rev-parse fm/$id)" ] \
+  [ "$(git -C "$project" rev-parse main)" = "$(git -C "$project" rev-parse fm/"$id")" ] \
     || fail "brief prose overrode the absent metadata base"
   pass "merge-local defaults to the project default when metadata omits a base"
 }
