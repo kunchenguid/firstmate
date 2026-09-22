@@ -61,10 +61,12 @@
 #   rejected/<event-id>.reason one-line reason so a refusal is inspectable and
 #                              never retried in a loop.
 #   rejection-wakes/<event-id> one pending wake line per refusal not yet
-#                              surfaced; the relay poll prints it once and
-#                              removes it only after that line is written, so a
-#                              refusal wakes this home instead of sitting
-#                              silently in rejected/ or vanishing unheard.
+#                              surfaced; the relay poll prints it and removes it
+#                              only after that line is written, so a refusal
+#                              wakes this home instead of sitting silently in
+#                              rejected/ or vanishing unheard. Delivery is
+#                              at-least-once: a repeat is keyed by the same
+#                              event id and carries the same reason.
 #   surfaced                  last surfaced pending-event signature, so the
 #                              existing relay poll wakes once per new event set
 #                              instead of every cycle.

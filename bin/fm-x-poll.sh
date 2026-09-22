@@ -21,8 +21,8 @@
 #       "public-followup ..." line BEFORE the relay call, so a promised final
 #       reply is surfaced through this same wake path
 #   a terminal result bin/fm-public-followup.sh consume refused -> print its
-#       one "public-followup rejected <event-id> ..." line, with the specific
-#       reason, once
+#       "public-followup rejected <event-id> ..." line, with the specific
+#       reason, at least once
 #
 # The public-followup line rides here rather than on a new poll of its own: this
 # check only exists in a home that opted into the relay, and it is an O(1)
@@ -68,12 +68,14 @@ if fm_pf_has_events "$STATE"; then
 fi
 
 # A terminal result consume refused is a promised reply that will never become
-# ready on its own, so each refusal wakes this home once with its specific
-# reason. The queued line is removed only once it has been read AND written to
-# this poll's stdout, which is the wake: a read that fails, a line that comes
-# back empty, or a write that fails all leave the line queued for the next
-# cycle, and a raised one is never repeated. The read is its own step because a
-# pipeline would report the status of its last stage, not of the read.
+# ready on its own, so each refusal wakes this home with its specific reason.
+# The queued line is removed only once it has been read AND written to this
+# poll's stdout, which is the wake: a read that fails, a line that comes back
+# empty, or a write that fails all leave the line queued for the next cycle. The
+# read is its own step because a pipeline would report the status of its last
+# stage, not of the read. Dropping a raised line is best-effort, so this wake is
+# at-least-once: a wake directory that cannot be written raises the same refusal
+# again, with the same event id and reason as the quarantine it came from.
 PF_WAKES=$(fm_pf_rejection_wakes_dir "$STATE")
 if fm_pf_dir_has_entry "$PF_WAKES"; then
   for PF_WAKE in "$PF_WAKES"/*; do

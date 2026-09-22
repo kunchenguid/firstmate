@@ -524,7 +524,9 @@ EOF
 # reject_event <file> <event-id> <reason> [<obligation-id>]: quarantine one
 # refused event with an inspectable reason so it is never retried in a loop, and
 # queue one wake line for this home so the refusal is never silent. The relay
-# poll prints that line once and removes it (bin/fm-x-poll.sh).
+# poll prints that line and then removes it (bin/fm-x-poll.sh); delivery is
+# at-least-once, so a retry that re-queues an already-raised wake repeats it
+# with the same event id and reason rather than announcing a new refusal.
 # The pending event is the only thing that brings consume back to this refusal,
 # so it is removed last, after the wake is durably recorded. A step that fails
 # before that leaves the event in place and the whole quarantine is retried by

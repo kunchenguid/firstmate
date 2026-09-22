@@ -273,7 +273,9 @@ So treat second-mate-routed Relay work as a promised final by construction: the 
 1. Run `bin/fm-public-followup.sh consume`.
    It reconciles every typed terminal result from disk and prints `ready <obligation-id> <request-id> <platform>` for each commitment that became deliverable.
    A refusal prints `rejected <event-id>: <reason>` and quarantines that event; read the reason rather than re-emitting blindly.
-   The same refusal later arrives once as a `public-followup rejected <event-id> ...` wake, so the promise is not left owed silently: have the bound work re-emit with the value the reason names, using the corrected `brief` command.
+   The same refusal later arrives as a `public-followup rejected <event-id> ...` wake, so the promise is not left owed silently: have the bound work re-emit with the value the reason names, using the corrected `brief` command.
+   That wake is at-least-once: a failed cleanup can raise the same refusal again, carrying the same event id and reason.
+   When the event id is one you already took up, acknowledge the wake and do not re-brief the work; re-acting is safe but redundant, because the corrected result resolves to the event id that was already accepted.
 2. For each ready commitment, run `bin/fm-public-followup.sh deliver <obligation-id>`.
    With no `--text-file` it reuses the accepted terminal outcome exactly, which is the preferred path for a landed result.
    Only pass `--text-file` when the outcome genuinely needs composing, and hold it to the same public-safety bar as every other reply here.

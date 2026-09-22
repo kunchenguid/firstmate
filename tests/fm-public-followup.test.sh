@@ -3728,6 +3728,80 @@ test_rejection_wake_survives_a_poll_that_cannot_read() {
   pass "a rejection wake survives a poll that could not read its line"
 }
 
+# The wake is at-least-once, not exactly-once: dropping a raised line is
+# best-effort, so a wake directory that cannot be written raises the same
+# refusal again. A repeat must be recognizable as the refusal already taken up -
+# same event id, same reason - and must leave the quarantine as it found it, so
+# acknowledging it without re-acting is safe.
+test_an_undroppable_wake_repeats_the_same_refusal() {
+  local home event_id out wakes reason first second
+  home=$(make_home reject-wake-repeat)
+  seed_repro_commitment "$home" pf-wake-repeat req-wake-repeat main work-wake-repeat
+  event_id=$(publish_raw_event "$home/state/public-followup/events" pf-wake-repeat main \
+    work-wake-repeat report-ready '{"report_path":"/abs/data/work-wake-repeat/report.md"}') \
+    || fail "could not publish the raw event"
+  out=$(run_pf "$home" consume) || true
+  assert_contains "$out" "rejected $event_id" "consume must refuse the absolute report path"
+  reason=$(cat "$home/state/public-followup/rejected/$event_id.reason")
+
+  wakes="$home/state/public-followup/rejection-wakes"
+  chmod 500 "$wakes"
+  first=$(run_poll "$home" | grep '^public-followup rejected' || true)
+  second=$(run_poll "$home" | grep '^public-followup rejected' || true)
+  chmod 700 "$wakes"
+  assert_contains "$first" "public-followup rejected $event_id" \
+    "a refusal must wake the owning home"
+  [ "$second" = "$first" ] \
+    || fail "a wake raised again must repeat the same refusal, not announce a new one"
+  [ "$(cat "$home/state/public-followup/rejected/$event_id.reason")" = "$reason" ] \
+    || fail "a repeated wake must leave the quarantined reason unchanged"
+  assert_absent "$home/state/public-followup/consumed/$event_id" \
+    "a repeated wake must not accept the refused event"
+
+  assert_contains "$(run_poll "$home")" "public-followup rejected $event_id" \
+    "the wake stays queued until it can be dropped"
+  assert_not_contains "$(run_poll "$home")" "rejected" \
+    "a dropped wake stops repeating"
+  pass "a wake that cannot be dropped repeats the same refusal"
+}
+
+# The other repeat path: a refusal whose event could not be drained is
+# quarantined again by the next consume, which re-queues a wake the poll may
+# already have raised. That repeat must also be the same refusal, and must not
+# disturb anything the first quarantine recorded.
+test_a_retained_refusal_repeats_its_wake_rather_than_a_new_one() {
+  local home event_id out rc=0 events reason first second
+  home=$(make_home reject-wake-retained)
+  seed_repro_commitment "$home" pf-wake-retained req-wake-retained main work-wake-retained
+  event_id=$(publish_raw_event "$home/state/public-followup/events" pf-wake-retained main \
+    work-wake-retained report-ready '{"report_path":"/abs/data/work-wake-retained/report.md"}') \
+    || fail "could not publish the raw event"
+
+  events="$home/state/public-followup/events"
+  chmod 500 "$events"
+  out=$(run_pf "$home" consume) || rc=$?
+  chmod 700 "$events"
+  [ "$rc" -ne 0 ] || fail "consume must report a quarantine it could not finish"
+  assert_contains "$out" "cleanup failed" "consume must say the refused event was retained"
+  assert_present "$events/$event_id.json" "the refused event must stay pending"
+  reason=$(cat "$home/state/public-followup/rejected/$event_id.reason")
+
+  first=$(run_poll "$home" | grep '^public-followup rejected' || true)
+  assert_contains "$first" "public-followup rejected $event_id" \
+    "the refusal must wake the owning home"
+  assert_not_contains "$(run_poll "$home")" "rejected" "the raised wake must be dropped"
+
+  out=$(run_pf "$home" consume) \
+    || fail "consume must finish the quarantine once the event can be drained: $out"
+  assert_absent "$events/$event_id.json" "the retried quarantine must drain the refused event"
+  second=$(run_poll "$home" | grep '^public-followup rejected' || true)
+  [ "$second" = "$first" ] \
+    || fail "a re-queued wake must repeat the same refusal, not announce a new one"
+  [ "$(cat "$home/state/public-followup/rejected/$event_id.reason")" = "$reason" ] \
+    || fail "the retried quarantine must leave the recorded reason unchanged"
+  pass "a refusal whose event was retained repeats its wake instead of a new one"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2 empty-lock
 # register regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -3821,3 +3895,5 @@ test_emit_requires_error_code_on_a_failure_promise
 test_rejection_is_retried_until_its_wake_is_recorded
 test_rejection_wake_survives_a_poll_that_cannot_write
 test_rejection_wake_survives_a_poll_that_cannot_read
+test_an_undroppable_wake_repeats_the_same_refusal
+test_a_retained_refusal_repeats_its_wake_rather_than_a_new_one
