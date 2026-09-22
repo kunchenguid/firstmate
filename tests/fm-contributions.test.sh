@@ -557,14 +557,21 @@ set -eu
 printf '%s\n' "$*" >> "$FORGE/calls"
 fault=$(cat "$FORGE/fault" 2>/dev/null || true)
 case "$fault" in latency) sleep "${FORGE_LATENCY:-2}" ;; esac
+# Concurrent forge callers each advance one shared clock. Truncating it in
+# place races with the other callers and the fake date: an interleaved write
+# can publish a half-written value (or the 6 an emptied read computes), and a
+# caller then evaluates DEADLINE against torn arithmetic. Publish every new
+# value by rename so each reader always sees one complete old-or-new clock.
+clock_bump() {
+  local tmp
+  tmp=$(mktemp "$FORGE/clock.XXXXXX")
+  printf '%s\n' "$(( $(cat "$FORGE/clock") + $1 ))" > "$tmp"
+  mv -f "$tmp" "$FORGE/clock"
+}
 case "$fault:$*" in
-  reserve:'api repos/o/r/'*)
-    printf '%s\n' "$(( $(cat "$FORGE/clock") + 6 ))" > "$FORGE/clock" ;;
-  exhaust:'api repos/o/r/issues/8/comments?'*)
-    printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock" ;;
-  fail-late:'api repos/o/r/pulls/8/reviews?'*)
-    printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock"
-    printf 'HTTP 502\n' >&2; exit 1 ;;
+  reserve:'api repos/o/r/'*) clock_bump 6 ;;
+  exhaust:'api repos/o/r/issues/8/comments?'*) clock_bump 100 ;;
+  fail-late:'api repos/o/r/pulls/8/reviews?'*) clock_bump 100; printf 'HTTP 502\n' >&2; exit 1 ;;
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;

@@ -58,9 +58,10 @@
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
 #     alert if submit still cannot be confirmed.
-#   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps all
-#     state/*.status for a captain-relevant line the per-wake classifier might
-#     have missed (e.g. a status verb outside CAPTAIN_RE) and escalates it.
+#   - Cheap heartbeat catch-all: every HEARTBEAT_SCAN_SECS the daemon greps the
+#     state dir's task status logs for a captain-relevant line the per-wake
+#     classifier might have missed (e.g. a status verb outside CAPTAIN_RE) and
+#     escalates it.
 #
 # The robustness shell from the prior always-inject version is preserved:
 # single-instance lock (portable helper, no flock dependency), crash-loop
@@ -1172,11 +1173,17 @@ housekeeping() {  # <state>
   #     because the event this backstop most needs to catch is precisely one a
   #     later routine append has already moved past; fm-classify-lib.sh's span
   #     read decides relevance, and the classified-through offset is the dedup.
+  #     A remote mate's own parent channel is not a self-home task status log,
+  #     so it is excluded here exactly as in the watcher's twin backstop
+  #     (fm-watch.sh heartbeat_scan_finds_actionable); the home-shape-aware
+  #     resolution lives in status_scan_parent_channel_exclude.
   if [ "$(_file_age "$state/.subsuper-last-scan")" -ge "${FM_HEARTBEAT_SCAN_SECS:-$HEARTBEAT_SCAN_SECS_DEFAULT}" ]; then
     _now > "$state/.subsuper-last-scan"
-    local event record rest endpoint ident rc
+    local event record rest endpoint ident rc exclude
+    exclude=$(status_scan_parent_channel_exclude "$state")
     for f in "$state"/*.status; do
       [ -e "$f" ] || [ -L "$f" ] || continue
+      [ "$f" = "$exclude" ] && continue
       task=$(basename "$f"); task="${task%.status}"
       record=$(status_span_first_actionable_record "$f" \
         "$(status_seen_offset "$state" "$task")")

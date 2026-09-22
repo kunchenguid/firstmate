@@ -1714,8 +1714,13 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 # The caller records reported state only after surfacing or intentional absorption,
 # and commits a status classification position only after a successful span read.
 scan_signals() {
-  local f sig sf
+  local f sig sf exclude
+  # A remote mate's own parent channel is not a self-home task status log; the
+  # home-shape-aware exclusion and its precedent live in
+  # status_scan_parent_channel_exclude (fm-classify-lib.sh).
+  exclude=$(status_scan_parent_channel_exclude "$STATE")
   for f in "$STATE"/*.status "$STATE"/*.turn-ended; do
+    [ "$f" = "$exclude" ] && continue
     if [ ! -e "$f" ]; then
       case "$f" in *.status) [ -L "$f" ] || continue ;; *) continue ;; esac
     fi
@@ -1962,10 +1967,14 @@ EOF
 # is absorbed; it surfaces only an event the per-wake path absorbed by mistake -
 # the fail-safe backstop.
 heartbeat_scan_finds_actionable() {
-  local f task record rest endpoint ident rc found=1 sig marker
+  local f task record rest endpoint ident rc found=1 sig marker exclude
+  # Same self-home exclusion as scan_signals: a remote mate's parent channel
+  # must not come back through the heartbeat fail-safe backstop.
+  exclude=$(status_scan_parent_channel_exclude "$STATE")
   FM_HEARTBEAT_SURFACE_ENDPOINTS=''
   for f in "$STATE"/*.status; do
     [ -e "$f" ] || [ -L "$f" ] || continue
+    [ "$f" = "$exclude" ] && continue
     task=$(basename "$f"); task="${task%.status}"
     record=$(status_span_first_actionable_record "$f" "$(hb_surfaced_offset "$task")")
     rc=$?
