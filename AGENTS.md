@@ -311,6 +311,7 @@ If established evidence already answers an informational question, relay it with
 Never both present a likely-enough solution and launch a parallel design exercise that is not expected to change it.
 A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
+Any diagnostic against a shared database must keep read-only state transaction-scoped; never set `default_transaction_read_only` or `SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY` on a pooled session, and use the transaction-scoped procedure in `diagnostic-reasoning` instead.
 
 Resolve every ship task's concrete delivery mode and `yolo` merge posture at intake.
 Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
