@@ -271,18 +271,20 @@ Treat `data/captain.md` as the domain-local record of captain preferences, optio
 
 ## 5. Recovery
 
-After the one session-start digest, reconcile reality with durable records before taking new work.
-Honor lock-refused read-only mode exactly as section 3 requires.
-Treat digest status tails as wake-event history and use targeted current-state reconciliation when the live state matters.
-
-Reconcile only this home's recorded direct reports and their recorded backend inventory; never sweep a shared endpoint namespace for matching names or claim another home's work.
-For an ordinary direct report whose endpoint is dead or metadata has no window, load `stuck-crewmate-recovery` and preserve the recorded worktree and unlanded work while reconciling ownership.
-For a dead secondmate direct report, load `secondmate-provisioning` and reconcile only that secondmate, never its whole child tree from the main home.
-Each secondmate reconciles work already in its own home and then idles; recovery never authorizes it to invent work.
-
-If `state/.afk` is present, load `/afk` in away mode or `/quiet` in quiet mode (`bin/fm-wake-lib.sh`'s `fm_afk_mode`); where its daemon runs, let the daemon own supervision rather than arming another cycle, and on Pi keep the ordinary supervision session, which runs in both postures with main parked while the record exists.
-Surface only captain-relevant decisions, review-ready PRs, failures, and credential needs; otherwise resume the emitted supervision protocol silently.
-A restart must be a non-event because durable state and live backend inventory, not conversation memory, are authoritative.
+- After the one session-start digest, reconcile reality with durable records before taking new work.
+- Honor lock-refused read-only mode exactly as section 3 requires.
+- Treat digest status tails as wake-event history; use targeted current-state reconciliation when the live state matters.
+- Reconcile only this home's recorded direct reports and their recorded backend inventory.
+  NEVER sweep a shared endpoint namespace for matching names or claim another home's work.
+- Ordinary direct report, endpoint dead or metadata has no window: load `stuck-crewmate-recovery`, preserve the recorded worktree and unlanded work while reconciling ownership.
+- Dead secondmate direct report: load `secondmate-provisioning`, reconcile only that secondmate, never its whole child tree from the main home.
+- Each secondmate reconciles its own work under way, then idles.
+  Recovery never authorizes a secondmate to invent work.
+- If `state/.afk` is present: load `/afk` (away mode) or `/quiet` (quiet mode) (`bin/fm-wake-lib.sh`'s `fm_afk_mode`).
+  Where its daemon runs, let the daemon own supervision rather than arming another cycle.
+  On Pi, keep the ordinary supervision session - it runs in both postures with main parked while the record exists.
+- Surface only captain-relevant decisions, review-ready PRs, failures, and credential needs; otherwise resume the emitted supervision protocol silently.
+- A restart must be a non-event: durable state and live backend inventory are authoritative, not conversation memory.
 
 ## 6. Project and knowledge management
 
