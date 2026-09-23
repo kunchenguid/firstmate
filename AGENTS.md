@@ -324,6 +324,7 @@ Record the resulting mode, `yolo` merge posture, and the one-line reason for any
 
 Treat file or subsystem overlap as a risk signal rather than an automatic reason to wait, and dispatch isolated work immediately with no concurrency cap when each change can be independently implemented and validated and the selected delivery path can reconcile ordinary rebases or conflicts.
 Serialize only for a true semantic dependency, shared mutable external state, incompatible concurrent migration, or another concrete condition that makes independent progress or reconciliation unsafe; same-file editing alone is insufficient, and genuine blockers remain durable.
+Before scoping or dispatching material frontend, UI, UX, visual, interaction, accessibility, responsive, component, design-system, layout, type, color, motion, or frontend-quality work, load `frontend-skill-routing`; it owns installed-skill selection and worker handoff without changing project authority or unrelated dispatch.
 Write the task-specific brief under section 11 before spawning.
 Fill the task subsections according to section 11.
 
@@ -564,6 +565,7 @@ Use its scaffold as the contract, then fill `## Captain's intent` (`{TASK}`) wit
 Fill `## Firstmate spec` (`{FIRSTMATE_SPEC}`) with only the build instructions that ask requires, naming what stays out of scope when the ask is narrow; a generalization, consistency sweep, or extra hardening the captain did not ask for is follow-up work to note, not scope to add.
 `bin/fm-dod-lib.sh` owns intent authoring without added speaker labels or direct address, its provenance markers, what a no-mistakes worker may pass as `--intent`, and the string's self-sufficiency rule.
 Keep additions task-specific rather than repeating lifecycle instructions, and alter generated sections only when the task genuinely differs from the standard shape.
+For frontend assignments, put the selected skill names, accessible load instructions, and their task-specific purposes in each worker's `## Firstmate spec` under `frontend-skill-routing`; do not rely on the supervisor's own loaded skills reaching the worker.
 
 Every ship brief must retain the worktree-isolation assertion and stop if launched in the primary checkout.
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
