@@ -463,6 +463,8 @@ The report is the only thing that survives, so anything worth keeping must be in
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
 
+$(fm_clickup_completion_block)
+
 $INBOX_SECTION
 
 # Definition of done
@@ -497,6 +499,7 @@ case "$MODE" in
 esac
 RULE1=$(fm_ship_rule_one "$MODE" "$ID") || exit 1
 DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+CLICKUP_COMPLETION=$(fm_clickup_completion_block)
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -553,6 +556,8 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+
+$CLICKUP_COMPLETION
 
 $INBOX_SECTION
 

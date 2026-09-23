@@ -354,6 +354,10 @@ STUB
       "$mode: promoted worker did not receive the Captain's intent subsection"
     assert_grep "## Firstmate spec" "$payload" \
       "$mode: promoted worker did not receive the Firstmate spec subsection"
+    assert_grep "before appending \`done:\`, use \`clickup-cli\` to inspect that task and update that same task" "$payload" \
+      "$mode: promoted worker did not receive the ClickUp completion update requirement"
+    assert_grep "Do not create a ClickUp task for internal Firstmate work, especially not in the captain's Personal List." "$payload" \
+      "$mode: promoted worker did not receive the Firstmate Personal List boundary"
 
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated

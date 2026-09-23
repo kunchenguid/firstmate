@@ -96,6 +96,22 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
   esac
 }
 
+# Completion contract shared by generated ship and scout briefs, including a
+# scout promoted to a ship, so an existing ClickUp work task is accurate before
+# any terminal worker report.
+fm_clickup_completion_block() {
+  cat <<'EOF'
+# ClickUp-linked work tasks
+Only a concrete ClickUp task link in these instructions makes this a ClickUp-linked work task.
+For a ClickUp-linked work task, before appending `done:`, use `clickup-cli` to inspect that task and update that same task.
+Record only verified milestones, the full PR URL when there is one, actual affected services, concrete deployment requirements, the current task status, and checklist items actually completed.
+Read the task back with `clickup-cli` to verify the update persisted.
+Do not guess missing facts or mark planned or partial checklist items complete.
+An internal Firstmate record is not a ClickUp work task.
+Do not create a ClickUp task for internal Firstmate work, especially not in the captain's Personal List.
+EOF
+}
+
 # Return 0 when a Task subsection still consists only of its scaffold
 # placeholder. A missing file and legacy briefs carry no such placeholders.
 fm_brief_task_placeholders_present() {  # <file>
