@@ -182,7 +182,7 @@ wd_live2_68a84f6cd0d8
 ```
 
 The pre-registered worktree reached the composer with no prompt; the unregistered sibling stopped on the dialog.
-The helper was pointed at the probe store with `KIMI_CODE_HOME` on the day this ran; it is now pinned to `$HOME/.kimi-code` (see below), so repeating this probe points it at the probe store with `HOME` instead.
+The helper was pointed at the probe store with `KIMI_CODE_HOME` on the day this ran; it is now pinned to `$HOME/.kimi-code` (see below), so repeating this probe runs it with `HOME` set to a directory whose own `.kimi-code` is the probe home, and that home must already exist because an absent one is refused rather than created.
 The vendor half of the transcript is unaffected: Kimi's own launch still reads `KIMI_CODE_HOME`.
 
 ## Multiple Kimi homes
