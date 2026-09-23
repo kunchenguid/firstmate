@@ -65,8 +65,9 @@ OP_TRUST="$HOME/.pi/agent/trust.json"
 OP_TRUST_BEFORE=
 cleanup_all() {
   local status=$?
+  trap - EXIT
+  herdr_safe_stop_and_delete "$SESSION" || status=1
   [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
-  herdr_safe_stop_and_delete "$SESSION"
   if [ -n "${OP_TRUST_BEFORE:-}" ] && [ -f "$OP_TRUST" ]; then
     local after
     after=$(sha256sum "$OP_TRUST" | cut -d' ' -f1)
@@ -76,7 +77,7 @@ cleanup_all() {
   exit "$status"
 }
 trap cleanup_all EXIT
-fm_herdr_lab_prepare "$SESSION" || fail "could not prepare the isolated Herdr lab session"
+fm_herdr_lab_provision "$SESSION" || fail "could not provision the isolated Herdr lab session"
 
 OP_TRUST_BEFORE=$(sha256sum "$OP_TRUST" 2>/dev/null | cut -d' ' -f1) \
   || fail "could not hash the operator trust store before the guard"
@@ -89,8 +90,6 @@ SCRATCH=$(cd "$SCRATCH" && pwd)
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
 
 lab() { fm_herdr_lab_cli "$SESSION" "$@"; }
-
-fm_backend_herdr_server_ensure "$SESSION" || fail "could not start the isolated Herdr lab server"
 
 # The repro project: a git repo whose every pooled worktree carries a
 # project-local trust-requiring resource (.pi/settings.json), with the
@@ -141,7 +140,7 @@ make_home() { # <home-dir>
 
 write_brief() { # <home> <id>
   local home=$1 id=$2 brief
-  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" repro-project --scout >/dev/null 2>&1 \
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" repro-project --scout --herdr-lab >/dev/null 2>&1 \
     || fail "could not scaffold the scout brief for $id"
   brief="$home/data/$id/brief.md"
   python3 - "$brief" "$home/instruction-processed" <<'PY' || fail "could not fill the scout brief"
@@ -181,7 +180,7 @@ WS1=$(lab workspace create --label fm-pi-trust-trigger --cwd "$PROJECT" 2>&1) \
   || fail "could not create the trigger workspace: $WS1"
 PANE1=$(printf '%s' "$WS1" | jq -r '.result.root_pane.pane_id // empty')
 [ -n "$PANE1" ] || fail "workspace create did not return a root pane id"
-PATH="$SCRATCH/shim-1:$PATH" lab pane run "$PANE1" pi >/dev/null 2>&1 \
+lab pane run "$PANE1" "$SCRATCH/shim-1/pi" >/dev/null 2>&1 \
   || fail "could not launch the real pi in the trigger pane"
 wait_for_regex "$PANE1" 'Trust project folder\?' 45 'the folder-trust dialog (the stall)'
 pass "bare pi in a fresh untrusted worktree parks on Trust project folder?$(version_note)"
@@ -232,6 +231,8 @@ for ((i = 0; i < 150; i++)); do
 done
 [ "$SEEN_MARKER" = 1 ] \
   || fail "the approved launch never processed its brief within budget$(version_note); last tail:\n$(printf '%s' "$TAIL2" | tail -30)"
+note "model-created marker: $(cat "$MARKER2")"
+capture "$PANE2"
 pass "the managed launch carries --approve, never renders the dialog, and processes its brief$(version_note)"
 
 # --- Case 3: the approval is one-run and never touches the operator store --
@@ -252,7 +253,7 @@ WS4_UNTRUSTED=$(lab workspace create --label fm-pi-trust-unsaved --cwd "$WORKTRE
   || fail "could not create the untrusted child workspace: $WS4_UNTRUSTED"
 PANE4_UNTRUSTED=$(printf '%s' "$WS4_UNTRUSTED" | jq -r '.result.root_pane.pane_id // empty')
 [ -n "$PANE4_UNTRUSTED" ] || fail "workspace create did not return a root pane id"
-PATH="$SCRATCH/shim-4:$PATH" lab pane run "$PANE4_UNTRUSTED" pi >/dev/null 2>&1 \
+lab pane run "$PANE4_UNTRUSTED" "$SCRATCH/shim-4/pi" >/dev/null 2>&1 \
   || fail "could not launch the real pi in the untrusted child pane"
 wait_for_regex "$PANE4_UNTRUSTED" 'Trust project folder\?' 45 'the same child worktree without parent trust'
 lab pane close "$PANE4_UNTRUSTED" >/dev/null 2>&1 \
@@ -264,7 +265,7 @@ WS4=$(lab workspace create --label fm-pi-trust-saved --cwd "$WORKTREE4" 2>&1) \
   || fail "could not create the saved-trust workspace: $WS4"
 PANE4=$(printf '%s' "$WS4" | jq -r '.result.root_pane.pane_id // empty')
 [ -n "$PANE4" ] || fail "workspace create did not return a root pane id"
-PATH="$SCRATCH/shim-4:$PATH" lab pane run "$PANE4" pi >/dev/null 2>&1 \
+lab pane run "$PANE4" "$SCRATCH/shim-4/pi" >/dev/null 2>&1 \
   || fail "could not launch the real pi in the saved-trust pane"
 # With no --approve and no submitted prompt, a saved decision must carry the
 # TUI past the trust gate: the dialog never renders and pi registers its
@@ -276,11 +277,11 @@ for ((i = 0; i < 30; i++)); do
     DIALOG4=1
     break
   fi
-  REG4=$(herdr agent get "$PANE4" --session "$SESSION" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
+  REG4=$(lab agent get "$PANE4" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
   case "$REG4" in working|idle|done|blocked) break ;; esac
   sleep 1
 done
-REG4=$(herdr agent get "$PANE4" --session "$SESSION" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
+REG4=$(lab agent get "$PANE4" 2>/dev/null | jq -r '.result.agent.agent_status // empty')
 [ "$DIALOG4" = 0 ] || fail "a saved parent-path decision still rendered the trust dialog$(version_note)"
 case "$REG4" in
   working|idle|done|blocked) ;;
