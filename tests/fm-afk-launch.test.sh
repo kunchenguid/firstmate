@@ -217,10 +217,12 @@ unit_quiet_entry_needs_no_record() {
   fi
   out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop 2>&1)
   if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-contract" ] && [ ! -e "$st/state/afk-contracts" ] \
-    && printf '%s' "$out" | grep -F 'no posture record stood' >/dev/null; then
-    pass "quiet exit: stop clears quiet mode without claiming a record archive"
+    && printf '%s' "$out" | grep -F 'no posture record stood' >/dev/null \
+    && printf '%s' "$out" | grep -F 'quiet mode stopped' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'away mode stopped' >/dev/null; then
+    pass "quiet exit: stop clears quiet mode, names the quiet posture, and claims no record archive"
   else
-    fail "quiet exit: stop left state behind or misreported the record: $out"
+    fail "quiet exit: stop left state behind or misreported the posture or record: $out"
   fi
   out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=away "$LAUNCH" start-native 2>&1)
   rc=$?
@@ -303,18 +305,19 @@ unit_failed_daemon_launch_preserves_the_record() {
 }
 
 unit_stop_archives_the_record_last() {
-  local st epoch
+  local st epoch out
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-archive.XXXXXX")
   mkdir -p "$st/state"
   enter_posture "$st" || fail "stop archive: could not enter fixture posture"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 || fail "stop archive: native entry failed"
   epoch=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$CONTRACT" field entered_epoch)
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1 \
-    && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-contract" ] \
-    && [ -f "$st/state/afk-contracts/$epoch.afk-contract" ]; then
-    pass "stop: clears the away flag and archives the posture record under its entry time"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop 2>&1)
+  if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-contract" ] \
+    && [ -f "$st/state/afk-contracts/$epoch.afk-contract" ] \
+    && printf '%s' "$out" | grep -F 'away mode stopped' >/dev/null; then
+    pass "stop: clears the away flag, names the away posture, and archives the record under its entry time"
   else
-    fail "stop: the posture record was not archived (state: $(ls -a "$st/state"))"
+    fail "stop: the posture record was not archived or the posture was misnamed (state: $(ls -a "$st/state")): $out"
   fi
   rm -rf "$st"
 }

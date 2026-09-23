@@ -703,7 +703,7 @@ fm_afk_launch_start_native() {
 }
 
 fm_afk_launch_stop() {
-  local pid pid_identity current_identity result=0 read_result archived closed_daemon_terminal=0 record_note
+  local pid pid_identity current_identity result=0 read_result archived closed_daemon_terminal=0 record_note mode
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
@@ -750,7 +750,9 @@ fm_afk_launch_stop() {
     [ "$result" -eq 0 ] || closed_daemon_terminal=0
   fi
   # (3) Clear the away-mode flag, then (4) archive the posture record LAST so the
-  # posture ends only once every daemon-side artifact is down.
+  # posture ends only once every daemon-side artifact is down. The flag names
+  # which posture this stop is ending, so read it before it is gone.
+  mode=$(fm_afk_mode "$FM_AFK_LAUNCH_STATE")
   if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
     fm_afk_launch_log "failed to clear away-mode flag"
     result=1
@@ -768,12 +770,12 @@ fm_afk_launch_stop() {
   fi
   if [ "$result" -eq 0 ]; then
     if [ "$closed_daemon_terminal" -eq 1 ]; then
-      fm_afk_launch_log "away mode stopped; daemon terminal torn down, .afk cleared, and $record_note"
+      fm_afk_launch_log "$mode mode stopped; daemon terminal torn down, .afk cleared, and $record_note"
     else
-      fm_afk_launch_log "away mode stopped; no daemon terminal was running, .afk cleared, and $record_note"
+      fm_afk_launch_log "$mode mode stopped; no daemon terminal was running, .afk cleared, and $record_note"
     fi
   else
-    fm_afk_launch_log "away mode stopped; terminal teardown or the record archive remains recorded for retry"
+    fm_afk_launch_log "$mode mode stopped; terminal teardown or the record archive remains recorded for retry"
   fi
   return "$result"
 }
