@@ -241,12 +241,12 @@ if [ -e "$TRUST_DIR" ] || [ -L "$TRUST_DIR" ]; then
   [ -O "$TRUST_DIR" ] || refuse "'$TRUST_DIR' is not owned by this user"
   [ -w "$TRUST_DIR" ] || refuse "'$TRUST_DIR' is not writable"
 else
-  # 0700 is the mode Kimi itself creates this directory with, and it is set at
-  # creation rather than chmod'd afterwards so the store is never briefly
-  # group- or world-readable. The Kimi home above is already resolved, so this
-  # is a single-level create and needs no -p (which would apply the mode to the
-  # deepest component only).
-  mkdir -m 700 "$TRUST_DIR" 2>/dev/null || true
+  # 0700 is the mode Kimi itself creates this directory with, and the umask is
+  # set for this one call so mkdir(2) creates it at 0700 directly: mkdir -m
+  # would create it under the ambient umask and chmod afterwards, leaving the
+  # store group- and world-readable between those two syscalls. The Kimi home
+  # above is already resolved, so this is a single-level create and needs no -p.
+  (umask 077 && mkdir "$TRUST_DIR") 2>/dev/null || true
   [ -d "$TRUST_DIR" ] || refuse "Kimi trust store '$TRUST_DIR' does not exist and could not be created"
 fi
 

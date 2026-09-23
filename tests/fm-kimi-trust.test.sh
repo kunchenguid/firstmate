@@ -104,17 +104,6 @@ file_mode() {  # <path> -> octal permission bits
   fi
 }
 
-# A PATH carrying the tools the scope test needs but no node, so the
-# missing-interpreter path is exercised without disturbing the real PATH.
-node_free_path() {  # <case-dir> -> a bin dir holding the script's own tools but no node
-  local dir=$1/nonode-bin tool
-  mkdir -p "$dir"
-  for tool in bash env git mkdir cat find basename dirname stat ls; do
-    ln -sf "$(command -v "$tool")" "$dir/$tool" 2>/dev/null || true
-  done
-  printf '%s\n' "$dir"
-}
-
 # seed_secondmate_home <home> <id> [shape]: the on-disk shape bin/fm-home-seed.sh
 # leaves behind. "clone" (the default) is the standalone-clone home an explicit
 # ~/fm-homes/<id> path produces, a primary checkout; "worktree" is the linked
@@ -444,7 +433,7 @@ test_malformed_store_is_refused() {
 test_missing_node_is_refused() {
   local out rc=0 nonode
   read_case "$(make_case nonode)"
-  nonode=$(node_free_path "$CASE_DIR")
+  nonode=$(fm_test_base_path_sans "$PATH" node)
   out=$(HOME="$FAKE_HOME" PATH="$nonode" "$TRUST" "$WT" "$PROJ" 2>&1) || rc=$?
   expect_code 1 "$rc" "a missing node must be refused: $out"
   assert_contains "$out" "node is required" "the refusal does not name node as the missing tool"
@@ -456,7 +445,7 @@ test_missing_node_is_refused() {
 test_scope_refusal_precedes_the_node_requirement() {
   local out rc=0 nonode
   read_case "$(make_case nonode-scope)"
-  nonode=$(node_free_path "$CASE_DIR")
+  nonode=$(fm_test_base_path_sans "$PATH" node)
   out=$(HOME="$FAKE_HOME" PATH="$nonode" "$TRUST" "$PROJ" "$PROJ" 2>&1) || rc=$?
   expect_code 1 "$rc" "a primary checkout must still be refused without node: $out"
   assert_contains "$out" "primary checkout" "the refusal fell back to the node message instead of the scope reason"

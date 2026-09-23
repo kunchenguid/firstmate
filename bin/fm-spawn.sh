@@ -322,15 +322,20 @@
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
-# Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog.
-# Its launch-readiness loop reads the visible viewport - so the spawn refuses at
-# preflight on a backend with no viewport-bounded capture - recognizes the
-# complete dialog, re-selects the already highlighted affirmative option on
-# every poll the complete dialog is still there, refuses any ready verdict while
-# dialog text is on that pane, and requires two consecutive captures that are
-# each ready and dialog-free before the ordinary readiness gates can pass. A
-# blank viewport read proves nothing either way: it costs the poll and restarts
-# that count. A viewport read that fails outright fails readiness at once.
+# Kimi 2.0.0 also gates a fresh worktree on an interactive folder-trust dialog,
+# so the spawn pre-registers the launch directory in Kimi's own workspace-trust
+# store through bin/fm-kimi-trust.sh (the agy shape, non-fatal: a failed
+# registration warns and leaves the dialog to the live gate), whose header owns
+# the store contract. That removes the dialog outright, and the launch-readiness
+# loop is the backstop for one that renders anyway: it reads the visible
+# viewport - so the spawn refuses at preflight on a backend with no
+# viewport-bounded capture - recognizes the complete dialog, re-selects the
+# already highlighted affirmative option on every poll the complete dialog is
+# still there, refuses any ready verdict while dialog text is on that pane, and
+# requires two consecutive captures that are each ready and dialog-free before
+# the ordinary readiness gates can pass. A blank viewport read proves nothing
+# either way: it costs the poll and restarts that count. A viewport read that
+# fails outright fails readiness at once.
 # grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
