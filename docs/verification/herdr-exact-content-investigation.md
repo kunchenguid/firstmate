@@ -1,6 +1,8 @@
-# Herdr exact-content investigation (R5)
+# Herdr exact-content capture evidence
 
-Status: **unresolved; F1 acceptance remains unmet on Herdr**. Exact equality remains mandatory. No live Herdr pane was read or modified during this investigation.
+Status: **unresolved; F1 acceptance remains unmet on Herdr**.
+The current recovery predicate and capture limits are owned by [`fm_task_inbox_composer_holds_doorbell`](../../bin/fm-task-inbox-lib.sh).
+No live Herdr pane was read or modified during this investigation.
 
 ## Installed CLI evidence
 
@@ -64,13 +66,20 @@ Use `herdr api schema --json` to print the full schema.
 Use `herdr api schema --output PATH` to write it to a file.
 ```
 
-`herdr api schema --json` returned the bundled schema. Its `PaneReadParams` properties are `format` (default `text`), `lines` (nullable uint32), `pane_id`, `source`, and `strip_ansi` (default `true`). Required parameters are `pane_id` and `source`.
+`herdr api schema --json` returned the bundled schema.
+Its `PaneReadParams` properties are `format` (default `text`), `lines` (nullable uint32), `pane_id`, `source`, and `strip_ansi` (default `true`).
+Required parameters are `pane_id` and `source`.
 
-Its `PaneReadResult` requires `pane_id`, `workspace_id`, `tab_id`, `source`, `format`, `text`, `revision`, and `truncated`. The result supplies rendered text and a truncation indicator, but no cell occupancy or whitespace-preservation contract.
+Its `PaneReadResult` requires `pane_id`, `workspace_id`, `tab_id`, `source`, `format`, `text`, `revision`, and `truncated`.
+The result supplies rendered text and a truncation indicator, but no cell occupancy or whitespace-preservation contract.
 
-## What this establishes—and does not
+## What this establishes - and does not
 
-Visible capture and raw/ANSI modes exist. The help does not explain whether `--raw` preserves input spaces, changes escape handling, or only changes CLI serialization. The schema does not settle that question. Neither metadata absence nor the current adapter's refusal proves that Herdr cannot capture losslessly. Consequently, adding `lossless=1` on this evidence would be unjustified.
+Visible capture and raw/ANSI modes exist.
+The help does not explain whether `--raw` preserves input spaces, changes escape handling, or only changes CLI serialization.
+The schema does not settle that question.
+Neither metadata absence nor the current adapter's refusal proves that Herdr cannot capture losslessly.
+Consequently, adding `lossless=1` on this evidence would be unjustified.
 
 `printf 'HERDR_ENV=%s\n' "${HERDR_ENV:-}"` returned:
 
@@ -78,8 +87,16 @@ Visible capture and raw/ANSI modes exist. The help does not explain whether `--r
 HERDR_ENV=
 ```
 
-This agent is outside Herdr. The Herdr skill prohibits inspecting or controlling the focused session from that context. Static help and bundled schema inspection do not access a live session. No `pane read` against a live pane, real-capture regression, or Muse inbox acceptance was performed. R5 therefore remains open, not resolved as an API impossibility.
+The verification environment was outside Herdr.
+The Herdr skill prohibits inspecting or controlling the focused session from that context.
+Static help and bundled schema inspection do not access a live session.
+No `pane read` against a live pane, real-capture regression, or Muse inbox acceptance was performed.
+API capability therefore remains unresolved, not proven impossible.
 
 ## Required follow-up
 
-In a Herdr-managed verification environment, render known byte fixtures in a dedicated test pane and compare real `visible` reads across `text`, `ansi`, and `--raw` modes. Include an exact doorbell, a trailing-space variant, and a multiline draft with a blank row followed by other text. Verify capture completeness and truncation handling as well as space preservation before assigning `lossless=1`. Then exercise ring and lifecycle recovery through the production capture adapter. The outer acceptance phase must separately prove that a newly launched Muse lane reads `001.msg` without human assistance.
+In a Herdr-managed verification environment, render known byte fixtures in a dedicated test pane and compare real `visible` reads across `text`, `ansi`, and `--raw` modes.
+Include an exact doorbell, a trailing-space variant, and a multiline draft with a blank row followed by other text.
+Verify capture completeness and truncation handling as well as space preservation before assigning `lossless=1`.
+Then exercise ring and lifecycle recovery through the production capture adapter, following the regression pattern in [`tests/fm-task-inbox.test.sh`](../../tests/fm-task-inbox.test.sh).
+Live acceptance must separately prove that a newly launched Muse lane reads `001.msg` without human assistance.

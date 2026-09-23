@@ -275,7 +275,12 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # unsent earlier ring, not user text: an Enter swallowed by a completion popup
 # or a not-yet-ready pane leaves the constant line sitting pending, and every
 # later ring would skip on it forever. Returns 0 only for that one constant
-# text, never for anything else.
+# text, never for anything else. The shared exact-content extractor requires
+# lossless capture and proof of the complete composer extent. Currently only
+# tmux supplies lossless capture, and only a single agent-glyph row bounded
+# immediately by identical horizontal rules is accepted. Wrapped/multiline
+# content, whitespace differences, and unsupported capture shapes fail closed;
+# Herdr cannot yet establish losslessness, and other backends refuse directly.
 fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <doorbell-line> [expected-label]
   local backend=$1 target=$2 doorbell=$3 label=${4:-} text
   [ -n "$doorbell" ] || return 1
@@ -287,13 +292,13 @@ fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <doorbell-line> 
 # composer pre-check, then the backend's submit machinery with a minimal retry
 # budget, verdict discarded.
 # Returns 0 rang (or submitted our own still-pending doorbell), 1 skipped
-# because the composer PROVENLY holds someone else's pending text (the watcher
+# because pending text cannot be proven to be our doorbell (the watcher
 # re-rings later), 2 the backend send failed, 3 skipped because the endpoint
 # is positively dead or missing (nothing typed; recovery owns the record). No
 # return value is delivery proof; the acknowledgement move is the only
 # delivery signal.
 # The skip is deliberately narrow: only an exact `pending` verdict over text
-# that is NOT our own doorbell defers, because there our Enter could submit
+# that is not proven to be our own doorbell defers, because our Enter could submit
 # someone's real half-typed content. `pending-unproven` and `unknown` still
 # ring - the worst outcome is a garbled CONSTANT line the worker recovers
 # semantically, while skipping on ambiguous verdicts would starve a harness

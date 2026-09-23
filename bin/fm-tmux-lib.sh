@@ -165,13 +165,10 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   printf '%s' "$verdict"
 }
 
-# fm_tmux_composer_content: the selected composer's visible text - the same
-# capture and capability descriptor the verdict above reads, fed to the shared
-# content extractor instead of the classifier. Prints the text (possibly
-# empty) and fails when no composer shape is selectable, so callers can tell
-# "no readable composer" from "composer holding nothing". Cursorless by
-# construction, like every other backend's content read: the extractor selects
-# the proven envelope, never bare footer furniture.
+# Preserve trailing spaces (-N) and capture the visible pane from its top so
+# the shared exact-content extractor can prove the complete composer envelope.
+# Ordinary classification capture is insufficient for byte-exact comparison.
+# The extractor owns accepted shapes and refuses unproven boundaries.
 fm_tmux_composer_content() {  # <target> -> selected composer text or fail
   local target=$1 pane
   pane=$(tmux capture-pane -N -T -e -p -t "$target" -S 0 -E - 2>/dev/null) || return 1

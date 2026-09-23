@@ -882,11 +882,9 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # fm_backend_composer_content: the selected composer's visible text for
 # callers that must distinguish WHICH text a pending composer holds, not just
 # that it is pending. Prints the text (possibly empty); fails when the
-# composer is unreadable or no composer shape is selectable, so callers fail
-# safe toward "not our text". Every adapter's named reader is a THIN wrapper
-# - the same capture plus capability descriptor its classifier reads, fed to
-# the one shared content owner (bin/fm-composer-lib.sh,
-# fm_composer_extract_selected_content) - so no backend holds a private
+# composer cannot be proven lossless and complete, so callers fail safe toward
+# "not our text". Adapters supply capture and capabilities to the shared owner
+# (bin/fm-composer-lib.sh, fm_composer_extract_selected_content), never a private
 # content assumption. The one consumer is the own-doorbell predicate in
 # bin/fm-task-inbox-lib.sh, shared by the ring and the control plane.
 fm_backend_composer_content() {  # <backend> <target> [expected-label] -> selected composer text or fail

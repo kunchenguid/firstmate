@@ -221,22 +221,18 @@ A build that ever split one turn across several runs would make a settled log am
 
 The portable counterparts that run in ordinary CI are `tests/fm-muse-harness.test.sh`, `tests/fm-tmux-agent-liveness.test.sh`, `tests/fm-composer-lib.test.sh`, and `tests/fm-composer-ghost.test.sh`.
 
-## Unsent-Enter root cause (doorbell deadlock, F1, 2026-09-23, muse 1.3.0-R3401.1, tmux)
+## Doorbell submit observations (2026-09-23, muse 1.3.0-R3401.1, tmux)
 
-A Muse lane can sit idle holding an unsubmitted doorbell while every re-ring skips on its `pending` verdict, so the steer is never read.
+An unsubmitted doorbell motivated checking whether Muse's completion popup consumes Enter.
 Probed live in a scratch tmux pane (`muse --yolo`, idle, `/tmp` cwd) with the repo's own `fm_tmux_composer_state` as the verdict source.
 Typing a leading `/` opens a slash-command completion popup within ~1s, and Enter with that popup open accepts the popup selection (it ran `/clear`) instead of submitting the typed line: the swallow mechanism is real.
 But a `:`-leading doorbell-shaped line opens no popup at 0.3s or after a 3s hold, and typing it plus 0.3s settle plus one Enter submitted on the first try (the turn started, composer read `empty`).
-So on an idle pane the first submit already sticks and a longer pre-Enter settle for `harness=muse` changes nothing; the settle stays at the shared doorbell value.
-The failure needs a popup-open or not-yet-ready pane at Enter time (e.g. the first steer racing startup UI), which a longer settle cannot fix either: an open popup does not self-close.
-The recovery is the own-doorbell submit: a later ladder ring finds the composer holding exactly our constant line and sends Enter then, when the pane is ready and no popup is open.
+This idle-pane observation did not establish a need for a longer Muse-specific settle; the shared doorbell settle is unchanged.
+It does not establish the cause of the startup failure or whether a longer settle would help a not-yet-ready pane.
+The recovery predicate and its supported capture limits are owned by [`fm_task_inbox_composer_holds_doorbell`](../../bin/fm-task-inbox-lib.sh).
 `tests/fm-task-inbox.test.sh` (`test_ring_submits_own_doorbell`, `test_ring_skips_foreign_pending_text`) and `tests/fm-control.test.sh` (`test_exit_submits_own_doorbell_then_proceeds`, `test_exit_refuses_foreign_pending_text`) pin that predicate.
 Note the shape drift on this version: idle muse 1.3.0 renders a `❯` glyph between `─` rules (the claude-2.x separated-over-bare shape), not the bordered `⟩` box recorded for 0.1.0; the shared classifier still reads it `empty`.
 
 ### Herdr acceptance remains unmet
 
-The [R5 CLI/API investigation](herdr-exact-content-investigation.md) records the installed command output and the remaining live-capture blocker; it does not establish API inability.
-
-The Herdr content reader does not establish lossless capture and therefore cannot authorize own-doorbell submission. Its ANSI/plain capture paths have not been proven to preserve trailing input spaces and the full composer extent; this is not evidence that Herdr has no suitable API. Do not add `lossless=1` without that proof.
-
-The R4 fix environment was outside Herdr (`HERDR_ENV` unset), so no real Herdr capture test or Muse `001.msg` acceptance was performed. Herdr support and the requested real-capture regression remain unresolved. Acceptance requires a Herdr-managed verification environment, byte-preservation and composer-boundary tests (including trailing spaces and multiline drafts), and the live Muse inbox check.
+The [CLI/API investigation](herdr-exact-content-investigation.md) owns the capture evidence and remaining live-verification requirements; it does not establish API inability.
