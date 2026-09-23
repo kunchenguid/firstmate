@@ -38,14 +38,14 @@ Readers must ignore members and events they do not recognize, so later versions 
 
 `task.status` members: `state` is the status line's leading word, such as `working`, `needs-decision`, `blocked`, `paused`, `done`, `failed`, or `resolved`, or `null` when the line has none.
 `key` is the line's `[key=...]` decision key, or `null`.
-`text` is the status line after its first colon, exactly as the status log holds it apart from leading whitespace and the key token, capped at 2000 characters.
+`text` is the status line after its first colon, verbatim, capped at 2000 characters.
 
 Example:
 
 ```json
 {"v":1,"ts":1790132857,"event":"task.dispatched","task":"fix-login","kind":"ship","project":"webapp","harness":"claude","model":null}
-{"v":1,"ts":1790132870,"event":"task.status","task":"fix-login","state":"working","key":null,"text":"bug reproduced"}
-{"v":1,"ts":1790133400,"event":"task.status","task":"fix-login","state":"done","key":null,"text":"PR https://github.com/acme/webapp/pull/7 checks green"}
+{"v":1,"ts":1790132870,"event":"task.status","task":"fix-login","state":"working","key":null,"text":" bug reproduced"}
+{"v":1,"ts":1790133400,"event":"task.status","task":"fix-login","state":"done","key":null,"text":" PR https://github.com/acme/webapp/pull/7 checks green"}
 {"v":1,"ts":1790133900,"event":"task.merged","task":"fix-login","via":"pr","pr":"https://github.com/acme/webapp/pull/7"}
 {"v":1,"ts":1790133960,"event":"task.cleaned_up","task":"fix-login"}
 ```
@@ -54,6 +54,7 @@ Example:
 
 - Status records come from the supervision monitor's regular poll, so they may trail the status line by one poll interval.
   Lines written while no monitor runs are picked up on its next run.
+  Recording `task.merged` or `task.cleaned_up` first records that task's pending status lines.
 - Status records are delivered at least once: an interrupted write can repeat records, so a reader that must not double-count should tolerate duplicates.
 - A status record can appear just before its task's `task.dispatched` record when the worker writes a status line in the moment between its launch and that record.
 - When a home turns the ledger on, status lines already in its live tasks' logs are recorded on the first poll, while tasks dispatched or cleaned up while the flag was absent have no record of that.

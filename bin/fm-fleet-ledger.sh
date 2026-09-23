@@ -134,7 +134,7 @@ append_status() { # <task> <status-line>
   case "$verb" in [a-z]*) case "$verb" in *[!a-z-]*) verb='' ;; esac ;; *) verb='' ;; esac
   key=$(_fm_decision_key "$line" 2>/dev/null) || key=''
   [ "$key" != default ] || key=''
-  text=$(status_line_note "$line")
+  text=${line#*:}
   append task.status "$task" \
     "{state: (\$state | n), key: (\$key | n), text: \$text[0:$TEXT_MAX_CHARS]}" \
     --arg state "$verb" --arg key "$key" --arg text "$text"
