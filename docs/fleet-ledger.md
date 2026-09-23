@@ -57,7 +57,7 @@ Example:
 
 ## Limits
 
-- A worker's status line is recorded the moment the worker writes it, because the status command in its instructions records it right after appending it.
+- A worker using the current status command in its instructions records its line immediately after appending it, while the ledger is enabled.
   The supervision monitor's regular poll is the backstop: it records any line the immediate write missed, and does not record again a line that write already recorded.
   These lines still trail the status log by up to one poll interval, or until the monitor next runs when none is running:
   - lines firstmate itself writes to a task's status log, such as a recorded answer, a failed launch, a relayed pending reply, or a second mate's report line;
@@ -67,7 +67,7 @@ Example:
   Recording `task.pr_ready`, `task.merged`, or `task.cleaned_up` first records that task's pending status lines.
 - Captured status lines are delivered at least once unless a write fails or a crash loses unflushed records: an interrupted capture can repeat records, so a reader that must not double-count should tolerate duplicates.
 - A status record can appear just before its task's `task.dispatched` record when the worker writes a status line in the moment between its launch and that record.
-- When a home turns the ledger on, status lines already in its live tasks' logs are recorded on the first poll, while tasks dispatched or cleaned up while the flag was absent have no record of that.
+- When a home turns the ledger on, status lines already in a live task's log are recorded on that task's next capture (which may be a worker status command, PR registration, merge, cleanup, or monitor poll); tasks dispatched or cleaned up while the flag was absent have no record of that.
 - There is no sequence number and no gap detection.
 - Writes are plain appends with no forced flush to disk, so a machine crash can lose the newest records.
 - The file is never rotated and grows until truncated.
