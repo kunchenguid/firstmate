@@ -8,7 +8,7 @@ Exact task chronology, branch names, temporary homes, local paths, process ids, 
 
 ## Devin worker runtime
 
-Verified on 2026-09-21 with Devin CLI 3000.11.1 (cc4e349ca55e) on macOS arm64 through the isolated tmux live guard.
+Verified on 2026-09-21 with Devin CLI 3000.11.1 (cc4e349ca55e) on macOS arm64 through the isolated tmux live guard, and re-verified on 2026-09-22 through that guard plus a Herdr 0.9.0 lab session.
 [Devin verification](devin.md) owns the exact refresh commands, lifecycle evidence, and worker-only limits.
 
 ## Harness detection precedence

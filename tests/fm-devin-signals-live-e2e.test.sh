@@ -4,6 +4,8 @@
 # Runs the real fm-spawn launch command in a private tmux server; only worktree
 # allocation and initial endpoint delivery use fixtures. All later steering,
 # interrupt and exit operations use the real Firstmate control plane.
+# The isolated home carries a user Claude Code hook that must never fire, and
+# the worker's own commit must carry no Devin attribution.
 set -u
 # shellcheck source=tests/fixtures.sh
 . "$(dirname "${BASH_SOURCE[0]}")/fixtures.sh"
@@ -44,11 +46,19 @@ fm_git_worktree "$PROJ" "$WT" devin-live
 mkdir -p "$H/user-home/.local/share/devin" "$H/user-home/.config/devin" "$LAB/bin"
 cp "$CREDENTIALS" "$H/user-home/.local/share/devin/credentials.toml"
 chmod 600 "$H/user-home/.local/share/devin/credentials.toml"
+# A user Claude Code hook Devin would import by default; the worker config
+# must keep it from ever running.
+mkdir -p "$H/user-home/.claude"
+jq -n --arg cmd "cat >> '$LAB/claude-hooks.jsonl'" \
+  '{hooks: {SessionStart: [{hooks: [{type: "command", command: $cmd}]}], UserPromptSubmit: [{hooks: [{type: "command", command: $cmd}]}], Stop: [{hooks: [{type: "command", command: $cmd}]}]}}' \
+  > "$H/user-home/.claude/settings.json"
+git -C "$WT" config user.name 'Devin Live Guard'
+git -C "$WT" config user.email devin-live-guard@example.invalid
 # Keep SessionStart evidence for native resume and command hooks for tool ancestry.
 jq -n --arg cmd "cat >> '$LAB/events.jsonl'; printf '\n' >> '$LAB/events.jsonl'" \
   '{hooks: {SessionStart: [{hooks: [{type: "command", command: $cmd}]}], PreToolUse: [{hooks: [{type: "command", command: $cmd}]}]}}' \
   > "$H/user-home/.config/devin/config.json"
-fm_test_spawn_brief "$H" "$ID" "Runtime verification only: compute 12345 plus 67890 using your shell tool and write only the result into answer.txt. Also run '$ROOT/bin/fm-harness.sh' and write its output to harness.txt. Do no other work and do not delegate. Later read and acknowledge Firstmate's instruction inbox when the doorbell arrives."
+fm_test_spawn_brief "$H" "$ID" "Runtime verification only: compute 12345 plus 67890 using your shell tool and write only the result into answer.txt, then commit answer.txt with git using a commit message you write yourself. Also run '$ROOT/bin/fm-harness.sh' and write its output to harness.txt. Do no other work and do not delegate. Later read and acknowledge Firstmate's instruction inbox when the doorbell arrives."
 fakebin=$(make_spawn_fakebin "$LAB/fake" claude)
 ln -s "$DEVIN_BIN" "$fakebin/devin"
 FM_FAKE_LAUNCH_LOG="$LAB/launch.sh" fm_test_run_spawn "$H" "$WT" "$fakebin" "$ID" "$PROJ" \
@@ -63,6 +73,7 @@ TARGET="firstmate:fm-$ID"
 "$REAL_TMUX" -S "$SOCKET" new-session -d -s firstmate -n "fm-$ID" -x 120 -y 40 -c "$WT" \
   "HOME='$H/user-home' /bin/sh '$LAB/launch.sh'; exec /bin/bash --noprofile --norc" || fail 'could not start pane'
 capture() { "$REAL_TMUX" -S "$SOCKET" capture-pane -p -e -t "$TARGET"; }
+screen_text() { "$REAL_TMUX" -S "$SOCKET" capture-pane -p -t "$TARGET"; }
 wait_file() {
   local path=$1 i
   for i in $(seq 1 480); do [ -s "$path" ] && return 0; sleep 0.5; done
@@ -84,6 +95,13 @@ wait_idle
 [ -f "$H/state/$ID.turn-ended" ] || fail 'Stop did not notify turn end'
 [ "$(fm_backend_agent_state tmux "$TARGET")" = alive ] || fail 'real Devin process not classified alive'
 pass "$VERSION: spawn brief, model, autonomy, trust, identity and native Stop"
+git -C "$WT" log -1 --format=%B -- answer.txt > "$LAB/commit.txt" 2>/dev/null
+[ -s "$LAB/commit.txt" ] || fail 'the worker did not commit answer.txt'
+! grep -qiE 'co-authored-by|generated with' "$LAB/commit.txt" \
+  || fail "worker commit carries Devin attribution: $(cat "$LAB/commit.txt")"
+[ ! -e "$LAB/claude-hooks.jsonl" ] \
+  || fail "the worker ran imported Claude Code hooks: $(head -c 300 "$LAB/claude-hooks.jsonl")"
+pass "$VERSION: no Claude Code hook ran and the worker commit carries no attribution"
 # The full styled screen, not an invented glyph-only fixture, must be safe to type into.
 verdict=$(fm_composer_classify_screen $'styled=1\ncursor=1\nidentity=1\nrows=0' "$(capture)" \
   "$(tmux display-message -p -t "$TARGET" '#{cursor_y}')" devin)
@@ -94,6 +112,36 @@ wait_file "$H/state/$ID.inbox/handled/001.msg"
 [ "$(tr -d '[:space:]' < "$WT/steer.txt")" = 1147 ] || fail 'wrong steering result'
 wait_idle
 pass "$VERSION: real fm-send doorbell read and acknowledged"
+# An idle Devin opens its /revert picker (Enter reverts) on a fast Escape pair,
+# so an interrupt with no running turn must send one press and open nothing.
+"$ROOT/bin/fm-control.sh" "$ID" interrupt > "$LAB/idle-interrupt.log" 2>&1 \
+  || fail "idle interrupt failed: $(cat "$LAB/idle-interrupt.log")"
+grep -q 'cancel=not-running' "$LAB/idle-interrupt.log" \
+  || fail "idle interrupt did not report not-running: $(cat "$LAB/idle-interrupt.log")"
+sleep 1.5
+! screen_text | grep -q 'Revert to step' || fail 'idle interrupt opened the revert picker'
+# The hazard is real on this version: a raw fast pair opens the picker. Exit
+# must refuse to type into it and interrupt must close it with no revert.
+picker=0
+for _ in 1 2 3; do
+  tmux send-keys -t "$TARGET" Escape
+  tmux send-keys -t "$TARGET" Escape
+  sleep 1
+  if screen_text | grep -q 'Revert to step'; then picker=1; break; fi
+  sleep 1
+done
+[ "$picker" = 1 ] || fail 'a raw fast Escape pair no longer opens the revert picker; re-verify the interrupt arm gate'
+if "$ROOT/bin/fm-control.sh" "$ID" exit > "$LAB/picker-exit.log" 2>&1; then
+  fail "exit proceeded with the revert picker open: $(cat "$LAB/picker-exit.log")"
+fi
+screen_text | grep -q 'Revert to step' || fail 'the refused exit closed or typed into the picker'
+"$ROOT/bin/fm-control.sh" "$ID" interrupt > "$LAB/picker-interrupt.log" 2>&1 \
+  || fail "interrupt could not close the revert picker: $(cat "$LAB/picker-interrupt.log")"
+sleep 1
+! screen_text | grep -q 'Revert to step' || fail 'interrupt left the revert picker open'
+[ "$(tr -d '[:space:]' < "$WT/steer.txt")" = 1147 ] && [ "$(tr -d '[:space:]' < "$WT/answer.txt")" = 80235 ] \
+  || fail 'the revert picker changed the worker files'
+pass "$VERSION: idle interrupt sends one press; an open revert picker blocks exit and is closed without reverting"
 "$ROOT/bin/fm-send.sh" "$ID" 'Runtime interrupt verification: run sleep 90 in your shell tool, then wait for it to finish. Do not respond before it finishes.' > "$LAB/send.log" 2>&1 || fail 'could not steer interrupt probe'
 seen_busy=0
 for _ in $(seq 1 240); do
@@ -103,6 +151,7 @@ for _ in $(seq 1 240); do
 done
 [ "$seen_busy" = 1 ] || fail 'no semantic and rendered busy during interrupt probe'
 "$ROOT/bin/fm-control.sh" "$ID" interrupt > "$LAB/interrupt.log" 2>&1 || fail "interrupt failed: $(cat "$LAB/interrupt.log")"
+grep -q 'cancel=unconfirmed' "$LAB/interrupt.log" || fail "busy interrupt was not armed: $(cat "$LAB/interrupt.log")"
 [ "$(fm_busy_classify tmux "$TARGET" devin "$ID" "$H/state")" = 'unknown fm-interrupt' ] || fail 'interrupt did not conservatively invalidate state'
 for _ in $(seq 1 60); do
   capture | grep -q 'Canceled. What should Devin do?' && break
