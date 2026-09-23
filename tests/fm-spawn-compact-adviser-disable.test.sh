@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # tests/fm-spawn-compact-adviser-disable.test.sh - every agent this fleet
-# launches must start with COMPACT_ADVISER_DISABLE=1 in its environment.
+# launches must start with COMPACT_ADVISER_DISABLE=1 in its environment, unless
+# the home opts in through config/compact-adviser, in which case no launch path
+# may set the switch at all and the cleared allowlisted environment must still
+# deliver the two names the adviser needs.
 #
 # The assertions never read bin/fm-spawn.sh's source. They drive the real spawn
 # against a fake pane and a real isolated git worktree, then EXECUTE the launch
@@ -253,57 +256,67 @@ SH
   chmod +x "$fb/sleep"
 }
 
+# relaunch_case <name> <allowlist:absent|enabled> <compact-adviser:absent|present>
+# Provisions a home holding one recorded task, drives the relaunch verb, and
+# leaves the case directory, the replacement launch command, and the pane
+# preamble in RELAUNCH_DIR, RELAUNCH_LAUNCH, and RELAUNCH_PREAMBLE.
+relaunch_case() {
+  local name=$1 allowlist=$2 optin=$3 dir home proj wt id out status
+  id="relaunch-$name-a1"
+  dir="$TMP_ROOT/relaunch-$name"
+  home="$dir/home"
+  proj="$dir/proj"
+  wt="$dir/wt"
+  mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$dir/fake"
+  touch "$home/state/.last-watcher-beat"
+  [ "$allowlist" = absent ] || : > "$home/config/launch-env-allowlist"
+  [ "$optin" = absent ] || : > "$home/config/compact-adviser"
+  make_relaunch_stub "$dir"
+  fm_git_worktree "$proj" "$wt" "wt-relaunch-$name"
+  fm_test_spawn_brief "$home" "$id"
+  : > "$dir/fake/literal"
+  : > "$dir/fake/keys"
+  printf 'codex' > "$dir/fake/command"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$wt" > "$dir/fake/cwd"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$wt"
+    echo "project=$proj"
+    echo "harness=codex"
+    echo "kind=ship"
+    echo "mode=no-mistakes"
+    echo "yolo=off"
+    echo "tasktmp=$dir/tasktmp"
+    echo "model=default"
+    echo "effort=default"
+  } > "$home/state/$id.meta"
+
+  mkdir -p "$dir/user-home"
+  out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_FAKE_DIR="$dir/fake" \
+    HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' FM_SPAWN_NO_GUARD=1 \
+    FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    "$CONTROL" "$id" relaunch --note 'replacement continues the same task' 2>&1)
+  status=$?
+  expect_code 0 "$status" "relaunch $name (allowlist=$allowlist compact-adviser=$optin) should succeed: $out"
+  RELAUNCH_DIR=$dir
+  RELAUNCH_LAUNCH=$(grep 'encode launch-brief' "$dir/fake/literal" | tail -1)
+  [ -n "$RELAUNCH_LAUNCH" ] || fail "relaunch $name sent no replacement launch command"
+  RELAUNCH_PREAMBLE=$(grep '^export ' "$dir/fake/keys")
+}
+
 test_relaunch_rebuilds_the_switch() {
-  local setting dir home proj wt id out status seen launch preamble
+  local setting seen
   for setting in absent enabled; do
-    id="relaunch-$setting-a1"
-    dir="$TMP_ROOT/relaunch-$setting"
-    home="$dir/home"
-    proj="$dir/proj"
-    wt="$dir/wt"
-    mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$dir/fake"
-    touch "$home/state/.last-watcher-beat"
-    [ "$setting" = absent ] || : > "$home/config/launch-env-allowlist"
-    make_relaunch_stub "$dir"
-    fm_git_worktree "$proj" "$wt" "wt-relaunch-$setting"
-    fm_test_spawn_brief "$home" "$id"
-    : > "$dir/fake/literal"
-    : > "$dir/fake/keys"
-    printf 'codex' > "$dir/fake/command"
-    printf '%s\n' "fm-$id" > "$dir/fake/windows"
-    printf '%s' "$wt" > "$dir/fake/cwd"
-    {
-      echo "window=fmses:fm-$id"
-      echo "endpoint_task_id=$id"
-      echo "worktree=$wt"
-      echo "project=$proj"
-      echo "harness=codex"
-      echo "kind=ship"
-      echo "mode=no-mistakes"
-      echo "yolo=off"
-      echo "tasktmp=$dir/tasktmp"
-      echo "model=default"
-      echo "effort=default"
-    } > "$home/state/$id.meta"
-
-    mkdir -p "$dir/user-home"
-    out=$(env PATH="$dir/fakebin:$PATH" FM_HOME="$home" FM_FAKE_DIR="$dir/fake" \
-      HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' FM_SPAWN_NO_GUARD=1 \
-      FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
-      "$CONTROL" "$id" relaunch --note 'replacement continues the same task' 2>&1)
-    status=$?
-    expect_code 0 "$status" "relaunch with allowlist=$setting should succeed: $out"
-
-    grep -qx 'export COMPACT_ADVISER_DISABLE=1' "$dir/fake/keys" \
+    relaunch_case "$setting" "$setting" absent
+    grep -qx 'export COMPACT_ADVISER_DISABLE=1' "$RELAUNCH_DIR/fake/keys" \
       || fail "relaunch with allowlist=$setting did not re-export the compact-adviser switch into the pane"
-    launch=$(grep 'encode launch-brief' "$dir/fake/literal" | tail -1)
-    [ -n "$launch" ] || fail "relaunch with allowlist=$setting sent no replacement launch command"
-    install_env_probe "$dir/fakebin" codex
-    preamble=$(grep '^export ' "$dir/fake/keys")
-    seen=$(env -i HOME="$dir/user-home" PATH="$dir/fakebin:$PATH" TERM=xterm \
+    install_env_probe "$RELAUNCH_DIR/fakebin" codex
+    seen=$(env -i HOME="$RELAUNCH_DIR/user-home" PATH="$RELAUNCH_DIR/fakebin:$PATH" TERM=xterm \
       TMUX=synthetic-pane COMPACT_ADVISER_DISABLE="$CONTRARY" \
-      /bin/sh -c "$preamble
-$launch") \
+      /bin/sh -c "$RELAUNCH_PREAMBLE
+$RELAUNCH_LAUNCH") \
       || fail "relaunch with allowlist=$setting: the replacement launch failed to run"
     assert_equals 1 "$seen" \
       "a relaunched agent with allowlist=$setting must start with the compact adviser disabled, exactly as a fresh spawn does"
@@ -345,9 +358,158 @@ SH
   pass "a compound raw launch-command still starts its agent with the compact-adviser switch on"
 }
 
+# --- config/compact-adviser opt-in ------------------------------------------
+#
+# A present config/compact-adviser file is the one gate on the switch above.
+# The probe below reports the switch and the two names the adviser needs, so
+# executing an opted-in launch answers both halves of that contract: no launch
+# path puts the switch there, and the cleared allowlisted environment still
+# delivers the names the destination pane carries.
+install_opt_in_probe() {  # <fakebin> <harness>
+  cat > "$1/$2" <<'SH'
+#!/bin/sh
+printf '%s\n' "${COMPACT_ADVISER_DISABLE-unset}" "${TYPESAFE_API_KEY-unset}" \
+  "${CLAUDE_CODE_ENABLE_FUNCTION_HOOKS-unset}"
+SH
+  chmod +x "$1/$2"
+}
+
+# Synthetic nonsecret stand-ins for what the captain's pane shell carries, and a
+# distinct value planted in the SPAWNING process: values expand in the
+# destination pane, so the spawning process's own value must never reach launch
+# text or the pane.
+SYNTHETIC_KEY=synthetic-typesafe-key
+SPAWN_PROCESS_KEY=spawn-process-value-that-must-not-leak
+
+# Replay a launch in a synthetic pane that carries the adviser's two names.
+# <switch> is the pane's own COMPACT_ADVISER_DISABLE, or "absent" for a pane
+# that never had it.
+#   opt_in_launch_env <bindir> <home> <launch> <preamble> <switch>
+opt_in_launch_env() {
+  local bindir=$1 home=$2 launch=$3 preamble=$4 switch=$5
+  if [ "$switch" = absent ]; then set --; else set -- COMPACT_ADVISER_DISABLE="$switch"; fi
+  env -i HOME="$home" PATH="$bindir:$PATH" TERM=xterm TMUX=synthetic-pane \
+    TYPESAFE_API_KEY="$SYNTHETIC_KEY" CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 "$@" \
+    /bin/sh -c "$preamble
+$launch"
+}
+
+# What an opted-in agent must see. With ambient inheritance the pane's own
+# switch value passes through untouched, because the launch neither sets nor
+# rewrites it; under the cleared allowlisted environment the switch is no longer
+# a floor entry, so a pane value is dropped and only the adviser's names remain.
+#   opt_in_expected <allowlist:absent|enabled> <switch|absent>
+opt_in_expected() {
+  local allowlist=$1 switch=$2
+  if [ "$switch" = absent ] || [ "$allowlist" = enabled ]; then switch='unset'; fi
+  printf '%s\n' "$switch" "$SYNTHETIC_KEY" 1
+}
+
+assert_no_pane_compact_export() {  # <pane-log> <label>
+  [ "$(pane_export_lines "$1")" = 0 ] \
+    || fail "$2: an opted-in launch must not export the compact-adviser switch into the pane, got $(pane_export_lines "$1")"
+  grep -q '^export GOTMPDIR=' "$1" \
+    || fail "$2: the pane log is missing the GOTMPDIR pre-launch export, so the pane channel itself never ran"
+}
+
+test_opt_in_ship_launch_leaves_the_switch_alone() {
+  local setting rec out status launch preamble seen switch
+  for setting in absent enabled; do
+    rec=$(make_case "optin-ship-$setting" codex "optin-ship-$setting-a1")
+    read_case "$rec"
+    : > "$HOME_DIR/config/compact-adviser"
+    [ "$setting" = absent ] || : > "$HOME_DIR/config/launch-env-allowlist"
+    out=$(TYPESAFE_API_KEY="$SPAWN_PROCESS_KEY" CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
+      run_case_spawn "optin-ship-$setting-a1" "$PROJ_DIR" --mode no-mistakes --yolo off)
+    status=$?
+    expect_code 0 "$status" "opted-in ship spawn with allowlist=$setting should succeed: $out"
+    assert_no_pane_compact_export "$PANE_LOG" "opted in, allowlist $setting"
+    launch=$(cat "$LAUNCH_LOG")
+    preamble=$(grep '^export ' "$PANE_LOG")
+    assert_not_contains "$launch$preamble" "$SPAWN_PROCESS_KEY" \
+      "opted in, allowlist $setting: the spawning process's key value must never reach launch text or the pane"
+    install_opt_in_probe "$FAKEBIN_DIR" codex
+    for switch in absent "$CONTRARY"; do
+      seen=$(opt_in_launch_env "$FAKEBIN_DIR" "$TMP_ROOT/pane-home" "$launch" "$preamble" "$switch") \
+        || fail "opted in, allowlist $setting, pane switch $switch: the emitted launch failed to run"
+      assert_equals "$(opt_in_expected "$setting" "$switch")" "$seen" \
+        "opted in, allowlist $setting, pane switch $switch: the agent must start with the switch left alone and the adviser's names intact"
+    done
+  done
+  pass "an opted-in ship launch never sets the compact-adviser switch and keeps the adviser's names through the cleared environment"
+}
+
+# The forwarding is gated by the opt-in: a home that keeps the default must not
+# have the adviser's names slip through its cleared environment.
+test_default_allowlist_still_strips_the_adviser_names() {
+  local rec out status launch preamble seen
+  rec=$(make_case default-strips codex default-strips-a1)
+  read_case "$rec"
+  : > "$HOME_DIR/config/launch-env-allowlist"
+  out=$(run_case_spawn default-strips-a1 "$PROJ_DIR" --mode no-mistakes --yolo off)
+  status=$?
+  expect_code 0 "$status" "default ship spawn under an allowlist should succeed: $out"
+  install_opt_in_probe "$FAKEBIN_DIR" codex
+  launch=$(cat "$LAUNCH_LOG")
+  preamble=$(grep '^export ' "$PANE_LOG")
+  seen=$(opt_in_launch_env "$FAKEBIN_DIR" "$TMP_ROOT/pane-home" "$launch" "$preamble" absent) \
+    || fail "default, allowlist enabled: the emitted launch failed to run"
+  assert_equals "$(printf '%s\n' 1 unset unset)" "$seen" \
+    "without the opt-in, the cleared environment must keep the switch on and strip the adviser's names"
+  pass "the default posture keeps the switch and does not forward the adviser's names"
+}
+
+test_opt_in_secondmate_launch() {
+  local rec sm out status launch preamble seen
+  rec=$(make_case optin-secondmate codex sm-optin)
+  read_case "$rec"
+  : > "$HOME_DIR/config/compact-adviser"
+  : > "$HOME_DIR/config/launch-env-allowlist"
+  sm="$CASE_DIR/secondmate-home"
+  mkdir -p "$sm/bin" "$sm/data"
+  printf '# Firstmate\n' > "$sm/AGENTS.md"
+  printf '%s\n' sm-optin > "$sm/.fm-secondmate-home"
+  printf 'charter for sm-optin\n' > "$sm/data/charter.md"
+  out=$(run_case_spawn sm-optin "$sm" --secondmate)
+  status=$?
+  expect_code 0 "$status" "opted-in secondmate spawn should succeed: $out"
+  assert_present "$sm/config/compact-adviser" \
+    "the secondmate home must inherit the compact-adviser opt-in so its own launches follow it"
+  assert_no_pane_compact_export "$PANE_LOG" "opted in, secondmate"
+  install_opt_in_probe "$FAKEBIN_DIR" codex
+  launch=$(cat "$LAUNCH_LOG")
+  preamble=$(grep '^export ' "$PANE_LOG")
+  seen=$(opt_in_launch_env "$FAKEBIN_DIR" "$TMP_ROOT/pane-home" "$launch" "$preamble" "$CONTRARY") \
+    || fail "opted in, secondmate: the emitted launch failed to run"
+  assert_equals "$(opt_in_expected enabled "$CONTRARY")" "$seen" \
+    "an opted-in secondmate must start with the switch unset and the adviser's names forwarded"
+  pass "a secondmate launch honors the opt-in and inherits it into the secondmate home"
+}
+
+test_relaunch_honors_the_opt_in() {
+  local setting seen
+  for setting in absent enabled; do
+    relaunch_case "optin-$setting" "$setting" present
+    if grep -q '^export COMPACT_ADVISER_DISABLE=' "$RELAUNCH_DIR/fake/keys"; then
+      fail "relaunch with allowlist=$setting exported the compact-adviser switch into the pane although the home opted in"
+    fi
+    install_opt_in_probe "$RELAUNCH_DIR/fakebin" codex
+    seen=$(opt_in_launch_env "$RELAUNCH_DIR/fakebin" "$RELAUNCH_DIR/user-home" \
+      "$RELAUNCH_LAUNCH" "$RELAUNCH_PREAMBLE" "$CONTRARY") \
+      || fail "opted-in relaunch with allowlist=$setting: the replacement launch failed to run"
+    assert_equals "$(opt_in_expected "$setting" "$CONTRARY")" "$seen" \
+      "a relaunched agent with allowlist=$setting must honor the opt-in exactly as a fresh spawn does"
+  done
+  pass "relaunch honors the compact-adviser opt-in in both allowlist postures"
+}
+
 test_ship_allowlist_absent
 test_ship_allowlist_enabled
 test_launch_command_carries_the_switch_without_the_pane_export
 test_secondmate_launch
 test_relaunch_rebuilds_the_switch
 test_raw_compound_launch_command_carries_the_switch
+test_opt_in_ship_launch_leaves_the_switch_alone
+test_default_allowlist_still_strips_the_adviser_names
+test_opt_in_secondmate_launch
+test_relaunch_honors_the_opt_in

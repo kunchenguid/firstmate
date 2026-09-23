@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tests/fm-spawn-compact-adviser-disable-remote.test.sh - the compact-adviser
-# kill switch must reach a second mate that Firstmate launches on another host.
+# kill switch must reach a second mate that Firstmate launches on another host,
+# and the parent's config/compact-adviser opt-in must reach it the same way.
 #
 # A remote second mate never reaches the local spawn path covered by
 # tests/fm-spawn-compact-adviser-disable.test.sh: bin/fm-spawn.sh routes it
@@ -188,5 +189,59 @@ SEEN=$(replay_remote_launch bare) \
 assert_equals 1 "$SEEN" \
   "a remote second mate launched under the cleared allowlisted environment must still start with the compact adviser disabled"
 pass "the remote route keeps the compact-adviser switch through the cleared allowlisted environment"
+
+# --- an opted-in parent leaves the remote switch alone ----------------------
+# config/compact-adviser is inherited local material like the allowlist, so the
+# parent's opt-in is what the remote host's own fm-spawn reads. The probe now
+# also reports the two names the adviser needs, because the cleared environment
+# must forward them once the home opts in.
+cat > "$PROBEBIN/codex" <<'SH'
+#!/bin/sh
+printf '%s\n' "${COMPACT_ADVISER_DISABLE-unset}" "${TYPESAFE_API_KEY-unset}" \
+  "${CLAUDE_CODE_ENABLE_FUNCTION_HOOKS-unset}"
+SH
+SYNTHETIC_KEY=synthetic-typesafe-key
+replay_opt_in_launch() {  # <switch|absent>
+  local switch=$1 preamble launch
+  launch=$(remote_launch_command)
+  [ -n "$launch" ] || fail "the remote pane received no launch command"
+  preamble=$(remote_pane_exports)
+  if [ "$switch" = absent ]; then set --; else set -- COMPACT_ADVISER_DISABLE="$switch"; fi
+  env -i HOME="$TMP_ROOT/pane-home" PATH="$PROBEBIN:$PATH" TERM=xterm \
+    TYPESAFE_API_KEY="$SYNTHETIC_KEY" CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 "$@" \
+    /bin/sh -c "$preamble
+$launch"
+}
+assert_no_remote_compact_export() {  # <label>
+  if remote_pane_exports | grep -q '^export COMPACT_ADVISER_DISABLE='; then
+    fail "$1: the remote pane shell received the compact-adviser export although the parent opted in"
+  fi
+}
+
+: > "$PARENT/config/compact-adviser"
+run_remote_launch 'opted in, allowlist enabled'
+assert_present "$REMOTE_HOME/config/compact-adviser" \
+  "the remote launch did not inherit the compact-adviser opt-in"
+assert_no_remote_compact_export 'opted in, allowlist enabled'
+LAUNCH=$(remote_launch_command)
+assert_contains "$LAUNCH" '/usr/bin/env -i' \
+  "the inherited allowlist should still launch the opted-in remote second mate under a cleared environment"
+SEEN=$(replay_opt_in_launch "$CONTRARY") \
+  || fail "the opted-in cleared-environment remote launch failed to run"
+assert_equals "$(printf '%s\n' unset "$SYNTHETIC_KEY" 1)" "$SEEN" \
+  "an opted-in remote second mate under the cleared environment must start with the switch unset and the adviser's names forwarded"
+pass "the remote route honors the compact-adviser opt-in and forwards the adviser's names through the cleared environment"
+
+# --- and with ambient inheritance the remote agent gets exactly its pane -----
+rm "$PARENT/config/launch-env-allowlist"
+run_remote_launch 'opted in, allowlist absent'
+assert_absent "$REMOTE_HOME/config/launch-env-allowlist" \
+  "the remote home retained an allowlist the parent removed"
+assert_no_remote_compact_export 'opted in, allowlist absent'
+SEEN=$(replay_opt_in_launch absent) \
+  || fail "the opted-in ambient remote launch failed to run"
+assert_equals "$(printf '%s\n' unset "$SYNTHETIC_KEY" 1)" "$SEEN" \
+  "an opted-in remote second mate with ambient inheritance must start with the switch left unset"
+pass "the remote route leaves an opted-in second mate's ambient environment untouched"
 
 echo "ALL TESTS PASSED"

@@ -274,7 +274,8 @@
 #   TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_PANE_ID
 #   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID CMUX_SOCKET_PATH
 #   ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION, plus the task
-#   marker FM_TASK_ID that ship and scout panes receive above, plus the
+#   marker FM_TASK_ID that ship and scout panes receive above, plus, unless
+#   config/compact-adviser is present (next section), the
 #   compact-adviser kill switch COMPACT_ADVISER_DISABLE, which the floor also
 #   pins to 1 with a literal assignment so it survives the cleared environment
 #   even on a host that never had it set.
@@ -284,6 +285,24 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+# Compact adviser (config/compact-adviser):
+#   Absent, the default, means every launch this script emits - ship, scout,
+#   secondmate, raw command, and relaunch - exports COMPACT_ADVISER_DISABLE=1
+#   ahead of the agent command, sends the same export to the pane shell before
+#   the launch, and pins it again inside the cleared-environment floor above,
+#   so an unattended agent never activates the compact-adviser Claude Code
+#   function-hooks module. A present file is a presence flag that opts the
+#   home's launched agents in to the adviser: no launch path then sets,
+#   forwards, or pins COMPACT_ADVISER_DISABLE at all, because the module
+#   treats the variable's presence as the switch, so the agent inherits
+#   exactly what its pane shell carries. Under an enabled
+#   config/launch-env-allowlist the floor additionally forwards the two names
+#   the adviser needs, TYPESAFE_API_KEY and CLAUDE_CODE_ENABLE_FUNCTION_HOOKS,
+#   by name only, expanded in the destination pane like every other allowlisted
+#   name and never copied into launch text, briefs, metadata, or logs. The
+#   file's content is ignored; it is read once per spawn or relaunch and is
+#   inherited into secondmate homes (bin/fm-config-inherit-lib.sh), so a local
+#   or remote second mate's own launches follow the same choice.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -525,6 +544,12 @@ if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
       exit 1
       ;;
   esac
+fi
+# config/compact-adviser (header above): an opt-in presence flag read once per
+# spawn or relaunch. 0 keeps the default kill switch on every launch path, and
+# 1 makes every launch path leave COMPACT_ADVISER_DISABLE alone.
+if ! COMPACT_ADVISER_OPT_IN=$(fm_config_source_present "$CONFIG/compact-adviser"); then
+  exit 1
 fi
 SUB_HOME_MARKER=".fm-secondmate-home"
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
@@ -4702,22 +4727,27 @@ if [ "$KIND" = secondmate ]; then
   # injected carrier and this on/off snapshot are guaranteed to agree.
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
-# Every agent this fleet launches - crewmate, scout, and secondmate, on a fresh
-# spawn and on a relaunch alike - runs with the compact-adviser kill switch on.
+# Unless config/compact-adviser opts this home in (header above), every agent
+# this fleet launches - crewmate, scout, and secondmate, on a fresh spawn and on
+# a relaunch alike - runs with the compact-adviser kill switch on.
 # This is an export statement rather than a forwarded ambient name or a
 # command-prefix assignment, so it carries the value across an entire compound
 # raw launch expression. A pane that never had it, and a remote host whose
-# transport never carried it, both still start the agent with it set. It is
-# unconditional, with no config file or flag gating it, and is inserted outside
-# every generated launch prefix; relaunch trace cleanup may execute first but
-# cannot change this value. The cleared-environment floor in the
-# LAUNCH_ENV_PREFIX construction below sets it again at the `env -i` boundary,
-# so under an enabled allowlist the switch is established before the wrapping
-# `/bin/sh` starts rather than only inside the command that shell runs.
+# transport never carried it, both still start the agent with it set. The
+# presence flag is its only gate, and the export is inserted outside every
+# generated launch prefix; relaunch trace cleanup may execute first but cannot
+# change this value. The cleared-environment floor in the LAUNCH_ENV_PREFIX
+# construction below sets it again at the `env -i` boundary, so under an
+# enabled allowlist the switch is established before the wrapping `/bin/sh`
+# starts rather than only inside the command that shell runs. An opted-in home
+# skips every one of those sites rather than exporting another value, because
+# the module treats the variable's presence as the switch.
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   LAUNCH="export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST"); $LAUNCH"
 fi
-LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
+if [ "$COMPACT_ADVISER_OPT_IN" != 1 ]; then
+  LAUNCH="export COMPACT_ADVISER_DISABLE=1; $LAUNCH"
+fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
 fi
@@ -4754,8 +4784,11 @@ spawn_record_traceparent() {
 spawn_send_text_line "$T" "export GOTMPDIR=$TASK_TMP/gotmp"
 # Export the compact-adviser kill switch into the pane shell through the same
 # pre-launch channel, so later commands in that shell inherit it too. The launch
-# command independently establishes the value for the agent process itself.
-spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1"
+# command independently establishes the value for the agent process itself. An
+# opted-in home sends nothing here and leaves the pane shell exactly as it was.
+if [ "$COMPACT_ADVISER_OPT_IN" != 1 ]; then
+  spawn_send_text_line "$T" "export COMPACT_ADVISER_DISABLE=1"
+fi
 if [ "$LAVISH_AXI_HOST_CONFIG_PRESENT" = 1 ]; then
   spawn_send_text_line "$T" "export LAVISH_AXI_HOST=$(shell_quote "$LAVISH_AXI_HOST")"
 fi
@@ -4786,14 +4819,23 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
-  # COMPACT_ADVISER_DISABLE is the intentional declarative floor-membership
-  # entry; the explicit COMPACT_ADVISER_DISABLE=1 assignment below is the
-  # authoritative setter.
+  # The compact-adviser floor entries follow config/compact-adviser (header
+  # above). Absent: COMPACT_ADVISER_DISABLE is the intentional declarative
+  # floor-membership entry, and the explicit COMPACT_ADVISER_DISABLE=1
+  # assignment below is the authoritative setter. Present: the kill switch
+  # leaves the floor entirely, and the two names the adviser needs join it as
+  # forwarded names, so the cleared environment does not strip what the
+  # destination pane already carries. Only names enter the launch text.
+  if [ "$COMPACT_ADVISER_OPT_IN" = 1 ]; then
+    compact_adviser_floor='TYPESAFE_API_KEY CLAUDE_CODE_ENABLE_FUNCTION_HOOKS'
+  else
+    compact_adviser_floor=COMPACT_ADVISER_DISABLE
+  fi
   for env_name in HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTYPE \
     TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
     HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
     CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
-    FM_TASK_ID COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
+    FM_TASK_ID $compact_adviser_floor LAVISH_AXI_HOST \
     $LAUNCH_ENV_NAMES; do
     # Only validated names enter shell syntax. Values expand once, quoted, in
     # the pane shell and never become source text or spawn-process snapshots.
@@ -4801,16 +4843,18 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     printf -v env_arg '${%s+"%s=$%s"}' "$env_name" "$env_name" "$env_name"
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $env_arg"
   done
-  # COMPACT_ADVISER_DISABLE is retained by the floor loop above, which forwards
-  # whatever the pane export set, and then pinned here to the one value Firstmate
-  # launches on. The literal assignment comes last deliberately: `env` applies
-  # assignments left to right, so this one wins over a forwarded pane value, and
-  # it still delivers the switch on a pane whose export never landed. Unlike the
-  # trace carrier below it carries no gate, so it is appended unconditionally.
-  # Setting it here rather than relying on the assignment already carried by
-  # $LAUNCH is what gives the wrapping `/bin/sh` itself the switch, not only the
-  # agent command it runs.
-  LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX COMPACT_ADVISER_DISABLE=1"
+  # By default COMPACT_ADVISER_DISABLE is retained by the floor loop above, which
+  # forwards whatever the pane export set, and then pinned here to the one value
+  # Firstmate launches on. The literal assignment comes last deliberately: `env`
+  # applies assignments left to right, so this one wins over a forwarded pane
+  # value, and it still delivers the switch on a pane whose export never landed.
+  # Its only gate is the config/compact-adviser opt-in, which skips it together
+  # with the export sites above. Setting it here rather than relying on the
+  # assignment already carried by $LAUNCH is what gives the wrapping `/bin/sh`
+  # itself the switch, not only the agent command it runs.
+  if [ "$COMPACT_ADVISER_OPT_IN" != 1 ]; then
+    LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX COMPACT_ADVISER_DISABLE=1"
+  fi
   if [ -n "$SPAWN_TRACEPARENT" ]; then
     # shellcheck disable=SC2016
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
