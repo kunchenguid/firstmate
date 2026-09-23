@@ -1035,6 +1035,15 @@ fm_lock_try_recover_steal_mutex() {  # <steal-lock> <observed-pid> <current-pid>
       FM_LOCK_HELD_PID=$recovery_pid
       return 1
     fi
+    case "$recovery_pid" in
+      ''|*[!0-9]*|0) ;;
+      *)
+        if [ "$recovery_pid" != "$current" ] && kill -0 -"$recovery_pid" 2>/dev/null; then
+          FM_LOCK_HELD_PID=$recovery_pid
+          return 1
+        fi
+        ;;
+    esac
     if [ -n "$recovery_pid" ] && [ "$recovery_pid" = "$current" ]; then
       fm_lock_remove_path "$recovery" || true
     else

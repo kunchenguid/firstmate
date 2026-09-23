@@ -433,7 +433,7 @@ test_lock_live_recovery_holder_is_not_reclaimed() {
   pass "live recovery-mutex holder is not reclaimed"
 }
 
-test_lock_recovery_with_live_process_group_is_refused() {
+test_lock_recovery_with_live_process_group_is_waited_out() {
   local dir state lockdir dead leader out waiter i
   dir=$(make_case lock-recovery-group)
   state="$dir/state"
@@ -451,28 +451,26 @@ test_lock_recovery_with_live_process_group_is_refused() {
   printf '%s\n' "$leader" > "$lockdir.steal.recovery/pid"
   out=$(FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
-    fm_lock_try_acquire "$2" 2>/dev/null
-    printf "try=%s " "$?"
-    fm_lock_acquire_wait_refusable "$2" 2>/dev/null
-    printf "refusable=%s\n" "$?"
-  ' _ "$LIB" "$lockdir")
-  if [ "$out" != "try=2 refusable=2" ]; then
+    fm_lock_try_acquire "$2"
+    printf "try=%s\n" "$?"
+  ' _ "$LIB" "$lockdir" 2>&1)
+  if [ "$out" != "try=1" ]; then
     kill -KILL -"$leader" 2>/dev/null || true
-    fail "recovery mutex with a live process group was not refused: $out"
+    fail "recovery mutex with a live process group was not treated as held: $out"
   fi
   [ "$(cat "$lockdir.steal.recovery/pid")" = "$leader" ] \
-    || fail "refused recovery mutex evidence changed"
-  [ "$(cat "$lockdir/pid")" = "$dead" ] || fail "primary lock evidence changed on refusal"
+    || fail "held recovery mutex evidence changed"
+  [ "$(cat "$lockdir/pid")" = "$dead" ] || fail "primary lock evidence changed while waiting"
   FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
-    fm_lock_acquire_wait "$2" 2>/dev/null
+    fm_lock_acquire_wait_refusable "$2" 2>/dev/null
     printf "%s\n" "$?" > "$3"
   ' _ "$LIB" "$lockdir" "$dir/waited" &
   waiter=$!
   sleep 0.5
   if ! kill -0 "$waiter" 2>/dev/null; then
     kill -KILL -"$leader" 2>/dev/null || true
-    fail "blocking lock wait returned while the recovery holder group was alive"
+    fail "refusable lock wait returned while the recovery holder group was alive: $(cat "$dir/waited" 2>/dev/null)"
   fi
   kill -KILL -"$leader" 2>/dev/null || true
   i=0
@@ -483,11 +481,11 @@ test_lock_recovery_with_live_process_group_is_refused() {
   if kill -0 "$waiter" 2>/dev/null; then
     kill "$waiter" 2>/dev/null || true
     wait "$waiter" 2>/dev/null || true
-    fail "blocking lock wait did not recover after the holder group exited"
+    fail "refusable lock wait did not resume after the holder group exited"
   fi
   wait "$waiter" 2>/dev/null || true
-  [ "$(cat "$dir/waited" 2>/dev/null)" = 0 ] || fail "blocking lock wait did not acquire after recovery"
-  pass "recovery mutex with a live process group is refused, then recovered once it exits"
+  [ "$(cat "$dir/waited" 2>/dev/null)" = 0 ] || fail "refusable lock wait did not acquire after recovery"
+  pass "recovery mutex with a live process group is waited out, then recovered once it exits"
 }
 
 test_lock_legacy_nested_steal_does_not_wedge() {
@@ -1371,7 +1369,7 @@ test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
 test_lock_dead_recovery_holder_is_reclaimed
 test_lock_live_recovery_holder_is_not_reclaimed
-test_lock_recovery_with_live_process_group_is_refused
+test_lock_recovery_with_live_process_group_is_waited_out
 test_lock_legacy_nested_steal_does_not_wedge
 test_lock_self_held_recovery_is_reclaimed
 test_lock_dangling_recovery_link_is_retried

@@ -724,6 +724,62 @@ assert_not_contains "$(cat "$lock_arm_err")" ".steal.steal" \
   || fail "Lavish arm lost or changed an existing feedback capture on lock refusal"
 pass "Lavish arm bounds recovery-mutex refusal without suffix growth or durable-state mutation"
 
+# --- Lavish arm waits out a recovery holder's live descendant ----------------
+# A recovery-mutex holder killed as a process-group leader can leave a child
+# (a poll or sleep) running. Its absence is not yet provable, so the arm must
+# keep waiting instead of dying, and must finish once that group is gone.
+HGROUP="$TMP_ROOT/hgroup"; new_home "$HGROUP"
+GROUP_ART="$TMP_ROOT/group-board.html"
+printf '<h1>group review</h1>\n' > "$GROUP_ART"
+group_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$GROUP_ART")
+GROUP_CLAIMS="$TMP_ROOT/group-claims"
+mkdir -p "$GROUP_CLAIMS"
+PATH="$LOCK_BIN:$PATH" FM_HOME="$HGROUP" FM_PROCEVENT_CLAIM_ROOT="$GROUP_CLAIMS" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$GROUP_ART" >/dev/null \
+  || fail "could not seed the Lavish registration for group wait"
+group_lock="$GROUP_CLAIMS/$group_id.lock"
+set -m
+( sleep 300 & exit 0 ) &
+group_leader=$!
+set +m
+wait "$group_leader" 2>/dev/null || true
+kill -0 -"$group_leader" 2>/dev/null || fail "could not seed a leaderless recovery-holder group"
+mkdir "$group_lock" "$group_lock.steal" "$group_lock.steal.recovery"
+printf '%s\n' "$dead_lock_pid" > "$group_lock/pid"
+printf '%s\n' "$dead_lock_pid" > "$group_lock.steal/pid"
+printf '%s\n' "$group_leader" > "$group_lock.steal.recovery/pid"
+group_arm_err="$TMP_ROOT/group-arm.err"
+PATH="$LOCK_BIN:$PATH" FM_HOME="$HGROUP" FM_PROCEVENT_CLAIM_ROOT="$GROUP_CLAIMS" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$GROUP_ART" >/dev/null 2> "$group_arm_err" &
+group_arm_pid=$!
+sleep 0.5
+if ! kill -0 "$group_arm_pid" 2>/dev/null; then
+  kill -KILL -"$group_leader" 2>/dev/null || true
+  wait "$group_arm_pid" 2>/dev/null || true
+  fail "Lavish arm exited while the recovery holder's group was alive: $(cat "$group_arm_err")"
+fi
+[ "$(cat "$group_lock.steal.recovery/pid")" = "$group_leader" ] \
+  || fail "Lavish arm changed the live recovery holder's evidence while waiting"
+kill -KILL -"$group_leader" 2>/dev/null || true
+for _ in $(seq 1 100); do
+  kill -0 "$group_arm_pid" 2>/dev/null || break
+  sleep 0.05
+done
+if kill -0 "$group_arm_pid" 2>/dev/null; then
+  kill -TERM "$group_arm_pid" 2>/dev/null || true
+  wait "$group_arm_pid" 2>/dev/null || true
+  fail "Lavish arm did not resume after the recovery holder's group exited"
+fi
+group_arm_status=0
+wait "$group_arm_pid" || group_arm_status=$?
+[ "$group_arm_status" -eq 0 ] \
+  || fail "Lavish arm failed after the recovery holder's group exited: $(cat "$group_arm_err")"
+assert_not_contains "$(cat "$group_arm_err")" "lock recovery refused" \
+  "Lavish arm reported a refusal while only waiting on a live group"
+[ ! -e "$group_lock.steal.recovery" ] && [ ! -L "$group_lock.steal.recovery" ] \
+  || fail "Lavish arm left the reclaimed recovery mutex behind"
+pass "Lavish arm waits through a live recovery-holder group and resumes after it exits"
+
 # --- end-user-aligned regression: one Send & End, one captured result -------
 # The dogfood defect: a real armed Lavish source received one human `Send & End`
 # action, and the runner captured four results - the human's real feedback, then
