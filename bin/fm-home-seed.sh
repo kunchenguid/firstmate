@@ -457,7 +457,7 @@ EOF
 }
 
 # Single reader of a project's registered posture for seeding. It prints the
-# parser's "<mode> <yolo> <forge>" line, and fails when bin/fm-project-mode.sh
+# parser's "<mode> <yolo>" line, and fails when bin/fm-project-mode.sh
 # refuses the registry entry, so a posture the fleet cannot resolve stops the
 # seed instead of arriving as an empty mode that passes every posture guard.
 registered_posture_line() {  # <project>

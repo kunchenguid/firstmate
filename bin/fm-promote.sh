@@ -176,11 +176,10 @@ grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (ki
 PROMOTE_PROJECT=$(sed -n 's/^project=//p' "$META" | head -n 1)
 if [ -n "$PROMOTE_PROJECT" ]; then
   PROMOTE_PROJECT_NAME=$(basename "$PROMOTE_PROJECT")
-  if ! PROMOTE_STANDING_LINE=$("$FM_ROOT/bin/fm-project-mode.sh" "$PROMOTE_PROJECT_NAME"); then
+  if ! PROMOTE_STANDING_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROMOTE_PROJECT_NAME"); then
     echo "error: $ID cannot promote: the registry entry for $PROMOTE_PROJECT_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and promote again" >&2
     exit 1
   fi
-  PROMOTE_STANDING_FORGE=$(printf '%s\n' "$PROMOTE_STANDING_LINE" | awk '{print $3}')
   FORGE=${PROMOTE_STANDING_FORGE:-none}
   refuse_impossible_forge_posture || exit 1
 fi

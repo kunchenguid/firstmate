@@ -2819,19 +2819,13 @@ if [ "$KIND" = ship ]; then
   # local-only) resolves to no posture at all, and launching on the silent
   # default is how a mistyped forge would hand a Gerrit project the
   # pull-request contract.
-  if ! STANDING_LINE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null); then
-    "$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" >/dev/null || true
+  if ! STANDING_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROJ_NAME" 2>/dev/null); then
+    "$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROJ_NAME" >/dev/null || true
     echo "error: $ID cannot launch: the registry entry for $PROJ_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and spawn again" >&2
     exit 1
   fi
-  STANDING_MODE=
-  STANDING_FORGE=none
-  if [ -n "$STANDING_LINE" ]; then
-    read -r STANDING_MODE _ STANDING_FORGE <<EOF
-$STANDING_LINE
-EOF
-    [ -n "$STANDING_FORGE" ] || STANDING_FORGE=none
-  fi
+  [ -n "$STANDING_FORGE" ] || STANDING_FORGE=none
+  STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
   [ -n "$BRIEF_FORGE" ] || BRIEF_FORGE=none

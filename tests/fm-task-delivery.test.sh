@@ -412,21 +412,21 @@ test_project_mode_maps_the_conditional_policy() {
 - typoproj [no-mistakez] - fixture (added 2026-01-01)
 EOF
   out=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>/dev/null)
-  [ "$out" = "no-mistakes off none" ] || fail "conditional policy did not map to its most rigorous leg (got '$out')"
+  [ "$out" = "no-mistakes off" ] || fail "conditional policy did not map to its most rigorous leg (got '$out')"
   err=$(FM_HOME="$home" "$PROJECT_MODE" prodproj 2>&1 >/dev/null)
   [ -z "$err" ] || fail "a registered conditional policy still warned as unknown: $err"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" yoloproj 2>/dev/null)
-  [ "$out" = "no-mistakes on none" ] || fail "conditional policy dropped its +yolo posture (got '$out')"
+  [ "$out" = "no-mistakes on" ] || fail "conditional policy dropped its +yolo posture (got '$out')"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --raw prodproj 2>/dev/null)
-  [ "$out" = "no-mistakes-prod-only off none" ] || fail "--raw did not expose the registered annotation (got '$out')"
+  [ "$out" = "no-mistakes-prod-only off" ] || fail "--raw did not expose the registered annotation (got '$out')"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" --raw flatproj 2>/dev/null)
-  [ "$out" = "direct-PR off none" ] || fail "--raw altered a flat registered mode (got '$out')"
+  [ "$out" = "direct-PR off" ] || fail "--raw altered a flat registered mode (got '$out')"
 
   out=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>/dev/null)
-  [ "$out" = "no-mistakes off none" ] || fail "a typo'd mode no longer falls back to the most rigorous default"
+  [ "$out" = "no-mistakes off" ] || fail "a typo'd mode no longer falls back to the most rigorous default"
   err=$(FM_HOME="$home" "$PROJECT_MODE" typoproj 2>&1 >/dev/null)
   assert_contains "$err" "unknown mode" "a typo'd registry mode stopped warning"
   pass "fm-project-mode: the conditional policy is accepted, mapped for mechanical callers, and readable raw"
@@ -883,140 +883,105 @@ EOF
 
 # The forge binding is orthogonal to the mode and to +yolo, exactly as +yolo is
 # orthogonal to the mode: it is read from its own `forge=` token wherever that
-# token sits in the annotation, and it is never derived from the mode. It is also
-# never inferred - only this explicit token binds a project to a forge - so an
-# unrecognized value resolves to nothing at all: the parser refuses, because a
-# mistyped forge reported as "no registered forge" is exactly how a Gerrit project
-# would receive the pull-request contract the binding exists to prevent. An absent
-# or empty forge value is not a typo and still means no registered forge.
+# token sits in the annotation, and it is never derived from the mode. It is
+# asked for explicitly with --forge, so the default output stays the same two
+# words for every project, bound or not, and no existing caller sees a change.
 test_project_mode_binds_the_forge_orthogonally() {
-  local home out err status label registry expect n=0
+  local home out err status label registry expect forge
   home="$TMP_ROOT/forge-binding/home"
   mkdir -p "$home/data"
-  while IFS='|' read -r label registry expect; do
+  while IFS='|' read -r label registry expect forge; do
     [ -n "$label" ] || continue
-    n=$((n + 1))
     printf '%s\n' "$registry" > "$home/data/projects.md"
     out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null)
-    [ "$out" = "$expect" ] || fail "$label: expected '$expect', got '$out'"
+    [ "$out" = "$expect" ] || fail "$label: expected default output '$expect', got '$out'"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --forge fp 2>/dev/null)
+    [ "$out" = "$forge" ] || fail "$label: expected --forge '$forge', got '$out'"
   done <<'ROWS'
-no annotation at all|- fp - fixture (added 2026-01-01)|no-mistakes off none
-mode only|- fp [direct-PR] - fixture (added 2026-01-01)|direct-PR off none
-forge beside a mode|- fp [no-mistakes forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off gerrit
-forge as the only token leaves the default mode|- fp [forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off gerrit
-forge before yolo on a direct-PR project|- fp [direct-PR forge=gerrit +yolo] - fixture (added 2026-01-01)|direct-PR off gerrit
-forge under the conditional policy|- fp [no-mistakes-prod-only forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off gerrit
-a forge without gerrit keeps yolo|- fp [direct-PR +yolo] - fixture (added 2026-01-01)|direct-PR on none
-an empty forge value is no registered forge|- fp [no-mistakes +yolo forge=] - fixture (added 2026-01-01)|no-mistakes on none
+no annotation at all|- fp - fixture (added 2026-01-01)|no-mistakes off|none
+mode only|- fp [direct-PR] - fixture (added 2026-01-01)|direct-PR off|none
+forge beside a mode|- fp [no-mistakes forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|gerrit
+forge as the only token leaves the default mode|- fp [forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|gerrit
+forge before yolo on a direct-PR project|- fp [direct-PR forge=gerrit +yolo] - fixture (added 2026-01-01)|direct-PR off|gerrit
+forge under the conditional policy|- fp [no-mistakes-prod-only forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|gerrit
+a project with no forge keeps yolo|- fp [direct-PR +yolo] - fixture (added 2026-01-01)|direct-PR on|none
+an empty forge value is no registered forge|- fp [no-mistakes +yolo forge=] - fixture (added 2026-01-01)|no-mistakes on|none
+an unregistered project|- other [direct-PR] - fixture (added 2026-01-01)|no-mistakes off|none
 ROWS
 
   printf '%s\n' '- fp [no-mistakes-prod-only forge=gerrit] - fixture (added 2026-01-01)' > "$home/data/projects.md"
   out=$(FM_HOME="$home" "$PROJECT_MODE" --raw fp 2>/dev/null)
-  [ "$out" = "no-mistakes-prod-only off gerrit" ] \
-    || fail "--raw altered the forge while exposing the annotation (got '$out')"
+  [ "$out" = "no-mistakes-prod-only off" ] \
+    || fail "--raw on a bound project did not keep the two-word annotation (got '$out')"
   err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null)
   [ -z "$err" ] || fail "a registered forge warned as unknown: $err"
-
-  printf '%s\n' '- fp [no-mistakes +yolo forge=gitlab] - fixture (added 2026-01-01)' > "$home/data/projects.md"
-  out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null)
-  status=$?
-  [ "$status" -ne 0 ] || fail "an unrecognized forge resolved to a posture instead of refusing (got '$out')"
-  [ -z "$out" ] || fail "a refused forge still handed the caller a posture: '$out'"
-  err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null) || true
-  assert_contains "$err" 'unknown forge "gitlab"' "the refusal did not name the token it could not read"
-  assert_contains "$err" 'forge=gerrit' "the refusal did not name the accepted values"
 
   # A forge describes what a mode publishes, and local-only publishes nothing, so
   # the pair is refused rather than kept as an inert annotation: that mode's
   # landing would fast-forward local main with content the server never saw.
   printf '%s\n' '- fp [local-only forge=gerrit] - fixture (added 2026-01-01)' > "$home/data/projects.md"
-  out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null)
-  status=$?
-  [ "$status" -ne 0 ] || fail "local-only with a forge resolved to a posture instead of refusing (got '$out')"
-  [ -z "$out" ] || fail "a refused local-only forge still handed the caller a posture: '$out'"
+  for flag in "" --forge; do
+    # shellcheck disable=SC2086 # An empty flag must expand to nothing.
+    out=$(FM_HOME="$home" "$PROJECT_MODE" $flag fp 2>/dev/null)
+    status=$?
+    [ "$status" -eq 3 ] || fail "local-only with a forge did not refuse${flag:+ under $flag} (status $status, got '$out')"
+    [ -z "$out" ] || fail "a refused local-only forge still handed the caller a posture: '$out'"
+  done
   err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null) || true
   assert_contains "$err" 'local-only publishes nothing' "the refusal did not say why local-only takes no forge"
-  pass "fm-project-mode: the forge binds from its own explicit token, orthogonal to mode and yolo"
+  pass "fm-project-mode: the forge binds from its own token and is reported only through --forge"
 }
 
-# The binding is only as strong as the weakest way of mistyping it. A token whose
-# KEY is wrong - one dropped character, a capital, a space instead of the `=` -
-# would otherwise be discarded silently, leaving forge=none and dropping every
-# guard that reads it, which is the same hazard as a wrong forge VALUE. Every
-# unrecognized annotation token therefore refuses with the token named, while an
-# annotation carrying only a mode, `+yolo` and `forge=` still resolves.
-test_project_mode_refuses_an_unrecognized_annotation_token() {
-  local home out err status label registry token n=0
+# The registry keeps its old tolerance: a token the parser does not know is
+# ignored, and an unknown mode falls back to the most rigorous default with a
+# warning. The one exception is a malformed forge binding - a `forge=` value
+# outside the closed set, or a keyed token whose key is not `forge` - because
+# resolving it to "no registered forge" would hand a Gerrit project the
+# pull-request contract. Those refuse, naming the token, in both output forms.
+test_project_mode_refuses_only_a_malformed_forge_binding() {
+  local home out err status label registry token flag
   home="$TMP_ROOT/forge-token/home"
   mkdir -p "$home/data"
   while IFS='|' read -r label registry token; do
     [ -n "$label" ] || continue
-    n=$((n + 1))
     printf '%s\n' "$registry" > "$home/data/projects.md"
-    out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null)
-    status=$?
-    [ "$status" -ne 0 ] || fail "$label: resolved to a posture instead of refusing (got '$out')"
-    [ -z "$out" ] || fail "$label: a refused annotation still handed the caller a posture: '$out'"
+    for flag in "" --forge; do
+      # shellcheck disable=SC2086 # An empty flag must expand to nothing.
+      out=$(FM_HOME="$home" "$PROJECT_MODE" $flag fp 2>/dev/null)
+      status=$?
+      [ "$status" -eq 3 ] || fail "$label: did not refuse${flag:+ under $flag} (status $status, got '$out')"
+      [ -z "$out" ] || fail "$label: a refused binding still handed the caller a posture: '$out'"
+    done
     err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null) || true
-    assert_contains "$err" "unrecognized annotation token \"$token\"" \
-      "$label: the refusal did not name the token it could not read"
-    assert_contains "$err" 'forge=gerrit' "$label: the refusal did not name the accepted set"
+    assert_contains "$err" "\"$token\"" "$label: the refusal did not name the token it could not read"
+    assert_contains "$err" 'forge=gerrit' "$label: the refusal did not name the accepted binding"
   done <<'ROWS'
+an unknown forge value|- fp [no-mistakes forge=gitlab] - fixture (added 2026-01-01)|gitlab
+a misspelled forge value|- fp [no-mistakes forge=gerit] - fixture (added 2026-01-01)|gerit
 a dropped character in the key|- fp [no-mistakes forg=gerrit] - fixture (added 2026-01-01)|forg=gerrit
 a transposed key|- fp [no-mistakes frge=gerrit] - fixture (added 2026-01-01)|frge=gerrit
 a capitalized key|- fp [no-mistakes Forge=gerrit] - fixture (added 2026-01-01)|Forge=gerrit
-a space instead of the equals sign|- fp [no-mistakes forge gerrit] - fixture (added 2026-01-01)|forge
-the forge value with no key at all|- fp [no-mistakes gerrit] - fixture (added 2026-01-01)|gerrit
-an unknown token beside a valid forge|- fp [no-mistakes forge=gerrit +tomorrow] - fixture (added 2026-01-01)|+tomorrow
 ROWS
 
-  # An annotation the line never closes swallows the description as tokens, so the
-  # refusal must point at the missing bracket rather than at a description word.
-  printf '%s\n' '- fp [no-mistakes - fixture (added 2026-01-01)' > "$home/data/projects.md"
-  out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null)
-  status=$?
-  [ "$status" -ne 0 ] || fail "an unterminated annotation resolved to a posture (got '$out')"
-  [ -z "$out" ] || fail "a refused unterminated annotation still handed the caller a posture: '$out'"
-  err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null) || true
-  assert_contains "$err" 'unterminated annotation' "the refusal did not name the unclosed bracket"
-  assert_not_contains "$err" 'unrecognized annotation token' \
-    "the refusal blamed a description word instead of the missing bracket"
-
-  # A forge value standing alone is the most natural shorthand a captain reaches
-  # for, and the mode slot would otherwise swallow it as a mistyped mode and fall
-  # back to no-mistakes with no forge bound at all.
+  while IFS='|' read -r label registry; do
+    [ -n "$label" ] || continue
+    printf '%s\n' "$registry" > "$home/data/projects.md"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null) \
+      || fail "$label: a token the parser never read became a refusal"
+    [ "$out" = "no-mistakes off" ] || fail "$label: expected the old tolerant 'no-mistakes off', got '$out'"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --forge fp 2>/dev/null) \
+      || fail "$label: --forge refused a token the parser never read"
+    [ "$out" = none ] || fail "$label: an ignored token bound a forge ('$out')"
+  done <<'ROWS'
+an unknown token beside the mode|- fp [no-mistakes +tomorrow] - fixture (added 2026-01-01)
+the forge key with a space|- fp [no-mistakes forge gerrit] - fixture (added 2026-01-01)
+a bare forge value in the mode slot|- fp [gerrit] - fixture (added 2026-01-01)
+an annotation the line never closes|- fp [no-mistakes - fixture (added 2026-01-01)
+ROWS
   printf '%s\n' '- fp [gerrit] - fixture (added 2026-01-01)' > "$home/data/projects.md"
-  out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a forge standing in the mode slot resolved to a posture (got '$out')"
-  [ -z "$out" ] || fail "a refused mode-slot forge still handed the caller a posture: '$out'"
-  err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null) || true
-  assert_contains "$err" 'is a forge rather than a delivery mode' \
-    "the refusal did not say why the mode slot could not take that token"
-  assert_contains "$err" '"forge=gerrit"' "the refusal did not name the token that binds a forge"
-
-  # "none" is the parser's internal name for no registered forge, not a registry
-  # spelling, so the mode-slot refusal must not prescribe writing "forge=none" -
-  # an operator who followed that would register a third spelling of "unbound".
-  printf '%s\n' '- fp [none] - fixture (added 2026-01-01)' > "$home/data/projects.md"
-  out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a bare none in the mode slot resolved to a posture (got '$out')"
-  [ -z "$out" ] || fail "a refused mode-slot none still handed the caller a posture: '$out'"
-  err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null) || true
-  assert_contains "$err" 'is a forge rather than a delivery mode' \
-    "the refusal did not say why the mode slot could not take that token"
-  assert_not_contains "$err" '"forge=none"' \
-    "the refusal prescribed a registry spelling the forge check does not document"
-  printf '%s\n' '- fp [no-mistakes forge=none] - fixture (added 2026-01-01)' > "$home/data/projects.md"
-  out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null) \
-    || fail "forge=none stopped resolving, so the refusal above must keep steering away from it"
-  [ "$out" = "no-mistakes off none" ] || fail "forge=none resolved to something other than unbound (got '$out')"
-
-  printf '%s\n' '- fp [no-mistakes +yolo forge=gerrit] - fixture (added 2026-01-01)' > "$home/data/projects.md"
-  out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null)
-  [ "$out" = "no-mistakes off gerrit" ] || fail "the accepted token set stopped resolving (got '$out')"
-  pass "fm-project-mode: an annotation token the parser does not recognize is refused, never discarded"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null)
+  assert_contains "$err" "unknown mode" "a forge value in the mode slot stopped warning as an unknown mode"
+  pass "fm-project-mode: only a malformed forge binding refuses; every other token keeps its old tolerance"
 }
 
 # Yolo is inactive for the Gerrit forge on the captain's decision of 2026-09-15,
@@ -1030,7 +995,7 @@ test_forge_gerrit_refuses_yolo() {
   mkdir -p "$home/data"
   printf '%s\n' '- fp [no-mistakes +yolo forge=gerrit] - fixture (added 2026-01-01)' > "$home/data/projects.md"
   out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null)
-  [ "$out" = "no-mistakes off gerrit" ] \
+  [ "$out" = "no-mistakes off" ] \
     || fail "a registered +yolo survived the gerrit forge (got '$out')"
   err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null)
   assert_contains "$err" "refused" "the dropped yolo posture was a silent no-op"
@@ -1252,7 +1217,7 @@ printf '%s' "$2" > "$FM_TEST_CAPTURE"
 STUB
   chmod +x "$sendroot/bin/fm-send.sh"
 
-  id=forge-promote-g1
+  id="forge-promote-g1"
   meta="$home/state/$id.meta"
   printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\n' "$id" "$home/projects/proj" > "$meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout >/dev/null 2>&1 \
@@ -1348,7 +1313,7 @@ test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
 test_project_mode_maps_the_conditional_policy
 test_project_mode_binds_the_forge_orthogonally
-test_project_mode_refuses_an_unrecognized_annotation_token
+test_project_mode_refuses_only_a_malformed_forge_binding
 test_forge_gerrit_refuses_yolo
 test_forge_gerrit_changes_what_no_mistakes_means
 test_forge_gerrit_direct_pr_publishes_one_change

@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Resolve a project's REGISTERED delivery posture from the data/projects.md registry.
-# Prints three words to stdout: "<mode> <yolo> <forge>" where mode is one of
-# no-mistakes|direct-PR|local-only, yolo is on|off, and forge is none|gerrit.
+# Prints two words to stdout: "<mode> <yolo>" where mode is one of
+# no-mistakes|direct-PR|local-only and yolo is on|off.
+# With --forge it prints one word instead: the project's registered forge,
+# none|gerrit. The forge is asked for explicitly, so the default output stays
+# the same two words for every project, bound or not.
 #
 # MECHANICAL CONSUMERS ONLY. This answers "what posture did the captain register
 # for this project", never "how does this task ship". A task's delivery mode and
@@ -9,19 +12,18 @@
 # bin/fm-brief.sh, bin/fm-spawn.sh, and bin/fm-promote.sh (AGENTS.md section 7).
 # The consumers are bin/fm-fleet-sync.sh (skip local-only clones),
 # bin/fm-home-seed.sh and bin/fm-remote-home-seed.sh (refuse local-only seeding,
-# run no-mistakes init), bin/fm-spawn.sh's advisory registry-deviation notice plus
-# its forge agreement and yolo refusal, and bin/fm-promote.sh, which takes the
-# forge binding from here because it is a project fact rather than a task choice.
+# run no-mistakes init), bin/fm-spawn.sh's advisory registry-deviation notice,
+# and --forge for bin/fm-spawn.sh's forge agreement and yolo refusal and for
+# bin/fm-promote.sh, which takes the forge binding from here because it is a
+# project fact rather than a task choice.
 #
 # Registry line format (data/projects.md):
-#   - <name> - <desc> (added <date>)                  -> no-mistakes off none  (legacy default)
-#   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off none
-#   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on none
-#   - <name> [<mode> forge=gerrit] - <desc> (added <date>) -> <mode> off gerrit
-# `+yolo` and `forge=` are order-independent annotation tokens that may appear
-# together; only the FIRST token is read as the mode. They are the ONLY tokens an
-# annotation may carry beside that mode: anything else is refused rather than
-# ignored, because a silently dropped `forg=gerrit` binds no forge at all.
+#   - <name> - <desc> (added <date>)                  -> no-mistakes off  (legacy default)
+#   - <name> [<mode>] - <desc> (added <date>)          -> <mode> off
+#   - <name> [<mode> +yolo] - <desc> (added <date>)    -> <mode> on
+#   - <name> [<mode> forge=gerrit] - <desc> (added <date>) -> <mode> off, --forge gerrit
+# `+yolo` and `forge=` are order-independent annotation tokens; only the FIRST
+# token is read as the mode.
 #
 # Registered modes:
 #   no-mistakes            full pipeline -> PR -> configured merge authority (default)
@@ -57,20 +59,18 @@
 #
 # --raw prints the registered annotation unmapped, so a caller that must tell a
 # conditional policy apart from a flat mode sees "no-mistakes-prod-only" itself.
-# It affects the mode field only.
 #
-# An unknown/missing project or unknown mode falls back to "no-mistakes off none" and
-# warns to stderr, so a typo never silently drops the gate. An unrecognized
-# annotation token is REFUSED instead - both a `forge=` value outside the closed
-# set and a token the parser does not know at all, such as `forg=gerrit` or a bare
-# `gerrit`: nothing is printed to stdout and the exit status is 3, naming the bad
-# token and the accepted set. A mistyped forge resolved to "no registered forge"
-# would hand a Gerrit project the pull-request contract this binding exists to
-# prevent, so it fails closed rather than degrading. An absent or empty `forge=`
-# value is not a typo and still means no registered forge, and an annotation with
-# no tokens at all keeps the legacy default. A local-only mode carrying a forge
-# is refused the same way, with the same exit status.
-# Usage: fm-project-mode.sh [--raw] <project-name>
+# An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
+# to stderr, so a typo never silently drops the gate. Other annotation tokens are
+# ignored, as they always were. The one exception is a malformed forge binding,
+# which is REFUSED - nothing on stdout, exit status 3, the token named - in both
+# output forms: a `forge=` value outside the closed set, or a `<key>=<value>`
+# token whose key is not `forge` (`forge=` is the only keyed token, so any other
+# key is a mistyped one, such as `forg=gerrit`). Resolving either to "no
+# registered forge" would hand a Gerrit project the pull-request contract the
+# binding exists to prevent. An empty `forge=` value means no registered forge.
+# local-only with a forge is refused the same way.
+# Usage: fm-project-mode.sh [--raw|--forge] <project-name>
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,37 +79,37 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 REG="$DATA/projects.md"
 RAW=0
-if [ "${1:-}" = "--raw" ]; then
-  RAW=1
-  shift
-fi
-NAME=${1:?usage: fm-project-mode.sh [--raw] <project-name>}
+WANT_FORGE=0
+case "${1:-}" in
+  --raw) RAW=1; shift ;;
+  --forge) WANT_FORGE=1; shift ;;
+esac
+NAME=${1:?usage: fm-project-mode.sh [--raw|--forge] <project-name>}
 
 if [ ! -f "$REG" ]; then
-  echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off none" >&2
-  echo "no-mistakes off none"
+  echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
+  if [ "$WANT_FORGE" -eq 1 ]; then echo none; else echo "no-mistakes off"; fi
   exit 0
 fi
 
-# awk emits "posture <mode> <yolo> <forge>", "token <bad-token>" for an annotation
-# token it does not recognize, "unterminated" for a bracket the line never closes,
-# or nothing if the project is absent. A `forge=` token with an empty value reaches
-# the shell as an empty forge field, which the closed-set check below reads as no
-# registered forge, exactly like an annotation carrying no forge token at all.
+# awk emits "posture <mode> <yolo> <forge>", "keyed <bad-token>" for a keyed
+# token whose key is not forge, or nothing if the project is absent. Every other
+# token beside the mode is ignored, exactly as before the forge existed. An
+# empty `forge=` value reaches the shell as an empty forge field, which means no
+# registered forge.
 parsed=$(awk -v n="$NAME" '
   $1=="-" && $2==n {
     mode="no-mistakes"; yolo="off"; forge="none";
     if ($3 ~ /^\[/) {
-      s=""; closed=0;
-      for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) { closed=1; break } }
-      if (!closed) { print "unterminated"; exit }
+      s="";
+      for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
       gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
       k = split(s, a, " ");
+      if (a[1] != "" && a[1] != "+yolo" && a[1] !~ /=/) mode = a[1];
       for (j=1; j<=k; j++) {
         if (a[j]=="+yolo") { yolo="on"; continue }
         if (a[j] ~ /^forge=/) { forge = substr(a[j], 7); continue }
-        if (j==1) { if (a[j] != "") mode = a[j]; continue }
-        print "token", a[j]; exit
+        if (a[j] ~ /^[^=]+=/) { print "keyed", a[j]; exit }
       }
     }
     print "posture", mode, yolo, forge; exit
@@ -117,42 +117,16 @@ parsed=$(awk -v n="$NAME" '
 ' "$REG")
 
 if [ -z "$parsed" ]; then
-  echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off none" >&2
-  echo "no-mistakes off none"
+  echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
+  if [ "$WANT_FORGE" -eq 1 ]; then echo none; else echo "no-mistakes off"; fi
   exit 0
 fi
 
-read -r kind parsed_one parsed_two parsed_three <<EOF
+read -r kind mode yolo forge <<EOF
 $parsed
 EOF
-if [ "$kind" = unterminated ]; then
-  echo "refused: unterminated annotation for $NAME in $REG: the bracket opens but no \"]\" closes it, so the description cannot be told apart from the annotation; close the bracket after the delivery mode and any +yolo or forge= token" >&2
-  exit 3
-fi
-if [ "$kind" = token ]; then
-  echo "refused: unrecognized annotation token \"$parsed_one\" registered for $NAME in $REG; an annotation carries a delivery mode first, then only +yolo and forge=gerrit in any order; correct the registry entry" >&2
-  exit 3
-fi
-mode=$parsed_one
-yolo=$parsed_two
-forge=$parsed_three
-# One owner of the forge values this fleet knows. The forge field is checked
-# against it, and so is the mode slot, where a forge value is a binding written
-# without its token rather than a delivery mode.
-KNOWN_FORGES="none gerrit"
-forge_is_known() {  # <value>
-  case " $KNOWN_FORGES " in
-    *" $1 "*) return 0 ;;
-  esac
-  return 1
-}
-if forge_is_known "$mode"; then
-  if [ "$mode" = none ]; then
-    remedy="\"none\" is not a registry spelling at all, so drop the token and leave the delivery mode alone"
-  else
-    remedy="a forge binds only through its own token, so write \"forge=$mode\" beside the delivery mode"
-  fi
-  echo "refused: \"$mode\" is a forge rather than a delivery mode, and it stands in the mode slot of the annotation registered for $NAME in $REG; $remedy; correct the registry entry" >&2
+if [ "$kind" = keyed ]; then
+  echo "refused: malformed forge binding \"$mode\" registered for $NAME in $REG; forge= is the only keyed annotation token, and its one value is forge=gerrit; correct the registry entry" >&2
   exit 3
 fi
 case "$mode" in
@@ -160,17 +134,20 @@ case "$mode" in
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
-# A forge this fleet does not know is a registry error, not a posture: resolving
-# it to "no registered forge" is how a Gerrit project would quietly receive the
-# pull-request contract, so nothing is reported and the caller is refused.
 [ -n "$forge" ] || forge=none
-if ! forge_is_known "$forge"; then
-  echo "refused: unknown forge \"$forge\" registered for $NAME in $REG; the accepted values are forge=gerrit, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
-  exit 3
-fi
+case "$forge" in
+  none|gerrit) ;;
+  *)
+    echo "refused: unknown forge \"$forge\" registered for $NAME in $REG; the accepted value is forge=gerrit, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
+    exit 3 ;;
+esac
 if [ "$forge" != none ] && [ "$mode" = local-only ]; then
   echo "refused: $NAME is registered local-only with forge=$forge in $REG; local-only publishes nothing, so a forge has no meaning there, and its landing would fast-forward local main with content the review server has never seen; register no-mistakes or direct-PR to publish through the forge, or drop the forge token to keep the project local" >&2
   exit 3
+fi
+if [ "$WANT_FORGE" -eq 1 ]; then
+  echo "$forge"
+  exit 0
 fi
 if [ "$forge" = gerrit ] && [ "$yolo" = on ]; then
   echo "refused: +yolo is registered for $NAME but yolo is inactive for forge=gerrit, so this reports yolo=off: a Gerrit Code-Review+2 is a positive attributed claim that a named human approved, and firstmate must not manufacture one (captain's decision 2026-09-15)" >&2
@@ -181,4 +158,4 @@ fi
 if [ "$RAW" -eq 0 ] && [ "$mode" = no-mistakes-prod-only ]; then
   mode=no-mistakes
 fi
-echo "$mode $yolo $forge"
+echo "$mode $yolo"
