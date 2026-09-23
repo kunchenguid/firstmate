@@ -110,6 +110,8 @@
 #     classified state acts.
 #   - A composer that visibly holds pending text refuses before an exit command
 #     is typed, so existing text is preserved instead of being concatenated.
+#     The one exception is our own unsent doorbell line, which is submitted
+#     and re-verified empty rather than refused.
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
@@ -162,6 +164,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$SCRIPT_DIR/fm-task-inbox-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -541,7 +545,22 @@ do_exit() {
   case "$composer_state" in
     empty) ;;
     pending)
-      die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
+      if fm_task_inbox_composer_holds_doorbell "$BACKEND" "$T" \
+        "$(fm_task_inbox_doorbell_line "$STATE/$ID.inbox/000.msg" 2>/dev/null)" "$LABEL"; then
+        # Our own unsent doorbell, not user text: submit it with one Enter
+        # (the same backend key primitive fm-send.sh's --key Enter path
+        # uses), then still require a proven-empty composer before the exit
+        # command is typed, so a swallowed Enter refuses instead of
+        # concatenating. Relaunch flows through here too.
+        fm_backend_send_key "$BACKEND" "$T" Enter "$LABEL" 2>/dev/null \
+          || die "task $ID's composer holds our own doorbell but the submitting Enter could not be sent; clear the composer, then retry '$VERB'"
+        composer_state=$(fm_backend_composer_state "$BACKEND" "$T" "$LABEL" 2>/dev/null) \
+          || composer_state=unknown
+        [ "$composer_state" = empty ] \
+          || die "task $ID's composer still holds text after submitting our own doorbell; clear the composer, then retry '$VERB'"
+      else
+        die "task $ID's composer visibly holds pending text; refusing to type the $cmd exit command because it would concatenate onto that text. Clear or submit the pending text, then retry '$VERB'"
+      fi
       ;;
     *)
       die "task $ID's composer state is '$composer_state', not proven empty; refusing to type the $cmd exit command because it could concatenate onto existing text. Clear the composer, then retry '$VERB'"

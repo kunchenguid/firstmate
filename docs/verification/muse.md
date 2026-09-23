@@ -220,3 +220,19 @@ Repeat that smoke after a protocol-affecting upgrade: run one real multi-step to
 A build that ever split one turn across several runs would make a settled log ambiguous, which is a classifier change rather than a note in this file.
 
 The portable counterparts that run in ordinary CI are `tests/fm-muse-harness.test.sh`, `tests/fm-tmux-agent-liveness.test.sh`, `tests/fm-composer-lib.test.sh`, and `tests/fm-composer-ghost.test.sh`.
+
+## Doorbell submit observations (2026-09-23, muse 1.3.0-R3401.1, tmux)
+
+An unsubmitted doorbell motivated checking whether Muse's completion popup consumes Enter.
+Probed live in a scratch tmux pane (`muse --yolo`, idle, `/tmp` cwd) with the repo's own `fm_tmux_composer_state` as the verdict source.
+Typing a leading `/` opens a slash-command completion popup within ~1s, and Enter with that popup open accepts the popup selection (it ran `/clear`) instead of submitting the typed line: the swallow mechanism is real.
+But a `:`-leading doorbell-shaped line opens no popup at 0.3s or after a 3s hold, and typing it plus 0.3s settle plus one Enter submitted on the first try (the turn started, composer read `empty`).
+This idle-pane observation did not establish a need for a longer Muse-specific settle; the shared doorbell settle is unchanged.
+It does not establish the cause of the startup failure or whether a longer settle would help a not-yet-ready pane.
+The recovery predicate and its supported capture limits are owned by [`fm_task_inbox_composer_holds_doorbell`](../../bin/fm-task-inbox-lib.sh).
+`tests/fm-task-inbox.test.sh` (`test_ring_submits_own_doorbell`, `test_ring_skips_foreign_pending_text`) and `tests/fm-control.test.sh` (`test_exit_submits_own_doorbell_then_proceeds`, `test_exit_refuses_foreign_pending_text`) pin that predicate.
+Note the shape drift on this version: idle muse 1.3.0 renders a `❯` glyph between `─` rules (the claude-2.x separated-over-bare shape), not the bordered `⟩` box recorded for 0.1.0; the shared classifier still reads it `empty`.
+
+### Herdr acceptance remains unmet
+
+The [CLI/API investigation](herdr-exact-content-investigation.md) owns the capture evidence and remaining live-verification requirements; it does not establish API inability.

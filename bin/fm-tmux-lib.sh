@@ -165,6 +165,17 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   printf '%s' "$verdict"
 }
 
+# Preserve trailing spaces (-N) and capture the visible pane from its top so
+# the shared exact-content extractor can prove the complete composer envelope.
+# Ordinary classification capture is insufficient for byte-exact comparison.
+# The extractor owns accepted shapes and refuses unproven boundaries.
+fm_tmux_composer_content() {  # <target> -> selected composer text or fail
+  local target=$1 pane
+  pane=$(tmux capture-pane -N -T -e -p -t "$target" -S 0 -E - 2>/dev/null) || return 1
+  fm_composer_extract_selected_content "$(fm_tmux_composer_caps)
+lossless=1" "$pane"
+}
+
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains
 # a genuine Cursor Agent CLI process. Cursor runs as a bundled node script, so
 # tmux's own #{pane_current_command} reports a bare `node`; identity therefore
