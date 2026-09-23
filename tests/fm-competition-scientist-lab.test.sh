@@ -150,13 +150,24 @@ PY
   rm "$extra_ws/other.py"
 
   printf 'partial' > "$extra_ws/.run/.state.json.4242.tmp"
-  printf 'partial' > "$extra_ws/.run/tmp/.evaluation-7-9.json.4242.tmp"
+  printf 'partial' > "$extra_ws/.run/.final.json.4242.tmp"
   output=$($LAB attempt "$extra_ws" --proposal "$proposal" 2>&1); status=$?
-  expect_code 0 "$status" "an interrupted harness-owned atomic write should not brick the workspace"
+  expect_code 0 "$status" "an interrupted rewrite of a harness-owned record should not brick the workspace"
   printf 'x' > "$extra_ws/.run/.secrets.tmp"
   output=$($LAB replay "$extra_ws" 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "a temp-looking file with no declared target should still be rejected"
   assert_contains "$output" "undeclared-file-edit:file:.run/.secrets.tmp" "the tolerated pattern must not admit arbitrary files"
+  rm "$extra_ws/.run/.secrets.tmp"
+  printf 'partial' > "$extra_ws/.candidate.py.4242.tmp"
+  output=$($LAB replay "$extra_ws" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a temp named after a record the harness never rewrites in place should be rejected"
+  assert_contains "$output" "undeclared-file-edit:file:.candidate.py.4242.tmp" "tolerance must not extend beyond the rewritten records"
+  rm "$extra_ws/.candidate.py.4242.tmp"
+  printf 'partial' > "$extra_ws/.run/tmp/.evaluation-7-9.json.4242.tmp"
+  output=$($LAB replay "$extra_ws" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "evaluator-owned residue is reclaimed by its evaluator, not tolerated forever"
+  assert_contains "$output" "undeclared-file-edit:file:.run/tmp/.evaluation-7-9.json.4242.tmp" "an evaluator temporary is not a harness-record rewrite"
+  rm "$extra_ws/.run/tmp/.evaluation-7-9.json.4242.tmp"
   pass "competition scientist: frozen hashes and the single editable surface are enforced"
 }
 
@@ -217,9 +228,12 @@ import pathlib
 import sys
 manifest = json.loads((pathlib.Path(sys.argv[1]) / ".frozen/manifest.json").read_text())
 floors = manifest["noise_floor"]
-assert sorted(floors) == ["calibration_loss", "grouped_mean", "ood_stress", "worst_group"], floors
-assert len(set(floors.values())) > 1, floors
-assert max(floors.values()) > 0.03, floors
+assert sorted(floors) == ["dev", "falsification"], floors
+for split, split_floors in floors.items():
+    assert sorted(split_floors) == ["calibration_loss", "grouped_mean", "ood_stress", "worst_group"], (split, split_floors)
+    assert len(set(split_floors.values())) > 1, (split, split_floors)
+    assert max(split_floors.values()) > 0.03, (split, split_floors)
+assert floors["dev"] != floors["falsification"], floors
 PY
 
   write_proposal "$TMP_ROOT/drop-spurious.json" drop-spurious "remove the feature whose relationship flips in stress groups" main '{"GROUPED_SPURIOUS_WEIGHT":0.0}'
@@ -615,6 +629,11 @@ assert final["aborted"]["phase"] == phase, final["aborted"]
 assert "evaluation-failed" in final["aborted"]["error"], final["aborted"]
 assert final["sealed"]["ok"] is False, final["sealed"]
 assert final["sealed"]["metrics"] is None, final["sealed"]
+if phase == "sealed":
+    assert final["sealed"]["failure_class"] not in ("", "sealed-not-completed"), final["sealed"]
+    assert final["aborted"]["error"].endswith("sealed-evaluation-failed:" + final["sealed"]["failure_class"]), (final["aborted"], final["sealed"])
+else:
+    assert final["sealed"]["failure_class"] == "", final["sealed"]
 ledger = [json.loads(line) for line in (workspace / ".run/ledger.jsonl").read_text().splitlines() if line]
 assert any(row["kind"] == "baseline" for row in ledger), "prior evidence was discarded"
 if phase == "falsification":

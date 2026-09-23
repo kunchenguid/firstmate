@@ -660,9 +660,11 @@ def init_workspace(args: argparse.Namespace) -> Path:
         "branch_factor": args.branch_factor,
         "plateau": args.plateau,
     }
-    dev_rows = read_json(frozen / "dev.json")
     workspace_baseline_values = parse_candidate(workspace / "candidate.py")
-    noise_floor = estimate_noise_floor(args.task, dev_rows, workspace_baseline_values, args.seed)
+    noise_floor = {
+        split: estimate_noise_floor(args.task, read_json(frozen / f"{split}.json"), workspace_baseline_values, args.seed)
+        for split in ("dev", "falsification")
+    }
     manifest = {
         "schema": SCHEMA_VERSION,
         "task": args.task,
@@ -677,7 +679,7 @@ def init_workspace(args: argparse.Namespace) -> Path:
         "caps": caps,
         "per_attempt_token_cap": caps["token_budget"] // caps["attempts"],
         "noise_floor": noise_floor,
-        "noise_floor_source": "one 1.96-sigma resolution floor per metric from 64 deterministic within-group bootstrap resamples of the baseline",
+        "noise_floor_source": "per split, one 1.96-sigma resolution floor per metric from 64 deterministic within-group bootstrap resamples of the baseline on that split",
         "catastrophic_group_drop": 0.10,
         "frozen": {
             f"{split}.json": sha256_file(frozen / f"{split}.json")
@@ -746,10 +748,24 @@ ALLOWED_WORKSPACE_FILES = frozenset({
     ".run/results.tsv",
     ".run/final.json",
 })
+INTERRUPTED_WRITE_RECORDS = frozenset({".run/state.json", ".run/final.json"})
+
+
+def interrupted_record_write(relative: str) -> bool:
+    path = Path(relative)
+    name = path.name
+    if not name.startswith(".") or not name.endswith(".tmp"):
+        return False
+    target, separator, pid = name[1:-len(".tmp")].rpartition(".")
+    if not separator or not pid.isdigit():
+        return False
+    return (path.parent / target).as_posix() in INTERRUPTED_WRITE_RECORDS
 
 
 def allowed_workspace_file(relative: str) -> bool:
     if relative in ALLOWED_WORKSPACE_FILES:
+        return True
+    if interrupted_record_write(relative):
         return True
     if relative.startswith(".run/tmp/evaluation-") and relative.endswith(".json"):
         return True
@@ -764,16 +780,6 @@ def allowed_workspace_file(relative: str) -> bool:
     return False
 
 
-def interrupted_write_target(relative: str) -> str:
-    name = Path(relative).name
-    if not name.startswith(".") or not name.endswith(".tmp"):
-        return ""
-    target, separator, pid = name[1:-len(".tmp")].rpartition(".")
-    if not separator or not target or not pid.isdigit():
-        return ""
-    return (Path(relative).parent / target).as_posix()
-
-
 def verify_workspace_surface(workspace: Path) -> None:
     for path in workspace.rglob("*"):
         relative = path.relative_to(workspace).as_posix()
@@ -786,9 +792,6 @@ def verify_workspace_surface(workspace: Path) -> None:
                 continue
             raise LabError(f"undeclared-file-edit:directory:{relative}")
         if allowed_workspace_file(relative):
-            continue
-        interrupted_target = interrupted_write_target(relative)
-        if interrupted_target and allowed_workspace_file(interrupted_target):
             continue
         raise LabError(f"undeclared-file-edit:file:{relative}")
 
@@ -861,7 +864,7 @@ def load_artifact_metrics(workspace: Path, candidate_sha: str) -> dict[str, Any]
     return read_json(workspace / "artifacts" / candidate_sha / "result.json")["metrics"]
 
 
-def metric_comparison(candidate: dict[str, Any], parent: dict[str, Any], manifest: dict[str, Any]) -> tuple[bool, str, float]:
+def metric_comparison(candidate: dict[str, Any], parent: dict[str, Any], manifest: dict[str, Any], split: str) -> tuple[bool, str, float]:
     tolerance = float(manifest["catastrophic_group_drop"])
     if float(candidate["worst_group"]) < float(parent["worst_group"]):
         for group, parent_score in parent["per_group"].items():
@@ -869,7 +872,7 @@ def metric_comparison(candidate: dict[str, Any], parent: dict[str, Any], manifes
             if candidate_score < parent_score - tolerance:
                 return False, f"catastrophic-group-regression:{group}", candidate_score - parent_score
     for name, direction in DIRECTIONS.items():
-        floor = float(manifest["noise_floor"][name])
+        floor = float(manifest["noise_floor"][split][name])
         delta = direction * (float(candidate[name]) - float(parent[name]))
         if abs(delta) > floor:
             return delta > 0, f"lexicographic:{name}", delta
@@ -1056,7 +1059,7 @@ def evaluate_and_record(workspace: Path, proposal: dict[str, Any], *, baseline: 
             verdict, reason = "KEEP", "baseline"
         else:
             parent_metrics = load_artifact_metrics(workspace, parent_sha)
-            keep, reason, _ = metric_comparison(metrics, parent_metrics, manifest)
+            keep, reason, _ = metric_comparison(metrics, parent_metrics, manifest, "dev")
             verdict = "KEEP" if keep else "REVERT"
 
     state = load_state(workspace)
@@ -1104,7 +1107,7 @@ def evaluate_and_record(workspace: Path, proposal: dict[str, Any], *, baseline: 
         state["branches"][branch] = candidate_sha
         state["consecutive_rejects"] = 0
         current_best = load_artifact_metrics(workspace, state["global_best_sha256"])
-        is_better, _, _ = metric_comparison(metrics, current_best, manifest)
+        is_better, _, _ = metric_comparison(metrics, current_best, manifest, "dev")
         if is_better:
             state["global_best_sha256"] = candidate_sha
     elif verdict == "REVERT":
@@ -1148,6 +1151,7 @@ def abandon_charged_search(
     phase: str,
     error: BaseException,
     falsification_block: dict[str, Any] | None,
+    sealed_block: dict[str, Any] | None,
 ) -> None:
     publish_final(
         workspace,
@@ -1163,7 +1167,7 @@ def abandon_charged_search(
                 "error": f"{type(error).__name__}: {error}"[-2000:],
             },
             "falsification": falsification_block,
-            "sealed": {
+            "sealed": sealed_block or {
                 "ok": False,
                 "metrics": None,
                 "prediction_sha256": "",
@@ -1192,6 +1196,7 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
     best_sha = state["global_best_sha256"]
     selected_sha = best_sha
     falsification_block: dict[str, Any] | None = None
+    sealed_block: dict[str, Any] | None = None
     charged_phase = ""
     try:
         if manifest["controller"] == "proposed":
@@ -1229,7 +1234,7 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
                 "failure_class": "" if unusable is None else f"{failed_arm}-{unusable.get('failure_class', 'runtime')}",
             }
             if unusable is None:
-                keep, _, _ = metric_comparison(falsification["metrics"], baseline_metrics["metrics"], manifest)
+                keep, _, _ = metric_comparison(falsification["metrics"], baseline_metrics["metrics"], manifest, "falsification")
                 if best_sha != state["baseline_sha256"] and not keep:
                     selected_sha = state["baseline_sha256"]
             append_record(
@@ -1263,7 +1268,13 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
         sealed_candidate = workspace / "artifacts" / selected_sha / "candidate.py"
         sealed = run_bounded_evaluator(workspace, sealed_candidate, "sealed")
         if not sealed.get("ok"):
-            raise LabError(f"sealed-evaluation-failed:{sealed.get('failure_class', 'runtime')}")
+            sealed_block = {
+                "ok": False,
+                "metrics": None,
+                "prediction_sha256": "",
+                "failure_class": sealed.get("failure_class", "runtime"),
+            }
+            raise LabError(f"sealed-evaluation-failed:{sealed_block['failure_class']}")
         state["selected_candidate_sha256"] = selected_sha
         final = publish_final(
             workspace,
@@ -1291,7 +1302,7 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
         )
     except BaseException as exc:
         if charged_phase:
-            abandon_charged_search(workspace, manifest, state, charged_phase, exc, falsification_block)
+            abandon_charged_search(workspace, manifest, state, charged_phase, exc, falsification_block, sealed_block)
         raise
     (workspace / "candidate.py").write_bytes(sealed_candidate.read_bytes())
     print_final(final)

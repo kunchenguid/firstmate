@@ -23,12 +23,13 @@ The only scientific surface is the generated workspace file `candidate.py`.
 The lab accepts typed proposals and materializes one literal assignment per attempt.
 It parses the candidate with Python's AST and never executes candidate code.
 Imports, calls, extra assignments, missing assignments, symlinks, and undeclared workspace files are rejected.
-The one exception is a temp file left beside a declared record by an interrupted harness write, which is tolerated so an interrupted run stays verifiable without hand-deleting a file the contract otherwise calls undeclared.
+The one exception is an interrupted atomic write of `.run/state.json` or `.run/final.json`, the two records the harness rewrites in place, so an interrupted run stays verifiable without hand-deleting a file the contract otherwise calls undeclared.
+Every other temp file is undeclared, including one named after a frozen, artifact, or evaluator record: the evaluator reclaims its own output temporaries when its bounded call ends.
 This also prevents a proposal from opening a network connection or launching a subprocess.
 
 The evaluator, synthetic data, development split, falsification split, sealed-data generator, Python environment record, baseline template, and empty dependency set are frozen and SHA-256 verified before every evaluation.
 The sealed rows are generated into a temporary harness-owned file only during finalization and are removed after that single evaluation, including when that evaluation raises or is interrupted.
-Unlike the evaluator's own output temporaries, a sealed dataset left in the workspace is never tolerated by the surface check, so an escaped holdout is named rather than silently walked past.
+A sealed dataset left in the workspace is never tolerated by the surface check, so an escaped holdout is named rather than silently walked past.
 The evaluator runs in a subprocess with a kernel CPU limit and a parent-enforced wall limit.
 Linux uses a kernel address-space limit for memory, while macOS uses parent-side resident-memory sampling because macOS rejects a lowered `RLIMIT_AS` for the Python process image.
 The default experiment cap is 30 seconds of CPU, 30 seconds of wall time, and 1 GiB of resident memory per evaluator call.
@@ -76,8 +77,8 @@ The quality comparison is lexicographic in this order:
 4. calibration or normalized error;
 5. lower candidate complexity when the quality dimensions are equivalent within resolution.
 
-One evaluator-noise floor per quality dimension is frozen from 64 deterministic within-group bootstrap resamples of the baseline, each recorded as that metric's own 1.96-sigma resolution.
-A dimension measured on its own scale therefore carries its own floor rather than a shared constant.
+One evaluator-noise floor per quality dimension and per split is frozen from 64 deterministic within-group bootstrap resamples of the baseline on that split, each recorded as that metric's own 1.96-sigma resolution.
+A dimension measured on its own scale therefore carries its own floor rather than a shared constant, and each comparison reads the floors of the split it was scored on: development attempts use the development floors, and the pre-promotion falsification uses the smaller falsification split's own floors.
 A change below its metric's floor does not promote unless it is a verified simplification.
 A group regression beyond the frozen tolerance rejects the candidate before the lexicographic comparison, unless every candidate group still scores at or above the incumbent's worst-group floor, which is the robustness trade the primary objective exists to reward.
 The noisy-classification fixture demonstrates the below-resolution outcome.
@@ -185,7 +186,8 @@ Every field is written on one line with tabs and every ASCII or Unicode line bre
 `.run/final.json` alone contains the post-search sealed score, or an `aborted` block naming the charged phase when an audit could not complete.
 No sealed dataset file exists in the proposer-visible workspace before finalization.
 
-Failure classes include immutable or undeclared-surface refusal, unparseable, duplicate, or confounded proposal, budget refusal, syntax, timeout, CPU-limit kill, OOM, network denial, runtime failure, nondeterministic replay, and the terminal `sealed-not-completed` class recorded when a charged sealed audit could not finish.
+Failure classes include immutable or undeclared-surface refusal, unparseable, duplicate, or confounded proposal, budget refusal, syntax, timeout, CPU-limit kill, OOM, network denial, runtime failure, nondeterministic replay, and the terminal `sealed-not-completed` class recorded when a charged sealed audit was interrupted before it returned.
+A sealed audit that runs to completion and reports a bounded failure keeps that returned class, so an interrupted call and a returned OOM, timeout, CPU-limit, syntax, or nondeterministic-replay failure stay distinguishable in the final record.
 A falsification arm that fails outright is recorded with its arm prefix, as `candidate-<class>` or `baseline-<class>`.
 An audit abandoned without an arm failure names its phase only in the `aborted` block, leaving the evaluation failure classes empty rather than inventing one.
 A failure restores the branch incumbent and leaves its evidence reachable.
