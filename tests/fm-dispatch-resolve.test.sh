@@ -672,6 +672,35 @@ assert_contains "$out" '  status: clear' "dynamic catalog candidates can resolve
 assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "dynamic discovery emits the concrete profile line"
 assert_not_contains "$out" 'gpt-5.5' "a model absent from the catalog fixture drops out automatically"
 
+printf '%s\n' '{"model":"gpt-5.6-luna","provider":"codex","reasoningCapabilities":["low","medium","high","xhigh","max"],"taskTypes":["implementation"]}' > "$DYNAMIC_FIXTURES/codex.jsonl"
+cat > "$RULES" <<'JSON'
+{"rules":[{"when":"Dynamic max implementation.","use":{"discover":{"task_type":"implementation","required_reasoning_class":"max","harnesses":["codex"],"providers":["codex"]}}}]}
+JSON
+reset_log
+FM_MODEL_CATALOG_FIXTURE_DIR="$DYNAMIC_FIXTURES" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "catalog max capability satisfies a max dynamic policy"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-luna'" "catalog max capability keeps Luna eligible"
+assert_contains "$out" 'catalog=fixture  fit=task:implementation/supported  reasoning:max [catalog]' "dynamic candidates disclose catalog provenance and task fit"
+
+cat > "$RULES" <<'JSON'
+{"rules":[{"when":"Dynamic documentation.","use":{"discover":{"task_type":"documentation","required_reasoning_class":"max","harnesses":["codex"],"providers":["codex"]}}}]}
+JSON
+reset_log
+FM_MODEL_CATALOG_FIXTURE_DIR="$DYNAMIC_FIXTURES" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "task type fit rejects an explicitly mismatched catalog"
+assert_contains "$out" 'task fit rejected: catalog declares implementation, not documentation' "task type fit evidence names the mismatch"
+
+printf '%s\n' '{"model":"gpt-5.6-sol","provider":"codex"}' > "$DYNAMIC_FIXTURES/codex.jsonl"
+PREFERENCE_QUOTA="$TMP_ROOT/preference-quota.json"
+jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models") | .selection.spendPriority) = -0.9 | (.providers[] | select(.provider == "claude") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models") | .selection.spendPriority) = -0.1' "$QUOTA" > "$PREFERENCE_QUOTA"
+cat > "$RULES" <<'JSON'
+{"rules":[{"when":"Dynamic preference evidence.","use":{"discover":{"task_type":"implementation","required_reasoning_class":"high","harnesses":["codex","claude"],"providers":["codex","claude"],"preferred_models":["gpt-5.6-sol"]}}}]}
+JSON
+reset_log
+FM_MODEL_CATALOG_FIXTURE_DIR="$DYNAMIC_FIXTURES" QUOTA_AXI_FIXTURE="$PREFERENCE_QUOTA" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" "  profile: --harness 'claude' --model 'claude-haiku-4-5-20251001'" "preference evidence cannot override spendPriority"
+assert_contains "$out" 'preference=preferred_model' "dynamic preference is disclosed without ranking bonus"
+
 printf '%s\n' '{"model":"opencode-go/space-bunny-free","provider":"opencode-go"}' > "$DYNAMIC_FIXTURES/opencode.jsonl"
 cat > "$RULES" <<'JSON'
 {"rules":[{"when":"OpenCode dynamic work.","use":{"discover":{"task_type":"implementation","required_reasoning_class":"medium","harnesses":["opencode"],"providers":["opencode-go"]}}}]}
@@ -679,7 +708,7 @@ JSON
 reset_log
 FM_MODEL_CATALOG_FIXTURE_DIR="$DYNAMIC_FIXTURES" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "unknown dynamic quota does not silently choose"
-assert_contains "$out" 'candidate: opencode:opencode-go/space-bunny-free  provider=opencode-go  -> eligible, unranked: provider opencode-go not in the quota snapshot: disclosed uncertainty' "unknown quota is disclosed on the discovered candidate"
+assert_contains "$out" 'candidate: opencode:opencode-go/space-bunny-free  provider=opencode-go  catalog=fixture  fit=task:implementation/unknown  reasoning:high [inferred]  fitReason=catalog does not declare implementation; meets medium  -> eligible, unranked: provider opencode-go not in the quota snapshot: disclosed uncertainty' "unknown quota is disclosed on the discovered candidate"
 
 cat > "$RULES" <<'JSON'
 {"rules":[{"when":"Unsupported dynamic work.","use":{"discover":{"task_type":"implementation","required_reasoning_class":"high","harnesses":["grok"],"providers":["grok"]}}}]}

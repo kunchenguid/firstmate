@@ -38,10 +38,20 @@ json_emit_error() {  # <harness> <reason> <method>
 normalize_fixture() {  # <harness> <file>
   local harness=$1 file=$2
   jq -c --arg harness "$harness" '
+    def reasoning_capabilities:
+      [(.reasoningCapabilities // .reasoning_classes // .supportedReasoningEfforts // .capabilities.reasoning // [])[]?
+       | if type == "object" then (.reasoningEffort // .reasoning_effort // .level // .name // empty) else . end
+       | select(type == "string") | ascii_downcase] | unique;
+    def task_types:
+      [(.taskTypes // .task_types // .capabilities.taskTypes // .capabilities.task_types // [])[]?
+       | select(type == "string") | ascii_downcase] | unique;
     select(type == "object") |
     if (.status // "ok") == "ok" then
       select((.harness? // $harness) == $harness) |
+      (reasoning_capabilities) as $reasoning |
+      (task_types) as $tasks |
       {status:"ok", harness:$harness, model:(.model // .id), provider:.provider,
+       reasoningCapabilities:$reasoning, taskTypes:$tasks,
        provenance: ((.provenance // {}) + {method:"fixture"})}
       | select((.model | type) == "string" and (.model | length) > 0 and (.provider | type) == "string" and (.provider | length) > 0)
     else
@@ -279,7 +289,14 @@ while True:
         if not isinstance(mid, str) or not mid or mid in seen:
             continue
         seen.add(mid)
-        print(json.dumps({'status':'ok','harness':'codex','model':mid,'provider':'codex','provenance':{'method':'codex app-server model/list','displayName':model.get('displayName'),'catalogProvider':model.get('provider')}}, separators=(',', ':')))
+        raw_efforts = model.get('supportedReasoningEfforts') or model.get('supported_reasoning_efforts') or []
+        efforts = []
+        for effort in raw_efforts:
+            if isinstance(effort, dict):
+                effort = effort.get('reasoningEffort') or effort.get('reasoning_effort') or effort.get('level') or effort.get('name')
+            if isinstance(effort, str) and effort:
+                efforts.append(effort.lower())
+        print(json.dumps({'status':'ok','harness':'codex','model':mid,'provider':'codex','reasoningCapabilities':sorted(set(efforts)),'provenance':{'method':'codex app-server model/list','displayName':model.get('displayName'),'catalogProvider':model.get('provider')}}, separators=(',', ':')))
     cursor = got.get('nextCursor')
     if not cursor:
         break

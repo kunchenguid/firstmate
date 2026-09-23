@@ -314,18 +314,38 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   def lane_of($c): quota_lane($c.harness; $c.model);
   def reasoning_rank($class):
     if $class == "low" then 1 elif $class == "medium" then 2 elif $class == "high" then 3 elif $class == "xhigh" then 4 elif $class == "max" then 5 else 0 end;
-  def inferred_reasoning($model; $provider; $task):
+  def inferred_reasoning($model; $provider):
     (($model // "") | ascii_downcase) as $m |
     (($provider // "") | ascii_downcase) as $p |
-    if ($m | test("opus|fable|gpt-5\\.6|gpt-5\\.5|luna|sol|grok-4|k3|k2\\.7|sonnet-5")) then "xhigh"
+    if ($m | test("gpt-5\\.6-luna")) then "max"
+    elif ($m | test("opus|fable|gpt-5\\.6|gpt-5\\.5|sol|grok-4|k3|k2\\.7|sonnet-5")) then "xhigh"
     elif ($m | test("sonnet|gpt-5|claude|kimi|codex|space-bunny")) then "high"
     elif ($p | test("claude|codex|opencode|grok|kimi|cursor")) then "medium"
     else "low" end;
-  def preferred_bonus($model; $d):
+  def catalog_reasoning($row):
+    [($row.reasoningCapabilities // [])[]? | ascii_downcase | select(reasoning_rank(.) > 0)] | unique as $classes |
+    if ($classes | length) == 0 then
+      {class: inferred_reasoning($row.model; $row.provider), source: "inferred", capabilities: []}
+    else
+      {class: ($classes | max_by(reasoning_rank(.))), source: "catalog", capabilities: $classes}
+    end;
+  def task_fit($task; $row):
+    (($task // "") | ascii_downcase) as $task_name |
+    [($row.taskTypes // [])[]? | ascii_downcase] | unique as $declared_tasks |
+    if ($declared_tasks | length) > 0 then
+      if ($declared_tasks | index($task_name)) != null then
+        {status: "supported", eligible: true, reason: ("catalog declares " + $task_name)}
+      else
+        {status: "unsupported", eligible: false, reason: ("catalog declares " + ($declared_tasks | join(", ")) + ", not " + $task_name)}
+      end
+    else
+      {status: "unknown", eligible: true, reason: ("catalog does not declare " + $task_name)}
+    end;
+  def preference($model; $d):
     (($model // "") | ascii_downcase) as $m |
     ((($d.preferred_models // []) | map(ascii_downcase) | index($m)) != null) as $model_hit |
     ((($d.preferred_families // []) | map(ascii_downcase)) as $families | any($families[]?; . as $family | ($m | contains($family)))) as $family_hit |
-    (if $model_hit then 2 elif $family_hit then 1 else 0 end);
+    if $model_hit then "preferred_model" elif $family_hit then "preferred_family" else "none" end;
   def dynamic_profiles($u):
     ($u.discover) as $d |
     ([ $catalog[]? | select(. as $row | $row.status == "error" and (($d.harnesses // []) | index($row.harness))) ]) as $errs |
@@ -341,13 +361,17 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
         select(. as $row | (($d.harnesses // []) | index($row.harness))) |
         select(. as $row | ((($d.providers // []) | length) == 0 or (($d.providers // []) | index($row.provider)))) |
         (.model) as $model | (.provider) as $provider |
-        (inferred_reasoning($model; $provider; ($d.task_type // ""))) as $class |
-        (reasoning_rank($class)) as $class_rank |
+        (catalog_reasoning(.)) as $reasoning |
+        (task_fit($d.task_type; .)) as $task_fit |
+        (reasoning_rank($reasoning.class)) as $class_rank |
         (reasoning_rank($d.required_reasoning_class)) as $required_rank |
         {harness: .harness, model: $model, provider: $provider,
-         fitClass: $class, fitTier: (($class_rank * 10) + preferred_bonus($model; $d)),
-         fitEligible: ($class_rank >= $required_rank),
-         fitReason: (if $class_rank >= $required_rank then "meets " + $d.required_reasoning_class else "requires " + $d.required_reasoning_class + ", catalog fit is " + $class end)}
+         catalogMethod: (.provenance.method // "unknown"), catalogCapabilities: $reasoning.capabilities,
+         taskType: $d.task_type, taskFit: $task_fit.status, taskFitReason: $task_fit.reason,
+         fitClass: $reasoning.class, fitSource: $reasoning.source,
+         fitEligible: ($task_fit.eligible and ($class_rank >= $required_rank)),
+         fitReason: (if ($class_rank >= $required_rank) then "meets " + $d.required_reasoning_class else "requires " + $d.required_reasoning_class + ", catalog fit is " + $reasoning.class end),
+         preference: preference($model; $d)}
         + (if $d.floor then {floor: $d.floor} else {} end)
       ] | unique_by([.harness, .model, .provider])) as $profiles |
       if ($profiles | length) == 0 then {error: "model catalog discovery returned no candidates matching the dynamic policy"}
@@ -375,7 +399,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), spendPriority: (.selection.spendPriority // null)});
   def evaluate($c):
     (provider_of($c)) as $p | (lane_of($c)) as $lane |
-    if (($c.fitEligible // true) | not) then {profile: $c, provider: $p, eligible: false, reason: "task fit rejected: \($c.fitReason)"}
+    if ($c.fitEligible == false) then {profile: $c, provider: $p, eligible: false, reason: "task fit rejected: \($c.taskFitReason)"}
     elif $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
     elif prov($p; $lane) == null then
       {profile: $c, provider: $p, eligible: true, unranked: true,
@@ -457,10 +481,8 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     ([$cands[] | select(.unranked)]) as $unranked |
     if ($elig | length) == 0 then $ev + {status: "escalate", reason: "no rankable eligible candidate", note: $sel.note, candidates: $cands}
     else
-      ($elig | max_by(.profile.fitTier // 0) | (.profile.fitTier // 0)) as $best_fit |
-      ([$elig[] | select((.profile.fitTier // 0) == $best_fit)]) as $fit_elig |
-      ($fit_elig | max_by(.spendPriority)) as $best |
-      ([$fit_elig[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
+      ($elig | max_by(.spendPriority)) as $best |
+      ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
       if $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $sel.note, candidates: $cands}
       else $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $best}
         + (if ($unranked | length) > 0 then
@@ -484,6 +506,9 @@ TEXT=$(jq -r '
   (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
   (.candidates[]? | "  candidate: \(.profile.harness | flat):\(show(.profile.model))"
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
+      + (if .profile.catalogMethod then "  catalog=\(.profile.catalogMethod | flat)" else "" end)
+      + (if .profile.fitClass then "  fit=task:\(.profile.taskType | flat)/\(.profile.taskFit | flat)  reasoning:\(.profile.fitClass | flat) [\(.profile.fitSource | flat)]  fitReason=\(.profile.taskFitReason | flat); \(.profile.fitReason | flat)" else "" end)
+      + (if .profile.preference and .profile.preference != "none" then "  preference=\(.profile.preference | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
       + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
