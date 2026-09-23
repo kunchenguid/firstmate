@@ -472,7 +472,7 @@ The resolver returns an actionable configuration error before any request when s
 A profile `floor` contains only `scope` and `min_percent`, always uses that profile's provider, and makes that one candidate ineligible below `min_percent` on the named scope.
 An absent or unknown named row also makes the candidate unrankable and is reported as an unverifiable floor, not as a known shortfall.
 `ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
-Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed catalog entry supports that reasoning level.
+Codex `max` is valid when the profile selects a Luna model (`gpt-<version>-luna`, such as `gpt-5.6-luna` or `gpt-6-luna`), whose installed catalog entries support that reasoning level.
 An omitted model or effort means the selected harness uses its own default for that axis.
 Every profile array is an implicit quota-aware choice resolved through `quota-array-dispatch`.
 If no dispatch rule fits, firstmate resolves `default` through the same object-or-array path before falling back to `config/crew-harness`.

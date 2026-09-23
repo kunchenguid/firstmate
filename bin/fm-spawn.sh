@@ -2405,12 +2405,12 @@ effort_flag_for_harness() {
     ;;
   codex)
     # The installed codex config schema uses model_reasoning_effort. The
-    # installed model catalog supports max for gpt-5.6-luna; keep that level
-    # scoped to the model whose catalog entry advertises it.
+    # installed model catalog advertises max for every Luna release
+    # (gpt-5.6-luna, gpt-6-luna); keep that level scoped to Luna models.
     case "$effort" in
     low | medium | high | xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
     max)
-      [ "$model" = gpt-5.6-luna ] || return 0
+      [[ $model =~ ^gpt-[0-9]+(\.[0-9]+)*-luna$ ]] || return 0
       printf -- '-c %s ' "$(shell_quote 'model_reasoning_effort="max"')"
       ;;
     esac
