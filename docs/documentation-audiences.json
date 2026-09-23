@@ -313,6 +313,10 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/claude-seats.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/cmux-backend.md",
       "audience": "operator-current"
     },

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Push declared inherited local material to live secondmate homes.
-# Usage: fm-config-push.sh [--help]
+# Usage: fm-config-push.sh [--local-only] [--help]
 #
 # Mid-session convergence for inherited local material such as
 # config/crew-dispatch.json, config/backend, or data/captain-shared.md updates.
@@ -14,14 +14,20 @@
 # through their SSH route. Unchanged config and data/captain-shared.md-only
 # updates send no reread unless a previous send failure is pending for that home.
 # Warnings-only skips exit 0; real propagation or reread-send errors exit non-zero.
+# --local-only skips every record carrying remote_host, so the push never opens
+# SSH or waits on another machine; bin/fm-seat.sh uses it after a seat switch,
+# because seat settings never cross to a remote route.
 set -u
 
 usage() {
   cat <<'EOF'
-Usage: fm-config-push.sh [--help]
+Usage: fm-config-push.sh [--local-only] [--help]
 
 Push the primary firstmate home's declared inherited local material into each
 live secondmate home.
+
+  --local-only  skip remote secondmate routes (records carrying remote_host);
+                only this machine's local homes are pushed and reported
 
 This is local-material-only:
   - does not fast-forward tracked files
@@ -45,15 +51,20 @@ Environment overrides follow the rest of firstmate:
 EOF
 }
 
+LOCAL_ONLY=0
 case "${1:-}" in
   -h|--help)
     usage
     exit 0
     ;;
+  --local-only)
+    [ "$#" -eq 1 ] || { echo "usage: fm-config-push.sh [--local-only] [--help]" >&2; exit 2; }
+    LOCAL_ONLY=1
+    ;;
   "")
     ;;
   *)
-    echo "usage: fm-config-push.sh [--help]" >&2
+    echo "usage: fm-config-push.sh [--local-only] [--help]" >&2
     exit 2
     ;;
 esac
@@ -120,6 +131,9 @@ while IFS='|' read -r id home _window meta; do
     continue
   fi
   remote_host=$(fm_meta_get "$meta" remote_host)
+  if [ -n "$remote_host" ] && [ "$LOCAL_ONLY" -eq 1 ]; then
+    continue
+  fi
   if [ -n "$remote_host" ]; then
     printf 'secondmate %s (%s:%s):\n' "$id" "$remote_host" "$home"
     remote_lock=$(fm_remote_inherit_transaction_lock_path "$STATE" "$id" 2>/dev/null || true)

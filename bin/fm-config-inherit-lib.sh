@@ -47,8 +47,8 @@
 # secondmates, and a secondmate never spawns secondmates, so it must not flow
 # downstream.
 #
-# That single declaration is also the ONE owner of the inherited-material
-# allowlist for remote routes: bin/fm-remote-inherit-push.sh (sender) and
+# That single declaration, less FM_MACHINE_LOCAL_INHERITABLE_CONFIG, is also the
+# ONE owner of the inherited-material allowlist for remote routes: bin/fm-remote-inherit-push.sh (sender) and
 # bin/fm-remote-inherit.sh (receiver, executing inside the remote home) both
 # derive their item set from fm_config_inherit_items rather than restating it,
 # so a new inheritable item cannot be accepted by one side and refused by the
@@ -68,7 +68,14 @@ FM_SHARED_CAPTAIN_MODE="444"
 # The declared inheritable set (space-separated, config-dir-relative item paths).
 # Extend here to inherit more of the primary's local config; override via the
 # environment only in tests. Items must not contain whitespace.
-FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host}"
+FM_INHERITABLE_CONFIG="${FM_INHERITABLE_CONFIG:-crew-dispatch.json crew-harness backlog-backend backend herdr-presentation-spaces startup-memory-budget trace-context launch-env-allowlist claude-permission-mode lavish-axi-host claude-seat claude-seats-root claude-seat-threshold}"
+
+# Items that name something that exists only on THIS machine, so they reach local
+# secondmate homes but never cross to a remote route. A Claude seat is a
+# per-machine, Keychain-backed profile the owner logged in here; a remote home
+# handed its name would resolve a profile nobody logged in there, so it keeps
+# its own login exactly as before seats existed (docs/claude-seats.md).
+FM_MACHINE_LOCAL_INHERITABLE_CONFIG="claude-seat claude-seats-root claude-seat-threshold"
 
 # Items whose value is a home-SESSION enablement decision rather than durable
 # local configuration. They are inherited at the launch convergence point, where
@@ -86,13 +93,15 @@ fm_config_inherit_item_session_scoped() {  # <item>
   return 1
 }
 
-# The complete declared inherited-material set as home-relative paths, one per
-# line, in propagation order: every FM_INHERITABLE_CONFIG item under config/,
-# then the one shared data file. This is what remote senders and receivers
-# derive from, so both ends of a transfer agree by construction.
+# The inherited-material set that may cross machines, as home-relative paths,
+# one per line, in propagation order: every FM_INHERITABLE_CONFIG item under
+# config/ except the machine-local ones, then the one shared data file. This is
+# what remote senders and receivers derive from, so both ends of a transfer
+# agree by construction.
 fm_config_inherit_items() {
   local item
   for item in $FM_INHERITABLE_CONFIG; do
+    case " $FM_MACHINE_LOCAL_INHERITABLE_CONFIG " in *" $item "*) continue ;; esac
     printf 'config/%s\n' "$item"
   done
   printf '%s\n' "$FM_SHARED_CAPTAIN_REL"

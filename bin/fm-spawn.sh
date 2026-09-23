@@ -589,6 +589,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-seat-lib.sh
+. "$SCRIPT_DIR/fm-seat-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -1593,6 +1595,14 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+# The claude_seat line from the task's own record on a relaunch, empty when it
+# has none.
+RELAUNCH_SEAT=
+# The Claude profile directory THIS task launches with, empty for the ambient
+# default, and the value its record carries as claude_seat. Both are resolved
+# once the harness is known, below (bin/fm-seat-lib.sh).
+SEAT_CONFIG_DIR=
+SEAT_RECORD=
 # 1 when the recorded endpoint is authoritatively gone and this relaunch must
 # create a fresh one for the task rather than adopt its recorded address.
 RELAUNCH_REBIND=0
@@ -1680,6 +1690,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
       ;;
   esac
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  RELAUNCH_SEAT=$(fm_meta_get "$RELAUNCH_META" claude_seat)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   # A secondmate whose endpoint is gone already has ONE owner for that
@@ -4024,6 +4035,30 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
+# Resolve the Claude seat, only for a claude worker: no other harness reads a
+# Claude profile, so recording one for it would misreport which workers a
+# switch left alone, and a relaunch onto another harness drops the line.
+# A claude-to-claude relaunch keeps the task's OWN recorded seat, never the
+# home's current setting: its session history lives under that profile, so
+# re-resolving would strand it and silently change which account the work
+# bills to. An absent line there means the task predates seats and took
+# firstmate's own ambient CLAUDE_CONFIG_DIR, which it keeps getting. Every
+# other claude launch - a fresh spawn, or a relaunch from another harness,
+# which has no Claude history to protect - is a new worker for seat purposes
+# and resolves the home's active seat exactly as a fresh spawn does
+# (bin/fm-seat-lib.sh owns that order), so it never lands on the ambient
+# default that rotation avoids. Resolving here, before trust pre-registration,
+# is what lets the trust entry land in the same profile the worker will read.
+if [ "$HARNESS" = claude ]; then
+  if [ "$RELAUNCH" -eq 1 ] && [ "$RELAUNCH_PRIOR_HARNESS" = claude ]; then
+    SEAT_RECORD=$RELAUNCH_SEAT
+    SEAT_CONFIG_DIR=${RELAUNCH_SEAT:-${CLAUDE_CONFIG_DIR:-}}
+  else
+    SEAT_CONFIG_DIR=$(fm_seat_spawn_config_dir)
+    SEAT_RECORD=$SEAT_CONFIG_DIR
+  fi
+fi
+
 # Pre-register Claude's workspace trust for the directory this launch starts in,
 # at the first point that directory is known and before any per-task state is
 # created below. The dialog gates the pane before the brief is ever read, and it
@@ -4056,7 +4091,11 @@ claude*)
   else
     spawn_trust_args=("$WT" "$PROJ_ABS")
   fi
-  if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+  # Register the trust entry in the seat's OWN store. bin/fm-claude-trust.sh
+  # resolves the store from its own CLAUDE_CONFIG_DIR, so without this the entry
+  # would land in firstmate's ambient profile while the worker launches against
+  # the seat, and the worker would still meet the dialog it cannot answer.
+  if ! CLAUDE_CONFIG_DIR="$SEAT_CONFIG_DIR" "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
     exit 1
   fi
@@ -4556,7 +4595,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort account account_provider busy_gen spawn_gen claude_seat traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4578,6 +4617,11 @@ preserve_relaunch_meta() {
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"
   [ -z "$WORKER_ACCOUNT_PROVIDER" ] || echo "account_provider=$WORKER_ACCOUNT_PROVIDER"
+  # The seat this task launched on. A claude-to-claude relaunch rewrites the
+  # value it read back from this same line, which is the whole mechanism by
+  # which a later seat switch cannot move this task. Absent means the ambient
+  # default store, which is also what a pre-seats record has.
+  [ -z "$SEAT_RECORD" ] || echo "claude_seat=$SEAT_RECORD"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -4754,14 +4798,21 @@ claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo 
 esac
 # Crewmate panes are created by a long-lived tmux/herdr daemon that does not
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
-# back to the default ~/.claude store even when firstmate itself runs under a
-# different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
+# back to the default ~/.claude store even when this task should run on another
+# account. Forward the task's resolved store onto the claude launch: the home's
+# active seat, firstmate's own ambient CLAUDE_CONFIG_DIR, or - on a relaunch -
+# the profile this task's record says it already launched with. Only when set;
 # an unset value is the single-store default and needs no prefix.
 # A home's worker account pin replaces that forwarding: the launch names the
 # pinned root (or unsets the variable for the ordinary Claude account) and
 # sheds the environment credentials Claude ranks above the root's login.
+# The pin and an active seat are mutually exclusive - a home configuring both
+# is refused far above, before any endpoint, worktree or record exists - so
+# these branches can never both want CLAUDE_CONFIG_DIR at once. The seat branch
+# also carries the plain ambient forwarding described above, because
+# fm_seat_config_dir falls back to firstmate's own CLAUDE_CONFIG_DIR when no
+# named seat is active; a separate ambient branch would only re-assign the same
+# value a second time in the launch string.
 if [ -n "$WORKER_ACCOUNT" ]; then
   case "$HARNESS" in
   claude)
@@ -4775,8 +4826,8 @@ if [ -n "$WORKER_ACCOUNT" ]; then
     LAUNCH="PI_CODING_AGENT_DIR=$(shell_quote "$WORKER_ACCOUNT_ROOT") $LAUNCH"
     ;;
   esac
-elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+elif [ "$HARNESS" = claude ] && [ -n "$SEAT_CONFIG_DIR" ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$SEAT_CONFIG_DIR") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

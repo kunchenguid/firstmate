@@ -330,31 +330,12 @@ provider_for_harness() {
 # effective_for_provider_model <provider> <model> <lane>
 # Print the most constraining applicable quota evidence for the provider/model
 # tuple, including provider-wide and exact model or product scopes. The row is
-# bound through quota_row from bin/fm-quota-axi-lib.sh, so <lane> matters only
-# on a schema 6 snapshot.
+# bound through quota_row and read through quota_effective from
+# bin/fm-quota-axi-lib.sh, so <lane> matters only on a schema 6 snapshot.
 effective_for_provider_model() {
   local provider=$1 model=${2:-default} lane=${3:-}
   printf '%s\n' "$QUOTA_JSON" | jq -c --arg provider "$provider" --arg model "$model" --arg lane "$lane" "$FM_QUOTA_ROW_JQ"'
-    ($model | sub("^model:"; "")) as $model_token |
-    quota_row(.; $provider; $lane) as $p |
-    if ($p // null) == null then {status: "unknown"}
-    else ($p.quotaSemantics.effectiveAvailability // []) |
-    map(select(.scope as $scope |
-      $scope == "all_models" or $scope == "all_products" or
-      ($model_token != "" and $model_token != "default" and
-       (($scope | startswith("model:")) or ($scope | startswith("product:"))) and
-       ($model_token == ($scope | sub("^(model|product):"; ""))))
-    )) as $applicable |
-    ($applicable | map(select(.status == "known"))) as $known |
-    if ($applicable | length) == 0 then {status: "unknown"}
-    elif any($applicable[]; (.runway.status // "") == "exhausted_now") then
-      ($applicable | map(select((.runway.status // "") == "exhausted_now")) | first)
-    elif ($known | length) == 0 then {status: "unknown"}
-    elif any($known[]; .effectivePercentRemaining == 0) then
-      ($known | map(select(.effectivePercentRemaining == 0)) | first)
-    else ($known | min_by(.effectivePercentRemaining))
-    end
-    end
+    quota_effective(quota_row(.; $provider; $lane); $model)
   ' 2>/dev/null
 }
 
