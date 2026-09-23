@@ -121,6 +121,14 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/auto-research/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/auto-research/evolution.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/bearings/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -242,6 +250,10 @@
     },
     {
       "path": ".agents/skills/quota-array-dispatch/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/reckon/SKILL.md",
       "audience": "agent-runtime"
     },
     {
