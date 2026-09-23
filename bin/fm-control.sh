@@ -775,7 +775,7 @@ resolve_relaunch_profile() {
   local account_model=$TARGET_MODEL
   [ "$account_model" != default ] || account_model=
   fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
-    "$account_model" "$TARGET_HARNESS" 0 >/dev/null || return 1
+    "$account_model" "$TARGET_HARNESS" >/dev/null || return 1
 }
 
 # safe_checkpoint: prove, before anything is stopped, that the work a relaunch

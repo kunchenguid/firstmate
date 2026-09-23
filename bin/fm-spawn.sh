@@ -2237,7 +2237,9 @@ fi
 # record exists. An absent pin selects nothing and leaves every later launch
 # step exactly as it was. A pinned Claude root is exported here as well, so the
 # trust registration below writes the store the worker will actually read.
-WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_LAUNCH") || exit 1
+RAW_COMMAND=
+[ "$RAW_LAUNCH" = 0 ] || RAW_COMMAND=$ARG3
+WORKER_ACCOUNT=$(fm_worker_account_select "$HARNESS" "$CONFIG" "$MODEL" "${PI_BIN:-$HARNESS}" "$RAW_COMMAND") || exit 1
 WORKER_ACCOUNT_DECLARED=${WORKER_ACCOUNT%%$'\t'*}
 WORKER_ACCOUNT_ROOT=${WORKER_ACCOUNT#*$'\t'}
 WORKER_ACCOUNT_PROVIDER=${WORKER_ACCOUNT_ROOT#*$'\t'}

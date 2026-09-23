@@ -30,7 +30,10 @@
 # passes --provider <that provider>, because without it Pi may resolve a
 # provider-prefixed model under another authenticated provider. A raw Pi
 # launch command is launched verbatim and cannot receive that flag, so a home
-# with config/pi-account refuses raw Pi launches.
+# with config/pi-account refuses raw Pi launches. A raw Claude launch command
+# runs after the pinned root and shed credentials are applied, so its own
+# leading CLAUDE_CONFIG_DIR or shed-credential assignment would override the
+# pin; a home with config/claude-account refuses such a command.
 #
 # The sign-in check asks the runner itself, with only HOME, PATH, TMPDIR,
 # USER, LOGNAME, and the selected root in its environment, so a credential
@@ -214,7 +217,7 @@ fm_worker_account_check() {
   return 0
 }
 
-# fm_worker_account_select <harness> <config-dir> <model> <executable> <raw:0|1>
+# fm_worker_account_select <harness> <config-dir> <model> <executable> [<raw-command>]
 # The whole launch-time decision. Prints nothing for an unpinned runner, so
 # the caller keeps today's launch unchanged. For a pinned one prints
 # "declared<TAB>root<TAB>provider", where provider is the Pi launch model's
@@ -223,15 +226,29 @@ fm_worker_account_check() {
 # endpoint exists, and bin/fm-control.sh before a relaunch stops the live
 # agent.
 fm_worker_account_select() {
-  local harness=$1 config=$2 model=$3 executable=$4 raw=$5 selection declared root providers provider=
+  local harness=$1 config=$2 model=$3 executable=$4 raw=${5:-} selection declared root providers word provider=
   selection=$(fm_worker_account_resolve "$harness" "$config") || return 1
   [ -n "$selection" ] || return 0
   declared=${selection%%$'\t'*}
   root=${selection#*$'\t'}
   providers=${root#*$'\t'}
   root=${root%%$'\t'*}
-  if [ "$harness" != claude ]; then
-    if [ "$raw" = 1 ]; then
+  if [ "$harness" = claude ]; then
+    for word in $raw; do
+      case "$word" in
+      [A-Za-z_]*=*)
+        case " CLAUDE_CONFIG_DIR $FM_WORKER_ACCOUNT_CLAUDE_SHED " in
+        *" ${word%%=*} "*)
+          echo "error: config/claude-account pins Claude workers, but the raw launch command sets ${word%%=*}, which would override the pinned account; remove ${word%%=*} from the raw command, or change or remove config/claude-account" >&2
+          return 1
+          ;;
+        esac
+        ;;
+      *) break ;;
+      esac
+    done
+  else
+    if [ -n "$raw" ]; then
       echo "error: config/pi-account pins Pi workers, and a raw Pi launch command runs verbatim, so it cannot carry the pinned --provider; launch with --harness $harness and --model <provider>/<id> instead" >&2
       return 1
     fi

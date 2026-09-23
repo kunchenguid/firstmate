@@ -398,6 +398,7 @@ A pinned Pi launch therefore needs `--model <provider>/<id>` naming a declared p
 An unqualified model, an undeclared provider, or a raw Pi launch command, which cannot receive that flag, refuses; Firstmate never guesses a provider.
 
 When a file is present, every launch of that runner from this home uses it: ships, scouts, local secondmate agents, raw Claude launch commands, and relaunches.
+A raw Claude launch command whose leading assignments set `CLAUDE_CONFIG_DIR` or one of the credentials a pinned launch unsets, such as `ANTHROPIC_API_KEY`, would override the pin, so it refuses and names the variable; remove the assignment from the raw command, or change or remove `config/claude-account`.
 Before any worker endpoint, local copy, or task record exists, and before a relaunch stops the running worker, Firstmate asks the runner itself whether the pinned account is signed in: `claude auth status` for Claude, and `pi auth check --provider <provider> --json --no-refresh` for Pi, falling back to `pi --list-models <provider>` for a provider an extension registers.
 The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pinned root in its environment, so a credential variable in firstmate's own environment cannot answer for an empty root.
 A pinned Claude launch also unsets the environment credentials Claude ranks above a stored login, such as `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and the Bedrock and Vertex switches ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).

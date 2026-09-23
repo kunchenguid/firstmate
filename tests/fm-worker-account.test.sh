@@ -329,6 +329,36 @@ test_raw_claude_command_receives_the_pin() {
   pass "a raw Claude launch command receives the home's pin"
 }
 
+test_raw_claude_account_override_refuses_under_a_pin() {
+  local out rc id=acct-raw-override var
+  new_case raw-override claude
+  signed_in_claude_root "$CASE/work"
+  signed_in_claude_root "$CASE/other"
+  printf '%s\n' "$CASE/work" > "$HOME_DIR/config/claude-account"
+  for var in "CLAUDE_CONFIG_DIR=$CASE/other" ANTHROPIC_API_KEY=override-key; do
+    out=$(spawn_ship "$id-${var%%=*}" --harness "FOO=1 $var claude --print raw"); rc=$?
+    expect_code 1 "$rc" "a raw Claude command setting ${var%%=*} must refuse under a pin"
+    assert_refused_before_launch "$id-${var%%=*}" "$out" "the raw launch command sets ${var%%=*}"
+    assert_contains "$out" "remove ${var%%=*} from the raw command, or change or remove config/claude-account" \
+      "the refusal should say how to proceed"
+  done
+  assert_absent "$CASE/claude-worker" "a refused raw override must never start Claude"
+  pass "a pinned home refuses a raw Claude command that overrides the account"
+}
+
+test_raw_claude_account_override_is_kept_without_a_pin() {
+  local out rc id=acct-raw-unpinned
+  new_case raw-unpinned claude
+  mkdir -p "$CASE/other"
+  out=$(spawn_ship "$id" --harness "CLAUDE_CONFIG_DIR=$CASE/other ANTHROPIC_API_KEY=override-key claude --print raw"); rc=$?
+  expect_code 0 "$rc" "an unpinned home should accept a raw Claude account override: $out"
+  assert_not_contains "$out" "account=" "an unpinned raw spawn must not report an account"
+  run_pane
+  assert_grep "CLAUDE_CONFIG_DIR=$CASE/other" "$CASE/claude-worker" "an unpinned raw override should keep its own root"
+  assert_grep "ANTHROPIC_API_KEY=override-key" "$CASE/claude-worker" "an unpinned raw override should keep its own key"
+  pass "an unpinned home keeps a raw Claude account override"
+}
+
 test_local_secondmate_reads_the_launching_home_pin() {
   local out rc id=acct-sm sm
   new_case secondmate claude
@@ -363,6 +393,8 @@ test_pi_pin_refusals
 test_pi_extension_provider_and_old_pi_fall_back_to_the_model_listing
 test_a_pin_governs_only_its_own_runner
 test_raw_claude_command_receives_the_pin
+test_raw_claude_account_override_refuses_under_a_pin
+test_raw_claude_account_override_is_kept_without_a_pin
 test_local_secondmate_reads_the_launching_home_pin
 
 echo "# all fm-worker-account tests passed"
