@@ -236,6 +236,28 @@ OPTIONAL_DIRS=(
   /opt/homebrew/bin
   /usr/local/bin
 )
+DISCOVERED_DIRS=()
+OMITTED_DIRS=()
+for candidate in "${MANAGER_DIRS[@]}"; do
+  if [ -d "$candidate" ] && [ ! -L "$candidate" ]; then
+    DISCOVERED_DIRS+=("$candidate")
+  else
+    OMITTED_DIRS+=("$candidate")
+  fi
+done
+for candidate in "${OPTIONAL_DIRS[@]}"; do
+  if [ ! -d "$candidate" ]; then
+    OMITTED_DIRS+=("$candidate")
+  elif [ ! -L "$candidate" ]; then
+    DISCOVERED_DIRS+=("$candidate")
+  else
+    physical=$(CDPATH='' cd -- "$candidate" 2>/dev/null && pwd -P) || physical=
+    if [ -d "$physical" ] && [ ! -L "$physical" ]; then
+      DISCOVERED_DIRS+=("$physical")
+    fi
+    OMITTED_DIRS+=("$candidate")
+  fi
+done
 EXPECTED_PATH=
 expect_dir() {
   case ":$EXPECTED_PATH:" in *":$1:"*) return 0 ;; esac
@@ -253,12 +275,7 @@ if [ -d "$ACCOUNT_HOME/.local/bin" ] && [ ! -L "$ACCOUNT_HOME/.local/bin" ]; the
   expect_dir "$ACCOUNT_HOME/.local/bin"
 fi
 for candidate in "${NVM_CHILD_DIRS[@]}"; do expect_dir "$candidate"; done
-for candidate in "${MANAGER_DIRS[@]}"; do
-  [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
-done
-for candidate in "${OPTIONAL_DIRS[@]}"; do
-  [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
-done
+for candidate in "${DISCOVERED_DIRS[@]}"; do expect_dir "$candidate"; done
 for fixed in /usr/bin /bin /usr/sbin /sbin; do expect_dir "$fixed"; done
 
 [ "$CHILD_PATH" = "$EXPECTED_PATH" ] \
@@ -274,16 +291,13 @@ fi
 case "$CHILD_PATH" in *:/usr/bin:/bin:/usr/sbin:/sbin) ;; *) fail "the child PATH did not end with the portable system tail" ;; esac
 DUPES=$(printf '%s\n' "$CHILD_PATH" | tr ':' '\n' | sort | uniq -d)
 [ -z "$DUPES" ] || fail "the child PATH repeated entries: $DUPES"
-PRESENT_CHECKED=0
-ABSENT_CHECKED=0
-for candidate in "${MANAGER_DIRS[@]}" "${OPTIONAL_DIRS[@]}"; do
-  if [ -d "$candidate" ] && [ ! -L "$candidate" ]; then
-    path_has "$CHILD_PATH" "$candidate" || fail "an existing discovered PATH directory was dropped: $candidate"
-    PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
-  else
-    path_has "$CHILD_PATH" "$candidate" && fail "an absent or symlinked PATH directory was added: $candidate"
-    ABSENT_CHECKED=$((ABSENT_CHECKED + 1))
-  fi
+PRESENT_CHECKED=${#DISCOVERED_DIRS[@]}
+ABSENT_CHECKED=${#OMITTED_DIRS[@]}
+for candidate in "${DISCOVERED_DIRS[@]}"; do
+  path_has "$CHILD_PATH" "$candidate" || fail "an existing discovered PATH directory was dropped: $candidate"
+done
+for candidate in "${OMITTED_DIRS[@]}"; do
+  path_has "$CHILD_PATH" "$candidate" && fail "an absent or unresolved PATH directory was added: $candidate"
 done
 pass "the entrypoint composes a deduplicated discovered child PATH (kept $PRESENT_CHECKED existing, omitted $ABSENT_CHECKED absent)"
 

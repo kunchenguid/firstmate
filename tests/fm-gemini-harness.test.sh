@@ -128,7 +128,7 @@ test_gemini_node_bundle_is_not_ancestry_detectable() {
   # documents ancestry as covering gemini or "fixes" it by matching MainThread.
   comm=$(node -e 'const{execSync}=require("child_process");process.stdout.write(execSync("ps -o comm= -p "+process.pid).toString().trim())' 2>/dev/null)
   [ -n "$comm" ] || return 0
-  if [ "$comm" = node ]; then
+  if [ "$(basename -- "$comm")" = node ]; then
     # A platform whose node DOES report `node` reaches the interpreter arm, and
     # there the gemini script path must win.
     cat > "$dir/gemini" <<'JS'
