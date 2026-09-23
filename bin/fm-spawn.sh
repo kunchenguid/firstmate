@@ -298,6 +298,8 @@
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
+#     __CODEXADDROOTS__ repeatable --add-dir grant for a codex crew/scout launch
+#                  (nine task-exact writable roots; see the codex paragraph below)
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -319,6 +321,9 @@
 #     __DEVINBIN__ resolved Devin executable
 #     __DEVINCONFIG__ private per-task Devin config with lifecycle hooks
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
+# Codex launches use workspace-write with approvals disabled. Crew/scout
+# launches add the grant owned by bin/fm-codex-workspace-write-lib.sh and
+# refuse preparation or resolution failures. Secondmates carry no grant.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -393,6 +398,8 @@
 # success line and state/<id>.meta omit them.
 # Every fresh spawn or relaunch records a new spawn_gen= incarnation token so durable
 # consumers can distinguish a replacement worker that reuses the same task id.
+# A fresh spawn records task_started_epoch= as Unix seconds for usage harvest;
+# relaunch preserves the original value and leaves legacy records without it.
 # When the home session's frozen trace-context decision is enabled (see
 # docs/configuration.md and bin/fm-trace-context-lib.sh), the meta also records
 # one W3C traceparent= carrier, the same value injected into the pane as
@@ -549,6 +556,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
+# shellcheck source=bin/fm-codex-workspace-write-lib.sh
+. "$SCRIPT_DIR/fm-codex-workspace-write-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
@@ -1892,9 +1901,9 @@ launch_template() {
   # secondmate launch deliberately keeps hooks on.
   codex)
     if [ "$kind" = secondmate ]; then
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__-s workspace-write -a never "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     else
-      printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+      printf '%s' 'codex __CODEXADDROOTS____MODELFLAG____EFFORTFLAG__-s workspace-write -a never --disable hooks -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
     fi
     ;;
   opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
@@ -1958,10 +1967,11 @@ launch_template() {
   # launch command - it is a Stop-event hook installed below (global hook +
   # per-task pointer), so the template is identical for ship/scout/secondmate.
   grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
-  # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
-  # --yolo does NOT cover and which would otherwise block every spawn, since
-  # each task gets a fresh worktree path cursor has never seen. --yolo is the
-  # --force alias whose TUI label is "Run Everything". --workspace pins the
+  # Cursor Agent CLI. --trust suppresses the workspace-trust prompt that
+  # would otherwise block every spawn, since each task gets a fresh worktree
+  # path cursor has never seen, and it is also what loads the project hooks.
+  # --auto-review --sandbox enabled replaces the former blanket --yolo bypass
+  # with a sandboxed, auto-reviewing autonomy posture. --workspace pins the
   # exact worktree. -w/--worktree is deliberately never passed: it allocates a
   # SECOND worktree under ~/.cursor/worktrees and would break firstmate's
   # isolation contract. The binary is resolved rather than named because
@@ -1970,7 +1980,7 @@ launch_template() {
   # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
   # only reads the environment. Cursor exposes no effort flag, so the shared
   # effort axis is deliberately omitted and stays in task metadata only.
-  cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --auto-review --sandbox enabled __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # gemini (Google Gemini CLI): a positional query starts the supervised
   # interactive session and auto-submits it, so the brief rides the launch
   # command exactly as it does for claude and grok (verified: a multi-line
@@ -4499,6 +4509,9 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
+  if [ "$RELAUNCH" -eq 0 ]; then
+    echo "task_started_epoch=$(date +%s)"
+  fi
   # Default-off writes no traceparent= line.
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -4632,6 +4645,27 @@ sq_ompext=$(shell_quote "$STATE/$ID.omp-ext.ts")
 sq_ompcfg=$(shell_quote "${OMP_WORKER_CFG:-$FM_ROOT/.omp/fm-worker-overlay.yml}")
 sq_opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
 sq_worktree=$(shell_quote "$WT")
+CODEX_ADDROOTS=
+if [ "$HARNESS" = codex ] && [ "$KIND" != secondmate ]; then
+  fm_codex_workspace_write_prepare "$WT" "$DATA/$ID" "$STATE_REAL/$ID.status" "$STATE_REAL/$ID.inbox" "$ID" || {
+    echo "error: could not prepare narrow Codex workspace-write roots for linked worktree '$WT'; refusing to launch a worker that cannot branch, commit, or report" >&2
+    exit 1
+  }
+  CODEX_ROOTS=$(fm_codex_workspace_write_roots "$WT" "$DATA/$ID" "$STATE_REAL/$ID.status" "$STATE_REAL/$ID.inbox" "$ID") || {
+    echo "error: could not resolve narrow Codex workspace-write roots for linked worktree '$WT'; refusing to broaden the task sandbox" >&2
+    exit 1
+  }
+  [ "$(printf '%s\n' "$CODEX_ROOTS" | wc -l | tr -d ' ')" -eq 9 ] || {
+    echo "error: Codex workspace-write grant resolved to an unexpected root set; refusing to launch" >&2
+    exit 1
+  }
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    CODEX_ADDROOTS="$CODEX_ADDROOTS--add-dir $(shell_quote "$root") "
+  done <<EOF
+$CODEX_ROOTS
+EOF
+fi
 MODELFLAG=$(model_flag_for_harness "$HARNESS" "$MODEL")
 EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
@@ -4652,6 +4686,7 @@ LAUNCH=${LAUNCH//__PIWATCH__/$sq_piwatch}
 LAUNCH=${LAUNCH//__OMPEXT__/$sq_ompext}
 LAUNCH=${LAUNCH//__OMPWORKERCFG__/$sq_ompcfg}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
+LAUNCH=${LAUNCH//__CODEXADDROOTS__/$CODEX_ADDROOTS}
 case "$HARNESS" in
 pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;

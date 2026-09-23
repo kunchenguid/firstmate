@@ -456,13 +456,23 @@ finish_concurrent_teardown() {  # <id> <status> <stdout> <stderr>
     || fail "projected teardown $id retry failed after presentation cleanup completed: $(cat "$err")"
 }
 
-normalize_meta() {  # <meta>
+normalize_meta() {  # <meta> <spawn-start> <spawn-end>
+  # task_started_epoch is persisted output for usage harvest, not projection
+  # state. Verify its value before normalizing the two distinct launches.
+  awk -F= -v start="$2" -v end="$3" '
+    $1 == "task_started_epoch" {
+      count++
+      if (NF != 2 || $2 !~ /^[0-9]+$/ || $2 < start || $2 > end) bad = 1
+    }
+    END { exit(count != 1 || bad ? 1 : 0) }
+  ' "$1" || fail "metadata must record exactly one task start timestamp within its spawn interval"
   sed -E \
     -e 's|^window=.*$|window=<herdr-container-id>|' \
     -e 's|^herdr_workspace_id=.*$|herdr_workspace_id=<herdr-container-id>|' \
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
     -e 's|^herdr_pane_id=.*$|herdr_pane_id=<herdr-container-id>|' \
     -e 's|^spawn_gen=.*$|spawn_gen=<spawn-incarnation>|' \
+    -e 's|^task_started_epoch=.*$|task_started_epoch=<spawn-time>|' \
     "$1"
 }
 
@@ -544,12 +554,14 @@ FIRSTMATE_WSID=$(grep '^herdr_workspace_id=' "$ANCHOR_META" | cut -d= -f2-)
 
 # The same task id and project run once opted out and once projected, so
 # Treehouse commands and metadata can be compared after normalizing endpoint
-# IDs and the deliberately fresh per-spawn incarnation.
+# IDs, the deliberately fresh per-spawn incarnation, and verified start time.
 : > "$TREEHOUSE_CALL_LOG"
 OFF_HERDR_START=$(log_line_count)
 OFF_MOVE_START=$(wc -l < "$MOVE_CALL_LOG" | tr -d '[:space:]')
+OFF_SPAWN_START=$(date +%s)
 spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/off.out" 2> "$TMP_ROOT/off.err" \
   || fail "opted-out spawn failed: $(cat "$TMP_ROOT/off.err")"
+OFF_SPAWN_END=$(date +%s)
 OFF_HERDR_END=$(log_line_count)
 OFF_META="$TMP_ROOT/off.meta"
 cp "$HOME_DIR/state/shape.meta" "$OFF_META"
@@ -635,8 +647,10 @@ assert_focus_is "$CAPTAIN_FOCUS" "focused secondmate fixture"
 # so no home that had already enabled the projection is turned off by the default.
 : > "$HOME_DIR/config/herdr-presentation-spaces"
 SHAPE_FOCUS_AUDIT_START=$(focus_audit_line_count)
+ON_SPAWN_START=$(date +%s)
 spawn_task shape "$HOME_DIR" "$PROJECT_DIR" > "$TMP_ROOT/on.out" 2> "$TMP_ROOT/on.err" \
   || fail "projected spawn failed: $(cat "$TMP_ROOT/on.err")"
+ON_SPAWN_END=$(date +%s)
 assert_focus_is "$CAPTAIN_FOCUS" "projected spawn"
 assert_raw_presentation_mutations_preserved_since "$SHAPE_FOCUS_AUDIT_START" "projected spawn"
 ON_META="$TMP_ROOT/on.meta"
@@ -755,10 +769,10 @@ pass "real Herdr lab: bounded lock contention warns and falls back flat without 
 PROJECTION_ORDER_START=$(log_line_count)
 
 [ "$OFF_WT" = "$ON_WT" ] || fail "Treehouse did not reuse the same fixture worktree, so byte comparison is inconclusive"
-normalize_meta "$OFF_META" > "$TMP_ROOT/off.meta.normalized"
-normalize_meta "$ON_META" > "$TMP_ROOT/on.meta.normalized"
-cmp -s "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
-  || fail "metadata changed beyond Herdr container IDs between opted-out and projected paths"
+normalize_meta "$OFF_META" "$OFF_SPAWN_START" "$OFF_SPAWN_END" > "$TMP_ROOT/off.meta.normalized"
+normalize_meta "$ON_META" "$ON_SPAWN_START" "$ON_SPAWN_END" > "$TMP_ROOT/on.meta.normalized"
+diff -u "$TMP_ROOT/off.meta.normalized" "$TMP_ROOT/on.meta.normalized" \
+  || fail "metadata changed beyond Herdr container IDs, spawn incarnation, and start time between opted-out and projected paths"
 
 # Two real primary spawns begin concurrently.
 # The fresh-spawn task-set lock may fail closed for one while the other
@@ -895,7 +909,7 @@ teardown_task shape "$HOME_DIR" > "$TMP_ROOT/on-teardown.out" 2> "$TMP_ROOT/on-t
   || fail "projected teardown failed: $(cat "$TMP_ROOT/on-teardown.err")"
 assert_focus_is "$CAPTAIN_FOCUS" "projected teardown"
 assert_cleanup_focus_preserved "$SHAPE_CLEANUP_AUDIT_START" "$PROJECTED_PANE" "$CAPTAIN_FOCUS"
-pass "real Herdr lab: Treehouse commands and metadata shape are byte-identical except for endpoint IDs and spawn incarnation"
+pass "real Herdr lab: Treehouse commands and metadata shape are byte-identical except for endpoint IDs, spawn incarnation, and verified start time"
 if lab workspace get "$PROJECTED_WSID" >/dev/null 2>&1; then
   fail "closing the exact projected task pane did not remove its last-tab workspace"
 fi

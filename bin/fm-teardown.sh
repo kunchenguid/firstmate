@@ -984,6 +984,10 @@ remote_secondmate_teardown() {
   mv -f -- "$tmp" "$SECONDMATE_REG"
   [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
   status_retire_presentation_task "$STATE" "$ID" || return 1
+  # Best-effort fleet usage harvest runs while the task's state files still
+  # exist; a harvest failure must never block teardown.
+  "$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
+    || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
   fm_backlog_atomic_transition remove "$STATE/$ID.meta" "task record" "$STATE" || return 1
   rm -f -- "$STATE/$ID.turn-ended" "$STATE/$ID.progress"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
@@ -3658,6 +3662,10 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 # retired so its last lines are captured; off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" cleaned_up "$ID" || true
 status_retire_presentation_task "$STATE" "$ID" || exit 1
+# Best-effort fleet usage harvest runs while the task's state files still
+# exist; a harvest failure must never block teardown.
+"$FM_ROOT/bin/fm-usage-harvest.sh" "$ID" >/dev/null \
+  || echo "warning: usage harvest for $ID failed; continuing teardown" >&2
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.omp-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \

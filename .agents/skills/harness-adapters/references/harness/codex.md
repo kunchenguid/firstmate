@@ -20,6 +20,10 @@ A directory trust dialog appears on the first run for a repository root: "Do you
 Accept it with Enter and verify the instructions begin processing.
 The decision persists for the repository, so later worktrees of the same project skip it.
 
+## Task sandbox
+
+`../../../bin/fm-spawn.sh` owns the sandboxed launch contract and links to the task grant implementation; `../../../docs/verification/runtime-backends.md#codex-cli-sandbox-grant` owns the dated enforcement proof and refresh command.
+
 ## Hook trust
 
 A second dialog, "Hooks need review - N hooks are new or changed", appears whenever the machine's `~/.codex/hooks.json` or a project's own `.codex/hooks.json` carries a hook Codex has not persisted trust for.
