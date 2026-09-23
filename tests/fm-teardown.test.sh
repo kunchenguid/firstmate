@@ -654,12 +654,30 @@ backlog_row_state() {
 # Build the teardown test's executable search path without lsof, regardless of
 # whether the host installs it in /usr/bin, /usr/sbin, or a package-manager bin.
 make_path_without_lsof() {  # <case-dir>
-  local case_dir=$1 path_dir="$1/path-without-lsof" cmd resolved
+  local case_dir=$1 path_dir cmd resolved bash_res
+  if ! command -v lsof >/dev/null 2>&1; then
+    # Hosts that genuinely lack lsof (Git Bash/MSYS) need no restriction:
+    # the real PATH already satisfies the fixture's only condition, while a
+    # whitelist would strip host tools teardown legitimately needs
+    # (powershell.exe for the Win32 process table, cmd.exe for the lock
+    # junction fallback, cygpath, jq, tasks-axi, rmdir, ...).
+    printf '%s\n' "$PATH"
+    return 0
+  fi
+  path_dir="$case_dir/path-without-lsof"
   mkdir -p "$path_dir"
+  # Wrapper scripts, not symlinks: Git Bash/MSYS implements ln -s as a file
+  # copy, and a copied msys binary cannot find its runtime dll outside
+  # /usr/bin, so every copied entry exits 127. A wrapper whose shebang is
+  # the resolved bash path always runs the real interpreter and execs the
+  # real binary.
+  bash_res=$(command -v bash 2>/dev/null) || return 1
   for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
     mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
     resolved=$(command -v "$cmd" 2>/dev/null) || continue
-    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+    case "$resolved" in
+      /*) printf '#!%s\nexec "%s" "$@"\n' "$bash_res" "$resolved" > "$path_dir/$cmd" ;;
+    esac
   done
   printf '%s\n' "$path_dir"
 }
@@ -702,6 +720,65 @@ test_local_only_fork_remote_allows() {
   ' "$case_dir/state/home-summary.json" >/dev/null \
     || fail "successful task teardown did not publish the task's removal from the home summary ledger"
   pass "local-only worktree with HEAD on a fork remote is torn down and the home summary is refreshed"
+}
+
+# A pool-slot teardown driven with the state dir under a non-canonical
+# spelling must not read the task's own meta as a conflicting record. The
+# exclusive-slot guard dedups the collected state dirs by string compare, but
+# record_state keeps the caller's spelling while fm_firstmate_root_home
+# returns pwd -P - on a Windows host that is C:/ vs /c/ (seen live as the
+# first native pool-slot teardown refusing "task X's worktree is also task
+# X's worktree"), and a symlinked home reproduces the same split on POSIX.
+test_pool_slot_teardown_under_a_noncanonical_state_spelling() {
+  local case_dir pool_wt alias_state out rc
+  case_dir=$(make_case slot-owner-noncanon)
+  # Re-home the task worktree into a treehouse-pool-shaped slot so
+  # teardown_live_slot_path and the exclusive-slot record scan engage:
+  # <pool>/<slot>/<repo> plus the pool's state file.
+  git -C "$case_dir/project" worktree remove "$case_dir/wt"
+  git -C "$case_dir/project" branch -D fm/task-x1 >/dev/null
+  mkdir -p "$case_dir/pool/1"
+  printf '{}\n' > "$case_dir/pool/treehouse-state.json"
+  pool_wt="$case_dir/pool/1/wt"
+  git -C "$case_dir/project" worktree add -q -b fm/task-x1 "$pool_wt" main
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$pool_wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=local-only" \
+    "spawn_gen=teardown-test-task-x1"
+  git -C "$pool_wt" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m "wt work"
+  git init -q --bare "$case_dir/fork.git"
+  git -C "$case_dir/project" remote add fork "$case_dir/fork.git"
+  git -C "$pool_wt" push -q fork fm/task-x1
+  git -C "$case_dir/project" fetch -q fork
+  seed_backlog_in_flight "$case_dir"
+  # The same state dir under a second spelling: drive-letter form on MSYS
+  # (the production failure mode), a symlink elsewhere.
+  if command -v cygpath >/dev/null 2>&1; then
+    alias_state=$(cygpath -m "$case_dir/state")
+  else
+    ln -s "$case_dir/state" "$TMP_ROOT/noncanon-state"
+    alias_state="$TMP_ROOT/noncanon-state"
+  fi
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+    FM_STATE_OVERRIDE="$alias_state" \
+    FM_DATA_OVERRIDE="$case_dir/data" FM_CONFIG_OVERRIDE="$case_dir/config" \
+    PATH="$case_dir/fakebin:${FM_TEARDOWN_TEST_PATH:-$PATH}" \
+    "$TEARDOWN" task-x1 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "slot-owner-noncanon: teardown refused its own record under a second state spelling: $out"
+  ! grep -q "is also task" <<EOF >/dev/null || fail "slot-owner-noncanon: teardown read its own meta as a conflicting record: $out"
+$out
+EOF
+  [ ! -e "$case_dir/state/task-x1.meta" ] \
+    || fail "slot-owner-noncanon: teardown left the task meta behind"
+  pass "a pool-slot teardown resolves its own meta across state-path spellings"
 }
 
 test_teardown_closes_the_backlog_item_itself() {
@@ -3554,6 +3631,17 @@ test_leaked_tasktmp_process_is_reaped() {
 
 test_lsof_absent_reaps_tmux_process_group() {
   local case_dir rc pid path_without_lsof
+  # The contract needs a real POSIX process group: perl setpgrp is a no-op
+  # under MSYS (the sleeper stays in the test's own pgrp) and MSYS ps has no
+  # pgid field, so the fallback correctly refuses to signal its own group
+  # there. On such hosts the /proc cwd scan is the exercised lsof fallback,
+  # covered by the leaked-worktree/tasktmp cases above.
+  case "$(uname)" in
+    MINGW*|MSYS*|CYGWIN*)
+      pass "tmux process-group fallback needs POSIX setpgrp and ps -o pgid; skipped on MSYS where neither exists"
+      return
+      ;;
+  esac
   case_dir=$(make_case lsof-absent-process-group-reap)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
@@ -3685,7 +3773,14 @@ test_exec_changed_process_is_still_reaped() {
 #!/usr/bin/env bash
 if [ "${1:-}" = -p ] && [ "${2:-}" = "${FM_FAKE_EXEC_PID:-}" ] \
    && [ "${3:-}" = -o ] && [ "${4:-}" = lstart= ]; then
-  out=$("$REAL_PS_FOR_TEST" "$@") || exit $?
+  out=$("$REAL_PS_FOR_TEST" "$@" 2>/dev/null) || out=
+  if [ -z "$out" ]; then
+    # MSYS ps has no -o: /proc/<pid>/stat starttime is the same birth
+    # identity lstart encodes, and it survives exec - the contract under
+    # test here.
+    out=$(sed 's/.*) //' "/proc/$2/stat" 2>/dev/null | awk '{print $20}')
+    [ -n "$out" ] || exit 1
+  fi
   [ -e "$FM_FAKE_EXEC_MARKER" ] || : > "$FM_FAKE_EXEC_MARKER"
   printf '%s\n' "$out"
   exit 0
@@ -3705,6 +3800,15 @@ if [ "$count" -eq 2 ]; then
     sleep 0.01
     i=$((i + 1))
   done
+fi
+if [ -z "${REAL_LSOF_FOR_TEST:-}" ]; then
+  # MSYS has no lsof to delegate to: emit the same `lsof -a -d cwd -Fpn`
+  # shape from the /proc cwd links so the scan still carries real data.
+  for procdir in /proc/[0-9]*; do
+    path=$(readlink "$procdir/cwd" 2>/dev/null) || continue
+    printf 'p%s\nfcwd\nn%s\n' "${procdir##*/}" "$path"
+  done
+  exit 0
 fi
 exec "$REAL_LSOF_FOR_TEST" "$@"
 SH
@@ -3885,6 +3989,7 @@ EOF
 }
 
 test_local_only_fork_remote_allows
+test_pool_slot_teardown_under_a_noncanonical_state_spelling
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses

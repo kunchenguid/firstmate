@@ -1964,9 +1964,27 @@ conclude_task_no_mistakes_run() {  # <worktree>
 # documents as slow). Never $$ (this script's own pid). Empty output when
 # nothing matches; failure means the scan could not establish a safe result.
 pids_with_cwd_under() {  # <dir>
-  local dir=$1 out pid path line
+  local dir=$1 out pid path line procdir proc_root
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
   dir=$(cd "$dir" && pwd -P) || return 1
+  if ! command -v lsof >/dev/null 2>&1; then
+    # Git Bash/MSYS has no lsof but exposes each process's cwd through the
+    # virtual /proc filesystem: read every /proc/<pid>/cwd link instead of
+    # the system-wide lsof scan. A vanished or unreadable proc entry just
+    # skips that pid; a missing /proc fails like an unusable lsof scan.
+    proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+    [ -d "$proc_root" ] || return 1
+    for procdir in "$proc_root"/[0-9]*; do
+      [ -e "$procdir" ] || continue
+      pid=${procdir##*/}
+      [ "$pid" != "$$" ] || continue
+      path=$(readlink "$procdir/cwd" 2>/dev/null) || continue
+      case "$path" in
+        "$dir"|"$dir"/*) printf '%s\n' "$pid" ;;
+      esac
+    done
+    return 0
+  fi
   out=$(lsof -a -d cwd -Fpn 2>/dev/null) || return 1
   [ -n "$out" ] || return 0
   pid=
@@ -2088,15 +2106,32 @@ reap_task_backend_process_group() {  # <label>
 # - both unique per task and never shared - before either is removed. TERM
 # first, then KILL after a short grace period for anything still alive; a
 # process that exits on its own between the two passes is simply absent from
-# the recheck. A missing lsof uses the backend process-group fallback; an lsof
-# scan error refuses before destructive teardown.
+# the recheck. A missing lsof uses the /proc cwd scan below when that
+# filesystem exists, the tmux process-group fallback when a pane leader
+# still resolves, and refuses on a scan error before destructive teardown.
 reap_task_worktree_processes() {  # <label> <dir>...
   local label=$1 pids pid identity current_pids i pass=1 max_passes=3
   local -a tracked_pids tracked_identities remaining_pids remaining_identities
+  local leader proc_root
   shift
   if ! command -v lsof >/dev/null 2>&1; then
-    reap_task_backend_process_group "$label"
-    return 0
+    # Without lsof the tmux pane's process group is the legacy fallback, and
+    # only while a pane leader still resolves on a host whose ps can express
+    # a pgid; Git Bash/MSYS ps cannot, so the precise /proc cwd scan below
+    # is the better instrument there - MSYS exposes /proc/<pid>/cwd but no
+    # lsof and no process-group process table at all.
+    proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc}
+    leader=
+    if [ "$BACKEND" = tmux ] && ps -o pgid= -p "$$" >/dev/null 2>&1; then
+      leader=$(tmux display-message -p -t "$T" '#{pane_pid}' 2>/dev/null) || leader=
+    fi
+    case "$leader" in
+      ''|*[!0-9]*)
+        [ -d "$proc_root" ] || { reap_task_backend_process_group "$label"; return 0; } ;;
+      *)
+        reap_task_backend_process_group "$label"
+        return 0 ;;
+    esac
   fi
   while [ "$pass" -le "$max_passes" ]; do
     if ! task_pids_under_roots "$@"; then
@@ -2236,9 +2271,21 @@ collect_local_firstmate_states() {
   while [ "$i" -lt "${#homes[@]}" ]; do
     home=${homes[$i]}
     i=$((i + 1))
+    # Dedup by canonical directory, not spelling: record_state keeps whatever
+    # path form the caller passed while every home/state entry is derived from
+    # pwd -P roots, so a state dir reachable under two spellings (D:/ vs /d/
+    # on Windows hosts, a symlinked home elsewhere) would otherwise be scanned
+    # twice - and the record scan's string-equal self-skip then fails on the
+    # second visit, reading the task's own meta as a conflicting record.
     known=0
+    home_state_canon=$(canonical_existing_dir "$home/state" 2>/dev/null || printf '%s\n' "$home/state")
     for existing in "${TREEHOUSE_OWNER_STATES[@]}"; do
-      [ "$existing" != "$home/state" ] || known=1
+      if [ "$existing" = "$home/state" ]; then
+        known=1
+      else
+        existing_canon=$(canonical_existing_dir "$existing" 2>/dev/null || printf '%s\n' "$existing")
+        [ "$existing_canon" != "$home_state_canon" ] || known=1
+      fi
     done
     [ "$known" = 1 ] || TREEHOUSE_OWNER_STATES+=("$home/state")
     reg="$home/data/secondmates.md"
