@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import functools
 import hashlib
 import json
 import math
@@ -397,12 +398,22 @@ def estimate_noise_floor(task: str, rows: list[dict[str, Any]], values: dict[str
     return floors
 
 
+@functools.lru_cache(maxsize=1)
+def baseline_values() -> dict[str, Any]:
+    return parse_candidate(BASELINE_TEMPLATE)
+
+
 def candidate_complexity(task: str, values: dict[str, Any]) -> int:
+    baseline = baseline_values()
+
+    def changed(name: str) -> int:
+        return int(values[name] != baseline[name])
+
     if task == "grouped-classification":
-        return int(values["GROUPED_CAUSAL_WEIGHT"] != 0.65) + int(values["GROUPED_SPURIOUS_WEIGHT"] != 1.0) + int(values["GROUPED_THRESHOLD"] != 0.0)
+        return changed("GROUPED_CAUSAL_WEIGHT") + changed("GROUPED_SPURIOUS_WEIGHT") + changed("GROUPED_THRESHOLD")
     if task == "nonlinear-regression":
-        return len(values["REGRESSION_COMPONENTS"]) + int(values["REGRESSION_SCALE"] != 1.0) + int(values["REGRESSION_BIAS"] != 0.0)
-    return int(values["NOISY_THRESHOLD"] != 0.0) + int(values["NOISY_MARGIN"] != 0.0)
+        return len(values["REGRESSION_COMPONENTS"]) + changed("REGRESSION_SCALE") + changed("REGRESSION_BIAS")
+    return changed("NOISY_THRESHOLD") + changed("NOISY_MARGIN")
 
 
 def worker_main(args: argparse.Namespace) -> int:
@@ -582,6 +593,8 @@ def run_bounded_evaluator(workspace: Path, candidate: Path, split: str) -> dict[
         }
     finally:
         output.unlink(missing_ok=True)
+        for residue in output.parent.glob(f".{output.name}.*.tmp"):
+            residue.unlink(missing_ok=True)
         if generated_data is not None:
             generated_data.unlink(missing_ok=True)
 

@@ -647,7 +647,7 @@ test_sealed_dataset_never_persists_in_the_workspace() {
     --fixture --wall-seconds 2 --cpu-seconds 2 --memory-mb 512 >/dev/null
   [ -z "$(find "$workspace" -name 'sealed-*.json' -print -quit)" ] \
     || fail "the sealed dataset outlived the single evaluation it was generated for"
-  [ -z "$(find "$workspace/.run/tmp" -name 'evaluation-*.json' -print -quit)" ] \
+  [ -z "$(find "$workspace/.run/tmp" -type f -print -quit)" ] \
     || fail "evaluator output temporaries accumulated in the workspace"
 
   printf '[]\n' > "$workspace/.run/tmp/sealed-leaked.json"
