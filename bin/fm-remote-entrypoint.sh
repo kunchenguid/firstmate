@@ -24,10 +24,17 @@
 # exit after staging and before the published result marks the job cancelled
 # (signal traps cover a delivered HUP/TERM/PIPE/INT, and the exit trap covers a
 # failed bounded wait), and while waiting this process probes its parent about
-# once per second, so an ssh channel that dies without delivering any signal -
-# sshd exiting and reparenting this process - also cancels the job. The worker
-# then skips or stops the cancelled job instead of running it to completion for
-# nobody.
+# once per second, so a dedicated ssh connection whose death reparents this
+# process also cancels the job. The worker then skips or stops the cancelled job
+# instead of running it to completion for nobody.
+#
+# Neither cover is complete, and neither is this side's last line of defence.
+# A caller killed outright runs no trap at all, and a channel on a multiplexed
+# connection can close while the sshd session process serving this process keeps
+# running for its other channels, so the parent never changes. The worker owns
+# the backstop for both: the record carries the staging process's identity and
+# bin/fm-remote-job-lib.sh's fm_remote_job_caller_abandoned cancels a record
+# whose caller is provably gone, while the job deadline bounds the rest.
 set -eu
 
 PROTOCOL=1
@@ -91,7 +98,9 @@ ENTRYPOINT_PPID=$(ps -o ppid= -p $$ 2>/dev/null | tr -d ' ' || true)
 
 # The recorded parent is the ssh session process; when it disappears this
 # process is reparented and the caller is provably gone. An unreadable probe
-# never cancels: only an observed parent change does.
+# never cancels: only an observed parent change does, so a multiplexed
+# connection whose sshd session process outlives this channel reads as connected
+# and leaves the disconnect to the worker-side backstop above.
 # shellcheck disable=SC2329 # Invoked by fm_remote_job_wait through FM_REMOTE_JOB_DISCONNECT_PROBE.
 entrypoint_caller_connected() {
   local current

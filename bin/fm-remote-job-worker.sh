@@ -22,6 +22,15 @@
 # its recorded command group, leaving interrupted records for the replacement
 # worker's orphan recovery.
 #
+# A lane is bounded in age as well as in what it may run. Its command group is
+# bounded by the job deadline, its output capture is drained only for
+# FM_REMOTE_JOB_OUTPUT_DRAIN_SECONDS after that group is gone, and a lane still
+# alive FM_REMOTE_JOB_LANE_GRACE_SECONDS past the deadline is stopped outright.
+# Without those bounds one descendant that escaped a job's process group while
+# holding its stdout kept a lane running forever, so its home's queue never
+# drained and every later caller held an SSH session open until its own
+# deadline - the shape that exhausted a remote host's sessions.
+#
 # The worker is abandoned when its configured FM_ROOT stops being a genuine
 # Firstmate checkout - the state a pruned no-mistakes gate worktree, a returned
 # pooled worktree, or a removed test fixture root leaves behind. It can never
@@ -59,6 +68,7 @@ FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)}
 
 WORKER_LOCK=
 WORKER_LOCK_HELD=0
+WORKER_ACCOUNT_HOME=
 WORKER_RELEASE_OWNERSHIP=1
 WORKER_SUPERVISED_PID=
 WORKER_PREEMPTIBLE=0
@@ -601,6 +611,9 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
       break
     fi
     if [ "$SECONDS" -ge "$next_check" ]; then
+      if [ -n "$WORKER_ACCOUNT_HOME" ] && fm_remote_job_caller_abandoned "$job"; then
+        fm_remote_job_cancel "$WORKER_ACCOUNT_HOME" "${job##*/}" 2>/dev/null || true
+      fi
       if fm_remote_job_cancelled "$job"; then
         worker_signal_process_or_group group TERM "$group_pid"
         attempt=0
@@ -668,12 +681,56 @@ worker_cleanup_output_capture() { # <job-dir> <stdout-reader> <stderr-reader>
   rm -f -- "$job/.stdout.pipe" "$job/.stderr.pipe"
 }
 
+# Wait for both output readers, but never longer than the drain bound. The
+# command's own process group is already dead by the time this runs, so EOF is
+# immediate unless a descendant escaped that group - a daemonized agent runtime
+# or multiplexer server - and still holds the job's stdout or stderr. An
+# unbounded wait there wedged the lane for good: the record stayed running, the
+# home's lane never freed, and every later caller held an SSH session open until
+# its own deadline, which is how a remote host ran out of sessions. Whatever was
+# captured before the bound is what the record publishes.
+worker_drain_output_capture() { # <stdout-reader> <stderr-reader>
+  local stdout_reader=$1 stderr_reader=$2 watchdog
+  {
+    sleep "$FM_REMOTE_JOB_OUTPUT_DRAIN_SECONDS"
+    kill -TERM "$stdout_reader" "$stderr_reader" 2>/dev/null || true
+    sleep 1
+    kill -KILL "$stdout_reader" "$stderr_reader" 2>/dev/null || true
+  } &
+  watchdog=$!
+  wait "$stdout_reader" 2>/dev/null || true
+  wait "$stderr_reader" 2>/dev/null || true
+  kill -KILL "$watchdog" 2>/dev/null || true
+  wait "$watchdog" 2>/dev/null || true
+}
+
+# Copy the job's output with no buffer of its own, so a reader stopped at the
+# drain bound has already committed every byte it read rather than losing a
+# partial stdio buffer. Reading continues past the byte bound and discards the
+# excess, which is what keeps a writer past the bound from taking SIGPIPE.
 worker_capture_output() { # <fifo> <destination>
   local fifo=$1 destination=$2
-  {
-    head -c "$FM_REMOTE_JOB_MAX_BYTES"
-    cat >/dev/null
-  } < "$fifo" > "$destination"
+  perl -e '
+    use strict;
+    use warnings;
+    my $limit = shift;
+    my $written = 0;
+    $SIG{TERM} = sub { exit 0 };
+    while (1) {
+      my $count = sysread(STDIN, my $buffer, 65536);
+      last unless defined $count && $count > 0;
+      my $take = $written < $limit ? $limit - $written : 0;
+      $take = $count if $take > $count;
+      my $offset = 0;
+      while ($offset < $take) {
+        my $count_written = syswrite(STDOUT, $buffer, $take - $offset, $offset);
+        exit 0 unless defined $count_written;
+        $offset += $count_written;
+      }
+      $written += $take;
+    }
+    exit 0;
+  ' "$FM_REMOTE_JOB_MAX_BYTES" < "$fifo" > "$destination"
 }
 
 worker_run_job() { # <account-home> <job-dir>
@@ -766,8 +823,7 @@ worker_run_job() { # <account-home> <job-dir>
     "$command_path" "${argv[@]:1}" < "$job/stdin" > "$stdout_pipe" 2> "$stderr_pipe"
   rc=$?
   WORKER_PREEMPTIBLE=0
-  wait "$stdout_reader"
-  wait "$stderr_reader"
+  worker_drain_output_capture "$stdout_reader" "$stderr_reader"
   rm -f -- "$stdout_pipe" "$stderr_pipe"
   set -e
   if [ "$WORKER_PREEMPTED" -eq 1 ]; then
@@ -833,6 +889,30 @@ worker_reap_finished_lanes() {
     WORKER_LANE_STARTS+=("${live_starts[$i]}")
     WORKER_LANE_JOBS+=("${live_jobs[$i]}")
     i=$((i + 1))
+  done
+}
+
+# A lane that outlived its job's own deadline by the lane grace is stopped, so
+# no lane can outlive the work it was started for whatever wedges inside it.
+# Stopping the lane process is the whole action: the next reap drops it from the
+# tracked set and the serving scan then reclaims its record through the same
+# orphan recovery a crashed worker's job gets.
+worker_stop_overrun_lanes() {
+  local i=0 count=${#WORKER_LANE_PIDS[@]} pid start job deadline now
+  now=$(date +%s)
+  while [ "$i" -lt "$count" ]; do
+    pid=${WORKER_LANE_PIDS[$i]}
+    start=${WORKER_LANE_STARTS[$i]}
+    job=${WORKER_LANE_JOBS[$i]}
+    i=$((i + 1))
+    worker_lane_identity_matches "$pid" "$start" || continue
+    [ -d "$job" ] && [ ! -L "$job" ] || continue
+    deadline=$(fm_remote_job_read_number "$job" deadline 2>/dev/null || true)
+    case "$deadline" in ''|*[!0-9]*) continue ;; esac
+    [ "$now" -ge $((deadline + FM_REMOTE_JOB_LANE_GRACE_SECONDS)) ] || continue
+    worker_error "lane for ${job##*/} outlived its deadline; stopping it"
+    kill -TERM "$pid" 2>/dev/null || true
+    kill -KILL "$pid" 2>/dev/null || true
   done
 }
 
@@ -922,6 +1002,7 @@ worker_lane_main() { # <job-id>
   local account_home job
   fm_remote_job_safe_id "$1" || { worker_error "invalid lane job id"; exit 2; }
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; exit 1; }
+  WORKER_ACCOUNT_HOME=$account_home
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; exit 1; }
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; exit 1; }
   job=$(fm_remote_job_job_dir "$1" 2>/dev/null) || exit 0
@@ -932,6 +1013,7 @@ worker_process_once() { # <account-home>
   local account_home=$1 job id state queue_deadline home seq candidates=''
   local reserved_index reserved_count home_reserved
   local reserved_homes=()
+  worker_stop_overrun_lanes
   worker_reap_finished_lanes
   for job in "$FM_REMOTE_JOB_JOBS"/job-*; do
     [ -d "$job" ] && [ ! -L "$job" ] || continue
@@ -949,6 +1031,9 @@ worker_process_once() { # <account-home>
             [ -n "$home" ] && reserved_homes+=("$home")
           fi
           continue
+        fi
+        if fm_remote_job_caller_abandoned "$job"; then
+          fm_remote_job_cancel "$account_home" "$id" 2>/dev/null || true
         fi
         if fm_remote_job_cancelled "$job"; then
           worker_finalize_cancelled "$account_home" "$job" || true
@@ -1000,6 +1085,7 @@ worker_process_once() { # <account-home>
 main() {
   local account_home lock_status
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; exit 1; }
+  WORKER_ACCOUNT_HOME=$account_home
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; exit 1; }
   [ -f "$FM_ROOT/AGENTS.md" ] && [ ! -L "$FM_ROOT/AGENTS.md" ] || { worker_error "FM_ROOT is not a Firstmate checkout"; exit 1; }
   fm_remote_job_prepare_state "$account_home" || { worker_error "$FM_REMOTE_JOB_ERROR"; exit 1; }

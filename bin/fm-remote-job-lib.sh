@@ -8,11 +8,19 @@
 # runtime PATH.
 #
 # A published job directory is mode 0700 and contains root, home, argv
-# (NUL-delimited), stdin, seq, stdout, stderr, queue_deadline, timeout, and
-# state; deadline and exit are added as execution advances, cancel is an
-# optional caller-cancellation marker, and .claim may hold owner, owner_start,
+# (NUL-delimited), stdin, seq, stdout, stderr, queue_deadline, timeout, state,
+# and the .owner-pid/.owner-start pair identifying the process that staged it;
+# deadline and exit are added as execution advances, cancel is an optional
+# caller-cancellation marker, and .claim may hold owner, owner_start,
 # supervisor, supervisor_start, group, group_start, and armed records while
 # work executes.
+# The owner pair persists for the record's whole life because a caller cannot be
+# relied on to cancel its own job. A caller killed outright, or lost with its
+# host, never runs the cancellation its own exit path owns, so its record would
+# otherwise be executed - or kept queued - for nobody. The worker reads that
+# recorded identity through fm_remote_job_caller_abandoned and cancels the job
+# itself, which is what keeps an abandoned record from holding its home's lane
+# for the rest of its timeout.
 # Stage writes state=queued last. seq is a queue-wide monotonic staging
 # sequence reserved atomically by its persistent .seq-claims directory; the
 # counter is only a forward-moving allocation hint. If the bounded hint walk
@@ -91,6 +99,8 @@ FM_REMOTE_JOB_WAIT_GRACE=${FM_REMOTE_JOB_WAIT_GRACE:-30}
 FM_REMOTE_JOB_POLL_SECONDS=${FM_REMOTE_JOB_POLL_SECONDS:-0.05}
 FM_REMOTE_JOB_REAP_SECONDS=${FM_REMOTE_JOB_REAP_SECONDS:-3600}
 FM_REMOTE_JOB_STAGE_REAP_SECONDS=${FM_REMOTE_JOB_STAGE_REAP_SECONDS:-600}
+FM_REMOTE_JOB_OUTPUT_DRAIN_SECONDS=${FM_REMOTE_JOB_OUTPUT_DRAIN_SECONDS:-5}
+FM_REMOTE_JOB_LANE_GRACE_SECONDS=${FM_REMOTE_JOB_LANE_GRACE_SECONDS:-30}
 FM_REMOTE_JOB_SEQ_CLAIM_REAP_SECONDS=86400
 FM_REMOTE_JOB_SEQ_CLAIM_REAP_INTERVAL=3600
 # shellcheck disable=SC2034 # Shared protocol constant consumed by the worker and sourcing callers.
@@ -573,7 +583,6 @@ fm_remote_job_next_seq() { # [stage-dir destination]
           rm -f -- "$stage/state" "$stage/seq"
           return 1
         fi
-        rm -f -- "$destination/.owner-pid" "$destination/.owner-start" || true
       fi
       printf '%s\n' "$value"
       return 0
@@ -761,7 +770,11 @@ fm_remote_job_path_mtime() { # <path>
   if [ "$(uname -s 2>/dev/null || true)" = Darwin ]; then /usr/bin/stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
 }
 
-fm_remote_job_stage_owner_alive() { # <stage-dir>
+# Whether the process that staged <record-dir> is still the live process it was.
+# Both a .stage.* directory and a published job record carry the same pair, so
+# the same predicate answers "is this staging litter" and "has this job's caller
+# gone away".
+fm_remote_job_record_owner_alive() { # <record-dir>
   local stage=$1 pid recorded_start actual_start
   pid=$(fm_remote_job_read_single_line "$stage/.owner-pid" 64 2>/dev/null) || return 1
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
@@ -769,6 +782,15 @@ fm_remote_job_stage_owner_alive() { # <stage-dir>
   recorded_start=$(fm_remote_job_read_single_line "$stage/.owner-start" 256 2>/dev/null) || return 1
   actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || return 1
   [ "$recorded_start" = "$actual_start" ]
+}
+
+# A published record whose recorded caller is provably gone. The recorded start
+# time is what makes this safe against pid reuse. A record with no owner pair -
+# one staged by an older library - is never abandoned.
+fm_remote_job_caller_abandoned() { # <job-dir>
+  local job=$1
+  [ -f "$job/.owner-pid" ] && [ ! -L "$job/.owner-pid" ] || return 1
+  ! fm_remote_job_record_owner_alive "$job"
 }
 
 fm_remote_job_reap_stale() { # <account-home>
@@ -813,7 +835,7 @@ fm_remote_job_reap_stale() { # <account-home>
   # longer the process that created it and the stage has exceeded the age bound.
   for stage in "$FM_REMOTE_JOB_JOBS"/.stage.*; do
     [ -d "$stage" ] && [ ! -L "$stage" ] || continue
-    fm_remote_job_stage_owner_alive "$stage" && continue
+    fm_remote_job_record_owner_alive "$stage" && continue
     mtime=$(fm_remote_job_path_mtime "$stage" 2>/dev/null || true)
     case "$mtime" in ''|*[!0-9]*) continue ;; esac
     [ $((now - mtime)) -ge "$FM_REMOTE_JOB_STAGE_REAP_SECONDS" ] || continue
