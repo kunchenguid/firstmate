@@ -23,6 +23,9 @@ BASE_RULES="$TMP_ROOT/rules.json"
 RULES="$HOME_DIR/config/crew-dispatch.json"
 QUOTA="$TMP_ROOT/quota.json"
 BASE_PATH=$PATH
+SHADOW_LOG="$HOME_DIR/state/dispatch-stakes-shadow.jsonl"
+SHADOW_RESPONSE="$TMP_ROOT/stakes-response.json"
+printf '%s\n' '{"answers":{"stakes":{"type":"choice","choice":"stakes_required","confidence":0.95,"probabilities":{"stakes_required":0.97,"not_required":0.02,"unclear":0.01}}}}' > "$SHADOW_RESPONSE"
 mkdir -p "$HOME_DIR/config" "$LOG" "$NO_CURL_BIN"
 for command_name in bash chmod cp dirname jq mktemp rm; do
   ln -s "$(command -v "$command_name")" "$NO_CURL_BIN/$command_name"
@@ -110,28 +113,52 @@ cat > "$FAKEBIN/curl" <<'SH'
 # Fake curl: records argv (minus the -o target), the stdin body, and the header
 # read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP.
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
-  printf 'curl:secret-present\n' >> "${CHILD_ENV_LOG:?}"
-else
-  printf 'curl:clean\n' >> "${CHILD_ENV_LOG:?}"
+out='' body=$(cat)
+log=${FAKE_CURL_LOG:?}
+response=${FAKE_CURL_RESPONSE:?}
+http=${FAKE_CURL_HTTP:-200}
+fail=${FAKE_CURL_FAIL:-0}
+shadow=false
+if jq -e '.questions.stakes' >/dev/null 2>&1 <<<"$body"; then
+  shadow=true
+  log="$log/shadow"
+  mkdir -p "$log"
+  response=${FAKE_SHADOW_RESPONSE:?}
+  http=${FAKE_SHADOW_HTTP:-200}
+  fail=${FAKE_SHADOW_FAIL:-0}
 fi
-out=''
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+  printf 'curl:secret-present\n' >> "$log/child-env"
+else
+  printf 'curl:clean\n' >> "$log/child-env"
+fi
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out=$2; shift 2 ;;
-    *) printf '%s\n' "$1" >> "${FAKE_CURL_LOG:?}/argv"; shift ;;
+    *) printf '%s\n' "$1" >> "$log/argv"; shift ;;
   esac
 done
-cat > "$FAKE_CURL_LOG/body"
-cat /dev/fd/3 > "$FAKE_CURL_LOG/header" 2>/dev/null || printf 'fd3 unreadable\n' > "$FAKE_CURL_LOG/header"
+printf '%s' "$body" > "$log/body"
+cat /dev/fd/3 > "$log/header" 2>/dev/null || printf 'fd3 unreadable\n' > "$log/header"
+if $shadow; then
+  # A gate proves the caller can return while this independent request is pending.
+  if [ -n "${FAKE_SHADOW_GATE:-}" ]; then
+    for ((i=0; i<100; i++)); do
+      [ -e "$FAKE_SHADOW_GATE" ] && break
+      sleep 0.1
+    done
+  fi
+  [ "$fail" = 1 ] && exit 7
+  cp "$response" "$out"
+  printf '%s' "$http"
+  exit 0
+fi
 if [ -n "${FAKE_CURL_MUTATE_SOURCE:-}" ]; then
   cp "$FAKE_CURL_MUTATE_SOURCE" "${FAKE_CURL_MUTATE_TARGET:?}"
 fi
-if [ "${FAKE_CURL_FAIL:-0}" = 1 ]; then
-  exit 7
-fi
-cp "${FAKE_CURL_RESPONSE:?}" "$out"
-printf '%s' "${FAKE_CURL_HTTP:-200}"
+[ "$fail" = 1 ] && exit 7
+cp "$response" "$out"
+printf '%s' "$http"
 SH
 chmod +x "$FAKEBIN/curl"
 
@@ -151,7 +178,20 @@ SH
 chmod +x "$FAKEBIN/quota-axi"
 
 RESPONSE="$TMP_ROOT/response.json"
+export FAKE_SHADOW_RESPONSE="$SHADOW_RESPONSE"
 export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" QUOTA_AXI_CALLS="$LOG/quota-axi.calls" QUOTA_AXI_FIXTURE="$QUOTA" CHILD_ENV_LOG="$LOG/child-env"
+
+wait_shadow() {
+  local expected=$1 count=0 i
+  for ((i=0; i<100; i++)); do
+    if [ -f "$SHADOW_LOG" ]; then
+      count=$(wc -l < "$SHADOW_LOG" | tr -d ' ')
+    fi
+    [ "$count" -ge "$expected" ] && return 0
+    sleep 0.1
+  done
+  fail "shadow record not appended (expected $expected, got $count)"
+}
 
 reset_log() {
   rm -rf "$LOG"
@@ -161,10 +201,28 @@ reset_log() {
 # run <exit-var> <out-var> <err-var> [args...]: the tool with fakebin first on
 # PATH and an isolated FM_HOME; TYPESAFE_API_KEY comes from the caller's env.
 run() {
-  local __exit=$1 __out=$2 __err=$3 _out _code
+  local __exit=$1 __out=$2 __err=$3 _out _code before=0
   shift 3
-  _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
-  _code=$?
+  [ ! -f "$SHADOW_LOG" ] || before=$(wc -l < "$SHADOW_LOG")
+  if [ -n "${FAKE_SHADOW_GATE:-}" ]; then
+    # Capture both streams through the pipe to detect saved stderr descriptors
+    # as well as saved stdout descriptors in the background recorder.
+    _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" "$TOOL" "$@" 2>&1)
+    _code=$?
+    : > "$TMP_ROOT/stderr"
+  else
+    _out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" "$TOOL" "$@" 2> "$TMP_ROOT/stderr")
+    _code=$?
+  fi
+  if [ -n "${FAKE_SHADOW_GATE:-}" ]; then
+    # If command substitution retained a shadow stdout/stderr descriptor it
+    # could not return until the mock timed out, before this gate was opened.
+    [ ! -f "$SHADOW_LOG" ] || assert_equals "$before" "$(wc -l < "$SHADOW_LOG")" "live returns before gated shadow"
+    : > "$FAKE_SHADOW_GATE"
+  fi
+  if [ -n "$_out" ] && [[ "$_out" != *'no rules to match'* ]] && [ "$_code" = 0 ] && [[ "$_out" == dispatch-resolve:* ]]; then
+    wait_shadow "$((before + 1))"
+  fi
   printf -v "$__exit" '%s' "$_code"
   printf -v "$__out" '%s' "$_out"
   printf -v "$__err" '%s' "$(cat "$TMP_ROOT/stderr")"
@@ -211,7 +269,24 @@ cp "$BASE_RULES" "$OVERRIDE_CONFIG/crew-dispatch.json"
 reset_log
 TYPESAFE_API_KEY=$KEY FM_CONFIG_OVERRIDE="$OVERRIDE_CONFIG" run code out err "$BRIEF" --project pager
 assert_contains "$out" '  status: clear' "FM_CONFIG_OVERRIDE selects the canonical rules directory"
-pass "TYPESAFE_API_KEY= in .env activates the tool; environment and config overrides work"
+# The shadow recorder writes into this home's state directory, which
+# FM_STATE_OVERRIDE redirects for every other state writer too.
+OVERRIDE_STATE="$TMP_ROOT/override-state"
+OVERRIDE_SHADOW="$OVERRIDE_STATE/dispatch-stakes-shadow.jsonl"
+home_shadow_lines=0
+[ ! -f "$SHADOW_LOG" ] || home_shadow_lines=$(wc -l < "$SHADOW_LOG" | tr -d ' ')
+reset_log
+out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$OVERRIDE_STATE" \
+  TYPESAFE_API_KEY=$KEY "$TOOL" "$BRIEF" --project pager 2>/dev/null)
+assert_contains "$out" '  status: clear' "FM_STATE_OVERRIDE leaves the live result unchanged"
+for ((shadow_wait=0; shadow_wait<100; shadow_wait++)); do
+  [ -s "$OVERRIDE_SHADOW" ] && break
+  sleep 0.1
+done
+assert_equals 1 "$(wc -l < "$OVERRIDE_SHADOW" 2>/dev/null | tr -d ' ')" "the shadow record follows FM_STATE_OVERRIDE"
+assert_equals "$home_shadow_lines" "$( [ -f "$SHADOW_LOG" ] && wc -l < "$SHADOW_LOG" | tr -d ' ' || echo 0)" "a redirected shadow never lands in the home state directory"
+rm -rf "$OVERRIDE_STATE"
+pass "TYPESAFE_API_KEY= in .env activates the tool; environment, config, and state overrides work"
 
 # --- clear: request shape, secret handling, argmax --------------------------
 reset_log
@@ -237,14 +312,24 @@ body=$(cat "$LOG/body")
 assert_equals 'jev-latest' "$(jq -r .model <<<"$body")" "default model is jev-latest"
 assert_equals 'pager' "$(jq -r .state.task.project <<<"$body")" "project rides in the state"
 assert_contains "$(jq -r .state.task.brief <<<"$body")" 'off-by-one in the pager' "the whole brief rides in the state"
-assert_equals '["rule"]' "$(jq -c '.questions | keys' <<<"$body")" "only the rule Choice is asked"
+assert_equals '["rule"]' "$(jq -c '.questions | keys' <<<"$body")" "live call asks only the rule Choice"
 assert_equals '["default","rule_1","rule_2","rule_3","rule_4"]' "$(jq -c '.questions.rule.criteria | keys' <<<"$body")" "one option per rule plus default"
 assert_equals 'No listed rule applies to this task.' "$(jq -r '.questions.rule.criteria.default' <<<"$body")" "the fixed generic none criterion is the default option"
 assert_equals 'A simple bug fix with a stated root cause.' "$(jq -r '.questions.rule.criteria.rule_4' <<<"$body")" "rule when text is the option verbatim"
 assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine"
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
-pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
+shadow_body=$(cat "$LOG/shadow/body")
+assert_equals '["stakes"]' "$(jq -c '.questions | keys' <<<"$shadow_body")" "shadow is an independent stakes question"
+assert_equals '["not_required","stakes_required","unclear"]' "$(jq -c '.questions.stakes.criteria | keys' <<<"$shadow_body")" "shadow has exactly three stakes answers"
+assert_equals "$(jq -c .state <<<"$body")" "$(jq -c .state <<<"$shadow_body")" "both questions see the same brief"
+assert_not_contains "$shadow_body" 'SECRET-WHY-TEXT' "shadow excludes private rule metadata"
+assert_not_contains "$shadow_body" 'cursor-grok' "shadow excludes profiles"
+assert_not_contains "$(cat "$LOG/shadow/argv")" "$KEY" "shadow key never reaches argv"
+assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/shadow/header")" "shadow key uses fd 3"
+assert_equals 'curl:clean' "$(cat "$LOG/shadow/child-env")" "shadow child environment contains no key"
+assert_contains "$(cat "$LOG/shadow/argv")" $'--max-time\n5' "shadow keeps the five-second request bound"
+pass "clear: independent rule and stakes calls, descriptor-only keys, live argmax unchanged"
 
 # --- rules are snapshotted and line output is injection-safe -------------------
 MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
@@ -341,6 +426,252 @@ assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_mod
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "ambiguous preserves eligible unranked candidate evidence"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
 pass "ambiguous: confidence below the fixed floor hands the decision back"
+
+# --- rule confidence floors and fail-closed missing confidence -----------------
+normalize_live() { sed -E 's/latency_ms: [0-9]+/latency_ms: measured/g; s/after [0-9]+ ms/after measured ms/g'; }
+for confidence in 0.59 0.6 0.9; do
+  cp "$BASE_RULES" "$RULES"
+  write_response "$RESPONSE" rule_4 "$confidence"
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  legacy=$(normalize_live <<<"$out")
+  jq '.rules[3].confidence_floor = 0.6' "$BASE_RULES" > "$RULES"
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  assert_equals "$legacy" "$(normalize_live <<<"$out")" "omitted floor preserves global 0.6 behavior at $confidence"
+done
+jq '.rules[3].confidence_floor = 0.3' "$BASE_RULES" > "$RULES"
+write_response "$RESPONSE" rule_4 0.41
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 2 "$code" "a lower floor without the strongest declaration is refused"
+assert_contains "$err" 'confidence_floor below 0.6 requires strongest_reasoning: true' "the direction guard explains the required declaration"
+jq '.rules[3] += {confidence_floor: 0.3, strongest_reasoning: true}' "$BASE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a declared strongest set clears below 0.6"
+jq '.rules[3].confidence_floor = 0.8' "$BASE_RULES" > "$RULES"
+write_response "$RESPONSE" rule_4 0.7
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "a higher declared floor rejects above 0.6"
+assert_contains "$out" 'confidence 0.7 below floor 0.8' "the rule floor is explained"
+assert_not_contains "$out" '  profile:' "higher floor prevents profile emission"
+# A present confidence must be numeric: a broken response contract is an error
+# outcome, never the supervisor-facing claim that Jev reported no confidence.
+for value in '"0.9"' '"not-a-number"' true '{}' '[]'; do
+  jq '.rules[3] += {confidence_floor: 0, strongest_reasoning: true}' "$BASE_RULES" > "$RULES"
+  write_response "$RESPONSE" rule_4 "$value"
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 0 "$code" "a malformed confidence still exits 0"
+  assert_contains "$out" '  status: error' "a present nonnumeric confidence breaks the response contract: $value"
+  assert_contains "$out" '  reason: response is not a rule Choice answer' "the malformed response names the contract, not model uncertainty"
+  assert_not_contains "$out" '  status: ambiguous' "a broken contract is never reported as uncertainty: $value"
+  tail -1 "$SHADOW_LOG" | jq -e '.live.rule == null and .live.confidence == null' >/dev/null \
+    || fail "calibration must not record a broken contract as an answered dispatch: $value"
+done
+for missing in null absent; do
+  write_response "$RESPONSE" rule_4 null
+  if [ "$missing" = absent ]; then
+    jq 'del(.answers.rule.confidence)' "$RESPONSE" > "$TMP_ROOT/no-confidence.json"
+    mv "$TMP_ROOT/no-confidence.json" "$RESPONSE"
+  fi
+  cp "$BASE_RULES" "$RULES"
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  assert_contains "$out" '  status: ambiguous' "$missing confidence without a declaration is ambiguous"
+  # The waiver belongs to actually lowering the bar. A rule that declares the
+  # strongest class but leaves its floor at the global default hands back a
+  # missing confidence exactly as it hands back a number below that floor.
+  jq '.rules[3].strongest_reasoning = true' "$BASE_RULES" > "$RULES"
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  assert_contains "$out" '  status: ambiguous' "$missing confidence cannot clear a strongest rule that never lowered its floor"
+  assert_contains "$out" 'floor 0.6 not cleared' "the unlowered floor is named on the hand-back"
+  assert_not_contains "$out" '  profile:' "the declaration alone never authorizes a dispatch without a confidence"
+  tail -1 "$SHADOW_LOG" | jq -e '.live.rule == "rule_4" and .live.confidence == null' >/dev/null \
+    || fail "calibration must record a genuinely unanswered confidence against its matched rule"
+  write_response "$RESPONSE" rule_4 0.59
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  assert_contains "$out" '  status: ambiguous' "the same rule rejects a stated 0.59, so silence cannot outrank it"
+  jq '.rules[3] += {strongest_reasoning: true, confidence_floor: 0.3}' "$BASE_RULES" > "$RULES"
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  assert_contains "$out" '  status: clear' "a genuinely lowered floor accepts a stated 0.59"
+  write_response "$RESPONSE" rule_4 null
+  if [ "$missing" = absent ]; then
+    jq 'del(.answers.rule.confidence)' "$RESPONSE" > "$TMP_ROOT/no-confidence.json"
+    mv "$TMP_ROOT/no-confidence.json" "$RESPONSE"
+  fi
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  assert_contains "$out" '  status: clear' "$missing confidence clears only where the floor was actually lowered"
+  # A raised floor is the operator asking for more, so the missing-confidence
+  # exception must not waive it either.
+  jq '.rules[3] += {strongest_reasoning: true, confidence_floor: 0.9}' "$BASE_RULES" > "$RULES"
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  assert_contains "$out" '  status: ambiguous' "$missing confidence cannot clear a raised floor on a strongest rule"
+  assert_contains "$out" 'floor 0.9 not cleared' "the raised floor is named on the missing-confidence hand-back"
+  assert_not_contains "$out" '  profile:' "a raised floor still emits no profile without a confidence"
+  write_response "$RESPONSE" rule_4 0.89
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  assert_contains "$out" '  status: ambiguous' "the same raised floor rejects a numeric confidence just below it"
+  write_response "$RESPONSE" rule_4 null
+  if [ "$missing" = absent ]; then
+    jq 'del(.answers.rule.confidence)' "$RESPONSE" > "$TMP_ROOT/no-confidence.json"
+    mv "$TMP_ROOT/no-confidence.json" "$RESPONSE"
+  fi
+done
+write_response "$RESPONSE" rule_3 null
+jq '.rules[2] += {strongest_reasoning: true, confidence_floor: 0.3}' "$BASE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "a waived missing confidence never bypasses captain approval"
+# The strongest-class declaration and a below-global floor are per-rule only,
+# so a default selection always answers to the global floor.
+write_response "$RESPONSE" default null
+cp "$BASE_RULES" "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "a default selection carrying no confidence is ambiguous"
+assert_contains "$out" 'floor 0.6 not cleared' "the default selection answers to the global floor"
+assert_contains "$out" '  note: no rule matched' "a direct default match states its own selection"
+assert_not_contains "$out" '  profile:' "no rule and no confidence never reaches a dispatch"
+jq '.rules[3].strongest_reasoning = true' "$BASE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "an unmatched rule's declaration cannot clear a default selection"
+# Rule 1 falls through to default under the fixture quota. Both lower and
+# higher rule confidence floors must stop governing that default selection.
+for rule_floor in 0.3 0.8; do
+  jq --argjson floor "$rule_floor" '.rules[0] += {confidence_floor: $floor, strongest_reasoning: true}' "$BASE_RULES" > "$RULES"
+  for confidence in 0.41 0.7 null; do
+    write_response "$RESPONSE" rule_1 "$confidence"
+    TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+    if [ "$confidence" = 0.7 ]; then expected=clear; else expected=ambiguous; fi
+    assert_contains "$out" "  status: $expected" "default fallback uses global floor despite rule floor $rule_floor at $confidence"
+    if [ "$expected" = clear ]; then
+      assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-high'" "fallback chooses default profiles"
+      tail -1 "$SHADOW_LOG" | jq -e '.live.rule == "rule_1" and .live.confidence == 0.7 and .live.profile.model == "cursor-grok-4.6-high"' >/dev/null || fail "shadow must distinguish matched rule from selected default profile"
+    else
+      assert_contains "$out" 'floor 0.6' "fallback explains the global floor"
+      assert_contains "$out" '  note: rule rule_1 floor model:fable below 20%: fall through to default' "an ambiguous fall-through names the set the floor belongs to"
+      assert_contains "$out" 'candidate: claude:opus  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  -> eligible' "the fall-through prints the default set it says it selected"
+      assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-high  provider=cursor  scope=all_models  remaining=91%  spendPriority=0.7597  runway=through_reset  -> eligible' "every default candidate carries its own evidence"
+      assert_not_contains "$out" 'candidate: claude:fable' "the profile the rule floor disqualified is never offered as a candidate"
+      assert_not_contains "$out" '  profile:' "fallback cannot borrow strongest rule authority"
+    fi
+  done
+done
+# A direct default match answers to the global floor in both directions.
+cp "$BASE_RULES" "$RULES"
+write_response "$RESPONSE" default 0.41
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "a direct default match below the global floor hands back"
+assert_contains "$out" 'confidence 0.41 below floor 0.6' "the global floor is explained"
+assert_contains "$out" '  note: no rule matched' "a direct default match states its own selection"
+assert_not_contains "$out" '  profile:' "a rejected default emits no profile"
+write_response "$RESPONSE" default 0.7
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a direct default match above the global floor resolves"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-high'" "the cleared default emits its ranked profile"
+cp "$BASE_RULES" "$RULES"
+pass "confidence floors enforce declared direction and follow the selected profile set"
+
+# --- shadow failures and answers cannot influence the live protocol -----------
+for live_case in clear ambiguous escalate error; do
+  case "$live_case" in
+    clear) write_response "$RESPONSE" rule_4 0.9 ;;
+    ambiguous) write_response "$RESPONSE" rule_4 0.4 ;;
+    escalate) write_response "$RESPONSE" rule_3 0.9 ;;
+    error) printf '%s\n' '{"answers":{}}' > "$RESPONSE" ;;
+  esac
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  live_out=$(normalize_live <<<"$out") live_err=$err live_code=$code
+  assert_contains "$out" "  status: $live_case" "baseline live outcome is $live_case"
+  for shadow_case in transport http malformed missing high_risk not_required unclear; do
+    response_override="$SHADOW_RESPONSE"
+    fail_override=0 http_override=200
+    case "$shadow_case" in
+      transport) fail_override=1 ;;
+      http) http_override=429 ;;
+      malformed) response_override="$TMP_ROOT/shadow-bad.json"; printf '%s\n' 'not-json' > "$response_override" ;;
+      missing) response_override="$TMP_ROOT/shadow-bad.json"; printf '%s\n' '{"answers":{}}' > "$response_override" ;;
+      not_required|unclear)
+        response_override="$TMP_ROOT/shadow-other.json"
+        jq --arg choice "$shadow_case" '.answers.stakes |= (.choice = $choice | .probabilities |= with_entries(.value = (if .key == $choice then 1 else 0 end)))' "$SHADOW_RESPONSE" > "$response_override" ;;
+    esac
+    TYPESAFE_API_KEY=$KEY FAKE_SHADOW_RESPONSE="$response_override" FAKE_SHADOW_FAIL=$fail_override FAKE_SHADOW_HTTP=$http_override run code out err "$BRIEF"
+    assert_equals "$live_out" "$(normalize_live <<<"$out")" "$shadow_case leaves $live_case stdout identical"
+    assert_equals "$live_err" "$err" "$shadow_case leaves $live_case stderr identical"
+    expect_code "$live_code" "$code" "$shadow_case leaves $live_case exit identical"
+    record=$(tail -1 "$SHADOW_LOG")
+    jq -e 'keys == ["dispatch", "live", "stakes", "timestamp"] and (.dispatch | keys) == ["brief_id", "project"] and (.dispatch.brief_id | test("^sha256:[a-f0-9]{64}$")) and .dispatch.project == "" and (.timestamp | fromdateiso8601 | type) == "number" and (.live | keys) == ["confidence", "profile", "rule"] and (.stakes | keys) == ["answer", "confidence", "error", "probabilities", "status"]' <<<"$record" >/dev/null || fail "shadow record shape: $record"
+    case "$shadow_case" in
+      transport|http|malformed|missing) assert_equals error "$(jq -r .stakes.status <<<"$record")" "shadow failure is recorded" ;;
+      *) assert_equals ok "$(jq -r .stakes.status <<<"$record")" "valid shadow is recorded" ;;
+    esac
+    case "$live_case" in
+      clear) jq -e '.live == {rule:"rule_4",confidence:0.9,profile:{harness:"cursor",model:"cursor-grok-4.6-medium"}}' <<<"$record" >/dev/null || fail "live profile not recorded exactly" ;;
+      ambiguous|escalate) assert_equals null "$(jq -c .live.profile <<<"$record")" "non-clear live result records no chosen profile" ;;
+    esac
+  done
+done
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY FAKE_SHADOW_GATE="$TMP_ROOT/shadow-release" run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "slow shadow cannot hold up live answer"
+record=$(tail -1 "$SHADOW_LOG")
+jq -e '.stakes == {status:"ok",answer:"stakes_required",confidence:0.95,probabilities:{stakes_required:0.97,not_required:0.02,unclear:0.01},error:null}' <<<"$record" >/dev/null || fail "stakes distribution and confidence not preserved"
+assert_not_contains "$(cat "$SHADOW_LOG")" "$KEY" "shadow history contains no key"
+assert_not_contains "$(cat "$SHADOW_LOG")" 'off-by-one' "shadow history contains no brief text"
+assert_not_contains "$(cat "$SHADOW_LOG")" 'SECRET-WHY-TEXT' "shadow history contains no private rule metadata"
+assert_not_contains "$(cat "$SHADOW_LOG")" 'A simple bug fix' "shadow history contains no rule text"
+# Calibration joins use project plus a stable path digest, with a real UTC
+# timestamp rather than brief content or private path names in the record.
+started=$(date +%s)
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project sample-project
+record=$(tail -1 "$SHADOW_LOG")
+brief_id=$(jq -r .dispatch.brief_id <<<"$record")
+jq -e --argjson started "$started" --argjson finished "$(date +%s)" '
+  .dispatch.project == "sample-project" and
+  (.timestamp | fromdateiso8601) >= $started and
+  (.timestamp | fromdateiso8601) <= $finished' <<<"$record" >/dev/null || fail "shadow timestamp must locate this dispatch in UTC"
+TYPESAFE_API_KEY=$KEY run code out err "$(dirname "$BRIEF")/./brief.md" --project sample-project
+assert_equals "$brief_id" "$(tail -1 "$SHADOW_LOG" | jq -r .dispatch.brief_id)" "equivalent brief paths retain the join key"
+cp "$BRIEF" "$TMP_ROOT/other-brief.md"
+TYPESAFE_API_KEY=$KEY run code out err "$TMP_ROOT/other-brief.md" --project sample-project
+other_id=$(tail -1 "$SHADOW_LOG" | jq -r .dispatch.brief_id)
+[ "$brief_id" != "$other_id" ] || fail "different brief paths must have different join keys even for identical content"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project other-project
+tail -1 "$SHADOW_LOG" | jq -e --arg id "$brief_id" '.dispatch == {project: "other-project", brief_id: $id}' >/dev/null || fail "project distinguishes dispatches without changing the path digest"
+assert_not_contains "$(cat "$SHADOW_LOG")" "$TMP_ROOT" "shadow history contains no raw brief path"
+# Deletion must be harmless; the next append recreates the diagnostic.
+rm "$SHADOW_LOG"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_equals 1 "$(wc -l < "$SHADOW_LOG" | tr -d ' ')" "deleted shadow history is recreated with one record"
+# The pipe drains while the network is pending even for a large configured
+# profile; the diagnostic worker also removes its private response scratch.
+shadow_tmp="$TMP_ROOT/shadow-scratch"
+mkdir "$shadow_tmp"
+jq '.rules[3].use[1].model = ([range(70000) | "x"] | join(""))' "$BASE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY TMPDIR="$shadow_tmp" FAKE_SHADOW_GATE="$TMP_ROOT/large-shadow-release" run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "large live handoff never waits for shadow network"
+for ((i=0; i<100; i++)); do
+  [ -z "$(find "$shadow_tmp" -mindepth 1 -print)" ] && break
+  sleep 0.1
+done
+assert_equals '' "$(find "$shadow_tmp" -mindepth 1 -print)" "both requests clean up temporary response files"
+cp "$BASE_RULES" "$RULES"
+# Arbitrary response extras, even state echoes, never enter the diagnostic.
+jq --arg secret "$KEY" '.answers.stakes.extra = $secret | .answers.stakes.probabilities.unoffered = $secret' "$SHADOW_RESPONSE" > "$TMP_ROOT/shadow-private.json"
+TYPESAFE_API_KEY=$KEY FAKE_SHADOW_RESPONSE="$TMP_ROOT/shadow-private.json" run code out err "$BRIEF"
+assert_equals invalid_response "$(tail -1 "$SHADOW_LOG" | jq -r .stakes.error)" "unoffered shadow fields invalidate the distribution"
+assert_not_contains "$(cat "$SHADOW_LOG")" "$KEY" "malformed shadow cannot persist arbitrary response text"
+# A failed append also leaves the live protocol alone.
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+live_out=$(normalize_live <<<"$out")
+rm "$SHADOW_LOG"
+mkdir "$SHADOW_LOG"
+failed_record_out=$(PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY="$KEY" "$TOOL" "$BRIEF" 2> "$TMP_ROOT/record-failure-stderr")
+expect_code 0 "$?" "recording failure exits zero"
+assert_equals "$live_out" "$(normalize_live <<<"$failed_record_out")" "recording failure leaves stdout unchanged"
+assert_equals '' "$(cat "$TMP_ROOT/record-failure-stderr")" "recording failure emits no caller stderr"
+# Leave the failure fixture in place; use a new home for subsequent cases so
+# an asynchronous failed append cannot race with removal of its path.
+HOME_DIR="$TMP_ROOT/home-after-record-failure"
+mkdir -p "$HOME_DIR/config"
+RULES="$HOME_DIR/config/crew-dispatch.json"
+SHADOW_LOG="$HOME_DIR/state/dispatch-stakes-shadow.jsonl"
+cp "$BASE_RULES" "$RULES"
+pass "shadow answers and failures are append-only observations, isolated from every live outcome"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log
@@ -728,6 +1059,15 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 2 "$code" "non-JSON rules exits 2"
 assert_contains "$err" 'not JSON' "non-JSON rules is named"
 for bad in \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"confidence_floor":0.3}]}|rule confidence_floor below 0.6 requires strongest_reasoning: true' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"confidence_floor":0.3,"strongest_reasoning":false}]}|rule confidence_floor below 0.6 requires strongest_reasoning: true' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"strongest_reasoning":"true"}]}|rule strongest_reasoning must be a boolean' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"strongest_reasoning":null}]}|rule strongest_reasoning must be a boolean' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"strongest_reasoning":true},{"when":"y","use":{"harness":"codex"},"strongest_reasoning":true,"confidence_floor":0.3}]}|every strongest_reasoning rule must use the same profile set' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"confidence_floor":"0.3"}]}|rule confidence_floor must be a number 0..1' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"confidence_floor":null}]}|rule confidence_floor must be a number 0..1' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"confidence_floor":-0.1}]}|rule confidence_floor must be a number 0..1' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"confidence_floor":1.1}]}|rule confidence_floor must be a number 0..1' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"approval":"firstmate"}]}|approval must be "captain" when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"select":"mystery"}]}|unknown select: mystery' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \

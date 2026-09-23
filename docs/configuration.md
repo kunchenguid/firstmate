@@ -504,6 +504,8 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "approval": "captain",
+      "confidence_floor": 0.6,
+      "strongest_reasoning": false,
       "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
         { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
@@ -521,15 +523,31 @@ Per rule, `when` and `use` are required; the top-level `rules` array itself may 
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
-Rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
+Rule `approval`, `confidence_floor`, `strongest_reasoning`, and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
+A rule `confidence_floor` is a JSON number from 0 through 1, inclusive, setting the minimum numeric rule-match confidence while that rule's profile set is selected.
+Omitting it preserves the global floor of 0.6, owned once by `FM_DISPATCH_CONFIDENCE_FLOOR` in [`bin/fm-dispatch-lib.sh`](../bin/fm-dispatch-lib.sh) and read by both the resolver and bootstrap.
+It is independent of the quota `floor`; null, strings (including numeric strings), and out-of-range values are configuration errors.
+A rule's optional boolean `strongest_reasoning: true` declares that its entire `use` set belongs to the strongest reasoning class in this configuration.
+False or omission makes no declaration; null and nonboolean values are configuration errors.
+The strongest reasoning class is singular: every rule that declares `strongest_reasoning: true` must use the same profile set, and declarations naming different sets are refused as malformed configuration.
+Only a rule that declares itself the strongest reasoning class may set its `confidence_floor` below the global default; a lower floor without that declaration is refused as malformed configuration, never clamped or silently honored.
+Floors at or above the global default remain legal for every rule, and the declaration alone does not reduce a numeric floor.
+Both declarations are per-rule only: the top-level `default` set carries neither, so an operator whose strongest reasoning class genuinely is the fallback expresses it as a catch-all rule rather than by declaring the default set.
+The operator owns this assertion for every candidate in the set; code neither ranks classes nor infers strength from harness or model names.
+An absent or null answer confidence may clear only for a selected rule that both declares the strongest reasoning class and sets its `confidence_floor` strictly below the global default; a rule that leaves its floor at or above the global default keeps that floor for a missing confidence too, so weaker evidence never clears where stronger evidence would not.
+The waiver belongs to actually lowering the bar, not to the declaration on its own: a rule that declares the strongest reasoning class but never lowers its floor hands a missing confidence back exactly as it hands back a number below that floor.
+Any other absent or null confidence returns `ambiguous`.
+A present confidence must be a JSON number from 0 through 1; a string, boolean, object, array, or out-of-range number is a malformed-response `error`, not model uncertainty, so a broken response contract can never be read as Jev reporting no confidence.
+The confidence exception does not bypass captain approval, quota gates, or ties.
+The confidence floor and the strongest-class declaration are properties of the profile set that is actually selected: a matched rule's selection uses that rule's own values, while a direct default match and a rule quota-floor fall-through alike take the global floor with no missing-confidence waiver, never the matched rule's confidence settings.
 A rule `floor` names the quota-axi `provider` and `scope` whose `effectivePercentRemaining` must be at least `min_percent` for the rule's profiles to apply.
 A provider-only rule floor on an expanded provider binds to its `default` account row.
 An absent or unknown row or unmeasured provider makes the floor unverifiable and escalates without authorizing default routing.
 A known percentage below the floor makes the tool resolve among `default` profiles instead.
 A profile `provider` optionally names the quota-axi provider family whose rows apply to that profile; when present, profile and rule-floor provider IDs must match the strict whole-string pattern `^[a-z0-9]+(-[a-z0-9]+)*\z`.
-Bootstrap validates resolver-only `approval`, `floor`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
+Bootstrap validates resolver-only `approval`, `confidence_floor`, `strongest_reasoning`, `floor`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
 Typed resolution additively recognizes `gemini` because AGENTS.md section 4 verifies it for crewmate and scout dispatch.
 The opted-in resolver has authoritative single-provider mappings for `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, and `muse`; every other verified harness must declare `provider` explicitly, including multi-provider `pi`, `pi-signed`, `omp`, and `opencode` and unmapped `gemini`, `rovo`, and `devin`.
 Its single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
@@ -547,7 +565,7 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
 Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
-While typed resolution is active, malformed `approval`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
+While typed resolution is active, malformed `approval`, `confidence_floor`, `strongest_reasoning`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
 Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
@@ -565,7 +583,7 @@ bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON blo
 ```
 
 Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.
-When on and at least one rule exists, the tool sends the project name and the whole brief as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, or approvals.
+When on and at least one rule exists, the tool sends the project name and the whole brief as state and asks a live Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, or approvals.
 An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
 Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, and the numeric `spendPriority` argmax over candidates using each candidate's limiting row.
 The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and schema 6 and implements the [account-matching contract](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).
@@ -573,8 +591,9 @@ An expanded provider with no matching account row leaves the candidate eligible 
 Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
 Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
 Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
+Those candidate lines always describe the profile set the resolution actually selected, which is the set the `note:` line names whenever it is printed, so a rule quota-floor fall-through prints the default set's candidates rather than the matched rule's disqualified ones.
 On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
-The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor), `escalate` (an approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
+The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence fails the selected profile set's confidence contract above), `escalate` (an approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
 Response probabilities must contain exactly every offered choice, use numeric values from 0 through 1, and sum to approximately 1 within 0.01.
 Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
 Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
@@ -584,7 +603,15 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and each request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+An independent stakes question runs concurrently against the same brief, asking whether completing the described work involves an action needing separate stakes review, with required, not-required, and unclear outcomes.
+Its purpose is one month of local calibration: the answer is recorded beside the actual live match and chosen profile, never used for routing, threshold overrides, or permission to act.
+The second request incurs additional API usage, but the live result never waits for its completion; a timeout, malformed answer, or recording failure cannot change live stdout, stderr, status, or exit code.
+The script header owns the append-only, safe-to-delete shadow record's path and schema.
+After the observation month, evaluate this home's labeled dispatch outcomes before proposing any routing threshold; no timer or probability promotes the shadow automatically.
+The shadow has no expiry of its own either: every resolution that reaches the live request issues the second billed request alongside it, for as long as the shadow is present.
+It stops when the operator removes it after that evaluation, which is the same operator work the sentence above describes; the code enforces neither an automatic promotion nor an automatic end.
+Merge approval, irreversible or destructive actions, security decisions, and the owner's taste, priority, and spending choices retain their existing authority boundaries.
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
 ## Toolchain

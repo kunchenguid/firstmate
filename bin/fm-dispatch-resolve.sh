@@ -13,7 +13,7 @@
 #   The key lives in one shell variable and reaches curl as a header read from
 #   a file descriptor, never on argv; nothing logs or writes it.
 #
-# What it does when on with at least one rule: one POST to
+# What it does when on with at least one rule: a live POST to
 #   https://api.typesafe.ai/v1/systemone with the project name and the whole brief as
 #   state and ONE Choice question whose
 #   options are every rule's `when` from config/crew-dispatch.json plus one
@@ -39,7 +39,9 @@
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
-#   ambiguous -> confidence below the floor; decide as today from the probabilities
+#   ambiguous -> confidence below the selected set's floor, or missing where the
+#                Confidence note below grants no waiver; decide as today from
+#                the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
@@ -53,6 +55,32 @@
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
 #   inspectable answer plus every candidate's evidence, in code.
+#
+# Confidence: docs/configuration.md "Crew dispatch profiles" owns the per-rule
+#   confidence_floor and strongest-reasoning declarations. The floor and the
+#   strongest-class declaration are properties of the profile set actually
+#   selected, so a direct default match and a quota fall-through to default
+#   alike take the global floor and no missing-confidence waiver;
+#   bin/fm-dispatch-lib.sh owns that global floor, which this tool and the
+#   bootstrap diagnostic both apply.
+# Shadow: an independent stakes Choice runs concurrently with the live request,
+#   with the same five-second curl bound and descriptor-only key handling.
+#   The live path never waits for it. A pipe hands the final live evidence to
+#   the detached recorder, whose stdout/stderr are closed to the caller.
+#   It appends one JSON line per attempted resolution to
+#   dispatch-stakes-shadow.jsonl in this home's state directory
+#   (FM_STATE_OVERRIDE when set, else $FM_HOME/state), with stakes {status, answer,
+#   probabilities, confidence, error}, live {rule, confidence, profile}, a UTC
+#   ISO-8601 timestamp, and dispatch {project, brief_id}. The timestamp marks
+#   recorder start; brief_id is "sha256:" plus the SHA-256 of the brief path
+#   (physical absolute parent directory plus filename, no trailing newline).
+#   This joins retries of the same path without storing the path or brief text.
+#   Unknown/invalid fields are null; errors are fixed codes, never response text.
+#   The live rule is its matched option ID, including default, not its when text;
+#   profile contains only the emitted harness/model/effort, or null if none.
+#   Recording failures are ignored. This append-only diagnostic is safe to delete
+#   and must never be read as dispatch authority. It is a one-month calibration
+#   shadow, with no automatic promotion to routing or approval authority.
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
@@ -63,7 +91,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-$FM_ROOT}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
+# shellcheck source=bin/fm-dispatch-lib.sh
+. "$SCRIPT_DIR/fm-dispatch-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
@@ -73,7 +104,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-timing-lib.sh
 . "$SCRIPT_DIR/fm-timing-lib.sh"
 
-CONFIDENCE_FLOOR=0.6
 TS_MODEL=jev-latest
 TS_BASE=https://api.typesafe.ai
 TS_TIMEOUT=5
@@ -125,7 +155,7 @@ VERIFIED_HARNESSES=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(le
 
 # The fields this tool consumes must be well formed; bootstrap owns the wider
 # schema diagnostic, but an intake never selects around a malformed file.
-rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
+rules_err=$(jq -r --argjson confidence_floor "$FM_DISPATCH_CONFIDENCE_FLOOR" --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
   def verified($h): $verified_harnesses | index($h);
   def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
   def effort_ok($h; $m; $e):
@@ -164,6 +194,10 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
   elif any((.rules // [])[]; (.when | type) != "string" or (.when | length) == 0) then "each rule needs non-empty when"
   elif any((.rules // [])[]; (profiles(.use) | length) == 0) then "each rule needs at least one use profile"
   elif any((.rules // [])[]; has("approval") and .approval != "captain") then "approval must be \"captain\" when present"
+  elif any((.rules // [])[]; has("confidence_floor") and ((.confidence_floor | type) != "number" or .confidence_floor < 0 or .confidence_floor > 1)) then "rule confidence_floor must be a number 0..1"
+  elif any((.rules // [])[]; has("strongest_reasoning") and (.strongest_reasoning | type) != "boolean") then "rule strongest_reasoning must be a boolean"
+  elif ([(.rules // [])[] | select(.strongest_reasoning == true) | profiles(.use) | sort] | unique | length) > 1 then "every strongest_reasoning rule must use the same profile set"
+  elif any((.rules // [])[]; has("confidence_floor") and .confidence_floor < $confidence_floor and .strongest_reasoning != true) then "rule confidence_floor below \($confidence_floor) requires strongest_reasoning: true"
   elif any((.rules // [])[]; has("select") and ((.select | type) != "string" or (.select | length) == 0)) then "select must be a non-empty string"
   elif any((.rules // [])[]; has("select") and .select != "quota-balanced") then
     "unknown select: " + ([.rules[] | select(has("select") and .select != "quota-balanced") | .select] | unique | join(", "))
@@ -222,7 +256,77 @@ fi
 
 RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
-trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA"' EXIT
+LIVE_EVIDENCE='{"rule":null,"confidence":null,"profile":null}'
+SHADOW_OPEN=false
+# shellcheck disable=SC2329 # EXIT trap owns the final diagnostic handoff.
+finish() {
+  if $SHADOW_OPEN; then
+    trap '' PIPE
+    { printf '%s\n' "$LIVE_EVIDENCE" >&4; } 2>/dev/null || true
+    exec 4>&-
+  fi
+  rm -f "$RULES" "$RESP_FILE" "$QUOTA"
+}
+trap finish EXIT
+
+record_stakes_shadow() {
+  # This child owns no live resources and never inherits the cleanup trap.
+  trap - EXIT
+  local http shadow live request_pid timestamp brief_path brief_id
+  timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ') || return 0
+  SHADOW_SCRATCH=$(mktemp -d) || return 0
+  trap 'rm -rf "$SHADOW_SCRATCH"' EXIT
+  printf '%s' "$REQUEST" | jq '
+    .questions = {stakes: {
+      type: "choice",
+      instructions: "Based only on `task.brief`, does the requested work involve unattended actions or consequential commitments needing separate stakes review? Assess the requested work and its effects, not the difficulty of implementing it. This is an observation, never permission to act.",
+      criteria: {
+        stakes_required: "The work creates or changes automation that acts without per-action human review, or completion involves sending or publishing something outward, merging, an irreversible or destructive action, a security decision, or a choice about the owner\u0027s taste, priorities, or spending. Preparing a draft alone does not count as sending it.",
+        not_required: "The brief clearly limits completion to reversible internal work, fact reporting, or preparing a draft, with none of the listed stakes-bearing actions or choices.",
+        unclear: "The brief does not establish whether completion includes any of those actions or choices."
+      }
+    }}' | curl -sS --max-time "$TS_TIMEOUT" -o "$SHADOW_SCRATCH/response" -w '%{http_code}' \
+      -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
+      -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$TYPESAFE_API_KEY_PRIVATE") \
+      --data-binary @- > "$SHADOW_SCRATCH/http" 2>/dev/null &
+  request_pid=$!
+  # Always consume the live handoff, even after a failed request. This child
+  # drains while curl runs, so even a large profile cannot fill the pipe and
+  # make the live caller wait on the shadow network request.
+  IFS= read -r live || live='{"rule":null,"confidence":null,"profile":null}'
+  if wait "$request_pid"; then http=$(cat "$SHADOW_SCRATCH/http"); else http=000; fi
+  shadow='{"status":"error","answer":null,"probabilities":null,"confidence":null,"error":"transport"}'
+  if [ "$http" = 200 ]; then
+    shadow=$(jq -ce '
+      .answers.stakes as $a |
+      ["not_required", "stakes_required", "unclear"] as $choices |
+      if $a.type == "choice" and ($choices | index($a.choice)) != null and
+         ($a.confidence | type) == "number" and $a.confidence >= 0 and $a.confidence <= 1 and
+         ($a.probabilities | type) == "object" and ($a.probabilities | keys) == $choices and
+         all($a.probabilities[]; type == "number" and . >= 0 and . <= 1) and
+         (($a.probabilities | [.[]] | add) as $sum | $sum >= 0.99 and $sum <= 1.01)
+      then {status: "ok", answer: $a.choice, probabilities: $a.probabilities, confidence: $a.confidence, error: null}
+      else error("invalid") end' "$SHADOW_SCRATCH/response" 2>/dev/null) ||
+      shadow='{"status":"error","answer":null,"probabilities":null,"confidence":null,"error":"invalid_response"}'
+  elif [ "$http" != 000 ]; then
+    shadow='{"status":"error","answer":null,"probabilities":null,"confidence":null,"error":"http"}'
+  fi
+  brief_path=$(cd -- "$(dirname -- "$BRIEF")" && printf '%s/%s' "$(pwd -P)" "${BRIEF##*/}") || return 0
+  if command -v shasum >/dev/null 2>&1; then
+    brief_id=$(printf '%s' "$brief_path" | shasum -a 256) || return 0
+  elif command -v sha256sum >/dev/null 2>&1; then
+    brief_id=$(printf '%s' "$brief_path" | sha256sum) || return 0
+  else
+    return 0
+  fi
+  brief_id="sha256:${brief_id%% *}"
+  umask 077
+  mkdir -p "$STATE" || return 0
+  jq -nc --arg timestamp "$timestamp" --arg project "$PROJECT" --arg brief_id "$brief_id" \
+    --argjson stakes "$shadow" --argjson live "$live" \
+    '{timestamp: $timestamp, dispatch: {project: $project, brief_id: $brief_id}, stakes: $stakes, live: $live}' \
+    >> "$STATE/dispatch-stakes-shadow.jsonl" || true
+}
 LAT_MS=null
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
@@ -240,6 +344,11 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
         }
       }
     }')
+  # Do not wrap this exec in a stderr redirection: Bash saves the old stderr
+  # descriptor and the recorder would then keep a caller's capture pipe open.
+  if exec 4> >(exec >/dev/null 2>&1; record_stakes_shadow); then
+    SHADOW_OPEN=true
+  fi
   T0=$(fm_timing_now_ms)
   HTTP=$(printf '%s' "$REQUEST" | curl -sS --max-time "$TS_TIMEOUT" -o "$RESP_FILE" -w '%{http_code}' \
     -X POST "$TS_BASE/v1/systemone" -H 'Content-Type: application/json' \
@@ -251,8 +360,9 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
 jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
     (.answers.rule.choice | type) == "string" and
-    (.answers.rule.confidence | type) == "number" and
-    .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1 and
+    (.answers.rule.confidence == null or
+      ((.answers.rule.confidence | type) == "number" and
+       .answers.rule.confidence >= 0 and .answers.rule.confidence <= 1)) and
     (.answers.rule.probabilities | type) == "object" and
     ((.answers.rule.probabilities | keys | sort) == $choices) and
     all(.answers.rule.probabilities[]; type == "number" and . >= 0 and . <= 1) and
@@ -262,6 +372,13 @@ jq -e --slurpfile rules "$RULES" '
        (.usage.input_tokens | type) == "number" and
        (.usage.output_tokens | type) == "number"))' \
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
+LIVE_EVIDENCE=$(jq -c --argjson count "$RULE_COUNT" '
+  .answers.rule | {
+    rule: (if .choice == "default" or
+      (.choice | test("^rule_[1-9][0-9]*$") and (ltrimstr("rule_") | tonumber) <= $count)
+      then .choice else null end),
+    confidence: (.confidence | if type == "number" then . else null end), profile: null
+  }' "$RESP_FILE")
 
 # ---- quota evidence: one quota-axi --json snapshot -----------------------------
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
@@ -269,7 +386,7 @@ quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
 fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
-RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
+RESULT=$(jq -n --arg floor "$FM_DISPATCH_CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
   --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
@@ -348,29 +465,33 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
   (if $choice == "default" then null
    elif $rule_number != null and $rule_number <= (($cfg.rules // []) | length) then $cfg.rules[$rule_number - 1]
    else null end) as $rule |
+  ($a.confidence | if type == "number" then . else null end) as $confidence |
   (if $rule == null then "none" else floor_state($rule.floor; $rule.floor.provider; "") end) as $rule_floor_state |
-  (if $choice != "default" and $rule == null then []
-   elif $rule == null then profiles($cfg.default // null)
-   else profiles($rule.use)
-   end) as $answer_use |
-  (if $choice != "default" and $rule == null then {invalid: "rule \($choice) is not in the rules file"}
+  (if $choice != "default" and $rule == null then {invalid: "rule \($choice) is not in the rules file", use: []}
    elif $rule == null then {source: "default", use: profiles($cfg.default // null), note: "no rule matched"}
-   elif ($rule.approval // "") == "captain" then {source: $choice, escalate: "rule requires the captain'"'"'s explicit approval before dispatch"}
-   elif $rule_floor_state == "unknown" then {source: $choice, escalate: "rule \($choice) floor \($rule.floor.provider)/\($rule.floor.scope) is unverifiable"}
+   elif ($rule.approval // "") == "captain" then {source: $choice, use: profiles($rule.use), escalate: "rule requires the captain'"'"'s explicit approval before dispatch"}
+   elif $rule_floor_state == "unknown" then {source: $choice, use: profiles($rule.use), escalate: "rule \($choice) floor \($rule.floor.provider)/\($rule.floor.scope) is unverifiable"}
    elif $rule_floor_state == "below"
      then {source: "default", use: profiles($cfg.default // null), note: "rule \($choice) floor \($rule.floor.scope) below \($rule.floor.min_percent)%: fall through to default"}
    else {source: $choice, use: profiles($rule.use), note: "rule matched"} end) as $sel |
+  ($floor | tonumber) as $global_floor |
+  (if $sel.source == "default" then $global_floor
+   else ($rule.confidence_floor // $global_floor) end) as $confidence_floor |
+  (if $sel.source == "default" then false
+   else $rule.strongest_reasoning == true end) as $strongest |
   {
     model: $r.model, latency_ms: $lat, tokens: ($r.usage // null),
     rule: $choice,
     rule_when: (if $rule == null then $none_criterion else $rule.when end | .[0:60]),
-    confidence: $a.confidence, probabilities: $a.probabilities
+    confidence: $confidence, probabilities: $a.probabilities
   } as $ev |
   if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
-  elif $a.confidence < ($floor | tonumber) then
-    $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(evaluate(.)))}
+  elif $confidence == null and (($strongest | not) or $confidence_floor >= $global_floor) then
+    $ev + {status: "ambiguous", reason: "confidence missing; floor \($confidence_floor) not cleared", note: $sel.note, candidates: ($sel.use | map(evaluate(.)))}
+  elif $confidence != null and $confidence < $confidence_floor then
+    $ev + {status: "ambiguous", reason: "confidence \($confidence) below floor \($confidence_floor)", note: $sel.note, candidates: ($sel.use | map(evaluate(.)))}
   elif $sel.escalate then
-    $ev + {status: "escalate", reason: $sel.escalate, candidates: ($answer_use | map(evaluate(.)))}
+    $ev + {status: "escalate", reason: $sel.escalate, candidates: ($sel.use | map(evaluate(.)))}
   elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}
   else
     ($sel.use | map(evaluate(.))) as $cands |
@@ -410,4 +531,9 @@ TEXT=$(jq -r '
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 printf '%s\n' "$TEXT"
+LIVE_EVIDENCE=$(jq -c --argjson live "$LIVE_EVIDENCE" '$live + {profile: (if .chosen then
+  .chosen.profile | {harness} + (if has("model") then {model} else {} end)
+    + (if has("effort") then {effort} else {} end)
+    | with_entries(.value |= gsub("[\t\r\n]"; " "))
+  else null end)}' <<<"$RESULT")
 exit 0
