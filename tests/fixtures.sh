@@ -98,6 +98,12 @@ fm_test_fake_gh_axi() {
 # is set, each send-keys TEXT-LINE payload (the pre-launch pane exports, which
 # carry no -l) is appended there instead, one per line in send order. Optional
 # FM_FAKE_DUPLICATE_WINDOW is printed from list-windows.
+# FM_FAKE_PENDING_LAUNCH models an unsubmitted staged launch; Enter records a
+# start in FM_FAKE_WORKER_START_LOG, while C-c clears it without starting.
+# FM_FAKE_ENTER_KEY_FAIL makes Enter fail while leaving the staged input intact.
+# FM_FAKE_EXECUTE_LAUNCH runs that staged launch on Enter in the fake pane path.
+# FM_FAKE_PANE_ENV_COMMAND optionally names an executable test shim that receives
+# `/bin/sh <staged>` and models a long-lived pane daemon's inherited environment.
 #
 # The pane path defaults to empty when FM_FAKE_PANE_PATH is unset. Window
 # cleanup and option operations are no-ops. Launch logging is env-gated, so
@@ -113,13 +119,82 @@ esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows)
-    if [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
+    if [ -n "${FM_FAKE_ENDPOINT_SURVIVES:-}" ] &&
+      [ -n "${FM_FAKE_ENDPOINT_RETIRE_LOG:-}" ] && [ -e "$FM_FAKE_ENDPOINT_RETIRE_LOG" ]; then
+      printf '%s\n' "$FM_FAKE_ENDPOINT_SURVIVES"
+    elif [ -n "${FM_FAKE_DUPLICATE_WINDOW:-}" ]; then
       printf '%s\n' "$FM_FAKE_DUPLICATE_WINDOW"
     fi
     exit 0
     ;;
-  has-session|new-session|new-window|kill-window|set-window-option) exit 0 ;;
+  has-session|new-session|new-window|set-window-option) exit 0 ;;
+  kill-window)
+    [ -z "${FM_FAKE_ENDPOINT_RETIRE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_ENDPOINT_RETIRE_LOG"
+    [ "${FM_FAKE_ENDPOINT_RETIRE_FAIL:-0}" != 1 ] || exit 1
+    [ -z "${FM_FAKE_PENDING_LAUNCH:-}" ] || rm -f "$FM_FAKE_PENDING_LAUNCH"
+    exit 0
+    ;;
   send-keys)
+    if [ "${FM_FAKE_EXECUTE_LAUNCH:-0}" != 1 ]; then
+      prev=
+      for a in "$@"; do
+        if [ "$prev" = "-l" ]; then
+          case "$a" in
+            ". '"*"'")
+              staged=${a#". '"}
+              staged=${staged%"'"}
+              if grep -Fq 'fm-exact-head-launch-guard.sh' "$staged"; then
+                expected=$(grep -Eo '[0-9a-f]{40}' "$staged" | head -n 1)
+                {
+                  printf 'schema=fm-exact-head-launch.v1\n'
+                  printf 'status=verified\n'
+                  printf 'expected_head=%s\n' "$expected"
+                  printf 'reason=clean\n'
+                } >"$staged.receipt"
+              fi
+              ;;
+          esac
+        fi
+        prev=$a
+      done
+    fi
+    if [ -n "${FM_FAKE_PENDING_LAUNCH:-}" ]; then
+      prev=
+      for a in "$@"; do
+        if [ "$prev" = "-l" ]; then
+          case "$a" in
+            ". '"*"'")
+              staged=${a#". '"}
+              staged=${staged%"'"}
+              printf '%s\n' "$staged" > "$FM_FAKE_PENDING_LAUNCH"
+              ;;
+          esac
+        fi
+        case "$a" in
+          Enter|C-m)
+            [ "${FM_FAKE_ENTER_KEY_FAIL:-0}" != 1 ] || [ ! -e "$FM_FAKE_PENDING_LAUNCH" ] || exit 1
+            if [ -e "$FM_FAKE_PENDING_LAUNCH" ]; then
+              if [ "${FM_FAKE_EXECUTE_LAUNCH:-0}" = 1 ]; then
+                staged=$(cat "$FM_FAKE_PENDING_LAUNCH")
+                if [ -n "${FM_FAKE_PANE_ENV_COMMAND:-}" ]; then
+                  (cd "${FM_FAKE_PANE_PATH:?}" && "$FM_FAKE_PANE_ENV_COMMAND" /bin/sh "$staged")
+                else
+                  (cd "${FM_FAKE_PANE_PATH:?}" && env -u GIT_NO_REPLACE_OBJECTS /bin/sh "$staged")
+                fi
+              else
+                printf 'started\n' >> "${FM_FAKE_WORKER_START_LOG:?}"
+              fi
+              rm -f "$FM_FAKE_PENDING_LAUNCH"
+            fi
+            ;;
+          C-c)
+            [ "${FM_FAKE_CANCEL_KEY_FAIL:-0}" != 1 ] || exit 1
+            [ "${FM_FAKE_CANCEL_KEY_STALL:-0}" = 1 ] || rm -f "$FM_FAKE_PENDING_LAUNCH"
+            ;;
+        esac
+        prev=$a
+      done
+    fi
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
       prev=
       for a in "$@"; do

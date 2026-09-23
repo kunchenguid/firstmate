@@ -597,6 +597,33 @@ test_spawn_refuses_orca_secondmate_before_home_mutation() {
   pass "fm-spawn.sh --backend orca --secondmate: refuses before secondmate-home mutation"
 }
 
+test_spawn_refuses_expected_head_before_orca_mutation() {
+  local proj data state config id head out status
+  id="orcaexpectedz1"
+  proj="$TMP_ROOT/expected-head-project"
+  data="$TMP_ROOT/expected-head-data"
+  state="$TMP_ROOT/expected-head-state"
+  config="$TMP_ROOT/expected-head-config"
+  fm_git_init_commit "$proj"
+  head=$(git -C "$proj" rev-parse HEAD)
+  mkdir -p "$data/$id" "$state" "$config"
+  write_spawn_brief "$data" "$id"
+  touch "$state/.last-watcher-beat"
+  orca_case expected-head-refusal
+  out=$( HOME="$SPAWN_HOME" CLAUDE_CONFIG_DIR='' PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" FM_ORCA_RESPONSES="$RESP" \
+    FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    FM_PROJECTS_OVERRIDE="$TMP_ROOT/unused-projects" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" claude --mode no-mistakes --yolo off \
+      --backend orca --expected-head "$head" 2>&1 )
+  status=$?
+  [ "$status" -ne 0 ] || fail "fm-spawn.sh accepted --expected-head with backend=orca"
+  assert_contains "$out" "backend=orca does not support --expected-head" \
+    "Orca expected-head refusal did not explain the unsupported lifecycle"
+  assert_absent "$state/$id.meta" "Orca expected-head refusal published task metadata"
+  [ ! -s "$LOG" ] || fail "Orca expected-head refusal invoked the Orca lifecycle"
+  pass "fm-spawn.sh --backend orca --expected-head: refuses before Orca mutation"
+}
+
 test_spawn_refuses_orca_when_runtime_not_ready() {
   local proj data state config id out status
   id="orcaruntimez6"
@@ -1378,6 +1405,7 @@ test_worktree_create_removes_worktree_when_path_missing
 test_spawn_preserves_orca_metadata_when_pathless_worktree_cleanup_fails
 test_spawn_writes_orca_metadata_and_launches_harness
 test_spawn_refuses_orca_secondmate_before_home_mutation
+test_spawn_refuses_expected_head_before_orca_mutation
 test_spawn_refuses_orca_when_runtime_not_ready
 test_spawn_refuses_orca_nonisolated_worktree
 test_spawn_removes_orca_worktree_when_terminal_create_fails

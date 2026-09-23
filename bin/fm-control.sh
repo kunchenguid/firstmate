@@ -55,7 +55,8 @@
 #              SAME worktree - and the same endpoint whenever that endpoint
 #              still exists - on the same or a newly chosen
 #              harness/model/effort - so switching harness is one ordinary use
-#              of this verb. When the recorded endpoint is instead proven gone -
+#              of this verb unless the task records a task-lifetime native
+#              provider guard. When the recorded endpoint is instead proven gone -
 #              a Herdr pane or workspace destroyed in churn - the launch owner
 #              re-creates one in that worktree, in the herdr session the record
 #              names, and the task's record rebinds to it; that is how a task
@@ -170,6 +171,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-codex-native-lib.sh
+. "$SCRIPT_DIR/fm-codex-native-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -772,6 +775,7 @@ relaunch_rollback() {
 }
 
 resolve_relaunch_profile() {
+  local native_provider native_bin native_home
   PRIOR_HARNESS=$HARNESS
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
   PRIOR_MODEL=$(fm_meta_get "$META" model)
@@ -815,6 +819,18 @@ resolve_relaunch_profile() {
   else
     TARGET_HARNESS=$PRIOR_HARNESS
   fi
+  native_provider=$(fm_meta_get "$META" codex_native_provider)
+  case "$native_provider" in
+    '') ;;
+    chatgpt)
+      [ "$TARGET_HARNESS" = codex ] \
+        || die "task $ID's recorded Codex native-provider guard is a task-lifetime billing posture; refusing to relaunch it on '$TARGET_HARNESS'"
+      native_bin=$(fm_meta_get "$META" codex_native_bin)
+      native_home=$(fm_meta_get "$META" codex_native_home)
+      fm_codex_native_preflight "$native_bin" "$native_home"
+      ;;
+    *) die "task $ID records unknown codex_native_provider '$native_provider'; refusing relaunch before its running agent is touched" ;;
+  esac
   # The launch owner refuses an adapter that cannot run this task's kind, but it
   # is only reached after the old agent has been stopped. Asking the same
   # capability table here keeps that refusal on the pre-stop side of the

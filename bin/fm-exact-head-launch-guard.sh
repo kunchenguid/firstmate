@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# Pane-side exact-head launch gate. This is the last program run before a
+# reviewed worker command. It writes one atomic receipt under the private launch
+# directory, then returns success only when the requested HEAD and the complete
+# worktree custody scan both pass at this boundary.
+# Usage: fm-exact-head-launch-guard.sh <worktree> <40-hex-head> <receipt> <git-bin>
+set -u
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-exact-head-lib.sh
+. "$SCRIPT_DIR/fm-exact-head-lib.sh"
+
+worktree=${1:-}
+expected=${2:-}
+receipt=${3:-}
+EXACT_HEAD_GIT_BIN=${4:-}
+export EXACT_HEAD_GIT_BIN
+
+write_receipt() { # <status> <reason>
+  local status=$1 reason=$2 tmp
+  [ -n "$receipt" ] || return 1
+  tmp="$receipt.tmp.$$"
+  (umask 077 && {
+    printf 'schema=fm-exact-head-launch.v1\n'
+    printf 'status=%s\n' "$status"
+    printf 'expected_head=%s\n' "$expected"
+    printf 'reason=%s\n' "$reason"
+  } >"$tmp") || return 1
+  mv -f -- "$tmp" "$receipt"
+}
+
+refuse() { # <reason>
+  write_receipt refused "$1" || true
+  printf 'error: exact-head launch guard refused: %s\n' "$1" >&2
+  exit 1
+}
+
+[ "$#" -eq 4 ] || refuse invalid-arguments
+case "$worktree" in /*) ;; *) refuse invalid-worktree ;; esac
+case "$receipt" in /*) ;; *) refuse invalid-receipt ;; esac
+case "$expected" in *[!0-9a-f]*|'') refuse invalid-expected-head ;; esac
+[ "${#expected}" -eq 40 ] || refuse invalid-expected-head
+case "$EXACT_HEAD_GIT_BIN" in /*) ;; *) refuse invalid-git-bin ;; esac
+[ -x "$EXACT_HEAD_GIT_BIN" ] || refuse invalid-git-bin
+[ -d "$worktree" ] || refuse missing-worktree
+[ ! -e "$receipt" ] && [ ! -L "$receipt" ] || refuse receipt-already-exists
+
+# The worker inherits this process's directory. Binding only `git -C` would
+# verify the reviewed worktree while a stale terminal pane launches the provider
+# somewhere else, so require the physical launch directory to be that same tree.
+actual_cwd=$(pwd -P 2>/dev/null) || refuse unreadable-cwd
+worktree_cwd=$(cd "$worktree" 2>/dev/null && pwd -P) || refuse unreadable-worktree
+[ "$actual_cwd" = "$worktree_cwd" ] || refuse cwd-mismatch
+
+# Repository/ref resolution at the worker boundary must not inherit ambient Git
+# redirection or replacement-object state from the pane shell.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE \
+  GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE \
+  GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_CONFIG_SYSTEM \
+  GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM
+export GIT_NO_REPLACE_OBJECTS=1
+
+actual=$(exact_head_git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) \
+  || refuse unreadable-head
+[ "$actual" = "$expected" ] || refuse head-mismatch
+
+status=$(expected_head_worktree_status "$worktree" "$expected") || refuse unreadable-worktree
+[ -z "$status" ] || refuse dirty-worktree
+
+# A ref race during the full byte scan cannot substitute another commit. Read
+# HEAD again, then run the complete scan once more so a write triggered by that
+# coordinate read is still rejected before the worker command begins.
+actual=$(exact_head_git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) \
+  || refuse unreadable-head
+[ "$actual" = "$expected" ] || refuse head-mismatch
+status=$(expected_head_worktree_status "$worktree" "$expected") || refuse unreadable-worktree
+[ -z "$status" ] || refuse dirty-worktree
+
+# This coordinate read is deliberately the final custody operation before the
+# verified receipt and worker command. Every byte/mode/index derivation above is
+# pinned to the immutable expected object, so a checkout during either scan is
+# dirty; a checkout after the scans is caught here.
+actual=$(exact_head_git -C "$worktree" rev-parse --verify --quiet HEAD 2>/dev/null) \
+  || refuse unreadable-head
+[ "$actual" = "$expected" ] || refuse head-mismatch
+
+write_receipt verified clean || refuse receipt-write-failed
