@@ -616,6 +616,17 @@ test_matrix_kimi_202_footer_furniture() {
     "$idle"$'\n'"$foreign_row"
   assert_screen "kimi 2.0.2 foreign row instead of footer on herdr" unknown "$CAPS_STYLED" \
     $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"$foreign_row"
+  # Post-submit usage renders nonzero, possibly decimal or lowercase counts;
+  # a narrow pane may drop everything after the effort cell.
+  local used
+  for used in 'context: 8% (81.9K/1M)' 'context: 8% (82k/1M)' 'context: 12.5% (125000/1M)'; do
+    assert_screen "kimi 2.0.2 idle footer with '$used' on herdr" empty "$CAPS_STYLED" \
+      $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"$mode_row"$'\n'"                    ${ESC}[38;2;224;224;224m${used}${ESC}[39m"
+  done
+  assert_screen "kimi 2.0.2 narrow mode row on herdr" empty "$CAPS_STYLED" \
+    $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"Never Ask  K3 thinking: high"$'\n'"$ctx_row"
+  assert_screen "kimi context row with a malformed count still refuses" unknown "$CAPS_STYLED" \
+    $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"context: 8% (81.9K/1M) extra"
   # Narrowness pin: an effort word outside kimi's own set is not furniture.
   assert_screen "kimi mode row with an unknown effort still refuses" unknown "$CAPS_STYLED" \
     $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"${mode_row/thinking: high/thinking: extreme}"
