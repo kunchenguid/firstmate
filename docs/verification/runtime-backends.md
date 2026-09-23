@@ -393,6 +393,24 @@ Removing the `--force` arm makes the forced generic case refuse; honoring `--for
 Restoring `fm_backend_orca_kill`'s swallowed tool check makes the CLI-absent adapter case report success.
 Dropping the retention-is-not-durable line makes the refusal claim a retention teardown does not own.
 
+### Pane session reap
+
+The tmux close is a pty hangup, so a successful close proves the window gone but not its processes.
+Verified on 2026-09-22 with tmux 3.7c on macOS 26.5.2: after `kill-window`, a pane-session member that called `setpgid(0,0)`, ignored SIGHUP, and moved its cwd to `/` stayed alive reparented to init, while Herdr 0.9.1's pane close ended every member of the pane session.
+`bin/fm-teardown.sh` therefore snapshots the exact tmux window's pane sessions before the close and reaps identity-matched survivors after a successful one; `bin/fm-pane-session-reap-lib.sh` owns that contract.
+
+```sh
+tests/fm-teardown-pane-session.test.sh
+```
+
+```text
+ok - fm-teardown: tmux cleanup reaps the closed pane's session members and spares a sibling window's
+```
+
+Without the reap the same case fails with `not ok - SIGHUP-ignoring own-process-group pane-session member survived teardown`.
+The control is an identically shaped process in a sibling window of the same tmux session, so a reap that widened past the exact window's own sessions would fail it.
+A process that detaches into its own session is not a pane-session member and stays out of scope, on tmux and Herdr alike.
+
 ## Claude workspace trust
 
 Verified 2026-09-03 on Claude Code 2.1.259.
