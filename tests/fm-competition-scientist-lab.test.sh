@@ -402,7 +402,53 @@ state = json.loads((pathlib.Path(sys.argv[1]) / ".run/state.json").read_text())
 assert state["sealed_calls"] == 1, state["sealed_calls"]
 assert state["falsification_calls"] == 1, state["falsification_calls"]
 PY
+  output=$($LAB replay "$workspace" 2>&1); status=$?
+  expect_code 0 "$status" "replay should audit a terminal failed record instead of calling it a mismatch"
+  assert_contains "$output" "aborted=sealed" "replay should name the phase that was charged but never completed"
   pass "competition scientist: an interrupted charged audit ends the search with an auditable failed final record"
+}
+
+test_interrupted_falsification_record_replays_as_aborted() {
+  local workspace output status
+  workspace="$TMP_ROOT/falsification-abort"
+  init_workspace "$workspace" noisy-classification proposed 3 2
+
+  chmod 0400 "$workspace/.run/results.tsv"
+  $LAB finish "$workspace" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "an interrupted falsification should not report success"
+  chmod 0600 "$workspace/.run/results.tsv"
+  python3 - "$workspace" <<'PY'
+import json
+import pathlib
+import sys
+workspace = pathlib.Path(sys.argv[1])
+state = json.loads((workspace / ".run/state.json").read_text())
+final = json.loads((workspace / ".run/final.json").read_text())
+assert final["aborted"]["phase"] == "falsification", final["aborted"]
+assert final["sealed_calls"] == 0, final["sealed_calls"]
+assert state["sealed_calls"] == 0, state["sealed_calls"]
+assert state["falsification_calls"] == 1, state["falsification_calls"]
+PY
+
+  output=$($LAB replay "$workspace" 2>&1); status=$?
+  expect_code 0 "$status" "an uncharged sealed audit must not be reported as evidence tampering"
+  assert_contains "$output" "sealed_calls=0 aborted=falsification" "replay should report the real charged-call count"
+
+  python3 - "$workspace" <<'PY'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1]) / ".run/final.json"
+final = json.loads(path.read_text())
+final["sealed_calls"] = 1
+path.chmod(0o600)
+path.write_text(json.dumps(final, indent=2, sort_keys=True) + "\n")
+PY
+  output=$($LAB replay "$workspace" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a final record disagreeing with the charged count should still be refused"
+  assert_contains "$output" "replay-mismatch:sealed-call-count" "count tampering should still be named"
+  pass "competition scientist: replay audits an aborted final record and still catches a forged call count"
 }
 
 test_sealed_dataset_never_persists_in_the_workspace() {
@@ -432,6 +478,7 @@ test_branch_and_planning_limits
 test_duplicate_confounded_and_budget_rejections
 test_finish_is_idempotent_and_replayable
 test_charged_audit_interruption_publishes_a_failed_final_record
+test_interrupted_falsification_record_replays_as_aborted
 test_sealed_dataset_never_persists_in_the_workspace
 
 echo "# fm-competition-scientist-lab.test.sh: all assertions passed"

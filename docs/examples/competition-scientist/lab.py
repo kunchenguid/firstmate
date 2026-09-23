@@ -1379,9 +1379,13 @@ def replay_workspace(workspace: Path) -> None:
             raise LabError(f"replay-mismatch:predictions:{candidate_sha}")
         checked += 1
     final = read_json(workspace / ".run" / "final.json")
-    if final.get("sealed_calls") != 1 or load_state(workspace).get("sealed_calls") != 1:
+    aborted = final.get("aborted")
+    sealed_calls = final.get("sealed_calls")
+    charged = 0 if (aborted or {}).get("phase") == "falsification" else 1
+    if sealed_calls != charged or load_state(workspace).get("sealed_calls") != charged:
         raise LabError("replay-mismatch:sealed-call-count")
-    print(f"replay: PASS task={manifest['task']} controller={manifest['controller']} candidates={checked} sealed_calls=1")
+    outcome = "" if aborted is None else f" aborted={aborted['phase']}"
+    print(f"replay: PASS task={manifest['task']} controller={manifest['controller']} candidates={checked} sealed_calls={sealed_calls}{outcome}")
 
 
 def smoke(args: argparse.Namespace) -> None:
