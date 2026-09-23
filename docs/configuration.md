@@ -523,8 +523,8 @@ Secondmate homes inherit this file from the primary, so a secondmate's own crewm
 
 `bin/fm-dispatch-resolve.sh` resolves one concrete crewmate or scout profile from a written brief with typesafe.ai's System One model (Jev), so the rule match that firstmate otherwise reasons out in its own context becomes one short tool turn.
 It is off unless `TYPESAFE_API_KEY` is non-empty in the calling environment, the home's gitignored `.env` holds a `TYPESAFE_API_KEY=` line, or the macOS Keychain has a generic-password item for the `typesafe-api-key` service.
-The resolver and bootstrap probe those sources in that order through `bin/fm-env-lib.sh`, so the environment and `.env` win over the Keychain; the Relay accessor there reads the `.env` line, and a missing `security` command or Keychain item is simply an absent final source.
-Bootstrap only checks that the Keychain item exists and never reads its secret.
+The resolver and bootstrap probe those sources in that order through the same `bin/fm-env-lib.sh` helper, so the environment and `.env` win over the Keychain; the Relay accessor there reads the `.env` line, and a missing `security` command, Keychain item, or secret that `security find-generic-password -w` cannot read is simply an absent final source for both.
+Store the item with `security add-generic-password -a "$USER" -s typesafe-api-key -w`, which prompts for the key and lets `security` read it back without an access dialog.
 Off means one `dispatch-resolve: off` line on stderr, nothing on stdout, exit 0, and no network call, so firstmate dispatches exactly as it does without the tool.
 This section is the single owner of the tool's operator contract; the script header owns its exact flags and output lines, and "Crew dispatch profiles" above owns the declared rule and profile fields it applies.
 Rules come only from the effective home's `config/crew-dispatch.json`; `FM_CONFIG_OVERRIDE` selects the config directory for tests and specialized setup like the other scripts.

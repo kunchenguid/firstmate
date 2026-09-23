@@ -88,9 +88,14 @@ SH
   cat > "$fakebin/security" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_FAKE_SECURITY_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_SECURITY_LOG"
-[ "$*" = 'find-generic-password -s typesafe-api-key' ] || exit 2
-[ "${FM_FAKE_KEYCHAIN_ITEM:-}" = 1 ] || exit 44
-printf '%s\n' 'keychain: "login.keychain-db"'
+case "${FM_FAKE_KEYCHAIN_ITEM:-}" in
+  1|metadata-only) ;;
+  *) exit 44 ;;
+esac
+[ "$*" != 'find-generic-password -s typesafe-api-key' ] || { printf '%s\n' 'keychain: "login.keychain-db"'; exit 0; }
+[ "$*" = 'find-generic-password -s typesafe-api-key -w' ] || exit 2
+[ "$FM_FAKE_KEYCHAIN_ITEM" = 1 ] || exit 36
+printf '%s\n' 'keychain-test-key'
 SH
   chmod +x "$fakebin/security"
   add_tasks_axi "$fakebin" "0.2.6"
@@ -1240,9 +1245,13 @@ ROWS
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ -z "$out" ] || fail "a Keychain-only typed key should add verified Gemini crewmate routing, got: $out"
   [ -s "$case_dir/security.log" ] || fail "bootstrap never checked the Keychain"
-  if grep -Fxv 'find-generic-password -s typesafe-api-key' "$case_dir/security.log" >/dev/null; then
-    fail "bootstrap must only check that the Keychain item exists, got: $(cat "$case_dir/security.log")"
+  if grep -Fxv 'find-generic-password -s typesafe-api-key -w' "$case_dir/security.log" >/dev/null; then
+    fail "bootstrap must apply the resolver's readable-secret Keychain query, got: $(cat "$case_dir/security.log")"
   fi
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_KEYCHAIN_ITEM=metadata-only FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: gemini' ] \
+    || fail "a Keychain item whose secret is unreadable must leave typed resolution off, got: $out"
 
   : > "$case_dir/child-env.log"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
