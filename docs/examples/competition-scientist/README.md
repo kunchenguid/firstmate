@@ -23,8 +23,8 @@ The only scientific surface is the generated workspace file `candidate.py`.
 The lab accepts typed proposals and materializes one literal assignment per attempt.
 It parses the candidate with Python's AST and never executes candidate code.
 Imports, calls, extra assignments, missing assignments, symlinks, and undeclared workspace files are rejected.
-The one exception is an interrupted atomic write of `.run/state.json` or `.run/final.json`, the two records the harness rewrites in place, so an interrupted run stays verifiable without hand-deleting a file the contract otherwise calls undeclared.
-Every other temp file is undeclared, including one named after a frozen, artifact, or evaluator record: the evaluator reclaims its own output temporaries when its bounded call ends.
+The one exception is an interrupted atomic write of a record the harness rewrites in place: `.run/state.json`, `.run/final.json`, or an archived `artifacts/<candidate-sha256>/result.json`, so an interrupted run stays verifiable without hand-deleting a file the contract otherwise calls undeclared.
+Every other temp file is undeclared, including one named after a frozen record, an archived candidate or prediction file, or an evaluator output: the evaluator reclaims its own output temporaries when its bounded call ends.
 This also prevents a proposal from opening a network connection or launching a subprocess.
 
 The evaluator, synthetic data, development split, falsification split, sealed-data generator, Python environment record, baseline template, and empty dependency set are frozen and SHA-256 verified before every evaluation.

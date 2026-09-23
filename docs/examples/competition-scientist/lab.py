@@ -749,6 +749,16 @@ ALLOWED_WORKSPACE_FILES = frozenset({
     ".run/final.json",
 })
 INTERRUPTED_WRITE_RECORDS = frozenset({".run/state.json", ".run/final.json"})
+ARTIFACT_RECORD_FILES = frozenset({"candidate.py", "dev-predictions.json", "result.json"})
+ARTIFACT_REWRITTEN_RECORDS = frozenset({"result.json"})
+
+
+def artifact_record(relative: str, filenames: frozenset[str]) -> bool:
+    parts = Path(relative).parts
+    if len(parts) != 3 or parts[0] != "artifacts" or parts[2] not in filenames:
+        return False
+    artifact_name = parts[1]
+    return len(artifact_name) == 64 and all(c in "0123456789abcdef" for c in artifact_name)
 
 
 def interrupted_record_write(relative: str) -> bool:
@@ -759,7 +769,8 @@ def interrupted_record_write(relative: str) -> bool:
     target, separator, pid = name[1:-len(".tmp")].rpartition(".")
     if not separator or not pid.isdigit():
         return False
-    return (path.parent / target).as_posix() in INTERRUPTED_WRITE_RECORDS
+    target_relative = (path.parent / target).as_posix()
+    return target_relative in INTERRUPTED_WRITE_RECORDS or artifact_record(target_relative, ARTIFACT_REWRITTEN_RECORDS)
 
 
 def allowed_workspace_file(relative: str) -> bool:
@@ -769,13 +780,12 @@ def allowed_workspace_file(relative: str) -> bool:
         return True
     if relative.startswith(".run/tmp/evaluation-") and relative.endswith(".json"):
         return True
+    if artifact_record(relative, ARTIFACT_RECORD_FILES):
+        return True
     parts = Path(relative).parts
-    if len(parts) == 3 and parts[0] == "artifacts":
-        artifact_name, filename = parts[1], parts[2]
-        proposal_hash = artifact_name.removeprefix("proposal-")
-        if artifact_name.startswith("proposal-") and len(proposal_hash) == 64 and all(c in "0123456789abcdef" for c in proposal_hash) and filename == "proposal.json":
-            return True
-        if len(artifact_name) == 64 and all(c in "0123456789abcdef" for c in artifact_name) and filename in {"candidate.py", "dev-predictions.json", "result.json"}:
+    if len(parts) == 3 and parts[0] == "artifacts" and parts[2] == "proposal.json":
+        proposal_hash = parts[1].removeprefix("proposal-")
+        if parts[1].startswith("proposal-") and len(proposal_hash) == 64 and all(c in "0123456789abcdef" for c in proposal_hash):
             return True
     return False
 

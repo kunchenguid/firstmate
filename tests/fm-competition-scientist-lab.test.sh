@@ -106,7 +106,7 @@ PY
 }
 
 test_frozen_hash_and_undeclared_edit_guards() {
-  local hash_ws engine_ws extra_ws proposal output status
+  local hash_ws engine_ws extra_ws proposal output status sha
   proposal="$TMP_ROOT/guard-proposal.json"
   write_proposal "$proposal" guard "change the grouped threshold" main '{"GROUPED_THRESHOLD":0.1}'
 
@@ -168,6 +168,16 @@ PY
   [ "$status" -ne 0 ] || fail "evaluator-owned residue is reclaimed by its evaluator, not tolerated forever"
   assert_contains "$output" "undeclared-file-edit:file:.run/tmp/.evaluation-7-9.json.4242.tmp" "an evaluator temporary is not a harness-record rewrite"
   rm "$extra_ws/.run/tmp/.evaluation-7-9.json.4242.tmp"
+  sha=$(python3 -c 'import json,pathlib,sys; print(json.loads((pathlib.Path(sys.argv[1]) / ".run/state.json").read_text())["global_best_sha256"])' "$extra_ws")
+  printf 'partial' > "$extra_ws/artifacts/$sha/.result.json.4242.tmp"
+  output=$($LAB attempt "$extra_ws" --proposal "$proposal" 2>&1); status=$?
+  expect_code 0 "$status" "an interrupted rewrite of an archived result record should not brick the evidence"
+  rm "$extra_ws/artifacts/$sha/.result.json.4242.tmp"
+  printf 'partial' > "$extra_ws/artifacts/$sha/.candidate.py.4242.tmp"
+  output=$($LAB replay "$extra_ws" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "an archived file the harness never rewrites in place has no interrupted-write tolerance"
+  assert_contains "$output" "undeclared-file-edit:file:artifacts/$sha/.candidate.py.4242.tmp" "artifact tolerance must cover only the result record"
+  rm "$extra_ws/artifacts/$sha/.candidate.py.4242.tmp"
   pass "competition scientist: frozen hashes and the single editable surface are enforced"
 }
 
