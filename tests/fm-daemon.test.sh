@@ -1469,16 +1469,28 @@ test_heartbeat_scan_dedup() {
 }
 
 test_handle_wake_routes_self_and_escalate() {
-  local dir state
+  local dir state out
   dir=$(make_supercase handle)
   state="$dir/state"
-  printf 'working\n' > "$state/h-routine.status"
+  printf 'working: ordinary progress\n' > "$state/h-routine.status"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/h-routine.status" "$state"
   [ -s "$state/.subsuper-escalations" ] && fail "routine signal was escalated by handle_wake"
+  printf 'working [at=1758528000]: implemented, ready for the pipeline\n' > "$state/h-pipeline.status"
+  FM_CAPTAIN_RE='custom-verb:' FM_STATE_OVERRIDE="$state" \
+    handle_wake "signal: $state/h-pipeline.status" "$state"
+  out=$(cat "$state/.subsuper-escalations" 2>/dev/null || true)
+  case "$out" in
+    *"working [at=1758528000]: implemented, ready for the pipeline"*) ;;
+    *) fail "FM_CAPTAIN_RE suppressed the no-mistakes implementation handoff: $out" ;;
+  esac
+  : > "$state/.subsuper-escalations"
+  printf 'working: implemented, ready for the pipeline review\n' > "$state/h-near-handoff.status"
+  FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/h-near-handoff.status" "$state"
+  [ -s "$state/.subsuper-escalations" ] && fail "a non-exact working handoff was escalated by handle_wake"
   printf 'done: PR 1\n' > "$state/h-done.status"
   FM_STATE_OVERRIDE="$state" handle_wake "signal: $state/h-done.status" "$state"
   [ -s "$state/.subsuper-escalations" ] || fail "captain signal was not buffered by handle_wake"
-  pass "handle_wake routes routine->self and captain->escalate"
+  pass "handle_wake routes routine progress, the pipeline handoff, and terminal events"
 }
 
 # Decision-owned queued rows are marked needs-decision:<files> by the watcher.
