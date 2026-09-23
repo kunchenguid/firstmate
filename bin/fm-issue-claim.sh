@@ -12,7 +12,6 @@
 # Usage:
 #   fm-issue-claim.sh --repo <owner/name> [options] <issue>...
 #   fm-issue-claim.sh --repo <owner/name> --sweep [options] [<issue>...]
-#   fm-issue-claim.sh --repo <owner/name> --save-corpus <file>
 #
 # Options:
 #   --git-dir <dir>      local clone searched by the history check (default: .)
@@ -20,8 +19,6 @@
 #                        <remote> is the clone's remote whose URL names the repo)
 #   --symbol <n>:<text>  also search history for commits adding or removing
 #                        <text> (git log -S) for issue <n>; repeatable
-#   --corpus <file>      reuse an open-PR corpus written by --save-corpus
-#   --save-corpus <file> write the fetched open-PR corpus for later reuse
 #   --sweep              opt-in, report-only: print one disposition line per
 #                        issue instead of the evidence block; with no issue
 #                        numbers it screens every open issue of the repo
@@ -63,24 +60,29 @@
 #   hint: / disclose: <context that never decides a verdict>
 # Verdicts:
 #   claimed            an open or draft PR, a fork branch, or a maintainer
-#                      existing-pr stamp claims the issue; nothing merged.
-#   partially-covered  merged evidence exists and an open claim remains.
-#   fixed-on-main      merged evidence (a merged PR, or a history commit
-#                      citing the issue or matching a --symbol) and no open
-#                      claim. It is evidence to inspect, not proof that every
+#                      existing-pr stamp claims the issue; no merged fix found.
+#   partially-covered  merged fixing evidence exists and an open claim remains.
+#   fixed-on-main      merged fixing evidence (a merged PR body or history
+#                      commit message with a closing keyword referencing this
+#                      issue) and no open claim. It is evidence to inspect,
+#                      not proof that every
 #                      part of the issue is resolved.
-#   open               every check looked and found nothing.
+#   open               every check looked and found no claim or fixing evidence.
 #   unknown            the issue could not be read, or nothing was found while
 #                      at least one check could not look. A failed or
 #                      rate-limited read never yields open.
 # A positive verdict reached with incomplete coverage keeps its verdict and
 # says so on its coverage line.
+# Closing keywords are close/closes/closed, fix/fixes/fixed, and
+# resolve/resolves/resolved, followed by #<n>, owner/name#<n>, or the issue URL
+# in this repository; case and an optional colon are ignored.
+# Merged PR references, commit citations, and symbol changes without such a
+# fixing reference are hints and never establish a fix.
 #
 # --sweep prints, per issue:
 #   sweep: #<n> <disposition> state=<s> verdict=<v> coverage=<complete|incomplete>
 #          link=<items|-> evidence=<items|->
-# Dispositions, judged only from durable evidence - a merged PR that
-# cross-references the issue, a history commit, or an open PR - and never from
+# Dispositions, judged only from fixing evidence and live claims, never from
 # PR checks, reviews, or mergeability, which stay forge-owned:
 #   close-candidate  fixed-on-main with complete coverage.
 #   leave-open       any open claim remains, including every issue with a live
@@ -88,16 +90,12 @@
 #   no-action        verdict open, or the issue is no longer open.
 #   undetermined     verdict unknown, or merged evidence with incomplete
 #                    coverage that could hide a live claim.
-# link= names durable evidence the issue page does not show: a PR whose body
-# cites the issue, or a commit whose message does, found by neither the
+# link= names fixing evidence the issue page does not show: a PR whose body
+# has a fixing reference, or a commit whose message does, found by neither the
 # timeline nor a stamp. A title, branch, fork-branch, or --symbol match is
 # never a link candidate. Screening every open issue costs about five API
 # reads per issue plus one shared corpus; the open-issue list is checked
 # against the search API total the same way the corpus is.
-#
-# The corpus file is JSON (schema fm-issue-claim-corpus.v1) carrying repo,
-# fetched_at, fetched, total_count, and slim prs[]; a reused corpus keeps its
-# own completeness verdict and discloses its age.
 #
 # Exit status: 0 when every issue got a verdict other than unknown, 1 when any
 # verdict is unknown, 2 on a usage or setup refusal.
@@ -115,8 +113,6 @@ die() {
 REPO=
 GIT_DIR_ARG=.
 REF=
-CORPUS_IN=
-CORPUS_OUT=
 SWEEP=0
 ISSUES=()
 SYMBOLS=()
@@ -128,8 +124,6 @@ while [ "$#" -gt 0 ]; do
     --git-dir) [ "$#" -ge 2 ] || die "--git-dir needs a directory"; GIT_DIR_ARG=$2; shift 2 ;;
     --ref) [ "$#" -ge 2 ] || die "--ref needs a ref"; REF=$2; shift 2 ;;
     --symbol) [ "$#" -ge 2 ] || die "--symbol needs <n>:<text>"; SYMBOLS+=("$2"); shift 2 ;;
-    --corpus) [ "$#" -ge 2 ] || die "--corpus needs a file"; CORPUS_IN=$2; shift 2 ;;
-    --save-corpus) [ "$#" -ge 2 ] || die "--save-corpus needs a file"; CORPUS_OUT=$2; shift 2 ;;
     --sweep) SWEEP=1; shift ;;
     --) shift; while [ "$#" -gt 0 ]; do ISSUES+=("$1"); shift; done ;;
     -*) die "unknown option: $1" ;;
@@ -142,9 +136,8 @@ case "$REPO" in
   */*) ;;
   *) die "--repo must be <owner/name>" ;;
 esac
-[ "${#ISSUES[@]}" -gt 0 ] || [ -n "$CORPUS_OUT" ] || [ "$SWEEP" = 1 ] \
-  || die "name at least one issue number, --sweep, or --save-corpus <file>"
-[ "$SWEEP" = 0 ] || [ -z "$CORPUS_OUT" ] || die "--sweep and --save-corpus are exclusive"
+[ "${#ISSUES[@]}" -gt 0 ] || [ "$SWEEP" = 1 ] \
+  || die "name at least one issue number or --sweep"
 SWEEP_ALL=0
 [ "$SWEEP" = 0 ] || [ "${#ISSUES[@]}" -gt 0 ] || SWEEP_ALL=1
 for n in ${ISSUES[@]+"${ISSUES[@]}"}; do
@@ -163,7 +156,6 @@ for s in ${SYMBOLS[@]+"${SYMBOLS[@]}"}; do
   [ "$found" = 1 ] || [ "$SWEEP_ALL" = 1 ] \
     || die "--symbol names issue $sn, which is not being screened"
 done
-[ -z "$CORPUS_IN" ] || [ -z "$CORPUS_OUT" ] || die "--corpus and --save-corpus are exclusive"
 command -v gh >/dev/null 2>&1 || die "gh is required"
 command -v jq >/dev/null 2>&1 || die "jq is required"
 command -v git >/dev/null 2>&1 || die "git is required"
@@ -210,21 +202,8 @@ CORPUS="$WORK/corpus.json"
 CORPUS_STATUS=
 CORPUS_NOTE=
 
-load_corpus_file() {
-  local file=$1
-  [ -r "$file" ] || die "cannot read corpus file: $file"
-  jq -e --arg repo "$REPO" '
-    .schema == "fm-issue-claim-corpus.v1"
-    and ((.repo | ascii_downcase) == ($repo | ascii_downcase))
-    and (.prs | type == "array")
-    and (.fetched | type == "number")
-  ' "$file" >/dev/null 2>&1 \
-    || die "corpus file is not an fm-issue-claim-corpus.v1 corpus for $REPO: $file"
-  cp "$file" "$CORPUS"
-}
-
 fetch_corpus() {
-  local total='' incomplete='' now
+  local total='' incomplete=''
   if gh_read "$WORK/search" api "search/issues?q=repo:$REPO+is:pr+is:open&per_page=1" \
     && total=$(jq -er '.total_count | numbers' "$WORK/search" 2>/dev/null); then
     incomplete=$(jq -r '.incomplete_results // false' "$WORK/search")
@@ -242,11 +221,7 @@ fetch_corpus() {
     CORPUS_NOTE="open-PR corpus pages were not JSON arrays"
     return 0
   fi
-  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  jq --arg repo "$REPO" --arg now "$now" --arg total "$total" --arg inc "$incomplete" '{
-      schema: "fm-issue-claim-corpus.v1",
-      repo: $repo,
-      fetched_at: $now,
+  jq --arg total "$total" --arg inc "$incomplete" '{
       fetched: length,
       total_count: (if $total == "" then null else ($total | tonumber) end),
       search_incomplete: ($inc == "true"),
@@ -257,7 +232,7 @@ fetch_corpus() {
     }' "$WORK/pulls.json" > "$CORPUS"
 }
 
-# Sets CORPUS_STATUS (ok|truncated|unverified|failed) from a loaded corpus.
+# Sets CORPUS_STATUS (ok|truncated|unverified|failed) from the fetched corpus.
 judge_corpus() {
   local fetched total inc
   fetched=$(jq -r .fetched "$CORPUS")
@@ -277,23 +252,8 @@ judge_corpus() {
   fi
 }
 
-if [ -n "$CORPUS_IN" ]; then
-  load_corpus_file "$CORPUS_IN"
-  judge_corpus
-  CORPUS_AGE_NOTE="open-PR corpus reused from $(jq -r .fetched_at "$CORPUS"); PRs opened since then are not in it"
-else
-  CORPUS_AGE_NOTE=
-  fetch_corpus
-  [ "$CORPUS_STATUS" = failed ] || judge_corpus
-fi
-
-if [ -n "$CORPUS_OUT" ]; then
-  [ -s "$CORPUS" ] || die "no corpus to save: $CORPUS_NOTE"
-  cp "$CORPUS" "$CORPUS_OUT" || die "could not write corpus file: $CORPUS_OUT"
-  printf 'corpus: %s %s -> %s\n' "$REPO" "$CORPUS_STATUS" "$CORPUS_OUT"
-  [ -z "$CORPUS_NOTE" ] || printf 'disclose: %s\n' "$CORPUS_NOTE"
-  [ "${#ISSUES[@]}" -gt 0 ] || exit 0
-fi
+fetch_corpus
+[ "$CORPUS_STATUS" = failed ] || judge_corpus
 
 # --- history ref ----------------------------------------------------------
 
@@ -351,12 +311,19 @@ cite_pattern() {
     "$n" "$REPO_RE" "$n" "$REPO_RE" "$n"
 }
 
+fix_pattern() {
+  local n=$1
+  printf '(^|[^A-Za-z0-9_])(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+(#%s|%s#%s|https?://github\\.com/%s/issues/%s)([^0-9]|$)' \
+    "$n" "$REPO_RE" "$n" "$REPO_RE" "$n"
+}
+
 ANY_UNKNOWN=0
 
 screen_issue() {
   local n=$1
   local d="$WORK/issue-$n" ev failed=() checks state author title labels created
-  local timeline_st stamps_st corpus_st fork_st history_st pat
+  local timeline_st stamps_st corpus_st fork_st history_st pat fixpat
+  fixpat=$(fix_pattern "$n")
   mkdir -p "$d"
   ev="$d/evidence.tsv"
   : > "$ev"
@@ -403,7 +370,7 @@ screen_issue() {
   if gh_read "$d/timeline" api "repos/$REPO/issues/$n/timeline?per_page=100" --paginate \
     && slurp_pages "$d/timeline" > "$d/timeline.json" 2>/dev/null; then
     timeline_st=ok
-    jq -r --arg repo "$REPO" '
+    jq -r --arg repo "$REPO" --arg fix "$fixpat" '
       .[] | select(.event == "cross-referenced") | .source.issue // empty
       | (.repository.full_name // "?") as $src
       | ((.title // "") | gsub("[\t\n\r]"; " ") | .[0:80]) as $t
@@ -412,7 +379,8 @@ screen_issue() {
            (if .pull_request.merged_at then "merged"
             elif .state == "open" then (if .draft then "open(draft)" else "open" end)
             else "closed" end),
-           "timeline", (.user.login // "?"), $t] | @tsv
+           "timeline", (.user.login // "?"), $t,
+           ((.body // "") | test($fix; "i"))] | @tsv
         elif .pull_request then
           ["hint", "", "", "", "", "PR \($src)#\(.number) (\(.state)) in another repository cross-references this issue"] | @tsv
         else
@@ -464,7 +432,7 @@ screen_issue() {
   else
     case "$CORPUS_STATUS" in ok*) ;; *) failed+=(corpus) ;; esac
     pat=$(cite_pattern "$n")
-    jq -r --arg n "$n" --arg cite "$pat" '
+    jq -r --arg n "$n" --arg cite "$pat" --arg fix "$fixpat" '
       ("(^|[^0-9])" + $n + "([^0-9]|$)") as $whole
       | .prs[]
       | [ (if (.body | test($cite; "i")) then "body" else empty end),
@@ -473,10 +441,10 @@ screen_issue() {
       | select(($m | length) > 0)
       | ["pr", (.number | tostring), (if .draft then "open(draft)" else "open" end),
          "corpus:" + ($m | join("+")), .author,
-         ((.title | gsub("[\t\n\r]"; " ")) | .[0:80])] | @tsv' "$CORPUS" >> "$ev"
+         ((.title | gsub("[\t\n\r]"; " ")) | .[0:80]),
+         (.body | test($fix; "i"))] | @tsv' "$CORPUS" >> "$ev"
   fi
   [ -z "$CORPUS_NOTE" ] || printf 'disclose: %s\n' "$CORPUS_NOTE" >> "$d/notes"
-  [ -z "$CORPUS_AGE_NOTE" ] || printf 'disclose: %s\n' "$CORPUS_AGE_NOTE" >> "$d/notes"
 
   # 4. the issue author's fork branches.
   if [ -z "$author" ]; then
@@ -505,16 +473,18 @@ screen_issue() {
     while IFS= read -r br; do
       [ -n "$br" ] || continue
       # A branch that heads a known PR is that PR's evidence, not a new claim.
-      pulls_of=$(jq -r --arg b "$br" --arg who "$author" '
+      pulls_of=$(jq -r --arg b "$br" --arg who "$author" --arg fix "$fixpat" '
         .prs[]? | select(.head == $b and (((.head_owner // .author) | ascii_downcase) == ($who | ascii_downcase)))
         | ["pr", (.number | tostring), (if .draft then "open(draft)" else "open" end), "fork", .author,
-           ((.title | gsub("[\t\n\r]"; " ")) | .[0:80])] | @tsv' "$CORPUS" 2>/dev/null || true)
+           ((.title | gsub("[\t\n\r]"; " ")) | .[0:80]),
+           (.body | test($fix; "i"))] | @tsv' "$CORPUS" 2>/dev/null || true)
       if [ -z "$pulls_of" ]; then
         if gh_read "$d/headpr" api -X GET "repos/$REPO/pulls" -f head="$author:$br" -f state=all -F per_page=10 \
           && slurp_pages "$d/headpr" > "$d/headpr.json" 2>/dev/null; then
-          pulls_of=$(jq -r '.[] | ["pr", (.number | tostring),
+          pulls_of=$(jq -r --arg fix "$fixpat" '.[] | ["pr", (.number | tostring),
             (if .merged_at then "merged" elif .state == "open" then (if .draft then "open(draft)" else "open" end) else "closed" end),
-            "fork", (.user.login // "?"), ((.title // "") | gsub("[\t\n\r]"; " ") | .[0:80])] | @tsv' "$d/headpr.json")
+            "fork", (.user.login // "?"), ((.title // "") | gsub("[\t\n\r]"; " ") | .[0:80]),
+            ((.body // "") | test($fix; "i"))] | @tsv' "$d/headpr.json")
         else
           fork_st=partial
           failed+=(fork)
@@ -541,17 +511,19 @@ EOF
     failed+=(history)
     printf 'disclose: %s\n' "$HISTORY_NOTE" >> "$d/notes"
   else
-    local since=() s sym
+    local since=() s sym match_kind
     [ -z "$created" ] || since=(--since="$created")
-    pat=$(cite_pattern "$n")
-    if git -C "$GIT_DIR_ARG" log -E --regexp-ignore-case --grep="$pat" ${since[@]+"${since[@]}"} \
-        --format='%h%x09%cs %s' "$REF" > "$d/history" 2>"$d/history.err"; then
-      awk -F '\t' '{ printf "commit\t%s\tmerged\thistory:cites\t\t%s\n", $1, substr($2, 1, 90) }' "$d/history" >> "$ev"
-    else
-      history_st=failed
-      failed+=(history)
-      printf 'disclose: history search failed: %s\n' "$(head -n 1 "$d/history.err" | one_line 160)" >> "$d/notes"
-    fi
+    for match_kind in cites fixes; do
+      if [ "$match_kind" = fixes ]; then pat=$fixpat; else pat=$(cite_pattern "$n"); fi
+      if git -C "$GIT_DIR_ARG" log -E --regexp-ignore-case --grep="$pat" ${since[@]+"${since[@]}"} \
+          --format='%h%x09%cs %s' "$REF" > "$d/history" 2>"$d/history.err"; then
+        awk -F '\t' -v kind="$match_kind" '{ printf "commit\t%s\tmerged\thistory:%s\t\t%s\t%s\n", $1, kind, substr($2, 1, 90), (kind == "fixes" ? "true" : "false") }' "$d/history" >> "$ev"
+      else
+        history_st=failed
+        failed+=(history)
+        printf 'disclose: history search failed: %s\n' "$(head -n 1 "$d/history.err" | one_line 160)" >> "$d/notes"
+      fi
+    done
     for s in ${SYMBOLS[@]+"${SYMBOLS[@]}"}; do
       [ "${s%%:*}" = "$n" ] || continue
       sym=${s#*:}
@@ -575,9 +547,10 @@ EOF
       printf 'pr\t%s\t%s\tstamp\t\t\n' "$x" "$known" >> "$ev"
     elif gh_read "$d/pr-$x" api "repos/$REPO/pulls/$x" \
       && jq -e '.number | numbers' "$d/pr-$x" >/dev/null 2>&1; then
-      jq -r '["pr", (.number | tostring),
+      jq -r --arg fix "$fixpat" '["pr", (.number | tostring),
         (if .merged_at then "merged" elif .state == "open" then (if .draft then "open(draft)" else "open" end) else "closed" end),
-        "stamp", (.user.login // "?"), ((.title // "") | gsub("[\t\n\r]"; " ") | .[0:80])] | @tsv' "$d/pr-$x" >> "$ev"
+        "stamp", (.user.login // "?"), ((.title // "") | gsub("[\t\n\r]"; " ") | .[0:80]),
+        ((.body // "") | test($fix; "i"))] | @tsv' "$d/pr-$x" >> "$ev"
     else
       printf 'pr\t%s\tunknown\tstamp\t\t\n' "$x" >> "$ev"
       stamps_st=partial
@@ -597,40 +570,27 @@ EOF
       if (index("," src[k] ",", "," $4 ",") == 0) src[k] = (src[k] == "" ? $4 : src[k] "," $4)
       if (who[k] == "" && $5 != "") who[k] = $5
       if (what[k] == "" && $6 != "") what[k] = $6
+      if ($7 == "true") fixing[k] = 1
     }
     $1 == "stamp-claim" { claims[++nclaims] = $6 }
     $1 == "hint" { hints[++nhints] = $6 }
     END {
-      # A squash commit whose subject ends in (#X) for a PR already in evidence
-      # is that PR landing; fold it in rather than listing it twice.
       for (i = 1; i <= count; i++) {
         k = order[i]
-        if (kind[k] != "commit" || match(what[k], /\(#[0-9]+\)$/) == 0) continue
-        pk = "pr" SUBSEP substr(what[k], RSTART + 2, RLENGTH - 3)
-        if (!(pk in seen)) continue
-        folded[k] = 1
-        split(src[k], parts, ",")
-        for (j in parts) if (index("," src[pk] ",", "," parts[j] ",") == 0) src[pk] = src[pk] "," parts[j]
-        landed[pk] = (landed[pk] == "" ? "" : landed[pk] ",") id[k]
-      }
-      for (i = 1; i <= count; i++) {
-        k = order[i]
-        if (k in folded) continue
         if (kind[k] == "pr") {
           s = st[k]
-          label = (s ~ /^open/ || s == "unknown") ? "claim" : (s == "merged" ? "merged" : "closed")
+          label = (s ~ /^open/ || s == "unknown") ? "claim" : (s == "merged" ? (fixing[k] ? "merged" : "hint") : "closed")
           line = "PR #" id[k] " " s
           if (who[k] != "") line = line " by " who[k]
-          if (landed[k] != "") line = line " landed as " landed[k]
           if (what[k] != "") line = line " :: " what[k]
         } else if (kind[k] == "commit") {
-          label = "merged"
+          label = fixing[k] ? "merged" : "hint"
           line = "commit " id[k] " " what[k]
         } else {
           label = "claim"
           line = "fork branch " id[k] " (no PR found for it)"
         }
-        printf "%s: %s [%s]\n", label, line, src[k]
+        printf "%s: %s [%s%s]\n", label, line, src[k], (fixing[k] ? ",fixes" : "")
       }
       for (i = 1; i <= nclaims; i++) printf "claim: %s [stamp]\n", claims[i]
       for (i = 1; i <= nhints; i++) printf "hint: %s\n", hints[i]
@@ -728,7 +688,7 @@ sweep_line() {
     /^(claim|merged): / {
       src = $0; sub(/.*\[/, "", src); sub(/\]$/, "", src)
       if (src ~ /(^|,)(timeline|stamp)(,|$)/) next
-      if (src !~ /corpus:[^,]*body|history:cites/) next
+      if (src !~ /(^|,)fixes(,|$)/) next
       item = $0; sub(/^[a-z]+: /, "", item); split(item, w, " ")
       out = out (out == "" ? "" : ",") w[2]
     }
@@ -758,7 +718,6 @@ done
 if [ "$SWEEP" = 1 ]; then
   [ -z "$SWEEP_NOTE" ] || printf 'disclose: %s\n' "$SWEEP_NOTE"
   [ -z "$CORPUS_NOTE" ] || printf 'disclose: %s\n' "$CORPUS_NOTE"
-  [ -z "$CORPUS_AGE_NOTE" ] || printf 'disclose: %s\n' "$CORPUS_AGE_NOTE"
   [ "$HISTORY_STATUS" != failed ] || printf 'disclose: %s\n' "$HISTORY_NOTE"
   printf 'sweep: %s issue(s) screened; nothing was written to the forge - no issue closed, labelled, or commented on\n' \
     "${#ISSUES[@]}"
