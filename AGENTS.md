@@ -409,7 +409,7 @@ Retire a custom check only through `bin/fm-check-unregister.sh <id>` (or `bin/fm
 Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
-After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
+After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work through section 8's admission step.
 
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.
@@ -439,6 +439,16 @@ Treat any `OPEN DECISIONS` section from the drain as actionable reconciliation i
 Treat any `UNREAD STATUS` section as newly surfaced status that must be read this turn; those lines are not re-printed after this presentation.
 Treat any `RECORD DIVERGENCE` section as a contradiction between two records of one captain call, never as proof the captain ruled; load `captain-hold-lifecycle` and reconcile it in whichever direction the evidence supports.
 After handling all emitted wakes and reconciling the OPEN DECISIONS and UNREAD STATUS sections, run the exact generation-bound `--ack-through` command printed as `WAKE_ACK_REQUIRED`; interruption before that acknowledgement deliberately leaves the work durable for idempotent re-handling.
+
+When this session holds the fleet lock and owns supervision, then in that same turn run the admission step on every wake, including one whose own record changed nothing; a lock-refused read-only session never admits.
+Count this home's dispatchable rows (queued, not held for the captain, not blocked, and past any time gate), measure headroom against the resource floor, provider quota, and counted slots (an unmeasurable term is disclosed and counts as headroom, never as zero), and admit rows in backlog priority order up to that headroom through the ordinary section 7 intake and `bin/fm-spawn.sh`.
+Run section 4 intake per row in that order and keep each row's required reasoning class; when that class cannot proceed, stop and report for that row rather than downgrade, then continue over the remaining eligible rows in priority order.
+A row-specific hold or escalation likewise never ends admission; only an actual resource-floor, quota, or serial-slot capacity constraint on remaining eligible work ends admission before the walk is exhausted.
+Emit exactly one line per wake: `dispatchable=N admitted=M bound=<headroom|quota|slots|none>`, naming the capacity limit that stopped admission, or `none` when the walk was exhausted without a capacity limit.
+A wake with dispatchable rows and remaining headroom that admits nothing is a failure.
+With dispatchable rows, a zero-admission turn is acceptable only when it names an actual binding capacity constraint; a row-specific hold, escalation, or reasoning-class stop-and-report is not an exception.
+Load `wake-admission` for the actor in away posture and secondmate homes, the headroom owners and unknown-headroom rule, and the summary's vocabulary and channel.
+
 A status line is a wake event, not current state; use `bin/fm-crew-state.sh` when current state matters, especially before re-escalating an old decision, blocker, or pause.
 A declared `paused:` event means a bounded external wait expected to clear on its own, while `blocked:` means firstmate action is needed.
 
@@ -513,6 +523,7 @@ When evidence uses an internal label, rewrite it before sending:
 Never relay worker reports, status lines, tool output, validation-state labels, or decision records verbatim into captain chat.
 Read them as evidence, then send the plain-English outcome and consequence.
 Private evidence reports may retain exact identifiers, paths, status lines, validation labels, and internal terms when they are useful, but the captain-facing chat summary that points to the report still follows this translation rule.
+Section 8's required admission summary is exempt from the translation and no-op reply rules; it does not replace a captain-facing outcome when one is due.
 
 Every escalation must stand alone and remain concise.
 Lead directly with concrete evidence, then the consequence, options when applicable, and a recommendation.
@@ -546,7 +557,7 @@ A decision is simply a task held for the captain: create the task with `bin/fm-t
 When a main-side thread such as a pending captain decision or relay reminder is worth durable tracking, file it as its own work item and hold it through that wrapper.
 Captain calls discovered by investigations or visual reviews follow `captain-hold-lifecycle`, which owns their completion gate and recorded-answer rules.
 When the automatic transition gate applies, dispatch and completion move the item themselves - `bin/fm-spawn.sh` and `bin/fm-teardown.sh` own those transitions and refuse rather than report success without them - so what remains yours is filing the item before dispatch, recording decisions, and keeping notes current; `docs/configuration.md` owns gate applicability and the manual-backend exception.
-Re-evaluate queued work after every teardown and heartbeat, dispatching items only when dependencies and time gates have cleared.
+Re-evaluate queued work on every wake through section 8's admission step, dispatching items only when dependencies and time gates have cleared.
 
 `.tasks.toml`, `docs/configuration.md`, and current `tasks-axi --help` own the backlog schema, compatibility, retention, and routine command syntax.
 Use compatible `tasks-axi` when the configured backend selects it, always through `bin/fm-tasks-axi.sh` so the call reaches this home's backlog from any directory, and the documented manual path otherwise; keep only the configured recent Done entries.
@@ -589,6 +600,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `diagnostic-reasoning` - load before scoping a reported bug and before acting on a diagnostic report.
 - `ask-user-authority` - load before deciding any ask-user finding.
 - `quota-array-dispatch` - load before choosing among a matched crew-dispatch profile array from current quota-axi default TOON.
+- `wake-admission` - load before the first section 8 admission step of a session and whenever a headroom term, its measurement, or the bound to report is unclear.
 - `harness-adapters` - load before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
 - `firstmate-orca` - load before switching to Orca, spawning or supervising Orca-backed work, smoke-testing Orca backend behavior, debugging Orca task state, or reconciling Orca-backed task metadata.
 - `project-management` - load before adding, creating, removing, or initializing a project.
