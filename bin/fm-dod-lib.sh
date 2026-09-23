@@ -601,8 +601,9 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
 # PR whose head the forge holds, when it names a Gerrit change whose current
 # patch set carries the worker copy's HEAD tree, or otherwise when its named
-# head - the worker copy's HEAD - is reachable outside that disposable copy. There is no free-text SHA
-# scan: a SHA that happens to appear in the note is not the named head. 1 when
+# head - the worker copy's HEAD - is reachable outside that disposable copy.
+# There is no free-text SHA scan: a SHA that happens to appear in the note is
+# not the named head. 1 when
 # the claim is refused; stdout then holds a one-line reason and no other
 # output. <state> <id> <meta> supply pr=,
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
