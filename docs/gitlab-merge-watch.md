@@ -268,7 +268,7 @@ It skips only that prompt; the conditions above are what authorize the merge.
 ## Why a recorded head is not the authority
 
 `bin/fm-pr-check.sh` does not record `pr_head=` for GitLab; its header owns provider-specific recording, including the [Azure DevOps path](azure-devops.md).
-It is optional by design, and the other consumers already treat it that way: `bin/fm-teardown.sh` reads the head from the forge at teardown and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` resolves the head from the remote when none is recorded.
+It is optional by design, and the other consumers already treat it that way: `bin/fm-teardown.sh` reads the head from the forge at teardown and falls back to its provider-agnostic content check, and `bin/fm-review-diff.sh` owns the local-branch fallback warning for GitLab and Gerrit.
 
 The merge path does not record one either, and deliberately does not depend on one.
 A rebase moves the head and leaves any recorded value stale, so a merge decided from metadata can verify a commit that no longer exists.
