@@ -461,10 +461,12 @@ FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:
 # `context: <pct>% (<used>/<total>)` usage cell (counts may be decimal or
 # lowercase-suffixed once usage is nonzero, e.g. `(81.9K/1M)`, which the
 # post-submit delivery gate must still read) - the same `context: N%`
-# vocabulary fm-spawn.sh's kimi delivery confirmation already greps. Effort
-# words beyond the observed `high` are admitted only from kimi's own
-# low|medium|high set; anything else below the box still defeats it.
-FM_COMPOSER_KIMI_FOOTER_MODE_RE_DEFAULT='^[A-Za-z][A-Za-z ]*  [A-Za-z0-9._/-]+ thinking: (low|medium|high)(  |$)'
+# vocabulary fm-spawn.sh's kimi delivery confirmation already greps. The
+# model cell may hold a spaced display name (a plain `kimi --auto` shows the
+# configured default, e.g. `K2.8 Preview thinking: max`, observed live), and
+# effort words are admitted only from kimi's own low|medium|high|max set;
+# anything else below the box still defeats it.
+FM_COMPOSER_KIMI_FOOTER_MODE_RE_DEFAULT='^[A-Za-z][A-Za-z ]*  [A-Za-z0-9._/-]+( [A-Za-z0-9._/-]+)* thinking: (low|medium|high|max)(  |$)'
 FM_COMPOSER_KIMI_FOOTER_CONTEXT_RE_DEFAULT='^context:[[:space:]]*[0-9]+(\.[0-9]+)?%[[:space:]]*\([0-9]+(\.[0-9]+)?[KkMm]?/[0-9]+(\.[0-9]+)?[KkMm]?\)$'
 # Braille-pattern cells (U+2800..U+28FF) are animation furniture: codex-cli
 # 0.154.0 draws an idle "starfield" of them on the row above its `›` prompt

@@ -625,6 +625,19 @@ test_matrix_kimi_202_footer_furniture() {
   done
   assert_screen "kimi 2.0.2 narrow mode row on herdr" empty "$CAPS_STYLED" \
     $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"Never Ask  K3 thinking: high"$'\n'"$ctx_row"
+  # A plain `kimi --auto` shows the configured default model, whose display
+  # name carries a space and whose default effort is `max` (captured live on
+  # herdr: `Never Ask  K2.8 Preview thinking: max  ~`, both idle and after
+  # submit at `context: 2% (19.8k/1M)`).
+  local default_mode="Never Ask  ${ESC}[38;2;224;224;224mK2.8 Preview thinking: max${ESC}[39m  ${ESC}[38;2;136;136;136m~${ESC}[39m"
+  assert_screen "kimi default-model footer idle on herdr" empty "$CAPS_STYLED" \
+    $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"$default_mode"$'\n'"$ctx_row"
+  assert_screen "kimi default-model footer post-submit on herdr" empty "$CAPS_STYLED" \
+    $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"$default_mode"$'\n'"                    context: 2% (19.8k/1M)"
+  assert_screen "kimi default-model footer pending on herdr" pending "$CAPS_STYLED" \
+    $'transcript\n'"$top"$'\n'"$typed_row"$'\n'"$bottom"$'\n'"$default_mode"$'\n'"$ctx_row"
+  assert_screen "kimi K3 at effort max on herdr" empty "$CAPS_STYLED" \
+    $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"${mode_row/thinking: high/thinking: max}"$'\n'"$ctx_row"
   assert_screen "kimi context row with a malformed count still refuses" unknown "$CAPS_STYLED" \
     $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"context: 8% (81.9K/1M) extra"
   # Narrowness pin: an effort word outside kimi's own set is not furniture.
