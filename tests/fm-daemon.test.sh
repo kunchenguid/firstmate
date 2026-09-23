@@ -618,6 +618,41 @@ test_stale_transient_self_records_marker() {
   pass "transient stale self-handles and records a persistence marker"
 }
 
+test_looping_wake_survives_busy_housekeeping() {
+  local case_name dir state key task win reason status_line gen
+  for case_name in working prior-terminal paused; do
+    dir=$(make_supercase "looping-$case_name"); state="$dir/state"
+    task="loop-$case_name"; win="sess:fm-$task"
+    reason="stale: $win (looping 900s, escalation 1: structural proxy - inspect the pane)"
+    fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=pi"
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")
+    "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" busy --gen "$gen" --source pi-ext --event agent-start
+    case "$case_name" in
+      working) status_line='working: preparing gate response' ;;
+      prior-terminal) status_line='done: already surfaced' ;;
+      paused) status_line='paused: awaiting gate decision' ;;
+    esac
+    printf '%s\n' "$status_line" > "$state/$task.status"
+    [ "$case_name" != prior-terminal ] || seen_through "$state" "$task"
+    key=$(printf '%s' "$task" | tr ':/.' '___')
+    echo $(( $(date +%s) - 1000 )) > "$state/.subsuper-stale-$key"
+    (
+      kill() { fail "looping dispatch must not signal the worker"; }
+      fm_backend_send_text_submit() { fail "looping dispatch must not steer the worker"; }
+      LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+        handle_wake "$reason" "$state"
+      PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" \
+        LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+    ) || fail "$case_name looping dispatch failed"
+    [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+      || fail "$case_name looping did not preserve exactly one escalation"
+    grep -Fx "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+      || fail "$case_name looping lost its original reason"
+    [ ! -e "$state/.subsuper-stale-$key" ] || fail "$case_name looping retained a stale recheck"
+  done
+  pass "looping wakes survive routine, terminal, and paused daemon absorption without worker interruption"
+}
+
 test_stale_diagnostic_wedge_survives_busy_housekeeping() {
   local case_name dir state fakebin key task win pane reason status_line action_log
   for case_name in working prior-terminal paused; do
@@ -2781,6 +2816,11 @@ test_inject_msg_defers_on_unrecognized_composer_state() {
   pass "inject_msg: unrecognized composer states defer by default"
 }
 
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_afk_start_refuses_when_flag_cannot_be_written
 test_afk_start_ignores_stale_pidfile_without_lock
 test_afk_start_reclaims_stale_daemon_lock_reused_pid
@@ -2790,6 +2830,7 @@ test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
+test_looping_wake_survives_busy_housekeeping
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_stale_terminal_escalates
 test_stale_actionable_wait_escalates_and_keeps_pause_cadence

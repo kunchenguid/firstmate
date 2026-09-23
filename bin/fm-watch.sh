@@ -80,8 +80,7 @@
 #                          one busy turn of an ordinary no-mistakes crew kept
 #                          seeing the same parked gate for FM_LOOP_PARKED_SECS
 #                          with no completed turn, run-step change, or task
-#                          worktree write (busy_loop_check owns the rule),
-#                          unless afk is active
+#                          worktree write (busy_loop_check owns the proxy)
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -292,16 +291,9 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
-# A busy turn is also no proof of progress while the crew's no-mistakes run sits
-# parked at a gate: nothing moves until someone answers it, so a turn that stays
-# open seeing the same parked gate is spending itself re-reading state (issue
-# #4795: ~900 read-only commands and most of a context window). LOOP_PARKED_SECS
-# is how long one busy turn may see an unchanged parked gate, with no completed
-# turn and no write to its task worktree, before busy_loop_check wakes the
-# supervisor as looping; 0 turns the check off. LOOP_PROBE_SECS throttles its
-# current-state read per window, and only turns open at least that long are read.
-LOOP_PARKED_SECS=${FM_LOOP_PARKED_SECS:-600}
-case "$LOOP_PARKED_SECS" in ''|*[!0-9]*) LOOP_PARKED_SECS=600 ;; esac
+# docs/architecture.md owns the parked-gate looping proxy and its limits.
+LOOP_PARKED_SECS=${FM_LOOP_PARKED_SECS:-900}
+case "$LOOP_PARKED_SECS" in ''|*[!0-9]*|0*) LOOP_PARKED_SECS=900 ;; esac
 LOOP_PROBE_SECS=${FM_LOOP_PROBE_SECS:-60}
 case "$LOOP_PROBE_SECS" in ''|*[!0-9]*) LOOP_PROBE_SECS=60 ;; esac
 # A local secondmate's foreign queue is checked on every poll, but only after this
@@ -1407,44 +1399,37 @@ clear_loop_tracking() {  # <window-key>
 # verdict is busy; a pane that is not busy clears the tracking instead, so an
 # idle parked worker keeps its ordinary parked and stale handling.
 #
-# The episode is .loop-since-<key>: its content is the gate's whole current-state
-# line (crew_parked_gate_line) and its mtime is when this turn was first seen at
-# that gate. The episode ends, and the pane reads as working again, on any of the
-# structural facts that mean the turn is not just re-reading state: the run-step
-# line changes or stops reading parked (the gate was answered or the run moved),
-# a completed turn lands (the worker yielded), or a file in the task worktree is
-# written (crew_worktree_written_since, the wedge detector's write probe). The
-# native progress marker deliberately does not end it, because a looping turn is
-# exactly a stream of native activity.
-#
-# Deliberately independent of the declared-wait and supervisor-owed-gate deferrals
-# the wedge timer applies to a QUIET pane: they explain why a pane is idle, while
-# this pane is spending its context. It is inspection-only like every other wake
-# here - it never interrupts or signals the worker and never touches its steering
-# inbox, so an ordinary fm-send steer still reaches and resumes it - and a firing
-# restarts the episode, so a persisting loop re-surfaces once per LOOP_PARKED_SECS
-# with a rising escalation count. Only ordinary no-mistakes crews are read, the
-# away-mode daemon owns triage while state/.afk exists, and the current-state read
-# runs at most once per LOOP_PROBE_SECS per window.
+# The episode is .loop-since-<key>: its first line is the busy record's gen:seq,
+# its second is the gate's whole current-state line (crew_parked_gate_line),
+# and its mtime is when this turn was first seen at that gate.
 busy_loop_check() {  # <window> <task> <window-key>
-  local win=$1 task=$2 key=$3 meta since probe esc line prev age n reason turn_marker
+  local win=$1 task=$2 key=$3 meta since probe esc line prev age n reason
+  local record source seq gen ts turn episode
   since="$STATE/.loop-since-$key"
   probe="$STATE/.loop-probe-$key"
   esc="$STATE/.loop-escalations-$key"
   meta="$STATE/$task.meta"
-  if [ "$LOOP_PARKED_SECS" -eq 0 ] || [ -z "$task" ] || [ ! -f "$meta" ] || afk_present \
+  if [ -z "$task" ] || [ ! -f "$meta" ] \
     || [ "$(grep '^kind=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)" = secondmate ] \
     || [ "$(grep '^mode=' "$meta" 2>/dev/null | tail -1 | cut -d= -f2-)" != no-mistakes ]; then
     clear_loop_tracking "$key"
     return 0
   fi
-  turn_marker="$STATE/$task.turn-ended"
-  if [ -e "$since" ] && [ "$turn_marker" -nt "$since" ]; then
+  if ! record=$(fm_busy_record_read "$STATE" "$task"); then
     clear_loop_tracking "$key"
-    triage_log "looping episode ended (completed turn): $win"
+    return 0
   fi
-  [ -e "$turn_marker" ] || turn_marker=$meta
-  [ "$(age_of "$turn_marker")" -ge "$LOOP_PROBE_SECS" ] || return 0
+  read -r _ source _ seq gen ts <<< "$record"
+  if [ "${record%% *}" != busy ] || ! fm_busy_source_trusted "$(fm_meta_get "$meta" harness)" "$source"; then
+    clear_loop_tracking "$key"
+    return 0
+  fi
+  turn="$gen:$seq"
+  if [ -e "$since" ] && [ "$(head -n 1 "$since")" != "$turn" ]; then
+    clear_loop_tracking "$key"
+    triage_log "looping episode ended (semantic busy lifecycle changed): $win"
+  fi
+  [ "$(( $(date +%s) - ts ))" -ge "$LOOP_PROBE_SECS" ] || return 0
   [ "$(age_of "$probe")" -ge "$LOOP_PROBE_SECS" ] || return 0
   touch "$probe"
   if ! line=$(crew_parked_gate_line "$task"); then
@@ -1452,9 +1437,10 @@ busy_loop_check() {  # <window> <task> <window-key>
     rm -f "$since" "$esc"
     return 0
   fi
+  episode="$turn"$'\n'"$line"
   prev=$(cat "$since" 2>/dev/null || true)
-  if [ "$prev" != "$line" ]; then
-    printf '%s\n' "$line" > "$since"
+  if [ "$prev" != "$episode" ]; then
+    printf '%s\n' "$episode" > "$since"
     rm -f "$esc"
     triage_log "looping episode opened (busy turn at a parked gate): $win"
     return 0
@@ -1462,16 +1448,16 @@ busy_loop_check() {  # <window> <task> <window-key>
   age=$(age_of "$since")
   [ "$age" -ge "$LOOP_PARKED_SECS" ] || return 0
   if crew_worktree_written_since "$task" "$STATE" "$since"; then
-    printf '%s\n' "$line" > "$since"
+    printf '%s\n' "$episode" > "$since"
     rm -f "$esc"
     triage_log "looping episode restarted (task worktree written): $win"
     return 0
   fi
   n=$(( $(cat "$esc" 2>/dev/null || echo 0) + 1 ))
   echo "$n" > "$esc"
-  reason="stale: $win (looping ${age}s, escalation $n: one busy turn has kept seeing the same parked gate - ${line#state: parked · source: run-step · } - with no completed turn, no run-step change, and no task worktree write, so this is spent context rather than healthy busy work, a quiet wedge, or an idle park; inspect the pane and steer the worker)"
+  reason="stale: $win (looping ${age}s, escalation $n: structural proxy - one semantic busy turn at the same parked gate - ${line#state: parked · source: run-step · } - with no run-step change or task worktree write; distinct read-only work can also match, so inspect the pane before steering the worker)"
   fm_wake_append stale "$win" "$reason" || exit 1
-  printf '%s\n' "$line" > "$since"
+  printf '%s\n' "$episode" > "$since"
   wake "$reason"
 }
 

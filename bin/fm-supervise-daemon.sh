@@ -1392,15 +1392,15 @@ handle_wake() {  # <reason> <state>
               # once per STALE_ESCALATE_SECS for as long as the wait lasted.
               # Housekeeping (2b) then owns the re-surface, so the wait is still
               # bounded - by one recheck per PAUSE_RESURFACE_SECS instead.
-              case "${decision%%|*}" in
-                pause) : ;;
-                *) case "$stale_detail" in
-                     idle\ *s,\ possible\ wedge,\ escalation\ *)
-                       last=$(last_status_line "$state/$task.status")
-                       status_is_paused_or_captain_held "$last" \
-                         || decision="escalate|${reason#stale: }"
-                       ;;
-                   esac ;;
+              case "$stale_detail" in
+                looping\ *s,\ escalation\ *) decision="escalate|${reason#stale: }" ;;
+                idle\ *s,\ possible\ wedge,\ escalation\ *)
+                  if [ "${decision%%|*}" != pause ]; then
+                    last=$(last_status_line "$state/$task.status")
+                    status_is_paused_or_captain_held "$last" \
+                      || decision="escalate|${reason#stale: }"
+                  fi
+                  ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;

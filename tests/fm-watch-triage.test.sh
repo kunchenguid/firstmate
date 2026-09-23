@@ -4891,7 +4891,7 @@ SH
 # A no-mistakes worker whose run parked at a gate kept its turn open re-reading
 # the same run state for ~900 commands. Its semantic busy verdict proved
 # liveness and every capture changed, so the watcher read a healthy busy pane
-# and never woke the supervisor. These cases pin the looping classification:
+# and never woke the supervisor. These cases pin the structural looping proxy:
 # a busy turn that sees the same parked gate for FM_LOOP_PARKED_SECS with no
 # completed turn and no worktree write wakes as looping, while a run-step
 # change, a worktree write, or a completed turn keeps it reading as working.
@@ -4901,19 +4901,21 @@ PARKED_LOOP_LINE='state: parked · source: run-step · parked at fix_review: 2 f
 # source, turn open for 15 minutes (below FM_BUSY_TURN_MAX_SECS, as in the
 # report), and a worktree whose only file predates everything.
 make_parked_loop_case() {  # <name> <window>
-  local name=$1 window=$2 dir state
+  local name=$1 window=$2 dir state record
   dir=$(make_case "$name"); state="$dir/state"
   mkdir -p "$dir/wt"
   printf 'source\n' > "$dir/wt/src.txt"
   touch -t 200001010000 "$dir/wt/src.txt"
   printf 'window=%s\nkind=ship\nmode=no-mistakes\nharness=pi\nworktree=%s\n' "$window" "$dir/wt" > "$state/loop.meta"
   record_pi_busy "$state" loop >/dev/null
+  record=$(cat "$state/loop.busy-state")
+  printf '%s ts=%s\n' "${record% ts=*}" "$(( $(date +%s) - 900 ))" > "$state/loop.busy-state"
   printf 'working: setup complete\n' > "$state/loop.status"
   printf '%s' "$(seen_sig "$state/loop.status")" > "$state/.seen-loop_status"
   touch "$state/loop.turn-ended"
   set_mtime $(( $(date +%s) - 900 )) "$state/loop.turn-ended"
   prime_turnend_seen "$state/loop.turn-ended"
-  printf 'Working... read-only command\n' > "$dir/pane.txt"
+  printf 'Working...\n' > "$dir/pane.txt"
   printf '%s\n' "$dir"
 }
 
@@ -4934,16 +4936,18 @@ test_busy_turn_at_unchanged_parked_gate_wakes_as_looping() {
   FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" FM_LOOP_PARKED_SECS=1
   pid=$!
   wait_for_exit "$pid" 100 \
-    || fail "a busy turn re-reading an unchanged parked gate never woke the supervisor (read as healthy busy)"
+    || fail "the structural parked-gate proxy never woke the supervisor"
   grep -F "stale: $window (looping " "$out" >/dev/null \
     || fail "the wake did not name the pane as looping: $(cat "$out")"
   grep -F "parked at fix_review: 2 finding(s)" "$out" >/dev/null \
     || fail "the looping wake did not name the unchanged gate: $(cat "$out")"
   grep -F "possible wedge" "$out" >/dev/null && fail "a looping pane was reported as a possible wedge: $(cat "$out")"
+  grep -F 'distinct read-only work can also match' "$out" >/dev/null \
+    || fail "the looping wake omitted its proxy limitation: $(cat "$out")"
   grep -F "(looping " "$state/.wake-queue" >/dev/null \
     || fail "the looping wake was not queued durably: $(cat "$state/.wake-queue" 2>/dev/null)"
   [ -s "$state/.loop-since-$key" ] || fail "the looping wake did not restart its episode window for the next escalation"
-  pass "a busy turn that keeps re-reading the same parked gate wakes the supervisor as looping"
+  pass "the structural parked-gate proxy wakes as looping and names its limitation"
 }
 
 test_parked_loop_run_step_change_keeps_working() {
@@ -5010,8 +5014,8 @@ test_parked_loop_completed_turn_ends_episode() {
   [ -s "$state/.loop-since-$key" ] || fail "a busy turn at a parked gate did not open a looping episode"
   set_mtime $(( $(date +%s) - 30 )) "$state/.loop-since-$key"
   # The worker ended its turn at the gate and a new turn began: it yielded.
-  touch "$state/loop.turn-ended"
-  prime_turnend_seen "$state/loop.turn-ended"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" loop idle --current-gen --source pi-ext --event agent-settled
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" loop busy --current-gen --source pi-ext --event agent-start
   : > "$out"
   FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" FM_LOOP_PARKED_SECS=20
   pid=$!
@@ -5072,8 +5076,8 @@ SH
   # pipeline moved on inside a new turn.
   mkdir -p "$state/loop.inbox/handled"
   mv "$state/loop.inbox/001.msg" "$state/loop.inbox/handled/"
-  touch "$state/loop.turn-ended"
-  prime_turnend_seen "$state/loop.turn-ended"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" loop idle --current-gen --source pi-ext --event agent-settled
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" loop busy --current-gen --source pi-ext --event agent-start
   : > "$out"
   FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · run: 01RUNLOOP' \
     loop_watch_bg "$dir" "$window" "$out" FM_LOOP_PARKED_SECS=1
@@ -5084,6 +5088,123 @@ SH
   [ ! -s "$out" ] || fail "a resumed worker printed a wake reason: $(cat "$out")"
   [ ! -e "$state/.loop-since-$key" ] || fail "resuming the worker did not clear its looping episode"
   pass "a steer still reaches and resumes a looping worker, and the classification clears"
+}
+
+test_parked_loop_inner_notifications_keep_episode() {
+  local harness source dir state out window key pid record
+  for harness in pi pi-signed omp; do
+    window="test:fm-loop-notifications-$harness"
+    dir=$(make_parked_loop_case "loop-notifications-$harness" "$window"); state="$dir/state"; out="$dir/watch.out"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    source=pi-ext; [ "$harness" != omp ] || source=omp-ext
+    printf 'harness=%s\n' "$harness" >> "$state/loop.meta"
+    "$ROOT/bin/fm-busy-event.sh" apply "$state" loop busy --current-gen --source "$source" --event agent-start
+    record=$(cat "$state/loop.busy-state")
+    record="${record% ts=*} ts=$(( $(date +%s) - 900 ))"
+    printf '%s\n' "$record" > "$state/loop.busy-state"
+    FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" FM_LOOP_PARKED_SECS=999
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$harness episode failed to open: $(cat "$out")"; }
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "could not acknowledge $harness episode opening"
+    [ -s "$state/.loop-since-$key" ] || fail "$harness never opened an episode"
+    set_mtime $(( $(date +%s) - 120 )) "$state/.loop-since-$key"
+    set_mtime $(( $(date +%s) - 120 )) "$state/.loop-probe-$key"
+    touch "$state/loop.turn-ended" "$state/loop.progress"
+    printf 'Working... inner iteration\n' > "$dir/pane.txt"
+    FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" \
+      FM_CONFIG_OVERRIDE="$(churn_config "$dir")" FM_LOOP_PROBE_SECS=60 FM_LOOP_PARKED_SECS=1
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "$harness inner notification hid an eligible loop"
+    grep -F "stale: $window (looping " "$out" >/dev/null || fail "$harness lost looping: $(cat "$out")"
+    [ -s "$state/.churn-since-$key" ] || fail "$harness never absorbed the notification through pane churn"
+    [ "$(cat "$state/loop.busy-state")" = "$record" ] || fail "$harness semantic lifecycle changed during the notification"
+  done
+  pass "Pi, pi-signed, and omp inner notifications do not reset or defer looping"
+}
+
+test_parked_loop_fresh_semantic_turn_waits() {
+  local dir state out window key pid
+  window="test:fm-loop-fresh-turn"
+  dir=$(make_parked_loop_case loop-fresh-turn "$window"); state="$dir/state"; out="$dir/watch.out"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" loop busy --current-gen --source pi-ext --event agent-start
+  FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" \
+    FM_LOOP_PROBE_SECS=60 FM_LOOP_PARKED_SECS=1
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a fresh semantic turn escalated: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a fresh semantic turn printed a wake: $(cat "$out")"
+  [ ! -e "$state/.loop-since-$key" ] || fail "an old notification aged a fresh semantic turn"
+  pass "loop eligibility uses the semantic timestamp, not the last notification"
+}
+
+test_parked_loop_rearm_ends_episode() {
+  local dir state out window key pid
+  window="test:fm-loop-rearm"
+  dir=$(make_parked_loop_case loop-rearm "$window"); state="$dir/state"; out="$dir/watch.out"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" FM_LOOP_PARKED_SECS=999
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "rearm episode failed to open: $(cat "$out")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge episode before rearm"
+  [ -s "$state/.loop-since-$key" ] || fail "no episode before rearm"
+  set_mtime $(( $(date +%s) - 120 )) "$state/.loop-since-$key"
+  record_pi_busy "$state" loop >/dev/null
+  FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" \
+    FM_LOOP_PROBE_SECS=60 FM_LOOP_PARKED_SECS=1
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a rearmed task inherited a loop: $(cat "$out")"; }
+  reap "$pid"
+  [ ! -s "$out" ] || fail "a rearmed task printed a wake: $(cat "$out")"
+  [ ! -e "$state/.loop-since-$key" ] || fail "a fresh generation did not clear the old episode"
+  pass "a new busy generation clears looping even when its sequence repeats"
+}
+
+test_parked_loop_default_and_zero_use_900_seconds() {
+  local setting dir state out window key pid
+  for setting in default 0 00 invalid; do
+    window="test:fm-loop-interval-$setting"
+    dir=$(make_parked_loop_case "loop-interval-$setting" "$window"); state="$dir/state"; out="$dir/watch.out"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    case "$setting" in
+      default) set -- -u FM_LOOP_PARKED_SECS ;;
+      *) set -- "FM_LOOP_PARKED_SECS=$setting" ;;
+    esac
+    FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" "$@"
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$setting episode failed to open: $(cat "$out")"; }
+    reap "$pid"
+    ack_stopped_cycle "$state" || fail "could not acknowledge $setting episode opening"
+    [ -s "$state/.loop-since-$key" ] || fail "$setting disabled looping"
+    set_mtime $(( $(date +%s) - 700 )) "$state/.loop-since-$key"
+    FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" "$@"
+    pid=$!
+    wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$setting escalated below 900s: $(cat "$out")"; }
+    reap "$pid"
+    [ ! -s "$out" ] || fail "$setting woke below 900s: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge $setting subthreshold check"
+    set_mtime $(( $(date +%s) - 950 )) "$state/.loop-since-$key"
+    FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" "$@"
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "$setting did not escalate past 900s"
+    grep -F "stale: $window (looping " "$out" >/dev/null || fail "$setting lost looping: $(cat "$out")"
+  done
+  pass "default, zero, and invalid loop intervals use the positive 900s window"
+}
+
+test_parked_loop_away_mode_wakes() {
+  local dir state out window pid
+  window="test:fm-loop-away"
+  dir=$(make_parked_loop_case loop-away "$window"); state="$dir/state"; out="$dir/watch.out"
+  touch "$state/.afk"
+  FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" FM_LOOP_PARKED_SECS=1
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "away mode suppressed looping"
+  grep -F "stale: $window (looping " "$out" >/dev/null || fail "away mode lost looping: $(cat "$out")"
+  grep -F "stale: $window (looping " "$state/.wake-queue" >/dev/null || fail "away looping wake was not durable"
+  pass "the daemon flag shared by away and quiet modes does not suppress looping"
 }
 
 # Behavioral proof that the production default (no FM_BUSY_TURN_MAX_SECS override
@@ -6411,6 +6532,11 @@ test_parked_loop_run_step_change_keeps_working
 test_parked_loop_worktree_write_keeps_working
 test_parked_loop_completed_turn_ends_episode
 test_parked_loop_steer_still_resumes_worker
+test_parked_loop_inner_notifications_keep_episode
+test_parked_loop_fresh_semantic_turn_waits
+test_parked_loop_rearm_ends_episode
+test_parked_loop_default_and_zero_use_900_seconds
+test_parked_loop_away_mode_wakes
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
