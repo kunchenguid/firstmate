@@ -114,7 +114,7 @@ The file is size-capped through `FM_WATCH_CYCLE_LOG_MAX_BYTES` and `FM_WATCH_CYC
 
 The default 300-second grace is unchanged.
 Only the watcher process touches `state/.last-watcher-beat`; no helper process can make a wedged watcher appear healthy.
-Every stopper waits for the watcher to exit after one HUP or TERM, so either signal ends it at any point of a poll and still runs its EXIT cleanup; `watcher_stop_signals` in `bin/fm-watch.sh` owns why they use bash's native handling instead of a trap body.
+The watcher uses bash's native fatal handling for HUP and TERM, including during a blocked poll, so both run its EXIT cleanup; `watcher_stop_signals` in `bin/fm-watch.sh` owns the signal-handling rationale.
 
 ## Regression coverage
 
