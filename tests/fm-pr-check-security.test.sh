@@ -240,8 +240,9 @@ printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"s
 SH
   # no-mistakes, answering only `axi status` the way the real CLI does from a
   # worker copy: a run object, then its branch_sync block. By default the run's
-  # result is the copy's own HEAD and custody is returned; a case overrides the
-  # pipeline head, the next action, or makes the read fail.
+  # result is the copy's own passed HEAD and custody is returned; a case
+  # overrides the outcome, the pipeline head, the next action, or makes the read
+  # fail.
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 [ -z "${FM_TEST_NM_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_TEST_NM_LOG"
@@ -249,7 +250,8 @@ SH
 [ "${FM_TEST_NM_FAIL:-0}" = 0 ] || exit 1
 head=$(git rev-parse HEAD 2>/dev/null) || exit 1
 pipeline=${FM_TEST_NM_PIPELINE_HEAD:-$head}
-printf 'run:\n  id: "RUNFIXTURE"\n  branch: fm/task\n  status: completed\n  head_sha: %s\noutcome: passed\n' "$pipeline"
+printf 'run:\n  id: "RUNFIXTURE"\n  branch: fm/task\n  status: completed\n  head_sha: %s\noutcome: %s\n' \
+  "$pipeline" "${FM_TEST_NM_OUTCOME-passed}"
 printf 'branch_sync:\n  state: %s\n  local:\n    head: %s\n  pipeline:\n    current_head: %s\n' \
   "${FM_TEST_NM_SYNC_STATE:-synchronized}" "$head" "$pipeline"
 if [ -n "${FM_TEST_NM_NEXT_ACTION:-}" ]; then
@@ -1847,6 +1849,42 @@ test_gerrit_nm_ready_gate_requires_recovered_custody() {
     *"could not be read"*) ;;
     *) fail "the refusal did not say the run could not be read: $out" ;;
   esac
+
+  # A failed run whose own head was published has nothing to recover, so the
+  # trees agree; its outcome alone refuses it, as does a missing outcome.
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_OUTCOME=failed run_check_entry "$dir" task-unrecovered "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a publish of a failed no-mistakes run"
+  case "$out" in
+    *"has outcome failed, not a pass"*) ;;
+    *) fail "the refusal did not name the run's failed outcome: $out" ;;
+  esac
+  grep -q '^pr=' "$state/task-unrecovered.meta" && fail "a refused failed-run publish recorded pr="
+  set +e
+  FM_TEST_GERRIT_REVISION=$unfixed FM_TEST_NM_OUTCOME='' run_check_entry "$dir" task-unrecovered "$url" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a publish of a run with no outcome"
+
+  # A published-for-review done whose URL is not a canonical Gerrit change is
+  # refused, even though a gate push left HEAD on a remote-tracking ref.
+  git -C "$dir/wt" update-ref refs/remotes/no-mistakes/fm/task "$unfixed"
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$unfixed PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" \
+    "done: PR https://gerrit.example/r/c/group/apps/console/+/4201/1 published for review" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the done gate accepted a published-for-review report naming no Gerrit change"
+  case "$out" in
+    *"canonical https://<host>/c/<project>/+/<number> form"*) ;;
+    *) fail "the refusal did not name the canonical Gerrit change form: $out" ;;
+  esac
+  git -C "$dir/wt" update-ref -d refs/remotes/no-mistakes/fm/task
 
   # Recovery fast-forwards the copy to the fix; the publish then stamps a
   # Change-Id, rewriting the message but not the tree, and pushes one squash.

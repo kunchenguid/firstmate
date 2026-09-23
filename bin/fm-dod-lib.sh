@@ -22,12 +22,13 @@
 # reachability test entirely: it passes when that change is already the task's
 # recorded pr=, which bin/fm-pr-check.sh writes only after this gate accepted it
 # at arming, and otherwise only when a live read shows the change's current
-# patch set carrying the worker copy's HEAD tree. A squash is a new commit on the
+# patch set carrying the worker copy's HEAD tree. A published-for-review report
+# whose URL is not a canonical Gerrit change is refused outright. A squash is a new commit on the
 # server's base, so the tree rather than the commit is what names the published
 # content. In no-mistakes mode that live read is preceded by
 # fm_dod_nm_custody_returned: a copy that publishes before recovering the
 # pipeline's fix commits agrees with its own unfixed patch set, so the copy must
-# also hold the run's result. These live reads are the one check at the ready
+# also hold the result of a passed run. These live reads are the one check at the ready
 # decision; a later rebase or patch set on the server does not revoke an armed
 # task's done. Teardown's landed-work test remains the complete discard gate.
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [<forge>] prints the
@@ -596,7 +597,8 @@ fm_dod_gerrit_change_carries_head() {  # <worktree> <url>
 }
 
 # 0 when the worker copy holds the result of its own passed no-mistakes run:
-# that pipeline owns no unreturned work (branch_sync.next_action.code is neither
+# the run's outcome is passed, passed-with-skips or passed-with-override (the
+# passing set bin/fm-crew-state.sh reads), that pipeline owns no unreturned work (branch_sync.next_action.code is neither
 # recover_custody nor continue_active_run) and HEAD's tree equals the tree of the
 # pipeline's current head resolved in this copy. On a Gerrit project push is
 # skipped, so a fix round's commits stay in the gate until custody is recovered,
@@ -606,11 +608,18 @@ fm_dod_gerrit_change_carries_head() {  # <worktree> <url>
 # rewrites the branch's messages. An unreadable status refuses, as an unreadable
 # change does. 1 when refused; stdout then holds a one-line reason.
 fm_dod_nm_custody_returned() {  # <worktree>
-  local wt=$1 out code pipeline_head head_tree pipeline_tree
+  local wt=$1 out outcome code pipeline_head head_tree pipeline_tree
   if ! out=$(fm_nm_run_checked "$wt" 15 axi status) || ! printf '%s\n' "$out" | grep -q '^run:'; then
     printf '%s\n' "the no-mistakes run for this copy could not be read, so its fixes cannot be proven recovered"
     return 1
   fi
+  outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
+  case "$outcome" in
+    passed|passed-with-skips|passed-with-override) ;;
+    *)
+      printf '%s\n' "the no-mistakes run for this copy has outcome ${outcome:-(none)}, not a pass, so the published work is not validated"
+      return 1 ;;
+  esac
   code=$(fm_nm_branch_sync_nested "$out" next_action code)
   case "$code" in
     recover_custody|continue_active_run)
@@ -643,7 +652,8 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
 # PR whose head the forge holds, when it names a Gerrit change whose current
 # patch set carries the worker copy's HEAD tree, or otherwise when its named
-# head - the worker copy's HEAD - is reachable outside that disposable copy.
+# head - the worker copy's HEAD - is reachable outside that disposable copy. A
+# published-for-review report that names no Gerrit change is refused.
 # There is no free-text SHA scan: a SHA that happens to appear in the note is
 # not the named head. 1 when
 # the claim is refused; stdout then holds a one-line reason and no other
@@ -651,7 +661,7 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 # pr_head=, and the merge-notified marker; <meta> may be a captured copy
 # (bin/fm-fleet-snapshot.sh), so the marker is read from <state>.
 fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state> <id> <meta>]
-  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha
+  local kind=$1 mode=$2 wt=$3 project=$4 line=$5 state=${6:-} id=${7:-} meta=${8:-} url sha gerrit
   fm_dod_should_gate_ship_done "$kind" "$mode" "$line" || return 0
   if url=$(fm_dod_pr_url_from_done_note "$(status_line_note "$line")") \
     && fm_dod_recorded_pr_on_forge "$state" "$id" "$meta" "$mode" "$url"; then
@@ -669,7 +679,13 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     printf '%s\n' "named head could not be resolved"
     return 1
   }
-  if [ -n "$url" ] && fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gerrit ]; then
+  gerrit=0
+  [ -n "$url" ] && fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gerrit ] && gerrit=1
+  if [ "$gerrit" = 0 ] && fm_dod_note_reports_published_change "$(status_line_note "$line")"; then
+    printf '%s\n' "the published-for-review report does not name a Gerrit change in the canonical https://<host>/c/<project>/+/<number> form"
+    return 1
+  fi
+  if [ "$gerrit" = 1 ]; then
     case "$mode" in
       no-mistakes|'')
         fm_dod_nm_custody_returned "$wt" || return 1 ;;
