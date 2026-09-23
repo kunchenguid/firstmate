@@ -445,7 +445,7 @@ assert_contains "$sent" $'## Firstmate spec\nTouch pager.sh only.' "the Firstmat
 assert_contains "$sent" $'# Not a heading inside a fence\n## Setup\n```\n### Out of scope\nAnything else.' "fenced lines and subheadings stay inside the section"
 assert_not_contains "$sent" 'BOILERPLATE' "scaffold boilerplate after the task sections is not sent"
 assert_not_contains "$sent" '# Task' "the enclosing Task heading is not sent"
-assert_not_contains "$sent" 'Brief kind:' "a brief without a contract line gets no kind line"
+assert_not_contains "$sent" 'Brief kind:' "a brief without a scout contract line gets no kind line"
 
 SPEC_ONLY_BRIEF="$TMP_ROOT/spec-only-brief.md"
 printf '%s\n' '# Task' '## Firstmate spec' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
@@ -468,8 +468,9 @@ KIND_BRIEF="$TMP_ROOT/kind-brief.md"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$KIND_BRIEF"
 sent=$(jq -r .state.task.brief "$LOG/body")
-assert_contains "$sent" $'Brief kind: ship, mode=no-mistakes\n\n## Captain\'s intent\nAdd a flag to the pager.' "a ship brief's first delivery contract line names its kind and mode"
-assert_not_contains "$sent" 'Delivery contract' "the contract line itself is not sent"
+assert_contains "$sent" $'## Captain\'s intent\nAdd a flag to the pager.' "a ship brief still sends its task sections"
+assert_not_contains "$sent" 'Brief kind:' "a ship brief gets no kind line"
+assert_not_contains "$sent" 'mode=' "a ship brief's delivery mode is not sent"
 
 { cat "$SCAFFOLD_BRIEF"; printf '%s\n' 'This is a SCOUT task: the deliverable is a written report, not a PR.'; } > "$KIND_BRIEF"
 reset_log
@@ -481,7 +482,7 @@ assert_not_contains "$sent" 'This is a SCOUT task' "the scout contract line itse
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_equals "$(cat "$BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a brief with neither heading is sent whole"
-pass "only the brief's task sections and kind reach the model, with a whole-brief fallback"
+pass "only the brief's task sections and scout tag reach the model, with a whole-brief fallback"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log

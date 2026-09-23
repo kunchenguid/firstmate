@@ -15,8 +15,8 @@
 #
 # What it does when on with at least one rule: one POST to
 #   https://api.typesafe.ai/v1/systemone with the project name and the brief's
-#   `## Captain's intent` and `## Firstmate spec` sections plus its kind and
-#   delivery mode (the whole brief when it has neither section) as state and
+#   `## Captain's intent` and `## Firstmate spec` sections, tagged when it is a
+#   scout brief (the whole brief when it has neither section), as state and
 #   ONE Choice question whose options are every rule's `when` from
 #   config/crew-dispatch.json plus one fixed generic none option. Jev returns
 #   the matched rule, a probability per option, and a confidence. Everything
@@ -233,16 +233,13 @@ QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
 TASK_TEXT=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
 trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK_TEXT"' EXIT
 
-# Send Jev only the task-specific sections bin/fm-brief.sh scaffolds, plus the
-# brief's kind and delivery mode from its fixed contract lines; the rest of a
-# scaffolded brief is standard boilerplate whose safety language reads as high
-# stakes on every task. A brief with neither section goes whole.
+# Send Jev only the task-specific sections bin/fm-brief.sh scaffolds, plus a
+# scout tag from the scout contract line; the rest of a scaffolded brief is
+# standard boilerplate whose safety language reads as high stakes on every task.
+# A brief with neither section goes whole. Ship delivery mode is deliberately
+# not sent: live runs showed it pushing routine ship briefs to the top tier.
 brief_kind() {
-  local mode
-  mode=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
-  if [ -n "$mode" ]; then
-    printf 'Brief kind: ship, mode=%s\n\n' "$mode"
-  elif grep -qxF 'This is a SCOUT task: the deliverable is a written report, not a PR.' "$BRIEF"; then
+  if grep -qxF 'This is a SCOUT task: the deliverable is a written report, not a PR.' "$BRIEF"; then
     printf 'Brief kind: scout (report only)\n\n'
   fi
 }
