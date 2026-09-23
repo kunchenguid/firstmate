@@ -712,6 +712,15 @@ TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "http 500 is a TOON error outcome"
 pass "API, transport, and response failures are error outcomes with exit 0"
 
+# --- Mirasim uses the wrapped Claude effort range ------------------------------------
+jq 'del(.rules[0].floor) | .rules[0].use = {"harness":"mirasim","model":"claude-opus-5[1m]","effort":"max","provider":"claude"}' "$BASE_RULES" > "$RULES"
+reset_log
+write_response "$RESPONSE" rule_1 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "Mirasim max effort resolves"
+assert_contains "$out" "  profile: --harness 'mirasim' --model 'claude-opus-5[1m]' --effort 'max'" "Mirasim keeps Claude's supported max effort"
+pass "Mirasim dispatch accepts the wrapped Claude effort range"
+
 # --- configuration errors exit 2 and select nothing ----------------------------------
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err
@@ -740,6 +749,7 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":[{"harness":"claude","model":"opus"},{"harness":"claude","model":"opus"}]}|default must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \
   '{"rules":[{"when":"x","use":{"harness":"grok","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
+  '{"default":{"harness":"mirasim","model":"claude-opus-5[1m]","effort":"ultra","provider":"claude"}}|each default profile effort must be supported by its harness and model' \
   '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|use profiles whose harness lacks one authoritative provider family require provider: opencode' \
   '{"rules":[{"when":"x","use":{"harness":"rovo"}}]}|use profiles whose harness lacks one authoritative provider family require provider: rovo' \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"pi","model":"anthropic/claude-sonnet-5"}}|default profiles whose harness lacks one authoritative provider family require provider: pi'; do

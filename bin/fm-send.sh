@@ -302,7 +302,7 @@ fm_send_normalize_key() { # <key>
 fm_send_record_interrupt() { # <key>
   local key=$1 id gen
   [ "$key" = Escape ] || return 0
-  case "$TARGET_HARNESS" in claude*) : ;; *) return 0 ;; esac
+  case "$TARGET_HARNESS" in claude*|mirasim) : ;; *) return 0 ;; esac
   [ -n "$TARGET_META" ] || return 0
   id=$(fm_send_id_from_meta "$TARGET_META")
   [ -f "$STATE/$id.busy-gen" ] || return 0
