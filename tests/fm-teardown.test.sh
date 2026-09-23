@@ -741,23 +741,23 @@ test_teardown_closes_the_backlog_item_itself() {
 
 test_local_only_completion_records_the_resolved_default_branch() {
   local case_dir out
-  case_dir=$(make_case local-only-master-default)
+  case_dir=$(make_case local-only-remote-default)
   write_meta "$case_dir" local-only ship
   seed_backlog_in_flight "$case_dir"
 
-  git -C "$case_dir/origin.git" update-ref refs/heads/master refs/heads/main
+  git -C "$case_dir/origin.git" update-ref refs/heads/develop refs/heads/main
   git -C "$case_dir/origin.git" update-ref -d refs/heads/main
-  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/master
-  git -C "$case_dir/project" branch -m main master
+  git -C "$case_dir/origin.git" symbolic-ref HEAD refs/heads/develop
+  git -C "$case_dir/project" branch -m main develop
   git -C "$case_dir/project" fetch -q origin
-  git -C "$case_dir/project" remote set-head origin master
+  git -C "$case_dir/project" remote set-head origin --delete
 
-  out=$(run_teardown "$case_dir") || fail "master-default teardown failed: $out"
+  out=$(run_teardown "$case_dir") || fail "remote-default teardown failed: $out"
   [ "$(backlog_row_state "$case_dir")" = "done" ] \
-    || fail "master-default teardown left its backlog item open"
-  assert_grep 'local-landing:master' "$case_dir/data/backlog.md" \
-    "local-only completion recorded main instead of the resolved master default"
-  pass "local-only completion records the resolved master default branch"
+    || fail "remote-default teardown left its backlog item open"
+  assert_grep 'local-landing:develop' "$case_dir/data/backlog.md" \
+    "local-only completion did not record the resolved remote default"
+  pass "local-only completion records the remote default without origin/HEAD"
 }
 
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {

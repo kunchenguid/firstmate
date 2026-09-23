@@ -577,14 +577,14 @@ test_unreachable_origin_refuses_stale_pool_base() {
   out=$(run_spawn "$id" --mode no-mistakes --yolo off)
   status=$?
   [ "$status" -ne 0 ] || fail "spawn succeeded despite an unreachable origin"
-  assert_contains "$out" "could not fetch origin" \
+  assert_contains "$out" "could not verify whether crew branch" \
     "spawn did not clearly refuse an unreachable origin"
   after=$(git -C "$POOL_DIR" rev-parse HEAD)
   [ "$after" = "$before" ] || fail "spawn changed the pooled worktree after origin became unreachable"
   if [ "${FM_TEST_EVIDENCE:-0}" = 1 ]; then
     printf '# observed unreachable-origin refusal: %s\n' "$(printf '%s\n' "$out" | tail -n 1)"
   fi
-  pass "an unreachable origin refuses a potentially stale pooled worktree"
+  pass "an unreachable origin refuses fresh allocation before pool access"
 }
 
 test_direct_pr_and_scout_refresh_before_launch() {

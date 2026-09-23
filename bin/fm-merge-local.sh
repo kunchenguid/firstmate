@@ -28,6 +28,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-default-branch-lib.sh
+. "$SCRIPT_DIR/fm-default-branch-lib.sh"
 # shellcheck source=bin/fm-backlog-transition-lib.sh
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 if [ "$#" -ne 1 ] || ! fm_pr_task_id_valid "$1"; then
@@ -137,7 +139,7 @@ if [ -n "$recorded_base" ]; then
   TARGET=$recorded_base
   DEFAULT=$(default_branch || true)
 else
-  DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+  DEFAULT=$(fm_remote_default_branch "$PROJ") || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, remote HEAD, main, or master" >&2; exit 1; }
   TARGET=$DEFAULT
 fi
 TARGET_REF="refs/heads/$TARGET"

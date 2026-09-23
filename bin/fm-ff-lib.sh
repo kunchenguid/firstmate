@@ -38,6 +38,8 @@
 # its checked-out default branch under the same guard.
 
 SUB_HOME_MARKER="${SUB_HOME_MARKER:-.fm-secondmate-home}"
+# shellcheck source=bin/fm-default-branch-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-default-branch-lib.sh"
 # shellcheck source=bin/fm-secondmate-registry-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-secondmate-registry-lib.sh"
 
@@ -48,27 +50,7 @@ first_line() {
 }
 
 default_branch() {
-  local dir=$1 ref branch
-  ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  if git -C "$dir" remote get-url origin >/dev/null 2>&1; then
-    ref=$(git -C "$dir" ls-remote --symref origin HEAD 2>/dev/null | awk '$1 == "ref:" && $2 ~ /^refs\/heads\// { sub(/^refs\/heads\//, "", $2); print $2; exit }')
-    if [ -n "$ref" ]; then
-      echo "$ref"
-      return 0
-    fi
-    return 1
-  fi
-  for branch in main master; do
-    if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
+  fm_local_default_branch "$1"
 }
 
 # Resolve the PRIMARY checkout's current default-branch commit - the local-HEAD

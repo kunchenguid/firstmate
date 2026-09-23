@@ -172,6 +172,26 @@ test_absent_metadata_base_uses_default() {
   pass "merge-local defaults to the project default when metadata omits a base"
 }
 
+test_remote_default_without_origin_head_is_used() {
+  local case_dir project id=task-remote-default
+  case_dir=$(make_case remote-default "$id")
+  project=$case_dir/project
+  git init -q --bare "$case_dir/origin.git"
+  git -C "$project" remote add origin "$case_dir/origin.git"
+  git -C "$project" branch develop main
+  git -C "$project" push -q origin develop
+  git --git-dir="$case_dir/origin.git" symbolic-ref HEAD refs/heads/develop
+  git -C "$project" checkout -q develop
+  commit_on "$project" "fm/$id" crew.txt
+  git -C "$project" checkout -q develop
+
+  run_merge "$case_dir" "$id" >/dev/null \
+    || fail "merge-local refused the remote default without origin/HEAD"
+  [ "$(git -C "$project" rev-parse develop)" = "$(git -C "$project" rev-parse "fm/$id")" ] \
+    || fail "merge-local did not land on the remote default branch"
+  pass "merge-local resolves the remote default without origin/HEAD"
+}
+
 test_recorded_base_without_default_branch_merges() {
   local case_dir project id=task-no-default
   case_dir=$(make_case no-default "$id")
@@ -238,6 +258,7 @@ test_legacy_task_uses_recorded_worktree_branch
 test_last_recorded_crew_branch_wins
 test_metadata_base_is_authoritative
 test_absent_metadata_base_uses_default
+test_remote_default_without_origin_head_is_used
 test_recorded_base_without_default_branch_merges
 test_invalid_metadata_base_refuses
 test_diverged_branch_refuses
