@@ -456,6 +456,27 @@ PY
   pass "competition scientist: replay audits an aborted final record and still catches a forged call count"
 }
 
+test_results_tsv_keeps_a_fixed_column_count() {
+  local workspace
+  workspace="$TMP_ROOT/tsv-columns"
+  init_workspace "$workspace" noisy-classification linear 5 2
+
+  python3 -c 'import json,sys; json.dump({"id":"x","hypothesis":"h","changes":{"NOISY_THRESHOLD":0.1},"we\tird":1}, open(sys.argv[1],"w"))' "$TMP_ROOT/tab-field.json"
+  python3 -c 'import json,sys; json.dump({"id":"y","hypothesis":"h2","changes":{"NOISY_THRESHOLD":0.2},"branch":"a\tb\nc"}, open(sys.argv[1],"w"))' "$TMP_ROOT/tab-branch.json"
+  $LAB attempt "$workspace" --proposal "$TMP_ROOT/tab-field.json" >/dev/null 2>&1
+  $LAB attempt "$workspace" --proposal "$TMP_ROOT/tab-branch.json" >/dev/null 2>&1
+
+  python3 - "$workspace" <<'PY'
+import pathlib
+import sys
+lines = (pathlib.Path(sys.argv[1]) / ".run/results.tsv").read_text().splitlines()
+widths = {len(line.split("\t")) for line in lines}
+assert widths == {9}, (widths, lines)
+assert len(lines) == 4, lines
+PY
+  pass "competition scientist: proposal and failure text cannot shift the results.tsv column count"
+}
+
 test_failed_audit_evaluation_is_a_terminal_failed_record() {
   local workspace controller sha first second output status
   for controller in linear proposed; do
@@ -487,8 +508,15 @@ assert final["aborted"]["phase"] == phase, final["aborted"]
 assert "evaluation-failed" in final["aborted"]["error"], final["aborted"]
 assert final["sealed"]["ok"] is False, final["sealed"]
 assert final["sealed"]["metrics"] is None, final["sealed"]
-ledger = [line for line in (workspace / ".run/ledger.jsonl").read_text().splitlines() if line]
-assert any(json.loads(line)["kind"] == "baseline" for line in ledger), "prior evidence was discarded"
+ledger = [json.loads(line) for line in (workspace / ".run/ledger.jsonl").read_text().splitlines() if line]
+assert any(row["kind"] == "baseline" for row in ledger), "prior evidence was discarded"
+if phase == "falsification":
+    charged = [row for row in ledger if row["kind"] == "falsification"]
+    assert len(charged) == 1, charged
+    assert charged[0]["verdict"] == "FAIL", charged[0]
+    assert charged[0]["failure_class"], charged[0]
+    assert final["falsification"]["ok"] is False, final["falsification"]
+    assert final["falsification"]["failure_class"], final["falsification"]
 PY
 
     output=$($LAB finish "$workspace" 2>&1); status=$?
@@ -534,6 +562,7 @@ test_finish_is_idempotent_and_replayable
 test_charged_audit_interruption_publishes_a_failed_final_record
 test_interrupted_falsification_record_replays_as_aborted
 test_failed_audit_evaluation_is_a_terminal_failed_record
+test_results_tsv_keeps_a_fixed_column_count
 test_sealed_dataset_never_persists_in_the_workspace
 
 echo "# fm-competition-scientist-lab.test.sh: all assertions passed"

@@ -177,6 +177,7 @@ Every row carries:
 - replay command, previous-record hash, and current-record hash.
 
 `.run/results.tsv` is a compact human view, not a second contract owner.
+Every field is written on one line with tabs, carriage returns, and newlines replaced by spaces, so proposal or failure text can never change its nine-column shape.
 `artifacts/<candidate-sha256>/` retains each materialized candidate, predictions, and result, including rejected and failed attempts.
 `artifacts/proposal-<sha256>/` retains proposals rejected before candidate execution.
 `.run/final.json` alone contains the post-search sealed score, or an `aborted` block naming the charged phase when an audit could not complete.

@@ -810,6 +810,10 @@ def save_state(workspace: Path, state: dict[str, Any]) -> None:
     write_mutable_json(workspace / ".run" / "state.json", state)
 
 
+def tsv_field(value: str) -> str:
+    return value.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+
+
 def append_record(workspace: Path, record: dict[str, Any]) -> None:
     ledger = workspace / ".run" / "ledger.jsonl"
     previous_hash = ""
@@ -834,10 +838,10 @@ def append_record(workspace: Path, record: dict[str, Any]) -> None:
         record["verdict"],
         record.get("failure_class", ""),
         f"{record.get('wall_seconds', 0.0):.6f}",
-        record.get("hypothesis", "").replace("\t", " ").replace("\n", " "),
+        record.get("hypothesis", ""),
     ]
     with (workspace / ".run" / "results.tsv").open("a", encoding="utf-8") as handle:
-        handle.write("\t".join(fields) + "\n")
+        handle.write("\t".join(tsv_field(field) for field in fields) + "\n")
 
 
 def load_artifact_metrics(workspace: Path, candidate_sha: str) -> dict[str, Any]:
@@ -1206,9 +1210,7 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
                 (result for result in (falsification, baseline_metrics) if not result.get("ok")),
                 None,
             )
-            if unusable is not None:
-                selected_sha = state["baseline_sha256"]
-            else:
+            if unusable is None:
                 keep, _, _ = metric_comparison(falsification["metrics"], baseline_metrics["metrics"], manifest)
                 if best_sha != state["baseline_sha256"] and not keep:
                     selected_sha = state["baseline_sha256"]
@@ -1226,15 +1228,16 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
                     "hypothesis": "Try to disconfirm the development-selected candidate on counterfactual data.",
                     "falsifier": requested_falsifier,
                     "changes": {},
-                    "metrics": falsification.get("metrics") if falsification else None,
-                    "verdict": "KEEP" if selected_sha == best_sha else "REVERT",
-                    "failure_class": "" if falsification and falsification.get("ok") else (falsification or {}).get("failure_class", "runtime"),
-                    "wall_seconds": (falsification or {}).get("wall_seconds", 0.0),
+                    "metrics": falsification.get("metrics"),
+                    "verdict": "FAIL" if unusable is not None else ("KEEP" if selected_sha == best_sha else "REVERT"),
+                    "failure_class": "" if unusable is None else unusable.get("failure_class", "runtime"),
+                    "wall_seconds": falsification.get("wall_seconds", 0.0),
                     "resources": {"tokens": 0, "planning_tokens": 0},
                     "replay": "sealed-by-design:not-part-of-attempt-replay",
                 },
             )
             if unusable is not None:
+                falsification = unusable
                 raise LabError(f"falsification-evaluation-failed:{unusable.get('failure_class', 'runtime')}")
 
         charged_phase = "sealed"
