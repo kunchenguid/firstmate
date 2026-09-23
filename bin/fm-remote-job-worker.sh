@@ -531,6 +531,12 @@ worker_publish_result() { # <job-dir> <exit>
   case "$exit_status" in ''|*[!0-9]*) exit_status=125 ;; esac
   [ "$exit_status" -le 255 ] || exit_status=125
   for tmp in stdout stderr; do
+    fm_remote_job_regular_bounded "$job/$tmp" "$FM_REMOTE_JOB_MAX_BYTES" && continue
+    # Only a stream that actually exceeded the bound is rewritten, and only here,
+    # where publication already had to measure it. Measuring again in the caller
+    # would have cost a second read of both streams on every job to answer a
+    # question that is almost always no.
+    worker_bound_capture_file "$job/$tmp" || return 1
     fm_remote_job_regular_bounded "$job/$tmp" "$FM_REMOTE_JOB_MAX_BYTES" || return 1
   done
   tmp=$(umask 077; mktemp "$job/.exit.XXXXXX") || return 1
@@ -718,9 +724,10 @@ worker_capture_output() { # <fifo> <destination>
   cat < "$fifo" > "$destination"
 }
 
-# Re-establish the record's byte bound on a captured stream. The publication
-# path refuses an over-bound file, so this is what keeps a command that wrote
-# more than the bound publishable, exactly as the reader's own cap used to.
+# Re-establish the record's byte bound on a captured stream. Publication refuses
+# an over-bound file, so this is what keeps a command that wrote more than the
+# bound publishable, exactly as the reader's own cap used to. Called only from
+# that refusal, never speculatively.
 worker_bound_capture_file() { # <file>
   local file=$1 bytes tmp
   [ -f "$file" ] && [ ! -L "$file" ] || return 0
@@ -826,8 +833,6 @@ worker_run_job() { # <account-home> <job-dir>
   rc=$?
   WORKER_PREEMPTIBLE=0
   worker_drain_output_capture "$stdout_reader" "$stderr_reader"
-  worker_bound_capture_file "$job/stdout" || worker_error "could not bound captured stdout for ${job##*/}"
-  worker_bound_capture_file "$job/stderr" || worker_error "could not bound captured stderr for ${job##*/}"
   rm -f -- "$stdout_pipe" "$stderr_pipe"
   set -e
   if [ "$WORKER_PREEMPTED" -eq 1 ]; then
