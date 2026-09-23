@@ -285,7 +285,8 @@ unit_launcher_messages_name_the_posture() {
   lock="$st/state/.supervise-daemon.lock"
   mkdir -p "$lock"
   printf '%s' "$sleep_pid" > "$lock/pid"
-  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
+  bash -c '. "$1"; fm_pid_identity "$2"' _ "$ROOT/bin/fm-wake-lib.sh" "$sleep_pid" \
+    > "$lock/pid-identity" 2>/dev/null || true
   out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
   if printf '%s' "$out" | grep -F 'refreshed the quiet-mode flag' >/dev/null \
     && ! printf '%s' "$out" | grep -F 'away-mode flag' >/dev/null; then
