@@ -3,9 +3,9 @@
 #
 # Limits, first: this command closes, labels, and comments on nothing - every
 # forge call is a read, including in --sweep - and it never fetches into the
-# local clone. A fix that cites the issue number nowhere - no PR body, branch,
-# or title, no commit message, and no --symbol the caller supplied - stays
-# invisible to every check. It is the evidence half of claim hygiene, not
+# local clone. Work with no issue reference, discoverable PR or fork branch,
+# commit citation, or caller-supplied --symbol stays invisible to these checks.
+# It is the evidence half of claim hygiene, not
 # governance: acting on a verdict stays with the caller and the forge's own
 # policy, and it reads and writes no backlog.
 #
@@ -18,7 +18,8 @@
 #   --ref <ref>          history ref (default: <remote>/<default-branch>, where
 #                        <remote> is the clone's remote whose URL names the repo)
 #   --symbol <n>:<text>  also search history for commits adding or removing
-#                        <text> (git log -S) for issue <n>; repeatable
+#                        <text> (git log -S) for issue <n>; repeatable;
+#                        report matches as suspected fixes to verify
 #   --sweep              opt-in, report-only: print one disposition line per
 #                        issue instead of the evidence block; with no issue
 #                        numbers it screens every open issue of the repo
@@ -39,9 +40,9 @@
 #             body cites #<n> (not owner/repo#<n> of another repository), the
 #             repo's own owner/name#<n>, or github.com/<owner/name>/issues/<n>,
 #             or its head branch or title contains <n> as a whole number, so
-#             4018 never matches 40181. The fetched count is compared with the
-#             search API's open-PR total_count; a short or unverified corpus is
-#             disclosed and never treated as complete.
+#             4018 never matches 40181. PR numbers are deduplicated; duplicates,
+#             a unique count different from the search total, or a total that
+#             changes across the fetch make coverage unverified.
 #   fork      head branches containing <n> in <author>/<name>, the issue
 #             author's fork under the upstream repository's name. A missing
 #             repository there is disclosed: a renamed fork is not searched.
@@ -54,7 +55,8 @@
 # Output, per issue, one block:
 #   === #<n> state=<state> author=<login> labels=<a,b> :: <title>
 #   verdict: <open|claimed|partially-covered|fixed-on-main|unknown>
-#   checks: issue=.. timeline=.. stamps=.. corpus=.. fork=.. history=..
+#   checks: issue=.. timeline=.. stamps=.. corpus=.. fork=.. history=.. prs=..
+#           issues=.. (when sweeping the open-issue list)
 #   coverage: complete | incomplete (<checks that could not look>)
 #   claim: / merged: / closed: <evidence> [<checks that found it>]
 #   hint: / disclose: <context that never decides a verdict>
@@ -62,11 +64,11 @@
 #   claimed            an open or draft PR, a fork branch, or a maintainer
 #                      existing-pr stamp claims the issue; no merged fix found.
 #   partially-covered  merged fixing evidence exists and an open claim remains.
-#   fixed-on-main      merged fixing evidence (a merged PR body or history
-#                      commit message with a closing keyword referencing this
-#                      issue) and no open claim. It is evidence to inspect,
-#                      not proof that every
-#                      part of the issue is resolved.
+#   fixed-on-main      fixing evidence and no open claim: a history-ref commit
+#                      with a closing keyword naming this issue, or a PR merged
+#                      into the repository's default branch whose body has such
+#                      a keyword or whose GitHub closingIssuesReferences include
+#                      this issue. It is not proof that every part is resolved.
 #   open               every check looked and found no claim or fixing evidence.
 #   unknown            the issue could not be read, or nothing was found while
 #                      at least one check could not look. A failed or
@@ -76,8 +78,12 @@
 # Closing keywords are close/closes/closed, fix/fixes/fixed, and
 # resolve/resolves/resolved, followed by #<n>, owner/name#<n>, or the issue URL
 # in this repository; case and an optional colon are ignored.
-# Merged PR references, commit citations, and symbol changes without such a
-# fixing reference are hints and never establish a fix.
+# Every discovered merged PR has its current state and base.ref resolved before
+# classification. Other-base merges name their base in a hint. When a default-
+# base merged PR has no closing keyword, a read-only GraphQL query checks its
+# closingIssuesReferences. Failed lookups make coverage incomplete.
+# Incidental PR references and commit citations are hints. Symbol matches are
+# labelled "suspected fix to verify" and never establish a fix on their own.
 #
 # --sweep prints, per issue:
 #   sweep: #<n> <disposition> state=<s> verdict=<v> coverage=<complete|incomplete>
@@ -91,14 +97,17 @@
 #   undetermined     verdict unknown, or merged evidence with incomplete
 #                    coverage that could hide a live claim.
 # link= names fixing evidence the issue page does not show: a PR whose body
-# has a fixing reference, or a commit whose message does, found by neither the
+# has a fixing reference, a merged PR with a closing-issue reference, or a
+# commit whose message has a fixing reference, found by neither the
 # timeline nor a stamp. A title, branch, fork-branch, or --symbol match is
-# never a link candidate. Screening every open issue costs about five API
-# reads per issue plus one shared corpus; the open-issue list is checked
-# against the search API total the same way the corpus is.
+# never a link candidate. Screening shares one fresh PR corpus; merged and
+# stamped PRs need additional reads. The open-issue list uses the same identity
+# and total checks as the corpus; an unverified list prevents open verdicts
+# and close recommendations and makes the sweep exit 1.
 #
-# Exit status: 0 when every issue got a verdict other than unknown, 1 when any
-# verdict is unknown, 2 on a usage or setup refusal.
+# Exit status: 0 when every issue got a verdict other than unknown and the
+# sweep list is verified, 1 for unknown verdicts or an unverified sweep list,
+# 2 on a usage or setup refusal.
 set -eu
 
 usage() {
@@ -202,58 +211,61 @@ CORPUS="$WORK/corpus.json"
 CORPUS_STATUS=
 CORPUS_NOTE=
 
-fetch_corpus() {
-  local total='' incomplete=''
-  if gh_read "$WORK/search" api "search/issues?q=repo:$REPO+is:pr+is:open&per_page=1" \
-    && total=$(jq -er '.total_count | numbers' "$WORK/search" 2>/dev/null); then
-    incomplete=$(jq -r '.incomplete_results // false' "$WORK/search")
+fetch_list() {
+  local kind=$1 endpoint=$2 out=$3 label=$4 before='' after='' inc_before=true inc_after=true rows fetched
+  LIST_NOTE=
+  if gh_read "$out.before" api "search/issues?q=repo:$REPO+is:$kind+is:open&per_page=1" \
+    && before=$(jq -er '.total_count | numbers' "$out.before" 2>/dev/null); then
+    inc_before=$(jq -r '.incomplete_results // false' "$out.before")
+  fi
+  if ! gh_read "$out.pages" api "$endpoint" --paginate; then
+    LIST_STATUS=failed
+    LIST_NOTE="$label could not be fetched: $(gh_reason "$out.pages")"
+    return 0
+  fi
+  if ! slurp_pages "$out.pages" > "$out.rows" 2>/dev/null; then
+    LIST_STATUS=failed
+    LIST_NOTE="$label pages were not JSON arrays"
+    return 0
+  fi
+  if gh_read "$out.after" api "search/issues?q=repo:$REPO+is:$kind+is:open&per_page=1" \
+    && after=$(jq -er '.total_count | numbers' "$out.after" 2>/dev/null); then
+    inc_after=$(jq -r '.incomplete_results // false' "$out.after")
+  fi
+  jq --arg kind "$kind" '
+    (if $kind == "issue" then map(select(.pull_request | not)) else . end)
+    | {rows: length, items: unique_by(.number)} | . + {fetched: (.items | length)}
+  ' "$out.rows" > "$out"
+  rows=$(jq -r .rows "$out")
+  fetched=$(jq -r .fetched "$out")
+  if [ -z "$before" ] || [ -z "$after" ] || [ "$rows" != "$fetched" ] \
+    || [ "$fetched" != "$before" ] || [ "$before" != "$after" ] \
+    || [ "$inc_before" = true ] || [ "$inc_after" = true ]; then
+    LIST_STATUS="unverified($fetched/${before:-?})"
+    LIST_NOTE="$label unverified: $rows rows, $fetched unique, totals ${before:-?} -> ${after:-?}; duplicates, inconsistent counts, or incomplete search results may hide work"
   else
-    total=
-    CORPUS_NOTE="open-PR total could not be read: $(gh_reason "$WORK/search")"
+    LIST_STATUS="ok($fetched/$before)"
   fi
-  if ! gh_read "$WORK/pulls" api "repos/$REPO/pulls?state=open&per_page=100" --paginate; then
-    CORPUS_STATUS="failed"
-    CORPUS_NOTE="open-PR corpus could not be fetched: $(gh_reason "$WORK/pulls")"
-    return 0
-  fi
-  if ! slurp_pages "$WORK/pulls" > "$WORK/pulls.json" 2>/dev/null; then
-    CORPUS_STATUS="failed"
-    CORPUS_NOTE="open-PR corpus pages were not JSON arrays"
-    return 0
-  fi
-  jq --arg total "$total" --arg inc "$incomplete" '{
-      fetched: length,
-      total_count: (if $total == "" then null else ($total | tonumber) end),
-      search_incomplete: ($inc == "true"),
-      prs: map({number, title: (.title // ""), body: (.body // ""),
-        head: (.head.ref // ""), author: (.user.login // "?"),
-        head_owner: (.head.repo.owner.login // .user.login // "?"),
-        draft: (.draft // false)})
-    }' "$WORK/pulls.json" > "$CORPUS"
 }
 
-# Sets CORPUS_STATUS (ok|truncated|unverified|failed) from the fetched corpus.
-judge_corpus() {
-  local fetched total inc
-  fetched=$(jq -r .fetched "$CORPUS")
-  total=$(jq -r '.total_count // ""' "$CORPUS")
-  inc=$(jq -r '.search_incomplete // false' "$CORPUS")
-  if [ -z "$total" ]; then
-    CORPUS_STATUS="unverified($fetched/?)"
-    [ -n "$CORPUS_NOTE" ] || CORPUS_NOTE="open-PR total was not recorded, so corpus completeness is unverified"
-  elif [ "$fetched" -lt "$total" ]; then
-    CORPUS_STATUS="truncated($fetched/$total)"
-    CORPUS_NOTE="open-PR corpus is short: fetched $fetched of $total open PRs; a claim may be missing"
-  elif [ "$inc" = true ]; then
-    CORPUS_STATUS="unverified($fetched/$total)"
-    CORPUS_NOTE="search reported incomplete results, so the open-PR total is not trusted"
-  else
-    CORPUS_STATUS="ok($fetched/$total)"
-  fi
+fetch_corpus() {
+  fetch_list pr "repos/$REPO/pulls?state=open&per_page=100" "$WORK/pulls.json" "open-PR corpus"
+  CORPUS_STATUS=$LIST_STATUS
+  CORPUS_NOTE=$LIST_NOTE
+  [ "$CORPUS_STATUS" != failed ] || return 0
+  jq '{prs: (.items | map({number, title: (.title // ""), body: (.body // ""),
+    head: (.head.ref // ""), author: (.user.login // "?"),
+    head_owner: (.head.repo.owner.login // .user.login // "?"),
+    draft: (.draft // false)}))}' "$WORK/pulls.json" > "$CORPUS"
 }
 
 fetch_corpus
-[ "$CORPUS_STATUS" = failed ] || judge_corpus
+
+DEFAULT_BRANCH=
+if ! gh_read "$WORK/repo" api "repos/$REPO" \
+  || ! DEFAULT_BRANCH=$(jq -er '.default_branch | strings | select(length > 0)' "$WORK/repo" 2>/dev/null); then
+  DEFAULT_BRANCH=
+fi
 
 # --- history ref ----------------------------------------------------------
 
@@ -261,7 +273,7 @@ HISTORY_STATUS=
 HISTORY_NOTE=
 
 resolve_history() {
-  local remote='' url norm want lower_repo default sha date
+  local remote='' url norm want lower_repo sha date
   if ! git -C "$GIT_DIR_ARG" rev-parse --git-dir >/dev/null 2>&1; then
     HISTORY_STATUS=failed
     HISTORY_NOTE="history check could not look: $GIT_DIR_ARG is not a git repository"
@@ -283,13 +295,12 @@ EOF
       HISTORY_NOTE="history check could not look: no remote of $GIT_DIR_ARG points at github.com/$REPO (pass --ref)"
       return 0
     fi
-    if ! gh_read "$WORK/repo" api "repos/$REPO" \
-      || ! default=$(jq -er '.default_branch | strings' "$WORK/repo" 2>/dev/null); then
+    if [ -z "$DEFAULT_BRANCH" ]; then
       HISTORY_STATUS=failed
       HISTORY_NOTE="history check could not look: default branch of $REPO could not be read (pass --ref)"
       return 0
     fi
-    REF="$remote/$default"
+    REF="$remote/$DEFAULT_BRANCH"
   fi
   if ! sha=$(git -C "$GIT_DIR_ARG" rev-parse --verify --quiet "$REF^{commit}" 2>/dev/null); then
     HISTORY_STATUS=failed
@@ -328,6 +339,10 @@ screen_issue() {
   ev="$d/evidence.tsv"
   : > "$ev"
   : > "$d/notes"
+  if [ "$SWEEP_ALL" = 1 ] && [ -n "$SWEEP_NOTE" ]; then
+    failed+=(issues)
+    printf 'disclose: %s\n' "$SWEEP_NOTE" >> "$d/notes"
+  fi
 
   # Issue itself: nothing else can be judged without it.
   if ! gh_read "$d/issue" api "repos/$REPO/issues/$n" \
@@ -529,7 +544,7 @@ EOF
       sym=${s#*:}
       if git -C "$GIT_DIR_ARG" log -S"$sym" ${since[@]+"${since[@]}"} \
           --format='%h%x09%cs %s' "$REF" > "$d/pickaxe" 2>"$d/pickaxe.err"; then
-        SYM=$sym awk -F '\t' '{ printf "commit\t%s\tmerged\thistory:-S %s\t\t%s\n", $1, ENVIRON["SYM"], substr($2, 1, 90) }' "$d/pickaxe" >> "$ev"
+        SYM=$sym awk -F '\t' '{ printf "hint\t\t\t\t\tsuspected fix to verify: commit %s %s [history:-S %s]\n", $1, substr($2, 1, 90), ENVIRON["SYM"] }' "$d/pickaxe" >> "$ev"
       else
         history_st=failed
         failed+=(history)
@@ -538,32 +553,85 @@ EOF
     done
   fi
 
-  # Resolve the current state of every stamped PR not already seen.
-  local x known
+  local x
   while IFS= read -r x; do
     [ -n "$x" ] || continue
-    known=$(awk -F '\t' -v x="$x" '$1 == "pr" && $2 == x { print $3; exit }' "$ev")
-    if [ -n "$known" ]; then
-      printf 'pr\t%s\t%s\tstamp\t\t\n' "$x" "$known" >> "$ev"
-    elif gh_read "$d/pr-$x" api "repos/$REPO/pulls/$x" \
-      && jq -e '.number | numbers' "$d/pr-$x" >/dev/null 2>&1; then
-      jq -r --arg fix "$fixpat" '["pr", (.number | tostring),
-        (if .merged_at then "merged" elif .state == "open" then (if .draft then "open(draft)" else "open" end) else "closed" end),
-        "stamp", (.user.login // "?"), ((.title // "") | gsub("[\t\n\r]"; " ") | .[0:80]),
-        ((.body // "") | test($fix; "i"))] | @tsv' "$d/pr-$x" >> "$ev"
-    else
-      printf 'pr\t%s\tunknown\tstamp\t\t\n' "$x" >> "$ev"
-      stamps_st=partial
-      failed+=(stamps)
-      printf 'disclose: stamped PR #%s could not be read: %s\n' "$x" "$(gh_reason "$d/pr-$x")" >> "$d/notes"
-    fi
+    printf 'pr\t%s\tunknown\tstamp\t\t\n' "$x" >> "$ev"
   done <<EOF
 $(awk -F '\t' '$1 == "stamp-pr" { print $2 }' "$ev" | sort -un)
 EOF
 
+  local prs_st=ok pr_state pr_base pr_fix
+  : > "$d/resolved-prs"
+  while IFS= read -r x; do
+    [ -n "$x" ] || continue
+    if gh_read "$d/pr-$x" api "repos/$REPO/pulls/$x" \
+      && jq -e --argjson x "$x" '.number == $x and (.state == "open" or .state == "closed")' "$d/pr-$x" >/dev/null 2>&1; then
+      pr_state=$(jq -r 'if .merged_at then "merged" elif .state == "open" then (if .draft then "open(draft)" else "open" end) else "closed" end' "$d/pr-$x")
+      pr_fix=false
+      pr_base=
+      if [ "$pr_state" = merged ]; then
+        if ! pr_base=$(jq -er '.base.ref | strings | select(length > 0)' "$d/pr-$x" 2>/dev/null) \
+          || [ -z "$DEFAULT_BRANCH" ]; then
+          prs_st=partial
+          failed+=(prs)
+          printf 'disclose: merged PR #%s base or repository default branch could not be read\n' "$x" >> "$d/notes"
+        elif [ "$pr_base" = "$DEFAULT_BRANCH" ]; then
+          if jq -e --arg fix "$fixpat" '(.body // "") | test($fix; "i")' "$d/pr-$x" >/dev/null; then
+            pr_fix=true
+          elif gh_read "$d/closing-$x" api graphql --paginate -F owner="$OWNER" -F name="$NAME" -F number="$x" -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { closingIssuesReferences(first: 100, after: $endCursor) { nodes { number repository { nameWithOwner } } pageInfo { hasNextPage endCursor } } } } }' \
+            && pr_fix=$(jq -sr --argjson n "$n" --arg repo "$REPO" '
+              if length == 0 or any(.[];
+                ((.errors // []) | length) > 0
+                or (.data.repository.pullRequest.closingIssuesReferences.nodes | type) != "array"
+                or (.data.repository.pullRequest.closingIssuesReferences.pageInfo.hasNextPage | type) != "boolean")
+                or .[-1].data.repository.pullRequest.closingIssuesReferences.pageInfo.hasNextPage != false
+              then error("incomplete closing-issue references")
+              else any(.[].data.repository.pullRequest.closingIssuesReferences.nodes[];
+                .number == $n and ((.repository.nameWithOwner | ascii_downcase) == ($repo | ascii_downcase))) end
+            ' "$d/closing-$x" 2>/dev/null); then
+            :
+          else
+            pr_fix=false
+            prs_st=partial
+            failed+=(prs)
+            printf 'disclose: PR #%s closing-issue references could not be read: %s\n' "$x" "$(gh_reason "$d/closing-$x")" >> "$d/notes"
+          fi
+        fi
+      elif [ "$pr_state" != closed ]; then
+        pr_fix=$(jq -r --arg fix "$fixpat" '(.body // "") | test($fix; "i")' "$d/pr-$x")
+      fi
+      jq -r --arg state "$pr_state" --arg fix "$pr_fix" --arg base "$pr_base" '
+        [(.number | tostring), $state, $fix, $base, (.user.login // "?"),
+         ((.title // "") | gsub("[\t\n\r]"; " ") | .[0:80])] | @tsv
+      ' "$d/pr-$x" >> "$d/resolved-prs"
+    else
+      printf '%s\tunknown\tfalse\t\t\t\n' "$x" >> "$d/resolved-prs"
+      prs_st=partial
+      failed+=(prs)
+      if awk -F '\t' -v x="$x" '$1 == "pr" && $2 == x && $4 == "stamp" { found=1 } END { exit !found }' "$ev"; then
+        stamps_st=partial
+        failed+=(stamps)
+      fi
+      printf 'disclose: PR #%s could not be read: %s\n' "$x" "$(gh_reason "$d/pr-$x")" >> "$d/notes"
+    fi
+  done <<EOF
+$(awk -F '\t' '$1 == "pr" && ($3 == "merged" || $3 == "unknown") { print $2 }' "$ev" | sort -un)
+EOF
+
   # Aggregate evidence per item, then judge.
   awk -F '\t' '
+    FILENAME == ARGV[1] {
+      resolved_state[$1] = $2; resolved_fix[$1] = $3; resolved_base[$1] = $4
+      resolved_who[$1] = $5; resolved_what[$1] = $6
+      next
+    }
     $1 == "pr" || $1 == "commit" || $1 == "branch" {
+      if ($1 == "pr" && ($2 in resolved_state)) {
+        $3 = resolved_state[$2]; $7 = resolved_fix[$2]
+        if ($5 == "") $5 = resolved_who[$2]
+        if ($6 == "") $6 = resolved_what[$2]
+      }
       k = $1 SUBSEP $2
       if (!(k in seen)) { seen[k] = 1; order[++count] = k; kind[k] = $1; id[k] = $2 }
       if ($3 != "" && (st[k] == "" || st[k] == "unknown")) st[k] = $3
@@ -579,8 +647,9 @@ EOF
         k = order[i]
         if (kind[k] == "pr") {
           s = st[k]
-          label = (s ~ /^open/ || s == "unknown") ? "claim" : (s == "merged" ? (fixing[k] ? "merged" : "hint") : "closed")
+          label = (s ~ /^open/ || (s == "unknown" && src[k] ~ /(^|,)stamp(,|$)/)) ? "claim" : (s == "merged" ? (fixing[k] ? "merged" : "hint") : (s == "closed" ? "closed" : "hint"))
           line = "PR #" id[k] " " s
+          if (resolved_base[id[k]] != "") line = line " base=" resolved_base[id[k]]
           if (who[k] != "") line = line " by " who[k]
           if (what[k] != "") line = line " :: " what[k]
         } else if (kind[k] == "commit") {
@@ -594,7 +663,7 @@ EOF
       }
       for (i = 1; i <= nclaims; i++) printf "claim: %s [stamp]\n", claims[i]
       for (i = 1; i <= nhints; i++) printf "hint: %s\n", hints[i]
-    }' "$ev" > "$d/lines"
+    }' "$d/resolved-prs" "$ev" > "$d/lines"
 
   local has_open=0 has_merged=0 verdict coverage uniq_failed
   ! grep -q '^claim: ' "$d/lines" || has_open=1
@@ -617,7 +686,8 @@ EOF
     verdict=unknown
     ANY_UNKNOWN=1
   fi
-  checks="issue=ok timeline=$timeline_st stamps=$stamps_st corpus=$corpus_st fork=$fork_st history=$history_st"
+  checks="issue=ok timeline=$timeline_st stamps=$stamps_st corpus=$corpus_st fork=$fork_st history=$history_st prs=$prs_st"
+  [ "$SWEEP_ALL" = 0 ] || checks="$checks issues=$ISSUE_LIST_STATUS"
 
   {
     printf '=== #%s state=%s author=%s labels=%s :: %s\n' "$n" "$state" "${author:-?}" "${labels:--}" "$title"
@@ -637,27 +707,14 @@ EOF
 # --- sweep ----------------------------------------------------------------
 
 SWEEP_NOTE=
+ISSUE_LIST_STATUS=
 list_open_issues() {
-  local total='' inc=false fetched
-  if gh_read "$WORK/isearch" api "search/issues?q=repo:$REPO+is:issue+is:open&per_page=1" \
-    && total=$(jq -er '.total_count | numbers' "$WORK/isearch" 2>/dev/null); then
-    inc=$(jq -r '.incomplete_results // false' "$WORK/isearch")
-  else
-    total=
-  fi
-  gh_read "$WORK/issues" api "repos/$REPO/issues?state=open&per_page=100" --paginate \
-    || die "open issues of $REPO could not be listed: $(gh_reason "$WORK/issues")"
-  slurp_pages "$WORK/issues" > "$WORK/issues.json" 2>/dev/null \
-    || die "open issues of $REPO were not JSON pages"
-  jq -r '.[] | select(.pull_request | not) | .number' "$WORK/issues.json" > "$WORK/issue-numbers"
-  fetched=$(wc -l < "$WORK/issue-numbers" | tr -d ' ')
-  if [ -z "$total" ]; then
-    SWEEP_NOTE="open-issue total could not be read: $(gh_reason "$WORK/isearch"); the list of $fetched may be short"
-  elif [ "$fetched" -lt "$total" ]; then
-    SWEEP_NOTE="open-issue list is short: listed $fetched of $total; unlisted issues were not screened"
-  elif [ "$inc" = true ]; then
-    SWEEP_NOTE="search reported incomplete results, so the open-issue total of $total is not trusted"
-  fi
+  fetch_list issue "repos/$REPO/issues?state=open&per_page=100" "$WORK/issues.json" "open-issue list"
+  ISSUE_LIST_STATUS=$LIST_STATUS
+  SWEEP_NOTE=$LIST_NOTE
+  [ "$ISSUE_LIST_STATUS" != failed ] || die "$SWEEP_NOTE"
+  [ -z "$SWEEP_NOTE" ] || ANY_UNKNOWN=1
+  jq -r '.items[].number' "$WORK/issues.json" > "$WORK/issue-numbers"
   while IFS= read -r n; do
     [ -z "$n" ] || ISSUES+=("$n")
   done < "$WORK/issue-numbers"

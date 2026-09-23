@@ -24,27 +24,45 @@ set -u
 printf '%s\n' "$*" >> "$FM_FAKE_FORGE/calls.log"
 [ "${1:-}" = api ] || { echo "fake gh: only api is served: $*" >&2; exit 90; }
 shift
-endpoint= head=
+endpoint= head= owner= name= number= query= paginate=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -X) [ "$2" = GET ] || { echo "fake gh: refusing method $2" >&2; exit 92; }; shift 2 ;;
     --method) echo "fake gh: refusing --method $2" >&2; exit 92 ;;
-    --paginate) shift ;;
+    --paginate) paginate=1; shift ;;
     -f|-F)
-      case "$2" in head=*) head=${2#head=} ;; esac
+      case "$2" in
+        head=*) head=${2#head=} ;;
+        owner=*) owner=${2#owner=} ;;
+        name=*) name=${2#name=} ;;
+        number=*) number=${2#number=} ;;
+        query=*) query=${2#query=} ;;
+      esac
       shift 2 ;;
     -*) echo "fake gh: unexpected flag $1" >&2; exit 93 ;;
     *) endpoint=$1; shift ;;
   esac
 done
 [ -z "$head" ] || endpoint="$endpoint?head=$head"
+if [ "$endpoint" = graphql ]; then
+  case "$query" in query\(*) ;; *) echo "fake gh: refusing a non-query GraphQL operation" >&2; exit 92 ;; esac
+  [ -n "$owner" ] && [ -n "$name" ] && [ -n "$number" ] || exit 93
+  endpoint="graphql?owner=$owner&name=$name&number=$number"
+fi
 key=$(printf '%s' "$endpoint" | tr '/?=&:+' '______')
+if [ -e "$FM_FAKE_FORGE/$key.after.json" ] || [ -e "$FM_FAKE_FORGE/$key.after.fail" ]; then
+  if [ "$(grep -Fxc "api $endpoint" "$FM_FAKE_FORGE/calls.log")" -gt 1 ]; then key="$key.after"; fi
+fi
 if [ -e "$FM_FAKE_FORGE/$key.fail" ]; then
   cat "$FM_FAKE_FORGE/$key.fail" >&2
   exit 1
 fi
 if [ -e "$FM_FAKE_FORGE/$key.json" ]; then
-  cat "$FM_FAKE_FORGE/$key.json"
+  if [ -n "$query" ] && [ "$paginate" = 0 ]; then
+    jq -s '.[0]' "$FM_FAKE_FORGE/$key.json"
+  else
+    cat "$FM_FAKE_FORGE/$key.json"
+  fi
   exit 0
 fi
 echo "gh: Not Found (HTTP 404)" >&2
@@ -60,6 +78,10 @@ key_of() {
 # put <endpoint> <json>: serve <json> for <endpoint>.
 put() {
   printf '%s\n' "$2" > "$FIX/$(key_of "$1").json"
+}
+
+put_closing() {
+  put "graphql?owner=o&name=r&number=$1" "{\"data\":{\"repository\":{\"pullRequest\":{\"closingIssuesReferences\":{\"nodes\":$2,\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}}"
 }
 
 # fail_on <endpoint> <stderr text>: make <endpoint> fail.
@@ -127,11 +149,16 @@ JSON
     {"event":"cross-referenced","source":{"issue":{"number":9,"state":"open","title":"fork pr","user":{"login":"dan"},"repository":{"full_name":"dan/r"},"pull_request":{"merged_at":null}}}},
     {"event":"labeled"}]'
   put "repos/o/r/pulls/60" '{"number":60,"state":"open","draft":false,"merged_at":null,"title":"helper","user":{"login":"helper"}}'
+  put "repos/o/r/pulls/70" '{"number":70,"state":"closed","merged_at":"2026-01-05T00:00:00Z","base":{"ref":"main"},"body":"Fixes #400","title":"part one","user":{"login":"dan"}}'
+  put_closing 70 '[]'
+  put_closing 66 '[]'
   # 800: the author's fork branch heads a PR that already merged.
   plain_issue 800 carol
   put "repos/carol/r" '{"fork":true,"parent":{"full_name":"o/r"},"source":{"full_name":"o/r"}}'
   put "repos/carol/r/branches?per_page=100" '[{"name":"fix-800"}]'
   put "repos/o/r/pulls?head=carol:fix-800" '[{"number":80,"state":"closed","merged_at":"2026-02-02T00:00:00Z","draft":false,"title":"fix 800","user":{"login":"carol"}}]'
+  put "repos/o/r/pulls/80" '{"number":80,"state":"closed","merged_at":"2026-02-02T00:00:00Z","base":{"ref":"main"},"title":"fix 800","user":{"login":"carol"}}'
+  put_closing 80 '[]'
   # 900: a pull request number, not an issue.
   put "repos/o/r/issues/900" '{"number":900,"state":"open","title":"a pr","user":{"login":"x"},"pull_request":{"url":"u"},"created_at":"2026-01-01T00:00:00Z"}'
 }
@@ -217,10 +244,10 @@ test_history_requires_a_fixing_reference() {
   assert_contains "$(block_of "$out" 200)" "merged: commit $FIX200_SHA" "the citing commit is named"
   assert_not_contains "$(block_of "$out" 200)" "2000" "#2001 and 2000 must not match issue 200"
   assert_contains "$(block_of "$out" 300)" "verdict: open" "a --symbol pickaxe hit cannot establish a fix"
-  assert_contains "$(block_of "$out" 300)" "hint: commit $FIX300_SHA" "the removing commit is inspectable"
+  assert_contains "$(block_of "$out" 300)" "hint: suspected fix to verify: commit $FIX300_SHA" "the removing commit is explicitly a suspected fix to verify"
   assert_contains "$(block_of "$out" 300)" "[history:-S magic_symbol]" "the symbol search is labelled"
   assert_not_contains "$(block_of "$out" 300)" "$MAGIC_INTRO_SHA" "commits before the issue opened are out of range"
-  assert_equals 1 "$(block_of "$out" 300 | grep -c '^hint: commit ')" "only the commit removing the symbol matches"
+  assert_equals 1 "$(block_of "$out" 300 | grep -c '^hint: suspected fix to verify: commit ')" "only the commit removing the symbol matches"
   pass "history distinguishes fixing references from symbol hints"
 }
 
@@ -249,6 +276,7 @@ test_fork_branch_heading_a_merged_pr() {
   out=$(run_claim --sweep 800)
   assert_contains "$out" "sweep: #800 no-action state=open verdict=open coverage=complete link=-" "a branch match cannot close or link"
   put "repos/o/r/pulls?head=carol:fix-800" '[{"number":80,"state":"closed","merged_at":"2026-02-02T00:00:00Z","body":"Fixes #800","title":"fix 800","user":{"login":"carol"}}]'
+  put "repos/o/r/pulls/80" '{"number":80,"state":"closed","merged_at":"2026-02-02T00:00:00Z","base":{"ref":"main"},"body":"Fixes #800","title":"fix 800"}'
   out=$(run_claim --sweep 800)
   assert_contains "$out" "sweep: #800 close-candidate state=open verdict=fixed-on-main coverage=complete link=#80" "a fixing reference in the fork PR establishes a fix"
   build_forge
@@ -275,6 +303,7 @@ test_related_commit_after_helper_withdrawal() {
     assert_contains "$out" "sweep: #$n no-action state=open verdict=open coverage=complete link=-" "withdrawing the helper cannot promote incidental references"
   done
   put "repos/o/r/issues/4412/timeline?per_page=100" '[{"event":"cross-referenced","source":{"issue":{"number":70,"state":"closed","body":"Fixes #4412","repository":{"full_name":"o/r"},"pull_request":{"merged_at":"2026-02-04T00:00:00Z"}}}}]'
+  put "repos/o/r/pulls/70" '{"number":70,"state":"closed","merged_at":"2026-02-04T00:00:00Z","base":{"ref":"main"},"body":"Fixes #4412"}'
   out=$(run_claim --sweep 4412)
   assert_contains "$out" "sweep: #4412 close-candidate state=open verdict=fixed-on-main coverage=complete link=-" "an explicit fixing reference in a merged timeline PR establishes a fix"
   build_forge
@@ -300,19 +329,169 @@ test_stamped_pr_fixing_references() {
   local out
   plain_issue 600 alice
   put "repos/o/r/issues/600/comments?per_page=100" '[{"user":{"login":"maint"},"author_association":"MEMBER","body":"<!-- triage: x outcome=existing-pr --> existing-pr -> #66"}]'
-  put "repos/o/r/pulls/66" '{"number":66,"state":"closed","merged_at":"2026-02-02T00:00:00Z","title":"Fixes #600","body":"Refs #600"}'
+  put "repos/o/r/pulls/66" '{"number":66,"state":"closed","merged_at":"2026-02-02T00:00:00Z","base":{"ref":"main"},"title":"Fixes #600","body":"Refs #600"}'
   out=$(run_claim 600)
   assert_contains "$out" "hint: PR #66 merged" "an existing-pr stamp and title cannot establish a fix"
   out=$(run_claim --sweep 600)
   assert_contains "$out" "sweep: #600 no-action state=open verdict=open coverage=complete link=-" "an incidental stamped PR cannot recommend closure"
-  put "repos/o/r/pulls/66" '{"number":66,"state":"closed","merged_at":"2026-02-02T00:00:00Z","body":"RESOLVES: o/r#600"}'
+  put "repos/o/r/pulls/66" '{"number":66,"state":"closed","merged_at":"2026-02-02T00:00:00Z","base":{"ref":"main"},"body":"RESOLVES: o/r#600"}'
   out=$(run_claim --sweep 600)
   assert_contains "$out" "sweep: #600 close-candidate state=open verdict=fixed-on-main coverage=complete link=-" "a fixing stamped PR may recommend closure without relinking"
   put "repos/o/r/issues/600/timeline?per_page=100" '[{"event":"cross-referenced","source":{"issue":{"number":66,"state":"closed","body":"Fixes #600","repository":{"full_name":"o/r"},"pull_request":{"merged_at":"2026-02-02T00:00:00Z"}}}}]'
   out=$(run_claim 600)
   assert_contains "$out" "merged: PR #66 merged" "reusing a timeline PR for a stamp preserves fixing evidence"
   assert_equals 1 "$(printf '%s\n' "$out" | grep -c '^merged: ')" "one PR remains one evidence item"
+  put "repos/o/r/issues/600/timeline?per_page=100" '[{"event":"cross-referenced","source":{"issue":{"number":66,"state":"closed","repository":{"full_name":"o/r"},"pull_request":{"url":"https://api.github.com/repos/o/r/pulls/66"}}}}]'
+  out=$(run_claim 600)
+  assert_contains "$out" "merged: PR #66 merged base=main" "a known timeline state cannot bypass the current stamped PR lookup"
   pass "stamps preserve claims but require fixing references for merged verdicts"
+}
+
+test_closing_issue_references() {
+  local out rc endpoint='graphql?owner=o&name=r&number=71'
+  plain_issue 700 alice
+  put "repos/o/r/issues/700/timeline?per_page=100" '[{"event":"cross-referenced","source":{"issue":{"number":71,"state":"closed","title":"implementation","repository":{"full_name":"o/r"},"pull_request":{"merged_at":"2026-02-02T00:00:00Z"}}}}]'
+  put "repos/o/r/pulls/71" '{"number":71,"state":"closed","merged_at":"2026-02-02T00:00:00Z","base":{"ref":"main"},"body":"Related work"}'
+  put_closing 71 '[{"number":700,"repository":{"nameWithOwner":"other/r"}},{"number":7000,"repository":{"nameWithOwner":"o/r"}}]'
+  out=$(run_claim 700)
+  assert_contains "$out" "verdict: open" "foreign and different-number closing references do not fix this issue"
+  assert_contains "$out" "hint: PR #71 merged base=main" "the unrelated PR remains inspectable"
+
+  put "$endpoint" '{"data":{"repository":{"pullRequest":{"closingIssuesReferences":{"nodes":[{"number":701,"repository":{"nameWithOwner":"o/r"}}],"pageInfo":{"hasNextPage":true,"endCursor":"next"}}}}}}
+{"data":{"repository":{"pullRequest":{"closingIssuesReferences":{"nodes":[{"number":700,"repository":{"nameWithOwner":"O/R"}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}'
+  out=$(run_claim 700)
+  assert_contains "$out" "verdict: fixed-on-main" "a closing reference on the second page establishes fixing evidence"
+  assert_contains "$out" "merged: PR #71 merged base=main" "the fixing PR is named"
+  out=$(run_claim --sweep 700)
+  assert_contains "$out" "sweep: #700 close-candidate state=open verdict=fixed-on-main coverage=complete link=-" "an existing closing reference can recommend closure without relinking"
+
+  fail_on "$endpoint" 'gh: API rate limit exceeded (HTTP 403)'
+  rc=0; out=$(run_claim 700) || rc=$?
+  heal "$endpoint"
+  expect_code 1 "$rc" "a failed closing-reference lookup"
+  assert_contains "$out" "verdict: unknown" "a failed closing-reference read cannot support open or fixed"
+  assert_contains "$out" "coverage: incomplete (prs)" "closing-reference failures reduce coverage"
+  assert_contains "$out" "hint: PR #71 merged base=main" "the unresolved PR remains inspectable"
+
+  put "$endpoint" '{"errors":[{"message":"denied"}],"data":{"repository":{"pullRequest":{"closingIssuesReferences":{"nodes":[{"number":700,"repository":{"nameWithOwner":"o/r"}}],"pageInfo":{"hasNextPage":false}}}}}}'
+  rc=0; out=$(run_claim --sweep 700) || rc=$?
+  expect_code 1 "$rc" "GraphQL errors alongside partial data"
+  assert_contains "$out" "sweep: #700 undetermined state=open verdict=unknown coverage=incomplete link=-" "partial GraphQL data cannot establish a fix"
+  put "$endpoint" '{"data":{"repository":{"pullRequest":null}}}'
+  rc=0; out=$(run_claim 700) || rc=$?
+  expect_code 1 "$rc" "a missing closing-reference connection"
+  assert_contains "$out" "verdict: unknown" "a missing connection cannot be interpreted as an empty connection"
+  put_closing 71 '[{"number":700,"repository":{"nameWithOwner":"o/r"}}]'
+  put "repos/o/r/issues/700/comments?per_page=100" '[{"user":{"login":"maint"},"author_association":"OWNER","body":"<!-- triage: x outcome=existing-pr --> existing-pr -> #60"}]'
+  out=$(run_claim --sweep 700)
+  assert_contains "$out" "sweep: #700 leave-open state=open verdict=partially-covered" "a live stamped helper keeps a closing-reference fix open"
+  build_forge
+  pass "closing references are paginated, repository-bound fixing evidence and failures remain incomplete"
+}
+
+test_default_base_required_for_every_merged_pr_path() {
+  local pair n pr evidence body out rc
+  plain_issue 600 alice
+  put "repos/o/r/issues/600/comments?per_page=100" '[{"user":{"login":"maint"},"author_association":"OWNER","body":"<!-- triage: x outcome=existing-pr --> existing-pr -> #66"}]'
+  put "repos/o/r/issues/400/comments?per_page=100" '[]'
+  for pair in 400:70 600:66 800:80; do
+    n=${pair%:*}; pr=${pair#*:}
+    for evidence in keyword closing-reference; do
+      body="Fixes #$n"
+      [ "$evidence" != closing-reference ] || body="Related #$n"
+      put_closing "$pr" "[{\"number\":$n,\"repository\":{\"nameWithOwner\":\"o/r\"}}]"
+      put "repos/o/r/pulls/$pr" "$(jq -nc --argjson pr "$pr" --arg body "$body" '{number:$pr,state:"closed",merged_at:"2026-02-02T00:00:00Z",base:{ref:"release"},body:$body}')"
+      out=$(run_claim --ref origin/main "$n")
+      assert_contains "$out" "hint: PR #$pr merged base=release" "$evidence on another base stays a hint for path $pair"
+      assert_not_contains "$out" "merged: PR #$pr" "another-base merge must not enter fixing evidence"
+      out=$(run_claim --sweep --ref origin/main "$n")
+      assert_contains "$out" "sweep: #$n no-action state=open verdict=open coverage=complete link=-" "another-base merge cannot recommend closure or linking"
+
+      put "repos/o/r/pulls/$pr" "$(jq -nc --argjson pr "$pr" --arg body "$body" '{number:$pr,state:"closed",merged_at:"2026-02-02T00:00:00Z",base:{ref:"main"},body:$body}')"
+      out=$(run_claim --ref origin/main "$n")
+      assert_contains "$out" "verdict: fixed-on-main" "$evidence on the default base remains fixing evidence for path $pair"
+      assert_contains "$out" "merged: PR #$pr merged base=main" "the default base is named"
+    done
+    fail_on "repos/o/r/pulls/$pr" 'gh: Bad Gateway (HTTP 502)'
+    rc=0; out=$(run_claim --ref origin/main "$n") || rc=$?
+    heal "repos/o/r/pulls/$pr"
+    assert_not_contains "$out" "verdict: open" "a failed PR resolution cannot support open"
+    assert_not_contains "$out" "verdict: fixed-on-main" "earlier evidence cannot bypass the failed shared lookup"
+    assert_contains "$out" "coverage: incomplete" "failed lookups reduce coverage for every discovery path"
+    assert_contains "$out" "PR #$pr unknown" "the failed PR lookup remains inspectable"
+  done
+  put "repos/o/r/issues/600/timeline?per_page=100" '[{"event":"cross-referenced","source":{"issue":{"number":66,"state":"closed","repository":{"full_name":"o/r"},"pull_request":{"merged_at":"2026-02-02T00:00:00Z"}}}}]'
+  out=$(run_claim 600)
+  assert_contains "$out" "verdict: fixed-on-main" "shared timeline and stamp evidence still resolves"
+  assert_equals 1 "$(grep -Fxc 'api repos/o/r/pulls/66' "$FIX/calls.log")" "multiple discovery paths resolve the same PR once"
+
+  fail_on "repos/o/r" 'gh: Not Found (HTTP 404)'
+  rc=0; out=$(run_claim --ref origin/main 800) || rc=$?
+  heal "repos/o/r"
+  expect_code 1 "$rc" "the default branch is required even with an explicit history ref"
+  assert_contains "$out" "verdict: unknown" "an explicit history ref cannot stand in for the repository default branch"
+  put "repos/o/r/pulls/80" '{"number":80,"state":"closed","merged_at":"2026-02-02T00:00:00Z","body":"Fixes #800"}'
+  rc=0; out=$(run_claim 800) || rc=$?
+  expect_code 1 "$rc" "a merged PR with no readable base"
+  assert_contains "$out" "coverage: incomplete (prs)" "missing base metadata reduces coverage"
+  assert_not_contains "$out" "merged: PR #80" "a body keyword cannot bypass a missing base"
+  build_forge
+  pass "timeline, fork, stamp, and closing-reference fixes share the default-base requirement"
+}
+
+test_pagination_identity_and_total_checks() {
+  local out rc kind mode endpoint search label total path
+  for kind in pr issue; do
+    search="search/issues?q=repo:o/r+is:$kind+is:open&per_page=1"
+    for mode in duplicate fewer more changed failed incomplete; do
+      build_forge
+      if [ "$kind" = pr ]; then
+        endpoint='repos/o/r/pulls?state=open&per_page=100'; total=5; label=open-PR
+      else
+        endpoint='repos/o/r/issues?state=open&per_page=100'; total=2; label=open-issue
+        put "$endpoint" "[$(issue_json 100 bob),$(issue_json 4018 alice)]"
+        put "$search" '{"total_count":2}'
+      fi
+      path="$FIX/$(key_of "$endpoint").json"
+      case "$mode" in
+        duplicate) printf '\n%s\n' "$(jq -sc 'add | [.[0]]' "$path")" >> "$path" ;;
+        fewer) put "$search" "{\"total_count\":$((total + 1))}" ;;
+        more) put "$search" "{\"total_count\":$((total - 1))}" ;;
+        changed) put "$search.after" "{\"total_count\":$((total + 1))}" ;;
+        failed) fail_on "$search.after" 'gh: API rate limit exceeded (HTTP 403)' ;;
+        incomplete) put "$search.after" "{\"total_count\":$total,\"incomplete_results\":true}" ;;
+      esac
+      rc=0
+      if [ "$kind" = pr ]; then out=$(run_claim 100) || rc=$?; else out=$(run_claim --sweep) || rc=$?; fi
+      expect_code 1 "$rc" "$kind pagination mode $mode must be unverified"
+      assert_contains "$out" "$label" "the inconsistent input is named"
+      assert_contains "$out" "unverified" "the list cannot report complete coverage"
+      assert_not_contains "$out" "verdict: open" "an unverified corpus cannot support an open verdict"
+      assert_not_contains "$out" "verdict=open" "an unverified issue list cannot support no-action from open"
+      if [ "$kind" = issue ]; then
+        assert_contains "$out" "sweep: #100 undetermined" "the sweep cannot recommend no action on an incomplete list"
+        assert_contains "$out" "sweep: #4018 leave-open" "a positive live claim is preserved despite incomplete coverage"
+        assert_contains "$out" "sweep: 2 issue(s) screened" "duplicate issue identities are screened only once"
+        assert_equals 1 "$(printf '%s\n' "$out" | grep -c '^sweep: #100 ')" "an issue has only one disposition"
+      fi
+      rm -f "$FIX/$(key_of "$search").after.json" "$FIX/$(key_of "$search").after.fail"
+    done
+  done
+  build_forge
+  put "repos/o/r/pulls?state=open&per_page=100" "$(jq -nc '[range(1000;1100) | {number:.,title:"unrelated",head:{ref:"misc"}}], [{number:1099,title:"unrelated"},{number:1100,title:"unrelated"}]')"
+  put "search/issues?q=repo:o/r+is:pr+is:open&per_page=1" '{"total_count":101}'
+  rc=0; out=$(run_claim 100) || rc=$?
+  expect_code 1 "$rc" "a shifted 101-PR pagination boundary"
+  assert_contains "$out" "corpus=unverified(101/101)" "duplicate rows invalidate coverage even when unique counts match"
+  assert_contains "$out" "102 rows, 101 unique, totals 101 -> 101" "the overlapping page is disclosed"
+  assert_contains "$out" "verdict: unknown" "a missing new claim cannot be reported as open"
+  build_forge
+  put "repos/o/r/issues?state=open&per_page=100" '[]'
+  put "search/issues?q=repo:o/r+is:issue+is:open&per_page=1" '{"total_count":1}'
+  rc=0; out=$(run_claim --sweep) || rc=$?
+  expect_code 1 "$rc" "an empty inconsistent issue list"
+  assert_contains "$out" "sweep: 0 issue(s) screened" "an empty list does not invent issues"
+  pass "both paginated lists deduplicate identities and reject inconsistent or unreadable totals"
 }
 
 test_failed_reads_never_yield_open() {
@@ -358,7 +537,7 @@ test_short_or_unverified_corpus_is_disclosed() {
   put "$search" '{"total_count":9,"incomplete_results":false}'
   rc=0; out=$(run_claim 100) || rc=$?
   expect_code 1 "$rc" "a truncated corpus"
-  assert_contains "$out" "corpus=truncated(5/9)" "a short corpus is reported with its counts"
+  assert_contains "$out" "corpus=unverified(5/9)" "a short corpus is reported with its counts"
   assert_contains "$out" "verdict: unknown" "a short corpus must not support open"
   rc=0; out=$(run_claim 4018) || rc=$?
   assert_contains "$out" "verdict: claimed" "positive evidence still stands on a short corpus"
@@ -503,7 +682,8 @@ test_sweep_all_open_issues() {
 
   put "search/issues?q=repo:o/r+is:issue+is:open&per_page=1" '{"total_count":7,"incomplete_results":false}'
   out=$(run_claim --sweep) || true
-  assert_contains "$out" "open-issue list is short: listed 2 of 7" "a short issue list is disclosed"
+  assert_contains "$out" "open-issue list unverified: 2 rows, 2 unique, totals 7 -> 7" "a short issue list is disclosed"
+  assert_contains "$out" "sweep: #100 undetermined state=open verdict=unknown coverage=incomplete" "an unverified issue list cannot support no-action from open"
   pass "a sweep with no issue numbers screens every listed open issue"
 }
 
@@ -530,6 +710,9 @@ test_fork_branch_heading_a_merged_pr
 test_related_commit_after_helper_withdrawal
 test_fixing_reference_boundaries_and_aggregation
 test_stamped_pr_fixing_references
+test_closing_issue_references
+test_default_base_required_for_every_merged_pr_path
+test_pagination_identity_and_total_checks
 test_failed_reads_never_yield_open
 test_short_or_unverified_corpus_is_disclosed
 test_history_that_cannot_look_is_unknown
