@@ -261,6 +261,32 @@ unit_away_entry_from_quiet_writes_away() {
   rm -rf "$st"
 }
 
+# Going /afk from quiet mode must not leave quiet standing beside the record: a
+# failed daemon launch rolls the flag back to whatever stood before it, so the
+# quiet flag has to be gone by the time `enter` returns.
+unit_away_entry_from_quiet_clears_the_quiet_flag() {
+  local st out
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet-cleared.XXXXXX")
+  mkdir -p "$st/state"
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" start-native >/dev/null 2>&1 \
+    || fail "quiet flag cleared: quiet entry failed"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'ship it' >/dev/null 2>&1 \
+    && [ -f "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk" ]; then
+    pass "quiet to away: enter clears the standing quiet flag as it writes the record"
+  else
+    fail "quiet to away: enter left '$(read_mode "$st/state")' standing beside the record"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
+    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start 2>&1)
+  if [ -f "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk" ]; then
+    pass "quiet to away: a failed start rolls back to no flag, never to quiet, beside the record"
+  else
+    fail "quiet to away: the failed start restored '$(read_mode "$st/state")' beside the record: $out"
+  fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
+  rm -rf "$st"
+}
+
 unit_failed_daemon_launch_preserves_the_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-failed-record.XXXXXX")
@@ -1345,6 +1371,7 @@ unit_pi_enter_stop_does_not_claim_a_daemon_terminal
 unit_daemon_entry_requires_the_record
 unit_quiet_entry_needs_no_record
 unit_away_entry_from_quiet_writes_away
+unit_away_entry_from_quiet_clears_the_quiet_flag
 unit_failed_daemon_launch_preserves_the_record
 unit_stop_archives_the_record_last
 unit_relative_paths_are_absolute_before_daemon_launch
