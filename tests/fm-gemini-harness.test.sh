@@ -129,8 +129,9 @@ test_gemini_node_bundle_is_not_ancestry_detectable() {
   comm=$(node -e 'const{execSync}=require("child_process");process.stdout.write(execSync("ps -o comm= -p "+process.pid).toString().trim())' 2>/dev/null)
   [ -n "$comm" ] || return 0
   case "$(basename -- "$comm")" in node*)
-    # A platform whose node DOES report `node` reaches the interpreter arm, and
-    # there the gemini script path must win.
+    # A platform whose comm basename matches production's `node*` interpreter
+    # arm, including a versioned name, reaches that arm, and there the gemini
+    # script path must win.
     cat > "$dir/gemini" <<'JS'
 const { spawnSync } = require('child_process');
 const env = { ...process.env };
