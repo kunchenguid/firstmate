@@ -101,6 +101,10 @@
 # regular file, or text carrying its own "Delivery contract: mode=" line (which
 # a later scout promotion could not outrank), stops the scaffold before
 # anything is written. Secondmate charters never take it.
+# When a task's changed or target paths are already known, Firstmate may state
+# them in the filled task text on a "Target paths: <path> [<path>...]" line, and
+# typed dispatch resolution routes declared deployment-configuration paths by
+# that fact (contract: docs/configuration.md "Typed dispatch resolution").
 # Refuses to overwrite an existing brief.
 set -eu
 

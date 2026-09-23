@@ -712,6 +712,183 @@ TYPESAFE_API_KEY=$KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF"
 assert_contains "$out" '  status: error' "http 500 is a TOON error outcome"
 pass "API, transport, and response failures are error outcomes with exit 0"
 
+# --- path force: declared target paths route deployment work in code ----------
+PATH_BRIEF="$TMP_ROOT/path-brief.md"
+CAREFUL_RULES="$TMP_ROOT/careful-rules.json"
+REORDERED_RULES="$TMP_ROOT/reordered-rules.json"
+cat > "$CAREFUL_RULES" <<'JSON'
+{
+  "rules": [
+    { "when": "A trivial mechanical edit.", "use": { "harness": "claude", "model": "haiku", "effort": "low" } },
+    { "when": "A scout investigation whose deliverable is a report.", "use": { "harness": "claude", "model": "sonnet", "effort": "high" } },
+    { "when": "Migrations, schema, CI gates, credentials, or anything that reaches staging or production.",
+      "path_force": "deployment-config",
+      "use": [ { "harness": "claude", "model": "opus", "effort": "high" },
+               { "harness": "cursor", "model": "cursor-grok-4.6-high" } ] }
+  ],
+  "default": [ { "harness": "claude", "model": "sonnet", "effort": "medium" } ]
+}
+JSON
+# The same three rules in a different order, as another home's private file
+# would carry them: the careful rule sits at position 1 instead of 3.
+jq '{rules: [.rules[2], .rules[0], .rules[1]], default: .default}' "$CAREFUL_RULES" > "$REORDERED_RULES"
+
+write_careful_response() {  # <path> <choice>: an answer over the three careful rules
+  cat > "$1" <<JSON
+{ "model": "jev-1.13.0",
+  "answers": { "rule": { "type": "choice", "choice": "$2", "confidence": 0.99,
+    "probabilities": { "rule_1": 0.97, "rule_2": 0.01, "rule_3": 0.01, "default": 0.01 } } },
+  "usage": { "input_tokens": 400, "output_tokens": 30 } }
+JSON
+}
+
+brief_with_paths() {  # <target-paths line body>
+  { cat "$BRIEF"; printf '\nTarget paths: %s\n' "$1"; } > "$PATH_BRIEF"
+}
+
+cp "$CAREFUL_RULES" "$RULES"
+brief_with_paths 'infra/prod.tf'
+reset_log
+write_careful_response "$RESPONSE" rule_1
+TYPESAFE_API_KEY=$KEY run code out err "$PATH_BRIEF" --project pager
+expect_code 0 "$code" "a forced route exits 0"
+assert_contains "$out" '  status: clear' "a forced route resolves to a profile"
+assert_contains "$out" '  decided_by: path-forced' "a forced route says so in the output"
+assert_contains "$out" '  rule: rule_3 (Migrations, schema, CI gates, credentials, or anything that )' "the forced rule is the one declaring path_force"
+assert_contains "$out" '  forced_path: infra/prod.tf   forced_pattern: *.tf or *.tfvars' "the matched path and pattern are reported"
+assert_not_contains "$out" '  probabilities:' "a forced route reports no model probabilities"
+assert_not_contains "$out" 'confidence:' "a forced route reports no model confidence"
+assert_absent "$LOG/argv" "a forced route makes no model call"
+assert_present "$LOG/quota-axi.calls" "a forced route still reads quota evidence"
+assert_contains "$out" 'candidate: claude:opus  provider=claude  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  -> eligible' "forced candidates carry the same quota evidence"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-high  provider=cursor  scope=all_models  remaining=91%  spendPriority=0.7597  runway=through_reset  -> eligible' "every forced candidate is accounted for"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-high'" "the forced rule's profiles run the same spendPriority argmax"
+pass "a declared deployment path forces the careful rule in code, with no model call"
+
+# The careful rule is found by its declaration, never by position.
+cp "$REORDERED_RULES" "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PATH_BRIEF" --project pager
+assert_contains "$out" '  decided_by: path-forced' "a home with a different rule order still forces"
+assert_contains "$out" '  rule: rule_1 (Migrations, schema, CI gates, credentials, or anything that )' "the forced rule follows the declaration to its new position"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-high'" "the reordered home resolves the same forced profiles"
+assert_absent "$LOG/argv" "the reordered home makes no model call either"
+pass "path force finds the careful rule by declaration, not by rule index"
+
+# Every path class named in the fact list.
+cp "$CAREFUL_RULES" "$RULES"
+for pair in \
+  'vercel.json|vercel.json' \
+  'apps/web/vercel.json|vercel.json' \
+  'infra/main.tf|*.tf or *.tfvars' \
+  'infra/prod.tfvars|*.tf or *.tfvars' \
+  'infra/stack.cfn.yaml|CloudFormation template' \
+  'cloudformation/pipeline.yml|CloudFormation template directory' \
+  'k8s/service.yaml|Kubernetes manifest directory' \
+  'kubernetes/koslink-ai/deployment.yaml|Kubernetes or ingress manifest' \
+  'argocd/koslink-ai.yaml|ArgoCD manifest directory' \
+  'deploy/argo/app.yaml|ArgoCD manifest directory' \
+  'template.yaml|CloudFormation template' \
+  'services/api/template.yml|CloudFormation template' \
+  'infra/network.template|CloudFormation template' \
+  'infra/network.template.json|CloudFormation template' \
+  'infra/network.template.yaml|CloudFormation template' \
+  'charts/api/values.yaml|Helm chart manifest' \
+  'charts/api/Chart.yaml|Helm chart manifest' \
+  'helm/api/service.yaml|Helm chart directory' \
+  'ops/ingress-nginx.yml|Kubernetes or ingress manifest' \
+  'scripts/deploy/deploy.ps1|deploy or release script' \
+  'scripts/deployment/env.sh|deploy or release script' \
+  'bin/redeploy.sh|deploy or release script' \
+  '.github/workflows/release.yml|release workflow' \
+  '.github/workflows/publish-image.yaml|release workflow' \
+  'tests/fixtures/deploy.sh|deploy or release script'; do
+  brief_with_paths "${pair%%|*}"
+  reset_log
+  TYPESAFE_API_KEY=$KEY run code out err "$PATH_BRIEF"
+  assert_contains "$out" '  decided_by: path-forced' "declared path forces the careful rule: ${pair%%|*}"
+  assert_contains "$out" "  forced_path: ${pair%%|*}   forced_pattern: ${pair#*|}" "the matched pattern is named: ${pair%%|*}"
+  assert_absent "$LOG/argv" "a forced path never calls the model: ${pair%%|*}"
+done
+pass "every deployment-configuration path class in the fact list forces the careful rule"
+
+# Near misses: a declared path that only reads like deployment work falls
+# through to the model unchanged. A path under tests/ is a deliberate match
+# above, because forcing is the safe direction and the list carries no
+# exclusions; a docs page or a UI chart directory is not.
+for near in docs/deployment.md docs/template-guide.md src/application.yaml src/argonaut/app.yaml README.md src/charts/bar.tsx app/terraform-notes.md src/deploy_helper.py .github/workflows/ci.yml; do
+  brief_with_paths "$near"
+  reset_log
+  write_careful_response "$RESPONSE" rule_1
+  TYPESAFE_API_KEY=$KEY run code out err "$PATH_BRIEF"
+  assert_not_contains "$out" 'decided_by' "a near miss never forces: $near"
+  assert_contains "$out" '  rule: rule_1 (A trivial mechanical edit.)   confidence: 0.99' "a near miss resolves from the model answer: $near"
+  assert_present "$LOG/argv" "a near miss still calls the model: $near"
+done
+pass "near-miss paths fall through to the model unchanged"
+
+# Paths are read only from the explicit line, and only a declaring rules file forces.
+reset_log
+write_careful_response "$RESPONSE" rule_1
+printf '%s\n' '# Task' 'Fix the vercel.json rewrite and the terraform in infra/main.tf that broke the production deploy.' > "$PATH_BRIEF"
+TYPESAFE_API_KEY=$KEY run code out err "$PATH_BRIEF"
+assert_not_contains "$out" 'decided_by' "prose naming deployment files never forces"
+assert_present "$LOG/argv" "prose paths leave the model call in place"
+brief_with_paths 'infra/main.tf'
+cp "$BASE_RULES" "$RULES"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$PATH_BRIEF"
+assert_not_contains "$out" 'decided_by' "a rules file declaring no path_force never forces"
+assert_present "$LOG/argv" "an undeclared home keeps the model call"
+pass "only an explicit Target paths line and a declared careful rule force a route"
+
+# Only the documented line form declares paths, and the existing status
+# semantics hold on the forced rule.
+cp "$CAREFUL_RULES" "$RULES"
+brief_with_paths 'README.md infra/main.tf'
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PATH_BRIEF"
+assert_contains "$out" '  decided_by: path-forced' "the exact target-paths form forces the careful rule"
+assert_contains "$out" '  forced_path: infra/main.tf   forced_pattern: *.tf or *.tfvars' "a declared path list is read token by token"
+assert_absent "$LOG/argv" "the exact form makes no model call"
+mkdir -p "$TMP_ROOT/globcwd/infra"
+: > "$TMP_ROOT/globcwd/infra/one.tf"
+: > "$TMP_ROOT/globcwd/infra/two.tf"
+brief_with_paths 'infra/*.tf'
+reset_log
+glob_out=$(cd "$TMP_ROOT/globcwd" && PATH="$FAKEBIN:$BASE_PATH" FM_HOME="$HOME_DIR" TYPESAFE_API_KEY=$KEY "$TOOL" "$PATH_BRIEF" 2>/dev/null)
+assert_contains "$glob_out" '  forced_path: infra/*.tf   forced_pattern: *.tf or *.tfvars' "a declared path is never expanded against the working directory"
+
+# shellcheck disable=SC2016  # the literal backticks are the markdown a brief author might write
+for line in '- Target paths: infra/main.tf' 'Target paths: `infra/main.tf`' 'Target paths: infra/main.tf, src/app.ts'; do
+  { cat "$BRIEF"; printf '\n%s\n' "$line"; } > "$PATH_BRIEF"
+  reset_log
+  write_careful_response "$RESPONSE" rule_1
+  TYPESAFE_API_KEY=$KEY run code out err "$PATH_BRIEF"
+  assert_not_contains "$out" 'decided_by' "an undocumented line form never forces: $line"
+  assert_contains "$out" '  rule: rule_1 (A trivial mechanical edit.)   confidence: 0.99' "an undocumented line form resolves from the model answer: $line"
+  assert_present "$LOG/argv" "an undocumented line form still calls the model: $line"
+done
+
+brief_with_paths 'infra/main.tf'
+jq '.rules[2].approval = "captain"' "$CAREFUL_RULES" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PATH_BRIEF"
+assert_contains "$out" '  status: escalate' "captain approval still gates the forced rule"
+assert_contains "$out" '  decided_by: path-forced' "an escalated forced route still reports how it was decided"
+assert_contains "$out" "  reason: rule requires the captain's explicit approval before dispatch" "the approval reason is unchanged on a forced route"
+assert_not_contains "$out" '  profile:' "an approval-gated forced route emits no profile"
+jq '.rules[2].floor = {"scope":"model:fable","min_percent":80,"provider":"claude"}' "$CAREFUL_RULES" > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$PATH_BRIEF"
+assert_contains "$out" '  status: clear' "a forced rule below its floor still resolves"
+assert_contains "$out" '  note: rule rule_3 floor model:fable below 80%: fall through to default' "rule floor handling is unchanged on a forced route"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'medium'" "a forced rule below its floor resolves among the default profiles"
+assert_absent "$LOG/argv" "floor fall-through on a forced route makes no model call"
+cp "$BASE_RULES" "$RULES"
+pass "only the documented line form declares paths, and approval and floor semantics hold on a forced route"
+
 # --- configuration errors exit 2 and select nothing ----------------------------------
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err
@@ -730,6 +907,9 @@ assert_contains "$err" 'not JSON' "non-JSON rules is named"
 for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"approval":"firstmate"}]}|approval must be "captain" when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"select":"mystery"}]}|unknown select: mystery' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"path_force":true}]}|path_force must be "deployment-config" when present' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"path_force":"deploy"}]}|path_force must be "deployment-config" when present' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"},"path_force":"deployment-config"},{"when":"y","use":{"harness":"claude"},"path_force":"deployment-config"}]}|at most one rule may declare path_force' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"floor":{"scope":"model:fable","min_percent":20,"provider":"CLAUDE"}}]}|rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\z' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":""}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
