@@ -312,4 +312,3 @@ grep -q -- '--approve' "$SCRATCH/spawn-5.out" \
 pass "a pi whose --help omits --approve is refused before endpoint or metadata exists$(version_note)"
 
 cleanup_all
-trap - EXIT
