@@ -211,8 +211,7 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 
 ## Fleet activity ledger (config/fleet-ledger)
 
-The optional local, gitignored `config/fleet-ledger` presence flag opts this home into the default-off fleet activity ledger at `state/fleet-ledger.jsonl`, and it is not inherited by second mate homes.
-[`fleet-ledger.md`](fleet-ledger.md) owns the record contract and its limits.
+See [`fleet-ledger.md`](fleet-ledger.md) for the opt-in setup, record contract, and limits.
 
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
