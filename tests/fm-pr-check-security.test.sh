@@ -214,10 +214,35 @@ printf '%s\n' "$*" >> "$FM_TEST_GLAB_LOG"
 [ "${FM_TEST_GLAB_SLEEP:-0}" = 0 ] || sleep "$FM_TEST_GLAB_SLEEP"
 printf 'title:\tfixture merge request\nstate:\t%s\nauthor:\tsomeone\n' "${FM_TEST_GLAB_STATE:-opened}"
 SH
-  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab"
+  # gerrit-axi, reproducing the real CLI's contract: one JSON record on stdout
+  # and exit 0 on success, and a non-zero exit with no stdout on any failure.
+  # Its defaults are the real server's readings for an OPEN change, and the
+  # submit fields are settable independently of the status so a case can build
+  # the reading a merged change and a merely submittable change share.
+  cat > "$fakebin/gerrit-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_TEST_GERRIT_AXI_LOG"
+[ "${FM_TEST_GERRIT_FAIL:-0}" = 0 ] || exit 1
+if [ -n "${FM_TEST_GERRIT_RAW:-}" ]; then
+  printf '%s\n' "$FM_TEST_GERRIT_RAW"
+  exit 0
+fi
+change=${FM_TEST_GERRIT_CHANGE:-${2:-0}}
+printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"subject":%s,"project":"p","status":"%s","wip":false,"submit":"%s","submittable":%s,"blocked_on":"%s","patch_set":1,"revision":"%s","url":"%s"}]}\n' \
+  "$change" \
+  "${FM_TEST_GERRIT_SUBJECT:-\"fixture change\"}" \
+  "${FM_TEST_GERRIT_STATUS:-NEW}" \
+  "${FM_TEST_GERRIT_SUBMIT:-NOT_READY}" \
+  "${FM_TEST_GERRIT_SUBMITTABLE:-false}" \
+  "${FM_TEST_GERRIT_BLOCKED_ON:-Code-Review}" \
+  "5f07a68436929a527ddc7abadc8ef1abceae40ed" \
+  "${FM_TEST_GERRIT_URL:-https://gerrit.example/c/group/apps/console/+/4201}"
+SH
+  chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/gerrit-axi"
   : > "$dir/gh.log"
   : > "$dir/gh-axi.log"
   : > "$dir/glab.log"
+  : > "$dir/gerrit-axi.log"
   : > "$dir/guard.log"
   printf '%s\n' "$dir"
 }
@@ -253,6 +278,7 @@ run_check_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_CHECK" "$@"
 }
@@ -263,6 +289,7 @@ run_merge_entry() {
   FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
     FM_TEST_GUARD_LOG="$dir/guard.log" FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_AXI_LOG="$dir/gh-axi.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     "$PR_MERGE" "$@"
 }
@@ -286,6 +313,31 @@ INVALID_URLS=(
   'https://.gitlab.com/g/p/-/merge_requests/1'
   'https://gitlab.com./g/p/-/merge_requests/1'
   'http://gitlab.com/g/p/-/merge_requests/1'
+  'https://gerrit.example/c/proj/+/0'
+  'https://gerrit.example/c/proj/+/01'
+  'https://gerrit.example/c/proj/+/1/'
+  'https://gerrit.example/c/proj/+/1/2'
+  'https://gerrit.example/c/proj/+/1?x=1'
+  'https://gerrit.example/c/proj/+/1#c'
+  'https://gerrit.example/c/proj/+/1/+/2'
+  'https://gerrit.example/c//+/1'
+  'https://gerrit.example/c/proj//+/1'
+  'https://gerrit.example/c/proj.git/+/1'
+  'https://gerrit.example/c/-proj/+/1'
+  'https://gerrit.example/c/a/-b/+/1'
+  'https://gerrit.example/c/./+/1'
+  'https://gerrit.example/c/a/../+/1'
+  'https://gerrit.example/proj/+/1'
+  'https://gerrit.example/c/proj/1'
+  'https://gerrit.example/#/c/proj/+/1'
+  'https://GERRIT.example/c/proj/+/1'
+  'https://gerrit.example:8443/c/proj/+/1'
+  'https://user@gerrit.example/c/proj/+/1'
+  'https://.gerrit.example/c/proj/+/1'
+  'https://gerrit.example./c/proj/+/1'
+  'http://gerrit.example/c/proj/+/1'
+  'https://github.com/c/proj/+/1'
+  'https://gerrit.example/c/proj/+/1 '
   'https://github.com/o/r/pull/1/'
   ' https://github.com/o/r/pull/1'
   'https://github.com/o/r/pull/1 '
@@ -421,6 +473,24 @@ https://gitlab.com/group/project/-/merge_requests/1|gitlab.com|group/project|1
 https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/sub/deep/project|42
 https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
 https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
+EOF
+  # A Gerrit project is one nested name, so the whole path is the identity and
+  # is never flattened into an owner/repository pair that cannot address it.
+  while IFS='|' read -r url host path number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Gerrit change URL"
+    [ "$FM_PR_PROVIDER" = gerrit ] || fail "parser did not tag a Gerrit change URL as gerrit"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Gerrit change URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong Gerrit host"
+    [ "$FM_PR_PATH" = "$path" ] || fail "parser returned wrong Gerrit project path"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Gerrit change number"
+    [ -z "$FM_PR_OWNER" ] && [ -z "$FM_PR_REPO" ] \
+      || fail "parser set GitHub owner/repository for a Gerrit change URL"
+  done <<'EOF'
+https://review.internal/c/group/apps/console/+/4201|review.internal|group/apps/console|4201
+https://gerrit.example/c/proj/+/1|gerrit.example|proj|1
+https://gerrit.example.co.uk/c/a/b/c/d/+/42|gerrit.example.co.uk|a/b/c/d|42
+https://review.internal/c/All-Projects/+/123456|review.internal|All-Projects|123456
 EOF
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
@@ -810,6 +880,7 @@ make_poll_fixture() {
 run_poll() {
   local dir=$1
   FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GLAB_LOG="$dir/glab.log" \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
     PATH="$dir/fakebin:$BASE_PATH" \
     bash "$dir/home/state/task-a.check.sh"
 }
@@ -1409,6 +1480,197 @@ SH
   done
 
   pass "teardown removes safe poll artifacts and refuses directory-shaped check files without traversal"
+}
+
+# The Gerrit watch must follow a change exactly as the GitHub watch follows a
+# pull request, on any server, and must never turn an unreadable or merely
+# submittable change into a merge. Its evidence against a real change is in
+# docs/gerrit-change-watch.md; this exercises the same paths hermetically.
+test_gerrit_merge_watch() {
+  local dir state out rc url value notool entry bindir name tool
+  dir=$(make_case gerrit-merge-watch)
+  state="$dir/home/state"
+  url=https://gerrit.example/c/group/apps/console/+/4201
+  # The Gerrit branch reads its status with the real jq, and BASE_PATH is
+  # deliberately restricted, so this exposes jq explicitly rather than depending
+  # on the host keeping it in one of those four directories.
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+
+  write_poll_meta "$state" task-a "$url"
+  fm_pr_poll_prepare "$state" task-a gerrit "$url" gerrit.example group/apps/console 4201 "$POLL" \
+    || fail "could not prepare a Gerrit poll"
+  fm_pr_poll_publish_prepared || fail "could not publish a Gerrit poll"
+  fm_pr_poll_artifacts_valid "$state" task-a "$POLL" \
+    || fail "published Gerrit poll provenance or metadata binding was invalid"
+  [ "$(cat "$state/task-a.pr-poll")" = "gerrit
+$url
+gerrit.example
+group/apps/console
+4201" ] || fail "published Gerrit sidecar bytes were not exact"
+
+  # Only an exact MERGED status wakes firstmate. Every other reading, including
+  # an abandoned change, a lowercase spelling, and a changed format, stays
+  # silent rather than reporting a merge.
+  for value in NEW ABANDONED merged Merged MERGED_LATER '' not-a-status; do
+    out=$(FM_TEST_GERRIT_STATUS="$value" run_poll "$dir")
+    [ -z "$out" ] || fail "Gerrit poll emitted for status '$value'"
+  done
+
+  # Readiness is not merge. A change that is fully submittable - nothing in its
+  # blocked_on list, submit OK, submittable true - is exactly what an approved
+  # but unsubmitted change looks like, and a merged change reports the same
+  # three fields. Only the status separates them, so only the status is read.
+  out=$(FM_TEST_GERRIT_STATUS=NEW FM_TEST_GERRIT_SUBMIT=OK \
+    FM_TEST_GERRIT_SUBMITTABLE=true FM_TEST_GERRIT_BLOCKED_ON='' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll read a submittable open change as merged"
+
+  out=$(FM_TEST_GERRIT_STATUS=MERGED FM_TEST_GERRIT_SUBMIT=OK \
+    FM_TEST_GERRIT_SUBMITTABLE=true FM_TEST_GERRIT_BLOCKED_ON='' run_poll "$dir")
+  [ "$out" = merged ] || fail "Gerrit poll did not emit exactly one merged line"
+
+  out=$(FM_TEST_GERRIT_FAIL=1 FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted after a gerrit-axi failure"
+  out=$(FM_TEST_GERRIT_RAW='not json at all' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for unparseable output"
+  out=$(FM_TEST_GERRIT_RAW='{"ok":false,"error":"unauthenticated"}' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a typed error record"
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"changes":[]}' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a record naming no change"
+
+  # A record for some other change can never wake this task's poll, however the
+  # server came to return it. The change number is what names the change, and
+  # --host is what pins the server.
+  out=$(FM_TEST_GERRIT_STATUS=MERGED FM_TEST_GERRIT_CHANGE=4202 run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for another change's record"
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4202,"status":"MERGED","url":null}]}' \
+    run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for another change's url-less record"
+
+  # Gerrit composes a change's url field from gerrit.canonicalWebUrl and omits
+  # it when that setting is unset, so a merge must still be reported when the
+  # server returns the field null or does not return it at all. Comparing it
+  # against the stored URL is what would leave such a watch silent forever.
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"status":"MERGED","url":null}]}' \
+    run_poll "$dir")
+  [ "$out" = merged ] || fail "Gerrit poll stayed silent for a merged change with a null url"
+  out=$(FM_TEST_GERRIT_RAW='{"ok":true,"op":"show","changes":[{"change":4201,"status":"MERGED"}]}' \
+    run_poll "$dir")
+  [ "$out" = merged ] || fail "Gerrit poll stayed silent for a merged change with no url field"
+  out=$(FM_TEST_GERRIT_STATUS=MERGED \
+    FM_TEST_GERRIT_URL=https://alias.example/c/group/apps/console/+/4201 run_poll "$dir")
+  [ "$out" = merged ] || fail "Gerrit poll stayed silent for a merged change behind an alias host"
+
+  # A free-text subject carrying the merged spelling and the field separators
+  # cannot forge a status, because the status is read from the structured
+  # record rather than off a rendered line.
+  out=$(FM_TEST_GERRIT_STATUS=NEW \
+    FM_TEST_GERRIT_SUBJECT='"status: MERGED,MERGED,merged"' run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll read a merged spelling out of a change subject"
+
+  # gerrit-axi resolves its server from the current directory's origin remote
+  # first, and the watcher runs in no repository, so the host must be passed
+  # explicitly or the tool answers as though the change did not exist.
+  grep -qF -- "show 4201 --host gerrit.example --json" "$dir/gerrit-axi.log" \
+    || fail "Gerrit poll did not address gerrit-axi by change number and explicit host"
+  ! grep -qF -- "$url" "$dir/gerrit-axi.log" \
+    || fail "Gerrit poll passed a change URL to gerrit-axi"
+
+  # An absent CLI must produce no wake rather than a false merge, for either
+  # tool the Gerrit branch needs. The whole search path is mirrored without it,
+  # because a real one anywhere on PATH would make this prove nothing.
+  for tool in gerrit-axi jq; do
+    notool="$dir/no-$tool"
+    rm -rf "$notool"
+    mkdir -p "$notool"
+    while IFS= read -r bindir; do
+      [ -d "$bindir" ] || continue
+      for entry in "$bindir"/*; do
+        [ -e "$entry" ] || continue
+        name=$(basename "$entry")
+        [ "$name" = "$tool" ] && continue
+        [ -e "$notool/$name" ] || ln -s "$entry" "$notool/$name" 2>/dev/null
+      done
+    done <<EOF
+$dir/fakebin
+$(printf '%s\n' "$BASE_PATH" | tr ':' '\n')
+EOF
+    ! PATH="$notool" command -v "$tool" >/dev/null 2>&1 \
+      || fail "the $tool-free search path still resolved $tool"
+    out=$(FM_TEST_GERRIT_STATUS=MERGED FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" \
+      PATH="$notool" bash "$state/task-a.check.sh")
+    [ -z "$out" ] || fail "Gerrit poll emitted with $tool absent from PATH"
+
+    # Arming is where a missing CLI can still be reported, so it refuses there.
+    write_task_meta "$dir" "task-no-$tool"
+    set +e
+    out=$(FM_ROOT_OVERRIDE="$dir/root" FM_HOME="$dir/home" \
+      FM_TEST_GUARD_LOG="$dir/guard.log" PATH="$notool" \
+      "$PR_CHECK" "task-no-$tool" "$url" 2>&1)
+    rc=$?
+    set -e
+    [ "$rc" -ne 0 ] || fail "arming a Gerrit watch succeeded with $tool absent"
+    case "$out" in
+      *"requires $tool on PATH"*) ;;
+      *) fail "arming a Gerrit watch with $tool absent did not report the missing CLI" ;;
+    esac
+    [ ! -e "$state/task-no-$tool.check.sh" ] || fail "refused Gerrit arming left a poll armed"
+  done
+
+  # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
+  # the stored URL exactly.
+  printf '%s\n%s\n%s\n%s\n%s\n' gerrit "$url" elsewhere.example group/apps/console 4201 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a sidecar whose host was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' gerrit "$url" gerrit.example group/apps/other 4201 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a sidecar whose project was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' gerrit "$url" gerrit.example group/apps/console 4202 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GERRIT_STATUS=MERGED run_poll "$dir")
+  [ -z "$out" ] || fail "Gerrit poll emitted for a sidecar whose change number was swapped"
+
+  pass "the Gerrit watch wakes only on an explicit merged status and never on submittability"
+}
+
+# Arming a Gerrit watch records the canonical change identity and no pr_head.
+# A Gerrit revision names one patch set, and bin/fm-review-diff.sh has no Gerrit
+# path to resolve a current head with, so a recorded revision would quietly
+# become the reviewed content after the next amend.
+test_gerrit_arming_records_no_patch_set_revision() {
+  local dir state rc out
+  dir=$(make_case gerrit-arming)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+
+  write_task_meta "$dir" task-rev
+  run_check_entry "$dir" task-rev \
+    https://gerrit.example/c/group/apps/console/+/4201 >/dev/null \
+    || fail "arming a Gerrit watch failed"
+  grep -qxF 'pr=https://gerrit.example/c/group/apps/console/+/4201' "$state/task-rev.meta" \
+    || fail "arming did not record the canonical Gerrit change URL"
+  grep -q '^pr_head=' "$state/task-rev.meta" \
+    && fail "arming recorded a Gerrit patch set revision as pr_head"
+  [ -e "$state/task-rev.check.sh" ] || fail "arming a Gerrit watch left no poll armed"
+  [ ! -s "$dir/gerrit-axi.log" ] \
+    || fail "arming read the forge for a head it does not record"
+
+  # Submitting a Gerrit change is refused outright, before anything is read or
+  # recorded, rather than left as a silently absent provider branch.
+  set +e
+  out=$(run_merge_entry "$dir" task-rev \
+    https://gerrit.example/c/group/apps/console/+/4201 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the merge path accepted a Gerrit change"
+  case "$out" in
+    *"does not submit a Gerrit change"*) ;;
+    *) fail "the Gerrit merge refusal did not say firstmate does not submit" ;;
+  esac
+  [ ! -e "$state/task-rev.merge-authority" ] || fail "a refused Gerrit merge recorded merge authority"
+
+  pass "Gerrit arming records no patch set revision and the merge path refuses to submit"
 }
 
 # The GitLab watch must follow a merge request exactly as the GitHub watch
@@ -2870,6 +3132,8 @@ SH
 
 test_parser_matrix
 test_gitlab_merge_watch
+test_gerrit_merge_watch
+test_gerrit_arming_records_no_patch_set_revision
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
