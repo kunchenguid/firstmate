@@ -516,18 +516,21 @@ Each signature below was live-verified against the real installed binary through
 An initial Pi signature sourced only from the installed binary's own UI strings ("Project trust", the internal panel-title component, never the dialog's own rendered heading) was wrong and never matched the real screen.
 This guard's first live run caught that before it shipped, which is the evidence for why this class of check must be driven end to end rather than read off strings or a component name.
 
-Verified 2026-09-22 on Claude Code 2.1.278, pi 0.86.1, and gemini 0.60.0.
+Verified 2026-09-23 on Claude Code 2.1.280, pi 0.87.0, and gemini 0.60.0. The guard reaps every harness process it launches on success, failure, and interrupt; Gemini outlives the tmux hangup and exits on SIGTERM. `tests/fm-launch-prompt-guard-reap.test.sh` is the portable regression for cleanup.
 
 ```sh
 FM_LAUNCH_PROMPT_SIGNALS_LIVE=1 bash tests/fm-launch-prompt-signals-live-e2e.test.sh
 ```
 
 ```
-# live claude version: 2.1.278 (Claude Code)
+# live claude version: 2.1.280 (Claude Code)
+# claude: every launched process exited on the tmux hangup
 ok - claude: a real launch parked on its own rendered trust dialog surfaces through the watcher gate
-# live pi version: 0.86.1
+# live pi version: 0.87.0
+# pi: every launched process exited on the tmux hangup
 ok - pi, pi-signed, omp: a real Pi-engine launch parked on its own rendered trust dialog surfaces through the watcher gate
 # live gemini version: 0.60.0
+# gemini: every launched process exited on SIGTERM after outliving the tmux hangup
 ok - gemini: a real launch parked on its own rendered auth or trust dialog surfaces through the watcher gate
 # checked 3 launch-prompt signature(s) against real installed binaries
 ```
