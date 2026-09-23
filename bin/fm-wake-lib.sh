@@ -551,6 +551,41 @@ fm_lock_claim() {
   return 0
 }
 
+# Windows junction fallback state: '' untried, 'ok', or 'unavailable'.
+# Latched per process so a host without the primitive pays one probe instead
+# of one cmd.exe spawn per lock attempt.
+_FM_LOCK_JUNCTION_STATE=
+
+# Try to create <lockdir> as a Windows directory junction bound to
+# <ownerdir>, verified through the same fm_lock_points_to_owner check the
+# symlink path uses. Reached only after `ln -s` failed to produce a
+# verifiable link: on Git Bash without Developer Mode that call silently
+# copies the owner directory instead, and mklink /J needs no privileges.
+_fm_lock_try_create_junction() {  # <lockdir> <ownerdir>
+  local lockdir=$1 ownerdir=$2 wlock wowner
+  [ "$_FM_LOCK_JUNCTION_STATE" = unavailable ] && return 1
+  command -v cmd.exe >/dev/null 2>&1 || { _FM_LOCK_JUNCTION_STATE=unavailable; return 1; }
+  command -v cygpath >/dev/null 2>&1 || { _FM_LOCK_JUNCTION_STATE=unavailable; return 1; }
+  # A copy-fallback ln -s leaves a real directory where the link belongs.
+  # Only its known files are removed so rmdir still refuses over foreign
+  # content, keeping the fallback unable to overwrite a stranger's lockdir.
+  if [ -e "$lockdir" ] && [ ! -L "$lockdir" ]; then
+    fm_lock_clean_known_files "$lockdir"
+    rmdir "$lockdir" 2>/dev/null || return 1
+  fi
+  wlock=$(cygpath -w "$lockdir" 2>/dev/null) || return 1
+  wowner=$(cygpath -w "$ownerdir" 2>/dev/null) || return 1
+  # //c and //J survive MSYS argument conversion, which would otherwise turn
+  # the bare /c and /J switches into Windows paths and drop cmd.exe into its
+  # interactive prompt.
+  if ! cmd.exe //c mklink //J "$wlock" "$wowner" >/dev/null 2>&1; then
+    _FM_LOCK_JUNCTION_STATE=unavailable
+    return 1
+  fi
+  _FM_LOCK_JUNCTION_STATE=ok
+  fm_lock_points_to_owner "$lockdir" "$ownerdir"
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
@@ -573,6 +608,15 @@ fm_lock_try_create() {
     fi
   else
     fm_lock_remove_stray_owner_link "$lockdir" "$ownerdir"
+    if _fm_lock_try_create_junction "$lockdir" "$ownerdir"; then
+      if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
+        FM_LOCK_OWNER_DIR=$ownerdir
+        return 0
+      fi
+      if fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+        rm -f "$lockdir" 2>/dev/null || true
+      fi
+    fi
   fi
   fm_lock_discard_owner "$ownerdir"
   return 1
