@@ -22,8 +22,9 @@
 # QUIET mode (FM_AFK_MODE=quiet, the /quiet skill) is the same daemon for a
 # captain who stays present, so it is NOT the away posture: a quiet `start` or
 # `start-native` needs no record, never writes one, and refuses while one stands
-# (return from away first). With FM_AFK_MODE unset, a standing record means away
-# and an on-disk quiet flag with no record means a quiet refresh
+# (return from away first), and going /afk out of quiet mode clears the quiet
+# flag as `enter` writes the record. With FM_AFK_MODE unset, a standing record
+# means away and an on-disk quiet flag with no record means a quiet refresh
 # (fm_afk_launch_posture_require).
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
@@ -249,10 +250,7 @@ fm_afk_launch_requested_mode() {
 fm_afk_launch_posture_require() {
   local mode
   mode=$(fm_afk_launch_requested_mode)
-  if [ -z "$mode" ]; then
-    mode=away
-    [ -e "$FM_AFK_LAUNCH_STATE/.afk" ] && mode=$(fm_afk_mode "$FM_AFK_LAUNCH_STATE")
-  fi
+  [ -n "$mode" ] || mode=$(fm_afk_mode "$FM_AFK_LAUNCH_STATE")
   if [ "$mode" = quiet ]; then
     if fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
       fm_afk_launch_log "an away-posture record stands; quiet mode cannot start until the captain's return (bin/fm-afk-return.sh) archives it"
@@ -263,9 +261,20 @@ fm_afk_launch_posture_require() {
   fm_afk_launch_record_require
 }
 
+# The record IS the away posture, and quiet never coexists with one, so writing
+# it clears a standing quiet flag: the captain's explicit /afk wins, and a later
+# `start` failure has no quiet flag left to roll back to.
 fm_afk_launch_enter() {
+  local status
   fm_afk_launch_catchup_pending && return 1
   "$FM_AFK_CONTRACT_CMD" enter "$@"
+  status=$?
+  [ "$status" -eq 0 ] || return "$status"
+  if [ "$(fm_afk_mode "$FM_AFK_LAUNCH_STATE")" = quiet ] \
+    && ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
+    fm_afk_launch_log "failed to clear the quiet-mode flag beside the away-posture record"
+    return 1
+  fi
 }
 
 # The command run inside the created terminal. Real launch runs the shared
