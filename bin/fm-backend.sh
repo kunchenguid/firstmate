@@ -890,7 +890,7 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
 # content assumption. The one consumer is the own-doorbell predicate in
 # bin/fm-task-inbox-lib.sh, shared by the ring and the control plane.
 fm_backend_composer_content() {  # <backend> <target> [expected-label] -> selected composer text or fail
-  local backend=$1
+  local backend=$1 FM_COMPOSER_EXACT_CONTENT=1
   shift
   fm_backend_source "$backend" || return 1
   case "$backend" in

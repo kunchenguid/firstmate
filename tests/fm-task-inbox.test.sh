@@ -29,7 +29,7 @@
 #   7. Own-doorbell submit: a composer holding exactly the doorbell line this
 #      home generates is our own unsent earlier ring, so the ring submits it
 #      with one Enter instead of skipping; any other pending text keeps the
-#      skip. A terminal-wrapped (multi-row) doorbell still identifies as our
+#      skip. A terminal-wrapped (multi-row) doorbell cannot prove our
 #      own text through whitespace-collapsed comparison.
 set -u
 
@@ -292,9 +292,7 @@ test_ring_skips_dead_agent() {
 }
 
 # A fixture composer holding the doorbell submits it with one Enter instead of
-# skipping: the ring returns 0 and types nothing but the key. The wrapped
-# variant splits the long line across two rows, as a narrow terminal renders
-# it, and must still identify as our own text.
+# skipping: the ring returns 0 and types nothing but the key.
 test_ring_submits_own_doorbell() {
   local dir state rec doorbell log rc cap head_c tail_c
   dir="$TMP_ROOT/ring-doorbell"
@@ -323,17 +321,16 @@ test_ring_submits_own_doorbell() {
   PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
     FM_FAKE_TMUX_CAPTURE="$cap" \
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
-  [ "$rc" = 0 ] || fail "a wrapped composer holding our doorbell should submit, got rc=$rc"
-  [ "$(cat "$log")" = "KEY:Enter" ] \
-    || fail "submitting a wrapped doorbell should send exactly one Enter, got:"$'\n'"$(cat "$log")"
-  pass "inbox: the ring submits a composer holding our own doorbell, wrapped or not"
+  [ "$rc" = 1 ] || fail "an unproven wrapped composer should skip, got rc=$rc"
+  [ ! -s "$log" ] || fail "an unproven wrapped composer must send nothing"
+  pass "inbox: the ring submits only a byte-exact doorbell"
 }
 
 # Any other pending text keeps the skip: the ring returns 1 and sends nothing,
 # not even a key. The near-miss variant (our doorbell with extra words) pins
 # the boundary that Firstmate never submits unknown text.
 test_ring_skips_foreign_pending_text() {
-  local dir state rec doorbell log rc cap
+  local dir state rec doorbell log rc cap variant
   dir="$TMP_ROOT/ring-foreign"
   state="$dir/state"
   mkdir -p "$state"
@@ -358,6 +355,16 @@ test_ring_skips_foreign_pending_text() {
     inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
   [ "$rc" = 1 ] || fail "a composer holding our doorbell plus other words should skip, got rc=$rc"
   [ ! -s "$log" ] || fail "a near-miss skip must send nothing at all:"$'\n'"$(cat "$log")"
+  for variant in " ${doorbell}" "${doorbell} " "${doorbell/Firstmate instruction/Firstmate  instruction}" "${doorbell/Firstmate instruction/Firstmateinstruction}" "${doorbell/Firstmate instruction/Firstmate$'\t'instruction}"; do
+    { printf '\n'; printf '❯ %s\n' "$variant"; printf '\n'; } > "$cap"
+    : > "$log"
+    rc=0
+    PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
+      FM_FAKE_TMUX_CAPTURE="$cap" \
+      inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+    [ "$rc" = 1 ] || fail "a whitespace-only near miss should skip, got rc=$rc"
+    [ ! -s "$log" ] || fail "a whitespace-only near miss must send nothing"
+  done
   [ -f "$rec" ] || fail "skipping the ring must leave the durable record in place"
   pass "inbox: the ring keeps skipping a composer holding anything but our own doorbell"
 }

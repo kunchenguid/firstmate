@@ -1521,6 +1521,17 @@ EOF
   plain=$(printf '%s\n' "$screen" | fm_composer_strip_ansi)
   _fm_composer_scan_screen "$plain" '' 1
   _fm_composer_select_cursorless "$plain" || return 1
+  if [ "${FM_COMPOSER_EXACT_CONTENT:-0}" = 1 ]; then
+    [ "$FM_COMPOSER_SELECTED_KIND" = bare ] || return 1
+    [ "$FM_COMPOSER_SELECTED_FIRST" = "$FM_COMPOSER_SELECTED_LAST" ] || return 1
+    raw=$(_fm_composer_screen_row "$FM_COMPOSER_SELECTED_FIRST" "$plain")
+    fm_composer_leading_agent_glyph_var glyph "$raw" || return 1
+    case "$raw" in
+      "$glyph "*) printf '%s' "${raw#"$glyph "}" ;;
+      *) return 1 ;;
+    esac
+    return 0
+  fi
   row=$FM_COMPOSER_SELECTED_FIRST
   while [ "$row" -le "$FM_COMPOSER_SELECTED_LAST" ]; do
     raw=$(_fm_composer_screen_row "$row" "$screen")

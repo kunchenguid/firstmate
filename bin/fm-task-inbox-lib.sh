@@ -275,18 +275,12 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # unsent earlier ring, not user text: an Enter swallowed by a completion popup
 # or a not-yet-ready pane leaves the constant line sitting pending, and every
 # later ring would skip on it forever. Returns 0 only for that one constant
-# text, never for anything else. A terminal wrap reflows the long line into
-# several rows, which the extractor joins with spaces, so the comparison also
-# accepts whitespace-collapsed equality: collapsing cannot alias real user
-# text onto the constant doorbell line.
+# text, never for anything else.
 fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <doorbell-line> [expected-label]
-  local backend=$1 target=$2 doorbell=$3 label=${4:-} text squashed squashed_doorbell
+  local backend=$1 target=$2 doorbell=$3 label=${4:-} text
   [ -n "$doorbell" ] || return 1
   text=$(fm_backend_composer_content "$backend" "$target" "$label" 2>/dev/null) || return 1
-  [ "$text" = "$doorbell" ] && return 0
-  squashed=$(printf '%s' "$text" | tr -d '[:space:]')
-  squashed_doorbell=$(printf '%s' "$doorbell" | tr -d '[:space:]')
-  [ -n "$squashed" ] && [ "$squashed" = "$squashed_doorbell" ]
+  [ "$text" = "$doorbell" ]
 }
 
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
