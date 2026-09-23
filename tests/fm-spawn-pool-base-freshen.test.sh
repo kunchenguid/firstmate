@@ -238,6 +238,38 @@ make_originless_case() {  # <name> <id>
   printf '%s\n' "$case_dir|$home|$project|$pool|$fakebin|$initial|main"
 }
 
+test_graphify_out_links_only_when_worktree_flag_is_present() {
+  local rec id out status source_graph linked_graph
+  id='pool-graphify-off-r1'
+  rec=$(make_originless_case graphify-off "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJECT_DIR/graphify-out"
+  printf '%s\n' '{"nodes":[]}' > "$PROJECT_DIR/graphify-out/graph.json"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn should succeed with graphify-out present but config/graphify-worktree absent"$'\n'"$out"
+  [ ! -e "$POOL_DIR/graphify-out" ] && [ ! -L "$POOL_DIR/graphify-out" ] \
+    || fail "spawn created a graphify-out entry without the opt-in flag"
+
+  id='pool-graphify-on-r1'
+  rec=$(make_originless_case graphify-on "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJECT_DIR/graphify-out"
+  printf '%s\n' '{"nodes":[]}' > "$PROJECT_DIR/graphify-out/graph.json"
+  : > "$HOME_DIR/config/graphify-worktree"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 0 "$status" "spawn should remain successful when graphify worktree linking is enabled"$'\n'"$out"
+  [ -L "$POOL_DIR/graphify-out" ] || fail "spawn did not create a graphify-out symlink in the task worktree"
+  source_graph=$(cd "$PROJECT_DIR/graphify-out" && pwd -P)
+  linked_graph=$(readlink "$POOL_DIR/graphify-out")
+  [ "$linked_graph" = "$source_graph" ] || fail "graphify-out link was not absolute: $linked_graph"
+  [ -f "$POOL_DIR/graphify-out/graph.json" ] || fail "task worktree graphify-out link does not reach the source graph"
+  pass "spawn links graphify-out into task worktrees only when config/graphify-worktree is present"
+}
+
 test_originless_pool_launches_without_a_freshness_fetch() {
   local rec id out status before
   id='pool-originless-r6'
@@ -749,6 +781,7 @@ test_linked_spawning_home_rejects_primary_before_refresh
 test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
+test_graphify_out_links_only_when_worktree_flag_is_present
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base

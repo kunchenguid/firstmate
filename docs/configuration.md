@@ -569,6 +569,14 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## Graphify worktree links (config/graphify-worktree)
+
+The optional local, gitignored `config/graphify-worktree` presence flag enables default-off graphify sharing for ship and scout task worktrees.
+With the flag absent, spawns do not link `graphify-out/` into task worktrees and generated briefs do not mention graphify.
+With the flag present, `bin/fm-spawn.sh` links the source clone's `graphify-out/` into each ship or scout worktree when that source directory exists, and `bin/fm-brief.sh` tells those workers to try `graphify query` for codebase questions before grep or bulk reads.
+The source graph remains in the project clone, existing task worktree entries are preserved, link failures warn without blocking spawn, and `bin/fm-teardown.sh` removes only a worktree `graphify-out` symlink guarded by `-L`.
+Secondmate charters and homes are unchanged by this flag.
+
 ## Fleet activity ledger (config/fleet-ledger)
 
 See [`fleet-ledger.md`](fleet-ledger.md) for the opt-in setup, record contract, and limits.

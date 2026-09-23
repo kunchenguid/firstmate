@@ -221,6 +221,44 @@ test_ship_modes_generate_clean_briefs() {
   pass "fm-brief.sh: no-mistakes/direct-PR/local-only briefs generate cleanly"
 }
 
+test_graphify_worktree_flag_controls_ship_and_scout_guidance() {
+  local home brief graph_line count
+  home="$TMP_ROOT/graphify-guidance-home"
+  mkdir -p "$home/data" "$home/config"
+  # shellcheck disable=SC2016 # the expected brief line intentionally stays literal.
+  graph_line='If `graphify-out/` exists in the worktree, answer codebase questions with `graphify query "<question>" --budget N` before reaching for grep or bulk file reads.'
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" graphify-off-ship sample --mode direct-PR >/dev/null 2>&1 \
+    || fail "ship graphify-off scaffold failed"
+  assert_no_grep "graphify query" "$home/data/graphify-off-ship/brief.md" \
+    "ship brief should not mention graphify when config/graphify-worktree is absent"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" graphify-off-scout sample --scout >/dev/null 2>&1 \
+    || fail "scout graphify-off scaffold failed"
+  assert_no_grep "graphify query" "$home/data/graphify-off-scout/brief.md" \
+    "scout brief should not mention graphify when config/graphify-worktree is absent"
+
+  : > "$home/config/graphify-worktree"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" graphify-on-ship sample --mode direct-PR >/dev/null 2>&1 \
+    || fail "ship graphify-on scaffold failed"
+  brief="$home/data/graphify-on-ship/brief.md"
+  count=$(grep -Fxc -- "$graph_line" "$brief" || true)
+  [ "$count" = 1 ] || fail "ship brief should contain exactly one graphify query instruction line (got $count)"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" graphify-on-scout sample --scout >/dev/null 2>&1 \
+    || fail "scout graphify-on scaffold failed"
+  brief="$home/data/graphify-on-scout/brief.md"
+  count=$(grep -Fxc -- "$graph_line" "$brief" || true)
+  [ "$count" = 1 ] || fail "scout brief should contain exactly one graphify query instruction line (got $count)"
+
+  FM_SECONDMATE_CHARTER='Keep the sample domain idle.' \
+    FM_HOME="$home" "$ROOT/bin/fm-brief.sh" graphify-on-mate --secondmate sample >/dev/null 2>&1 \
+    || fail "secondmate graphify-on scaffold failed"
+  assert_no_grep "graphify query" "$home/data/graphify-on-mate/brief.md" \
+    "secondmate charter should not receive the task graph query instruction"
+  pass "fm-brief.sh: config/graphify-worktree controls graphify guidance for ship and scout briefs"
+}
+
 # A ship task's delivery mode is firstmate's per-task decision, so a missing or
 # unusable value must stop the scaffold instead of silently defaulting. The
 # no-mistakes-prod-only row is the conditional registry policy: it is never a task
@@ -1399,6 +1437,7 @@ test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
 test_ship_modes_generate_clean_briefs
+test_graphify_worktree_flag_controls_ship_and_scout_guidance
 test_ship_mode_is_required_and_closed_set
 test_ship_mode_is_explicit_not_registry
 test_delivery_flags_are_refused_where_they_do_not_apply
