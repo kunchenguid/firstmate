@@ -1136,12 +1136,6 @@ def abandon_charged_search(
     error: BaseException,
     falsification_block: dict[str, Any] | None,
 ) -> None:
-    if falsification_block is not None and phase == "falsification":
-        falsification_block = {
-            **falsification_block,
-            "ok": False,
-            "failure_class": falsification_block["failure_class"] or "falsification-not-completed",
-        }
     publish_final(
         workspace,
         state,

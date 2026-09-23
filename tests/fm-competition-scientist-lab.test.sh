@@ -546,12 +546,18 @@ PY
 import json
 import pathlib
 import sys
-final = json.loads((pathlib.Path(sys.argv[1]) / ".run/final.json").read_text())
+workspace = pathlib.Path(sys.argv[1])
+ledger = [json.loads(line) for line in (workspace / ".run/ledger.jsonl").read_text().splitlines() if line]
+row = [r for r in ledger if r["kind"] == "falsification"][0]
+final = json.loads((workspace / ".run/final.json").read_text())
 assert final["aborted"]["phase"] == "falsification", final["aborted"]
-assert final["falsification"]["ok"] is False, "both arms scored but the phase aborted, so ok must be false"
-assert final["falsification"]["failure_class"] == "falsification-not-completed", final["falsification"]
+assert row["failure_class"] == "", row["failure_class"]
+assert row["verdict"] in {"KEEP", "REVERT"}, row["verdict"]
+assert final["falsification"]["failure_class"] == row["failure_class"], (final["falsification"], row)
+assert final["falsification"]["ok"] is True, "both arms scored, so the block must not invent a failure"
+assert final["falsification"]["metrics"] is not None, final["falsification"]
 PY
-  pass "competition scientist: the final falsification block reports the whole two-arm phase"
+  pass "competition scientist: the final falsification block agrees with its ledger row"
 }
 
 test_results_tsv_keeps_a_fixed_column_count() {

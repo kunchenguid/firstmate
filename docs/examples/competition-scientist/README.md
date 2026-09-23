@@ -53,7 +53,7 @@ The default per-attempt cap is 8,000 tokens, and the default planning cap is 9,6
 Before final promotion, the proposed controller runs one deterministic counterfactual falsification evaluation.
 The final sealed audit runs once after search completion and never changes an earlier attempt verdict.
 The falsification phase evaluates the selected candidate and the baseline control separately, and a failure of either arm is recorded against that arm rather than against the candidate.
-`.run/final.json`'s `falsification` block describes the whole phase: it reports `ok` false with the arm-prefixed failure class whenever either arm did not complete, and never reports success for a phase that aborted.
+`.run/final.json`'s `falsification` block reports the same outcome as the phase's ledger row: `ok` false with the arm-prefixed failure class whenever either arm did not complete, and the arms' real result otherwise.
 Both one-shot budgets are charged to `.run/state.json` before the evaluation they gate, so a charged call is never retried.
 If a charged falsification or sealed call is interrupted, raises, or returns a bounded resource or runtime failure, the search ends there: `finish` publishes a failed `.run/final.json` whose `aborted` block names the charged phase and the underlying failure, marks the workspace complete, and leaves every earlier attempt record intact.
 A published successful record therefore always carries a real sealed score; it never reports a completed audit that produced none.
@@ -185,9 +185,9 @@ Every field is written on one line with tabs and every ASCII or Unicode line bre
 `.run/final.json` alone contains the post-search sealed score, or an `aborted` block naming the charged phase when an audit could not complete.
 No sealed dataset file exists in the proposer-visible workspace before finalization.
 
-Failure classes include immutable or undeclared-surface refusal, unparseable, duplicate, or confounded proposal, budget refusal, syntax, timeout, CPU-limit kill, OOM, network denial, runtime failure, nondeterministic replay, and the terminal `falsification-not-completed` and `sealed-not-completed` classes recorded when a charged audit could not finish.
+Failure classes include immutable or undeclared-surface refusal, unparseable, duplicate, or confounded proposal, budget refusal, syntax, timeout, CPU-limit kill, OOM, network denial, runtime failure, nondeterministic replay, and the terminal `sealed-not-completed` class recorded when a charged sealed audit could not finish.
 A falsification arm that fails outright is recorded with its arm prefix, as `candidate-<class>` or `baseline-<class>`.
-An audit abandoned before the sealed call names its phase only in the `aborted` block, leaving the sealed failure class empty.
+An audit abandoned without an arm failure names its phase only in the `aborted` block, leaving the evaluation failure classes empty rather than inventing one.
 A failure restores the branch incumbent and leaves its evidence reachable.
 
 ## Full A/B budget
