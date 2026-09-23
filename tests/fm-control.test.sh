@@ -901,7 +901,6 @@ test_fm_send_still_marks_the_same_secondmate_task() {
   pass "fm-control's arrival leaves fm-send's from-firstmate marking untouched"
 }
 
-
 # --- 7. claude's background-work exit dialog ---------------------------------
 
 CAPTURES="$ROOT/tests/captures/claude-exit-dialog"
@@ -928,9 +927,16 @@ test_exit_dialog_classifier_accepts_only_the_exact_selected_dialog() {
   screen="$(cat "$CAPTURES/background-work-v2.1.280.screen")"$'\n'"❯ "
   fm_control_exit_confirm_key claude "$screen" >/dev/null \
     && fail "a dialog that is no longer the bottom of the screen must get no key"
+  screen=$(stay_selected "$CAPTURES/background-work-two-option.screen")
+  assert_contains "$screen" "❯ 2. Stay" "the two-option counterfactual should really move the selection"
+  fm_control_exit_confirm_key claude "$screen" >/dev/null \
+    && fail "the two-option dialog with Stay selected must get no key"
   screen=$(sed 's/The following will stop when you exit:/Something else:/' "$CAPTURES/background-work-v2.1.280.screen")
   fm_control_exit_confirm_key claude "$screen" >/dev/null \
     && fail "a dialog whose text differs from the verified dialog must get no key"
+  screen=$(sed 's/2\. Move to background and exit/2. Something new/' "$CAPTURES/background-work-v2.1.280.screen")
+  fm_control_exit_confirm_key claude "$screen" >/dev/null \
+    && fail "a dialog with an unverified second option must get no key"
   fm_control_exit_confirm_key codex "$(cat "$CAPTURES/background-work-v2.1.280.screen")" >/dev/null \
     && fail "only the claude adapter has a verified exit dialog"
   pass "fm-control exit dialog: only claude's exact dialog with option 1 selected is confirmed"

@@ -113,7 +113,9 @@
 #
 # Environment knobs (all bounded waits, seconds):
 #   FM_CONTROL_POLL              poll interval for postcondition waits (0.5)
-#   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt (5)
+#   FM_CONTROL_SETTLE_WAIT       adapter acknowledgement wait after interrupt,
+#                                and exit's wait before it reads the screen for
+#                                the harness's exit-confirmation dialog (5)
 #   FM_CONTROL_EXIT_WAIT         alive->dead wait after the exit command (30)
 #   FM_CONTROL_LAUNCH_WAIT       dead->alive wait after a relaunch (90)
 #   FM_CONTROL_EXIT_RETRIES      Enter retries for the exit command (3)
@@ -573,7 +575,7 @@ do_exit() {
   EXIT_DIALOG=
   state=$(wait_agent_state "$SETTLE_WAIT" dead) \
     || { confirm_exit_dialog; state=$(wait_agent_state "$EXIT_WAIT" dead); } \
-    || die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed${EXIT_DIALOG:+ exit-dialog=$EXIT_DIALOG}; the agent did not stop within ${EXIT_WAIT}s"
+    || die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed${EXIT_DIALOG:+ exit-dialog=$EXIT_DIALOG}; the agent did not stop within $(awk -v s="$SETTLE_WAIT" -v e="$EXIT_WAIT" 'BEGIN{print s + e}')s"
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
