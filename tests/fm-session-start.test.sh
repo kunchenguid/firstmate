@@ -29,12 +29,18 @@
 #     network result surfaces exactly once (inline or as a wake, never both), a
 #     read-only session declares the checks it skipped, and the tasks-axi
 #     compatibility verdict is paid for once per session start
+#   - ACT FIRST: a local priority list after the wake queue; the deferred Jev
+#     ranking never delays the network result and raises exactly one wake
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 # shellcheck source=tests/wake-helpers.sh
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
+
+# The digest's ACT FIRST ranking reads Jev keys from the environment first; the
+# cases that exercise it supply a key through the test home's .env instead.
+unset TYPESAFE_API_KEY OPENROUTER_API_KEY JEV_ROUTE JEV_URL JEV_BASE
 
 SESSION_START="$ROOT/bin/fm-session-start.sh"
 BASE_PATH=${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}
@@ -1395,6 +1401,131 @@ EOF
   pass "fm-session-start.sh composes the real fm-lock.sh, fm-bootstrap.sh, and fm-wake-drain.sh output verbatim"
 }
 
+# install_fake_jev_curl <fakebin> <log-dir> <sleep-seconds>: a curl that records
+# the Jev request and when it started, sleeps, then answers the ACT FIRST Choice
+# with the second offered item on top. jq is linked in because the digest runs
+# on a minimal PATH.
+install_fake_jev_curl() {
+  local fakebin=$1 log=$2 delay=$3
+  mkdir -p "$log"
+  ln -sf "$(command -v jq)" "$fakebin/jq"
+  cat > "$fakebin/curl" <<SH
+#!/usr/bin/env bash
+out=''
+while [ \$# -gt 0 ]; do
+  case "\$1" in -o) out=\$2; shift 2 ;; *) shift ;; esac
+done
+date +%s > '$log/started'
+cat > '$log/body'
+sleep $delay
+touch '$log/finished'
+printf '%s' '{"answers":{"first":{"type":"choice","choice":"i2","confidence":0.8,"probabilities":{"i1":0.2,"i2":0.8}}}}' > "\$out"
+printf '200'
+SH
+  chmod +x "$fakebin/curl"
+}
+
+# make_act_first_world <name> <curl-delay>: a locked world with a Jev key, the
+# recording fake curl, and two presented wakes whose status logs are live. Runs
+# pin FM_FAKE_HARNESS_PID so the lock has a stable owner and the deferred stage
+# starts.
+make_act_first_world() {
+  local name=$1 delay=$2 rec
+  rec=$(new_world "$name")
+  IFS='|' read -r AF_ROOT AF_HOME AF_FAKEBIN <<EOF
+$rec
+EOF
+  make_fake_toolchain "$AF_FAKEBIN"
+  make_fake_ps_claude "$AF_FAKEBIN"
+  AF_LOG="${AF_ROOT%/root}/jev"
+  install_fake_jev_curl "$AF_FAKEBIN" "$AF_LOG" "$delay"
+  printf 'TYPESAFE_API_KEY=ts-act-first-test\n' > "$AF_HOME/.env"
+  printf 'needs-decision: pick a library\n' > "$AF_HOME/state/task-y.status"
+  printf 'blocked: waiting on a key\n' > "$AF_HOME/state/task-z.status"
+  append_wake "$AF_HOME/state" signal task-y.status "needs-decision: pick a library"
+  append_wake "$AF_HOME/state" signal task-z.status "blocked: waiting on a key"
+}
+
+test_act_first_lists_presented_items_without_a_network_call() {
+  local out wake act supervision section
+  make_act_first_world act-first-local 8
+
+  out=$(FM_FAKE_HARNESS_PID=$$ run_session_start "$AF_HOME" "$AF_ROOT" "$AF_FAKEBIN:$BASE_PATH")
+
+  [ ! -e "$AF_LOG/finished" ] || fail "the digest waited for the Jev call to finish"
+  assert_contains "$out" "ACT FIRST (priority order: open decisions, unfinished execution, failures and blockers, then wakes" \
+    "the ACT FIRST section did not print"
+  section=$(printf '%s\n' "$out" | awk '/^ACT FIRST/ { p = 1; next } p && /^(=|SUPERVISION)/ { exit } p')
+  assert_contains "$section" "1. decision task-y needs-decision: pick a library" \
+    "open decisions were not listed first"$'\n'"$section"
+  assert_contains "$section" "2. decision task-z blocked: waiting on a key" \
+    "the second decision was not listed"$'\n'"$section"
+  [ "$(printf '%s\n' "$section" | grep -c '^[0-9]\. ')" -eq 2 ] \
+    || fail "each task's wake repeated its open decision"$'\n'"$section"
+  assert_not_contains "$section" "(p=" "the digest printed a model ranking"
+  wake=$(printf '%s\n' "$out" | grep -n '^WAKE QUEUE$' | cut -d: -f1)
+  act=$(printf '%s\n' "$out" | grep -n '^ACT FIRST' | cut -d: -f1)
+  supervision=$(printf '%s\n' "$out" | grep -n '^SUPERVISION OPERATING INSTRUCTIONS' | cut -d: -f1)
+  [ -n "$wake" ] && [ -n "$act" ] && [ -n "$supervision" ] && [ "$wake" -lt "$act" ] && [ "$act" -lt "$supervision" ] \
+    || fail "ACT FIRST was not between the wake queue and the supervision block (wake=$wake act=$act supervision=$supervision)"
+  wait_for_network_stage "$AF_HOME" "$AF_ROOT" 60 || fail "the deferred stage never finished"
+  pass "session start: ACT FIRST lists presented items in priority order without waiting on Jev"
+}
+
+# wait_for_file <path> <seconds>: poll until the file exists.
+wait_for_file() {
+  local path=$1 limit=$2 waited=0
+  while [ ! -e "$path" ] && [ "$waited" -lt "$((limit * 10))" ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -e "$path" ]
+}
+
+test_act_first_network_result_never_waits_for_the_ranking() {
+  local report
+  # Slower than the sweeps, yet inside the ranking's own 10-second bound.
+  make_act_first_world act-first-slow 7
+
+  (unset HERDR_ENV; FM_FAKE_HARNESS_PID=$$ run_session_start "$AF_HOME" "$AF_ROOT" "$AF_FAKEBIN:$BASE_PATH" >/dev/null)
+
+  wait_for_network_stage "$AF_HOME" "$AF_ROOT" 15 || fail "the network result waited for the slow ranking"
+  [ ! -e "$AF_LOG/finished" ] || fail "the network result was published only after the Jev call finished"
+  report=$(network_stage_report "$AF_HOME" "$AF_ROOT")
+  assert_not_contains "$report" "ACT FIRST" "the ranking was published before its Jev call could finish"
+  wait_for_file "$AF_HOME/state/.startup-network.act-first" 30 || fail "the slow ranking never published"
+  pass "session start: the network result publishes without waiting for a slow Jev ranking"
+}
+
+test_act_first_ranking_with_items_raises_exactly_one_wake() {
+  local report wakes waited
+  make_act_first_world act-first-deferred 0
+
+  (unset HERDR_ENV; FM_FAKE_HARNESS_PID=$$ run_session_start "$AF_HOME" "$AF_ROOT" "$AF_FAKEBIN:$BASE_PATH" >/dev/null)
+
+  wait_for_file "$AF_HOME/state/.startup-network.act-first" 45 || fail "the ranking never published"
+  wait_for_network_stage "$AF_HOME" "$AF_ROOT" 60 || fail "the deferred stage never finished"
+  # The wake follows the published ranking; wait for the ranking process to
+  # finish (it no longer claims to be waiting and has queued its wake).
+  waited=0
+  while ! grep -q $'\tcheck\tact-first\t' "$AF_HOME/state/.wake-queue" 2>/dev/null && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  sleep 1
+  wakes=$(grep -c $'\tcheck\tact-first\t' "$AF_HOME/state/.wake-queue" 2>/dev/null)
+  [ "$wakes" = 1 ] || fail "the ranking raised $wakes act-first wakes, want exactly one"$'\n'"$(cat "$AF_HOME/state/.wake-queue")"
+  assert_no_grep $'check\tstartup-network' "$AF_HOME/state/.wake-queue" \
+    "the ranking made the network result raise its own wake"
+  report=$(network_stage_report "$AF_HOME" "$AF_ROOT")
+  assert_contains "$report" "1. decision task-z blocked: waiting on a key (p=0.8)" \
+    "report did not show Jev's ranking"$'\n'"$report"
+  jq -e '.state | contains("decision task-y needs-decision: pick a library")' "$AF_LOG/body" >/dev/null \
+    || fail "the ranking did not use this session start's presented items"
+  [ ! -e "$AF_HOME/state/.startup-network.act-first-input" ] || fail "the consumed ranking input was left behind"
+  pass "session start: a ranking with items publishes separately and raises exactly one wake"
+}
+
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep() {
   local rec root home fakebin out
   rec=$(new_world branch-recovery)
@@ -2730,6 +2861,9 @@ test_orphan_status_logs_are_printed
 test_endpoint_liveness_tmux
 test_endpoint_liveness_herdr
 test_composition_invokes_real_scripts
+test_act_first_lists_presented_items_without_a_network_call
+test_act_first_network_result_never_waits_for_the_ranking
+test_act_first_ranking_with_items_raises_exactly_one_wake
 test_branch_outcome_replay_respects_captain_barrier_and_lease_sweep
 test_non_pi_session_start_leaves_branch_state_untouched
 test_backlog_compact_tasks_axi_omits_bodies_and_keeps_metadata

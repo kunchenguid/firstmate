@@ -113,17 +113,7 @@ case "${FM_JEV_BRIEF_PREFLIGHT:-shadow}" in
     ;;
 esac
 
-typesafe_key=${TYPESAFE_API_KEY:-}
-openrouter_key=${OPENROUTER_API_KEY:-}
-if [ -z "$typesafe_key" ]; then
-  typesafe_key=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-fi
-if [ -z "$openrouter_key" ]; then
-  openrouter_key=$(fmx_env_get OPENROUTER_API_KEY "$FM_HOME/.env")
-fi
-if [ -z "$typesafe_key" ] && [ -z "$openrouter_key" ]; then
-  exit 0
-fi
+fm_jev_key_configured || exit 0
 
 command -v jq >/dev/null 2>&1 || exit 0
 

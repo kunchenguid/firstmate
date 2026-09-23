@@ -759,7 +759,266 @@ GITHUB_TOKEN=ghp_supersecretvalue" \
   pass "fm-startup-network: the timing artifact cannot carry a command line or forge records"
 }
 
+# act_first_status <home> <generation> <locked>: a running stage record.
+act_first_status() {
+  printf 'state=running\npid=%s\nstarted=%s\nlocked=%s\nphases=probe,sweeps\ngeneration=%s\nlock_pid=\n' \
+    "$$" "$(date +%s)" "$3" "$2" > "$1/state/.startup-network.status"
+}
+
+act_first_drain() {
+  printf '1790000000\t7\tsignal\ttask-y.status\tneeds-decision: pick a library\n'
+  printf '1790000001\t8\tsignal\ttask-z.status\tblocked: waiting on a key\n'
+}
+
+test_act_first_input_is_generation_scoped_and_persisted_early() {
+  local rec home root log expected actual
+  rec=$(new_world act-first-input)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf 'TYPESAFE_API_KEY=ts-test-key\n' > "$home/.env"
+  act_first_status "$home" g-reemit 0
+  act_first_drain | run_stage "$home" "$root" act-first-input
+  [ ! -e "$home/state/.startup-network.act-first-input" ] \
+    || fail "a run with no waiting ranking still got the drain output"
+  printf 'g-older\n' > "$home/state/.startup-network.act-first-waiting"
+  act_first_drain | run_stage "$home" "$root" act-first-input
+  [ ! -e "$home/state/.startup-network.act-first-input" ] \
+    || fail "a ranking waiting for another generation received this one's drain output"
+  act_first_status "$home" g-locked 1
+  printf 'g-locked\n' > "$home/state/.startup-network.act-first-launched"
+  printf 'g-locked\n' > "$home/state/.startup-network.act-first-waiting"
+  expected=$(act_first_drain)
+  act_first_drain | run_stage "$home" "$root" act-first-input
+  [ "$(head -n 1 "$home/state/.startup-network.act-first-input" 2>/dev/null)" = "generation=g-locked" ] \
+    || fail "the drain output was not persisted for its active generation"
+  actual=$(tail -n +2 "$home/state/.startup-network.act-first-input")
+  [ "$actual" = "$expected" ] || fail "the persisted drain output changed"$'\n'"$actual"
+  pass "fm-startup-network: drain input persists for its locked generation"
+}
+
+test_act_first_rank_uses_the_home_timeout_and_wakes_once() {
+  local rec home root log calls rank_pid waited
+  rec=$(new_world act-first-rank)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  calls="${root%/root}/curl"
+  mkdir -p "$calls"
+  ln -sf "$(command -v jq)" "$root/bin/jq"
+  cat > "$root/bin/curl" <<SH
+#!/usr/bin/env bash
+out=''
+while [ \$# -gt 0 ]; do
+  case "\$1" in -o) out=\$2; shift 2 ;; *) printf '%s\n' "\$1" >> '$calls/argv'; shift ;; esac
+done
+cat > /dev/null
+sleep 11
+printf '%s' '{"answers":{"first":{"type":"choice","choice":"i2","confidence":0.8,"probabilities":{"i1":0.2,"i2":0.8}}}}' > "\$out"
+printf '200'
+SH
+  chmod +x "$root/bin/curl"
+  printf 'TYPESAFE_API_KEY=ts-test-key\nJEV_TIMEOUT=12\n' > "$home/.env"
+  act_first_status "$home" g-rank 1
+  (unset JEV_TIMEOUT; run_stage "$home" "$root" act-first-rank --generation g-rank) &
+  rank_pid=$!
+  waited=0
+  while [ "$(cat "$home/state/.startup-network.act-first-waiting" 2>/dev/null)" != g-rank ] \
+    && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ "$(cat "$home/state/.startup-network.act-first-waiting" 2>/dev/null)" = g-rank ] \
+    || fail "the ranker did not register its wait"
+  act_first_drain | run_stage "$home" "$root" act-first-input
+  wait "$rank_pid"
+  grep -A1 -x -- '--max-time' "$calls/argv" | grep -qx 12 \
+    || fail "the ranking ignored the home JEV_TIMEOUT: $(tr '\n' ' ' < "$calls/argv")"
+  assert_grep "1. wake signal task-z.status: blocked: waiting on a key (p=0.8)" \
+    "$home/state/.startup-network.act-first" "the ranking was not published"
+  [ "$(grep -c $'\tcheck\tact-first\t' "$home/state/.wake-queue")" = 1 ] \
+    || fail "the ranking did not raise exactly one act-first wake"
+  [ ! -e "$home/state/.startup-network.act-first-input" ] || fail "the consumed input was left behind"
+  [ ! -e "$home/state/.startup-network.act-first-waiting" ] || fail "the finished ranking still claimed to be waiting"
+  pass "fm-startup-network: the ranking honours a home timeout above ten seconds and wakes once"
+}
+
+test_late_act_first_input_restarts_an_expired_ranker_once() {
+  local rec home root log calls rank_pid waited count
+  rec=$(new_world act-first-late-input)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  calls="$home/curl-calls"
+  mkdir -p "$calls"
+  ln -sf "$(command -v jq)" "$root/bin/jq"
+  cat > "$root/bin/sleep" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = 0.1 ]; then
+  : > '$home/sleep-seen'
+  /bin/sleep 0.001
+else
+  exec /bin/sleep "\$@"
+fi
+SH
+  chmod +x "$root/bin/sleep"
+  cat > "$root/bin/curl" <<SH
+#!/usr/bin/env bash
+out=''
+while [ \$# -gt 0 ]; do
+  case "\$1" in -o) out=\$2; shift 2 ;; *) shift ;; esac
+done
+cat > /dev/null
+printf 'call\\n' >> '$calls/count'
+printf '%s' '{"answers":{"first":{"type":"choice","choice":"i1","confidence":0.8,"probabilities":{"i1":0.8,"i2":0.2}}}}' > "\$out"
+printf '200'
+SH
+  chmod +x "$root/bin/curl"
+  printf 'TYPESAFE_API_KEY=ts-test-key\n' > "$home/.env"
+  act_first_status "$home" g-late 1
+  (run_stage "$home" "$root" act-first-rank --generation g-late) &
+  rank_pid=$!
+  wait "$rank_pid"
+  assert_present "$home/sleep-seen" "the primary ranker never entered its bounded input wait"
+  [ ! -e "$home/state/.startup-network.act-first-waiting" ] \
+    || fail "the expired ranker retained its waiting marker"
+  [ ! -e "$home/state/.startup-network.act-first-launched" ] \
+    || fail "the expired ranker retained its launch marker"
+
+  act_first_drain | run_stage "$home" "$root" act-first-input
+  act_first_drain | run_stage "$home" "$root" act-first-input
+  waited=0
+  while [ ! -s "$home/state/.startup-network.act-first" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  assert_present "$home/state/.startup-network.act-first" "the late handoff did not produce a ranking"
+  [ "$(head -n 1 "$home/state/.startup-network.act-first")" = generation=g-late ] \
+    || fail "the late ranking was published for the wrong generation"
+  count=$(grep -c . "$calls/count")
+  [ "$count" -eq 1 ] || fail "duplicate handoffs started $count rankers"
+  waited=0
+  while ! grep -q $'\tcheck\tact-first\t' "$home/state/.wake-queue" 2>/dev/null \
+    && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ "$(grep -c $'\tcheck\tact-first\t' "$home/state/.wake-queue")" -eq 1 ] \
+    || fail "the late ranking did not raise exactly one wake"
+  [ ! -e "$home/state/.startup-network.act-first-input" ] || fail "the late input was not consumed"
+  pass "fm-startup-network: late input starts one ranker after the bounded wait expires"
+}
+
+test_act_first_rank_drops_a_result_after_its_generation_changes() {
+  local rec home root log rank_pid waited report_out
+  rec=$(new_world act-first-stale-rank)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  mkdir -p "$root/bin"
+  ln -sf "$(command -v jq)" "$root/bin/jq"
+  cat > "$root/bin/curl" <<'SH'
+#!/usr/bin/env bash
+out=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cat > /dev/null
+: > "${FAKE_CURL_STARTED:?}"
+while [ ! -e "${FAKE_CURL_RELEASE:?}" ]; do sleep 0.05; done
+printf '%s' '{"answers":{"first":{"type":"choice","choice":"i2","confidence":0.8,"probabilities":{"i1":0.2,"i2":0.8}}}}' > "$out"
+printf '200'
+SH
+  chmod +x "$root/bin/curl"
+  printf 'TYPESAFE_API_KEY=ts-test-key\n' > "$home/.env"
+  act_first_status "$home" g-stale 1
+  (FAKE_CURL_STARTED="$home/curl-started" FAKE_CURL_RELEASE="$home/curl-release" \
+    run_stage "$home" "$root" act-first-rank --generation g-stale) &
+  rank_pid=$!
+  waited=0
+  while [ ! -e "$home/state/.startup-network.act-first-waiting" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  act_first_drain | run_stage "$home" "$root" act-first-input
+  waited=0
+  while [ ! -e "$home/curl-started" ] && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ -e "$home/curl-started" ] || fail "the stale ranking never reached Jev"
+  act_first_status "$home" g-current 1
+  : > "$home/curl-release"
+  wait "$rank_pid"
+  [ ! -e "$home/state/.startup-network.act-first" ] \
+    || fail "a result from the superseded generation was published"
+  if grep -Fq $'\tcheck\tact-first\t' "$home/state/.wake-queue" 2>/dev/null; then
+    fail "a result from the superseded generation raised a wake"
+  fi
+  report_out=$(run_stage "$home" "$root" report)
+  assert_not_contains "$report_out" "ACT FIRST" "report showed a ranking from another generation"
+  pass "fm-startup-network: a late ranking cannot publish or wake after supersession"
+}
+
+test_timed_out_ranker_preserves_newer_generation_state() {
+  local rec home root log rank_pid waited input_body
+  rec=$(new_world act-first-generation-race)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf 'TYPESAFE_API_KEY=ts-test-key\n' > "$home/.env"
+  act_first_status "$home" g-old 1
+  (run_stage "$home" "$root" act-first-rank --generation g-old) &
+  rank_pid=$!
+  waited=0
+  while [ "$(cat "$home/state/.startup-network.act-first-waiting" 2>/dev/null)" != g-old ] \
+    && [ "$waited" -lt 100 ]; do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  [ "$(cat "$home/state/.startup-network.act-first-waiting" 2>/dev/null)" = g-old ] \
+    || fail "the older ranker did not register its wait"
+  act_first_status "$home" g-new 1
+  printf 'g-new\n' > "$home/state/.startup-network.act-first-waiting"
+  act_first_drain | run_stage "$home" "$root" act-first-input
+  wait "$rank_pid"
+  [ "$(cat "$home/state/.startup-network.act-first-waiting" 2>/dev/null)" = g-new ] \
+    || fail "the timed-out older ranker removed the newer generation's marker"
+  [ "$(head -n 1 "$home/state/.startup-network.act-first-input" 2>/dev/null)" = "generation=g-new" ] \
+    || fail "the newer generation's input was removed or replaced"
+  input_body=$(tail -n +2 "$home/state/.startup-network.act-first-input")
+  [ "$input_body" = "$(act_first_drain)" ] || fail "the newer generation's drain was changed"
+  pass "fm-startup-network: an older timeout preserves newer marker and input"
+}
+
+test_report_omits_a_ranking_from_another_generation() {
+  local rec home root log report_out
+  rec=$(new_world act-first-stale-report)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  act_first_status "$home" g-current 1
+  printf 'generation=g-old\n1. stale ranking\n' > "$home/state/.startup-network.act-first"
+  report_out=$(run_stage "$home" "$root" report)
+  assert_not_contains "$report_out" "ACT FIRST" "report rendered a stale generation heading"
+  assert_not_contains "$report_out" "stale ranking" "report rendered stale ranking items"
+  printf 'generation=g-current\n1. current ranking\n' > "$home/state/.startup-network.act-first"
+  report_out=$(run_stage "$home" "$root" report)
+  assert_contains "$report_out" "ACT FIRST" "report omitted the current generation ranking"
+  assert_contains "$report_out" "1. current ranking" "report omitted the current ranking item"
+  pass "fm-startup-network: report renders only the matching generation ranking"
+}
+
 test_wait_fails_without_a_published_stage
+test_act_first_input_is_generation_scoped_and_persisted_early
+test_act_first_rank_uses_the_home_timeout_and_wakes_once
+test_late_act_first_input_restarts_an_expired_ranker_once
+test_act_first_rank_drops_a_result_after_its_generation_changes
+test_timed_out_ranker_preserves_newer_generation_state
+test_report_omits_a_ranking_from_another_generation
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
 test_a_claimant_crash_after_publish_still_queues_the_wake

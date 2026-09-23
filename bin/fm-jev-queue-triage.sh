@@ -193,19 +193,6 @@ parse_captain_held_ids() {
   '
 }
 
-has_key() {
-  local typesafe_key openrouter_key
-  typesafe_key=${TYPESAFE_API_KEY:-}
-  openrouter_key=${OPENROUTER_API_KEY:-}
-  if [ -z "$typesafe_key" ]; then
-    typesafe_key=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-  fi
-  if [ -z "$openrouter_key" ]; then
-    openrouter_key=$(fmx_env_get OPENROUTER_API_KEY "$FM_HOME/.env")
-  fi
-  [ -n "$typesafe_key" ] || [ -n "$openrouter_key" ]
-}
-
 skip_empty() {
   local snap
   snap=$(jq -nc --arg ts "$(iso_now)" '{
@@ -302,7 +289,7 @@ case "$ready_n" in
   ''|0) skip_empty ;;
 esac
 
-if ! has_key; then
+if ! fm_jev_key_configured; then
   snap=$(jq -nc --arg ts "$(iso_now)" --argjson ids "$(printf '%s' "$items" | jq -c '[.[].id]')" '{
     purpose: "queue-triage",
     advisory: true,

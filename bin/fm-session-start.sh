@@ -39,6 +39,7 @@
 #   3. wake-drain     - presents durable wakes and advances recovery handling
 #                       state, so it only runs when locked. The local bounded
 #                       inactive-outcome startup scan runs in the deferred worker.
+#                       An optional ACT FIRST priority list follows it (note below).
 #   4. supervision-instructions - the one emitted operating block for the
 #                       detected primary harness.
 #   5. read-once contract - the do-not-re-read contract covering every source
@@ -60,6 +61,15 @@
 #
 # Those nine names are also the runtime-bound stage list below, so a truncated
 # startup can name exactly which of them never ran.
+#
+# ACT FIRST: on the locked path, after the wake queue, the --local mode of
+# bin/fm-jev-act-first.sh prints a bounded priority view from the drain output
+# and current live-task status tails, without a model or network call. That
+# same drain output is handed to the deferred network stage, which ranks it
+# with Jev and current status tails in a separate publication and wake
+# (bin/fm-startup-network.sh owns that step). The helper header owns item
+# selection and ordering; neither list replaces handling and acknowledging
+# every presented wake.
 #
 # NO NETWORK ON THE BLOCKING PATH. This digest runs on a session-open hook that
 # blocks session initialization, so anything it waits for is time the captain
@@ -744,6 +754,22 @@ else
     printf '%s\n' "$DRAIN_OUT"
   else
     printf '(no queued wakes)\n'
+  fi
+  # ACT FIRST: the local priority list of items already in this digest, plus
+  # the hand-off of the same drain output to the deferred stage's Jev ranking
+  # (see this file's ACT FIRST note). Neither makes a network call here.
+  ACT_FIRST_INPUT=$(mktemp "$STATE/.act-first-input.XXXXXX" 2>/dev/null) || ACT_FIRST_INPUT=
+  if [ -n "$ACT_FIRST_INPUT" ]; then
+    printf '%s\n' "$DRAIN_OUT" > "$ACT_FIRST_INPUT"
+    ACT_FIRST_OUT=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-jev-act-first.sh" \
+      --local --drain-file "$ACT_FIRST_INPUT" --status-dir "$STATE" 2>/dev/null </dev/null) || ACT_FIRST_OUT=
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-startup-network.sh" act-first-input \
+      < "$ACT_FIRST_INPUT" >/dev/null 2>&1 || true
+    rm -f "$ACT_FIRST_INPUT"
+    if [ -n "$ACT_FIRST_OUT" ]; then
+      subsection "ACT FIRST (priority order: open decisions, unfinished execution, failures and blockers, then wakes; handle and acknowledge every item regardless)"
+      printf '%s\n' "$ACT_FIRST_OUT" | head -n 5
+    fi
   fi
 fi
 

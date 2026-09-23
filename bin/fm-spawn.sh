@@ -229,6 +229,13 @@
 #   scan bin/fm-teardown.sh runs before returning a slot (bin/fm-wake-lib.sh
 #   owns it), applied before the slot is claimed or refreshed; a scan that
 #   cannot prove the slot unowned refuses the same way.
+#   Under the Treehouse project lock, before any pane or slot exists, a fresh
+#   ship or scout given a fleet clone under projects/ refuses with one line
+#   naming the path to pass when that clone shares its Treehouse pool with the
+#   local origin repository it was cloned from (bin/fm-wake-lib.sh's
+#   fm_treehouse_pool_origin_root owns the detection): the pool's slots would
+#   be worktrees of that repository, not of the clone. Spawn never redirects silently, because that would change
+#   which repository the work lands in.
 #   Only after this isolation check, every fresh ship or scout requires a clean
 #   task worktree. When an origin configuration is detected, spawn fetches it,
 #   resolves the current remote default branch, and resets to its tip. When none
@@ -2630,6 +2637,21 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ];
     exit 1
   fi
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=1
+fi
+# Truth-path check: a fleet clone whose Treehouse pool is rooted in its local
+# origin repository would be handed a slot of that other repository, and the
+# launch would only die late on the trust or isolation checks. Refuse before
+# any pane or slot exists and name the path that owns the pool; never redirect
+# silently, because that would change which repository work lands in. It runs
+# under the Treehouse project lock just taken, which the clone and its origin
+# share, so a concurrent spawn from the origin cannot add a slot between this
+# check and allocation. bin/fm-wake-lib.sh's fm_treehouse_pool_origin_root owns
+# the detection.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] &&
+  [ "$(cd "$(dirname "$PROJ_ABS")" 2>/dev/null && pwd -P)" = "$(cd "$PROJECTS" 2>/dev/null && pwd -P)" ] &&
+  SPAWN_POOL_TRUTH_PATH=$(fm_treehouse_pool_origin_root "$PROJ_ABS"); then
+  echo "error: project '$PROJ_ABS' shares its Treehouse worktree pool with its origin repository, so its slots are worktrees of that repository, not of this clone; pass '$SPAWN_POOL_TRUTH_PATH' as the project to spawn from the repository that owns the pool" >&2
+  exit 1
 fi
 [ -f "$BRIEF" ] || {
   echo "error: task $ID has no brief at inaccessible data path $BRIEF" >&2

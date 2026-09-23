@@ -1237,6 +1237,50 @@ fm_treehouse_project_lock_path() {  # <project-dir>
   printf '%s/.treehouse-project-%s.lock\n' "$root/state" "$hash"
 }
 
+# Truth path of a clone whose Treehouse pool is rooted in its origin repository.
+# Treehouse keys a pool by the origin URL, or by the repository path when there
+# is no origin (verified against Treehouse v2.0.0 on 2026-09-22: the pool
+# ~/.treehouse/Wikis-899784 served both ~/Documents/Wikis, which has no remote,
+# and the fleet clone projects/Wikis, whose origin is that plain path). Such a
+# clone therefore shares one pool with its origin repository, and a slot that
+# repository created is a worktree of it rather than of the clone. Prints the
+# origin repository's path and succeeds only when <project-dir> has a plain
+# absolute-path origin naming a non-bare repository root with no origin of its
+# own, and that repository already has a linked worktree in a Treehouse pool
+# (the same <pool>/<slot>/<repo> layout fm_treehouse_pool_slot requires).
+# A file:// origin, a bare origin, or an origin with its own remote keys a
+# separate pool; an origin with no pool slot leaves the pool the clone's own.
+fm_treehouse_pool_origin_root() {  # <project-dir>
+  local project=$1 origin origin_real top top_real line wt wt_real
+  [ -d "$project" ] || return 1
+  origin=$(git -C "$project" remote get-url origin 2>/dev/null) || return 1
+  case "$origin" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  origin_real=$(CDPATH='' cd -- "$origin" 2>/dev/null && pwd -P) || return 1
+  [ "$(git -C "$origin_real" rev-parse --is-bare-repository 2>/dev/null)" = false ] || return 1
+  top=$(git -C "$origin_real" rev-parse --show-toplevel 2>/dev/null) || return 1
+  top_real=$(CDPATH='' cd -- "$top" 2>/dev/null && pwd -P) || return 1
+  [ "$top_real" = "$origin_real" ] || return 1
+  if git -C "$origin_real" remote get-url origin >/dev/null 2>&1; then
+    return 1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      'worktree '*) wt=${line#worktree } ;;
+      *) continue ;;
+    esac
+    wt_real=$(CDPATH='' cd -- "$wt" 2>/dev/null && pwd -P) || continue
+    [ "$wt_real" != "$origin_real" ] || continue
+    if fm_treehouse_pool_slot "$origin_real" "$wt_real"; then
+      printf '%s\n' "$origin_real"
+      return 0
+    fi
+  done < <(git -C "$origin_real" worktree list --porcelain 2>/dev/null)
+  return 1
+}
+
 # A Treehouse slot has the managed pool's fixed <pool>/<slot>/<repo> layout.
 # Require both its pool state and the same Git common directory as the recorded
 # project; an ordinary linked worktree is not evidence that Treehouse owns it.

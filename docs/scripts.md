@@ -57,6 +57,8 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-jev-tool-gate.sh` | Remainder Jev Choice after a deterministic arm-policy allow; shadow-log default (docs/arm-pretool-check.md) |
 | `fm-jev-skill-select.sh` | Suggest optional skills ([configuration](configuration.md#jev-skill-selector-fm_jev_skill_select)) |
 | `fm-jev-queue-triage.sh` | Advisory heartbeat next-work signal ([configuration](configuration.md#jev-queue-triage-heartbeat)) |
+| `fm-jev-intake-match.sh` | Match positional free-text captain references to backlog items and task records, keyword fallback ([configuration](configuration.md#jev-intake-match)) |
+| `fm-jev-act-first.sh` | ACT FIRST priority list of the session-start digest's actionable items, and its deferred Jev ranking ([configuration](configuration.md#jev-act-first-ranking-session-start)) |
 | `fm-jev-brief-preflight.sh` | Advisory spawn-path brief check ([configuration](configuration.md#jev-brief-preflight-fm_jev_brief_preflight)) |
 | `fm-dispatch-replay.sh` | Replay labeled dispatch briefs under a live call budget and score recorded choices offline ([configuration](configuration.md#typed-dispatch-resolution-env-typesafe_api_key)) |
 | `fm-jev-done-verify.sh` | Log-only shadow score of a worker done line; drain-invoked, never closes or tears down (docs/configuration.md) |

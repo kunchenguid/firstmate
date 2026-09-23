@@ -39,6 +39,10 @@
 #     non-200 response. Sets FM_JEV_LAST_ROUTE, FM_JEV_LAST_URL,
 #     FM_JEV_LAST_MODEL, FM_JEV_LAST_HTTP, and FM_JEV_LAST_LATENCY_MS on every
 #     attempted call (empty HTTP/latency when the call never reached curl).
+#   fm_jev_key_configured
+#     Succeeds when either API key is present in the process environment or
+#     $FM_HOME/.env; it does not validate JEV_ROUTE and never reaches the network.
+#     Callers use it as the no-key fast path; fm_jev_decide reports route errors.
 #   fm_jev_choice_confidence_ok <confidence> [<floor>]
 #     Succeeds when <confidence> is a number in 0..1 at or above <floor>.
 #     Default floor is 0.7 (new shadows); typed dispatch uses the top-2 margin.
@@ -283,6 +287,16 @@ fm_jev_decide() {
   cat "$resp_file"
   rm -f "$resp_file"
   return 0
+}
+
+fm_jev_key_configured() {
+  local typesafe_key openrouter_key home
+  home=$(_fm_jev_home)
+  typesafe_key=${TYPESAFE_API_KEY:-}
+  openrouter_key=${OPENROUTER_API_KEY:-}
+  [ -n "$typesafe_key" ] || typesafe_key=$(fmx_env_get TYPESAFE_API_KEY "$home/.env")
+  [ -n "$openrouter_key" ] || openrouter_key=$(fmx_env_get OPENROUTER_API_KEY "$home/.env")
+  [ -n "$typesafe_key" ] || [ -n "$openrouter_key" ]
 }
 
 fm_jev_choice_confidence_ok() {

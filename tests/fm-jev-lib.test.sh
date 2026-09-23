@@ -273,6 +273,23 @@ test_environment_key_wins_over_env_file() {
   pass "environment TYPESAFE_API_KEY wins over .env"
 }
 
+test_key_configured_checks_only_key_presence() {
+  unset TYPESAFE_API_KEY OPENROUTER_API_KEY JEV_ROUTE
+  rm -f "$HOME_DIR/.env"
+  if FM_HOME="$HOME_DIR" JEV_ROUTE=invalid fm_jev_key_configured; then
+    fail "missing API keys must remain off even with an invalid route"
+  fi
+  TYPESAFE_API_KEY=$TS_KEY JEV_ROUTE=invalid FM_HOME="$HOME_DIR" fm_jev_key_configured \
+    || fail "a present TypeSafe key must activate calls despite an invalid route"
+  OPENROUTER_API_KEY=$OR_KEY JEV_ROUTE=typesafe FM_HOME="$HOME_DIR" fm_jev_key_configured \
+    || fail "a present OpenRouter key must activate calls despite a route/key mismatch"
+  printf '%s\n' "TYPESAFE_API_KEY=from-file" > "$HOME_DIR/.env"
+  FM_HOME="$HOME_DIR" JEV_ROUTE=invalid fm_jev_key_configured \
+    || fail "a key in .env must activate calls despite an invalid route"
+  rm -f "$HOME_DIR/.env"
+  pass "key configuration is a presence gate independent of route resolution"
+}
+
 test_missing_keys_do_not_call_curl() {
   local code out err
   unset TYPESAFE_API_KEY OPENROUTER_API_KEY JEV_ROUTE
@@ -420,6 +437,7 @@ test_jev_timeout_default_and_overrides
 test_env_file_model_url_timeout_and_environment_wins
 test_env_file_openrouter_key
 test_environment_key_wins_over_env_file
+test_key_configured_checks_only_key_presence
 test_missing_keys_do_not_call_curl
 test_bad_questions_do_not_call_curl
 test_http_error_is_hard_failure

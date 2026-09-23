@@ -73,6 +73,28 @@
 #        fm-startup-network.sh wait [<seconds>]
 #          Block until the report is published, up to <seconds> (default 120).
 #          For operators and tests only; a session start never waits.
+#        fm-startup-network.sh act-first-input
+#          Persist this generation's wake-drain output (stdin) for the ACT FIRST
+#          ranking. Called by bin/fm-session-start.sh after its locked drain.
+#          If no ranker is active for the generation, it starts one detached
+#          ranker; a missing Jev key leaves the input unused.
+#
+# ACT FIRST RANKING. On a locked run started by `start`, the worker also
+# launches bin/fm-jev-act-first.sh's Jev ranking of the digest's actionable
+# items as its own detached process, so the one model call it makes never
+# touches the digest's blocking path and the sweep report never waits for it:
+# the report publishes as soon as the sweeps finish. The ranking waits up to
+# 20 seconds for act-first-input to deliver its own generation's drain output;
+# if that wait expires, a later handoff starts one detached ranker for that
+# generation. Generation markers prevent duplicate launches. Its detached
+# helper allows the resolved JEV_TIMEOUT plus a 3-second cleanup margin; this
+# stage uses 5 seconds when JEV_TIMEOUT is unset. It skips at once when no Jev key is
+# configured, and publishes separately to .startup-network.act-first. Only when
+# it ranked at least one item does it raise one `check: act-first` wake through
+# the ordinary durable wake queue, so the advisory ranking is actually seen; no
+# items, no key, or a Jev error stays silent. Publication and its wake require
+# the ranking's generation to remain current in the status record; `report`
+# prints a stored ranking only when its generation still matches.
 #
 # STATE, all under this home's state/ and gitignored with it:
 #   .startup-network.status   key=value record - generation, lock_pid, state,
@@ -102,6 +124,23 @@
 #                             decision, and losing it never downgrades a run.
 #   .startup-network.lock     serializes publication, harvest acknowledgement,
 #                             and the wake decision.
+#   .startup-network.act-first-input
+#                             the generation line plus the drain output the
+#                             ACT FIRST ranking reads, persisted before the
+#                             ranker waits; removed only when that generation
+#                             consumes it.
+#   .startup-network.act-first
+#                             the generation line plus the latest published
+#                             ACT FIRST ranking, at most five lines.
+#   .startup-network.act-first-waiting
+#                             the generation whose ranking is waiting for
+#                             input; present only while it waits.
+#   .startup-network.act-first-launched
+#                             the generation whose ranker has been launched;
+#                             cleared only if its input wait expires.
+#   .startup-network.act-first-handed-off
+#                             the generation whose drain input has been handed
+#                             off, preventing duplicate rank launches.
 #
 # The whole stage is bounded by FM_STARTUP_NETWORK_TIMEOUT (default 120s), one
 # aggregate deadline covering both the inactive-outcome scan and network sweeps.
@@ -120,6 +159,11 @@ CLAIM_FILE="$STATE/.startup-network.claim"
 DELIVERED_FILE="$STATE/.startup-network.delivered"
 TIMINGS_FILE="$STATE/.startup-network.timings"
 PUBLISH_LOCK="$STATE/.startup-network.lock"
+ACT_FIRST_INPUT="$STATE/.startup-network.act-first-input"
+ACT_FIRST_FILE="$STATE/.startup-network.act-first"
+ACT_FIRST_WAITING="$STATE/.startup-network.act-first-waiting"
+ACT_FIRST_LAUNCHED="$STATE/.startup-network.act-first-launched"
+ACT_FIRST_HANDED_OFF="$STATE/.startup-network.act-first-handed-off"
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
@@ -491,6 +535,13 @@ EOF
   # inactive-outcome wakes directly. A child shell composes the two executable
   # owners only so fm_run_timed can govern them as one process group.
   if [ "$sweep_locked" -eq 1 ]; then
+    # The ACT FIRST ranking is detached from the sweeps and publishes on its
+    # own, so the sweep report never waits for it (see the header). Only a
+    # worker started by `start` has a generation the digest hands input to; a
+    # manual run skips it rather than waiting for input that never comes.
+    if [ "$internal" -eq 1 ]; then
+      start_act_first_ranker "$generation"
+    fi
     # shellcheck disable=SC2016  # Child-shell variables expand inside the bound.
     fm_run_timed "$budget" env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
       FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_NETWORK_LOCK_PID="$lock_pid" \
@@ -631,6 +682,180 @@ cmd_wait() {  # <seconds>
   return 1
 }
 
+# --- ACT FIRST ranking ---------------------------------------------------------
+
+cmd_act_first_input() {
+  local generation tmp handed_off launched waiting
+  # shellcheck source=bin/fm-jev-lib.sh
+  . "$SCRIPT_DIR/fm-jev-lib.sh"
+  fm_jev_key_configured || { cat >/dev/null; return 0; }
+  tmp=$(mktemp "$STATE/.startup-network.act-first-input.XXXXXX" 2>/dev/null) || { cat >/dev/null; return 0; }
+  if ! cat > "$tmp"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  fm_lock_acquire_wait "$PUBLISH_LOCK"
+  generation=$(status_get generation)
+  handed_off=$(cat "$ACT_FIRST_HANDED_OFF" 2>/dev/null)
+  if [ -n "$generation" ] && [ "$(status_get locked)" = 1 ] && [ "$handed_off" != "$generation" ]; then
+    if { printf 'generation=%s\n' "$generation"; cat "$tmp"; } | write_atomic "$ACT_FIRST_INPUT"; then
+      printf '%s\n' "$generation" | write_atomic "$ACT_FIRST_HANDED_OFF" || true
+      launched=$(cat "$ACT_FIRST_LAUNCHED" 2>/dev/null)
+      waiting=$(cat "$ACT_FIRST_WAITING" 2>/dev/null)
+      if [ "$launched" != "$generation" ] && [ "$waiting" != "$generation" ]; then
+        launch_act_first_ranker_locked "$generation" || true
+      fi
+    fi
+  fi
+  fm_lock_release "$PUBLISH_LOCK"
+  rm -f "$tmp"
+}
+
+launch_act_first_ranker_locked() {  # caller holds PUBLISH_LOCK
+  local generation=$1 monitor_was_on=0
+  printf '%s\n' "$generation" | write_atomic "$ACT_FIRST_LAUNCHED" || return 1
+  if ! printf '%s\n' "$generation" | write_atomic "$ACT_FIRST_WAITING"; then
+    rm -f "$ACT_FIRST_LAUNCHED" 2>/dev/null || true
+    return 1
+  fi
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
+  nohup "$SCRIPT_DIR/fm-startup-network.sh" act-first-rank --generation "$generation" \
+    >/dev/null 2>&1 </dev/null &
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
+}
+
+start_act_first_ranker() {  # <generation>
+  local generation=$1 launched
+  # shellcheck source=bin/fm-jev-lib.sh
+  . "$SCRIPT_DIR/fm-jev-lib.sh"
+  fm_jev_key_configured || return 0
+  fm_lock_acquire_wait "$PUBLISH_LOCK"
+  if [ "$(status_get generation)" = "$generation" ] && [ "$(status_get locked)" = 1 ]; then
+    launched=$(cat "$ACT_FIRST_LAUNCHED" 2>/dev/null)
+    [ "$launched" = "$generation" ] || launch_act_first_ranker_locked "$generation" || true
+  fi
+  fm_lock_release "$PUBLISH_LOCK"
+}
+
+expire_act_first_ranker() {  # <generation> <drain-file-or-empty>
+  local generation=$1 drain=$2 consumed=0 waiting launched
+  fm_lock_acquire_wait "$PUBLISH_LOCK"
+  if [ -n "$drain" ] && [ "$(status_get generation)" = "$generation" ] \
+    && [ "$(head -n 1 "$ACT_FIRST_INPUT" 2>/dev/null)" = "generation=$generation" ] \
+    && tail -n +2 "$ACT_FIRST_INPUT" > "$drain" 2>/dev/null; then
+    rm -f "$ACT_FIRST_INPUT" 2>/dev/null || true
+    waiting=$(cat "$ACT_FIRST_WAITING" 2>/dev/null)
+    [ "$waiting" != "$generation" ] || rm -f "$ACT_FIRST_WAITING"
+    consumed=1
+  else
+    waiting=$(cat "$ACT_FIRST_WAITING" 2>/dev/null)
+    [ "$waiting" != "$generation" ] || rm -f "$ACT_FIRST_WAITING"
+    launched=$(cat "$ACT_FIRST_LAUNCHED" 2>/dev/null)
+    [ "$launched" != "$generation" ] || rm -f "$ACT_FIRST_LAUNCHED"
+  fi
+  fm_lock_release "$PUBLISH_LOCK"
+  [ "$consumed" -eq 1 ]
+}
+
+consume_act_first_input() {  # <generation> <drain-file>
+  local generation=$1 drain=$2 waiting
+  fm_lock_acquire_wait "$PUBLISH_LOCK"
+  if [ "$(status_get generation)" != "$generation" ] \
+    || [ "$(head -n 1 "$ACT_FIRST_INPUT" 2>/dev/null)" != "generation=$generation" ]; then
+    fm_lock_release "$PUBLISH_LOCK"
+    return 1
+  fi
+  tail -n +2 "$ACT_FIRST_INPUT" > "$drain" 2>/dev/null || {
+    fm_lock_release "$PUBLISH_LOCK"
+    return 1
+  }
+  rm -f "$ACT_FIRST_INPUT" 2>/dev/null || true
+  waiting=$(cat "$ACT_FIRST_WAITING" 2>/dev/null)
+  [ "$waiting" != "$generation" ] || rm -f "$ACT_FIRST_WAITING"
+  fm_lock_release "$PUBLISH_LOCK"
+}
+
+cmd_act_first_rank() {  # <generation>
+  local generation=$1 waited=0 drain lines timeout launched outer_timeout
+  # shellcheck source=bin/fm-jev-lib.sh
+  . "$SCRIPT_DIR/fm-jev-lib.sh"
+  fm_jev_key_configured || return 0
+  fm_lock_acquire_wait "$PUBLISH_LOCK"
+  if [ "$(status_get generation)" != "$generation" ] || [ "$(status_get locked)" != 1 ]; then
+    fm_lock_release "$PUBLISH_LOCK"
+    return 0
+  fi
+  launched=$(cat "$ACT_FIRST_LAUNCHED" 2>/dev/null)
+  if [ "$launched" != "$generation" ]; then
+    printf '%s\n' "$generation" | write_atomic "$ACT_FIRST_LAUNCHED" || {
+      fm_lock_release "$PUBLISH_LOCK"
+      return 0
+    }
+  fi
+  printf '%s\n' "$generation" | write_atomic "$ACT_FIRST_WAITING" || {
+    fm_lock_release "$PUBLISH_LOCK"
+    return 0
+  }
+  fm_lock_release "$PUBLISH_LOCK"
+  while :; do
+    if [ "$(head -n 1 "$ACT_FIRST_INPUT" 2>/dev/null)" = "generation=$generation" ]; then
+      drain=$(mktemp "${TMPDIR:-/tmp}/fm-startup-act-first-drain.XXXXXX" 2>/dev/null) || {
+        expire_act_first_ranker "$generation" "" || true
+        return 0
+      }
+      if consume_act_first_input "$generation" "$drain"; then
+        break
+      fi
+      rm -f "$drain"
+    fi
+    if [ "$waited" -ge 200 ]; then
+      drain=$(mktemp "${TMPDIR:-/tmp}/fm-startup-act-first-drain.XXXXXX" 2>/dev/null) || {
+        expire_act_first_ranker "$generation" "" || true
+        return 0
+      }
+      if expire_act_first_ranker "$generation" "$drain"; then
+        break
+      fi
+      rm -f "$drain"
+      return 0
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  timeout=${JEV_TIMEOUT:-$(fmx_env_get JEV_TIMEOUT "$FM_HOME/.env")}
+  JEV_TIMEOUT=${timeout:-5}
+  timeout=$(_fm_jev_timeout)
+  outer_timeout=$((10#$timeout + 3))
+  lines=$(JEV_TIMEOUT="$timeout" FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+    fm_run_timed "$outer_timeout" "$SCRIPT_DIR/fm-jev-act-first.sh" --drain-file "$drain" --status-dir "$STATE" 2>/dev/null </dev/null) || lines=
+  rm -f "$drain"
+  [ -n "$lines" ] || return 0
+  fm_lock_acquire_wait "$PUBLISH_LOCK"
+  if [ "$(status_get generation)" != "$generation" ]; then
+    fm_lock_release "$PUBLISH_LOCK"
+    return 0
+  fi
+  if ! printf 'generation=%s\n%s\n' "$generation" "$(printf '%s\n' "$lines" | head -n 5)" \
+    | write_atomic "$ACT_FIRST_FILE"; then
+    fm_lock_release "$PUBLISH_LOCK"
+    return 0
+  fi
+  fm_wake_append check act-first \
+    "check: act-first: Jev ranked this session start's actionable items (advisory; handle every item regardless); read them with $FM_ROOT/bin/fm-startup-network.sh report" \
+    || true
+  fm_lock_release "$PUBLISH_LOCK"
+}
+
+print_act_first() {
+  local generation
+  [ -s "$ACT_FIRST_FILE" ] || return 0
+  generation=$(status_get generation)
+  [ -n "$generation" ] && [ "$(head -n 1 "$ACT_FIRST_FILE" 2>/dev/null)" = "generation=$generation" ] || return 0
+  printf 'ACT FIRST - latest advisory Jev ranking of a session start'"'"'s actionable items:\n'
+  tail -n +2 "$ACT_FIRST_FILE"
+}
+
 # --- entry -------------------------------------------------------------------
 
 LOCKED=0
@@ -655,12 +880,14 @@ case "$MODE" in
   start) cmd_start "$LOCKED" "${HARVEST_PID:-0}" ;;
   run) cmd_run "$LOCKED" "$LOCK_PID" "$GENERATION" ;;
   harvest) cmd_harvest "${HARVEST_PID:-}" ;;
-  report) print_state; print_timings ;;
+  report) print_state; print_timings; print_act_first ;;
   wait) cmd_wait "${1:-120}" || exit $? ;;
+  act-first-input) cmd_act_first_input ;;
+  act-first-rank) cmd_act_first_rank "$GENERATION" ;;
   -h|--help) usage ;;
   *)
     printf 'fm-startup-network: unknown mode: %s\n' "${MODE:-<none>}" >&2
-    printf 'usage: fm-startup-network.sh start|run|harvest|report|wait\n' >&2
+    printf 'usage: fm-startup-network.sh start|run|harvest|report|wait|act-first-input\n' >&2
     exit 2
     ;;
 esac
