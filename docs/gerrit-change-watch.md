@@ -125,6 +125,7 @@ The server permitting self-approval is what makes this a policy boundary rather 
 - The merge path refuses a Gerrit change.
 - Arming accepts a done naming a Gerrit change only when a live read shows the change's current patch set carrying the worker's HEAD tree, even when a remote-tracking ref such as the no-mistakes gate branch holds that HEAD, and refuses a mismatched, unknown, or unreadable patch set before recording anything.
 - Once arming has recorded the change as `pr=`, a later done naming it is accepted from that record with no forge read, so a server-side rebase or new patch set does not revoke it.
+- A no-mistakes done naming a Gerrit change is also refused unless the copy holds the pipeline's result: refused while the run reports `recover_custody` or `continue_active_run`, when HEAD's tree differs from the pipeline head's, or when the run cannot be read, and accepted once recovered even after the Change-Id stamp rewrote the branch's messages.
 
 `tests/fm-crew-state.test.sh` pins the crew-state read with no server either: a passed run whose change is open reports `PR open`, an abandoned one `PR closed`, a merged one `PR merged`, and an unreadable record or one naming another change reports an honest unknown rather than a merge.
 

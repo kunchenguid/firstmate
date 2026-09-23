@@ -24,9 +24,12 @@
 # at arming, and otherwise only when a live read shows the change's current
 # patch set carrying the worker copy's HEAD tree. A squash is a new commit on the
 # server's base, so the tree rather than the commit is what names the published
-# content. The live read is the one check at the ready decision; a later rebase
-# or patch set on the server does not revoke an armed task's done. Teardown's
-# landed-work test remains the complete discard gate.
+# content. In no-mistakes mode that live read is preceded by
+# fm_dod_nm_custody_returned: a copy that publishes before recovering the
+# pipeline's fix commits agrees with its own unfixed patch set, so the copy must
+# also hold the run's result. These live reads are the one check at the ready
+# decision; a later rebase or patch set on the server does not revoke an armed
+# task's done. Teardown's landed-work test remains the complete discard gate.
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [<forge>] prints the
 # block on stdout with no trailing blank line. The caller validates the mode; an
 # unknown mode is refused rather than silently rendered as the pipeline contract.
@@ -86,6 +89,8 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-classify-lib.sh"
+# shellcheck source=bin/fm-nm-run-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-nm-run-lib.sh"
 
 fm_brief_worker_role() {  # <state-dir> <task-id>
   local state=$1 task_id=$2
@@ -411,9 +416,10 @@ Because \`push\` is skipped, the pipeline's fixes DO NOT arrive in your checkout
 Your tree never goes dirty and nothing interrupts you, so a passed run whose fixes are still in the gate looks exactly like a passed run whose fixes you already have.
 You may not publish until you have closed that gap:
 1. After the run reaches its outcome, read \`branch_sync.next_action\` from \`no-mistakes axi status\`.
-2. When its code is \`recover_custody\`, run the exact command that status prints - \`no-mistakes axi sync --recover\` - and confirm \`branch_sync.state\` comes back \`custody_returned\` on a clean tree. The printed command is authoritative if it differs.
+2. When its code is \`recover_custody\`, run the exact command that status prints - \`no-mistakes axi sync --recover\` - and confirm \`branch_sync.state\` comes back \`custody_returned\` on a clean tree. The printed command is authoritative if it differs. The \`run_pipeline\` next action status reports after recovery is not an instruction to run again: the recovered head is the one the passed run validated, so publish it.
 3. Confirm with \`git log\` that \`fm/$id\` now carries every fix commit the run made, whether or not step 2 was needed.
 An unrecovered fix round is an unfinished task, never housekeeping: publishing without it is how the UNFIXED code reaches review.
+Your ready report is refused while the run still holds your branch or while your HEAD's tree differs from the run's result.
 
 When the run's outcome is passed and step 3 holds, publish.
 EOF
@@ -589,6 +595,42 @@ fm_dod_gerrit_change_carries_head() {  # <worktree> <url>
   [ -n "$head_tree" ] && [ "$head_tree" = "$revision_tree" ]
 }
 
+# 0 when the worker copy holds the result of its own passed no-mistakes run:
+# that pipeline owns no unreturned work (branch_sync.next_action.code is neither
+# recover_custody nor continue_active_run) and HEAD's tree equals the tree of the
+# pipeline's current head resolved in this copy. On a Gerrit project push is
+# skipped, so a fix round's commits stay in the gate until custody is recovered,
+# and a copy that publishes before recovering has a server patch set that agrees
+# with its own unfixed HEAD - the published-tree check alone accepts it. Trees
+# are compared rather than ancestry because the publish stamps a Change-Id and
+# rewrites the branch's messages. An unreadable status refuses, as an unreadable
+# change does. 1 when refused; stdout then holds a one-line reason.
+fm_dod_nm_custody_returned() {  # <worktree>
+  local wt=$1 out code pipeline_head head_tree pipeline_tree
+  if ! out=$(fm_nm_run_checked "$wt" 15 axi status) || ! printf '%s\n' "$out" | grep -q '^run:'; then
+    printf '%s\n' "the no-mistakes run for this copy could not be read, so its fixes cannot be proven recovered"
+    return 1
+  fi
+  code=$(fm_nm_branch_sync_nested "$out" next_action code)
+  case "$code" in
+    recover_custody|continue_active_run)
+      printf '%s\n' "the no-mistakes run still holds this copy's branch (next action $code), so its fixes are not recovered into the published work"
+      return 1 ;;
+  esac
+  pipeline_head=$(fm_nm_branch_sync_nested "$out" pipeline current_head)
+  [ -n "$pipeline_head" ] || pipeline_head=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head_sha)")
+  head_tree=$(git -C "$wt" rev-parse --verify --quiet 'HEAD^{tree}' 2>/dev/null) || head_tree=
+  pipeline_tree=
+  if fm_pr_head_valid "$pipeline_head"; then
+    pipeline_tree=$(git -C "$wt" rev-parse --verify --quiet "$pipeline_head^{tree}" 2>/dev/null) || pipeline_tree=
+  fi
+  if [ -z "$head_tree" ] || [ -z "$pipeline_tree" ] || [ "$head_tree" != "$pipeline_tree" ]; then
+    printf '%s\n' "this copy's HEAD does not carry the no-mistakes run's result ${pipeline_head:-(unknown head)}, so the pipeline's fixes are not in the published work"
+    return 1
+  fi
+  return 0
+}
+
 # 0 when <sha> is reachable from a ref that survives the disposable worktree:
 # any remote-tracking ref, or - for local-only - heads in the project clone.
 fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> <sha>
@@ -628,6 +670,10 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     return 1
   }
   if [ -n "$url" ] && fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gerrit ]; then
+    case "$mode" in
+      no-mistakes|'')
+        fm_dod_nm_custody_returned "$wt" || return 1 ;;
+    esac
     if fm_dod_gerrit_change_carries_head "$wt" "$url"; then
       return 0
     fi
