@@ -144,6 +144,7 @@ test_measured_lanes_keep_their_existing_bounds() {
   done <<'CAPS'
 tests-portable-parallel-1 10
 tests-portable-parallel-2 10
+tests-portable-parallel-3 10
 tests-portable-serial 30
 tests-herdr 75
 macos-stock-bash 10
@@ -152,7 +153,7 @@ CAPS
 }
 
 test_ci_matrices_match_executable_partitions() {
-  ruby -ryaml -ropen3 - "$CI_WORKFLOW" "$ROOT" <<'RUBY' || fail "CI partition contract"
+  ruby -ryaml -ropen3 -rtmpdir - "$CI_WORKFLOW" "$ROOT" <<'RUBY' || fail "CI partition contract"
 jobs = YAML.load_file(ARGV[0]).fetch("jobs")
 root = ARGV[1]
 serial = jobs.fetch("tests-portable-serial").fetch("strategy")
@@ -165,6 +166,46 @@ raise "cannot list runner lanes" unless status.success?
 actual = lanes.lines.map(&:strip).select { |l| l.match?(/\Aportable-serial-\d+of\d+\z/) }
 expected = shards.map { |s| "portable-serial-#{s}of#{shards.length}" }
 raise "CI matrix and runner disagree" unless actual.sort == expected.sort
+parallel_jobs = jobs.keys.grep(/\Atests-portable-parallel-\d+\z/).sort
+actual_parallel = lanes.lines.map(&:strip).select { |lane| lane.match?(/\Aportable-parallel-\d+\z/) }.sort
+expected_parallel = parallel_jobs.map { |job| job.sub(/\Atests-/, "") }
+raise "portable parallel jobs and runner lanes disagree" unless actual_parallel == expected_parallel
+aggregate_needs = jobs.fetch("tests-timing-aggregate").fetch("needs")
+raise "timing aggregate must wait for every portable parallel shard" unless (parallel_jobs - aggregate_needs).empty?
+parallel_jobs.each do |job|
+  index = job.sub(/\Atests-portable-parallel-/, "")
+  definition = jobs.fetch(job)
+  raise "unexpected name for #{job}" unless definition.fetch("name") == "Behavior portable parallel #{index}"
+  steps = definition.fetch("steps")
+  run_step = steps.find { |step| step["name"] == "Run portable parallel shard #{index}" }
+  raise "#{job} must have its named lane step" unless run_step
+  Dir.mktmpdir("fm-ci-workflow-", root) do |sandbox|
+    bin_dir = File.join(sandbox, "bin")
+    Dir.mkdir(bin_dir)
+    capture_path = File.join(sandbox, "runner-args")
+    runner_stub = File.join(bin_dir, "fm-test-run.sh")
+    File.write(runner_stub, <<~'SH')
+      #!/usr/bin/env bash
+      printf '%s\0' "$@" > "$FM_CAPTURE_ARGS"
+    SH
+    File.chmod(0o755, runner_stub)
+    _stdout, stderr, result = Open3.capture3(
+      {"RUNNER_TEMP" => File.join(sandbox, "runner-temp"), "FM_CAPTURE_ARGS" => capture_path},
+      "bash", "-e", "-c", run_step.fetch("run"), chdir: sandbox
+    )
+    raise "#{job} run step failed: #{stderr}" unless result.success?
+    args = File.binread(capture_path).split("\0")
+    lane_values = args.each_with_index.each_with_object([]) do |(arg, arg_index), values|
+      values << args[arg_index + 1] if arg == "--lane" && args[arg_index + 1]
+      values << arg.delete_prefix("--lane=") if arg.start_with?("--lane=")
+    end
+    expected_lane = "portable-parallel-#{index}"
+    raise "#{job} invoked #{lane_values.inspect}, expected #{expected_lane}" unless lane_values == [expected_lane]
+  end
+  upload_step = steps.find { |step| step["name"] == "Upload shard #{index} timing artifact" }
+  expected_artifact = "fm-test-timing-portable-parallel-#{index}"
+  raise "#{job} must upload its matching timing artifact" unless upload_step && upload_step.fetch("with").fetch("name") == expected_artifact
+end
 lint = jobs.fetch("lint").fetch("strategy")
 raise "lint failures must not cancel another partition" unless lint.fetch("fail-fast") == false
 matrix = lint.fetch("matrix")

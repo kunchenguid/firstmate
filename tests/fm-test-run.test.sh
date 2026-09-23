@@ -1054,48 +1054,52 @@ test_list_scheduled_non_lane_selections_use_serial_weights() {
 }
 
 test_portable_shard_union_and_coverage_guard() {
-  local s1 s2 proven serial herdr all_count union_count overlap out lane
+  local s1 s2 s3 proven serial herdr all_count union_count overlap out lane lanes
   s1=$("$RUNNER" --list --lane portable-parallel-1)
   s2=$("$RUNNER" --list --lane portable-parallel-2)
+  s3=$("$RUNNER" --list --lane portable-parallel-3)
   proven=$("$RUNNER" --list --proven-isolated)
   serial=$("$RUNNER" --list --lane portable-serial)
   herdr=$("$RUNNER" --list --family real-herdr-gated)
-  [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
+  [ -n "$s1" ] && [ -n "$s2" ] && [ -n "$s3" ] \
+    || fail "portable parallel shards must be non-empty"
+  lanes=$("$RUNNER" --list-lanes)
+  for lane in portable-parallel-1 portable-parallel-2 portable-parallel-3; do
+    printf '%s\n' "$lanes" | grep -Fxq "$lane" || fail "$lane must be listed"
+  done
   # Shards disjoint.
-  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(printf '%s\n' "$s1" "$s2" "$s3" | LC_ALL=C sort | uniq -d || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
-  [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
+  [ "$(printf '%s\n' "$s1" "$s2" "$s3" | LC_ALL=C sort -u)" = \
     "$(printf '%s\n' "$proven" | LC_ALL=C sort -u)" ] \
     || fail "shard union must equal proven-isolated set"
   # No herdr in portable lanes.
-  printf '%s\n' "$s1" "$s2" "$serial" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
+  printf '%s\n' "$s1" "$s2" "$s3" "$serial" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
     && fail "portable lanes must not include real-herdr-gated smoke"
   printf '%s\n' "$herdr" | grep -Fq 'tests/fm-backend-herdr-smoke.test.sh' \
     || fail "herdr family must include smoke"
   out=$("$RUNNER" --check-coverage)
   assert_contains "$out" "FM_TEST_COVERAGE ok" "coverage guard success marker"
   all_count=$("$RUNNER" --list --all | wc -l | tr -d ' ')
-  union_count=$(printf '%s\n' "$s1" "$s2" "$serial" "$herdr" | LC_ALL=C sort -u | wc -l | tr -d ' ')
+  union_count=$(printf '%s\n' "$s1" "$s2" "$s3" "$serial" "$herdr" | LC_ALL=C sort -u | wc -l | tr -d ' ')
   [ "$union_count" = "$all_count" ] \
     || fail "union of lanes ($union_count) must equal --all ($all_count)"
-  # No duplicates across the four partitions.
-  [ "$(printf '%s\n' "$s1" "$s2" "$serial" "$herdr" | LC_ALL=C sort | uniq -d | wc -l | tr -d ' ')" = "0" ] \
+  # No duplicates across the five partitions.
+  [ "$(printf '%s\n' "$s1" "$s2" "$s3" "$serial" "$herdr" | LC_ALL=C sort | uniq -d | wc -l | tr -d ' ')" = "0" ] \
     || fail "lanes must not duplicate scripts"
   # LPT execution order, asserted against the runner's own measured schedule
   # rather than against a script name: naming the current longest script here is
   # what let the recorded lane duration go stale unnoticed in the first place.
-  for lane in portable-parallel-1 portable-parallel-2; do
+  for lane in portable-parallel-1 portable-parallel-2 portable-parallel-3; do
     [ "$("$RUNNER" --list --lane "$lane")" = "$("$RUNNER" --list-scheduled --lane "$lane")" ] \
       || fail "$lane membership must be stored longest-measured-first"
   done
   pass "portable shard union, disjointness, and coverage guard hold"
 }
 
-# The two parallel lanes are only "duration-balanced" while every member has a
-# measured hint and the packing over those hints stays even. Both halves went
-# unchecked until one lane grew past its CI job cap and was cancelled on every
-# run, so assert them through the guard's own reported numbers.
+# The portable parallel lanes are only "duration-balanced" while every member
+# has a measured hint and the packed estimate stays below seven minutes.
 test_portable_parallel_lanes_stay_duration_balanced() {
   local out max imbalance unhinted
   out=$("$RUNNER" --check-coverage)
@@ -1107,11 +1111,12 @@ test_portable_parallel_lanes_stay_duration_balanced() {
   [ "$unhinted" = "0" ] \
     || fail "$unhinted proven-isolated scripts have no measured parallel hint, so the lanes are packed on a guess"
   [ "$max" -gt 0 ] || fail "parallel_max_ms must be a positive packed duration, got $max"
+  [ "$max" -lt 420000 ] || fail "parallel_max_ms must stay below seven minutes, got $max"
   # 5% of the worst lane: wide enough that one script's growth does not trip it,
   # narrow enough that a lopsided partition cannot call itself balanced.
   [ "$((imbalance * 20))" -le "$max" ] \
     || fail "parallel lanes differ by ${imbalance}ms against a ${max}ms worst lane, more than 5%"
-  pass "portable parallel lanes are fully hinted and packed within 5% of each other"
+  pass "portable parallel lanes stay fully hinted, below seven minutes, and within 5% of each other"
 }
 
 test_portable_serial_shards_partition_the_serial_lane() {

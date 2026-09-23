@@ -261,6 +261,7 @@ test_parallel_shards_consume_the_proven_set() {
     {
       "$RUNNER" --list --lane portable-parallel-1
       "$RUNNER" --list --lane portable-parallel-2
+      "$RUNNER" --list --lane portable-parallel-3
     } | LC_ALL=C sort -u
   )
   [ "$proven" = "$shards" ] \
