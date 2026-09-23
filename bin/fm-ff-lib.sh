@@ -54,6 +54,14 @@ default_branch() {
     echo "${ref#origin/}"
     return 0
   fi
+  if git -C "$dir" remote get-url origin >/dev/null 2>&1; then
+    ref=$(git -C "$dir" ls-remote --symref origin HEAD 2>/dev/null | awk '$1 == "ref:" && $2 ~ /^refs\/heads\// { sub(/^refs\/heads\//, "", $2); print $2; exit }')
+    if [ -n "$ref" ]; then
+      echo "$ref"
+      return 0
+    fi
+    return 1
+  fi
   for branch in main master; do
     if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
       echo "$branch"

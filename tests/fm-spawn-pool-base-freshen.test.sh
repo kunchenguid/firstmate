@@ -138,6 +138,51 @@ test_custom_crew_branch_ref_collision_is_refused_before_allocation() {
   pass "spawn refuses an occupied custom crew branch before allocation"
 }
 
+test_custom_crew_branch_remote_collision_is_refused_before_allocation() {
+  local rec id out status before
+  id='pool-crew-remote-collision-r1'
+  rec=$(make_case crew-remote-collision "$id")
+  read_case_record "$rec"
+  git -C "$CASE_DIR/publisher" checkout --quiet -b feature/remote-existing
+  git -C "$CASE_DIR/publisher" push --quiet origin refs/heads/feature/remote-existing:refs/heads/feature/remote-existing
+  scaffold_ship_brief "$id" direct-PR '' feature/remote-existing
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a crew branch occupied on origin"
+  assert_contains "$out" "already exists on origin" \
+    "remote crew branch refusal did not explain the collision"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "remote crew branch collision published task metadata"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "remote crew branch collision moved the pooled worktree before refusing"
+  pass "spawn refuses a crew branch occupied on origin before allocation"
+}
+
+test_custom_crew_branch_resolves_remote_default_before_allocation() {
+  local rec id out status before
+  id='pool-crew-unresolved-default-r1'
+  rec=$(make_case crew-unresolved-default "$id" develop)
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" checkout --quiet --detach "$INITIAL_SHA"
+  git -C "$PROJECT_DIR" branch -D "$DEFAULT_BRANCH" >/dev/null
+  git -C "$PROJECT_DIR" branch main "$INITIAL_SHA"
+  scaffold_ship_brief "$id" direct-PR '' develop
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a crew branch equal to origin's default"
+  assert_contains "$out" "which is the project default branch" \
+    "origin default collision did not explain the unsafe target"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "unresolved default refusal published task metadata"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "unresolved default refusal moved the pooled worktree before refusing"
+  pass "spawn resolves origin's default before accepting a custom crew branch"
+}
+
 test_custom_crew_branch_task_collision_is_refused_before_allocation() {
   local rec id out status
   id='pool-crew-task-collision-r1'
@@ -1290,6 +1335,8 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_custom_crew_branch_is_persisted_for_relaunch
 test_custom_crew_branch_ref_collision_is_refused_before_allocation
+test_custom_crew_branch_remote_collision_is_refused_before_allocation
+test_custom_crew_branch_resolves_remote_default_before_allocation
 test_custom_crew_branch_task_collision_is_refused_before_allocation
 test_custom_crew_branch_never_targets_requested_base
 test_implicit_crew_branch_never_targets_requested_base

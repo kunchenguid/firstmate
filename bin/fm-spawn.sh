@@ -2852,6 +2852,10 @@ if [ "$KIND" != secondmate ]; then
   fi
   if [ -n "$RECORDED_CREW_BRANCH" ]; then
     CURRENT_DEFAULT_BRANCH=$(default_branch "$PROJ_ABS" || true)
+    if [ -z "$CURRENT_DEFAULT_BRANCH" ] && git -C "$PROJ_ABS" remote get-url origin >/dev/null 2>&1; then
+      echo "error: could not determine origin's default branch for $PROJ_ABS; refusing to launch with an unresolved crew branch safety boundary" >&2
+      exit 1
+    fi
     if [ -n "$CURRENT_DEFAULT_BRANCH" ] && [ "$RECORDED_CREW_BRANCH" = "$CURRENT_DEFAULT_BRANCH" ]; then
       echo "error: $BRIEF records crew branch $RECORDED_CREW_BRANCH, which is the project default branch; refusing to launch" >&2
       exit 1
@@ -2861,6 +2865,18 @@ if [ "$KIND" != secondmate ]; then
     if git -C "$PROJ_ABS" show-ref --verify --quiet "refs/heads/$EFFECTIVE_CREW_BRANCH"; then
       echo "error: crew branch $EFFECTIVE_CREW_BRANCH already exists; refusing to launch a fresh task with an occupied branch" >&2
       exit 1
+    fi
+    if git -C "$PROJ_ABS" remote get-url origin >/dev/null 2>&1; then
+      SPAWN_REMOTE_BRANCH_STATUS=0
+      git -C "$PROJ_ABS" ls-remote --exit-code --heads origin "refs/heads/$EFFECTIVE_CREW_BRANCH" >/dev/null 2>&1 || SPAWN_REMOTE_BRANCH_STATUS=$?
+      case "$SPAWN_REMOTE_BRANCH_STATUS" in
+        0)
+          echo "error: crew branch $EFFECTIVE_CREW_BRANCH already exists on origin; refusing to launch a fresh task with an occupied branch" >&2
+          exit 1
+          ;;
+        2) ;;
+        *) ;;
+      esac
     fi
     SPAWN_PROJECT_COMMON=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
     for SPAWN_OTHER_META in "$STATE"/*.meta; do
