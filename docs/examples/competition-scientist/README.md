@@ -30,6 +30,7 @@ This also prevents a proposal from opening a network connection or launching a s
 The evaluator, synthetic data, development split, falsification split, sealed-data generator, Python environment record, baseline template, and empty dependency set are frozen and SHA-256 verified before every evaluation.
 The sealed rows are generated into a temporary harness-owned file only during finalization and are removed after that single evaluation, including when that evaluation raises or is interrupted.
 A sealed dataset left in the workspace is never tolerated by the surface check, so an escaped holdout is named rather than silently walked past.
+The single exception is the holdout escaped by a terminated run: the recovery that publishes that run's failed record removes it first, and a holdout in any other workspace state is still refused by name.
 The evaluator runs in a subprocess with a kernel CPU limit and a parent-enforced wall limit.
 Linux uses a kernel address-space limit for memory, while macOS uses parent-side resident-memory sampling because macOS rejects a lowered `RLIMIT_AS` for the Python process image.
 The default experiment cap is 30 seconds of CPU, 30 seconds of wall time, and 1 GiB of resident memory per evaluator call.
@@ -59,6 +60,7 @@ Both one-shot budgets are charged to `.run/state.json` before the evaluation the
 If a charged falsification or sealed call is interrupted, raises, or returns a bounded resource or runtime failure, the search ends there: `finish` publishes a failed `.run/final.json` whose `aborted` block names the charged phase and the underlying failure, marks the workspace complete, and leaves every earlier attempt record intact.
 A published successful record therefore always carries a real sealed score; it never reports a completed audit that produced none.
 A later `finish` reprints that record's outcome without re-running either evaluation, and still exits non-zero, so an abandoned search never reads as a completed one.
+The same policy covers an uncatchable termination of the run itself: because the budget is durably charged first, the next `finish` or `replay` detects a charged phase with no final record, reclaims the sealed holdout that run owned, publishes the identical terminal failed record, and never executes either charged audit again.
 `replay` accepts such a workspace, verifies both charged-call counts the record claims against `.run/state.json` and the controller mode, and names the aborted phase in its `PASS` line.
 
 A typed proposal may choose a change, name one bounded falsifier, and request a branch, but it cannot provide a score, acceptance verdict, evaluator edit, budget override, hidden result, or failure injection.
@@ -186,7 +188,7 @@ Every field is written on one line with tabs and every ASCII or Unicode line bre
 `.run/final.json` alone contains the post-search sealed score, or an `aborted` block naming the charged phase when an audit could not complete.
 No sealed dataset file exists in the proposer-visible workspace before finalization.
 
-Failure classes include immutable or undeclared-surface refusal, unparseable, duplicate, or confounded proposal, budget refusal, syntax, timeout, CPU-limit kill, OOM, network denial, runtime failure, nondeterministic replay, and the terminal `sealed-not-completed` class recorded when a charged sealed audit was interrupted before it returned.
+Failure classes include immutable or undeclared-surface refusal, unparseable, duplicate, or confounded proposal, budget refusal, syntax, timeout, CPU-limit kill, OOM, network denial, runtime failure, nondeterministic replay, and the terminal `sealed-not-completed` class recorded when a charged sealed audit was interrupted, in process or by an uncatchable kill, before it returned.
 A sealed audit that runs to completion and reports a bounded failure keeps that returned class, so an interrupted call and a returned OOM, timeout, CPU-limit, syntax, or nondeterministic-replay failure stay distinguishable in the final record.
 A falsification arm that fails outright is recorded with its arm prefix, as `candidate-<class>` or `baseline-<class>`.
 An audit abandoned without an arm failure names its phase only in the `aborted` block, leaving the evaluation failure classes empty rather than inventing one.

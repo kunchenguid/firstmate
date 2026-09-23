@@ -1192,7 +1192,54 @@ def abandon_charged_search(
     )
 
 
+def recorded_falsification_block(workspace: Path, state: dict[str, Any]) -> dict[str, Any] | None:
+    if not state["falsification_calls"]:
+        return None
+    for line in reversed((workspace / ".run" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()):
+        record = json.loads(line) if line else {}
+        if record.get("kind") == "falsification":
+            return {
+                "ok": not record["failure_class"],
+                "metrics": record.get("metrics"),
+                "failure_class": record["failure_class"],
+            }
+    return {"ok": False, "metrics": None, "failure_class": "falsification-not-completed"}
+
+
+def recover_interrupted_charge(workspace: Path) -> None:
+    """Publish the terminal failed record a killed parent could not write.
+
+    Each one-shot budget is charged to ``.run/state.json`` before the
+    evaluation it gates, so a charged, incomplete search with no
+    ``.run/final.json`` can only be a finish whose parent was terminated
+    uncatchably. The sealed holdout that parent owned is reclaimed here, the
+    abandoned phase is published as a terminal failed record, and neither
+    charged audit is ever executed again.
+    """
+    run_dir = workspace / ".run"
+    if (run_dir / "final.json").exists() or not (run_dir / "state.json").exists():
+        return
+    state = load_state(workspace)
+    if state["complete"] or not (state["sealed_calls"] or state["falsification_calls"]):
+        return
+    phase = "sealed" if state["sealed_calls"] else "falsification"
+    if phase == "sealed":
+        for escaped in (run_dir / "tmp").glob("sealed-*.json"):
+            escaped.unlink(missing_ok=True)
+    manifest = verify_frozen(workspace)
+    abandon_charged_search(
+        workspace,
+        manifest,
+        state,
+        phase,
+        LabError(f"{phase}-audit-not-completed:run-terminated-before-the-charged-call-returned"),
+        recorded_falsification_block(workspace, state),
+        None,
+    )
+
+
 def finish_workspace(workspace: Path) -> dict[str, Any]:
+    recover_interrupted_charge(workspace)
     manifest = verify_frozen(workspace)
     state = load_state(workspace)
     if state["complete"]:
@@ -1401,6 +1448,7 @@ def run_all(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def replay_workspace(workspace: Path) -> None:
+    recover_interrupted_charge(workspace)
     manifest = verify_frozen(workspace)
     records = [json.loads(line) for line in (workspace / ".run" / "ledger.jsonl").read_text(encoding="utf-8").splitlines() if line]
     checked = 0

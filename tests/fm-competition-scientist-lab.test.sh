@@ -436,6 +436,90 @@ PY
   pass "competition scientist: an interrupted charged audit ends the search with an auditable failed final record"
 }
 
+test_killed_finish_recovers_into_a_failed_final_record() {
+  local workspace outcome output status first second attempt
+  outcome=missed
+  for attempt in 1 2 3; do
+    workspace="$TMP_ROOT/killed-finish-$attempt"
+    init_workspace "$workspace" noisy-classification linear 3 2
+    outcome=$(python3 - "$LAB" "$workspace" <<'PY'
+import json
+import pathlib
+import subprocess
+import sys
+import time
+
+lab, workspace = sys.argv[1], pathlib.Path(sys.argv[2])
+state_path = workspace / ".run/state.json"
+proc = subprocess.Popen([lab, "finish", str(workspace)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+deadline = time.monotonic() + 60
+outcome = "missed"
+while time.monotonic() < deadline:
+    try:
+        charged = json.loads(state_path.read_text())["sealed_calls"] >= 1
+    except (OSError, ValueError, KeyError):
+        charged = False
+    if charged:
+        proc.kill()  # SIGKILL: the parent gets no chance to unwind
+        outcome = "killed"
+        break
+    if proc.poll() is not None:
+        break
+    time.sleep(0.001)
+proc.wait()
+print(outcome)
+PY
+)
+    [ "$outcome" = killed ] && break
+  done
+  [ "$outcome" = killed ] || fail "could not kill the parent inside the charged sealed window"
+
+  python3 - "$workspace" <<'PY'
+import json
+import pathlib
+import sys
+workspace = pathlib.Path(sys.argv[1])
+state = json.loads((workspace / ".run/state.json").read_text())
+assert state["sealed_calls"] == 1, state["sealed_calls"]
+assert state["complete"] is False, state["complete"]
+assert not (workspace / ".run/final.json").exists(), "a killed parent cannot have published a record"
+PY
+
+  output=$($LAB finish "$workspace" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "recovering a killed charged audit must not report success"
+  assert_contains "$output" "aborted: task=noisy-classification controller=linear phase=sealed" \
+    "the recovering finish should print the abandoned charged phase"
+  [ -z "$(find "$workspace" -name 'sealed-*.json' -print -quit)" ] \
+    || fail "recovery left the escaped sealed dataset in the proposer-visible workspace"
+  first=$(shasum -a 256 "$workspace/.run/final.json" | awk '{print $1}')
+  python3 - "$workspace" <<'PY'
+import json
+import pathlib
+import sys
+workspace = pathlib.Path(sys.argv[1])
+state = json.loads((workspace / ".run/state.json").read_text())
+final = json.loads((workspace / ".run/final.json").read_text())
+assert state["complete"] is True, state["complete"]
+assert state["sealed_calls"] == 1, state["sealed_calls"]
+assert final["aborted"]["phase"] == "sealed", final["aborted"]
+assert "not-completed" in final["aborted"]["error"], final["aborted"]
+assert final["sealed"]["ok"] is False, final["sealed"]
+assert final["sealed"]["failure_class"] == "sealed-not-completed", final["sealed"]
+assert final["sealed_calls"] == 1, final["sealed_calls"]
+assert final["selected_candidate_sha256"] == "", final["selected_candidate_sha256"]
+assert any(json.loads(line)["kind"] == "baseline" for line in (workspace / ".run/ledger.jsonl").read_text().splitlines() if line)
+PY
+
+  output=$($LAB finish "$workspace" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a later finish must not report success for a killed search"
+  second=$(shasum -a 256 "$workspace/.run/final.json" | awk '{print $1}')
+  [ "$first" = "$second" ] || fail "recovery re-ran a charged one-shot call"
+  output=$($LAB replay "$workspace" 2>&1); status=$?
+  expect_code 0 "$status" "replay should audit the recovered record instead of refusing the workspace"
+  assert_contains "$output" "sealed_calls=1 aborted=sealed" "replay should name the charged phase that never completed"
+  pass "competition scientist: an uncatchable kill during the charged audit recovers into a failed final record"
+}
+
 test_interrupted_falsification_record_replays_as_aborted() {
   local workspace output status
   workspace="$TMP_ROOT/falsification-abort"
@@ -697,6 +781,7 @@ test_duplicate_confounded_and_budget_rejections
 test_finish_is_idempotent_and_replayable
 test_charged_audit_interruption_publishes_a_failed_final_record
 test_interrupted_falsification_record_replays_as_aborted
+test_killed_finish_recovers_into_a_failed_final_record
 test_failed_audit_evaluation_is_a_terminal_failed_record
 test_falsification_failure_names_the_failing_arm
 test_final_falsification_block_reports_the_whole_phase
