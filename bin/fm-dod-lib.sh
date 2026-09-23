@@ -25,7 +25,7 @@
 # pipeline contract. An omitted crew-branch keeps `fm/<task-id>`. An omitted
 # base-branch keeps the historical default-branch wording; a named base changes
 # the direct-PR create command, the local-only landing target, and the
-# no-mistakes `axi run --base-branch` step.
+# no-mistakes `no-mistakes axi run --base-branch` step.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # The two PR-based blocks require a non-draft pull request before the done
@@ -333,7 +333,7 @@ EOF
     no-mistakes)
       no_mistakes_base_steps=
       if [ -n "$base_branch" ]; then
-        no_mistakes_base_steps="When starting no-mistakes, pass \`axi run --base-branch $base_command\` so the pipeline opens the PR against that named integration branch for this run only.
+        no_mistakes_base_steps="When starting no-mistakes, pass \`no-mistakes axi run --base-branch $base_command\` so the pipeline opens the PR against that named integration branch for this run only.
 Do not open against the repo default and retarget later, and do not change repo \`pr.base_branch\` settings.
 "
       fi

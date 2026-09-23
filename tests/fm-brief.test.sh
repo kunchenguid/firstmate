@@ -363,7 +363,7 @@ test_pr_based_dod_requires_non_draft() {
 # Pin the specific line the bug lived on: the no-mistakes DOD's no-mistakes
 # reference must render as plain prose with no dangling apostrophe artifact.
 test_no_mistakes_dod_wording() {
-  local home id brief spelling
+  local home id brief spelling named_brief
   home="$TMP_ROOT/wording-home"
   mkdir -p "$home/data"
   id="brief-wording-b1"
@@ -410,6 +410,12 @@ test_no_mistakes_dod_wording() {
     "no-mistakes DOD still states the --yes ban as a preference"
   assert_no_grep "no-mistakes refuses" "$brief" \
     "no-mistakes DOD must not claim the tool itself refuses --yes"
+
+  id="brief-wording-named-base-b1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode no-mistakes --base-branch develop >/dev/null 2>&1
+  named_brief="$home/data/$id/brief.md"
+  assert_grep 'no-mistakes axi run --base-branch '\''develop'\''' "$named_brief" \
+    "named-base no-mistakes DOD must render the full pipeline command"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose and bans --yes outright"
 }
 

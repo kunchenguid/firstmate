@@ -57,7 +57,7 @@
 # report rather than a merge, and a charter is not a delivery contract.
 # --base-branch <branch> writes the worker-facing steps for the sequence owned
 # by bin/fm-spawn.sh's header: freshen from that branch, and for no-mistakes
-# pass `axi run --base-branch <branch>` so the PR opens on that integration
+# pass `no-mistakes axi run --base-branch <branch>` so the PR opens on that integration
 # branch. A direct-PR brief opens with gh-axi pr create --base <branch>. A
 # local-only brief names that same base as the local landing target in prose.
 # After spawn, state/<id>.meta base_branch= is the source of truth for review,

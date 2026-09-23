@@ -239,7 +239,7 @@
 #   default or to an origin-less skip. An unverifiable ref-specific fetch also
 #   refuses.
 #   The spawn records base_branch=<branch> in state/<id>.meta only when the
-#   flag is set. A no-mistakes ship then passes `axi run --base-branch
+#   flag is set. A no-mistakes ship then passes `no-mistakes axi run --base-branch
 #   <branch>` so the pipeline opens against that integration branch; do not
 #   retarget after green. A direct-PR ship opens with `gh-axi pr create
 #   --base <branch>`. Scaffold the matching brief with the same flag
