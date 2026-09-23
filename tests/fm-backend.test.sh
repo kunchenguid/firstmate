@@ -518,6 +518,40 @@ test_backend_source_shell_portable() {
   pass "bash: fm_backend_source recognizes known backends and rejects unknown ones"
 }
 
+test_backend_source_requires_adapter_file() {
+  local dir adapter exit_status continuation out rc condition
+  dir="$TMP_ROOT/adapter-precheck"
+  adapter="$dir/backends/tmux.sh"
+  mkdir -p "$dir/backends"
+
+  for condition in missing unreadable; do
+    if [ "$condition" = unreadable ]; then
+      printf ':\n' > "$adapter"
+      chmod 000 "$adapter"
+      if [ -r "$adapter" ]; then
+        pass "fm_backend_source: unreadable adapter case skipped (this user can read mode-000 files)"
+        continue
+      fi
+    fi
+    exit_status="$dir/$condition.exit"
+    continuation="$dir/$condition.continued"
+    out=$(bash -c '
+      . "$1"
+      FM_BACKEND_LIB_DIR=$2
+      trap '\''printf "%s\n" "$?" > "$3"'\'' EXIT
+      set -e
+      fm_backend_source tmux
+      : > "$4"
+    ' _ "$ROOT/bin/fm-backend.sh" "$dir" "$exit_status" "$continuation" 2>&1)
+    rc=$?
+    [ "$rc" -ne 0 ] || fail "fm_backend_source returned success for a $condition adapter: $out"
+    [ -f "$exit_status" ] || fail "fm_backend_source did not record the $condition adapter exit status"
+    [ "$(cat "$exit_status")" -ne 0 ] || fail "fm_backend_source lost the $condition adapter failure at EXIT"
+    [ ! -e "$continuation" ] || fail "fm_backend_source continued the lifecycle after a $condition adapter"
+    pass "fm_backend_source: $condition adapter fails before lifecycle continuation"
+  done
+}
+
 test_backend_validate_spawn_accepts_orca() {
   local out
   fm_backend_validate_spawn tmux 2>/dev/null || fail "fm_backend_validate_spawn should accept tmux"
@@ -1145,6 +1179,7 @@ test_backend_name_autodetect_notice
 test_backend_name_explicit_beats_detection
 test_backend_validate_refuses_unknown
 test_backend_source_shell_portable
+test_backend_source_requires_adapter_file
 test_backend_validate_spawn_accepts_orca
 test_meta_get_and_backend_of_meta
 test_resolve_selector_three_forms
