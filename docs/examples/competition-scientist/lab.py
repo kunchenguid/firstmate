@@ -811,7 +811,7 @@ def save_state(workspace: Path, state: dict[str, Any]) -> None:
 
 
 def tsv_field(value: str) -> str:
-    return value.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+    return " ".join(value.replace("\t", " ").splitlines())
 
 
 def append_record(workspace: Path, record: dict[str, Any]) -> None:
@@ -1206,9 +1206,13 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
                 workspace / "artifacts" / state["baseline_sha256"] / "candidate.py",
                 "falsification",
             )
-            unusable = next(
-                (result for result in (falsification, baseline_metrics) if not result.get("ok")),
-                None,
+            failed_arm, unusable = next(
+                (
+                    (arm, result)
+                    for arm, result in (("candidate", falsification), ("baseline", baseline_metrics))
+                    if not result.get("ok")
+                ),
+                ("", None),
             )
             if unusable is None:
                 keep, _, _ = metric_comparison(falsification["metrics"], baseline_metrics["metrics"], manifest)
@@ -1230,15 +1234,14 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
                     "changes": {},
                     "metrics": falsification.get("metrics"),
                     "verdict": "FAIL" if unusable is not None else ("KEEP" if selected_sha == best_sha else "REVERT"),
-                    "failure_class": "" if unusable is None else unusable.get("failure_class", "runtime"),
-                    "wall_seconds": falsification.get("wall_seconds", 0.0),
+                    "failure_class": "" if unusable is None else f"{failed_arm}-{unusable.get('failure_class', 'runtime')}",
+                    "wall_seconds": falsification.get("wall_seconds", 0.0) + baseline_metrics.get("wall_seconds", 0.0),
                     "resources": {"tokens": 0, "planning_tokens": 0},
                     "replay": "sealed-by-design:not-part-of-attempt-replay",
                 },
             )
             if unusable is not None:
-                falsification = unusable
-                raise LabError(f"falsification-evaluation-failed:{unusable.get('failure_class', 'runtime')}")
+                raise LabError(f"falsification-evaluation-failed:{failed_arm}-{unusable.get('failure_class', 'runtime')}")
 
         charged_phase = "sealed"
         state["sealed_calls"] += 1
@@ -1409,10 +1412,14 @@ def replay_workspace(workspace: Path) -> None:
         checked += 1
     final = read_json(workspace / ".run" / "final.json")
     aborted = final.get("aborted")
+    state = load_state(workspace)
     sealed_calls = final.get("sealed_calls")
-    charged = 0 if (aborted or {}).get("phase") == "falsification" else 1
-    if sealed_calls != charged or load_state(workspace).get("sealed_calls") != charged:
+    charged_sealed = 0 if (aborted or {}).get("phase") == "falsification" else 1
+    charged_falsification = 1 if manifest["controller"] == "proposed" else 0
+    if sealed_calls != charged_sealed or state.get("sealed_calls") != charged_sealed:
         raise LabError("replay-mismatch:sealed-call-count")
+    if final.get("falsification_calls") != charged_falsification or state.get("falsification_calls") != charged_falsification:
+        raise LabError("replay-mismatch:falsification-call-count")
     outcome = "" if aborted is None else f" aborted={aborted['phase']}"
     print(f"replay: PASS task={manifest['task']} controller={manifest['controller']} candidates={checked} sealed_calls={sealed_calls}{outcome}")
 

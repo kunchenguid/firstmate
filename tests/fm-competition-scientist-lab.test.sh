@@ -453,7 +453,60 @@ PY
   output=$($LAB replay "$workspace" 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "a final record disagreeing with the charged count should still be refused"
   assert_contains "$output" "replay-mismatch:sealed-call-count" "count tampering should still be named"
+
+  python3 - "$workspace" <<'@@'
+import json
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1]) / ".run/final.json"
+final = json.loads(path.read_text())
+final["sealed_calls"] = 0
+final["falsification_calls"] = 7
+path.chmod(0o600)
+path.write_text(json.dumps(final, indent=2, sort_keys=True) + "\n")
+@@
+  output=$($LAB replay "$workspace" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "the other charged counter must be audited too"
+  assert_contains "$output" "replay-mismatch:falsification-call-count" "falsification count tampering should be named"
   pass "competition scientist: replay audits an aborted final record and still catches a forged call count"
+}
+
+test_falsification_failure_names_the_failing_arm() {
+  local workspace baseline best output status
+  workspace="$TMP_ROOT/falsification-arms"
+  init_workspace "$workspace" grouped-classification proposed 4 2
+  write_proposal "$TMP_ROOT/drop-flip.json" drop-flip "remove the feature whose relationship flips" main '{"GROUPED_SPURIOUS_WEIGHT":0.0}'
+  $LAB attempt "$workspace" --proposal "$TMP_ROOT/drop-flip.json" >/dev/null
+  baseline=$(python3 -c 'import json,pathlib,sys; print(json.loads((pathlib.Path(sys.argv[1]) / ".run/state.json").read_text())["baseline_sha256"])' "$workspace")
+  best=$(python3 -c 'import json,pathlib,sys; print(json.loads((pathlib.Path(sys.argv[1]) / ".run/state.json").read_text())["global_best_sha256"])' "$workspace")
+  [ "$baseline" != "$best" ] || fail "fixture did not promote a candidate above the baseline"
+
+  chmod u+w "$workspace/artifacts/$baseline/candidate.py"
+  printf 'BROKEN =\n' > "$workspace/artifacts/$baseline/candidate.py"
+  output=$($LAB finish "$workspace" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a failed control arm must still abort the charged phase"
+  assert_contains "$output" "falsification-evaluation-failed:baseline-" \
+    "the abort should say which falsification arm failed"
+
+  python3 - "$workspace" <<'PY'
+import json
+import pathlib
+import sys
+workspace = pathlib.Path(sys.argv[1])
+ledger = [json.loads(line) for line in (workspace / ".run/ledger.jsonl").read_text().splitlines() if line]
+row = [r for r in ledger if r["kind"] == "falsification"][0]
+final = json.loads((workspace / ".run/final.json").read_text())
+candidate_wall = row["wall_seconds"]
+assert row["failure_class"].startswith("baseline-"), row["failure_class"]
+assert row["metrics"] is not None, "the candidate arm scored, so its metrics belong in the record"
+assert candidate_wall > 0.0, candidate_wall
+assert final["falsification"]["ok"] is True, final["falsification"]
+assert final["falsification"]["metrics"] is not None, final["falsification"]
+assert final["falsification"]["failure_class"] == "", final["falsification"]
+assert final["aborted"]["phase"] == "falsification", final["aborted"]
+assert "baseline-" in final["aborted"]["error"], final["aborted"]
+PY
+  pass "competition scientist: a failed falsification control arm is not charged to the selected candidate"
 }
 
 test_results_tsv_keeps_a_fixed_column_count() {
@@ -466,13 +519,16 @@ test_results_tsv_keeps_a_fixed_column_count() {
   $LAB attempt "$workspace" --proposal "$TMP_ROOT/tab-field.json" >/dev/null 2>&1
   $LAB attempt "$workspace" --proposal "$TMP_ROOT/tab-branch.json" >/dev/null 2>&1
 
+  python3 -c 'import json,sys; json.dump({"id":"u","hypothesis":"a" + chr(0x2028) + "b" + chr(0x85) + "c" + chr(0x0b) + "d","changes":{"NOISY_THRESHOLD":0.3}}, open(sys.argv[1],"w"))' "$TMP_ROOT/unicode-break.json"
+  $LAB attempt "$workspace" --proposal "$TMP_ROOT/unicode-break.json" >/dev/null 2>&1
+
   python3 - "$workspace" <<'PY'
 import pathlib
 import sys
 lines = (pathlib.Path(sys.argv[1]) / ".run/results.tsv").read_text().splitlines()
 widths = {len(line.split("\t")) for line in lines}
 assert widths == {9}, (widths, lines)
-assert len(lines) == 4, lines
+assert len(lines) == 5, lines
 PY
   pass "competition scientist: proposal and failure text cannot shift the results.tsv column count"
 }
@@ -562,6 +618,7 @@ test_finish_is_idempotent_and_replayable
 test_charged_audit_interruption_publishes_a_failed_final_record
 test_interrupted_falsification_record_replays_as_aborted
 test_failed_audit_evaluation_is_a_terminal_failed_record
+test_falsification_failure_names_the_failing_arm
 test_results_tsv_keeps_a_fixed_column_count
 test_sealed_dataset_never_persists_in_the_workspace
 

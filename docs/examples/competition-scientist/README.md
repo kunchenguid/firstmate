@@ -52,11 +52,12 @@ Planning tokens may not exceed the smaller declared planning cap.
 The default per-attempt cap is 8,000 tokens, and the default planning cap is 9,600 of 48,000 total tokens, or 20 percent.
 Before final promotion, the proposed controller runs one deterministic counterfactual falsification evaluation.
 The final sealed audit runs once after search completion and never changes an earlier attempt verdict.
+The falsification phase evaluates the selected candidate and the baseline control separately, and a failure of either arm is recorded against that arm rather than against the candidate.
 Both one-shot budgets are charged to `.run/state.json` before the evaluation they gate, so a charged call is never retried.
 If a charged falsification or sealed call is interrupted, raises, or returns a bounded resource or runtime failure, the search ends there: `finish` publishes a failed `.run/final.json` whose `aborted` block names the charged phase and the underlying failure, marks the workspace complete, and leaves every earlier attempt record intact.
 A published successful record therefore always carries a real sealed score; it never reports a completed audit that produced none.
 A later `finish` reprints that record's outcome without re-running either evaluation, and still exits non-zero, so an abandoned search never reads as a completed one.
-`replay` accepts such a workspace, verifies the charged-call count the record claims, and names the aborted phase in its `PASS` line.
+`replay` accepts such a workspace, verifies both charged-call counts the record claims against `.run/state.json` and the controller mode, and names the aborted phase in its `PASS` line.
 
 A typed proposal may choose a change, name one bounded falsifier, and request a branch, but it cannot provide a score, acceptance verdict, evaluator edit, budget override, hidden result, or failure injection.
 Syntax, timeout, OOM, and network faults are reachable only through the harness-only `attempt --inject-failure` recovery drill, never through a lever a proposal can name.
@@ -177,7 +178,7 @@ Every row carries:
 - replay command, previous-record hash, and current-record hash.
 
 `.run/results.tsv` is a compact human view, not a second contract owner.
-Every field is written on one line with tabs, carriage returns, and newlines replaced by spaces, so proposal or failure text can never change its nine-column shape.
+Every field is written on one line with tabs and every ASCII or Unicode line break replaced by spaces, so proposal or failure text can never change its nine-column shape.
 `artifacts/<candidate-sha256>/` retains each materialized candidate, predictions, and result, including rejected and failed attempts.
 `artifacts/proposal-<sha256>/` retains proposals rejected before candidate execution.
 `.run/final.json` alone contains the post-search sealed score, or an `aborted` block naming the charged phase when an audit could not complete.
