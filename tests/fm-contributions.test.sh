@@ -564,7 +564,7 @@ case "$fault:$*" in
     printf 'HTTP 502\n' >&2; exit 1 ;;
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
-  hang:'api repos/o/r/pulls/8') sleep 4 ;;
+  hang:'api repos/o/r/pulls/8/reviews?'*) sleep 30 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
 esac
 exec "$(dirname "$0")/gh-fixture" "$@"
@@ -584,11 +584,20 @@ test_budget_exhaustion_keeps_prior_record() { # exhaust|hang
   wrap_forge "$home"
   mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
   cp "$home/data/delivery/contributions.json" "$home/prior.json"
-  # Both modes freeze the clock: an unfrozen one can tick past a one-second
-  # budget before the first forge call, so nothing is ever observed.
+  # Both modes freeze the clock so the budget expires only where the fault
+  # decides, never from wall-clock time passing between forge calls.
+  #
+  # Neither mode may make its evidence depend on how fast a fixture process
+  # starts. Exhaustion is driven from inside the observation - `exhaust` jumps
+  # the frozen clock past the deadline, `hang` blocks a later call well past
+  # the bound - so the calls that prove the observation started are ordinary
+  # completed reads, not the read being killed. The budget is five seconds
+  # rather than one for the same reason: it is still `-le 5`, so a killed read
+  # is still classified as budget exhaustion rather than an unavailable forge,
+  # but a contended runner cannot spend the whole bound spawning the fixture.
   /bin/date +%s > "$home/forge/clock"
   printf '%s\n' "$mode" > "$home/forge/fault"
-  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=1 "$ROOT/bin/fm-contributions.sh" poll) \
+  out=$(with_home "$home" env FM_CONTRIBUTIONS_BUDGET=5 "$ROOT/bin/fm-contributions.sh" poll) \
     || fail "poll failed when its budget ran out ($mode)"
   [ -z "$out" ] || fail "budget exhaustion ($mode) printed a wake line: $out"
   grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
