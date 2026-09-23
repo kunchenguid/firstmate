@@ -107,13 +107,22 @@ fm_write_meta "$HOME_DIRTY/state/busy.meta" "worktree=$TMP_ROOT/dirty-pool/3/alp
 git -C "$REPO" worktree add --quiet --detach "$TMP_ROOT/dirty-pool/4/alpha"
 printf 'edit\n' >> "$TMP_ROOT/dirty-pool/4/alpha/README.md"
 fm_write_secondmate_meta "$HOME_DIRTY/state/mate.meta" "$TMP_ROOT/dirty-pool/4/alpha"
+printf '{}\n' > "$TMP_ROOT/dirty-pool/treehouse-state.json"
+# A claimed slot outside a recognizable pool is still a pool copy.
+git -C "$REPO" worktree add --quiet --detach "$TMP_ROOT/loose-slot/1/alpha"
+printf 'edit\n' >> "$TMP_ROOT/loose-slot/1/alpha/README.md"
+printf 'task=gone\nhome=%s\n' "$HOME_DIRTY" > "$TMP_ROOT/loose-slot/1/.fm-slot-owner"
+# Another agent's linked worktree under the shared-workspace layout is live work.
+git -C "$REPO" worktree add --quiet -b agent-task "$TMP_ROOT/worktrees/alpha/agent--task"
+printf 'in progress\n' >> "$TMP_ROOT/worktrees/alpha/agent--task/README.md"
 json=$(audit "$HOME_DIRTY" --json)
-assert_equals "1" "$(printf '%s' "$json" | jq '[.findings[] | select(.class == "dirty-orphan-copy")] | length')" \
-  "only the unowned copy with real edits is reported; a task copy and a secondmate home are owned"
-assert_contains "$(printf '%s' "$json" | jq -r '.findings[] | select(.class == "dirty-orphan-copy") | .path')" \
-  "dirty-pool/1/alpha" "the dirty orphan copy is named"
+assert_equals "dirty-pool/1/alpha,loose-slot/1/alpha" \
+  "$(printf '%s' "$json" | jq -r '[.findings[] | select(.class == "dirty-orphan-copy") | .path | split("/") | .[-3:] | join("/")] | sort | join(",")')" \
+  "only unowned pool copies with real edits are reported; a task copy and a secondmate home are owned"
+assert_not_contains "$(printf '%s' "$json" | jq -r '.findings[].path // empty')" "agent--task" \
+  "a dirty linked worktree outside the pools is not reported"
 [ -n "$(git -C "$TMP_ROOT/dirty-pool/1/alpha" status --porcelain)" ] || fail "the audit changed the dirty copy"
-pass "dirty copies no task owns are reported and left untouched"
+pass "dirty pool copies no task owns are reported and left untouched"
 
 # --- fm/* branches -----------------------------------------------------------------
 

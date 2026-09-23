@@ -2098,11 +2098,14 @@ heartbeat_scan_finds_actionable() {
 # STATE is this FM_HOME's own state directory, because the audit correlates this
 # home's task records with this home's clones; it is bounded by
 # FM_HEARTBEAT_HYGIENE_TIMEOUT (default 15 seconds), and FM_HEARTBEAT_HYGIENE=0
-# disables it. An audit failure or overrun wakes nothing.
+# disables it. An audit failure or overrun wakes nothing and leaves the
+# surfaced set untouched; FM_HYGIENE_SCANNED=1 marks a scan whose JSON parsed.
 FM_HYGIENE_CAPTURED_KEYS=''
+FM_HYGIENE_SCANNED=0
 hygiene_scan_finds_new() {
-  local home_state state_real json new
+  local home_state state_real json keys new
   FM_HYGIENE_CAPTURED_KEYS=''
+  FM_HYGIENE_SCANNED=0
   [ "${FM_HEARTBEAT_HYGIENE:-1}" != 0 ] || return 1
   home_state=$(CDPATH='' cd -- "$FM_HOME/state" 2>/dev/null && pwd -P) || return 1
   state_real=$(CDPATH='' cd -- "$STATE" 2>/dev/null && pwd -P) || return 1
@@ -2116,10 +2119,14 @@ hygiene_scan_finds_new() {
     triage_log "leftover-state audit unavailable on heartbeat"
     return 1
   }
-  FM_HYGIENE_CAPTURED_KEYS=$(printf '%s\n' "$json" | jq -r '.findings[]?
+  keys=$(printf '%s\n' "$json" | jq -r '.findings[]?
       | select(.severity == "action" or .severity == "routine")
-      | [.class, .repo // "", .branch // "", .path // "", .task // ""] | join("\t")' 2>/dev/null \
-    | LC_ALL=C sort -u) || return 1
+      | [.class, .repo // "", .branch // "", .path // "", .task // ""] | join("\t")' 2>/dev/null) || {
+    triage_log "leftover-state audit output unreadable on heartbeat"
+    return 1
+  }
+  FM_HYGIENE_CAPTURED_KEYS=$(printf '%s\n' "$keys" | LC_ALL=C sort -u)
+  FM_HYGIENE_SCANNED=1
   new=$(printf '%s\n' "$FM_HYGIENE_CAPTURED_KEYS" \
     | LC_ALL=C comm -23 - <(LC_ALL=C sort -u "$STATE/.hygiene-surfaced" 2>/dev/null) | sed '/^$/d')
   [ -n "$new" ]
@@ -3022,7 +3029,7 @@ EOF
       mark_all_captain_relevant_surfaced || true
       wake "heartbeat"
     else
-      if [ -n "$FM_HYGIENE_CAPTURED_KEYS" ] || [ -s "$STATE/.hygiene-surfaced" ]; then
+      if [ "$FM_HYGIENE_SCANNED" = 1 ] && { [ -n "$FM_HYGIENE_CAPTURED_KEYS" ] || [ -s "$STATE/.hygiene-surfaced" ]; }; then
         mark_hygiene_surfaced
       fi
       if ! mark_all_captain_relevant_surfaced; then

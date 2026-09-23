@@ -5785,7 +5785,7 @@ test_heartbeat_backstop_surfaces_unsurfaced_status() {
 }
 
 test_heartbeat_wakes_once_for_new_cleanup_findings() {
-  local dir state fakebin out pid i
+  local dir state fakebin out pid i audit_env
   dir=$(make_case heartbeat-hygiene); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"
   # The home's own clone holds an unpushed fm/* branch no task record owns.
@@ -5805,24 +5805,33 @@ test_heartbeat_wakes_once_for_new_cleanup_findings() {
   grep -F "fm/lost" "$state/.hygiene-surfaced" >/dev/null \
     || fail "the surfaced cleanup finding was not recorded (would re-fire every heartbeat)"
   ack_stopped_cycle "$state" >/dev/null || fail "acknowledging the cleanup heartbeat failed"
-  : > "$out"
-  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
-    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
-  pid=$!
-  if ! wait_poll_cycle "$state" "$pid"; then
-    reap "$pid"; fail "an already surfaced cleanup finding woke the heartbeat again: $(cat "$out")"
-  fi
-  i=0
-  while [ "$i" -lt 200 ]; do
-    [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] && break
-    kill -0 "$pid" 2>/dev/null || break
-    sleep 0.1
-    i=$((i + 1))
+  # A failed audit absorbs the heartbeat and must leave the surfaced set intact;
+  # an audit that must not run at all (switched off) must leave it intact too.
+  # Later rounds run as a handled successor so the reaped round's downtime is
+  # not re-announced.
+  for audit_env in FM_HYGIENE_BRANCH_LIMIT=abc FM_HEARTBEAT_HYGIENE=0 none=; do
+    rm -f "$state/.heartbeat-streak"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_WATCH_HANDLING_SUCCESSOR=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 env "$audit_env" "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_poll_cycle "$state" "$pid"; then
+      reap "$pid"; fail "an already surfaced cleanup finding woke the heartbeat again ($audit_env): $(cat "$out")"
+    fi
+    i=0
+    while [ "$i" -lt 200 ]; do
+      [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] && break
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.1
+      i=$((i + 1))
+    done
+    [ ! -s "$out" ] || fail "a standing cleanup finding printed a wake reason ($audit_env): $(cat "$out")"
+    [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] \
+      || fail "the heartbeat did not absorb a standing cleanup finding ($audit_env)"
+    reap "$pid"
+    grep -F "fm/lost" "$state/.hygiene-surfaced" >/dev/null \
+      || fail "the surfaced cleanup set was lost after a heartbeat ($audit_env), so it would wake again"
   done
-  [ ! -s "$out" ] || fail "a standing cleanup finding printed a wake reason: $(cat "$out")"
-  [ "$(cat "$state/.heartbeat-streak" 2>/dev/null || echo 0)" -ge 1 ] \
-    || fail "the heartbeat did not absorb a standing cleanup finding"
-  reap "$pid"
   git -C "$dir/projects/alpha" rev-parse --verify -q fm/lost >/dev/null || fail "the heartbeat audit changed the branch"
   pass "the heartbeat wakes once for new leftover-state cleanup findings and absorbs standing ones"
 }
