@@ -378,6 +378,25 @@ Any other value, or an unreadable file, refuses every spawn from that home, whic
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
 
+## Claude seats (config/claude-seat, config/claude-seats-root, config/claude-seat-threshold)
+
+A "seat" is one Claude account, reached through a Claude Code profile directory named by `CLAUDE_CONFIG_DIR`.
+Claude Code derives that profile's macOS Keychain service name from a hash of the directory path, so two seats never share a credential store: a worker pointed at a profile that was never logged in stops with `Not logged in` instead of quietly spending the default account.
+`bin/fm-seat.sh` is the one command that reads and writes these three files, and [`docs/claude-seats.md`](claude-seats.md) owns the operator procedure, including the login steps only the account owner can perform.
+
+The optional local, gitignored `config/claude-seat` holds the active seat NAME for new Claude workers, as the file's whitespace-trimmed first line.
+Absent, empty, or malformed means the reserved seat `default`: no `CLAUDE_CONFIG_DIR` is added and launches stay byte-for-byte as they were before seats existed.
+The optional `config/claude-seats-root` holds one absolute path, the directory holding one subdirectory per named seat, and defaults to `$HOME/.claude-seats`; seats live outside the firstmate home so the owner logs into a seat once and every home on the machine reaches the same profile.
+The optional `config/claude-seat-threshold` holds one percentage between 0 and 100, the remaining quota at which an armed watch switches future workers to the next logged-in seat; absent means no automatic switching, and there is deliberately no default that would move accounts on a home that never asked for it.
+All three are inherited into local secondmate homes through the primary-authoritative configuration contract, so a secondmate's own Claude crewmates launch on the same seat; a switch runs `bin/fm-config-push.sh --local-only` to carry the change to running local secondmates at once without contacting remote routes.
+They are never sent to a remote secondmate route, because a seat is a profile logged in on this machine only.
+
+A switch changes only which seat the NEXT worker gets.
+`bin/fm-spawn.sh` resolves the seat once per fresh Claude spawn (other harnesses record no seat), prefers the active seat over firstmate's own ambient `CLAUDE_CONFIG_DIR`, pre-registers Claude workspace trust in that same profile, and records the resolved directory as `claude_seat=` in the task's own record.
+Every Claude-to-Claude relaunch reads that record instead of re-resolving the setting, so a switch never moves a live or relaunched worker; a task's session history lives under its profile directory, which makes the recorded value a correctness requirement rather than only a billing one.
+A task whose record carries no `claude_seat=` line, including every task created before seats existed, keeps the ambient default and is never retroactively moved onto a seat.
+A relaunch that switches a task from another harness onto Claude has no Claude history to protect, so it resolves and records the active seat exactly as a fresh spawn does; a relaunch onto any other harness drops the `claude_seat=` line.
+
 ## Lavish server address (config/lavish-axi-host)
 
 The optional local, gitignored `config/lavish-axi-host` contains one non-empty address without whitespace for the per-machine Lavish server.
@@ -600,6 +619,7 @@ When a running home advances and its loaded instruction surface (`AGENTS.md`, `b
 If that send fails, bootstrap keeps an idempotent retry marker and emits `NUDGE_SECONDMATES:` with the failure reason.
 The same bootstrap run emits `SECONDMATE_LIVENESS:` only when a registered secondmate is skipped or its relaunch fails; already-live and successfully relaunched secondmates are handled silently.
 For a mid-session inherited local-material edit where tracked-file sync is not needed, run `bin/fm-config-push.sh`.
+Pass `--local-only` to skip remote secondmate routes and push only this machine's local homes.
 It uses the same live secondmate discovery and propagation helper as bootstrap; its [help](../bin/fm-config-push.sh) owns reporting and exit semantics, and [`fm_config_inherit_items`](../bin/fm-config-inherit-lib.sh) declares the inherited items.
 When an allowlisted config item changes for an already-running local home, it sends the literal-content reread pointer described in [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md); unchanged allowlisted config sends no pointer unless a previous delivery is pending.
 A changed remote home instead receives one durably recorded marked re-read instruction after the allowlisted bytes have transferred because primary-local generation paths are not meaningful on another host.
