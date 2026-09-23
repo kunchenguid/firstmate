@@ -1110,11 +1110,10 @@ def print_final(final: dict[str, Any]) -> None:
             f"phase={aborted['phase']} error={aborted['error']}"
         )
         return
-    metrics = final["sealed"].get("metrics") or {}
     print(
         f"final: task={final['task']} controller={final['controller']} "
         f"attempts={final['attempts_used']} selected={final['selected_candidate_sha256'][:12]} "
-        f"sealed_worst_group={metrics.get('worst_group', 0.0):.6f}"
+        f"sealed_worst_group={final['sealed']['metrics']['worst_group']:.6f}"
     )
 
 
@@ -1203,7 +1202,11 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
                 workspace / "artifacts" / state["baseline_sha256"] / "candidate.py",
                 "falsification",
             )
-            if not falsification.get("ok") or not baseline_metrics.get("ok"):
+            unusable = next(
+                (result for result in (falsification, baseline_metrics) if not result.get("ok")),
+                None,
+            )
+            if unusable is not None:
                 selected_sha = state["baseline_sha256"]
             else:
                 keep, _, _ = metric_comparison(falsification["metrics"], baseline_metrics["metrics"], manifest)
@@ -1231,12 +1234,16 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
                     "replay": "sealed-by-design:not-part-of-attempt-replay",
                 },
             )
+            if unusable is not None:
+                raise LabError(f"falsification-evaluation-failed:{unusable.get('failure_class', 'runtime')}")
 
         charged_phase = "sealed"
         state["sealed_calls"] += 1
         save_state(workspace, state)
         sealed_candidate = workspace / "artifacts" / selected_sha / "candidate.py"
         sealed = run_bounded_evaluator(workspace, sealed_candidate, "sealed")
+        if not sealed.get("ok"):
+            raise LabError(f"sealed-evaluation-failed:{sealed.get('failure_class', 'runtime')}")
         state["selected_candidate_sha256"] = selected_sha
         final = publish_final(
             workspace,
@@ -1254,10 +1261,10 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
                     "failure_class": falsification.get("failure_class", ""),
                 },
                 "sealed": {
-                    "ok": sealed.get("ok", False),
-                    "metrics": sealed.get("metrics"),
-                    "prediction_sha256": sealed.get("prediction_sha256", ""),
-                    "failure_class": sealed.get("failure_class", ""),
+                    "ok": True,
+                    "metrics": sealed["metrics"],
+                    "prediction_sha256": sealed["prediction_sha256"],
+                    "failure_class": "",
                 },
                 "sealed_calls": state["sealed_calls"],
                 "falsification_calls": state["falsification_calls"],

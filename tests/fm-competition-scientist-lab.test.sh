@@ -362,7 +362,7 @@ PY
 test_charged_audit_interruption_publishes_a_failed_final_record() {
   local workspace output status first second
   workspace="$TMP_ROOT/interrupted-finish"
-  init_workspace "$workspace" noisy-classification proposed 3 2
+  init_workspace "$workspace" noisy-classification linear 3 2
 
   chmod 0500 "$workspace/.run/tmp"
   $LAB finish "$workspace" >/dev/null 2>&1
@@ -386,7 +386,7 @@ assert final["aborted"]["phase"] == "sealed", final["aborted"]
 assert final["aborted"]["error"], final["aborted"]
 assert final["sealed"]["failure_class"] == "sealed-not-completed", final["sealed"]
 assert final["sealed"]["ok"] is False, final["sealed"]
-assert final["falsification"] is not None, "the charged falsification phase left no evidence"
+assert final["falsification"] is None, final["falsification"]
 assert final["attempts_used"] == state["attempts_used"]
 ledger = [line for line in (workspace / ".run/ledger.jsonl").read_text().splitlines() if line]
 assert any(json.loads(line)["kind"] == "baseline" for line in ledger), "prior evidence was discarded"
@@ -394,7 +394,7 @@ PY
 
   output=$($LAB finish "$workspace" 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "a later finish must not report success for an abandoned search"
-  assert_contains "$output" "aborted: task=noisy-classification controller=proposed phase=sealed" \
+  assert_contains "$output" "aborted: task=noisy-classification controller=linear phase=sealed" \
     "a later finish should reprint the recorded outcome"
   second=$(shasum -a 256 "$workspace/.run/final.json" | awk '{print $1}')
   [ "$first" = "$second" ] || fail "a later finish re-ran a charged one-shot call"
@@ -404,7 +404,7 @@ import pathlib
 import sys
 state = json.loads((pathlib.Path(sys.argv[1]) / ".run/state.json").read_text())
 assert state["sealed_calls"] == 1, state["sealed_calls"]
-assert state["falsification_calls"] == 1, state["falsification_calls"]
+assert state["falsification_calls"] == 0, state["falsification_calls"]
 PY
   output=$($LAB replay "$workspace" 2>&1); status=$?
   expect_code 0 "$status" "replay should audit a terminal failed record instead of calling it a mismatch"
@@ -456,6 +456,55 @@ PY
   pass "competition scientist: replay audits an aborted final record and still catches a forged call count"
 }
 
+test_failed_audit_evaluation_is_a_terminal_failed_record() {
+  local workspace controller sha first second output status
+  for controller in linear proposed; do
+    workspace="$TMP_ROOT/failed-audit-$controller"
+    init_workspace "$workspace" noisy-classification "$controller" 3 2
+    sha=$(python3 -c 'import json,pathlib,sys; print(json.loads((pathlib.Path(sys.argv[1]) / ".run/state.json").read_text())["global_best_sha256"])' "$workspace")
+    cp "$workspace/artifacts/$sha/candidate.py" "$TMP_ROOT/restore-$controller.py"
+    chmod u+w "$workspace/artifacts/$sha/candidate.py"
+    printf 'BROKEN =\n' > "$workspace/artifacts/$sha/candidate.py"
+
+    output=$($LAB finish "$workspace" 2>&1); status=$?
+    [ "$status" -ne 0 ] || fail "an audit that produced no score must not report success"
+    case "$output" in
+      *sealed_worst_group*) fail "a failed audit must not print a fabricated sealed score" ;;
+    esac
+    cat "$TMP_ROOT/restore-$controller.py" > "$workspace/artifacts/$sha/candidate.py"
+    first=$(shasum -a 256 "$workspace/.run/final.json" | awk '{print $1}')
+
+    python3 - "$workspace" "$controller" <<'PY'
+import json
+import pathlib
+import sys
+workspace, controller = pathlib.Path(sys.argv[1]), sys.argv[2]
+state = json.loads((workspace / ".run/state.json").read_text())
+final = json.loads((workspace / ".run/final.json").read_text())
+phase = "falsification" if controller == "proposed" else "sealed"
+assert state["complete"] is True, state["complete"]
+assert final["aborted"]["phase"] == phase, final["aborted"]
+assert "evaluation-failed" in final["aborted"]["error"], final["aborted"]
+assert final["sealed"]["ok"] is False, final["sealed"]
+assert final["sealed"]["metrics"] is None, final["sealed"]
+ledger = [line for line in (workspace / ".run/ledger.jsonl").read_text().splitlines() if line]
+assert any(json.loads(line)["kind"] == "baseline" for line in ledger), "prior evidence was discarded"
+PY
+
+    output=$($LAB finish "$workspace" 2>&1); status=$?
+    [ "$status" -ne 0 ] || fail "a repaired workspace must not silently re-run a charged audit"
+    assert_contains "$output" "aborted: task=noisy-classification controller=$controller" \
+      "a later finish should reprint the recorded failure"
+    second=$(shasum -a 256 "$workspace/.run/final.json" | awk '{print $1}')
+    [ "$first" = "$second" ] || fail "a later finish re-ran the charged audit"
+
+    output=$($LAB replay "$workspace" 2>&1); status=$?
+    expect_code 0 "$status" "replay should audit a terminal failed record"
+    assert_contains "$output" "aborted=" "replay should name the aborted phase"
+  done
+  pass "competition scientist: an audit that returns a bounded failure ends the search as a terminal failed record"
+}
+
 test_sealed_dataset_never_persists_in_the_workspace() {
   local workspace output status
   workspace="$TMP_ROOT/sealed-residue"
@@ -484,6 +533,7 @@ test_duplicate_confounded_and_budget_rejections
 test_finish_is_idempotent_and_replayable
 test_charged_audit_interruption_publishes_a_failed_final_record
 test_interrupted_falsification_record_replays_as_aborted
+test_failed_audit_evaluation_is_a_terminal_failed_record
 test_sealed_dataset_never_persists_in_the_workspace
 
 echo "# fm-competition-scientist-lab.test.sh: all assertions passed"

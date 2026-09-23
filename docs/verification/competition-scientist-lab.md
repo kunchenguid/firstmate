@@ -10,7 +10,7 @@ The maintained behavior owner is the [example guide](../examples/competition-sci
 - Platform: macOS arm64.
 - Python: 3.14.7.
 - Shell entry point SHA-256: `adbf438cc45b1e1d019e3544b712059738a5881602b2becaebf090e6668502ca`.
-- Python engine SHA-256: `2f0ef8ab08b03bb4d358904afc4a0c4b49c680957e2fde72fc90b6dd30cc14f0`.
+- Python engine SHA-256: `74c12910c988cee834fb8368dbe9e5d3b785d81463d253cd95c076f497b86348`.
 - Baseline candidate SHA-256: `8fd5cd7ca977c030d96aa617a43d3fc647d9aefb9b5fb6849b874ec8608b8f06`.
 
 ## Command
