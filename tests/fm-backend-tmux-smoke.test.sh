@@ -170,8 +170,8 @@ state=$(fm_backend_agent_state tmux "$TARGET")
 seat_pane=$(tmux list-panes -t "$SESSION" -F '#{pane_id}' | head -1)
 server_pid=$(tmux display-message -p -t "$seat_pane" '#{pid}')
 socket_path=$(tmux display-message -p -t "$seat_pane" '#{socket_path}')
-TMUX="$socket_path,$server_pid,0" TMUX_PANE="$seat_pane" \
-  absence=$(fm_control_endpoint_absence_verdict tmux "$TARGET")
+absence=$(TMUX="$socket_path,$server_pid,0" TMUX_PANE="$seat_pane" \
+  fm_control_endpoint_absence_verdict tmux "$TARGET")
 [ "${absence%%$'\t'*}" = gone ] \
   || fail "the live owning session should prove the exact missing window absent, got '$absence'"
 TMUX="$socket_path,$server_pid,0" TMUX_PANE="$seat_pane" \

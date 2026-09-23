@@ -1948,6 +1948,7 @@ test_tmux_missing_window_rollback_removes_only_the_unused_endpoint() {
   pass "tmux: failed publication removes only the unused recreated endpoint"
 }
 
+# shellcheck disable=SC2031
 test_tmux_missing_window_relaunch_refuses_concurrent_lifecycle_work() {
   local dir out rc lock holder i=0 id=tmux-concurrent
   dir=$(new_case tmux-concurrent "$id")
