@@ -17,6 +17,10 @@
 #   6. Marker non-regression: a control command to a kind=secondmate task
 #      carries NO from-firstmate marker and opens no pending-reply expectation,
 #      while fm-send's marking of the same task is untouched.
+#   7. Own-doorbell submit on exit: a composer holding exactly the doorbell
+#      line this home generates is our own unsent steer, so exit submits it
+#      with Enter, re-verifies empty, and proceeds; any other pending text
+#      still refuses. Relaunch flows through the same exit gate.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -103,6 +107,9 @@ case "${1:-}" in
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
+      if [ "${FM_FAKE_ENTER_CLEARS:-0}" = 1 ] && [ "$payload" = Enter ]; then
+        printf '╭────╮\n│    │\n╰────╯\n' > "$D/pane"
+      fi
       if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
@@ -709,6 +716,60 @@ test_idle_agent_is_not_interrupted() {
   pass "fm-control exit: an idle agent goes straight to its exit command"
 }
 
+# doorbell_for <case-dir> <id>: write a steer record into the case home and
+# echo this home's doorbell line for it, through the production library.
+doorbell_for() {
+  local dir=$1 id=$2
+  # The single-quoted inner script intentionally defers $FM_LIB_* to the
+  # env-passed inner bash, exactly like the popup-settle suite's $-messages.
+  # shellcheck disable=SC2016
+  env FM_LIB_ROOT="$ROOT" FM_LIB_STATE="$dir/home/state" FM_LIB_ID="$id" bash -c '
+    . "$FM_LIB_ROOT/bin/fm-task-inbox-lib.sh"
+    rec=$(fm_task_inbox_write "$FM_LIB_STATE" "$FM_LIB_ID" "please continue") || exit 1
+    fm_task_inbox_doorbell_line "$rec" || exit 1' \
+    || fail "could not derive the doorbell line for $id"
+}
+
+# A composer holding exactly our own doorbell is submitted with Enter and exit
+# proceeds: the stub clears the pane on Enter (a submitted composer reads
+# empty), the exit command is typed, the agent stops, and the raw key log
+# holds one submit Enter plus the exit submit's Enter.
+test_exit_submits_own_doorbell_then_proceeds() {
+  local dir out rc doorbell enters
+  dir=$(new_case exit-doorbell)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  doorbell=$(doorbell_for "$dir" t1)
+  { printf '\n'; printf '❯ %s\n' "$doorbell"; printf '\n'; } > "$dir/fake/pane"
+  export FM_FAKE_ENTER_CLEARS=1
+  out=$(run_control "$dir" t1 exit); rc=$?
+  unset FM_FAKE_ENTER_CLEARS
+  expect_code 0 "$rc" "exit with our own doorbell pending should proceed"$'\n'"$out"
+  assert_contains "$out" "stopped" "exit should report the stop"
+  enters=$(grep -c '^Enter$' "$dir/fake/keys" || true)
+  [ "$enters" = 2 ] || fail "exit should send one submit Enter plus the exit submit's Enter, got $enters: $(cat "$dir/fake/keys")"
+  [ "$(literals "$dir")" = "/exit" ] || fail "the exit command should follow the submitted doorbell, got: $(literals "$dir")"
+  pass "fm-control exit: our own pending doorbell is submitted and exit proceeds"
+}
+
+# Any other pending text still refuses: no Enter, no exit command, nonzero.
+test_exit_refuses_foreign_pending_text() {
+  local dir out rc
+  dir=$(new_case exit-foreign)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  doorbell_for "$dir" t1 >/dev/null
+  { printf '\n'; printf '❯ some user draft here\n'; printf '\n'; } > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  [ "$rc" -ne 0 ] || fail "exit with foreign text pending should refuse"$'\n'"$out"
+  assert_contains "$out" "pending text" "the refusal should name the pending text"
+  grep -q '^Enter$' "$dir/fake/keys" \
+    && fail "a refused exit must send no Enter: $(cat "$dir/fake/keys")"
+  [ -z "$(literals "$dir")" ] \
+    || fail "a refused exit must type no exit command, got: $(literals "$dir")"
+  pass "fm-control exit: foreign pending text still refuses"
+}
+
 test_interrupt_without_acknowledgement_preserves_busy_state() {
   local dir gen before after out rc
   dir=$(new_case unconfirmed)
@@ -913,6 +974,8 @@ test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
+test_exit_submits_own_doorbell_then_proceeds
+test_exit_refuses_foreign_pending_text
 test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait

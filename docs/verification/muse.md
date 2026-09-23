@@ -220,3 +220,15 @@ Repeat that smoke after a protocol-affecting upgrade: run one real multi-step to
 A build that ever split one turn across several runs would make a settled log ambiguous, which is a classifier change rather than a note in this file.
 
 The portable counterparts that run in ordinary CI are `tests/fm-muse-harness.test.sh`, `tests/fm-tmux-agent-liveness.test.sh`, `tests/fm-composer-lib.test.sh`, and `tests/fm-composer-ghost.test.sh`.
+
+## Unsent-Enter root cause (doorbell deadlock, F1, 2026-09-23, muse 1.3.0-R3401.1, tmux)
+
+A Muse lane can sit idle holding an unsubmitted doorbell while every re-ring skips on its `pending` verdict, so the steer is never read.
+Probed live in a scratch tmux pane (`muse --yolo`, idle, `/tmp` cwd) with the repo's own `fm_tmux_composer_state` as the verdict source.
+Typing a leading `/` opens a slash-command completion popup within ~1s, and Enter with that popup open accepts the popup selection (it ran `/clear`) instead of submitting the typed line: the swallow mechanism is real.
+But a `:`-leading doorbell-shaped line opens no popup at 0.3s or after a 3s hold, and typing it plus 0.3s settle plus one Enter submitted on the first try (the turn started, composer read `empty`).
+So on an idle pane the first submit already sticks and a longer pre-Enter settle for `harness=muse` changes nothing; the settle stays at the shared doorbell value.
+The failure needs a popup-open or not-yet-ready pane at Enter time (e.g. the first steer racing startup UI), which a longer settle cannot fix either: an open popup does not self-close.
+The recovery is the own-doorbell submit: a later ladder ring finds the composer holding exactly our constant line and sends Enter then, when the pane is ready and no popup is open.
+`tests/fm-task-inbox.test.sh` (`test_ring_submits_own_doorbell`, `test_ring_skips_foreign_pending_text`) and `tests/fm-control.test.sh` (`test_exit_submits_own_doorbell_then_proceeds`, `test_exit_refuses_foreign_pending_text`) pin that predicate.
+Note the shape drift on this version: idle muse 1.3.0 renders a `❯` glyph between `─` rules (the claude-2.x separated-over-bare shape), not the bordered `⟩` box recorded for 0.1.0; the shared classifier still reads it `empty`.

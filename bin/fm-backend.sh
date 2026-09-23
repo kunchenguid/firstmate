@@ -879,6 +879,30 @@ fm_backend_composer_state() {  # <backend> <target> [expected-label] -> empty|pe
   esac
 }
 
+# fm_backend_composer_content: the selected composer's visible text for
+# callers that must distinguish WHICH text a pending composer holds, not just
+# that it is pending. Prints the text (possibly empty); fails when the
+# composer is unreadable or no composer shape is selectable, so callers fail
+# safe toward "not our text". Every adapter's named reader is a THIN wrapper
+# - the same capture plus capability descriptor its classifier reads, fed to
+# the one shared content owner (bin/fm-composer-lib.sh,
+# fm_composer_extract_selected_content) - so no backend holds a private
+# content assumption. The one consumer is the own-doorbell predicate in
+# bin/fm-task-inbox-lib.sh, shared by the ring and the control plane.
+fm_backend_composer_content() {  # <backend> <target> [expected-label] -> selected composer text or fail
+  local backend=$1
+  shift
+  fm_backend_source "$backend" || return 1
+  case "$backend" in
+    tmux) fm_tmux_composer_content "$@" ;;
+    herdr) fm_backend_herdr_composer_content "$@" ;;
+    orca) fm_backend_orca_composer_content "$@" ;;
+    cmux) fm_backend_cmux_composer_content "$@" ;;
+    zellij) fm_backend_zellij_composer_content "$@" ;;
+    *) return 1 ;;
+  esac
+}
+
 # fm_backend_target_exists: cheap, READ-ONLY existence check - does the
 # recorded TARGET endpoint still exist on BACKEND? Never starts a server or
 # session: for herdr this deliberately queries the pane directly instead of

@@ -165,6 +165,19 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
   printf '%s' "$verdict"
 }
 
+# fm_tmux_composer_content: the selected composer's visible text - the same
+# capture and capability descriptor the verdict above reads, fed to the shared
+# content extractor instead of the classifier. Prints the text (possibly
+# empty) and fails when no composer shape is selectable, so callers can tell
+# "no readable composer" from "composer holding nothing". Cursorless by
+# construction, like every other backend's content read: the extractor selects
+# the proven envelope, never bare footer furniture.
+fm_tmux_composer_content() {  # <target> -> selected composer text or fail
+  local target=$1 pane
+  pane=$(fm_tmux_composer_capture "$target") || return 1
+  fm_composer_extract_selected_content "$(fm_tmux_composer_caps)" "$pane"
+}
+
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains
 # a genuine Cursor Agent CLI process. Cursor runs as a bundled node script, so
 # tmux's own #{pane_current_command} reports a bare `node`; identity therefore

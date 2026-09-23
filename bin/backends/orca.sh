@@ -253,6 +253,16 @@ fm_backend_orca_composer_state() {  # <terminal-id> [expected-label] -> empty|pe
   printf '%s' "$verdict"
 }
 
+# fm_backend_orca_composer_content: the selected composer's visible text -
+# the same capture and capability descriptor the verdict above reads, fed to
+# the shared content extractor instead of the classifier. Prints the text
+# (possibly empty) and fails when no composer shape is selectable.
+fm_backend_orca_composer_content() {  # <terminal-id> -> selected composer text or fail
+  local cap
+  cap=$(fm_backend_orca_composer_capture "$1") || return 1
+  fm_composer_extract_selected_content "$(fm_backend_orca_composer_caps)" "$cap"
+}
+
 fm_backend_orca_send_key() {  # <terminal-id> <key>
   local terminal=$1 key=$2
   fm_backend_orca_tool_check || return 1

@@ -26,6 +26,11 @@
 #   6. Dead panes: the doorbell line is a shell no-op when executed by a bare
 #      shell, the ring skips an agent the backend classifies dead, and the
 #      watcher surfaces such a record exactly once instead of re-ringing.
+#   7. Own-doorbell submit: a composer holding exactly the doorbell line this
+#      home generates is our own unsent earlier ring, so the ring submits it
+#      with one Enter instead of skipping; any other pending text keeps the
+#      skip. A terminal-wrapped (multi-row) doorbell still identifies as our
+#      own text through whitespace-collapsed comparison.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -79,6 +84,8 @@ case "${1:-}" in
       if [ -n "${FM_ACK_RECORD:-}" ] && [ -f "$FM_ACK_RECORD" ]; then
         mv "$FM_ACK_RECORD" "${FM_ACK_RECORD%/*}/handled/"
       fi
+    else
+      printf 'KEY:%s\n' "$*" >> "${FM_SEND_LOG:-/dev/null}"
     fi
     exit 0 ;;
   display-message)
@@ -282,6 +289,77 @@ test_ring_skips_dead_agent() {
   [ "$rc" = 0 ] || fail "an endpoint the classifier cannot see should still be rung, got $rc"
   grep -qF 'Firstmate instruction waiting' "$log" || fail "an unclassifiable endpoint did not receive the doorbell"
   pass "inbox: the ring skips dead or missing endpoints and still rings live or unclassifiable endpoints"
+}
+
+# A fixture composer holding the doorbell submits it with one Enter instead of
+# skipping: the ring returns 0 and types nothing but the key. The wrapped
+# variant splits the long line across two rows, as a narrow terminal renders
+# it, and must still identify as our own text.
+test_ring_submits_own_doorbell() {
+  local dir state rec doorbell log rc cap head_c tail_c
+  dir="$TMP_ROOT/ring-doorbell"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_watch_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  log="$dir/send.log"
+  cap="$dir/doorbell.capture"
+  { printf '\n'; printf '❯ %s\n' "$doorbell"; printf '\n'; } > "$cap"
+  : > "$log"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
+    FM_FAKE_TMUX_CAPTURE="$cap" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 0 ] || fail "a composer holding our doorbell should submit, got rc=$rc"
+  [ "$(cat "$log")" = "KEY:Enter" ] \
+    || fail "submitting our doorbell should send exactly one Enter and type nothing, got:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "submitting must leave the durable record in place"
+  head_c=$(printf '%s' "$doorbell" | cut -c1-60)
+  tail_c=$(printf '%s' "$doorbell" | cut -c61-)
+  { printf '\n'; printf '❯ %s\n' "$head_c"; printf '%s\n' "$tail_c"; printf '\n'; } > "$cap"
+  : > "$log"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
+    FM_FAKE_TMUX_CAPTURE="$cap" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 0 ] || fail "a wrapped composer holding our doorbell should submit, got rc=$rc"
+  [ "$(cat "$log")" = "KEY:Enter" ] \
+    || fail "submitting a wrapped doorbell should send exactly one Enter, got:"$'\n'"$(cat "$log")"
+  pass "inbox: the ring submits a composer holding our own doorbell, wrapped or not"
+}
+
+# Any other pending text keeps the skip: the ring returns 1 and sends nothing,
+# not even a key. The near-miss variant (our doorbell with extra words) pins
+# the boundary that Firstmate never submits unknown text.
+test_ring_skips_foreign_pending_text() {
+  local dir state rec doorbell log rc cap
+  dir="$TMP_ROOT/ring-foreign"
+  state="$dir/state"
+  mkdir -p "$state"
+  make_watch_stubs "$dir" >/dev/null
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "please continue")
+  doorbell=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  log="$dir/send.log"
+  cap="$dir/foreign.capture"
+  { printf '\n'; printf '❯ some user draft here\n'; printf '\n'; } > "$cap"
+  : > "$log"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
+    FM_FAKE_TMUX_CAPTURE="$cap" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "a composer holding foreign text should skip, got rc=$rc"
+  [ ! -s "$log" ] || fail "a skipped ring must send nothing at all:"$'\n'"$(cat "$log")"
+  { printf '\n'; printf '❯ %s plus user words\n' "$doorbell"; printf '\n'; } > "$cap"
+  : > "$log"
+  rc=0
+  PATH="$dir/fakebin:$PATH" FM_SEND_LOG="$log" FM_FAKE_TMUX_AGENT=claude \
+    FM_FAKE_TMUX_CAPTURE="$cap" \
+    inbox_lib "$state" fm_task_inbox_ring tmux sess:fm-t1 "$rec" fm-t1 || rc=$?
+  [ "$rc" = 1 ] || fail "a composer holding our doorbell plus other words should skip, got rc=$rc"
+  [ ! -s "$log" ] || fail "a near-miss skip must send nothing at all:"$'\n'"$(cat "$log")"
+  [ -f "$rec" ] || fail "skipping the ring must leave the durable record in place"
+  pass "inbox: the ring keeps skipping a composer holding anything but our own doorbell"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -701,6 +779,8 @@ test_write_is_durable_and_exact
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent
+test_ring_submits_own_doorbell
+test_ring_skips_foreign_pending_text
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence

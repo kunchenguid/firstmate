@@ -46,7 +46,9 @@
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
-# attempt may ring or be skipped to protect proven pending composer text. After
+# attempt may ring or be skipped to protect proven pending composer text,
+# except that a composer holding exactly our own doorbell is submitted rather
+# than skipped (fm_task_inbox_composer_holds_doorbell). After
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
 # caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
 # while a positively dead or missing endpoint skips delivery and the ladder and
@@ -269,20 +271,40 @@ fm_task_inbox_doorbell_line() {  # <record-path>
     "$quoted" "$quoted"
 }
 
+# A composer holding exactly the doorbell line this home generates is our own
+# unsent earlier ring, not user text: an Enter swallowed by a completion popup
+# or a not-yet-ready pane leaves the constant line sitting pending, and every
+# later ring would skip on it forever. Returns 0 only for that one constant
+# text, never for anything else. A terminal wrap reflows the long line into
+# several rows, which the extractor joins with spaces, so the comparison also
+# accepts whitespace-collapsed equality: collapsing cannot alias real user
+# text onto the constant doorbell line.
+fm_task_inbox_composer_holds_doorbell() {  # <backend> <target> <doorbell-line> [expected-label]
+  local backend=$1 target=$2 doorbell=$3 label=${4:-} text squashed squashed_doorbell
+  [ -n "$doorbell" ] || return 1
+  text=$(fm_backend_composer_content "$backend" "$target" "$label" 2>/dev/null) || return 1
+  [ "$text" = "$doorbell" ] && return 0
+  squashed=$(printf '%s' "$text" | tr -d '[:space:]')
+  squashed_doorbell=$(printf '%s' "$doorbell" | tr -d '[:space:]')
+  [ -n "$squashed" ] && [ "$squashed" = "$squashed_doorbell" ]
+}
+
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
 # composer pre-check, then the backend's submit machinery with a minimal retry
 # budget, verdict discarded.
-# Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
-# (the watcher re-rings later), 2 the backend send failed, 3 skipped because
-# the endpoint is positively dead or missing (nothing typed; recovery owns the
-# record). No return value is delivery proof; the acknowledgement move is the
-# only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict defers,
-# because there our Enter could submit someone's real half-typed content.
-# `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
-# CONSTANT line the worker recovers semantically, while skipping on ambiguous
-# verdicts would starve a harness whose idle screen the classifier cannot
-# positively identify (that classifier is advisory here by design).
+# Returns 0 rang (or submitted our own still-pending doorbell), 1 skipped
+# because the composer PROVENLY holds someone else's pending text (the watcher
+# re-rings later), 2 the backend send failed, 3 skipped because the endpoint
+# is positively dead or missing (nothing typed; recovery owns the record). No
+# return value is delivery proof; the acknowledgement move is the only
+# delivery signal.
+# The skip is deliberately narrow: only an exact `pending` verdict over text
+# that is NOT our own doorbell defers, because there our Enter could submit
+# someone's real half-typed content. `pending-unproven` and `unknown` still
+# ring - the worst outcome is a garbled CONSTANT line the worker recovers
+# semantically, while skipping on ambiguous verdicts would starve a harness
+# whose idle screen the classifier cannot positively identify (that classifier
+# is advisory here by design).
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
@@ -293,7 +315,19 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   fi
   cstate=$(fm_backend_composer_state "$backend" "$target" "$label" 2>/dev/null) || cstate=unknown
   case "$cstate" in
-    pending) return 1 ;;
+    pending)
+      if fm_task_inbox_composer_holds_doorbell "$backend" "$target" "$line" "$label"; then
+        # Our own unsent doorbell: submit it with one Enter - the documented
+        # `fm-send.sh <target> --key Enter` retry, via the same backend key
+        # primitive that path uses (spawning fm-send here would recurse into
+        # this library). A later ladder ring retries while it stays pending.
+        if fm_backend_send_key "$backend" "$target" Enter "$label" 2>/dev/null; then
+          return 0
+        fi
+        return 2
+      fi
+      return 1
+      ;;
   esac
   # Accepted residual race: terminal input and Enter are separate delivery
   # steps, so an agent exiting after the liveness check could leave a bare
