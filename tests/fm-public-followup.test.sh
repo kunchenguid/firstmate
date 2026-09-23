@@ -3334,6 +3334,42 @@ test_emit_refuses_a_deliverable_tasks_axi_would_reject() {
   pass "the emitter refuses a deliverable tasks-axi would reject, naming key, value, and format"
 }
 
+# A repeated --deliverable key would serialize only its last value, so which
+# value was meant is ambiguous; the emitter refuses it by name in both modes
+# rather than judging or publishing either value.
+test_emit_refuses_a_repeated_deliverable_key() {
+  local home staging
+  home=$(make_home emit-repeat)
+  seed_repro_commitment "$home" pf-emit-repeat req-emit-repeat main work-repeat
+
+  expect_failure "a repeated deliverable key must be refused at emit" \
+    "$EMIT" --home "$home" --obligation pf-emit-repeat --relation rel-code \
+    --source-home main --work-id work-repeat --generation 1 --outcome report-ready \
+    --deliverable report_path=/abs/data/work-repeat/report.md \
+    --deliverable report_path=data/work-repeat/report.md \
+    --outcome-text 'The report is ready.'
+  assert_contains "$EXPECT_OUT" "'report_path' is repeated" \
+    "the refusal must name the repeated key"
+  assert_not_contains "$EXPECT_OUT" "data/<task-id>/report.md" \
+    "a repeated key must be refused before any value is judged"
+  [ -z "$(ls -A "$home/state/public-followup/events" 2>/dev/null)" ] \
+    || fail "a repeated deliverable key must publish nothing"
+
+  staging="$TMP_ROOT/emit-repeat-staging"
+  mkdir -p "$staging/state"
+  printf 'axi-a1\n' > "$staging/.fm-secondmate-home"
+  expect_failure "a staged emit must refuse a repeated deliverable key" \
+    "$EMIT" --stage-in "$staging" --obligation pf-emit-repeat --relation rel-code \
+    --source-home secondmate:axi-a1 --work-id work-repeat --generation 1 --outcome report-ready \
+    --deliverable report_path=data/work-repeat/report.md \
+    --deliverable report_path=data/work-repeat/report.md \
+    --outcome-text 'The report is ready.'
+  assert_contains "$EXPECT_OUT" "'report_path' is repeated" \
+    "a staged refusal must name the repeated key"
+  assert_absent "$staging/state/public-followup" "a repeated deliverable key must stage nothing"
+  pass "the emitter refuses a repeated deliverable key by name in both destinations"
+}
+
 # The same mistake with the value left out entirely: an event that never carries
 # the key its obligation requires can only ever be quarantined by the owning
 # home, so the emitter must refuse it before it travels, in both destinations.
@@ -3958,6 +3994,7 @@ test_remote_collection_is_idempotent
 test_stage_in_refuses_ambiguous_or_unusable_homes
 test_brief_prefills_known_deliverables_and_states_formats
 test_emit_refuses_a_deliverable_tasks_axi_would_reject
+test_emit_refuses_a_repeated_deliverable_key
 test_emit_refuses_a_missing_required_deliverable
 test_emit_rules_agree_with_tasks_axi
 test_rejected_event_wakes_owning_home_with_specific_reason

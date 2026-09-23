@@ -167,6 +167,12 @@ while [ "$#" -gt 0 ]; do
         *=*) ;;
         *) die "--deliverable needs <key>=<value>, got '${1:-}'" ;;
       esac
+      i=0
+      while [ "$i" -lt "${#DELIVERABLE_KEYS[@]}" ]; do
+        [ "${DELIVERABLE_KEYS[$i]}" != "${1%%=*}" ] \
+          || die "--deliverable key '${1%%=*}' is repeated; pass each deliverable once"
+        i=$((i + 1))
+      done
       DELIVERABLE_KEYS+=("${1%%=*}")
       DELIVERABLE_VALUES+=("${1#*=}")
       ;;
