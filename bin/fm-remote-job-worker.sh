@@ -79,6 +79,7 @@ WORKER_LANE_PIDS=()
 WORKER_LANE_STARTS=()
 WORKER_LANE_JOBS=()
 WORKER_LANE_SCAN_AT=0
+WORKER_ABANDON_SCAN_AT=0
 
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
 
@@ -1021,8 +1022,17 @@ worker_lane_main() { # <job-id>
 
 worker_process_once() { # <account-home>
   local account_home=$1 job id state queue_deadline home seq candidates=''
-  local reserved_index reserved_count home_reserved
+  local reserved_index reserved_count home_reserved check_abandoned=0
   local reserved_homes=()
+  # Reading a record's caller identity costs several forks, so a queued record
+  # is tested for an abandoned caller at most once a second rather than on every
+  # poll. A record queued behind a busy lane would otherwise pay that scan
+  # twenty times a second for an answer that cannot change faster than the
+  # clock this gate reads.
+  if [ "$SECONDS" -ge "$WORKER_ABANDON_SCAN_AT" ]; then
+    check_abandoned=1
+    WORKER_ABANDON_SCAN_AT=$((SECONDS + 1))
+  fi
   worker_stop_overrun_lanes
   worker_reap_finished_lanes
   for job in "$FM_REMOTE_JOB_JOBS"/job-*; do
@@ -1042,7 +1052,7 @@ worker_process_once() { # <account-home>
           fi
           continue
         fi
-        if fm_remote_job_caller_abandoned "$job"; then
+        if [ "$check_abandoned" -eq 1 ] && fm_remote_job_caller_abandoned "$job"; then
           fm_remote_job_cancel "$account_home" "$id" 2>/dev/null || true
         fi
         if fm_remote_job_cancelled "$job"; then
