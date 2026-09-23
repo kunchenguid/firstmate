@@ -51,7 +51,8 @@ The default per-attempt cap is 8,000 tokens, and the default planning cap is 9,6
 Before final promotion, the proposed controller runs one deterministic counterfactual falsification evaluation.
 The final sealed audit runs once after search completion and never changes an earlier attempt verdict.
 
-A typed proposal may choose a change, name one bounded falsifier, and request a branch, but it cannot provide a score, acceptance verdict, evaluator edit, budget override, or hidden result.
+A typed proposal may choose a change, name one bounded falsifier, and request a branch, but it cannot provide a score, acceptance verdict, evaluator edit, budget override, hidden result, or failure injection.
+Syntax, timeout, OOM, and network faults are reachable only through the harness-only `attempt --inject-failure` recovery drill, never through a lever a proposal can name.
 The selected proposal's falsifier is recorded with the one frozen counterfactual suite rather than executed as arbitrary plan-authored code.
 Any model integration must pass measured token use into the proposal record rather than trusting an estimate written by the model.
 
@@ -66,10 +67,10 @@ The quality comparison is lexicographic in this order:
 4. calibration or normalized error;
 5. lower candidate complexity when the quality dimensions are equivalent within resolution.
 
-A task-specific evaluator-noise floor is frozen from 64 deterministic within-group bootstrap resamples of the baseline and capped to the interval `[0.005, 0.03]`.
-The same floor applies to each normalized quality dimension.
-A change below that floor does not promote unless it is a verified simplification.
-Any group regression beyond the frozen tolerance rejects the candidate before the lexicographic comparison.
+One evaluator-noise floor per quality dimension is frozen from 64 deterministic within-group bootstrap resamples of the baseline, each recorded as that metric's own 1.96-sigma resolution.
+A dimension measured on its own scale therefore carries its own floor rather than a shared constant.
+A change below its metric's floor does not promote unless it is a verified simplification.
+A group regression beyond the frozen tolerance rejects the candidate before the lexicographic comparison, unless every candidate group still scores at or above the incumbent's worst-group floor, which is the robustness trade the primary objective exists to reward.
 The noisy-classification fixture demonstrates the below-resolution outcome.
 
 ## Commands

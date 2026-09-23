@@ -47,18 +47,15 @@ TASK_LEVERS = {
         "GROUPED_CAUSAL_WEIGHT",
         "GROUPED_SPURIOUS_WEIGHT",
         "GROUPED_THRESHOLD",
-        "INJECT_FAILURE",
     },
     "nonlinear-regression": {
         "REGRESSION_COMPONENTS",
         "REGRESSION_SCALE",
         "REGRESSION_BIAS",
-        "INJECT_FAILURE",
     },
     "noisy-classification": {
         "NOISY_THRESHOLD",
         "NOISY_MARGIN",
-        "INJECT_FAILURE",
     },
 }
 EXPECTED_KEYS = {
@@ -379,7 +376,7 @@ def group_metrics(task: str, rows: list[dict[str, Any]], values: dict[str, Any])
     return metrics, predictions
 
 
-def estimate_noise_floor(task: str, rows: list[dict[str, Any]], values: dict[str, Any], seed: int) -> float:
+def estimate_noise_floor(task: str, rows: list[dict[str, Any]], values: dict[str, Any], seed: int) -> dict[str, float]:
     by_group: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         by_group.setdefault(row["group"], []).append(row)
@@ -392,12 +389,12 @@ def estimate_noise_floor(task: str, rows: list[dict[str, Any]], values: dict[str
         metrics, _ = group_metrics(task, resampled, values)
         for name in DIRECTIONS:
             samples[name].append(float(metrics[name]))
-    standard_errors = []
-    for values_for_metric in samples.values():
+    floors: dict[str, float] = {}
+    for name, values_for_metric in samples.items():
         mean = sum(values_for_metric) / len(values_for_metric)
         variance = sum((value - mean) ** 2 for value in values_for_metric) / len(values_for_metric)
-        standard_errors.append(math.sqrt(variance))
-    return round(min(0.03, max(0.005, 1.96 * max(standard_errors))), 6)
+        floors[name] = round(1.96 * math.sqrt(variance), 6)
+    return floors
 
 
 def candidate_complexity(task: str, values: dict[str, Any]) -> int:
@@ -668,7 +665,7 @@ def init_workspace(args: argparse.Namespace) -> Path:
         "caps": caps,
         "per_attempt_token_cap": caps["token_budget"] // caps["attempts"],
         "noise_floor": noise_floor,
-        "noise_floor_source": "64 deterministic within-group bootstrap resamples of the baseline, capped to [0.005, 0.03]",
+        "noise_floor_source": "one 1.96-sigma resolution floor per metric from 64 deterministic within-group bootstrap resamples of the baseline",
         "catastrophic_group_drop": 0.10,
         "frozen": {
             f"{split}.json": sha256_file(frozen / f"{split}.json")
@@ -831,12 +828,17 @@ def load_artifact_metrics(workspace: Path, candidate_sha: str) -> dict[str, Any]
 
 def metric_comparison(candidate: dict[str, Any], parent: dict[str, Any], manifest: dict[str, Any]) -> tuple[bool, str, float]:
     tolerance = float(manifest["catastrophic_group_drop"])
-    for group, parent_score in parent["per_group"].items():
-        candidate_score = candidate["per_group"].get(group, 0.0)
-        if candidate_score < parent_score - tolerance:
-            return False, f"catastrophic-group-regression:{group}", candidate_score - parent_score
-    floor = float(manifest["noise_floor"])
+    candidate_floor = min(
+        (float(candidate["per_group"].get(group, 0.0)) for group in parent["per_group"]),
+        default=0.0,
+    )
+    if candidate_floor < float(parent["worst_group"]):
+        for group, parent_score in parent["per_group"].items():
+            candidate_score = float(candidate["per_group"].get(group, 0.0))
+            if candidate_score < parent_score - tolerance:
+                return False, f"catastrophic-group-regression:{group}", candidate_score - parent_score
     for name, direction in DIRECTIONS.items():
+        floor = float(manifest["noise_floor"][name])
         delta = direction * (float(candidate[name]) - float(parent[name]))
         if abs(delta) > floor:
             return delta > 0, f"lexicographic:{name}", delta
@@ -903,7 +905,7 @@ def policy_reject(workspace: Path, proposal: Any, failure_class: str) -> dict[st
     return record
 
 
-def evaluate_and_record(workspace: Path, proposal: dict[str, Any], *, baseline: bool = False) -> dict[str, Any]:
+def evaluate_and_record(workspace: Path, proposal: dict[str, Any], *, baseline: bool = False, inject_failure: str = "") -> dict[str, Any]:
     manifest = verify_frozen(workspace)
     state = load_state(workspace)
     if state["complete"]:
@@ -961,8 +963,10 @@ def evaluate_and_record(workspace: Path, proposal: dict[str, Any], *, baseline: 
         values = parse_candidate(parent_candidate)
         lever, value = next(iter(proposal["changes"].items()))
         values[lever] = tuple(value) if lever == "REGRESSION_COMPONENTS" and isinstance(value, list) else value
+        if inject_failure:
+            values["INJECT_FAILURE"] = inject_failure
         validate_candidate(values)
-        break_syntax = lever == "INJECT_FAILURE" and value == "syntax"
+        break_syntax = inject_failure == "syntax"
         candidate_path.write_text(render_candidate(values, break_syntax=break_syntax), encoding="utf-8")
         candidate_sha = sha256_file(candidate_path)
         if candidate_sha in state["candidate_hashes"]:
@@ -1239,9 +1243,9 @@ def fixture_proposals(task: str, controller: str) -> list[dict[str, Any]]:
     return proposals
 
 
-def run_attempt(workspace: Path, proposal: Any) -> dict[str, Any]:
+def run_attempt(workspace: Path, proposal: Any, inject_failure: str = "") -> dict[str, Any]:
     try:
-        return evaluate_and_record(workspace, proposal)
+        return evaluate_and_record(workspace, proposal, inject_failure=inject_failure)
     except LabError as exc:
         if workspace.exists() and (workspace / ".run" / "state.json").exists():
             message = str(exc)
@@ -1392,6 +1396,12 @@ def parser() -> argparse.ArgumentParser:
     attempt_parser = sub.add_parser("attempt", help="Apply one typed proposal to an initialized workspace.")
     attempt_parser.add_argument("workspace")
     attempt_parser.add_argument("--proposal", required=True, help="Path to a one-object JSON proposal.")
+    attempt_parser.add_argument(
+        "--inject-failure",
+        default="",
+        choices=[failure for failure in ALLOWED_FAILURES if failure],
+        help="Harness-only recovery drill: corrupt this attempt's candidate with the named failure. Not selectable by a proposal.",
+    )
 
     finish_parser = sub.add_parser("finish", help="Run the bounded falsifier when enabled, then the sealed audit exactly once.")
     finish_parser.add_argument("workspace")
@@ -1427,7 +1437,7 @@ def main() -> int:
             return 0
         if args.command == "attempt":
             proposal = read_json(Path(args.proposal))
-            record = run_attempt(Path(args.workspace).expanduser().resolve(), proposal)
+            record = run_attempt(Path(args.workspace).expanduser().resolve(), proposal, args.inject_failure)
             print(canonical_json(record))
             return 0
         if args.command == "finish":

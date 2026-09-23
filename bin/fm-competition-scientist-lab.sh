@@ -9,7 +9,8 @@
 #   fm-competition-scientist-lab.sh run --workspace <new-dir> \
 #     --task grouped-classification|nonlinear-regression|noisy-classification \
 #     --controller linear|proposed (--fixture | --proposals <jsonl>) [limits]
-#   fm-competition-scientist-lab.sh attempt <workspace> --proposal <json>
+#   fm-competition-scientist-lab.sh attempt <workspace> --proposal <json> \
+#     [--inject-failure syntax|timeout|oom|network]
 #   fm-competition-scientist-lab.sh finish <workspace>
 #   fm-competition-scientist-lab.sh replay <workspace>
 #   fm-competition-scientist-lab.sh smoke --output <new-dir> [limits]

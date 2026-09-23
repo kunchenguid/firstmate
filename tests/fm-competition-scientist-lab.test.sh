@@ -153,14 +153,20 @@ PY
 test_failure_recovery_and_rejected_artifacts() {
   local workspace proposal output
   workspace="$TMP_ROOT/failures"
-  init_workspace "$workspace" noisy-classification linear 6 1
+  init_workspace "$workspace" noisy-classification linear 7 1
 
+  local threshold=0.04
   for failure in syntax timeout oom network; do
     proposal="$TMP_ROOT/$failure.json"
-    write_proposal "$proposal" "$failure-case" "exercise $failure recovery" main "{\"INJECT_FAILURE\":\"$failure\"}"
-    output=$($LAB attempt "$workspace" --proposal "$proposal")
+    threshold=$(python3 -c 'import sys; print(round(float(sys.argv[1]) + 0.01, 2))' "$threshold")
+    write_proposal "$proposal" "$failure-case" "exercise $failure recovery" main "{\"NOISY_THRESHOLD\":$threshold}"
+    output=$($LAB attempt "$workspace" --proposal "$proposal" --inject-failure "$failure")
     assert_contains "$output" "\"failure_class\":\"$([ "$failure" = network ] && printf network-denied || printf %s "$failure")\"" "$failure should be classified"
   done
+
+  write_proposal "$TMP_ROOT/lever-injection.json" lever-injection "smuggle a fault through the proposal surface" main '{"INJECT_FAILURE":"timeout"}'
+  output=$($LAB attempt "$workspace" --proposal "$TMP_ROOT/lever-injection.json")
+  assert_contains "$output" "out-of-scope-lever:INJECT_FAILURE" "a proposal must not be able to select a failure injection"
 
   proposal="$TMP_ROOT/recovery.json"
   write_proposal "$proposal" recovery "recover with a valid isolated threshold change" main '{"NOISY_THRESHOLD":0.2}'
@@ -188,6 +194,34 @@ assert current == state["global_best_sha256"]
 assert rows[-1]["failure_class"] == ""
 PY
   pass "competition scientist: syntax, timeout, OOM, and denied-network failures recover without losing rejected artifacts"
+}
+
+test_worst_group_trade_and_per_metric_floors() {
+  local workspace output
+  workspace="$TMP_ROOT/selection"
+  init_workspace "$workspace" grouped-classification linear 5 2
+
+  python3 - "$workspace" <<'PY'
+import json
+import pathlib
+import sys
+manifest = json.loads((pathlib.Path(sys.argv[1]) / ".frozen/manifest.json").read_text())
+floors = manifest["noise_floor"]
+assert sorted(floors) == ["calibration_loss", "grouped_mean", "ood_stress", "worst_group"], floors
+assert len(set(floors.values())) > 1, floors
+assert max(floors.values()) > 0.03, floors
+PY
+
+  write_proposal "$TMP_ROOT/drop-spurious.json" drop-spurious "remove the feature whose relationship flips in stress groups" main '{"GROUPED_SPURIOUS_WEIGHT":0.0}'
+  output=$($LAB attempt "$workspace" --proposal "$TMP_ROOT/drop-spurious.json")
+  assert_contains "$output" '"decision_reason":"lexicographic:worst_group"' "raising the worst group should reach the lexicographic test"
+  assert_contains "$output" '"verdict":"KEEP"' "a candidate that raises every group above the incumbent worst-group floor should be kept"
+
+  write_proposal "$TMP_ROOT/sink-group.json" sink-group "remove the stable causal signal entirely" main '{"GROUPED_CAUSAL_WEIGHT":0.0}'
+  output=$($LAB attempt "$workspace" --proposal "$TMP_ROOT/sink-group.json")
+  assert_contains "$output" '"decision_reason":"catastrophic-group-regression' "a candidate that sinks a group below the incumbent floor should still be vetoed"
+  assert_contains "$output" '"verdict":"REVERT"' "the vetoed candidate should revert"
+  pass "competition scientist: the worst-group objective survives a subgroup trade and each metric carries its own floor"
 }
 
 test_branch_and_planning_limits() {
@@ -319,6 +353,7 @@ test_help_and_inertness
 test_smoke_contract
 test_frozen_hash_and_undeclared_edit_guards
 test_failure_recovery_and_rejected_artifacts
+test_worst_group_trade_and_per_metric_floors
 test_branch_and_planning_limits
 test_duplicate_confounded_and_budget_rejections
 test_finish_is_idempotent_and_replayable
