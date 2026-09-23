@@ -395,12 +395,13 @@ EOF
   mkdir -p "$pools/pool/1/repo"
   : > "$pools/pool/treehouse-state.json"
   printf 'task=lost-task\nhome=%s\n' "$TMP_ROOT/orphan-inventory/gone-home" > "$pools/pool/1/.fm-slot-owner"
+  fm_touch_epoch "$(( $(date +%s) - 3600 ))" "$pools/pool/1/.fm-slot-owner"
 
-  FM_ORPHAN_POOL_ROOT="$pools" FM_ORPHAN_CLAIM_MIN_AGE_MIN=0 FM_FAKE_BOOTSTRAP_LOG="$log" \
+  FM_ORPHAN_POOL_ROOT="$pools" FM_FAKE_BOOTSTRAP_LOG="$log" \
     run_stage "$home" "$root" run --locked 0
   assert_not_contains "$(run_stage "$home" "$root" report)" "ORPHAN_SLOT:" \
     "an unlocked probe ran the orphan inventory"
-  FM_ORPHAN_POOL_ROOT="$pools" FM_ORPHAN_CLAIM_MIN_AGE_MIN=0 FM_FAKE_BOOTSTRAP_LOG="$log" \
+  FM_ORPHAN_POOL_ROOT="$pools" FM_FAKE_BOOTSTRAP_LOG="$log" \
     run_stage "$home" "$root" run --locked 1
   report=$(run_stage "$home" "$root" report)
   assert_contains "$report" "ORPHAN_SLOT: slot=$pools/pool/1/repo task=lost-task" \

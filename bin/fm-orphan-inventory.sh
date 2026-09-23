@@ -15,13 +15,21 @@
 #   2. The claim's home= is canonicalized with pwd -P, as is this home, so two
 #      spellings of one directory compare equal.
 #   3. A claim is orphaned when it names this home and state/<task>.meta is
-#      absent, or names a home directory that no longer exists. A claim naming
+#      absent, or names a home that no longer exists: no directory, or one
+#      without a state/ directory (a retired home whose path was reused). A home
+#      on an unmounted volume therefore reads as gone; the report stays
+#      report-only, so that costs a false line, never an action. A claim naming
 #      another existing home is that home's business and is skipped, as is an
 #      unreadable, relative, or oddly named claim. A claim younger than
 #      FM_ORPHAN_CLAIM_MIN_AGE_MIN minutes is skipped too: a spawn writes it
 #      before publishing the task's record.
 #   4. One bounded system-wide `lsof -a -d cwd` scan attributes a process to an
-#      orphaned slot when its working directory is inside the slot's copy.
+#      orphaned slot when its working directory is inside the slot.
+# The terminal window or pane that hosted such a process is not named: its pane
+# shell and `treehouse get` run from the project clone, not the slot, so after
+# the reported processes stop, that endpoint may remain as an idle shell to close
+# by hand. Findings repeat at every locked session start, in every home that sees
+# them, until they are cleaned up.
 #
 # OUTPUT, one line per finding, silent when there is none:
 #   ORPHAN_PROCESS: pid=<pid> command=<name> age=<etime> rss_kb=<kb> slot=<copy>
@@ -51,7 +59,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 POOL_ROOT="${FM_ORPHAN_POOL_ROOT:-${TREEHOUSE_ROOT:-$HOME/.treehouse}}"
 MIN_AGE_MIN="${FM_ORPHAN_CLAIM_MIN_AGE_MIN:-5}"
+case "$MIN_AGE_MIN" in ''|*[!0-9]*) MIN_AGE_MIN=5 ;; esac
 SCAN_TIMEOUT="${FM_ORPHAN_SCAN_TIMEOUT:-20}"
+case "$SCAN_TIMEOUT" in ''|*[!0-9]*|0) SCAN_TIMEOUT=20 ;; esac
 ORPHANS=()   # "<copy><TAB><task><TAB><home><TAB><reason>"
 CWDS=''      # "<pid><TAB><cwd>" lines from the one scan
 
@@ -75,8 +85,8 @@ slot_copy() {  # <slot-dir>: the slot's single repo copy, canonical
 orphan_reason() {  # <claimed-home> <task> <this-home>
   local home
   case "$1" in /*) ;; *) return 1 ;; esac
-  if ! home=$(canon_dir "$1"); then
-    [ -e "$1" ] || { printf 'home-gone\n'; return 0; }
+  if ! home=$(canon_dir "$1") || [ ! -d "$home/state" ]; then
+    [ -e "$1/state" ] || { printf 'home-gone\n'; return 0; }
     return 1
   fi
   [ "$home" = "$3" ] && [ ! -e "$STATE/$2.meta" ] || return 1
@@ -101,9 +111,9 @@ scan_cwds() {  # sets CWDS; fails when the scan cannot establish a result
   CWDS=$(printf '%s\n' "$listing" | awk '/^p/ { pid = substr($0, 2) } /^n/ { print pid "\t" substr($0, 2) }')
 }
 
-pids_in() {  # <copy>
-  printf '%s\n' "$CWDS" | awk -F '\t' -v dir="$1" -v self="$$" \
-    '$1 != self && ($2 == dir || index($2, dir "/") == 1) { print $1 }'
+pids_in() {  # <slot-dir>
+  printf '%s\n' "$CWDS" | FM_SLOT="$1" FM_SELF="$$" awk -F '\t' \
+    '$1 != ENVIRON["FM_SELF"] && index($2, ENVIRON["FM_SLOT"] "/") == 1 { print $1 }'
 }
 
 report_process() {  # <pid> <orphan-record>
@@ -125,7 +135,7 @@ report_slot() {  # <orphan-record> <processes>
 report_orphan() {  # <orphan-record> <scan-ok>
   local pids pid
   [ "$2" = 1 ] || { report_slot "$1" unknown; return 0; }
-  pids=$(pids_in "${1%%$'\t'*}")
+  pids=$(pids_in "$(dirname "${1%%$'\t'*}")")
   [ -n "$pids" ] || { report_slot "$1" none; return 0; }
   for pid in $pids; do report_process "$pid" "$1"; done
 }
