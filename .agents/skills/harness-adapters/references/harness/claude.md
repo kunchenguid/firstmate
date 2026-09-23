@@ -7,7 +7,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Fact | Value |
 |---|---|
 | Busy | Owned hooks: `UserPromptSubmit` opens while `Stop`, `StopFailure`, and `SessionEnd` close; manual interrupt emits no hook, so control reports delivered keys and live endpoint only, publishes no idle event or cancellation claim, and usually leaves `claude-hook` busy. |
-| Exit | `/exit`. |
+| Exit | `/exit`; with background shells running, Claude answers with a "Background work is running" dialog preselecting `1. Exit and stop tasks` (verified on 2.1.280), which `../../../../../bin/fm-control.sh` exit confirms with one Enter only on that exact screen, and `fm_control_exit_confirm_key` in `../../../../../bin/fm-control-lib.sh` owns the match. |
 | Interrupt | Single Escape. |
 | Skill | `/<skill>`, for example `/no-mistakes`. |
 | Model | `--model <model>`; discover through the interactive `/model` picker, with alias or full-name shape documented by `claude --help`. |

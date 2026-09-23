@@ -1,0 +1,45 @@
+
+ ▐▛███▛█   Claude Code v2.1.280
+▝▜██████▀  Haiku 4.5 · Claude Team
+  ▝▝ ▝▝    /tmp/fm-task-worktree
+
+⚠ 3 MCP servers need authentication · run /mcp
+
+❯ Run the Bash command: sleep 900  (with run_in_background set to true). Then reply only OK.
+
+  Ran 1 shell command
+
+⏺ OK
+
+✻ Worked for 6s · done 8:48 PM · 1 shell still running
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Background work is running
+   The following will stop when you exit:
+
+   shell · sleep 900
+
+   ❯ 1. Exit and stop tasks
+     2. Move to background and exit
+     3. Stay
+
+   Enter to confirm · Esc to cancel

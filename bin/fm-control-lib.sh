@@ -192,6 +192,33 @@ fm_control_exit_command() {  # <harness>
   esac
 }
 
+# The key that confirms the harness's own exit-confirmation dialog, printed
+# only when <visible-capture> shows exactly that dialog with its exiting
+# option selected; any other screen, selection, or harness returns 1 and gets
+# no key. Claude answers /exit while background shells run with a
+# "Background work is running" dialog whose preselected first option, "Exit
+# and stop tasks", stops them and exits (verified on Claude Code 2.1.280;
+# captures in tests/captures/claude-exit-dialog/).
+fm_control_exit_confirm_key() {  # <harness> <visible-capture>
+  case "${1-}" in
+    claude) fm_control_claude_exit_dialog_selected "${2-}" && printf 'Enter' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Whether the last non-blank lines of <capture> are claude's background-work
+# dialog, opened by its exact two header lines, with the one selected option
+# being "1. Exit and stop tasks" and the exact footer closing the screen.
+fm_control_claude_exit_dialog_selected() {  # <capture>
+  printf '%s\n' "$1" | awk '
+    { sub(/^[ \t]+/, ""); sub(/[ \t]+$/, "") } $0 == "" { next }
+    { n++; last = $0 }
+    $0 == "Background work is running" { head = n; sel = ""; next }
+    head && n == head + 1 && $0 != "The following will stop when you exit:" { head = 0 }
+    head && index($0, "❯") == 1 { sel = (sel == "") ? $0 : "several" }
+    END { exit !(head && sel == "❯ 1. Exit and stop tasks" && last == "Enter to confirm · Esc to cancel") }'
+}
+
 # Which named keys a backend adapter can deliver. Every session provider
 # normalizes Enter, Ctrl+C, and the Ctrl+U composer clear; Orca's terminal API
 # exposes only an interrupt and an Enter, so it can deliver neither Escape nor

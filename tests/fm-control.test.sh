@@ -68,11 +68,15 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
 #   keys     every named key send, one per line.
 #   pane     optional capture-pane override, for an adapter whose busy verdict
 #            is read from the rendered tail.
+#   dialog-keys  every key that reached the exit-confirmation dialog.
 # Two transitions make it a lifecycle model rather than a recorder: a literal
 # that is the harness's exit command flips `command` to a shell (the agent
 # stopped), and a literal carrying a launch brief flips it to the value in
 # `becomes` (a new agent came up). FM_FAKE_NEVER_DIES suppresses the first, so
-# a stubborn agent can be tested too.
+# a stubborn agent can be tested too. FM_FAKE_EXIT_DIALOG names a captured
+# screen that models claude's background-work dialog instead: the Enter that
+# submits /exit renders that screen, and the next Enter answers it and stops
+# the agent, whatever the screen's selection says.
 make_tmux_stub() {  # <dir> -> echoes fakebin dir
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -94,7 +98,9 @@ case "${1:-}" in
     payload=${1:-}
     if [ "$literal" = 1 ]; then
       printf '%s\n' "$payload" >> "$D/literal"
-      if [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
+      if [ -n "${FM_FAKE_EXIT_DIALOG:-}" ] && [ "$payload" = /exit ]; then
+        : > "$D/exit-typed"
+      elif [ -z "${FM_FAKE_NEVER_DIES:-}" ] \
          && { [ "$payload" = /exit ] || [ "$payload" = /quit ]; }; then
         printf 'zsh' > "$D/command"
       fi
@@ -103,6 +109,13 @@ case "${1:-}" in
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
+      if [ "$payload" = Enter ] && [ -e "$D/dialog-shown" ]; then
+        printf 'Enter\n' >> "$D/dialog-keys"
+        printf 'zsh' > "$D/command"
+      elif [ "$payload" = Enter ] && [ -e "$D/exit-typed" ]; then
+        cp "$FM_FAKE_EXIT_DIALOG" "$D/pane"
+        : > "$D/dialog-shown"
+      fi
       if [ -n "${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" ] \
          && { [ "$payload" = Escape ] || [ "$payload" = C-c ]; }; then
         printf 'zsh' > "$D/command"
@@ -198,6 +211,7 @@ run_control() {
     FM_FAKE_MUSE_LOG="${FM_FAKE_MUSE_LOG:-}" \
     FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK="${FM_FAKE_MUSE_DISAPPEAR_BEFORE_ACK:-}" \
     FM_FAKE_INTERRUPT_STOPS_AGENT="${FM_FAKE_INTERRUPT_STOPS_AGENT:-}" \
+    FM_FAKE_EXIT_DIALOG="${FM_FAKE_EXIT_DIALOG:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -800,7 +814,7 @@ test_agent_that_does_not_stop_fails_closed() {
   printf 'busy_gen=%s\n' "$gen" >> "$dir/home/state/t1.meta"
   out=$(env FM_FAKE_NEVER_DIES=1 PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" \
     FM_FAKE_DIR="$dir/fake" FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 \
-    "$CONTROL" t1 exit 2>&1); rc=$?
+    FM_CONTROL_SETTLE_WAIT=0.05 "$CONTROL" t1 exit 2>&1); rc=$?
   expect_code 1 "$rc" "an agent that ignores its exit command should fail closed"
   assert_contains "$out" "did not stop" "the failure should say the agent did not stop"
   assert_contains "$out" "exit-delivered t1 interrupt=delivered verified=agent-alive cancel=unconfirmed exit-command=delivered agent-state=alive exit=unconfirmed" \
@@ -887,6 +901,76 @@ test_fm_send_still_marks_the_same_secondmate_task() {
   pass "fm-control's arrival leaves fm-send's from-firstmate marking untouched"
 }
 
+
+# --- 7. claude's background-work exit dialog ---------------------------------
+
+CAPTURES="$ROOT/tests/captures/claude-exit-dialog"
+
+# stay_selected <capture>: the same dialog with the selection moved off
+# "Exit and stop tasks", as an arrow key would leave it.
+stay_selected() {
+  sed -e 's/❯ 1\. Exit and stop tasks/  1. Exit and stop tasks/' \
+    -e 's/^\(  *\)  \([23]\. Stay\)$/\1❯ \2/' "$1"
+}
+
+test_exit_dialog_classifier_accepts_only_the_exact_selected_dialog() {
+  local screen
+  for screen in background-work-v2.1.280 background-work-two-option; do
+    [ "$(fm_control_exit_confirm_key claude "$(cat "$CAPTURES/$screen.screen")")" = Enter ] \
+      || fail "claude's $screen dialog with 'Exit and stop tasks' selected should be confirmed with Enter"
+  done
+  screen=$(stay_selected "$CAPTURES/background-work-v2.1.280.screen")
+  assert_contains "$screen" "❯ 3. Stay" "the counterfactual should really move the selection"
+  fm_control_exit_confirm_key claude "$screen" >/dev/null \
+    && fail "a dialog whose selection is not 'Exit and stop tasks' must get no key"
+  fm_control_exit_confirm_key claude "$(cat "$CAPTURES/workspace-trust-v2.1.280.screen")" >/dev/null \
+    && fail "the workspace-trust dialog shares the footer but must get no key"
+  screen="$(cat "$CAPTURES/background-work-v2.1.280.screen")"$'\n'"❯ "
+  fm_control_exit_confirm_key claude "$screen" >/dev/null \
+    && fail "a dialog that is no longer the bottom of the screen must get no key"
+  screen=$(sed 's/The following will stop when you exit:/Something else:/' "$CAPTURES/background-work-v2.1.280.screen")
+  fm_control_exit_confirm_key claude "$screen" >/dev/null \
+    && fail "a dialog whose text differs from the verified dialog must get no key"
+  fm_control_exit_confirm_key codex "$(cat "$CAPTURES/background-work-v2.1.280.screen")" >/dev/null \
+    && fail "only the claude adapter has a verified exit dialog"
+  pass "fm-control exit dialog: only claude's exact dialog with option 1 selected is confirmed"
+}
+
+test_exit_confirms_background_work_dialog_once() {
+  local dir out rc
+  dir=$(new_case exit-dialog)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  out=$(FM_FAKE_EXIT_DIALOG="$CAPTURES/background-work-v2.1.280.screen" run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit should stop a claude agent that asks to stop its background work"$'\n'"$out"
+  assert_contains "$out" "stopped t1 harness=claude" "the confirmed exit should report the stop"
+  [ -e "$dir/fake/dialog-shown" ] || fail "the fake should have rendered the dialog after /exit"
+  [ "$(cat "$dir/fake/dialog-keys")" = Enter ] \
+    || fail "the dialog should receive exactly one Enter, got: $(cat "$dir/fake/dialog-keys")"
+  pass "fm-control exit: claude's background-work dialog is confirmed with one Enter"
+}
+
+test_exit_leaves_any_other_dialog_unanswered() {
+  local dir out rc screen
+  for screen in stay workspace-trust-v2.1.280; do
+    dir=$(new_case "exit-no-dialog-$screen")
+    add_task "$dir" t1 claude
+    alive_as "$dir" claude
+    if [ "$screen" = stay ]; then
+      stay_selected "$CAPTURES/background-work-v2.1.280.screen" > "$dir/dialog.screen"
+    else
+      cp "$CAPTURES/$screen.screen" "$dir/dialog.screen"
+    fi
+    out=$(FM_FAKE_EXIT_DIALOG="$dir/dialog.screen" run_control "$dir" t1 exit); rc=$?
+    expect_code 1 "$rc" "exit on the $screen screen should fail closed"
+    assert_contains "$out" "agent-state=alive exit=unconfirmed" \
+      "the $screen screen should keep today's unconfirmed exit"
+    [ -e "$dir/fake/dialog-shown" ] || fail "the fake should have rendered the $screen screen"
+    [ ! -s "$dir/fake/dialog-keys" ] || fail "the $screen screen must receive no key"
+  done
+  pass "fm-control exit: any other dialog or selection keeps the unconfirmed exit"
+}
+
 test_exit_types_each_harness_verified_command
 test_interrupt_sends_each_harness_verified_key
 test_opencode_interrupts_twice_and_others_once
@@ -922,3 +1006,6 @@ test_grok_interrupt_without_acknowledgement_reports_unconfirmed
 test_grok_idle_footer_does_not_confirm_cancellation
 test_secondmate_control_command_carries_no_marker
 test_fm_send_still_marks_the_same_secondmate_task
+test_exit_dialog_classifier_accepts_only_the_exact_selected_dialog
+test_exit_confirms_background_work_dialog_once
+test_exit_leaves_any_other_dialog_unanswered

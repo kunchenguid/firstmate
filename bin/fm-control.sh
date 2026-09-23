@@ -370,6 +370,19 @@ wait_agent_state() {  # <timeout> <wanted>...
   return 1
 }
 
+# confirm_exit_dialog: answer the harness's own exit-confirmation dialog once,
+# and only when the exact endpoint's visible screen is that dialog with its
+# exiting option selected (fm_control_exit_confirm_key). Any other screen gets
+# no key, so the caller's dead-state wait keeps today's unconfirmed failure.
+confirm_exit_dialog() {
+  local screen key
+  screen=$(fm_backend_visible_capture "$BACKEND" "$T" "$LABEL" 2>/dev/null) || return 0
+  key=$(fm_control_exit_confirm_key "$HARNESS" "$screen") || return 0
+  fm_backend_send_key "$BACKEND" "$T" "$key" "$LABEL" \
+    || die "task $ID shows its exit-confirmation dialog, but $key could not be delivered on $BACKEND; the agent is still running"
+  EXIT_DIALOG=confirmed
+}
+
 require_state_verified_backend() {  # <verb>
   fm_control_backend_state_verified "$BACKEND" && return 0
   die "task $ID runs on the $BACKEND backend, which has no recovery-grade agent-state classifier, so '$1' cannot prove the agent actually stopped; refusing rather than reporting an unproven transition as done"
@@ -557,9 +570,10 @@ do_exit() {
     || die "the exit command could not be sent to task $ID on $BACKEND"
   [ "$verdict" != send-failed ] \
     || die "the exit command could not be sent to task $ID on $BACKEND"
-  state=$(wait_agent_state "$EXIT_WAIT" dead) || {
-    die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed; the agent did not stop within ${EXIT_WAIT}s"
-  }
+  EXIT_DIALOG=
+  state=$(wait_agent_state "$SETTLE_WAIT" dead) \
+    || { confirm_exit_dialog; state=$(wait_agent_state "$EXIT_WAIT" dead); } \
+    || die "exit-delivered $ID interrupt=$interrupt_result exit-command=delivered agent-state=$state exit=unconfirmed${EXIT_DIALOG:+ exit-dialog=$EXIT_DIALOG}; the agent did not stop within ${EXIT_WAIT}s"
   # The incarnation is over: retire its busy wiring so no stale record or
   # orphaned generation survives the agent that produced it.
   retire_busy_incarnation
