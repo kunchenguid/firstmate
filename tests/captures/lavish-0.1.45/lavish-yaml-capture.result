@@ -1,0 +1,51 @@
+session:
+  file: /tmp/synthetic/board.html
+  status: feedback
+  session_ended: true
+  ended_by: user
+prompts[6]:
+  - uid: "1"
+    prompt: "synthetic prompt 1"
+    selector: "div#app-popup > div:nth-of-type(3) > div > ol > li:nth-of-type(2)"
+    tag: li
+    text: "synthetic text 2"
+  - uid: "1"
+    prompt: "synthetic prompt 3"
+    selector: "div#app-popup > div:nth-of-type(2) > div:nth-of-type(1)"
+    tag: text
+    text: "synthetic text 4"
+    target:
+      type: text-range
+      text: "synthetic text 5"
+      selector: "div#app-popup > div:nth-of-type(2) > div:nth-of-type(1)"
+      commonAncestorSelector: "div#app-popup > div:nth-of-type(2) > div:nth-of-type(1)"
+      start:
+        selector: "div#app-popup > div:nth-of-type(2) > div:nth-of-type(1)"
+        path[1]: 1
+        offset: 100
+      end:
+        selector: "div#app-popup > div:nth-of-type(2) > div:nth-of-type(1)"
+        path[1]: 1
+        offset: 101
+  - uid: "2"
+    prompt: "synthetic prompt 6"
+    selector: "div#app-popup > div:nth-of-type(3) > div > div:nth-of-type(3) > div:nth-of-type(1)"
+    tag: div
+    text: "synthetic text 7"
+  - uid: "4"
+    prompt: "synthetic prompt 8"
+    selector: "div#app-popup > div:nth-of-type(3) > div"
+    tag: div
+    text: "synthetic text 9"
+  - uid: "5"
+    prompt: "synthetic prompt 10"
+    selector: "div#app-popup > div:nth-of-type(3) > div > ol > li:nth-of-type(5)"
+    tag: li
+    text: "synthetic text 11"
+  - uid: "6"
+    prompt: "synthetic prompt 12"
+    selector: "div#app-popup > div:nth-of-type(3) > div > ol > li:nth-of-type(6)"
+    tag: li
+    text: "synthetic text 13"
+next_step: This was the last feedback before the user ended the session. Stop polling /tmp/synthetic/board.html and do not reopen it - deliver any remaining updates directly in this conversation instead. Only run `lavish-axi /tmp/synthetic/board.html --reopen` if the user explicitly asks for further review or something genuinely important needs their visual attention.
+dom_snapshot: "uid=3 body \"PROTOTYPE — SIMULATION STRIP Posting: Inject failure: Surface: Popup — Safari to\"\n  uid=7 header \"PROTOTYPE — SIMULATION STRIP Posting: Inject failure: Surface: Popup — Safari to\"\n    uid=8 span \"PROTOTYPE — SIMULATION STRIP\"\n    uid=9 span \"Posting:\"\n      uid=10 label \"Posting:\"\n      uid=11 select \"Fluxgate Financial — mixed outcome Kestrel Dynamics — hard eligibility conflict\"\n        uid=12 option \"Fluxgate Financial — mixed outcome\"\n        uid=13 option \"Kestrel Dynamics — hard eligibility conflict\"\n    uid=14 span \"Inject failure:\"\n      uid=15 label \"Inject failure:\"\n      uid=16 select \"None Extraction warning Provider / network failure\"\n        uid=17 option \"None\"\n        uid=18 option \"Extraction warning\"\n        uid=19 option \"Provider / network failure\"\n    uid=20 span \"Surface: Popup — Safari toolbar Full tab — extension tab\"\n      uid=21 label \"Surface:\"\n      uid=22 span \"Popup — Safari toolbar Full tab — extension tab\"\n        uid=23 button \"Popup — Safari toolbar\"\n        uid=24 button \"Full tab — extension tab\"\n    uid=25 span \"History Settings Assumptions Data map Legend Reset session\"\n      uid=26 button \"History\"\n      uid=27 button \"Settings\"\n      uid=28 button \"Assumptions\"\n      uid=29 button \"Data map\"\n      uid=30 button \"Legend\"\n      uid=31 button \"Reset session\"\n    uid=32 span \"Synthetic data only · no network calls · no external resources · no storage APIs\"\n  uid=33 main \"Safari toolbar popup ◈ Job-Fit JF First-run setup 1 of 2 — your TypeSafe API key\"\n    uid=34 div \"Safari toolbar popup ◈ Job-Fit JF First-run setup 1 of 2 — your TypeSafe API key\"\n      uid=35 div \"Safari toolbar popup ◈ Job-Fit\"\n        uid=36 span\n          uid=37 i\n          uid=38 i\n          uid=39 i\n        uid=40 span \"Safari toolbar popup\"\n        uid=41 span \"◈ Job-Fit\"\n      uid=42 div \"JF First-run setup 1 of 2 — your TypeSafe API key This extension assesses your C\"\n        uid=43 div \"JF First-run setup 1 of 2 — your TypeSafe API key\"\n          uid=44 span \"JF\"\n          uid=45 span \"First-run setup 1 of 2 — your TypeSafe API key\"\n            uid=46 span \"First-run setup\"\n            uid=47 br\n            uid=48 span \"1 of 2 — your TypeSafe API key\"\n        uid=49 div \"This extension assesses your CV against the LinkedIn job you have open. Judgment\"\n          uid=50 p \"This extension assesses your CV against the LinkedIn job you have open. Judgment\"\n            uid=51 b \"hosted Jev (TypeSafe AI)\"\n            uid=52 b \"your own API key\"\n          uid=53 div \"Your data boundary, as you set it. Your CV’s header — name, email, phone, addres\"\n            uid=54 b \"Your data boundary, as you set it.\"\n          uid=55 div \"TypeSafe API key Show Create one at typesafe.ai → API keys. Stored in Safari sto\"\n            uid=56 label \"TypeSafe API key\"\n            uid=57 div \"Show\"\n            uid=58 div \"Create one at typesafe.ai → API keys. Stored in Safari storage.local (never sync\"\n          uid=59 button \"Continue — import your CV\"\n    uid=60 div \"◈ Job-Fit Assessment — extension tab (Safari)\"\n      uid=61 div \"◈ Job-Fit Assessment — extension tab (Safari)\"\n        uid=62 span\n          uid=63 i\n          uid=64 i\n          uid=65 i\n        uid=66 span \"◈ Job-Fit Assessment — extension tab (Safari)\"\n      uid=67 div\n  uid=68 div \"Variant A · Ledger B · Dashboard C · Workspace Hybrid ← →\"\n    uid=69 span \"Variant\"\n    uid=70 button \"A · Ledger\"\n    uid=71 button \"B · Dashboard\"\n    uid=72 button \"C · Workspace\"\n    uid=73 button \"Hybrid\"\n    uid=74 span \"← →\"\n  uid=75 script \"'use strict'; /* ===============================================================\"\n  uid=76 script"
