@@ -2069,12 +2069,11 @@ EOF
 # The simpler wrapper prints only the event field, and the predicate discards the
 # record; all three inherit the library-header contract above.
 #
-# A keyed `needs-decision` or `blocked` transition accepted by the whole-file
-# fold is included only when that fold still names the exact opening as live.
-# The liveness check folds only the captured span, never the log before it: an
-# accepted opening does not depend on earlier lines, and only later lines close
-# or supersede it, so the span fold names the same live openings as the
-# whole-file fold at a cost bounded by the span rather than the log's lifetime.
+# A keyed `needs-decision` or `blocked` opening is included only when the
+# captured span's fold still names that exact opening as live.
+# Earlier log lines cannot change whether an opening in the span survives:
+# only later lines can close or supersede it. Folding only the span therefore
+# gives the same verdict for its openings without rereading the log's history.
 # A transition rejected by the reserved-key vocabulary is surfaced instead as a
 # reconciliation signal and never treated here as an open decision.
 # status_open_decisions remains the single owner of open/closed semantics,
