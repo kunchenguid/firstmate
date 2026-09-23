@@ -233,8 +233,8 @@ write_task_meta() {
     "mode=no-mistakes"
 }
 
-# Extra "field=value" arguments are written before pr=, because
-# fm_pr_metadata_identity_parse rejects an unrecognised line after it.
+# Extra "field=value" arguments must name fields in the parser's closed set;
+# their position relative to pr= does not affect identity validation.
 write_poll_meta() {
   local state=$1 id=$2 url=$3 case_dir
   case_dir=$(cd "$state/../.." && pwd)
@@ -438,6 +438,35 @@ EOF
   fm_pr_task_id_valid "$id" || fail "operational validator rejected a path-safe legacy task ID"
   ! fm_task_id_creation_valid "$id" || fail "creation validator accepted an overlong task ID"
   pass "raw-byte parser accepts canonical URLs and rejects the complete adversarial matrix"
+}
+
+test_metadata_identity_is_order_independent_and_closed() {
+  local dir meta url head
+  dir=$(make_case metadata-key-set)
+  meta="$dir/home/state/task-a.meta"
+  url=https://github.com/o/r/pull/41
+  head=0123456789abcdef0123456789abcdef01234567
+  fm_write_meta "$meta" \
+    "pr_head=$head" \
+    'window=firstmate:fm-task-a' \
+    "pr=$url" \
+    'control_relaunch_tx=123.20260910T120000Z.456'
+  fm_pr_metadata_identity_parse "$meta" \
+    || fail "known task metadata keys were order-dependent"
+  [ "$FM_PR_META_URL" = "$url" ] \
+    || fail "order-independent metadata parsing lost the PR identity"
+
+  fm_write_meta "$meta" \
+    'unexpected_before_pr=value' \
+    "pr=$url"
+  ! fm_pr_metadata_identity_parse "$meta" \
+    || fail "an unknown task metadata key before pr= was accepted"
+  fm_write_meta "$meta" \
+    "pr=$url" \
+    'unexpected_after_pr=value'
+  ! fm_pr_metadata_identity_parse "$meta" \
+    || fail "an unknown task metadata key after pr= was accepted"
+  pass "PR metadata identity is order-independent over a closed key set"
 }
 
 test_invalid_entrypoints_have_zero_side_effects() {
@@ -2869,6 +2898,7 @@ SH
 }
 
 test_parser_matrix
+test_metadata_identity_is_order_independent_and_closed
 test_gitlab_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
