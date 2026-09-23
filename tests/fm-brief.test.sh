@@ -1149,7 +1149,7 @@ test_ship_branch_prefix_override_is_consistent_across_modes() {
   assert_grep "committed on your branch \`contrib/$id\`" "$brief" \
     "local-only: definition-of-done text did not use the configured override"
   # shellcheck disable=SC2016
-  assert_grep "\`done: ready in branch contrib/$id\`" "$brief" \
+  assert_grep "\`done [at=<epoch>]: ready in branch contrib/$id\`" "$brief" \
     "local-only: status-message text did not use the configured override"
   assert_no_grep "fm/$id" "$brief" \
     "local-only: brief mixed the legacy fm/ prefix in with the configured override"
