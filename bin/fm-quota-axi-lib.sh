@@ -28,6 +28,15 @@ FM_QUOTA_PROVIDER_ID_RE='^[a-z0-9]+(-[a-z0-9]+)*\z'
 #   quota_row($snapshot; $provider; $lane)
 #                                  the one provider row the candidate binds to,
 #                                  or null; schema 5 ignores $lane.
+#   quota_binding($harness; $model; $account)
+#                                  {lane, exact}: a claude candidate with a named
+#                                  account binds exactly to that accountKey,
+#                                  every other candidate to quota_lane.
+#   quota_bound_row($snapshot; $provider; $binding)
+#                                  quota_row for an inexact binding; an exact one
+#                                  matches only its own accountKey row and never
+#                                  falls back to default, so it is null under
+#                                  schema 5 and for an unreported account.
 # shellcheck disable=SC2016,SC2034  # jq program text, not shell expansion; read by the sourcing consumers
 FM_QUOTA_ROW_JQ='
   def quota_lane($harness; $model):
@@ -41,6 +50,19 @@ FM_QUOTA_ROW_JQ='
       (([$rows[] | select(.accountKey == $lane)] | first) //
        ([$rows[] | select(.accountKey == "default")] | first) // null)
     else ($rows | first) // null
+    end;
+  def quota_binding($harness; $model; $account):
+    if $harness == "claude" and (($account // "") != "")
+    then {lane: $account, exact: true}
+    else {lane: quota_lane($harness; $model), exact: false}
+    end;
+  def quota_bound_row($snapshot; $provider; $binding):
+    if $binding.exact then
+      (if $snapshot.schemaVersion == 6
+       then ([$snapshot.providers[]? | select(.provider == $provider and .accountKey == $binding.lane)] | first) // null
+       else null
+       end)
+    else quota_row($snapshot; $provider; $binding.lane)
     end;
 '
 

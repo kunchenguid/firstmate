@@ -173,6 +173,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
 # shellcheck source=bin/fm-quota-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-quota-axi-lib.sh"
+# shellcheck source=bin/fm-claude-accounts-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-claude-accounts-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-env-lib.sh disable=SC1091
@@ -1110,7 +1112,7 @@ EOF
 }
 
 crew_dispatch_validate() {
-  local file err verified_harnesses typed_key typed_active=false
+  local file err verified_harnesses typed_key typed_active=false account
   file="$CONFIG/crew-dispatch.json"
   [ -f "$file" ] || return 0
   if ! command -v jq >/dev/null 2>&1; then
@@ -1179,6 +1181,16 @@ crew_dispatch_validate() {
       | map(select(. as $p | effort_ok($p.h; $p.m; $p.e) | not))
       | map("\(.h):\(.e)")
       | unique;
+    # A profile account names a config/claude-accounts entry and selects a
+    # Claude subscription, so it is valid only on the claude harness; the
+    # names themselves are resolved against that file after this program.
+    def malformed_accounts:
+      configured_profiles | any(has("account") and (((.account | type) != "string") or (.account | length) == 0));
+    def non_claude_accounts:
+      configured_profiles
+      | map(select(has("account") and .harness != "claude"))
+      | map("\(.harness):\(.account)")
+      | unique;
     if type != "object" then "top-level value must be an object"
     elif has("rules") and (.rules | type) != "array" then "rules must be an array"
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
@@ -1214,10 +1226,28 @@ crew_dispatch_validate() {
         | unique) as $bad_harnesses
       | if ($bad_harnesses | length) > 0 then "unverified harness: " + ($bad_harnesses | join(", "))
         elif (bad_efforts | length) > 0 then "invalid effort: " + (bad_efforts | join(", "))
+        elif malformed_accounts then "profile account must be a non-empty string when present"
+        elif (non_claude_accounts | length) > 0 then "account needs harness claude: " + (non_claude_accounts | join(", "))
         else empty
         end
     end
   ' "$file" 2>/dev/null || true)
+  if [ -z "$err" ]; then
+    while IFS= read -r account; do
+      [ -n "$account" ] || continue
+      fm_claude_account_resolve "$CONFIG" "$account" && continue
+      err=$FM_CLAUDE_ACCOUNT_ERROR
+      break
+    done < <(jq -r '
+      def profiles($value):
+        if ($value | type) == "array" then $value
+        elif ($value | type) == "object" then [$value]
+        else []
+        end;
+      [(.rules // [])[]? | profiles(.use?)[]?] + [profiles(.default?)[]?]
+      | map(.account? // empty) | unique | .[]
+    ' "$file" 2>/dev/null)
+  fi
   if [ -n "$err" ]; then
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - $err"
     return 0
@@ -1229,7 +1259,8 @@ crew_dispatch_validate() {
       + (if ($p.model? != null) then "/" + ($p.model | tostring)
          elif ($p.effort? != null) then "/default"
          else "" end)
-      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end);
+      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end)
+      + (if ($p.account? != null) then "@" + ($p.account | tostring) else "" end);
     def profile_set($value; $selector):
       if ($value | type) == "array" then
         (($selector // "quota-balanced") + "[" + ([$value[] | profile(.)] | join(", ")) + "]")

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--account <name>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--account <name>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -28,7 +28,7 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--account <name>|default]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -39,8 +39,8 @@
 #   backend, kind, project or home, worktree, endpoint - comes from the task's
 #   validated state/<id>.meta, so --backend, --scout, --secondmate, a project
 #   positional, and batch pairs are all refused alongside it; only harness,
-#   model, and effort may change, which is what makes a harness switch one
-#   ordinary relaunch. It refuses unless the recorded endpoint is positively
+#   model, effort, and Claude account may change, which is what makes a harness
+#   switch one ordinary relaunch. It refuses unless the recorded endpoint is positively
 #   agent-free on a backend with a recovery-grade agent-state classifier (tmux
 #   or herdr), and clears the previous harness's per-task wiring before arming
 #   the new incarnation. Two verdicts are agent-free: a `dead` endpoint is
@@ -67,6 +67,22 @@
 #   from that harness's launch rather than guessed. Ultra is the explicit
 #   exception: bin/fm-harness.sh validate-native-effort owns its model scope;
 #   supported Pi launches receive --codex-effort ultra, never --thinking ultra.
+#   --account <name> is the concrete Claude account axis of a crewmate or scout
+#   profile: it names an entry in config/claude-accounts (docs/configuration.md
+#   "Claude accounts"; bin/fm-claude-accounts-lib.sh owns the parse), and the
+#   launch then carries CLAUDE_CONFIG_DIR=<that account's directory> in place of
+#   the ambient forward described under the launch templates below, while the
+#   workspace-trust pre-registration writes into that same account's store. It
+#   is valid only with the canonical claude harness and is refused on
+#   --secondmate spawns and raw launch commands; an unknown name, a malformed
+#   file, or a relative or missing directory refuses before any endpoint,
+#   worktree, or record exists. The name is recorded as account= in task meta
+#   only when set. A --relaunch that stays on claude without --account reuses
+#   the recorded account (re-resolving its directory), and one onto another
+#   harness drops it; a --relaunch may instead name --account <name> to move a
+#   claude task onto another account, or --account default to clear it back to
+#   the default store, under the same refusals. Absent --account launches
+#   exactly as before.
 #   --backend <name> is the explicit runtime session-provider backend for this
 #   exact task only (docs/configuration.md "Runtime backend" owns when that flag
 #   is authorized). Without it, the script resolves FM_BACKEND, then
@@ -242,7 +258,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   source of truth; shared --scout/--harness/--model/--effort/--account/--backend/--mode/--yolo
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -565,6 +581,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-claude-accounts-lib.sh
+. "$SCRIPT_DIR/fm-claude-accounts-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -576,6 +594,7 @@ KIND_SET=0
 HARNESS_ARG=
 MODEL=
 EFFORT=
+ACCOUNT=
 BACKEND_ARG=
 MODE=
 YOLO=
@@ -583,6 +602,7 @@ TRACEPARENT_ARG=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+ACCOUNT_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -610,6 +630,10 @@ for a in "$@"; do
     effort)
       EFFORT=$a
       EFFORT_SET=1
+      ;;
+    account)
+      ACCOUNT=$a
+      ACCOUNT_SET=1
       ;;
     backend)
       BACKEND_ARG=$a
@@ -660,6 +684,11 @@ for a in "$@"; do
     EFFORT=${a#--effort=}
     EFFORT_SET=1
     ;;
+  --account) want_value=account ;;
+  --account=*)
+    ACCOUNT=${a#--account=}
+    ACCOUNT_SET=1
+    ;;
   --backend) want_value=backend ;;
   --backend=*)
     BACKEND_ARG=${a#--backend=}
@@ -699,8 +728,18 @@ done
   echo "error: --effort requires a non-empty value" >&2
   exit 1
 }
+[ "$ACCOUNT_SET" -eq 0 ] || [ -n "$ACCOUNT" ] || {
+  echo "error: --account requires a non-empty value" >&2
+  exit 1
+}
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || {
   echo "error: --backend requires a non-empty value" >&2
+  exit 1
+}
+# A Claude account is a crewmate/scout dispatch-profile axis; a secondmate's
+# runtime is its durable config/secondmate-harness pin, which has no account.
+[ "$ACCOUNT_SET" -eq 0 ] || [ "$KIND" != secondmate ] || {
+  echo "error: --account applies only to crewmate and scout spawns, not --secondmate" >&2
   exit 1
 }
 [ "$MODE_SET" -eq 0 ] || [ -n "$MODE" ] || {
@@ -1220,6 +1259,7 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            [ -z "${ACCOUNT:-}" ] || echo "account=$ACCOUNT"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -1356,6 +1396,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ -z "$ACCOUNT" ] || shared_args+=(--account "$ACCOUNT")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -2231,6 +2272,34 @@ if [ "$EFFORT" = ultra ]; then
     echo "error: --effort ultra requires the canonical --harness pi or pi-signed launch so its native flag cannot be omitted" >&2
     exit 1
   }
+fi
+# Claude account (--account, header above). A relaunch that stays on claude
+# reuses the account recorded for the task unless it names one, and `default`
+# clears it; one onto another harness drops it, exactly as a harness change
+# resets model and effort. Resolved here, after the harness and before any
+# worktree or endpoint exists, so every refusal leaves nothing behind.
+CLAUDE_ACCOUNT_DIR=
+if [ "$RELAUNCH" -eq 1 ]; then
+  if [ "$ACCOUNT_SET" -eq 1 ]; then
+    [ "$ACCOUNT" != default ] || ACCOUNT=
+  elif [ "$HARNESS" = claude ] && [ "$RAW_LAUNCH" = 0 ]; then
+    ACCOUNT=$(fm_meta_get "$RELAUNCH_META" account)
+  fi
+fi
+if [ -n "$ACCOUNT" ]; then
+  if [ "$KIND" = secondmate ]; then
+    echo "error: --account applies only to crewmate and scout tasks, not secondmate $ID" >&2
+    exit 1
+  fi
+  if [ "$HARNESS" != claude ] || [ "$RAW_LAUNCH" != 0 ]; then
+    echo "error: --account $ACCOUNT selects a Claude account and needs the canonical claude harness, not '${ARG3:-$HARNESS}'" >&2
+    exit 1
+  fi
+  fm_claude_account_resolve "$CONFIG" "$ACCOUNT" || {
+    echo "error: $FM_CLAUDE_ACCOUNT_ERROR" >&2
+    exit 1
+  }
+  CLAUDE_ACCOUNT_DIR=$FM_CLAUDE_ACCOUNT_DIR
 fi
 if [ "$HARNESS" = omp ]; then
   omp_model_validate "$OMP_BIN" "$MODEL" || exit 1
@@ -3979,7 +4048,11 @@ claude*)
   else
     spawn_trust_args=("$WT" "$PROJ_ABS")
   fi
-  if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+  # A selected Claude account's store is the one this worker reads, so its
+  # trust lands there; otherwise the ambient store the launch forwards (an
+  # empty value is the helper's own unset default).
+  if ! CLAUDE_CONFIG_DIR=${CLAUDE_ACCOUNT_DIR:-${CLAUDE_CONFIG_DIR:-}} \
+    "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
     exit 1
   fi
@@ -4479,7 +4552,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort account busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4497,6 +4570,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$ACCOUNT" ] || echo "account=$ACCOUNT"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -4675,8 +4749,11 @@ esac
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
 # Forward firstmate's own resolved store onto the claude launch so the crewmate
 # uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+# an unset value is the single-store default and needs no prefix. A selected
+# --account replaces that forward for this one launch with its own directory.
+if [ "$HARNESS" = claude ] && [ -n "$CLAUDE_ACCOUNT_DIR" ]; then
+  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_ACCOUNT_DIR") $LAUNCH"
+elif [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then

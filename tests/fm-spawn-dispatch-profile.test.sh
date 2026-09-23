@@ -889,6 +889,92 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
 
+# config/claude-accounts + --account (docs/configuration.md "Claude accounts"):
+# a named account replaces the ambient CLAUDE_CONFIG_DIR forward for that one
+# launch, lands workspace trust in that account's store, and is recorded.
+test_claude_account_selects_its_config_dir_and_trust_store() {
+  local rec id out status launch
+  id='account-second-z30'
+  rec=$(make_spawn_case account-second claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/claude second"
+  printf '# accounts\nclaude-second  %s\n' "$CASE_DIR/claude second" > "$HOME_DIR/config/claude-accounts"
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --account claude-second)
+  status=$?
+  expect_code 0 "$status" "claude spawn with a configured account should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude second' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false" \
+    "the launch must run on the selected account's config directory"
+  assert_not_contains "$launch" "claude-work" "the selected account must replace firstmate's ambient store for this launch"
+  assert_grep 'account=claude-second' "$HOME_DIR/state/$id.meta" "meta must record the selected account"
+  assert_grep "\"$WT_DIR\"" "$CASE_DIR/claude second/.claude.json" "workspace trust must land in the selected account's store"
+  if [ -e "$CASE_DIR/claude-work/.claude.json" ]; then
+    assert_no_grep "\"$WT_DIR\"" "$CASE_DIR/claude-work/.claude.json" "workspace trust must not land in firstmate's ambient store"
+  fi
+  pass "--account launches claude on that account's config directory and registers trust in its store"
+}
+
+test_claude_without_account_records_none() {
+  local rec id out status
+  id='account-none-z31'
+  rec=$(make_spawn_case account-none claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/claude-second"
+  printf 'claude-second %s\n' "$CASE_DIR/claude-second" > "$HOME_DIR/config/claude-accounts"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude)
+  status=$?
+  expect_code 0 "$status" "claude spawn without an account should succeed"$'\n'"$out"
+  assert_not_contains "$(cat "$LAUNCH_LOG")" "CLAUDE_CONFIG_DIR=" "an absent account must keep today's launch"
+  assert_no_grep 'account=' "$HOME_DIR/state/$id.meta" "an absent account must write no account= line"
+  pass "a claude spawn with no account launches and records exactly as before, even with accounts configured"
+}
+
+test_claude_account_refusals_happen_before_endpoint_or_metadata() {
+  local rec id out status n=0 harness_args account setup expect sm
+  while IFS='^' read -r setup harness_args account expect; do
+    [ -n "$setup" ] || continue
+    n=$((n + 1))
+    id=account-refuse-z4$n
+    rec=$(make_spawn_case "account-refuse-$n" claude "$id")
+    read_case_record "$rec"
+    mkdir -p "$CASE_DIR/claude-second"
+    case "$setup" in
+    none) ;;
+    ok) printf 'claude-second %s\n' "$CASE_DIR/claude-second" > "$HOME_DIR/config/claude-accounts" ;;
+    relative) printf 'claude-second claude-second\n' > "$HOME_DIR/config/claude-accounts" ;;
+    missing) printf 'claude-second %s\n' "$CASE_DIR/nowhere" > "$HOME_DIR/config/claude-accounts" ;;
+    esac
+    # shellcheck disable=SC2086  # harness_args is a deliberate word list
+    out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" $harness_args --account "$account")
+    status=$?
+    expect_code 1 "$status" "account refusal ($setup/$harness_args/$account) must exit 1: $out"
+    assert_contains "$out" "$expect" "account refusal must name its reason ($setup/$harness_args/$account)"
+    [ ! -s "$LAUNCH_LOG" ] || fail "an account refusal must launch nothing (got: $(cat "$LAUNCH_LOG"))"
+    assert_absent "$HOME_DIR/state/$id.meta" "an account refusal must happen before meta is written"
+  done <<'ROWS'
+none^--harness claude^claude-second^config/claude-accounts does not exist
+ok^--harness claude^claude-third^claude account 'claude-third' is unknown
+ok^--harness claude^Claude-Second^is not a valid name
+ok^--harness claude^default^'default' is reserved for the default Claude config directory
+relative^--harness claude^claude-second^maps to relative directory 'claude-second'
+missing^--harness claude^claude-second^which is not an existing directory
+ok^--harness codex^claude-second^needs the canonical claude harness, not 'codex'
+ROWS
+  rec=$(make_spawn_case account-refuse-secondmate claude account-refuse-sm)
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" account-refuse-sm
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" account-refuse-sm "$sm" --secondmate --account claude-second)
+  status=$?
+  expect_code 1 "$status" "--account on a secondmate spawn must refuse: $out"
+  assert_contains "$out" "--account applies only to crewmate and scout spawns" "the secondmate refusal must name the axis"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a secondmate account refusal must launch nothing"
+  pass "an unusable --account refuses before any endpoint or metadata exists"
+}
+
 test_lavish_server_address_is_exported_to_worker_launch() {
   local rec id out status launch
   id=profile-lavish-host-z18
@@ -1516,6 +1602,9 @@ test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
 test_claude_forwards_firstmate_config_dir_when_set
+test_claude_account_selects_its_config_dir_and_trust_store
+test_claude_without_account_records_none
+test_claude_account_refusals_happen_before_endpoint_or_metadata
 test_lavish_server_address_is_exported_to_worker_launch
 test_lavish_absent_config_preserves_destination_ambient
 test_claude_omits_config_dir_prefix_when_unset

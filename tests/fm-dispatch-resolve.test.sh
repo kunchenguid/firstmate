@@ -630,6 +630,81 @@ assert_contains "$out" '  reason: quota-axi --json returned an invalid snapshot'
 cp "$BASE_RULES" "$RULES"
 pass "schema 6: each candidate binds to its account row; schema 5 is unchanged"
 
+# --- Claude accounts: a named account binds only to its own accountKey row ------
+# A claude profile's account runs on another subscription, so it must never
+# borrow the default account's row; with no row of its own it is unmeasured.
+ACCOUNT_RULES="$TMP_ROOT/account-rules.json"
+ACCOUNT_Q6="$TMP_ROOT/account-schema6.json"
+mkdir -p "$TMP_ROOT/claude-second"
+printf 'claude-second %s\n' "$TMP_ROOT/claude-second" > "$HOME_DIR/config/claude-accounts"
+cat > "$ACCOUNT_RULES" <<'JSON'
+{
+  "rules": [
+    {
+      "when": "Claude work.",
+      "use": [
+        { "harness": "claude", "model": "sonnet", "effort": "high", "account": "claude-second" },
+        { "harness": "claude", "model": "sonnet", "effort": "high" }
+      ]
+    }
+  ]
+}
+JSON
+cat > "$ACCOUNT_Q6" <<'JSON'
+{
+  "generatedAt": "2030-01-01T00:00:00Z",
+  "schemaVersion": 6,
+  "providers": [
+    { "provider": "claude", "accountKey": "default", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 40, "runway": { "status": "through_reset" }, "selection": { "spendPriority": 0.2 } } ] } },
+    { "provider": "claude", "accountKey": "claude-second", "quotaSemantics": { "status": "known", "effectiveAvailability": [
+      { "scope": "all_models", "status": "known", "effectivePercentRemaining": 90, "runway": { "status": "through_reset" }, "selection": { "spendPriority": 0.9 } } ] } }
+  ]
+}
+JSON
+cat > "$RESPONSE" <<'JSON'
+{ "model": "jev-1.13.0",
+  "answers": { "rule": { "type": "choice", "choice": "rule_1", "confidence": 0.9,
+    "probabilities": { "rule_1": 0.97, "default": 0.03 } } },
+  "usage": { "input_tokens": 812, "output_tokens": 60 } }
+JSON
+cp "$ACCOUNT_RULES" "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$ACCOUNT_Q6" run code out err "$BRIEF"
+expect_code 0 "$code" "account schema 6 snapshot exits 0"
+assert_contains "$out" '  status: clear' "profiles that differ only in account are distinct, not duplicates"
+assert_contains "$out" 'candidate: claude:sonnet  account=claude-second  provider=claude  scope=all_models  remaining=90%  spendPriority=0.9  runway=through_reset  -> eligible' "the named account reads its own accountKey row"
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=40%  spendPriority=0.2  runway=through_reset  -> eligible' "the default-account profile keeps reading the default row"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high' --account 'claude-second'" "the chosen profile carries its account to fm-spawn"
+
+jq '.providers |= map(select(.accountKey != "claude-second"))' "$ACCOUNT_Q6" > "$TMP_ROOT/account-default-only.json"
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TMP_ROOT/account-default-only.json" run code out err "$BRIEF"
+assert_contains "$out" 'candidate: claude:sonnet  account=claude-second  provider=claude  -> eligible, unranked: provider claude has no quota row for account claude-second: disclosed uncertainty' "a named account never borrows the default row"
+assert_contains "$out" "  profile: --harness 'claude' --model 'sonnet' --effort 'high'" "the measured default-account profile is chosen instead"
+assert_not_contains "$out" "--account" "the unmeasured account is not selected"
+
+reset_log
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$QUOTA" run code out err "$BRIEF"
+assert_contains "$out" 'candidate: claude:sonnet  account=claude-second  provider=claude  -> eligible, unranked: provider claude has no quota row for account claude-second: disclosed uncertainty' "a schema 5 row describes the default store, never a named account"
+assert_contains "$out" 'candidate: claude:sonnet  provider=claude  scope=all_models  remaining=79%' "schema 5 still binds the default-account profile by provider"
+
+for bad in \
+  '{"rules":[{"when":"x","use":{"harness":"codex","account":"claude-second"}}]}|each use profile account must be a non-empty string on a claude profile' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","account":""}}]}|each use profile account must be a non-empty string on a claude profile' \
+  '{"rules":[{"when":"x","use":{"harness":"claude"}}],"default":{"harness":"cursor","account":"claude-second"}}|each default profile account must be a non-empty string on a claude profile' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","account":"claude-third"}}]}|claude account '"'"'claude-third'"'"' is unknown: config/claude-accounts has no entry for it'; do
+  printf '%s\n' "${bad%%|*}" > "$RULES"
+  reset_log
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 2 "$code" "malformed account exits 2: ${bad#*|}"
+  assert_contains "$err" "malformed rules file: $RULES - ${bad#*|}" "malformed account is named: ${bad#*|}"
+  assert_absent "$LOG/argv" "an account configuration error never reaches the network"
+done
+rm -f "$HOME_DIR/config/claude-accounts"
+cp "$BASE_RULES" "$RULES"
+pass "claude accounts: exact accountKey binding, disclosed uncertainty without one, and configuration errors"
+
 # --- quota-axi is read exactly once --------------------------------------------
 reset_log
 write_response "$RESPONSE" rule_4 0.9
@@ -736,8 +811,8 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":" claude"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":"claude\n"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
   '{"rules":[{"when":"x","use":{"harness":"codex","floor":{"scope":"all_models","min_percent":20,"provider":"claude"}}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
-  '{"rules":[{"when":"x","use":[{"harness":"codex","model":"gpt-5.5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]}]}|each rule use must not contain duplicate harness, model, and effort profiles' \
-  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":[{"harness":"claude","model":"opus"},{"harness":"claude","model":"opus"}]}|default must not contain duplicate harness, model, and effort profiles' \
+  '{"rules":[{"when":"x","use":[{"harness":"codex","model":"gpt-5.5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]}]}|each rule use must not contain duplicate harness, model, effort, and account profiles' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":[{"harness":"claude","model":"opus"},{"harness":"claude","model":"opus"}]}|default must not contain duplicate harness, model, effort, and account profiles' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \
   '{"rules":[{"when":"x","use":{"harness":"grok","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
   '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|use profiles whose harness lacks one authoritative provider family require provider: opencode' \

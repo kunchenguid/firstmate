@@ -458,9 +458,9 @@ The scratch repo was deleted and the test entries were removed from the store an
 That verification is point-in-time rather than a durable guarantee, because a concurrent Claude session can re-add a path it visited: one entry reappeared after an earlier zero-residual check, most plausibly flushed by a session as it exited, and was removed again.
 
 One limitation belongs beside that result.
-An intermediate arm run against an isolated `CLAUDE_CONFIG_DIR` holding only a copied `.claude.json` cleared the trust dialog but then surfaced the separate machine-scoped Bypass Permissions warning.
+An intermediate arm run against an isolated `CLAUDE_CONFIG_DIR` holding only a copied `.claude.json` cleared the trust dialog but then surfaced the separate Bypass Permissions warning, whose acceptance Claude records per config store rather than per machine.
 That warning rendered in the same shape as the trust dialog, with the selection cursor on `No, exit` and the footer `Enter to confirm . Esc to cancel`, so a sent Enter would end that worker too.
-That gate is not a production blocker, because a normal environment has already accepted it and the treatment arm above ran against the real config and saw neither dialog.
+That gate is not a blocker for the default store, which the operator has already accepted and which the treatment arm above ran against without seeing either dialog; a separate store such as a named Claude account's has not accepted it until the operator does, and the [Claude accounts section](../configuration.md#claude-accounts-configclaude-accounts) owns that precondition.
 This change does not address that warning and does not claim to.
 
 ### Secondmate homes
@@ -501,7 +501,7 @@ trusted: /private/tmp/fm-sm-trust-live-69759/fm-homes/livemate-n1
   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
 ```
 
-No dialog appeared, the composer was reached, and neither did the machine-scoped bypass warning, because this ran against the real config.
+No dialog appeared, the composer was reached, and neither did the per-store bypass warning, because this ran against the real config, whose store had already accepted it.
 The lab home was deleted and the test entry was removed from the store and verified absent, with the same point-in-time caveat as the worktree arms above.
 
 `bin/fm-spawn.sh` therefore pre-registers the directory every claude launch starts in through `bin/fm-claude-trust.sh` before launch, and `tests/fm-claude-trust.test.sh` pins both halves of the scope contract for both shapes: a fresh worktree and a seeded secondmate home are trusted, and an out-of-scope path is refused.

@@ -150,10 +150,11 @@
 # file this uid owns; every unrelated key and project entry is preserved, and
 # both entries land in one atomic replacement. In secondmate-home mode: the
 # single projects entry for the registered home path, same store, same atomic
-# replacement. fm-spawn.sh forwards CLAUDE_CONFIG_DIR onto the claude launch
-# verbatim rather than resolving it, and the pane starts in the registered
-# directory, so only an absolute value names the same store on both sides; a
-# relative one is refused below rather than guessed at.
+# replacement. fm-spawn.sh runs this helper with the same CLAUDE_CONFIG_DIR it
+# puts on the claude launch - a selected --account's directory, else its own
+# ambient value - verbatim rather than resolved, and the pane starts in the
+# registered directory, so only an absolute value names the same store on both
+# sides; a relative one is refused below rather than guessed at.
 set -u
 # Path resolution here must answer from the filesystem, never from the caller's
 # environment, because the refusals below are the safety property. CDPATH would

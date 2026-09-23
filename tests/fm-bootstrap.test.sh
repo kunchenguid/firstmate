@@ -1237,6 +1237,62 @@ ROWS
   pass "bootstrap gates resolver fields and additive harnesses on the typed key"
 }
 
+# A profile account names a config/claude-accounts entry and is valid only on
+# the claude harness; bootstrap surfaces every way it cannot resolve, with or
+# without the typed resolver key.
+test_crew_dispatch_claude_accounts() {
+  local case_dir fakebin out bs
+  case_dir="$TMP_ROOT/dispatch-claude-accounts"
+  mkdir -p "$case_dir/home/config" "$case_dir/claude-second"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  bs() {
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+      FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$@" "$ROOT/bin/fm-bootstrap.sh"
+  }
+  printf '%s\n' '{"rules":[{"when":"claude work","use":[{"harness":"claude","model":"sonnet","account":"claude-second"},{"harness":"claude","model":"sonnet"}]}]}' \
+    > "$case_dir/home/config/crew-dispatch.json"
+
+  out=$(bs env)
+  [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - claude account '"'"'claude-second'"'"' is unknown: config/claude-accounts does not exist' ] \
+    || fail "an account without config/claude-accounts must be flagged, got: $out"
+
+  printf 'claude-second %s\n' "$case_dir/claude-second" > "$case_dir/home/config/claude-accounts"
+  out=$(bs env)
+  [ -z "$out" ] || fail "a resolvable claude account must stay silent, got: $out"
+  out=$(bs env FM_BOOTSTRAP_VERBOSE_FACTS=1)
+  assert_contains "$out" 'BOOTSTRAP_INFO: crew dispatch rule: claude work -> quota-balanced[claude/sonnet@claude-second, claude/sonnet]' \
+    "verbose dispatch facts must name the account a profile selects"
+  out=$(bs env TYPESAFE_API_KEY=test-key)
+  [ -z "$out" ] || fail "a resolvable claude account must stay silent under typed resolution, got: $out"
+
+  printf 'claude-second %s\n' "$case_dir/not-signed-in" > "$case_dir/home/config/claude-accounts"
+  out=$(bs env)
+  [ "$out" = "CREW_DISPATCH: invalid config/crew-dispatch.json - claude account 'claude-second' maps to '$case_dir/not-signed-in', which is not an existing directory; sign that account in under it first" ] \
+    || fail "a missing account directory must be flagged, got: $out"
+  printf 'claude-second relative/dir\n' > "$case_dir/home/config/claude-accounts"
+  out=$(bs env)
+  [ "$out" = "CREW_DISPATCH: invalid config/crew-dispatch.json - claude account 'claude-second' maps to relative directory 'relative/dir'; config/claude-accounts needs an absolute path" ] \
+    || fail "a relative account directory must be flagged, got: $out"
+
+  printf 'claude-second %s\n' "$case_dir/claude-second" > "$case_dir/home/config/claude-accounts"
+  printf '%s\n' '{"rules":[{"when":"claude work","use":{"harness":"claude","account":"claude-third"}}]}' \
+    > "$case_dir/home/config/crew-dispatch.json"
+  out=$(bs env)
+  [ "$out" = "CREW_DISPATCH: invalid config/crew-dispatch.json - claude account 'claude-third' is unknown: config/claude-accounts has no entry for it" ] \
+    || fail "an unknown account name must be flagged, got: $out"
+  printf '%s\n' '{"default":{"harness":"codex","account":"claude-second"}}' > "$case_dir/home/config/crew-dispatch.json"
+  out=$(bs env)
+  [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - account needs harness claude: codex:claude-second' ] \
+    || fail "an account on a non-claude harness must be flagged, got: $out"
+  printf '%s\n' '{"default":{"harness":"claude","account":""}}' > "$case_dir/home/config/crew-dispatch.json"
+  out=$(bs env)
+  [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - profile account must be a non-empty string when present' ] \
+    || fail "an empty account must be flagged, got: $out"
+  pass "bootstrap validates crew-dispatch Claude accounts against config/claude-accounts"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_gh_axi_min_version
@@ -1265,3 +1321,4 @@ test_network_phases_record_per_step_elapsed_times
 test_tasks_axi_verdict_handoff_is_consumed_once
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_crew_dispatch_claude_accounts
