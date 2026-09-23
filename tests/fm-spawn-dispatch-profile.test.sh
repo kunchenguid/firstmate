@@ -455,6 +455,192 @@ test_codex_omits_max_effort_for_unsupported_model() {
   pass "codex omits max for models without the catalog capability"
 }
 
+# --codex-profile threads codex --profile ahead of --model, records the pin in
+# meta, and lets a provider profile carry the model so --model can be omitted.
+test_codex_profile_threads_and_records_without_model() {
+  local rec id out status launch
+  id=profile-codex-deepseek-z4e
+  rec=$(make_spawn_case profile-codex-deepseek codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex --codex-profile deepseek --effort high)
+  status=$?
+  expect_code 0 "$status" "codex spawn with a provider profile and no model should succeed"$'\n'"$out"
+  assert_grep "codex_profile=deepseek" "$HOME_DIR/state/$id.meta" "meta missing codex_profile=deepseek"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --profile 'deepseek' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread --profile ahead of the effort config with no model"
+  assert_not_contains "$launch" "--model" "an omitted model must leave --model out of the codex launch"
+  pass "codex --codex-profile threads --profile, records the pin, and omits --model when unset"
+}
+
+# An explicit --model still overrides the profile's model and sits after --profile.
+test_codex_profile_allows_model_override() {
+  local rec id out status launch
+  id=profile-codex-deepseek-model-z4f
+  rec=$(make_spawn_case profile-codex-deepseek-model codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex --codex-profile deepseek --model gpt-5 --effort high)
+  status=$?
+  expect_code 0 "$status" "codex spawn with a profile and an explicit model should succeed"$'\n'"$out"
+  assert_grep "codex_profile=deepseek" "$HOME_DIR/state/$id.meta" "meta missing codex_profile=deepseek"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 high
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --profile 'deepseek' --model 'gpt-5' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not place --profile ahead of the overriding --model"
+  pass "codex --codex-profile keeps --model as an override placed after --profile"
+}
+
+# The profile axis is codex-only: any other harness refuses it, before writing a
+# task record.
+test_codex_profile_refused_on_non_codex_harness() {
+  local rec id out status
+  id=profile-codex-nonharness-z4g
+  rec=$(make_spawn_case profile-codex-nonharness claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --codex-profile deepseek)
+  status=$?
+  expect_code 1 "$status" "a non-codex --codex-profile spawn should refuse"
+  assert_contains "$out" "codex-profile applies only to the codex harness" \
+    "the refusal should name the codex-only axis"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused profile spawn must write no task record"
+  pass "codex --codex-profile is refused for any other harness before a record is written"
+}
+
+# Without the flag, a codex launch is byte-identical to today's, so the axis is
+# inert until used.
+test_codex_without_profile_is_unchanged() {
+  local rec id out status launch expected
+  id=profile-codex-unchanged-z4h
+  rec=$(make_spawn_case profile-codex-unchanged codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex --model gpt-6-astra --effort high)
+  status=$?
+  expect_code 0 "$status" "a plain codex spawn should succeed"$'\n'"$out"
+  assert_grep "harness=codex" "$HOME_DIR/state/$id.meta" "meta missing harness=codex"
+  ! grep -q '^codex_profile=' "$HOME_DIR/state/$id.meta" \
+    || fail "a spawn without --codex-profile must write no codex_profile= line"
+  launch=$(cat "$LAUNCH_LOG")
+  # The codex core is unchanged and carries no --profile: the axis is inert until
+  # used. (The env prefix is shared with every codex launch and pinned by the
+  # other codex cases.)
+  assert_contains "$launch" "codex --model 'gpt-6-astra' -c 'model_reasoning_effort=\"high\"' --dangerously-bypass-approvals-and-sandbox --disable hooks" \
+    "plain codex launch core changed"
+  assert_not_contains "$launch" "--profile" "a codex launch without the flag must carry no --profile"
+  pass "a codex launch without --codex-profile is unchanged and carries no --profile"
+}
+
+# A profile literally named "default" is an ordinary profile name, not a
+# sentinel: the launch carries it and the record matches what launched.
+test_codex_profile_named_default_threads_literally() {
+  local rec id out status launch
+  id=profile-codex-default-z4i
+  rec=$(make_spawn_case profile-codex-default codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex --codex-profile default --effort high)
+  status=$?
+  expect_code 0 "$status" "codex spawn with a profile named default should succeed"$'\n'"$out"
+  assert_grep "codex_profile=default" "$HOME_DIR/state/$id.meta" "meta missing codex_profile=default"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --profile 'default' -c 'model_reasoning_effort=\"high\"'" \
+    "a profile named default must reach the codex launch as --profile default"
+  pass "codex --codex-profile default threads literally and matches its recorded pin"
+}
+
+# A remote secondmate launch crosses the transport hop without the profile axis,
+# so the flag is refused up front rather than silently dropped on the far side.
+test_codex_profile_refused_for_remote_secondmate() {
+  local rec id out status
+  id=profile-codex-remote-z4j
+  rec=$(make_spawn_case profile-codex-remote codex "$id")
+  read_case_record "$rec"
+  printf -- '- %s - remote domain (host: remote-mac; root: /srv/fm; home: /srv/%s; scope: things; projects: p; added 2026-09-03)\n' \
+    "$id" "$id" > "$HOME_DIR/data/secondmates.md"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --secondmate --harness codex --codex-profile deepseek)
+  status=$?
+  expect_code 1 "$status" "a remote secondmate spawn with --codex-profile should refuse"$'\n'"$out"
+  assert_contains "$out" "a remote secondmate spawn does not yet take --codex-profile" \
+    "the refusal should name the unsupported remote profile axis"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "a refused remote profile spawn must write no task record"
+  [ ! -e "$HOME_DIR/state/.spawn-$id.lock" ] || fail "a refused remote profile spawn must release its spawn lock"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused remote profile spawn must launch nothing"
+  pass "codex --codex-profile is refused for a remote secondmate instead of being dropped"
+}
+
+# A direct fm-spawn --relaunch (no fm-control in front of it) reads the recorded
+# codex_profile= itself, so a codex-to-codex relaunch that omits the flag keeps
+# the provider, while a harness change drops it. The recorded pane is modelled
+# as agent-free (its window exists and its foreground is a shell) so the
+# relaunch adopts it rather than refusing.
+make_dead_pane_tmux() {  # <fakebin>; the pane answers from FM_FAKE_DIR
+  cat > "$1/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+D=$FM_FAKE_DIR
+case "${1:-}" in
+  send-keys)
+    shift; literal=0
+    while [ $# -gt 0 ]; do case "$1" in -t) shift 2 ;; -l) literal=1; shift ;; *) break ;; esac; done
+    payload=${1:-}
+    if [ "$literal" = 1 ]; then
+      case "$payload" in ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;; esac
+      printf '%s\n' "$payload" >> "$FM_FAKE_LAUNCH_LOG"
+    fi
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do case "$a" in
+      *cursor_y*) printf '1\n'; exit 0 ;;
+      *pane_current_command*) printf 'zsh\n'; exit 0 ;;
+      *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
+    esac; done
+    printf 'firstmate\n'; exit 0 ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
+  list-windows) cat "$D/windows"; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$1/tmux"
+}
+
+test_codex_profile_carries_forward_on_direct_relaunch() {
+  local rec id out status launch
+  id=profile-codex-direct-relaunch-z4k
+  rec=$(make_spawn_case profile-codex-direct-relaunch codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex --codex-profile deepseek --effort high)
+  status=$?
+  expect_code 0 "$status" "the initial codex spawn with a provider profile should succeed"$'\n'"$out"
+
+  mkdir -p "$CASE_DIR/fake-pane"
+  printf '%s\n' "fm-$id" > "$CASE_DIR/fake-pane/windows"
+  printf '%s' "$WT_DIR" > "$CASE_DIR/fake-pane/cwd"
+  make_dead_pane_tmux "$FAKEBIN_DIR"
+
+  out=$(FM_FAKE_DIR="$CASE_DIR/fake-pane" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --relaunch --harness codex)
+  status=$?
+  expect_code 0 "$status" "a direct codex-to-codex relaunch without the flag should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --profile 'deepseek' --dangerously-bypass-approvals-and-sandbox" \
+    "a direct relaunch must thread the recorded provider profile into the replacement launch"
+  assert_grep "codex_profile=deepseek" "$HOME_DIR/state/$id.meta" "the relaunched record must keep codex_profile=deepseek"
+
+  out=$(FM_FAKE_DIR="$CASE_DIR/fake-pane" run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --relaunch --harness claude)
+  status=$?
+  expect_code 0 "$status" "a direct relaunch onto claude should succeed and drop the profile"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "--profile" "a relaunch onto claude must carry no --profile"
+  ! grep -q '^codex_profile=' "$HOME_DIR/state/$id.meta" \
+    || fail "a harness change on a direct relaunch must clear codex_profile="
+  pass "a direct fm-spawn --relaunch carries codex_profile= forward on codex and clears it on a harness change"
+}
+
 # Codex parks a crewmate launch forever on its unanswerable hook-trust modal
 # unless the launch turns the hook layer off. These two cases pin the split:
 # a crewmate runs hook-free, a secondmate keeps the project hooks that carry its
@@ -1499,6 +1685,13 @@ test_codex_threads_model_and_max_effort
 test_codex_omits_max_effort_for_unsupported_model
 test_codex_crewmate_launch_disables_the_hook_layer
 test_codex_secondmate_launch_keeps_the_hook_layer
+test_codex_profile_threads_and_records_without_model
+test_codex_profile_allows_model_override
+test_codex_profile_refused_on_non_codex_harness
+test_codex_without_profile_is_unchanged
+test_codex_profile_named_default_threads_literally
+test_codex_profile_refused_for_remote_secondmate
+test_codex_profile_carries_forward_on_direct_relaunch
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort

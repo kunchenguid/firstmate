@@ -523,6 +523,27 @@ test_remote_mate_restarts_over_the_transport_hop() {
   pass "T6 a remote mate restarts through the host-local control plane over the fm-on hop"
 }
 
+# The parent's per-id pin, not the bare default line, is what a remote mate's
+# replacement must run on, exactly as a local relaunch resolves it.
+test_remote_restart_honors_per_id_pin() {
+  local dir out rc relaunch_line
+  dir=$(new_case remote-pin)
+  setup_remote_case "$dir" sm2 ok
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
+  printf 'claude\nsm2: codex big-model high\n' > "$dir/home/config/secondmate-harness"
+
+  out=$(run_restart "$dir" fm-sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 0 "$rc" "a pinned remote mate should restart over its transport hop"$'\n'"$out"
+  assert_contains "$out" "restarted: sm2 on remote-mac (codex)" \
+    "a remote restart should report the per-id pinned runtime"
+  relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
+    || fail "the host-local relaunch did not carry the parent's per-id pin: $relaunch_line"
+  pass "a remote restart honors the parent's per-id secondmate pin over the bare default"
+}
+
 # --- T7: an unreachable host is unknown, never a claimed reload --------------
 test_unreachable_host_is_reported_unknown() {
   local dir out rc
@@ -849,6 +870,7 @@ test_refused_restart_falls_back_without_claiming_a_reload
 test_local_restart_uses_the_home_pin_and_reports_what_ran
 test_native_ultra_restart_keeps_local_and_remote_profiles
 test_remote_mate_restarts_over_the_transport_hop
+test_remote_restart_honors_per_id_pin
 test_unreachable_host_is_reported_unknown
 test_concurrent_reply_cannot_release_persist_gate
 test_persist_waits_are_polled_together
