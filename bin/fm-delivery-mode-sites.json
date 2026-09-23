@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "modes": ["no-mistakes", "direct-PR", "local-only", "no-mistakes-prod-only"],
+  "sites": [
+    {"path": "bin/fm-brief.sh", "accepts": ["no-mistakes", "direct-PR", "local-only"]},
+    {"path": "bin/fm-spawn.sh", "accepts": ["no-mistakes", "direct-PR", "local-only"]},
+    {"path": "bin/fm-promote.sh", "accepts": ["no-mistakes", "direct-PR", "local-only"]},
+    {"path": "bin/fm-project-mode.sh", "accepts": ["no-mistakes", "direct-PR", "local-only", "no-mistakes-prod-only"]},
+    {"path": "bin/fm-remote-home-provision.sh", "accepts": ["no-mistakes", "direct-PR"]},
+    {"path": "bin/fm-remote-home-seed.sh", "accepts": ["no-mistakes", "direct-PR"]}
+  ]
+}
