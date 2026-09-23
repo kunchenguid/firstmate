@@ -14,13 +14,8 @@
 # caller-cancellation marker, and .claim may hold owner, owner_start,
 # supervisor, supervisor_start, group, group_start, and armed records while
 # work executes.
-# The owner pair persists for the record's whole life because a caller cannot be
-# relied on to cancel its own job. A caller killed outright, or lost with its
-# host, never runs the cancellation its own exit path owns, so its record would
-# otherwise be executed - or kept queued - for nobody. The worker reads that
-# recorded identity through fm_remote_job_caller_abandoned and cancels the job
-# itself, which is what keeps an abandoned record from holding its home's lane
-# for the rest of its timeout.
+# The owner pair persists for the record's whole life; the cancellation contract
+# below owns why.
 # Stage writes state=queued last. seq is a queue-wide monotonic staging
 # sequence reserved atomically by its persistent .seq-claims directory; the
 # counter is only a forward-moving allocation hint. If the bounded hint walk
@@ -57,9 +52,21 @@
 # the finalized record because no result consumer remains. fm_remote_job_wait
 # honors an optional FM_REMOTE_JOB_DISCONNECT_PROBE function name. When set,
 # the probe runs about once per second; a failure cancels the job and fails
-# the wait. The staging entrypoint arms it with a parent-liveness probe so an
-# ssh channel
-# that dies without delivering a signal still cancels the abandoned job.
+# the wait. The staging entrypoint arms it with a parent-liveness probe so a
+# dedicated ssh connection whose death reparents it still cancels the abandoned
+# job.
+#
+# A caller cannot be relied on to do any of that for itself, which is why the
+# record keeps its staging process's .owner-pid/.owner-start pair for its whole
+# life. A caller killed outright, or lost with its host, runs no cancellation at
+# all, so the worker reads that recorded identity through
+# fm_remote_job_caller_abandoned and cancels the record itself rather than
+# executing - or queueing - it for nobody. The recorded start time is what makes
+# that safe against pid reuse, and a record with no owner pair, one staged by an
+# older library, is never abandoned. A channel closing on a multiplexed
+# connection reaches neither cover, because the sshd session process serving it
+# keeps running for its other channels and the caller stays alive; that job is
+# bounded by its deadline instead.
 # Abandoned .stage.* staging litter older than
 # FM_REMOTE_JOB_STAGE_REAP_SECONDS is reaped by the worker's stale sweep.
 #
@@ -784,9 +791,8 @@ fm_remote_job_record_owner_alive() { # <record-dir>
   [ "$recorded_start" = "$actual_start" ]
 }
 
-# A published record whose recorded caller is provably gone. The recorded start
-# time is what makes this safe against pid reuse. A record with no owner pair -
-# one staged by an older library - is never abandoned.
+# A published record whose recorded caller is provably gone; this file's header
+# owns the contract.
 fm_remote_job_caller_abandoned() { # <job-dir>
   local job=$1
   [ -f "$job/.owner-pid" ] && [ ! -L "$job/.owner-pid" ] || return 1

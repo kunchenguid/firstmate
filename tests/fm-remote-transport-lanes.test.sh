@@ -434,7 +434,7 @@ LEAK_BEGAN=$(date +%s)
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_B" fm-leaked-descendant-job.sh \
   < /dev/null > /dev/null
 LEAK_JOB=$FM_REMOTE_JOB_ID
-wait_for_state "$LEAK_JOB" done \
+wait_for_state "$LEAK_JOB" 'done' \
   || fail "a job whose descendant held its output never published a result"
 LEAK_ELAPSED=$(( $(date +%s) - LEAK_BEGAN ))
 [ "$LEAK_ELAPSED" -le 10 ] || fail "the leaked-descendant job took ${LEAK_ELAPSED}s to publish"
@@ -445,7 +445,7 @@ LEAK_FOLLOW_BEGAN=$(date +%s)
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_B" fm-touch-job.sh \
   "$TMP_ROOT/leak-follow" < /dev/null > /dev/null
 LEAK_FOLLOW=$FM_REMOTE_JOB_ID
-wait_for_state "$LEAK_FOLLOW" done \
+wait_for_state "$LEAK_FOLLOW" 'done' \
   || fail "the lane stayed busy behind the leaked descendant"
 LEAK_FOLLOW_ELAPSED=$(( $(date +%s) - LEAK_FOLLOW_BEGAN ))
 [ "$LEAK_FOLLOW_ELAPSED" -le 10 ] \

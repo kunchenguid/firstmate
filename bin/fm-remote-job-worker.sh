@@ -704,33 +704,33 @@ worker_drain_output_capture() { # <stdout-reader> <stderr-reader>
   wait "$watchdog" 2>/dev/null || true
 }
 
-# Copy the job's output with no buffer of its own, so a reader stopped at the
-# drain bound has already committed every byte it read rather than losing a
-# partial stdio buffer. Reading continues past the byte bound and discards the
-# excess, which is what keeps a writer past the bound from taking SIGPIPE.
+# Copy the job's output with plain read and write calls, so every byte the
+# reader has taken from the pipe is already in the destination. `head -c` holds
+# its last stdio buffer instead, which a reader stopped at the drain bound never
+# gets to flush - a short command's whole output was lost that way. The byte
+# bound moves to worker_bound_capture_file, applied once the copy is over,
+# because that is the only place it can be enforced without either a buffer or a
+# runtime this worker deliberately does not depend on.
 worker_capture_output() { # <fifo> <destination>
   local fifo=$1 destination=$2
-  perl -e '
-    use strict;
-    use warnings;
-    my $limit = shift;
-    my $written = 0;
-    $SIG{TERM} = sub { exit 0 };
-    while (1) {
-      my $count = sysread(STDIN, my $buffer, 65536);
-      last unless defined $count && $count > 0;
-      my $take = $written < $limit ? $limit - $written : 0;
-      $take = $count if $take > $count;
-      my $offset = 0;
-      while ($offset < $take) {
-        my $count_written = syswrite(STDOUT, $buffer, $take - $offset, $offset);
-        exit 0 unless defined $count_written;
-        $offset += $count_written;
-      }
-      $written += $take;
-    }
-    exit 0;
-  ' "$FM_REMOTE_JOB_MAX_BYTES" < "$fifo" > "$destination"
+  cat < "$fifo" > "$destination"
+}
+
+# Re-establish the record's byte bound on a captured stream. The publication
+# path refuses an over-bound file, so this is what keeps a command that wrote
+# more than the bound publishable, exactly as the reader's own cap used to.
+worker_bound_capture_file() { # <file>
+  local file=$1 bytes tmp
+  [ -f "$file" ] && [ ! -L "$file" ] || return 0
+  bytes=$(LC_ALL=C wc -c < "$file" 2>/dev/null | tr -d ' ') || return 0
+  case "$bytes" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$bytes" -gt "$FM_REMOTE_JOB_MAX_BYTES" ] || return 0
+  tmp=$(umask 077; mktemp "$file.XXXXXX") || return 1
+  if ! head -c "$FM_REMOTE_JOB_MAX_BYTES" "$file" > "$tmp" || ! chmod 600 "$tmp" \
+    || ! mv -f -- "$tmp" "$file"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
 }
 
 worker_run_job() { # <account-home> <job-dir>
@@ -824,6 +824,8 @@ worker_run_job() { # <account-home> <job-dir>
   rc=$?
   WORKER_PREEMPTIBLE=0
   worker_drain_output_capture "$stdout_reader" "$stderr_reader"
+  worker_bound_capture_file "$job/stdout" || worker_error "could not bound captured stdout for ${job##*/}"
+  worker_bound_capture_file "$job/stderr" || worker_error "could not bound captured stderr for ${job##*/}"
   rm -f -- "$stdout_pipe" "$stderr_pipe"
   set -e
   if [ "$WORKER_PREEMPTED" -eq 1 ]; then
