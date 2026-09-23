@@ -102,6 +102,14 @@ harness_marker() {
   # additionally clears foreign markers at rovo's launch boundary as defense in depth.
   [ "${ATLASSIAN_AGENT_TYPE:-}" = "rovo" ] && { echo rovo; return; }
   [ "${ROVODEV_CLI:-}" = "1" ] && { echo rovo; return; }
+  # omp 18.2.8 publishes its own identity marker OMPCODE=1 on tool subprocesses
+  # (verified live 2026-09-22; earlier 18.1.11 published none, which is why
+  # FM_OMP_HARNESS below is still kept). omp is Claude-Code-compatible and does
+  # NOT clear an inherited CLAUDECODE, so a live omp session carries BOTH
+  # markers and OMPCODE must be tested BEFORE the CLAUDECODE line - the same
+  # ordering hazard cursor and gemini document above. FM_OMP_HARNESS stays as
+  # the launch-boundary override for older omp versions.
+  [ "${OMPCODE:-}" = "1" ] && { echo omp; return; }
   # omp (Oh My Pi) publishes NO harness-identity marker of its own: verified on
   # omp 18.1.11 that PI_CODING_AGENT is absent from the binary and that the
   # default profile sets neither PI_CODING_AGENT_DIR nor OMP_PROFILE in the
@@ -148,11 +156,24 @@ harness_marker() {
 # True when an exact `omp` process sits within eight parents of this one. The
 # same anchored match as the ancestry walk below, kept separate so the marker
 # precedence above can demand real process evidence before trusting FM_OMP_HARNESS.
+# omp 18.2.8 ships as a Bun script, so an omp process can also report the
+# interpreter name with the omp script path in args[1]; an exact trailing `omp`
+# path component identifies it without claiming any other Bun command.
 ancestry_names_omp() {
-  local pid=$$ comm
+  local pid=$$ comm args arg1
   for _ in 1 2 3 4 5 6 7 8; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    [ "$(basename -- "$comm")" = omp ] && return 0
+    case "$(basename -- "$comm")" in
+      omp) return 0 ;;
+      bun|node)
+        # The interpreter runs the omp script; the harness name is the final
+        # component of args[1] only, never of later arguments.
+        args=$(ps -o args= -p "$pid" 2>/dev/null)
+        arg1=${args#* }
+        arg1=${arg1%% *}
+        [ "$(basename -- "$arg1")" = omp ] && return 0
+        ;;
+    esac
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
     [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
   done
@@ -235,6 +256,10 @@ harness_process_verdict() {  # <pid>
         echo "args gemini"
         return
       fi
+      # omp can also be launched through node; its script path must be args[1].
+      arg1=${args#* }
+      arg1=${arg1%% *}
+      [ "$(basename -- "$arg1")" = omp ] && { echo "args omp"; return; }
       case "$args" in
         *claude*) echo "args claude"; return ;;
         *codex*) echo "args codex"; return ;;
@@ -242,6 +267,16 @@ harness_process_verdict() {  # <pid>
         *grok*) echo "args grok"; return ;;
         *" pi "*|*/pi) echo "args pi"; return ;;
       esac ;;
+    # omp 18.2.8 ships as a Bun script (`bun /path/bin/omp` reports comm=bun
+    # and argv[0]=bun on macOS), so the omp arm above cannot see it. Match the
+    # omp script path in args[1] only, never later arguments, and never a bare
+    # `omp` argument, so unrelated Bun commands cannot claim the identity.
+    bun)
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+      arg1=${args#* }
+      arg1=${arg1%% *}
+      [ "$(basename -- "$arg1")" = omp ] && { echo "args omp"; return; }
+      ;;
   esac
 }
 
