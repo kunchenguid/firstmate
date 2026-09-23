@@ -162,6 +162,7 @@ Firstmate never writes a project's `AGENTS.md` directly.
 A crewmate creates or updates it lazily through the project's selected delivery path, using `bin/fm-ensure-agents-md.sh` and preferring pointers to authoritative sources over copied detail.
 Keep fleet delivery posture and captain-private strategy out of project memory.
 When the captain invokes `/stow`, load the `stow` skill for its memory curation, knowledge routing, and persistence of the open work records this session is holding.
+It never reconciles the backlog against repository or forge reality.
 
 ## 7. Task lifecycle
 
@@ -489,6 +490,7 @@ That token is consent for public replies and normal reversible lifecycle actions
 A Relay-only home still requires the live supervision cycle so mentions can wake it without fleet work.
 Load `fmx-respond` on an `x-mention <request_id>` or `x-mode-error ...` check wake, on a `public-followup ...` check wake or startup-surfaced public commitment, and on milestone or terminal wakes for Relay-linked tasks before posting completion follow-ups.
 That skill owns classification, public-safety policy, reply or dismissal, task linking, promised-final reconciliation, and follow-ups.
+A promised final public reply is durable state, never conversation memory.
 Only the home holding the relay consent and thread binding ever posts a public reply, so never ask a secondmate or crewmate to find the thread or send the reply, and never recover a terminal result by reading a `done:` sentence.
 
 ## Captain instruction precedence
