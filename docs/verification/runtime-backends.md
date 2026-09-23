@@ -1161,17 +1161,22 @@ The projected spawn in that run used the historical empty opt-in file, so a home
 One concurrent cross-home recovery case refused under contention on a loaded machine and passed on an immediate rerun; recovery-path presentation lock contention is a deliberate hard refusal rather than a flat fallback, which default-on now makes reachable from any Herdr home.
 That run measured the default-on projection on Herdr 0.8.0 only, while the focus-flash regression below was last run on 0.7.5 before the flip, so neither run covered a defective release under default-on projection; the version floor and the focus-flash suite's Part C close that gap.
 
-The restored-shell session-start cleanup ran on 2026-09-17 against Herdr 0.9.0 protocol 22:
+The restored-shell session-start cleanup ran on 2026-09-22 against Herdr 0.9.0 protocol 22 with the herdr-sidebar 0.11.0 plugin enabled:
 
 ```sh
 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
   tests/fm-herdr-session-cleanup-e2e.test.sh
 ```
 
+```text
+evidence: herdr=0.9.0 protocol=22 topology=sidebar default-session-tripwire=armed
+```
+
 Observed guarantee: one exact home-local, journal-correlated, one-tab child was closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op.
 The child may now hold one idle shell pane plus at most one installed `herdr-sidebar` pane proven by its `herdr-sidebar-explorer` metadata token, exact sole foreground argv, and an OS-proven shell with only that child; the sidebar closes before the shell pane.
 A journal-first sweep also retires version 2 journals whose exact bound workspace, tab, and pane are all absent from two complete snapshots.
-Paned shells inherit `$SHELL` from the provisioning environment, so the e2e exports `SHELL=/bin/zsh` before provision; a shell whose argv0 and process name disagree correctly keeps refusing the idle proof.
+Paned shells inherit `$SHELL` from the provisioning environment, so the e2e exports `SHELL=/bin/bash` before provision, a recognized shell present on macOS and on the Linux CI runner; a shell whose argv0 and process name disagree correctly keeps refusing the idle proof.
+The sidebar topology needs an enabled herdr-sidebar plugin, which declares Herdr 0.8.0 as its minimum; without one, including on the pinned Herdr 0.7.4 CI lane, the e2e runs the same cleanup assertions on the plain one-pane topology and prints a `# skip:` line naming the unverified sidebar topology.
 
 ### Workspace-removal focus safety
 

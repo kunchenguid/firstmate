@@ -12,12 +12,15 @@ set -u
 # lifecycle in which startup and later clear/compact hooks share one harness
 # ancestor. This also prevents a developer's ambient harness from making the
 # portable regression pass locally while failing on a harness-free CI runner.
+# The same fixture directory also holds a Pi-named harness for the Pi-flavored
+# cases (run_in_pi_session below).
 if [ "${FM_SESSIONSTART_TEST_HARNESS:-0}" != 1 ]; then
   HARNESS_FIXTURE=$(mktemp -d "${TMPDIR:-/tmp}/fm-sessionstart-harness.XXXXXX") || exit 1
   ln -s /bin/bash "$HARNESS_FIXTURE/codex" || exit 1
+  ln -s /bin/bash "$HARNESS_FIXTURE/pi" || exit 1
   # shellcheck disable=SC2016 # Expand in the fixture shell, not this parent.
-  FM_SESSIONSTART_TEST_HARNESS=1 "$HARNESS_FIXTURE/codex" \
-    -c '"$@"; rc=$?; :; exit "$rc"' _ "$0" "$@"
+  FM_SESSIONSTART_TEST_HARNESS=1 FM_SESSIONSTART_PI_FIXTURE="$HARNESS_FIXTURE/pi" \
+    "$HARNESS_FIXTURE/codex" -c '"$@"; rc=$?; :; exit "$rc"' _ "$0" "$@"
   HARNESS_STATUS=$?
   rm -rf "$HARNESS_FIXTURE"
   exit "$HARNESS_STATUS"
@@ -228,9 +231,23 @@ run_hook() {  # <root> [args...]
     FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
 }
 
+# A real Pi session's opens all descend from its own `pi` process, which is both
+# the harness bin/fm-harness.sh detects and the owner bin/fm-lock.sh records. The
+# suite-wide codex fixture is a structural ancestor that correctly outranks Pi's
+# markers, so a Pi-flavored case re-runs alone beneath the Pi-named fixture, and
+# every open it makes shares that one long-lived Pi process.
+run_in_pi_session() {  # <test-function>
+  # shellcheck disable=SC2016 # Expand in the fixture shell, not this parent.
+  FM_TEST_ONLY=$1 FM_SESSIONSTART_IN_PI_SESSION=1 \
+    "${FM_SESSIONSTART_PI_FIXTURE:?the suite fixture did not provide a Pi harness}" \
+    -c '"$@"; rc=$?; :; exit "$rc"' _ "$0" || exit 1
+}
+
 run_hook_pi() {  # <root> [args...]
   local root=$1
   shift
+  [ "${FM_SESSIONSTART_IN_PI_SESSION:-0}" = 1 ] \
+    || fail "run_hook_pi must run inside run_in_pi_session, beneath a Pi harness process"
   env -u CLAUDECODE -u GROK_AGENT PI_CODING_AGENT=true FM_PI_HARNESS=pi \
     FM_GATE_REFUSE_BYPASS=0 FM_ROOT_OVERRIDE="$root" FM_HOME="$root" PATH="$RUN_PATH" "$RUN" "$@"
 }
@@ -1048,6 +1065,12 @@ test_run_reports_a_failed_session_start_as_digest_text() {
   pass "run wrapper: a session start that cannot take the lock still opens the session and says so"
 }
 
+# run_in_pi_session re-runs this script with FM_TEST_ONLY naming one case.
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
 test_genuine_primary_nudges
 test_gate_env_is_silent
 test_gate_common_dir_is_silent
@@ -1059,8 +1082,8 @@ test_namespace_pid1_lock_holder_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest
 test_run_clear_and_compact_reemit
-test_run_rebuild_forwards_source_to_drifted_instruction_refresh
-test_run_compact_without_completion_refreshes_before_finishing_startup
+run_in_pi_session test_run_rebuild_forwards_source_to_drifted_instruction_refresh
+run_in_pi_session test_run_compact_without_completion_refreshes_before_finishing_startup
 test_run_clear_without_completion_finishes_startup
 test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge

@@ -1865,8 +1865,8 @@ for (let i = 0; i < 250; i += 1) {
 }
 const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
 if (rows.length !== 2) throw new Error(`clean empty close was ignored: ${rows.join(" | ")}`);
-// A retry follows a FAILED cycle, so it must arm cold: handing the dead
-// predecessor's pid to fm-watch-arm.sh makes the next child a handling
+// A retry follows a FAILED cycle, so it must arm cold: handing the pid of the
+// dead predecessor to fm-watch-arm.sh makes the next child a handling
 // successor, which skips the state/.watcher-down reopen that recovers the home.
 if (!/ pred=\[\]$/.test(rows[1])) throw new Error(`the retry after a failed cycle must arm as a cold start: ${rows[1]}`);
 if (prompts !== 0) throw new Error(`restored transient close surfaced ${prompts} failure prompts`);

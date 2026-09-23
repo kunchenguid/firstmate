@@ -34,10 +34,12 @@ cleanup() {
 }
 trap cleanup EXIT
 # The lab server inherits this environment at provision and every pane it
-# spawns inherits it from the server. Pin zsh here, before provision: the idle
-# proof requires argv0 and process name to agree, and this host's non-login
-# tool shells otherwise spawn as sh-aliased bash, which correctly refuses.
-export SHELL=/bin/zsh
+# spawns inherits it from the server. Pin a shell here, before provision: the
+# idle proof requires argv0 and process name to agree, and an inherited
+# SHELL=/bin/sh is sh-aliased bash on macOS, which correctly refuses. Bash is
+# the one recognized shell present at /bin/bash on every supported host,
+# including the Linux CI runner, which has no zsh.
+export SHELL=/bin/bash
 "$HERDR_LAB_HELPER" provision "$HERDR_LAB_SESSION"
 
 # Keep the lab helper as the only CLI transport. Production adapter calls have
@@ -79,6 +81,30 @@ focus_snapshot() {
   printf '%s\t%s' "$workspace" "$tab"
 }
 
+# The owned-sidebar topology needs the herdr-sidebar plugin installed and
+# enabled, and that plugin declares Herdr 0.8.0 as its minimum, so the pinned
+# 0.7.4 CI lane cannot host it. A host without it produces the plain one-pane
+# child instead, and every cleanup assertion below runs on that topology.
+LAB_STATUS=$(lab status --json) || fail 'could not read named-lab Herdr version'
+LAB_VERSION=$(printf '%s' "$LAB_STATUS" | jq -r '.client.version // empty')
+[ -n "$LAB_VERSION" ] || fail 'named-lab Herdr status reported no client version'
+SIDEBAR=0
+case "$LAB_VERSION" in
+  0.[0-7].*) ;;
+  *)
+    PLUGINS=$(lab plugin list --json) || fail 'could not list installed Herdr plugins'
+    if printf '%s' "$PLUGINS" | jq -e '[.result.plugins[]? | select(.plugin_id == "herdr-sidebar" and .enabled == true)] | length == 1' >/dev/null; then
+      SIDEBAR=1
+    fi
+    ;;
+esac
+if [ "$SIDEBAR" -eq 1 ]; then
+  TOPOLOGY=sidebar
+else
+  TOPOLOGY=plain
+  printf '# skip: Herdr %s has no enabled herdr-sidebar plugin, so the owned-sidebar topology is unverified here; the plain one-pane topology runs instead\n' "$LAB_VERSION"
+fi
+
 # The exported SHELL above pins every pane's login shell deterministically.
 ANCHOR=$(lab workspace create --cwd "$ROOT" --label captain-anchor --focus) || fail 'could not create focus anchor'
 ANCHOR_TAB=$(printf '%s' "$ANCHOR" | jq -r '.result.tab.tab_id')
@@ -89,16 +115,18 @@ CANDIDATE=$(lab workspace create --cwd "$ROOT" --label "└ $ID · p:$TOKEN" --n
 WS=$(printf '%s' "$CANDIDATE" | jq -r '.result.workspace.workspace_id')
 PANE=$(printf '%s' "$CANDIDATE" | jq -r '.result.root_pane.pane_id')
 TAB=$(printf '%s' "$CANDIDATE" | jq -r '.result.tab.tab_id')
-"$HERDR_LAB_HELPER" viewer start "$HERDR_LAB_SESSION" || fail 'could not attach lab viewer'
-attempt=0
-while [ "$attempt" -lt 60 ]; do
-  PANES=$(lab pane list --workspace "$WS") || fail 'could not inspect sidebar startup'
-  if printf '%s' "$PANES" | jq -e 'any(.result.panes[]; .tokens["herdr-sidebar-explorer"] != null)' >/dev/null; then break; fi
-  sleep 0.2
-  attempt=$((attempt + 1))
-done
-[ "$attempt" -lt 60 ] || fail 'installed sidebar did not publish its identity token'
-"$HERDR_LAB_HELPER" viewer stop "$HERDR_LAB_SESSION" || fail 'could not detach lab viewer'
+if [ "$SIDEBAR" -eq 1 ]; then
+  "$HERDR_LAB_HELPER" viewer start "$HERDR_LAB_SESSION" || fail 'could not attach lab viewer'
+  attempt=0
+  while [ "$attempt" -lt 60 ]; do
+    PANES=$(lab pane list --workspace "$WS") || fail 'could not inspect sidebar startup'
+    if printf '%s' "$PANES" | jq -e 'any(.result.panes[]; .tokens["herdr-sidebar-explorer"] != null)' >/dev/null; then break; fi
+    sleep 0.2
+    attempt=$((attempt + 1))
+  done
+  [ "$attempt" -lt 60 ] || fail 'installed sidebar did not publish its identity token'
+  "$HERDR_LAB_HELPER" viewer stop "$HERDR_LAB_SESSION" || fail 'could not detach lab viewer'
+fi
 {
   printf 'version=2\ntask_id=%s\nprojection_id=%s\nhome=%s\n' "$ID" "$TOKEN" "$HOME_DIR"
   printf 'session=%s\nworkspace_id=%s\ntab_id=%s\npane_id=%s\n' "$HERDR_LAB_SESSION" "$WS" "$TAB" "$PANE"
@@ -125,7 +153,11 @@ PANES=$(lab pane list --workspace "$WS") || fail 'could not inspect restored pan
 [ "$(printf '%s' "$WORKSPACES" | jq --arg title "$TITLE" '[.result.workspaces[] | select(.label == $title)] | length')" = 1 ] \
   || fail 'restored projected title is not unique'
 [ "$(printf '%s' "$TABS" | jq '.result.tabs | length')" = 1 ] || fail 'restored child is not one tab'
-[ "$(printf '%s' "$PANES" | jq '.result.panes | length')" = 2 ] || fail 'child is not agent pane plus sidebar'
+if [ "$SIDEBAR" -eq 1 ]; then
+  [ "$(printf '%s' "$PANES" | jq '.result.panes | length')" = 2 ] || fail 'child is not agent pane plus sidebar'
+else
+  [ "$(printf '%s' "$PANES" | jq '.result.panes | length')" = 1 ] || fail 'plain child is not one pane'
+fi
 PANE_IDS=$(printf '%s' "$PANES" | jq -r '[.result.panes[].pane_id] | sort | join(",")')
 if lab agent get "$PANE" >/dev/null 2>&1; then
   fail 'restored child unexpectedly retained a registered agent'
@@ -138,8 +170,8 @@ while [ "$attempt" -lt 50 ]; do
   sleep 0.1
   attempt=$((attempt + 1))
 done
-[ "$attempt" -lt 50 ] || fail 'sidebar and shell did not converge to the owned idle process shape'
-pass 'real named lab reproduced idle agent shell plus metadata-bound sidebar'
+[ "$attempt" -lt 50 ] || fail "$TOPOLOGY child did not converge to the owned idle process shape"
+pass "real named lab reproduced the $TOPOLOGY idle-shell child topology"
 
 FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
   PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" "$ROOT/bin/fm-herdr-session-cleanup.sh" \
@@ -163,6 +195,6 @@ lab pane get "$(printf '%s' "$ANCHOR" | jq -r '.result.root_pane.pane_id')" >/de
   || fail 'anchor pane was touched by cleanup'
 STATUS=$(lab status --json) || fail 'could not read final named-lab version evidence'
 pass 'real named lab cleanup is idempotent and leaves the default fleet session to the teardown tripwire'
-printf 'evidence: herdr=%s protocol=%s default-session-tripwire=armed\n' \
+printf 'evidence: herdr=%s protocol=%s topology=%s default-session-tripwire=armed\n' \
   "$(printf '%s' "$STATUS" | jq -r '.client.version')" \
-  "$(printf '%s' "$STATUS" | jq -r '.server.protocol')"
+  "$(printf '%s' "$STATUS" | jq -r '.server.protocol')" "$TOPOLOGY"
