@@ -69,7 +69,7 @@ case "$provider" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
     [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
-    # github.com is addressed exactly as before; an enterprise instance takes
+    # github.com is addressed by the pull request URL; an enterprise instance takes
     # GH_HOST plus a host-qualified repository, both from the validated record.
     if [ "$host" = github.com ]; then
       state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
