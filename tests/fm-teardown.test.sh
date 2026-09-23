@@ -768,7 +768,7 @@ test_local_only_completion_falls_back_when_origin_is_unreachable() {
   git -C "$case_dir/project" remote set-url origin ssh://127.0.0.1:1/unreachable
 
   out=$(run_teardown "$case_dir") || fail "local-only teardown did not fall back to the local default: $out"
-  [ "$(backlog_row_state "$case_dir")" = done ] \
+  [ "$(backlog_row_state "$case_dir")" = "done" ] \
     || fail "local-only teardown left the backlog item open after origin became unreachable"
   assert_grep 'local-landing:main' "$case_dir/data/backlog.md" \
     "local-only teardown did not record the local fallback landing branch"
