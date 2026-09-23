@@ -2333,6 +2333,23 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
   printf '%s\n' "$run"
 }
 
+# Print crew <id>'s whole current-state line when it is a no-mistakes run parked
+# at a gate, read from the run-step source; 1 for every other verdict. The line
+# is the gate's fingerprint for the watcher's busy-turn looping check
+# (bin/fm-watch.sh busy_loop_check): the run id, gate name, findings count, and
+# who owes the answer are all components of it, so any real movement of the run
+# changes it. Same cost and caveat as crew_absorb_class: one fm-crew-state.sh
+# read, which may make a bounded no-mistakes call.
+crew_parked_gate_line() {  # <id> -> <state-line> on stdout
+  local id=$1 line
+  [ -n "$id" ] || return 1
+  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  case "$line" in
+    "state: parked · source: run-step · "?*) printf '%s\n' "$line" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Directories excluded from the worktree write probe below, and the depth it walks.
 # The excluded set is everything a supervisor read or a package manager can write
 # without the crew doing any work - .git first, so firstmate's own read-only git
