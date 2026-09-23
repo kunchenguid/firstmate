@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Static watcher program for a validated PR/MR poll sidecar.
-# It emits exactly one merged line for a merged PR or MR and stays silent
-# otherwise, including on every error, so a failed lookup can never be read as
-# a merge. The provider-tagged identity is data in the sidecar and is never
-# interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# It emits exactly one merged line for a merged PR or MR, a provider-prefixed
+# status line for a closed-unmerged PR where the provider supports it, or stays
+# silent otherwise, including on every error, so a failed lookup can never be
+# read as a merge. The provider-tagged identity is data in the sidecar and is
+# never interpolated into this source: these bytes are identical for every task.
+# GitHub is read through gh, GitLab through glab, and Forgejo through curl+jq
+# with a token from ~/.config/das/forgejo.env (or FM_FORGEJO_CREDS_FILE).
 set -u
 LC_ALL=C
 export LC_ALL
@@ -104,6 +105,53 @@ case "$provider" in
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
     [ "$state" = merged ] && printf '%s\n' merged
+    ;;
+  forgejo)
+    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
+    [ "$host" != github.com ] || exit 0
+    case "$host" in .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;; esac
+    owner=${path%%/*}
+    repo=${path#*/}
+    [ -n "$owner" ] && [ -n "$repo" ] || exit 0
+    case "$repo" in */*) exit 0 ;; esac
+    [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 39 ] || exit 0
+    case "$owner" in *[!A-Za-z0-9-]*|-*|*-|*--*) exit 0 ;; esac
+    [ "${#repo}" -ge 1 ] && [ "${#repo}" -le 100 ] || exit 0
+    case "$repo" in .|..|*[!A-Za-z0-9._-]*) exit 0 ;; esac
+    [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
+    creds=${FM_FORGEJO_CREDS_FILE:-$HOME/.config/das/forgejo.env}
+    if [ ! -f "$creds" ]; then
+      printf '%s\n' 'forgejo credentials unavailable'
+      exit 0
+    fi
+    forgejo_token=''
+    while IFS= read -r _fline || [ -n "$_fline" ]; do
+      case "$_fline" in FORGEJO_TOKEN=*) forgejo_token=${_fline#FORGEJO_TOKEN=} ;; esac
+    done < "$creds"
+    forgejo_token=${forgejo_token#[\"\']}
+    forgejo_token=${forgejo_token%[\"\']}
+    if [ -z "$forgejo_token" ]; then
+      printf '%s\n' 'forgejo credentials unavailable'
+      exit 0
+    fi
+    command -v jq >/dev/null 2>&1 || exit 0
+    # Token is passed only in the header and never printed or logged.
+    json=$(curl -sf --max-time 10 \
+      -H "Authorization: token $forgejo_token" \
+      "https://$host/api/v1/repos/$owner/$repo/pulls/$number" 2>/dev/null) || exit 0
+    [ -n "$json" ] || exit 0
+    fstate=$(printf '%s' "$json" | jq -r \
+      'if type=="object" and (.state|type)=="string" then .state else "" end' \
+      2>/dev/null) || exit 0
+    fmerged=$(printf '%s' "$json" | jq -r \
+      'if type=="object" then (.merged|tostring) else "" end' \
+      2>/dev/null) || exit 0
+    [ -n "$fstate" ] || exit 0
+    if [ "$fmerged" = true ]; then
+      printf '%s\n' merged
+    elif [ "$fstate" = closed ]; then
+      printf '%s\n' 'forgejo closed'
+    fi
     ;;
   *) exit 0 ;;
 esac
