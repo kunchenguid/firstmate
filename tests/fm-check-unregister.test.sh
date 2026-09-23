@@ -177,6 +177,16 @@ test_unsafe_hardlink_or_symlink_is_refused() {
   assert_present "$alias" "hard-link refusal deleted the external alias"
 
   rm -f "$alias"
+  # The symlink half needs a creatable symlink: Git Bash/MSYS without
+  # Developer Mode makes ln -s copy the target instead, so the refusal
+  # surface cannot exist there - probed on a scratch link, not uname.
+  ln -s "$home/outside.check.sh" "$home/.link-probe" 2>/dev/null || true
+  if [ ! -L "$home/.link-probe" ]; then
+    rm -f "$home/.link-probe"
+    pass "hard-link refusal verified; symlink refusal needs a creatable symlink, skipped where ln -s only copies"
+    return
+  fi
+  rm -f "$home/.link-probe"
   rm -f "$home/state/custom.check.sh"
   printf '#!/usr/bin/env bash\nprintf target\n' > "$home/outside.check.sh"
   chmod 0700 "$home/outside.check.sh"

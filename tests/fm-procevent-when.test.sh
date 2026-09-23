@@ -92,7 +92,13 @@ assert_present "$H/state/when/when-arm-test.trust" "arm writes the trust binding
 assert_present "$H/state/procevent/when-arm-test.source" "arm registers the process-event source"
 mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
   '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$H/state/when/when-arm-test.spec")
-assert_contains "$mode" 600 "the spec is private"
+# On a mode-inexpressible filesystem (Git Bash/MSYS noacl mounts) 600 is
+# unanswerable and the platform ACL owns the file's isolation; the shared
+# probe is the same fallback fm_pr_private_file_valid uses.
+[ "$mode" = 600 ] \
+  || PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
+    '. "$1/bin/fm-pr-lib.sh"; fm_pr_mode_bits_unfaithful "$2"' _ "$ROOT" "$H/state/when" \
+  || fail "the spec is private (mode: ${mode:-unreadable})"
 if when "$H" arm arm-test --condition true --action true 2>"$TMP_ROOT/dup.err"; then
   fail "re-arming an existing watch must be refused"
 fi
