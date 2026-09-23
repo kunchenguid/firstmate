@@ -113,7 +113,7 @@ LOCK="$REC.lock"
 fm_busy_lock_helpers() {
   command -v fm_lock_try_acquire >/dev/null 2>&1 && return 0
   # shellcheck source=bin/fm-wake-lib.sh
-  . "$SCRIPT_DIR/fm-wake-lib.sh"
+  FM_STATE_OVERRIDE="$STATE" . "$SCRIPT_DIR/fm-wake-lib.sh"
 }
 
 # Serialize writers. The lock protects seq advancement and the sidecar/record
