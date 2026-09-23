@@ -4,6 +4,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-dod-lib.sh
+. "$ROOT/bin/fm-dod-lib.sh"
 
 BRIEF="$ROOT/bin/fm-brief.sh"
 TMP_ROOT=$(fm_test_tmproot fm-ask-user-authority)
@@ -16,6 +18,8 @@ test_primary_and_secondmate_instruction_generation() {
   FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$BRIEF" authority-worker sample --mode no-mistakes >/dev/null 2>&1
   ship="$home/data/authority-worker/brief.md"
+  printf '\n' >> "$ship"
+  fm_dod_block no-mistakes authority-worker >> "$ship"
   assert_grep 'ask-user findings are never yours to answer' "$ship" \
     "generated implementation brief lets the worker own an ask-user decision"
   assert_grep "Firstmate applies \`ask-user-authority\` and obtains any required captain decision" "$ship" \

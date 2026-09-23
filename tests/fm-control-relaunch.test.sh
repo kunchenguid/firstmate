@@ -1026,7 +1026,7 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
 }
 
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
-  local dir home id brief launch out mode rule
+  local dir home id brief launch out mode rule dod_count
   for mode in no-mistakes direct-PR local-only; do
     id="rl-promoted-${mode}"
     dir=$(new_case "promoted-scout-$mode" "$id")
@@ -1086,6 +1086,13 @@ test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
       "$mode: the replacement launch did not receive the carry-over boundary"
     assert_grep "Delivery contract: mode=$mode" "$launch" \
       "$mode: the replacement launch did not receive the actual ship delivery mode"
+    dod_count=$(grep -c '^# Definition of done$' "$launch" || true)
+    [ "$dod_count" -eq 1 ] || \
+      fail "$mode: the replacement launch received $dod_count Definitions of done"
+    if [ "$mode" = direct-PR ]; then
+      assert_grep "Do NOT run /no-mistakes" "$launch" \
+        "$mode: the relaunched worker was not re-guarded against no-mistakes"
+    fi
   done
   pass "fm-promote/fm-spawn --relaunch: the current ship contract supersedes stale scout delivery text"
 }
