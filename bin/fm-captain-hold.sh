@@ -274,12 +274,14 @@ publish_parent_hold() {  # <task-id> <occurrence> <verb> <note>
 # command_complete wrote): the declaration stands either way and must not be
 # duplicated.
 status_declare_hold() {  # <task-id> <occurrence> <reason>
-  local id=$1 occurrence=$2 reason=$3 status_file line rc=0
+  local id=$1 occurrence=$2 reason=$3 status_file line rc=0 cap
   [ -f "$STATE/$id.meta" ] || return 0
   status_file="$STATE/$id.status"
   status_is_captain_held "$(last_status_line "$status_file")" && return 0
   line="captain-held [key=captain-hold-$id-$occurrence]: $reason"
-  fm_cap_line_var "$line"
+  cap=$((FM_LINE_CAP_DEFAULT - $(status_stamp_width)))
+  [ "$cap" -ge 0 ] || cap=0
+  fm_cap_line_var "$line" "$cap"
   fm_wake_status_append_self_announced "$STATE" "$status_file" "$FM_LINE_CAP_LINE" || rc=$?
   [ "$rc" -ne 2 ] \
     || printf 'actionable: task %s is held for the captain in this home but the hold declaration could not be written to %s\n' \
@@ -305,12 +307,12 @@ status_retract_hold() {  # <task-id> <occurrence> <note>
   local id=$1 occurrence=$2 note=$3 f key lane ids named rc
   local -a names
   f="$STATE/$id.status"
-  if [[ $(last_status_line "$f") =~ $(_fm_hold_mirror_line_ere "$f" 'captain-held') ]]; then
+  if _fm_hold_unstamped_match "$(last_status_line "$f")" "$(_fm_hold_mirror_line_ere "$f" 'captain-held')"; then
     status_append_retraction "$id" "$f" "captain-hold-$id-$occurrence" "$note"
   fi
   for f in "$STATE"/*.status; do
     [ -f "$f" ] && [ ! -L "$f" ] || continue
-    [[ $(last_status_line "$f") =~ $FM_HOLD_TRANSFER_ERE ]] || continue
+    _fm_hold_unstamped_match "$(last_status_line "$f")" "$FM_HOLD_TRANSFER_ERE" || continue
     key=${BASH_REMATCH[1]}
     lane=${f##*/}
     ids="${BASH_REMATCH[2]},${lane%.status}"
@@ -327,8 +329,10 @@ status_retract_hold() {  # <task-id> <occurrence> <note>
 }
 
 status_append_retraction() {  # <task-id> <status-file> <key> <note>
-  local rc=0
-  fm_cap_line_var "resolved [key=$3]: captain call $4 by fm-captain-hold"
+  local rc=0 cap
+  cap=$((FM_LINE_CAP_DEFAULT - $(status_stamp_width)))
+  [ "$cap" -ge 0 ] || cap=0
+  fm_cap_line_var "resolved [key=$3]: captain call $4 by fm-captain-hold" "$cap"
   fm_wake_status_append_self_announced "$STATE" "$2" "$FM_LINE_CAP_LINE" || rc=$?
   [ "$rc" -ne 2 ] \
     || printf 'actionable: captain-held task %s is settled in this home but the hold retraction could not be written to %s\n' \

@@ -166,6 +166,16 @@ _fm_hold_line_ere() {  # <status-file>
     "$FM_HOLD_TRANSFER_ERE" "$FM_HOLD_RETRACTION_ERE"
 }
 
+# Match a hold-command regex against the unstamped copy of <line>. Those
+# regexes describe the bytes before status_stamp_line inserts [at=<epoch>], so
+# every reader of them goes through this rather than matching stamped log bytes.
+# BASH_REMATCH is that of the unstamped copy.
+_fm_hold_unstamped_match() {  # <line> <ere>
+  local __fm_hold_u
+  _fm_status_unstamped "$1" __fm_hold_u
+  [[ $__fm_hold_u =~ $2 ]]
+}
+
 # Return the last recognized status event, ignoring continuation prose and blanks
 # (empty if missing/blank), and with <previous-event-var> the event before it.
 # The optional previous event is what this reader returned before the latest one
@@ -196,7 +206,7 @@ last_worker_status_line() {  # <status-file> [<previous-event-var>]
 _fm_status_read() {  # <skip-ere> <status-file> [<previous-event-var>]
   local latest
   latest=$(_fm_last_status_event "$1" "$2")
-  if [[ $latest =~ $FM_HOLD_RETRACTION_ERE ]]; then
+  if _fm_hold_unstamped_match "$latest" "$FM_HOLD_RETRACTION_ERE"; then
     _fm_last_status_event "$(_fm_hold_line_ere "$2")" "${@:2}"
   elif [ "$#" -gt 2 ]; then
     _fm_last_status_event "$@"
@@ -209,7 +219,7 @@ _fm_status_read() {  # <skip-ere> <status-file> [<previous-event-var>]
 # bookkeeping last_status_line reads through - so a caller can tell a lane
 # whose only lifted wait was the hold from a worker that moved on.
 status_hold_settled() {  # <status-file>
-  [[ $(_fm_last_status_event '' "$1") =~ $FM_HOLD_RETRACTION_ERE ]]
+  _fm_hold_unstamped_match "$(_fm_last_status_event '' "$1")" "$FM_HOLD_RETRACTION_ERE"
 }
 
 # status_observed_signature of the log as its worker left it: the hold
@@ -223,7 +233,7 @@ status_worker_signature() {  # <status-file>
   case "$size" in ''|*[!0-9]*) status_observed_signature "$f"; return ;; esac
   hold=$(_fm_hold_line_ere "$f")
   while IFS= read -r line; do
-    [[ $line =~ $hold ]] || break
+    _fm_hold_unstamped_match "$line" "$hold" || break
     size=$((size - ${#line} - 1))
   done < <(tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null \
     | awk '{ l[NR] = $0 } END { for (i = NR; i > 0; i--) print l[i] }')
@@ -319,7 +329,7 @@ _fm_status_event_scan() {  # [<skip-ere>]
   local skip=${1:-} line last='' prev='' fallback='' legacy_re
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
   while IFS= read -r line || [ -n "$line" ]; do
-    [ -z "$skip" ] || ! [[ $line =~ $skip ]] || continue
+    [ -z "$skip" ] || ! _fm_hold_unstamped_match "$line" "$skip" || continue
     case "$line" in *[![:space:]]*) fallback=$line ;; *) continue ;; esac
     _fm_status_line_is_event "$line" "$legacy_re" && { prev=$last; last=$line; }
   done
