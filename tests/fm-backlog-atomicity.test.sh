@@ -126,7 +126,7 @@ configure_env_backend_tasks_axi() {  # <case-dir>
   cat > "$case_dir/fakebin/tasks-axi" <<SH
 #!/usr/bin/env bash
 case "\${1:-}" in
-  --version) printf '0.2.5\n' ;;
+  --version) printf '0.2.6\n' ;;
   update) printf '%s\n' '--archive-body' ;;
   mv) printf '%s\n' '[<id>...]' ;;
   show)
@@ -180,7 +180,7 @@ make_beads_tasks_axi_stub() {  # <case-dir> <id>
 printf '%s\n' "\$*" >> "$case_dir/tasks-axi-calls"
 case "\${1:-}" in
   --version)
-    printf '%s\n' '0.2.5'
+    printf '%s\n' '0.2.6'
     ;;
   update)
     [ "\${2:-}" = --help ] || exit 1
@@ -845,7 +845,7 @@ test_completion_omits_the_file_for_a_beads_done() {
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$case_dir/tasks-axi-calls"
 case "\${1:-}" in
-  --version) printf '%s\n' '0.2.5' ;;
+  --version) printf '%s\n' '0.2.6' ;;
   update)
     [ "\${2:-}" = --help ] || exit 1
     printf '%s\n' '--archive-body'

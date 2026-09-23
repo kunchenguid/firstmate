@@ -274,16 +274,21 @@ SH
     FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-progress.out" 2> "$dir/watch-progress.err" || true
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-progress.out" 2> "$dir/watch-progress.err" || true
   [ ! -s "$state/.wake-queue" ] \
     || fail "an advancing foreign queue produced a stall alert because its oldest row was old"
 
   # With no further sequence progress, the same queue must still expose the real
-  # failure after the configured interval. Every checkpoint that asserts an alert
-  # gets 4s rather than 1s: reaching the alert costs a pane capture in the
-  # active-turn gate, and a 1s bound sits under that cost on a loaded machine.
-  # The bound is only a ceiling - the checkpoint returns on the first actionable
-  # wake - so a healthy watcher still finishes in well under a second.
+  # failure after the configured interval. Every checkpoint that observes for a
+  # later alert gets 4s rather than 1s: an observation checkpoint must reach the
+  # end of the watcher's poll loop, where the recovery surfacing consumes the
+  # downtime marker the previous checkpoint's exit published and the stall tick
+  # records the observation, and both cost a pane capture in the active-turn
+  # gate. A 1s bound sits under that cost on a loaded machine - it left the
+  # marker pending, so the alerting checkpoint surfaced `check:
+  # rearm-resurface` instead of the stall it was asserting. The bound is only a
+  # ceiling - the checkpoint returns on the first actionable wake - so a healthy
+  # watcher still finishes in well under a second.
   printf '1004\n' > "$dir/now"
   row_before="$dir/foreign-before"
   row_after="$dir/foreign-after"
@@ -313,7 +318,7 @@ SH
     FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-next.out" 2> "$dir/watch-next.err" || true
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-next.out" 2> "$dir/watch-next.err" || true
   [ ! -s "$state/.wake-queue" ] \
     || fail "a newly-oldest row cascaded an immediate second alert after progress"
   cp "$sub/state/.wake-queue" "$row_after"
@@ -422,7 +427,7 @@ SH
     FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
     FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
-    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-regen.out" 2> "$dir/watch-regen.err" || true
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-regen.out" 2> "$dir/watch-regen.err" || true
   [ ! -s "$state/.wake-queue" ] \
     || fail "a reprovisioned queue generation inherited the retired generation's idle interval and alerted"
 
@@ -561,6 +566,243 @@ SH
   stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$state/.wake-queue" || true)
   [ "$stall_count" -eq 1 ] || fail "the over-bound episode did not publish exactly one notification"
   pass "a long-lived mate mid-turn is not a stall, but a queue frozen past the busy bound still alarms"
+}
+
+# Agent liveness matches the exact window name from list-windows. Printing
+# session:window makes the pane look missing, which is the leftover-row tests'
+# ring-unsafe path and must keep the parent alarm. These cases print fm-mate
+# and a claude foreground command so a proven-idle mate can actually be rung.
+install_secondmate_alive_tmux() {  # <fakebin>
+  local fakebin=$1
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf '%s\n' 'fm-mate' ;;
+  capture-pane) exit 0 ;;
+  display-message)
+    case "$*" in
+      *pane_current_command*) printf 'claude\n' ;;
+      *pane_tty*) exit 1 ;;
+      *cursor_y*) printf '0\n' ;;
+      *) printf '0\n' ;;
+    esac
+    ;;
+  send-keys)
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -l) shift; [ "$#" -gt 0 ] && printf '%s\n' "$1" >> "${FM_FAKE_TMUX_SENT:-/dev/null}" ;;
+        Enter)
+          printf '[ENTER]\n' >> "${FM_FAKE_TMUX_SENT:-/dev/null}"
+          if [ -n "${FM_FAKE_CHILD_WAKE_QUEUE:-}" ]; then
+            : > "$FM_FAKE_CHILD_WAKE_QUEUE"
+          fi
+          ;;
+      esac
+      shift
+    done
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+}
+
+install_secondmate_stall_date() {  # <fakebin>
+  local fakebin=$1 real_date
+  real_date=$(command -v date)
+  cat > "$fakebin/date" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = +%s ]; then
+  cat "\${FM_FAKE_NOW_FILE:?}"
+else
+  exec "$real_date" "\$@"
+fi
+SH
+  chmod +x "$fakebin/date"
+}
+
+# A proven-idle, ring-safe mate with a leftover foreign row is rung so its
+# own home can drain. The parent alarm stays silent when that ring actually
+# empties the child's queue.
+test_secondmate_proven_idle_ring_lets_the_child_drain() {
+  local dir state sub fakebin inbox_body inbox_rec steer
+  dir=$(make_case secondmate-proven-idle-drain)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '100\t7\tcheck\trouted\tcheck: routed row\n' > "$sub/state/.wake-queue"
+  install_secondmate_alive_tmux "$fakebin"
+  install_secondmate_stall_date "$fakebin"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
+    || fail "could not arm the mate's busy contract"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --current-gen \
+    --source claude-hook --event stop >/dev/null \
+    || fail "could not mark the mate idle"
+
+  printf '1000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-first.out" 2> "$dir/watch-first.err" || true
+  [ ! -s "$state/.wake-queue" ] || fail "the first observation of a leftover row produced an alert"
+  [ ! -s "$dir/sent" ] || fail "a proven-idle mate was rung before the stall interval"
+
+  printf '1002\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_FAKE_CHILD_WAKE_QUEUE="$sub/state/.wake-queue" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-ring.out" 2> "$dir/watch-ring.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-ring.out" >/dev/null \
+    || fail "a proven-idle mate that drained after the ring still alarmed: $(cat "$dir/watch-ring.out")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a proven-idle child-first ring published a parent stall notification"
+  [ ! -s "$sub/state/.wake-queue" ] \
+    || fail "the child ring did not drain the leftover foreign row"
+  inbox_rec=
+  for inbox_rec in "$state/mate.inbox/"*.msg; do break; done
+  [ -f "$inbox_rec" ] || fail "the child-first ring did not write a drain steer record"
+  sed '/^--$/q' "$inbox_rec" | grep -Fx 'delivery=fire-and-forget' >/dev/null \
+    || fail "the child-first ring did not write a fire-and-forget drain steer"
+  inbox_body=$(sed '1,/^--$/d' "$inbox_rec")
+  [ "$(printf '%s' "$inbox_body" | "$ROOT/bin/fm-operational-input.sh" kind)" = from-firstmate ] \
+    || fail "the child-first drain steer lacks the from-firstmate marker, so the mate would read it as captain intervention: $inbox_body"
+  steer=$(printf '%s' "$inbox_body" | "$ROOT/bin/fm-operational-input.sh" body)
+  [[ $steer =~ ^delivery=[0-9a-f]{16}\ (.*)$ ]] \
+    || fail "the child-first drain steer does not carry a fire-and-forget delivery id: $steer"
+  [ "${BASH_REMATCH[1]}" = "Drain pending rows in this home's wake queue, then resume idle supervision." ] \
+    || fail "the child-first ring wrote the wrong drain instruction: $steer"
+  grep -F '[ENTER]' "$dir/sent" >/dev/null \
+    || fail "the child-first ring did not submit the doorbell: $(cat "$dir/sent" 2>/dev/null)"
+  pass "a proven-idle leftover row is rung so the child home can drain without a parent alarm"
+}
+
+# Busy and unknown panes are never typed into. Busy still defers inside the
+# active-turn bound. Unknown keeps the parent alarm. Empty inbox is not idle
+# proof, so the unknown fixture starts with no instruction records.
+test_secondmate_busy_and_unknown_panes_are_not_rung() {
+  local dir state sub fakebin
+  dir=$(make_case secondmate-busy-unknown-no-ring)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '100\t7\tcheck\trouted\tcheck: routed row\n' > "$sub/state/.wake-queue"
+  install_secondmate_alive_tmux "$fakebin"
+  install_secondmate_stall_date "$fakebin"
+
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
+    || fail "could not arm the mate's busy contract"
+  printf '1000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent-busy" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-busy-first.out" 2> "$dir/watch-busy-first.err" || true
+  printf '1002\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent-busy" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-busy.out" 2> "$dir/watch-busy.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-busy.out" >/dev/null \
+    || fail "a busy mate was escalated as a stalled wake loop: $(cat "$dir/watch-busy.out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a busy mate published a durable stall notification"
+  [ ! -e "$dir/sent-busy" ] || fail "a busy mate was rung"
+  [ ! -e "$state/mate.inbox" ] || fail "a busy mate received a drain steer"
+
+  rm -f "$state/.secondmate-wake-progress-mate" "$state/.secondmate-wake-stall-mate" \
+    "$state/.secondmate-wake-ring-mate"
+  rm -rf "$state/.secondmate-wake-stall-receipts" "$state/mate.busy-state" "$state/mate.busy-gen"
+  : > "$dir/sent-unknown"
+  printf '1000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent-unknown" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-unknown-first.out" 2> "$dir/watch-unknown-first.err" || true
+  printf '1002\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent-unknown" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-unknown.out" 2> "$dir/watch-unknown.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 idle=2s' "$dir/watch-unknown.out" >/dev/null \
+    || fail "an unknown pane did not keep the parent alarm: $(cat "$dir/watch-unknown.out")"
+  [ ! -s "$dir/sent-unknown" ] || fail "an unknown pane was rung: $(cat "$dir/sent-unknown")"
+  [ ! -e "$state/mate.inbox" ] || fail "an unknown pane received a drain steer"
+  pass "busy panes defer without a ring and unknown panes keep the parent alarm"
+}
+
+# After a proven-idle ring, the same leftover row is a genuine stall if the
+# child home does not drain it. The second stall interval must still surface.
+test_secondmate_genuine_stall_after_idle_ring_still_alarms() {
+  local dir state sub fakebin row_before stall_count
+  dir=$(make_case secondmate-genuine-stall-after-ring)
+  state="$dir/state"
+  sub="$dir/secondmate"
+  fakebin="$dir/fakebin"
+  mkdir -p "$sub/state"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '100\t7\tcheck\trouted\tcheck: routed row\n' > "$sub/state/.wake-queue"
+  row_before="$dir/foreign-before"
+  cp "$sub/state/.wake-queue" "$row_before"
+  install_secondmate_alive_tmux "$fakebin"
+  install_secondmate_stall_date "$fakebin"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" mate >/dev/null \
+    || fail "could not arm the mate's busy contract"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --current-gen \
+    --source claude-hook --event stop >/dev/null \
+    || fail "could not mark the mate idle"
+
+  printf '1000\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 1 > "$dir/watch-first.out" 2> "$dir/watch-first.err" || true
+
+  printf '1002\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-ring.out" 2> "$dir/watch-ring.err" || true
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-ring.out" >/dev/null \
+    || fail "the first proven-idle ring published a parent alarm: $(cat "$dir/watch-ring.out")"
+  [ ! -s "$state/.wake-queue" ] || fail "the first proven-idle ring published a durable stall"
+  grep -F '[ENTER]' "$dir/sent" >/dev/null \
+    || fail "the genuine-stall fixture never rang the child"
+  [ "$(cat "$state/.secondmate-wake-ring-mate" 2>/dev/null || true)" = "100-7" ] \
+    || fail "the successful ring did not record the frozen row"
+  cmp -s "$row_before" "$sub/state/.wake-queue" \
+    || fail "the unread ring rewrote the foreign queue"
+
+  printf '1004\n' > "$dir/now"
+  PATH="$fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_SENT="$dir/sent" \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 4 > "$dir/watch-stall.out" 2> "$dir/watch-stall.err" || true
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 idle=2s' "$dir/watch-stall.out" >/dev/null \
+    || fail "a leftover row that survived the idle ring stayed hidden: $(cat "$dir/watch-stall.out")"
+  stall_count=$(grep -c 'secondmate-wake-loop-mate-' "$state/.wake-queue" || true)
+  [ "$stall_count" -eq 1 ] || fail "the genuine stall after a ring did not publish exactly one notification"
+  cmp -s "$row_before" "$sub/state/.wake-queue" \
+    || fail "the parent alarm path rewrote the foreign queue"
+  pass "a leftover row that survives a proven-idle ring still surfaces as a genuine stall"
 }
 
 test_secondmate_stall_marker_rejects_symlink() {
@@ -1657,6 +1899,148 @@ test_self_announced_append_guards() {
   pass "self-announced appends suppress only their own bytes and fail toward waking"
 }
 
+# Two distinct --resolve-key closes after an OPEN DECISIONS fold record their
+# own byte ranges, so the watcher's span classification never reports the
+# answers. The fold alone does not mark the worker's decisions seen, because
+# any actor's drain folds: a folded decision this home has not answered still
+# classifies as a new signal. Once the watcher has classified the worker's
+# decisions and nothing beyond them, only the owned-append ledger can vouch
+# for the two answers sitting past that offset, and a later worker line past
+# the recorded ranges still wakes.
+test_separate_self_announced_answers_after_fold_are_owned() {
+  local dir state status rc events pre_answer ident
+  dir=$(make_case multi-answer-owned)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  {
+    printf 'needs-decision [key=k1]: pick REST or RPC\n'
+    printf 'needs-decision [key=k2]: pick us-east or eu-west\n'
+    printf 'needs-decision [key=k3]: pick a database\n'
+  } > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \
+    || fail "the OPEN DECISIONS fold drain failed"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a fold alone marked unclassified worker decisions as seen"
+
+  pre_answer=$(wc -c < "$status" | tr -d '[:space:]')
+  rc=0
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: REST' || rc=$?
+  [ "$rc" -eq 1 ] || fail "the first answer over unclassified decisions did not fail toward waking (rc=$rc)"
+  rc=0
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k2]: answered: eu-west' || rc=$?
+  [ "$rc" -eq 1 ] || fail "the second answer over unclassified decisions did not fail toward waking (rc=$rc)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "unclassified worker decisions were hidden behind this home's answers"
+
+  events=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; status_span_first_actionable "$2" 0' _ "$ROOT/bin/fm-classify-lib.sh" "$status") \
+    || fail "the unanswered folded decision was not classified as actionable"
+  [ "$events" = 'needs-decision [key=k3]: pick a database' ] \
+    || fail "the span classification reported more than the unanswered decision: $events"
+
+  ident=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"; _fm_open_decisions_file_ident "$2"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$status") \
+    || fail "could not read the status identity"
+  run_wake_lib fm_wake_status_seen_commit "$state" "$status" "$pre_answer" "$ident" \
+    || fail "could not record the watcher classifying the worker's decisions"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "the owned answers past the classified offset were left to re-wake this home"
+
+  printf 'blocked [key=creds]: need staging credentials\n' >> "$status"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a later worker line after two owned answers was swallowed"
+
+  pass "separate self-announced answers after a fold stay owned; worker decisions and later lines still wake"
+}
+
+# The owned ledger only vouches for growth it recorded. A signature change
+# with no growth past the classified offset, such as the log turning
+# unreadable, must still read as unreported, before and after owned growth.
+test_unreadable_status_is_not_owned() {
+  local dir state status
+  dir=$(make_case owned-unreadable)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "unreadable status check skipped: root reads mode-000 files"
+    return 0
+  fi
+  printf 'needs-decision [key=k1]: pick one\n' > "$status"
+  run_wake_lib fm_wake_status_mark_current "$state" "$status" \
+    || fail "could not prime the announced baseline"
+  chmod 000 "$status"
+  if run_wake_lib fm_wake_signal_seen_current "$state" "$status"; then
+    chmod 600 "$status"
+    fail "an unreadable fully classified status read as already seen"
+  fi
+  chmod 600 "$status"
+
+  run_wake_lib fm_wake_status_mark_current "$state" "$status" \
+    || fail "could not re-prime the announced baseline"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k1]: answered: one' \
+    || fail "the owned close was not self-announced"
+  printf 'needs-decision [key=k2]: pick two\n' >> "$status"
+  run_wake_lib fm_wake_status_mark_current "$state" "$status" \
+    || fail "could not record the watcher classifying the worker line"
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=k2]: answered: two' \
+    || fail "the second owned close was not self-announced"
+  chmod 000 "$status"
+  if run_wake_lib fm_wake_signal_seen_current "$state" "$status"; then
+    chmod 600 "$status"
+    fail "an unreadable status after owned growth read as already seen"
+  fi
+  chmod 600 "$status"
+  pass "an unreadable status still reads as unreported, with or without owned growth"
+}
+
+test_folded_worker_resolved_is_not_owned_lag() {
+  local dir state status rc
+  dir=$(make_case folded-worker-resolved)
+  state="$dir/state"
+  status="$state/t.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  {
+    printf 'needs-decision [key=budget]: approve spend?\n'
+    printf 'needs-decision [key=vendor]: vendor A or B?\n'
+    printf 'resolved [key=vendor]: picked vendor B myself, cheaper\n'
+  } > "$status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2>"$dir/fold.err" \
+    || fail "the OPEN DECISIONS fold drain failed"
+
+  rc=0
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=budget]: answered: approved' || rc=$?
+  [ "$rc" -eq 1 ] || fail "a close over a folded worker resolved did not fail toward waking (rc=$rc)"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    && fail "a worker resolved in the folded span was treated as already owned"
+
+  pass "a worker resolved in fold lag still wakes after this home's close"
+}
+
 # A trap that fires inside a lock's critical section abandons the holding
 # frame, and the exit path then re-acquires the same lock (a TERM inside a
 # recovery-marker section is the reproduced case: the watcher's reap wedged
@@ -1960,6 +2344,49 @@ test_malformed_presentation_lock_reports_acquire_failure() {
   pass "malformed presentation locks report acquire failure instead of contention"
 }
 
+# The owned-append ledger is wake-only: it must never withhold a captain-facing
+# turn-ended annotation. An in-flight watcher classification that commits after
+# this home's own close regresses the classified offset behind the owned bytes -
+# exactly the state the wake scan treats as already owned - so the wake stays
+# suppressed while the historical annotation must still present the line.
+test_owned_growth_still_annotates_turn_ended() {
+  local dir state out err status pre_close ident
+  dir=$(make_case owned-historical)
+  state="$dir/state"
+  out="$dir/drain.out"
+  err="$dir/drain.err"
+  status="$state/scout.status"
+
+  run_wake_lib() {
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"; shift; "$@"
+    ' _ "$ROOT/bin/fm-wake-lib.sh" "$@"
+  }
+
+  printf 'needs-decision [key=budget]: approve spend?\n' > "$status"
+  prime_status_seen "$state" "$status" || fail "could not prime the scout seen marker"
+  pre_close=$(wc -c < "$status" | tr -d '[:space:]')
+  run_wake_lib fm_wake_status_append_self_announced "$state" "$status" \
+    'resolved [key=budget]: answered: approved' \
+    || fail "the answerer close was not self-announced"
+  ident=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"; _fm_open_decisions_file_ident "$2"
+  ' _ "$ROOT/bin/fm-classify-lib.sh" "$status") \
+    || fail "could not read the status identity"
+  run_wake_lib fm_wake_status_seen_commit "$state" "$status" "$pre_close" "$ident" \
+    || fail "could not replay the stale watcher classification"
+  run_wake_lib fm_wake_signal_seen_current "$state" "$status" \
+    || fail "owned-only growth did not suppress the wake"
+
+  : > "$state/scout.turn-ended"
+  append_wake "$state" signal scout.turn-ended "signal: $state/scout.turn-ended" \
+    || fail "turn-ended wake append failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" 2> "$err" || fail "drain failed"
+  sed -E 's/ \[at=[0-9]+\]//' "$out" | grep -F 'scout.status: resolved [key=budget]: answered: approved' >/dev/null \
+    || fail "owned growth hid this home's own close from the turn-ended annotation: $(cat "$out")"
+  pass "owned growth suppresses the wake without hiding the turn-ended annotation"
+}
+
 # Drain-time historical annotation staleness: a turn-ended-only wake row must
 # not present an already-announced status line as a new update, while a status
 # file with unannounced bytes keeps its annotation and a direct status row is
@@ -2019,10 +2446,17 @@ test_secondmate_declared_pause_rows_do_not_feed_stall_escalation
 test_secondmate_reprovisioned_queue_starts_a_fresh_interval
 test_secondmate_active_turn_defers_stall_until_the_turn_ends
 test_secondmate_long_lived_mate_mid_turn_is_not_a_stall
+test_secondmate_proven_idle_ring_lets_the_child_drain
+test_secondmate_busy_and_unknown_panes_are_not_rung
+test_secondmate_genuine_stall_after_idle_ring_still_alarms
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt
 test_self_announced_append_guards
+test_separate_self_announced_answers_after_fold_are_owned
+test_unreadable_status_is_not_owned
+test_folded_worker_resolved_is_not_owned_lag
+test_owned_growth_still_annotates_turn_ended
 test_historical_annotation_skips_announced_status
 test_concurrent_append_and_drain
 test_signal_catchup_without_running_watcher

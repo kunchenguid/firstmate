@@ -79,8 +79,12 @@
 # browser_disconnected. A waiting result from this no-timeout poll means a
 # second poller was present; it is not a normal idle round. browser_disconnected
 # means the session remains open and is handled as a silent reconnect wait.
-# The poll reads config/lavish-axi-host from FM_HOME before every lavish-axi
-# invocation so firstmate and workers reach the same server.
+# Before each poll attempt, resolve the artifact's saved URL from Lavish's own
+# session store (LAVISH_AXI_STATE_DIR/state.json, default ~/.lavish-axi/state.json)
+# and use its host and port. Opening the board writes that URL; polling does not.
+# This is a routing lookup before the blocking call, not presence polling or a
+# second route record. Ambient/configured addresses must not retarget a reply.
+# An unreadable or missing session stops before the staged reply is consumed.
 #
 # `answers` is this adapter's half of the generic keyed-answer contract in
 # bin/fm-procevent.sh. It reports what the captain actually chose, as
@@ -142,47 +146,38 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; exit 2; }
 
-apply_configured_lavish_host() {
-  local original_present=$1 original_host=$2 host_file host rc
-  host_file="${FM_HOME%/}/config/lavish-axi-host"
-  host=$(perl -MFcntl=:mode -e '
+apply_session_host() {  # <artifact>
+  local endpoint
+  endpoint=$(perl -MJSON::PP -MCwd=realpath -MEncode=decode,FB_CROAK -e '
     use strict;
     use warnings;
-    my ($path) = @ARGV;
-    if (!lstat $path) {
-      exit 10 if $!{ENOENT};
-      exit 11;
-    }
-    open my $file, "<", $path or exit 11;
-    my @stat = stat $file;
-    exit 11 unless @stat && S_ISREG($stat[2]);
-    while (1) {
-      my $count = read $file, my $chunk, 65536;
-      exit 12 unless defined $count;
-      last if $count == 0;
-      print $chunk or exit 12;
-    }
-  ' "$host_file")
-  rc=$?
-  case "$rc" in
-    0) ;;
-    10)
-      if [ "$original_present" = 1 ]; then
-        export LAVISH_AXI_HOST=$original_host
-      else
-        unset LAVISH_AXI_HOST
-      fi
-      return 0
-      ;;
-    11) die "config/lavish-axi-host must be a readable regular file" ;;
-    *) die "cannot read config/lavish-axi-host" ;;
-  esac
-  case "$host" in
-    ''|*[[:space:][:cntrl:]]*)
-      die "config/lavish-axi-host must contain one non-empty address without whitespace"
-      ;;
-  esac
-  export LAVISH_AXI_HOST=$host
+    my ($path, $artifact) = @ARGV;
+    my $real = realpath($artifact) // die "cannot resolve board artifact\n";
+    $real = decode("UTF-8", $real, FB_CROAK);
+    open my $file, "<", $path or die "cannot read Lavish session store\n";
+    -f $file or die "Lavish session store is not a regular file\n";
+    local $/;
+    my $state = eval { decode_json(<$file>) };
+    !$@ or die "invalid Lavish session store\n";
+    ref($state) eq "HASH" && ref($state->{sessions}) eq "HASH"
+      or die "invalid Lavish session store\n";
+    my @sessions = grep {
+      ref($_) eq "HASH" && defined($_->{file}) && $_->{file} eq $real
+    } values %{$state->{sessions}};
+    @sessions == 1 or die "board must have one saved Lavish session\n";
+    my $url = $sessions[0]->{url} // "";
+    $url =~ m{\Ahttp://(\[[0-9a-fA-F:]+\]|[A-Za-z0-9._-]+):([0-9]+)/session/[0-9a-f]{16}(?:\?[^\s#]*)?\z}
+      or die "invalid saved Lavish session URL\n";
+    my ($host, $port) = ($1, $2);
+    $host =~ s/^\[|\]$//g;
+    $host ne "0.0.0.0" && $host ne "::" && $port >= 1 && $port <= 65535
+      or die "invalid saved Lavish server address\n";
+    print "$host\n$port\n";
+  ' "${LAVISH_AXI_STATE_DIR:-$HOME/.lavish-axi}/state.json" "$1") \
+    || die "cannot resolve the board server from its Lavish session: $1"
+  LAVISH_AXI_HOST=${endpoint%$'\n'*}
+  LAVISH_AXI_PORT=${endpoint##*$'\n'}
+  export LAVISH_AXI_HOST LAVISH_AXI_PORT
 }
 
 # Canonical identity is physical, not the path string: Lavish itself keys a
@@ -348,13 +343,9 @@ poll_iteration_floor_wait() {
 
 cmd_poll() {
   local artifact=${1-} delay attempt=0 response cleanup_command rc filter_rc iteration_started
-  local pipeline_status original_host_present=0 original_host='' reply_file=''
+  local pipeline_status reply_file=''
   local reply_text='' reply_pending=0
   [ -n "$artifact" ] || usage
-  if [ "${LAVISH_AXI_HOST+x}" = x ]; then
-    original_host_present=1
-    original_host=$LAVISH_AXI_HOST
-  fi
   if [ "$#" -eq 3 ] && [ "${2-}" = --agent-reply-file ]; then
     reply_file=$3
   elif [ "$#" -ne 1 ]; then
@@ -377,9 +368,9 @@ cmd_poll() {
   done
   while :; do
     iteration_started=$(poll_iteration_started) || die "cannot start the poll rate governor"
-    apply_configured_lavish_host "$original_host_present" "$original_host"
     [ -f "$artifact" ] && [ ! -L "$artifact" ] && [ -r "$artifact" ] \
       || die "artifact is no longer a readable file: $artifact"
+    apply_session_host "$artifact"
     # Posting a round's reply is BEST EFFORT and deliberately carries no delivery
     # machinery. The staged file is the only record that a reply is owed, so it is
     # consumed HERE - after every non-posting step that could abort this poll has
