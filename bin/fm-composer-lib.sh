@@ -1084,7 +1084,7 @@ _fm_composer_grok_title_ok() {  # <title>
   case "$title" in
     *" $FM_COMPOSER_GROK_TITLE_MIDDOT "*)
       model_part=${title%%" $FM_COMPOSER_GROK_TITLE_MIDDOT "*}
-      permission=${title##*" $FM_COMPOSER_GROK_TITLE_MIDDOT "} ;;
+      permission=${title#*" $FM_COMPOSER_GROK_TITLE_MIDDOT "} ;;
     *) model_part=$title; permission='' ;;
   esac
   case "$model_part" in
