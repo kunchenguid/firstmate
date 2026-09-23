@@ -22,8 +22,17 @@
 # contract is decided: --mode and --yolo are REQUIRED and written into the meta
 # alongside the kind= flip. Firstmate resolves both at promotion time, having just
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
-# captain's standing posture as context, and this script never looks it up.
+# captain's standing posture as context, and this script never looks that posture
+# up. The registry IS read for one thing only: the project's forge binding, which
+# is a project fact rather than a per-task decision, so promotion takes it from
+# there instead of asking firstmate to remember it.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
+# There is no --forge flag here: the binding comes from the registry, and for a
+# task record naming no project it is none. bin/fm-brief.sh takes --forge instead
+# because that script has no registry access at all, and bin/fm-spawn.sh checks
+# its value against the registry; bin/fm-project-mode.sh's header owns the
+# binding and bin/fm-dod-lib.sh owns what it changes for the worker, including
+# the refusal of a forge on local-only.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
 set -eu
 
@@ -54,6 +63,7 @@ MODE=
 YOLO=
 MODE_SET=0
 YOLO_SET=0
+FORGE=none
 POS=()
 want_value=
 for a in "$@"; do
@@ -97,6 +107,22 @@ case "$YOLO" in
   on|off) ;;
   *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
 esac
+# A posture this forge cannot carry is refused once the registry binding has been
+# read. Merge authority on a Gerrit forge is refused rather than quietly dropped,
+# on the captain's decision of 2026-09-15 (bin/fm-project-mode.sh's header carries
+# it). The call right below the definition is kept deliberately as a guard on the
+# mode and yolo posture; it cannot refuse on the forge, which stays none until the
+# registry supplies it after the lock, so the post-registry call is the one that
+# fires.
+refuse_impossible_forge_posture() {
+  fm_forge_valid_for_mode "$FORGE" "$MODE" fm-promote.sh || return 1
+  if [ "$FORGE" = gerrit ] && [ "$YOLO" = on ]; then
+    echo "error: --yolo on is refused for forge=gerrit: a Code-Review+2 is a positive attributed claim that a named human approved and firstmate must not manufacture one (captain's decision 2026-09-15); promote with --yolo off and take any landing on a current explicit captain instruction naming that concrete change" >&2
+    return 1
+  fi
+  return 0
+}
+refuse_impossible_forge_posture || exit 1
 
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
@@ -143,6 +169,23 @@ if ! fm_backlog_record_present "$META" "task record" "$STATE"; then
   exit 1
 fi
 grep -qx 'kind=scout' "$META" || { echo "error: task $ID is not a scout task (kind=scout not in meta)" >&2; exit 1; }
+
+# Unlike the mode and yolo above, the forge is not a per-task decision: it is the
+# captain's project binding, so promotion takes it from the registry rather than
+# from a flag firstmate must remember.
+PROMOTE_PROJECT=$(sed -n 's/^project=//p' "$META" | head -n 1)
+if [ -n "$PROMOTE_PROJECT" ]; then
+  PROMOTE_PROJECT_NAME=$(basename "$PROMOTE_PROJECT")
+  if ! PROMOTE_STANDING_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROMOTE_PROJECT_NAME"); then
+    echo "error: $ID cannot promote: the registry entry for $PROMOTE_PROJECT_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and promote again" >&2
+    exit 1
+  fi
+  FORGE=${PROMOTE_STANDING_FORGE:-none}
+  refuse_impossible_forge_posture || exit 1
+fi
+# An unbound project keeps the exact wording it always had.
+PROMOTE_FORGE_WORDS=
+[ "$FORGE" = none ] || PROMOTE_FORGE_WORDS=" forge=$FORGE"
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
@@ -191,7 +234,7 @@ EOF
 promote_delivery_contract() {
   cat <<EOF
 # Current delivery mode contract
-This task is now kind=ship with mode=$MODE.
+This task is now kind=ship with mode=$MODE$PROMOTE_FORGE_WORDS.
 This section supersedes every earlier brief instruction about delivery mode.
 These current ship instructions supersede the scout delivery rules and report-based Definition of done.
 Any earlier "Never push" or scout-only delivery language in this file is superseded.
@@ -199,13 +242,13 @@ The mode-specific Definition of done below is the current delivery contract.
 
 # Current ship safety rule
 EOF
-  fm_ship_rule_one "$MODE" "$ID"
+  fm_ship_rule_one "$MODE" "$ID" "$FORGE"
   if [ -n "$PROMOTION_ASK_USER_BLOCK" ]; then
     printf '\nThe no-mistakes ask-user escalation below supersedes the scout rule 6 escalation shape.\n'
     printf '%s\n' "$PROMOTION_ASK_USER_BLOCK"
   fi
   printf '\n'
-  fm_dod_block "$MODE" "$ID"
+  fm_dod_block "$MODE" "$ID" "$FORGE"
 }
 mkdir -p "$DATA/$ID"
 [ ! -d "$INSTRUCTIONS" ] || { echo "error: ship instructions path is a directory: $INSTRUCTIONS" >&2; exit 1; }
@@ -278,8 +321,8 @@ META_LOCK_HELD=0
 
 HOME_Q=$(printf '%q' "$FM_HOME")
 INSTRUCTIONS_Q=$(printf '%q' "$INSTRUCTIONS")
-echo "promoted $ID to ship mode=$MODE yolo=$YOLO (teardown protection restored)"
-echo "wrote ship instructions for mode=$MODE: $INSTRUCTIONS"
+echo "promoted $ID to ship mode=$MODE yolo=$YOLO$PROMOTE_FORGE_WORDS (teardown protection restored)"
+echo "wrote ship instructions for mode=$MODE$PROMOTE_FORGE_WORDS: $INSTRUCTIONS"
 echo "next: FM_HOME=$HOME_Q bin/fm-send.sh fm-$ID \"\$(cat $INSTRUCTIONS_Q)\""
 
 promote_print_rechain_hint() {
