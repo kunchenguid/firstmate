@@ -4,8 +4,9 @@
 # otherwise, including on every error, so a failed lookup can never be read as
 # a merge. The provider-tagged identity is data in the sidecar and is never
 # interpolated into this source: these bytes are identical for every task.
-# Each provider is read through its own standard CLI, gh for GitHub and glab
-# for GitLab, so an upstream checkout needs no extra tooling to follow either.
+# Each provider is read through its own standard CLI: gh for GitHub, glab for
+# GitLab, and tea for Forgejo, so an upstream checkout needs no extra tooling
+# to follow any of them.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -103,6 +104,56 @@ case "$provider" in
     # unreadable merge request stays silent instead of reporting a merge.
     raw=$(glab mr view "$number" -R "https://$host/$path" 2>/dev/null) || exit 0
     state=$(printf '%s\n' "$raw" | sed -n 's/^state:[[:space:]]*//p' | head -1) || exit 0
+    [ "$state" = merged ] && printf '%s\n' merged
+    ;;
+  forgejo)
+    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
+    [ "$host" != github.com ] || exit 0
+    case "$host" in
+      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+    esac
+    case "$path" in
+      */*/*|/*|*/) exit 0 ;;
+    esac
+    owner=${path%%/*}
+    repo=${path#*/}
+    [ "$owner" != "$path" ] || exit 0
+    for segment in "$owner" "$repo"; do
+      [ "${#segment}" -ge 1 ] && [ "${#segment}" -le 100 ] || exit 0
+      case "$segment" in
+        .|..|*.git|*[!A-Za-z0-9._-]*) exit 0 ;;
+      esac
+    done
+    [ "$url" = "https://$host/$owner/$repo/pulls/$number" ] || exit 0
+    command -v tea >/dev/null 2>&1 || exit 0
+    # tea addresses a repo by slug only; the host comes from a named login
+    # rather than a URL the way gh and glab take one, so the login registered
+    # for this exact host is resolved fresh on every poll rather than trusted
+    # from anywhere durable. Refuse to guess when zero or more than one
+    # registered login matches, rather than picking one arbitrarily.
+    login=$(
+      tea login list --output json 2>/dev/null | awk -F'"' -v h="$host" '
+        /"name":/ { name = $4 }
+        /"url":/ {
+          u = $4
+          sub(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "", u)
+          sub(/\/.*$/, "", u)
+          sub(/:[0-9]+$/, "", u)
+          if (u == h) { print name; n++ }
+        }
+        END { exit (n == 1) ? 0 : 1 }
+      '
+    ) || exit 0
+    [ -n "$login" ] || exit 0
+    # tea has no single-PR field selector: "tea pulls <n>" always renders a
+    # free-text detail view regardless of -f/-o, so the list form is used
+    # instead and filtered to the one matching index. A repo with more open
+    # and closed pull requests than this limit can page past a very old one;
+    # that PR then stays silently unmerged here until it is inside the window,
+    # which is the same fail-safe-silent behavior as every other error above.
+    raw=$(tea pulls list --login "$login" --repo "$owner/$repo" --state all \
+      -f index,state -o csv --limit 50 2>/dev/null) || exit 0
+    state=$(printf '%s\n' "$raw" | awk -F, -v n="$number" 'NR > 1 && $1 == n { print $2 }')
     [ "$state" = merged ] && printf '%s\n' merged
     ;;
   *) exit 0 ;;

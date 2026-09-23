@@ -59,6 +59,8 @@ Clone into `projects/<name>` and add the registry entry only after the destinati
 A `no-mistakes` or `no-mistakes-prod-only` project must have an `origin` remote and must complete the initialization procedure below, because a conditional policy's product-facing work runs the pipeline while its internal-only work still takes the direct PR.
 A `direct-PR` project needs an `origin` remote but skips no-mistakes initialization.
 A `local-only` project may have no remote and skips no-mistakes initialization.
+A remote-backed project hosted on GitLab or Forgejo needs the registry's optional `forge:gitlab`/`forge:forgejo` token (`bin/fm-project-mode.sh` owns the exact bracket grammar); it defaults to `forge:github` and every existing entry needs no change.
+Confirm the captain has the matching CLI authenticated for that host - `glab auth login` for GitLab, or a `tea login add` for Forgejo/Gitea - since a brief generated for that project tells the worker to use that CLI.
 
 ## Create a project
 
