@@ -384,6 +384,28 @@ Any other value, or an unreadable file, refuses every spawn from that home, whic
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
 
+## Fleet worker ceiling (config/fleet-crew-limit)
+
+The optional local, gitignored `config/fleet-crew-limit` in the local root Firstmate home holds one positive integer: the most ordinary workers, ship and scout tasks together, that may be live at once across that home and every local secondmate home below it.
+When the file is absent, spawns behave exactly as before and no admission ledger exists.
+Secondmate homes never read a ceiling of their own; every local home follows its parent bindings to the same root, so the primary and all concurrent secondmates count against one ledger in the root's `state/fleet-admission/`, and persistent secondmates themselves never take a slot.
+A home whose parent is on another machine is its own root, so the ceiling binds one machine's homes rather than a remote tree.
+A spawn that would exceed the ceiling refuses before any endpoint, local copy, or task record exists, and the task stays queued until a worker finishes and its cleanup returns the slot.
+A malformed or unreadable file refuses every ordinary spawn in the tree rather than guessing a ceiling.
+A relaunch keeps its task's existing claim, but a live worker that predates the ceiling and holds no claim must be adopted first or its relaunch is refused at the ceiling.
+The ledger is durable, so replacing the primary session in the same home keeps the count.
+`bin/fm-fleet-admission.sh` is the operator surface: `status` reconciles the ledger against task records, `adopt` brings a home's tasks from before the ceiling under the count, and `release` frees a slot only after an operator confirms its claim is orphaned.
+The fleet worker admission section of [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh) owns the claim lifecycle, including how failed, killed, and relaunched spawns keep or return their slots.
+
+To enable a ceiling of two, write it in the root home, then adopt existing work once in every local home, primary first:
+
+```bash
+printf '2\n' > "$FM_HOME/config/fleet-crew-limit"
+FM_HOME=<root-home> bin/fm-fleet-admission.sh adopt
+FM_HOME=<each-secondmate-home> bin/fm-fleet-admission.sh adopt
+bin/fm-fleet-admission.sh status
+```
+
 ## Lavish server address (config/lavish-axi-host)
 
 The optional local, gitignored `config/lavish-axi-host` contains one non-empty address without whitespace for the per-machine Lavish server.

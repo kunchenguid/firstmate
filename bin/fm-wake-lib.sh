@@ -2523,3 +2523,345 @@ EOF
 
   return 0
 }
+
+# --- Fleet-wide worker admission ---------------------------------------------
+# The single owner of the opt-in ceiling on how many ordinary workers (ship and
+# scout tasks) may be live at once across every local Firstmate home - the
+# primary and each persistent secondmate below it.
+#
+# Anchor. Every local home resolves the same anchor through
+# fm_firstmate_root_home above, following local parent bindings upward, exactly as
+# the Treehouse project lock does. The ceiling is read from that root home's
+# config/fleet-crew-limit and the ledger lives in its state directory, so a
+# secondmate never consults a ceiling or a count of its own. A home whose parent
+# is on another machine is its own local root: the ceiling binds one machine's
+# homes, never a remote tree, because a lock here cannot be observed there.
+#
+# Configuration. <root>/config/fleet-crew-limit holds one positive integer.
+# Absent means admission is off and every spawn behaves exactly as before. Any
+# other content, an unreadable file, or a root that cannot be resolved refuses
+# admission rather than guessing a ceiling.
+#
+# Ledger. <root>/state/fleet-admission/ holds one claim file per admitted task,
+# named by a hash of its canonical home and task id, with the fields
+#   home=<canonical home>  state=<state dir>  task=<id>  kind=<ship|scout>
+#   phase=<pending|active> pid=<spawning pid, pending only>  at=<epoch>
+# Every claim file present counts against the ceiling, whatever its phase or
+# readability, so an unreadable or ambiguous claim can only make admission
+# stricter. Admission counts and writes under one lock,
+# <root>/state/.fleet-admission.lock, so concurrent spawns from any mix of homes
+# can never both take the last slot. Persistent secondmates never hold a claim.
+#
+# Lifecycle. bin/fm-spawn.sh admits a fresh ship or scout as `pending` before
+# any endpoint, worktree, or record exists and refuses the spawn when the
+# ceiling is reached; it marks the claim `active` right after publishing the
+# task record. A spawn that aborts before publishing drops its own pending
+# claim; one that aborts later keeps it, because a worker may already be
+# running. Retrying the same task in the same home reuses its claim instead of
+# taking a second slot, and the reused claim becomes active, since the earlier
+# attempt may have left a worker running. A relaunch keeps the task's existing claim and admits
+# one only for a task that predates activation. bin/fm-teardown.sh releases the
+# claim once the task record is gone, and releases every claim of a secondmate
+# home it has removed.
+#
+# Nothing here reclaims a slot on its own judgment. A claim whose task record is
+# gone and whose spawning process is not alive is reported as orphaned by
+# bin/fm-fleet-admission.sh status, and only its explicit release removes it.
+# The ledger is ordinary durable state, so replacing the primary session in the
+# same home neither resets nor rebuilds it.
+
+# shellcheck disable=SC2034 # Output globals read by sourcing callers.
+FM_FLEET_ADMISSION_ERROR=
+# shellcheck disable=SC2034
+FM_FLEET_ADMISSION_ENABLED=0
+# shellcheck disable=SC2034
+FM_FLEET_ADMISSION_LIMIT=
+# shellcheck disable=SC2034
+FM_FLEET_ADMISSION_ROOT=
+FM_FLEET_ADMISSION_LOCK_HELD=0
+
+# fm_fleet_admission_resolve [home]
+# Sets FM_FLEET_ADMISSION_ROOT, _LIMIT, and _ENABLED. Returns 1 with
+# FM_FLEET_ADMISSION_ERROR set when the anchor or its ceiling cannot be read.
+fm_fleet_admission_resolve() {
+  local file raw
+  FM_FLEET_ADMISSION_ENABLED=0
+  FM_FLEET_ADMISSION_LIMIT=
+  fm_fleet_admission_resolve_root "${1:-$FM_HOME}" || return 1
+  file="$FM_FLEET_ADMISSION_ROOT/config/fleet-crew-limit"
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 0
+  fi
+  if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+    FM_FLEET_ADMISSION_ERROR="fleet worker ceiling $file is not a readable regular file"
+    return 1
+  fi
+  raw=$(tr -d ' \t\r\n' < "$file" 2>/dev/null) || {
+    FM_FLEET_ADMISSION_ERROR="fleet worker ceiling $file could not be read"
+    return 1
+  }
+  case "$raw" in
+    ''|*[!0-9]*|0*)
+      FM_FLEET_ADMISSION_ERROR="fleet worker ceiling $file must hold one positive integer, found '$raw'"
+      return 1
+      ;;
+  esac
+  FM_FLEET_ADMISSION_LIMIT=$raw
+  FM_FLEET_ADMISSION_ENABLED=1
+}
+
+# fm_fleet_admission_resolve_root [home]
+# Sets FM_FLEET_ADMISSION_ROOT only. Releasing or activating an existing claim
+# needs the ledger, not a valid ceiling, so those paths stop here.
+fm_fleet_admission_resolve_root() {
+  local home=${1:-$FM_HOME} root
+  FM_FLEET_ADMISSION_ERROR=
+  FM_FLEET_ADMISSION_ROOT=
+  root=$(fm_firstmate_root_home "$home") || {
+    FM_FLEET_ADMISSION_ERROR="could not resolve the local root Firstmate home above $home, so the fleet worker ledger cannot be reached"
+    return 1
+  }
+  FM_FLEET_ADMISSION_ROOT=$root
+}
+
+fm_fleet_admission_dir() {
+  printf '%s/state/fleet-admission\n' "$FM_FLEET_ADMISSION_ROOT"
+}
+
+fm_fleet_admission_lock_path() {
+  printf '%s/state/.fleet-admission.lock\n' "$FM_FLEET_ADMISSION_ROOT"
+}
+
+fm_fleet_admission_canonical_home() {  # <home>
+  CDPATH='' cd -- "$1" 2>/dev/null && pwd -P
+}
+
+fm_fleet_admission_claim_path() {  # <canonical-home> <task-id>
+  local hash
+  case "$2" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  hash=$(printf '%s\t%s' "$1" "$2" | git hash-object --stdin 2>/dev/null) || return 1
+  [ -n "$hash" ] || return 1
+  printf '%s/%s.claim\n' "$(fm_fleet_admission_dir)" "$hash"
+}
+
+fm_fleet_admission_field() {  # <claim> <key>
+  sed -n "s/^$2=//p" "$1" 2>/dev/null | tail -n 1
+}
+
+_fm_fleet_admission_lock() {
+  local lock rc
+  lock=$(fm_fleet_admission_lock_path)
+  mkdir -p "$FM_FLEET_ADMISSION_ROOT/state/fleet-admission" 2>/dev/null || {
+    FM_FLEET_ADMISSION_ERROR="could not create the fleet admission ledger under $FM_FLEET_ADMISSION_ROOT/state"
+    return 1
+  }
+  if fm_lock_acquire_wait_bounded "$lock" "${FM_FLEET_ADMISSION_LOCK_WAIT:-30}"; then
+    FM_FLEET_ADMISSION_LOCK_HELD=1
+    return 0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 124 ]; then
+    FM_FLEET_ADMISSION_ERROR="the fleet admission lock $lock is still held by pid ${FM_LOCK_HELD_PID:-unknown}"
+  else
+    FM_FLEET_ADMISSION_ERROR="could not acquire the fleet admission lock $lock"
+  fi
+  return 1
+}
+
+_fm_fleet_admission_unlock() {
+  [ "$FM_FLEET_ADMISSION_LOCK_HELD" = 1 ] || return 0
+  FM_FLEET_ADMISSION_LOCK_HELD=0
+  fm_lock_release "$(fm_fleet_admission_lock_path)" || true
+}
+
+_fm_fleet_admission_write() {  # <claim> <home> <state> <task> <kind> <phase> <pid>
+  local claim=$1 tmp
+  tmp="$claim.tmp.${BASHPID:-$$}"
+  {
+    printf 'home=%s\n' "$2"
+    printf 'state=%s\n' "$3"
+    printf 'task=%s\n' "$4"
+    printf 'kind=%s\n' "$5"
+    printf 'phase=%s\n' "$6"
+    [ "$6" != pending ] || printf 'pid=%s\n' "$7"
+    printf 'at=%s\n' "$(date +%s)"
+  } > "$tmp" 2>/dev/null && mv -f "$tmp" "$claim" 2>/dev/null && return 0
+  rm -f "$tmp" 2>/dev/null || true
+  FM_FLEET_ADMISSION_ERROR="could not write fleet admission claim $claim"
+  return 1
+}
+
+# Human-readable one-line list of every held claim, for refusal messages.
+fm_fleet_admission_holders() {
+  local claim sep='' out=''
+  for claim in "$(fm_fleet_admission_dir)"/*.claim; do
+    [ -e "$claim" ] || continue
+    out="$out$sep$(fm_fleet_admission_field "$claim" task)@$(fm_fleet_admission_field "$claim" home)"
+    sep=', '
+  done
+  printf '%s\n' "${out:-none}"
+}
+
+fm_fleet_admission_count() {
+  local claim n=0
+  for claim in "$(fm_fleet_admission_dir)"/*.claim; do
+    [ -e "$claim" ] || [ -L "$claim" ] || continue
+    n=$((n + 1))
+  done
+  printf '%s\n' "$n"
+}
+
+# fm_fleet_admission_admit <home> <state> <task-id> <kind> <pending|active> [pid]
+# Returns 0 when admitted, including a reused claim for the same task, or when
+# admission is off; 3 when the ceiling is reached; and 1 on any other refusal. FM_FLEET_ADMISSION_ERROR explains every refusal.
+fm_fleet_admission_admit() {
+  local home=$1 state=$2 id=$3 kind=$4 phase=$5 pid=${6:-} claim held_phase held_pid count
+  fm_fleet_admission_resolve "$home" || return 1
+  [ "$FM_FLEET_ADMISSION_ENABLED" = 1 ] || return 0
+  home=$(fm_fleet_admission_canonical_home "$home") || {
+    FM_FLEET_ADMISSION_ERROR="could not resolve home $1"
+    return 1
+  }
+  claim=$(fm_fleet_admission_claim_path "$home" "$id") || {
+    FM_FLEET_ADMISSION_ERROR="could not name a fleet admission claim for task $id"
+    return 1
+  }
+  _fm_fleet_admission_lock || return 1
+  if [ -e "$claim" ] || [ -L "$claim" ]; then
+    held_phase=$(fm_fleet_admission_field "$claim" phase)
+    held_pid=$(fm_fleet_admission_field "$claim" pid)
+    if [ "$held_phase" = pending ] && [ -n "$held_pid" ] && [ "$held_pid" != "$pid" ] \
+      && fm_pid_alive "$held_pid"; then
+      _fm_fleet_admission_unlock
+      FM_FLEET_ADMISSION_ERROR="task $id already has a fleet admission claim held by a spawn still running as pid $held_pid"
+      return 1
+    fi
+    # A reused claim may belong to an earlier attempt that already started a
+    # worker, so it becomes active and this attempt's abort can never drop it.
+    phase=active
+    _fm_fleet_admission_write "$claim" "$home" "$state" "$id" "$kind" "$phase" "$pid" || {
+      _fm_fleet_admission_unlock
+      return 1
+    }
+    _fm_fleet_admission_unlock
+    return 0
+  fi
+  count=$(fm_fleet_admission_count)
+  if [ "$count" -ge "$FM_FLEET_ADMISSION_LIMIT" ]; then
+    FM_FLEET_ADMISSION_ERROR="the fleet worker ceiling of $FM_FLEET_ADMISSION_LIMIT is reached ($count held: $(fm_fleet_admission_holders)); task $id stays queued until a worker finishes"
+    _fm_fleet_admission_unlock
+    return 3
+  fi
+  _fm_fleet_admission_write "$claim" "$home" "$state" "$id" "$kind" "$phase" "$pid" || {
+    _fm_fleet_admission_unlock
+    return 1
+  }
+  _fm_fleet_admission_unlock
+}
+
+# fm_fleet_admission_activate <home> <task-id>
+# Marks an existing claim active. No claim, or admission off with no ledger, is
+# a no-op success.
+fm_fleet_admission_activate() {
+  local home id=$2 claim
+  fm_fleet_admission_resolve_root "$1" || return 1
+  home=$(fm_fleet_admission_canonical_home "$1") || return 1
+  claim=$(fm_fleet_admission_claim_path "$home" "$id") || return 1
+  [ -e "$claim" ] || return 0
+  _fm_fleet_admission_lock || return 1
+  if [ -e "$claim" ]; then
+    _fm_fleet_admission_write "$claim" "$home" \
+      "$(fm_fleet_admission_field "$claim" state)" "$id" \
+      "$(fm_fleet_admission_field "$claim" kind)" active "" || {
+      _fm_fleet_admission_unlock
+      return 1
+    }
+  fi
+  _fm_fleet_admission_unlock
+}
+
+# fm_fleet_admission_release <home> <task-id> [pending-pid]
+# Removes the task's claim. With a pid, removes it only while it is still that
+# spawn's pending claim, so an aborting spawn never drops a claim it no longer
+# owns. A missing claim is a no-op success.
+fm_fleet_admission_release() {
+  local home id=$2 pid=${3:-} claim
+  fm_fleet_admission_resolve_root "$1" || return 1
+  home=$(fm_fleet_admission_canonical_home "$1") || home=$1
+  claim=$(fm_fleet_admission_claim_path "$home" "$id") || return 1
+  [ -e "$claim" ] || [ -L "$claim" ] || return 0
+  _fm_fleet_admission_lock || return 1
+  if [ -n "$pid" ]; then
+    if [ "$(fm_fleet_admission_field "$claim" phase)" != pending ] \
+      || [ "$(fm_fleet_admission_field "$claim" pid)" != "$pid" ]; then
+      _fm_fleet_admission_unlock
+      return 0
+    fi
+  fi
+  _fm_fleet_admission_remove_locked "$claim"
+}
+
+# fm_fleet_admission_release_orphan <anchor-home> <claim-home> <task-id>
+# The explicit operator release: frees a claim only while it reads orphaned,
+# re-checked under the ledger lock. Returns 4 when the claim is not orphaned.
+fm_fleet_admission_release_orphan() {
+  local home=$2 id=$3 claim verdict
+  fm_fleet_admission_resolve_root "$1" || return 1
+  home=$(fm_fleet_admission_canonical_home "$home") || home=$2
+  claim=$(fm_fleet_admission_claim_path "$home" "$id") || return 1
+  [ -e "$claim" ] || [ -L "$claim" ] || return 0
+  _fm_fleet_admission_lock || return 1
+  verdict=$(fm_fleet_admission_verdict "$claim")
+  if [ "$verdict" != orphaned ]; then
+    _fm_fleet_admission_unlock
+    FM_FLEET_ADMISSION_ERROR="the claim for $id in $home is $verdict, not orphaned"
+    return 4
+  fi
+  _fm_fleet_admission_remove_locked "$claim"
+}
+
+_fm_fleet_admission_remove_locked() {  # <claim>
+  if ! rm -f "$1" 2>/dev/null; then
+    _fm_fleet_admission_unlock
+    # shellcheck disable=SC2034 # Read by sourcing callers.
+    FM_FLEET_ADMISSION_ERROR="could not remove fleet admission claim $1"
+    return 1
+  fi
+  _fm_fleet_admission_unlock
+}
+
+# fm_fleet_admission_release_retired_home <anchor-home> <retired-home>
+# Drops every claim naming a home whose state directory no longer exists. Used
+# only after a secondmate teardown has removed that whole home.
+fm_fleet_admission_release_retired_home() {
+  local retired=$2 claim
+  fm_fleet_admission_resolve_root "$1" || return 1
+  [ -d "$(fm_fleet_admission_dir)" ] || return 0
+  _fm_fleet_admission_lock || return 1
+  for claim in "$(fm_fleet_admission_dir)"/*.claim; do
+    [ -e "$claim" ] || continue
+    [ "$(fm_fleet_admission_field "$claim" home)" = "$retired" ] || continue
+    [ ! -d "$(fm_fleet_admission_field "$claim" state)" ] || continue
+    rm -f "$claim" 2>/dev/null || true
+  done
+  _fm_fleet_admission_unlock
+}
+
+# fm_fleet_admission_verdict <claim>
+# Prints live (its task record exists), spawning (a pending claim whose spawn
+# is still running), or orphaned (neither, so only an explicit release frees it).
+fm_fleet_admission_verdict() {
+  local claim=$1 state task phase pid
+  state=$(fm_fleet_admission_field "$claim" state)
+  task=$(fm_fleet_admission_field "$claim" task)
+  phase=$(fm_fleet_admission_field "$claim" phase)
+  pid=$(fm_fleet_admission_field "$claim" pid)
+  if [ -n "$state" ] && [ -n "$task" ] && { [ -e "$state/$task.meta" ] || [ -L "$state/$task.meta" ]; }; then
+    printf 'live\n'
+  elif [ "$phase" = pending ] && fm_pid_alive "$pid"; then
+    printf 'spawning\n'
+  else
+    printf 'orphaned\n'
+  fi
+}

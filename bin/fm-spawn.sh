@@ -150,6 +150,10 @@
 #   fm_firstmate_root_home resolves, so a home seeded from another machine anchors
 #   that lock itself rather than failing to resolve one;
 #   contention refuses rather than waits.
+#   When the local root home configures config/fleet-crew-limit, a fresh ship or
+#   scout (and a relaunch of a task holding no slot) must first take a fleet
+#   worker slot and refuses at the ceiling before any endpoint exists;
+#   bin/fm-wake-lib.sh's fleet worker admission section owns that contract.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -1119,6 +1123,7 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_FLEET_CLAIM_PID=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1266,6 +1271,18 @@ spawn_abort_cleanup() {
     else
       echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
     fi
+  fi
+  # A fresh spawn that aborts before its task record was ever published
+  # created no task, so it returns its fleet slot (bin/fm-wake-lib.sh's fleet
+  # worker admission section owns the claim lifecycle). Once published the claim
+  # is active and this pid-bound release leaves it alone, because a worker may
+  # already be running.
+  if [ -n "$SPAWN_FLEET_CLAIM_PID" ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    if ! fm_fleet_admission_release "$FM_HOME" "$ID" "$SPAWN_FLEET_CLAIM_PID"; then
+      echo "warning: could not return task $ID's fleet worker slot (${FM_FLEET_ADMISSION_ERROR:-unknown error}); bin/fm-fleet-admission.sh status reports it" >&2
+    fi
+    SPAWN_FLEET_CLAIM_PID=
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
@@ -1524,6 +1541,38 @@ if [ "$RELAUNCH" -eq 0 ]; then
   spawn_refuse_if_away_spend_cap
   spawn_require_relocated_queued_work
 fi
+# Fleet-wide worker ceiling (bin/fm-wake-lib.sh's fleet worker admission
+# section owns the contract):
+# an ordinary worker takes a slot in the local root home's ledger before any
+# endpoint, worktree, or record exists, so concurrent spawns from every local
+# home share one count; a persistent secondmate never takes one. A fresh spawn
+# claims pending, bound to this process; a relaunch keeps the task's claim or,
+# for a task that predates the ceiling, claims one as already active.
+spawn_fleet_admit() {
+  local phase=pending pid rc=0
+  [ "$KIND" != secondmate ] || return 0
+  [ "$RELAUNCH" -ne 1 ] || phase=active
+  fm_current_pid pid || {
+    echo "error: spawn refused - could not identify this process for its fleet admission claim" >&2
+    exit 1
+  }
+  fm_fleet_admission_admit "$FM_HOME" "$STATE" "$ID" "$KIND" "$phase" "$pid" || rc=$?
+  case "$rc" in
+  0) ;;
+  3)
+    echo "error: spawn refused - $FM_FLEET_ADMISSION_ERROR (bin/fm-fleet-admission.sh status)" >&2
+    exit 1
+    ;;
+  *)
+    echo "error: spawn refused - fleet admission failed: $FM_FLEET_ADMISSION_ERROR" >&2
+    exit 1
+    ;;
+  esac
+  if [ "$phase" = pending ] && [ "$FM_FLEET_ADMISSION_ENABLED" = 1 ]; then
+    SPAWN_FLEET_CLAIM_PID=$pid
+  fi
+}
+[ "$RELAUNCH" -eq 1 ] || spawn_fleet_admit
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
     exit 0
@@ -1665,6 +1714,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
+  spawn_fleet_admit
   # A secondmate whose endpoint is gone already has ONE owner for that
   # recovery: the session-start liveness sweep respawns it with
   # `fm-spawn.sh <id> --secondmate`, which stands its home's own workspace back
@@ -4585,6 +4635,11 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_META_TMP=
+  if [ -n "$SPAWN_FLEET_CLAIM_PID" ]; then
+    SPAWN_FLEET_CLAIM_PID=
+    fm_fleet_admission_activate "$FM_HOME" "$ID" ||
+      echo "warning: task $ID's fleet worker slot stays pending (${FM_FLEET_ADMISSION_ERROR:-unknown error}); it still counts against the ceiling" >&2
+  fi
 fi
 
 # Fuse the backlog In-flight transition into the publication that just created

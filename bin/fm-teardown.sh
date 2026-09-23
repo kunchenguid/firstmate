@@ -131,6 +131,9 @@
 # These refusals are not relaxed by --force: --force authorizes discarding THIS
 # task's unlanded work, never another task's live work. Nothing of this task's
 # own is removed by a refusal; reconcile whichever record is wrong and re-run.
+# Once the task record is gone, a ship or scout returns its fleet worker slot,
+# and a retired secondmate home returns every slot its tasks held
+# (bin/fm-wake-lib.sh's fleet worker admission section).
 # Orca is not a pool slot and proves its path through
 # require_orca_worktree_path_match instead.
 # Orca tasks use the same safety checks, then close the recorded terminal and
@@ -3606,6 +3609,7 @@ if [ "$KIND" != secondmate ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  RETIRED_HOME_CANON=$(CDPATH='' cd -- "$HOME_PATH" 2>/dev/null && pwd -P) || RETIRED_HOME_CANON=
   handoff_wake_retire_stage \
     || { echo "error: receiver wake cleanup could not be staged; preserving the secondmate home and route" >&2; exit 1; }
   pending_replies_recovery_validate recheck \
@@ -3620,6 +3624,13 @@ if [ "$KIND" = secondmate ]; then
   fi
   handoff_wake_retire_stage_commit \
     || { echo "error: receiver wake cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
+  # The whole home is gone, so no worker it held can still be recorded there;
+  # return every fleet slot its tasks held (bin/fm-wake-lib.sh's fleet worker
+  # admission section).
+  if [ -n "$RETIRED_HOME_CANON" ] &&
+    ! fm_fleet_admission_release_retired_home "$FM_HOME" "$RETIRED_HOME_CANON"; then
+    echo "warning: could not return the fleet worker slots held by retired home $RETIRED_HOME_CANON (${FM_FLEET_ADMISSION_ERROR:-unknown error}); bin/fm-fleet-admission.sh status reports them" >&2
+  fi
   if [ "$PENDING_REPLIES_DIR_PRESENT" -eq 1 ]; then
     pending_replies_cleanup_for_task "$STATE/pending-replies" "$PENDING_REPLIES_DIR_REAL" \
       || { echo "error: local pending-reply cleanup failed; preserving the secondmate route for retry" >&2; exit 1; }
@@ -3705,6 +3716,11 @@ else
 fi
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
+# The task record is gone, so its fleet worker slot is free
+# (bin/fm-wake-lib.sh's fleet worker admission section owns the claim lifecycle).
+if [ "$KIND" != secondmate ] && ! fm_fleet_admission_release "$FM_HOME" "$ID"; then
+  echo "warning: $ID is torn down but its fleet worker slot could not be returned (${FM_FLEET_ADMISSION_ERROR:-unknown error}); bin/fm-fleet-admission.sh status reports it as orphaned" >&2
+fi
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
