@@ -328,19 +328,20 @@ test_a_symlinked_argument_registers_the_resolved_path() {
 # --- which home ------------------------------------------------------------
 
 # The store is $HOME/.kimi-code - the home the turn-end hook and the token
-# registry already use - and it is created when Kimi has not run there yet.
-test_store_is_home_kimi_code_and_is_created_when_absent() {
-  local out fresh
+# registry already use - and Kimi creates that home itself on its first run. A
+# home Kimi has never initialised holds no credentials, so a record written into
+# one this provisioned would buy the worker nothing: it is refused instead, and
+# bin/fm-spawn.sh turns the refusal into its warning.
+test_an_absent_kimi_home_is_refused_rather_than_created() {
+  local out rc=0 fresh
   read_case "$(make_case home-default)"
   fresh="$CASE_DIR/fresh-home"
   mkdir -p "$fresh"
-  out=$(HOME="$fresh" "$TRUST" "$WT" "$PROJ" 2>&1)
-  expect_code 0 $? "registering under a home where Kimi has never run must succeed: $out"
-  [ -f "$(expected_record "$fresh/.kimi-code" "$WT" wt)" ] \
-    || fail "the record did not land in \$HOME/.kimi-code"
-  [ "$(file_mode "$fresh/.kimi-code")" = 700 ] \
-    || fail "the created Kimi home is not mode 0700 (got $(file_mode "$fresh/.kimi-code"))"
-  pass "fm-kimi-trust.sh: the store is \$HOME/.kimi-code, created when Kimi has not run there"
+  out=$(HOME="$fresh" "$TRUST" "$WT" "$PROJ" 2>&1) || rc=$?
+  expect_code 1 "$rc" "a home where Kimi has never run must be refused: $out"
+  assert_contains "$out" "$fresh/.kimi-code" "the refusal does not name the missing Kimi home"
+  assert_absent "$fresh/.kimi-code" "the refused registration created the Kimi home anyway"
+  pass "fm-kimi-trust.sh: an absent \$HOME/.kimi-code is refused, never created"
 }
 
 # --- scope refusals --------------------------------------------------------
@@ -547,7 +548,7 @@ test_workspace_id_slug_matches_the_vendor_rule
 test_workspace_id_slug_truncation_order
 test_workspace_id_slug_falls_back_when_nothing_is_left
 test_a_symlinked_argument_registers_the_resolved_path
-test_store_is_home_kimi_code_and_is_created_when_absent
+test_an_absent_kimi_home_is_refused_rather_than_created
 test_out_of_scope_directories_are_refused
 test_usage_errors_are_refused
 test_malformed_store_is_refused

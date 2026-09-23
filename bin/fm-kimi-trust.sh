@@ -75,11 +75,16 @@
 #
 # WHICH HOME. $HOME/.kimi-code, the same home bin/fm-kimi-turnend-hook.sh
 # installs the crew turn-end region into and the same one bin/fm-spawn.sh's
-# per-task token registry lives under. Multi-home support (KIMI_CODE_HOME) is
-# deliberately out of scope: it is only correct if trust, the turn-end hook, the
-# hook script and the token registry move to the selected home together, and
-# moving only this one puts the record in a home whose config.toml carries no
-# Firstmate hook.
+# per-task token registry lives under. It must ALREADY EXIST: Kimi creates it on
+# its own first run, and a home this would have to create is one Kimi has never
+# initialised, holding neither credentials nor config, where a trust record buys
+# the worker nothing. An absent home is therefore refused rather than
+# provisioned, and bin/fm-spawn.sh turns that refusal into its warning so the
+# live dialog gate answers. Multi-home support (KIMI_CODE_HOME) is deliberately
+# out of scope: it is only correct if trust, the turn-end hook, the hook script
+# and the token registry move to the selected home together, and moving only
+# this one puts the record in a home whose config.toml carries no Firstmate
+# hook.
 #
 # THE SCOPE TEST IS THE SAFETY PROPERTY, and it is STRUCTURAL rather than a path
 # policy. Both modes mirror bin/fm-claude-trust.sh, which owns the full reasoning
@@ -163,18 +168,8 @@ fi
 
 [ -n "${HOME:-}" ] || refuse "HOME is not set, so the Kimi home cannot be located"
 KIMI_HOME="$HOME/.kimi-code"
-# Kimi creates its own home on first run, so an absent $HOME/.kimi-code is
-# created here for the same reason: a home this cannot reach means the worker
-# meets the dialog. 0700 at creation is the mode Kimi itself uses and the mode
-# the store one level down is created with, so a home holding credentials is
-# never briefly group- or world-readable. It sits directly under HOME, so this
-# is a single-level create and needs no -p.
 KIMI_HOME_REAL=$(real_dir "$KIMI_HOME") || true
-if [ -z "$KIMI_HOME_REAL" ]; then
-  mkdir -m 700 "$KIMI_HOME" 2>/dev/null || true
-  KIMI_HOME_REAL=$(real_dir "$KIMI_HOME") || true
-fi
-[ -n "$KIMI_HOME_REAL" ] || refuse "Kimi home '$KIMI_HOME' does not exist and could not be created"
+[ -n "$KIMI_HOME_REAL" ] || refuse "Kimi home '$KIMI_HOME' is not an accessible directory; Kimi creates it on its first run, and this registers trust only in a home Kimi has already initialised"
 
 # The filesystem root, a home directory, and the Kimi home itself are never
 # something this registers. Checked explicitly so the refusal names the real
