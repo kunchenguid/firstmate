@@ -7,12 +7,13 @@
 #
 # Opt-in gate: TYPESAFE_API_KEY non-empty in this process environment, else a
 #   TYPESAFE_API_KEY= line in $FM_HOME/.env read with fmx_env_get, the same
-#   accessor as FMX_PAIRING_TOKEN (bin/fm-env-lib.sh), else the macOS generic
-#   password named by FM_TYPESAFE_KEYCHAIN_SERVICE (typesafe-api-key by
-#   default). The environment and .env win in that order. The Keychain query
-#   runs only when security exists, and a missing item is absent. Absent
-#   everywhere: one "dispatch-resolve: off" line on stderr, nothing on stdout,
-#   exit 0, no network call, so firstmate dispatches exactly as today.
+#   accessor as FMX_PAIRING_TOKEN, else the macOS Keychain generic password
+#   for service typesafe-api-key, all through fm_typesafe_key
+#   (bin/fm-env-lib.sh). The environment and .env win in that order. The
+#   Keychain query runs only when security exists, and a missing item is
+#   absent. Absent everywhere: one "dispatch-resolve: off" line on stderr,
+#   nothing on stdout, exit 0, no network call, so firstmate dispatches exactly
+#   as today.
 #   The key lives in one shell variable and reaches curl as a header read from
 #   a file descriptor, never on argv; nothing logs or writes it.
 #
@@ -51,8 +52,7 @@
 #   actionable, never selected around.
 #
 # Environment:
-#   TYPESAFE_API_KEY supplies an explicit key, and
-#   FM_TYPESAFE_KEYCHAIN_SERVICE optionally overrides the Keychain service.
+#   TYPESAFE_API_KEY is the only resolver-specific environment setting.
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -62,7 +62,6 @@ set -u
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
 export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
 unset TYPESAFE_API_KEY
-FM_TYPESAFE_KEYCHAIN_SERVICE=${FM_TYPESAFE_KEYCHAIN_SERVICE:-typesafe-api-key}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -108,14 +107,9 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- opt-in gate ---------------------------------------------------------------
+TYPESAFE_API_KEY_PRIVATE=$(fm_typesafe_key "$TYPESAFE_API_KEY_PRIVATE" "$FM_HOME/.env")
 if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  TYPESAFE_API_KEY_PRIVATE=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
-fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ] && command -v security >/dev/null 2>&1; then
-  TYPESAFE_API_KEY_PRIVATE=$(security find-generic-password -s "$FM_TYPESAFE_KEYCHAIN_SERVICE" -w 2>/dev/null) || TYPESAFE_API_KEY_PRIVATE=''
-fi
-if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
-  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment, $FM_HOME/.env, and Keychain service $FM_TYPESAFE_KEYCHAIN_SERVICE)" >&2
+  echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment, $FM_HOME/.env, and Keychain service typesafe-api-key)" >&2
   exit 0
 fi
 

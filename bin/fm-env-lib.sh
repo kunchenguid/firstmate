@@ -6,6 +6,8 @@
 # token (bin/fm-x-lib.sh and its callers) and the optional typesafe.ai
 # dispatch key (bin/fm-dispatch-resolve.sh) both resolve their value through
 # fmx_env_get, so those opt-in secrets in $FM_HOME/.env are parsed by one rule.
+# It also owns the dispatch key's source order (environment, then .env, then
+# the macOS Keychain) for the resolver and bin/fm-bootstrap.sh.
 # (bin/fm-mail.sh loads its whole .env block itself under the same env-wins
 # contract.) The value is printed to the caller's command substitution only;
 # nothing is logged.
@@ -28,4 +30,27 @@ fmx_env_get() {
     \'*\') val=${val#\'}; val=${val%\'} ;;
   esac
   printf '%s' "$val"
+}
+
+# fm_typesafe_key <env-value> <file>
+# Print the typed dispatch key: <env-value> (the caller's private copy of
+# TYPESAFE_API_KEY) when non-empty, else the TYPESAFE_API_KEY line in <file>,
+# else the macOS Keychain generic password for service typesafe-api-key. A
+# missing security command or Keychain item is absent, so empty output is off.
+fm_typesafe_key() {
+  local val=$1
+  [ -n "$val" ] || val=$(fmx_env_get TYPESAFE_API_KEY "$2")
+  [ -n "$val" ] || val=$(fm_typesafe_keychain -w) || val=''
+  printf '%s' "$val"
+}
+
+# fm_typesafe_key_present <env-value> <file>
+# Succeed when the same sources hold a key, without reading the Keychain secret.
+fm_typesafe_key_present() {
+  [ -n "$1" ] || [ -n "$(fmx_env_get TYPESAFE_API_KEY "$2")" ] || fm_typesafe_keychain >/dev/null
+}
+
+fm_typesafe_keychain() {
+  command -v security >/dev/null 2>&1 || return 1
+  security find-generic-password -s typesafe-api-key "$@" 2>/dev/null
 }

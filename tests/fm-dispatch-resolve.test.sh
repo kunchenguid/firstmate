@@ -221,7 +221,7 @@ assert_equals '' "$out" "absent key prints nothing on stdout"
 assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment,' "absent key explains itself on stderr"
 assert_absent "$LOG/argv" "absent key never calls curl"
 assert_absent "$LOG/quota-axi.calls" "absent key never reads quota-axi"
-assert_equals 'find-generic-password -s typesafe-api-key -w' "$(cat "$LOG/security.argv")" "missing Keychain item is queried by its default service"
+assert_equals 'find-generic-password -s typesafe-api-key -w' "$(cat "$LOG/security.argv")" "missing Keychain item is queried by its fixed service"
 pass "missing Keychain item is off: one stderr line, exit 0, no network call"
 
 # --- Keychain is the final opt-in source, and unavailable security is absent ---
@@ -232,12 +232,8 @@ FAKE_SECURITY_SECRET_FILE="$SECURITY_SECRET" run code out err "$BRIEF" --project
 expect_code 0 "$code" "Keychain key resolves"
 assert_contains "$out" '  status: clear' "Keychain key produces a clear result"
 assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "Keychain key reaches curl on the fd header"
-assert_equals 'find-generic-password -s typesafe-api-key -w' "$(cat "$LOG/security.argv")" "Keychain query passes only the default service on argv"
+assert_equals 'find-generic-password -s typesafe-api-key -w' "$(cat "$LOG/security.argv")" "Keychain query passes only the fixed service on argv"
 assert_not_contains "$(cat "$LOG/security.argv")" "$KEY" "Keychain key never appears on security argv"
-reset_log
-FAKE_SECURITY_SECRET_FILE="$SECURITY_SECRET" FM_TYPESAFE_KEYCHAIN_SERVICE=firstmate-test-key run code out err "$BRIEF" --project pager
-assert_contains "$out" '  status: clear' "custom Keychain service resolves"
-assert_equals 'find-generic-password -s firstmate-test-key -w' "$(cat "$LOG/security.argv")" "custom Keychain service overrides the default"
 reset_log
 run_without_security code out err "$BRIEF" --project pager
 expect_code 0 "$code" "missing security exits 0"
