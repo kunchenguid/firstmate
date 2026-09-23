@@ -52,9 +52,10 @@
 #   bordered   - a complete boxed composer: a top border, side-bordered content
 #                rows of the same family, and a bottom border (grok, kimi,
 #                older claude). The bottom border may carry a TITLE (grok
-#                writes its model name there); a titled bottom border that
+#                writes its model title there); a titled bottom border that
 #                still starts and ends with the family's rule glyph is
-#                tolerated, including Grok 1.0.5's three-column title overhang.
+#                tolerated, extending the rule right by the title's own width
+#                (a variable overhang, not a fixed column count).
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
@@ -549,12 +550,16 @@ FM_COMPOSER_CAPTURE_LINES=${FM_COMPOSER_CAPTURE_LINES:-20}
 # large region between them can never be promoted into a composer.
 FM_COMPOSER_PI_MAX_LINES=${FM_COMPOSER_PI_MAX_LINES:-8}
 
-# Column overhang of Grok 1.0.5's titled bottom border over its aligned top
-# and content rows, captured live in issue #3436's 2026-09-14 idle repro
-# (see docs/verification/runtime-backends.md). Not re-verified against a live
-# Grok install since; may need to change if a future Grok release renders a
-# different overhang or scales it with title/model-name length.
-FM_COMPOSER_GROK_TITLE_OVERHANG=3
+# Grok's bottom-border title cells are separated by a U+00B7 MIDDLE DOT
+# (e.g. "Sofie Think 0 (medium) · always-approve"); the middot is written as
+# an octal escape so it stays reviewable in source instead of an invisible
+# character. The overhang a titled bottom adds over its aligned top and
+# content rows is NOT a fixed constant: it is the title's own width, which
+# scales with the model name, effort, and permission cells, so a narrow pane
+# overhangs far past the three columns issue #3436's 1.0.5 repro measured.
+# The rule-and-title shape below accepts any such overhang and validates the
+# title instead of pinning a width.
+FM_COMPOSER_GROK_TITLE_MIDDOT=$(printf '\302\267')
 
 # 0 when <content> is exactly one glyph drawn from <glyph-list>.
 _fm_composer_is_prompt_glyph() {  # <content> <glyph-list>
@@ -1017,11 +1022,16 @@ EOF
   fi
 }
 
-# 0 when a mismatched bottom border reads as a legitimate TITLE: the trimmed
-# inner (corners already stripped) still starts and ends with the family's own
-# rule glyph, so the title is embedded IN the rule rather than replacing it.
+# 0 when a bottom border that is not a plain same-width rule is a legitimate
+# grok title: the trimmed inner (corners already stripped) starts and ends
+# with the family's own rule glyph and either embeds the title at the top's own
+# width or extends that rule right by the title's overhang, so the title is
+# part of the rule rather than a mismatch that leaves the box open. The
+# overhang is the title's own width, which varies with the model, effort, and
+# permission cells, so an overhanging bottom validates the title instead of
+# pinning a column count.
 _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
-  local family=$1 inner=$2 expected=$3 dash spaces title effort model
+  local family=$1 inner=$2 expected=$3 dash spaces title
   fm_composer_normalize_trim_var inner
   case "$family" in
     rounded|light) dash='─' ;;
@@ -1034,35 +1044,59 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
     "$dash"*"$dash") ;;
     *) return 1 ;;
   esac
+  # Blank the rule and every ASCII title character, plus grok's middot cell
+  # separator; whatever is left is residue the rule-and-title shape cannot
+  # carry, so it keeps the box ambiguous. The width test below compares these
+  # all-space strings byte-exactly rather than their ${#} lengths, which would
+  # count bytes under LC_ALL=C but characters in a UTF-8 locale.
   spaces=${inner//"$dash"/ }
+  spaces=${spaces//"$FM_COMPOSER_GROK_TITLE_MIDDOT"/ }
   spaces=$(printf '%s' "$spaces" | LC_ALL=C sed 's/[!-~]/ /g')
   case "$spaces" in
     *[![:space:]]*) return 1 ;;
   esac
+  # An EMBEDDED title - the bottom at exactly the top's own width - closes the
+  # box at the top's proven geometry, so any residue-free title embedded in the
+  # rule is tolerated (grok writes "Grok 4.5" this way on a wide pane).
   [ "$spaces" = "$expected" ] && return 0
-
-  # Grok 1.0.5 renders its real model title FM_COMPOSER_GROK_TITLE_OVERHANG
-  # columns wider than the otherwise aligned top and content rows (issue
-  # #3436; see the constant's definition for provenance and caveats). Accept
-  # only that exact overhang and only the typed Grok model/effort title
-  # shape. This keeps arbitrary malformed bottoms ambiguous while preserving
-  # the complete-box proof around a genuinely idle or pending Grok composer.
-  local overhang
-  overhang=$(printf '%*s' "$FM_COMPOSER_GROK_TITLE_OVERHANG" '')
-  [ "$spaces" = "$expected$overhang" ] || return 1
-  title=${inner//"$dash"/}
-  fm_composer_normalize_trim_var title
-  case "$title" in
-    'Grok '*\ \(low\)) effort=low ;;
-    'Grok '*\ \(medium\)) effort=medium ;;
-    'Grok '*\ \(high\)) effort=high ;;
-    'Grok '*\ \(xhigh\)) effort=xhigh ;;
+  # A bottom wider than the top overhangs right by the title's own width, which
+  # varies with the model, effort, and permission cells; only a legitimate grok
+  # model title may extend the rule that far. A narrower bottom leaves the box
+  # open, so it never begins with the top's full width of spaces.
+  case "$spaces" in
+    "$expected"*) ;;
     *) return 1 ;;
   esac
-  model=${title#Grok }
-  model=${model%" ($effort)"}
+  title=${inner//"$dash"/}
+  fm_composer_normalize_trim_var title
+  [ -n "$title" ] || return 1
+  _fm_composer_grok_title_ok "$title"
+}
+
+# 0 when <title> is a Grok bottom-border model title: a model cell, a
+# parenthesized effort cell, and an optional middot-separated permission
+# cell. The model cell is plain word characters (it may be a multi-word
+# name); a bottom whose embedded text is not this shape (a decorative banner
+# or a mid-redraw rule) keeps the box ambiguous rather than proving an empty
+# composer.
+_fm_composer_grok_title_ok() {  # <title>
+  local title=$1 model_part permission model
+  case "$title" in
+    *" · "*) model_part=${title%%" · "*}; permission=${title##*" · "} ;;
+    *) model_part=$title; permission='' ;;
+  esac
+  case "$model_part" in
+    *' (low)')    model=${model_part%' (low)'} ;;
+    *' (medium)') model=${model_part%' (medium)'} ;;
+    *' (high)')   model=${model_part%' (high)'} ;;
+    *' (xhigh)')  model=${model_part%' (xhigh)'} ;;
+    *) return 1 ;;
+  esac
   [ -n "$model" ] || return 1
-  case "$model" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$model" in *[!-A-Za-z0-9._\ ]*) return 1 ;; esac
+  if [ -n "$permission" ]; then
+    case "$permission" in *[!-A-Za-z0-9\ ]*) return 1 ;; esac
+  fi
   return 0
 }
 

@@ -655,16 +655,29 @@ test_matrix_opencode_leftbar_signals() {
 }
 
 test_matrix_grok_titled_bottom_border() {
-  # Grok 1.0.5 widened its titled BOTTOM border three columns past the top and
-  # content rows. This is the idle capture from issue #3436; Herdr has no
-  # cursor anchor, so the geometry mismatch used to make the proven box
-  # ambiguous and the verdict unknown, stranding away-mode injection.
-  local titled plain_border typed malformed placeholder_draft
+  # Grok's titled BOTTOM border carries its model title and extends past the
+  # top and content rows by the title's own width - a VARIABLE overhang that
+  # grows with the model, effort, and permission cells (issue #3436's 1.0.5
+  # idle capture measured three columns; a narrow Herdr pane with the current
+  # "Sofie Think 0 (medium) · always-approve" title overhangs far past that).
+  # Herdr has no cursor anchor, so the widened bottom used to make the proven
+  # box ambiguous and the verdict unknown, stranding away-mode injection and
+  # the composer-empty recovery path. The read accepts any such overhang and
+  # validates the title instead of pinning a column count.
+  local titled titled_v2 plain_border typed malformed placeholder_draft middot
+  middot=$(printf '\302\267')
   titled=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                        │\n  ╰────────────────────────────────────────────────────────── Grok 4.6 (xhigh) ─╯\n\n  Shift+Tab:mode  │  Ctrl+x:shortcuts'
+  # Current Grok 1.0.41 idle capture on a narrow Herdr pane: the middot-separated
+  # model/effort/permission title overhangs the aligned top by well more than the
+  # three columns issue #3436 measured. Built with printf so the middot cell
+  # separator stays out of the source as an invisible character.
+  titled_v2=$(printf '  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                        │\n  ╰────────────────────────────────────────────────────────── Sofie Think 0 (medium) %s always-approve ─╯\n\n  Shift+Tab:mode  │  Ctrl+x:shortcuts' "$middot")
   plain_border=$'  ╭──────────────────────────────────────╮\n  │ ❯                                    │\n  ╰──────────────────────────────────────╯'
   assert_screen "grok titled on tmux" empty "$CAPS_TMUX" "$titled" 1
   assert_screen "grok titled on tmux bottom-border cursor" empty "$CAPS_TMUX" "$titled" 2
   assert_screen "issue #3436 idle grok 1.0.5 on herdr" empty "$CAPS_STYLED" "$titled"
+  assert_screen "grok 1.0.41 idle on herdr (variable overhang, middot title)" empty "$CAPS_STYLED" "$titled_v2"
+  assert_screen "grok 1.0.41 idle on tmux" empty "$CAPS_TMUX" "$titled_v2" 1
   placeholder_draft=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯ Type a message...                                                      │\n  ╰────────────────────────────────────────────────────────── Grok 4.6 (xhigh) ─╯'
   assert_screen "grok bright placeholder-like draft on tmux" pending "$CAPS_TMUX" "$placeholder_draft" 1
   assert_screen "grok placeholder on plain backends" empty "$CAPS_PLAIN" "$placeholder_draft"
@@ -677,7 +690,7 @@ test_matrix_grok_titled_bottom_border() {
   assert_screen "grok typed on herdr" pending "$CAPS_STYLED" "$typed"
   malformed=$'  ╭──────────────────────────────────────────────────────────────────────────╮\n  │ ❯                                                                        │\n  ╰────────────────────────────────────────────────────────── unknown surface ─╯'
   assert_screen "oversized unknown title on herdr" unknown "$CAPS_STYLED" "$malformed"
-  pass "matrix: grok's real oversized titled bottom is empty while typed and unproved panes stay safe"
+  pass "matrix: grok's real variable-overhang titled bottom is empty while typed and unproved panes stay safe"
 }
 
 test_matrix_kimi_bordered_shell_glyph_box() {
