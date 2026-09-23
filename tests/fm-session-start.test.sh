@@ -112,8 +112,8 @@ SH
 # four group filters the startup listing composes (in-flight, held, blocked
 # queued, and the dispatchable ready set) and REFUSES anything the recovery
 # listing must never ask for: a body field, an unfiltered whole-backlog listing,
-# or done rows. FM_FAKE_TASKS_AXI_READY sizes the ready set so the queued bound
-# can be driven past its limit.
+# or body fields. FM_FAKE_TASKS_AXI_READY sizes the ready set so the queued
+# bound can be driven past its limit.
 make_fake_tasks_axi_compact() {
   local fakebin=$1
   cat > "$fakebin/tasks-axi" <<'SH'
@@ -175,10 +175,6 @@ case "${1:-}" in
     esac
     require_file "$@"
     case "$*" in
-      *'--state done'*)
-        printf '%s\n' 'startup recovery must never list done rows' >&2
-        exit 9
-        ;;
       *'--state in_flight'*)
         task_header 1
         printf '%s\n' '  compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending'
@@ -190,6 +186,15 @@ case "${1:-}" in
       *'--state queued'*'--blocked'*)
         task_header 1
         printf '%s\n' '  blocked-followup,queued,scout,firstmate,Follow compact startup,compact-startup,"-","-"'
+        ;;
+      *'--state done'*)
+        printf 'count: 8\n'
+        printf 'tasks[5]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:\n'
+        i=1
+        while [ "$i" -le 5 ]; do
+          printf '  done-%s,done,ship,firstmate,Completed item %s,none,"-","-"\n' "$i" "$i"
+          i=$((i + 1))
+        done
         ;;
       *)
         printf '%s\n' 'startup recovery must not request an unfiltered whole-backlog listing' >&2
@@ -2027,8 +2032,8 @@ EOF
   out=$(FM_FAKE_TASKS_AXI_LOG="$log" FM_FAKE_TASKS_AXI_READY=3 \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "compact backlog listing (tasks-axi; done rows omitted; every in-flight, held, and blocked row shown in full; ready queued bounded to 20; task bodies omitted)" \
-    "compatible tasks-axi backend did not render the compact backlog listing"
+  assert_contains "$out" "work at a glance (tasks-axi; every in-flight, held, and blocked row shown in full; ready queued bounded to 20; completed bounded to 5;" \
+    "compatible tasks-axi backend did not render the bounded work overview"
   assert_contains "$out" "tasks[1]{id,state,kind,repo,title,blocked_by,hold_kind,hold_reason}:" \
     "tasks-axi compact listing omitted the expected structured field header"
   assert_contains "$out" "compact-startup,in_flight,ship,firstmate,Compact startup digest,none,captain,captain choice pending" \
@@ -2041,7 +2046,11 @@ EOF
     "tasks-axi compact listing omitted a dispatchable queued row inside the bound"
   assert_not_contains "$out" "OVERSIZED-BODY-LINE" "tasks-axi compact digest leaked an in-flight task body"
   assert_not_contains "$out" "QUEUED-BODY-LINE" "tasks-axi compact digest leaked a queued task body"
-  assert_not_contains "$out" "DONE-ROW-LINE" "tasks-axi compact digest listed a done row at startup"
+  assert_contains "$out" "completed (bounded):" "tasks-axi work overview omitted completed work"
+  assert_contains "$out" "done-5,done,ship,firstmate,Completed item 5" "tasks-axi work overview dropped a completed row inside its bound"
+  assert_not_contains "$out" "done-6,done" "tasks-axi work overview did not bound completed rows"
+  assert_contains "$out" "(3 completed row(s) omitted)" "tasks-axi work overview did not disclose the completed remainder"
+  assert_contains "$out" "display order is not a priority ranking" "ready queue order could be mistaken for priority"
   assert_contains "$out" "--- compact-startup ---" "in-flight meta identity disappeared from startup recovery digest"
   assert_contains "$out" "worktree=$home/projects/firstmate" "in-flight recovery worktree identity disappeared from startup digest"
   assert_contains "$out" "Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full" \
@@ -2052,9 +2061,7 @@ EOF
   assert_not_contains "$out" "help[1]:" \
     "the composed listing repeated tasks-axi's per-group help block"
 
-  # The fake refuses a body field, an unfiltered listing, and a done listing, so
-  # a clean render already proves those were never asked for; pin the group
-  # filters the listing is built from.
+  # Pin the canonical lifecycle filters and bounded completed query.
   assert_grep "--state in_flight --fields blocked_by,hold_kind,hold_reason" "$log" \
     "session start did not ask tasks-axi for the in-flight group"
   assert_grep "--state held --fields blocked_by,hold_kind,hold_reason" "$log" \
@@ -2063,8 +2070,10 @@ EOF
     "session start did not ask tasks-axi for the blocked queued group"
   assert_grep "ready --file $home/data/backlog.md" "$log" \
     "session start did not ask tasks-axi for the dispatchable queued set"
+  assert_grep "--state done --limit 5 --fields blocked_by,hold_kind,hold_reason" "$log" \
+    "session start did not request only the bounded completed summary"
 
-  pass "compatible tasks-axi backlog rendering drops done rows and keeps every in-flight, held, and blocked row"
+  pass "compatible tasks-axi overview bounds completions and keeps active, held, blocked, and ready work"
 }
 
 # The bound may only ever cut the dispatchable-now listing, and whatever it cuts
@@ -2115,8 +2124,8 @@ EOF
 
   out=$(FM_SESSION_START_QUEUED_LIMIT=4 run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "compact backlog listing (manual backend; done rows omitted; every in-flight, held, and blocked title line kept; other queued bounded to 4; indented task bodies omitted)" \
-    "manual backend did not use compact title-line rendering"
+  assert_contains "$out" "work at a glance (manual backend; every in-flight, held, and blocked title line kept; ready queued bounded to 4; completed bounded to 5;" \
+    "manual backend did not use bounded title-line overview rendering"
   assert_contains "$out" "## In flight" "manual compact rendering omitted the in-flight section heading"
   assert_contains "$out" "- [ ] compact-startup - Compact startup digest" \
     "manual compact rendering omitted the in-flight title line"
@@ -2128,13 +2137,13 @@ EOF
     "manual compact rendering dropped a held queued title line"
   assert_not_contains "$out" "OVERSIZED-BODY-LINE" "manual compact digest leaked an in-flight task body"
   assert_not_contains "$out" "QUEUED-BODY-LINE" "manual compact digest leaked a queued task body"
-  assert_not_contains "$out" "DONE-ROW-LINE" "manual compact digest listed a done row at startup"
-  assert_not_contains "$out" "## Done" "manual compact digest printed the done heading it never fills"
+  assert_contains "$out" "## Completed (bounded)" "manual overview omitted the completed section"
+  assert_contains "$out" "DONE-ROW-LINE" "manual overview omitted a completed title inside its bound"
   assert_contains "$out" "- [ ] plain-4 - Plain queued item 4" \
     "manual compact rendering dropped a queued title line inside its bound"
   assert_not_contains "$out" "- [ ] plain-5 - Plain queued item 5" \
     "manual compact rendering did not bound its plain queued listing"
-  assert_contains "$out" "(shown 1 in-flight, 2 held or blocked queued, 4 of 25 other queued title line(s); 1 done row(s) omitted)" \
+  assert_contains "$out" "(shown 1 in-flight, 2 held or blocked queued, 4 of 25 ready queued title line(s); 1 of 1 completed row(s))" \
     "manual compact rendering did not report its bound accounting"
   assert_contains "$out" "(21 more queued - raise FM_SESSION_START_QUEUED_LIMIT or read data/backlog.md for the rest)" \
     "manual compact rendering did not disclose an exact queued remainder"
@@ -2155,12 +2164,12 @@ EOF
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
 
-  assert_contains "$out" "compact backlog listing (tasks-axi unavailable or incompatible; done rows omitted;" \
+  assert_contains "$out" "work at a glance (tasks-axi unavailable or incompatible;" \
     "unavailable tasks-axi did not fall back to compact title-line rendering"
   assert_contains "$out" "- [ ] compact-startup - Compact startup digest" \
     "unavailable tasks-axi fallback omitted a backlog title line"
   assert_not_contains "$out" "OVERSIZED-BODY-LINE" "unavailable tasks-axi fallback leaked an in-flight task body"
-  assert_not_contains "$out" "DONE-ROW-LINE" "unavailable tasks-axi fallback listed a done row at startup"
+  assert_contains "$out" "DONE-ROW-LINE" "unavailable tasks-axi fallback omitted bounded completed work"
 
   pass "unavailable or incompatible tasks-axi falls back to compact manual backlog rendering"
 }
