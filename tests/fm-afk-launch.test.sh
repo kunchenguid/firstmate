@@ -540,7 +540,6 @@ unit_concurrent_lock_never_double_holds() {
   # refused and must observe a live holder.
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
-    fm_afk_launch_lock_helpers || exit 1
     fm_lock_try_acquire "$2/state/.afk-launch.lock" && exit 1
     [ -n "${FM_LOCK_HELD_PID:-}" ] || exit 1
     exit 0

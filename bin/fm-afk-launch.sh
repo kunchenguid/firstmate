@@ -121,29 +121,17 @@ FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
-# The one fleet lock primitive (bin/fm-wake-lib.sh: ln -s plus owner
-# verification). Loaded lazily, following bin/fm-afk-contract.sh's pattern;
-# usually already present through bin/fm-afk-start.sh.
-fm_afk_launch_lock_helpers() {
-  command -v fm_lock_try_acquire >/dev/null 2>&1 && return 0
-  # shellcheck source=bin/fm-wake-lib.sh
-  . "$FM_AFK_LAUNCH_DIR/fm-wake-lib.sh"
-}
-
 fm_afk_launch_lock_acquire() {
   local attempt=0 identity
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
-  fm_afk_launch_lock_helpers || return 1
   while [ "$attempt" -lt 200 ]; do
     attempt=$((attempt + 1))
     if fm_lock_try_acquire "$FM_AFK_LAUNCH_LOCK"; then
-      # The primitive already records our pid as the owner; the pid-identity
-      # pins the exact process start so a recycled pid can never match.
       identity=$(fm_pid_identity "$$" 2>/dev/null) || {
         fm_lock_release "$FM_AFK_LAUNCH_LOCK"
         return 1
       }
-      if [ -z "$identity" ] || ! printf '%s' "$identity" > "$FM_AFK_LAUNCH_LOCK/pid-identity"; then
+      if [ -z "$identity" ]; then
         fm_lock_release "$FM_AFK_LAUNCH_LOCK"
         return 1
       fi
@@ -156,7 +144,6 @@ fm_afk_launch_lock_acquire() {
 }
 
 fm_afk_launch_lock_release() {
-  command -v fm_lock_release >/dev/null 2>&1 || return 0
   fm_lock_release "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || true
 }
 
