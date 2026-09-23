@@ -1,6 +1,6 @@
 # Kimi Code
 
-Verified on 2026-09-17 with Kimi Code CLI 2.0.0; the workspace-trust facts below were re-established on 2026-09-23 against Kimi Code CLI 2.0.2.
+Verified on 2026-09-17 with Kimi Code CLI 2.0.0; the workspace-trust facts below were re-established on 2026-09-23 against Kimi Code CLI 2.0.2 and re-checked on 2026-09-24 against 2.1.0, which Kimi self-updated to on launch.
 
 ## Operating facts
 

@@ -8,11 +8,15 @@ This record owns how those facts were established and what is still unproven.
 
 | Field | Value |
 |---|---|
-| Version | `kimi 2.0.2` |
-| Verified | 2026-09-23 |
+| Version | `kimi 2.0.2` for every transcript below; re-verified against `kimi 2.1.0` |
+| Verified | 2026-09-23 on 2.0.2; re-verified 2026-09-24 on 2.1.0 |
 | Binary | `~/.kimi-code/bin/kimi`, a Mach-O 64-bit arm64 executable |
 | Platform | macOS (Darwin 23.6.0), arm64 |
 | Backend | tmux 3.7c, in throwaway sessions launched per probe |
+
+Kimi Code self-updates on launch, so exercising the binary can move the installed version out from under a probe: the 2026-09-23 transcripts below ran on 2.0.2, and by 2026-09-24 the same `~/.kimi-code/bin/kimi` had updated itself to 2.1.0.
+Every vendor fact this record establishes was re-checked against 2.1.0 on 2026-09-24 and still holds - the store layout and its one-file-per-workspace shape, the filename-is-the-lookup-key property, the workspace-id slug rule including both truncation-order cases and the `workspace` fallback, exact-directory matching with no ancestor walk, and symlink resolution.
+The transcripts below are the original 2.0.2 evidence and are kept exactly as recorded rather than re-taken; version-scoped claims in them name 2.0.2 for that reason.
 
 Every launch below ran against a throwaway `KIMI_CODE_HOME` holding a copy of the credential and config files only, with the Firstmate turn-end hook region stripped so the probe home was inert.
 The operator's own `~/.kimi-code` was read but never written, and no firstmate fleet state was touched.
@@ -202,7 +206,7 @@ Selecting a home is only correct once trust, the hook, the hook script and the t
 ## What is still unproven
 
 Whether a future version begins validating the `root` field inside the record; the field is written correctly, so this would be a silent no-change rather than a break.
-Whether the 40-character slug cap or the fallback literal differ on Linux or Windows builds; only macOS arm64 2.0.2 was exercised.
+Whether the 40-character slug cap or the fallback literal differ on Linux or Windows builds; only macOS arm64 was exercised, on 2.0.2 and then 2.1.0.
 No secondmate Kimi home was launched live - that mode's scope test is covered by `tests/fm-kimi-trust.test.sh` against seeded fixture homes, and the store write is the same single-file path as worktree mode.
 Kimi's behavior when the trust file exists but is unreadable was not probed.
 
@@ -216,3 +220,4 @@ bin/fm-test-run.sh tests/fm-kimi-trust.test.sh tests/fm-kimi-harness.test.sh
 
 Those are portable and need no Kimi.
 To re-confirm the vendor surface itself, repeat the control-and-treatment launch above against a throwaway `KIMI_CODE_HOME` and a folder Kimi has never seen, and re-harvest the slug table from `workspaces.json`, which Kimi writes at launch before the dialog is answered.
+Read `kimi --version` after that run rather than before it: the vendor self-updates on launch, so the probe itself can move the installed version, and the Subject table records the version each pass actually exercised.

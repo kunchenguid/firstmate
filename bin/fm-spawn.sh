@@ -3976,12 +3976,18 @@ fi
 # path that was not pre-registered, refuses to count a busy turn as ready until
 # it has done so. agy is crewmate/scout only (refused above for secondmate), so
 # only the worktree shape applies.
-# kimi gates a fresh worktree behind its own "Trust this folder?" dialog and
-# honours a workspace-trust record written ahead of launch
-# (bin/fm-kimi-trust.sh). Its dialog preselects the affirmative answer and
+# kimi gates a folder it has never seen behind its own full-screen "Trust this
+# folder?" dialog and honours a workspace-trust record written ahead of launch
+# (bin/fm-kimi-trust.sh, whose header owns the store contract and the evidence),
+# so the same pre-registration removes the dialog outright and the readiness
+# gate's fragile vendor-frame read is never needed. Like agy's and unlike
+# claude's, kimi's dialog preselects the affirmative answer and
 # kimi_wait_for_ready answers it live, so a failed registration warns rather
-# than refusing, as for agy. kimi IS a verified secondmate harness, so both
-# shapes apply.
+# than refusing: it costs that gate a frame it may not be able to read, not the
+# spawn. Trust is exact-directory with no ancestor walk, so only the directory
+# this launch starts in is registered and never the primary checkout. kimi IS a
+# verified secondmate harness, so both shapes apply: that directory is the
+# worktree for a crewmate or scout and the home itself for a secondmate.
 AGY_TRUST_PREREGISTERED=0
 case "$HARNESS" in
 claude*)
@@ -4005,17 +4011,6 @@ agy)
   fi
   ;;
 kimi)
-  # Kimi gates a folder it has never seen behind a full-screen "Trust this
-  # folder?" dialog, and bin/fm-kimi-trust.sh records the one workspace-trust
-  # file that suppresses it (its header owns the store contract and the
-  # evidence). Like agy's and unlike claude's, Kimi's dialog PRESELECTS the
-  # affirmative answer and kimi_wait_for_ready below answers it live, so a
-  # failed registration is a warning rather than a refusal: it costs the
-  # readiness gate a vendor-rendered TUI frame it may not be able to read, not
-  # the spawn. Registering removes the dialog outright so that fragile frame
-  # read is never needed. Trust is exact-directory with no ancestor walk, so
-  # only the directory this launch starts in is registered - the worktree for a
-  # crewmate or scout, the home itself for a secondmate.
   if [ "$KIND" = secondmate ]; then
     kimi_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
     kimi_trust_dir=$PROJ_ABS
