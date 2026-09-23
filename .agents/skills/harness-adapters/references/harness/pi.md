@@ -14,6 +14,7 @@ Verified on 2026-07-27 with Pi and Pi-signed 0.82.0 unless a fact gives another 
 | Model flag | `--model <model>`. |
 | Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>`; both identities expose the same levels and completed the same model-qualified max-thinking smoke. |
 | Model discovery | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
+| Start directory | `--start-dir <relative-directory>` starts a Pi or Pi-signed ship or scout inside a subdirectory of its worktree on tmux or Herdr, so a monorepo game's own instructions load; `../../../bin/fm-spawn.sh --help` owns the contract, and relaunch preserves the recorded choice. |
 
 Native Codex sessions may request `ultra` through the native extension flag described by `../../../bin/fm-spawn.sh`; it is separate from Pi's thinking levels.
 Pi has no permission system, so workers are always autonomous.

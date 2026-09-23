@@ -759,6 +759,57 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   pass "native Ultra relaunch preserves its profile and rejects an unsupported model before stopping"
 }
 
+# A recorded start directory is part of what the replacement needs, so every
+# way it can make fm-spawn --relaunch refuse is asked here first, before the
+# running agent is sent anything.
+test_relaunch_refuses_a_lost_or_unsupported_start_directory_before_stop() {
+  local dir out rc id=rl-startdir
+  dir=$(new_case startdir "$id")
+  add_ship_task "$dir" "$id" pi
+  printf pi > "$dir/fake/command"
+  printf pi > "$dir/fake/becomes"
+  printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
+  chmod +x "$dir/fakebin/pi"
+  printf 'start_dir=games/demo\n' >> "$dir/home/state/$id.meta"
+  cp "$dir/home/state/$id.meta" "$dir/meta.before"
+  mkdir -p "$dir/wt/games/demo"
+
+  out=$(run_control "$dir" "$id" relaunch --harness codex --note "switch runtime"); rc=$?
+  expect_code 1 "$rc" "a start-directory task relaunched onto codex should refuse: $out"
+  assert_contains "$out" "start_dir 'games/demo'" "the refusal should name the recorded start directory"
+  assert_contains "$out" "only canonical Pi" "the refusal should name the supported axes"
+  [ "$(cat "$dir/fake/command")" = pi ] || fail "an unsupported start-directory harness switch stopped the running agent"
+  [ ! -s "$dir/fake/literal" ] || fail "an unsupported start-directory harness switch sent lifecycle input"
+  cmp -s "$dir/meta.before" "$dir/home/state/$id.meta" || fail "an unsupported harness switch changed the task record"
+
+  rmdir "$dir/wt/games/demo"
+  out=$(run_control "$dir" "$id" relaunch --note "directory gone"); rc=$?
+  expect_code 1 "$rc" "a missing start directory should refuse before stopping: $out"
+  assert_contains "$out" "not an accessible directory" "the refusal should say the directory is gone"
+  [ "$(cat "$dir/fake/command")" = pi ] || fail "a missing start directory stopped the running agent"
+  [ ! -s "$dir/fake/literal" ] || fail "a missing start directory sent lifecycle input"
+  cmp -s "$dir/meta.before" "$dir/home/state/$id.meta" || fail "a missing start directory changed the task record"
+
+  rmdir "$dir/wt/games"
+  mkdir -p "$dir/outside/demo"
+  ln -s "$dir/outside" "$dir/wt/games"
+  printf 'games\n' >> "$(git -C "$dir/wt" rev-parse --git-path info/exclude)"
+  out=$(run_control "$dir" "$id" relaunch --note "directory escaped"); rc=$?
+  expect_code 1 "$rc" "an escaping start directory should refuse before stopping: $out"
+  assert_contains "$out" "physically escapes" "the refusal should say the directory left the worktree"
+  [ "$(cat "$dir/fake/command")" = pi ] || fail "an escaping start directory stopped the running agent"
+  [ ! -s "$dir/fake/literal" ] || fail "an escaping start directory sent lifecycle input"
+  cmp -s "$dir/meta.before" "$dir/home/state/$id.meta" || fail "an escaping start directory changed the task record"
+
+  rm "$dir/wt/games"
+  mkdir -p "$dir/wt/games/demo"
+  out=$(run_control "$dir" "$id" relaunch --note "directory restored"); rc=$?
+  expect_code 0 "$rc" "a restored start directory should relaunch: $out"
+  [ "$(meta_field "$dir" "$id" start_dir)" = games/demo ] || fail "relaunch dropped the recorded start directory"
+  assert_contains "$(cat "$dir/fake/literal")" "cd -- '$dir/wt/games/demo'" "the replacement was not launched into the recorded start directory"
+  pass "fm-control relaunch: a lost, escaping, or unsupported start directory refuses before the agent is stopped"
+}
+
 test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
@@ -1930,6 +1981,7 @@ case "${1:-} ${2:-}" in
     case "$payload" in
       ". '"*"'") staged=${payload#". '"}; staged=${staged%"'"}; [ ! -f "$staged" ] || payload=$(cat "$staged") ;;
     esac
+    printf '%s\n' "$payload" >> "$D/literal"
     case "$payload" in
       *'encode launch-brief'*) : > "$D/herdr-agent-live" ;;
     esac
@@ -2176,6 +2228,38 @@ test_herdr_reclaim_keeps_the_task_whole() {
   pass "reclaim: a herdr reclaim rebinds the endpoint and leaves the whole rest of the task alone"
 }
 
+# Exercise the start-directory contract through the newer destroyed-endpoint
+# recovery path. The backend is a fake; the delivered Pi command is executed.
+test_herdr_reclaim_preserves_start_directory() {
+  local dir out rc=0 launch
+  herdr_case_or_skip gone-herdr-start-dir rl78 fmlab '%none' || {
+    echo "skip - herdr reclaim needs jq (the herdr adapter parses JSON with it)"
+    return 0
+  }
+  dir=$HERDR_CASE_DIR
+  mkdir -p "$dir/wt/games/demo"
+  printf 'start_dir=games/demo\n' >> "$dir/home/state/rl78.meta"
+  cat > "$dir/fakebin/pi" <<'PI'
+#!/bin/sh
+[ "${1:-}" != --help ] || exit 0
+pwd -P > "$FM_START_CAPTURE"
+printf '%s\n' "$@" >> "$FM_START_CAPTURE"
+PI
+  chmod +x "$dir/fakebin/pi"
+  out=$(run_spawn "$dir" rl78 --relaunch --harness pi --model codex-native/gpt-6-astra --effort high) || rc=$?
+  expect_code 0 "$rc" "nested Pi reclaim failed: $out"
+  [ "$(meta_field "$dir" rl78 herdr_pane_id)" = '%9' ] || fail "reclaim did not rebind the destroyed endpoint"
+  [ "$(meta_field "$dir" rl78 worktree)" = "$dir/wt" ] || fail "reclaim changed worktree identity"
+  [ "$(meta_field "$dir" rl78 start_dir)" = games/demo ] || fail "reclaim lost start directory"
+  launch=$(tail -n 1 "$dir/fake/literal")
+  (cd "$dir/wt" && FM_START_CAPTURE="$dir/capture" sh -c "$launch" && pwd -P > "$dir/after") || fail "reclaimed launch command failed"
+  [ "$(head -n 1 "$dir/capture")" = "$(cd "$dir/wt/games/demo" && pwd -P)" ] || fail "reclaimed Pi started outside its game"
+  assert_grep 'codex-native/gpt-6-astra' "$dir/capture" "reclaim lost native model"
+  assert_grep 'high' "$dir/capture" "reclaim lost effort"
+  [ "$(cat "$dir/after")" = "$(cd "$dir/wt" && pwd -P)" ] || fail "reclaim moved the root shell"
+  pass "reclaim: a destroyed Herdr endpoint preserves Pi startup directory and root identity"
+}
+
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause() {
   local dir out rc
   # No HERDR_* env at all, which is how an operator reclaims from ssh or cron.
@@ -2316,7 +2400,9 @@ test_herdr_exit_reports_already_stopped_when_the_pane_outlived_its_server
 test_herdr_rebind_stays_in_the_recorded_session
 test_herdr_reclaim_refuses_an_agent_that_came_back
 test_herdr_reclaim_keeps_the_task_whole
+test_herdr_reclaim_preserves_start_directory
 test_herdr_reclaim_of_a_secondmate_names_its_own_owner
 test_herdr_rebind_failure_from_a_plain_shell_names_the_real_cause
+test_relaunch_refuses_a_lost_or_unsupported_start_directory_before_stop
 test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it
 test_relaunch_moves_a_drifted_item_back_in_flight
