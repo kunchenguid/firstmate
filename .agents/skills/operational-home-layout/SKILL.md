@@ -59,6 +59,7 @@ config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitig
 config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCAL, gitignored; absent means auto (macOS Notification Center when available); see docs/wedge-alarm.md
 config/watched-tools.json  optional list of the tools this home depends on, read by the update check armed with bin/fm-tool-update-check.sh; LOCAL, gitignored, firstmate-maintained but human-editable, and NOT inherited by secondmate homes; see docs/configuration.md "Watched tool updates"
 config/watch.env     optional home-local watcher tuning as exported shell assignments; LOCAL, gitignored, never removed by bootstrap; loaded by bin/fm-watch-arm.sh before x-mode.env; see docs/configuration.md "Relay (.env)"
+config/usage-warner  optional Claude usage-window thresholds for the opt-in macOS threshold warner armed with bin/fm-usage-warner.sh; LOCAL, gitignored, and NOT inherited by secondmate homes; see docs/configuration.md "Local Claude usage warner"
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
@@ -105,6 +106,7 @@ state/               runtime records and signals; gitignored
   x-watch.check.sh   generated Relay poll shim; present only when opted in (section 14)
   tool-updates.check.sh  generated watched-tool update poll shim and its .check-trust binding; present only after bin/fm-tool-update-check.sh arm; its report record .tool-updates is what keeps one pending update from being reported on every poll
   mail.check.sh      generated received-mail poll shim and its .check-trust binding; present only after bin/fm-mail-check.sh arm; report record .mail-check (mail schema: docs/configuration.md "Mail plane")
+  usage-warner.check.sh  generated Claude usage threshold poll shim and its .check-trust binding; present only after bin/fm-usage-warner.sh arm; its de-dupe record .usage-warner is what keeps one threshold crossing from warning on every poll
   .mail-seen .mail-woken .mail-retry .mail-retry-pos .mail-turn .mail-seen.lock  mail-plane poll cursor, emission journal, transient-fetch retry set, retry-scan position, contended-slot turn flag, and overlapping-poll lock; written only by bin/fm-mail.sh (mail schema: docs/configuration.md "Mail plane")
   startup-growth.check.sh  generated daily startup-growth poll shim and its .check-trust binding; present only after bin/fm-startup-growth-check.sh arm; its record .startup-growth-check holds the daily gate, the per-file growth baselines, and the last reported finding set, so removing it re-baselines growth silently and repeats a standing finding such as a budget overrun once (docs/configuration.md "Daily startup growth check")
   pr-health.check.sh  generated owned-PR health poll shim and its .check-trust binding; present only after bin/fm-pr-health.sh arm, which config/pr-health-monitor gates (docs/configuration.md "PR health monitor")

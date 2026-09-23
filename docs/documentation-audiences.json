@@ -359,6 +359,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/usage-warner",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/watched-tools.json",
       "audience": "operator-example"
     },
@@ -497,6 +501,10 @@
     {
       "path": "docs/opencode-2-plugin-port-scope.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/usage-warner.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/verification/agy.md",

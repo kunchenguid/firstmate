@@ -1831,6 +1831,30 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 - So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 - A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Local Claude usage warner (config/usage-warner)
+
+`config/usage-warner` is an optional local, gitignored set of Claude usage-window thresholds.
+It is opt-in and load-bearing: an unconfigured home sees no behaviour change, and [`bin/fm-usage-warner.sh`](../bin/fm-usage-warner.sh) refuses to arm without at least one valid threshold.
+This is a threshold warner, not a usage viewer - it runs the existing `quota-axi` read (`--no-credential-refresh`, never a credential-refreshing flag) and speaks only once when a configured window crosses a configured percentage, batching several crossings from the same read into one notification and re-arming once a window reads back below its threshold.
+Warnings post through macOS Notification Center, the same OS-level path the away-mode wedge alarm resolves to on this platform, without sourcing or coupling to that daemon's away-mode-specific config or rate limiting.
+
+This section is the single owner of the canonical schema.
+`bin/fm-usage-warner.sh` owns read, notification, and de-dupe mechanics.
+
+```
+<window-id>:<percent>
+```
+
+One directive per non-empty, non-comment line, split on the last colon so a per-model window id such as `model:fable` still parses.
+`<window-id>` is exactly the `id` field `quota-axi`'s own `--json` output already uses.
+`<percent>` is how much of that window has been CONSUMED, a whole number from 1 to 100, compared against the window's own `percentUsed`: `seven_day:90` warns once the weekly window is 90% used, with 10% of it left.
+See [`usage-warner.md`](usage-warner.md) for the full behaviour reference and [`docs/examples/usage-warner`](examples/usage-warner) for a starting point to copy into local `config/usage-warner`.
+
+Arm the check once per home with `bin/fm-usage-warner.sh arm`.
+That writes `state/usage-warner.check.sh` and binds its bytes with `bin/fm-check-register.sh`, so the existing watcher polls it on its normal cadence and turns a crossing into a `check:` wake; no separate schedule is involved.
+`arm` refuses on any platform other than macOS.
+`bin/fm-usage-warner.sh disarm` removes the shim, its trust binding, and the de-dupe record (`state/.usage-warner`).
+
 ## Mail plane (.env)
 
 The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
