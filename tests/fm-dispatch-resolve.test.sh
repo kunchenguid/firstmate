@@ -643,6 +643,7 @@ jq '.providers |= [to_entries[] | .value + {state: {status: (["auth_required", "
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_QUOTA_STATUS=1 QUOTA_AXI_FIXTURE="$TMP_ROOT/quota-all-failed.json" run code out err "$BRIEF"
 expect_code 0 "$code" "valid all-failed quota snapshot exits 0"
+assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "a nonzero quota-axi exit is still read exactly once"
 assert_contains "$out" '  status: escalate' "a valid snapshot from a nonzero quota-axi exit reaches resolution"
 assert_contains "$out" '  reason: no rankable eligible candidate' "all-failed providers leave nothing rankable"
 assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  -> eligible, unranked: provider cursor unmeasured (unknown): disclosed uncertainty' "failed providers stay listed as unmeasured"
@@ -651,6 +652,7 @@ assert_not_contains "$out" '  profile:' "an all-failed snapshot emits no profile
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_QUOTA_FAIL=1 run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi failure exits 0"
+assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "a failed quota-axi read is never retried"
 assert_contains "$out" '  status: error' "quota-axi failure is an error outcome"
 assert_contains "$out" '  reason: quota-axi --json failed' "quota-axi failure is named"
 pass "quota evidence comes from one quota-axi --json read, and only a missing valid snapshot is an error outcome"
