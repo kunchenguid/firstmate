@@ -21,9 +21,11 @@
 #     slot was handed out twice; bin/fm-wake-lib.sh owns the claim and its states.
 #   slot-claim-unreadable (action) - the claim file exists but is not a claim.
 #   shared-copy (action) - two or more task records name the same copy.
-#   dirty-orphan-copy (action) - a linked copy that no task record names has
-#     uncommitted changes (Firstmate's own untracked hook files are ignored, as in
-#     bin/fm-teardown.sh's landed-work test).
+#   dirty-orphan-copy (action) - a Treehouse pool copy (a slot
+#     fm_treehouse_pool_slot recognizes, or one carrying a .fm-slot-owner claim)
+#     that no task record names has uncommitted changes (Firstmate's own
+#     untracked hook files are ignored, as in bin/fm-teardown.sh's landed-work
+#     test). Other linked worktrees are someone's live work and never findings.
 #   unlanded-branch (action) - a local fm/* branch no live task record owns has
 #     commits on no remote whose content is not on the default branch.
 #   clone-behind (routine) - a clone under projects/ whose local default branch
@@ -76,7 +78,7 @@ usage() {
 usage: fm-hygiene-audit.sh [--json] [--pr-lookup]
 
 Read-only audit of leftover state that needs cleanup: stale or shared copy
-claims, dirty copies no task owns, unlanded fm/* branches no task owns, landed
+claims, dirty pool copies no task owns, unlanded fm/* branches no task owns, landed
 leftover branches, and clones behind their remote default branch.
 Nothing is fetched or changed. --pr-lookup opts in to bounded `gh pr list`
 calls that recognize a branch landed through a merged pull request.
@@ -174,13 +176,15 @@ copy_owner() {  # <real-path>: prints the first task id whose record names this 
   return 1
 }
 
-# Slot claims and shared copies. The claim owner is loaded only when a task
-# record exists, because loading it creates the state directory.
-if [ "${#TASK_IDS[@]}" -gt 0 ]; then
+# Slot claims and shared copies. The slot helpers are loaded only when needed,
+# because loading them creates the state directory.
+load_slot_lib() {
+  command -v fm_treehouse_slot_owner_state >/dev/null 2>&1 && return 0
   # shellcheck source=bin/fm-wake-lib.sh
   # shellcheck disable=SC1091
-  . "$SCRIPT_DIR/fm-wake-lib.sh"  # fm_treehouse_slot_owner_state
-fi
+  . "$SCRIPT_DIR/fm-wake-lib.sh"  # fm_treehouse_pool_slot, fm_treehouse_slot_owner_*
+}
+[ "${#TASK_IDS[@]}" -eq 0 ] || load_slot_lib
 for i in "${!TASK_IDS[@]}"; do
   [ "${TASK_KINDS[$i]}" = secondmate ] && continue
   id=${TASK_IDS[$i]} copy=${TASK_COPIES[$i]}
@@ -337,6 +341,14 @@ EOF
   return 1
 }
 
+pool_copy() {  # <repo> <real-path>
+  local marker
+  load_slot_lib
+  fm_treehouse_pool_slot "$1" "$2" && return 0
+  marker=$(fm_treehouse_slot_owner_marker "$2") || return 1
+  [ -e "$marker" ] || [ -L "$marker" ]
+}
+
 # Branches checked out in a copy some task record names.
 owned_by_checkout() {  # <repo> <branch-ref>
   local line path=''
@@ -357,7 +369,7 @@ audit_repo() {  # <repo>
   label=$(repo_label "$repo")
   common=$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || common=$repo
 
-  # Dirty linked copies no task record names.
+  # Dirty pool copies no task record names.
   while IFS= read -r line; do
     case "$line" in
       "worktree "*)
@@ -365,6 +377,7 @@ audit_repo() {  # <repo>
         if [ -z "$main" ]; then main=$path; continue; fi
         path=$(real_dir "$path") || continue
         copy_owner "$path" >/dev/null && continue
+        pool_copy "$repo" "$path" || continue
         dirty=$(git -C "$path" status --porcelain 2>/dev/null \
           | grep -vE '^\?\? (\.claude/|\.fm-(grok|kimi)-turnend$)' | head -1 || true)
         [ -n "$dirty" ] || continue
