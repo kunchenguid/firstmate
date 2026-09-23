@@ -26,7 +26,7 @@
 #   fm-fleet-ledger.sh merged <task> local
 #   fm-fleet-ledger.sh cleaned_up <task>
 #   fm-fleet-ledger.sh capture
-#   fm-fleet-ledger.sh appended <state>/<task>.status
+#   fm-fleet-ledger.sh appended <config> <state>/<task>.status
 #
 # capture appends one task.status record for every complete (newline-ended)
 # line added to a state/<task>.status log since that task's byte offset in
@@ -37,10 +37,9 @@
 # grown log, capture returns after one size listing and sources nothing.
 # appended captures only that task, so a worker's status line is recorded as
 # soon as the worker writes it; the byte offset keeps the per-poll capture from
-# recording it again. Its path names the home: the state directory is the
-# file's directory and the flag lives in that directory's sibling config/
-# (FM_CONFIG_OVERRIDE still wins), because a worker has no firstmate
-# environment.
+# recording it again. Its arguments name the home, because a worker has no
+# firstmate environment: the flag lives in <config> and the state directory is
+# the status file's directory.
 # pr_ready, merged, and cleaned_up first capture their own task, so its status
 # records precede them. cleaned_up then deletes the task's offset, because teardown
 # retires that status log right after. dispatched deletes any leftover offset
@@ -66,7 +65,7 @@ LOCK="$STATE/.fleet-ledger.lock"
 TEXT_MAX_CHARS=2000
 
 usage() {
-  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | pr_ready <task> <url> | merged <task> pr <url> | merged <task> local | cleaned_up <task> | capture | appended <state>/<task>.status" >&2
+  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | pr_ready <task> <url> | merged <task> pr <url> | merged <task> local | cleaned_up <task> | capture | appended <config> <state>/<task>.status" >&2
   exit 2
 }
 
@@ -85,13 +84,13 @@ case "$cmd" in
   cleaned_up) { [ "$#" -eq 2 ] && task_ok "$2"; } || usage ;;
   capture) [ "$#" -eq 1 ] || usage ;;
   appended)
-    [ "$#" -eq 2 ] || usage
-    case "$2" in /*/*.status) ;; *) usage ;; esac
-    APPENDED_TASK=${2##*/}
+    [ "$#" -eq 3 ] && [ -n "$2" ] || usage
+    case "$3" in /*/*.status) ;; *) usage ;; esac
+    APPENDED_TASK=${3##*/}
     APPENDED_TASK=${APPENDED_TASK%.status}
     task_ok "$APPENDED_TASK" || usage
-    STATE=${2%/*}
-    CONFIG="${FM_CONFIG_OVERRIDE:-${STATE%/*}/config}"
+    CONFIG=$2
+    STATE=${3%/*}
     LEDGER="$STATE/fleet-ledger.jsonl"
     LOCK="$STATE/.fleet-ledger.lock"
     ;;

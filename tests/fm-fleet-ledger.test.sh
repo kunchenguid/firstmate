@@ -162,10 +162,12 @@ EOF
 
 # Scaffold a real brief for TASK and print its status command, filled the way a
 # worker fills it.
-worker_status_command() {  # <state> <note>
+# An optional third argument is the scaffold's state override.
+worker_status_command() {  # <state> <note> [<state-dir>]
   local cmd
   rm -rf "${HOME_DIR:?}/data/$TASK"
-  in_home "$ROOT/bin/fm-brief.sh" "$TASK" sample --mode no-mistakes >/dev/null \
+  in_home env FM_STATE_OVERRIDE="${3:-$HOME_DIR/state}" \
+    "$ROOT/bin/fm-brief.sh" "$TASK" sample --mode no-mistakes >/dev/null \
     || fail "brief scaffold failed"
   # shellcheck disable=SC2016 # Match literal backticks in the generated brief.
   cmd=$(sed -n '/`echo "{state}/s/.*`\(echo .*\)`.*/\1/p' "$HOME_DIR/data/$TASK/brief.md" | head -1)
@@ -195,6 +197,30 @@ test_worker_status_line_is_recorded_when_written() {
   assert_equals 1 "$(wc -l < "$HOME_DIR/state/fleet-ledger.jsonl" | tr -d ' ')" \
     "ledger records after the backstop capture"
   pass "flag on: a worker's status command records its line at once, and the watcher backstop does not record it again"
+}
+
+test_worker_status_line_is_recorded_under_a_state_override() {
+  local out state_dir
+  make_case on-state-override on
+  state_dir="$TMP_ROOT/on-state-override/elsewhere/state"
+  mkdir -p "$HOME_DIR/data" "$state_dir"
+  out=$(run_worker_command "$(worker_status_command blocked 'need a token' "$state_dir")" 2>&1) \
+    || fail "the worker status command failed: $out"
+  assert_equals "blocked [at=1790000000]: need a token" "$(cat "$state_dir/$TASK.status")" "status log"
+  assert_equals '["task.status","blocked"]' \
+    "$(jq -c '[.event, .state]' "$state_dir/fleet-ledger.jsonl" 2>/dev/null)" \
+    "ledger rows right after the append"
+  pass "flag on, state override outside the home: the worker's status command records its line at once"
+}
+
+test_worker_status_command_fails_when_the_append_fails() {
+  local out rc=0
+  make_case on-append-fails on
+  mkdir -p "$HOME_DIR/data" "$HOME_DIR/state/$TASK.status"
+  out=$(run_worker_command "$(worker_status_command failed 'tests broke')" 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "the worker status command succeeded although its append failed: $out"
+  [ ! -e "$HOME_DIR/state/fleet-ledger.jsonl" ] || fail "a failed append still wrote a ledger record"
+  pass "append failing: the worker's status command exits nonzero and records nothing"
 }
 
 test_worker_status_line_lands_when_the_ledger_fails() {
@@ -239,6 +265,8 @@ test_flag_on_records_the_task_lifecycle
 test_flag_on_records_a_pr_merge_once
 test_flag_on_records_a_pr_registration
 test_worker_status_line_is_recorded_when_written
+test_worker_status_line_is_recorded_under_a_state_override
+test_worker_status_command_fails_when_the_append_fails
 test_worker_status_line_lands_when_the_ledger_fails
 test_worker_status_line_with_the_flag_absent
 test_flag_off_writes_nothing
