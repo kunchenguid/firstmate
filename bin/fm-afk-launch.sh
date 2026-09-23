@@ -27,7 +27,8 @@
 # (fm_afk_launch_posture_require), so going /afk out of quiet mode writes away at
 # the next flag write without `enter` touching the daemon's presence gate.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
-# clears state/.afk last, and archives the record under state/afk-contracts/.
+# clears state/.afk last, and archives the record under state/afk-contracts/ when
+# one stands; a quiet stop has none to archive.
 #
 # Why the terminal lifecycle exists (docs/herdr-backend.md "Away-mode daemon terminal launch"):
 # bin/fm-afk-start.sh execs the supervise daemon in the FOREGROUND of whatever
