@@ -284,6 +284,19 @@
 #   This is an exec environment boundary, not a sandbox for the pane's startup
 #   shell, credential files, same-user processes, or later shell initialization.
 #   See docs/configuration.md for provider/Git setup and supported limits.
+# Restricted account-task workspace admission:
+#   FM_ACCOUNT_TASK_WORKSPACE_ROOT is receiver-owned internal input from
+#   bin/fm-account-task.py. When present for a fresh ship/scout spawn, the
+#   isolated worktree resolved after `treehouse get` must be strictly beneath
+#   that already-qualified absolute root. A mismatch refuses before metadata or
+#   the harness launch and never falls back to another root. A successful fresh
+#   launch records `account_task_commit=<spawn_gen>` immediately before the final
+#   backlog transition. For a Pi task, the generated per-task extension also
+#   replaces only the Bash tool so its shell and descendants receive the exact
+#   receiver-fixed FM_HOME, PATH, and HISTFILE after Pi's own environment setup.
+#   Recovery requires both durable facts, so a crash on either side of that
+#   boundary cannot turn a provisional launch into an active task. Ordinary
+#   spawns do not set the marker and keep the standard Pi Bash tool unchanged.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
@@ -3922,6 +3935,27 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
+  if [ -n "${FM_ACCOUNT_TASK_WORKSPACE_ROOT:-}" ]; then
+    account_workspace_root=$(cd "$FM_ACCOUNT_TASK_WORKSPACE_ROOT" 2>/dev/null && pwd -P) || {
+      echo "error: restricted account-task workspace root is not a readable directory; refusing before launch" >&2
+      exit 1
+    }
+    account_worktree=$(cd "$WT" 2>/dev/null && pwd -P) || {
+      echo "error: restricted account-task worktree cannot be resolved; refusing before launch" >&2
+      exit 1
+    }
+    if [ "$account_worktree" = "$account_workspace_root" ]; then
+      echo "error: restricted account-task worktree is outside its qualified workspace root; refusing before launch" >&2
+      exit 1
+    fi
+    case "$account_worktree/" in
+      "$account_workspace_root"/*) ;;
+      *)
+        echo "error: restricted account-task worktree is outside its qualified workspace root; refusing before launch" >&2
+        exit 1
+        ;;
+    esac
+  fi
 
   # Claim the pool slot for this task. The interactive `treehouse get` sent to
   # the pane above records only a process lease (Treehouse's durable
@@ -4211,9 +4245,20 @@ EOF
     # Written OUTSIDE the worktree: pi's project-trust gate fires on any extension
     # loaded from inside the project (verified live), but an explicit -e path
     # elsewhere loads without a dialog. Lives in state/, cleaned by teardown.
+    account_task_pi_import=
+    account_task_pi_enabled=0
+    if [ -n "${FM_ACCOUNT_TASK_WORKSPACE_ROOT:-}" ]; then
+      if [ "${HISTFILE:-}" != /dev/null ]; then
+        echo "error: restricted account-task Pi launch requires receiver-fixed HISTFILE=/dev/null" >&2
+        exit 1
+      fi
+      account_task_pi_import='import { createBashTool } from "@earendil-works/pi-coding-agent";'
+      account_task_pi_enabled=1
+    fi
     cat >"$STATE/$ID.pi-ext.ts" <<EOF
 // Firstmate semantic busy-state events + turn-end notification; written by
 // fm-spawn under the contract owned by bin/fm-busy-lib.sh.
+$account_task_pi_import
 // Semantic state: "agent_start" -> busy when a low-level agent run begins;
 // "agent_settled" -> idle only when ctx.isIdle() confirms Pi will not
 // continue automatically - auto-retries, auto-compaction retries, tool
@@ -4231,6 +4276,33 @@ const busyEvent = (state: string, event: string) =>
     ], () => resolve());
   });
 export default function (pi: any) {
+
+EOF
+    if [ "$account_task_pi_enabled" = 1 ]; then
+      cat >>"$STATE/$ID.pi-ext.ts" <<EOF
+  // The restricted receiver validates these fixed route values before spawn.
+  // Pi adds its own agent-bin prefix to Bash-tool PATH, so an ordinary process
+  // environment is insufficient: override only these three values after Pi's
+  // session metadata injection and preserve every other tool environment key.
+  const accountBashTool = createBashTool(process.cwd(), {
+    spawnHook: (context) => ({
+      ...context,
+      env: {
+        ...context.env,
+        FM_HOME: "$(json_escape "$FM_HOME")",
+        PATH: "$(json_escape "$PATH")",
+        HISTFILE: "$(json_escape "$HISTFILE")",
+      },
+    }),
+  });
+  pi.registerTool({
+    ...accountBashTool,
+    execute: async (id, params, signal, onUpdate, _ctx) =>
+      accountBashTool.execute(id, params, signal, onUpdate),
+  });
+EOF
+    fi
+    cat >>"$STATE/$ID.pi-ext.ts" <<EOF
   pi.on("agent_start", () => busyEvent("busy", "agent-start"));
   pi.on("agent_settled", (_event: any, ctx: any) => {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
@@ -4479,7 +4551,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen account_task_commit traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4748,6 +4820,21 @@ spawn_record_traceparent() {
   return "$status"
 }
 
+spawn_record_account_task_commit() {
+  [ -n "${FM_ACCOUNT_TASK_WORKSPACE_ROOT:-}" ] && [ "$RELAUNCH" -eq 0 ] || return 0
+  local meta="$STATE/$ID.meta" status=0
+  SPAWN_META_TMP="$STATE/.$ID.meta.account-task-commit.${BASHPID:-$$}"
+  if [ ! -f "$meta" ] || [ ! -w "$meta" ] ||
+    ! awk -F= '$1 != "account_task_commit"' "$meta" >"$SPAWN_META_TMP" ||
+    ! printf 'account_task_commit=%s\n' "$SPAWN_GEN" >>"$SPAWN_META_TMP" ||
+    ! fm_backlog_atomic_transition publish "$SPAWN_META_TMP" "$meta" "task record" "$STATE"; then
+    status=1
+    rm -f "$SPAWN_META_TMP" 2>/dev/null || true
+  fi
+  SPAWN_META_TMP=
+  return "$status"
+}
+
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so
 # the env is set when the agent starts; the brief sleep lets the export land.
@@ -4965,6 +5052,10 @@ SPAWN_BACKLOG_COMMIT_STATUS=0
 # fails through the ordinary error plumbing, and the interrupted exit path
 # reports it as the reason the preservation could not be verified.
 FM_TASKS_AXI_TIMEOUT=${FM_TASKS_AXI_TIMEOUT:-30}
+if ! spawn_record_account_task_commit; then
+  echo "error: account-task launch $ID could not prepare its generation receipt" >&2
+  exit 1
+fi
 if spawn_commit_backlog_transition; then
   SPAWN_FRESH_COMMIT_PENDING=0
 else

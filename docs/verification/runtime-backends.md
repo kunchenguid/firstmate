@@ -131,6 +131,84 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Restricted exact-session reuse
+
+The account-task exact-session branch was verified on 2026-09-19 with tmux 3.7c on macOS 26.5.2 arm64.
+The real-backend test used a private tmux socket, created one qualified `smoke` session, exercised ordinary lazy creation of `firstmate`, then proved that the restricted marker reused only `smoke`, refused a missing session without creating it or falling back, and refused the shared `firstmate` name.
+It also proved that the receiver's exact `=<session>:` target reports the bound session name, process, and socket and refuses a missing exact session instead of selecting another one.
+
+```sh
+tmux -V
+bin/fm-test-run.sh tests/fm-backend-tmux-smoke.test.sh
+```
+
+Bounded observed output:
+
+```text
+tmux 3.7c
+ok - real tmux: restricted account tasks reuse only a prequalified non-shared exact session and never repair or fall back
+ok - real tmux: account-task runtime admission resolves only its exact session-qualified target
+ok - real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+```
+
+This is runtime-adapter evidence only.
+It does not claim that a live cross-account route, destination account, authentication source, or worker has been installed or qualified.
+
+### Restricted route executable fingerprint
+
+The account-task fingerprint boundary was verified on 2026-09-20 on macOS 26.5.2 arm64 against the official Node v24.18.0 Darwin-arm64 executable from the checksum-pinned `node-v24.18.0-darwin-arm64.tar.xz` archive.
+The executable was 120,965,360 bytes with SHA-256 `ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a`.
+The regression proved that an exact 128 MiB single file and an exact 256 MiB multi-file guard are accepted, one byte beyond either bound is refused, a byte change changes the fingerprint, and the official executable is fingerprinted through the same public command.
+
+```sh
+FM_ACCOUNT_TASK_OFFICIAL_NODE=/absolute/path/to/node-v24.18.0-darwin-arm64/bin/node \
+  bin/fm-test-run.sh tests/fm-account-task.test.sh
+```
+
+Observed bounded output:
+
+```text
+........................
+----------------------------------------------------------------------
+Ran 24 tests in 44.466s
+
+OK
+ok - restricted account-task protocol, identity, replay, control and rollback
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=44770
+```
+
+The portable suite always exercises both allocation boundaries with invented sparse files.
+The exact official-artifact case requires `FM_ACCOUNT_TASK_OFFICIAL_NODE` so network-free CI never downloads a runtime executable.
+This evidence proves only bounded fingerprint compatibility and does not qualify a live route, account, credential, or worker.
+
+### Restricted Pi Bash environment pin
+
+The account-task Pi Bash override was verified on 2026-09-20 with Node v24.18.0 against the `createBashTool` and `spawnHook` contract documented by Pi 0.85.0.
+The generated extension executed against an invented shell-tool host that first supplied wrong `FM_HOME` and `HISTFILE` values and prepended an invented account-global agent directory to `PATH`.
+The tool launched a child shell and proved that the extension replaced those three values with the receiver-fixed `FM_HOME`, `PATH`, and `HISTFILE=/dev/null` while preserving Pi's injected session identifier.
+The ordinary generated Pi lifecycle extension continued to execute without registering a Bash replacement.
+
+```sh
+bin/fm-test-run.sh tests/fm-busy-adapter-wiring.test.sh
+bin/fm-test-run.sh tests/fm-account-task.test.sh
+```
+
+Observed bounded output:
+
+```text
+ok - restricted account-task Pi Bash and its descendants receive exact route values while ordinary Pi wiring stays unchanged
+all fm-busy-adapter-wiring tests passed
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+Ran 31 tests in 63.686s
+OK (skipped=1)
+ok - restricted account-task protocol, identity, replay, control and rollback
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0
+```
+
+This fixture exercises generated extension execution and receiver environment construction without starting Pi, installing a route, crossing accounts, or qualifying an account, credential, provider, or worker.
+An attended live qualification remains required by [`docs/account-task-route.md`](../account-task-route.md).
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.

@@ -56,7 +56,12 @@ case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
   list-windows) exit 0 ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
-  send-keys) exit 0 ;;
+  send-keys)
+    case "$*" in
+      *codex*) [ -z "${FM_FAKE_WORKER_LAUNCH:-}" ] || : > "$FM_FAKE_WORKER_LAUNCH" ;;
+    esac
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -110,6 +115,11 @@ run_settle_spawn() {
     FM_SPAWN_NO_GUARD=1 TMUX="fake,1,0" \
     FM_FAKE_PANE_PATH="$WT_DIR" FM_FAKE_PANE_STALE="$STALE_DIR" \
     FM_FAKE_PANE_STALE_READS="$STALE_READS" FM_FAKE_PANE_COUNTFILE="$COUNTFILE" \
+    FM_FAKE_WORKER_LAUNCH="${FM_FAKE_WORKER_LAUNCH:-}" \
+    FM_ACCOUNT_TASK_WORKSPACE_ROOT="${FM_ACCOUNT_TASK_WORKSPACE_ROOT:-}" \
+    FM_REAL_TASKS_AXI="${FM_REAL_TASKS_AXI:-}" \
+    FM_TEST_COMMIT_META="${FM_TEST_COMMIT_META:-}" \
+    FM_TEST_COMMIT_OBSERVED="${FM_TEST_COMMIT_OBSERVED:-}" \
     PATH="$FAKEBIN_DIR:$PATH" \
     "$SPAWN" "$id" "$PROJ_DIR" --mode no-mistakes --yolo off 2>&1
 }
@@ -221,9 +231,89 @@ test_primary_checkout_that_never_settles_fails_at_the_deadline() {
   pass "a pane stuck on the primary checkout fails loudly at the deadline"
 }
 
+# A restricted receiver pins a workspace root before invoking fm-spawn.
+# The real spawn path must enforce that root after Treehouse settles but before
+# publishing metadata or launching the worker.
+test_restricted_account_workspace_root_is_enforced() {
+  local rec id out status approved
+  id=settle-account-root-z5
+  rec=$(make_settle_case settle-account-root "$id" 0)
+  read_settle_record "$rec"
+  approved="$TMP_ROOT/settle-account-root/approved"
+  mkdir -p "$approved"
+
+  out=$(FM_ACCOUNT_TASK_WORKSPACE_ROOT="$approved" run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "restricted spawn accepted a worktree outside its qualified root"
+  assert_contains "$out" "outside its qualified workspace root" \
+    "restricted spawn did not name the workspace-root refusal"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "restricted workspace refusal published task metadata"
+  pass "restricted account-task spawn refuses a worktree outside its qualified root before launch"
+}
+
+test_restricted_account_workspace_root_must_be_ancestor() {
+  local rec id out status launch_marker
+  id=settle-account-exact-root-z6
+  rec=$(make_settle_case settle-account-exact-root "$id" 0)
+  read_settle_record "$rec"
+  launch_marker="$TMP_ROOT/settle-account-exact-root/worker-launched"
+
+  out=$(FM_ACCOUNT_TASK_WORKSPACE_ROOT="$WT_DIR" \
+    FM_FAKE_WORKER_LAUNCH="$launch_marker" run_settle_spawn "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "restricted spawn accepted its qualified root as its worktree"
+  assert_contains "$out" "outside its qualified workspace root" \
+    "restricted spawn did not reject a worktree equal to the workspace root"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "exact-root refusal published task metadata"
+  [ ! -e "$launch_marker" ] || fail "exact-root refusal launched a worker"
+  pass "restricted account-task spawn requires a strict workspace-root descendant"
+}
+
+test_restricted_account_launch_publishes_commit_receipt() {
+  local rec id out status spawn_gen commit real_tasks
+  id=settle-account-commit-z7
+  rec=$(make_settle_case settle-account-commit "$id" 0)
+  read_settle_record "$rec"
+  real_tasks=$(command -v tasks-axi) || fail "tasks-axi is required for the commit-boundary regression"
+  touch "$HOME_DIR/data/backlog.md"
+  TASKS_AXI_BACKEND=markdown "$real_tasks" add "$id" "Account commit boundary" \
+    --file "$HOME_DIR/data/backlog.md" >/dev/null || fail "could not prepare the account-task backlog row"
+  cat > "$FAKEBIN_DIR/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = start ]; then
+  spawn_gen=$(sed -n 's/^spawn_gen=//p' "$FM_TEST_COMMIT_META")
+  commit=$(sed -n 's/^account_task_commit=//p' "$FM_TEST_COMMIT_META")
+  [ -n "$spawn_gen" ] && [ "$commit" = "$spawn_gen" ] || exit 86
+  : > "$FM_TEST_COMMIT_OBSERVED"
+fi
+exec "$FM_REAL_TASKS_AXI" "$@"
+SH
+  chmod +x "$FAKEBIN_DIR/tasks-axi"
+
+  out=$(TASKS_AXI_BACKEND=markdown \
+    FM_REAL_TASKS_AXI="$real_tasks" \
+    FM_TEST_COMMIT_META="$HOME_DIR/state/$id.meta" \
+    FM_TEST_COMMIT_OBSERVED="$TMP_ROOT/settle-account-commit/commit-observed" \
+    FM_ACCOUNT_TASK_WORKSPACE_ROOT="$TMP_ROOT/settle-account-commit" \
+    run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "restricted spawn should commit a qualified worktree launch"$'\n'"$out"
+  spawn_gen=$(sed -n 's/^spawn_gen=//p' "$HOME_DIR/state/$id.meta")
+  commit=$(sed -n 's/^account_task_commit=//p' "$HOME_DIR/state/$id.meta")
+  [ -n "$spawn_gen" ] || fail "restricted spawn omitted its generation"
+  [ "$commit" = "$spawn_gen" ] || fail "restricted spawn did not bind its final commit receipt to the generation"
+  [ -e "$TMP_ROOT/settle-account-commit/commit-observed" ] \
+    || fail "the final backlog transition did not observe the generation-bound receipt"
+  pass "restricted account-task spawn publishes a generation-bound final commit receipt"
+}
+
 test_single_stale_first_read_is_not_accepted
 test_already_settled_pane_costs_one_confirm_read
 test_transient_primary_checkout_is_not_accepted
 test_primary_checkout_that_never_settles_fails_at_the_deadline
+test_restricted_account_workspace_root_is_enforced
+test_restricted_account_workspace_root_must_be_ancestor
+test_restricted_account_launch_publishes_commit_receipt
 
 echo "# all fm-spawn-worktree-settle tests passed"

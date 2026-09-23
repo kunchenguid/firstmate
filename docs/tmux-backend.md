@@ -12,7 +12,8 @@ tmux is the hard default when no explicit setting or runtime auto-detection sele
 Select it explicitly with local `config/backend` containing `tmux`, with `FM_BACKEND=tmux` for one launch, or by asking Firstmate to use tmux.
 Explicit tmux selection via `config/backend` or `--backend tmux` overrides runtime auto-detection.
 
-No provisioning is required before the first task.
+No provisioning is required before the first ordinary task.
+A [restricted account-task route](account-task-route.md) is the deliberate exception: its attended qualification pins one already-running destination-owned server and non-shared session, and the adapter refuses rather than creating, repairing, or falling back when that exact session is unavailable.
 
 ## Watching the crew
 
@@ -102,6 +103,7 @@ Without that baseline, an `unknown` verdict is preserved untouched, so a busy-lo
 ## Limits and regression entry points
 
 - tmux is the reference path and supports secondmate homes.
+- Restricted account tasks reuse only their prequalified exact session; ordinary tmux selection and lazy `firstmate` session creation are unchanged when that route marker is absent.
 
 ```sh
 tests/fm-backend-tmux-smoke.test.sh

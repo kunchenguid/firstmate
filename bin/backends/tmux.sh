@@ -71,6 +71,18 @@ fm_backend_tmux_send_text_submit() {  # <target> <text> <retries> <enter-sleep> 
 # "firstmate" session exists. Mirrors fm-spawn.sh's container-ensure block;
 # prints the resolved session name.
 fm_backend_tmux_container_ensure() {
+  # Restricted account tasks pin an already-qualified session. A missing
+  # session is a refusal, never permission to create/repair a server or fall
+  # back to the ordinary firstmate session (bin/fm-account-task.py).
+  if [ -n "${FM_ACCOUNT_TASK_SESSION:-}" ]; then
+    case "$FM_ACCOUNT_TASK_SESSION" in
+      default|firstmate|fm-remote|*[!a-z0-9-]*) return 1 ;;
+    esac
+    [ -n "${TMUX:-}" ] || return 1
+    tmux has-session -t "=$FM_ACCOUNT_TASK_SESSION" 2>/dev/null || return 1
+    printf '%s' "$FM_ACCOUNT_TASK_SESSION"
+    return 0
+  fi
   if [ -n "${TMUX:-}" ]; then
     tmux display-message -p '#S'
   else
