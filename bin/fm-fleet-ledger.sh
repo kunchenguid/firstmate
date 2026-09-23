@@ -9,6 +9,8 @@
 # never run. It repeats that test so a direct invocation writes nothing.
 #
 # Producers:
+#   bin/fm-brief.sh              appended (in every worker's status command,
+#                                right after its unchanged plain append)
 #   bin/fm-spawn.sh              dispatched (fresh spawns only, never relaunch)
 #   bin/fm-watch.sh              capture, once per poll cycle
 #   bin/fm-pr-check.sh           pr_ready (a PR registered for review, not the
@@ -24,6 +26,7 @@
 #   fm-fleet-ledger.sh merged <task> local
 #   fm-fleet-ledger.sh cleaned_up <task>
 #   fm-fleet-ledger.sh capture
+#   fm-fleet-ledger.sh appended <state>/<task>.status
 #
 # capture appends one task.status record for every complete (newline-ended)
 # line added to a state/<task>.status log since that task's byte offset in
@@ -32,6 +35,12 @@
 # for a later capture. Records are appended before the offset is saved, so an
 # interrupted capture repeats records rather than losing them. Without any
 # grown log, capture returns after one size listing and sources nothing.
+# appended captures only that task, so a worker's status line is recorded as
+# soon as the worker writes it; the byte offset keeps the per-poll capture from
+# recording it again. Its path names the home: the state directory is the
+# file's directory and the flag lives in that directory's sibling config/
+# (FM_CONFIG_OVERRIDE still wins), because a worker has no firstmate
+# environment.
 # pr_ready, merged, and cleaned_up first capture their own task, so its status
 # records precede them. cleaned_up then deletes the task's offset, because teardown
 # retires that status log right after. dispatched deletes any leftover offset
@@ -57,7 +66,7 @@ LOCK="$STATE/.fleet-ledger.lock"
 TEXT_MAX_CHARS=2000
 
 usage() {
-  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | pr_ready <task> <url> | merged <task> pr <url> | merged <task> local | cleaned_up <task> | capture" >&2
+  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | pr_ready <task> <url> | merged <task> pr <url> | merged <task> local | cleaned_up <task> | capture | appended <state>/<task>.status" >&2
   exit 2
 }
 
@@ -75,6 +84,17 @@ case "$cmd" in
     ;;
   cleaned_up) { [ "$#" -eq 2 ] && task_ok "$2"; } || usage ;;
   capture) [ "$#" -eq 1 ] || usage ;;
+  appended)
+    [ "$#" -eq 2 ] || usage
+    case "$2" in /*/*.status) ;; *) usage ;; esac
+    APPENDED_TASK=${2##*/}
+    APPENDED_TASK=${APPENDED_TASK%.status}
+    task_ok "$APPENDED_TASK" || usage
+    STATE=${2%/*}
+    CONFIG="${FM_CONFIG_OVERRIDE:-${STATE%/*}/config}"
+    LEDGER="$STATE/fleet-ledger.jsonl"
+    LOCK="$STATE/.fleet-ledger.lock"
+    ;;
   *) usage ;;
 esac
 
@@ -183,6 +203,9 @@ case "$cmd" in
     while IFS=$'\t' read -r task _; do
       capture_task "$task" || rc=1
     done <<< "$grown"
+    ;;
+  appended)
+    capture_task "$APPENDED_TASK" || rc=1
     ;;
   dispatched)
     rm -f -- "$(offset_path "$2")"

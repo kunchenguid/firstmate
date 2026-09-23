@@ -57,8 +57,13 @@ Example:
 
 ## Limits
 
-- Status records normally come from the supervision monitor's regular poll, so they may trail the status line by one poll interval.
-  Lines written while no monitor runs are picked up on its next run.
+- A worker's status line is recorded the moment the worker writes it, because the status command in its instructions records it right after appending it.
+  The supervision monitor's regular poll is the backstop: it records any line the immediate write missed, and does not record again a line that write already recorded.
+  These lines still trail the status log by up to one poll interval, or until the monitor next runs when none is running:
+  - lines firstmate itself writes to a task's status log, such as a recorded answer, a failed launch, a relayed pending reply, or a second mate's report line;
+  - lines from workers whose instructions predate this, or that append without running the instruction's full command;
+  - lines a remote second mate reports, which reach this home through firstmate's relay;
+  - lines written while the immediate record fails, for example when the ledger file cannot be written.
   Recording `task.pr_ready`, `task.merged`, or `task.cleaned_up` first records that task's pending status lines.
 - Captured status lines are delivered at least once unless a write fails or a crash loses unflushed records: an interrupted capture can repeat records, so a reader that must not double-count should tolerate duplicates.
 - A status record can appear just before its task's `task.dispatched` record when the worker writes a status line in the moment between its launch and that record.

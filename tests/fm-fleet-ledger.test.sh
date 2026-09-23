@@ -160,6 +160,72 @@ EOF
   pass "flag on: registering a PR records task.pr_ready with its full URL after the task's pending status lines, and the merge-time re-record adds nothing"
 }
 
+# Scaffold a real brief for TASK and print its status command, filled the way a
+# worker fills it.
+worker_status_command() {  # <state> <note>
+  local cmd
+  rm -rf "${HOME_DIR:?}/data/$TASK"
+  in_home "$ROOT/bin/fm-brief.sh" "$TASK" sample --mode no-mistakes >/dev/null \
+    || fail "brief scaffold failed"
+  # shellcheck disable=SC2016 # Match literal backticks in the generated brief.
+  cmd=$(sed -n '/`echo "{state}/s/.*`\(echo .*\)`.*/\1/p' "$HOME_DIR/data/$TASK/brief.md" | head -1)
+  [ -n "$cmd" ] || fail "the brief carries no status command"
+  cmd=${cmd//\{state\}/$1}
+  cmd=${cmd//<epoch>/1790000000}
+  printf '%s\n' "${cmd//\{one short line\}/$2}"
+}
+
+# Run a filled status command as a worker would: a plain shell with no
+# firstmate environment.
+run_worker_command() {  # <command>
+  env -i PATH="$PATH" HOME="$HOME_DIR/user-home" bash -c "$1"
+}
+
+test_worker_status_line_is_recorded_when_written() {
+  local out
+  make_case on-immediate on
+  mkdir -p "$HOME_DIR/data"
+  out=$(run_worker_command "$(worker_status_command needs-decision 'pick a lamp colour')" 2>&1) \
+    || fail "the worker status command failed: $out"
+  assert_equals "needs-decision [at=1790000000]: pick a lamp colour" \
+    "$(cat "$HOME_DIR/state/$TASK.status")" "status log"
+  assert_equals '["task.status","needs-decision"," pick a lamp colour"]' \
+    "$(ledger_rows '[.event, .state, .text]')" "ledger rows right after the append"
+  out=$(in_home "$ROOT/bin/fm-fleet-ledger.sh" capture 2>&1) || fail "backstop capture failed: $out"
+  assert_equals 1 "$(wc -l < "$HOME_DIR/state/fleet-ledger.jsonl" | tr -d ' ')" \
+    "ledger records after the backstop capture"
+  pass "flag on: a worker's status command records its line at once, and the watcher backstop does not record it again"
+}
+
+test_worker_status_line_lands_when_the_ledger_fails() {
+  local out
+  make_case on-failing on
+  mkdir -p "$HOME_DIR/data" "$HOME_DIR/state/fleet-ledger.jsonl"
+  out=$(run_worker_command "$(worker_status_command failed 'tests broke')" 2>&1) \
+    || fail "a ledger failure changed the worker status command's result: $out"
+  assert_equals "" "$out" "worker status command output"
+  assert_equals "failed [at=1790000000]: tests broke" \
+    "$(cat "$HOME_DIR/state/$TASK.status")" "status log"
+  rmdir "$HOME_DIR/state/fleet-ledger.jsonl"
+  out=$(in_home "$ROOT/bin/fm-fleet-ledger.sh" capture 2>&1) || fail "backstop capture failed: $out"
+  assert_equals '["task.status","failed"]' "$(ledger_rows '[.event, .state]')" \
+    "ledger rows after the backstop capture"
+  pass "ledger failing: the worker's status line still lands exactly, quietly, and the backstop records it later"
+}
+
+test_worker_status_line_with_the_flag_absent() {
+  local out leftovers
+  make_case off-immediate off
+  mkdir -p "$HOME_DIR/data"
+  out=$(run_worker_command "$(worker_status_command 'done' 'ready')" 2>&1) \
+    || fail "the worker status command failed: $out"
+  assert_equals "" "$out" "worker status command output"
+  assert_equals "done [at=1790000000]: ready" "$(cat "$HOME_DIR/state/$TASK.status")" "status log"
+  leftovers=$(cd "$HOME_DIR/state" && find . -name '*fleet-ledger*')
+  assert_equals "" "$leftovers" "ledger files with the flag absent"
+  pass "flag off: the worker's status command is a plain append and leaves no ledger file, offset, or lock"
+}
+
 test_flag_off_writes_nothing() {
   local leftovers
   make_case off-lifecycle off
@@ -172,4 +238,7 @@ test_flag_off_writes_nothing() {
 test_flag_on_records_the_task_lifecycle
 test_flag_on_records_a_pr_merge_once
 test_flag_on_records_a_pr_registration
+test_worker_status_line_is_recorded_when_written
+test_worker_status_line_lands_when_the_ledger_fails
+test_worker_status_line_with_the_flag_absent
 test_flag_off_writes_nothing
