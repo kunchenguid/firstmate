@@ -134,7 +134,9 @@ age_path() {  # <path>  (set mtime well past any grace under test)
 # The escalation marker transfers ownership to recovery, not another enqueue.
 # Exercise the real classifier and existing ring API against the stale binding.
 test_recovery_rings_original_escalated_record() (
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-task-inbox-lib.sh"
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-composer-lib.sh"
   local state rec screen log rc
   state="$TMP_ROOT/recover-original/state"
@@ -145,10 +147,13 @@ test_recovery_rings_original_escalated_record() (
   [ "$(fm_task_inbox_due_action "$state" t1)" = quiet ] || fail "escalated record should stay quiet"
   screen=$'────────────────────────────────────────────\n❯ \n────────────────────────────────────────────\nmuse-spark-1.3 · xhigh · project · YOLO'
   log="$state/rings"
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced ring library.
   fm_backend_agent_state() { printf '%s' "${agent_state:-alive}"; }
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced ring library.
   fm_backend_composer_state() {
     fm_composer_classify_screen $'styled=1\ncursor=0\nidentity=1\nrows=60' "$screen" '' $'pi\tdone'
   }
+  # shellcheck disable=SC2329 # Mock invoked indirectly by the sourced ring library.
   fm_backend_send_text_submit() { printf '%s\n' "$3" >> "$log"; printf empty; }
   fm_task_inbox_ring herdr 'session:pane' "$rec" || fail "corrected composer blocked original record"
   [ "$(wc -l < "$log" | tr -d ' ')" = 1 ] || fail "recovery must ring once"

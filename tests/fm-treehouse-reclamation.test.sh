@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Exact-slot reclamation behavior with real Git and isolated pool metadata.
 set -euo pipefail
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 fm_git_identity fmtest fmtest@example.invalid
 TMP_ROOT=$(fm_test_tmproot fm-reclamation)
 export FM_HOME="$TMP_ROOT/home"
+# shellcheck source=bin/fm-wake-lib.sh
 . "$ROOT/bin/fm-wake-lib.sh"
 mkdir -p "$TMP_ROOT/bin" "$TMP_ROOT/project" "$TMP_ROOT/pool/1"
 git -C "$TMP_ROOT/project" init -q -b main
