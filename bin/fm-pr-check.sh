@@ -125,8 +125,11 @@ fi
 KIND=$(grep '^kind=' "$META" | tail -1 | cut -d= -f2- || true)
 MODE=$(grep '^mode=' "$META" | tail -1 | cut -d= -f2- || true)
 PROJECT=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
-case "$MODE" in
-  no-mistakes|'') DONE_LINE="done: PR $URL checks green" ;;
+# The gate is asked about the ready report this task's worker was told to give;
+# on a Gerrit change both publishing modes report the same published line.
+case "$PROVIDER:$MODE" in
+  gerrit:*) DONE_LINE="done: PR $URL published for review" ;;
+  *:no-mistakes|*:) DONE_LINE="done: PR $URL checks green" ;;
   *) DONE_LINE="done: PR $URL" ;;
 esac
 if { [ -z "$PR_HEAD" ] || ! fm_dod_forge_head_is_named_head "$MODE"; } \

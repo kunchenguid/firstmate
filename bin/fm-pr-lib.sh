@@ -1114,6 +1114,41 @@ FIELDS
   FM_PR_RECORD_MERGED=$merged
 }
 
+# The current patch set revision of one Gerrit change, read the same way as its
+# status above: explicit host, exact change number, structured record only.
+# Consumed by bin/fm-dod-lib.sh's named-head gate, which accepts a published
+# change only when this revision carries the worker copy's HEAD tree. It is a
+# live read and never a recorded pr_head: the next amend replaces it.
+fm_pr_gerrit_read_revision() {  # <host> <number>
+  local host=$1 number=$2 json revision
+  FM_PR_RECORD_REVISION=
+  command -v gerrit-axi >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  case "$number" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  if ! json=$(gerrit-axi show "$number" --host "$host" --json 2>/dev/null) \
+    || [ -z "$json" ]; then
+    return 1
+  fi
+  if ! revision=$(printf '%s' "$json" | jq -r --argjson change "$number" '
+      if type == "object" and .ok == true and (.changes | type) == "array" then
+        [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
+        | if ($match | length) == 1 and ($match[0].revision | type) == "string"
+          then $match[0].revision
+          else error("no exact change record")
+          end
+      else
+        error("invalid gerrit record")
+      end' 2>/dev/null); then
+    return 1
+  fi
+  fm_pr_head_valid "$revision" || return 1
+  # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_change_carries_head.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_REVISION=$revision
+}
+
 fm_pr_poll_retirement_data_valid() {
   local state=$1 id=$2 state_device data data_hash data_identity
   state_device=$(fm_pr_file_device "$state") || return 1

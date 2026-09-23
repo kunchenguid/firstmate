@@ -55,9 +55,9 @@ test_fm_home_parameterization() {
   printf '%s\n' '- app [local-only +yolo] - test app (added 2026-06-22)' > "$home_one/data/projects.md"
 
   out=$(FM_HOME="$home_one" "$ROOT/bin/fm-project-mode.sh" app)
-  [ "$out" = "local-only on" ] || fail "fm-project-mode did not read projects.md from FM_HOME"
+  [ "$out" = "local-only on none" ] || fail "fm-project-mode did not read projects.md from FM_HOME"
   out=$(FM_HOME="$home_two" "$ROOT/bin/fm-project-mode.sh" app 2>/dev/null)
-  [ "$out" = "no-mistakes off" ] || fail "fm-project-mode did not isolate missing registry by home"
+  [ "$out" = "no-mistakes off none" ] || fail "fm-project-mode did not isolate missing registry by home"
 
   FM_HOME="$home_one" "$ROOT/bin/fm-brief.sh" task-a app --mode no-mistakes >/dev/null || fail "brief scaffold failed under FM_HOME"
   brief="$home_one/data/task-a/brief.md"
@@ -888,6 +888,32 @@ test_home_seed_refuses_local_only_project() {
     || fail "seed did not explain local-only project rejection"
   [ ! -e "$subhome" ] || fail "seed created a subhome before rejecting a local-only project"
   pass "home seeding refuses local-only projects"
+}
+
+# A registry entry whose forge token the parser cannot resolve yields no posture
+# at all. Reading that refusal as an empty mode would walk straight past the
+# local-only routing refusal above and clone the project into a secondmate home,
+# so the seed must stop instead.
+test_home_seed_refuses_an_unresolvable_registry_posture() {
+  local home subhome err
+  home="$TMP_ROOT/unresolvable-posture-home"
+  subhome="$TMP_ROOT/unresolvable-posture-subhome"
+  err="$TMP_ROOT/unresolvable-posture.err"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  fm_git_init_commit "$home/projects/alpha"
+  fm_git_add_origin "$home/projects/alpha" "$TMP_ROOT/remotes/unresolvable-alpha.git"
+  printf '%s\n' '- alpha [local-only forge=githb] - alpha project (added 2026-06-22)' > "$home/data/projects.md"
+
+  if FM_HOME="$home" FM_SECONDMATE_CHARTER='design for alpha' FM_SECONDMATE_SCOPE='design for alpha' \
+    "$ROOT/bin/fm-home-seed.sh" design "$subhome" alpha >/dev/null 2>"$err"; then
+    fail "seed proceeded on a registry entry the parser refuses"
+  fi
+  grep -F 'project alpha does not resolve to a delivery posture' "$err" >/dev/null \
+    || fail "seed did not name the project whose posture could not be resolved"
+  grep -F 'unknown forge "githb"' "$err" >/dev/null \
+    || fail "the parser's own refusal never reached the operator"
+  [ ! -e "$subhome" ] || fail "seed created a subhome from a registry entry it could not resolve"
+  pass "home seeding refuses a registry entry whose posture does not resolve"
 }
 
 test_home_seed_refuses_registry_delimiter_home() {
@@ -2990,6 +3016,7 @@ test_home_seed_refuses_projectless_home_with_non_directory_projects
 test_home_seed_refuses_projectless_home_with_uninspectable_registry
 test_home_seed_refuses_missing_projects_without_signal
 test_home_seed_refuses_local_only_project
+test_home_seed_refuses_an_unresolvable_registry_posture
 test_home_seed_refuses_registry_delimiter_home
 test_home_seed_refuses_active_home_and_root
 test_home_seed_refuses_home_marked_for_another_id

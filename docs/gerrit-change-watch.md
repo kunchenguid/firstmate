@@ -123,6 +123,7 @@ The server permitting self-approval is what makes this a policy boundary rather 
 - An absent `gerrit-axi` or `jq` produces no wake, and arming reports the missing tool instead.
 - Arming records no `pr_head`: a Gerrit revision names one patch set, and `bin/fm-review-diff.sh` has no Gerrit path to resolve a current head with, so a recorded revision would quietly become the reviewed content after the next amend.
 - The merge path refuses a Gerrit change.
+- Arming accepts a worker's published head that no remote-tracking ref holds only when a live read shows the change's current patch set carrying that head's tree, and refuses a mismatched, unknown, or unreadable patch set before recording anything.
 
 `tests/fm-crew-state.test.sh` pins the crew-state read with no server either: a passed run whose change is open reports `PR open`, an abandoned one `PR closed`, a merged one `PR merged`, and an unreadable record or one naming another change reports an honest unknown rather than a merge.
 

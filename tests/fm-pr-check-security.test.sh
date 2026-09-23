@@ -235,7 +235,7 @@ printf '{"ok":true,"op":"show","count":1,"missing":[],"changes":[{"change":%s,"s
   "${FM_TEST_GERRIT_SUBMIT:-NOT_READY}" \
   "${FM_TEST_GERRIT_SUBMITTABLE:-false}" \
   "${FM_TEST_GERRIT_BLOCKED_ON:-Code-Review}" \
-  "5f07a68436929a527ddc7abadc8ef1abceae40ed" \
+  "${FM_TEST_GERRIT_REVISION:-5f07a68436929a527ddc7abadc8ef1abceae40ed}" \
   "${FM_TEST_GERRIT_URL:-https://gerrit.example/c/group/apps/console/+/4201}"
 SH
   chmod +x "$fakebin/gh" "$fakebin/gh-axi" "$fakebin/glab" "$fakebin/gerrit-axi"
@@ -1671,6 +1671,74 @@ test_gerrit_arming_records_no_patch_set_revision() {
   [ ! -e "$state/task-rev.merge-authority" ] || fail "a refused Gerrit merge recorded merge authority"
 
   pass "Gerrit arming records no patch set revision and the merge path refuses to submit"
+}
+
+# A push to refs/for/ leaves no ref a fetch can see, so a worker's published HEAD
+# is never reachable from a remote-tracking ref. Arming then accepts the named
+# head only when a live read shows the change's current patch set carrying that
+# HEAD's tree - the squash is a new commit on the server's base, so the tree and
+# not the commit names what was published - and refuses otherwise, before
+# anything is recorded or armed.
+test_gerrit_ready_gate_reads_the_published_tree() {
+  local dir state base published other out rc
+  dir=$(make_case gerrit-ready-gate)
+  state="$dir/home/state"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  base=$(git -C "$dir/wt" rev-parse HEAD)
+  printf 'one\n' > "$dir/wt/a"
+  git -C "$dir/wt" add a
+  git -C "$dir/wt" commit -q -m first
+  printf 'two\n' > "$dir/wt/b"
+  git -C "$dir/wt" add b
+  git -C "$dir/wt" commit -q -m second
+  git -C "$dir/wt" for-each-ref --contains HEAD refs/remotes | grep -q . \
+    && fail "the fixture HEAD is reachable from a remote ref, so the Gerrit leg would never run"
+  published=$(git -C "$dir/wt" commit-tree "$(git -C "$dir/wt" rev-parse 'HEAD^{tree}')" -p "$base" -m squashed)
+  other=$(git -C "$dir/wt" rev-parse HEAD~1)
+  [ "$(git -C "$dir/wt" rev-parse "$published^{tree}")" != "$(git -C "$dir/wt" rev-parse "$other^{tree}")" ] \
+    || fail "the fixture's two revisions carry the same tree"
+
+  write_task_meta "$dir" task-mismatch
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=$other run_check_entry "$dir" task-mismatch \
+    https://gerrit.example/c/group/apps/console/+/4201 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a change whose patch set is not this copy's HEAD tree"
+  case "$out" in
+    *"not the published content"*) ;;
+    *) fail "the refusal did not say the change does not carry the named head: $out" ;;
+  esac
+  grep -q '^pr=' "$state/task-mismatch.meta" && fail "a refused Gerrit arming recorded pr="
+  [ ! -e "$state/task-mismatch.check.sh" ] || fail "a refused Gerrit arming armed a poll"
+
+  write_task_meta "$dir" task-unknown
+  set +e
+  FM_TEST_GERRIT_REVISION=0123456789abcdef0123456789abcdef01234567 run_check_entry "$dir" task-unknown \
+    https://gerrit.example/c/group/apps/console/+/4201 >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a patch set this copy has never held"
+
+  write_task_meta "$dir" task-unread
+  set +e
+  FM_TEST_GERRIT_FAIL=1 run_check_entry "$dir" task-unread \
+    https://gerrit.example/c/group/apps/console/+/4201 >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "arming accepted a change it could not read"
+
+  : > "$dir/gerrit-axi.log"
+  write_task_meta "$dir" task-published
+  FM_TEST_GERRIT_REVISION=$published run_check_entry "$dir" task-published \
+    https://gerrit.example/c/group/apps/console/+/4201 >/dev/null \
+    || fail "arming refused a change whose current patch set carries this copy's HEAD tree"
+  grep -qF -- "show 4201 --host gerrit.example --json" "$dir/gerrit-axi.log" \
+    || fail "the gate did not read the change from its own server"
+  [ -e "$state/task-published.check.sh" ] || fail "an accepted Gerrit arming left no poll armed"
+  grep -q '^pr_head=' "$state/task-published.meta" \
+    && fail "the gate's live revision was recorded as pr_head"
+  pass "Gerrit arming accepts a published HEAD only by the change's current patch set tree"
 }
 
 # The GitLab watch must follow a merge request exactly as the GitHub watch
@@ -3134,6 +3202,7 @@ test_parser_matrix
 test_gitlab_merge_watch
 test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision
+test_gerrit_ready_gate_reads_the_published_tree
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report
