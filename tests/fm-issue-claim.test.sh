@@ -21,21 +21,29 @@ command -v jq >/dev/null 2>&1 \
 cat > "$FAKEBIN/gh" <<'SH'
 #!/usr/bin/env bash
 set -u
-printf '%s\n' "$*" >> "$FM_FAKE_FORGE/calls.log"
+call=$*
+printf '%s\n' "${call//$'\n'/ }" >> "$FM_FAKE_FORGE/calls.log"
 [ "${1:-}" = api ] || { echo "fake gh: only api is served: $*" >&2; exit 90; }
 shift
 endpoint= head= owner= name= number= query= paginate=0
+owner_type=string name_type=string number_type=string
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -X) [ "$2" = GET ] || { echo "fake gh: refusing method $2" >&2; exit 92; }; shift 2 ;;
     --method) echo "fake gh: refusing --method $2" >&2; exit 92 ;;
     --paginate) paginate=1; shift ;;
     -f|-F)
+      value=${2#*=}
+      field_type=string
+      if [ "$1" = -F ]; then
+        case "$value" in true|false|null) field_type=literal ;; esac
+        if [[ "$value" =~ ^[+-]?[0-9]+$ ]]; then field_type=integer; fi
+      fi
       case "$2" in
         head=*) head=${2#head=} ;;
-        owner=*) owner=${2#owner=} ;;
-        name=*) name=${2#name=} ;;
-        number=*) number=${2#number=} ;;
+        owner=*) owner=${2#owner=}; owner_type=$field_type ;;
+        name=*) name=${2#name=}; name_type=$field_type ;;
+        number=*) number=${2#number=}; number_type=$field_type ;;
         query=*) query=${2#query=} ;;
       esac
       shift 2 ;;
@@ -47,7 +55,12 @@ done
 if [ "$endpoint" = graphql ]; then
   case "$query" in query\(*) ;; *) echo "fake gh: refusing a non-query GraphQL operation" >&2; exit 92 ;; esac
   [ -n "$owner" ] && [ -n "$name" ] && [ -n "$number" ] || exit 93
+  if [ "$owner_type" != string ] || [ "$name_type" != string ] || [ "$number_type" != integer ]; then
+    echo "fake gh: GraphQL variables require String owner/name and Int number" >&2
+    exit 94
+  fi
   endpoint="graphql?owner=$owner&name=$name&number=$number"
+  case "$query" in *timelineItems*) endpoint="$endpoint&kind=timeline" ;; esac
 fi
 key=$(printf '%s' "$endpoint" | tr '/?=&:+' '______')
 if [ -e "$FM_FAKE_FORGE/$key.after.json" ] || [ -e "$FM_FAKE_FORGE/$key.after.fail" ]; then
@@ -81,7 +94,23 @@ put() {
 }
 
 put_closing() {
-  put "graphql?owner=o&name=r&number=$1" "{\"data\":{\"repository\":{\"pullRequest\":{\"closingIssuesReferences\":{\"nodes\":$2,\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}}"
+  local repo=${3:-o/r}
+  put "graphql?owner=${repo%/*}&name=${repo#*/}&number=$1" "{\"data\":{\"repository\":{\"pullRequest\":{\"closingIssuesReferences\":{\"nodes\":$2,\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}}"
+}
+
+linked_event() {
+  jq -nc --arg id "$1" --arg kind "$2" --argjson n "$3" --argjson pr "$4" --arg repo "${5:-o/r}" '
+    {id:$id,__typename:$kind,createdAt:"2026-03-01T00:00:00Z",
+     source:{__typename:"PullRequest",number:$pr,repository:{nameWithOwner:$repo},state:"OPEN",isDraft:false},
+     subject:{__typename:"Issue",number:$n,repository:{nameWithOwner:$repo}}}'
+}
+
+put_links() {
+  local repo=${3:-o/r}
+  put "repos/$repo/issues/$1/timeline?per_page=100" "$(jq -nc --argjson nodes "$2" '
+    $nodes | map({node_id:.id,event:(if .__typename == "ConnectedEvent" then "connected" else "disconnected" end)})')"
+  put "graphql?owner=${repo%/*}&name=${repo#*/}&number=$1&kind=timeline" "$(jq -nc --argjson nodes "$2" '
+    {data:{repository:{issue:{timelineItems:{nodes:$nodes,pageInfo:{hasNextPage:false,endCursor:null}}}}}}')"
 }
 
 # fail_on <endpoint> <stderr text>: make <endpoint> fail.
@@ -264,6 +293,134 @@ test_stamps_timeline_and_hints() {
   assert_contains "$block" "hint: prose claim in a comment by helper" "a prose claim is a hint"
   assert_contains "$block" "hint: PR dan/r#9 (open) in another repository" "a cross-repository PR is only a hint"
   pass "maintainer stamps and timeline PRs decide; other stamps, prose, and foreign PRs are hints"
+}
+
+test_development_link_lifecycle() {
+  local connected disconnected reconnected out endpoint
+  endpoint='graphql?owner=o&name=r&number=100&kind=timeline'
+  connected=$(linked_event C1 ConnectedEvent 100 55)
+  disconnected=$(linked_event D2 DisconnectedEvent 100 55 | jq -c '.source as $pr | .source = .subject | .subject = $pr')
+  reconnected=$(linked_event C3 ConnectedEvent 100 55)
+  put "repos/o/r/pulls?state=open&per_page=100" "$(jq -sc 'add + [{number:55,title:"helper",body:"",head:{ref:"work"},user:{login:"helper"},draft:false}]' "$FIX/$(key_of 'repos/o/r/pulls?state=open&per_page=100').json")"
+  put "search/issues?q=repo:o/r+is:pr+is:open&per_page=1" '{"total_count":6}'
+  put "repos/o/r/pulls/55" '{"number":55,"state":"open","draft":false,"title":"helper","body":"","user":{"login":"helper"}}'
+  put_links 100 "[$connected]"
+  out=$(run_claim 100)
+  assert_contains "$out" "verdict: claimed" "a Development link claims an issue without any textual match"
+  assert_contains "$out" "claim: PR #55 open by helper :: helper [timeline]" "the linked PR is named and classified"
+  assert_contains "$out" "coverage: complete" "the link is resolved with complete coverage"
+  assert_equals 1 "$(grep -Fxc 'api repos/o/r/pulls/55' "$FIX/calls.log")" "the linked PR uses the shared resolver"
+  out=$(run_claim --sweep 100)
+  assert_contains "$out" "sweep: #100 leave-open state=open verdict=claimed coverage=complete link=- evidence=claim: PR #55 open [timeline]" \
+    "a linked PR is visible in the sweep without recommending a redundant link"
+
+  put_links 100 "[$connected,$disconnected]"
+  put "$endpoint" "$(jq -nc --argjson first "$connected" --argjson last "$disconnected" '
+    {data:{repository:{issue:{timelineItems:{nodes:[$first],pageInfo:{hasNextPage:true,endCursor:"next"}}}}}},
+    {data:{repository:{issue:{timelineItems:{nodes:[$last],pageInfo:{hasNextPage:false,endCursor:null}}}}}}')"
+  out=$(run_claim --sweep 100)
+  assert_contains "$out" "sweep: #100 no-action state=open verdict=open coverage=complete link=-" \
+    "a disconnect on the next page removes the link in either endpoint direction"
+  assert_not_contains "$out" "PR #55" "a disconnected PR does not remain a link claim"
+  put "repos/o/r/issues/100/comments?per_page=100" '[{"user":{"login":"maint"},"author_association":"OWNER","body":"<!-- triage: x outcome=existing-pr --> existing-pr -> #55"}]'
+  out=$(run_claim 100)
+  assert_contains "$out" "claim: PR #55 open by helper :: helper [stamp]" "a disconnect does not discard an independent stamp"
+  put "repos/o/r/issues/100/comments?per_page=100" '[{"user":{"login":"maint"},"author_association":"OWNER","body":"<!-- triage: x outcome=existing-pr -->"}]'
+  out=$(run_claim 100)
+  assert_contains "$out" "claim: maintainer stamp outcome=existing-pr names no PR (?) [stamp]" "unnamed stamp claims retain their source"
+  put "repos/o/r/issues/100/comments?per_page=100" '[]'
+
+  put_links 100 "[$connected,$disconnected,$reconnected]"
+  put "repos/o/r/pulls/55" '{"number":55,"state":"open","draft":true,"title":"helper"}'
+  out=$(run_claim 100)
+  assert_contains "$out" "claim: PR #55 open(draft)" "a reconnect restores the claim using the current draft state"
+  put "repos/o/r/pulls/55" '{"number":55,"state":"closed","title":"helper"}'
+  out=$(run_claim 100)
+  assert_contains "$out" "verdict: open" "a closed unmerged linked PR is no longer a live claim"
+  assert_contains "$out" "closed: PR #55 closed" "the closed PR remains inspectable"
+  put "repos/o/r/pulls/55" '{"number":55,"state":"closed","merged_at":"2026-03-02T00:00:00Z","base":{"ref":"main"},"title":"helper"}'
+  put_closing 55 '[{"number":100,"repository":{"nameWithOwner":"o/r"}}]'
+  out=$(run_claim --sweep 100)
+  assert_contains "$out" "sweep: #100 close-candidate state=open verdict=fixed-on-main coverage=complete link=-" \
+    "a merged link needs fixing evidence from the shared classifier"
+
+  connected=$(printf '%s' "$connected" | jq -c '.source.repository.nameWithOwner = "other/r"')
+  put_links 100 "[$connected]"
+  out=$(run_claim --sweep 100)
+  assert_contains "$out" "sweep: #100 leave-open state=open verdict=claimed coverage=complete link=-" "a foreign open PR linked through Development is a claim"
+  assert_contains "$out" "claim: PR other/r#55 open linked through Development [timeline]" "cross-repository claim identity is preserved"
+  put_links 100 "[$(printf '%s' "$connected" | jq -c '.source.isDraft = true')]"
+  out=$(run_claim 100)
+  assert_contains "$out" "claim: PR other/r#55 open(draft)" "foreign draft links are also claims"
+  put_links 100 "[$(printf '%s' "$connected" | jq -c '.source.state = "MERGED"')]"
+  out=$(run_claim --sweep 100)
+  assert_contains "$out" "sweep: #100 no-action state=open verdict=open coverage=complete link=-" "a foreign merge does not establish a fix in this repository"
+  assert_contains "$out" "hint: PR other/r#55 merged linked through Development" "foreign merged links stay inspectable"
+  disconnected=$(printf '%s' "$disconnected" | jq -c '.subject.repository.nameWithOwner = "other/r"')
+  put_links 100 "[$connected,$disconnected]"
+  out=$(run_claim 100)
+  assert_contains "$out" "verdict: open" "a foreign PR disconnect removes only its link claim"
+  connected=$(printf '%s' "$connected" | jq -c '.source.__typename = "Issue" | del(.source.state, .source.isDraft)')
+  put_links 100 "[$connected]"
+  out=$(run_claim 100)
+  assert_contains "$out" "verdict: open" "a linked issue is not a claiming PR"
+  assert_contains "$out" "hint: issue other/r#55 linked through Development" "linked issues remain inspectable"
+  build_forge
+  pass "Development links respect direction, pagination, disconnects, reconnects, and PR state"
+}
+
+test_unresolved_development_links() {
+  local connected endpoint mode out rc
+  connected=$(linked_event C1 ConnectedEvent 100 55)
+  endpoint='graphql?owner=o&name=r&number=100&kind=timeline'
+  put "repos/o/r/pulls/55" '{"number":55,"state":"open","title":"helper"}'
+  for mode in failed missing-event null-subject partial-page graphql-error missing-pr; do
+    put_links 100 "[$connected]"
+    case "$mode" in
+      failed) fail_on "$endpoint" 'gh: API rate limit exceeded (HTTP 403)' ;;
+      missing-event) put "$endpoint" '{"data":{"repository":{"issue":{"timelineItems":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}}' ;;
+      null-subject|partial-page|graphql-error)
+        put "$endpoint" "$(jq --arg mode "$mode" '
+          if $mode == "null-subject" then .data.repository.issue.timelineItems.nodes[0].source = null
+          elif $mode == "partial-page" then .data.repository.issue.timelineItems.pageInfo.hasNextPage = true
+          else .errors = [{message:"denied"}] end' "$FIX/$(key_of "$endpoint").json")" ;;
+      missing-pr) fail_on 'repos/o/r/pulls/55' 'gh: Not Found (HTTP 404)' ;;
+    esac
+    rc=0; out=$(run_claim 100) || rc=$?
+    expect_code 1 "$rc" "unresolved Development link: $mode"
+    assert_contains "$out" "verdict: unknown" "a $mode link cannot support open"
+    assert_contains "$out" "timeline=partial" "a $mode link marks timeline coverage incomplete"
+    out=$(run_claim --sweep 100) || true
+    assert_contains "$out" "sweep: #100 undetermined state=open verdict=unknown coverage=incomplete link=-" "a $mode link cannot support sweep no-action"
+    heal "$endpoint"
+    heal 'repos/o/r/pulls/55'
+  done
+  build_forge
+  pass "failed, incomplete, and unresolved Development links never produce open"
+}
+
+test_graphql_repository_strings() {
+  local repo out connected rc
+  for repo in acme/2026 2026/true true/false false/null null/2026; do
+    put "repos/$repo" '{"default_branch":"main"}'
+    put "search/issues?q=repo:$repo+is:pr+is:open&per_page=1" '{"total_count":0}'
+    put "repos/$repo/pulls?state=open&per_page=100" '[]'
+    put "repos/$repo/issues/100" "$(issue_json 100 alice)"
+    put "repos/$repo/issues/100/comments?per_page=100" '[]'
+    connected=$(linked_event C1 ConnectedEvent 100 55 "$repo")
+    put_links 100 "[$connected]" "$repo"
+    put "repos/$repo/issues/100/timeline?per_page=100" "$(jq --arg repo "$repo" '
+      . + [{event:"cross-referenced",source:{issue:{number:55,state:"closed",repository:{full_name:$repo},
+        pull_request:{merged_at:"2026-03-02T00:00:00Z"}}}}]' "$FIX/$(key_of "repos/$repo/issues/100/timeline?per_page=100").json")"
+    put "repos/$repo/pulls/55" '{"number":55,"state":"closed","merged_at":"2026-03-02T00:00:00Z","base":{"ref":"main"},"title":"helper"}'
+    put_closing 55 "[{\"number\":100,\"repository\":{\"nameWithOwner\":\"$repo\"}}]" "$repo"
+    rc=0; out=$(run_claim --repo "$repo" --ref origin/main --sweep 100) || rc=$?
+    expect_code 0 "$rc" "GraphQL string identifiers for $repo"
+    assert_contains "$out" "sweep: #100 close-candidate state=open verdict=fixed-on-main coverage=complete link=-" \
+      "both timeline and closing-reference GraphQL queries preserve $repo as strings"
+    assert_contains "$out" "merged: PR #55 merged base=main [timeline,fixes]" "the queried fixing PR is retained"
+  done
+  pass "numeric, boolean, and null-looking owner and repository names remain GraphQL strings"
 }
 
 test_fork_branch_heading_a_merged_pr() {
@@ -641,6 +798,7 @@ test_corpus_links_require_fixing_references() {
 }
 
 test_every_forge_call_is_a_read() {
+  put_links 100 "[$(linked_event C1 ConnectedEvent 100 60)]"
   run_claim --symbol 300:magic_symbol 4018 100 200 300 400 800 >/dev/null || true
   [ -s "$FIX/calls.log" ] || fail "no forge calls were recorded"
   assert_no_grep "POST" "$FIX/calls.log" "no forge write may be issued"
@@ -650,6 +808,7 @@ test_every_forge_call_is_a_read() {
   if grep -v '^api ' "$FIX/calls.log" >/dev/null; then
     fail "every gh call must be a read through gh api"
   fi
+  build_forge
   pass "every forge call is a read"
 }
 
@@ -727,6 +886,9 @@ test_title_and_branch_matches_are_claims
 test_nothing_found_with_full_coverage_is_open
 test_history_requires_a_fixing_reference
 test_stamps_timeline_and_hints
+test_development_link_lifecycle
+test_unresolved_development_links
+test_graphql_repository_strings
 test_fork_branch_heading_a_merged_pr
 test_related_commit_after_helper_withdrawal
 test_fixing_reference_boundaries_and_aggregation

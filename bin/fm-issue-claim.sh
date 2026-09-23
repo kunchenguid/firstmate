@@ -28,7 +28,11 @@
 # in the run:
 #   timeline  cross-referenced events (GET issues/<n>/timeline): a pull request
 #             in this repository that is open or merged; a cross-reference
-#             from an issue or another repository is only a hint.
+#             from an issue or another repository is only a hint. Development
+#             links are resolved through GraphQL connected/disconnected events;
+#             the latest event for each linked item applies. Active links to
+#             open PRs are claims, including across repositories. Unresolved
+#             events or linked PRs make timeline coverage incomplete.
 #   stamps    maintainer triage stamps: comments by OWNER, MEMBER, or
 #             COLLABORATOR carrying <!-- triage: ... outcome=... -->. When the
 #             outcome is existing-pr, each "existing-pr -> #X" (ASCII arrow or
@@ -403,6 +407,66 @@ screen_issue() {
         else
           ["hint", "", "", "", "", "issue \($src)#\(.number) (\(.state)) cross-references this issue"] | @tsv
         end' "$d/timeline.json" >> "$ev"
+    if jq -e 'any(.[]; .event == "connected" or .event == "disconnected")' "$d/timeline.json" >/dev/null; then
+      if gh_read "$d/links" api graphql --paginate -f owner="$OWNER" -f name="$NAME" -F number="$n" -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+        repository(owner: $owner, name: $name) { issue(number: $number) {
+          timelineItems(first: 100, after: $endCursor, itemTypes: [CONNECTED_EVENT, DISCONNECTED_EVENT]) {
+            nodes {
+              __typename
+              ... on ConnectedEvent { id createdAt source { ...linkedSubject } subject { ...linkedSubject } }
+              ... on DisconnectedEvent { id createdAt source { ...linkedSubject } subject { ...linkedSubject } }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        } }
+      }
+      fragment linkedSubject on ReferencedSubject {
+        __typename
+        ... on Issue { number repository { nameWithOwner } }
+        ... on PullRequest { number repository { nameWithOwner } state isDraft }
+      }' \
+        && jq -sr --arg repo "$REPO" --argjson n "$n" --slurpfile timeline "$d/timeline.json" '
+          def this_issue: .__typename == "Issue" and .number == $n
+            and ((.repository.nameWithOwner | ascii_downcase) == ($repo | ascii_downcase));
+          if length == 0 or any(.[];
+            ((.errors // []) | length) > 0
+            or (.data.repository.issue.timelineItems.nodes | type) != "array"
+            or (.data.repository.issue.timelineItems.pageInfo.hasNextPage | type) != "boolean")
+            or .[-1].data.repository.issue.timelineItems.pageInfo.hasNextPage != false
+          then error("incomplete Development links")
+          else [.[].data.repository.issue.timelineItems.nodes[]] end
+          | . as $events
+          | if any($timeline[0][] | select(.event == "connected" or .event == "disconnected");
+              .node_id as $id | ($id | type) != "string" or all($events[]; .id != $id))
+            then error("unresolved Development event") else . end
+          | map(
+              if (.__typename != "ConnectedEvent" and .__typename != "DisconnectedEvent")
+                or (.createdAt | type) != "string" then error("invalid Development event") else . end
+              | .peer = (if (.source | this_issue) then .subject
+                  elif (.subject | this_issue) then .source else error("unresolved Development endpoint") end)
+              | if (.peer.number | type) != "number" or (.peer.repository.nameWithOwner | type) != "string"
+                  or (.peer.__typename != "Issue" and .peer.__typename != "PullRequest")
+                  or (.peer.__typename == "PullRequest" and (.peer.state != "OPEN" and .peer.state != "CLOSED" and .peer.state != "MERGED"))
+                then error("unresolved Development subject") else . end)
+          | sort_by(.createdAt)
+          | reduce .[] as $e ({};
+              .[($e.peer | "\(.__typename):\(.repository.nameWithOwner | ascii_downcase)#\(.number)")] = $e)
+          | .[] | select(.__typename == "ConnectedEvent") | .peer
+          | if .__typename == "PullRequest" and ((.repository.nameWithOwner | ascii_downcase) == ($repo | ascii_downcase)) then
+              ["pr", (.number | tostring), "unknown", "timeline", "", ""]
+            else
+              [(if .__typename == "PullRequest" and .state == "OPEN" then "claim" else "hint" end),
+               "", "", "timeline", "",
+               "\(if .__typename == "PullRequest" then "PR" else "issue" end) \(.repository.nameWithOwner)#\(.number)\(if .state then " " + (.state | ascii_downcase) + (if .state == "OPEN" and .isDraft then "(draft)" else "" end) else "" end) linked through Development"]
+            end | @tsv
+        ' "$d/links" > "$d/links.tsv" 2>/dev/null; then
+        cat "$d/links.tsv" >> "$ev"
+      else
+        timeline_st=partial
+        failed+=(timeline)
+        printf 'disclose: Development links could not be resolved: %s\n' "$(gh_reason "$d/links")" >> "$d/notes"
+      fi
+    fi
   else
     timeline_st=failed
     failed+=(timeline)
@@ -426,7 +490,7 @@ screen_issue() {
               | if ($prs | length) > 0 then
                   ($prs[] | ["stamp-pr", ., "", "stamp", $u, ""] | @tsv)
                 else
-                  ["stamp-claim", "", "", "stamp", $u, "maintainer stamp outcome=existing-pr names no PR (\(.html_url // "?"))"] | @tsv
+                  ["claim", "", "", "stamp", $u, "maintainer stamp outcome=existing-pr names no PR (\(.html_url // "?"))"] | @tsv
                 end
             elif $maint then
               ["hint", "", "", "", "", "maintainer stamp outcome=\($o) by \($u) (\($a)) \(.created_at // "")"] | @tsv
@@ -581,7 +645,7 @@ EOF
         elif [ "$pr_base" = "$DEFAULT_BRANCH" ]; then
           if jq -e --arg fix "$fixpat" '(.body // "") | test($fix; "i")' "$d/pr-$x" >/dev/null; then
             pr_fix=true
-          elif gh_read "$d/closing-$x" api graphql --paginate -F owner="$OWNER" -F name="$NAME" -F number="$x" -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { closingIssuesReferences(first: 100, after: $endCursor) { nodes { number repository { nameWithOwner } } pageInfo { hasNextPage endCursor } } } } }' \
+          elif gh_read "$d/closing-$x" api graphql --paginate -f owner="$OWNER" -f name="$NAME" -F number="$x" -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { closingIssuesReferences(first: 100, after: $endCursor) { nodes { number repository { nameWithOwner } } pageInfo { hasNextPage endCursor } } } } }' \
             && pr_fix=$(jq -sr --argjson n "$n" --arg repo "$REPO" '
               if length == 0 or any(.[];
                 ((.errors // []) | length) > 0
@@ -615,6 +679,10 @@ EOF
         stamps_st=partial
         failed+=(stamps)
       fi
+      if awk -F '\t' -v x="$x" '$1 == "pr" && $2 == x && $3 == "unknown" && $4 == "timeline" { found=1 } END { exit !found }' "$ev"; then
+        timeline_st=partial
+        failed+=(timeline)
+      fi
       printf 'disclose: PR #%s could not be read: %s\n' "$x" "$(gh_reason "$d/pr-$x")" >> "$d/notes"
     fi
   done <<EOF
@@ -642,7 +710,7 @@ EOF
       if (what[k] == "" && $6 != "") what[k] = $6
       if ($7 == "true") fixing[k] = 1
     }
-    $1 == "stamp-claim" { claims[++nclaims] = $6 }
+    $1 == "claim" { claims[++nclaims] = $6 " [" $4 "]" }
     $1 == "hint" { hints[++nhints] = $6 }
     END {
       for (i = 1; i <= count; i++) {
@@ -663,7 +731,7 @@ EOF
         }
         printf "%s: %s [%s%s]\n", label, line, src[k], (fixing[k] ? ",fixes" : "")
       }
-      for (i = 1; i <= nclaims; i++) printf "claim: %s [stamp]\n", claims[i]
+      for (i = 1; i <= nclaims; i++) printf "claim: %s\n", claims[i]
       for (i = 1; i <= nhints; i++) printf "hint: %s\n", hints[i]
     }' "$d/resolved-prs" "$ev" > "$d/lines"
 
