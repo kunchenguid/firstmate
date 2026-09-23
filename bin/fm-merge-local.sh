@@ -87,19 +87,7 @@ MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ "$MODE" = local-only ] || { echo "error: task $ID is mode=$MODE, not local-only; merge PR tasks with bin/fm-pr-merge.sh <id> <PR url> after approval" >&2; exit 1; }
 
 default_branch() {
-  local ref branch
-  ref=$(git -C "$PROJ" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
-  if [ -n "$ref" ]; then
-    echo "${ref#origin/}"
-    return 0
-  fi
-  for branch in main master; do
-    if git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch"; then
-      echo "$branch"
-      return 0
-    fi
-  done
-  return 1
+  fm_local_default_branch "$PROJ"
 }
 
 BRIEF="$DATA/$ID/brief.md"
@@ -139,7 +127,7 @@ if [ -n "$recorded_base" ]; then
   TARGET=$recorded_base
   DEFAULT=$(default_branch || true)
 else
-  DEFAULT=$(fm_remote_default_branch "$PROJ") || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, remote HEAD, main, or master" >&2; exit 1; }
+  DEFAULT=$(fm_local_only_default_branch "$PROJ") || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, remote HEAD, main, or master" >&2; exit 1; }
   TARGET=$DEFAULT
 fi
 TARGET_REF="refs/heads/$TARGET"

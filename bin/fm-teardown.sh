@@ -1249,7 +1249,11 @@ elif [ "$FORCE" != "--force" ] && fm_pf_relay_active "$FM_HOME"; then
 fi
 
 default_branch() {
-  fm_remote_default_branch "$PROJ"
+  if [ "$MODE" = local-only ]; then
+    fm_local_only_default_branch "$PROJ"
+  else
+    fm_remote_default_branch "$PROJ"
+  fi
 }
 
 meta_value() {

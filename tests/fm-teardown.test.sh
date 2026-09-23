@@ -760,6 +760,21 @@ test_local_only_completion_records_the_resolved_default_branch() {
   pass "local-only completion records the remote default without origin/HEAD"
 }
 
+test_local_only_completion_falls_back_when_origin_is_unreachable() {
+  local case_dir out
+  case_dir=$(make_case local-only-origin-unreachable)
+  write_meta "$case_dir" local-only ship
+  seed_backlog_in_flight "$case_dir"
+  git -C "$case_dir/project" remote set-url origin ssh://127.0.0.1:1/unreachable
+
+  out=$(run_teardown "$case_dir") || fail "local-only teardown did not fall back to the local default: $out"
+  [ "$(backlog_row_state "$case_dir")" = done ] \
+    || fail "local-only teardown left the backlog item open after origin became unreachable"
+  assert_grep 'local-landing:main' "$case_dir/data/backlog.md" \
+    "local-only teardown did not record the local fallback landing branch"
+  pass "local-only teardown falls back to the local default when origin is unreachable"
+}
+
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator() {
   local case_dir out backlog_path
   case_dir=$(make_case tasks-axi-manual-optout)
@@ -3980,6 +3995,7 @@ EOF
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_local_only_completion_records_the_resolved_default_branch
+test_local_only_completion_falls_back_when_origin_is_unreachable
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows

@@ -192,6 +192,21 @@ test_remote_default_without_origin_head_is_used() {
   pass "merge-local resolves the remote default without origin/HEAD"
 }
 
+test_local_default_fallback_when_origin_is_unreachable() {
+  local case_dir project id=task-local-fallback
+  case_dir=$(make_case local-fallback "$id")
+  project=$case_dir/project
+  git -C "$project" remote set-url origin ssh://127.0.0.1:1/unreachable
+  commit_on "$project" "fm/$id" crew.txt
+  git -C "$project" checkout -q main
+
+  run_merge "$case_dir" "$id" >/dev/null \
+    || fail "merge-local refused the local default after origin became unreachable"
+  [ "$(git -C "$project" rev-parse main)" = "$(git -C "$project" rev-parse "fm/$id")" ] \
+    || fail "merge-local did not fall back to the local default branch"
+  pass "merge-local falls back to the local default when origin is unreachable"
+}
+
 test_recorded_base_without_default_branch_merges() {
   local case_dir project id=task-no-default
   case_dir=$(make_case no-default "$id")
@@ -259,6 +274,7 @@ test_last_recorded_crew_branch_wins
 test_metadata_base_is_authoritative
 test_absent_metadata_base_uses_default
 test_remote_default_without_origin_head_is_used
+test_local_default_fallback_when_origin_is_unreachable
 test_recorded_base_without_default_branch_merges
 test_invalid_metadata_base_refuses
 test_diverged_branch_refuses
