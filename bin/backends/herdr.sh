@@ -1947,13 +1947,19 @@ fm_backend_herdr_home_binding_validate_live() { # <session> [<workspace>]
   [ "$presence" = present ]
 }
 fm_backend_herdr_task_binding_validate() { # <meta> <session> <workspace>
-  local meta=$1 session=$2 workspace=$3 home version socket
+  local meta=$1 session=$2 workspace=$3 home version socket binding presence
   home=$(fm_backend_meta_exact_value "$meta" herdr_home 2>/dev/null || true); [ -z "$home" ] && return 0
   version=$(fm_backend_meta_exact_value "$meta" herdr_workspace_binding_version 2>/dev/null || true)
   socket=$(fm_backend_meta_exact_value "$meta" herdr_socket_path 2>/dev/null || true)
   [ "$version" = "$FM_BACKEND_HERDR_HOME_BINDING_VERSION" ] || return 1
-  fm_backend_herdr_home_binding_validate_live "$session" "$workspace" || return 1
-  [ "$home" = "$FM_BACKEND_HERDR_BINDING_HOME" ] && [ "$socket" = "$FM_BACKEND_HERDR_BINDING_SOCKET" ]
+  binding="$home/state/$FM_BACKEND_HERDR_HOME_BINDING_FILE"
+  fm_backend_herdr_home_binding_snapshot "$binding" || return 1
+  [ "$FM_BACKEND_HERDR_BINDING_HOME" = "$home" ] \
+    && [ "$FM_BACKEND_HERDR_BINDING_SESSION" = "$session" ] \
+    && [ "$FM_BACKEND_HERDR_BINDING_WORKSPACE_ID" = "$workspace" ] || return 1
+  [ -n "$socket" ] && [ "$socket" = "$FM_BACKEND_HERDR_BINDING_SOCKET" ] || return 1
+  presence=$(fm_backend_herdr_workspace_presence_state "$session" "$workspace")
+  [ "$presence" = present ]
 }
 
 # fm_backend_herdr_workspace_ensure: the workspace this spawn's task tab

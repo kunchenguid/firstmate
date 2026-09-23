@@ -9,6 +9,8 @@ trap 'rm -rf "$TMP_ROOT"' EXIT
 export FM_ROOT_OVERRIDE=$ROOT
 export FM_HOME="$TMP_ROOT/primary"
 mkdir -p "$FM_HOME/state"
+# shellcheck source=bin/fm-backend.sh
+. "$ROOT/bin/fm-backend.sh"
 # shellcheck source=bin/backends/herdr.sh
 . "$ROOT/bin/backends/herdr.sh"
 
@@ -34,6 +36,10 @@ fm_backend_herdr_cli() {
     *'tab create'*) printf '%s\n' '{"result":{"tab":{"tab_id":"w-primary:t-worker"},"root_pane":{"pane_id":"w-primary:p-worker"}}}' ;;
     *) printf '%s\n' '{"result":{}}' ;;
   esac
+}
+
+home_binding_content() { # <home> <workspace>
+  printf 'version=1\nhome=%s\nsession=default\nsocket=/tmp/herdr-%s.sock\nworkspace_id=%s\nowner_kind=secondmate\ngeneration=1\nanchor_tab_id=\nanchor_pane_id=\n' "$1" "default" "$2"
 }
 
 assert_eq() { [ "$1" = "$2" ] || { echo "assertion failed: expected '$2', got '$1'" >&2; exit 1; }; }
@@ -112,5 +118,40 @@ if grep -E 'workspace (create|move)' "$FAKE_LOG" >/dev/null; then
   echo 'ordinary tab placement used workspace create/move' >&2; exit 1
 fi
 pass 'ordinary placement creates only a tab in the exact owner workspace'
+
+# Task binding validation reads the TASK'S OWN recorded home binding, not the
+# ambient caller's binding, so a primary home retiring a SecondMate whose home
+# workspace differs from the primary's validates the SecondMate against its own
+# durable record and passes when it matches.
+FM_HOME="$TMP_ROOT/primary"
+meta_secondmate="$TMP_ROOT/meta-secondmate"
+secondmate_home="$TMP_ROOT/sm2"
+mkdir -p "$secondmate_home/state"
+cat > "$meta_secondmate" <<EOF
+kind=secondmate
+herdr_home=$secondmate_home
+herdr_socket_path=/tmp/herdr-default.sock
+herdr_workspace_binding_version=1
+window=default:w-sm2:p2
+EOF
+# Matching task-home binding passes even though the ambient primary home has no
+# binding of its own (its file is absent) and its own workspace would differ.
+rm -f "$(home_binding_path "$FM_HOME")"
+home_binding_content "$secondmate_home" w-sm2 > "$(home_binding_path "$secondmate_home")"
+FAKE_PRESENCE=present
+fm_backend_herdr_task_binding_validate "$meta_secondmate" default w-sm2 >/dev/null || {
+  echo 'valid matching SecondMate task binding was refused' >&2; exit 1
+}
+pass 'task binding validates against the task home, not the ambient caller home'
+# A recorded workspace that disagrees with the task home binding still refuses.
+if fm_backend_herdr_task_binding_validate "$meta_secondmate" default w-other >/dev/null 2>&1; then
+  echo 'mismatched task workspace binding was accepted' >&2; exit 1
+fi
+# An absent task home binding still refuses (binding is authoritative).
+rm -f "$(home_binding_path "$secondmate_home")"
+if fm_backend_herdr_task_binding_validate "$meta_secondmate" default w-sm2 >/dev/null 2>&1; then
+  echo 'missing task home binding was accepted' >&2; exit 1
+fi
+pass 'missing/mismatched task home binding refuses safely'
 
 echo 'all Herdr home-binding tests passed'
