@@ -11,6 +11,7 @@ In this checkout (your firstmate home):
 ```sh
 touch config/fleet-ledger                 # firstmate's opt-in activity ledger: run history
 cargo install --path vessel               # or: cargo run --manifest-path vessel/Cargo.toml
+vessel radar arm                          # keep firstmate monitoring GitHub and Jira all day
 ```
 
 Then run `claude` here as usual, and `vessel` in another terminal. vessel finds the home from `--home`, `$VESSEL_FM_HOME`, `$FM_HOME`, or the checkout it runs in.

@@ -86,6 +86,7 @@ pub(super) fn insert_review_pull_requests(
                 .and_modify(|pull_request| {
                     if review_requested {
                         pull_request.my_status = ReviewDecision::Waiting;
+                        pull_request.is_review_requested = true;
                     }
                 })
                 .or_insert(ReviewPullRequest {
@@ -111,6 +112,7 @@ pub(super) fn insert_review_pull_requests(
                         my_status
                     },
                     total_status,
+                    is_review_requested: review_requested,
                 });
         }
     }
@@ -137,6 +139,21 @@ pub(super) fn insert_pull_requests(
                 .pointer("/latestOpinionatedReviews/nodes")
                 .and_then(Value::as_array)
                 .ok_or_else(|| "A GitHub pull request has no reviews".to_string())?;
+            let review_ids: Vec<String> = reviews
+                .iter()
+                .filter(|review| {
+                    review.get("state").and_then(Value::as_str) == Some("CHANGES_REQUESTED")
+                })
+                .filter_map(|review| review.get("id").and_then(Value::as_str).map(str::to_owned))
+                .collect();
+            let unresolved_thread_ids: Vec<String> = node
+                .pointer("/reviewThreads/nodes")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|thread| thread.get("isResolved").and_then(Value::as_bool) != Some(true))
+                .filter_map(|thread| thread.get("id").and_then(Value::as_str).map(str::to_owned))
+                .collect();
             pull_requests.entry(url.clone()).or_insert(PullRequest {
                 repository: node
                     .pointer("/repository/nameWithOwner")
@@ -174,6 +191,12 @@ pub(super) fn insert_pull_requests(
                 } else {
                     ReviewStatus::Waiting
                 },
+                ci_status: node
+                    .pointer("/latestCommit/nodes/0/commit/statusCheckRollup/state")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                review_ids,
+                unresolved_thread_ids,
             });
         }
     }

@@ -17,19 +17,30 @@ mod firstmate;
 mod github;
 mod input;
 mod jira;
+mod radar;
 mod ui;
 
 use app::{App, GitHubReviewFocus};
 
 const USAGE: &str = "usage: vessel [--home <firstmate-home>]
+       vessel radar check|arm|disarm|ack [--home <firstmate-home>]
 
 A read-only view of what firstmate is doing, with Jira and GitHub alongside.
 The firstmate home is --home, $VESSEL_FM_HOME, $FM_HOME, or the nearest
-firstmate checkout above the current directory.";
+firstmate checkout above the current directory.
+
+vessel radar monitors GitHub and Jira for events that need attention.
+Run `vessel radar arm` once to keep firstmate monitoring all day.";
 
 fn main() -> io::Result<()> {
+    let all_args: Vec<String> = std::env::args().skip(1).collect();
+
+    if all_args.first().map(String::as_str) == Some("radar") {
+        return radar::run(&all_args[1..]);
+    }
+
     let mut explicit_home = None;
-    let mut arguments = std::env::args().skip(1);
+    let mut arguments = all_args.into_iter();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--home" => explicit_home = arguments.next().map(PathBuf::from),

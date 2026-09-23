@@ -45,6 +45,9 @@ fn pull_requests() -> Vec<PullRequest> {
         has_conflicts: false,
         status: ReviewStatus::ChangesRequested,
         needs_attention: true,
+        ci_status: None,
+        review_ids: vec![],
+        unresolved_thread_ids: vec![],
     }]
 }
 

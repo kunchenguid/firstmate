@@ -17,11 +17,12 @@ const PULL_REQUESTS_QUERY: &str = r#"query($searchQuery: String!, $endCursor: St
         nodes {
             ... on PullRequest {
                 number title url isDraft mergeable repository { nameWithOwner }
-                latestCommit: commits(last: 1) { nodes { commit { oid } } }
-                latestOpinionatedReviews(first: 100) { nodes { author { login } state } }
+                latestCommit: commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
+                latestOpinionatedReviews(first: 100) { nodes { id author { login } state } }
                 reviewRequests(first: 100) {
                     nodes { requestedReviewer { ... on User { login } ... on Bot { login } } }
                 }
+                reviewThreads(first: 100) { nodes { id isResolved } }
             }
         }
         pageInfo { hasNextPage endCursor }
@@ -67,6 +68,9 @@ pub(crate) struct PullRequest {
     pub(crate) has_conflicts: bool,
     pub(crate) status: ReviewStatus,
     pub(crate) needs_attention: bool,
+    pub(crate) ci_status: Option<String>,
+    pub(crate) review_ids: Vec<String>,
+    pub(crate) unresolved_thread_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -78,6 +82,7 @@ pub(crate) struct ReviewPullRequest {
     pub(crate) head_commit: String,
     pub(crate) my_status: ReviewDecision,
     pub(crate) total_status: ReviewDecision,
+    pub(crate) is_review_requested: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

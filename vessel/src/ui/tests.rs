@@ -380,6 +380,9 @@ fn github_pull_requests_are_grouped_by_repository() {
         has_conflicts: false,
         status: ReviewStatus::Waiting,
         needs_attention: false,
+        ci_status: None,
+        review_ids: vec![],
+        unresolved_thread_ids: vec![],
     };
     let pull_requests = vec![
         pull_request("org/b", 1),
@@ -407,6 +410,9 @@ fn github_statuses_use_compact_symbols() {
         has_conflicts: false,
         status,
         needs_attention: matches!(status, ReviewStatus::Draft | ReviewStatus::ChangesRequested),
+        ci_status: None,
+        review_ids: vec![],
+        unresolved_thread_ids: vec![],
     };
 
     assert_eq!(

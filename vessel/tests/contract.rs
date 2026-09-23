@@ -4,7 +4,7 @@
 //! interfaces instead. The sync workflow runs these after merging upstream, so
 //! an upstream change that breaks one stops the merge from reaching `main`.
 
-use std::{fs, path::PathBuf};
+use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
 fn firstmate_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -154,4 +154,73 @@ fn skill_points_at_files_that_exist() {
         assert!(skill.contains(path), "the skill no longer names {path}");
         assert!(firstmate_root().join(path).exists(), "{path} is missing");
     }
+}
+
+#[test]
+fn check_register_accepts_vessel_radar_id_and_creates_trust_binding() {
+    let state_dir = std::env::temp_dir().join(format!("vessel-reg-{}", std::process::id()));
+    fs::create_dir_all(&state_dir).unwrap();
+
+    let check_sh = state_dir.join("vessel-radar.check.sh");
+    fs::write(&check_sh, "#!/usr/bin/env bash\n").unwrap();
+    fs::set_permissions(&check_sh, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let status = std::process::Command::new(firstmate_root().join("bin/fm-check-register.sh"))
+        .arg("vessel-radar")
+        .env("FM_STATE_OVERRIDE", &state_dir)
+        .status()
+        .expect("fm-check-register.sh should be executable");
+    assert!(status.success(), "fm-check-register.sh should succeed");
+    assert!(
+        state_dir.join("vessel-radar.check-trust").exists(),
+        "fm-check-register.sh should create the trust binding"
+    );
+
+    let status = std::process::Command::new(firstmate_root().join("bin/fm-check-unregister.sh"))
+        .arg("vessel-radar")
+        .env("FM_STATE_OVERRIDE", &state_dir)
+        .status()
+        .expect("fm-check-unregister.sh should be executable");
+    assert!(status.success(), "fm-check-unregister.sh should succeed");
+    assert!(
+        !state_dir.join("vessel-radar.check.sh").exists(),
+        "fm-check-unregister.sh should remove check.sh"
+    );
+    assert!(
+        !state_dir.join("vessel-radar.check-trust").exists(),
+        "fm-check-unregister.sh should remove the trust binding"
+    );
+
+    fs::remove_dir_all(&state_dir).ok();
+}
+
+#[test]
+fn registered_check_keeps_supervision_running() {
+    let state_dir = std::env::temp_dir().join(format!("vessel-sup-{}", std::process::id()));
+    fs::create_dir_all(&state_dir).unwrap();
+
+    let check_sh = state_dir.join("vessel-radar.check.sh");
+    let check_trust = state_dir.join("vessel-radar.check-trust");
+    fs::write(&check_sh, "#!/usr/bin/env bash\n").unwrap();
+    fs::set_permissions(&check_sh, fs::Permissions::from_mode(0o700)).unwrap();
+    // The trust binding content is validated by the watcher at execution time,
+    // not by fm_supervision_status; presence of both files is the supervision gate.
+    fs::write(&check_trust, "fm-custom-check-v1\nhash\n").unwrap();
+
+    let lib = firstmate_root().join("bin/fm-supervision-lib.sh");
+    let script = format!(
+        ". '{}' && fm_supervision_status '{}' && [ \"$FM_SUP_NEEDED\" = true ]",
+        lib.display(),
+        state_dir.display()
+    );
+    let status = std::process::Command::new("bash")
+        .args(["-c", &script])
+        .status()
+        .expect("bash should be available");
+
+    fs::remove_dir_all(&state_dir).ok();
+    assert!(
+        status.success(),
+        "FM_SUP_NEEDED should be true when vessel-radar is registered"
+    );
 }
