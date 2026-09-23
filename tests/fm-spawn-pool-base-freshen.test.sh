@@ -289,6 +289,52 @@ test_aborted_spawn_removes_its_graphify_link() {
   pass "an aborted spawn removes the graphify-out link it created"
 }
 
+test_committed_interrupted_spawn_preserves_its_graphify_link() {
+  local rec id out status real_tasks
+  id='pool-graphify-committed-signal-r1'
+  rec=$(make_originless_case graphify-committed-signal "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJECT_DIR/graphify-out"
+  printf '%s\n' '{"nodes":[]}' > "$PROJECT_DIR/graphify-out/graph.json"
+  : > "$HOME_DIR/config/graphify-worktree"
+  : > "$HOME_DIR/data/backlog.md"
+  real_tasks=$(command -v tasks-axi)
+  "$real_tasks" add "$id" "graphify committed signal fixture" --kind scout \
+    --file "$HOME_DIR/data/backlog.md" >/dev/null
+  cat > "$FAKEBIN_DIR/tasks-axi" <<SH
+#!/usr/bin/env bash
+"$real_tasks" "\$@"
+rc=\$?
+if [ "\${1:-}" = start ] && [ "\$rc" -eq 0 ]; then
+  ancestor=\$PPID
+  attempts=0
+  while [ "\$ancestor" -gt 1 ] 2>/dev/null && [ "\$attempts" -lt 8 ]; do
+    command_line=\$(ps -o command= -p "\$ancestor" 2>/dev/null || true)
+    case "\$command_line" in
+      *fm-spawn.sh*) kill -TERM "\$ancestor"; break ;;
+    esac
+    ancestor=\$(ps -o ppid= -p "\$ancestor" 2>/dev/null | tr -d ' ')
+    attempts=\$((attempts + 1))
+  done
+fi
+exit "\$rc"
+SH
+  chmod +x "$FAKEBIN_DIR/tasks-axi"
+
+  out=$(run_spawn "$id" --scout)
+  status=$?
+  expect_code 143 "$status" "spawn should report a deferred TERM after committing the task"$'\n'"$out"
+  assert_contains "$out" "verified preserved" \
+    "the interrupted spawn did not verify its committed task state"
+  assert_present "$HOME_DIR/state/$id.meta" \
+    "the interrupted committed spawn did not preserve its task record"
+  [ -L "$POOL_DIR/graphify-out" ] \
+    || fail "the interrupted committed spawn removed its live task's graphify-out link"
+  [ -f "$POOL_DIR/graphify-out/graph.json" ] \
+    || fail "the preserved graphify-out link no longer reaches the source graph"
+  pass "an interrupted committed spawn preserves its graphify-out link"
+}
+
 test_originless_pool_launches_without_a_freshness_fetch() {
   local rec id out status before
   id='pool-originless-r6'
@@ -802,6 +848,7 @@ test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_graphify_out_links_only_when_worktree_flag_is_present
 test_aborted_spawn_removes_its_graphify_link
+test_committed_interrupted_spawn_preserves_its_graphify_link
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base
