@@ -354,6 +354,10 @@ STUB
       "$mode: promoted worker did not receive the Captain's intent subsection"
     assert_grep "## Firstmate spec" "$payload" \
       "$mode: promoted worker did not receive the Firstmate spec subsection"
+    assert_grep "Never run \`gh issue close\`, \`gh issue reopen\`, or any \`gh project\` command" "$payload" \
+      "$mode: promoted worker did not receive the manual issue and project-command ban"
+    assert_grep "issues close through the PR body's \`closes #N\` on merge, and the project board is not used" "$payload" \
+      "$mode: promoted worker did not receive the issue-lifecycle rationale"
 
     # Compare the public outputs of both real generation paths. The promoted
     # payload ends at its Definition of done, as does an ordinary generated
