@@ -1589,7 +1589,7 @@ ok - real herdr: a drifted agent-free shell returns to its worktree and reuses t
 
 `tests/fm-backend-herdr.test.sh` pins the logic portably by driving the two signals apart - the same failed pane read yields `missing` under a stopped server and `unreadable` under a running one - and asserts that the husk classifier still refuses on that identical read.
 `tests/fm-control-herdr-smoke.test.sh` proves the Herdr-only drift recovery against a real binary in an isolated lab session.
-`tests/fm-control-relaunch.test.sh` drives a tmux stub and proves that tmux retains its prior refusal without sending `cd` or any other input to the pane.
+`tests/fm-control-relaunch.test.sh` drives a tmux stub and proves the guarded recovery and its remaining refusals; see "Missing-window seat binding" above.
 The Herdr refusal when a shell accepts the command but does not move is not exercised in this change.
 
 ### Stale agent registration
