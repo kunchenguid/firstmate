@@ -740,7 +740,7 @@ test_exit_submits_own_doorbell_then_proceeds() {
   add_task "$dir" t1 claude
   alive_as "$dir" claude
   doorbell=$(doorbell_for "$dir" t1)
-  { printf '\n'; printf '❯ %s\n' "$doorbell"; printf '\n'; } > "$dir/fake/pane"
+  { printf '────────\n'; printf '❯ %s\n' "$doorbell"; printf '────────\n'; } > "$dir/fake/pane"
   export FM_FAKE_ENTER_CLEARS=1
   out=$(run_control "$dir" t1 exit); rc=$?
   unset FM_FAKE_ENTER_CLEARS

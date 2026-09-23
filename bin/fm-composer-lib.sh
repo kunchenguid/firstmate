@@ -1511,10 +1511,11 @@ _fm_composer_select_cursorless() {
 
 fm_composer_extract_selected_content() {  # <caps> <screen>
   local caps=$1 screen=$2 styled=0 kv plain row raw content glyph joined='' footer_re prompt_row=-1
-  local leading_blank=1 placeholder_position=0 prompt_is_shell=0
+  local leading_blank=1 placeholder_position=0 prompt_is_shell=0 lossless=0 top bottom
   footer_re=${FM_COMPOSER_LEFTBAR_FOOTER_RE:-$FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT}
   while IFS= read -r kv; do
     [ "$kv" = styled=1 ] && styled=1
+    [ "$kv" = lossless=1 ] && lossless=1
   done <<EOF
 $caps
 EOF
@@ -1522,8 +1523,14 @@ EOF
   _fm_composer_scan_screen "$plain" '' 1
   _fm_composer_select_cursorless "$plain" || return 1
   if [ "${FM_COMPOSER_EXACT_CONTENT:-0}" = 1 ]; then
+    [ "$lossless" = 1 ] || return 1
     [ "$FM_COMPOSER_SELECTED_KIND" = bare ] || return 1
     [ "$FM_COMPOSER_SELECTED_FIRST" = "$FM_COMPOSER_SELECTED_LAST" ] || return 1
+    [ "$FM_COMPOSER_SELECTED_FIRST" -gt 0 ] || return 1
+    top=$(_fm_composer_screen_row "$((FM_COMPOSER_SELECTED_FIRST - 1))" "$plain")
+    bottom=$(_fm_composer_screen_row "$((FM_COMPOSER_SELECTED_LAST + 1))" "$plain")
+    [ "$top" = "$bottom" ] || return 1
+    [[ "$top" =~ ^─{3,}$ ]] || return 1
     raw=$(_fm_composer_screen_row "$FM_COMPOSER_SELECTED_FIRST" "$plain")
     fm_composer_leading_agent_glyph_var glyph "$raw" || return 1
     case "$raw" in

@@ -174,8 +174,9 @@ fm_tmux_composer_state() {  # <target> -> empty|pending|pending-unproven|unknown
 # the proven envelope, never bare footer furniture.
 fm_tmux_composer_content() {  # <target> -> selected composer text or fail
   local target=$1 pane
-  pane=$(fm_tmux_composer_capture "$target") || return 1
-  fm_composer_extract_selected_content "$(fm_tmux_composer_caps)" "$pane"
+  pane=$(tmux capture-pane -N -T -e -p -t "$target" -S 0 -E - 2>/dev/null) || return 1
+  fm_composer_extract_selected_content "$(fm_tmux_composer_caps)
+lossless=1" "$pane"
 }
 
 # fm_tmux_pane_is_cursor: true when the pane's FOREGROUND process group contains
