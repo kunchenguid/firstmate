@@ -901,6 +901,9 @@ worker_reap_finished_lanes() {
 # orphan recovery a crashed worker's job gets.
 worker_stop_overrun_lanes() {
   local i=0 count=${#WORKER_LANE_PIDS[@]} pid start job deadline now
+  # The serving loop calls this on every poll, so it costs nothing at all while
+  # no lane is tracked rather than reading the clock twenty times a second.
+  [ "$count" -gt 0 ] || return 0
   now=$(date +%s)
   while [ "$i" -lt "$count" ]; do
     pid=${WORKER_LANE_PIDS[$i]}
