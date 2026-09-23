@@ -11,7 +11,14 @@
 #   the mode up. A ship spawn additionally reads the brief's recorded
 #   "Delivery contract: mode=<mode>" line and REFUSES a mismatch, so the worker's
 #   instructions and the recorded task delivery cannot drift apart; a brief
-#   scaffolded before that line existed warns once and launches on the flag. A
+#   scaffolded before that line existed warns once and launches on the flag.
+#   The project's forge IS read from data/projects.md, because it is the
+#   captain's confirmed project fact rather than a per-task choice: a spawn
+#   refuses a brief whose `forge=` disagrees with the registered binding in
+#   either direction, and refuses --yolo on for a forge=gerrit project, where
+#   yolo is inactive (bin/fm-project-mode.sh's header carries that decision). A
+#   registry entry the parser refuses stops the spawn rather than launching on a
+#   guessed posture. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
@@ -2802,15 +2809,51 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
 
 # Brief/spawn delivery agreement, checked before any endpoint exists.
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
-# line. A spawn that disagrees would launch a worker whose instructions and whose
-# recorded task delivery differ, which is the exact drift this contract prevents.
+# line, with " forge=<forge>" appended on a bound forge. A spawn that disagrees
+# would launch a worker whose instructions and whose recorded task delivery
+# differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
   PROJ_NAME=$(basename "$PROJ_ABS")
+  # The parser's own refusal reaches the operator here rather than being
+  # discarded: an entry it refuses (an unknown forge token, or a forge on
+  # local-only) resolves to no posture at all, and launching on the silent
+  # default is how a mistyped forge would hand a Gerrit project the
+  # pull-request contract.
+  if ! STANDING_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROJ_NAME" 2>/dev/null); then
+    "$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROJ_NAME" >/dev/null || true
+    echo "error: $ID cannot launch: the registry entry for $PROJ_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and spawn again" >&2
+    exit 1
+  fi
+  [ -n "$STANDING_FORGE" ] || STANDING_FORGE=none
+  STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  [ -n "$BRIEF_FORGE" ] || BRIEF_FORGE=none
   if [ -z "$BRIEF_MODE" ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
   elif [ "$BRIEF_MODE" != "$MODE" ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
+    exit 1
+  fi
+  # The registered forge is the captain's confirmed binding (bin/fm-project-mode.sh)
+  # and is never inferred here from a remote, host, or protocol. A brief that
+  # disagrees with it would tell the worker to open a pull request a Gerrit
+  # server does not have, or to publish a change to a forge that is not Gerrit.
+  if [ "$BRIEF_FORGE" != "$STANDING_FORGE" ]; then
+    if [ "$STANDING_FORGE" = none ]; then
+      forge_scaffold="fm-brief.sh $ID $PROJ_NAME --mode $MODE"
+    else
+      forge_scaffold="fm-brief.sh $ID $PROJ_NAME --mode $MODE --forge $STANDING_FORGE"
+    fi
+    echo "error: forge mismatch for $ID: $PROJ_NAME is registered forge=$STANDING_FORGE but $SOURCE_BRIEF records forge=$BRIEF_FORGE; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $forge_scaffold, then re-fill those two subsections, so the worker's publication matches the project's forge" >&2
+    exit 1
+  fi
+  # Merge authority on a Gerrit forge is refused rather than quietly dropped, on
+  # the captain's decision of 2026-09-15: a Code-Review+2 is a positive
+  # attributed claim that a named human approved, and firstmate must not
+  # manufacture one.
+  if [ "$STANDING_FORGE" = gerrit ] && [ "$YOLO" = on ]; then
+    echo "error: --yolo on is refused for $ID: $PROJ_NAME is registered forge=gerrit, where yolo is inactive because a Code-Review+2 is a positive attributed claim that a named human approved and firstmate must not manufacture one (captain's decision 2026-09-15); spawn with --yolo off" >&2
     exit 1
   fi
   # The registry holds the captain's standing posture, so dropping below it is
@@ -2818,7 +2861,6 @@ if [ "$KIND" = ship ]; then
   # unregistered project resolves to the same no-mistakes standing default, which
   # is why the notice names the standing posture rather than the registry line. A
   # conditional policy is excluded: both of its legs are legitimate classifications.
-  STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] &&
     [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
