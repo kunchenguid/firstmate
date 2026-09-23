@@ -491,7 +491,7 @@ for stream in stdout stderr; do
   [ "$VOLUME_BYTES" -eq "$FM_REMOTE_JOB_MAX_BYTES" ] || fail "$stream was not bounded during execution: $VOLUME_BYTES"
 done
 printf 'release\n' > "$TMP_ROOT/volume-release"
-wait_for_state "$VOLUME_JOB" done || fail "the verbose job did not publish"
+wait_for_state "$VOLUME_JOB" "done" || fail "the verbose job did not publish"
 [ "$(cat "$STATE_ROOT/jobs/$VOLUME_JOB/exit")" = 23 ] || fail "output bounding changed the verbose job's exit status"
 fm_remote_job_reap "$ACCOUNT_HOME" "$VOLUME_JOB" || fail "the verbose job could not be reaped"
 pass "streaming capture stays bounded while excess output drains without blocking"

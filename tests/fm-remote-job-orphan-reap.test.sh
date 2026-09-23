@@ -361,11 +361,15 @@ cp "$CASE3_STATE/jobs/$LANE_JOB/.claim/supervisor_start" "$CASE3_STATE/superviso
 printf 'stale identity\n' > "$CASE3_STATE/jobs/$LANE_JOB/.claim/supervisor_start"
 out=$(case3_reaper) || fail "the reaper failed against a stale lane identity: $out"
 assert_not_contains "$out" "$LANE" "the reaper accepted a mismatched supervisor identity"
-alive "$LANE" && alive "$EXECUTION" || fail "stale claim identity authorized cleanup"
+if ! alive "$LANE" || ! alive "$EXECUTION"; then
+  fail "stale claim identity authorized cleanup"
+fi
 cp "$CASE3_STATE/supervisor-start.saved" "$CASE3_STATE/jobs/$LANE_JOB/.claim/supervisor_start"
 out=$(case3_reaper --dry-run) || fail "the overdue lane dry run failed: $out"
 assert_contains "$out" "abandoned lane for $LANE_JOB" "the dry run missed the overdue lane"
-alive "$LANE" && alive "$EXECUTION" || fail "the dry run signalled the lane execution"
+if ! alive "$LANE" || ! alive "$EXECUTION"; then
+  fail "the dry run signalled the lane execution"
+fi
 out=$(case3_reaper) || fail "the reaper failed against a lane past its deadline: $out"
 assert_contains "$out" "$LANE" "the reaper did not report stopping the lane past its deadline"
 wait_gone "$LANE" 20 || fail "the lane past its job's deadline survived the reaper"
