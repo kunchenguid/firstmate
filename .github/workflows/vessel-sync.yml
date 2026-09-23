@@ -1,0 +1,82 @@
+# Keeps this fork (vessel) current with upstream firstmate.
+#
+# Upstream changes arrive as a merge commit on main, never a rebase, so local
+# homes keep fast-forwarding through /updatefirstmate. vessel only adds files,
+# so the merge itself is always clean; the vessel tests (including the
+# contract tests against upstream's scripts) decide whether it may land.
+#
+# Pushing a merge that touches upstream's own .github/workflows needs a token
+# with the "workflows" permission, which the default GITHUB_TOKEN never has.
+# Add a fine-grained token (this repository only; Contents and Workflows: read
+# and write) as the VESSEL_SYNC_TOKEN secret so those merges land too.
+name: vessel sync
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: vessel-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.VESSEL_SYNC_TOKEN || github.token }}
+
+      - name: Merge upstream firstmate
+        id: merge
+        run: |
+          git config user.name "vessel-sync"
+          git config user.email "vessel-sync@users.noreply.github.com"
+          git remote add upstream https://github.com/kunchenguid/firstmate.git
+          git fetch --no-tags upstream main
+          upstream=$(git rev-parse --short upstream/main)
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already contains upstream $upstream"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git merge --no-edit -m "Merge upstream firstmate $upstream" upstream/main
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.merge.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+
+      - name: Install tools firstmate's scripts use
+        if: steps.merge.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq tmux
+
+      # A manual run always tests, so the workflow can be checked while main is current.
+      - name: Test vessel against the new upstream
+        if: steps.merge.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        run: cargo test --manifest-path vessel/Cargo.toml
+
+      - name: Push to main
+        if: steps.merge.outputs.changed == 'true'
+        run: git push origin HEAD:main
+
+      - name: Park the failed merge and report it
+        if: failure() && steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM: ${{ steps.merge.outputs.upstream }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          branch="sync/failed-$(date -u +%Y%m%d-%H%M)"
+          git push origin "HEAD:refs/heads/$branch" || true
+          gh issue create \
+            --title "vessel sync blocked at upstream $UPSTREAM" \
+            --body "Merging upstream firstmate $UPSTREAM failed vessel's tests, so main stays on the last good upstream. The merge is parked on \`$branch\`. Run: $RUN_URL" \
+            || echo "::warning::Could not open an issue (are issues enabled on this fork?)"

@@ -1,0 +1,1 @@
+Resolve merge conflicts conservatively. Preserve the intent of both the pull request and its base branch, validate the result, and leave the branch ready to merge.

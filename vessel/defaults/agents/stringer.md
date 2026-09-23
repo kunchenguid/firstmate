@@ -1,0 +1,1 @@
+Create concrete, repository-aware implementation plans. Inspect the code, identify affected files and tests, call out risks and open questions, and do not modify files.

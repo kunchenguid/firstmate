@@ -1,0 +1,468 @@
+{
+  "schema": "fm-fleet-snapshot.v1",
+  "generated": "2026-09-23T08:00:00Z",
+  "fm_home": "/home/fm",
+  "roots": {
+    "fm_root": "/Users/robbertmanders/Repositories/vessel",
+    "state": "/home/fm/state",
+    "data": "/home/fm/data",
+    "config": "/home/fm/config",
+    "projects": "/home/fm/projects"
+  },
+  "backlog": {
+    "path": "/home/fm/data/backlog.md",
+    "present": true,
+    "records": [
+      {
+        "order": 1,
+        "state": "in_flight",
+        "structured": true,
+        "id": "implement-aa4fi-1234",
+        "checked": false,
+        "title": "Implement AA4FI-1234 login fix",
+        "repo": "webapp",
+        "kind": "ship",
+        "priority": null,
+        "hold_reason": null,
+        "hold_kind": null,
+        "hold_until": null,
+        "hold_set": null,
+        "blocked_by": null,
+        "blocked_by_ids": [],
+        "blocked_reason": null,
+        "since": "2026-09-23",
+        "merged": null,
+        "reported": null,
+        "done": null,
+        "completion": {
+          "verb": null,
+          "date": null
+        },
+        "links": [],
+        "pr_url": null,
+        "report_path": null,
+        "local_note": null,
+        "raw": "- [ ] implement-aa4fi-1234 - Implement AA4FI-1234 login fix (repo: webapp, kind: ship, since 2026-09-23)",
+        "body_lines": [],
+        "body_excerpt": null,
+        "unresolved_blocker_ids": [],
+        "current_role": "worker",
+        "requires_child_metadata": true,
+        "hold_age_days": 0,
+        "hold_bucket": null,
+        "captain_actionable": false
+      },
+      {
+        "order": 2,
+        "state": "in_flight",
+        "structured": true,
+        "id": "review-webapp-42",
+        "checked": false,
+        "title": "Review acme/webapp#42",
+        "repo": "webapp",
+        "kind": "scout",
+        "priority": null,
+        "hold_reason": null,
+        "hold_kind": null,
+        "hold_until": null,
+        "hold_set": null,
+        "blocked_by": null,
+        "blocked_by_ids": [],
+        "blocked_reason": null,
+        "since": "2026-09-23",
+        "merged": null,
+        "reported": null,
+        "done": null,
+        "completion": {
+          "verb": null,
+          "date": null
+        },
+        "links": [],
+        "pr_url": null,
+        "report_path": null,
+        "local_note": null,
+        "raw": "- [ ] review-webapp-42 - Review acme/webapp#42 (repo: webapp, kind: scout, since 2026-09-23)",
+        "body_lines": [],
+        "body_excerpt": null,
+        "unresolved_blocker_ids": [],
+        "current_role": "worker",
+        "requires_child_metadata": true,
+        "hold_age_days": 0,
+        "hold_bucket": null,
+        "captain_actionable": false
+      },
+      {
+        "order": 3,
+        "state": "queued",
+        "structured": true,
+        "id": "plan-aa4fi-99",
+        "checked": false,
+        "title": "Plan AA4FI-99 checkout redesign",
+        "repo": "webapp",
+        "kind": "scout",
+        "priority": null,
+        "hold_reason": null,
+        "hold_kind": null,
+        "hold_until": null,
+        "hold_set": null,
+        "blocked_by": null,
+        "blocked_by_ids": [],
+        "blocked_reason": null,
+        "since": "2026-09-22",
+        "merged": null,
+        "reported": null,
+        "done": null,
+        "completion": {
+          "verb": null,
+          "date": null
+        },
+        "links": [],
+        "pr_url": null,
+        "report_path": null,
+        "local_note": null,
+        "raw": "- [ ] plan-aa4fi-99 - Plan AA4FI-99 checkout redesign (repo: webapp, kind: scout, since 2026-09-22)",
+        "body_lines": [],
+        "body_excerpt": null,
+        "unresolved_blocker_ids": [],
+        "current_role": "queued",
+        "requires_child_metadata": false,
+        "hold_age_days": 1,
+        "hold_bucket": null,
+        "captain_actionable": false
+      },
+      {
+        "order": 4,
+        "state": "done",
+        "structured": true,
+        "id": "review-webapp-40",
+        "checked": true,
+        "title": "Review acme/webapp#40",
+        "repo": "webapp",
+        "kind": "scout",
+        "priority": null,
+        "hold_reason": null,
+        "hold_kind": null,
+        "hold_until": null,
+        "hold_set": null,
+        "blocked_by": null,
+        "blocked_by_ids": [],
+        "blocked_reason": null,
+        "since": null,
+        "merged": null,
+        "reported": "2026-09-21",
+        "done": null,
+        "completion": {
+          "verb": "reported",
+          "date": "2026-09-21"
+        },
+        "links": [],
+        "pr_url": null,
+        "report_path": null,
+        "local_note": null,
+        "raw": "- [x] review-webapp-40 - Review acme/webapp#40 (repo: webapp, kind: scout, reported 2026-09-21)",
+        "body_lines": [],
+        "body_excerpt": null,
+        "unresolved_blocker_ids": [],
+        "current_role": "done",
+        "requires_child_metadata": false,
+        "hold_age_days": null,
+        "hold_bucket": null,
+        "captain_actionable": false
+      }
+    ]
+  },
+  "tasks": [
+    {
+      "id": "implement-aa4fi-1234",
+      "kind": "ship",
+      "harness": "pi",
+      "mode": "direct-PR",
+      "yolo": "off",
+      "project": "webapp",
+      "spawn_gen": "1",
+      "backend": "tmux",
+      "remote": null,
+      "paths": {
+        "meta": {
+          "path": "/home/fm/state/implement-aa4fi-1234.meta",
+          "present": true
+        },
+        "status_log": {
+          "path": "/home/fm/state/implement-aa4fi-1234.status",
+          "present": true,
+          "kind": "event_history",
+          "last_event": {
+            "state": "working at=1790140000",
+            "note": "bug reproduced",
+            "raw": "working at=1790140000: bug reproduced",
+            "age_seconds": null
+          }
+        },
+        "worktree": {
+          "path": "/work/implement-aa4fi-1234",
+          "present": false
+        },
+        "home": {
+          "path": null,
+          "present": false
+        },
+        "report": {
+          "path": "/home/fm/data/implement-aa4fi-1234/report.md",
+          "present": false
+        }
+      },
+      "secondmate_projects": [],
+      "current_state": {
+        "state": "working",
+        "source": "run-step",
+        "detail": "implementing",
+        "raw": "state: working · source: run-step · implementing",
+        "observed_at": "2026-09-23T08:00:00Z",
+        "freshness": "fresh"
+      },
+      "endpoint": {
+        "target": "fm-implement-aa4fi-1234",
+        "exists": true,
+        "agent_alive": "not_checked",
+        "status": "unknown",
+        "observed_at": "2026-09-23T07:23:27Z",
+        "freshness": "fresh"
+      },
+      "pr": {
+        "url": "https://github.com/acme/webapp/pull/7",
+        "source": "meta",
+        "head": null
+      },
+      "hints": {
+        "pending_decision": false,
+        "blocked_event": false,
+        "open_decisions": [],
+        "scout_report_present": false,
+        "last_event_text": "working at=1790140000: bug reproduced"
+      },
+      "actions": {
+        "watch": "bin/fm-peek.sh fm-implement-aa4fi-1234",
+        "steer": "bin/fm-send.sh fm-implement-aa4fi-1234 '<instruction>'",
+        "return_channel_note": null
+      },
+      "backlog": {
+        "order": 1,
+        "state": "in_flight",
+        "structured": true,
+        "id": "implement-aa4fi-1234",
+        "checked": false,
+        "title": "Implement AA4FI-1234 login fix",
+        "repo": "webapp",
+        "kind": "ship",
+        "priority": null,
+        "hold_reason": null,
+        "hold_kind": null,
+        "hold_until": null,
+        "hold_set": null,
+        "blocked_by": null,
+        "blocked_by_ids": [],
+        "blocked_reason": null,
+        "since": "2026-09-23",
+        "merged": null,
+        "reported": null,
+        "done": null,
+        "completion": {
+          "verb": null,
+          "date": null
+        },
+        "links": [],
+        "pr_url": null,
+        "report_path": null,
+        "local_note": null,
+        "raw": "- [ ] implement-aa4fi-1234 - Implement AA4FI-1234 login fix (repo: webapp, kind: ship, since 2026-09-23)",
+        "body_lines": [],
+        "body_excerpt": null,
+        "unresolved_blocker_ids": [],
+        "current_role": "worker",
+        "requires_child_metadata": true,
+        "hold_age_days": 0,
+        "hold_bucket": null,
+        "captain_actionable": false
+      }
+    },
+    {
+      "id": "review-webapp-42",
+      "kind": "scout",
+      "harness": "pi",
+      "mode": "",
+      "yolo": "",
+      "project": "webapp",
+      "spawn_gen": "1",
+      "backend": "tmux",
+      "remote": null,
+      "paths": {
+        "meta": {
+          "path": "/home/fm/state/review-webapp-42.meta",
+          "present": true
+        },
+        "status_log": {
+          "path": "/home/fm/state/review-webapp-42.status",
+          "present": true,
+          "kind": "event_history",
+          "last_event": {
+            "state": "needs-decision key=scope at=1790141000",
+            "note": "review only the API layer?",
+            "raw": "needs-decision key=scope at=1790141000: review only the API layer?",
+            "age_seconds": null
+          }
+        },
+        "worktree": {
+          "path": "/work/review-webapp-42",
+          "present": false
+        },
+        "home": {
+          "path": null,
+          "present": false
+        },
+        "report": {
+          "path": "/home/fm/data/review-webapp-42/report.md",
+          "present": false
+        }
+      },
+      "secondmate_projects": [],
+      "current_state": {
+        "state": "parked",
+        "source": "status-log",
+        "detail": "needs-decision",
+        "raw": "state: parked",
+        "observed_at": "2026-09-23T08:00:00Z",
+        "freshness": "fresh"
+      },
+      "endpoint": {
+        "target": "fm-review-webapp-42",
+        "exists": true,
+        "agent_alive": "not_checked",
+        "status": "unknown",
+        "observed_at": "2026-09-23T07:23:27Z",
+        "freshness": "fresh"
+      },
+      "pr": {
+        "url": null,
+        "source": "absent",
+        "head": null
+      },
+      "hints": {
+        "pending_decision": true,
+        "blocked_event": false,
+        "open_decisions": [
+          {
+            "key": "scope",
+            "verb": "needs-decision",
+            "summary": "review only the API layer?"
+          }
+        ],
+        "scout_report_present": false,
+        "last_event_text": "needs-decision key=scope at=1790141000: review only the API layer?"
+      },
+      "actions": {
+        "watch": "bin/fm-peek.sh fm-review-webapp-42",
+        "steer": "bin/fm-send.sh fm-review-webapp-42 '<instruction>'",
+        "return_channel_note": null
+      },
+      "backlog": {
+        "order": 2,
+        "state": "in_flight",
+        "structured": true,
+        "id": "review-webapp-42",
+        "checked": false,
+        "title": "Review acme/webapp#42",
+        "repo": "webapp",
+        "kind": "scout",
+        "priority": null,
+        "hold_reason": null,
+        "hold_kind": null,
+        "hold_until": null,
+        "hold_set": null,
+        "blocked_by": null,
+        "blocked_by_ids": [],
+        "blocked_reason": null,
+        "since": "2026-09-23",
+        "merged": null,
+        "reported": null,
+        "done": null,
+        "completion": {
+          "verb": null,
+          "date": null
+        },
+        "links": [],
+        "pr_url": null,
+        "report_path": null,
+        "local_note": null,
+        "raw": "- [ ] review-webapp-42 - Review acme/webapp#42 (repo: webapp, kind: scout, since 2026-09-23)",
+        "body_lines": [],
+        "body_excerpt": null,
+        "unresolved_blocker_ids": [],
+        "current_role": "worker",
+        "requires_child_metadata": true,
+        "hold_age_days": 0,
+        "hold_bucket": null,
+        "captain_actionable": false
+      }
+    }
+  ],
+  "main_inventory": {
+    "valid": true,
+    "reason": null,
+    "orphan_in_flight": [],
+    "unstructured_current_count": 0
+  },
+  "contributions": {
+    "known": 1,
+    "checked": 0,
+    "counts": {
+      "captain": 0,
+      "fleet": 1,
+      "maintainer": 0,
+      "nobody": 0
+    },
+    "unmeasured": 0,
+    "complete": false,
+    "proven_clear": false,
+    "stale_verdicts": 0,
+    "missing_verdicts": 0,
+    "unreadable_records": 0,
+    "valid_until": 900,
+    "captain": [],
+    "captain_omitted": 0
+  },
+  "scout_reports": [],
+  "secondmate_current": {
+    "registry": {
+      "present": false,
+      "available": true,
+      "complete": true,
+      "reason": null,
+      "provenance": "registered-table",
+      "path": "/home/fm/data/secondmates.md",
+      "freshness": {
+        "status": "fresh",
+        "observed_at": "2026-09-23T07:23:27Z"
+      },
+      "records": [],
+      "input_truncated": false,
+      "records_truncated": false,
+      "reasons": [],
+      "lines_in_window": 0,
+      "records_in_window": 0
+    },
+    "records": [],
+    "total_registered": 0,
+    "total": 0,
+    "shown": 0,
+    "truncated": 0
+  },
+  "secondmate_landed": {
+    "records": [],
+    "truncated": [],
+    "unreadable": [],
+    "partial": []
+  },
+  "secondmate_guidance": {
+    "note": "For kind=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority."
+  }
+}

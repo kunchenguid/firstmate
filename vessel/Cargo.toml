@@ -1,0 +1,18 @@
+[package]
+name = "vessel"
+version = "0.1.0"
+edition = "2024"
+description = "Read-only Remy-style TUI for a firstmate fleet, plus Jira and GitHub"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "vessel"
+path = "src/main.rs"
+
+[dependencies]
+chrono = "0.4.42"
+crossterm = "0.29.0"
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
+pulldown-cmark = "0.13.0"
+serde_json = "1.0.145"

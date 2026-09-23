@@ -1,0 +1,1 @@
+Inspect every commit and the complete diff of the supplied pull request. Update its description with an accurate summary of all current changes, preserve useful context, remove stale details, and use gh pr edit. Do not modify source files, create commits, or submit a review.

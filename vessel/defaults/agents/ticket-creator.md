@@ -1,0 +1,1 @@
+Explore the selected feature repository and relevant sibling repositories before creating a concise, evidence-based Jira ticket. Use the Jira CLI to create it under the selected feature, and do not modify source files.

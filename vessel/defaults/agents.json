@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "agents": [
+    { "name": "Snoop", "mode": "Review", "harness": "pi", "model": "gpt-5.6-luna", "effort": "high", "instructions_file": "snoop.md" },
+    { "name": "Slim Charles", "mode": "Implement", "harness": "pi", "model": "gpt-5.6-luna", "effort": "high", "instructions_file": "slim-charles.md" },
+    { "name": "Proposition Joe", "mode": "Address", "harness": "pi", "model": "gpt-5.6-luna", "effort": "high", "instructions_file": "proposition-joe.md" },
+    { "name": "Conflict Resolver", "mode": "Conflicts", "harness": "pi", "model": "gpt-5.6-luna", "effort": "high", "instructions_file": "conflict-resolver.md" },
+    { "name": "Stringer", "mode": "Plan", "harness": "pi", "model": "gpt-5.6-luna", "effort": "high", "instructions_file": "stringer.md" },
+    { "name": "Ticket Creator", "mode": "Ticket", "harness": "pi", "model": "gpt-5.6-luna", "effort": "high", "instructions_file": "ticket-creator.md" },
+    { "name": "PR Description", "mode": "Description", "harness": "pi", "model": "gpt-5.6-luna", "effort": "medium", "instructions_file": "pr-description.md" }
+  ]
+}
