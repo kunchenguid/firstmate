@@ -459,7 +459,7 @@ render_return_brief() {  # <evidence-file> <blockers-file> <since-epoch>
     [ "$MANDATE_COUNT" -gt 0 ] || printf '  (no away instructions recorded)\n'
     render_words_account
   else
-    printf '  (no away-posture record for this window; legacy away flag only)\n'
+    printf '  (no away-posture record for this window: quiet mode, or a legacy away flag)\n'
   fi
 
   # 3. waiting on the captain.
