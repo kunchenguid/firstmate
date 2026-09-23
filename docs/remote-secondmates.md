@@ -41,7 +41,7 @@ One case reaches neither: a channel closing on a multiplexed SSH connection leav
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
 A worker stops itself once its configured code root stops being a Firstmate checkout, so a worker started from a worktree cannot outlive that worktree, and `bin/fm-remote-job-reap-orphans.sh` clears any worker already left behind that way without ever touching one whose checkout still exists.
 A job's execution is bounded in age as well: its command group ends at the job deadline, its output capture drains only briefly after that group is gone, and a lane still alive past the deadline is stopped, so one descendant that escaped a job's process group while holding its output cannot keep a home's queue shut and leave later callers holding their transport open.
-The same sweep clears a lane worker whose own job record is gone or past its deadline, which the pruned-code-root rule alone could not see.
+The same sweep clears a lane worker whose running job record in its explicitly named queue is past its deadline, which the pruned-code-root rule alone could not see.
 The remote account must provide the required toolchain, the selected worker runtime, the selected session backend, and credentials that work on that host.
 A [worker account pin](configuration.md#worker-account-pin-configclaude-account-configpi-account) for the second mate or its workers lives in the remote home's own configuration on that host.
 The origin URL named for each project must be reachable from the remote account because projects are cloned on that host rather than copied from the primary.

@@ -712,16 +712,21 @@ worker_drain_output_capture() { # <stdout-reader> <stderr-reader>
   wait "$watchdog" 2>/dev/null || true
 }
 
-# Copy the job's output with plain read and write calls, so every byte the
-# reader has taken from the pipe is already in the destination. `head -c` holds
-# its last stdio buffer instead, which a reader stopped at the drain bound never
-# gets to flush - a short command's whole output was lost that way. The byte
-# bound moves to worker_bound_capture_file, applied once the copy is over,
-# because that is the only place it can be enforced without either a buffer or a
-# runtime this worker deliberately does not depend on.
-worker_capture_output() { # <fifo> <destination>
-  local fifo=$1 destination=$2
-  cat < "$fifo" > "$destination"
+worker_capture_output() {
+  local fifo=$1 destination=$2 copy_pid
+  exec 3< "$fifo"
+  trap 'kill -TERM "$copy_pid" 2>/dev/null || true; wait "$copy_pid" 2>/dev/null || true; exit 0' TERM INT HUP
+  (
+    unset POSIXLY_CORRECT
+    set +o posix
+    ulimit -c 0
+    ulimit -f "$(( (FM_REMOTE_JOB_MAX_BYTES + 1023) / 1024 ))" || exit 1
+    exec cat <&3 > "$destination"
+  ) 2>/dev/null &
+  copy_pid=$!
+  wait "$copy_pid" 2>/dev/null || true
+  trap - TERM INT HUP
+  exec cat <&3 > /dev/null
 }
 
 # Re-establish the record's byte bound on a captured stream. Publication refuses
@@ -1005,7 +1010,7 @@ worker_lane_execute() { # <account-home> <job-dir>
 # has always run in.
 worker_start_lane() { # <job-dir> <home>
   local job=$1 home=$2 lane_pid lane_start
-  "$SCRIPT_DIR/fm-remote-job-worker.sh" --lane "${job##*/}" &
+  "$SCRIPT_DIR/fm-remote-job-worker.sh" --lane "${job##*/}" "$FM_REMOTE_JOB_STATE" &
   lane_pid=$!
   lane_start=$(fm_remote_job_process_start "$lane_pid" 2>/dev/null || true)
   WORKER_LANE_HOMES+=("$home")
@@ -1014,9 +1019,10 @@ worker_start_lane() { # <job-dir> <home>
   WORKER_LANE_JOBS+=("$job")
 }
 
-worker_lane_main() { # <job-id>
+worker_lane_main() {
   local account_home job
   fm_remote_job_safe_id "$1" || { worker_error "invalid lane job id"; exit 2; }
+  FM_REMOTE_JOB_STATE_ROOT=$2
   account_home=$(worker_account_home) || { worker_error "cannot resolve account home"; exit 1; }
   WORKER_ACCOUNT_HOME=$account_home
   FM_ROOT=$(fm_remote_job_canonical_existing_dir "$FM_ROOT") || { worker_error "configured FM_ROOT is unsafe"; exit 1; }
@@ -1225,8 +1231,8 @@ case "${1:-}" in
     main
     ;;
   --lane)
-    [ "$#" -eq 2 ] || { worker_error "unexpected worker arguments"; exit 2; }
-    worker_lane_main "$2"
+    [ "$#" -eq 3 ] || { worker_error "unexpected worker arguments"; exit 2; }
+    worker_lane_main "$2" "$3"
     ;;
   '')
     if [ "$(fm_remote_job_platform)" = linux ]; then worker_supervise_linux; else main; fi

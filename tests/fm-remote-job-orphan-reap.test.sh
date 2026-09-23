@@ -24,6 +24,20 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 TMP_ROOT=$(fm_test_tmproot fm-remote-job-orphan-reap)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
 REAPER="$ROOT/bin/fm-remote-job-reap-orphans.sh"
+export FM_TEST_REAP_ROOT="$TMP_ROOT"
+export FM_TEST_REAL_PS
+FM_TEST_REAL_PS=$(command -v ps)
+mkdir -p "$TMP_ROOT/scan-bin"
+cat > "$TMP_ROOT/scan-bin/ps" <<'SH'
+#!/bin/bash
+if [ "${1:-}" = -u ]; then
+  "$FM_TEST_REAL_PS" "$@" | awk -v root="$FM_TEST_REAP_ROOT/" 'index($0, root)'
+else
+  exec "$FM_TEST_REAL_PS" "$@"
+fi
+SH
+chmod +x "$TMP_ROOT/scan-bin/ps"
+export PATH="$TMP_ROOT/scan-bin:$PATH"
 
 TRACKED_PIDS=()
 orphan_cleanup() {
@@ -237,7 +251,7 @@ pass "the reaper is idempotent"
 CASE3="$TMP_ROOT/case3"
 CASE3_ROOT="$CASE3/remote-root"
 CASE3_ACCOUNT="$CASE3/account"
-CASE3_STATE="$CASE3/remote-jobs"
+CASE3_STATE="$CASE3/remote jobs"
 LANE_JOB=job-wedgedlane
 mkdir -p "$CASE3_ROOT/bin" "$CASE3_ACCOUNT"
 # A stand-in for a lane that can no longer finish its job: it presents the lane
@@ -271,22 +285,32 @@ write_lane_record() { # <job-id> <deadline>
 start_lane() { # <job-id>; echoes the lane stand-in's pid
   local pid
   set -m
-  "$CASE3_ROOT/bin/fm-remote-job-worker.sh" --lane "$1" >/dev/null 2>&1 &
+  "$CASE3_ROOT/bin/fm-remote-job-worker.sh" --lane "$1" "$CASE3_STATE" >/dev/null 2>&1 &
   pid=$!
   set +m
-  track "$pid"
   printf '%s\n' "$pid"
 }
 
 write_lane_record "$LANE_JOB" "$(( $(date +%s) + 3600 ))" \
   || fail "could not stage the live lane record fixture"
 LANE=$(start_lane "$LANE_JOB")
+track "$LANE"
 alive "$LANE" || fail "the lane stand-in did not start"
 
 out=$(case3_reaper --dry-run) || fail "the reaper failed against a live lane record: $out"
 assert_not_contains "$out" "$LANE" "the reaper reported a lane still inside its job's deadline"
 alive "$LANE" || fail "the reaper stopped a lane still inside its job's deadline"
 pass "a lane executing a record inside its deadline is never reaped"
+
+OWN_STATE=$CASE3_STATE
+CASE3_STATE="$CASE3/decoy-queue"
+write_lane_record "$LANE_JOB" "$(( $(date +%s) - 3600 ))" || fail "could not stage the decoy record"
+out=$(case3_reaper) || fail "the cross-queue sweep failed: $out"
+assert_not_contains "$out" "$LANE" "the sweep used its own expired record for another queue's lane"
+alive "$LANE" || fail "the sweep killed a healthy lane in another queue"
+CASE3_STATE=$OWN_STATE
+pass "the sweep binds lanes to their own queue despite matching ids elsewhere"
+
 
 # The wedged shape itself: the record is still there, but its deadline - and the
 # lane grace after it - has passed, so the lane can no longer be executing
@@ -298,19 +322,20 @@ assert_contains "$out" "$LANE" "the reaper did not report stopping the lane past
 wait_gone "$LANE" 20 || fail "the lane past its job's deadline survived the reaper"
 pass "a lane past its job's deadline is reaped though its code root is healthy"
 
-# The same rule with no record left at all, which is what an already-cleaned
-# queue leaves a surviving lane holding.
 GONE_JOB=job-gonerecord
 rm -rf "$CASE3_STATE/jobs/$LANE_JOB"
 GONE_LANE=$(start_lane "$GONE_JOB")
+track "$GONE_LANE"
 alive "$GONE_LANE" || fail "the second lane stand-in did not start"
 
-out=$(case3_reaper --dry-run) || fail "the reaper dry run failed against a wedged lane: $out"
-assert_contains "$out" "$GONE_LANE" "the dry run did not report the lane whose record is gone"
-assert_contains "$out" "would reap" "the dry run did not mark its report as a preview"
-alive "$GONE_LANE" || fail "the dry run stopped the wedged lane instead of only reporting it"
-
-out=$(case3_reaper) || fail "the reaper failed against a wedged lane: $out"
-assert_contains "$out" "$GONE_LANE" "the reaper did not report stopping the wedged lane"
-wait_gone "$GONE_LANE" 20 || fail "the wedged lane survived the reaper"
-pass "a lane whose job record is gone is reaped though its code root is healthy"
+out=$(case3_reaper --dry-run) || fail "the reaper dry run failed: $out"
+assert_not_contains "$out" "$GONE_LANE" "the dry run reported a lane after record cleanup"
+out=$(case3_reaper) || fail "the reaper failed after record cleanup: $out"
+assert_not_contains "$out" "$GONE_LANE" "the reaper reported a lane after record cleanup"
+alive "$GONE_LANE" || fail "the reaper killed a lane during normal completion"
+write_lane_record "$GONE_JOB" "$(( $(date +%s) - 3600 ))" || fail "could not stage the completed record"
+printf 'done\n' > "$CASE3_STATE/jobs/$GONE_JOB/state"
+out=$(case3_reaper) || fail "the reaper failed against a completed record: $out"
+assert_not_contains "$out" "$GONE_LANE" "the reaper reported a lane with a published result"
+alive "$GONE_LANE" || fail "the reaper killed a lane with a published result"
+pass "published and reaped results leave completing lanes alone"

@@ -95,6 +95,15 @@ printf 'command output\\n'
 perl -MPOSIX -e 'POSIX::setsid(); sleep $FM_TEST_STUB_MAX_BLOCK_SECONDS' &
 exit 0
 SH
+cat > "$REMOTE_ROOT/bin/fm-volume-job.sh" <<'SH'
+#!/bin/bash
+set -e
+head -c 4194304 < /dev/zero
+head -c 4194304 < /dev/zero >&2
+printf 'ready\n' > "$1"
+while [ ! -f "$2" ]; do sleep 0.1; done
+exit 23
+SH
 cat > "$REMOTE_ROOT/bin/fm-stdin-probe.sh" <<'SH'
 #!/bin/bash
 while IFS= read -r line || [ -n "$line" ]; do printf 'stdin=%s\n' "$line"; done
@@ -434,12 +443,28 @@ LEAK_BEGAN=$(date +%s)
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_B" fm-leaked-descendant-job.sh \
   < /dev/null > /dev/null
 LEAK_JOB=$FM_REMOTE_JOB_ID
+CAPTURE_PIDS=
+for _ in $(seq 1 100); do
+  LEAK_LANE=$(cat "$STATE_ROOT/jobs/$LEAK_JOB/.claim/supervisor" 2>/dev/null || true)
+  if [ -n "$LEAK_LANE" ]; then
+    CAPTURE_PIDS=$(ps -axo pid=,ppid=,comm= | awk -v lane="$LEAK_LANE" '
+      { parent[$1]=$2; command[$1]=$3 }
+      END { for (pid in parent) if (command[pid] ~ /(^|\/)cat$/ &&
+        (parent[pid] == lane || parent[parent[pid]] == lane)) print pid }')
+    [ -z "$CAPTURE_PIDS" ] || break
+  fi
+  sleep 0.05
+done
+[ -n "$CAPTURE_PIDS" ] || fail "the escaped-writer fixture never exposed its capture processes"
 wait_for_state "$LEAK_JOB" 'done' \
   || fail "a job whose descendant held its output never published a result"
 LEAK_ELAPSED=$(( $(date +%s) - LEAK_BEGAN ))
 [ "$LEAK_ELAPSED" -le 10 ] || fail "the leaked-descendant job took ${LEAK_ELAPSED}s to publish"
 assert_grep 'command output' "$STATE_ROOT/jobs/$LEAK_JOB/stdout" \
   "the bounded output drain lost the command's own output"
+for pid in $CAPTURE_PIDS; do
+  kill -0 "$pid" 2>/dev/null && fail "capture process $pid survived result publication"
+done
 fm_remote_job_reap "$ACCOUNT_HOME" "$LEAK_JOB" || true
 LEAK_FOLLOW_BEGAN=$(date +%s)
 fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_B" fm-touch-job.sh \
@@ -453,6 +478,23 @@ LEAK_FOLLOW_ELAPSED=$(( $(date +%s) - LEAK_FOLLOW_BEGAN ))
 assert_present "$TMP_ROOT/leak-follow" "the follow-up job never ran"
 fm_remote_job_reap "$ACCOUNT_HOME" "$LEAK_FOLLOW" || true
 pass "a job whose descendant holds its output still publishes and frees its lane"
+
+fm_remote_job_stage "$ACCOUNT_HOME" "$REMOTE_ROOT" "$HOME_B" fm-volume-job.sh   "$TMP_ROOT/volume-ready" "$TMP_ROOT/volume-release" < /dev/null > /dev/null
+VOLUME_JOB=$FM_REMOTE_JOB_ID
+for _ in $(seq 1 200); do
+  [ ! -f "$TMP_ROOT/volume-ready" ] || break
+  sleep 0.05
+done
+assert_present "$TMP_ROOT/volume-ready" "output beyond the bound blocked or killed the writer"
+for stream in stdout stderr; do
+  VOLUME_BYTES=$(wc -c < "$STATE_ROOT/jobs/$VOLUME_JOB/$stream" | tr -d ' ')
+  [ "$VOLUME_BYTES" -eq "$FM_REMOTE_JOB_MAX_BYTES" ] || fail "$stream was not bounded during execution: $VOLUME_BYTES"
+done
+printf 'release\n' > "$TMP_ROOT/volume-release"
+wait_for_state "$VOLUME_JOB" done || fail "the verbose job did not publish"
+[ "$(cat "$STATE_ROOT/jobs/$VOLUME_JOB/exit")" = 23 ] || fail "output bounding changed the verbose job's exit status"
+fm_remote_job_reap "$ACCOUNT_HOME" "$VOLUME_JOB" || fail "the verbose job could not be reaped"
+pass "streaming capture stays bounded while excess output drains without blocking"
 
 # A caller killed outright runs no cleanup of its own, so the worker must read
 # the identity the record carries and cancel the job itself.
