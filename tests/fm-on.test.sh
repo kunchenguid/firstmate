@@ -229,35 +229,51 @@ MANAGER_DIRS=(
   "$ACCOUNT_HOME"/.local/share/mise/installs/*/*/bin
   "$ACCOUNT_HOME"/.mise/installs/*/*/bin
 )
-OPTIONAL_DIRS=(
+RESOLVED_DIRS=(
   "$ACCOUNT_HOME/.nix-profile/bin"
   "/etc/profiles/per-user/$ACCOUNT_USER/bin"
   /run/current-system/sw/bin
+)
+PREFIX_DIRS=(
   /opt/homebrew/bin
   /usr/local/bin
 )
 DISCOVERED_DIRS=()
 OMITTED_DIRS=()
-for candidate in "${MANAGER_DIRS[@]}"; do
-  if [ -d "$candidate" ] && [ ! -L "$candidate" ]; then
-    DISCOVERED_DIRS+=("$candidate")
+PRESENT_CHECKED=0
+ABSENT_CHECKED=0
+# fm_remote_job_path_append_if_dir omits a symlinked directory outright, while
+# fm_remote_job_path_append_resolved_dir substitutes its physical target and
+# still omits the symlink path itself, so each group carries its own helper's
+# rule. The loops run in production's append order, because PATH is ordered.
+classify_plain_dir() {
+  if [ -d "$1" ] && [ ! -L "$1" ]; then
+    DISCOVERED_DIRS+=("$1")
+    PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
   else
-    OMITTED_DIRS+=("$candidate")
+    OMITTED_DIRS+=("$1")
+    ABSENT_CHECKED=$((ABSENT_CHECKED + 1))
   fi
-done
-for candidate in "${OPTIONAL_DIRS[@]}"; do
-  if [ ! -d "$candidate" ]; then
-    OMITTED_DIRS+=("$candidate")
-  elif [ ! -L "$candidate" ]; then
-    DISCOVERED_DIRS+=("$candidate")
+}
+classify_resolved_dir() {
+  local physical
+  if [ -d "$1" ] && [ ! -L "$1" ]; then
+    DISCOVERED_DIRS+=("$1")
+    PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
+    return 0
+  fi
+  OMITTED_DIRS+=("$1")
+  physical=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || physical=
+  if [ -d "$physical" ]; then
+    DISCOVERED_DIRS+=("$physical")
+    PRESENT_CHECKED=$((PRESENT_CHECKED + 1))
   else
-    physical=$(CDPATH='' cd -- "$candidate" 2>/dev/null && pwd -P) || physical=
-    if [ -d "$physical" ] && [ ! -L "$physical" ]; then
-      DISCOVERED_DIRS+=("$physical")
-    fi
-    OMITTED_DIRS+=("$candidate")
+    ABSENT_CHECKED=$((ABSENT_CHECKED + 1))
   fi
-done
+}
+for candidate in "${MANAGER_DIRS[@]}"; do classify_plain_dir "$candidate"; done
+for candidate in "${RESOLVED_DIRS[@]}"; do classify_resolved_dir "$candidate"; done
+for candidate in "${PREFIX_DIRS[@]}"; do classify_plain_dir "$candidate"; done
 EXPECTED_PATH=
 expect_dir() {
   case ":$EXPECTED_PATH:" in *":$1:"*) return 0 ;; esac
@@ -291,8 +307,6 @@ fi
 case "$CHILD_PATH" in *:/usr/bin:/bin:/usr/sbin:/sbin) ;; *) fail "the child PATH did not end with the portable system tail" ;; esac
 DUPES=$(printf '%s\n' "$CHILD_PATH" | tr ':' '\n' | sort | uniq -d)
 [ -z "$DUPES" ] || fail "the child PATH repeated entries: $DUPES"
-PRESENT_CHECKED=${#DISCOVERED_DIRS[@]}
-ABSENT_CHECKED=${#OMITTED_DIRS[@]}
 for candidate in "${DISCOVERED_DIRS[@]}"; do
   path_has "$CHILD_PATH" "$candidate" || fail "an existing discovered PATH directory was dropped: $candidate"
 done
