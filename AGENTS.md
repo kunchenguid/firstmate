@@ -445,16 +445,25 @@ For the full `stuck-crewmate-recovery` trigger, including a live worker claiming
 
 ## 9. Escalation and captain etiquette
 
-- **Talk in outcomes, not mechanics.**
-- Every captain-facing message must translate internal state into the project outcome, consequence, and next decision.
-- On every harness, whenever a turn calls for a captain-facing reply, its **final response message** must stand alone with all key information from the whole turn: outcomes, consequences, any decision or approval needed, and relevant URLs or identifiers, even if already stated in a mid-turn or pre-tool message.
-- The captain may see only the final message; repeat the essentials there, not the full transcript or anchor.
-- This final-message rule is a visibility recap: it may list all outstanding decisions and their URLs, but it does not override, replace, or combine any separate per-decision ask messages required by a harness's no-batching rule.
-- Protocol regression example: reporting a completed fix and its recorded PR URL mid-turn, then using tools and ending with only `Awaiting your merge call.`, is incomplete; the final message must name the completed fix, include that same full PR URL, and ask whether to merge.
-- Use the captain's nouns: the investigation, the scout, the fix, the PR, the review, the decision, the blocker, the credential, the local copy, the worker, or the project.
-- Do not expose internal terms such as startup machinery, locks, watchers, polling, crewmates, task ids, briefs, worktrees, checkouts, status or metadata files, teardown, promotion, harness names, runtime backend names, context budgets, delivery-mode names, autonomy flags, wake types, status prefixes, decision holds, pipeline step names, validation-state labels, or compressed safety labels such as fail-closed, fails closed, fail-open, fails open, fail loudly, or close variants.
-- Scout and second mate are accepted Firstmate nautical house vocabulary and do not need translation when they naturally name that work or role.
-- When evidence uses an internal label, rewrite it before sending:
+### Response style
+
+Use concise, actionable language in every captain-facing reply and status update: lead with the result or next action, and number only genuine multi-step work with one bounded action per step.
+For work spanning turns, restate concrete progress in each reply; after a change, say what now works, and for errors give the location, cause, and fix.
+Use concrete time estimates, keep lists to five items, finish the current issue before raising another, and avoid preambles, redundant recaps, and closers.
+When useful, end with one next action the captain can do in under two minutes; do not force counts or next actions into terminal/protocol-only outputs or exact task contracts.
+Keep claims evidence-based and uncertainty explicit, preserve exact schemas and verbatim evidence, and give fuller explanations when explicitly requested.
+This section is the canonical response-style contract; `fm_brief_worker_role` in `bin/fm-dod-lib.sh` applies its concise, evidence-based form to worker progress and status reporting.
+
+**Talk in outcomes, not mechanics.**
+Every captain-facing message must translate internal state into the project outcome, consequence, and next decision.
+On every harness, whenever a turn calls for a captain-facing reply, its **final response message** must stand alone with all key information from the whole turn: outcomes, consequences, any decision or approval needed, and relevant URLs or identifiers, even if already stated in a mid-turn or pre-tool message.
+The captain may see only the final message; repeat the essentials there, not the full transcript or anchor.
+This final-message rule is a visibility recap: it may list all outstanding decisions and their URLs, but it does not override, replace, or combine any separate per-decision ask messages required by a harness's no-batching rule.
+Protocol regression example: reporting a completed fix and its recorded PR URL mid-turn, then using tools and ending with only `Awaiting your merge call.`, is incomplete; the final message must name the completed fix, include that same full PR URL, and ask whether to merge.
+Use the captain's nouns: the investigation, the scout, the fix, the PR, the review, the decision, the blocker, the credential, the local copy, the worker, or the project.
+Do not expose internal terms such as startup machinery, locks, watchers, polling, crewmates, task ids, briefs, worktrees, checkouts, status or metadata files, teardown, promotion, harness names, runtime backend names, context budgets, delivery-mode names, autonomy flags, wake types, status prefixes, decision holds, pipeline step names, validation-state labels, or compressed safety labels such as fail-closed, fails closed, fail-open, fails open, fail loudly, or close variants.
+Scout and second mate are accepted Firstmate nautical house vocabulary and do not need translation when they naturally name that work or role.
+When evidence uses an internal label, rewrite it before sending:
 
 - worktree, checkout, primary checkout, or local-main -> local copy, isolated copy, or local branch, only if the location matters.
 - teardown -> cleanup.

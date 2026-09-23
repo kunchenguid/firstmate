@@ -608,6 +608,10 @@ test_relaunch_appends_the_progress_note_to_the_instructions() {
     "the Firstmate-worktree relaunch omitted the worker's exact steering inbox"
   assert_grep 'do not reject it as another home' "$launch_brief" \
     "the Firstmate-worktree relaunch did not distinguish its inbox from cross-home state"
+  assert_grep '## Progress and status reporting' "$launch_brief" \
+    "the relaunched worker did not receive the response-style contract"
+  assert_grep "Preserve this task's exact status syntax, schemas, and verbatim evidence" "$launch_brief" \
+    "the relaunched worker response style did not preserve task output contracts"
   pass "fm-control relaunch: progress and the Firstmate-worktree worker identity reach the replacement"
 }
 
