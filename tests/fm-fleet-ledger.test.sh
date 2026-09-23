@@ -162,12 +162,14 @@ EOF
 
 # Scaffold a real brief for TASK and print its status command, filled the way a
 # worker fills it.
-# An optional third argument is the scaffold's state override.
-worker_status_command() {  # <state> <note> [<state-dir>]
+# Optional arguments are the scaffold's state and config overrides; the
+# scaffold runs from the home, so a relative config override names its config/.
+worker_status_command() {  # <state> <note> [<state-dir> [<config-dir>]]
   local cmd
   rm -rf "${HOME_DIR:?}/data/$TASK"
-  in_home env FM_STATE_OVERRIDE="${3:-$HOME_DIR/state}" \
-    "$ROOT/bin/fm-brief.sh" "$TASK" sample --mode no-mistakes >/dev/null \
+  (cd "$HOME_DIR" && in_home env FM_STATE_OVERRIDE="${3:-$HOME_DIR/state}" \
+    FM_CONFIG_OVERRIDE="${4:-$HOME_DIR/config}" \
+    "$ROOT/bin/fm-brief.sh" "$TASK" sample --mode no-mistakes >/dev/null) \
     || fail "brief scaffold failed"
   # shellcheck disable=SC2016 # Match literal backticks in the generated brief.
   cmd=$(sed -n '/`echo "{state}/s/.*`\(echo .*\)`.*/\1/p' "$HOME_DIR/data/$TASK/brief.md" | head -1)
@@ -211,6 +213,18 @@ test_worker_status_line_is_recorded_under_a_state_override() {
     "$(jq -c '[.event, .state]' "$state_dir/fleet-ledger.jsonl" 2>/dev/null)" \
     "ledger rows right after the append"
   pass "flag on, state override outside the home: the worker's status command records its line at once"
+}
+
+test_worker_status_line_is_recorded_under_a_relative_config_override() {
+  local out
+  make_case on-relative-config on
+  mkdir -p "$HOME_DIR/data"
+  out=$(cd "$PROJ_DIR" && run_worker_command \
+    "$(worker_status_command needs-decision 'which lamp' "$HOME_DIR/state" config)" 2>&1) \
+    || fail "the worker status command failed: $out"
+  assert_equals '["task.status","needs-decision"]' "$(ledger_rows '[.event, .state]')" \
+    "ledger rows right after the append"
+  pass "flag on, relative config override: a worker running elsewhere still records its line at once"
 }
 
 test_worker_status_command_fails_when_the_append_fails() {
@@ -266,6 +280,7 @@ test_flag_on_records_a_pr_merge_once
 test_flag_on_records_a_pr_registration
 test_worker_status_line_is_recorded_when_written
 test_worker_status_line_is_recorded_under_a_state_override
+test_worker_status_line_is_recorded_under_a_relative_config_override
 test_worker_status_command_fails_when_the_append_fails
 test_worker_status_line_lands_when_the_ledger_fails
 test_worker_status_line_with_the_flag_absent
