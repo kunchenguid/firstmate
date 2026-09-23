@@ -206,6 +206,9 @@ After a signal's disposition is durable as filed work, a captain hold, or a reco
 Do not acknowledge merely because the signal was read.
 For secondmate-owned contributions, handle and acknowledge in that home and use the existing parent channel for any captain call.
 
+When a disposition turns on whether the change fits the project's own values, that project has a `VISION.md`, and this home has the `vision-md-triage-verdict` capability on its source shelf, judge it with that capability and take a disposition it leaves unresolved to the ordinary captain call rather than coercing one.
+`tool-source-shelf` owns how to reach it.
+
 ## Supervision discipline
 
 During a digest/build invocation, this skill changes no fleet state beyond observational remote-ledger cache refreshes, durable local per-target reconcile-notify requests, explicit report or board artifacts, binding, and source registration.

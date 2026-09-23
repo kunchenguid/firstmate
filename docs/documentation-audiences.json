@@ -257,6 +257,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/tool-source-shelf/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/updatefirstmate/SKILL.md",
       "audience": "agent-runtime"
     },
