@@ -95,6 +95,127 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
+# --- native Windows process table (Git Bash / MSYS / Cygwin) -----------------
+# A harness on Windows is a native process (claude.exe, codex.exe, node.exe),
+# while the shell running this file is an MSYS process. MSYS `ps` ignores `-o`
+# and never reports a native parent (it shows PPID 0 or 1), so the POSIX walk
+# below can never reach the harness and every session opened read-only. On such
+# a host every pid this file records or tests is a Windows pid - the same
+# namespace Claude Code uses for CLAUDE_PID - and identity, parentage, and
+# liveness come from Win32_Process instead of ps and kill.
+#
+# The host is detected by MSYS's own /proc/<pid>/winpid bookkeeping.
+# FM_PROC_ROOT_OVERRIDE and FM_PROC_SELF_OVERRIDE exist for tests only.
+fm_proc_windows_native() {
+  [ -r "${FM_PROC_ROOT_OVERRIDE:-/proc}/${FM_PROC_SELF_OVERRIDE:-$$}/winpid" ]
+}
+
+# Print Win32_Process rows as "<pid><TAB><ppid><TAB><name><TAB><command line>",
+# for one pid when $1 is given, otherwise for every process. One PowerShell
+# call per invocation (about 0.3-0.5 s), so callers fetch once and walk in
+# memory. The command line is used only for harness matching, never logged.
+_fm_win_proc_rows() {  # [<pid>]
+  local filter='' out
+  if [ -n "${1:-}" ]; then
+    case "$1" in *[!0-9]*) return 1 ;; esac
+    filter=" -Filter \"ProcessId=$1\""
+  fi
+  out=$(powershell.exe -NoProfile -NonInteractive -Command \
+    "Get-CimInstance Win32_Process$filter | ForEach-Object { \"{0}\`t{1}\`t{2}\`t{3}\" -f \$_.ProcessId,\$_.ParentProcessId,\$_.Name,\$_.CommandLine }" \
+    2>/dev/null) || return 1
+  out=$(printf '%s' "$out" | tr -d '\r')
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# Split Win32_Process row $1 into _FM_WIN_PID, _FM_WIN_PPID, _FM_WIN_COMM (the
+# lowercased image name without .exe, comparable to a POSIX comm), and
+# _FM_WIN_ARGS.
+_fm_win_row_parse() {  # <row>
+  local row=$1 name
+  _FM_WIN_PID=${row%%$'\t'*}; row=${row#*$'\t'}
+  _FM_WIN_PPID=${row%%$'\t'*}; row=${row#*$'\t'}
+  name=${row%%$'\t'*}
+  case "$row" in *$'\t'*) _FM_WIN_ARGS=${row#*$'\t'} ;; *) _FM_WIN_ARGS= ;; esac
+  name=$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]')
+  _FM_WIN_COMM=${name%.exe}
+}
+
+# The Windows pid this shell's MSYS process tree hangs from. MSYS's fork
+# emulation can leave a child's Win32 ParentProcessId pointing at a transient
+# process, so the MSYS-owned part of the chain is climbed through /proc first
+# and the native walk starts from the topmost MSYS process's own winpid.
+_fm_win_start_pid() {
+  local proc_root=${FM_PROC_ROOT_OVERRIDE:-/proc} pid=${FM_PROC_SELF_OVERRIDE:-$$} \
+    winpid='' wp ppid
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    wp=$(cat "$proc_root/$pid/winpid" 2>/dev/null) || break
+    case "$wp" in '' | *[!0-9]*) break ;; esac
+    winpid=$wp
+    ppid=$(cat "$proc_root/$pid/ppid" 2>/dev/null) || break
+    case "$ppid" in '' | *[!0-9]*) break ;; esac
+    [ "$ppid" = "$pid" ] && break
+    pid=$ppid
+  done
+  [ -n "$winpid" ] || return 1
+  printf '%s\n' "$winpid"
+}
+
+# True when pid $1 is live, and prints its "<comm><TAB><args>" on the host's
+# own process table. The single process-identity primitive for everything
+# below except the ancestry walk, which reads parents too.
+_fm_proc_identity() {  # <pid>
+  local pid=$1 comm args row
+  case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+  if fm_proc_windows_native; then
+    row=$(_fm_win_proc_rows "$pid") || return 1
+    row=$(printf '%s\n' "$row" | awk -F'\t' -v p="$pid" '$1 == p { print; exit }')
+    [ -n "$row" ] || return 1
+    _fm_win_row_parse "$row"
+    printf '%s\t%s\n' "$_FM_WIN_COMM" "$_FM_WIN_ARGS"
+    return 0
+  fi
+  kill -0 "$pid" 2>/dev/null || return 1
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  printf '%s\t%s\n' "$comm" "$args"
+}
+
+# True when pid $1 exists on the host at all, harness or not.
+_fm_proc_exists() {  # <pid>
+  if fm_proc_windows_native; then
+    _fm_proc_identity "$1" >/dev/null
+    return
+  fi
+  kill -0 "$1" 2>/dev/null && return 0
+  ps -o comm= -p "$1" >/dev/null 2>&1
+}
+
+# Windows-native counterpart of the POSIX walk in fm_harness_ancestry_pids,
+# applying the same contiguous-run rule to one Win32_Process snapshot.
+_fm_harness_ancestry_pids_windows() {
+  local pid table row extending=0 printed=0
+  pid=$(_fm_win_start_pid) || return 1
+  table=$(_fm_win_proc_rows) || return 1
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    row=$(printf '%s\n' "$table" | awk -F'\t' -v p="$pid" '$1 == p { print; exit }')
+    [ -n "$row" ] || break
+    _fm_win_row_parse "$row"
+    if fm_harness_process_matches "$_FM_WIN_COMM" "$_FM_WIN_ARGS"; then
+      printf '%s\n' "$pid"
+      printed=1
+      [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
+      extending=1
+    elif [ "$extending" -eq 1 ]; then
+      break
+    fi
+    case "$_FM_WIN_PPID" in '' | *[!0-9]*) break ;; esac
+    [ "$_FM_WIN_PPID" -ge 1 ] && [ "$_FM_WIN_PPID" != "$pid" ] || break
+    pid=$_FM_WIN_PPID
+  done
+  [ "$printed" -eq 1 ]
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -115,6 +236,10 @@ fm_harness_process_matches() {  # <comm> <args>
 # reported and the callers below decide what they need from it.
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
+  if fm_proc_windows_native; then
+    _fm_harness_ancestry_pids_windows
+    return
+  fi
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
     comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     args=$(ps -o args= -p "$pid" 2>/dev/null)
@@ -162,11 +287,9 @@ EOF
 
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
-  local pid=$1 comm args
-  kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  local identity
+  identity=$(_fm_proc_identity "$1") || return 1
+  fm_harness_process_matches "${identity%%$'\t'*}" "${identity#*$'\t'}"
 }
 
 # --- trusted same-session identity -------------------------------------------
@@ -196,7 +319,7 @@ fm_harness_pid_alive() {
 # ancestry list an earlier walk already produced, so a caller that walked once
 # need not walk again.
 fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
-  local id=${CLAUDE_CODE_SESSION_ID:-} claude_pid=${CLAUDE_PID:-} pids=${1:-} pid comm args
+  local id=${CLAUDE_CODE_SESSION_ID:-} claude_pid=${CLAUDE_PID:-} pids=${1:-} pid identity
   [ -n "$id" ] || return 1
   case "$id" in *$'\n'*|*$'\r'*) return 1 ;; esac
   case "$claude_pid" in ''|*[!0-9]*) return 1 ;; esac
@@ -205,9 +328,8 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
   fi
   while IFS= read -r pid; do
     [ "$pid" = "$claude_pid" ] || continue
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
-    fm_harness_process_matches "$comm" "$args" || return 1
+    identity=$(_fm_proc_identity "$pid") || return 1
+    fm_harness_process_matches "${identity%%$'\t'*}" "${identity#*$'\t'}" || return 1
     [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
     printf '%s\n' "$id"
     return 0
@@ -363,17 +485,12 @@ fm_session_lock_inspect() {  # <state>
       return 0
       ;;
   esac
-  if kill -0 "$pid" 2>/dev/null; then
-    if fm_harness_pid_alive "$pid"; then
-      FM_LOCK_INSPECT_STATE=held
-      FM_LOCK_INSPECT_LIVE_HARNESS=true
-    else
-      FM_LOCK_INSPECT_STATE=unknown
-      FM_LOCK_INSPECT_LIVE_HARNESS=false
-    fi
+  if fm_harness_pid_alive "$pid"; then
+    FM_LOCK_INSPECT_STATE=held
+    FM_LOCK_INSPECT_LIVE_HARNESS=true
     return 0
   fi
-  if ps -o comm= -p "$pid" >/dev/null 2>&1; then
+  if _fm_proc_exists "$pid"; then
     FM_LOCK_INSPECT_STATE=unknown
     return 0
   fi

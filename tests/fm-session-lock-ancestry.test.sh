@@ -44,7 +44,10 @@ lib_eval() {  # <fakebin> <expression>
   local -a session_env=()
   [ -z "${FM_TEST_SESSION_ID:-}" ] || session_env+=("CLAUDE_CODE_SESSION_ID=$FM_TEST_SESSION_ID")
   [ -z "${FM_TEST_CLAUDE_PID:-}" ] || session_env+=("CLAUDE_PID=$FM_TEST_CLAUDE_PID")
+  # The fake ps table only means something on the POSIX path, so the native
+  # Windows table stays off unless a case supplies its own fake /proc.
   env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID ${session_env[@]+"${session_env[@]}"} \
+    FM_PROC_ROOT_OVERRIDE="${FM_TEST_PROC_ROOT:-$TMP_ROOT/no-proc}" \
     PATH="$fakebin:$PATH" bash -c "
     . \"\$0\"
     kill() { return \${FM_TEST_KILL_RC:-0}; }
@@ -425,6 +428,56 @@ test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id() {
     || fail "no anchor pid was resolved for the healthy chain with a trusted id"
   [ "$got" = 710 ] || fail "the healthy chain with a trusted id anchored '$got', expected 710 rather than the front-end"
   pass "session-lock: a trusted id anchors the lock on the model-loop process, anything else on the outermost pid"
+}
+
+# On Git Bash the harness is a native Windows process that MSYS ps cannot see.
+# The fake /proc gives this shell (msys 40) an MSYS parent (msys 41, winpid
+# 510) whose own parent is outside MSYS, and the fake powershell.exe serves
+# Win32_Process. The shell's own Win32 row is deliberately missing, the
+# transient fork-emulation shape, so the walk must start from the MSYS top.
+# A codex.exe above a non-harness gap must never join the ancestry.
+test_windows_native_harness_owns_the_lock() {
+  local dir fakebin procroot state got
+  dir="$TMP_ROOT/windows-native"
+  fakebin=$(fm_fakebin "$dir")
+  procroot="$dir/proc"
+  state="$dir/state"
+  mkdir -p "$procroot/40" "$procroot/41" "$state"
+  printf '500\n' > "$procroot/40/winpid"; printf '41\n' > "$procroot/40/ppid"
+  printf '510\n' > "$procroot/41/winpid"; printf '1\n' > "$procroot/41/ppid"
+  printf '510\t520\tbash.exe\tbash -c x\n520\t11444\tbash.exe\t\n11444\t600\tclaude.exe\t"C:\\Users\\u\\.local\\bin\\claude.exe"\n600\t700\tpowershell.exe\tpowershell\n700\t800\tCodex.EXE\tcodex\n' \
+    > "$dir/win-table"
+  cat > "$fakebin/powershell.exe" <<SH
+#!/usr/bin/env bash
+pid=\$(printf '%s' "\$*" | sed -n 's/.*ProcessId=\([0-9]*\).*/\1/p')
+if [ -n "\$pid" ]; then awk -F'\t' -v p="\$pid" '\$1 == p' "$dir/win-table"; else cat "$dir/win-table"; fi
+SH
+  chmod +x "$fakebin/powershell.exe"
+  win_eval() { FM_TEST_PROC_ROOT="$procroot" lib_eval "$fakebin" "FM_PROC_SELF_OVERRIDE=40; $1"; }
+
+  got=$(win_eval 'fm_harness_ancestry_pids') || fail "windows: the native harness was not found in the ancestry"
+  [ "$got" = 11444 ] || fail "windows: ancestry resolved '$got', expected only claude.exe 11444"
+  got=$(FM_TEST_SESSION_ID=S1 FM_TEST_CLAUDE_PID=11444 win_eval 'fm_session_lock_anchor_pid') \
+    || fail "windows: no anchor pid was resolved for a trusted id"
+  [ "$got" = 11444 ] || fail "windows: a trusted id anchored '$got', expected CLAUDE_PID 11444"
+  win_eval 'fm_harness_pid_alive 11444' || fail "windows: live claude.exe was not recognized as a harness"
+  win_eval 'fm_harness_pid_alive 700' || fail "windows: a case-varied codex.exe image name was not recognized"
+  if win_eval 'fm_harness_pid_alive 600'; then fail "windows: powershell.exe was treated as a harness"; fi
+  if win_eval 'fm_harness_pid_alive 999'; then fail "windows: a missing pid was treated as live"; fi
+
+  printf '11444\n' > "$state/.lock"
+  win_eval "fm_session_lock_owned_by_self '$state'" || fail "windows: the session holding the lock did not recognize itself"
+  got=$(win_eval "fm_session_lock_inspect '$state'; echo \$FM_LOCK_INSPECT_STATE")
+  [ "$got" = held ] || fail "windows: a live claude.exe lock inspected as '$got', expected held"
+  printf '700\n' > "$state/.lock"
+  win_eval "fm_session_lock_foreign_owner_live '$state'" || fail "windows: a codex.exe beyond the gap was not a foreign live owner"
+  printf '600\n' > "$state/.lock"
+  got=$(win_eval "fm_session_lock_inspect '$state'; echo \$FM_LOCK_INSPECT_STATE")
+  [ "$got" = unknown ] || fail "windows: a live non-harness lock pid inspected as '$got', expected unknown"
+  printf '999\n' > "$state/.lock"
+  got=$(win_eval "fm_session_lock_inspect '$state'; echo \$FM_LOCK_INSPECT_STATE")
+  [ "$got" = stale ] || fail "windows: a dead lock pid inspected as '$got', expected stale"
+  pass "session-lock: on Git Bash the native Windows harness is found, anchored, and checked for liveness"
 }
 
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
@@ -1098,6 +1151,7 @@ test_harness_beyond_a_gap_never_owns_the_lock
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id
+test_windows_native_harness_owns_the_lock
 test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock

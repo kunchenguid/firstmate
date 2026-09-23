@@ -817,12 +817,22 @@ fm_backend_herdr_presentation_lock_namespace_valid() {
 # path so two spellings of the same socket compare equal. Refuses a relative
 # or empty path. An unresolvable directory is left as-is rather than treated as
 # a failure, so a socket whose directory was removed still compares by its own
-# literal path. Single owner for every socket-identity comparison in this
+# literal path. Native Windows herdr reports a drive-letter path
+# (C:\...\herdr.sock) on both sides of every comparison, so under Git Bash such
+# a path is first converted with cygpath into the POSIX spelling the rest of
+# this function canonicalizes; without cygpath it is refused like any other
+# non-absolute path. Single owner for every socket-identity comparison in this
 # adapter (the presentation session lock and the launcher-identity same-session
 # proof both use it).
 fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   local socket=$1 sock_dir sock_base
   [ -n "$socket" ] || return 1
+  case "$socket" in
+    [A-Za-z]:[\\/]*)
+      command -v cygpath >/dev/null 2>&1 || return 1
+      socket=$(cygpath -u -- "$socket" 2>/dev/null) || return 1
+      ;;
+  esac
   case "$socket" in
     /*) ;;
     *) return 1 ;;
