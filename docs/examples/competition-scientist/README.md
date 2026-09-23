@@ -23,6 +23,7 @@ The only scientific surface is the generated workspace file `candidate.py`.
 The lab accepts typed proposals and materializes one literal assignment per attempt.
 It parses the candidate with Python's AST and never executes candidate code.
 Imports, calls, extra assignments, missing assignments, symlinks, and undeclared workspace files are rejected.
+The one exception is a temp file left beside a declared record by an interrupted harness write, which is tolerated so an interrupted run stays verifiable without hand-deleting a file the contract otherwise calls undeclared.
 This also prevents a proposal from opening a network connection or launching a subprocess.
 
 The evaluator, synthetic data, development split, falsification split, sealed-data generator, Python environment record, baseline template, and empty dependency set are frozen and SHA-256 verified before every evaluation.
@@ -50,6 +51,7 @@ Planning tokens may not exceed the smaller declared planning cap.
 The default per-attempt cap is 8,000 tokens, and the default planning cap is 9,600 of 48,000 total tokens, or 20 percent.
 Before final promotion, the proposed controller runs one deterministic counterfactual falsification evaluation.
 The final sealed audit runs once after search completion and never changes an earlier attempt verdict.
+Both one-shot budgets are charged to `.run/state.json` before the evaluation they gate, so a `finish` interrupted mid-audit refuses the next `finish` instead of silently running a second falsification or sealed call.
 
 A typed proposal may choose a change, name one bounded falsifier, and request a branch, but it cannot provide a score, acceptance verdict, evaluator edit, budget override, hidden result, or failure injection.
 Syntax, timeout, OOM, and network faults are reachable only through the harness-only `attempt --inject-failure` recovery drill, never through a lever a proposal can name.

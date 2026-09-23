@@ -573,9 +573,9 @@ def run_bounded_evaluator(workspace: Path, candidate: Path, split: str) -> dict[
         result["wall_seconds"] = elapsed
         result["stderr"] = stderr[-2000:]
         return finish_result(result)
-    if proc.returncode in (-signal.SIGXCPU, 128 + signal.SIGXCPU):
+    if proc.returncode == -signal.SIGXCPU:
         failure = "cpu-limit"
-    elif proc.returncode in (-signal.SIGKILL, 137):
+    elif proc.returncode == -signal.SIGKILL:
         failure = "oom"
     else:
         failure = "runtime"
@@ -724,17 +724,47 @@ def init_workspace(args: argparse.Namespace) -> Path:
     return workspace
 
 
+ALLOWED_WORKSPACE_FILES = frozenset({
+    "candidate.py",
+    ".frozen/dev.json",
+    ".frozen/falsification.json",
+    ".frozen/manifest.json",
+    ".run/state.json",
+    ".run/ledger.jsonl",
+    ".run/results.tsv",
+    ".run/final.json",
+})
+
+
+def allowed_workspace_file(relative: str) -> bool:
+    if relative in ALLOWED_WORKSPACE_FILES:
+        return True
+    if relative.startswith(".run/tmp/evaluation-") and relative.endswith(".json"):
+        return True
+    if relative.startswith(".run/tmp/sealed-") and relative.endswith(".json"):
+        return True
+    parts = Path(relative).parts
+    if len(parts) == 3 and parts[0] == "artifacts":
+        artifact_name, filename = parts[1], parts[2]
+        proposal_hash = artifact_name.removeprefix("proposal-")
+        if artifact_name.startswith("proposal-") and len(proposal_hash) == 64 and all(c in "0123456789abcdef" for c in proposal_hash) and filename == "proposal.json":
+            return True
+        if len(artifact_name) == 64 and all(c in "0123456789abcdef" for c in artifact_name) and filename in {"candidate.py", "dev-predictions.json", "result.json"}:
+            return True
+    return False
+
+
+def interrupted_write_target(relative: str) -> str:
+    name = Path(relative).name
+    if not name.startswith(".") or not name.endswith(".tmp"):
+        return ""
+    target, separator, pid = name[1:-len(".tmp")].rpartition(".")
+    if not separator or not target or not pid.isdigit():
+        return ""
+    return (Path(relative).parent / target).as_posix()
+
+
 def verify_workspace_surface(workspace: Path) -> None:
-    allowed_exact = {
-        "candidate.py",
-        ".frozen/dev.json",
-        ".frozen/falsification.json",
-        ".frozen/manifest.json",
-        ".run/state.json",
-        ".run/ledger.jsonl",
-        ".run/results.tsv",
-        ".run/final.json",
-    }
     for path in workspace.rglob("*"):
         relative = path.relative_to(workspace).as_posix()
         if path.is_symlink():
@@ -745,20 +775,11 @@ def verify_workspace_surface(workspace: Path) -> None:
             if relative.startswith("artifacts/") and len(Path(relative).parts) == 2:
                 continue
             raise LabError(f"undeclared-file-edit:directory:{relative}")
-        if relative in allowed_exact:
+        if allowed_workspace_file(relative):
             continue
-        if relative.startswith(".run/tmp/evaluation-") and relative.endswith(".json"):
+        interrupted_target = interrupted_write_target(relative)
+        if interrupted_target and allowed_workspace_file(interrupted_target):
             continue
-        if relative.startswith(".run/tmp/sealed-") and relative.endswith(".json"):
-            continue
-        parts = Path(relative).parts
-        if len(parts) == 3 and parts[0] == "artifacts":
-            artifact_name, filename = parts[1], parts[2]
-            proposal_hash = artifact_name.removeprefix("proposal-")
-            if artifact_name.startswith("proposal-") and len(proposal_hash) == 64 and all(c in "0123456789abcdef" for c in proposal_hash) and filename == "proposal.json":
-                continue
-            if len(artifact_name) == 64 and all(c in "0123456789abcdef" for c in artifact_name) and filename in {"candidate.py", "dev-predictions.json", "result.json"}:
-                continue
         raise LabError(f"undeclared-file-edit:file:{relative}")
 
 
@@ -828,11 +849,7 @@ def load_artifact_metrics(workspace: Path, candidate_sha: str) -> dict[str, Any]
 
 def metric_comparison(candidate: dict[str, Any], parent: dict[str, Any], manifest: dict[str, Any]) -> tuple[bool, str, float]:
     tolerance = float(manifest["catastrophic_group_drop"])
-    candidate_floor = min(
-        (float(candidate["per_group"].get(group, 0.0)) for group in parent["per_group"]),
-        default=0.0,
-    )
-    if candidate_floor < float(parent["worst_group"]):
+    if float(candidate["worst_group"]) < float(parent["worst_group"]):
         for group, parent_score in parent["per_group"].items():
             candidate_score = float(candidate["per_group"].get(group, 0.0))
             if candidate_score < parent_score - tolerance:
@@ -1100,6 +1117,7 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
         if state["falsification_calls"] >= 1:
             raise LabError("falsification-budget-exhausted")
         state["falsification_calls"] += 1
+        save_state(workspace, state)
         prior_records = [
             json.loads(line)
             for line in (workspace / ".run" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
@@ -1149,6 +1167,7 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
     if state["sealed_calls"] >= 1:
         raise LabError("sealed-audit-already-called")
     state["sealed_calls"] += 1
+    save_state(workspace, state)
     sealed_candidate = workspace / "artifacts" / selected_sha / "candidate.py"
     sealed = run_bounded_evaluator(workspace, sealed_candidate, "sealed")
     final = {

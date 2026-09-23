@@ -147,6 +147,16 @@ PY
   output=$($LAB attempt "$extra_ws" --proposal "$proposal" 2>&1); status=$?
   [ "$status" -ne 0 ] || fail "undeclared workspace file should be rejected"
   assert_contains "$output" "undeclared-file-edit:file:other.py" "undeclared edit refusal should name the file"
+  rm "$extra_ws/other.py"
+
+  printf 'partial' > "$extra_ws/.run/.state.json.4242.tmp"
+  printf 'partial' > "$extra_ws/.run/tmp/.evaluation-7-9.json.4242.tmp"
+  output=$($LAB attempt "$extra_ws" --proposal "$proposal" 2>&1); status=$?
+  expect_code 0 "$status" "an interrupted harness-owned atomic write should not brick the workspace"
+  printf 'x' > "$extra_ws/.run/.secrets.tmp"
+  output=$($LAB replay "$extra_ws" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a temp-looking file with no declared target should still be rejected"
+  assert_contains "$output" "undeclared-file-edit:file:.run/.secrets.tmp" "the tolerated pattern must not admit arbitrary files"
   pass "competition scientist: frozen hashes and the single editable surface are enforced"
 }
 
@@ -349,6 +359,30 @@ PY
   pass "competition scientist: final falsification and sealed audit run once and visible candidates replay"
 }
 
+test_sealed_audit_budget_survives_an_interrupted_finish() {
+  local workspace output status
+  workspace="$TMP_ROOT/interrupted-finish"
+  init_workspace "$workspace" noisy-classification linear 3 2
+
+  chmod 0500 "$workspace/.run/tmp"
+  $LAB finish "$workspace" >/dev/null 2>&1
+  chmod 0700 "$workspace/.run/tmp"
+  python3 - "$workspace" <<'PY'
+import json
+import pathlib
+import sys
+state = json.loads((pathlib.Path(sys.argv[1]) / ".run/state.json").read_text())
+assert state["sealed_calls"] == 1, state["sealed_calls"]
+assert state["complete"] is False, state["complete"]
+PY
+
+  output=$($LAB finish "$workspace" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a second sealed audit should be refused, not performed silently"
+  assert_contains "$output" "sealed-audit-already-called" "the one-shot sealed budget should already be charged"
+  [ ! -e "$workspace/.run/final.json" ] || fail "an unfinished search should not publish a final record"
+  pass "competition scientist: the one-shot sealed audit budget is charged before the evaluation it gates"
+}
+
 test_help_and_inertness
 test_smoke_contract
 test_frozen_hash_and_undeclared_edit_guards
@@ -357,5 +391,6 @@ test_worst_group_trade_and_per_metric_floors
 test_branch_and_planning_limits
 test_duplicate_confounded_and_budget_rejections
 test_finish_is_idempotent_and_replayable
+test_sealed_audit_budget_survives_an_interrupted_finish
 
 echo "# fm-competition-scientist-lab.test.sh: all assertions passed"
