@@ -790,14 +790,10 @@ A work home that reports across a machine boundary also gets `outbox/`, describe
 The home that owns the commitment also owns the outward post, because only it holds the relay consent, the request context, and the opaque thread binding.
 Work routed elsewhere reports a typed terminal result with `bin/fm-public-followup-emit.sh` and never looks for the thread; when writing directly into the owning home, that emitter refuses a home with no registration for the named obligation.
 `bin/fm-public-followup.sh brief` pre-fills every deliverable value the binding determines, such as `report_path=data/<work-id>/report.md`, and states the accepted format of every value it cannot know.
-In either destination the emitter refuses a deliverable `tasks-axi` would refuse - a bad format such as an absolute `report_path`, a value over 500 characters, or a key outside `tasks-axi`'s own deliverable-name rule - and gives the applicable correction, so a bad value never travels to the owning home.
-It refuses a missing required deliverable the same way.
-A direct emit reads the obligation's required keys from `tasks-axi`, the same record `brief` reads, so every registration this home holds is covered whenever it was written.
-`brief` repeats those keys as `--require-deliverable` flags for a staged emit, which is on the other side of a machine boundary from that record and enforces exactly the keys it was given.
-An outcome alone cannot tell a key the promise requires from one it never did - a `local-main` result answers both a `local-main` final that needs a `commit_sha` and an `explicit-answer` final that needs nothing - so a staged command that drops those flags keeps every value-format check but makes no presence demand.
-Such an event is caught by the owning home's `consume` and surfaced by its rejection wake instead of being guessed at here.
-A `failed` outcome is exempt only from a key it could not carry anyway, so a promise whose expected final is the failure still needs its `error_code`; no other outcome type excuses a missing required value.
-That same record is what makes a direct emit refuse an outcome that cannot satisfy the promise (only the expected outcome, or `failed`, may answer it), and every emit refuses `superseded`, which `tasks-axi` takes only with a successor a typed terminal result does not carry.
+The emitter validates deliverable values and known required keys before publishing, including the relative `report_path` format, and names correctable mistakes at the work home.
+A direct emit reads the obligation from `tasks-axi`; a staged emit cannot read that remote record, so `brief` supplies its required keys in the printed command.
+If those flags are omitted from a staged command, it still checks values but cannot detect missing keys until the owning home's `consume` rejects the event and queues a rejection wake.
+The [emitter header](../bin/fm-public-followup-emit.sh) and its `--help` own the exact flags and outcome-dependent validation rules.
 When that work lives in a REMOTE secondmate home, delivery clears its bound legacy link after validating the public receipt, while retirement clears the link before closing the loop, and both clears run over that route's SSH transport.
 Readable remote state that proves no link exists succeeds without a write, while a present link is cleared only when its Relay request identity matches the registration and the state is writable; an identity mismatch, unreadable or unsafe state, an unavailable write or lock, an older remote copy, or a host that never confirms the clear leaves the loop retained for reconciliation.
 A terminal event's id is derived from its identity tuple, so a duplicate report, a retry, or a replay after restart resolves to the same event and changes nothing.
@@ -816,8 +812,8 @@ A home without that token runs one file test and stops: no `tasks-axi` call, no 
 Ordinary startup, polling, cleanup, and silent read-side subcommands also produce no output; commands that require an active relay report that configuration error after the same gate.
 A relay-enabled home with no registered commitment stops at an O(1) directory presence check, so the empty state costs no CLI call and adds no periodic scan.
 Unreconciled terminal results ride the existing 30-second relay poll rather than a new process or timer: `bin/fm-x-poll.sh` compares the pending-event signature against `surfaced` and wakes firstmate once per new result set.
-A result `consume` refuses is quarantined with a reason naming the specific deliverable, outcome, or missing key where one is identifiable, and the same poll wakes the owning home with a `public-followup rejected <event-id> ...` line carrying that reason.
-The refused event stays pending until that wake is recorded, and the queued wake is cleared only once its line has been written, so a refusal can be lost at neither boundary.
+A terminal event `tasks-axi` refuses during `consume` is quarantined with a reason naming the specific deliverable, outcome, or missing key where one is identifiable, and the same poll wakes the owning home with a `public-followup rejected <event-id> ...` line carrying that reason.
+The refused event stays pending until that wake is recorded, and a queued wake survives a failed read or write to poll output.
 That makes the wake at-least-once rather than exactly-once: a cleanup that fails after the line was already raised - a wake directory that cannot be written, or a refused event that could not be drained - raises the same refusal again on a later poll.
 A repeat carries the same event id and the same reason as the quarantined rejection, which is how an already-handled refusal is recognized.
 Acknowledge it without re-acting; re-emitting an already accepted corrected result is harmless but redundant because its derived event id is already in the accepted ledger.
