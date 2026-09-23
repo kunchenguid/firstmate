@@ -33,7 +33,14 @@
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
-#     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
+#       an omp-selected clear result also appends "  (<reason>: excluded from fallback chain)" to an
+#       eligible candidate's own tier the chain leaves out
+#     profile: --harness <h> [--model <m>] [--effort <e>] [--fallback <chain>]     (status clear only)
+#       --fallback is present only when the selected profile's harness is omp: a comma-separated
+#       <model>:<effort> list built from the same tier's other eligible omp candidates, ranked
+#       ones first in argmax order then eligible-but-unranked ones in config order, skipping the
+#       selected model, non-omp candidates, candidates missing effort or a <provider>/<id> model,
+#       and duplicate models
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
@@ -332,6 +339,14 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
          spendPriority: $limiting.selection.spendPriority, runway: $limiting.runway.status, eligible: true, reason: "ok"}
       end
     end;
+  def ckey($c): "\($c.profile.harness // "")|\($c.profile.model // "")|\($c.profile.effort // "")";
+  def provider_id_form($m): ($m // "") | test("^[^/]+/[^/]+$");
+  def fallback_reason($c; $chain_models):
+    if $c.profile.harness != "omp" then "not omp: excluded from fallback chain"
+    elif ($c.profile.effort // "") == "" then "no effort: excluded from fallback chain"
+    elif (provider_id_form($c.profile.model) | not) then "model not in provider/id form: excluded from fallback chain"
+    elif ($chain_models | index($c.profile.model)) != null then "duplicate model: excluded from fallback chain"
+    else null end;
   ($a.choice) as $choice |
   (if ($choice | test("^rule_[1-9][0-9]*$"))
    then ($choice | ltrimstr("rule_") | tonumber)
@@ -372,10 +387,27 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       ($elig | max_by(.spendPriority)) as $best |
       ([$elig[] | select(.spendPriority == $best.spendPriority)] | length) as $ties |
       if $ties > 1 then $ev + {status: "escalate", reason: "genuine spendPriority tie", note: $sel.note, candidates: $cands}
-      else $ev + {status: "clear", note: $sel.note, candidates: $cands, chosen: $best}
-        + (if ($unranked | length) > 0 then
-             {unranked_note: "\($unranked | length) eligible candidate(s) unranked (\([$unranked[].provider] | unique | join(", ")))"}
-           else {} end)
+      else
+        ($elig | sort_by(-.spendPriority)) as $ranked_elig |
+        ($ranked_elig[1:] + $unranked) as $others |
+        (if $best.profile.harness == "omp" then
+           reduce $others[] as $c (
+             {chain: [], notes: {}};
+             (.chain | map(.profile.model)) as $chain_models |
+             (fallback_reason($c; $chain_models)) as $reason |
+             if $reason == null then .chain += [$c]
+             else .notes += {(ckey($c)): $reason} end
+           )
+         else {chain: [], notes: {}}
+         end) as $fb |
+        ($fb.chain | map("\(.profile.model):\(.profile.effort)") | join(",")) as $fallback_spec |
+        $ev + {status: "clear", note: $sel.note,
+               candidates: ($cands | map(. + (if $fb.notes[ckey(.)] then {fallback_note: $fb.notes[ckey(.)]} else {} end))),
+               chosen: $best}
+          + (if ($unranked | length) > 0 then
+               {unranked_note: "\($unranked | length) eligible candidate(s) unranked (\([$unranked[].provider] | unique | join(", ")))"}
+             else {} end)
+          + (if ($fallback_spec | length) > 0 then {fallback: $fallback_spec} else {} end)
       end
     end
   end') || emit_error "resolution failed"
@@ -396,9 +428,11 @@ TEXT=$(jq -r '
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
-      + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
+      + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)
+      + (if .fallback_note then "  (\(.fallback_note | flat))" else "" end)),
   (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
-      + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
+      + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end)
+      + (if .fallback then " --fallback \(.fallback | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 printf '%s\n' "$TEXT"
 exit 0

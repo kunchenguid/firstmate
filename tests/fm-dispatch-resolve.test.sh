@@ -635,4 +635,67 @@ expect_code 0 "$code" "--help exits 0"
 assert_contains "$out" 'Usage:' "--help prints usage"
 pass "configuration errors exit 2 before any network call"
 
+# --- omp --fallback: the resolver builds the retry chain for a clear omp result ---
+reset_log
+OMP_RULES="$TMP_ROOT/omp-rules.json"
+cat > "$OMP_RULES" <<'JSON'
+{
+  "rules": [
+    {
+      "when": "Omp fallback chain work.",
+      "use": [
+        { "harness": "omp", "model": "openai-codex/gpt-5.6-sol", "effort": "high", "provider": "codex" },
+        { "harness": "omp", "model": "claude-bridge/claude-sonnet-5", "effort": "medium", "provider": "claude" },
+        { "harness": "omp", "model": "openai-codex/gpt-5.5-high", "effort": "low", "provider": "google" },
+        { "harness": "omp", "model": "codex-native/other-model", "provider": "agy" },
+        { "harness": "cursor", "model": "cursor-grok-4.6-medium" },
+        { "harness": "omp", "model": "openai-codex/gpt-5.4", "effort": "low", "provider": "codex", "floor": { "scope": "all_models", "min_percent": 50 } }
+      ]
+    }
+  ]
+}
+JSON
+cp "$OMP_RULES" "$RULES"
+OMP_QUOTA="$TMP_ROOT/omp-quota.json"
+jq '(.providers[] | select(.provider == "codex") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models") | .selection.spendPriority) = 0.9
+  | (.providers[] | select(.provider == "cursor") | .quotaSemantics.effectiveAvailability[] | select(.scope == "all_models") | .selection.spendPriority) = 0.5' "$QUOTA" > "$OMP_QUOTA"
+cat > "$RESPONSE" <<'JSON'
+{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.95,"probabilities":{"rule_1":0.95,"default":0.05}}},"usage":{"input_tokens":700,"output_tokens":50}}
+JSON
+TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$OMP_QUOTA" run code out err "$BRIEF"
+expect_code 0 "$code" "omp fallback chain resolves"
+assert_contains "$out" '  status: clear' "the omp tier resolves clear"
+assert_contains "$out" "  profile: --harness 'omp' --model 'openai-codex/gpt-5.6-sol' --effort 'high' --fallback 'openai-codex/gpt-5.5-high:low,claude-bridge/claude-sonnet-5:medium'" "the fallback chain rides the profile line in ranking order, each with its own effort"
+assert_not_contains "$out" "gpt-5.6-sol:high" "the selected model never appears inside its own fallback chain"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  scope=all_models  remaining=91%  spendPriority=0.5  runway=through_reset  -> eligible  (not omp: excluded from fallback chain)' "a non-omp candidate in the same tier is excluded from the chain and the line says why"
+assert_contains "$out" "candidate: omp:codex-native/other-model  provider=agy  scope=all_models  remaining=64%  spendPriority=0.4  runway=through_reset  -> eligible  (no effort: excluded from fallback chain)" "an omp candidate with no declared effort is excluded from the chain and the line says why"
+assert_contains "$out" "candidate: omp:openai-codex/gpt-5.4  provider=codex  scope=all_models  remaining=31%  spendPriority=-  runway=projected_exhaustion  -> not eligible: profile floor all_models below 50%" "an ineligible omp candidate stays ineligible and never enters the chain"
+assert_not_contains "$out" 'gpt-5.4:low' "an ineligible omp candidate is never added to the fallback chain"
+pass "clear omp result: --fallback carries the tier's other eligible omp candidates in ranking order, never the selected model"
+
+# --- omp --fallback: a single eligible candidate emits no --fallback --------------
+reset_log
+SOLO_OMP_RULES="$TMP_ROOT/solo-omp-rules.json"
+printf '%s\n' '{"rules":[{"when":"Single omp candidate work.","use":{"harness":"omp","model":"openai-codex/gpt-5.6-sol","effort":"high","provider":"codex"}}]}' > "$SOLO_OMP_RULES"
+cp "$SOLO_OMP_RULES" "$RULES"
+cat > "$RESPONSE" <<'JSON'
+{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.95,"probabilities":{"rule_1":0.95,"default":0.05}}},"usage":{"input_tokens":700,"output_tokens":50}}
+JSON
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 0 "$code" "solo omp candidate resolves"
+assert_contains "$out" "  profile: --harness 'omp' --model 'openai-codex/gpt-5.6-sol' --effort 'high'" "the sole eligible omp candidate still resolves"
+assert_not_contains "$out" '--fallback' "a tier with only one eligible omp candidate emits no --fallback"
+pass "clear omp result with only one eligible candidate: no --fallback"
+cp "$BASE_RULES" "$RULES"
+
+# --- the emitted --fallback spec is accepted by fm-spawn.sh's own validator -------
+FALLBACK_VALIDATOR=$(sed -n '/^fallback_spec_valid() {/,/^}/p' "$ROOT/bin/fm-spawn.sh")
+assert_not_equals '' "$FALLBACK_VALIDATOR" "fallback_spec_valid was extracted from fm-spawn.sh"
+eval "$FALLBACK_VALIDATOR"
+if fallback_spec_valid 'openai-codex/gpt-5.5-high:low,claude-bridge/claude-sonnet-5:medium' 'openai-codex/gpt-5.6-sol'; then
+  pass "the emitted fallback spec is accepted by fm-spawn.sh's real validator"
+else
+  fail "the emitted fallback spec was rejected by fm-spawn.sh's real fallback_spec_valid"
+fi
+
 printf '# all fm-dispatch-resolve tests passed\n'
