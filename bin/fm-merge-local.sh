@@ -41,8 +41,11 @@ META="$STATE/$ID.meta"
 "$FM_ROOT/bin/fm-guard.sh" || true
 # Role partition: landing local-only work is MAIN-owned; the Pi supervision
 # branch reports readiness and never lands (contract: bin/fm-lease-lib.sh;
-# no-op in homes without a branch actor). This precedes reading the task
-# record, because the wrong actor is refused for its role whatever it says.
+# no-op in homes without a branch actor). This action is deliberately NOT
+# relocated under the away-posture record: unlike the PR merge it has no
+# record-side grant gate of its own, so a parked main keeps it held for the
+# captain's return. This precedes reading the task record, because the wrong
+# actor is refused for its role whatever it says.
 # shellcheck source=bin/fm-lease-lib.sh
 . "$SCRIPT_DIR/fm-lease-lib.sh"
 fm_lease_forbid_branch "local-only landing (fm-merge-local)"
@@ -132,4 +135,6 @@ fm_lock_release "$MERGE_CONTROL_LOCK" || true
 MERGE_CONTROL_LOCK=
 [ "$merge_status" -eq 0 ] || exit "$merge_status"
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
+# Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
+[ ! -e "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE "$SCRIPT_DIR/fm-fleet-ledger.sh" merged "$ID" local || true
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"

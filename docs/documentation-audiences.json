@@ -193,6 +193,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/harness-adapters/references/harness/devin.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/harness-adapters/references/harness/gemini.md",
       "audience": "agent-runtime"
     },
@@ -361,8 +365,20 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/gerrit-change-watch.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/gerrit-forge-integration.md",
+      "audience": "maintainer-architecture"
+    },
+    {
       "path": "docs/gitlab-merge-watch.md",
       "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/fleet-ledger.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/herdr-backend.md",
@@ -442,6 +458,10 @@
     },
     {
       "path": "docs/verification/agy.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/devin.md",
       "audience": "maintainer-verification"
     },
     {

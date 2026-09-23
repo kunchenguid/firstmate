@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bin/backends/herdr.sh - the herdr session-provider adapter (EXPERIMENTAL).
+# bin/backends/herdr.sh - the verified herdr session-provider adapter.
 #
 # Design: data/fm-backend-design-d7/herdr-addendum.md ("Interface mapping",
 # decisions D1-D6) and the empirical verification recorded in
@@ -2011,10 +2011,19 @@ fm_backend_herdr_workspace_ensure() {  # <session> <cwd> [<launcher-relationship
 # function allowed to prune it (fm_backend_herdr_workspace_prune_seeded_default_tab).
 # <launcher-relationship> is passed straight through to
 # fm_backend_herdr_workspace_ensure, which owns its meaning.
-fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace> [<launcher-relationship>]
-  local cwd=${1:-$PWD} relationship=${2:-launcher-home} session label status
+#
+# <session> is optional and DEFAULTS to fm_backend_herdr_session, so every
+# ordinary spawn keeps resolving the ambient session exactly as before. A
+# RECOVERY passes the session its record already names, because a task must not
+# be relocated onto whatever server the recovering seat happens to sit on. It is
+# threaded as a parameter rather than by shadowing HERDR_SESSION on purpose:
+# fm_backend_herdr_launcher_identity compares the launcher's own ambient session
+# against this one, and shadowing would make that half of its cross-session
+# guard compare the pinned value with itself and pass vacuously.
+fm_backend_herdr_container_ensure() {  # <cwd-for-a-fresh-workspace> [<launcher-relationship>] [<session>]
+  local cwd=${1:-$PWD} relationship=${2:-launcher-home} session=${3:-} label status
   fm_backend_herdr_version_check || return 1
-  session=$(fm_backend_herdr_session)
+  [ -n "$session" ] || session=$(fm_backend_herdr_session)
   fm_backend_herdr_server_ensure "$session" || return 1
   fm_backend_herdr_workspace_ensure "$session" "$cwd" "$relationship" >/dev/null && status=0 || status=$?
   # A 3 already reported the exact placement it refused to guess at; adding the
@@ -2351,6 +2360,32 @@ fm_backend_herdr_agent_state() {  # <target>
       esac
       ;;
   esac
+}
+
+# fm_backend_herdr_endpoint_absence_recheck: re-read <target> with its own
+# session's server running, and print the resulting fm_backend_agent_state
+# verdict. For a recovery that is about to RE-CREATE an endpoint, this is the
+# read that decides whether there is anything to re-create at all.
+#
+# fm_backend_herdr_agent_state maps a positively STOPPED session server to
+# `missing` (issue #4091), which is correct for "no agent is running" but is
+# NOT evidence the endpoint was destroyed: stopping and restarting a named
+# Herdr server preserves workspace, tab, pane, and label ids (docs/herdr-backend.md
+# "Restart and liveness behavior") - only the harness processes and their
+# registrations die. So `missing` there means unreachable right now, and a
+# caller that rebound on it would abandon a pane that was about to come back.
+#
+# Only the RECORDED session's server is ensured, never a workspace or tab, so
+# this creates nothing: a merely-stopped server comes back and the recorded
+# pane classifies `dead` (adoptable), a genuinely destroyed pane still reads
+# `missing`, a returning agent reads `alive`, and a server that will not start
+# is `unreadable` - unreachable, which refuses, rather than absence.
+fm_backend_herdr_endpoint_absence_recheck() {  # <target>
+  local target=$1
+  fm_backend_herdr_parse_target "$target" || { printf 'unreadable'; return 0; }
+  fm_backend_herdr_server_ensure "$FM_BACKEND_HERDR_SESSION" >/dev/null 2>&1 \
+    || { printf 'unreadable'; return 0; }
+  fm_backend_herdr_agent_state "$target"
 }
 
 # Backward-compatible three-state view for callers that only need a yes/no
@@ -3083,7 +3118,7 @@ fm_backend_herdr_composer_state() {  # <target> -> empty|pending|pending-unprove
   verdict=$(fm_composer_classify_screen "$caps" "$cap")
   if [ "$verdict" = need-identity ]; then
     if ! identity=$(fm_backend_herdr_composer_identity "$target" 2>/dev/null) || [ -z "$identity" ]; then
-      identity=probe-absent
+      identity='probe-absent'
     fi
     verdict=$(fm_composer_classify_screen "$caps" "$cap" '' "$identity")
     [ "$verdict" != need-identity ] || verdict=unknown
@@ -3115,7 +3150,13 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # fm_backend_herdr_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
 # (Enter only, never retyped) until native agent-state, a cleared composer, or
-# fm_composer_queued_enter_verdict confirms delivery. Verified hazard
+# fm_composer_queued_enter_verdict confirms delivery. When native identity is
+# Claude, text is typed only into an empty composer and Enter is sent only
+# after the composer shows the payload (fm_backend_herdr_composer_payload_shown).
+# A missing read, a shorter suffix, or a paste placeholder followed by a
+# literal remainder does not press Enter: the composer is cleared back to
+# empty and the verdict is send-failed, or unknown when the clear cannot be
+# verified. Other harnesses skip this proof. Verified hazard
 # (herdr-verification-p2.md "slash/$ autocomplete popup"): a `/`- or
 # `$`-prefixed send opens a completion popup within ~0.1s, exactly like tmux's
 # claude/codex popups, so the caller's <settle> before the first Enter matters
@@ -3208,12 +3249,113 @@ fm_backend_herdr_queued_enter_busy() {  # <target> <allow-rendered>
   fi
 }
 
+# fm_backend_herdr_proof_lines: how many tail rows the pre-Enter payload proof
+# captures. A literal payload wraps, and a tail-only capture of a complete
+# wrap would look like the truncation this proof exists to refuse. The bound
+# stays inside the selected composer extraction; it is not a whole-pane search.
+fm_backend_herdr_proof_lines() {  # <text>
+  local text=$1 lines
+  lines=$(( (${#text} / 40) + 8 ))
+  if [ "$lines" -lt "$FM_COMPOSER_CAPTURE_LINES" ]; then
+    lines=$FM_COMPOSER_CAPTURE_LINES
+  fi
+  if [ "$lines" -gt 200 ]; then
+    lines=200
+  fi
+  printf '%s' "$lines"
+}
+
+# fm_backend_herdr_composer_content: the selected composer's visible text.
+# Styled capture is preferred. An empty or failed styled read falls through to
+# the plain capture so a missing ANSI format does not look like an empty draft.
+fm_backend_herdr_composer_content() {  # <target> [lines]
+  local target=$1 lines=${2:-$FM_COMPOSER_CAPTURE_LINES} cap caps
+  if cap=$(fm_backend_herdr_capture_ansi "$target" "$lines" 2>/dev/null) && [ -n "$cap" ]; then
+    caps=$(printf 'styled=1\ncursor=0\nidentity=0\nrows=%s' "$lines")
+  elif cap=$(fm_backend_herdr_capture "$target" "$lines") && [ -n "$cap" ]; then
+    caps=$(printf 'styled=0\ncursor=0\nidentity=0\nrows=%s' "$lines")
+  else
+    return 1
+  fi
+  fm_composer_extract_selected_content "$caps" "$cap"
+}
+
+# fm_backend_herdr_composer_payload_shown: 0 when <after>, read from a
+# composer that was empty before the send, shows <text>.
+# Literal equality ignores whitespace, the same comparison zellij uses, so a
+# wrapped payload still matches. It also ignores U+2063, the invisible mark
+# that starts operational inputs and separates the from-firstmate label:
+# Claude's composer read-back on Herdr never shows it (verified live), and it
+# carries no instruction text of its own. A composer that holds only
+# `[Pasted text #N]` or `[Pasted text #N +M lines]` placeholders (the
+# multi-line form, verified live on Claude 2.1.278), with no literal remainder,
+# is the same proof for one fast burst: Claude collapses that burst into the
+# placeholder and expands it on submit. A shorter literal suffix, or a placeholder followed by a literal
+# remainder, is the head-truncation shape and is not proof.
+fm_backend_herdr_composer_payload_shown() {  # <text> <after>
+  local text=$1 after=$2 literal
+  fm_composer_normalize_spaces_var text
+  fm_composer_normalize_spaces_var after
+  text=${text//[$' \t\r\n\v\f']/}
+  text=${text//$'\xE2\x81\xA3'/}
+  after=${after//[$' \t\r\n\v\f']/}
+  after=${after//$'\xE2\x81\xA3'/}
+  [ -n "$text" ] && [ -n "$after" ] || return 1
+  [ "$after" = "$text" ] && return 0
+  literal=$after
+  while [[ $literal =~ \[Pastedtext#[0-9]+(\+[0-9]+lines?)?\] ]]; do
+    literal=${literal/"${BASH_REMATCH[0]}"/}
+  done
+  [ -z "$literal" ]
+}
+
+# fm_backend_herdr_composer_clear: after a refused proof, press Ctrl+U until
+# the shared classifier reads the composer as empty. Claude documents Ctrl+U
+# as delete-to-line-start, repeated across lines of a multiline draft; Ctrl+C
+# is not used because it interrupts a running turn. Live Claude deletes one
+# wrapped screen row per press, so a single-line leftover can need several
+# presses. The press count is bounded by the rows the proof capture covers.
+# 0 only when the composer is verified empty again.
+fm_backend_herdr_composer_clear() {  # <target> <text>
+  local target=$1 text=$2 presses i=0
+  presses=$(fm_backend_herdr_proof_lines "$text")
+  while [ "$i" -lt "$presses" ]; do
+    fm_backend_herdr_send_key "$target" C-u || return 1
+    i=$((i + 1))
+    [ "$(fm_backend_herdr_composer_state "$target")" = empty ] && return 0
+  done
+  return 1
+}
+
 fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep> <settle>
   local target=$1 text=$2 retries=$3 sleep_s=$4 settle=$5 i=0 verdict baseline confirm_sleep
-  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0
+  local raw_status footer_baseline='' allow_rendered=0 enter_sent=0 identity proof=0 proof_lines content
   fm_backend_herdr_parse_target "$target" || { printf 'unknown'; return 0; }
+  # Claude on Herdr is the live-verified truncation shape: Enter is withheld
+  # unless the composer, empty before the send, shows this payload. A suffix
+  # that then starts a turn must not report empty. Other harnesses keep the
+  # unproven type-then-Enter path.
+  identity=$(fm_backend_herdr_agent_identity_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE") || identity=
+  if [ "${identity%%$'\t'*}" = claude ]; then
+    proof=1
+    proof_lines=$(fm_backend_herdr_proof_lines "$text")
+    content=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
+      || { printf 'send-failed'; return 0; }
+    [ -z "${content//[$' \t\r\n\v\f']/}" ] || { printf 'send-failed'; return 0; }
+  fi
   fm_backend_herdr_send_literal "$target" "$text" || { printf 'send-failed'; return 0; }
   sleep "$settle"
+  if [ "$proof" = 1 ]; then
+    if ! content=$(fm_backend_herdr_composer_content "$target" "$proof_lines") \
+      || ! fm_backend_herdr_composer_payload_shown "$text" "$content"; then
+      if fm_backend_herdr_composer_clear "$target" "$text"; then
+        printf 'send-failed'
+      else
+        printf 'unknown'
+      fi
+      return 0
+    fi
+  fi
   raw_status=$(fm_backend_herdr_agent_status_raw "$FM_BACKEND_HERDR_SESSION" "$FM_BACKEND_HERDR_PANE")
   baseline=$(fm_backend_herdr_classify_submit_agent_status "$raw_status")
   confirm_sleep=$(fm_backend_herdr_submit_confirm_budget "$sleep_s")

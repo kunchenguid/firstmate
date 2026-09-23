@@ -17,7 +17,8 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 
 `bin/fm-spawn.sh` owns the base task-metadata fields it emits, while the runtime-backend section below owns backend-specific fields and selector interpretation.
 `bin/fm-contributions.sh` owns durable published-contribution records under each task, observation bounds, equivalent triage-label configuration, and the authenticated contribution check.
-The producing PR and Relay helpers own the fields they append, `bin/fm-classify-lib.sh` owns status-event vocabulary, and `bin/fm-crew-state.sh` owns current-state reconciliation.
+The producing PR and Relay helpers own the fields they append, [`bin/fm-classify-lib.sh`](../bin/fm-classify-lib.sh) owns status-event vocabulary, optional emission-time syntax, and legacy unknown-time handling, and `bin/fm-crew-state.sh` owns current-state reconciliation.
+The [`bin/fm-fleet-snapshot.sh` header](../bin/fm-fleet-snapshot.sh) owns the snapshot's event-time and age fields, including secondmate parent-event projections.
 Wake, watcher, away-mode, and Relay-specific state mechanics remain with their named scripts and reference sections rather than being duplicated into one exhaustive state tree here.
 
 `bin/fm-session-start.sh`'s header is the single owner of session-start ordering, composed commands, digest contents, and the digest's startup mechanism.
@@ -42,11 +43,12 @@ This preference is local to each Firstmate home and is not part of secondmate in
 On a Pi primary, an in-process supervision branch handles eligible task-local wake rows and selected heartbeat reviews while keeping main-only rows on the captain-facing path; [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns its conversation lifecycle, row eligibility, mixed-queue dispatch, heartbeat routing, and pre-drain recheck.
 Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch is eligible for every task with no captain grant file required.
 A genuinely no-op heartbeat is absorbed in bash and never reaches Pi, and every watcher-failure alarm stays on the captain-facing main path.
-A legacy `state/.afk` daemon flag still declines every wake offer, the away-posture record alone does not, and a broken branch still falls back to today's wake-to-main path.
-The branch's role stays bounded exactly as the captain-approved architecture set it: it cannot merge a PR, land local work, or freshly spawn, and every existing captain gate remains unchanged.
-Homes on any other primary harness never load this feature and are entirely unaffected.
+A broken branch still falls back to today's wake-to-main path in both postures, and the legacy `state/.afk` daemon flag means nothing on Pi.
+While the away-posture record `state/.afk-contract` exists the branch takes every actionable row, no processing turn opens on the parked main, and main's standing authority relocates to the branch through the guarded scripts, each keeping its own gate; [docs/pi-supervision-branch.md](pi-supervision-branch.md#postures) owns that posture.
+While attended the branch's role stays bounded exactly as the captain-approved architecture set it: it cannot merge a PR, land local work, freshly spawn, or answer a decision, and every existing captain gate remains unchanged in either posture.
+Homes on other primary harnesses do not load the Pi branch extension; shared per-task lease behavior is owned by `bin/fm-lease-lib.sh`.
 `AGENTS.md`'s `state/` inventory routes the branch's runtime files to their format and lifecycle owners.
-A captain-facing (verdict `captain`) branch outcome persists as one exact, sequence-keyed visible transcript entry and then opens one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence through its `fm_branch_processed` tool.
+While attended, a captain-facing (verdict `captain`) branch outcome persists as one exact, sequence-keyed visible transcript entry and then opens one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence through its `fm_branch_processed` tool; while away, the entry persists but processing waits until the record is archived.
 The branch prompt's "Verdict: routine or captain" section owns the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
 A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
@@ -135,7 +137,7 @@ Treehouse remains the worktree provider for tmux, herdr, zellij, and cmux, since
 New spawns choose the backend in this order: an explicit `--backend` flag that current authority for that exact task alone has authorized (a present captain instruction or the task's own accepted brief; never later-task precedent by analogy), then `FM_BACKEND`, then the first non-empty line of local gitignored `config/backend`, then runtime auto-detection from `$TMUX`, `HERDR_ENV=1`, or cmux runtime signals, then default `tmux`.
 If more than one runtime marker is present, detection resolves innermost-first: `$TMUX` is checked before `HERDR_ENV=1`, which is checked before cmux's primary `CMUX_WORKSPACE_ID` marker and its documented fallback signals - tmux or herdr started from inside a cmux terminal is the innermost, currently-executing layer, while cmux itself (a terminal application, not a nestable multiplexer) is always checked last.
 See [`docs/cmux-backend.md`](cmux-backend.md#runtime-detection) for why cmux can be selected when `CMUX_WORKSPACE_ID` is absent.
-Auto-detected herdr or cmux prints a stderr notice naming `config/backend` and `--backend tmux` as opt-outs; auto-detected tmux stays silent to preserve existing default behavior.
+Auto-detected Herdr stays silent like tmux, while auto-detected cmux prints a stderr notice naming `config/backend` and `--backend tmux` because cmux remains experimental.
 Zellij and Orca are never auto-detected; select them by putting the name in a local `config/backend` file, by exporting `FM_BACKEND=<name>`, or by telling the first mate in chat.
 Any value other than `tmux`, `herdr`, `zellij`, `orca`, or `cmux` is rejected until another adapter is implemented and verified.
 `fm-spawn.sh` accepts `tmux`, `herdr`, `zellij`, `orca`, and `cmux` for ship and scout tasks; `backend=orca` and `backend=cmux` both still refuse `--secondmate` until secondmate launch semantics are designed for each.
@@ -207,6 +209,10 @@ A Secondmate on a remote route is covered the same way: the primary resolves and
 The presence flag is session-scoped enablement, so it transfers at launch and is left unchanged by live convergence into a running home.
 See [`trace-context.md`](trace-context.md) for carrier semantics, supported routes, the manual fleet-restart requirement, the session boundary, and safety limits; `bin/fm-trace-context-lib.sh`'s header owns the exact mechanics, and [`verification/trace-context.md`](verification/trace-context.md) records repeatable evidence.
 
+## Fleet activity ledger (config/fleet-ledger)
+
+See [`fleet-ledger.md`](fleet-ledger.md) for the opt-in setup, record contract, and limits.
+
 ## Turn-end pane-churn absorb (config/turnend-churn-absorb)
 
 The optional local, gitignored `config/turnend-churn-absorb` presence flag opts this home into a default-off third form of positive work evidence in watcher triage.
@@ -217,6 +223,15 @@ An invalid value fails closed and surfaces the wake.
 The bound is required rather than cosmetic because churn and pane staleness read the same pane.
 The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which run their own crew mix.
 [`architecture.md`](architecture.md) owns the triage contract and `bin/fm-watch.sh`'s `signal_turnend_panes_churned` owns the exact evidence and fail-closed boundaries.
+
+## Parked-gate wait deferral (config/wedge-defer-parked-gate)
+
+The optional local, gitignored `config/wedge-defer-parked-gate` presence flag opts this home into a default-off second form of wait evidence in the watcher's wedge timer.
+With it present, a provably-working pane about to escalate is also deferred to the `FM_PAUSE_RESURFACE_SECS` recheck cadence when its crew's own current state is a validation gate whose answer is owed to the supervisor and whose decision for that run is still open, and the recheck names the supervisor and the action that clears the lane instead of reporting a suspected wedge.
+It stays opt-in because the other evidence is the worker's own declaration about its own silence, while this is derived from a pipeline's gate state, so which lanes give up the escalation ladder for it is a home's choice.
+With the flag absent the wedge timer spends no fold or current-state read for it, writes no record, and keeps the unchanged escalation schedule, reasons, and `demand-deep-inspection` wording.
+The flag is a home-local supervision-noise preference and is not inherited by secondmate homes, which supervise their own crew and own that trade separately.
+[`architecture.md`](architecture.md) owns the wait-evidence contract and which records may take the ladder away; `bin/fm-watch.sh`'s `wedge_wait_evidence` owns the exact derivation and its fail-closed boundaries.
 
 ## Gate defaults (.no-mistakes.yaml)
 
@@ -322,6 +337,8 @@ muse also needs a worker-reachable credential before spawning, and the portable 
 gemini is likewise refused for secondmates because it has no primary supervision protocol; [its adapter reference](../.agents/skills/harness-adapters/references/harness/gemini.md) owns the credential precondition, canonical-launch wiring, and raw-launch limitations.
 rovo is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no turn-end hook and no primary supervision protocol; [`docs/verification/rovo.md`](verification/rovo.md) owns that evidence, including the OAuth token's silent background refresh from a stored refresh token and both tmux and herdr pane liveness (herdr placement is verified live, with a Herdr-side agent-detection gap left open for recovery classification).
 agy is likewise verified for crewmate and scout launches ONLY, refused for a secondmate for the same reason - no hook surface and no primary supervision protocol; [`docs/verification/agy.md`](verification/agy.md) owns that evidence, including the spawn-time worktree trust pre-registration through `bin/fm-agy-trust.sh` and Herdr's native agy pane recognition.
+devin is verified for crewmate and scout launches only; a secondmate is refused because Devin has no verified primary supervision protocol.
+Its private worker config disables Claude Code imports (including the captain's hooks) and Devin commit attribution without editing user or project config; [`fm-devin-config.sh`](../bin/fm-devin-config.sh) owns these enforced settings and [Devin verification](verification/devin.md) owns the live evidence and observed model availability.
 New harnesses get verified through a supervised trial task before joining the set.
 The verified adapter evidence - each harness's busy-state source, interrupt and exit behavior, skill-invocation syntax, and per-harness quirks - lives in the skill tree rooted at [`.agents/skills/harness-adapters/SKILL.md`](../.agents/skills/harness-adapters/SKILL.md).
 The executable interrupt and exit mechanics live in [`bin/fm-control-lib.sh`](../bin/fm-control-lib.sh), and [`docs/agent-control.md`](agent-control.md) owns their lifecycle-control architecture.
@@ -367,10 +384,60 @@ Any other value, or an unreadable file, refuses every spawn from that home, whic
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
 
+## Worker account pin (config/claude-account, config/pi-account)
+
+A home that mixes accounts for one runner, such as a work login and a personal one, can pin the account its own Claude and Pi workers launch on.
+The pin is opt-in: with neither file, every launch is unchanged, and Claude workers keep receiving firstmate's own `CLAUDE_CONFIG_DIR` when it is set.
+Both files are local and gitignored.
+
+| Runner | File | Variable the launch receives | `ordinary` means |
+| --- | --- | --- | --- |
+| `claude` | `config/claude-account` | `CLAUDE_CONFIG_DIR` | the variable unset, so Claude uses its default login |
+| `pi`, `pi-signed` | `config/pi-account` | `PI_CODING_AGENT_DIR` | `~/.pi/agent` |
+
+`config/claude-account` holds one line: `ordinary`, or the absolute path of an existing Claude config directory.
+`config/pi-account` holds that same root on line 1 and, on line 2, the providers this home may spend, separated by spaces, for example `openai-codex anthropic`.
+A final newline is optional; any other line, a relative path, or a control character such as a CR refuses.
+For Claude, `ordinary` unsets `CLAUDE_CONFIG_DIR` rather than pointing it at `~/.claude`, because Claude reads `$CLAUDE_CONFIG_DIR/.claude.json` and keys its macOS Keychain entry to any directory that is set ([authentication, "Credential management"](https://code.claude.com/docs/en/authentication#credential-management)).
+A Pi root can hold several provider logins at once, so the root alone does not say which account a launch spends.
+A pinned Pi launch therefore needs `--model <provider>/<id>` naming a declared provider, and Firstmate also passes `--provider <that provider>` so Pi cannot resolve the model under another signed-in provider.
+An unqualified model, an undeclared provider, or a raw Pi launch command, which cannot receive that flag, refuses; Firstmate never guesses a provider.
+
+When a file is present, every launch of that runner from this home uses it: ships, scouts, local secondmate agents, raw Claude launch commands, and relaunches.
+A raw Claude launch command whose leading assignments set `CLAUDE_CONFIG_DIR` or one of the credentials a pinned launch unsets, such as `ANTHROPIC_API_KEY`, would override the pin, so it refuses and names the variable; remove the assignment from the raw command, or change or remove `config/claude-account`.
+Before any worker endpoint, local copy, or task record exists, and before a relaunch stops the running worker, Firstmate asks the runner itself whether the pinned account is signed in: `claude auth status` for Claude, and `pi auth check --provider <provider> --json --no-refresh` for Pi, falling back to `pi --list-models <provider>` for a provider an extension registers.
+The check runs with only `HOME`, `PATH`, `TMPDIR`, `USER`, `LOGNAME`, and the pinned root in its environment, so a credential variable in firstmate's own environment cannot answer for an empty root.
+A pinned Claude launch also unsets the environment credentials Claude ranks above a stored login, such as `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and the Bedrock and Vertex switches ([authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)).
+Pi ranks a root's stored logins above environment variables, so a pinned Pi launch unsets nothing.
+A home that authenticates Claude through environment credentials on purpose should leave the pin absent.
+
+A malformed file, a root that is not a readable directory, or a signed-out account refuses the launch and names the file to fix; Firstmate never falls back to the ambient account and never changes a global login or copies a credential.
+The spawn prints the pin as `account=` (plus `account_provider=` for Pi) and records the same fields in the task record, so the session-start digest shows which account each worker launched on.
+Pins are not inherited into secondmate homes: a local secondmate agent launches on the launching home's pin, while the secondmate's own workers read the secondmate home's files.
+A remote secondmate is launched on its host from its own home's configuration, so create the file in that remote home.
+[`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.
+
+## Lavish server address (config/lavish-axi-host)
+
+The optional local, gitignored `config/lavish-axi-host` contains one non-empty address without whitespace for the per-machine Lavish server.
+`fm-spawn.sh` exports that address into every new worker and relaunch for opening boards, and the file is inherited into secondmate homes through the primary-authoritative configuration contract.
+Once a board exists, the process-event adapter derives the polling address from that board's own saved Lavish session instead; its header owns the lookup contract.
+When the file is absent, worker launches do not add a board address and retain the existing ambient-environment behavior.
+Malformed or unreadable values refuse the launch before the worker starts.
+The address selects the existing shared server; it does not authorize starting or stopping the server, and the Lavish startup crash remains a vendor-tool concern.
+
+## Home brief include (config/brief-include.md)
+
+The optional local, gitignored `config/brief-include.md` carries standing worker instructions that one captain wants on every ship and scout brief, so private brief content needs no edit to a tracked file.
+When the file exists, `bin/fm-brief.sh` appends its text verbatim as the scaffold's last section, `# Home brief additions`, which defers to every other section of the brief, including the ship contract a later scout promotion appends below it.
+An absent or blank file changes nothing, while a present path that is not a readable regular file, or text carrying its own `Delivery contract: mode=` line, stops the scaffold before anything is written.
+The text is static and never executed or expanded; secondmate charters never take it, and the file is local to each home rather than part of secondmate inherited configuration.
+`bin/fm-brief.sh`'s header owns the placement rule and its safety argument.
+
 ## Worker launch environment (config/launch-env-allowlist)
 
 The optional local, gitignored `config/launch-env-allowlist` limits the ambient environment passed to newly launched workers, scouts, and secondmates, including relaunches.
-With no file, launch behavior is unchanged: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
+With no file, ambient inheritance remains unfiltered: selected harness markers are cleared, while the provider, long-lived terminal daemon, and shell initialization determine which other variables reach the worker.
 Do not assume every worker inherits the invoking Firstmate process's current environment.
 The file is inherited into secondmate homes through the [primary-authoritative configuration contract](../.agents/skills/secondmate-provisioning/SKILL.md).
 Changes apply to subsequent launches; existing processes keep their environment.
@@ -388,7 +455,7 @@ OPENAI_API_KEY
 SSH_AUTH_SOCK
 ```
 
-Firstmate retains basic home, executable search, terminal, locale, temporary-directory, and backend routing variables, plus its explicit launch assignments, its ship and scout task marker, and enabled task trace.
+Firstmate retains basic home, executable search, terminal, locale, temporary-directory, and backend routing variables, plus its explicit launch assignments, its ship and scout task marker, the compact-adviser kill switch described below, and enabled task trace.
 [`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the exact retained names and parsing mechanics.
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
 The command shell and worker may still create their own variables.
@@ -412,6 +479,12 @@ Raw launch commands run under noninteractive POSIX `sh` with this option and mus
 The filter runs at the worker command boundary, after the terminal daemon and pane shell have started; it does not scrub either of those processes.
 This is not a sandbox: it cannot revoke same-user access to credential files, prevent tools or later shells from loading credentials again, or isolate processes from the same user's other processes.
 Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
+
+Every crewmate, scout, and secondmate Firstmate launches starts with `COMPACT_ADVISER_DISABLE=1` in its environment, on a fresh spawn and on a relaunch alike, so an unattended session never activates the compact adviser.
+This guarantee also covers raw launch commands, remote secondmates, and launches filtered by `config/launch-env-allowlist`; it does not depend on the destination environment already containing the variable.
+Firstmate provides no configuration or flag to change this value.
+This applies only to agents Firstmate launches; the captain's own primary Firstmate session is never given the variable.
+[`fm-spawn.sh --help`](../bin/fm-spawn.sh) owns the delivery mechanics, with focused regression coverage in [`tests/fm-spawn-compact-adviser-disable.test.sh`](../tests/fm-spawn-compact-adviser-disable.test.sh) and [`tests/fm-spawn-compact-adviser-disable-remote.test.sh`](../tests/fm-spawn-compact-adviser-disable-remote.test.sh).
 
 Every claude launch's inline `--settings` JSON also carries `"attribution":{"commit":"","pr":"","sessionUrl":false}`, so a spawned worker never writes a Co-Authored-By trailer, Claude-Session link, or generated-with line into a commit or PR body regardless of which settings scopes end up loaded.
 
@@ -452,14 +525,16 @@ Rule `approval` and `floor`, and profile `provider` and `floor` are optional dec
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
 A rule `floor` names the quota-axi `provider` and `scope` whose `effectivePercentRemaining` must be at least `min_percent` for the rule's profiles to apply.
-A known percentage below it makes the tool resolve among `default` instead; an absent or unknown row or unmeasured provider makes the floor unverifiable and escalates without authorizing default routing.
+A provider-only rule floor on an expanded provider binds to its `default` account row.
+An absent or unknown row or unmeasured provider makes the floor unverifiable and escalates without authorizing default routing.
+A known percentage below the floor makes the tool resolve among `default` profiles instead.
 A profile `provider` optionally names the quota-axi provider family whose rows apply to that profile; when present, profile and rule-floor provider IDs must match the strict whole-string pattern `^[a-z0-9]+(-[a-z0-9]+)*\z`.
 Bootstrap validates resolver-only `approval`, `floor`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
 Typed resolution additively recognizes `gemini` because AGENTS.md section 4 verifies it for crewmate and scout dispatch.
-The opted-in resolver has authoritative single-provider mappings for `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, and `muse`; every other verified harness must declare `provider` explicitly, including multi-provider `pi`, `pi-signed`, `omp`, and `opencode` and unmapped `gemini` and `rovo`.
+The opted-in resolver has authoritative single-provider mappings for `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, and `muse`; every other verified harness must declare `provider` explicitly, including multi-provider `pi`, `pi-signed`, `omp`, and `opencode` and unmapped `gemini`, `rovo`, and `devin`.
 Its single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
 The resolver returns an actionable configuration error before any request when such a profile omits it.
-A profile `floor` contains only `scope` and `min_percent`, always uses that profile's provider, and makes that one candidate ineligible below `min_percent` on the named scope.
+A profile `floor` contains only `scope` and `min_percent`, always uses that profile's provider and matched account, and makes that one candidate ineligible below `min_percent` on the named scope.
 An absent or unknown named row also makes the candidate unrankable and is reported as an unverifiable floor, not as a known shortfall.
 `ultra` is native-only: the model-aware validation contract and launch mapping are owned by `bin/fm-harness.sh validate-native-effort` and `bin/fm-spawn.sh` respectively.
 Codex `max` is valid when the profile selects `gpt-5.6-luna`, whose installed catalog entry supports that reasoning level.
@@ -493,6 +568,8 @@ Firstmate invokes the resolve path directly after writing the brief, without a p
 When on and at least one rule exists, the tool sends the project name and the whole brief as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, or approvals.
 An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
 Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, and the numeric `spendPriority` argmax over candidates using each candidate's limiting row.
+The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and schema 6 and implements the [account-matching contract](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).
+An expanded provider with no matching account row leaves the candidate eligible but unranked.
 Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
 Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
 Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
@@ -747,13 +824,19 @@ Firstmate's bounded registration retains the obligation's public-safe request bi
 `bin/fm-public-followup.sh` is firstmate's side: it registers a commitment, reconciles typed terminal work results into it, posts the final reply through `bin/fm-x-reply.sh --followup`, and explicitly rechains or retires the retained loop.
 Run `bin/fm-public-followup.sh --help` for the exact subcommands and flags.
 
-Registration is what creates this home's private transport under `state/public-followup/` (mode 0700): `registry/` for the bounded private binding of each open public loop (the record survives delivery, stamped `state=delivered`, and is removed only by `retire`), `events/` for typed terminal results awaiting reconciliation, `consumed/` for the accepted-event ledger, `rejected/` for refusals kept with a one-line reason, `retired/` for the mode-0600 reason-and-time receipt written before removal, and `surfaced` for the poll's last-surfaced signature.
+Registration is what creates this home's private transport under `state/public-followup/` (mode 0700): `registry/` for the bounded private binding of each open public loop (the record survives delivery, stamped `state=delivered`, and is removed only by `retire`), `events/` for typed terminal results awaiting reconciliation, `consumed/` for the accepted-event ledger, `rejected/` for refusals kept with a one-line reason, `rejection-wakes/` for each refusal's not-yet-raised wake, `retired/` for the mode-0600 reason-and-time receipt written before removal, and `surfaced` for the poll's last-surfaced signature.
 A work home that reports across a machine boundary also gets `outbox/`, described below.
 The home that owns the commitment also owns the outward post, because only it holds the relay consent, the request context, and the opaque thread binding.
 Work routed elsewhere reports a typed terminal result with `bin/fm-public-followup-emit.sh` and never looks for the thread; when writing directly into the owning home, that emitter refuses a home with no registration for the named obligation.
+`bin/fm-public-followup.sh brief` pre-fills every deliverable value the binding determines, such as `report_path=data/<work-id>/report.md`, and states the accepted format of every value it cannot know.
+The emitter validates deliverable values and known required keys before publishing, including the relative `report_path` format, and names correctable mistakes at the work home.
+A direct emit reads the obligation from `tasks-axi`; a staged emit cannot read that remote record, so `brief` supplies its required keys in the printed command.
+If those flags are omitted from a staged command, it still checks values but cannot detect missing keys until the owning home's `consume` rejects the event and queues a rejection wake.
+The [emitter header](../bin/fm-public-followup-emit.sh) and its `--help` own the exact flags and outcome-dependent validation rules.
 When that work lives in a REMOTE secondmate home, delivery clears its bound legacy link after validating the public receipt, while retirement clears the link before closing the loop, and both clears run over that route's SSH transport.
 Readable remote state that proves no link exists succeeds without a write, while a present link is cleared only when its Relay request identity matches the registration and the state is writable; an identity mismatch, unreadable or unsafe state, an unavailable write or lock, an older remote copy, or a host that never confirms the clear leaves the loop retained for reconciliation.
 A terminal event's id is derived from its identity tuple, so a duplicate report, a retry, or a replay after restart resolves to the same event and changes nothing.
+When bound work ends failed or parked, its typed failed result remains deliverable even when the promised final expected a merged pull request, so the owed reply carries the honest failure instead of remaining stranded.
 
 Work bound to a REMOTE secondmate home reports across a machine boundary, where no local path reaches the owning home.
 `bin/fm-public-followup.sh brief` therefore prints that worker the route's own code root and home with `--stage-in`, so the typed result is staged in `outbox/` in the home where the work actually runs rather than written to a path that only exists on the owning machine.
@@ -768,10 +851,15 @@ A home without that token runs one file test and stops: no `tasks-axi` call, no 
 Ordinary startup, polling, cleanup, and silent read-side subcommands also produce no output; commands that require an active relay report that configuration error after the same gate.
 A relay-enabled home with no registered commitment stops at an O(1) directory presence check, so the empty state costs no CLI call and adds no periodic scan.
 Unreconciled terminal results ride the existing 30-second relay poll rather than a new process or timer: `bin/fm-x-poll.sh` compares the pending-event signature against `surfaced` and wakes firstmate once per new result set.
+A terminal event `tasks-axi` refuses during `consume` is quarantined with a reason naming the specific deliverable, outcome, or missing key where one is identifiable, and the same poll wakes the owning home with a `public-followup rejected <event-id> ...` line carrying that reason.
+The refused event stays pending until that wake is recorded, and a queued wake survives a failed read or write to poll output.
+That makes the wake at-least-once rather than exactly-once: a cleanup that fails after the line was already raised - a wake directory that cannot be written, or a refused event that could not be drained - raises the same refusal again on a later poll.
+A repeat carries the same event id and the same reason as the quarantined rejection, which is how an already-handled refusal is recognized.
+Acknowledge it without re-acting; re-emitting an already accepted corrected result is harmless but redundant because its derived event id is already in the accepted ledger.
 The session-start digest separately prints a "Public commitments" subsection from disk when, and only when, this home is relay-active and still holds an open public loop (a reply still owed, or a delivered loop with nothing owed), so compaction and restart are non-events.
 `bin/fm-teardown.sh` refuses to clean up a task while this home still owes a public reply for exactly that work, unless `--force` carries explicit discard approval.
 `FM_PF_RETRY_BACKOFF_SECS` (default 900) sets the next-attempt time recorded with a retryable delivery error.
-See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind restart recovery, retained-loop disposition, and the relay-disabled zero-overhead guarantee.
+See [verification/public-followup.md](verification/public-followup.md) for the current maintainer evidence behind restart recovery, failed terminal outcomes, retained-loop disposition, and the relay-disabled zero-overhead guarantee.
 
 ## Trusted external process-event adapters (config/extensions.d)
 
@@ -845,10 +933,34 @@ Never run the registered blocking source command directly in a conversational tu
 A long-polling external process is registered as a *source* through its adapter, whose header and `--help` own the commands and flags.
 `bin/fm-procevent.sh` owns the generic contract; built-in adapters retain their tracked `bin/fm-procevent-<adapter>.sh` commands, while an explicitly bound external adapter routes through the trusted host contract above.
 `bin/fm-procevent-lavish.sh` is the first built-in adapter and wraps only the currently published `lavish-axi poll` interface.
+Before arming any Lavish source, open its artifact with `lavish-axi` so the saved session identifies the board's server; each poll attempt derives its host and port from that session and refuses missing or invalid session evidence before consuming a staged worker reply.
 That adapter, and only that adapter, retries the one exact transient response a cut-short listener returns while its marks remain available (`error: Lavish Editor poll response was interrupted` with `code: SERVER_ERROR`), up to 12 times with poll starts at least 5 seconds apart, so an internal retry never reaches the runner as a captured result.
 This start-to-start governor is a no-op after a normally blocking poll but caps an immediately returning poll under the shipped defaults independently of the owner lease and registration launch pacing.
 Real feedback, ended and missing sessions, any other `SERVER_ERROR`, and that same interruption still standing once the bound is spent are all captured and announced normally; `FM_LAVISH_POLL_RETRY_DELAY` is a bounded 1 to 60 second test override for the interval only, and the runner itself stays adapter-agnostic.
 An already-armed Lavish source keeps its registered listener command until it is retired and armed again, so re-arm a live board once to adopt this retry policy.
+
+### Crew-hosted Lavish review boards
+
+A live task that hosts a Lavish board owns its listener, so firstmate must never arm that board.
+After opening the artifact as required above, the worker arms it with `bin/fm-procevent-lavish.sh arm <artifact.html> --for <task-id>` and never runs `lavish-axi poll` itself.
+The arm is refused unless that task id has valid, identity-matching endpoint metadata, because a board whose owner has no endpoint would collect feedback nobody can be told about.
+The registration persists as one task-owned source record, while each captured nonterminal round remains open until the worker re-arms and the existing handled marker acknowledges that round.
+Re-arm is that acknowledgement and nothing else: the board is armed once while no record exists, and a further arm by the same owner is refused unless an unacknowledged nonterminal round is waiting, so a generation already carrying a reply is never replaced before its listener posts it.
+Re-arm never acquires, releases, or hands off the source claim, and it may carry `--agent-reply-file <path>` whose contents are copied into that generation's own private staging file and handed once to the published `--agent-reply` argument; a re-arm that fails leaves the prior registration and the reply it references exactly as they were, including when the acknowledgement it owes cannot be recorded.
+Posting that reply is best effort by design: the listener consumes the staged file only once its own setup and the board artifact have checked out, so the one loss window is a rare crash between that consume and the call it feeds, which drops that round's reply rather than posting it twice, and nothing here keeps a receipt, retry, or idempotency record - robust reply delivery waits on lavish-axi's exclusive listener.
+The captured result is stored with immutable task-owner routing evidence and delivered directly to that task's steering inbox, without a firstmate `check` wake for the captain's words.
+Filing that steering note away is not acknowledging the round, so while the round stays open every reconcile puts a live note back in the owner's inbox rather than ringing a filed one.
+A task-owned source with an unhandled capture is not relaunched, so delivery failure cannot consume a round and start another poll.
+That record is the only ownership evidence there is, so while any captured round of it is unacknowledged every retirement path refuses - the runner's own terminal retirement and an explicit `retire` alike - and the refusal names the acknowledgement that releases it.
+A terminal result, including `session_ended`, an empty End, or missing, is delivered to the owner with an explicit stop-and-conclude instruction and is never auto-rearmed.
+That round keeps the board with its owner: the source record is not retired while the terminal capture is unacknowledged, so no second armer can take the board, and acknowledging it with `bin/fm-procevent.sh handled <source-id> <sequence>` is what concludes and retires it.
+That conclude retains the registration it is retiring, removes it, then records the acknowledgement and restores the registration if that record cannot be written, so a failed conclude never leaves the round open with its owner gone.
+An interruption between those two durable steps leaves the board unregistered with its terminal round still open, which nothing relaunches and the same `handled` call finishes.
+It concludes only a round that is still open, so a repeated acknowledgement of an already-closed round reports `already-handled` and never touches whatever registration holds the board by then.
+A second armer is refused with the current owner named, and the source list derives `listening`, `round-open`, or `dead` from the claim and handled captures without a second ownership record.
+If the hosting worker cannot be recovered, relaunch a worker to re-host first; guarded firstmate adoption is an explicit last resort only after the old claim is proved dead.
+The cross-home gap between worker rounds remains an accepted residual until lavish-axi's exclusive listener lands.
+The interim crew instruction emitted by `bin/fm-brief.sh` points workers at this arm-and-acknowledge contract.
 
 The `when` adapter (`bin/fm-procevent-when.sh`) turns this channel into a condition->action primitive: it registers a deterministic condition and a deterministic action once, its blocking child polls the condition without waking firstmate, and a stable true fires the action at most once before one terminal outcome is durably captured and published as a wake that remains eligible for re-announcement until handled.
 The (condition, action) spec is stored privately under `state/when/` and hash-bound by a trust record the same way `bin/fm-check-register.sh` binds a custom check, while the spec separately binds the resolved action executable's bytes; a mutated or unregistered spec or a changed action executable is refused before the action runs, and that binding is reloaded from disk immediately before each fire rather than trusted from when polling started.
@@ -871,17 +983,19 @@ In supported steady state, a home with no registered source runs nothing, genera
 
 Whether a captured result is a routine no-op is adapter knowledge too, and the runner names no adapter-specific condition for it either.
 Before publishing, the runner asks the immutable captured owner through the built-in `silent` command or external `result.silent` operation and treats exit 0 as the only silence verdict: the result is recorded as durably handled and never announced, so it neither wakes a handler now nor returns on a later reconcile.
+The task-owned terminal exception is evaluated first, so an empty terminal board round goes to its owner's steering inbox for the required conclusion instead of entering this generic silence path.
 A missing command, an error, any other exit, or a silence the runner cannot durably record all publish the `check` wake exactly as before, so an adapter with no notion of a no-op needs no change and an unknown or degraded result always reaches its handler.
 For built-ins, silence remains independent of the keyed-answer feed below: suppressing an announcement never suppresses the captain's own answer.
-For Lavish that verdict covers exactly one shape - a session the adapter classifies `ended` that carries no queued content block at all, which is a review surface closed with nothing said.
+For Lavish that verdict covers two shapes - a session the adapter classifies `ended` that carries no queued content block at all, which is a review surface closed with nothing said, and `browser_disconnected` (classified `disconnected`), which carries no answer while the session remains open.
 Any recognized top-level `prompts` or `feedback` block counts as content regardless of its declared count, and a malformed header makes the result indeterminate rather than empty.
 A `Send & End` close carrying the captain's answer arrives as `status: feedback` with `session_ended`, so it classifies `feedback` and is announced unchanged, as is any `ended` result that still carries content, and every `waiting`, `missing`, `unknown`, or unreadable result.
 
 Whether a captured result ends its source is adapter knowledge, never the runner's.
-After capture - and after initial `check` publication for the default ordering - the runner asks the immutable captured owner through the built-in `terminal` command or external `result.terminal` operation and retires the registration on exit 0 alone, dropping only the exact registration generation captured by its claim and releasing that claim only after removal succeeds under one source boundary; a missing command, an error, or any other exit keeps the source armed, so an adapter with no notion of ending needs no change.
+After capture - and after initial `check` publication for the default ordering - the runner asks the immutable captured owner through the built-in `terminal` command or external `result.terminal` operation and retires the registration on exit 0 alone - except a task-owned board, whose terminal retirement is refused until its owner acknowledges the round, as the crew-hosted section above defines - dropping only the exact registration generation captured by its claim and releasing that claim only after removal succeeds under one source boundary; a missing command, an error, or any other exit keeps the source armed, so an adapter with no notion of ending needs no change.
 A failed terminal removal stays durably terminal and is completed by ordinary reconciliation without restarting its poll, while a concurrently replaced registration survives and becomes independently runnable after the old claim releases.
 Any registration refuses to replace an external registration while its prior runner claim is live, uncertain, orphaned, or terminal-pending; replacement becomes eligible only after that generation is proved gone or its terminal retirement completes.
-A source that has ended therefore captures at most one terminal result, is never restarted, and leaves no recurring poll work, while explicit `retire` stays the supported and idempotent path afterwards.
+A source that has ended therefore captures at most one terminal result, is never restarted, and leaves no recurring poll work.
+For ordinary sources, explicit `retire` stays the supported and idempotent path afterwards; a task-owned board instead refuses `retire` until its owner concludes the open terminal round with `handled`.
 For Lavish that verdict covers an ended session, a missing session, and the final feedback of a `Send & End` review, which the published poll marks with `session_ended` before it returns only empty ended sessions.
 
 Applying a captured result through code is a built-in adapter seam, and some built-in results carry no judgement at all: they must simply be applied idempotently to this home's own durable state.
@@ -995,7 +1109,7 @@ Never describe this path as at-least-once, no-loss, or lossless.
 
 The spoken interface in [`docs/voice-relay.md`](voice-relay.md) and the model-backed subcommands of `bin/fm-inbox.sh` reach a paid API in a named account, so no region, model id or AWS profile is shipped as a tracked default.
 Each is one line in a local, gitignored `config/` file, with an environment variable that overrides it for a single run, and a missing required value refuses with the path to write rather than falling back to a value that belongs to another home.
-That configuration is the whole opt-in: an unconfigured home cannot start the relay and cannot run `fm-inbox.sh say` or `ask`, while `note`, `status`, `list` and `drain` need no configuration at all because they make no model call.
+That configuration is the whole opt-in: an unconfigured home cannot start the relay and cannot run `fm-inbox.sh say` or `ask`, while `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list` and `drain` need no configuration at all because they make no model call.
 The voice handover depends on `note`, so it keeps working in a home that has configured nothing.
 
 | File | Environment | Holds |
@@ -1078,11 +1192,11 @@ FM_PROCEVENT_LAUNCH_FLOOR_SECONDS=1     # minimum interval between launches of o
 FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=3   # how long reconcile waits for the runners it started to prove they are running; 1..600, keep well below FM_POLL
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
 FM_CODEX_WATCH_CHECKPOINT=180   # seconds per foreground watcher checkpoint in Codex primary supervision
-FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh
+FM_CREW_STATE_NM_TIMEOUT=10   # seconds allowed per no-mistakes query inside fm-crew-state.sh, and per state-database run-inventory read behind a capped AXI overview
 FM_TEARDOWN_NM_TIMEOUT=10    # seconds allowed per no-mistakes query or abort inside fm-teardown.sh
 FM_CREW_STATE_RUNS_LIMIT=200  # plain runs-ledger rows scanned for fallback attribution; does not change the CLI's AXI overview window (selection owner: bin/fm-nm-run-lib.sh)
 FM_TEARDOWN_NM_RUNS_LIMIT=200  # recent no-mistakes run rows scanned to prove an unresolved-head parked run belongs to teardown's task
-FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by working/paused watcher triage
+FM_CREW_STATE_BIN=bin/fm-crew-state.sh   # test override for the current-state reader used by watcher triage: the working/paused classification, and the wedge timer's parked-gate wait evidence
 FM_MAIL_USER=      # mail-plane IMAP/SMTP login, from .env or environment (docs/configuration.md "Mail plane")
 FM_MAIL_PASS=      # mail-plane IMAP/SMTP password
 FM_IMAP_HOST=      # mail-plane IMAP server hostname
@@ -1121,10 +1235,10 @@ FM_SIGNAL_GRACE=30      # seconds to coalesce nearby status and turn-end signals
 FM_TURNEND_CHURN_ABSORB_SECS=900   # longest one endpoint's bare turn-ends may be deferred on pane-churn evidence alone; only consulted when config/turnend-churn-absorb is present
 FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|ready in branch|merged'   # captain-relevant status regex; nonterminal progress verbs remain excluded even when their prose matches
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
-FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates, unless that pane's own worker declared a wait that has not elapsed, which takes the FM_PAUSE_RESURFACE_SECS recheck below instead; stale panes whose crew is not provably working surface immediately unless admitted directly to the declared-wait cadence, while a live idle declared wait still surfaces once before that cadence bounds repeats; at that same escalation moment a recovery-grade agent-state probe (docs/architecture.md owns that dead-record contract) reports a pane whose endpoint is proven `dead` or `missing` once and stops re-escalating it while it stays that way
-FM_BUSY_TURN_MAX_SECS=3600         # maximum age without a completed turn or explicit native-harness progress (bin/fm-watch.sh owns marker selection), before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait or attended verified captain-held transfer takes the FM_PAUSE_RESURFACE_SECS recheck below instead
-FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, and between repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call; a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state; a captain-held transfer is never rechecked while the away-posture record exists
-FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above, declared external-wait pause rows are excluded, and zero or invalid values use 180
+FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates, unless that pane's own worker declared a wait that has not elapsed, or, where config/wedge-defer-parked-gate arms it, that pane's crew is parked at a validation gate awaiting the supervisor's decision on it that the crew raised under that run's key and nobody has answered yet, either of which takes the FM_PAUSE_RESURFACE_SECS recheck below instead; stale panes whose crew is not provably working surface immediately unless admitted directly to the declared-wait cadence, while a live idle declared wait still surfaces once before that cadence bounds repeats; at that same escalation moment a recovery-grade agent-state probe (docs/architecture.md owns that dead-record contract) reports a pane whose endpoint is proven `dead` or `missing` once and stops re-escalating it while it stays that way
+FM_BUSY_TURN_MAX_SECS=3600         # maximum age without a completed turn or explicit native-harness progress (bin/fm-watch.sh owns marker selection), before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait, an attended verified captain-held transfer, or - where config/wedge-defer-parked-gate arms it - a validation gate of the crew's own awaiting the supervisor's still-unanswered decision takes the FM_PAUSE_RESURFACE_SECS recheck below instead
+FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, and between repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call; a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait or, where config/wedge-defer-parked-gate arms it, unanswered supervisor-owed validation gate defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state; a captain-held transfer is never rechecked while the away-posture record exists, while an armed validation gate awaiting the supervisor's decision keeps this recheck in either posture
+FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above; a mate whose busy class is exactly idle, whose agent is alive, and whose composer is not pending is rung once so its own home can drain, and the parent notification is withheld until that same row stays frozen for another stall interval; unknown or ring-unsafe panes keep the parent alarm; declared external-wait pause rows are excluded, and zero or invalid values use 180
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
 FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
