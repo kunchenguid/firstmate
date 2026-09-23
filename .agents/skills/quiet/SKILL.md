@@ -37,6 +37,10 @@ If an away-posture record stands when `/quiet` arrives, that message is the capt
    active; I will batch routine updates and surface only decisions, failures,
    credentials, or review-ready work - ordinary chat will not exit this, say
    `/quiet off` when you want normal per-wake responses back."
+   On Pi and pi-signed nothing durable is written, so say plainly in the same
+   breath that quiet holds for this session only and has to be re-entered after
+   a restart or a compaction; there is no flag for the session-start digest to
+   find, so it will report away/quiet mode inactive.
 
 ## How to exit quiet mode
 
