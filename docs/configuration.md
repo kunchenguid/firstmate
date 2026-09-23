@@ -464,6 +464,7 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "approval": "captain",
+      "path_force": "deployment-config",
       "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
         { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
@@ -481,15 +482,18 @@ Per rule, `when` and `use` are required; the top-level `rules` array itself may 
 Both `use` and the optional top-level `default` accept either one profile object or a non-empty array of profile objects.
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
-Rule `approval` and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
+Rule `approval`, `floor`, and `path_force`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
+`path_force` accepts only `"deployment-config"` and marks the one rule that deployment-configuration work belongs to, so [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) can route that work by a path fact instead of by rule wording.
+At most one rule may declare it, and the resolver finds that rule by the declaration rather than by its position, so homes whose rules sit in a different order route identically.
+Path forcing does nothing until some rule declares `path_force`: a home that declares it on no rule keeps today's routing, and every brief, including one whose declared paths name deployment configuration, still goes to Jev.
 A rule `floor` names the quota-axi `provider` and `scope` whose `effectivePercentRemaining` must be at least `min_percent` for the rule's profiles to apply.
 A provider-only rule floor on an expanded provider binds to its `default` account row.
 An absent or unknown row or unmeasured provider makes the floor unverifiable and escalates without authorizing default routing.
 A known percentage below the floor makes the tool resolve among `default` profiles instead.
 A profile `provider` optionally names the quota-axi provider family whose rows apply to that profile; when present, profile and rule-floor provider IDs must match the strict whole-string pattern `^[a-z0-9]+(-[a-z0-9]+)*\z`.
-Bootstrap validates resolver-only `approval`, `floor`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
+Bootstrap validates resolver-only `approval`, `floor`, `path_force`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
 Typed resolution additively recognizes `gemini` because AGENTS.md section 4 verifies it for crewmate and scout dispatch.
 The opted-in resolver has authoritative single-provider mappings for `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, and `muse`; every other verified harness must declare `provider` explicitly, including multi-provider `pi`, `pi-signed`, `omp`, and `opencode` and unmapped `gemini` and `rovo`.
 Its single-provider table is separate from the frozen legacy mapping used by `fm-quota-choose.sh`, so additions cannot alter no-key routing.
@@ -507,7 +511,7 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
 Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
-While typed resolution is active, malformed `approval`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
+While typed resolution is active, malformed `approval`, `floor`, `path_force`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
 Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
@@ -525,6 +529,16 @@ bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON blo
 ```
 
 Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.
+
+Before any model call, the resolver checks one path fact.
+A brief may state the paths the task changes or targets on its own line, `Target paths: <path> [<path>...]`, beginning exactly `Target paths:` with the paths separated by whitespace; a line in any other shape, such as a Markdown bullet or backticked or comma-separated paths, is not a declaration; several such lines are read together, and a path containing whitespace cannot be declared this way.
+Those declared paths are the only paths the resolver reads: it never scans a brief's prose for path-shaped words, because inferring paths would restore exactly the ambiguity this check exists to remove.
+When one declared path matches the resolver's deployment-configuration list - `vercel.json`, `*.tf` and `*.tfvars`, CloudFormation templates (including `template.yaml`, `template.yml`, and `*.template`, `*.template.json`, and `*.template.yaml`), Kubernetes, ArgoCD (under an `argocd/`, `argo-cd/`, or `argo/` directory), ingress, and Helm manifests, deploy scripts (`scripts/deploy*`, `*deploy*.sh`, `*deploy*.ps1`), and deploy, release, or publish workflows under `.github/workflows/`, as [`bin/fm-dispatch-resolve.sh`](../bin/fm-dispatch-resolve.sh) enumerates them in one place - the rule declaring `path_force` is selected in code with no request to Jev.
+A match forces the declared rule because that is the safe direction, so the list carries no exclusions and a path under `tests/` that names a deploy script still forces; a documentation page or a UI `charts/` component that merely reads like deployment work does not match and changes nothing.
+A forced result replaces the model, confidence, and probability lines with `decided_by: path-forced`, the forced rule and its `when` excerpt, and `forced_path`/`forced_pattern`, so a forced route is never mistaken for a classified one; a result without a `decided_by:` line was decided by the model.
+Everything after the rule choice is identical: the rule's `approval` and `floor`, each candidate's `provider` and `floor`, the same `quota-axi` snapshot, and the same `spendPriority` argmax.
+Without a rule declaring `path_force` this check is inert, whatever paths a brief declares.
+A brief with no `Target paths:` line, no matching path, or a home whose rules declare no `path_force` leaves the Jev request and its output unchanged, so only some briefs carry this fact and the rest route exactly as before.
 When on and at least one rule exists, the tool sends the project name and the whole brief as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, or approvals.
 An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
 Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, and the numeric `spendPriority` argmax over candidates using each candidate's limiting row.

@@ -13,6 +13,15 @@
 #   The key lives in one shell variable and reaches curl as a header read from
 #   a file descriptor, never on argv; nothing logs or writes it.
 #
+# Path force, before any model call: when the brief states target paths on a
+#   "Target paths: <path> [<path>...]" line and one of them matches this file's
+#   deployment-configuration fact list (fm_dispatch_path_class below), the rule
+#   that declares `"path_force": "deployment-config"` is selected in code with
+#   no request to Jev, and the result carries decided_by: path-forced plus the
+#   matched path and pattern. Paths come only from that explicit line; prose is
+#   never scanned for path-shaped words. With no such line, no match, or no
+#   rule declaring the field, the Jev path below runs unchanged.
+#
 # What it does when on with at least one rule: one POST to
 #   https://api.typesafe.ai/v1/systemone with the project name and the whole brief as
 #   state and ONE Choice question whose
@@ -35,6 +44,9 @@
 #   dispatch-resolve:
 #     status: clear | ambiguous | escalate | error
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
+#       (a Jev-decided result only)
+#     decided_by: path-forced, rule (when excerpt), forced_path/forced_pattern
+#       (a path-forced result only; no decided_by line means Jev decided)
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
@@ -167,6 +179,9 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
   elif any((.rules // [])[]; has("select") and ((.select | type) != "string" or (.select | length) == 0)) then "select must be a non-empty string"
   elif any((.rules // [])[]; has("select") and .select != "quota-balanced") then
     "unknown select: " + ([.rules[] | select(has("select") and .select != "quota-balanced") | .select] | unique | join(", "))
+  elif any((.rules // [])[]; has("path_force") and .path_force != "deployment-config") then
+    "path_force must be \"deployment-config\" when present"
+  elif ([(.rules // [])[] | select(.path_force == "deployment-config")] | length) > 1 then "at most one rule may declare path_force"
   elif any((.rules // [])[]; has("floor") and floor_bad(.floor; true)) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
   elif any((.rules // [])[] | profiles(.use)[]; profile_bad(.)) then "each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
   elif any((.rules // [])[]; duplicate_profiles(profiles(.use))) then "each rule use must not contain duplicate harness, model, and effort profiles"
@@ -220,11 +235,80 @@ if [ "$RULE_COUNT" -eq 0 ]; then
   no_rules
 fi
 
+# ---- declared target paths -> forced careful rule ------------------------------
+# The single fact list. Each entry answers one question: does this path name
+# deployment configuration, where a routing mistake is expensive? A match forces
+# the declared rule, which is the safe direction, so this list carries no
+# exclusions: a path that looks like deployment configuration is treated as
+# deployment configuration even under tests/ or fixtures/.
+fm_dispatch_path_class() {  # <path> -> prints the matched pattern label, or exits 1
+  local path=$1 lower base
+  lower=$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')
+  base=${lower##*/}
+  case "$base" in
+    vercel.json) printf 'vercel.json\n'; return 0 ;;
+    *.tf|*.tfvars) printf '*.tf or *.tfvars\n'; return 0 ;;
+    *.cfn.yaml|*.cfn.yml|*.cfn.json|cloudformation*.yaml|cloudformation*.yml|cloudformation*.json|\
+    template.yaml|template.yml|*.template|*.template.json|*.template.yaml)
+      printf 'CloudFormation template\n'; return 0 ;;
+    chart.yaml|chart.yml|values.yaml|values.yml|values-*.yaml|values-*.yml)
+      printf 'Helm chart manifest\n'; return 0 ;;
+    *.k8s.yaml|*.k8s.yml|*deployment*.yaml|*deployment*.yml|*ingress*.yaml|*ingress*.yml)
+      printf 'Kubernetes or ingress manifest\n'; return 0 ;;
+    *deploy*.sh|*deploy*.ps1) printf 'deploy or release script\n'; return 0 ;;
+  esac
+  case "/$lower" in
+    */cloudformation/*) printf 'CloudFormation template directory\n'; return 0 ;;
+    */k8s/*|*/kubernetes/*) printf 'Kubernetes manifest directory\n'; return 0 ;;
+    */argocd/*|*/argo-cd/*|*/argo/*) printf 'ArgoCD manifest directory\n'; return 0 ;;
+    */helm/*) printf 'Helm chart directory\n'; return 0 ;;
+    */scripts/deploy*) printf 'deploy or release script\n'; return 0 ;;
+  esac
+  case "/$lower" in
+    */.github/workflows/*)
+      case "$base" in
+        *deploy*|*release*|*publish*) printf 'release workflow\n'; return 0 ;;
+      esac ;;
+  esac
+  return 1
+}
+
+# Paths come only from explicit "Target paths:" lines, never from prose.
+fm_dispatch_target_paths() {  # <brief-file>
+  local line token
+  local -a tokens
+  while IFS= read -r line; do
+    # read -a splits on whitespace without expanding a declared glob such as *.tf
+    read -r -a tokens <<< "$line"
+    for token in ${tokens[@]+"${tokens[@]}"}; do
+      printf '%s\n' "$token"
+    done
+  done < <(awk 'match($0, /^Target paths:[[:space:]]*/) { print substr($0, RSTART + RLENGTH) }' "$1")
+}
+
+FORCED_RULE=$(jq -r '
+  [(.rules // []) | to_entries[] | select(.value.path_force == "deployment-config")
+   | "rule_" + ((.key + 1) | tostring)] | first // ""' "$RULES")
+FORCED_PATH='' FORCED_PATTERN=''
+if [ -n "$FORCED_RULE" ]; then
+  while IFS= read -r declared_path; do
+    if FORCED_PATTERN=$(fm_dispatch_path_class "$declared_path"); then
+      FORCED_PATH=$declared_path
+      break
+    fi
+    FORCED_PATTERN=''
+  done < <(fm_dispatch_target_paths "$BRIEF")
+fi
+FORCED=null
+[ -z "$FORCED_PATH" ] || FORCED=$(jq -nc --arg rule "$FORCED_RULE" --arg path "$FORCED_PATH" \
+  --arg pattern "$FORCED_PATTERN" '{rule: $rule, path: $path, pattern: $pattern}')
+
 RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
 trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA"' EXIT
 LAT_MS=null
-command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
+if [ "$FORCED" = null ]; then
+  command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
     ($rules[0]) as $cfg |
@@ -248,7 +332,7 @@ command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
   T1=$(fm_timing_now_ms)
   LAT_MS=$(( T1 - T0 ))
   [ "$HTTP" = 200 ] || emit_error "http $HTTP after ${LAT_MS} ms: $(head -c 200 "$RESP_FILE" 2>/dev/null | tr '\n' ' ')"
-jq -e --slurpfile rules "$RULES" '
+  jq -e --slurpfile rules "$RULES" '
     (($rules[0].rules | to_entries | map("rule_" + ((.key + 1) | tostring))) + ["default"] | sort) as $choices |
     (.answers.rule.choice | type) == "string" and
     (.answers.rule.confidence | type) == "number" and
@@ -262,6 +346,9 @@ jq -e --slurpfile rules "$RULES" '
        (.usage.input_tokens | type) == "number" and
        (.usage.output_tokens | type) == "number"))' \
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
+else
+  printf 'null\n' > "$RESP_FILE"
+fi
 
 # ---- quota evidence: one quota-axi --json snapshot -----------------------------
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
@@ -270,6 +357,7 @@ fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an inval
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
+  --argjson forced "$FORCED" \
   --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
@@ -341,7 +429,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
          spendPriority: $limiting.selection.spendPriority, runway: $limiting.runway.status, eligible: true, reason: "ok"}
       end
     end;
-  ($a.choice) as $choice |
+  (if $forced == null then $a.choice else $forced.rule end) as $choice |
   (if ($choice | test("^rule_[1-9][0-9]*$"))
    then ($choice | ltrimstr("rule_") | tonumber)
    else null end) as $rule_number |
@@ -360,14 +448,24 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
    elif $rule_floor_state == "below"
      then {source: "default", use: profiles($cfg.default // null), note: "rule \($choice) floor \($rule.floor.scope) below \($rule.floor.min_percent)%: fall through to default"}
    else {source: $choice, use: profiles($rule.use), note: "rule matched"} end) as $sel |
-  {
-    model: $r.model, latency_ms: $lat, tokens: ($r.usage // null),
-    rule: $choice,
-    rule_when: (if $rule == null then $none_criterion else $rule.when end | .[0:60]),
-    confidence: $a.confidence, probabilities: $a.probabilities
-  } as $ev |
+  (if $rule == null then $none_criterion else $rule.when end | .[0:60]) as $when_excerpt |
+  (if $forced == null then
+     {
+       model: $r.model, latency_ms: $lat, tokens: ($r.usage // null),
+       rule: $choice,
+       rule_when: $when_excerpt,
+       confidence: $a.confidence, probabilities: $a.probabilities
+     }
+   else
+     {
+       decided_by: "path-forced",
+       rule: $choice,
+       rule_when: $when_excerpt,
+       forced_path: $forced.path, forced_pattern: $forced.pattern
+     }
+   end) as $ev |
   if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
-  elif $a.confidence < ($floor | tonumber) then
+  elif $forced == null and $a.confidence < ($floor | tonumber) then
     $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(evaluate(.)))}
   elif $sel.escalate then
     $ev + {status: "escalate", reason: $sel.escalate, candidates: ($answer_use | map(evaluate(.)))}
@@ -395,9 +493,15 @@ TEXT=$(jq -r '
   def shell_arg: flat | @sh;
   "dispatch-resolve:",
   "  status: \(.status | flat)",
-  "  model: \(show(.model))   latency_ms: \(show(.latency_ms))   tokens: \(show(.tokens.input_tokens))/\(show(.tokens.output_tokens))",
-  "  rule: \(.rule | flat) (\(.rule_when | flat))   confidence: \(.confidence | flat)",
-  "  probabilities: \([.probabilities | to_entries[] | "\(.key | flat)=\(.value | flat)"] | join(" "))",
+  (if .decided_by then
+     ("  decided_by: \(.decided_by | flat)",
+      "  rule: \(.rule | flat) (\(.rule_when | flat))",
+      "  forced_path: \(.forced_path | flat)   forced_pattern: \(.forced_pattern | flat)")
+   else
+     ("  model: \(show(.model))   latency_ms: \(show(.latency_ms))   tokens: \(show(.tokens.input_tokens))/\(show(.tokens.output_tokens))",
+      "  rule: \(.rule | flat) (\(.rule_when | flat))   confidence: \(.confidence | flat)",
+      "  probabilities: \([.probabilities | to_entries[] | "\(.key | flat)=\(.value | flat)"] | join(" "))")
+   end),
   (if .reason then "  reason: \(.reason | flat)" else empty end),
   (if .note then "  note: \(.note | flat)" else empty end),
   (if .unranked_note then "  note: \(.unranked_note | flat)" else empty end),
