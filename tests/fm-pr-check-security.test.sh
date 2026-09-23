@@ -422,6 +422,33 @@ https://gitlab.com/group/sub/deep/project/-/merge_requests/42|gitlab.com|group/s
 https://gitlab.example.co.uk/g/p/-/merge_requests/7|gitlab.example.co.uk|g/p|7
 https://code.internal/team/tools/ci-runner/-/merge_requests/123456|code.internal|team/tools/ci-runner|123456
 EOF
+  while IFS='|' read -r url workspace repo number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical Bitbucket pull request URL"
+    [ "$FM_PR_PROVIDER" = bitbucket ] || fail "parser did not tag a Bitbucket pull request URL as bitbucket"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical Bitbucket pull request URL"
+    [ "$FM_PR_HOST" = bitbucket.org ] || fail "parser returned wrong Bitbucket host"
+    [ "$FM_PR_PATH" = "$workspace/$repo" ] || fail "parser returned wrong Bitbucket project path"
+    [ "$FM_PR_OWNER" = "$workspace" ] || fail "parser returned wrong Bitbucket workspace"
+    [ "$FM_PR_REPO" = "$repo" ] || fail "parser returned wrong Bitbucket repository"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong Bitbucket pull request number"
+  done <<'EOF'
+https://bitbucket.org/ws/repo/pull-requests/1|ws|repo|1
+https://bitbucket.org/my-workspace/my-repo.name_1/pull-requests/42|my-workspace|my-repo.name_1|42
+https://bitbucket.org/Ws_2/Repo-Name/pull-requests/123456|Ws_2|Repo-Name|123456
+EOF
+  ! fm_pr_url_parse https://bitbucket.org/ws/repo/-/merge_requests/1 \
+    || fail "parser accepted a GitLab-shaped path under bitbucket.org"
+  ! fm_pr_url_parse https://bitbucket.org/-ws/repo/pull-requests/1 \
+    || fail "parser accepted a Bitbucket workspace with a leading hyphen"
+  ! fm_pr_url_parse https://bitbucket.org/ws/repo-/pull-requests/1 \
+    || fail "parser accepted a Bitbucket repository with a trailing hyphen"
+  ! fm_pr_url_parse https://bitbucket.org/ws/./pull-requests/1 \
+    || fail "parser accepted a bare '.' Bitbucket repository segment"
+  ! fm_pr_url_parse https://bitbucket.org/ws/repo/pull-requests/0 \
+    || fail "parser accepted a zero Bitbucket pull request number"
+  ! fm_pr_url_parse https://bitbucket.org/ws/repo/pull_requests/1 \
+    || fail "parser accepted a misspelled Bitbucket path segment"
   fm_pr_url_parse https://github.com/a/b/pull/1 || fail "parser rejected canonical URL"
   [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a pull request URL as github"
   [ "$FM_PR_HOST" = github.com ] || fail "parser returned wrong GitHub host"

@@ -6,8 +6,9 @@
 # head is that named head and is already stored on the forge.
 # The watcher check source is byte-for-byte bin/fm-pr-poll.sh; task and PR data
 # live only in a private sidecar and are never interpolated into shell source.
-# A GitHub pull request URL and a GitLab merge request URL are both accepted,
-# including a merge request on a self-hosted GitLab instance.
+# A GitHub pull request URL, a GitLab merge request URL (including on a
+# self-hosted instance), and a Bitbucket Cloud pull request URL are all
+# accepted.
 # A GitHub pull request the forge reports as a draft is refused, naming the draft
 # state and recording and arming nothing: a draft cannot be merged, so a poll armed on it
 # would wait for an event that cannot occur while nobody is asked to act.
@@ -71,6 +72,22 @@ fm_pr_poll_retirement_recover_one "$STATE" "$ID" "$SCRIPT_DIR/fm-pr-poll.sh" || 
 if [ "$PROVIDER" = gitlab ] && ! command -v glab >/dev/null 2>&1; then
   echo "error: watching a GitLab merge request requires glab on PATH" >&2
   exit 1
+fi
+# The same reasoning applies to Bitbucket, which the poll reads with curl and
+# jq under an access token rather than a CLI (bin/fm-pr-poll.sh, bitbucket_token).
+if [ "$PROVIDER" = bitbucket ]; then
+  BITBUCKET_ARM_MISSING=
+  command -v curl >/dev/null 2>&1 || BITBUCKET_ARM_MISSING="curl"
+  if ! command -v jq >/dev/null 2>&1; then
+    BITBUCKET_ARM_MISSING="${BITBUCKET_ARM_MISSING:+$BITBUCKET_ARM_MISSING and }jq"
+  fi
+  if [ -z "$BITBUCKET_ARM_MISSING" ] && ! fm_pr_bitbucket_token "$FM_HOME" >/dev/null 2>&1; then
+    BITBUCKET_ARM_MISSING="a Bitbucket access token (FM_BITBUCKET_TOKEN or the home's .env)"
+  fi
+  if [ -n "$BITBUCKET_ARM_MISSING" ]; then
+    echo "error: watching a Bitbucket pull request requires $BITBUCKET_ARM_MISSING" >&2
+    exit 1
+  fi
 fi
 
 # The draft state is read before anything is recorded or armed. Only a positive

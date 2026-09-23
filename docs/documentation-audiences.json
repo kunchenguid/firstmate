@@ -361,6 +361,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/bitbucket-backend.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/gitlab-merge-watch.md",
       "audience": "maintainer-verification"
     },

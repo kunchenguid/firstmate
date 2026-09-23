@@ -4,13 +4,16 @@
 # URLs before constructing task paths or performing any side effect.
 #
 # The stored identity is provider-tagged: provider, url, host, path, number.
-# "path" is the full project path, which is owner/repository on GitHub and an
-# arbitrarily nested group/subgroup/project namespace on GitLab. A GitLab
-# project can sit at any depth, so no owner/repository pair can address one and
-# the sidecar carries the whole path instead. GitLab also runs on self-hosted
-# instances, so the host is part of that identity rather than a constant. Every
-# consumer re-derives the identity from the stored URL and refuses any record
-# whose parts do not reconstruct that exact URL.
+# "path" is the full project path, which is owner/repository on GitHub and
+# workspace/repository on Bitbucket Cloud, and an arbitrarily nested
+# group/subgroup/project namespace on GitLab. A GitLab project can sit at any
+# depth, so no owner/repository pair can address one and the sidecar carries
+# the whole path instead. GitLab also runs on self-hosted instances, so the
+# host is part of that identity rather than a constant; Bitbucket Cloud is one
+# fixed host (bitbucket.org) like GitHub, and Bitbucket Server/Data Center -
+# a different API on a different host - is out of scope and never parses here.
+# Every consumer re-derives the identity from the stored URL and refuses any
+# record whose parts do not reconstruct that exact URL.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -119,13 +122,15 @@ fm_task_id_creation_valid() {
 # github.com is refused here even though its shape is otherwise valid: it is
 # GitHub's own host and never a GitLab instance, so a URL like
 # https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
-# would otherwise be armed as a GitLab watch that can never succeed.
+# would otherwise be armed as a GitLab watch that can never succeed. bitbucket.org
+# is refused the same way and for the same reason.
 fm_pr_gitlab_host_valid() {
   local host=${1-} label
   local LC_ALL=C
   local -a labels
   [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
   [ "$host" != github.com ] || return 1
+  [ "$host" != bitbucket.org ] || return 1
   case "$host" in
     .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
   esac
@@ -160,6 +165,20 @@ fm_pr_gitlab_path_valid() {
   done
 }
 
+# A Bitbucket Cloud workspace or repository slug: 1-62 characters, no leading
+# or trailing hyphen, no bare "." or "..", and no character outside
+# [A-Za-z0-9._-]. Bitbucket Cloud is one fixed host (bitbucket.org) addressing a
+# fixed two-segment workspace/repository path, unlike GitLab's arbitrarily
+# nested namespace, so no per-instance host or path-depth handling is needed.
+fm_pr_bitbucket_slug_valid() {
+  local slug=${1-}
+  local LC_ALL=C
+  [ "${#slug}" -ge 1 ] && [ "${#slug}" -le 62 ] || return 1
+  case "$slug" in
+    .|..|-*|*-|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+}
+
 # Parse a canonical PR or MR URL into the provider-tagged identity. Validation
 # is strict and per provider: the GitHub username and repository rules are
 # unchanged, and GitLab gets its own host and namespace rules rather than a
@@ -188,6 +207,27 @@ fm_pr_url_parse() {
     FM_PR_HOST=github.com
     FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
     # Consumed by bin/fm-pr-merge.sh, which addresses GitHub by owner/repository.
+    # shellcheck disable=SC2034
+    FM_PR_OWNER=${BASH_REMATCH[1]}
+    # shellcheck disable=SC2034
+    FM_PR_REPO=${BASH_REMATCH[2]}
+    FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # Bitbucket Cloud is one fixed host addressing a fixed two-segment
+  # workspace/repository path (never nested and never self-hosted the way
+  # GitLab is), so it is checked before the generic GitLab pattern below in the
+  # same style github.com is: a fixed host with its own exact path shape.
+  pattern='^https://bitbucket\.org/([A-Za-z0-9._-]{1,62})/([A-Za-z0-9._-]{1,62})/pull-requests/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    fm_pr_bitbucket_slug_valid "${BASH_REMATCH[1]}" || return 1
+    fm_pr_bitbucket_slug_valid "${BASH_REMATCH[2]}" || return 1
+    FM_PR_PROVIDER=bitbucket
+    FM_PR_URL=$raw
+    FM_PR_HOST=bitbucket.org
+    FM_PR_PATH="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    # Consumed by bin/fm-pr-merge.sh, which addresses Bitbucket Cloud by
+    # workspace/repository, the same way it addresses GitHub by owner/repository.
     # shellcheck disable=SC2034
     FM_PR_OWNER=${BASH_REMATCH[1]}
     # shellcheck disable=SC2034
@@ -972,6 +1012,131 @@ fm_pr_gitlab_read_record() {  # <host> <path> <number>
         "merged=" + (if .state == "merged" then "true" else "false" end)
       else
         error("invalid merge request state")
+      end' 2>/dev/null); then
+    return 1
+  fi
+  while IFS= read -r line; do
+    total=$((total + 1))
+    case "$line" in
+      state=*) state=${line#state=} ;;
+      merged=*) merged=${line#merged=} ;;
+      *) continue ;;
+    esac
+    named=$((named + 1))
+  done <<FIELDS
+$fields
+FIELDS
+  if [ "$named" -ne 2 ] || [ "$total" -ne 2 ] || [ -z "$state" ] \
+    || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
+    return 1
+  fi
+
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_STATE=$state
+  # Consumed by bin/fm-crew-state.sh passed_pr_detail.
+  # shellcheck disable=SC2034
+  FM_PR_RECORD_MERGED=$merged
+}
+
+# Bitbucket Cloud REST API v2.0 access token, read at call time in the same
+# "ambient environment wins, the calling home's gitignored .env is the opt-in
+# fallback" shape as the Relay pairing token and mail-plane credentials
+# (docs/configuration.md "Mail plane"; bin/fm-env-lib.sh's fmx_env_get). A
+# Workspace or Repository Access Token is expected; Bitbucket Cloud's deprecated
+# app passwords are deliberately not supported. Unlike gh and glab, curl has no
+# credential store of its own to fall back to, so a caller with no token
+# configured gets a clean refusal rather than an unauthenticated request.
+fm_pr_bitbucket_token() {  # <fm_home>
+  local home=${1-} file line val
+  if [ -n "${FM_BITBUCKET_TOKEN:-}" ]; then
+    printf '%s' "$FM_BITBUCKET_TOKEN"
+    return 0
+  fi
+  [ -n "$home" ] || return 1
+  file="$home/.env"
+  [ -f "$file" ] || return 1
+  line=$(grep -E '^[[:space:]]*(export[[:space:]]+)?FM_BITBUCKET_TOKEN=' "$file" 2>/dev/null | tail -n1) || return 1
+  [ -n "$line" ] || return 1
+  val=${line#*=}
+  val=${val#"${val%%[![:space:]]*}"}
+  val=${val%"${val##*[![:space:]]}"}
+  case "$val" in
+    \"*\") val=${val#\"}; val=${val%\"} ;;
+    \'*\') val=${val#\'}; val=${val%\'} ;;
+  esac
+  [ -n "$val" ] || return 1
+  printf '%s' "$val"
+}
+
+# One authenticated GET against the Bitbucket Cloud REST API v2.0 base
+# (https://api.bitbucket.org/2.0). Prints the response body on a 2xx status and
+# returns nonzero on any curl failure, missing token, or non-2xx status, so a
+# caller never mistakes an error page or empty body for a valid payload.
+fm_pr_bitbucket_api_get() {  # <fm_home> <api-path>
+  local home=$1 api_path=$2 token http_status body tmp cfg
+  command -v curl >/dev/null 2>&1 || return 1
+  token=$(fm_pr_bitbucket_token "$home") || return 1
+  [ -n "$token" ] || return 1
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-pr-bitbucket.XXXXXX") || return 1
+  cfg=$(mktemp "${TMPDIR:-/tmp}/fm-pr-bitbucket-cfg.XXXXXX") || { rm -f "$tmp"; return 1; }
+  chmod 600 "$cfg" 2>/dev/null
+  printf 'header = "Authorization: Bearer %s"\n' "$token" > "$cfg"
+  http_status=$(curl -sS -K "$cfg" -o "$tmp" -w '%{http_code}' \
+    -H 'Accept: application/json' \
+    "https://api.bitbucket.org/2.0$api_path" 2>/dev/null) || { rm -f "$tmp" "$cfg"; return 1; }
+  rm -f "$cfg"
+  body=$(cat "$tmp" 2>/dev/null)
+  rm -f "$tmp"
+  case "$http_status" in
+    2??) ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "$body"
+}
+
+# One authenticated POST with a JSON body against the Bitbucket Cloud REST API
+# v2.0 base. Prints the response body, then the final HTTP status on its own
+# trailing line ("http_status=<code>"), because the merge endpoint's 202
+# (accepted, asynchronous) is a distinct outcome from its 200 (merged
+# synchronously) that the caller must tell apart, and neither is an error.
+fm_pr_bitbucket_api_post() {  # <fm_home> <api-path> <json-body>
+  local home=$1 api_path=$2 json_body=$3 token http_status body tmp cfg
+  command -v curl >/dev/null 2>&1 || return 1
+  token=$(fm_pr_bitbucket_token "$home") || return 1
+  [ -n "$token" ] || return 1
+  tmp=$(mktemp "${TMPDIR:-/tmp}/fm-pr-bitbucket.XXXXXX") || return 1
+  cfg=$(mktemp "${TMPDIR:-/tmp}/fm-pr-bitbucket-cfg.XXXXXX") || { rm -f "$tmp"; return 1; }
+  chmod 600 "$cfg" 2>/dev/null
+  printf 'header = "Authorization: Bearer %s"\n' "$token" > "$cfg"
+  http_status=$(curl -sS -K "$cfg" -o "$tmp" -w '%{http_code}' -X POST \
+    -H 'Accept: application/json' \
+    -H 'Content-Type: application/json' \
+    --data-binary "$json_body" \
+    "https://api.bitbucket.org/2.0$api_path" 2>/dev/null) || { rm -f "$tmp" "$cfg"; return 1; }
+  rm -f "$cfg"
+  body=$(cat "$tmp" 2>/dev/null)
+  rm -f "$tmp"
+  case "$http_status" in
+    [1-5][0-9][0-9]) ;;
+    *) return 1 ;;
+  esac
+  printf '%s\nhttp_status=%s\n' "$body" "$http_status"
+}
+
+fm_pr_bitbucket_read_record() {  # <fm_home> <workspace> <repo> <number>
+  local home=$1 workspace=$2 repo=$3 number=$4 json fields line
+  local total=0 named=0 state='' merged=''
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  command -v jq >/dev/null 2>&1 || return 1
+  json=$(fm_pr_bitbucket_api_get "$home" "/repositories/$workspace/$repo/pullrequests/$number") || return 1
+  if ! fields=$(printf '%s' "$json" | jq -r '
+      if type == "object" and (.state | type == "string") and .state != "" then
+        "state=" + .state,
+        "merged=" + (if .state == "MERGED" then "true" else "false" end)
+      else
+        error("invalid pull request state")
       end' 2>/dev/null); then
     return 1
   fi
