@@ -800,11 +800,28 @@ fm_backend_herdr_presentation_lock_namespace_uid() {
 }
 
 fm_backend_herdr_presentation_lock_namespace_valid() {
-  local dir=$1 expected_uid owner mode
+  local dir=$1 expected_uid owner mode repaired
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   expected_uid=$(id -u 2>/dev/null) || return 1
   owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$dir") || return 1
   mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir") || return 1
+  if [ "$mode" != 700 ]; then
+    # Repair rather than refuse first: a foreign-mode but ownable namespace
+    # can be tightened in place, which keeps the lock resolvable across a
+    # umask or a copied namespace.
+    chmod 700 "$dir" 2>/dev/null || return 1
+    repaired=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir") || return 1
+    if [ "$repaired" = "$mode" ]; then
+      # chmod was a no-op: this filesystem cannot express mode bits at all
+      # (Git Bash/MSYS mounts report noacl - every directory stats 755
+      # whatever chmod runs). The 700 invariant is unanswerable there, so
+      # the verifiable boundary is ownership alone; the platform ACL on the
+      # user's temp/profile tree is what actually isolates the namespace.
+      [ "$owner" = "$expected_uid" ]
+      return
+    fi
+    mode=$repaired
+  fi
   [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
 }
 
@@ -825,6 +842,17 @@ fm_backend_herdr_canonical_socket_path() {  # <socket-path>
   [ -n "$socket" ] || return 1
   case "$socket" in
     /*) ;;
+    # A native-Windows herdr reports socket_path in drive-letter form
+    # (verified live: "C:\Users\...\herdr.sock"). The lock identity lives in
+    # the POSIX spelling this filesystem actually uses, so translate through
+    # cygpath rather than refusing; without it the session presentation lock
+    # cannot resolve and every endpoint close on that host fails closed. The
+    # translation is re-checked for an absolute result so a mangled path
+    # still refuses.
+    [A-Za-z]:[\\/]*)
+      command -v cygpath >/dev/null 2>&1 || return 1
+      socket=$(cygpath -u "$socket" 2>/dev/null) || return 1
+      case "$socket" in /*) ;; *) return 1 ;; esac ;;
     *) return 1 ;;
   esac
   sock_dir=$(dirname "$socket")
@@ -2982,6 +3010,47 @@ fm_backend_herdr_current_path() {  # <target>
   fm_backend_herdr_target_ready "$1" || return 0
   fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
     | jq -r '.result.pane.foreground_cwd // empty' 2>/dev/null
+}
+
+# fm_backend_herdr_foreground_cwd_supported: true when `pane get` exposes a
+# live foreground-cwd read for this pane. Native Windows panes report
+# `foreground_cwd: null` (or no field): live-cwd tracking there is
+# prompt-integration only, so the interactive `treehouse get` discovery poll
+# in fm-spawn.sh can never observe the pane leaving the project. Probed as a
+# capability (the field's JSON type on an idle pane), never by uname, and
+# retried briefly so a pane that is still starting up does not read as
+# unsupported.
+fm_backend_herdr_foreground_cwd_supported() {  # <target>
+  fm_backend_herdr_target_ready "$1" || return 1
+  local i=0
+  while [ "$i" -lt 6 ]; do
+    if fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane get "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+      | jq -e '.result.pane.foreground_cwd | type == "string"' >/dev/null 2>&1; then
+      return 0
+    fi
+    i=$((i + 1))
+    [ "$i" -ge 6 ] || sleep 0.5
+  done
+  return 1
+}
+
+# fm_backend_herdr_foreground_process_name: the name of the pane's primary
+# foreground process (foreground_processes[0].name - for a freshly created
+# pane, its root shell), or empty on any error. fm-spawn.sh's Windows arm
+# reads it to decide how (or whether) the pane can be entered into Git Bash.
+fm_backend_herdr_foreground_process_name() {  # <target>
+  fm_backend_herdr_target_ready "$1" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" pane process-info --pane "$FM_BACKEND_HERDR_PANE" 2>/dev/null \
+    | jq -r '.result.process_info.foreground_processes[0].name // empty' 2>/dev/null
+}
+
+# fm_backend_herdr_wait_output: wait until <match> appears as a literal
+# substring in the pane's output (the CLI searches existing scrollback first,
+# then polls), or <timeout-ms> elapses. Exit status is the verdict.
+fm_backend_herdr_wait_output() {  # <target> <match> <timeout-ms>
+  fm_backend_herdr_target_ready "$1" || return 1
+  fm_backend_herdr_cli "$FM_BACKEND_HERDR_SESSION" \
+    pane wait-output --match "$2" --timeout "$3" "$FM_BACKEND_HERDR_PANE" >/dev/null 2>&1
 }
 
 # fm_backend_herdr_send_text_line: send one line of TEXT then submit,

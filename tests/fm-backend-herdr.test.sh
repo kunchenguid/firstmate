@@ -3345,6 +3345,55 @@ test_presentation_session_lock_path_is_shared_across_homes() {
   pass "herdr presentation lock: one path per session/socket across homes"
 }
 
+# A native-Windows herdr reports socket_path in drive-letter form (verified
+# live against herdr 0.9.1 for Windows: "C:\\Users\\...\\herdr.sock"). The
+# canonical socket path refused anything but /* spellings, so the session
+# presentation lock could not resolve and the first real pool-slot teardown on
+# that host failed closed before touching anything. Drive-letter and POSIX
+# spellings of the same socket must derive ONE lock identity.
+test_presentation_session_lock_path_accepts_windows_socket_spelling() {
+  local dir log resp fb path_win path_posix
+  dir="$TMP_ROOT/presentation-win32-socket"; mkdir -p "$dir/responses"
+  log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The socket's parent exists nowhere, so canonicalization keeps the literal
+  # translated spelling and both forms must derive one lock identity.
+  printf '%s\n' '{"sessions":[{"name":"win32","running":true,"socket_path":"C:\\tmp\\fm-win32-sock\\fm.sock"}]}' > "$resp/1.out"
+  printf '%s\n' '{"sessions":[{"name":"win32","running":true,"socket_path":"/c/tmp/fm-win32-sock/fm.sock"}]}' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  # cygpath does the drive-letter translation on MSYS; emulate it where absent
+  # so the case runs on POSIX CI too.
+  if ! command -v cygpath >/dev/null 2>&1; then
+    cat > "$fb/cygpath" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  -u)
+    case "${2:-}" in
+      ?:\\*) d=${2:0:1}; printf '/%s%s\n' "$(printf '%s' "$d" | tr '[:upper:]' '[:lower:]')" "${2:2}" | tr '\\' '/' ;;
+      *) printf '%s\n' "$2" ;;
+    esac ;;
+  -w)
+    case "${2:-}" in
+      /?/*) d=${2:1:1}; printf '%s:%s\n' "$(printf '%s' "$d" | tr '[:lower:]' '[:upper:]')" "${2:2}" | tr '/' '\\' ;;
+      *) printf '%s\n' "$2" ;;
+    esac ;;
+  *) printf '%s\n' "${2:-}" ;;
+esac
+exit 0
+SH
+    chmod +x "$fb/cygpath"
+  fi
+  path_win=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path win32' "$ROOT") \
+    || fail "a drive-letter socket spelling must still resolve the presentation lock path"
+  path_posix=$(PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_presentation_session_lock_path win32' "$ROOT") \
+    || fail "the POSIX spelling of the same socket failed to resolve"
+  [ "$path_win" = "$path_posix" ] \
+    || fail "the same socket under drive-letter and POSIX spellings must share one lock identity: $path_win vs $path_posix"
+  pass "a Windows drive-letter socket spelling resolves the shared presentation lock"
+}
+
 test_presentation_session_lock_path_rejects_malformed_socket() {
   local dir log resp fb path status
   dir="$TMP_ROOT/presentation-malformed-socket"; mkdir -p "$dir/responses"
@@ -5705,6 +5754,7 @@ test_projection_order_anchors_the_parent_by_exact_id
 test_projection_order_foreign_new_child_before_parent_is_read_only
 test_projection_order_missing_parent_is_read_only
 test_presentation_session_lock_path_is_shared_across_homes
+test_presentation_session_lock_path_accepts_windows_socket_spelling
 test_presentation_session_lock_path_rejects_malformed_socket
 test_projection_order_rejects_malformed_socket
 test_projection_reclaim_refusal_matrix_is_non_mutating
