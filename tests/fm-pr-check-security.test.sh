@@ -2077,7 +2077,7 @@ test_ghes_merge_watch() {
   local dir state out rc url head
   dir=$(make_case ghes-merge-watch)
   state="$dir/home/state"
-  head=0123456789abcdef0123456789abcdef0123456789
+  head=a3f5c8d2b4e6f1a7c9d0e2b4f6a8c1d3e5f7a9b2
   url=https://git.example.com/kids/ms-service/pull/273
 
   # The entrypoint that used to refuse this URL as an invalid PR check request
@@ -2130,7 +2130,7 @@ kids/ms-service
   : > "$dir/gh.log"
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
   set +e
-  out=$(FM_TEST_GH_HOST_WANT=git.example.com run_merge_entry "$dir" task-c "$url" 2>&1)
+  out=$(FM_TEST_GH_HOST_WANT=git.example.com FM_TEST_GH_HEAD=$head run_merge_entry "$dir" task-c "$url" 2>&1)
   rc=$?
   set -e
   [ "$rc" -eq 0 ] || fail "merge wrapper refused a mergeable GHES pull request: $out"
