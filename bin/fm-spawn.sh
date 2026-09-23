@@ -1601,6 +1601,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   fm_backend_validate_task_endpoint "$RELAUNCH_META" "$ID" || exit 1
+  RELAUNCH_REASSIGNED_TO=$(fm_slot_reassigned_to "$RELAUNCH_META")
+  if [ -n "$RELAUNCH_REASSIGNED_TO" ]; then
+    echo "error: task $ID's recorded pool slot was reassigned to task $RELAUNCH_REASSIGNED_TO; refusing to relaunch an agent into another task's copy" >&2
+    exit 1
+  fi
   BACKEND=$FM_BACKEND_VALIDATED_BACKEND
   RELAUNCH_TARGET=$FM_BACKEND_VALIDATED_TARGET
   fm_backend_validate_spawn "$BACKEND" || exit 1
@@ -4651,6 +4656,13 @@ fi
 # still being delivered, cannot observe or complete a fresh provisional record
 # between its state check and `tasks-axi start`, and a delivery failure cannot
 # follow a committed In-flight transition.
+# With this task's record published and the slot claim it names already
+# written, retire any older record in this home that still names the same slot,
+# while the project lock that allocated it is still held (bin/fm-wake-lib.sh
+# owns what retiring means and why it discards nothing).
+if [ "$SPAWN_SLOT_CLAIMED" = 1 ] && [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
+  fm_treehouse_slot_retire_stale_records "$STATE" "$WT" "$ID"
+fi
 if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
   SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
   fm_lock_release "$SPAWN_TREEHOUSE_PROJECT_LOCK"
