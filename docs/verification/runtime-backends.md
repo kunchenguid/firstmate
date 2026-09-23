@@ -637,6 +637,16 @@ Grok was not installed on the verification machine for this 2026-09-14 change, s
 This closes only #3436's idle-composer-misclassification symptom (Grok/Herdr composer read `unknown` instead of `empty`, blocking away-mode injection). The issue's second symptom - a leftover watcher never yielding and never being taken over or refused at AFK start - is unrelated to composer classification and is tracked separately in #2270, where #3436's reproduction serves as corroborating evidence.
 Cursor is deliberately outside this cursor-anchored empty-composer matrix because its terminal cursor is parked outside the composer; tmux's Cursor-specific, process-identity-gated cursorless fallback is covered by the [Cursor Agent CLI](#cursor-agent-cli) section's separate live evidence and drift guard.
 
+### 2026-09-22 Pi 0.87.1 token-first footer through Herdr
+
+Verified a read-only Pi 0.87.1 pane capture with Herdr 0.9.0 using `herdr pane read <pane> --source visible --format ansi`.
+The captured idle footer was `↑121k ↓37k R9.5M $0.069 (sub) 55.2%/272k (auto) (openai-codex) gpt-6-luna • max`.
+A second captured idle footer omitted the R-count cell: `↑35k ↓6 $0.000 (sub) 12.8%/272k (auto) (openai-codex) gpt-6-astra • low`.
+Before the fix, the first captured screen classified as `unknown` because its footer begins with token counts rather than a dollar cost.
+`tests/fm-composer-lib.test.sh` proves both captures are empty for an idle Pi, typed content stays pending, and an unrecognized token-first prefix stays unknown; `tests/fm-backend-herdr.test.sh` proves the Herdr adapter returns empty after one native Pi identity probe for each capture.
+No Herdr lifecycle operation was run, so this record does not claim a live stop or restart.
+`FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh` refreshes the installed-harness live matrix; this cursorless Herdr footer variant is refreshed from a live read-only capture and the two fixture-backed suites above.
+
 `zellij action dump-screen --pane-id <id> --ansi` was verified at zellij 0.44.0 to preserve ANSI styling (real Claude Code rendered inside a zellij pane dumped `ESC[m` `❯` U+00A0 for its idle composer row), which is the capability the zellij composer classifier reads.
 
 ### 2026-09-15 codex-cli 0.154.0 idle starfield and status footer through Herdr

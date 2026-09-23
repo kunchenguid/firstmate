@@ -258,7 +258,7 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 
 Herdr has no direct cursor-row primitive.
 The adapter is a thin capture: it hands a bounded ANSI tail plus Herdr's capability facts to the fleet-wide classifier in `bin/fm-composer-lib.sh`, which owns bordered boxes, bare agent-glyph rows, OpenCode's left bar, and Pi's separator and Zen-rail regions.
-Pi emptiness requires native Pi identity and idle/done state; the footer-qualified fallback and its structural guards live in that classifier.
+Pi emptiness requires native Pi identity and idle/done state; its footer-qualified fallback accepts cost-first and token-count-first status lines, with exact footer and composer-structure guards in that classifier.
 A blocked Pi is parked on an interactive prompt, so its blank composer region is a menu's and not a free composer's; that state defers instead of proving emptiness.
 A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains unknown or pending.
 Identity stays a lazy second read, consulted when a recognized Pi region could change the verdict, or when an unhinted read came back `unknown` and the probed agent name can supply the missing harness hint.

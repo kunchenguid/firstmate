@@ -1399,17 +1399,22 @@ EOF
   printf '%s\n' "$joined" | LC_ALL=C awk '{$1=$1; printf "%s", $0}'
 }
 
-# Pi's ordinary footer can begin with a dollar-denominated cost, which is
-# otherwise (correctly) shell-prompt staleness evidence. Zen replaces Pi's
-# horizontal frame with a rail. Recognize these only as a conjunction of the
-# exact bottom footer, a complete input region, and native idle/done Pi identity.
-# This fallback never relaxes generic left-bar, shell, or separator verdicts.
+# Pi's footer can begin with a dollar-denominated cost or token-count cells;
+# the dollar glyph is otherwise (correctly) shell-prompt staleness evidence.
+# Zen replaces Pi's horizontal frame with a rail. Recognize these only as a
+# conjunction of the exact bottom footer, a complete input region, and native
+# idle/done Pi identity. This fallback never relaxes generic left-bar, shell,
+# or separator verdicts.
 _fm_composer_pi_footer_verdict() {  # <plain-screen> <screen> <styled> <has-identity> <identity>
   local plain=$1 screen=$2 styled=$3 has_identity=$4 identity=$5
   local -a rows=()
   local line n end first row content pending=0 shape=rail max=$FM_COMPOSER_PI_MAX_LINES open_row close_row
+  local metrics_tail metrics_re token_prefix_re
   case "$max" in ''|*[!0-9]*|0) max=8 ;; esac
-  local metrics_re='(^|[[:space:]])[0-9]+([.][0-9]+)?%/[0-9]+([.][0-9]+)?[kM]?([[:space:]]+\(auto\))?[[:space:]]+\([^)]+\)[[:space:]]+[^[:space:]]'
+  metrics_tail='[0-9]+([.][0-9]+)?%/[0-9]+([.][0-9]+)?[kM]?([[:space:]]+\(auto\))?[[:space:]]+\([^)]+\)[[:space:]]+[^[:space:]]'
+  metrics_re="(^|[[:space:]])$metrics_tail"
+  token_prefix_re='^↑[[:space:]]*[0-9]+([.][0-9]+)?[kM]?[[:space:]]+↓[[:space:]]*[0-9]+([.][0-9]+)?[kM]?([[:space:]]+R[0-9]+([.][0-9]+)?[kM]?)?([[:space:]]+\$?([0-9]+([.][0-9]+)?|[.][0-9]+))?([[:space:]]+\(sub\))?[[:space:]]+'
+  token_prefix_re+=$metrics_tail
   while IFS= read -r line; do rows+=("$line"); done <<EOF
 $plain
 EOF
@@ -1421,8 +1426,11 @@ EOF
     n=$((n - 1))
   done
   [ "$n" -ge 4 ] || { printf unknown; return; }
-  case "$line" in '$'*) ;; *) printf unknown; return ;; esac
   [[ "$line" =~ $metrics_re ]] || { printf unknown; return; }
+  case "$line" in
+    '$'*) ;;
+    *) [[ "$line" =~ $token_prefix_re ]] || { printf unknown; return; } ;;
+  esac
   case "${rows[$((n - 2))]}" in /*|\~/*) ;; *) printf unknown; return ;; esac
   end=$((n - 3))
   if [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" = 1 ] \

@@ -3866,6 +3866,38 @@ test_composer_state_pi_separator_idle_is_empty() {
   pass "fm_backend_herdr_composer_state: a native idle Pi separator composer reads empty"
 }
 
+# Pi 0.87.1's live idle footer now puts token counts before its context-window
+# metrics, instead of beginning with a dollar-denominated cost.
+test_composer_state_pi_token_first_footer_idle_is_empty() {
+  local dir log resp fb out calls
+  dir="$TMP_ROOT/composer-pi-token-first-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  cp "$ROOT/tests/fixtures/composer/pi-0.87.1-token-first-idle.ansi" "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a live Pi 0.87.1 token-first idle footer should read empty, got '$out'"
+  calls=$(grep -c $'\x1f''agent'$'\x1f''get' "$log")
+  [ "$calls" -eq 1 ] || fail "token-first Pi footer recognition must corroborate identity exactly once, made $calls agent calls"
+  pass "fm_backend_herdr_composer_state: captured Pi 0.87.1 token-first idle footer reads empty"
+}
+
+# Live Pi 0.87.1 capture: token counts and cost precede the metrics, but there
+# is no R-count cell. Herdr must recognize this footer without skipping identity.
+test_composer_state_pi_token_first_footer_without_r_idle_is_empty() {
+  local dir log resp fb out calls
+  dir="$TMP_ROOT/composer-pi-token-first-no-r-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  cp "$ROOT/tests/fixtures/composer/pi-0.87.1-token-first-no-r-idle.ansi" "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"pi","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state default:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "a live Pi 0.87.1 token-first footer without an R-count cell should read empty, got '$out'"
+  calls=$(grep -c $'\x1f''agent'$'\x1f''get' "$log")
+  [ "$calls" -eq 1 ] || fail "token-first Pi footer without R must corroborate identity exactly once, made $calls agent calls"
+  pass "fm_backend_herdr_composer_state: captured Pi 0.87.1 token-first footer without R reads empty"
+}
+
 # A pi worker parked on an interactive prompt (permission dialog, question
 # menu, trust dialog) reports agent_status=blocked: it is waiting on a human
 # keystroke. The menu is drawn ABOVE the separator pair, so the composer region
@@ -5446,6 +5478,8 @@ test_composer_state_unknown_on_capture_failure
 test_composer_state_unknown_when_no_composer_row_found
 test_composer_state_pi_parked_prompt_is_not_empty
 test_composer_state_pi_separator_idle_is_empty
+test_composer_state_pi_token_first_footer_idle_is_empty
+test_composer_state_pi_token_first_footer_without_r_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity

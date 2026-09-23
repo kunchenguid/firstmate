@@ -842,13 +842,15 @@ test_cursor_on_proven_box_bottom_classifies_content
 test_selected_content_is_composer_scoped_and_wrap_normalized
 
 test_pi_captured_footer_and_zen_rail() {
-  local cap screen variant out identity tilde
+  local cap screen variant out identity tilde no_dollar old_metrics new_metrics
   tilde='~'
   cap=$'styled=1\ncursor=0\nidentity=1\nrows=40'
-  for variant in pi-zen-idle pi-stock-idle; do
+  for variant in pi-zen-idle pi-stock-idle pi-0.87.1-token-first-idle pi-0.87.1-token-first-no-r-idle; do
     screen=$(cat "$ROOT/tests/fixtures/composer/$variant.ansi")
     out=$(fm_composer_classify_screen "$cap" "$screen" '' $'pi\tidle')
     [ "$out" = empty ] || fail "$variant captured live idle must be empty, got $out"
+    out=$(LC_ALL=C fm_composer_classify_screen "$cap" "$screen" '' $'pi\tidle')
+    [ "$out" = empty ] || fail "$variant captured idle under LC_ALL=C must be empty, got $out"
     out=$(fm_composer_classify_screen "$cap" "$screen")
     [ "$out" = need-identity ] || fail "$variant must request identity before claiming empty"
     for identity in $'pi\tblocked' $'pi\tworking' $'grok\tidle' probe-absent; do
@@ -859,6 +861,11 @@ test_pi_captured_footer_and_zen_rail() {
     [ "$out" = unknown ] || fail "$variant without identity must stay unknown"
     out=$(fm_composer_classify_screen "$cap" "$screen"$'\n$ echo hi' '' $'pi\tidle')
     [ "$out" = unknown ] || fail "lower shell must invalidate $variant"
+    if [ "$variant" = pi-0.87.1-token-first-no-r-idle ]; then
+      screen=${screen/┃/┃draft}
+      out=$(fm_composer_classify_screen "$cap" "$screen" '' $'pi\tidle')
+      [ "$out" = pending ] || fail "typed text with no R-count cell must remain pending, got '$out'"
+    fi
   done
   screen=$(cat "$ROOT/tests/fixtures/composer/pi-zen-idle.ansi")
   for variant in "${screen#*$'\n'}" $'─── ↑ 3 more ───\n'"${screen#*$'\n'}" "${screen%$'\n'*}"; do
@@ -874,13 +881,26 @@ test_pi_captured_footer_and_zen_rail() {
   [ "$out" = pending ] || fail "Zen multiline input including a final rail glyph must stay pending"
   out=$(fm_composer_classify_screen "$cap" "$screen" '' $'pi\tblocked')
   [ "$out" = unknown ] || fail "a blocked rail must never prove a composer"
+  screen=$(cat "$ROOT/tests/fixtures/composer/pi-0.87.1-token-first-idle.ansi")
+  old_metrics="\$0.069 (sub) 55.2%/272k"
+  new_metrics='.096 13.6%/1.0M'
+  no_dollar=${screen/"$old_metrics"/"$new_metrics"}
+  out=$(fm_composer_classify_screen "$cap" "$no_dollar" '' $'pi\tidle')
+  [ "$out" = empty ] || fail "a token-first footer without a currency symbol must read empty, got '$out'"
+  out=$(LC_ALL=C fm_composer_classify_screen "$cap" "$no_dollar" '' $'pi\tidle')
+  [ "$out" = empty ] || fail "a token-first footer without a currency symbol under LC_ALL=C must read empty, got '$out'"
+  screen=${screen/┃/┃draft}
+  out=$(fm_composer_classify_screen "$cap" "$screen" '' $'pi\tidle')
+  [ "$out" = pending ] || fail "typed text in Pi's token-first composer must remain pending, got '$out'"
+  out=$(LC_ALL=C fm_composer_classify_screen "$cap" "$screen" '' $'pi\tidle')
+  [ "$out" = pending ] || fail "typed text in Pi's token-first composer under LC_ALL=C must remain pending, got '$out'"
   screen=$(cat "$ROOT/tests/fixtures/composer/grok-weekly-limit.ansi")
   out=$(fm_composer_classify_screen "$cap" "$screen" '' $'grok\tblocked')
   [ "$out" = unknown ] || fail "Grok limit menu is not a composer"
-  screen=$(printf '%s\n' '' '↑ 0.000 (sub) 0.0%/272k (auto) (openai-codex) gpt-6-astra • xhigh' "${tilde}/project (main)")
+  screen=$(printf '%s\n' '' '┃ ' "${tilde}/project (main)" '↑ 0.000 (sub) 0.0%/272k (auto) (openai-codex) gpt-6-astra • xhigh')
   out=$(fm_composer_classify_screen "$cap" "$screen" '' $'pi\tidle')
-  [ "$out" = unknown ] || fail "an up-arrow footer spelling must stay unknown, got $out"
-  pass "captured Pi stock/Zen footers require identity and preserve pending input and menu refusal"
+  [ "$out" = unknown ] || fail "an unrecognized token-first footer prefix must stay unknown, got $out"
+  pass "captured Pi stock/token-first/Zen footers require identity and preserve pending input and menu refusal"
 }
 
 test_pi_captured_footer_and_zen_rail
