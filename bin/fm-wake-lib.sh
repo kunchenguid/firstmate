@@ -930,6 +930,69 @@ fm_recovery_marker_reopen_announced() {
   fm_recovery_transition "$1" reopen-announced
 }
 
+fm_lock_try_recover_steal_mutex() {  # <steal-lock> <observed-pid> <current-pid>
+  local lockdir=$1 pid=$2 current=$3 recovery recovery_owner primary_owner cur rc recovery_pid
+  if [ -n "$pid" ] && [ "$pid" != "$current" ] && fm_pid_alive "$pid"; then
+    FM_LOCK_HELD_PID=$pid
+    return 1
+  fi
+  if fm_lock_mid_acquire_is_fresh "$lockdir" "$pid"; then
+    FM_LOCK_HELD_PID=$pid
+    return 1
+  fi
+
+  recovery="$lockdir.recovery"
+  if ! fm_lock_try_create "$recovery"; then
+    recovery_pid=$(cat "$recovery/pid" 2>/dev/null || true)
+    if [ -n "$recovery_pid" ] && [ "$recovery_pid" != "$current" ] \
+      && fm_pid_alive "$recovery_pid"; then
+      FM_LOCK_HELD_PID=$recovery_pid
+      return 1
+    fi
+    if fm_lock_mid_acquire_is_fresh "$recovery" "$recovery_pid"; then
+      FM_LOCK_HELD_PID=$recovery_pid
+      return 1
+    fi
+    FM_LOCK_HELD_PID=$pid
+    FM_LOCK_OWNER_DIR=
+    printf 'lock recovery refused: recovery mutex is stale or unavailable; preserving it without nested recovery: %s\n' \
+      "$recovery" >&2
+    return 2
+  fi
+  recovery_owner=${FM_LOCK_OWNER_DIR:-}
+
+  if ! fm_lock_points_to_owner "$recovery" "$recovery_owner"; then
+    fm_lock_release "$recovery"
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_OWNER_DIR=
+    return 1
+  fi
+  primary_owner=
+  if [ -L "$lockdir" ]; then
+    primary_owner=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
+  fi
+  cur=$(cat "$lockdir/pid" 2>/dev/null || true)
+  if ! fm_lock_recheck_stale_owner "$lockdir" "$primary_owner" "$cur"; then
+    fm_lock_release "$recovery"
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_OWNER_DIR=
+    return 1
+  fi
+
+  fm_lock_remove_path "$lockdir" || true
+  rc=1
+  if fm_lock_try_create "$lockdir"; then
+    rc=0
+    FM_LOCK_RECOVERED_PID=$cur
+  fi
+  if [ "$rc" -ne 0 ]; then
+    FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
+    FM_LOCK_OWNER_DIR=
+  fi
+  fm_lock_release "$recovery"
+  return "$rc"
+}
+
 fm_lock_try_acquire() {
   local lockdir=$1 pid steal cur rc steal_owner primary_owner current
   FM_LOCK_HELD_PID=
@@ -942,6 +1005,12 @@ fm_lock_try_acquire() {
 
   fm_current_pid current || return 1
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)
+  case "$lockdir" in
+    *.steal)
+      fm_lock_try_recover_steal_mutex "$lockdir" "$pid" "$current"
+      return $?
+      ;;
+  esac
   if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
     # The recorded holder is THIS very process. Single-threaded bash can only
     # observe that when an interrupting trap abandoned the frame that held the
@@ -968,9 +1037,12 @@ fm_lock_try_acquire() {
   fi
 
   steal="$lockdir.steal"
-  if ! fm_lock_try_acquire "$steal"; then
+  fm_lock_try_acquire "$steal"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
     FM_LOCK_HELD_PID=$(cat "$lockdir/pid" 2>/dev/null || true)
     FM_LOCK_OWNER_DIR=
+    [ "$rc" -eq 2 ] && return 2
     return 1
   fi
   steal_owner=${FM_LOCK_OWNER_DIR:-}
@@ -1031,8 +1103,12 @@ fm_lock_try_acquire() {
 }
 
 fm_lock_acquire_wait() {
-  local lockdir=$1
-  while ! fm_lock_try_acquire "$lockdir"; do
+  local lockdir=$1 rc
+  while true; do
+    fm_lock_try_acquire "$lockdir"
+    rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    [ "$rc" -eq 2 ] && return 2
     sleep 0.1
   done
 }
@@ -1042,11 +1118,13 @@ fm_lock_acquire_wait() {
 # every interruption safe: before transfer the helper is the owner; after
 # transfer the still-live caller is the owner.
 _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
-  local lockdir=$1 caller_pid=$2 ownerdir current back
+  local lockdir=$1 caller_pid=$2 ownerdir current back acquire_rc
   case "$caller_pid" in ''|*[!0-9]*) return 1 ;; esac
   fm_pid_alive "$caller_pid" || return 1
   trap 'fm_lock_release "$lockdir"; exit 143' TERM INT
-  fm_lock_acquire_wait "$lockdir" || return 1
+  fm_lock_acquire_wait "$lockdir"
+  acquire_rc=$?
+  [ "$acquire_rc" -eq 0 ] || return "$acquire_rc"
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null) || {
       fm_lock_release "$lockdir"
@@ -1076,12 +1154,13 @@ _fm_lock_acquire_wait_handoff() {  # <lockdir> <caller-pid>
 # reconciliation refusal instead of wedging an unattended close.
 # Mutation-critical callers that can safely block keep fm_lock_acquire_wait.
 fm_lock_acquire_wait_bounded() {
-  local lockdir=$1 seconds=$2 caller_pid rc owner_pid
+  local lockdir=$1 seconds=$2 caller_pid rc owner_pid retry_rc
   case "$seconds" in ''|*[!0-9]*|0) return 2 ;; esac
   _fm_wake_require_timeout || return 1
-  if fm_lock_try_acquire "$lockdir"; then
-    return 0
-  fi
+  fm_lock_try_acquire "$lockdir"
+  rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ "$rc" -eq 2 ] && return 2
 
   fm_current_pid caller_pid || return 1
   # shellcheck disable=SC2016 # Positional parameters expand in the child shell.
@@ -1105,9 +1184,10 @@ fm_lock_acquire_wait_bounded() {
   # A deadline can kill the helper just after it acquired and before handoff.
   # Give ordinary stale-owner recovery one final non-blocking chance so that
   # helper cleanup cannot manufacture a false contention advisory.
-  if fm_lock_try_acquire "$lockdir"; then
-    return 0
-  fi
+  fm_lock_try_acquire "$lockdir"
+  retry_rc=$?
+  [ "$retry_rc" -eq 0 ] && return 0
+  [ "$retry_rc" -eq 2 ] && return 2
   if [ "$rc" -eq 124 ]; then
     owner_pid=$(cat "$lockdir/pid" 2>/dev/null || true)
     case "$owner_pid" in
