@@ -968,6 +968,87 @@ SH
   pass "claude ship, scout, and secondmate launches strip an inherited CLAUDE_CODE_CHILD_SESSION"
 }
 
+# bin/fm-control.sh relaunch stops the agent and rebuilds the launch through
+# bin/fm-spawn.sh --relaunch, so the marker must be stripped on that path too,
+# not just on a fresh spawn. --relaunch reads every identity axis from the
+# task's own durable record and proves the prior agent is gone through a
+# recovery-grade tmux read, so this drives fm-spawn.sh --relaunch directly
+# against a task record naming this case's own worktree, with a stub tmux
+# whose pane foreground reads back as a bare shell (`dead`, licensing the
+# relaunch) and whose send-keys -l capture reuses the harness's own
+# FM_FAKE_LAUNCH_LOG convention so the rendered command can be executed and
+# inspected exactly like the fresh-spawn case above.
+test_claude_relaunch_strips_inherited_child_session_marker() {
+  local rec id out status launch seen window
+  id=profile-child-session-relaunch-z31
+  rec=$(make_spawn_case profile-child-session-relaunch claude "$id")
+  read_case_record "$rec"
+  window="fm-$id"
+  {
+    echo "window=fmses:$window"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$WT_DIR"
+    echo "project=$PROJ_DIR"
+    echo "harness=claude"
+    echo "kind=ship"
+    echo "mode=no-mistakes"
+    echo "yolo=off"
+    echo "tasktmp=$CASE_DIR/tasktmp"
+    echo "model=default"
+    echo "effort=default"
+  } > "$HOME_DIR/state/$id.meta"
+
+  cat > "$FAKEBIN_DIR/tmux" <<SH
+#!/usr/bin/env bash
+set -u
+case "\$*" in
+  *"#{pane_current_command}"*) printf '%s\n' zsh; exit 0 ;;
+  *"#{pane_current_path}"*) printf '%s\n' "$WT_DIR"; exit 0 ;;
+esac
+case "\${1:-}" in
+  list-windows) printf '%s\n' "$window"; exit 0 ;;
+  send-keys)
+    if [ -n "\${FM_FAKE_LAUNCH_LOG:-}" ]; then
+      prev=
+      for a in "\$@"; do
+        if [ "\$prev" = "-l" ]; then
+          case "\$a" in
+            ". '"*"'")
+              staged=\${a#". '"}
+              staged=\${staged%"'"}
+              [ ! -f "\$staged" ] || a=\$(cat "\$staged")
+              ;;
+          esac
+          printf '%s\n' "\$a" >> "\$FM_FAKE_LAUNCH_LOG"
+        fi
+        prev=\$a
+      done
+    fi
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$FAKEBIN_DIR/tmux"
+
+  cat > "$FAKEBIN_DIR/claude" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${CLAUDE_CODE_CHILD_SESSION-unset}" > "$FM_CHILD_SESSION_SEEN"
+SH
+  chmod +x "$FAKEBIN_DIR/claude"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" --relaunch)
+  status=$?
+  expect_code 0 "$status" "claude --relaunch spawn should succeed"$'\n'"$out"
+
+  launch=$(cat "$LAUNCH_LOG")
+  seen="$CASE_DIR/child-session-seen-relaunch"
+  CLAUDE_CODE_CHILD_SESSION=1 FM_CHILD_SESSION_SEEN="$seen" PATH="$FAKEBIN_DIR:$PATH" \
+    bash -c "$launch" || fail "the claude relaunch launch command failed"
+  [ "$(cat "$seen")" = unset ] ||
+    fail "the claude relaunch launch passed an inherited CLAUDE_CODE_CHILD_SESSION to claude"
+  pass "claude --relaunch strips an inherited CLAUDE_CODE_CHILD_SESSION"
+}
+
 test_claude_omits_config_dir_prefix_when_unset() {
   local rec id out status launch
   id=profile-claude-nocfgdir-z18
@@ -1555,6 +1636,7 @@ test_claude_forwards_firstmate_config_dir_when_set
 test_lavish_server_address_is_exported_to_worker_launch
 test_lavish_absent_config_preserves_destination_ambient
 test_claude_launch_strips_inherited_child_session_marker
+test_claude_relaunch_strips_inherited_child_session_marker
 test_claude_omits_config_dir_prefix_when_unset
 test_claude_permission_mode_bypass_matches_absent_launch
 test_claude_permission_mode_auto_swaps_only_the_permission_flag
