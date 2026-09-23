@@ -9,18 +9,24 @@
 # never run. It repeats that test so a direct invocation writes nothing.
 #
 # Producers:
+#   bin/fm-brief.sh              appended (in every worker's status command,
+#                                right after its unchanged plain append)
 #   bin/fm-spawn.sh              dispatched (fresh spawns only, never relaunch)
 #   bin/fm-watch.sh              capture, once per poll cycle
+#   bin/fm-pr-check.sh           pr_ready (a PR registered for review, not the
+#                                merge-time re-record from bin/fm-pr-merge.sh)
 #   bin/fm-merge-outcome-lib.sh  merged ... pr (a recorded PR merge)
 #   bin/fm-merge-local.sh        merged ... local (a local-only landing)
 #   bin/fm-teardown.sh           cleaned_up
 #
 # Usage:
 #   fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model>
+#   fm-fleet-ledger.sh pr_ready <task> <url>
 #   fm-fleet-ledger.sh merged <task> pr <url>
 #   fm-fleet-ledger.sh merged <task> local
 #   fm-fleet-ledger.sh cleaned_up <task>
 #   fm-fleet-ledger.sh capture
+#   fm-fleet-ledger.sh appended <config> <state>/<task>.status
 #
 # capture appends one task.status record for every complete (newline-ended)
 # line added to a state/<task>.status log since that task's byte offset in
@@ -29,8 +35,13 @@
 # for a later capture. Records are appended before the offset is saved, so an
 # interrupted capture repeats records rather than losing them. Without any
 # grown log, capture returns after one size listing and sources nothing.
-# merged and cleaned_up first capture their own task, so its status records
-# precede them. cleaned_up then deletes the task's offset, because teardown
+# appended captures only that task, so a worker's status line is recorded as
+# soon as the worker writes it; the byte offset keeps the per-poll capture from
+# recording it again. Its arguments name the home, because a worker has no
+# firstmate environment: the flag lives in <config> and the state directory is
+# the status file's directory.
+# pr_ready, merged, and cleaned_up first capture their own task, so its status
+# records precede them. cleaned_up then deletes the task's offset, because teardown
 # retires that status log right after. dispatched deletes any leftover offset
 # so a reused task id starts at byte 0 of its fresh log.
 # Every write holds state/.fleet-ledger.lock.
@@ -54,7 +65,7 @@ LOCK="$STATE/.fleet-ledger.lock"
 TEXT_MAX_CHARS=2000
 
 usage() {
-  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | merged <task> pr <url> | merged <task> local | cleaned_up <task> | capture" >&2
+  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | pr_ready <task> <url> | merged <task> pr <url> | merged <task> local | cleaned_up <task> | capture | appended <config> <state>/<task>.status" >&2
   exit 2
 }
 
@@ -65,12 +76,24 @@ task_ok() {
 cmd=${1:-}
 case "$cmd" in
   dispatched) { [ "$#" -eq 6 ] && task_ok "$2"; } || usage ;;
+  pr_ready) { [ "$#" -eq 3 ] && task_ok "$2" && [ -n "$3" ]; } || usage ;;
   merged)
     task_ok "${2:-}" || usage
     case "$#:${3:-}" in 4:pr) [ -n "$4" ] || usage ;; 3:local) ;; *) usage ;; esac
     ;;
   cleaned_up) { [ "$#" -eq 2 ] && task_ok "$2"; } || usage ;;
   capture) [ "$#" -eq 1 ] || usage ;;
+  appended)
+    [ "$#" -eq 3 ] && [ -n "$2" ] || usage
+    case "$3" in /*/*.status) ;; *) usage ;; esac
+    APPENDED_TASK=${3##*/}
+    APPENDED_TASK=${APPENDED_TASK%.status}
+    task_ok "$APPENDED_TASK" || usage
+    CONFIG=$2
+    STATE=${3%/*}
+    LEDGER="$STATE/fleet-ledger.jsonl"
+    LOCK="$STATE/.fleet-ledger.lock"
+    ;;
   *) usage ;;
 esac
 
@@ -180,11 +203,18 @@ case "$cmd" in
       capture_task "$task" || rc=1
     done <<< "$grown"
     ;;
+  appended)
+    capture_task "$APPENDED_TASK" || rc=1
+    ;;
   dispatched)
     rm -f -- "$(offset_path "$2")"
     append task.dispatched "$2" \
       '{kind: ($kind | n), project: ($project | n), harness: ($harness | n), model: ($model | n)}' \
       --arg kind "$3" --arg project "$4" --arg harness "$5" --arg model "$6" || rc=1
+    ;;
+  pr_ready)
+    capture_task "$2" || rc=1
+    append task.pr_ready "$2" '{pr: $pr}' --arg pr "$3" || rc=1
     ;;
   merged)
     capture_task "$2" || rc=1
