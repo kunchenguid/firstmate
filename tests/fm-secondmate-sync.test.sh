@@ -131,12 +131,11 @@ seed_marked_home() {
 
 # run_ff <dir> <base>: drive the shared ff helper in THIS shell (output to a file,
 # not a subshell, so FF_STATUS / FF_INSTR propagate). Sets FF_OUT to the printed
-# status line. Uses allow_detached=yes, ignore_seed_marker=yes (the secondmate
-# home contract).
+# status line. Uses allow_detached=yes (the secondmate home contract).
 FF_OUT=""
 run_ff() {
   local dir=$1 base=$2 outfile="$TMP_ROOT/ff.out"
-  ff_target "$dir" "secondmate sm" "$base" yes yes >"$outfile" 2>&1
+  ff_target "$dir" "secondmate sm" "$base" yes >"$outfile" 2>&1
   FF_OUT=$(cat "$outfile")
 }
 
@@ -840,7 +839,7 @@ test_seed_marker_clean_when_gitignored() {
   seed_marked_home "$w" sm "$base"          # fresh home at the post-fix HEAD
 
   # The exact dirtiness signal bin/fm-fleet-sync.sh reads (its line: dirty=yes when
-  # `git status --porcelain | head -1` is non-empty).
+  # `git status --porcelain --untracked-files=no | head -1` is non-empty).
   [ -z "$(git -C "$w/sm" status --porcelain)" ] \
     || fail "seed marker still dirties a fresh home: $(git -C "$w/sm" status --porcelain)"
   # And the secondmate ff sweep sees no dirt: an at-HEAD home is a clean no-op.
@@ -852,7 +851,7 @@ test_seed_marker_clean_when_gitignored() {
 # --- T13: an existing marker-only-dirty home converges on the next sweep --------
 # The convergence chicken-and-egg: existing homes predate the fix, so their marker
 # is still untracked-and-unignored, and the fix itself only arrives by fast-forward.
-# The marker-tolerant ff-skip (ignore_seed_marker=yes) bridges the gap for
+# The ff-skip's tolerance of untracked-only paths bridges the gap for
 # linked-worktree homes, which bootstrap/spawn fast-forward from the primary's local HEAD.
 # Standalone-clone homes converge through /updatefirstmate's origin fetch instead.
 # Once advanced, the now-ignored marker reads clean with no hand intervention.
@@ -876,7 +875,7 @@ test_seed_marker_converges_existing_home() {
 }
 
 # --- T14: marker tolerance does not mask a genuinely dirty home -----------------
-# The ff-skip only forgives the seed marker; a real uncommitted change alongside the
+# The ff-skip forgives only untracked paths; a real uncommitted change alongside the
 # marker must still refuse the fast-forward and leave the work untouched, exactly as
 # before this fix.
 test_seed_marker_does_not_mask_real_dirt() {

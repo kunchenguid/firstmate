@@ -3,14 +3,20 @@
 # origin/<default> when safe, and prune local branches whose upstream tracking
 # branch is gone (the remote branch was deleted, i.e. its PR merged) and that no
 # worktree still needs.
-# Self-heals the one unambiguously safe drift: a clean, detached HEAD that holds
-# no unique commits (it is an ancestor of origin/<default>) and whose <default>
-# branch is free to check out is re-attached and then fast-forwarded ("recovered:").
+# Self-heals the one unambiguously safe drift: a detached HEAD with no tracked-file
+# changes that holds no unique commits (it is an ancestor of origin/<default>) and
+# whose <default> branch is free to check out is re-attached and then
+# fast-forwarded ("recovered:").
 # Every other off-default state - a non-default named branch, a detached HEAD with
-# unique commits, a dirty tree, or a diverged default - may hold real work, so it
-# is left untouched and reported as a quantified, loud "STUCK: ... N commits behind
-# ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
-# stashed, or discarded.
+# unique commits, a tracked-file dirty tree, or a diverged default - may hold real
+# work, so it is left untouched and reported as a quantified, loud "STUCK: ... N
+# commits behind ... - needs attention" warning rather than a quiet drift. Nothing
+# is ever forced, stashed, or discarded.
+# Untracked-only working trees (e.g. an ignored tool cache that was never added
+# to .gitignore) never block a fast-forward: git itself refuses a checkout or
+# ff-only merge that would overwrite an untracked file, so that self-protection
+# is relied on instead of treating untracked-only as dirty. A re-attach checkout
+# or fast-forward git refuses is still reported STUCK, carrying git's reason.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
 # and fetch failures.
 # A candidate under projects/ must be the root of its own work tree: git discovery
@@ -290,11 +296,12 @@ stuck_state() {
 
 # Loud, quantified report for a clone we deliberately leave untouched. Includes
 # how far behind origin/<default> it is, so a chronically-stuck clone is visibly
-# distinct from a benign one-off skip.
+# distinct from a benign one-off skip. An optional detail is appended in
+# parentheses.
 report_stuck() {
-  local state=$1 behind
+  local state=$1 detail=${2:-} behind
   behind=$(git -C "$PROJ" rev-list --count "HEAD..$BASE" 2>/dev/null) || behind="?"
-  echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention"
+  echo "$label: STUCK: on $state, $behind commits behind $BASE - needs attention${detail:+ ($detail)}"
 }
 
 sync_project() {
@@ -357,25 +364,34 @@ sync_project() {
   fi
 
   cur=$(git -C "$PROJ" symbolic-ref --short HEAD 2>/dev/null || echo "")
+  # Only tracked-file changes count as dirty; untracked-only paths never block
+  # (see the header comment).
   dirty=no
-  [ -z "$(git -C "$PROJ" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+  [ -z "$(git -C "$PROJ" status --porcelain --untracked-files=no 2>/dev/null | head -1)" ] || dirty=yes
   recovered=no
 
   if [ "$cur" != "$DEFAULT" ]; then
     # Off the default branch. Auto-recover only the one unambiguously safe drift:
-    # a clean, detached HEAD that holds no unique commits (it is an ancestor of
-    # origin/<default>) and whose <default> branch is free to check out here.
-    # Re-attaching to an already-published commit strands nothing, and the
-    # fast-forward path below then catches the clone up. Anything else - a
-    # non-default named branch, a detached HEAD with unique commits, a dirty tree,
-    # or <default> already checked out elsewhere - may hold real work, so it is
-    # reported loudly and left untouched.
+    # a detached HEAD with no tracked-file changes that holds no unique commits
+    # (it is an ancestor of origin/<default>) and whose <default> branch is free
+    # to check out here. Untracked-only is not a reason to withhold recovery: the
+    # checkout below carries the same overwrite protection as the ff-only merge
+    # further down, and a checkout git refuses is reported STUCK with git's
+    # reason. Re-attaching to an already-published commit strands nothing, and
+    # the fast-forward path below then catches the clone up. Anything else - a
+    # non-default named branch, a detached HEAD with unique commits, a
+    # tracked-file dirty tree, or <default> already checked out elsewhere - may
+    # hold real work, so it is reported loudly and left untouched.
     if [ -z "$cur" ] && [ "$dirty" = no ] \
         && git -C "$PROJ" merge-base --is-ancestor HEAD "$BASE" 2>/dev/null \
         && ! default_checked_out_elsewhere \
         && local_default_safe_for_recovery; then
-      if ! git -C "$PROJ" checkout --quiet "$DEFAULT" 2>/dev/null; then
-        report_stuck "$(stuck_state)"
+      if ! checkout_output=$(git -C "$PROJ" checkout --quiet "$DEFAULT" 2>&1); then
+        reason="checkout failed"
+        if [ -n "$checkout_output" ]; then
+          reason="$reason: $(first_line "$checkout_output")"
+        fi
+        report_stuck "$(stuck_state)" "$reason"
         return 0
       fi
       recovered=yes
@@ -385,7 +401,9 @@ sync_project() {
       return 0
     fi
   elif [ "$dirty" = yes ]; then
-    # On the default branch but with uncommitted changes we must not disturb.
+    # On the default branch but with tracked-file uncommitted changes we must
+    # not disturb. Untracked-only falls through: git's own ff-only protection
+    # below still guards against an overwrite.
     report_stuck "$(stuck_state)"
     return 0
   fi
@@ -425,7 +443,8 @@ sync_project() {
     if [ -n "$merge_output" ]; then
       reason="$reason: $(first_line "$merge_output")"
     fi
-    echo "$label: skipped: $reason"
+    [ "$recovered" = no ] || reason="re-attached $DEFAULT, $reason"
+    report_stuck "$(stuck_state)" "$reason"
     return 0
   fi
   after=$(git -C "$PROJ" rev-parse --short "$DEFAULT") || {
