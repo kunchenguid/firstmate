@@ -111,6 +111,13 @@ esac
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 CREWMATE_PAUSE_WAIT_EXAMPLES='an upstream release, a rate-limit reset, a scheduled window, or your own validation round'
+# Single-quoted so the bootout command renders unexpanded in both scaffolds.
+# shellcheck disable=SC2016
+NM_TEMP_HOME_RULE='8. Never run the real `no-mistakes` with a temporary `HOME` or `NM_HOME`: on macOS its daemon
+   registers a KeepAlive launchd job in your real user domain that respawns forever after the
+   temporary directory is deleted. If it is unavoidable, boot that job out in the same cleanup,
+   with `NM_HOME` naming the temporary no-mistakes root and before deleting it:
+   `launchctl bootout gui/$(id -u)/com.kunchenguid.no-mistakes.daemon.$(printf %s "$(cd "$NM_HOME" && pwd -P)" | shasum -a 256 | cut -c1-8)`'
 
 resolve_directory_input() {
   local name=$1 path=$2 resolved
@@ -456,6 +463,7 @@ The report is the only thing that survives, so anything worth keeping must be in
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+$NM_TEMP_HOME_RULE
 
 $INBOX_SECTION
 
@@ -547,6 +555,7 @@ $ASK_USER_BLOCK
    going. A drive-call error, timeout, slow read, or generic unreachability is NOT a daemon error:
    the daemon accepts \`respond\` immediately and runs the round in the background, so a killed or
    timed-out call was only waiting for a read while the run kept working.
+$NM_TEMP_HOME_RULE
 
 $INBOX_SECTION
 

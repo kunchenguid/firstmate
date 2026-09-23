@@ -926,6 +926,31 @@ test_ship_and_scout_teach_validation_round_pause() {
   pass "fm-brief.sh: ship and scout scaffolds teach validation-round pauses"
 }
 
+# A real no-mistakes run under a temporary HOME or NM_HOME registers a KeepAlive
+# launchd job in the real gui/<uid> domain that respawns after the temp dir is
+# gone; every worker brief must forbid it and name the exact bootout command.
+test_ship_and_scout_forbid_temp_home_no_mistakes() {
+  local home kind id brief bootout
+  home="$TMP_ROOT/temp-home-no-mistakes-home"
+  mkdir -p "$home/data"
+  # shellcheck disable=SC2016 # the brief must render this command unexpanded
+  bootout='launchctl bootout gui/$(id -u)/com.kunchenguid.no-mistakes.daemon.$(printf %s "$(cd "$NM_HOME" && pwd -P)" | shasum -a 256 | cut -c1-8)'
+  for kind in no-mistakes direct-PR local-only scout; do
+    id="brief-temp-home-nm-$kind"
+    if [ "$kind" = scout ]; then
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --scout >/dev/null 2>&1
+    else
+      FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" some-proj --mode "$kind" >/dev/null 2>&1
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_grep "Never run the real \`no-mistakes\` with a temporary \`HOME\` or \`NM_HOME\`" "$brief" \
+      "$kind brief did not forbid a temporary-HOME no-mistakes run"
+    assert_grep "\`$bootout\`" "$brief" \
+      "$kind brief did not render the exact launchd bootout command unexpanded"
+  done
+  pass "fm-brief.sh: ship and scout briefs forbid temporary-HOME no-mistakes runs"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -1112,6 +1137,7 @@ test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
+test_ship_and_scout_forbid_temp_home_no_mistakes
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
 test_scout_lavish_line_follows_presentation_floor
