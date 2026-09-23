@@ -218,6 +218,35 @@ test_pi_snippet_uses_effective_extension_path() {
   pass "pi supervision snippet renders the effective extension path"
 }
 
+test_muse_selects_its_own_foreground_checkpoint_snippet() {
+  local home config out
+  home="$TMP_ROOT/muse-home"
+  config="$TMP_ROOT/muse-config"
+  mkdir -p "$home/state" "$config"
+  out=$(FM_HOME="$home" FM_CONFIG_OVERRIDE="$config" "$RENDER" --harness muse --x-mode 1)
+  assert_contains "$out" "primary harness: muse" "muse heading missing"
+  assert_contains "$out" "Mode: Muse foreground checkpoint." "muse snippet missing"
+  # shellcheck disable=SC2016 # The snippet's own literal shell expansion.
+  assert_contains "$out" 'bin/fm-watch-checkpoint.sh --seconds "${FM_MUSE_WATCH_CHECKPOINT:-180}"' \
+    "muse snippet lost its own bounded foreground checkpoint command"
+  assert_contains "$out" "Do not run \`bin/fm-watch-arm.sh\` as the normal supervision command" \
+    "muse snippet lost the refusal of the Stop-hook rewake path it does not have"
+  assert_contains "$out" "$config/x-mode.env" "muse snippet did not render the effective x-mode config path"
+  assert_not_contains "$out" "__FM_X_MODE_ENV__" "muse snippet left the x-mode placeholder unsubstituted"
+
+  # The regression this pins. Before muse joined the renderer's case arm it fell
+  # through to the unknown fallback, so a muse primary was handed no supervision
+  # protocol at all. A selected snippet is also exactly one snippet.
+  assert_not_contains "$out" "Mode: Unknown harness fallback." "muse fell back to the unknown harness snippet"
+  assert_not_contains "$out" "Mode: Codex foreground checkpoint." "renderer printed the codex snippet alongside muse"
+
+  # Non-vacuity: the arm matches the whole name, so a name that merely starts
+  # with muse still falls back rather than borrowing muse's protocol.
+  out=$("$RENDER" --harness musescore)
+  assert_contains "$out" "Mode: Unknown harness fallback." "a name merely containing muse claimed the muse snippet"
+  pass "renderer selects the muse foreground-checkpoint snippet instead of the unknown fallback"
+}
+
 test_selected_harness_block_only
 test_unknown_fallback
 test_conditional_stanzas
@@ -228,3 +257,4 @@ test_pi_signed_preserves_identity_with_pi_supervision_protocol
 test_grok_is_background_notify
 test_grok_command_sources_effective_config
 test_pi_snippet_uses_effective_extension_path
+test_muse_selects_its_own_foreground_checkpoint_snippet

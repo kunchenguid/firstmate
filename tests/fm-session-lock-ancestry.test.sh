@@ -187,6 +187,68 @@ SH
   pass "session-lock: ordinary script paths under a harness directory are not harness processes"
 }
 
+test_muse_is_identified_only_on_whole_anchored_names() {
+  local dir fakebin shape got
+  dir="$TMP_ROOT/muse-anchoring"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field:${FM_TEST_MUSE_SHAPE:-launcher}" in
+  820:comm=:launcher) printf '%s\n' 'muse' ;;
+  820:args=:launcher) printf '%s\n' 'muse --resume' ;;
+  820:comm=:execd) printf '%s\n' 'muse-bin-1.3.0-R3233.1' ;;
+  820:args=:execd) printf '%s\n' '/Users/u/.local/bin/muse-bin-1.3.0-R3233.1 --resume' ;;
+  820:comm=:score) printf '%s\n' 'musescore' ;;
+  820:args=:score) printf '%s\n' 'musescore /scores/untitled.mscz' ;;
+  820:comm=:suffix) printf '%s\n' 'amuse' ;;
+  820:args=:suffix) printf '%s\n' 'amuse --serve' ;;
+  820:ppid=:*) printf '%s\n' 1 ;;
+  *:comm=:*) printf '%s\n' bash ;;
+  *:args=:*) printf '%s\n' 'bash /repo/bin/fm-watch-checkpoint.sh' ;;
+  *:ppid=:*) printf '%s\n' 820 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '820\n' > "$dir/state/.lock"
+
+  # The launcher execs muse-bin-<version>, so which of the two names the process
+  # table reports depends only on when it is read. Both are a real muse session
+  # and both must own the home, or a mate comes up read-only for a timing reason.
+  for shape in launcher execd; do
+    got=$(FM_TEST_MUSE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+      || fail "$shape: a muse session was not found in the ancestry at all"
+    [ "$got" = 820 ] || fail "$shape: ancestry resolved '$got', expected the muse pid 820"
+    FM_TEST_MUSE_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+      || fail "$shape: the muse session holding the lock did not recognize itself as the owner"
+  done
+
+  # The divergence that makes the anchoring worth having: the same pid, the same
+  # table and the same walk must REFUSE a name that merely contains muse. Without
+  # this the positive cases above would pass just as well on a bare substring.
+  for shape in score suffix; do
+    if FM_TEST_MUSE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_ancestry_pid'; then
+      fail "$shape: a process merely containing 'muse' was treated as a harness process"
+    fi
+    if FM_TEST_MUSE_SHAPE="$shape" lib_eval "$fakebin" 'fm_harness_pid_alive 820'; then
+      fail "$shape: a process merely containing 'muse' passed the harness-liveness predicate"
+    fi
+    if FM_TEST_MUSE_SHAPE="$shape" lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'"; then
+      fail "$shape: a process merely containing 'muse' claimed the home's session lock"
+    fi
+  done
+  pass "session-lock: muse owns its home under both launcher and exec'd names, and nothing that merely contains muse does"
+}
+
 test_harness_beyond_a_gap_never_owns_the_lock() {
   local dir fakebin got
   dir="$TMP_ROOT/gap"
@@ -1095,6 +1157,7 @@ test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
 test_harness_beyond_a_gap_never_owns_the_lock
+test_muse_is_identified_only_on_whole_anchored_names
 test_competing_version_named_session_is_seen_as_live
 test_same_session_id_owns_a_recycled_background_chain
 test_anchor_pid_is_the_model_loop_process_only_for_a_trusted_id

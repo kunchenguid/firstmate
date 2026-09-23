@@ -133,7 +133,7 @@ $ herdr agent get w2:p1 --session fm-lab-firstmate-agy-ad-1599574-8823
 
 Herdr tracks agy natively (`antigravity-cli` integration, detected as `agent=agy`), so `fm_backend_herdr_pane_agent_state` returns `live` for every registered agy status and no exit-detection hardening was needed.
 The tmux adapter classifies the anchored process name `agy` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names.
-agy stays out of the session-lock name vocabulary in `bin/fm-session-lock-lib.sh`, where the other crewmate-only adapters are also absent.
+agy stays out of the session-lock name vocabulary in `bin/fm-session-lock-lib.sh`; [`references/harness/agy.md`](../../.agents/skills/harness-adapters/references/harness/agy.md) owns which other adapters are and are not.
 
 ## Composer: unknown by design
 
