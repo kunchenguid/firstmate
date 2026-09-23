@@ -13,7 +13,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Busy state | No hook or plugin writer, so nothing is armed and no record is seeded; on Herdr the native `working` status classifies busy, and everywhere else the `agy-regex` rendered-tail fallback in `../../../../../bin/fm-busy-lib.sh` does. |
 | Rendered tail | Busy status row carries `esc to cancel` on the left; the idle row shows `? for shortcuts` instead. The `Generating...` word beside the braille spinner is free-floating output and is not a signal. |
 | Turn end | No turn-end hook or notification touch exists; completion arrives through the worker status protocol and, on Herdr, the native return to `idle`. |
-| Exit | `/quit`, one Enter; the process exits. |
+| Exit | `/quit`, one Enter; the process exits. `bin/fm-control.sh exit` is available: the shared separator-pair classifier proves the idle `>` composer empty from native agy identity, still refuses a pending draft, and keeps the recovery-grade gone-state postcondition (`docs/agent-control.md`). |
 | Interrupt | Single `Escape`, which prints the Interrupted row and leaves an idle composer with no repollution, so no clear key follows. |
 | Skill | No verified slash-skill form; use natural language. |
 | Autonomy | `--dangerously-skip-permissions` auto-approves tool calls for the run. |
@@ -21,7 +21,7 @@ Verified as a CREWMATE and SCOUT adapter only; `../../../../../bin/fm-spawn.sh` 
 | Resume | `--continue` and `--conversation` exist but carry no verified pane-resume contract; use deterministic relaunch. |
 | Model | `--model <id>` with the bare catalog id from `agy models` (for example `gemini-3.8-flash-high`); `bin/fm-spawn.sh` refuses a requested id a reachable listing omits. The listing is a remote fetch, so the probe runs stdin-detached under the shared hard bound and an unreachable or hung listing launches unvalidated with a notice. |
 | Effort | `--effort low\|medium\|high`; `xhigh` and `max` stay in task metadata under the record-and-omit contract. |
-| Composer | Borderless bare `>` row, which the shared classifier reads as `unknown` under the dead-shell rule, never `empty`; steering confirms delivery through native agent-state and the delivery footer instead, the cursor precedent. |
+| Composer | Borderless bare `>` row between solid `─` rules. Outside that pair the shared classifier still reads a bare `>` as `unknown` under the dead-shell rule; inside an identity-proven idle/done agy pair it reads `empty`, and `> draft` stays `pending`. Steering still confirms delivery through native agent-state and the delivery footer, the cursor precedent. |
 
 ## Trust, and where the decision persists
 

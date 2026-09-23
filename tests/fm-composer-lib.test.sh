@@ -619,6 +619,26 @@ test_matrix_pi_separated_needs_identity() {
   pass "matrix: pi's separated composer needs identity + structure; the blank row alone never proves it"
 }
 
+test_matrix_agy_separator_pair_empty_and_pending() {
+  # Real idle agy: a bare shell glyph `>` between two solid rules. Outside the
+  # pair that glyph is unknown under the dead-shell rule; inside an identity-
+  # proven idle/done agy pair it is empty, and `> draft` stays pending so exit
+  # still refuses a visible draft.
+  local idle typed bare agy_idle agy_working none
+  idle=$'transcript\n────────────────────────\n>\n────────────────────────\n? for shortcuts'
+  typed=$'transcript\n────────────────────────\n> draft that must refuse exit\n────────────────────────\n? for shortcuts'
+  bare=$'>'
+  agy_idle=$(printf 'agy\tidle'); agy_working=$(printf 'agy\tworking'); none=$(printf 'zsh\t')
+  assert_screen "agy idle separator pair" empty "$CAPS_STYLED" "$idle" '' "$agy_idle"
+  assert_screen "agy idle on tmux with identity" empty "$CAPS_TMUX" "$idle" 2 "$agy_idle"
+  assert_screen "agy typed draft stays pending" pending "$CAPS_STYLED" "$typed" '' "$agy_idle"
+  assert_screen "working agy defers empty proof" unknown "$CAPS_STYLED" "$idle" '' "$agy_working"
+  assert_screen "agy pair without identity capability" unknown "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "non-agy identity cannot prove agy pair" unknown "$CAPS_STYLED" "$idle" '' "$none"
+  assert_screen "bare agy glyph outside a pair stays unknown" unknown "$CAPS_STYLED" "$bare" '' "$agy_idle"
+  pass "matrix: agy's separator-pair composer is empty only with idle agy identity; drafts stay pending"
+}
+
 test_matrix_opencode_leftbar_signals() {
   # Real idle opencode: `┃`-prefixed rows holding an "Ask anything" hint,
   # blanks, and a Build-mode footer. Two independent idle signals: the shared
@@ -928,6 +948,7 @@ test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
 test_matrix_pi_separated_needs_identity
+test_matrix_agy_separator_pair_empty_and_pending
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box

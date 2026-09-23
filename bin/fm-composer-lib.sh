@@ -32,9 +32,9 @@
 #               anchors shape selection: the shape containing the cursor is the
 #               composer. Without it, the bottom-most shape wins.
 #   identity=1  a native agent identity/state probe exists (herdr `agent get`;
-#               the tmux pi foreground-process probe). Identity is what makes
-#               Pi's blank separated composer provable; with identity=0 that
-#               shape stays `unknown`.
+#               the tmux foreground-process probe). Identity is what makes a
+#               separated composer provable; with identity=0 that shape stays
+#               `unknown`.
 #   rows=<n>    the capture's bounded row count (informational).
 #
 # THE STRICT BLANK-ROW RULE (captain decision blank-row-injection-posture,
@@ -67,16 +67,20 @@
 #   left-bar   - opencode: rows prefixed by a heavy left bar `┃` with no
 #                closing border, holding the idle hint, blank rows, and a
 #                mode/model footer line.
-#   separated  - pi: content rows between two solid horizontal `─` rules, no
-#                glyph and no side border. Provable only with a live agent
-#                identity reporting an idle/done pi (herdr `agent
-#                get`; the tmux foreground-process probe), because a blank
-#                region between two transcript rules is otherwise exactly the
-#                strict rule's unidentifiable blank row.
-#                A separated pair that closes over a bare AGENT-GLYPH row is a
-#                different, self-proving thing: real claude 2.x draws exactly
-#                that (`─` rule, `❯`+NBSP, `─` rule), so the glyph inside the
-#                pair carries the shape and no identity is needed.
+#   separated  - content rows between two solid horizontal `─` rules, no
+#                side border. Provable only with a live agent identity from
+#                herdr `agent get` or the tmux foreground-process probe,
+#                because a blank region between two transcript rules is
+#                otherwise exactly the strict rule's unidentifiable blank row.
+#                Two harnesses own that identity today: an idle/done pi whose
+#                empty composer is a blank row, and an idle/done agy whose
+#                empty composer is the bare shell glyph `>` (still empty only
+#                because the separator pair is the container proof; the same
+#                bare `>` outside a pair stays unknown under the dead-shell
+#                rule). A separated pair that closes over a bare AGENT-GLYPH
+#                row is a different, self-proving thing: real claude 2.x draws
+#                exactly that (`─` rule, `❯`+NBSP, `─` rule), so the glyph
+#                inside the pair carries the shape and no identity is needed.
 #
 # THE COMPOSER FOOTER ZONE (task firstmate-doorbell-vals-pending-p1): a
 # harness draws its own furniture BELOW the composer - a user statusLine, a
@@ -118,10 +122,12 @@
 #
 # THE SAFETY RULE for glyphs: a bare shell prompt glyph (`>` `$` `%` `#`) -
 # what a pane shows once its agent has exited to a plain login shell - is a
-# genuine empty agent composer ONLY inside a bordered container. On a bare row
-# it is a dead-shell prompt and classifies `unknown` (never a safe injection
-# target). The AGENT glyphs `❯` (claude), `›` (codex), `⟩` (U+27E9, muse),
-# and `→` (U+2192, cursor) are a genuine empty agent composer either way.
+# genuine empty agent composer only inside a proven container (a bordered box,
+# or an identity-proven idle/done agy separator pair in the catalogue). On a
+# bare row it is a dead-shell prompt and classifies `unknown` (never a safe
+# injection target). The AGENT glyphs `❯` (claude), `›` (codex), `⟩`
+# (U+27E9, muse), and `→` (U+2192, cursor) are a genuine empty agent composer
+# either way.
 # Both glyph sets are declared
 # exactly once below; every decision reaches them through the declarations.
 #
@@ -370,9 +376,10 @@ fm_composer_strip_ghost() {
 # submit could never be acknowledged, because cursor parks its terminal cursor
 # outside its composer and the composer verdict is therefore always `unknown`.
 # agy's `esc to cancel` is part of the union for the same reason: an explicit
-# tmux agy endpoint reaches the submit core with no recorded harness, and its
-# bare `>` composer verdict is `unknown`, so the busy footer is the only
-# turn-started acknowledgement that path can read.
+# tmux agy endpoint reaches the submit core with no recorded harness. An idle
+# identity-proven separator pair can classify empty, but a working pair stays
+# unknown, so the busy footer is the only turn-started acknowledgement that
+# path can read.
 FM_DELIVERY_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working(\.\.\.|…)|Ctrl\+c:cancel|ctrl\+c to stop|esc[[:space:]]+to[[:space:]]+cancel'
 FM_DELIVERY_CLAUDE_BUSY_REGEX_DEFAULT='esc to interrupt|…[[:space:]]+\([0-9]+[smh]'
 FM_DELIVERY_CODEX_BUSY_REGEX_DEFAULT='esc to interrupt'
@@ -536,9 +543,9 @@ fm_composer_strip_braille() {
 # boxes) from ever competing with the live composer.
 FM_COMPOSER_CAPTURE_LINES=${FM_COMPOSER_CAPTURE_LINES:-20}
 
-# Pi allows a multi-line composer between its horizontal separators. Bound the
-# structural candidate so two unrelated transcript rules with an arbitrarily
-# large region between them can never be promoted into a composer.
+# Identity-gated separator pairs (pi, agy) may hold multiple content rows.
+# Bound the structural candidate so two unrelated transcript rules with an
+# arbitrarily large region between them can never be promoted into a composer.
 FM_COMPOSER_PI_MAX_LINES=${FM_COMPOSER_PI_MAX_LINES:-8}
 
 # Column overhang of Grok 1.0.5's titled bottom border over its aligned top
@@ -823,7 +830,7 @@ _fm_composer_scan_screen() {  # <plain-screen> <cursor-or-empty> [extract-wrap]
         row_glyph_row=$row
       fi
     fi
-    # Pi separator rows: a solid `─` rule at least 8 columns wide. A separator
+    # Separator-pair rows: a solid `─` rule at least 8 columns wide. A separator
     # closes the preceding candidate and immediately opens the next, so an
     # earlier transcript rule can never outrank the live bottom composer pair.
     if _fm_composer_pi_separator_row "$trimmed"; then
@@ -1755,6 +1762,35 @@ _fm_composer_classify_pi_rows() {  # <screen> <styled>
   printf 'empty'
 }
 
+# agy's empty composer is the bare shell glyph `>` inside the separator pair,
+# not a blank row. Classify those content rows as a bordered container so `>`
+# alone is empty while `> draft` stays pending, and never reuse the pi blank-
+# row rule that would treat the glyph itself as typed text.
+_fm_composer_classify_agy_separator_rows() {  # <screen> <styled>
+  local screen=$1 styled=$2 row raw content plain state
+  row=$((FM_COMPOSER_SCAN_PI_OPEN + 1))
+  while [ "$row" -lt "$FM_COMPOSER_SCAN_PI_CLOSE" ]; do
+    raw=$(_fm_composer_screen_row "$row" "$screen")
+    content=$(_fm_composer_row_content "$raw" "$styled")
+    plain=$(_fm_composer_row_content "$raw" 0)
+    state=$(fm_composer_classify_content 1 "$content" \
+      "${FM_COMPOSER_IDLE_RE:-$FM_COMPOSER_IDLE_RE_DEFAULT}" insensitive "$plain" 1 "$styled")
+    case "$state" in
+      pending)
+        printf 'pending'
+        return 0
+        ;;
+      empty) ;;
+      *)
+        printf 'unknown'
+        return 0
+        ;;
+    esac
+    row=$((row + 1))
+  done
+  printf 'empty'
+}
+
 _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <identity> <bare-row>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 row=$5 agent
   if [ "$has_identity" != 1 ]; then
@@ -1770,22 +1806,27 @@ _fm_composer_classify_bare_pi_overlap() {  # <screen> <styled> <has-identity> <i
     return 0
   fi
   agent=${identity%%$'\t'*}
-  if [ "$agent" = pi ]; then
-    _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
-  else
-    _fm_composer_classify_bare_row "$screen" "$styled" "$row"
-  fi
+  case "$agent" in
+    pi|agy)
+      _fm_composer_pi_verdict "$screen" "$styled" "$has_identity" "$identity"
+      ;;
+    *)
+      _fm_composer_classify_bare_row "$screen" "$styled" "$row"
+      ;;
+  esac
 }
 
-# The pi separated-shape verdict: identity + structure conjunction (herdr's
+# The separated-shape verdict: identity + structure conjunction (herdr's
 # rule, now fleet-wide). A missing identity capability keeps the shape
 # unknown; an unfetched identity on an identity-capable backend asks the
 # adapter to probe (lazily) and re-call. Proven input remains pending for every
-# live pi state, while only an idle/done pi proves an empty composer. A blocked
-# pi is parked on an interactive prompt waiting for a human keystroke: its menu
-# is drawn above the separator pair, so the composer region looks free while the
-# keys would answer the prompt instead of composing (issue #2797). Structure
-# cannot disprove that, so a blocked pi defers rather than claiming empty.
+# live accepted harness state, while only an idle/done accepted harness proves
+# an empty composer. Accepted harnesses today are pi (blank empty row) and agy
+# (shell-glyph empty row inside the pair). A blocked agent is parked on an
+# interactive prompt waiting for a human keystroke: its menu is drawn above the
+# separator pair, so the composer region looks free while the keys would answer
+# the prompt instead of composing (issue #2797). Structure cannot disprove that,
+# so a blocked agent defers rather than claiming empty.
 _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   local screen=$1 styled=$2 has_identity=$3 identity=$4 agent agent_status state
   if [ "$has_identity" != 1 ]; then
@@ -1802,13 +1843,21 @@ _fm_composer_pi_verdict() {  # <screen> <styled> <has_identity> <identity>
   fi
   agent=${identity%%$'\t'*}
   agent_status=${identity#*$'\t'}
-  if [ "$agent" != pi ] || [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
+  if [ "$FM_COMPOSER_SCAN_PI_PAIR_VALID" != 1 ]; then
     printf 'unknown'
     return 0
   fi
-  state=$(_fm_composer_classify_pi_rows "$screen" "$styled")
+  case "$agent" in
+    pi) state=$(_fm_composer_classify_pi_rows "$screen" "$styled") ;;
+    agy) state=$(_fm_composer_classify_agy_separator_rows "$screen" "$styled") ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
   if [ "$state" = pending ]; then
     printf 'pending'
+    return 0
+  fi
+  if [ "$state" != empty ]; then
+    printf 'unknown'
     return 0
   fi
   case "$agent_status" in

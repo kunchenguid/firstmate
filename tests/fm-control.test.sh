@@ -35,7 +35,7 @@ mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
-VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp"
+VERIFIED_HARNESSES="claude codex opencode pi pi-signed grok kimi cursor muse omp agy"
 
 # The expectation table, written out independently of the implementation so a
 # silent change to either side shows up here. The fourth field is the composer
@@ -53,6 +53,7 @@ verified_adapter_contract() {  # <harness> -> exit command, interrupt key, repea
     kimi) printf '/exit\tEscape\t1\t\n' ;;
     cursor) printf '/exit\tEscape\t1\t\n' ;;
     muse) printf '/exit\tEscape\t1\tC-u\n' ;;
+    agy) printf '/quit\tEscape\t1\t\n' ;;
     *) return 1 ;;
   esac
 }
@@ -268,7 +269,7 @@ test_harness_family_resolution() {
   for pair in claude:claude claude-latest:claude codex:codex codex-cli:codex \
       opencode:opencode grok:grok grok-2:grok kimi:kimi cursor:cursor \
       cursor-agent:cursor muse:muse muse-bin-0.1.0:muse pi:pi \
-      pi-signed:pi-signed omp:omp; do
+      pi-signed:pi-signed omp:omp agy:agy; do
     recorded=${pair%%:*}
     want=${pair#*:}
     got=$(fm_control_harness_family "$recorded") \
@@ -381,6 +382,8 @@ test_harness_kind_capability() {
   done
   fm_control_harness_supports_kind muse secondmate \
     && fail "muse has no primary supervision protocol and must not claim a secondmate"
+  fm_control_harness_supports_kind agy secondmate \
+    && fail "agy has no primary supervision protocol and must not claim a secondmate"
   for harness in claude codex opencode pi pi-signed grok kimi omp; do
     fm_control_harness_supports_kind "$harness" secondmate \
       || fail "$harness should be able to run a secondmate"
@@ -709,6 +712,63 @@ test_idle_agent_is_not_interrupted() {
   pass "fm-control exit: an idle agent goes straight to its exit command"
 }
 
+test_agy_exit_accepts_idle_separator_pair_composer() {
+  local dir out rc
+  dir=$(new_case agy-empty)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  # The tmux stub parks #{cursor_y} on row 1, so the composer glyph must sit
+  # there rather than on a separator rule that would read as an edge.
+  printf '%s\n' \
+    '────────────────────────' \
+    '>' \
+    '────────────────────────' \
+    '? for shortcuts' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 0 "$rc" "exit on idle agy should succeed once the separator pair is proven empty"$'\n'"$out"
+  [ "$(literals "$dir")" = /quit ] \
+    || fail "idle agy exit should type /quit, got: $(literals "$dir")"
+  assert_contains "$out" "stopped t1 harness=agy" \
+    "idle agy exit should report the stop"
+  pass "fm-control exit: an idle agy separator-pair composer is proven empty and exits"
+}
+
+test_agy_exit_refuses_pending_separator_pair_draft() {
+  local dir out rc
+  dir=$(new_case agy-pending)
+  add_task "$dir" t1 agy
+  alive_as "$dir" agy
+  printf '%s\n' \
+    '────────────────────────' \
+    '> draft that must refuse exit' \
+    '────────────────────────' \
+    '? for shortcuts' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit on agy must refuse a pending draft"$'\n'"$out"
+  assert_contains "$out" "composer visibly holds pending text" \
+    "the refusal should name the pending composer text"
+  [ -z "$(literals "$dir")" ] \
+    || fail "a pending agy draft must receive no exit command, got: $(literals "$dir")"
+  pass "fm-control exit: a pending agy separator-pair draft still refuses"
+}
+
+test_non_agy_exit_still_refuses_unproven_composer() {
+  local dir out rc
+  dir=$(new_case claude-unproven)
+  add_task "$dir" t1 claude
+  alive_as "$dir" claude
+  # A bare shell glyph outside any container stays unknown for every harness,
+  # including the ones that do not use agy's separator-pair empty proof.
+  printf '>\n' > "$dir/fake/pane"
+  out=$(run_control "$dir" t1 exit); rc=$?
+  expect_code 1 "$rc" "exit on claude must still refuse an unproven composer"$'\n'"$out"
+  assert_contains "$out" "not proven empty" \
+    "the non-agy refusal should keep the unproven-empty contract"
+  [ -z "$(literals "$dir")" ] \
+    || fail "an unproven claude composer must receive no exit command"
+  pass "fm-control exit: non-agy harnesses keep the unproven-empty refusal"
+}
+
 test_interrupt_without_acknowledgement_preserves_busy_state() {
   local dir gen before after out rc
   dir=$(new_case unconfirmed)
@@ -913,6 +973,9 @@ test_interrupt_refuses_when_no_agent_runs
 test_ambiguous_endpoint_refuses
 test_busy_agent_is_interrupted_before_the_exit_command
 test_idle_agent_is_not_interrupted
+test_agy_exit_accepts_idle_separator_pair_composer
+test_agy_exit_refuses_pending_separator_pair_draft
+test_non_agy_exit_still_refuses_unproven_composer
 test_interrupt_without_acknowledgement_preserves_busy_state
 test_muse_interrupt_confirms_adapter_acknowledgement
 test_interrupt_revalidates_agent_after_acknowledgement_wait

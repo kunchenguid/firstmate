@@ -135,14 +135,16 @@ Herdr tracks agy natively (`antigravity-cli` integration, detected as `agent=agy
 The tmux adapter classifies the anchored process name `agy` as `agent` through the shared name vocabulary in `bin/fm-agent-process-lib.sh`, the muse/omp precedent for short bare-word names.
 agy stays out of the session-lock name vocabulary in `bin/fm-session-lock-lib.sh`, where the other crewmate-only adapters are also absent.
 
-## Composer: unknown by design
+## Composer: separator-pair empty for idle agy
 
 Byte-level capture of the idle pane shows a bare unstyled `>` between two full-width `─` rules, with an unstyled `? for shortcuts` cell and a dim (`SGR 2`) model cell in the status row below.
-The shared classifier reads that bare `>` as `unknown` under the dead-shell rule, never `empty`.
+Outside that pair the shared classifier still reads a bare `>` as `unknown` under the dead-shell rule.
+Inside an identity-proven idle/done agy separator pair it reads `empty`, and `> draft` stays `pending`, so `bin/fm-control.sh exit` can type `/quit` without weakening the pending refusal.
+Re-verified live on 2026-09-22 with agy 1.2.8 through an isolated Herdr lab session: idle composer `empty`, mid-turn agent_status `working` with composer still `unknown`/`empty`-safe for interrupt-then-exit, pending draft `pending` and refused by exit, then cleared idle exit stopped the worker to a lone shell and a second exit reported `already-stopped`.
 Steering still confirms delivery: the Herdr submit core leads with the native `idle`-to-`working` transition, which agy performs, and the delivery footer regex covers the tmux path.
 agy renders the busy footer late for that confirm loop - about 1.5 s after Enter for a short steer and 4-5 s for a realistic longer brief, measured live on `agy 1.2.1` (2026-09-12) against the shared budget's 3 x 0.4 s - so `bin/fm-send.sh` gives agy typed targets a longer default submit-confirm budget (20 retries, about 8 s at the default cadence); an explicit `FM_SEND_RETRIES` still wins and every other harness keeps the shared 3-retry default.
 `tests/fm-send-agy-confirm.test.sh` pins the raised default and `tests/fm-agy-harness.test.sh` pins the Herdr transition path.
-This is the cursor precedent, not a gap to patch in shared code.
+`tests/fm-composer-lib.test.sh` and `tests/fm-control.test.sh` pin the separator-pair empty/pending contract and the exit guard.
 
 ## Supervised task: spawn, steer, relaunch, and exit through the new path
 
@@ -150,7 +152,7 @@ A trivial scout ran end to end through `bin/fm-spawn.sh --harness agy` against t
 The worker wrote its worktree file and appended `done: agy e2e turn complete` to its status file, which lives outside the worktree, proving prompt processing, tool execution, outside-workspace file access, and a new completion event.
 Durable steering held: a `bin/fm-send.sh` message landed in the task inbox, the worker appended the steered lines to both files, and its inbox record moved to `handled/`.
 Same-copy relaunch held: `bin/fm-control.sh relaunch --note` replaced the worker in place on the identical worktree, model, and effort, the replacement verified both prior lines intact and appended `relaunched: done`.
-Exit held: `bin/fm-control.sh exit` stopped the worker, the registry returned `agent_not_found`, and the pane remained a lone shell in the worktree with all work intact.
+Exit held: `bin/fm-control.sh exit` stopped the worker once the separator-pair empty proof landed, the registry returned `agent_not_found`, and the pane remained a lone shell in the worktree with all work intact.
 No automatic quota failover was exercised or claimed; every handoff above was an explicit supervised relaunch.
 
 ## What is still unproven
