@@ -6,6 +6,7 @@
 # bound. Most cases pin the perl watchdog, the preferred mechanism and the only
 # one a stock macOS host has, under a PATH that holds no timeout variant; the
 # GNU fallback case runs only where a real timeout exists.
+# shellcheck disable=SC2016 # each bounded bash -c script expands its own arguments
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -29,8 +30,7 @@ exec_timed() {
   shift
   (
     . "$ROOT/bin/fm-timeout-lib.sh"
-    PATH=$path
-    fm_exec_timed "$@"
+    PATH=$path fm_exec_timed "$@"
   )
 }
 
@@ -98,8 +98,7 @@ test_the_bound_replaces_the_calling_shell() {
     (
       . "$ROOT/bin/fm-timeout-lib.sh"
       printf '%s\n' "$BASHPID" > "$dir/caller"
-      PATH=$path
-      fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
+      PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
     ) || fail "the bounded probe failed under PATH=$path"
     caller=$(cat "$dir/caller")
     parent=$(cat "$dir/parent")

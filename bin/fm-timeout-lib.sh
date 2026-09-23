@@ -29,7 +29,12 @@
 #       preferred: once termination has begun it also KILLs whatever the group
 #       left behind, so a descendant that outlives the command and holds its
 #       output cannot keep a capturing caller waiting, and GNU timeout, the
-#       fallback, cannot be followed by that reap from a replaced shell. With
+#       fallback, cannot be followed by that reap from a replaced shell. A
+#       descendant that moves into a process group of its own is outside both
+#       signals and the reap (the Claude and Pi CLIs do this for every tool
+#       command they run), so it ends only through the command's own TERM
+#       handling; that is what the grace is for, and a command KILLed after
+#       the grace can leave such a descendant running. With
 #       no perl, timeout, or gtimeout on the host it refuses with 127 rather
 #       than run unbounded: there is no bash fallback, because a monitor-mode
 #       watchdog cannot replace the caller.
