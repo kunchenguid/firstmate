@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Firstmate browser-step fixture</title>
+  </head>
+  <body>
+    <main>
+      <h1>Browser step fixture</h1>
+      <button id="reveal" type="button">Reveal token</button>
+      <section id="revealed" hidden>
+        <h2>API token created</h2>
+        <p>cfut_Zx9Kq2Lm8Rt4Vw6Yb1Nc3Hd5Jf7Gs0PaQe8Ui2Ok4</p>
+        <button type="button">Copy token</button>
+      </section>
+
+      <label for="token-name">Token name</label>
+      <input id="token-name" type="text">
+
+      <label for="permission">Permission</label>
+      <select id="permission">
+        <option>DNS Read</option>
+        <option>DNS Edit</option>
+      </select>
+      <h2 id="form-status" aria-live="polite"></h2>
+
+      <section id="token-7" role="region" aria-label="Token 7">
+        <button type="button">Use</button>
+      </section>
+      <section id="token-8" role="region" aria-label="Token 8">
+        <button type="button">Use</button>
+      </section>
+    </main>
+    <script>
+      document.querySelector('#reveal').addEventListener('click', () => {
+        document.querySelector('#revealed').hidden = false;
+      });
+      document.querySelector('#token-name').addEventListener('input', () => {
+        document.querySelector('#form-status').textContent = 'Token name updated';
+      });
+      document.querySelector('#permission').addEventListener('change', () => {
+        document.querySelector('#form-status').textContent = 'Permission updated';
+      });
+      document.querySelector('#token-7 button').addEventListener('click', () => {
+        document.querySelector('#token-7').remove();
+      });
+      document.querySelector('#token-8 button').addEventListener('click', () => {
+        document.querySelector('#token-8').remove();
+      });
+    </script>
+  </body>
+</html>

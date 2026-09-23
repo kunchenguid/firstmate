@@ -191,11 +191,12 @@ assert_not_contains "$PREDICT" '"unmeasured"' "predict invents no row for unmeas
 python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert "daily" not in d["providers"], d["providers"]' "$PREDICT" \
   || fail "predict calibrated a non-weekly window"
 
-# Advancing the weekly reset by one day moves the start past S1's UTC bucket.
-DAY_RESET=$(format_reset "$((BASE_RESET_EPOCH + 86400))")
+# Move the weekly window start to midnight after all recent codex usage's UTC day.
+DAY_WINDOW_START_EPOCH=$(( ((SESSION_A_EPOCH + 360) / 86400 + 1) * 86400 ))
+DAY_RESET=$(format_reset "$((DAY_WINDOW_START_EPOCH + 7 * 86400))")
 write_quota "$STATE/quota-day-boundary.json" "$DAY_RESET"
 PREDICT_DAY_BOUNDARY=$("$LEDGER" --state "$STATE" --sessions-root "$SESSIONS" predict --quota "$STATE/quota-day-boundary.json")
-DAY_WINDOW_START=$(format_reset "$((BASE_RESET_EPOCH + 86400 - 7 * 86400))")
+DAY_WINDOW_START=$(format_reset "$DAY_WINDOW_START_EPOCH")
 assert_equals "$DAY_WINDOW_START" "$(json_field "$PREDICT_DAY_BOUNDARY" "d['providers']['codex']['windowStart']")" "predict after UTC day boundary"
 assert_equals "0" "$(json_field "$PREDICT_DAY_BOUNDARY" "d['providers']['codex']['windowTokens']")" "predict expires prior UTC day"
 

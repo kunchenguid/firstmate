@@ -666,12 +666,13 @@ list_portable_serial() {
   done < <(all_repo_tests)
 }
 
-# Measured portable-serial script durations in milliseconds, from the CI timing
-# artifacts recorded in docs/fm-test-portable-shards.md. Each value is the
-# slowest successful sample in the referenced complete/partial CI runs, rather
-# than only on the fastest one measured. These are balance hints only: the shard
-# partition stays complete and disjoint whatever they say, so a stale hint costs
-# balance rather than coverage. That doc owns the refresh procedure.
+# Portable-serial duration hints in milliseconds, primarily from the CI timing
+# artifacts recorded in docs/fm-test-portable-shards.md. Each measured value is
+# the slowest successful sample in the referenced complete/partial CI runs.
+# The live browser-step test uses its successful CI capability-skip sample; the
+# offline test has a conservative initial estimate pending a full CI sample.
+# Hints only affect balance: partition coverage stays complete and disjoint,
+# and docs/fm-test-portable-shards.md owns the refresh procedure.
 portable_serial_weight_hints() {
   cat <<'EOF'
 tests/fm-afk-contract.test.sh 15645
@@ -695,6 +696,9 @@ tests/fm-bearings-board-lavish-live-e2e.test.sh 48
 tests/fm-bearings-board-render.test.sh 12591
 tests/fm-bearings-board.test.sh 36490
 tests/fm-bearings-snapshot.test.sh 171176
+# The live test's 74 ms value is a successful CI capability-skip sample.
+tests/fm-browser-step-live-e2e.test.sh 74
+tests/fm-browser-step.test.sh 1000
 tests/fm-bootstrap-network-parallel.test.sh 9539
 tests/fm-bootstrap.test.sh 46634
 tests/fm-branch-supervision.test.sh 8915
