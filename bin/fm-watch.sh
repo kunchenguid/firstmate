@@ -58,6 +58,13 @@
 #                          on that cadence forever (wedge_dead_record); only the
 #                          two recovery-grade verdicts license it, and every other
 #                          verdict escalates unchanged.
+#                          A live pane whose own backlog row is held (any kind,
+#                          while the hold is live) or Done, and whose crew shows
+#                          no positive working evidence, is likewise deferred to
+#                          that long recheck cadence rather than re-escalating
+#                          while it stays unchanged (wedge_settled_evidence); a
+#                          captain hold is not rechecked at all while the
+#                          away-posture record exists.
 #                          A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
 #                          only up to BUSY_TURN_MAX_SECS with no completed turn
@@ -1168,11 +1175,17 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
 # record is archived rather than starting a cadence nobody could act on. The
 # costly parked-gate consult is owed to the supervisor instead, never silenced
 # here, and its own deferral restarts the timer below.
+# The one other `captain` whom is the backlog captain hold wedge_settled_evidence
+# mints, which is reached only after a backlog read and a current-state read.
+# Its caller passes <restart-while-silent>, so the silent absorb restarts the
+# idle timer as well: repeating those reads on every poll of an away window buys
+# nothing, and the recheck owed on return is then at most one
+# STALE_ESCALATE_SECS late rather than owed at once.
 # The escalation counter is left alone, exactly as the write deferral leaves it:
 # this is not an escalation, and a later genuine one must keep the
 # demand-inspection history it had already earned.
-wedge_defer_wait() {  # <window> <since-file> <triage-label> <idle-age> <wait-record>
-  local win=$1 since_file=$2 label=$3 age=$4 record=$5
+wedge_defer_wait() {  # <window> <since-file> <triage-label> <idle-age> <wait-record> [restart-while-silent]
+  local win=$1 since_file=$2 label=$3 age=$4 record=$5 restart_silent=${6-}
   local kind subject whom action anchor key mtime wage min_age waited us ok
   us=$(printf '\037')
   IFS=$us read -r kind subject whom action anchor <<EOF
@@ -1202,6 +1215,10 @@ EOF
   fi
   key=$(window_key "$win")
   if [ "$whom" = captain ] && afk_record_present; then
+    if [ -n "$restart_silent" ]; then
+      clear_write_tracking "$key"
+      date +%s > "$since_file"
+    fi
     triage_log "absorbed $label ($kind, never rechecked while the away-posture record exists): $win"
     return 0
   fi
@@ -1307,15 +1324,95 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
   wake "$reason"
 }
 
-# Repeat-poll wedge-timer bookkeeping for an already-classified stale hash
-# absorbed as provably-working - repairs a missing/corrupt timer (self-heals a
-# watcher restart between recording the hash and recording the timer), or
-# escalates once STALE_ESCALATE_SECS have elapsed. Shared by both places a hash
-# can be absorbed this way: the plain non-terminal path, and the
-# stale_is_terminal-overridden path (a captain-relevant status-log line that an
-# active run/busy pane outranked).
-# The wait-evidence consult (wedge_wait_evidence), the worktree write probe, and
-# the dead-record probe (wedge_dead_record) run ONLY here, inside the
+# The backlog row firstmate itself keeps for the task, read as the last account
+# of a quiet pane before it wedge-escalates. Prints one wait_record, and returns
+# 1 when the row explains nothing.
+#
+# The same-hash repeat of the non-terminal stale path runs the wedge timer for
+# every unchanged idle pane, not only for one absorbed as provably working: a
+# pane already surfaced as inconclusive re-escalates as a possible wedge once per
+# STALE_ESCALATE_SECS for as long as it stays unchanged. For a lane whose
+# supervisor has since recorded that nothing is owed - the work held (for the
+# captain, on an external dependency, or deliberately parked) or finished - each
+# of those escalations costs a supervising turn and says nothing new. The status
+# line cannot say so, because the worker's last line stays whatever it was, so
+# the backlog is read here: a live hold of any kind (`held: yes`, which a lapsed
+# `--until` date already reads as no) or a Done row. fm_backlog_row_probe owns
+# that read and its bound; any failure, an absent row, and an unheld open row
+# all return 1.
+#
+# A settled row explains a quiet pane only while nothing is running there:
+# crew_absorb_class answering `working` keeps the ladder, because a task that is
+# genuinely working and stops responding is the wedge this timer exists for,
+# whatever the backlog says. That read is taken only after the row reads
+# settled, so an unsettled lane pays only for the backlog read.
+#
+# The wait's age anchor is .waiting-since-<key>, holding the settlement, the pane
+# hash, and the status-log signature it was verified against, and rewritten only
+# when one of them changes. So an unchanged pane under an unchanged settlement
+# ages toward the ordinary PAUSE_RESURFACE_SECS recheck, while a new hash, a new
+# status event, or a different settlement starts its own window. The first
+# settled threshold is therefore silent: the pane was either just surfaced on
+# first sight or absorbed as working, and the settlement itself is a record its
+# supervisor wrote. Every return that is not a settlement drops the marker.
+wedge_settled_evidence() {  # <window> <task> <pane-hash> -> one wait_record on stdout
+  local win=$1 task=$2 hash=$3 marker state held settlement kind subject whom action identity
+  marker="$STATE/.waiting-since-$(window_key "$win")"
+  if [ -z "$task" ] || ! fm_backlog_row_probe "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$task" 2>/dev/null; then
+    rm -f "$marker"
+    return 1
+  fi
+  state=${FM_BACKLOG_ROW_STATE%% *}
+  held=${FM_BACKLOG_ROW_STATE#* }
+  held=${held%% *}
+  if [ "$state" = 'done' ]; then
+    settlement='done'
+    kind='finished in the backlog'; subject='awaiting firstmate'; whom=supervisor
+    action='clean up the finished task'
+  elif [ "$held" = yes ]; then
+    settlement="held:${FM_BACKLOG_ROW_HOLD_KIND:--}"
+    case "$FM_BACKLOG_ROW_HOLD_KIND" in
+      captain)
+        kind='held for the captain in the backlog'; subject='awaiting the captain'; whom=captain
+        action='answer the held decision or release the hold'
+        ;;
+      external)
+        kind='held in the backlog on an external dependency'; subject='awaiting external'; whom=external
+        action='release the hold once the external wait clears'
+        ;;
+      *)
+        kind="parked in the backlog${FM_BACKLOG_ROW_HOLD_KIND:+ ($FM_BACKLOG_ROW_HOLD_KIND)}"
+        subject='awaiting firstmate'; whom=supervisor
+        action='release the hold when the work should resume'
+        ;;
+    esac
+  else
+    rm -f "$marker"
+    return 1
+  fi
+  if [ "$(crew_absorb_class "$task")" = working ]; then
+    rm -f "$marker"
+    return 1
+  fi
+  identity="$settlement $hash $(fm_wake_signal_sig "$STATE/$task.status" || true)"
+  if [ "$(cat "$marker" 2>/dev/null || true)" != "$identity" ]; then
+    printf '%s' "$identity" > "$marker" || return 1
+  fi
+  wait_record "$kind" "$subject" "$whom" "$action" "$marker"
+}
+
+# Repeat-poll wedge-timer bookkeeping for an already-classified stale hash -
+# repairs a missing/corrupt timer (self-heals a watcher restart between
+# recording the hash and recording the timer), or escalates once
+# STALE_ESCALATE_SECS have elapsed. Shared by every place an unchanged stale
+# hash keeps being timed: the plain non-terminal path, whose same-hash repeat
+# times a hash absorbed as provably working and a hash already surfaced as
+# inconclusive alike, the stale_is_terminal-overridden path (a captain-relevant
+# status-log line that an active run/busy pane outranked), and a busy pane past
+# its completed-turn bound.
+# The wait-evidence consult (wedge_wait_evidence), the worktree write probe, the
+# dead-record probe (wedge_dead_record), and the backlog settlement consult
+# (wedge_settled_evidence) run ONLY here, inside the
 # at-threshold branch that is about to escalate: at most one each per window per
 # STALE_ESCALATE_SECS, never on an ordinary poll. The crew-state read
 # wedge_wait_evidence may take under config/wedge-defer-parked-gate keeps that
@@ -1323,9 +1420,12 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # the idle timer like every other deferral below; an unconfigured home never
 # reaches that read at all. The wait consult runs first, because a pane that can
 # account for its own quiet has nothing to prove through its worktree. The dead-record probe
-# runs last of the three, so the two cheaper deferrals keep the panes they
+# runs after the two cheaper deferrals, so they keep the panes they
 # already own on their existing bounded cadences and only a pane that would
-# otherwise alarm pays for a backend read.
+# otherwise alarm pays for a backend read; a gone agent keeps its report-once
+# absorb rather than a recurring recheck. The backlog consult runs last of all,
+# so only a live pane that would otherwise alarm pays for its backlog read and
+# the current-state read behind it.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash>
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 since age n reason evidence
   since=$(cat "$since_file" 2>/dev/null || true)
@@ -1349,6 +1449,10 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
           return 0
         fi
         if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
+          return 0
+        fi
+        if evidence=$(wedge_settled_evidence "$win" "$task" "$hash") &&
+           wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence" restart; then
           return 0
         fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
@@ -1524,7 +1628,7 @@ clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
   rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
-    "$STATE/.waiting-resurfaced-$key"
+    "$STATE/.waiting-resurfaced-$key" "$STATE/.waiting-since-$key"
 }
 
 clear_pause_tracking() {  # <window-key>
