@@ -1299,6 +1299,74 @@ EOF
   pass "fm-spawn: a registered forge must reach the worker's brief"
 }
 
+# The ship branch is immutable once the task record exists (state/<id>.meta
+# branch=), so the spawn is the last checkpoint where a drift between the branch
+# selected at intake (the brief's "Ship branch:" line) and the branch this spawn
+# would create can be caught: the worktree, the record, review-diff, and the
+# local merge all inherit the recorded name. A mismatch is refused before any
+# record exists, and a brief from before briefs recorded a ship branch is only
+# acceptable on the legacy default, which warns.
+test_spawn_requires_the_brief_to_carry_the_selected_branch() {
+  local rec home proj fakebin out status
+  rec=$(make_home branch-agree "- proj [no-mistakes] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  FM_HOME="$home" "$BRIEF" branch-agree-a1 proj --mode no-mistakes --branch-prefix fix/ >/dev/null \
+    || fail "a fix/-prefixed brief should scaffold"
+  fill_brief_subsections "$home/data/branch-agree-a1/brief.md" "Run the review loop." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a1 "$proj" claude --mode no-mistakes --yolo off --branch-prefix contrib/)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn selecting a different prefix than its brief records was accepted"
+  assert_contains "$out" "branch mismatch for branch-agree-a1" "the refusal did not name the drift it caught"
+  assert_contains "$out" "the brief says branch=fix/branch-agree-a1 but this spawn selected branch=contrib/branch-agree-a1" \
+    "the refusal did not name both sides of the drift"
+  assert_absent "$home/state/branch-agree-a1.meta" "the refused spawn still recorded a task"
+
+  write_brief "$home" branch-agree-a2 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a2 "$proj" claude --mode no-mistakes --yolo off --branch-prefix contrib/)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a non-legacy spawn on a brief that records no ship branch was accepted"
+  assert_contains "$out" "records no ship branch; regenerate it with --branch-prefix" \
+    "the legacy-brief refusal did not name the repair"
+  assert_absent "$home/state/branch-agree-a2.meta" "the refused legacy-brief spawn still recorded a task"
+
+  write_brief "$home" branch-agree-a3 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a3 "$proj" claude --mode no-mistakes --yolo off)
+  assert_contains "$out" "records no ship branch; defaulting to legacy branch fm/branch-agree-a3" \
+    "the legacy default did not warn about the brief's missing ship branch"
+  assert_not_contains "$out" "branch mismatch" "the legacy default was refused as drift"
+
+  FM_HOME="$home" "$BRIEF" branch-agree-a4 proj --mode no-mistakes --branch-prefix fix/ >/dev/null \
+    || fail "a second fix/-prefixed brief should scaffold"
+  fill_brief_subsections "$home/data/branch-agree-a4/brief.md" "Run the review loop." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a4 "$proj" claude --mode no-mistakes --yolo off --branch-prefix fix/)
+  assert_not_contains "$out" "branch mismatch" "an agreeing brief and selection were reported as drift"
+  assert_not_contains "$out" "records no ship branch" "an agreeing spawn reported the brief as legacy"
+
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a5 "$proj" claude --relaunch --branch-prefix fix/)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a relaunch carrying --branch-prefix was accepted"
+  assert_contains "$out" "--relaunch reuses the task's recorded ship branch; --branch-prefix cannot override it" \
+    "the relaunch refusal did not name the immutability it protects"
+
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a6 "$proj" claude --scout --branch-prefix fix/)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout spawn carrying --branch-prefix was accepted"
+  assert_contains "$out" "--branch-prefix applies only to ship spawns" \
+    "the scout refusal did not name the flag it refused"
+
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a7 "$proj" claude --mode no-mistakes --yolo off --branch-prefix "has space")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn whose prefix and task id compose an invalid branch was accepted"
+  assert_contains "$out" "--branch-prefix and task id must form a valid git branch (got 'has spacebranch-agree-a7')" \
+    "the ref-format refusal did not name the branch it refused"
+  assert_absent "$home/state/branch-agree-a7.meta" "the refused spawn still recorded a task"
+
+  pass "fm-spawn: the brief must carry the spawn's selected ship branch, and the selection is validated before anything is created"
+}
+
 # The registry is hand-edited markdown, so a one-character typo in the forge token
 # is the likeliest way it goes wrong. Such an entry must stop the spawn with the
 # parser's own reason in front of the operator: resolving it to "no registered
@@ -1492,6 +1560,7 @@ test_forge_gerrit_refuses_yolo
 test_forge_gerrit_changes_what_no_mistakes_means
 test_forge_gerrit_direct_pr_publishes_one_change
 test_spawn_requires_the_brief_to_carry_the_registered_forge
+test_spawn_requires_the_brief_to_carry_the_selected_branch
 test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
 test_spawn_and_promote_require_filled_task_subsections
