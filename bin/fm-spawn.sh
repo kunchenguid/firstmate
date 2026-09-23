@@ -2857,6 +2857,27 @@ if [ "$KIND" != secondmate ]; then
       exit 1
     fi
   fi
+  if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
+    if git -C "$PROJ_ABS" show-ref --verify --quiet "refs/heads/$EFFECTIVE_CREW_BRANCH"; then
+      echo "error: crew branch $EFFECTIVE_CREW_BRANCH already exists; refusing to launch a fresh task with an occupied branch" >&2
+      exit 1
+    fi
+    SPAWN_PROJECT_COMMON=$(git -C "$PROJ_ABS" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+    for SPAWN_OTHER_META in "$STATE"/*.meta; do
+      [ -f "$SPAWN_OTHER_META" ] || continue
+      [ "$SPAWN_OTHER_META" != "$STATE/$ID.meta" ] || continue
+      [ "$(fm_meta_get "$SPAWN_OTHER_META" kind)" != secondmate ] || continue
+      [ "$(fm_meta_get "$SPAWN_OTHER_META" crew_branch)" = "$EFFECTIVE_CREW_BRANCH" ] || continue
+      SPAWN_OTHER_PROJECT=$(fm_meta_get "$SPAWN_OTHER_META" project)
+      [ -n "$SPAWN_OTHER_PROJECT" ] || continue
+      SPAWN_OTHER_COMMON=$(git -C "$SPAWN_OTHER_PROJECT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+      [ -n "$SPAWN_PROJECT_COMMON" ] && [ "$SPAWN_OTHER_COMMON" = "$SPAWN_PROJECT_COMMON" ] || continue
+      SPAWN_OTHER_ID=${SPAWN_OTHER_META##*/}
+      SPAWN_OTHER_ID=${SPAWN_OTHER_ID%.meta}
+      echo "error: crew branch $EFFECTIVE_CREW_BRANCH is already assigned to task $SPAWN_OTHER_ID; refusing to launch a fresh task with a shared branch" >&2
+      exit 1
+    done
+  fi
 fi
 # Use the existing launch-brief overlay for every worker kind, including
   # pre-scope briefs and relaunches. Charters never enter this worker path.

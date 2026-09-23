@@ -117,6 +117,46 @@ test_custom_crew_branch_is_persisted_for_relaunch() {
   pass "spawn persists the custom crew branch in task metadata"
 }
 
+test_custom_crew_branch_ref_collision_is_refused_before_allocation() {
+  local rec id out status before
+  id='pool-crew-ref-collision-r1'
+  rec=$(make_case crew-ref-collision "$id")
+  read_case_record "$rec"
+  git -C "$PROJECT_DIR" branch feature/existing "$INITIAL_SHA"
+  scaffold_ship_brief "$id" direct-PR '' feature/existing
+  before=$(git -C "$POOL_DIR" rev-parse HEAD)
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted an occupied custom crew branch"
+  assert_contains "$out" "already exists" \
+    "occupied custom crew branch refusal did not explain the collision"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "occupied custom crew branch published task metadata"
+  [ "$(git -C "$POOL_DIR" rev-parse HEAD)" = "$before" ] \
+    || fail "occupied custom crew branch moved the pooled worktree before refusing"
+  pass "spawn refuses an occupied custom crew branch before allocation"
+}
+
+test_custom_crew_branch_task_collision_is_refused_before_allocation() {
+  local rec id out status
+  id='pool-crew-task-collision-r1'
+  rec=$(make_case crew-task-collision "$id")
+  read_case_record "$rec"
+  printf 'project=%s\nkind=ship\ncrew_branch=feature/shared\n' "$PROJECT_DIR" \
+    > "$HOME_DIR/state/other-task.meta"
+  scaffold_ship_brief "$id" direct-PR '' feature/shared
+
+  out=$(run_spawn "$id" --mode direct-PR --yolo off)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn accepted a crew branch assigned to another task"
+  assert_contains "$out" "already assigned to task other-task" \
+    "shared crew branch refusal did not identify the owning task"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "shared crew branch published task metadata"
+  pass "spawn refuses a crew branch already assigned to another task"
+}
+
 test_custom_crew_branch_never_targets_requested_base() {
   local rec id out status
   id='pool-crew-base-collision-r1'
@@ -1249,6 +1289,8 @@ test_pool_slot_claim_follows_the_spawn_outcome() {
 
 test_remote_seeded_home_spawns_from_treehouse_pool
 test_custom_crew_branch_is_persisted_for_relaunch
+test_custom_crew_branch_ref_collision_is_refused_before_allocation
+test_custom_crew_branch_task_collision_is_refused_before_allocation
 test_custom_crew_branch_never_targets_requested_base
 test_implicit_crew_branch_never_targets_requested_base
 test_pool_slot_claim_follows_the_spawn_outcome
