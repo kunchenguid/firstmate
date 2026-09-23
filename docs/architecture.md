@@ -5,6 +5,7 @@ How firstmate works, in depth.
 The [README](../README.md) carries the high-level diagram and a short synopsis.
 This document expands every part of it.
 firstmate's supervisor contract and routing index for conditional procedures is [`AGENTS.md`](../AGENTS.md); this is the human-facing companion.
+The extension and skill inventory and their wiring live in the [system map](system-map.md); this document owns the runtime mechanics.
 
 ## Event-driven supervision
 
