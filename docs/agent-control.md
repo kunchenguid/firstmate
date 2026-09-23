@@ -164,6 +164,7 @@ The worktree and the task's records are unaffected either way.
 - `fm-spawn --relaunch` independently refuses unless the endpoint is positively agent-free - either a `dead` endpoint that survives, or a Herdr endpoint proven gone by the absence proof above - so a replacement can never join a live agent.
   An `alive`, `ambiguous`, or `unreadable` verdict all refuse, and so does any endpoint whose absence is not provable, which on tmux is every `missing`; absence is claimed only from positive evidence of it.
   It also requires the shell to be in the recorded worktree: tmux refuses immediately when it is not, while Herdr sends one `cd` to the recorded path and refuses unless a subsequent path read confirms the move.
+  A record whose pool slot was reassigned to a later task (`worktree_reassigned_to=`, owned by [`bin/fm-wake-lib.sh`](../bin/fm-wake-lib.sh)) is refused, so a replacement is never launched into another task's copy.
 
 ## Capability matrix
 
