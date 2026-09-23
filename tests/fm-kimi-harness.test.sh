@@ -11,6 +11,11 @@ set -u
 # meant to control. Drop the ambient markers so the asserted verdict does not
 # depend on which harness launched the suite.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
+# A captain running several Kimi accounts exports KIMI_CODE_HOME to pick one.
+# Inherited into this suite it would send the spawn's trust pre-registration into
+# that real home instead of the fixture's, so the value is dropped here and the
+# cases that need it set it themselves.
+unset KIMI_CODE_HOME
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
@@ -21,6 +26,7 @@ KIMI_RUNTIME_LAUNCH_DIR=
 PYTHON_BIN=$(command -v python3) || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
+NODE_BIN=$(command -v node) || fail "test needs node"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
 cleanup_kimi_harness() {
@@ -210,6 +216,7 @@ SH
   fm_fake_exit0 "$fakebin" treehouse gh-axi gh
   fm_fake_exit0 "$fakebin" kimi
   ln -s "$JQ_BIN" "$fakebin/jq"
+  ln -s "$NODE_BIN" "$fakebin/node"
   printf '%s\n' "$fakebin"
 }
 
@@ -1119,6 +1126,105 @@ test_kimi_hook_install_is_surgical_idempotent_and_removable
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
+
+# --- workspace-trust pre-registration -------------------------------------
+#
+# The spawn's job here is to make the trust dialog never render. The live
+# dialog-answering gate stays as the backstop, so these cases prove the record
+# lands in the home the worker reads rather than that the gate stopped running.
+
+# The 12 hex characters Kimi takes from the sha256 of the resolved path,
+# computed with shasum so the expectation does not come from the subject's own
+# implementation.
+kimi_trust_record() {  # <kimi-home> <directory> -> the record path Kimi looks up
+  local home=$1 dir=$2 real slug hash
+  real=$(cd -P -- "$dir" && pwd -P)
+  slug=$(basename "$real" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9._-][^a-z0-9._-]*/-/g' -e 's/^-*//' -e 's/-*$//')
+  [ -n "$slug" ] || slug=workspace
+  if command -v shasum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$real" | shasum -a 256)
+  else
+    hash=$(printf '%s' "$real" | sha256sum)
+  fi
+  printf '%s/workspace-trust/wd_%s_%s\n' "$home" "$slug" "${hash:0:12}"
+}
+
+# The dialog is removed by a record in the home the pane will read. Without this
+# the launch depends on reading a vendor-rendered TUI frame through the backend's
+# viewport capture, which is exactly the fragile step.
+test_kimi_spawn_pretrusts_its_worktree() {
+  local id rec out rc record
+  id="kimi-trust-pre-$$"
+  rec=$(make_spawn_case trustpre "$id")
+  read_spawn_record "$rec"
+  KIMI_RUNTIME_TASK_TMP="/tmp/fm-$id"
+  rm -rf "$KIMI_RUNTIME_TASK_TMP"
+  KIMI_RUNTIME_LAUNCH_DIR=$(kimi_launch_dir "$id" "$HOME_DIR")
+  rm -rf "$KIMI_RUNTIME_LAUNCH_DIR"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "the kimi spawn should succeed: $out"
+  record=$(kimi_trust_record "$HOME_DIR/.kimi-code" "$WT_DIR")
+  assert_present "$record" "the kimi spawn did not pre-register workspace trust for its worktree"
+  # Trust has no ancestor walk, so the primary checkout is out of scope and the
+  # captain's own store must not gain an entry for a directory the pane never enters.
+  assert_absent "$(kimi_trust_record "$HOME_DIR/.kimi-code" "$PROJ_DIR")" \
+    "the kimi spawn also trusted the primary checkout, which the launch never enters"
+  pass "fm-spawn: a kimi spawn pre-registers workspace trust for its worktree only"
+}
+
+# Kimi's dialog preselects the affirmative answer and kimi_wait_for_ready answers
+# it live, so an unwritable store must cost the spawn a warning and nothing more -
+# the agy precedent. Turning it into a refusal would fail launches that work today.
+test_kimi_spawn_warns_but_continues_when_trust_cannot_be_recorded() {
+  local id rec out rc
+  id="kimi-trust-warn-$$"
+  rec=$(make_spawn_case trustwarn "$id")
+  read_spawn_record "$rec"
+  KIMI_RUNTIME_TASK_TMP="/tmp/fm-$id"
+  rm -rf "$KIMI_RUNTIME_TASK_TMP"
+  KIMI_RUNTIME_LAUNCH_DIR=$(kimi_launch_dir "$id" "$HOME_DIR")
+  rm -rf "$KIMI_RUNTIME_LAUNCH_DIR"
+  # A workspace-trust path that is a regular file is a malformed store: the
+  # registration refuses, and the spawn must carry on to the live dialog gate.
+  mkdir -p "$HOME_DIR/.kimi-code"
+  printf 'not a directory\n' > "$HOME_DIR/.kimi-code/workspace-trust"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "a failed trust pre-registration must not fail the kimi spawn: $out"
+  assert_contains "$out" "could not pre-register Kimi workspace trust" \
+    "the spawn did not warn that Kimi trust could not be pre-registered"
+  assert_contains "$out" "spawned $id harness=kimi" "the kimi spawn did not still report success"
+  pass "fm-spawn: a failed Kimi trust pre-registration warns and leaves the live dialog gate to answer"
+}
+
+# A captain may run several Kimi accounts as separate homes. The registration and
+# the pane must name the SAME one, or the record lands where the worker never looks.
+test_kimi_spawn_registers_and_forwards_the_selected_kimi_home() {
+  local id rec out rc selected
+  id="kimi-trust-home-$$"
+  rec=$(make_spawn_case trusthome "$id")
+  read_spawn_record "$rec"
+  KIMI_RUNTIME_TASK_TMP="/tmp/fm-$id"
+  rm -rf "$KIMI_RUNTIME_TASK_TMP"
+  KIMI_RUNTIME_LAUNCH_DIR=$(kimi_launch_dir "$id" "$HOME_DIR")
+  rm -rf "$KIMI_RUNTIME_LAUNCH_DIR"
+  selected="$CASE_DIR/kimi-code-2"
+  mkdir -p "$selected"
+  out=$(KIMI_CODE_HOME="$selected" run_spawn \
+    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "a kimi spawn under a selected Kimi home should succeed: $out"
+  assert_present "$(kimi_trust_record "$selected" "$WT_DIR")" \
+    "the kimi spawn did not pre-register trust in the selected Kimi home"
+  assert_absent "$(kimi_trust_record "$HOME_DIR/.kimi-code" "$WT_DIR")" \
+    "the kimi spawn wrote the default Kimi home instead of the selected one"
+  # The pane must read the same home the registration wrote, or the dialog appears anyway.
+  assert_grep "KIMI_CODE_HOME='$selected'" "$CASE_DIR/launch.log" \
+    "the launch command did not point the worker at the Kimi home that was trusted"
+  pass "fm-spawn: a kimi spawn registers and forwards the selected Kimi home"
+}
+
 test_kimi_launch_then_send_is_verified
 test_kimi_spawn_refuses_shared_task_temp_root
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
@@ -1145,3 +1251,6 @@ test_kimi_session_lock_identity
 test_kimi_busy_signature_is_scoped_to_spinner_lines
 test_watcher_never_classifies_kimi_from_its_spinner
 test_kimi_bordered_prompt_needs_no_override
+test_kimi_spawn_pretrusts_its_worktree
+test_kimi_spawn_warns_but_continues_when_trust_cannot_be_recorded
+test_kimi_spawn_registers_and_forwards_the_selected_kimi_home

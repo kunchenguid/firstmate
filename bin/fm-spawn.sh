@@ -3971,6 +3971,12 @@ fi
 # path that was not pre-registered, refuses to count a busy turn as ready until
 # it has done so. agy is crewmate/scout only (refused above for secondmate), so
 # only the worktree shape applies.
+# kimi gates a fresh worktree behind its own "Trust this folder?" dialog and
+# honours a workspace-trust record written ahead of launch
+# (bin/fm-kimi-trust.sh). Its dialog preselects the affirmative answer and
+# kimi_wait_for_ready answers it live, so a failed registration warns rather
+# than refusing, as for agy. kimi IS a verified secondmate harness, so both
+# shapes apply.
 AGY_TRUST_PREREGISTERED=0
 case "$HARNESS" in
 claude*)
@@ -3991,6 +3997,29 @@ agy)
     else
       echo "warning: could not pre-register agy workspace trust for $WT; the launch will answer the folder-trust dialog in window $T instead" >&2
     fi
+  fi
+  ;;
+kimi)
+  # Kimi gates a folder it has never seen behind a full-screen "Trust this
+  # folder?" dialog, and bin/fm-kimi-trust.sh records the one workspace-trust
+  # file that suppresses it (its header owns the store contract and the
+  # evidence). Like agy's and unlike claude's, Kimi's dialog PRESELECTS the
+  # affirmative answer and kimi_wait_for_ready below answers it live, so a
+  # failed registration is a warning rather than a refusal: it costs the
+  # readiness gate a vendor-rendered TUI frame it may not be able to read, not
+  # the spawn. Registering removes the dialog outright so that fragile frame
+  # read is never needed. Trust is exact-directory with no ancestor walk, so
+  # only the directory this launch starts in is registered - the worktree for a
+  # crewmate or scout, the home itself for a secondmate.
+  if [ "$KIND" = secondmate ]; then
+    kimi_trust_args=(--secondmate-home "$PROJ_ABS" "$ID")
+    kimi_trust_dir=$PROJ_ABS
+  else
+    kimi_trust_args=("$WT" "$PROJ_ABS")
+    kimi_trust_dir=$WT
+  fi
+  if ! "$FM_ROOT/bin/fm-kimi-trust.sh" "${kimi_trust_args[@]}" >/dev/null; then
+    echo "warning: could not pre-register Kimi workspace trust for $kimi_trust_dir; the launch will answer the folder-trust dialog in window $T instead" >&2
   fi
   ;;
 esac
@@ -4678,6 +4707,16 @@ esac
 # an unset value is the single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+fi
+# Same reasoning for Kimi, and here it is also what makes the trust
+# pre-registration above land where the worker will look: a captain may run
+# several Kimi accounts as separate homes (.kimi-code, .kimi-code-2, ...), and
+# bin/fm-kimi-trust.sh registers into ${KIMI_CODE_HOME:-$HOME/.kimi-code} as
+# resolved HERE. Without forwarding, a pane created by the backend daemon would
+# fall back to the default home and never see that record. Only when set; an
+# unset value is the single-home default on both sides and needs no prefix.
+if [ "$HARNESS" = kimi ] && [ -n "${KIMI_CODE_HOME:-}" ]; then
+  LAUNCH="KIMI_CODE_HOME=$(shell_quote "$KIMI_CODE_HOME") $LAUNCH"
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

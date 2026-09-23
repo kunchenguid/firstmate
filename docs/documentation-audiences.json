@@ -465,6 +465,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/verification/kimi.md",
+      "audience": "maintainer-verification"
+    },
+    {
       "path": "docs/verification/lint-option-a.md",
       "audience": "maintainer-verification"
     },

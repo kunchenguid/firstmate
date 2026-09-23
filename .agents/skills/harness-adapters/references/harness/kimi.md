@@ -1,6 +1,6 @@
 # Kimi Code
 
-Verified on 2026-09-17 with Kimi Code CLI 2.0.0.
+Verified on 2026-09-17 with Kimi Code CLI 2.0.0; the workspace-trust facts below were re-established on 2026-09-23 against Kimi Code CLI 2.0.2.
 
 ## Operating facts
 
@@ -14,7 +14,7 @@ Verified on 2026-09-17 with Kimi Code CLI 2.0.0.
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Firstmate skills are discovered. |
 | Autonomy | `--auto` is the `Never Ask` tier; `-y` and `--yolo` now select the distinct, weaker `Ask When Needed` tier and are not used. |
-| Trust dialog | A fresh worktree shows `Trust this folder?` with `Trust this folder` pre-selected; spawn reads the visible pane, recognizes the complete dialog (its title, both navigation-hint tokens `↑↓ navigate` and `Enter select` - matched separately so a hint wrapped in a narrow pane still counts - the selected `❯ Trust this folder`, and `Don't trust`), sends Enter on every poll the complete dialog is still there, verifies that a later visible-pane capture no longer contains it, and then continues the ordinary readiness gate. Trust is never pre-registered in `config.toml`; the dialog is answered live. |
+| Trust dialog | A folder Kimi has never seen shows a full-screen `Trust this folder?` with `Trust this folder` pre-selected, still true on 2.0.2. `../../../bin/fm-kimi-trust.sh` pre-registers the launch directory in Kimi's own workspace-trust store before launch so the dialog never renders; its header owns the store contract and the id derivation. Nothing is pre-registered in `config.toml`. The live answer remains the backstop for a dialog that renders anyway: spawn reads the visible pane, recognizes the complete dialog (its title, both navigation-hint tokens `↑↓ navigate` and `Enter select` - matched separately so a hint wrapped in a narrow pane still counts - the selected `❯ Trust this folder`, and `Don't trust`), sends Enter on every poll the complete dialog is still there, verifies that a later visible-pane capture no longer contains it, and then continues the ordinary readiness gate. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; identity comes from process ancestry command name `kimi`, which `../../../bin/fm-harness.sh` keeps a retained foreign marker from overriding. |
 | Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
@@ -39,6 +39,23 @@ The delivery-only matcher requires the observed whitespace, deliberately exclude
 Kimi's footer tip can show `ctrl+c: cancel` while idle, and its idle bar can contain lowercase `thinking` as an effort label.
 Neither is a busy-state source.
 The delivery-only spinner match covers the full moon-phase glyph set but remains locale- and emoji-font-sensitive because Kimi exposes no stable ASCII busy token.
+
+## Workspace trust pre-registration
+
+`../../../bin/fm-kimi-trust.sh` records the one file that suppresses the dialog, and its header is the single owner of the store contract, the workspace-id derivation, and the scope tests.
+[`../../../../../docs/verification/kimi.md`](../../../../../docs/verification/kimi.md) owns the dated commands and output those facts were established with.
+Four properties decide how the adapter uses it.
+
+Trust lives in one file per workspace at `<home>/workspace-trust/<workspace-id>`, so the registration creates a single new file and touches nothing else; `workspaces.json` is Kimi's own registry and has no part in the trust decision.
+The workspace id is the whole lookup key, matched as the filename rather than by the `root` field inside the file, so the derivation is the load-bearing part.
+Trust is exact-directory with no ancestor walk, so only the directory the pane starts in is registered - the worktree for a crewmate or scout, the home itself for a secondmate - and never the primary checkout.
+Kimi resolves the launch directory before deriving the id, so the physical path is what gets registered.
+
+The home is `${KIMI_CODE_HOME:-$HOME/.kimi-code}`, because a captain may run several Kimi accounts as separate homes.
+`../../../bin/fm-spawn.sh` forwards a set `KIMI_CODE_HOME` onto the launch so the pane reads the same home the registration wrote; a pane created by a long-lived backend daemon would otherwise fall back to the default home and never see the record.
+
+A failed registration is a stderr warning rather than a refusal, the `../../../bin/fm-agy-trust.sh` precedent: Kimi's dialog preselects the affirmative answer and the readiness gate can answer it, so the cost is the fragile vendor-frame read rather than the spawn.
+`../../../tests/fm-kimi-trust.test.sh` covers the store edits, the id derivation against vendor-observed basenames, and every scope and malformed-store refusal; `../../../tests/fm-kimi-harness.test.sh` covers the spawn wiring, the warning path, and the forwarded home.
 
 ## Crew turn-end hook and primary limit
 
