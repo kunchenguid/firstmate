@@ -46,7 +46,7 @@ If the workflow or target is ambiguous, ask one concise question instead of gues
 Read `config/vessel/agents.json` (if it is missing, use `vessel/defaults/agents.json`):
 
 ```json
-{"version":1,"agents":[{"name":"Snoop","mode":"Review","harness":"pi","model":"gpt-5.6-luna","effort":"high","instructions_file":"snoop.md"}]}
+{"version":1,"agents":[{"name":"Snoop","mode":"Review","harness":"pi","model":"openrouter/meta/muse-spark-1.3-contributor","effort":"high","instructions_file":"snoop.md"}]}
 ```
 
 - An agent the captain named wins (case-insensitive name match).

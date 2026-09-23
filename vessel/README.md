@@ -50,7 +50,7 @@ Delivery mode, merge authority, and supervision stay firstmate's. The request gr
 
 ## Configuration
 
-`config/vessel/agents.json` and `config/vessel/agents/*.md` hold the agents. They are created from `vessel/defaults/` on first run; edit them in Settings. Harnesses are firstmate's verified adapters (there is no Copilot adapter; the defaults use `pi` with `gpt-5.6-luna`).
+`config/vessel/agents.json` and `config/vessel/agents/*.md` hold the agents. They are created from `vessel/defaults/` on first run; edit them in Settings. Harnesses are firstmate's verified adapters (there is no Copilot adapter; the defaults use `pi` with `openrouter/meta/muse-spark-1.3-contributor`).
 
 `config/vessel/vessel.json` is optional:
 
