@@ -1031,14 +1031,22 @@ wedge_defer_writing() {  # <window> <since-file> <triage-label> <idle-age>
 #                degraded one: a gate the pipeline parked was never written down
 #                by the worker, so there is no honest age to publish and the
 #                deferral publishes none.
+#   <cadence-record> OPTIONAL, and read only when <age-record> is empty: a file
+#                whose mtime bounds the RECHECK alone, for a wait whose start
+#                nobody wrote down but whose evidence this watcher verifies
+#                itself. Its mtime is when the watcher first verified the wait,
+#                never when the wait began, so it paces the bounded recheck
+#                exactly as an age record does and publishes NO age: a number
+#                read from it would describe the observation rather than the
+#                wait.
 # The fields are joined with US (\037) rather than TAB because TAB is an IFS
 # WHITESPACE character: consecutive tabs collapse under `read`, so a record with
 # an empty middle field would not fail to parse, it would SHIFT every later field
 # left into another field's position. US is not IFS whitespace, so consecutive
 # delimiters yield genuinely empty fields and the record either parses as written
 # or fails the deferral's guard.
-wait_record() {  # <kind> <subject> <whom> <action> <age-record>
-  printf '%s\037%s\037%s\037%s\037%s' "$1" "$2" "$3" "$4" "$5"
+wait_record() {  # <kind> <subject> <whom> <action> <age-record> [cadence-record]
+  printf '%s\037%s\037%s\037%s\037%s\037%s' "$1" "$2" "$3" "$4" "$5" "${6-}"
 }
 
 # The evidence that a quiet pane is a BOUNDED WAIT rather than a wedge suspect,
@@ -1161,6 +1169,12 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
 # pass, so a number read from it would never grow and would tell a supervisor
 # that a day-old gate opened four minutes ago. The bounded re-surface still
 # fires, governed by its own throttle instead of by a wait age.
+# A wait with no written start but a CADENCE record is paced by that record and
+# still publishes no age, for the same reason: the record is this watcher's own
+# note of when it first verified the wait, so a number read from it would report
+# the observation as the wait - a hold the captain has been sitting on for a day
+# as four hours old. Only a record nothing at all can be aged from falls back to
+# the quiet window above.
 # A CAPTAIN-facing wait is not rechecked at all while the away-posture record
 # exists: the one human who can answer it is away, the return brief already lists
 # it, and every other captain-facing path in this file absorbs it silently for
@@ -1186,17 +1200,17 @@ wedge_wait_evidence() {  # <task> -> one wait_record on stdout
 # demand-inspection history it had already earned.
 wedge_defer_wait() {  # <window> <since-file> <triage-label> <idle-age> <wait-record> [restart-while-silent]
   local win=$1 since_file=$2 label=$3 age=$4 record=$5 restart_silent=${6-}
-  local kind subject whom action anchor key mtime wage min_age waited us ok
+  local kind subject whom action anchor cadence key mtime publish wage min_age waited us ok
   us=$(printf '\037')
-  IFS=$us read -r kind subject whom action anchor <<EOF
+  IFS=$us read -r kind subject whom action anchor cadence <<EOF
 $record
 EOF
   # Enforce the whole of the record's own contract here, which the US delimiter
   # now makes checkable: `kind`, `subject`, `whom` and `action` are each a field
   # the recheck prints and must be non-empty, `whom` is exactly one of the three
-  # values the record contract names, only `anchor` may legitimately
-  # be empty, and the record holds exactly four delimiters - a surplus one is
-  # visible because `read` puts everything past the last field into `anchor`.
+  # values the record contract names, only `anchor` and `cadence` may legitimately
+  # be empty, and the record holds exactly five delimiters - a surplus one is
+  # visible because `read` puts everything past the last field into `cadence`.
   # A record that fails any of these is refused rather than deferred: deferring
   # is what takes the ladder away, so the unparseable case must fall back to the
   # escalation the caller was about to make.
@@ -1205,7 +1219,7 @@ EOF
     captain|supervisor|external) ;;
     *) ok=0 ;;
   esac
-  case "$anchor" in
+  case "$cadence" in
     *"$us"*) ok=0 ;;
   esac
   if [ -z "$kind" ] || [ -z "$subject" ] || [ -z "$action" ]; then ok=0; fi
@@ -1223,12 +1237,28 @@ EOF
     return 0
   fi
   mtime=''
+  publish=1
   [ -n "$anchor" ] && mtime=$(stat_mtime "$anchor")
   case "$mtime" in
     ''|*[!0-9]*)
       # No readable record of when the wait started - either none exists, or the
-      # status file could not be read. Age from the quiet window already in hand
-      # and publish nothing: anchoring on the current time instead would
+      # status file could not be read. A cadence record still paces the recheck
+      # from here, but it dates this watcher's observation rather than the wait,
+      # so it publishes no age.
+      mtime=''
+      if [ -n "$cadence" ]; then
+        mtime=$(stat_mtime "$cadence")
+        case "$mtime" in
+          ''|*[!0-9]*) mtime='' ;;
+          *) publish=0 ;;
+        esac
+      fi
+      ;;
+  esac
+  case "$mtime" in
+    '')
+      # Nothing readable to age from at all. Age from the quiet window already in
+      # hand and publish nothing: anchoring on the current time instead would
       # recompute the wait age as 0 at every threshold, and the bounded
       # re-surface could then never fire at all - the one outcome this deferral
       # must not produce.
@@ -1237,7 +1267,8 @@ EOF
     *)
       wage=$(( $(date +%s) - mtime ))
       [ "$wage" -ge 0 ] || wage=0
-      min_age=$PAUSE_RESURFACE_SECS; waited=", waiting ${wage}s"
+      min_age=$PAUSE_RESURFACE_SECS; waited=''
+      [ "$publish" -eq 0 ] || waited=", waiting ${wage}s"
       ;;
   esac
   clear_write_tracking "$key"
@@ -1347,16 +1378,27 @@ wedge_dead_record() {  # <window> <since-file> <triage-label> <idle-age> <pane-h
 # whatever the backlog says. That read is taken only after the row reads
 # settled, so an unsettled lane pays only for the backlog read.
 #
-# The wait's age anchor is .waiting-since-<key>, holding the settlement, the pane
-# hash, and the status-log signature it was verified against, and rewritten only
-# when one of them changes. So an unchanged pane under an unchanged settlement
-# ages toward the ordinary PAUSE_RESURFACE_SECS recheck, while a new hash, a new
-# status event, or a different settlement starts its own window. The first
-# settled threshold is therefore silent: the pane was either just surfaced on
-# first sight or absorbed as working, and the settlement itself is a record its
-# supervisor wrote. Every return that is not a settlement drops the marker.
-wedge_settled_evidence() {  # <window> <task> <pane-hash> -> one wait_record on stdout
-  local win=$1 task=$2 hash=$3 marker state held settlement kind subject whom action identity
+# The recheck is paced by .waiting-since-<key>, holding the settlement and the
+# status-log signature it was verified against, and rewritten only when one of
+# them changes. So an unchanged settlement ages toward the ordinary
+# PAUSE_RESURFACE_SECS recheck, while a new status event or a different
+# settlement starts its own window. The pane hash is deliberately NOT part of
+# that identity: this timer also times a BUSY pane past its completed-turn bound
+# (busy_turn_bound_check), and a busy pane's harness footer ticks on every
+# capture, so a hash-keyed marker would be reminted at every threshold, its age
+# would never reach the cadence, and the absorb would be silent forever - the
+# forgotten wait rotting invisibly that a bounded recheck exists to prevent.
+# Leaving it out costs nothing: a pane that CHANGES leaves this timer altogether
+# and takes its ordinary first-sight classification, and the marker is dropped
+# wherever the window's stale bookkeeping resets (clear_stale_hash_tracking).
+# The marker dates the moment this watcher verified the settlement, not the
+# moment the wait began, so it is handed to the record as the CADENCE anchor and
+# publishes no wait age. The first settled threshold is therefore silent: the
+# pane was either just surfaced on first sight or absorbed as working, and the
+# settlement itself is a record its supervisor wrote. Every return that is not a
+# settlement drops the marker.
+wedge_settled_evidence() {  # <window> <task> -> one wait_record on stdout
+  local win=$1 task=$2 marker state held settlement kind subject whom action identity
   marker="$STATE/.waiting-since-$(window_key "$win")"
   if [ -z "$task" ] || ! fm_backlog_row_probe "${FM_DATA_OVERRIDE:-$FM_HOME/data}" "$task" 2>/dev/null; then
     rm -f "$marker"
@@ -1394,11 +1436,11 @@ wedge_settled_evidence() {  # <window> <task> <pane-hash> -> one wait_record on 
     rm -f "$marker"
     return 1
   fi
-  identity="$settlement $hash $(fm_wake_signal_sig "$STATE/$task.status" || true)"
+  identity="$settlement $(fm_wake_signal_sig "$STATE/$task.status" || true)"
   if [ "$(cat "$marker" 2>/dev/null || true)" != "$identity" ]; then
     printf '%s' "$identity" > "$marker" || return 1
   fi
-  wait_record "$kind" "$subject" "$whom" "$action" "$marker"
+  wait_record "$kind" "$subject" "$whom" "$action" '' "$marker"
 }
 
 # Repeat-poll wedge-timer bookkeeping for an already-classified stale hash -
@@ -1451,7 +1493,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         if wedge_dead_record "$win" "$since_file" "$label" "$age" "$hash" "$task"; then
           return 0
         fi
-        if evidence=$(wedge_settled_evidence "$win" "$task" "$hash") &&
+        if evidence=$(wedge_settled_evidence "$win" "$task") &&
            wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence" restart; then
           return 0
         fi
