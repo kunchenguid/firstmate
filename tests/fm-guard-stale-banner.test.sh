@@ -143,7 +143,11 @@ record_pi_extension_session() {
       version=$(FM_STATE_OVERRIDE="$home/state" bash -c '. "$1"; fm_pi_extension_version "$2"' \
         _ "$ROOT/bin/fm-wake-lib.sh" "$root/.pi/extensions/$source") || return 1
     fi
-    printf '%s\n%s\n' "$version" "$session_pid" > "$home/state/$marker"
+    if [ "${pair##*:}" = watch ]; then
+      printf '%s\n%s\ngeneration=1 phase=active\n' "$version" "$session_pid" > "$home/state/$marker"
+    else
+      printf '%s\n%s\n' "$version" "$session_pid" > "$home/state/$marker"
+    fi
   done
   [ -n "$session_pid" ] && printf '%s\n' "$session_pid" > "$home/state/.lock"
   return 0
@@ -713,7 +717,9 @@ test_extension_ownership_needs_every_signal() {
     "missing-watch-marker:live:watch:" \
     "missing-turnend-marker:live:turnend:" \
     "drifted-watch-build:live::watch" \
-    "drifted-turnend-build:live::turnend"; do
+    "drifted-turnend-build:live::turnend" \
+    "handoff-watch-generation:live::" \
+    "legacy-watch-marker:live::"; do
     case_name=${spec%%:*}
     dir=$(make_guard_case "extension-$case_name")
     home=$(case_home "$dir")
@@ -727,6 +733,20 @@ test_extension_ownership_needs_every_signal() {
       "$(printf '%s' "$spec" | cut -d: -f3)" \
       "$(printf '%s' "$spec" | cut -d: -f4)" \
       || fail "could not record the Pi extension session for $case_name"
+    case "$case_name" in
+      handoff-watch-generation)
+        head -n 2 "$home/state/.pi-watch-extension-loaded" \
+          > "$home/state/.pi-watch-extension-loaded.tmp"
+        printf 'generation=1 phase=handoff\n' \
+          >> "$home/state/.pi-watch-extension-loaded.tmp"
+        mv "$home/state/.pi-watch-extension-loaded.tmp" "$home/state/.pi-watch-extension-loaded"
+        ;;
+      legacy-watch-marker)
+        head -n 2 "$home/state/.pi-watch-extension-loaded" \
+          > "$home/state/.pi-watch-extension-loaded.tmp"
+        mv "$home/state/.pi-watch-extension-loaded.tmp" "$home/state/.pi-watch-extension-loaded"
+        ;;
+    esac
     touch "$home/state/.last-watcher-beat"
     out=$(run_guard_case_extension "$dir")
     kill "$pid" 2>/dev/null || true

@@ -238,17 +238,32 @@ fm_pi_extension_version() {
   fi
 }
 
-# fm_pi_extension_loaded <marker> <expected-version> <session-lock>
+# fm_pi_extension_loaded <marker> <expected-version> <session-lock> [active]
 # True when <marker> records <expected-version> and names the session process in
 # <session-lock>, i.e. the session holding this home loaded exactly this build.
+# The Pi watcher marker additionally carries its generation phase. Requiring
+# `active` rejects the handoff marker a retiring generation leaves behind, so a
+# running Pi process whose replacement did not load the watcher extension can
+# never vouch for an unheld watcher lock with stale load evidence.
 fm_pi_extension_loaded() {
-  local marker=$1 expected_version=$2 lock=$3 marker_version marker_pid lock_pid
+  local marker=$1 expected_version=$2 lock=$3 required_phase=${4:-} marker_version marker_pid lock_pid owner
   [ -f "$marker" ] && [ -f "$lock" ] && [ -n "$expected_version" ] || return 1
   marker_version=$(sed -n '1p' "$marker")
   marker_pid=$(sed -n '2p' "$marker")
   lock_pid=$(sed -n '1p' "$lock")
   [ -n "$marker_pid" ] || return 1
-  [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ]
+  [ "$marker_version" = "$expected_version" ] && [ "$marker_pid" = "$lock_pid" ] || return 1
+  [ -z "$required_phase" ] && return 0
+  owner=$(sed -n '3p' "$marker")
+  case "$owner" in
+    generation=*\ phase="$required_phase")
+      owner=${owner#generation=}
+      owner=${owner%% *}
+      case "$owner" in ''|0|*[!0-9]*) return 1 ;; esac
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 # fm_pi_extension_owns_supervision <state> <root>
@@ -260,7 +275,7 @@ fm_pi_extension_loaded() {
 # missing it has no benign hand-off to tolerate.
 fm_pi_extension_owns_supervision() {
   fm_extension_pair_owns_supervision "$1" "$2/.pi/extensions" \
-    "fm-primary-pi-watch.ts:.pi-watch-extension-loaded" \
+    "fm-primary-pi-watch.ts:.pi-watch-extension-loaded:active" \
     "fm-primary-turnend-guard.ts:.pi-turnend-extension-loaded"
 }
 
@@ -284,15 +299,18 @@ fm_extension_owns_supervision() {
   fm_pi_extension_owns_supervision "$1" "$2" || fm_omp_extension_owns_supervision "$1" "$2"
 }
 
-fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker>...
-  local state=$1 dir=$2 lock session_pid pair source marker version
+fm_extension_pair_owns_supervision() {  # <state> <extension-dir> <source:marker[:phase]>...
+  local state=$1 dir=$2 lock session_pid pair source rest marker phase version
   shift 2
   lock="$state/.lock"
   for pair in "$@"; do
     source=${pair%%:*}
-    marker=${pair#*:}
+    rest=${pair#*:}
+    marker=${rest%%:*}
+    phase=
+    [ "$marker" = "$rest" ] || phase=${rest#*:}
     version=$(fm_pi_extension_version "$dir/$source") || return 1
-    fm_pi_extension_loaded "$state/$marker" "$version" "$lock" || return 1
+    fm_pi_extension_loaded "$state/$marker" "$version" "$lock" "$phase" || return 1
   done
   session_pid=$(sed -n '1p' "$lock" 2>/dev/null)
   fm_pid_alive "$session_pid"
@@ -1949,6 +1967,22 @@ fm_wake_secondmate_progress_marker_write() { # <task> <observed-at> <oldest-row-
   fi
 }
 
+fm_wake_secondmate_ring_marker_write() { # <task> <row-key>
+  local task=$1 row_key=$2 marker tmp
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$row_key" in ''|*[!0-9-]*) return 1 ;; esac
+  marker="$STATE/.secondmate-wake-ring-$task"
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  fi
+  tmp=$(mktemp "$STATE/.secondmate-wake-ring.XXXXXX") || return 1
+  if ! printf '%s\n' "$row_key" > "$tmp" || ! chmod 0600 "$tmp" \
+    || ! _fm_atomic_replace "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 fm_wake_secondmate_stall_marker_write() { # <task> <row-key>
   local task=$1 row_key=$2 marker tmp
   case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
@@ -2022,6 +2056,34 @@ fm_wake_restore_queue() {
   else
     mv "$drained" "$FM_WAKE_QUEUE"
   fi
+}
+
+# fm_wake_queue_prune_task <state> <task-id> [target]
+# Prune pending durable wakes for <task-id> and its recorded <target> from
+# the wake queue. Removes stale wakes for <target>, signal wakes for the task's
+# status or turn-ended files, and task-specific check wakes.
+fm_wake_queue_prune_task() {  # <state> <task-id> [target]
+  local state=$1 task=$2 target=${3:-}
+  local queue="$state/.wake-queue" lock="$state/.wake-queue.lock" tmp
+  [ -f "$queue" ] || return 0
+  [ -s "$queue" ] || return 0
+  fm_lock_acquire_wait "$lock" || return 1
+  tmp=$(mktemp "$state/.wake-queue.prune.XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  chmod 0600 "$tmp" 2>/dev/null || true
+  awk -F '\t' -v task="$task" -v target="$target" -v state="$state" '
+    NF >= 5 {
+      if ($3 == "stale" && target != "" && $4 == target) next
+      if ($3 == "signal" && ($4 == task || $4 == task ".status" || $4 == task ".turn-ended" || $4 == state "/" task ".status" || $4 == state "/" task ".turn-ended")) next
+      if ($3 == "check" && $4 == state "/" task ".check.sh") next
+    }
+    { print }
+  ' "$queue" > "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
+  if ! _fm_atomic_replace "$tmp" "$queue"; then
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
 }
 
 fm_wake_print_deduped() {
@@ -2186,7 +2248,10 @@ fm_wake_signal_seen_size() {  # <state> <file>
 # that fact.
 # A missing marker or unreadable signature is not a match, so uncertainty reads
 # as an unreported state.
-fm_wake_signal_seen_current() {  # <state> <file>
+# This predicate never consults the owned-append ledger, which is what makes it
+# the safe gate for a captain-facing surface: a line must never be withheld from
+# presentation merely because this home is the writer that appended it.
+fm_wake_signal_reported_current() {  # <state> <file>
   local sig marker
   sig=$(fm_wake_signal_sig "$2") || return 1
   [ -n "$sig" ] || return 1
@@ -2198,6 +2263,28 @@ fm_wake_signal_seen_current() {  # <state> <file>
       ;;
     *) [ "$(cat "$marker" 2>/dev/null)" = "$sig" ] ;;
   esac
+}
+
+# 0 when the state was already reported, or when the file is a readable regular
+# file that grew past the watcher's classified offset and every grown byte is in
+# this home's owned-append ledger. Owned-only growth past the classified offset
+# is this home's own bookkeeping and is not a new signal, so separate
+# --resolve-key answers do not each force a wake. Any other signature change
+# without owned growth is not a match, so uncertainty still reads as unreported.
+# This is the wake-scan predicate and answers only "should this wake the home?".
+# Presentation asks the different question and uses
+# fm_wake_signal_reported_current.
+fm_wake_signal_seen_current() {  # <state> <file>
+  local classified size
+  fm_wake_signal_reported_current "$1" "$2" && return 0
+  case "$2" in *.status) ;; *) return 1 ;; esac
+  _fm_wake_require_classify || return 1
+  classified=$(fm_wake_signal_seen_size "$1" "$2")
+  size=$(_fm_status_file_size "$2") || return 1
+  size=${size//[[:space:]]/}
+  case "$classified:$size" in *[!0-9:]*) return 1 ;; esac
+  [ "$classified" -lt "$size" ] && [ -f "$2" ] && [ -r "$2" ] && [ ! -L "$2" ] || return 1
+  status_home_appends_covers "$2" "$classified" "$size"
 }
 
 fm_wake_status_reported_commit() {  # <state> <status-file> <reported-signature>
@@ -2225,9 +2312,10 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 # in the very turn or tick that writes them (answerer-closes resolved lines, a
 # pending-reply escalation close, captain-held transfers). Such a close must
 # not wake the session that wrote it, so this appends one command's lines
-# together and then advances the watcher's seen marker across the appended
-# bytes and no byte this home has not already read. The advance is
-# provenance-gated and fails toward waking:
+# together, records the exact appended byte range in the home-owned append
+# ledger (bin/fm-classify-lib.sh), and then advances the watcher's seen marker
+# across the appended bytes and no byte this home has not already read. The
+# advance is provenance-gated and fails toward waking:
 #   - the marker advances only when this home already read every pre-append
 #     byte, the post-append size equals that size plus exactly the appended
 #     bytes (no foreign write interleaved), AND the watcher's own span
@@ -2244,10 +2332,13 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 #     side-band;
 #   - on ANY other condition - a missing file, pending foreign bytes, an
 #     interleaved writer, an unreadable size or identity - the lines are still
-#     appended but the marker is left alone, so the watcher surfaces the file
-#     normally.
-# A later, different line from any other writer grows the size past the marker
-# and wakes as before: task identity alone can never suppress new content.
+#     appended and the owned range is still recorded when growth is proven, but
+#     the marker is left alone, so the watcher surfaces the file normally.
+# Later signal scans treat owned ranges as already owned even when the watcher
+# has not caught up, so separate --resolve-key answers do not each force a
+# captain-facing wake. A later, different line from any other writer grows the
+# size past the owned ranges and wakes as before: task identity alone can never
+# suppress new content.
 # Each line is stamped with its emission time on the way in (status_stamp_line,
 # bin/fm-classify-lib.sh), so the appended bytes are the stamped ones, not the
 # caller's: a caller that caps a line first must reserve status_stamp_width,
@@ -2256,7 +2347,8 @@ fm_wake_status_mark_current() {  # <state> <status-file>
 # Returns 0 appended and self-announced, 1 appended but left for the watcher
 # (the safe direction), 2 the append itself failed.
 fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
-  local state=$1 file=$2 line appended=0 pre_size='' pre_ident='' post_size post_ident classified folded lag span_rc=0
+  local state=$1 file=$2 line appended=0 pre_size='' pre_ident='' post_size post_ident
+  local classified folded lag span_rc=0
   local LC_ALL=C stamped=()
   shift 2
   _fm_wake_require_classify || return 1
@@ -2268,12 +2360,14 @@ fm_wake_status_append_self_announced() {  # <state> <status-file> <line>...
     pre_ident=$(_fm_open_decisions_file_ident "$file") || pre_ident=''
   fi
   printf '%s\n' "${stamped[@]}" >> "$file" || return 2
+  case "$pre_size" in ''|*[!0-9]*) return 1 ;; esac
   post_size=$(_fm_status_file_size "$file") || return 1
   post_ident=$(_fm_open_decisions_file_ident "$file") || return 1
-  case "$pre_size$post_size" in ''|*[!0-9]*) return 1 ;; esac
+  case "$post_size" in ''|*[!0-9]*) return 1 ;; esac
   [ -n "$pre_ident" ] && [ "$post_ident" = "$pre_ident" ] || return 1
   for line in "${stamped[@]}"; do appended=$((appended + ${#line} + 1)); done
   [ "$post_size" -eq $((pre_size + appended)) ] || return 1
+  status_home_appends_record "$file" "$pre_size" "$post_size" || return 1
   classified=$(fm_wake_signal_seen_size "$state" "$file")
   if [ "$classified" != "$pre_size" ]; then
     folded=$(status_open_decisions_cursor_offset "$file") || folded=0
@@ -2448,7 +2542,7 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
     # existing historical caveat. A direct status row is annotated for every
     # still-unread line since the last drain presentation; already-presented
     # bytes are not replayed.
-    if [ "$mode" = historical ] && fm_wake_signal_seen_current "$STATE" "$path"; then
+    if [ "$mode" = historical ] && fm_wake_signal_reported_current "$STATE" "$path"; then
       continue
     fi
     offset=$(fm_wake_status_cursor_offset "$path") || return 1

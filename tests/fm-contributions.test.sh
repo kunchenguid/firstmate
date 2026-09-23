@@ -339,10 +339,8 @@ test_away_yolo_is_fleet_work() {
   with_home "$home" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
     || fail 'could not register away delivery'
   printf 'yolo=on\n' >> "$home/state/delivery.meta"
-  with_home "$home" "$ROOT/bin/fm-afk-contract.sh" propose --words 'merge the delivery PR when green' >/dev/null \
-    || fail 'could not propose away posture'
-  with_home "$home" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null \
-    || fail 'could not confirm away posture'
+  with_home "$home" "$ROOT/bin/fm-afk-contract.sh" enter --words 'merge the delivery PR when green' >/dev/null \
+    || fail 'could not enter away posture'
   mutate_record "$home" delivery '.records[0].observation.can_merge=true'
   with_home "$home" "$ROOT/bin/fm-fleet-snapshot.sh" --contribution-input > "$home/input.json" \
     || fail 'could not collect contribution input for away posture'
@@ -364,10 +362,8 @@ test_away_yolo_cross_home_is_fleet_work() {
   with_home "$child" "$ROOT/bin/fm-pr-check.sh" delivery https://github.com/o/r/pull/8 >/dev/null \
     || fail 'could not register child away delivery'
   printf 'yolo=on\n' >> "$child/state/delivery.meta"
-  with_home "$child" "$ROOT/bin/fm-afk-contract.sh" propose --words 'merge the delivery PR when green' >/dev/null \
-    || fail 'could not propose child away posture'
-  with_home "$child" "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null \
-    || fail 'could not confirm child away posture'
+  with_home "$child" "$ROOT/bin/fm-afk-contract.sh" enter --words 'merge the delivery PR when green' >/dev/null \
+    || fail 'could not enter child away posture'
   mutate_record "$child" delivery '.records[0].observation.can_merge=true'
   FM_SNAPSHOT_NOW="$NOW" with_home "$child" "$ROOT/bin/fm-fleet-snapshot.sh" --secondmate-home-summary > "$child/state/home-summary.json" \
     || fail 'could not collect child contribution summary'
@@ -558,7 +554,8 @@ printf '%s\n' "$*" >> "$FORGE/calls"
 fault=$(cat "$FORGE/fault" 2>/dev/null || true)
 case "$fault" in latency) sleep "${FORGE_LATENCY:-2}" ;; esac
 case "$fault:$*" in
-  reserve:'api repos/o/r/'*)
+  # Advance once before the parallel read wave; its readers share this clock.
+  reserve:'api repos/o/r/issues/9')
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 6 ))" > "$FORGE/clock" ;;
   exhaust:'api repos/o/r/issues/8/comments?'*)
     printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock" ;;
