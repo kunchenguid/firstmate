@@ -565,7 +565,11 @@ Observed output (relevant lines):
 
 ```text
 ok - a mode-incapable device seals a fresh artifact by signature and still catches tampering
+ok - a symlinked sidecar destination is refused instead of written through
+ok - a merged poll retires with its sidecar on a mode-incapable device
 ok - a mode-capable device keeps its exact mode-only behavior, with no signature sidecar
+ok - a capable device that cannot be probed keeps enforcing modes
+FM_TEST_END 2026-09-23T17:13:10Z tests/fm-pr-check-security.test.sh exit=0 duration_ms=157632 gate_skip=false
 ```
 
 ## Watcher continuity
