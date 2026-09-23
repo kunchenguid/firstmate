@@ -45,7 +45,7 @@
 #   direct-PR    implement -> push + open PR via gh-axi (no pipeline) -> configured merge authority
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                the configured merge authority approves, firstmate merges to the
-#                recorded base or, when none is recorded, to local main
+#                recorded base or, when none is recorded, to the local default branch
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
 # The generated ship brief records the chosen mode as a fixed machine-readable
