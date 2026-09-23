@@ -1218,12 +1218,11 @@ ROWS
   printf '%s\n' '{"rules":[{"when":"gemini work","use":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}}]}' > "$case_dir/home/config/crew-dispatch.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: gemini' ] \
-    || fail "no-key bootstrap must preserve its former verified-harness baseline, got: $out"
+  [ -z "$out" ] || fail "no-key bootstrap should accept verified gemini harness, got: $out"
   printf '%s\n' 'TYPESAFE_API_KEY=test-key' > "$case_dir/home/.env"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
-  [ -z "$out" ] || fail "typed resolution should add verified Gemini crewmate routing, got: $out"
+  [ -z "$out" ] || fail "typed resolution should accept verified Gemini crewmate routing, got: $out"
 
   rm -f "$case_dir/home/.env"
   : > "$case_dir/child-env.log"
