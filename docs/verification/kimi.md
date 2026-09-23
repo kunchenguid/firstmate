@@ -49,7 +49,7 @@ Answering with Enter produced exactly one new file plus a registry entry:
 
 ```
 $ ls -la "$SP/kh/workspace-trust"
--rw-------  1 lele  wheel  167 Sep 23 20:30 wd_probe1_4724149180fa
+-rw-------  1 ...  ...  167 Sep 23 20:30 wd_probe1_4724149180fa
 $ cat "$SP/kh/workspace-trust/wd_probe1_4724149180fa"
 {"root":"/private/tmp/.../scratchpad/probe1","trustedAt":1790166600565}
 $ stat -f 'mode=%Sp' "$SP/kh/workspace-trust"
@@ -191,8 +191,8 @@ This box carries five:
 
 ```
 $ ls -d ~/.kimi-code*
-/Users/lele/.kimi-code  /Users/lele/.kimi-code-2  /Users/lele/.kimi-code-3
-/Users/lele/.kimi-code-4  /Users/lele/.kimi-code-5
+~/.kimi-code  ~/.kimi-code-2  ~/.kimi-code-3
+~/.kimi-code-4  ~/.kimi-code-5
 ```
 
 `KIMI_CODE_HOME` is a real variable in the 2.0.2 binary's own string table, alongside `KIMI_CODE_HOME_ENV`, and a registration in the wrong home is a silent no-op.

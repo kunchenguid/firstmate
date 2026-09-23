@@ -104,18 +104,6 @@ file_mode() {  # <path> -> octal permission bits
   fi
 }
 
-expect_code() {  # <expected> <actual> <msg>
-  [ "$1" -eq "$2" ] || fail "$3 (expected exit $1, got $2)"
-}
-
-assert_grep() {  # <pattern> <file-or-text> <msg>
-  if [ -f "$2" ]; then
-    grep -Fq "$1" "$2" || fail "$3"
-  else
-    printf '%s\n' "$2" | grep -Fq "$1" || fail "$3"
-  fi
-}
-
 # A PATH carrying the tools the scope test needs but no node, so the
 # missing-interpreter path is exercised without disturbing the real PATH.
 node_free_path() {  # <case-dir> -> a bin dir holding the script's own tools but no node
@@ -167,7 +155,7 @@ test_worktree_is_registered_with_the_vendor_record_shape() {
   esac
   [ "$(file_mode "$record")" = 600 ] || fail "the trust record is not mode 0600 (got $(file_mode "$record"))"
   [ "$(file_mode "$(trust_dir_of "$KIMI_HOME")")" = 700 ] || fail "the created workspace-trust directory is not mode 0700"
-  assert_grep "$WT" "$out" "the success line does not name the directory it trusted"
+  assert_contains "$out" "$WT" "the success line does not name the directory it trusted"
   pass "fm-kimi-trust.sh: a fresh worktree is registered with the vendor record shape"
 }
 
@@ -200,7 +188,7 @@ test_an_existing_record_is_never_overwritten() {
   expect_code 0 $? "re-registering an already trusted worktree must succeed: $out"
   after=$(cat "$record")
   [ "$after" = "$before" ] || fail "the existing trust record was rewritten (was '$before', now '$after')"
-  assert_grep "already trusted" "$out" "the repeat registration did not report the record as already present"
+  assert_contains "$out" "already trusted" "the repeat registration did not report the record as already present"
   assert_record_count "$KIMI_HOME" 1 "the repeat registration added a second record"
   pass "fm-kimi-trust.sh: an existing trust record is reported and never overwritten"
 }
@@ -350,6 +338,8 @@ test_store_is_home_kimi_code_and_is_created_when_absent() {
   expect_code 0 $? "registering under a home where Kimi has never run must succeed: $out"
   [ -f "$(expected_record "$fresh/.kimi-code" "$WT" wt)" ] \
     || fail "the record did not land in \$HOME/.kimi-code"
+  [ "$(file_mode "$fresh/.kimi-code")" = 700 ] \
+    || fail "the created Kimi home is not mode 0700 (got $(file_mode "$fresh/.kimi-code"))"
   pass "fm-kimi-trust.sh: the store is \$HOME/.kimi-code, created when Kimi has not run there"
 }
 
@@ -360,7 +350,7 @@ assert_refused() {  # <msg-fragment> <kimi-home> <fake-home> <args...>
   shift 3
   out=$(run_trust "$fake_home" "$@") || rc=$?
   expect_code 1 "$rc" "'$*' must be refused, not accepted: $out"
-  assert_grep "$fragment" "$out" "the refusal for '$*' does not name '$fragment' as the reason"
+  assert_contains "$out" "$fragment" "the refusal for '$*' does not name '$fragment' as the reason"
   assert_record_count "$kimi_home" 0 "a refused registration still wrote a trust record"
 }
 
@@ -396,7 +386,7 @@ test_usage_errors_are_refused() {
   rc=0
   out=$(run_trust "$FAKE_HOME" --help) || rc=$?
   expect_code 2 "$rc" "--help must print usage and exit 2: $out"
-  assert_grep "usage: fm-kimi-trust.sh" "$out" "the usage text does not name the script"
+  assert_contains "$out" "usage: fm-kimi-trust.sh" "the usage text does not name the script"
   rc=0
   out=$(run_trust "$FAKE_HOME" --secondmate-home "$WT") || rc=$?
   expect_code 2 "$rc" "secondmate mode without an id must be a usage error: $out"
@@ -415,7 +405,7 @@ test_malformed_store_is_refused() {
   printf 'not a directory\n' > "$dir"
   out=$(run_trust "$FAKE_HOME" "$WT" "$PROJ") || rc=$?
   expect_code 1 "$rc" "a workspace-trust file must be refused: $out"
-  assert_grep "is not a directory" "$out" "the refusal does not name the malformed store"
+  assert_contains "$out" "is not a directory" "the refusal does not name the malformed store"
   rm -f "$dir"
   # workspace-trust is a symlink, which makes another directory stand in for the store.
   read_case "$(make_case malformed-link)"
@@ -425,7 +415,7 @@ test_malformed_store_is_refused() {
   rc=0
   out=$(run_trust "$FAKE_HOME" "$WT" "$PROJ") || rc=$?
   expect_code 1 "$rc" "a symlinked workspace-trust store must be refused: $out"
-  assert_grep "is a symlink" "$out" "the refusal does not name the symlinked store"
+  assert_contains "$out" "is a symlink" "the refusal does not name the symlinked store"
   # The record path itself is a directory, so nothing can be written there.
   read_case "$(make_case malformed-record)"
   dir=$(trust_dir_of "$KIMI_HOME")
@@ -435,7 +425,7 @@ test_malformed_store_is_refused() {
   rc=0
   out=$(run_trust "$FAKE_HOME" "$WT" "$PROJ") || rc=$?
   expect_code 1 "$rc" "a record path that is a directory must be refused: $out"
-  assert_grep "not a regular file" "$out" "the refusal does not name the malformed record"
+  assert_contains "$out" "not a regular file" "the refusal does not name the malformed record"
   # The record path is a symlink, so some other file's bytes would stand in for trust.
   read_case "$(make_case malformed-record-link)"
   dir=$(trust_dir_of "$KIMI_HOME")
@@ -446,7 +436,7 @@ test_malformed_store_is_refused() {
   rc=0
   out=$(run_trust "$FAKE_HOME" "$WT" "$PROJ") || rc=$?
   expect_code 1 "$rc" "a symlinked record must be refused: $out"
-  assert_grep "is a symlink" "$out" "the refusal does not name the symlinked record"
+  assert_contains "$out" "is a symlink" "the refusal does not name the symlinked record"
   pass "fm-kimi-trust.sh: a malformed trust store is refused"
 }
 
@@ -456,7 +446,7 @@ test_missing_node_is_refused() {
   nonode=$(node_free_path "$CASE_DIR")
   out=$(HOME="$FAKE_HOME" PATH="$nonode" "$TRUST" "$WT" "$PROJ" 2>&1) || rc=$?
   expect_code 1 "$rc" "a missing node must be refused: $out"
-  assert_grep "node is required" "$out" "the refusal does not name node as the missing tool"
+  assert_contains "$out" "node is required" "the refusal does not name node as the missing tool"
   pass "fm-kimi-trust.sh: a missing node interpreter is refused"
 }
 
@@ -468,7 +458,7 @@ test_scope_refusal_precedes_the_node_requirement() {
   nonode=$(node_free_path "$CASE_DIR")
   out=$(HOME="$FAKE_HOME" PATH="$nonode" "$TRUST" "$PROJ" "$PROJ" 2>&1) || rc=$?
   expect_code 1 "$rc" "a primary checkout must still be refused without node: $out"
-  assert_grep "primary checkout" "$out" "the refusal fell back to the node message instead of the scope reason"
+  assert_contains "$out" "primary checkout" "the refusal fell back to the node message instead of the scope reason"
   pass "fm-kimi-trust.sh: a scope refusal precedes the node requirement"
 }
 

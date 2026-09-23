@@ -163,11 +163,15 @@ fi
 
 [ -n "${HOME:-}" ] || refuse "HOME is not set, so the Kimi home cannot be located"
 KIMI_HOME="$HOME/.kimi-code"
-# Kimi creates its own home on first run, so an absent one is created here for
-# the same reason: a home this cannot reach means the worker meets the dialog.
+# Kimi creates its own home on first run, so an absent $HOME/.kimi-code is
+# created here for the same reason: a home this cannot reach means the worker
+# meets the dialog. 0700 at creation is the mode Kimi itself uses and the mode
+# the store one level down is created with, so a home holding credentials is
+# never briefly group- or world-readable. It sits directly under HOME, so this
+# is a single-level create and needs no -p.
 KIMI_HOME_REAL=$(real_dir "$KIMI_HOME") || true
 if [ -z "$KIMI_HOME_REAL" ]; then
-  mkdir -p "$KIMI_HOME" 2>/dev/null || true
+  mkdir -m 700 "$KIMI_HOME" 2>/dev/null || true
   KIMI_HOME_REAL=$(real_dir "$KIMI_HOME") || true
 fi
 [ -n "$KIMI_HOME_REAL" ] || refuse "Kimi home '$KIMI_HOME' does not exist and could not be created"
