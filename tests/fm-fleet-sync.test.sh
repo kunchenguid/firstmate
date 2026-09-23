@@ -27,6 +27,13 @@
 # worktree dir as its cwd also blocks removal (the clone-dir liveness check); a
 # transient lock that self-clears is retried without a force-remove; and any
 # non-packed-refs.lock fetch failure keeps today's behavior with no retry.
+#
+# It also pins the moved-tag case: origin repointing a tag the clone already has
+# (a deploy tag moved on every release) makes git refuse the tag update and exit
+# non-zero while still updating every branch ref. That must not be read as a
+# failed fetch: the default branch still fast-forwards, the moved tags are named
+# on their own "tags not updated:" line with a command that accepts exactly
+# those tags, local tags are never overwritten, and bootstrap relays that line.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -88,6 +95,32 @@ advance_origin() {
 }
 
 head_sha() { git -C "$1" rev-parse HEAD; }
+
+# move_origin_tag <home> <name> <tag>: point <tag> at <name>'s current work HEAD
+# and force-push it, the way a deploy repoints a moving release tag.
+move_origin_tag() {
+  local home=$1 name=$2 tag=$3 work
+  work="$home/work-$name"
+  git -C "$work" tag -f "$tag" >/dev/null
+  git -C "$work" push -q --force origin "refs/tags/$tag"
+}
+
+# build_moved_tag_pair <home> <name> <tag>: a clone that already holds <tag>, whose
+# origin has since advanced main by one commit and moved <tag> onto it. Echoes the
+# clone path. Git's default tag auto-follow silently skips a tag name it already
+# has, so the clone sets fetch.pruneTags - a common global setting, and the one on
+# the machine where this was found - which makes every fetch request
+# refs/tags/*:refs/tags/* and therefore refuse the moved tag.
+build_moved_tag_pair() {
+  local home=$1 name=$2 tag=$3 clone
+  clone=$(build_pair "$home" "$name")
+  git -C "$clone" config fetch.pruneTags true
+  move_origin_tag "$home" "$name" "$tag"
+  git -C "$clone" fetch -q origin "refs/tags/$tag:refs/tags/$tag"
+  advance_origin "$home" "$name" C1
+  move_origin_tag "$home" "$name" "$tag"
+  printf '%s\n' "$clone"
+}
 
 # run_sync <home> [args...]: run fleet-sync against an isolated home, stdout only.
 run_sync() {
@@ -510,6 +543,66 @@ test_bootstrap_relays_recovered_and_stuck() {
   pass "bootstrap relays recovered: and STUCK: fleet-sync outcomes"
 }
 
+test_moved_tag_still_fast_forwards() {
+  local home clone out old_tag origin_main accept
+  home=$(new_home)
+  clone=$(build_moved_tag_pair "$home" tagmove current-production)
+  old_tag=$(git -C "$clone" rev-parse current-production)
+  origin_main=$(git -C "$home/work-tagmove" rev-parse HEAD)
+  [ "$old_tag" != "$origin_main" ] || fail "fixture: the tag did not move on origin"
+  if git -C "$clone" fetch -q origin 2>/dev/null; then
+    fail "fixture: a plain fetch accepted the moved tag, so this case is vacuous"
+  fi
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_not_contains "$out" "skipped" "a moved tag must not skip the project"
+  assert_contains "$out" "tagmove: synced" "the branch still fast-forwards past a moved tag"
+  [ "$(head_sha "$clone")" = "$origin_main" ] || fail "clone main was not fast-forwarded to origin's main"
+  assert_contains "$out" "tagmove: tags not updated: origin moved current-production;" "the moved tag is reported by name"
+  [ "$(git -C "$clone" rev-parse current-production)" = "$old_tag" ] || fail "the local tag was overwritten without consent"
+
+  accept=$(printf '%s\n' "$out" | sed -n "s/^tagmove: tags not updated: .*To accept origin's tags: //p")
+  [ -n "$accept" ] || fail "the tag line carries no accept command"
+  eval "$accept" >/dev/null 2>&1 || fail "the suggested accept command failed: $accept"
+  [ "$(git -C "$clone" rev-parse current-production)" = "$origin_main" ] || fail "the accept command did not update the tag"
+  out=$(run_sync "$home" "$clone")
+  assert_contains "$out" "tagmove: already current" "after accepting, the next sync is clean"
+  assert_not_contains "$out" "tags not updated" "after accepting, the tag line is gone"
+  pass "a tag moved on origin still fast-forwards the branch and is reported with a narrow accept command"
+}
+
+test_moved_tag_accept_command_is_shell_safe() {
+  local home clone out origin_main accept tag
+  home="$TMP_ROOT/spaced home $((HOME_N += 1))"
+  mkdir -p "$home/projects"
+  # shellcheck disable=SC2016 # The tag name must carry unexpanded shell syntax.
+  tag='x;touch${IFS}pwned'
+  clone=$(build_moved_tag_pair "$home" tagmove "$tag")
+  origin_main=$(git -C "$home/work-tagmove" rev-parse HEAD)
+
+  out=$(run_sync "$home" "$clone")
+
+  assert_contains "$out" "tagmove: synced" "the branch still fast-forwards past a moved tag"
+  accept=$(printf '%s\n' "$out" | sed -n "s/^tagmove: tags not updated: .*To accept origin's tags: //p")
+  [ -n "$accept" ] || fail "the tag line carries no accept command"
+  (cd "$home" && eval "$accept") >/dev/null 2>&1 || fail "the suggested accept command failed: $accept"
+  [ ! -e "$home/pwned" ] || fail "the accept command executed shell syntax from the tag name: $accept"
+  [ "$(git -C "$clone" rev-parse "refs/tags/$tag")" = "$origin_main" ] || fail "the accept command did not update the tag"
+  pass "the accept command quotes a spaced clone path and a tag name with shell metacharacters"
+}
+
+test_bootstrap_relays_moved_tags() {
+  local home out
+  home=$(new_home)
+  build_moved_tag_pair "$home" tagrelay current-production >/dev/null
+
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null)
+
+  assert_contains "$out" "FLEET_SYNC: tagrelay: tags not updated: origin moved current-production;" "bootstrap relays the moved-tag line"
+  pass "bootstrap relays the tags not updated fleet-sync outcome"
+}
+
 # --- packed-refs.lock guard tests -------------------------------------------
 
 test_orphaned_stale_packed_refs_lock_recovers() {
@@ -688,7 +781,7 @@ test_non_signature_fetch_failure_is_not_retried() {
     run_sync_guarded "$home" "$fakebin" "$out" "$err" locknonsig
   set -e
 
-  assert_contains "$(cat "$out")" "locknonsig: skipped: fetch failed" "non-signature: fleet-sync did not report the fetch failure"
+  assert_contains "$(cat "$out")" "locknonsig: skipped: fetch failed: fatal:" "non-signature: fleet-sync did not report the fetch failure with git's own reason"
   assert_no_grep "waiting" "$err" "non-signature: a non-lock failure was wrongly retried"
   assert_no_grep "packed-refs lock" "$err" "non-signature: a non-lock failure entered the lock guard"
   pass "a non-packed-refs.lock fetch failure keeps today's behavior (no retry)"
@@ -711,6 +804,9 @@ test_single_project_by_projects_relative_name_ignores_cwd_shadow
 test_single_project_unresolvable_name_still_skips
 test_whole_fleet_form
 test_bootstrap_relays_recovered_and_stuck
+test_moved_tag_still_fast_forwards
+test_moved_tag_accept_command_is_shell_safe
+test_bootstrap_relays_moved_tags
 test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal

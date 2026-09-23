@@ -11,7 +11,7 @@
 #                 "BACKEND_INVALID: <name> (known: <names>)",
 #                 "STARTUP_MEMORY_BUDGET: invalid config/startup-memory-budget - <reason>",
 #                 "CREW_DISPATCH: invalid config/crew-dispatch.json - <reason>",
-#                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK: <detail>",
+#                 "FLEET_SYNC: <repo>: skipped|recovered|STUCK|tags not updated: <detail>",
 #                 "HOME_SUMMARY: <ledger never published|not republished since
 #                 <stamp>>; <n> failed attempt(s) ... last: <recorded failure>",
 #                 "BACKLOG_RECONCILE: <id>: <what this home could not reconcile>",
@@ -315,6 +315,7 @@ fleet_sync_relay_filtered_output() {
       *': skipped:'*) echo "FLEET_SYNC: $line" ;;
       *': STUCK:'*) echo "FLEET_SYNC: $line" ;;
       *': recovered:'*) echo "FLEET_SYNC: $line" ;;
+      *': tags not updated:'*) echo "FLEET_SYNC: $line" ;;
     esac
   done < "$tmp"
 }

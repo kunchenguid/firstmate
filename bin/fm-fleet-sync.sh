@@ -12,7 +12,7 @@
 # ... - needs attention" warning rather than a quiet drift. Nothing is ever forced,
 # stashed, or discarded.
 # Still skips (benignly) local-only/no-origin projects, missing remotes/branches,
-# and fetch failures.
+# and genuine fetch failures, naming git's own error.
 # A candidate under projects/ must be the root of its own work tree: git discovery
 # walks up, so a plain nested directory would otherwise resolve to the enclosing
 # repository (the firstmate checkout) and be synced under that directory's label.
@@ -24,6 +24,11 @@
 # killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
 # it is retried with a bounded wait and removed only when provably stale; see
 # fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
+# A fetch whose only failure is origin having moved a tag the clone already has
+# (git refuses to clobber it, e.g. under fetch.pruneTags) is not a failed fetch:
+# every branch ref still updated, so the sync continues and the moved tags are
+# reported on their own "tags not updated:" line with a command that accepts
+# exactly those tags. Local tags are never overwritten by the sync itself.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
@@ -135,11 +140,77 @@ first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
 
+# The most telling line of a failed fetch: its first fatal/error/rejected line,
+# since the non-quiet output starts with a "From <url>" header.
+fetch_failure_line() {
+  local line
+  line=$(printf '%s\n' "$FETCH_OUTPUT" | grep -E -m1 '^(fatal|error):|^ ! ' || true)
+  [ -n "$line" ] || line=$(printf '%s\n' "$FETCH_OUTPUT" | grep -v -m1 '^From ' || true)
+  [ -n "$line" ] || line=$FETCH_OUTPUT
+  first_line "$line"
+}
+
 # True when git stderr shows the packed-refs.lock "File exists" race. The lock
 # path can appear anywhere in the message (git prefixes it with the failed ref op,
 # e.g. "could not delete reference ...:"). Other "File exists" errors must not match.
 is_packed_refs_lock_error() {
   printf '%s\n' "$1" | grep -Eq "Unable to create ['\"].*packed-refs\\.lock['\"]: File exists"
+}
+
+# The sync fetch. Deliberately not --quiet: --quiet also suppresses the per-ref
+# "! [rejected]" lines, and those are the only way to tell a rejected tag update
+# (see moved_tags_only) from a genuine fetch failure, since both exit non-zero.
+# LC_ALL=C keeps those lines untranslated and fetch.output=full stops a user's
+# compact setting from abbreviating the destination ref. Without a terminal git
+# prints no progress, so the output stays small. Sets FETCH_OUTPUT.
+run_fetch() {
+  local rc
+  FETCH_OUTPUT=$(LC_ALL=C git -C "$PROJ" -c fetch.output=full fetch origin --prune 2>&1); rc=$?
+  return "$rc"
+}
+
+# True when the failed fetch's ONLY failure is origin having moved one or more
+# tags that already exist locally, e.g. a release tag repointed on every deploy.
+# Git refuses to clobber an existing tag without --force and exits non-zero, but
+# still updates every other ref, so origin/<default> is current and the branch
+# sync can safely continue. Any fatal/error line or a rejected non-tag ref means
+# the fetch genuinely failed. Sets MOVED_TAGS to the rejected tag names.
+moved_tags_only() {
+  local line tag
+  MOVED_TAGS=""
+  while IFS= read -r line; do
+    case "$line" in
+      ' ! [rejected] '*'(would clobber existing tag)')
+        tag=$(printf '%s\n' "$line" | sed -n 's/^.* -> \([^ ]*\) *(would clobber existing tag)$/\1/p')
+        [ -n "$tag" ] || return 1
+        MOVED_TAGS="${MOVED_TAGS:+$MOVED_TAGS }$tag"
+        ;;
+      ' ! '*|fatal:*|error:*) return 1 ;;
+    esac
+  done <<EOF_FETCH
+$FETCH_OUTPUT
+EOF_FETCH
+  [ -n "$MOVED_TAGS" ]
+}
+
+# The operator-facing line for tags origin moved that this clone kept at their
+# old commits. Names each tag and the narrowest command that accepts just those
+# tags, because a blanket `fetch --tags --force` would also overwrite any other
+# local tag that differs from origin.
+report_moved_tags() {
+  local tag refspecs="" shown="" n=0 more=0 proj_abs
+  for tag in $MOVED_TAGS; do
+    n=$((n + 1))
+    refspecs="$refspecs $(printf '%q' "+refs/tags/$tag:refs/tags/$tag")"
+    if [ "$n" -le 5 ]; then
+      shown="${shown:+$shown, }$tag"
+    else
+      more=$((more + 1))
+    fi
+  done
+  [ "$more" -eq 0 ] || shown="$shown and $more more"
+  proj_abs=$(cd "$PROJ" && pwd -P) || proj_abs=$PROJ
+  echo "$label: tags not updated: origin moved $shown; the local copies still point at their old commits (branch refs fetched normally). To accept origin's tags: git -C $(printf '%q' "$proj_abs") fetch origin$refspecs"
 }
 
 # Absolute path to $PROJ's packed-refs.lock, or empty when it cannot be resolved.
@@ -156,7 +227,7 @@ packed_refs_lock_path() {
   esac
 }
 
-# Run `git -C "$PROJ" fetch origin --prune --quiet`, tolerating an orphaned
+# Run the sync fetch (see run_fetch), tolerating an orphaned
 # packed-refs.lock left by a killed ref rewrite. Sets FETCH_OUTPUT to the git
 # command's combined output and returns its exit status. On the packed-refs.lock
 # signature ONLY: retry up to FLEET_SYNC_PACKED_REFS_LOCK_RETRIES times (a
@@ -169,7 +240,7 @@ packed_refs_lock_path() {
 # a session-start refresh (which discards fleet-sync stderr) still surfaces it.
 fetch_with_packed_refs_lock_guard() {
   local rc attempt=0 lock lock_desc
-  FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+  run_fetch; rc=$?
   [ "$rc" -eq 0 ] && return 0
   is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
 
@@ -179,7 +250,7 @@ fetch_with_packed_refs_lock_guard() {
     attempt=$(( attempt + 1 ))
     echo "$label: fetch blocked by packed-refs lock ($lock_desc); waiting ${FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES}) (owning process may be exiting)" >&2
     sleep "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS"
-    FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+    run_fetch; rc=$?
     if [ "$rc" -eq 0 ]; then
       echo "$label: fetch succeeded on retry; packed-refs lock cleared on its own" >&2
       # One stdout summary so a session-start refresh (which discards fleet-sync
@@ -203,7 +274,7 @@ fetch_with_packed_refs_lock_guard() {
         return "$rc"
       fi
       echo "$label: removed provably-stale packed-refs lock $lock (age >= ${FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS}s, no live holder) and retrying fetch" >&2
-      FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+      run_fetch; rc=$?
       if [ "$rc" -eq 0 ]; then
         echo "$label: fetch succeeded after stale packed-refs lock cleanup" >&2
         echo "$label: recovered: removed a stale packed-refs lock (no live holder)"
@@ -336,12 +407,16 @@ sync_project() {
   fi
 
   if ! fetch_with_packed_refs_lock_guard; then
-    reason="fetch failed"
-    if [ -n "$FETCH_OUTPUT" ]; then
-      reason="$reason: $(first_line "$FETCH_OUTPUT")"
+    if moved_tags_only; then
+      report_moved_tags
+    else
+      reason="fetch failed"
+      if [ -n "$FETCH_OUTPUT" ]; then
+        reason="$reason: $(fetch_failure_line)"
+      fi
+      echo "$label: skipped: $reason"
+      return 0
     fi
-    echo "$label: skipped: $reason"
-    return 0
   fi
 
   prune_gone_branches || true
