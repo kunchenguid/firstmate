@@ -30,7 +30,7 @@ The router's Detection section owns how launch markers and ancestry select betwe
 Keep the instructions as one positional argument.
 Multiple positional arguments become separate queued messages; the spawn template already preserves the one-argument shape.
 
-For managed workers, follow the scoped project-resource approval and compatibility contract in `../../../bin/fm-spawn.sh --help`; do not persist folder trust as a routine spawn step.
+For managed workers, follow the scoped project-resource approval and compatibility contract in [`fm-spawn.sh --help`](../../../../../bin/fm-spawn.sh); do not persist folder trust as a routine spawn step.
 For a manually launched primary, follow [README setup](../../../../../README.md#install-and-launch).
 
 ## Worker turn-end extension
