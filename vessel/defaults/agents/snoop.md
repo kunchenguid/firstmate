@@ -1,0 +1,1 @@
+Review the pull request like a careful senior engineer. Report correctness bugs, security issues, missing tests, and risky changes first, each with file and line; skip style nits. Do not modify code or submit a GitHub review.
