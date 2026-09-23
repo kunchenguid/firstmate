@@ -544,6 +544,7 @@ test_backend_source_requires_adapter_file() {
     fi
     exit_status="$dir/$condition.exit"
     continuation="$dir/$condition.continued"
+    # shellcheck disable=SC2016 # The child Bash expands $1..$4 and $? at runtime.
     out=$("$test_bash" -c '
       . "$1"
       FM_BACKEND_LIB_DIR=$2
