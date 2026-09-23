@@ -4203,7 +4203,7 @@ settled_busy_round() {  # <case-dir> <exit|absorb>
 }
 
 test_settled_busy_over_age_lane_still_owes_its_recheck() {
-  local dir state out key window
+  local dir state out key window held_since reported
   command -v tasks-axi >/dev/null 2>&1 \
     || { echo "skip: tasks-axi not found (settled busy over-age lane)"; return 0; }
   window=test:fm-busy-settled; key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -4214,6 +4214,8 @@ test_settled_busy_over_age_lane_still_owes_its_recheck() {
   record_pi_busy "$state" wedge
   printf 'working: still tidying the branch\n' > "$state/wedge.status"
   settle_wedge_row "$dir" captain || fail "could not hold the busy lane's backlog row"
+  held_since=$(( $(date +%s) - 172800 ))
+  backdate_captain_hold "$dir" "$held_since" || fail "could not backdate the busy lane's captain hold"
   printf '%s' "$(seen_sig "$state/wedge.status")" > "$state/.seen-wedge_status"
   # No completed turn was ever recorded, so the bound ages the spawn record.
   touch -t 200001010000 "$state/wedge.meta"
@@ -4244,11 +4246,108 @@ test_settled_busy_over_age_lane_still_owes_its_recheck() {
   grep -F 'possible wedge' "$out" >/dev/null \
     && fail "a settled busy over-age lane was rechecked as a possible wedge: $(cat "$out")"
   # The anchor dates the watcher's own first verification, not the hold, so the
-  # recheck must publish no wait age rather than report one it cannot know.
-  [ -z "$(wedge_reported_wait_secs "$out")" ] \
-    || fail "the settled recheck published $(wedge_reported_wait_secs "$out")s as the wait's own age: $(cat "$out")"
+  # age the recheck publishes must be the hold's own, two days, not the anchor's.
+  reported=$(wedge_reported_wait_secs "$out")
+  assert_reported_hold_age "$reported" "$held_since" "the busy over-age settled recheck" "$out"
   ack_stopped_cycle "$state" || fail "could not acknowledge the settled recheck"
-  pass "a settled lane on the busy over-age route still owes its bounded recheck and publishes no wait age it cannot know"
+  pass "a settled lane on the busy over-age route still owes its bounded recheck and reports the hold's real age"
+}
+
+# Backdate a fixture's captain hold to <epoch>: the hold's own set stamp in the
+# markdown backlog, the one place bin/fm-captain-hold.sh records when a call
+# began. Succeeds only once fm-captain-hold.sh itself reads the backdated call.
+backdate_captain_hold() {  # <case-dir> <epoch>
+  local dir=$1 stamp
+  stamp=$(iso_utc_at "$2") || return 1
+  sed -i.bak "s/^  Captain hold set: .*Z\$/  Captain hold set: $stamp/" "$dir/data/backlog.md" || return 1
+  rm -f "$dir/data/backlog.md.bak"
+  [ "$(FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-captain-hold.sh" open wedge --identity 2>/dev/null)" \
+    = "$stamp#0" ]
+}
+
+# The published age must describe the hold itself: at least as old as the hold,
+# and no more than the few minutes a round can add. A number read from the
+# settlement marker instead would be minutes to hours, never days.
+assert_reported_hold_age() {  # <reported-secs> <held-since-epoch> <label> <watch-out>
+  local reported=$1 since=$2 label=$3 out=$4 lower upper
+  lower=$(( $(date +%s) - since - 600 ))
+  upper=$(( $(date +%s) - since ))
+  case "$reported" in
+    ''|*[!0-9]*) fail "$label published no wait age for a hold whose start is recorded: $(cat "$out")" ;;
+  esac
+  [ "$reported" -ge "$lower" ] && [ "$reported" -le "$upper" ] \
+    || fail "$label published ${reported}s, not the hold's own age of about ${upper}s: $(cat "$out")"
+}
+
+# The recheck publishes the wait's own age, read from the authoritative start its
+# backlog records, and nothing at all when the backlog records no start.
+test_settled_recheck_reports_the_real_wait_age() {
+  local dir out held_since
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (settled recheck age)"; return 0; }
+  dir=$(settled_wedge_fixture settled-age-captain captain) \
+    || fail "[captain] could not build a captain-held backlog fixture"
+  out="$dir/watch.out"
+  held_since=$(( $(date +%s) - 172800 ))
+  backdate_captain_hold "$dir" "$held_since" || fail "[captain] could not backdate the captain hold"
+  settled_recheck_round "$dir" 'awaiting the captain' 'captain age'
+  assert_reported_hold_age "$(wedge_reported_wait_secs "$out")" "$held_since" "[captain] the settled recheck" "$out"
+
+  # An external hold records no start to the second, so its recheck reports none.
+  dir=$(settled_wedge_fixture settled-age-external external) \
+    || fail "[external] could not build an externally held backlog fixture"
+  out="$dir/watch.out"
+  settled_recheck_round "$dir" 'awaiting external' 'external age'
+  [ -z "$(wedge_reported_wait_secs "$out")" ] \
+    || fail "[external] a hold with no recorded start published $(wedge_reported_wait_secs "$out")s as its age: $(cat "$out")"
+  pass "a settled recheck reports the captain hold's own age, and no age for a hold that records no start"
+}
+
+# The recheck window belongs to one wait on one agent. A relaunched agent - a new
+# busy incarnation token, minted by bin/fm-busy-event.sh arm exactly when the
+# agent is replaced - is a new lane to watch, so it starts its own window rather
+# than inheriting the old agent's already-elapsed one. The control half proves the
+# restart is the incarnation's doing: the same aged window with the SAME agent
+# still owes its recheck at once.
+test_settled_window_restarts_for_a_new_agent_incarnation() {
+  local dir state out key window
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (settled incarnation window)"; return 0; }
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  dir=$(settled_wedge_fixture settled-incarnation parked) \
+    || fail "could not build a parked backlog fixture"
+  state="$dir/state"; out="$dir/watch.out"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" wedge >/dev/null \
+    || fail "could not arm the lane's first agent incarnation"
+  settled_recheck_round "$dir" 'awaiting firstmate' 'first incarnation'
+
+  # Same agent, window aged past the cadence: the recheck is owed at once.
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/.waiting-since-$key"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/.waiting-resurfaced-$key"
+  : > "$out"
+  FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$dir/fakebin" "$out" "$dir/pane.txt" "$window" \
+    "$SETTLED_IDLE_VERDICT" exit \
+    || fail "an aged window on the same agent never owed its recheck"
+  grep -F 'awaiting firstmate' "$out" >/dev/null \
+    || fail "the same-agent recheck did not name who the wait is on: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the same-agent recheck"
+
+  # The identical aged window after the agent is replaced: a fresh window, so
+  # nothing is owed yet and the window is dated from now.
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/.waiting-since-$key"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$state/.waiting-resurfaced-$key"
+  "$ROOT/bin/fm-busy-event.sh" arm "$state" wedge >/dev/null \
+    || fail "could not arm the replacement agent's incarnation"
+  : > "$out"
+  FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$dir/fakebin" "$out" "$dir/pane.txt" "$window" \
+    "$SETTLED_IDLE_VERDICT" absorb \
+    || fail "a replaced agent inherited the old agent's elapsed window: $(cat "$out")"
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "a replaced agent's first settled threshold queued a wake: $(cat "$state/.wake-queue")"
+  [ "$(( $(date +%s) - $(file_mtime "$state/.waiting-since-$key") ))" -lt 600 ] \
+    || fail "the replaced agent's window was not dated from its own first verification"
+  pass "a relaunched agent starts its own settled window, while the same agent's aged window is owed at once"
 }
 
 
@@ -6557,6 +6656,8 @@ test_settled_backlog_lane_stops_reescalating_an_unchanged_pane
 test_settled_captain_hold_is_silent_while_away
 test_settled_backlog_lane_preserves_fresh_escalation
 test_settled_busy_over_age_lane_still_owes_its_recheck
+test_settled_recheck_reports_the_real_wait_age
+test_settled_window_restarts_for_a_new_agent_incarnation
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_captain_held_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
