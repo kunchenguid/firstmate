@@ -82,10 +82,11 @@
 # Closing keywords are close/closes/closed, fix/fixes/fixed, and
 # resolve/resolves/resolved, followed by #<n>, owner/name#<n>, or the issue URL
 # in this repository; case and an optional colon are ignored.
-# Every discovered merged PR has its current state and base.ref resolved before
-# classification. Other-base merges name their base in a hint. When a default-
-# base merged PR has no closing keyword, a read-only GraphQL query checks its
-# closingIssuesReferences. Failed lookups make coverage incomplete.
+# Every discovered merged PR in this repository has its current state and
+# base.ref resolved before classification. Other-base merges name their base
+# in a hint. When a default-base merged PR has no closing keyword, a read-only
+# GraphQL query checks its closingIssuesReferences. Failed lookups make
+# coverage incomplete.
 # Incidental PR references and commit citations are hints. Symbol matches are
 # labelled "suspected fix to verify" and never establish a fix on their own.
 #
@@ -105,15 +106,16 @@
 # link= names fixing evidence the issue page does not show: a PR whose body
 # has a fixing reference, a merged PR with a closing-issue reference, or a
 # commit whose message has a fixing reference, found by neither the
-# timeline nor a stamp. A title, branch, fork-branch, or --symbol match is
-# never a link candidate. Screening shares one fresh PR corpus; merged and
-# stamped PRs need additional reads. The open-issue list uses the same identity
-# and total checks as the corpus; an unverified list prevents open verdicts
-# and close recommendations and makes the sweep exit 1.
+# timeline nor a stamp. A title, branch, fork-branch, or --symbol match alone
+# supplies no linking evidence. Screening shares one fresh PR corpus; merged
+# and stamped PRs need additional reads. The open-issue list uses the same
+# identity and total checks as the corpus; an unverified list prevents open
+# verdicts and close recommendations and makes the sweep exit 1.
 #
 # Exit status: 0 when every issue got a verdict other than unknown and the
 # sweep list is verified, 1 for unknown verdicts or an unverified sweep list,
-# 2 on a usage or setup refusal.
+# 2 on a usage/setup refusal or failure to fetch the sweep's open-issue list.
+#
 set -eu
 
 usage() {
