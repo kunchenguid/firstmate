@@ -407,7 +407,8 @@ tests/fm-teardown-pane-session.test.sh
 ok - fm-teardown: tmux cleanup reaps the closed pane's session members and spares a sibling window's
 ```
 
-Without the reap the same case fails with `not ok - SIGHUP-ignoring own-process-group pane-session member survived teardown`.
+The case runs two such members, one that yields to SIGTERM and one that also ignores it, so both the TERM pass and the KILL pass are exercised.
+Without the reap the same case fails with `not ok - SIGHUP-ignoring own-process-group pane-session member 'target' survived teardown`.
 The control is an identically shaped process in a sibling window of the same tmux session, so a reap that widened past the exact window's own sessions would fail it.
 A process that detaches into its own session is not a pane-session member and stays out of scope, on tmux and Herdr alike.
 
