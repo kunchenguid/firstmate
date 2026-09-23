@@ -32,15 +32,18 @@
 #
 # poll consumes fm-fleet-snapshot.sh --contribution-input, a local-only read,
 # and spends at most FM_CONTRIBUTIONS_BUDGET seconds on forge reads (default 20,
-# 1..25). That budget is every read's only bound, so a read cut short is always
-# the budget running out and never evidence that the forge is unavailable. A
-# pull observation has three dependent waves: core, six independent reads, then
-# the closing head read; an issue has two waves. Each wave reads in parallel, so
-# a contribution with many pages spends its time on its own slowest page instead
-# of losing it to a fixed share too small to finish. poll reserves min(the
-# configured budget, 15) before starting a URL, so an in-progress normal-budget
-# observation gets all three waves and a later URL waits for the next
-# oldest-checked-first poll.
+# 1..25). A pull observation has three dependent waves: core, six independent
+# reads, then the closing head read; an issue has two waves. Each wave reads in
+# parallel, and every read's ceiling is the remaining budget divided by the
+# waves still to run, so a slow page from a busy contribution can use its whole
+# share instead of a fixed cap. A read killed by its ceiling while budget
+# remains is a forge failure: it records the error, advances checked_at, and
+# rotates the URL behind the others, so a read that never finishes cannot starve
+# the rest. A read killed by the poll deadline itself (the closing wave, or a
+# ceiling that already reached the deadline) is a time cut, never evidence that
+# the forge is unavailable. poll reserves min(the configured budget, 15) before
+# starting a URL, so an in-progress normal-budget observation gets all three
+# waves and a later URL waits for the next oldest-checked-first poll.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct URL is
 # observed once per poll and applied to every owner. A final observation applies
@@ -188,15 +191,16 @@ write_record() { # task record-json-file
 # the forge. The marker file carries it out of the background reads of a wave.
 time_cut() { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; }
 
-forge() {
-  local remaining rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
+forge() { # waves-still-to-run gh-args...
+  local waves=$1 remaining ceiling rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
+  shift
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { time_cut; return 1; }
-  # The deadline is the only bound, so every kill is the budget running out.
-  fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
+  ceiling=$(((remaining + waves - 1) / waves))
+  fm_run_timed "$ceiling" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  if [ "$rc" -eq 124 ]; then
+  if [ "$rc" -eq 124 ] && { [ "$ceiling" -ge "$remaining" ] || [ "$DEADLINE" -le "$(date +%s)" ]; }; then
     time_cut
   elif [ "$rc" -ne 0 ]; then
     : > "$TMP/forge-unavailable"
@@ -216,30 +220,30 @@ wait_forges() { # background forge pids from one independent read wave
 }
 
 observe() { # canonical GitHub URL -> normalized JSON
-  local url=$1 part number kind endpoint head after label
+  local url=$1 part number kind endpoint waves head after label
   case "$url" in https://github.com/*) ;; *) return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
-  case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
+  case "$kind" in pull) endpoint="repos/$part/pulls/$number"; waves=3 ;; issues) endpoint="repos/$part/issues/$number"; waves=2 ;; *) return 1 ;; esac
   rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
-  forge api "$endpoint" > "$TMP/core.json" || return 1
+  forge "$waves" api "$endpoint" > "$TMP/core.json" || return 1
   jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
     head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
-    FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
+    FORGE_ERR="$TMP/comments.err" forge 2 api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
-    FORGE_ERR="$TMP/reviews.err" forge api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" &
+    FORGE_ERR="$TMP/reviews.err" forge 2 api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" &
     local reviews_pid=$!
-    FORGE_ERR="$TMP/inline.err" forge api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" &
+    FORGE_ERR="$TMP/inline.err" forge 2 api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" &
     local inline_pid=$!
-    FORGE_ERR="$TMP/checks.err" forge api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" &
+    FORGE_ERR="$TMP/checks.err" forge 2 api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" &
     local checks_pid=$!
-    FORGE_ERR="$TMP/statuses.err" forge api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" &
+    FORGE_ERR="$TMP/statuses.err" forge 2 api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" &
     local statuses_pid=$!
-    FORGE_ERR="$TMP/repo.err" forge api "repos/$part" > "$TMP/repo.json" &
+    FORGE_ERR="$TMP/repo.err" forge 2 api "repos/$part" > "$TMP/repo.json" &
     local repo_pid=$!
     wait_forges "$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$statuses_pid" "$repo_pid" || return 1
     jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
-    forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
+    forge 1 pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
     after=$(jq -er .headRefOid "$TMP/after.json")
     [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
     jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
@@ -263,9 +267,9 @@ observe() { # canonical GitHub URL -> normalized JSON
                  author:.user.login,body:(.body // "" | .[:500])}))}' > "$TMP/observation.json" || return 1
   else
     label=${FM_CONTRIBUTIONS_READY_LABEL:-ready-for-pr}
-    FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
+    FORGE_ERR="$TMP/comments.err" forge 1 api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
-    FORGE_ERR="$TMP/issue-events.err" forge api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" &
+    FORGE_ERR="$TMP/issue-events.err" forge 1 api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" &
     local events_pid=$!
     wait_forges "$comments_pid" "$events_pid" || return 1
     jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1

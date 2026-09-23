@@ -566,6 +566,10 @@ case "$fault:$*" in
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
   hang:'api repos/o/r/pulls/8') sleep 4 ;;
   slow-read:'api repos/o/r/pulls/8/comments?'*) sleep "${FORGE_LATENCY:-6}" ;;
+  outrun:'api repos/o/r/pulls/8/comments?'*)
+    printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock"
+    sleep "${FORGE_LATENCY:-6}" ;;
+  stall:'api repos/o/r/pulls/8') sleep 60 ;;
   head:'pr view '*) printf '{"headRefOid":"%s","reviewDecision":"APPROVED"}\n' "$(printf 'b%.0s' $(seq 40))"; exit 0 ;;
 esac
 exec "$(dirname "$0")/gh-fixture" "$@"
@@ -797,7 +801,7 @@ test_intermittent_time_cut_never_opens_an_episode() { # failing, healthy, failin
     at=$(printf '2026-09-16T%02d:00:00Z' "$((8 + cycle))")
     : > "$home/forge/calls"
     /bin/date +%s > "$home/forge/clock"
-    case "$cycle" in 2) : > "$home/forge/fault" ;; *) printf 'slow-read\n' > "$home/forge/fault" ;; esac
+    case "$cycle" in 2) : > "$home/forge/fault" ;; *) printf 'outrun\n' > "$home/forge/fault" ;; esac
     out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW="$at" FM_CONTRIBUTIONS_BUDGET=6 FORGE_LATENCY=9 \
       "$ROOT/bin/fm-contributions.sh" poll) || fail "cycle $cycle poll failed"
     grep -F 'api repos/o/r/pulls/8' "$home/forge/calls" >/dev/null \
@@ -808,6 +812,50 @@ test_intermittent_time_cut_never_opens_an_episode() { # failing, healthy, failin
   jq -e '.records[0].error == null' "$home/data/delivery/contributions.json" >/dev/null \
     || fail 'a read the budget cut short was recorded as an unavailable forge'
   pass 'reads that intermittently outrun the budget never open a failure episode'
+}
+
+test_stalled_read_does_not_starve_other_contributions() {
+  local home out
+  home=$(new_home stalled-read)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf -- '- [ ] filed - Measured defect https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:00:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'initial healthy poll failed'
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  printf 'stall\n' > "$home/forge/fault"
+  for at in 2026-09-16T09:00:00Z 2026-09-16T10:00:00Z; do
+    out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW="$at" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail "poll at $at failed"
+  done
+  jq -e '.records[0] | .checked_at == "2026-09-16T10:00:00Z" and .error == null' \
+    "$home/data/filed/contributions.json" >/dev/null \
+    || fail 'a stalled read on one URL starved every other contribution'
+  jq -e '.records[0].error == "forge observation unavailable or changed during read"' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'a stalled read left no error evidence'
+  pass 'a read that never finishes rotates behind the other contributions'
+}
+
+test_stalled_read_does_not_starve_other_contributions() {
+  local home out
+  home=$(new_home stalled-read)
+  forge_home "$home"
+  wrap_forge "$home"
+  printf -- '- [ ] filed - Measured defect https://github.com/o/r/issues/9 (repo: sample) (kind: ship)\n' >> "$home/data/backlog.md"
+  with_home "$home" env FM_CONTRIBUTIONS_NOW=2026-09-16T08:00:00Z "$ROOT/bin/fm-contributions.sh" poll >/dev/null \
+    || fail 'initial healthy poll failed'
+  mutate_record "$home" delivery '.records[0].checked_at="2026-09-15T08:00:00Z"'
+  printf 'stall\n' > "$home/forge/fault"
+  for at in 2026-09-16T09:00:00Z 2026-09-16T10:00:00Z; do
+    out=$(with_home "$home" env FM_CONTRIBUTIONS_NOW="$at" "$ROOT/bin/fm-contributions.sh" poll) \
+      || fail "poll at $at failed"
+  done
+  jq -e '.records[0] | .checked_at == "2026-09-16T10:00:00Z" and .error == null' \
+    "$home/data/filed/contributions.json" >/dev/null \
+    || fail 'a stalled read on one URL starved every other contribution'
+  jq -e '.records[0].error == "forge observation unavailable or changed during read"' \
+    "$home/data/delivery/contributions.json" >/dev/null || fail 'a stalled read left no error evidence'
+  pass 'a read that never finishes rotates behind the other contributions'
 }
 
 test_unavailable_forge_records_error_and_wakes_once_per_episode() { # genuine outage, two consecutive cycles
@@ -870,7 +918,7 @@ test_late_owner_keeps_failure_episode_suppressed() {
 }
 
 failures=0
-for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_page_completes_inside_the_budget test_intermittent_time_cut_never_opens_an_episode test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
+for test_name in test_actor_coverage test_stale_verdict test_unchecked_is_not_silence test_newest_check_has_no_verdict test_comment_wake test_review_wake test_inline_wake test_ready_issue_wake test_fresh_issue_requires_maintainer test_missing_lane_remains_missing test_partial_freshness_keeps_measured_rows test_malformed_record_cannot_prove_silence test_issue_timeline_and_exact_ack test_verdict_retains_judged_head test_observed_replacement_refreshes_verdict test_unobserved_head_leaves_verdict_unknown test_away_yolo_is_fleet_work test_away_yolo_cross_home_is_fleet_work test_retired_and_unsupported_coverage test_unsupported_forge_is_not_fleet_work test_held_unsupported_forge_is_not_captain_work test_shared_contribution_signal_wakes_once test_watcher_keeps_diagnostics_separate_from_contribution_wakes test_expired_child_unsupported_forge_stays_unmeasured test_watcher_surfaces_new_contribution_once test_home_summary_coverage test_unreadable_pending_is_not_empty test_budget_refusal_between_calls test_budget_bounded_call_timeout test_genuine_failure_near_deadline_is_unavailable test_shared_url_observed_once test_terminal_contribution_settles test_late_owner_inherits_terminal_observation test_done_task_open_pr_still_observed test_reservation_defers_later_url_when_fifteen_seconds_do_not_remain test_three_second_pr_reads_complete_fresh_in_one_cycle test_slow_page_completes_inside_the_budget test_intermittent_time_cut_never_opens_an_episode test_stalled_read_does_not_starve_other_contributions test_unavailable_forge_records_error_and_wakes_once_per_episode test_late_owner_keeps_failure_episode_suppressed; do
   ( "$test_name" ) || failures=$((failures + 1))
 done
 [ "$failures" -eq 0 ] || fail "$failures contribution regressions"
