@@ -722,11 +722,14 @@ test_delivery_confirmation_serializes_with_reconciliation() {
     # The background PID is consumed within this isolated test subshell.
     # shellcheck disable=SC2031
     confirm_pid=$!
-    for i in $(seq 1 100); do
+    # A generous ceiling, not a measured cost: scheduling the backgrounded
+    # confirmation before it reaches this checkpoint can take longer than a
+    # second on a saturated runner even though it is fast once started.
+    for i in $(seq 1 1000); do
       [ -e "$entered" ] && break
       /bin/sleep 0.01
     done
-    [ -e "$entered" ] || fail "delivery confirmation did not reach its commit boundary"
+    [ -e "$entered" ] || fail "delivery confirmation did not reach its commit boundary within 10s"
     fm_pending_reply_reconcile_delivery "$state" "$corr" &
     # The background PID is consumed within this isolated test subshell.
     # shellcheck disable=SC2031

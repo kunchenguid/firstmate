@@ -2766,13 +2766,16 @@ SH
     FM_TEST_ACQUIRED="$PR_POLL_HOLDER_ACQUIRED" FM_TEST_RELEASE="$PR_POLL_HOLDER_RELEASE" \
     "$dir/poll-publish-holder.sh" &
   PR_POLL_HOLDER_PID=$!
-  for i in $(seq 1 100); do
+  # A generous ceiling, not a measured cost: scheduling the backgrounded
+  # holder before it acquires the lock can take longer than a couple of
+  # seconds on a saturated runner even though it is fast once started.
+  for i in $(seq 1 1000); do
     [ -e "$PR_POLL_HOLDER_ACQUIRED" ] && return 0
     sleep 0.02
   done
   kill "$PR_POLL_HOLDER_PID" 2>/dev/null || true
   wait "$PR_POLL_HOLDER_PID" 2>/dev/null || true
-  fail "poll publication holder did not acquire its lock"
+  fail "poll publication holder did not acquire its lock within 20s"
 }
 
 release_poll_publish_holder() {
@@ -2847,11 +2850,14 @@ SH
     FM_TEST_GH_LOG="$dir/gh.log" FM_TEST_GH_STATE=OPEN \
     run_watcher_bounded "$dir/home" "$dir/fakebin" > "$dir/watch.out" 2> "$dir/watch.err" &
   watcher_pid=$!
-  for i in $(seq 1 100); do
+  # A generous ceiling, not a measured cost: scheduling the backgrounded
+  # watcher before it reaches this checkpoint can take longer than a couple
+  # of seconds on a saturated runner even though it is fast once started.
+  for i in $(seq 1 1000); do
     [ -d "$state/.control-task-a.lock" ] && break
     sleep 0.02
   done
-  [ -d "$state/.control-task-a.lock" ] || fail "watcher did not reach its device re-record"
+  [ -d "$state/.control-task-a.lock" ] || fail "watcher did not reach its device re-record within 20s"
   sleep 1
   process_is_live_non_zombie "$watcher_pid" || fail "watcher did not wait for poll publication"
   [ "$(fm_pr_sha256 "$state/task-a.pr-poll-registration")" = "$original" ] \

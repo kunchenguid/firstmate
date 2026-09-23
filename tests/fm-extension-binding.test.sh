@@ -675,11 +675,14 @@ H_CONCURRENT="$HOMES/concurrent"; new_home "$H_CONCURRENT"
 bind_package "$H_CONCURRENT" "$P_CONCURRENT_ONE" ext-concurrent \
   > "$TMP_ROOT/concurrent-first.out" 2>&1 &
 first_bind_pid=$!
-for _ in $(seq 1 200); do
+# A generous ceiling, not a measured cost: scheduling the backgrounded bind
+# before it reaches this checkpoint can take longer than a couple of seconds
+# on a saturated runner even though the bind itself is fast once started.
+for _ in $(seq 1 2000); do
   [ -s "$concurrent_marker" ] && break
   sleep 0.01
 done
-[ -s "$concurrent_marker" ] || fail "first concurrent bind never reached its pre-publication handshake"
+[ -s "$concurrent_marker" ] || fail "first concurrent bind never reached its pre-publication handshake within 20s"
 bind_package "$H_CONCURRENT" "$P_CONCURRENT_TWO" ext-concurrent > "$TMP_ROOT/concurrent-second.out" 2>&1 &
 second_bind_pid=$!
 sleep 0.2
@@ -1719,8 +1722,11 @@ first_invocation_owner() {  # <home>
 }
 
 wait_for_invocation_owner() {  # <home>
+  # A generous ceiling, not a measured cost: this waits on a real backgrounded
+  # invocation's owner file, which can take longer than 2s to appear on a
+  # saturated runner even though the invocation itself starts fast.
   local candidate
-  for _ in $(seq 1 200); do
+  for _ in $(seq 1 2000); do
     candidate=$(first_invocation_owner "$1" 2>/dev/null || true)
     [ -n "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
     sleep 0.01

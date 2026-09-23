@@ -243,11 +243,14 @@ done
   || fail "the active-job readiness fixture did not begin running"
 ACTIVE_WORKER_PID=$(cat "$STATE_ROOT/worker.pid")
 touch -t 200001010000 "$STATE_ROOT/worker.ready"
-for _ in $(seq 1 40); do
+# A generous ceiling, not a measured cost: the running worker's own heartbeat
+# refresh can take longer than a couple of seconds to be scheduled on a
+# saturated runner even though the refresh itself is fast once it runs.
+for _ in $(seq 1 400); do
   fm_remote_job_probe "$ACCOUNT_HOME" && break
   sleep 0.05
 done
-fm_remote_job_probe "$ACCOUNT_HOME" || fail "the active worker did not refresh its readiness heartbeat"
+fm_remote_job_probe "$ACCOUNT_HOME" || fail "the active worker did not refresh its readiness heartbeat within 20s"
 fm_remote_job_ensure_worker "$REMOTE_ROOT" "$ACCOUNT_HOME" || fail "$FM_REMOTE_JOB_ERROR"
 [ "$(cat "$STATE_ROOT/worker.pid")" = "$ACTIVE_WORKER_PID" ] \
   || fail "ensure replaced a healthy worker during an active job"
