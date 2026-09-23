@@ -621,6 +621,27 @@ test_same_harness_relaunch_keeps_the_profile_axes() {
   pass "fm-control relaunch: a same-harness relaunch keeps the profile axes it was running with"
 }
 
+test_codex_relaunch_threads_max_effort() {
+  local dir out rc
+  dir=$(new_case codex-max rl35)
+  add_ship_task "$dir" rl35 codex
+  sed 's/^model=default$/model=gpt-6-luna/; s/^effort=default$/effort=max/' \
+    "$dir/home/state/rl35.meta" > "$dir/home/state/rl35.meta.tmp"
+  mv "$dir/home/state/rl35.meta.tmp" "$dir/home/state/rl35.meta"
+  printf 'codex' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+
+  out=$(run_control "$dir" rl35 relaunch --note "retain Luna max reasoning"); rc=$?
+  expect_code 0 "$rc" "a Codex relaunch with max effort should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl35 model)" = gpt-6-luna ] \
+    || fail "a Codex relaunch must preserve the Luna model"
+  [ "$(meta_field "$dir" rl35 effort)" = max ] \
+    || fail "a Codex relaunch must preserve max effort"
+  assert_grep "model_reasoning_effort=\"max\"" "$dir/fake/literal" \
+    "a Codex relaunch must pass model_reasoning_effort=max to the shared launch owner"
+  pass "fm-control relaunch: Codex preserves and passes Luna max effort"
+}
+
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   local dir out rc id=rl-ultra
   dir=$(new_case native-ultra "$id")
@@ -1570,6 +1591,7 @@ test_harness_switch_does_not_carry_the_old_profile_axes
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
+test_codex_relaunch_threads_max_effort
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused

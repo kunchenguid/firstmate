@@ -2003,10 +2003,10 @@ effort_flag_for_harness() {
       ;;
     codex)
       # The installed codex config schema uses model_reasoning_effort, and the
-      # bundled model catalog advertises low|medium|high|xhigh. Omit max rather
-      # than passing an unsupported value.
+      # current Luna account accepts low|medium|high|xhigh|max. Omit values
+      # outside that accepted set rather than passing an unsupported value.
       case "$effort" in
-        low|medium|high|xhigh) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
+        low|medium|high|xhigh|max) printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"$effort\"")" ;;
       esac
       ;;
     grok)

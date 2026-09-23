@@ -817,6 +817,27 @@ test_spawn_secondmate_harness_model_and_effort_tokens() {
   pass "C4 spawn: config/secondmate-harness's model+effort tokens thread into the launch and meta"
 }
 
+test_spawn_secondmate_codex_max_effort_token() {
+  local w sm meta launchlog launch
+  w="$TMP_ROOT/spawn-codex-max-token"
+  sm="$w/sm"
+  launchlog="$w/launch.log"
+  mkdir -p "$w/home/config"
+  printf 'codex gpt-6-luna max\n' > "$w/home/config/secondmate-harness"
+  make_seeded_home "$sm" sm
+
+  spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
+
+  meta="$w/home/state/sm.meta"
+  [ "$(meta_field "$meta" harness)" = codex ] || fail "codex-max-token: meta harness not codex"
+  [ "$(meta_field "$meta" model)" = gpt-6-luna ] || fail "codex-max-token: meta model not gpt-6-luna"
+  [ "$(meta_field "$meta" effort)" = max ] || fail "codex-max-token: meta effort not max"
+  launch=$(cat "$launchlog")
+  assert_contains "$launch" "codex --model 'gpt-6-luna' -c 'model_reasoning_effort=\"max\"'" \
+    "codex-max-token: launch did not carry model_reasoning_effort=max"
+  pass "C4b spawn: config/secondmate-harness carries Codex Luna max effort through the shared launch owner"
+}
+
 # Precedence: an explicit per-spawn --model overrides the file's model token.
 test_spawn_explicit_model_overrides_secondmate_harness_token() {
   local w sm meta launchlog launch
@@ -2645,6 +2666,7 @@ test_spawn_explicit_backend_precedence_over_env_and_inherited_config
 test_spawn_bare_harness_no_model_effort_flag
 test_spawn_secondmate_harness_model_token
 test_spawn_secondmate_harness_model_and_effort_tokens
+test_spawn_secondmate_codex_max_effort_token
 test_spawn_explicit_model_overrides_secondmate_harness_token
 test_spawn_explicit_effort_overrides_secondmate_harness_token
 test_spawn_explicit_harness_does_not_inherit_secondmate_harness_tokens

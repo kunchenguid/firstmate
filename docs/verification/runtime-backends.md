@@ -1506,6 +1506,34 @@ Observed guarantee: a Desktop-owned thread can write Firstmate lifecycle files w
 The missing guarantee remains a supported shell-callable bridge that lets Firstmate perform those operations against the same visible Desktop endpoint.
 App-server partial methods and raw socket experiments do not satisfy that bridge contract.
 
+## Codex CLI reasoning effort
+
+Verified on 2026-09-22 with WSL codex-cli 0.155.1 using ChatGPT-account authentication.
+
+```sh
+codex exec --skip-git-repo-check --json -m gpt-6-luna \
+  -c 'model_reasoning_effort="max"' \
+  "Reply with exactly: OK"
+```
+
+The request completed with assistant output `OK`, and its rollout reported model `gpt-6-luna` and effort `max`.
+The same command completed through Windows npm codex-cli 0.155.1.
+A task-local smoke also ran codex-cli 0.155.1 with an isolated worktree-local `CODEX_HOME`, the same model, effort, and prompt, and returned `OK`.
+
+```sh
+codex exec --ephemeral --ignore-user-config --sandbox read-only --skip-git-repo-check --json \
+  -m gpt-6-luna -c 'model_reasoning_effort="max"' \
+  "Reply with exactly: OK"
+```
+
+For that invocation, `CODEX_HOME` pointed to an isolated temporary directory under the worktree, which was removed after the run.
+A separate `gpt-6-luna` run configured with `model_reasoning_effort="ultra"` completed without error and reported rollout effort `ultra`.
+Codex accepts an effort that a model does not advertise, so that result does not make `ultra` the documented target; the target remains `max`.
+
+Windows Codex Desktop with bundled CLI 0.153.4 rejected `gpt-6-luna` with HTTP 400 `invalid_request_error`, saying the model is unsupported with a ChatGPT account.
+The bundled model catalog and `~/.codex/models_cache.json` did not contain `gpt-6-luna`.
+`max` is live-verified only for `gpt-6-luna` on codex-cli 0.155.1; the catalog advertises it for other models, whose live behavior remains unverified.
+
 ## Cursor Agent CLI
 
 Cursor runs crewmate, scout, secondmate, and primary work; [`supervision.md`](supervision.md#cursor-primary-park-2026-08-13) owns the primary evidence.

@@ -417,21 +417,39 @@ test_codex_threads_model_and_effort() {
   pass "codex receives --model and model_reasoning_effort profile flags"
 }
 
-test_codex_omits_invalid_max_effort() {
+test_codex_threads_max_effort() {
   local rec id out status launch
   id=profile-codex-max-z4
   rec=$(make_spawn_case profile-codex-max codex "$id")
   read_case_record "$rec"
 
-  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5 --effort max)
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-6-luna --effort max)
   status=$?
-  expect_code 0 "$status" "codex spawn with unsupported max effort should omit the effort flag"
-  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5 max
+  expect_code 0 "$status" "codex spawn with max effort should pass the effort flag"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-6-luna max
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "codex --model 'gpt-5' --dangerously-bypass-approvals-and-sandbox" \
-    "codex launch did not preserve the model flag when max effort was omitted"
-  assert_not_contains "$launch" "model_reasoning_effort" "codex launch must omit unsupported max reasoning effort"
-  pass "codex omits unsupported max effort instead of passing a bad config value"
+  assert_contains "$launch" "codex --model 'gpt-6-luna' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread max reasoning effort config"
+  pass "codex receives --model and model_reasoning_effort=max profile flags"
+}
+
+test_codex_rejects_unaccepted_effort_before_launch() {
+  local rec id out status sm
+  id=profile-codex-ultra-z4
+  rec=$(make_spawn_case profile-codex-ultra codex "$id")
+  read_case_record "$rec"
+  sm="$CASE_DIR/secondmate-home"
+  make_seeded_secondmate_home "$sm" "$id"
+  printf 'codex gpt-6-luna ultra\n' > "$HOME_DIR/config/secondmate-harness"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  status=$?
+  expect_code 1 "$status" "codex spawn with an unaccepted configured effort should refuse before launch"
+  assert_contains "$out" "ultra effort requires pi or pi-signed" \
+    "codex spawn should reject the native-only effort before launch"
+  [ ! -e "$HOME_DIR/state/$id.meta" ] || fail "codex rejected effort must not publish metadata"
+  [ ! -s "$LAUNCH_LOG" ] || fail "codex rejected effort must not pass any launch command"
+  pass "codex does not pass its unaccepted native-only effort"
 }
 
 test_grok_threads_model_and_reasoning_effort() {
@@ -1310,7 +1328,8 @@ test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
 test_codex_threads_model_and_effort
-test_codex_omits_invalid_max_effort
+test_codex_threads_max_effort
+test_codex_rejects_unaccepted_effort_before_launch
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
