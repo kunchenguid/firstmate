@@ -985,6 +985,10 @@ fm_lock_reclaim_dead_recovery() {  # <recovery-mutex> <observed-pid> <current-pi
   return 0
 }
 
+# A dead <lock>.steal is recovered under the single fixed <lock>.steal.recovery
+# mutex, never a further .steal suffix, so recovery tiers stay bounded. A live
+# recovery holder or its surviving process group is waited out (returns 1);
+# 2 means only that recovery cannot proceed and the mutex is preserved.
 fm_lock_try_recover_steal_mutex() {  # <steal-lock> <observed-pid> <current-pid>
   local lockdir=$1 pid=$2 current=$3 recovery recovery_owner primary_owner cur rc recovery_pid recovery_target
   if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
