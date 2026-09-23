@@ -892,7 +892,7 @@ if [ -f "$STATE/.afk-contract" ]; then
   fi
 elif [ -e "$STATE/.afk" ]; then
   if [ "$AFK_MODE" = quiet ]; then
-    printf 'present - quiet-mode supervision is active; the daemon owns the watcher, only an explicit /quiet off exits it (legacy flag with no posture record).\n'
+    printf 'present - quiet-mode supervision is active; the daemon owns the watcher, only an explicit /quiet off exits it.\n'
   else
     printf 'present - away-mode supervision is active; the daemon owns the watcher (legacy flag with no posture record).\n'
   fi

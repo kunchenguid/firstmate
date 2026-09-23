@@ -789,7 +789,7 @@ test_return_brief_without_a_record_reports_the_legacy_flag() {
   printf '%s\n' "$(( $(date +%s) - 7200 ))" > "$dir/home/state/.afk"
   : > "$dir/home/state/.fake-drain"
   out=$(run_return "$dir" begin) || fail "a legacy-flag return with no blockers should clear: $out"
-  assert_contains "$out" '(no away-posture record for this window; legacy away flag only)' "the legacy window was not named"
+  assert_contains "$out" '(no away-posture record for this window: quiet mode, or a legacy away flag)' "the legacy window was not named"
   assert_contains "$out" ', 2h00m) ===' "the away window was not measured from the legacy flag's own timestamp"
   [ ! -e "$dir/home/state/.afk" ] || fail "the legacy flag survived the return"
   pass "a return with only the legacy away flag still renders the brief and measures the window from the flag"
