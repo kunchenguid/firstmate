@@ -526,13 +526,13 @@ bin/fm-dispatch-resolve.sh data/<id>/brief.md --project <name>        # TOON blo
 ```
 
 Firstmate invokes the resolve path directly after writing the brief, without a preflight; the absent-key off line is handled exactly like every other non-clear outcome.
-When on and at least one rule exists, the tool sends the project name and the whole brief as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees quota, catalogs, `why`, `use`, or approvals.
+When on and at least one rule exists, the tool sends the project name and only the brief's `# Task` section, including both task subsections up to the next level-one heading, as state and asks one Choice question whose options are every rule's `when` plus the fixed neutral option for no matching rule; the model never sees the standard scaffold, quota, catalogs, `why`, `use`, or approvals.
 An absent rules file, a default-only file, or `rules: []` returns the non-clear reason `no rules to match` without a model or quota request, leaving firstmate's existing routing in control; an existing but unreadable or malformed rules file, including a broken symlink, remains an actionable exit 2 configuration error.
 Everything after the answer runs in code: the confidence floor, the matched rule's `approval` and `floor`, each candidate's `provider` and `floor`, every applicable account-wide and model/product row from one `quota-axi --json` snapshot, and the numeric `spendPriority` argmax over candidates using each candidate's limiting row.
 The [shared quota library](../bin/fm-quota-axi-lib.sh) accepts schema 5 and schema 6 and implements the [account-matching contract](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility).
 An expanded provider with no matching account row leaves the candidate eligible but unranked.
 Known applicable rows from a provider with partial quota semantics remain rankable; rows whose own status is not known remain unrankable.
-Any applicable `exhausted_now` row or known zero bound makes that candidate ineligible, and a known profile-floor shortfall does the same before unrelated quota uncertainty is considered.
+Any known applicable `projected_exhaustion` or `exhausted_now` runway, or a known zero bound, makes that candidate ineligible, as does a known profile-floor shortfall; unknown runway remains eligible but unranked.
 Missing or nonnumeric `spendPriority` evidence is never ranked, and every candidate is printed beside its evidence or the reason it was not rankable, including on ambiguous and approval-gated outcomes that emit no profile.
 On the opted-in path, duplicate concrete profiles with the same harness, model, and effort inside one rule or the default array are configuration errors rather than ties.
 The result is one of `clear` (a `profile:` line ready for `fm-spawn.sh`), `ambiguous` (confidence below the floor), `escalate` (an approval-gated rule, unverifiable rule floor, nothing rankable, or a genuine tie), or `error` (API, network, malformed response metadata, rendering, or quota-axi failure), and every one of them exits 0.
@@ -540,7 +540,8 @@ Response probabilities must contain exactly every offered choice, use numeric va
 Only a usage or configuration error exits 2: an unreadable brief, an existing but unreadable or malformed canonical rules file, or missing `jq`, each reported and never selected around.
 Missing `curl` is a normal structured `error` outcome with exit 0 so firstmate uses today's routing.
 The tool never replaces firstmate's judgment, `quota-array-dispatch`, the captain-approval gate, or `fm-spawn.sh` validation; `AGENTS.md` section 4 owns what firstmate does with each outcome.
-By accepted design, a `clear` result does not enforce catalog/authentication, reasoning-class, or completion-runway gates.
+A `clear` result checks the mapped native harness credential sources in one read-only `quota-axi auth --json` snapshot and refuses a candidate only when its own sources are all known missing; an absent, expired, unavailable, or unmapped source is disclosed uncertainty, never proof of sign-out.
+The resolver does not check model catalog or reasoning-class fit, nor calculate a task-specific completion horizon; it conservatively refuses known projected exhaustion before reset and leaves that judgment to firstmate when routing outside this tool.
 Firstmate passes its profile line unless it states a reason to override, such as the brief's reasoning class or an eligible-unranked-candidate note; every non-clear result returns to the full existing intake.
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.

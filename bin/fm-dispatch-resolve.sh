@@ -14,18 +14,21 @@
 #   a file descriptor, never on argv; nothing logs or writes it.
 #
 # What it does when on with at least one rule: one POST to
-#   https://api.typesafe.ai/v1/systemone with the project name and the whole brief as
-#   state and ONE Choice question whose
+#   https://api.typesafe.ai/v1/systemone with the project name and only the brief's
+#   # Task section (through the next level-one heading) as state and ONE Choice question whose
 #   options are every rule's `when` from config/crew-dispatch.json plus one
 #   fixed generic none option. Jev returns the matched rule, a probability per
 #   option, and a confidence. Everything after that is jq: the confidence
 #   floor, the rule's declared `approval` and `floor`, each profile's declared
-#   `provider` and `floor`, the quota rows from ONE quota-axi --json snapshot
+#   `provider` and `floor`, the harness-specific authentication sources from
+#   quota-axi auth --json, the quota rows from ONE quota-axi --json snapshot
 #   (schema 5 or 6; each candidate binds to one row through quota_row in
 #   bin/fm-quota-axi-lib.sh, so a Pi lane such as openai-codex-work/...
 #   reads its own account's row and an expanded provider with no row for the
-#   candidate is unmeasured, never blocked), and the spendPriority argmax over
-#   the eligible candidates. The model never
+#   candidate is unmeasured, never blocked), known authentication failures and
+#   projected-exhaustion runway vetoes, and the spendPriority argmax over the
+#   eligible candidates. Unknown auth and quota stay disclosed uncertainty.
+#   The model never
 #   sees quota, catalogs, approvals, `why`, or `use`. With no rules, it returns
 #   a non-clear result so firstmate keeps using the existing intake.
 #   docs/configuration.md "Crew dispatch profiles" owns the declared fields and
@@ -37,6 +40,7 @@
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
+#     authentication: <harness>:<model> <source evidence or uncertainty>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
@@ -52,7 +56,8 @@
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
-#   inspectable answer plus every candidate's evidence, in code.
+#   inspectable answer plus every candidate's evidence, in code. It does not
+#   verify model catalogs, reasoning class, or a task-specific completion horizon.
 set -u
 
 TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
@@ -222,10 +227,18 @@ fi
 
 RESP_FILE=$(mktemp) || die "mktemp failed"
 QUOTA=$(mktemp) || { rm -f "$RESP_FILE"; die "mktemp failed"; }
-trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA"' EXIT
+TASK=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA"; die "mktemp failed"; }
+AUTH=$(mktemp) || { rm -f "$RESP_FILE" "$QUOTA" "$TASK"; die "mktemp failed"; }
+trap 'rm -f "$RULES" "$RESP_FILE" "$QUOTA" "$TASK" "$AUTH"' EXIT
+awk '
+  /^# Task[[:space:]]*$/ && !found { found=1; print; next }
+  found && /^# / { exit }
+  found { print }
+  END { if (!found) exit 1 }
+' "$BRIEF" > "$TASK" || die "brief has no # Task section: $BRIEF"
 LAT_MS=null
 command -v curl >/dev/null 2>&1 || emit_error "curl not installed"
-  REQUEST=$(jq -n --rawfile brief "$BRIEF" --arg project "$PROJECT" --arg model "$TS_MODEL" \
+  REQUEST=$(jq -n --rawfile brief "$TASK" --arg project "$PROJECT" --arg model "$TS_MODEL" \
     --arg none_criterion "$DEFAULT_WHEN" --slurpfile rules "$RULES" '
     ($rules[0]) as $cfg |
     ($cfg.rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
@@ -267,10 +280,16 @@ jq -e --slurpfile rules "$RULES" '
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
 quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
 fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
+# Authentication is an independent read-only source inventory. Failure to read it
+# is uncertainty, not proof of sign-out. Source identity must be tied to the
+# candidate harness below; a provider aggregate is never an authentication gate.
+if ! quota-axi auth --json > "$AUTH" 2>/dev/null || ! jq -e '(.auth | type) == "array"' "$AUTH" >/dev/null 2>&1; then
+  printf '{"auth":[]}' > "$AUTH"
+fi
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
-  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
+  --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" --slurpfile auth "$AUTH" "$FM_QUOTA_ROW_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def prov($p; $lane): quota_row($q; $p; $lane);
@@ -297,11 +316,29 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     end;
   def evidence($rows):
     $rows | map({scope, status, pct: (.effectivePercentRemaining // null), runway: (.runway.status // null), spendPriority: (.selection.spendPriority // null)});
+  # Only these native harnesses have a documented, unambiguous credential
+  # surface. Do not infer Pi or other harness credentials from provider alone.
+  def auth_sources($c; $p):
+    if $c.harness == "codex" and $p == "codex" then ["auth-json"]
+    elif $c.harness == "claude" and $p == "claude" then ["oauth-file", "keychain"]
+    elif $c.harness == "kimi" and $p == "kimi" then ["kimi-code-cli"]
+    else [] end;
+  def auth_evidence($c; $p):
+    (auth_sources($c; $p)) as $names |
+    [($auth[0].auth // [])[] | select(.provider == $p) | .sources[]? | select(.source as $s | $names | index($s) != null)] as $sources |
+    if ($names | length) == 0 then {note: "authentication surface not mapped for this harness"}
+    elif ($sources | length) == 0 then {note: "authentication sources unmeasured"}
+    elif any($sources[]; .status == "available") then {note: "authentication source available"}
+    elif ($sources | length) == ($names | length) and all($sources[]; .status == "missing") then
+      {failed: true, note: "\($c.harness):\($c.model // "-") authentication sources \($names | join(",")) missing"}
+    else {note: "authentication sources inconclusive"} end;
   def evaluate($c):
     (provider_of($c)) as $p | (lane_of($c)) as $lane |
-    if $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
+    (auth_evidence($c; $p)) as $auth_ev |
+    if $auth_ev.failed then {profile: $c, provider: $p, eligible: false, reason: $auth_ev.note}
+    elif $p == null then {profile: $c, eligible: false, reason: "no provider family for harness \($c.harness); declare provider on the profile"}
     elif prov($p; $lane) == null then
-      {profile: $c, provider: $p, eligible: true, unranked: true,
+      {profile: $c, provider: $p, auth_note: $auth_ev.note, eligible: true, unranked: true,
        reason: (if any($q.providers[]; .provider == $p)
                 then "provider \($p) has no quota row for account \(if $lane == "" then "default" else $lane end)"
                 else "provider \($p) not in the quota snapshot" end)}
@@ -309,7 +346,10 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       (applicable($p; $lane; ($c.model // ""))) as $rows |
       (evidence($rows)) as $bounds |
       (floor_state($c.floor; $p; $lane)) as $profile_floor_state |
-      if any($rows[]; (.runway.status // "") == "exhausted_now") then
+      if any($rows[]; ((.runway.status // "") == "exhausted_now" or (.runway.status // "") == "projected_exhaustion") and .status == "known") then
+        ($rows | map(select(((.runway.status // "") == "exhausted_now" or (.runway.status // "") == "projected_exhaustion") and .status == "known")) | first) as $bad |
+        {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: ($bad.effectivePercentRemaining // null), runway: $bad.runway.status, eligible: false, reason: "runway \($bad.runway.status) at \($bad.scope)"}
+      elif any($rows[]; (.runway.status // "") == "exhausted_now") then
         ($rows | map(select((.runway.status // "") == "exhausted_now")) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: ($bad.effectivePercentRemaining // null), runway: $bad.runway.status, eligible: false, reason: "runway exhausted_now at \($bad.scope)"}
       elif any($rows[]; .status == "known" and (.effectivePercentRemaining | type) == "number" and .effectivePercentRemaining <= 0) then
@@ -332,6 +372,9 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
       elif any($rows[]; .status != "known") then
         ($rows | map(select(.status != "known")) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, eligible: true, unranked: true, unknown: true, reason: "quota row \($bad.scope) unknown: not rankable"}
+      elif any($rows[]; (.runway.status // "unknown") != "through_reset") then
+        ($rows | map(select((.runway.status // "unknown") != "through_reset")) | first) as $bad |
+        {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: ($bad.effectivePercentRemaining // null), runway: ($bad.runway.status // null), eligible: true, unranked: true, unknown: true, reason: "runway \($bad.runway.status // "unknown") at \($bad.scope): not rankable"}
       elif any($rows[]; (.selection.spendPriority | type) != "number") then
         ($rows | map(select((.selection.spendPriority | type) != "number")) | first) as $bad |
         {profile: $c, provider: $p, bounds: $bounds, scope: $bad.scope, pct: $bad.effectivePercentRemaining, runway: $bad.runway.status, eligible: true, unranked: true, reason: "spendPriority missing or non-numeric at \($bad.scope): not rankable"}
@@ -340,7 +383,7 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
         {profile: $c, provider: $p, bounds: $bounds, scope: $limiting.scope, pct: $limiting.effectivePercentRemaining,
          spendPriority: $limiting.selection.spendPriority, runway: $limiting.runway.status, eligible: true, reason: "ok"}
       end
-    end;
+    end | if .eligible then . + {auth_note: $auth_ev.note} else . end;
   ($a.choice) as $choice |
   (if ($choice | test("^rule_[1-9][0-9]*$"))
    then ($choice | ltrimstr("rule_") | tonumber)
@@ -405,7 +448,8 @@ TEXT=$(jq -r '
       + (if .provider then "  provider=\(.provider | flat)" else "" end)
       + (if .scope then "  scope=\(.scope | flat)  remaining=\(show(.pct))%  spendPriority=\(show(.spendPriority))  runway=\(show(.runway))" else "" end)
       + (if (.bounds // [] | length) > 1 then "  bounds=" + ([.bounds[] | "\(.scope | flat):\(show(.pct))%/\((.runway // .status) | flat)"] | join(",")) else "" end)
-      + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end)),
+      + "  -> " + (if .unranked then "eligible, unranked: \(.reason | flat): disclosed uncertainty" elif .eligible then "eligible" else "not eligible: \(.reason | flat)" end),
+    (if .auth_note then "    authentication: \(.profile.harness | flat):\(show(.profile.model)) \(.auth_note | flat)" else empty end)),
   (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
