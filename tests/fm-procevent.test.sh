@@ -219,6 +219,17 @@ sup=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
   '. "$1/bin/fm-supervision-lib.sh"; fm_supervision_needed "$2" && echo yes || echo no' _ "$ROOT" "$IDLE/state")
 assert_contains "$sup" no "an unconfigured home does not need supervision"
 
+# Everything below drives detached runners, and every runner must isolate and
+# then prove its own POSIX process group through `ps -o pgid` (see
+# require_isolated_group in bin/fm-procevent.sh). Git Bash/MSYS perl setpgrp
+# creates no group and MSYS ps cannot express pgid, so the runner substrate
+# does not exist on that host at all; the inert contract above is the only
+# part exercisable there. Capability-probed, never uname-gated.
+if ! ps -o pgid= -p "$$" >/dev/null 2>&1; then
+  pass "procevent runners need POSIX process-group isolation and ps -o pgid; skipped on MSYS where neither exists"
+  exit 0
+fi
+
 # --- a blocking source completes into exactly one normalized event ----------
 H1="$TMP_ROOT/h1"; mkdir -p "$H1"
 TRIG="$TMP_ROOT/trigger-one"
