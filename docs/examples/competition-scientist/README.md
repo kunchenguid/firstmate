@@ -54,7 +54,7 @@ Before final promotion, the proposed controller runs one deterministic counterfa
 The final sealed audit runs once after search completion and never changes an earlier attempt verdict.
 Both one-shot budgets are charged to `.run/state.json` before the evaluation they gate, so a charged call is never retried.
 If a charged falsification or sealed call is interrupted or fails uncertainly, the search ends there: `finish` publishes a failed `.run/final.json` whose `aborted` block names the charged phase and the error, marks the workspace complete, and leaves every earlier attempt record intact.
-Only that first, failing invocation exits non-zero; a later `finish` returns the same record without re-running either evaluation and exits zero.
+A later `finish` reprints that record's outcome without re-running either evaluation, and still exits non-zero, so an abandoned search never reads as a completed one.
 `replay` accepts such a workspace, verifies the charged-call count the record claims, and names the aborted phase in its `PASS` line.
 
 A typed proposal may choose a change, name one bounded falsifier, and request a branch, but it cannot provide a score, acceptance verdict, evaluator edit, budget override, hidden result, or failure injection.
@@ -181,7 +181,8 @@ Every row carries:
 `.run/final.json` alone contains the post-search sealed score, or an `aborted` block naming the charged phase when an audit could not complete.
 No sealed dataset file exists in the proposer-visible workspace before finalization.
 
-Failure classes include immutable or undeclared-surface refusal, unparseable, duplicate, or confounded proposal, budget refusal, syntax, timeout, CPU-limit kill, OOM, network denial, runtime failure, nondeterministic replay, and the terminal `falsification-not-completed` and `sealed-not-completed` classes an interrupted charged audit records.
+Failure classes include immutable or undeclared-surface refusal, unparseable, duplicate, or confounded proposal, budget refusal, syntax, timeout, CPU-limit kill, OOM, network denial, runtime failure, nondeterministic replay, and the terminal `sealed-not-completed` class recorded when a charged sealed audit could not finish.
+An audit abandoned before the sealed call names its phase only in the `aborted` block, leaving the sealed failure class empty.
 A failure restores the branch incumbent and leaves its evidence reachable.
 
 ## Full A/B budget

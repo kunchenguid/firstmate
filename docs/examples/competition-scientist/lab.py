@@ -1102,6 +1102,22 @@ def evaluate_and_record(workspace: Path, proposal: dict[str, Any], *, baseline: 
     return record
 
 
+def print_final(final: dict[str, Any]) -> None:
+    aborted = final.get("aborted")
+    if aborted:
+        print(
+            f"aborted: task={final['task']} controller={final['controller']} "
+            f"phase={aborted['phase']} error={aborted['error']}"
+        )
+        return
+    metrics = final["sealed"].get("metrics") or {}
+    print(
+        f"final: task={final['task']} controller={final['controller']} "
+        f"attempts={final['attempts_used']} selected={final['selected_candidate_sha256'][:12]} "
+        f"sealed_worst_group={metrics.get('worst_group', 0.0):.6f}"
+    )
+
+
 def publish_final(workspace: Path, state: dict[str, Any], final: dict[str, Any]) -> dict[str, Any]:
     write_mutable_json(workspace / ".run" / "final.json", final)
     state["complete"] = True
@@ -1128,7 +1144,6 @@ def abandon_charged_search(
             "development_best_sha256": state["global_best_sha256"],
             "aborted": {
                 "phase": phase,
-                "failure_class": f"{phase}-not-completed",
                 "error": f"{type(error).__name__}: {error}"[-2000:],
             },
             "falsification": None if falsification is None else {
@@ -1136,7 +1151,12 @@ def abandon_charged_search(
                 "metrics": falsification.get("metrics"),
                 "failure_class": falsification.get("failure_class", ""),
             },
-            "sealed": {"ok": False, "metrics": None, "prediction_sha256": "", "failure_class": f"{phase}-not-completed"},
+            "sealed": {
+                "ok": False,
+                "metrics": None,
+                "prediction_sha256": "",
+                "failure_class": "sealed-not-completed" if state["sealed_calls"] else "",
+            },
             "sealed_calls": state["sealed_calls"],
             "falsification_calls": state["falsification_calls"],
             "attempts_used": state["attempts_used"],
@@ -1150,7 +1170,9 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
     manifest = verify_frozen(workspace)
     state = load_state(workspace)
     if state["complete"]:
-        return read_json(workspace / ".run" / "final.json")
+        stored = read_json(workspace / ".run" / "final.json")
+        print_final(stored)
+        return stored
     if state["sealed_calls"] >= 1:
         raise LabError("sealed-audit-already-called")
     if state["falsification_calls"] >= 1:
@@ -1249,12 +1271,9 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
             abandon_charged_search(workspace, manifest, state, charged_phase, exc, falsification)
         raise
     (workspace / "candidate.py").write_bytes(sealed_candidate.read_bytes())
-    print(
-        f"final: task={manifest['task']} controller={manifest['controller']} "
-        f"attempts={state['attempts_used']} selected={selected_sha[:12]} "
-        f"sealed_worst_group={sealed.get('metrics', {}).get('worst_group', 0.0):.6f}"
-    )
+    print_final(final)
     return final
+
 
 def load_proposals(path: Path) -> list[Any]:
     proposals: list[Any] = []
@@ -1514,8 +1533,8 @@ def main() -> int:
             print(canonical_json(record))
             return 0
         if args.command == "finish":
-            finish_workspace(Path(args.workspace).expanduser().resolve())
-            return 0
+            final = finish_workspace(Path(args.workspace).expanduser().resolve())
+            return 2 if final.get("aborted") else 0
         if args.command == "replay":
             replay_workspace(Path(args.workspace).expanduser().resolve())
             return 0

@@ -381,8 +381,10 @@ state = json.loads((workspace / ".run/state.json").read_text())
 final = json.loads((workspace / ".run/final.json").read_text())
 assert state["complete"] is True, state["complete"]
 assert state["sealed_calls"] == 1, state["sealed_calls"]
+assert sorted(final["aborted"]) == ["error", "phase"], final["aborted"]
 assert final["aborted"]["phase"] == "sealed", final["aborted"]
 assert final["aborted"]["error"], final["aborted"]
+assert final["sealed"]["failure_class"] == "sealed-not-completed", final["sealed"]
 assert final["sealed"]["ok"] is False, final["sealed"]
 assert final["falsification"] is not None, "the charged falsification phase left no evidence"
 assert final["attempts_used"] == state["attempts_used"]
@@ -391,7 +393,9 @@ assert any(json.loads(line)["kind"] == "baseline" for line in ledger), "prior ev
 PY
 
   output=$($LAB finish "$workspace" 2>&1); status=$?
-  expect_code 0 "$status" "a later finish should return the recorded outcome instead of failing"
+  [ "$status" -ne 0 ] || fail "a later finish must not report success for an abandoned search"
+  assert_contains "$output" "aborted: task=noisy-classification controller=proposed phase=sealed" \
+    "a later finish should reprint the recorded outcome"
   second=$(shasum -a 256 "$workspace/.run/final.json" | awk '{print $1}')
   [ "$first" = "$second" ] || fail "a later finish re-ran a charged one-shot call"
   python3 - "$workspace" <<'PY'
@@ -426,6 +430,7 @@ workspace = pathlib.Path(sys.argv[1])
 state = json.loads((workspace / ".run/state.json").read_text())
 final = json.loads((workspace / ".run/final.json").read_text())
 assert final["aborted"]["phase"] == "falsification", final["aborted"]
+assert final["sealed"]["failure_class"] == "", final["sealed"]
 assert final["sealed_calls"] == 0, final["sealed_calls"]
 assert state["sealed_calls"] == 0, state["sealed_calls"]
 assert state["falsification_calls"] == 1, state["falsification_calls"]
