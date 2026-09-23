@@ -1,0 +1,18 @@
+# config/usage-warner - opt-in thresholds for the local Claude usage warner
+# (bin/fm-usage-warner.sh). Copy this into a local, gitignored
+# config/usage-warner and edit. One `<window-id>:<percent>` directive per
+# non-empty, non-comment line, split on the LAST colon so a per-model window
+# id such as `model:fable` still parses correctly.
+#
+# <window-id> is exactly the "id" field quota-axi's own --json output already
+# uses. <percent> is a whole number from 1 to 100. A configured window id the
+# account does not return is silently never compared.
+#
+# An ABSENT config/usage-warner means the feature is off: `check` stays
+# completely silent and `arm` refuses. This file's mere presence is the
+# opt-in.
+#
+# The two account-level windows below exist for every account regardless of
+# what per-model windows a given account happens to return.
+five_hour:80
+seven_day:90
