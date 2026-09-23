@@ -47,7 +47,9 @@
 # forge-facing steps skipped and recovers the pipeline's own fix commits into its
 # branch, because a passed run whose fixes stayed in the gate looks exactly like
 # one whose fixes arrived and publishing it ships the unfixed code. Either mode's
-# ready report is `done: PR <change url> published for review`. A stack of
+# ready report is `done: PR <change url> published for review`; under
+# no-mistakes a `note:` line listing each pipeline finding and its fix comes
+# first, because the squash's description never shows the fix commits. A stack of
 # changes is refused until it can be watched by its membership pinned when its
 # watch is armed, because the merge poll watches one change. No contract here
 # lets a worker submit, vote on, or abandon a change.
@@ -424,6 +426,8 @@ An unrecovered fix round is an unfinished task, never housekeeping: publishing w
 Your ready report is refused while the run still holds your branch, while its outcome is missing or not passing, or while your HEAD's tree differs from the run's result.
 
 When the run's outcome is passed, passed-with-skips, or passed-with-override and step 3 holds, publish.
+The squashed change carries only the oldest commit's message, so the pipeline's own fix commits never reach the reviewer's description; your report is how they reach the captain.
+After publishing and immediately before your ready report, append one line \`note [at=<epoch>]: pipeline changes: {finding} - {fix it made}; {finding} - {fix it made}\` to the status file, one short clause per finding the run fixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); write \`note [at=<epoch>]: pipeline changes: none\` when it fixed nothing.
 EOF
       fm_gerrit_publish_block
       ;;

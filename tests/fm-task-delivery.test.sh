@@ -1091,6 +1091,10 @@ test_forge_gerrit_changes_what_no_mistakes_means() {
   assert_grep 'Never pass `--stack`' "$brief" "the worker was not kept off an unwatchable stack"
   assert_grep 'done [at=<epoch>]: PR {change url} published for review' "$brief" \
     "the gerrit contract did not end at a published change"
+  assert_grep 'note [at=<epoch>]: pipeline changes: {finding} - {fix it made}' "$brief" \
+    "the gerrit worker was not told to report each pipeline fix the squash hides"
+  assert_grep 'pipeline changes: none' "$brief" \
+    "the gerrit worker was not told what to report when the pipeline fixed nothing"
   assert_no_grep 'done [at=<epoch>]: PR {url} checks green' "$brief" \
     "the gerrit contract still demands a PR with green checks this forge cannot produce"
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
@@ -1310,6 +1314,8 @@ test_forge_gerrit_direct_pr_publishes_one_change() {
   # shellcheck disable=SC2016 # Backticks are literal generated Markdown.
   assert_grep 'Never run `gerrit-axi submit`' "$brief" "the direct-PR worker was not kept from submitting"
   assert_grep 'Do NOT run /no-mistakes.' "$brief" "the direct-PR worker was not kept off the pipeline"
+  assert_no_grep 'pipeline changes:' "$brief" \
+    "the direct-PR worker was asked to report pipeline fixes from a pipeline it never runs"
 
   # A stack is several changes and the merge watch follows one, so the shape is
   # refused with that reason until pinned-membership watching exists.
