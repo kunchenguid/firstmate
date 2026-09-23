@@ -1455,7 +1455,7 @@ families_for_changed_path() {
     bin/fm-quota-choose.sh)
       printf '%s\n' "__script__:fm-quota-choose.test.sh"
       ;;
-    bin/fm-dispatch-resolve.sh)
+    bin/fm-dispatch-resolve.sh|bin/fm-model-catalog.sh)
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
     bin/fm-env-lib.sh)

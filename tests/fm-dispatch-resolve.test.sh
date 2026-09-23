@@ -150,6 +150,12 @@ cat "${QUOTA_AXI_FIXTURE:?}"
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
+cat > "$FAKEBIN/opencode" <<'SH'
+#!/usr/bin/env bash
+sleep 5
+SH
+chmod +x "$FAKEBIN/opencode"
+
 RESPONSE="$TMP_ROOT/response.json"
 export FAKE_CURL_LOG="$LOG" FAKE_CURL_RESPONSE="$RESPONSE" QUOTA_AXI_CALLS="$LOG/quota-axi.calls" QUOTA_AXI_FIXTURE="$QUOTA" CHILD_ENV_LOG="$LOG/child-env"
 
@@ -643,6 +649,55 @@ expect_code 0 "$code" "quota-axi failure exits 0"
 assert_contains "$out" '  status: error' "quota-axi failure is an error outcome"
 assert_contains "$out" '  reason: quota-axi --json failed' "quota-axi failure is named"
 pass "quota evidence comes from one quota-axi --json read, and its failure is an error outcome"
+
+# --- dynamic discovery expands catalog candidates before quota ranking ----------
+DYNAMIC_FIXTURES="$TMP_ROOT/catalog-fixtures"
+mkdir -p "$DYNAMIC_FIXTURES"
+cat > "$DYNAMIC_FIXTURES/codex.jsonl" <<'JSONL'
+{"model":"gpt-5.6-sol","provider":"codex"}
+JSONL
+cat > "$DYNAMIC_FIXTURES/claude.jsonl" <<'JSONL'
+{"model":"claude-haiku-4-5-20251001","provider":"claude"}
+JSONL
+cat > "$TMP_ROOT/dynamic-rules.json" <<'JSON'
+{"rules":[{"when":"Dynamic implementation.","use":{"discover":{"task_type":"implementation","required_reasoning_class":"high","harnesses":["codex","claude"],"providers":["codex","claude"],"preferred_families":["gpt-5.6"]}}}]}
+JSON
+cat > "$RESPONSE" <<'JSON'
+{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.9,"probabilities":{"rule_1":0.97,"default":0.03}}},"usage":{"input_tokens":100,"output_tokens":60}}
+JSON
+cp "$TMP_ROOT/dynamic-rules.json" "$RULES"
+reset_log
+FM_MODEL_CATALOG_FIXTURE_DIR="$DYNAMIC_FIXTURES" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "dynamic catalog candidates can resolve"
+assert_contains "$out" "  profile: --harness 'codex' --model 'gpt-5.6-sol'" "dynamic discovery emits the concrete profile line"
+assert_not_contains "$out" 'gpt-5.5' "a model absent from the catalog fixture drops out automatically"
+
+printf '%s\n' '{"model":"opencode-go/space-bunny-free","provider":"opencode-go"}' > "$DYNAMIC_FIXTURES/opencode.jsonl"
+cat > "$RULES" <<'JSON'
+{"rules":[{"when":"OpenCode dynamic work.","use":{"discover":{"task_type":"implementation","required_reasoning_class":"medium","harnesses":["opencode"],"providers":["opencode-go"]}}}]}
+JSON
+reset_log
+FM_MODEL_CATALOG_FIXTURE_DIR="$DYNAMIC_FIXTURES" TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: escalate' "unknown dynamic quota does not silently choose"
+assert_contains "$out" 'candidate: opencode:opencode-go/space-bunny-free  provider=opencode-go  -> eligible, unranked: provider opencode-go not in the quota snapshot: disclosed uncertainty' "unknown quota is disclosed on the discovered candidate"
+
+cat > "$RULES" <<'JSON'
+{"rules":[{"when":"Unsupported dynamic work.","use":{"discover":{"task_type":"implementation","required_reasoning_class":"high","harnesses":["grok"],"providers":["grok"]}}}]}
+JSON
+reset_log
+FM_MODEL_CATALOG_FIXTURE_DIR= TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "unavailable dynamic harness is an error outcome"
+assert_contains "$out" 'model catalog discovery failed: grok: no verified model catalog method for harness grok' "unavailable dynamic harness is named"
+
+cat > "$RULES" <<'JSON'
+{"rules":[{"when":"Timeout dynamic work.","use":{"discover":{"task_type":"implementation","required_reasoning_class":"medium","harnesses":["opencode"],"providers":["opencode-go"]}}}]}
+JSON
+reset_log
+FM_MODEL_CATALOG_TIMEOUT=1 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: error' "catalog timeout is an error outcome"
+assert_contains "$out" 'opencode: catalog command timed out after 1s' "catalog timeout is named"
+cp "$BASE_RULES" "$RULES"
+pass "dynamic discovery uses catalog rows, drops removed models, and reports unavailable, timeout, and unknown-quota cases"
 
 # --- API and response failures are error outcomes, exit 0 ----------------------
 reset_log
