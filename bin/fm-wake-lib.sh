@@ -494,10 +494,16 @@ fm_lock_link_owner() {
   esac
 }
 
+# On Git Bash readlink reports a native link's target through the MSYS mount
+# table (a directory under Windows' Temp reads back as /tmp/...), so the two
+# spellings are compared as the Windows paths they both name.
 fm_lock_points_to_owner() {
-  local lockdir=$1 ownerdir=$2 actual
+  local lockdir=$1 ownerdir=$2 actual both
   actual=$(readlink "$lockdir" 2>/dev/null) || return 1
-  [ "$actual" = "$ownerdir" ]
+  [ "$actual" = "$ownerdir" ] && return 0
+  [ "${_FM_LOCK_WINSYMLINKS:-0}" -eq 1 ] || return 1
+  both=$(cygpath -w -- "$actual" "$ownerdir" 2>/dev/null) || return 1
+  [ "${both%%$'\n'*}" = "${both#*$'\n'}" ]
 }
 
 fm_lock_discard_owner() {
@@ -551,6 +557,26 @@ fm_lock_claim() {
   return 0
 }
 
+# Publish lock link $2 -> owner dir $1. Git Bash / MSYS / Cygwin `ln -s` does
+# not make a symlink by default: it silently deep-copies the target, so the
+# lock never points at its owner, a dead holder can never be reclaimed, and
+# every reclaim attempt nests another .steal directory. Native Windows
+# symlinks are atomic and round-trip through readlink; nativestrict makes
+# `ln -s` fail outright, never copy, when Windows refuses them (Developer Mode
+# or the create-symlink privilege is required).
+case "$(uname -s 2>/dev/null)" in
+  MINGW* | MSYS* | CYGWIN*) _FM_LOCK_WINSYMLINKS=1 ;;
+  *) _FM_LOCK_WINSYMLINKS=0 ;;
+esac
+fm_lock_symlink() {  # <target> <link>
+  if [ "$_FM_LOCK_WINSYMLINKS" -eq 1 ]; then
+    MSYS="${MSYS:+$MSYS }winsymlinks:nativestrict" \
+      CYGWIN="${CYGWIN:+$CYGWIN }winsymlinks:nativestrict" ln -s "$1" "$2"
+    return
+  fi
+  ln -s "$1" "$2"
+}
+
 fm_lock_try_create() {
   local lockdir=$1 allowed_steal_owner=${2:-} ownerdir
   FM_LOCK_OWNER_DIR=
@@ -563,7 +589,7 @@ fm_lock_try_create() {
     fm_lock_discard_owner "$ownerdir"
     return 1
   fi
-  if ln -s "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
+  if fm_lock_symlink "$ownerdir" "$lockdir" 2>/dev/null && fm_lock_points_to_owner "$lockdir" "$ownerdir"; then
     if fm_lock_claim "$lockdir" "$ownerdir" "$allowed_steal_owner"; then
       FM_LOCK_OWNER_DIR=$ownerdir
       return 0
