@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-pr-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -485,6 +487,86 @@ test_relaunch_preserves_durable_task_metadata() {
   [ "$(meta_field "$dir" rl19 decisions_reviewed)" = 1 ] \
     || fail "the task decision state must survive relaunch"
   pass "fm-control relaunch: durable task metadata survives replacement launch publication"
+}
+
+# A relaunch republishes the task record, and the merge poll's authentication
+# re-reads that record's PR identity on every watcher cycle
+# (bin/fm-pr-lib.sh fm_pr_metadata_identity_parse). The relaunch must leave the
+# poll armed: still authenticated, and still executed by the real watcher.
+test_relaunch_keeps_an_armed_merge_poll_running() {
+  local dir out rc state url=https://github.com/example/repo/pull/42 watch_out
+  dir=$(new_case pr-poll rl42)
+  add_ship_task "$dir" rl42 claude
+  state="$dir/home/state"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" headRefOid "*) printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
+  *" state "*) printf '%s\n' MERGED ;;
+esac
+SH
+  chmod +x "$dir/fakebin/gh"
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-pr-check.sh" rl42 "$url" 2>&1); rc=$?
+  expect_code 0 "$rc" "arming the merge poll should succeed"$'\n'"$out"
+  # Arming also registers the separate contribution observer; retire it so the
+  # watcher cycle below reaches the merge poll itself.
+  [ ! -e "$state/contributions.check.sh" ] \
+    || FM_HOME="$dir/home" "$ROOT/bin/fm-check-unregister.sh" contributions >/dev/null \
+    || fail "could not retire the contribution observer"
+  fm_pr_poll_artifacts_valid "$state" rl42 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the freshly armed merge poll should authenticate"
+
+  out=$(run_control "$dir" rl42 relaunch --note "waiting on review"); rc=$?
+  expect_code 0 "$rc" "relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl42 pr)" = "$url" ] || fail "the task PR must survive relaunch"
+  fm_pr_poll_artifacts_valid "$state" rl42 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "a relaunch disarmed the merge poll: it no longer authenticates"$'\n'"$(cat "$state/rl42.meta")"
+
+  watch_out=$(perl -e 'my $pid=fork; die unless defined $pid; if (!$pid) { exec @ARGV } local $SIG{ALRM}=sub { kill "TERM", $pid; waitpid $pid, 0; exit 124 }; alarm 20; waitpid $pid, 0; alarm 0; exit($? >> 8)' \
+    env FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" FM_CHECK_INTERVAL=0 FM_CHECK_TIMEOUT=5 \
+      FM_POLL=0.02 FM_HEARTBEAT=999999 FM_SIGNAL_GRACE=0 PATH="$dir/fakebin:$PATH" \
+      "$ROOT/bin/fm-watch.sh" 2>&1)
+  assert_not_contains "$watch_out" "rejected unauthenticated" \
+    "the watcher must not reject the relaunched task's merge poll"
+  assert_contains "$watch_out" "rl42.check.sh: merged" \
+    "the watcher should still run the merge poll and report the merge"
+
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-pr-check.sh" rl42 "$url" 2>&1); rc=$?
+  expect_code 0 "$rc" "re-arming the relaunched task's merge poll should still succeed"$'\n'"$out"
+  fm_pr_poll_artifacts_valid "$state" rl42 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "re-arming after a relaunch should leave an authenticated merge poll"
+  [ "$(tail -1 "$state/rl42.meta")" = pr_head=0123456789abcdef0123456789abcdef01234567 ] \
+    || fail "re-arming should leave the PR identity as the record's tail"
+  pass "fm-control relaunch: an armed merge poll stays authenticated and keeps running"
+}
+
+test_traced_relaunch_keeps_an_armed_merge_poll_authenticated() {
+  local dir out rc state url=https://github.com/example/repo/pull/43
+  dir=$(new_case pr-poll-traced rl43)
+  add_ship_task "$dir" rl43 claude
+  state="$dir/home/state"
+  printf '%s\n' "$$" > "$state/.lock"
+  printf '%s on\n' "$$" > "$state/.trace-context-effective"
+  cat > "$dir/fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+case " $* " in
+  *" headRefOid "*) printf '%s\n' 0123456789abcdef0123456789abcdef01234567 ;;
+  *" state "*) printf '%s\n' OPEN ;;
+esac
+SH
+  chmod +x "$dir/fakebin/gh"
+  out=$(PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" "$ROOT/bin/fm-pr-check.sh" rl43 "$url" 2>&1); rc=$?
+  expect_code 0 "$rc" "arming the merge poll should succeed"$'\n'"$out"
+  fm_pr_poll_artifacts_valid "$state" rl43 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "the freshly armed merge poll should authenticate"
+
+  out=$(run_control "$dir" rl43 relaunch --note "waiting on review"); rc=$?
+  expect_code 0 "$rc" "traced relaunch should succeed"$'\n'"$out"
+  fm_trace_context_valid "$(meta_field "$dir" rl43 traceparent)" \
+    || fail "a traced relaunch should record the replacement's trace carrier"$'\n'"$(cat "$state/rl43.meta")"
+  fm_pr_poll_artifacts_valid "$state" rl43 "$ROOT/bin/fm-pr-poll.sh" \
+    || fail "a traced relaunch disarmed the merge poll: it no longer authenticates"$'\n'"$(cat "$state/rl43.meta")"
+  pass "fm-control relaunch: a traced relaunch keeps an armed merge poll authenticated"
 }
 
 test_relaunch_serializes_concurrent_durable_metadata_publication() {
@@ -2257,6 +2339,8 @@ test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
 test_relaunch_preserves_durable_task_metadata
+test_relaunch_keeps_an_armed_merge_poll_running
+test_traced_relaunch_keeps_an_armed_merge_poll_authenticated
 test_relaunch_serializes_concurrent_durable_metadata_publication
 test_disabled_relaunch_clears_prior_trace_context
 test_relaunch_appends_the_progress_note_to_the_instructions
