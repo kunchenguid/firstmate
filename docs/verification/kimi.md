@@ -182,6 +182,8 @@ wd_live2_68a84f6cd0d8
 ```
 
 The pre-registered worktree reached the composer with no prompt; the unregistered sibling stopped on the dialog.
+The helper was pointed at the probe store with `KIMI_CODE_HOME` on the day this ran; it is now pinned to `$HOME/.kimi-code` (see below), so repeating this probe points it at the probe store with `HOME` instead.
+The vendor half of the transcript is unaffected: Kimi's own launch still reads `KIMI_CODE_HOME`.
 
 ## Multiple Kimi homes
 
@@ -193,8 +195,9 @@ $ ls -d ~/.kimi-code*
 /Users/lele/.kimi-code-4  /Users/lele/.kimi-code-5
 ```
 
-`KIMI_CODE_HOME` is a real variable in the 2.0.2 binary's own string table, alongside `KIMI_CODE_HOME_ENV`.
-A registration in the wrong home is a silent no-op, so `bin/fm-kimi-trust.sh` resolves `${KIMI_CODE_HOME:-$HOME/.kimi-code}` and refuses a relative value, and `bin/fm-spawn.sh` forwards a set value onto the launch so both sides name the same home.
+`KIMI_CODE_HOME` is a real variable in the 2.0.2 binary's own string table, alongside `KIMI_CODE_HOME_ENV`, and a registration in the wrong home is a silent no-op.
+Multi-home support is nonetheless out of scope here: `bin/fm-kimi-trust.sh` writes `$HOME/.kimi-code`, the one home `bin/fm-kimi-turnend-hook.sh` installs the crew turn-end region into and `bin/fm-spawn.sh`'s per-task token registry lives under, and nothing forwards a selected home onto the launch.
+Selecting a home is only correct once trust, the hook, the hook script and the token registry move together, which is separate work.
 
 ## What is still unproven
 

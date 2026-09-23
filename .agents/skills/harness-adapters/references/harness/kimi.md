@@ -51,11 +51,11 @@ The workspace id is the whole lookup key, matched as the filename rather than by
 Trust is exact-directory with no ancestor walk, so only the directory the pane starts in is registered - the worktree for a crewmate or scout, the home itself for a secondmate - and never the primary checkout.
 Kimi resolves the launch directory before deriving the id, so the physical path is what gets registered.
 
-The home is `${KIMI_CODE_HOME:-$HOME/.kimi-code}`, because a captain may run several Kimi accounts as separate homes.
-`../../../bin/fm-spawn.sh` forwards a set `KIMI_CODE_HOME` onto the launch so the pane reads the same home the registration wrote; a pane created by a long-lived backend daemon would otherwise fall back to the default home and never see the record.
+The store is `$HOME/.kimi-code/workspace-trust/`, the same home the crew turn-end hook region and its per-task token registry below already use, so one home answers for all of them.
+A captain running several Kimi accounts as separate homes is out of scope: selecting one would have to move trust, the hook, the hook script and the token registry together.
 
 A failed registration is a stderr warning rather than a refusal, the `../../../bin/fm-agy-trust.sh` precedent: Kimi's dialog preselects the affirmative answer and the readiness gate can answer it, so the cost is the fragile vendor-frame read rather than the spawn.
-`../../../tests/fm-kimi-trust.test.sh` covers the store edits, the id derivation against vendor-observed basenames, and every scope and malformed-store refusal; `../../../tests/fm-kimi-harness.test.sh` covers the spawn wiring, the warning path, and the forwarded home.
+`../../../tests/fm-kimi-trust.test.sh` covers the store edits, the id derivation against vendor-observed basenames, and every scope and malformed-store refusal; `../../../tests/fm-kimi-harness.test.sh` covers the spawn wiring and the warning path.
 
 ## Crew turn-end hook and primary limit
 

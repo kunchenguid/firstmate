@@ -11,10 +11,10 @@ set -u
 # meant to control. Drop the ambient markers so the asserted verdict does not
 # depend on which harness launched the suite.
 unset CLAUDECODE PI_CODING_AGENT FM_PI_HARNESS GROK_AGENT CURSOR_AGENT CURSOR_INVOKED_AS
-# A captain running several Kimi accounts exports KIMI_CODE_HOME to pick one.
-# Inherited into this suite it would send the spawn's trust pre-registration into
-# that real home instead of the fixture's, so the value is dropped here and the
-# cases that need it set it themselves.
+# The spawn's trust pre-registration writes $HOME/.kimi-code, the home the
+# turn-end hook and the token registry already use, and reads no KIMI_CODE_HOME.
+# Kimi itself does read it, so an ambient value is dropped here and the fixture
+# HOME is the whole isolation.
 unset KIMI_CODE_HOME
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -1198,33 +1198,6 @@ test_kimi_spawn_warns_but_continues_when_trust_cannot_be_recorded() {
   pass "fm-spawn: a failed Kimi trust pre-registration warns and leaves the live dialog gate to answer"
 }
 
-# A captain may run several Kimi accounts as separate homes. The registration and
-# the pane must name the SAME one, or the record lands where the worker never looks.
-test_kimi_spawn_registers_and_forwards_the_selected_kimi_home() {
-  local id rec out rc selected
-  id="kimi-trust-home-$$"
-  rec=$(make_spawn_case trusthome "$id")
-  read_spawn_record "$rec"
-  KIMI_RUNTIME_TASK_TMP="/tmp/fm-$id"
-  rm -rf "$KIMI_RUNTIME_TASK_TMP"
-  KIMI_RUNTIME_LAUNCH_DIR=$(kimi_launch_dir "$id" "$HOME_DIR")
-  rm -rf "$KIMI_RUNTIME_LAUNCH_DIR"
-  selected="$CASE_DIR/kimi-code-2"
-  mkdir -p "$selected"
-  out=$(KIMI_CODE_HOME="$selected" run_spawn \
-    "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
-  rc=$?
-  expect_code 0 "$rc" "a kimi spawn under a selected Kimi home should succeed: $out"
-  assert_present "$(kimi_trust_record "$selected" "$WT_DIR")" \
-    "the kimi spawn did not pre-register trust in the selected Kimi home"
-  assert_absent "$(kimi_trust_record "$HOME_DIR/.kimi-code" "$WT_DIR")" \
-    "the kimi spawn wrote the default Kimi home instead of the selected one"
-  # The pane must read the same home the registration wrote, or the dialog appears anyway.
-  assert_grep "KIMI_CODE_HOME='$selected'" "$CASE_DIR/launch.log" \
-    "the launch command did not point the worker at the Kimi home that was trusted"
-  pass "fm-spawn: a kimi spawn registers and forwards the selected Kimi home"
-}
-
 test_kimi_launch_then_send_is_verified
 test_kimi_spawn_refuses_shared_task_temp_root
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
@@ -1253,4 +1226,3 @@ test_watcher_never_classifies_kimi_from_its_spinner
 test_kimi_bordered_prompt_needs_no_override
 test_kimi_spawn_pretrusts_its_worktree
 test_kimi_spawn_warns_but_continues_when_trust_cannot_be_recorded
-test_kimi_spawn_registers_and_forwards_the_selected_kimi_home

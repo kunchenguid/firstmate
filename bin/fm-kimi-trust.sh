@@ -73,12 +73,13 @@
 # folder the captain already trusted needs nothing and its original trustedAt
 # timestamp is left intact; this reports it and succeeds.
 #
-# WHICH HOME. ${KIMI_CODE_HOME:-$HOME/.kimi-code}, because a captain may run
-# several Kimi accounts as separate homes (.kimi-code, .kimi-code-2, ...) and a
-# registration in the wrong one is a silent no-op. bin/fm-spawn.sh forwards a set
-# KIMI_CODE_HOME onto the kimi launch so both sides name the same home; a
-# relative value is refused here rather than guessed at, because it would resolve
-# against this process's cwd on this side and the worker's own cwd on that one.
+# WHICH HOME. $HOME/.kimi-code, the same home bin/fm-kimi-turnend-hook.sh
+# installs the crew turn-end region into and the same one bin/fm-spawn.sh's
+# per-task token registry lives under. Multi-home support (KIMI_CODE_HOME) is
+# deliberately out of scope: it is only correct if trust, the turn-end hook, the
+# hook script and the token registry move to the selected home together, and
+# moving only this one puts the record in a home whose config.toml carries no
+# Firstmate hook.
 #
 # THE SCOPE TEST IS THE SAFETY PROPERTY, and it is STRUCTURAL rather than a path
 # policy. Both modes mirror bin/fm-claude-trust.sh, which owns the full reasoning
@@ -160,20 +161,8 @@ if [ "$MODE" = worktree ]; then
   [ -n "$PROJ_REAL" ] || refuse "project '$PROJ_ARG' is not an accessible directory"
 fi
 
-# A relative value resolves against this process's cwd here but against the
-# worker's own cwd once bin/fm-spawn.sh forwards it onto the launch, so the two
-# sides can name different homes and the registration would report a success the
-# worker never sees. Refuse rather than guess at the worker's cwd.
-case ${KIMI_CODE_HOME:-} in
-'' | /*) ;;
-*) refuse "KIMI_CODE_HOME '$KIMI_CODE_HOME' is a relative path, so the home the worker reads cannot be guaranteed to be the one written here; set it to an absolute path" ;;
-esac
-if [ -n "${KIMI_CODE_HOME:-}" ]; then
-  KIMI_HOME=$KIMI_CODE_HOME
-else
-  [ -n "${HOME:-}" ] || refuse "neither KIMI_CODE_HOME nor HOME is set, so the Kimi home cannot be located"
-  KIMI_HOME="$HOME/.kimi-code"
-fi
+[ -n "${HOME:-}" ] || refuse "HOME is not set, so the Kimi home cannot be located"
+KIMI_HOME="$HOME/.kimi-code"
 # Kimi creates its own home on first run, so an absent one is created here for
 # the same reason: a home this cannot reach means the worker meets the dialog.
 KIMI_HOME_REAL=$(real_dir "$KIMI_HOME") || true
@@ -188,10 +177,8 @@ fi
 # reason instead of the scope verdict behind it.
 [ "$TARGET_REAL" != / ] || refuse "'/' is the filesystem root, not a $SCOPE_NOUN"
 [ "$TARGET_REAL" != "$KIMI_HOME_REAL" ] || refuse "'$TARGET_REAL' is the Kimi home directory, not a $SCOPE_NOUN"
-if [ -n "${HOME:-}" ]; then
-  HOME_REAL=$(real_dir "$HOME") || true
-  [ "$TARGET_REAL" != "${HOME_REAL:-}" ] || refuse "'$TARGET_REAL' is the home directory, not a $SCOPE_NOUN"
-fi
+HOME_REAL=$(real_dir "$HOME") || true
+[ "$TARGET_REAL" != "${HOME_REAL:-}" ] || refuse "'$TARGET_REAL' is the home directory, not a $SCOPE_NOUN"
 
 if [ "$MODE" = worktree ]; then
   WT_TOP=$(git -C "$TARGET_REAL" rev-parse --show-toplevel 2>/dev/null) || true

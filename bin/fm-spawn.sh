@@ -4708,16 +4708,6 @@ esac
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi
-# Same reasoning for Kimi, and here it is also what makes the trust
-# pre-registration above land where the worker will look: a captain may run
-# several Kimi accounts as separate homes (.kimi-code, .kimi-code-2, ...), and
-# bin/fm-kimi-trust.sh registers into ${KIMI_CODE_HOME:-$HOME/.kimi-code} as
-# resolved HERE. Without forwarding, a pane created by the backend daemon would
-# fall back to the default home and never see that record. Only when set; an
-# unset value is the single-home default on both sides and needs no prefix.
-if [ "$HARNESS" = kimi ] && [ -n "${KIMI_CODE_HOME:-}" ]; then
-  LAUNCH="KIMI_CODE_HOME=$(shell_quote "$KIMI_CODE_HOME") $LAUNCH"
-fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
