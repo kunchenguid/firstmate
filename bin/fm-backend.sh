@@ -618,9 +618,9 @@ fm_backend_source() {  # <name>
   fm_backend_validate "$name" || return 1
   adapter="$FM_BACKEND_LIB_DIR/backends/$name.sh"
   # Bash 3.2 can enter an EXIT trap with status 0 after `set -e` aborts on a
-  # missing dot-sourced file. Refuse the absent adapter explicitly so callers
-  # retain the real failure status and never continue a destructive lifecycle
-  # operation after a missing backend prerequisite.
+  # missing or unreadable dot-sourced file. Refuse the adapter explicitly so
+  # callers retain the real failure status and never continue a destructive
+  # lifecycle operation after an unavailable backend prerequisite.
   [ -f "$adapter" ] && [ -r "$adapter" ] || return 1
   case "$name" in
     tmux)
