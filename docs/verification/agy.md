@@ -153,6 +153,109 @@ Same-copy relaunch held: `bin/fm-control.sh relaunch --note` replaced the worker
 Exit held: `bin/fm-control.sh exit` stopped the worker, the registry returned `agent_not_found`, and the pane remained a lone shell in the worktree with all work intact.
 No automatic quota failover was exercised or claimed; every handoff above was an explicit supervised relaunch.
 
+## Crew turn-end: a native Stop hook, gated on fullyIdle
+
+An earlier revision of this adapter recorded that agy exposes no hook surface at all.
+That is wrong, and the claim is corrected here rather than left to rot.
+agy loads named hooks from `$HOME/.gemini/config/hooks.json`, verified present on `agy 1.2.2` (2026-09-13) on a host where an unrelated third-party tool was already registered there on both `PreInvocation` and `Stop`.
+The binary carries the `hooks_json` and `workspacePaths` strings and this changelog line:
+
+```
+- Fixed a bug where the `/hooks` command wrote configurations to
+  `~/.gemini/antigravity-cli/hooks.json` instead of the shared
+  `~/.gemini/config/hooks.json`, ensuring hooks remain synchronized between
+  the TUI and the backend.
+```
+
+`bin/fm-agy-turnend-hook.sh` owns exactly one `firstmate-turn-end` key in that file and rewrites every other named hook untouched.
+An operator hook present before the install survived it and survived the removal:
+
+```
+$ HOME=$H bin/fm-agy-turnend-hook.sh install
+installed: firstmate-turn-end in .../.gemini/config/hooks.json
+$ cat $H/.gemini/config/hooks.json
+{
+  "operator-lint": { "PostToolUse": [ { "type": "command", "command": "true" } ] },
+  "firstmate-turn-end": {
+    "Stop": [ { "type": "command", "command": "bash \"$HOME/.gemini/antigravity-cli/fm-turn-end.sh\"", "timeout": 5 } ]
+  }
+}
+```
+
+### The fullyIdle gate is load-bearing
+
+agy moves a shell command that outruns its `WaitMsBeforeAsync` into the background, yields the composer, and fires `Stop` with `fullyIdle` false while that command is still running; a second `Stop` with `fullyIdle` true follows once it finishes and the agent has reported it (observed on `agy 1.1.25` with a 40s sleep: two Stop events, false then true).
+Signalling on the first event would report a worker done while its own build or test run is still going.
+Both events driven apart against the installed hook on 2026-09-13:
+
+```
+$ printf '{"fullyIdle":false,"workspacePaths":["$WS"]}' | bash fm-turn-end.sh
+{}
+exit=0
+marker: absent
+
+$ printf '{"fullyIdle":true,"workspacePaths":["$WS"]}' | bash fm-turn-end.sh
+{}
+exit=0
+marker: touched
+```
+
+`tests/fm-agy-harness.test.sh` pins that divergence.
+Deleting the `fullyIdle` check from the hook body turns it red with `a Stop with fullyIdle false reported the turn finished`, so the assertion cannot go quietly vacuous.
+
+### Removal refuses while a task still expects a wake
+
+A live token means a task is still waiting on a turn-end signal, so removal is refused rather than silently silencing it:
+
+```
+$ HOME=$H bin/fm-agy-turnend-hook.sh remove
+fm-agy-turnend-hook: refused: 1 task token(s) still registered in .../fm-turn-end.d; tear those tasks down first.
+exit=1
+```
+
+After the token is retired, removal restores the file to exactly its pre-install content, and a home that never had a `hooks.json` gets none back.
+
+### Live wake: one real agy turn produced the marker
+
+The turn-end wake was captured live on 2026-09-13 through the installed binary (`agy 1.2.2` at `/home/jon/.local/bin/agy`) in a throwaway lab built on this record's established method: a scratch workspace under `/tmp`, a `HOME` holding a copy of `~/.gemini`, and no hand-fed payload anywhere in the capture.
+The workspace was pre-registered in the copy's `trustedWorkspaces` (the effect `bin/fm-agy-trust.sh` produces ahead of every spawn), the hook was installed through this script, and one task token was registered in the lab's `fm-turn-end.d` pointing at a `state/task1.turn-ended` marker:
+
+```
+$ HOME=$H bin/fm-agy-turnend-hook.sh install
+installed: firstmate-turn-end in $H/.gemini/config/hooks.json
+$ printf '%s\n' "$STATE/task1.turn-ended" > "$H/.gemini/antigravity-cli/fm-turn-end.d/fm.W8b0AU6TQ6lW"
+$ printf 'token=fm.W8b0AU6TQ6lW\n' > "$WS/.fm-agy-turnend"
+$ tmux new-session -d -s agy-wake -c "$WS" "env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS HOME=$H agy --prompt-interactive 'Reply with exactly AGY_LIVE_WAKE_OK and nothing else' --model gemini-3.8-flash-low --effort low --dangerously-skip-permissions"
+```
+
+The turn launched at 17:08:36, the reply `AGY_LIVE_WAKE_OK` rendered within 5 s, and the pane settled to the idle composer:
+
+```
+>
+──────────────────────────────────────────────────────────────────────────────
+? for shortcuts                                           Gemini 3.8 Flash · low
+```
+
+The marker then existed with a mtime inside the turn window, so it was agy's own Stop event, delivered to the installed hook, that touched it:
+
+```
+$ ls -la --time-style=full-iso "$STATE"
+total 8
+drwxrwxr-x 2 jon jon 4096 2026-09-13 17:08:47.539006865 -0400 .
+-rw-rw-r-- 1 jon jon    0 2026-09-13 17:08:47.539999961 -0400 task1.turn-ended
+```
+
+One edge was observed live and matters: until agy has confirmed a workspace in-session, the Stop payload arrives with `"fullyIdle": true` but an empty `"workspacePaths": []`, and the hook stays silent.
+That state was captured on a fresh unregistered workspace whose folder-trust dialog was left unanswered: the turn still completed, but the marker stayed absent (the payload was read by temporarily wrapping the installed hook, which otherwise ran byte-identical).
+Once the workspace was registered ahead of the launch, or its dialog was answered once in-session, the payload listed the path and the wake landed - both were driven live against the unmodified hook.
+The spawn path is covered either way, because `bin/fm-spawn.sh` pre-registers the worktree before launch and its readiness gate answers a rendered dialog as the backstop.
+
+### What this does NOT establish
+
+The Stop payload reports only that a turn ended, so it is not a primary supervision protocol.
+`docs/supervision-protocols/` still carries no agy wake protocol, and `bin/fm-spawn.sh` still refuses `--secondmate` on agy for that reason - not for the absence of hooks.
+The hook reports turn END only, so it cannot source a busy START: the rendered-tail fallback above remains the busy source.
+
 ## What is still unproven
 
 The unauthenticated failure mode was never observed; this host's agy runs signed in, so any auth prompt is a fail-loud credential blocker, not a handled dialog.
