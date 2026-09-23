@@ -45,9 +45,9 @@ Scouts receive only their bounded question and relevant constraints.
 
 ## End
 
-When the question is answered or the captain stops the campaign, retire watches through `process-event-sources`, release the lead, finalize the campaign record and project pointer, and distill durable lessons into `evolution.md`.
+When the question is answered or the captain stops the campaign, retire watches through `process-event-sources`, release the lead, finalize the campaign record and project pointer, and distill durable lessons into this skill's `evolution.md`.
 An ended campaign leaves no armed watches, stale pointers, or open loops.
 
 ## Evolution
 
-`evolution.md` holds dated lessons; cross-reference facts owned by another file or skill instead of duplicating them.
+This skill's `evolution.md` holds dated lessons; cross-reference facts owned by another file or skill instead of duplicating them.
