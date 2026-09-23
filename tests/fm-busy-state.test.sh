@@ -107,6 +107,43 @@ test_retire_serializes_and_rejects_stale_gen() {
   pass "retire waits for the writer lock and cannot remove a new incarnation"
 }
 
+test_concurrent_writer_lock_serializes_seq_advancement() {
+  local state gen i pids=() out seq pid
+  state=$(new_state_dir concurrent-writers)
+  gen=$("$EV" arm "$state" t1)
+  for i in $(seq 1 10); do
+    "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event "e$i" &
+    pids+=("$!")
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" || fail "concurrent apply failed (pid $pid)"
+  done
+  out=$(cat "$state/t1.busy-state")
+  seq=$(printf '%s\n' "$out" | sed -n 's/.*seq=\([0-9]*\).*/\1/p')
+  [ "$seq" = 11 ] || fail "concurrent writers lost seq advancement, expected seq=11, got '$out'"
+  pass "concurrent writers serialize cleanly and advance seq without loss"
+}
+
+test_atomic_mkdir_never_double_acquires() {
+  local state i p1 p2 r1 r2 both=0
+  state=$(new_state_dir atomic-mkdir)
+  for i in $(seq 1 50); do
+    rm -rf "$state/test.lock"
+    ( python3 -S -c 'import os, sys; os.mkdir(sys.argv[1])' "$state/test.lock" 2>/dev/null ) &
+    p1=$!
+    ( python3 -S -c 'import os, sys; os.mkdir(sys.argv[1])' "$state/test.lock" 2>/dev/null ) &
+    p2=$!
+    r1=0; r2=0
+    wait "$p1" || r1=$?
+    wait "$p2" || r2=$?
+    if [ "$r1" -eq 0 ] && [ "$r2" -eq 0 ]; then
+      both=$((both + 1))
+    fi
+  done
+  [ "$both" -eq 0 ] || fail "atomic mkdir double-acquired $both/50 times"
+  pass "kernel-atomic directory creation primitive never double-acquires under concurrency"
+}
+
 # Regression for issue #2625: the writer lock's stale-lock branch resolved the
 # lock's mtime with `stat -f %m ... || stat -c %Y ...`. On GNU coreutils `-f` is
 # *filesystem* stat, so it consumes the format string as a path, complains on
@@ -465,6 +502,8 @@ test_apply_advances_seq_and_source
 test_apply_current_gen_reset
 test_apply_unarmed_refused
 test_retire_serializes_and_rejects_stale_gen
+test_concurrent_writer_lock_serializes_seq_advancement
+test_atomic_mkdir_never_double_acquires
 test_retire_missing_sidecar_is_idempotent
 test_stale_lock_broken_under_gnu_stat
 test_stale_gen_event_rejected

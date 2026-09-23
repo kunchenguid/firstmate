@@ -117,11 +117,18 @@ else
   lock_mtime() { stat -c %Y "$1" 2>/dev/null; }
 fi
 
+# Kernel-atomic directory creation via Python. The uutils coreutils 0.8.0 mkdir
+# binary is not atomic under concurrency and can report double-success on the
+# same path; os.mkdir delegates directly to the kernel mkdir(2) syscall.
+lock_mkdir() {
+  python3 -S -c 'import os, sys; os.mkdir(sys.argv[1])' "$1" 2>/dev/null
+}
+
 # Serialize writers. The lock protects seq advancement and the sidecar/record
 # pair; a holder that died mid-write is broken after FM_BUSY_LOCK_STALE_SECS.
 lock_acquire() {
   local tries=0 now mtime age
-  while ! mkdir "$LOCK" 2>/dev/null; do
+  while ! lock_mkdir "$LOCK"; do
     tries=$((tries + 1))
     if [ "$tries" -ge 40 ]; then
       now=$(date +%s)
@@ -133,7 +140,7 @@ lock_acquire() {
       age=$((now - mtime))
       if [ "$age" -ge "${FM_BUSY_LOCK_STALE_SECS:-5}" ]; then
         rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK" 2>/dev/null || true
-        mkdir "$LOCK" 2>/dev/null && break
+        lock_mkdir "$LOCK" && break
       fi
       echo "error: busy-state lock timeout for $ID" >&2
       return 1

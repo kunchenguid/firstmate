@@ -130,12 +130,19 @@ fm_afk_launch_lock_owned() {
   [ -n "$expected" ] && [ "$actual" = "$expected" ]
 }
 
+# Kernel-atomic directory creation via Python. The uutils coreutils 0.8.0 mkdir
+# binary is not atomic under concurrency and can report double-success on the
+# same path; os.mkdir delegates directly to the kernel mkdir(2) syscall.
+fm_afk_launch_lock_mkdir() {
+  python3 -S -c 'import os, sys; os.mkdir(sys.argv[1])' "$1" 2>/dev/null
+}
+
 fm_afk_launch_lock_acquire() {
   local attempt=0 incomplete=0 identity
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   while [ "$attempt" -lt 200 ]; do
     attempt=$((attempt + 1))
-    if mkdir "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
+    if fm_afk_launch_lock_mkdir "$FM_AFK_LAUNCH_LOCK"; then
       if ! printf '%s' "$$" > "$FM_AFK_LAUNCH_LOCK/pid"; then
         rm -rf "$FM_AFK_LAUNCH_LOCK"
         return 1

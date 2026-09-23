@@ -512,6 +512,39 @@ unit_concurrent_start_serialized() {
   rm -rf "$st"
 }
 
+unit_concurrent_lock_never_double_acquires() {
+  local st i p1 p2 r1 r2 both=0
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-conc-acquire.XXXXXX")
+  mkdir -p "$st/state"
+  for i in $(seq 1 50); do
+    rm -rf "$st/state/.afk-launch.lock"
+    (
+      # shellcheck source=bin/fm-afk-launch.sh
+      . "$LAUNCH"
+      fm_afk_launch_lock_mkdir "$st/state/.afk-launch.lock"
+    ) &
+    p1=$!
+    (
+      # shellcheck source=bin/fm-afk-launch.sh
+      . "$LAUNCH"
+      fm_afk_launch_lock_mkdir "$st/state/.afk-launch.lock"
+    ) &
+    p2=$!
+    r1=0; r2=0
+    wait "$p1" || r1=$?
+    wait "$p2" || r2=$?
+    if [ "$r1" -eq 0 ] && [ "$r2" -eq 0 ]; then
+      both=$((both + 1))
+    fi
+  done
+  rm -rf "$st"
+  if [ "$both" -eq 0 ]; then
+    pass "launcher lock: concurrent acquisition primitive never double-succeeds"
+  else
+    fail "launcher lock: concurrent acquisition primitive double-succeeded $both/50 times"
+  fi
+}
+
 unit_lock_initialization_grace() {
   local st marker initializer
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-lock-init.XXXXXX")
@@ -1208,6 +1241,7 @@ unit_stop_ordering
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized
+unit_concurrent_lock_never_double_acquires
 unit_lock_initialization_grace
 unit_signal_exits_with_lock_cleanup
 unit_herdr_partial_create_recovery
