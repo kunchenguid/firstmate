@@ -2,8 +2,8 @@
 # tests/fm-spawn-compact-adviser-disable.test.sh - every agent this fleet
 # launches must start with COMPACT_ADVISER_DISABLE=1 in its environment, unless
 # the home opts in through config/compact-adviser, in which case no launch path
-# may set the switch at all and the cleared allowlisted environment must still
-# deliver the two names the adviser needs.
+# may set the switch at all and the opt-in must forward nothing of its own
+# through the cleared allowlisted environment.
 #
 # The assertions never read bin/fm-spawn.sh's source. They drive the real spawn
 # against a fake pane and a real isolated git worktree, then EXECUTE the launch
@@ -256,7 +256,7 @@ SH
   chmod +x "$fb/sleep"
 }
 
-# relaunch_case <name> <allowlist:absent|enabled> <compact-adviser:absent|present>
+# relaunch_case <name> <allowlist:absent|enabled|listed> <compact-adviser:absent|present>
 # Provisions a home holding one recorded task, drives the relaunch verb, and
 # leaves the case directory, the replacement launch command, and the pane
 # preamble in RELAUNCH_DIR, RELAUNCH_LAUNCH, and RELAUNCH_PREAMBLE.
@@ -269,7 +269,7 @@ relaunch_case() {
   wt="$dir/wt"
   mkdir -p "$home/state" "$home/data" "$home/config" "$home/projects" "$dir/fake"
   touch "$home/state/.last-watcher-beat"
-  [ "$allowlist" = absent ] || : > "$home/config/launch-env-allowlist"
+  write_allowlist "$allowlist" "$home"
   [ "$optin" = absent ] || : > "$home/config/compact-adviser"
   make_relaunch_stub "$dir"
   fm_git_worktree "$proj" "$wt" "wt-relaunch-$name"
@@ -363,8 +363,8 @@ SH
 # A present config/compact-adviser file is the one gate on the switch above.
 # The probe below reports the switch and the two names the adviser needs, so
 # executing an opted-in launch answers both halves of that contract: no launch
-# path puts the switch there, and the cleared allowlisted environment still
-# delivers the names the destination pane carries.
+# path puts the switch there, and the opt-in forwards nothing of its own - the
+# names reach a cleared environment only when the home's allowlist lists them.
 install_opt_in_probe() {  # <fakebin> <harness>
   cat > "$1/$2" <<'SH'
 #!/bin/sh
@@ -372,6 +372,19 @@ printf '%s\n' "${COMPACT_ADVISER_DISABLE-unset}" "${TYPESAFE_API_KEY-unset}" \
   "${CLAUDE_CODE_ENABLE_FUNCTION_HOOKS-unset}"
 SH
   chmod +x "$1/$2"
+}
+
+# The allowlist postures an opted-in home can hold: no allowlist, an empty
+# allowlist that lists nothing, and an allowlist naming the adviser's two names
+# the way docs/configuration.md tells an opted-in home to.
+#   write_allowlist <absent|enabled|listed> <home>
+write_allowlist() {
+  case $1 in
+    absent) ;;
+    enabled) : > "$2/config/launch-env-allowlist" ;;
+    listed) printf '%s\n' TYPESAFE_API_KEY CLAUDE_CODE_ENABLE_FUNCTION_HOOKS \
+      > "$2/config/launch-env-allowlist" ;;
+  esac
 }
 
 # Synthetic nonsecret stand-ins for what the captain's pane shell carries, and a
@@ -396,13 +409,18 @@ $launch"
 
 # What an opted-in agent must see. With ambient inheritance the pane's own
 # switch value passes through untouched, because the launch neither sets nor
-# rewrites it; under the cleared allowlisted environment the switch is no longer
-# a floor entry, so a pane value is dropped and only the adviser's names remain.
-#   opt_in_expected <allowlist:absent|enabled> <switch|absent>
+# rewrites it; under a cleared allowlisted environment the switch is no longer
+# a floor entry, so a pane value is dropped. The adviser's names arrive
+# ambiently or when listed, and an allowlist that omits them strips them.
+#   opt_in_expected <allowlist:absent|enabled|listed> <switch|absent>
 opt_in_expected() {
   local allowlist=$1 switch=$2
-  if [ "$switch" = absent ] || [ "$allowlist" = enabled ]; then switch='unset'; fi
-  printf '%s\n' "$switch" "$SYNTHETIC_KEY" 1
+  if [ "$switch" = absent ] || [ "$allowlist" != absent ]; then switch='unset'; fi
+  if [ "$allowlist" = enabled ]; then
+    printf '%s\n' "$switch" unset unset
+  else
+    printf '%s\n' "$switch" "$SYNTHETIC_KEY" 1
+  fi
 }
 
 assert_no_pane_compact_export() {  # <pane-log> <label>
@@ -414,11 +432,11 @@ assert_no_pane_compact_export() {  # <pane-log> <label>
 
 test_opt_in_ship_launch_leaves_the_switch_alone() {
   local setting rec out status launch preamble seen switch
-  for setting in absent enabled; do
+  for setting in absent enabled listed; do
     rec=$(make_case "optin-ship-$setting" codex "optin-ship-$setting-a1")
     read_case "$rec"
     : > "$HOME_DIR/config/compact-adviser"
-    [ "$setting" = absent ] || : > "$HOME_DIR/config/launch-env-allowlist"
+    write_allowlist "$setting" "$HOME_DIR"
     out=$(TYPESAFE_API_KEY="$SPAWN_PROCESS_KEY" CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1 \
       run_case_spawn "optin-ship-$setting-a1" "$PROJ_DIR" --mode no-mistakes --yolo off)
     status=$?
@@ -433,30 +451,10 @@ test_opt_in_ship_launch_leaves_the_switch_alone() {
       seen=$(opt_in_launch_env "$FAKEBIN_DIR" "$TMP_ROOT/pane-home" "$launch" "$preamble" "$switch") \
         || fail "opted in, allowlist $setting, pane switch $switch: the emitted launch failed to run"
       assert_equals "$(opt_in_expected "$setting" "$switch")" "$seen" \
-        "opted in, allowlist $setting, pane switch $switch: the agent must start with the switch left alone and the adviser's names intact"
+        "opted in, allowlist $setting, pane switch $switch: the agent must start with the switch left alone and the adviser's names exactly as the allowlist posture allows"
     done
   done
-  pass "an opted-in ship launch never sets the compact-adviser switch and keeps the adviser's names through the cleared environment"
-}
-
-# The forwarding is gated by the opt-in: a home that keeps the default must not
-# have the adviser's names slip through its cleared environment.
-test_default_allowlist_still_strips_the_adviser_names() {
-  local rec out status launch preamble seen
-  rec=$(make_case default-strips codex default-strips-a1)
-  read_case "$rec"
-  : > "$HOME_DIR/config/launch-env-allowlist"
-  out=$(run_case_spawn default-strips-a1 "$PROJ_DIR" --mode no-mistakes --yolo off)
-  status=$?
-  expect_code 0 "$status" "default ship spawn under an allowlist should succeed: $out"
-  install_opt_in_probe "$FAKEBIN_DIR" codex
-  launch=$(cat "$LAUNCH_LOG")
-  preamble=$(grep '^export ' "$PANE_LOG")
-  seen=$(opt_in_launch_env "$FAKEBIN_DIR" "$TMP_ROOT/pane-home" "$launch" "$preamble" absent) \
-    || fail "default, allowlist enabled: the emitted launch failed to run"
-  assert_equals "$(printf '%s\n' 1 unset unset)" "$seen" \
-    "without the opt-in, the cleared environment must keep the switch on and strip the adviser's names"
-  pass "the default posture keeps the switch and does not forward the adviser's names"
+  pass "an opted-in ship launch never sets the compact-adviser switch and forwards the adviser's names only when the allowlist lists them"
 }
 
 test_opt_in_secondmate_launch() {
@@ -464,7 +462,7 @@ test_opt_in_secondmate_launch() {
   rec=$(make_case optin-secondmate codex sm-optin)
   read_case "$rec"
   : > "$HOME_DIR/config/compact-adviser"
-  : > "$HOME_DIR/config/launch-env-allowlist"
+  write_allowlist listed "$HOME_DIR"
   sm="$CASE_DIR/secondmate-home"
   mkdir -p "$sm/bin" "$sm/data"
   printf '# Firstmate\n' > "$sm/AGENTS.md"
@@ -481,14 +479,14 @@ test_opt_in_secondmate_launch() {
   preamble=$(grep '^export ' "$PANE_LOG")
   seen=$(opt_in_launch_env "$FAKEBIN_DIR" "$TMP_ROOT/pane-home" "$launch" "$preamble" "$CONTRARY") \
     || fail "opted in, secondmate: the emitted launch failed to run"
-  assert_equals "$(opt_in_expected enabled "$CONTRARY")" "$seen" \
-    "an opted-in secondmate must start with the switch unset and the adviser's names forwarded"
+  assert_equals "$(opt_in_expected listed "$CONTRARY")" "$seen" \
+    "an opted-in secondmate must start with the switch unset and the allowlisted adviser names forwarded"
   pass "a secondmate launch honors the opt-in and inherits it into the secondmate home"
 }
 
 test_relaunch_honors_the_opt_in() {
   local setting seen
-  for setting in absent enabled; do
+  for setting in absent enabled listed; do
     relaunch_case "optin-$setting" "$setting" present
     if grep -q '^export COMPACT_ADVISER_DISABLE=' "$RELAUNCH_DIR/fake/keys"; then
       fail "relaunch with allowlist=$setting exported the compact-adviser switch into the pane although the home opted in"
@@ -500,7 +498,7 @@ test_relaunch_honors_the_opt_in() {
     assert_equals "$(opt_in_expected "$setting" "$CONTRARY")" "$seen" \
       "a relaunched agent with allowlist=$setting must honor the opt-in exactly as a fresh spawn does"
   done
-  pass "relaunch honors the compact-adviser opt-in in both allowlist postures"
+  pass "relaunch honors the compact-adviser opt-in in every allowlist posture"
 }
 
 test_ship_allowlist_absent
@@ -510,6 +508,5 @@ test_secondmate_launch
 test_relaunch_rebuilds_the_switch
 test_raw_compound_launch_command_carries_the_switch
 test_opt_in_ship_launch_leaves_the_switch_alone
-test_default_allowlist_still_strips_the_adviser_names
 test_opt_in_secondmate_launch
 test_relaunch_honors_the_opt_in

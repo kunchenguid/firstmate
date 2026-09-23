@@ -295,11 +295,11 @@
 #   home's launched agents in to the adviser: no launch path then sets,
 #   forwards, or pins COMPACT_ADVISER_DISABLE at all, because the module
 #   treats the variable's presence as the switch, so the agent inherits
-#   exactly what its pane shell carries. Under an enabled
-#   config/launch-env-allowlist the floor additionally forwards the two names
-#   the adviser needs, TYPESAFE_API_KEY and CLAUDE_CODE_ENABLE_FUNCTION_HOOKS,
-#   by name only, expanded in the destination pane like every other allowlisted
-#   name and never copied into launch text, briefs, metadata, or logs. The
+#   exactly what its pane shell carries. The flag adds no forwarded names: an
+#   opted-in home that also enables config/launch-env-allowlist lists the
+#   names the adviser needs, TYPESAFE_API_KEY and
+#   CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, in that allowlist itself like any other
+#   ambient name. The
 #   file's content is ignored; it is read once per spawn or relaunch and is
 #   inherited into secondmate homes (bin/fm-config-inherit-lib.sh), so a local
 #   or remote second mate's own launches follow the same choice.
@@ -4819,16 +4819,14 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
 fi
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   LAUNCH_ENV_PREFIX='/usr/bin/env -i'
-  # The compact-adviser floor entries follow config/compact-adviser (header
+  # The compact-adviser floor entry follows config/compact-adviser (header
   # above). Absent: COMPACT_ADVISER_DISABLE is the intentional declarative
   # floor-membership entry, and the explicit COMPACT_ADVISER_DISABLE=1
   # assignment below is the authoritative setter. Present: the kill switch
-  # leaves the floor entirely, and the two names the adviser needs join it as
-  # forwarded names, so the cleared environment does not strip what the
-  # destination pane already carries. Only names enter the launch text.
-  if [ "$COMPACT_ADVISER_OPT_IN" = 1 ]; then
-    compact_adviser_floor='TYPESAFE_API_KEY CLAUDE_CODE_ENABLE_FUNCTION_HOOKS'
-  else
+  # leaves the floor entirely and nothing replaces it; the names an opted-in
+  # adviser needs come only from the home's own allowlist.
+  compact_adviser_floor=
+  if [ "$COMPACT_ADVISER_OPT_IN" != 1 ]; then
     compact_adviser_floor=COMPACT_ADVISER_DISABLE
   fi
   for env_name in HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTYPE \

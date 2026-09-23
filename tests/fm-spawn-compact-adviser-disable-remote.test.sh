@@ -193,8 +193,8 @@ pass "the remote route keeps the compact-adviser switch through the cleared allo
 # --- an opted-in parent leaves the remote switch alone ----------------------
 # config/compact-adviser is inherited local material like the allowlist, so the
 # parent's opt-in is what the remote host's own fm-spawn reads. The probe now
-# also reports the two names the adviser needs, because the cleared environment
-# must forward them once the home opts in.
+# also reports the two names the adviser needs: the opt-in forwards nothing of
+# its own, so the parent's allowlist lists them and that listing is inherited.
 cat > "$PROBEBIN/codex" <<'SH'
 #!/bin/sh
 printf '%s\n' "${COMPACT_ADVISER_DISABLE-unset}" "${TYPESAFE_API_KEY-unset}" \
@@ -219,6 +219,7 @@ assert_no_remote_compact_export() {  # <label>
 }
 
 : > "$PARENT/config/compact-adviser"
+printf '%s\n' TYPESAFE_API_KEY CLAUDE_CODE_ENABLE_FUNCTION_HOOKS > "$PARENT/config/launch-env-allowlist"
 run_remote_launch 'opted in, allowlist enabled'
 assert_present "$REMOTE_HOME/config/compact-adviser" \
   "the remote launch did not inherit the compact-adviser opt-in"
@@ -229,8 +230,8 @@ assert_contains "$LAUNCH" '/usr/bin/env -i' \
 SEEN=$(replay_opt_in_launch "$CONTRARY") \
   || fail "the opted-in cleared-environment remote launch failed to run"
 assert_equals "$(printf '%s\n' unset "$SYNTHETIC_KEY" 1)" "$SEEN" \
-  "an opted-in remote second mate under the cleared environment must start with the switch unset and the adviser's names forwarded"
-pass "the remote route honors the compact-adviser opt-in and forwards the adviser's names through the cleared environment"
+  "an opted-in remote second mate under the cleared environment must start with the switch unset and the allowlisted adviser names forwarded"
+pass "the remote route honors the compact-adviser opt-in and forwards the adviser's names only through the inherited allowlist"
 
 # --- and with ambient inheritance the remote agent gets exactly its pane -----
 rm "$PARENT/config/launch-env-allowlist"
