@@ -148,19 +148,28 @@ assert_equals "800" "$(json_field "$(cat "$ROLLUP")" "d['byFamily']['grok']['tok
 
 # --- predict: weekly window calibration --------------------------------------
 
-NOW_EPOCH=$(python3 -c 'import time; print(int(time.time()))')
-RESETS=$(python3 -c 'import sys,datetime; print(datetime.datetime.fromtimestamp(int(sys.argv[1])+86400, tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"))' "$NOW_EPOCH")
-cat > "$STATE/quota.json" <<EOF
+# Pin the quota snapshot clock so the fixed session dates stay in its weekly window.
+NOW_EPOCH=$(python3 -c 'import datetime; print(int(datetime.datetime(2026,9,22,tzinfo=datetime.timezone.utc).timestamp()))')
+format_reset() {
+  python3 -c 'import sys,datetime; print(datetime.datetime.fromtimestamp(int(sys.argv[1]), tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"))' "$1"
+}
+write_quota() {
+  local path=$1 resets=$2
+  cat > "$path" <<EOF
 {"schema":"quota-axi.v5","providers":[
- {"provider":"codex","windows":[{"id":"weekly","kind":"weekly","resetsAt":"$RESETS","percentRemaining":40,"pace":{"burnMultiple":2.0}}],"availability":[]},
- {"provider":"daily","windows":[{"id":"daily","kind":"daily","resetsAt":"$RESETS","percentRemaining":40,"pace":{"burnMultiple":2.0}}],"availability":[]},
+ {"provider":"codex","windows":[{"id":"weekly","kind":"weekly","resetsAt":"$resets","percentRemaining":40,"pace":{"burnMultiple":2.0}}],"availability":[]},
+ {"provider":"daily","windows":[{"id":"daily","kind":"daily","resetsAt":"$resets","percentRemaining":40,"pace":{"burnMultiple":2.0}}],"availability":[]},
  {"provider":"unmeasured","windows":[],"availability":[]}
  ]}
 EOF
+}
+BASE_RESET_EPOCH=$((NOW_EPOCH + 86400))
+RESETS=$(format_reset "$BASE_RESET_EPOCH")
+write_quota "$STATE/quota.json" "$RESETS"
 PREDICT=$("$LEDGER" --state "$STATE" --sessions-root "$SESSIONS" predict --quota "$STATE/quota.json")
-# Window covers the last 7 days: sessions S1 (3000 codex) + CHILD (400 codex)
-# fall inside; S0 (777, Sep 10) is outside; consumed=60 -> 3400/60 per point.
+# The Sep 16 UTC bucket overlaps this window; S0 (777, Sep 10) is outside.
 assert_equals "ok" "$(json_field "$PREDICT" "d['status']")" "predict status"
+assert_equals "2026-09-16T00:00:00.000Z" "$(json_field "$PREDICT" "d['providers']['codex']['windowStart']")" "predict weekly window start"
 assert_equals "3400" "$(json_field "$PREDICT" "d['providers']['codex']['windowTokens']")" "predict window tokens"
 assert_equals "60.0" "$(json_field "$PREDICT" "d['providers']['codex']['percentConsumed']")" "predict percent consumed"
 python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert abs(d["providers"]["codex"]["tokensPerPoint"] - 3400/60) < 0.01, d' "$PREDICT" \
@@ -168,6 +177,20 @@ python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert abs(d["providers"
 assert_not_contains "$PREDICT" '"unmeasured"' "predict invents no row for unmeasured provider"
 python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert "daily" not in d["providers"], d["providers"]' "$PREDICT" \
   || fail "predict calibrated a non-weekly window"
+
+# Advancing the weekly reset by one day moves the start past the Sep 16 bucket.
+DAY_RESET=$(format_reset "$((BASE_RESET_EPOCH + 86400))")
+write_quota "$STATE/quota-day-boundary.json" "$DAY_RESET"
+PREDICT_DAY_BOUNDARY=$("$LEDGER" --state "$STATE" --sessions-root "$SESSIONS" predict --quota "$STATE/quota-day-boundary.json")
+assert_equals "2026-09-17T00:00:00.000Z" "$(json_field "$PREDICT_DAY_BOUNDARY" "d['providers']['codex']['windowStart']")" "predict after UTC day boundary"
+assert_equals "0" "$(json_field "$PREDICT_DAY_BOUNDARY" "d['providers']['codex']['windowTokens']")" "predict expires prior UTC day"
+
+# Advancing the same weekly reset by seven days drops every session from the prior week.
+WEEK_RESET=$(format_reset "$((BASE_RESET_EPOCH + 7 * 86400))")
+write_quota "$STATE/quota-week-boundary.json" "$WEEK_RESET"
+PREDICT_WEEK_BOUNDARY=$("$LEDGER" --state "$STATE" --sessions-root "$SESSIONS" predict --quota "$STATE/quota-week-boundary.json")
+assert_equals "2026-09-23T00:00:00.000Z" "$(json_field "$PREDICT_WEEK_BOUNDARY" "d['providers']['codex']['windowStart']")" "predict after weekly boundary"
+assert_equals "0" "$(json_field "$PREDICT_WEEK_BOUNDARY" "d['providers']['codex']['windowTokens']")" "predict expires prior week"
 
 # --- malformed quota and missing sessions root --------------------------------
 
