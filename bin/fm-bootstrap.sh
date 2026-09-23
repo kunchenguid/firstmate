@@ -1132,6 +1132,18 @@ crew_dispatch_validate() {
   err=$(jq -r --argjson typed "$typed_active" --argjson verified_harnesses "$verified_harnesses" --arg provider_re "$FM_QUOTA_PROVIDER_ID_RE" '
     def verified($h): $verified_harnesses | index($h);
     def provider_id($p): ($p | type) == "string" and ($p | test($provider_re));
+    # providerCaps (docs/configuration.md "Crew dispatch profiles") bounds the
+    # live lanes one billing provider may carry; fm-provider-lib.sh enforces it
+    # at spawn. An invalid declaration must fail loudly here rather than be
+    # silently ignored, so every value must be a whole number of at least one
+    # and every key a provider id or the reserved `default`.
+    def provider_caps_bad:
+      (.providerCaps // null) as $c
+      | $c != null and (
+          ($c | type) != "object"
+          or ([$c | keys[] | select(. != "default") | select(test($provider_re) | not)] | length > 0)
+          or ([$c[] | select((type != "number") or (. < 1) or (. != (. | floor)))] | length > 0)
+        );
     def effort_ok($h; $m; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -1181,6 +1193,7 @@ crew_dispatch_validate() {
       | unique;
     if type != "object" then "top-level value must be an object"
     elif has("rules") and (.rules | type) != "array" then "rules must be an array"
+    elif provider_caps_bad then "providerCaps must map each provider id (or default) to a positive integer"
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
     elif [(.rules // [])[]? | select((.when? | type) != "string" or (.when | length) == 0)] | length > 0 then "each rule needs non-empty when"
     elif [(.rules // [])[]? | select((.use? | type) != "object" and (.use? | type) != "array")] | length > 0 then "each rule needs use"

@@ -1180,6 +1180,11 @@ default array profile without harness is flagged^{"default":[{"model":"gpt-5.5"}
 default array malformed effort is flagged^{"default":[{"harness":"codex","effort":3}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present
 default profile floor without min_percent is flagged^{"default":[{"harness":"codex","floor":{"scope":"all_models"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile floor needs scope and min_percent 0..100
 default profile floor provider override is flagged^{"default":{"harness":"codex","floor":{"scope":"all_models","min_percent":50,"provider":"claude"}}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - default profile floor needs scope and min_percent 0..100
+provider caps are accepted^{"rules":[],"providerCaps":{"default":4,"fireworks":3}}^empty^
+provider caps zero is flagged^{"rules":[],"providerCaps":{"fireworks":0}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - providerCaps must map each provider id (or default) to a positive integer
+provider caps fractional is flagged^{"rules":[],"providerCaps":{"fireworks":2.5}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - providerCaps must map each provider id (or default) to a positive integer
+provider caps non-object is flagged^{"rules":[],"providerCaps":4}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - providerCaps must map each provider id (or default) to a positive integer
+provider caps bad key is flagged^{"rules":[],"providerCaps":{"Fireworks":2}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - providerCaps must map each provider id (or default) to a positive integer
 ROWS
 
   case_dir="$TMP_ROOT/dispatch-opt-in-gate"

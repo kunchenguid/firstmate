@@ -480,7 +480,8 @@ This section is the single owner of the canonical schema and its per-field seman
   ],
   "default": [
     { "harness": "<adapter>", "model": "<optional model>", "effort": "<optional effort>" }
-  ]
+  ],
+  "providerCaps": { "default": 4, "fireworks": 4 }
 }
 ```
 
@@ -496,6 +497,13 @@ A provider-only rule floor on an expanded provider binds to its `default` accoun
 An absent or unknown row or unmeasured provider makes the floor unverifiable and escalates without authorizing default routing.
 A known percentage below the floor makes the tool resolve among `default` profiles instead.
 A profile `provider` optionally names the quota-axi provider family whose rows apply to that profile; when present, profile and rule-floor provider IDs must match the strict whole-string pattern `^[a-z0-9]+(-[a-z0-9]+)*\z`.
+`providerCaps` is optional and bounds how many live lanes one billing provider may carry.
+`providerCaps.<provider>` sets that one provider's cap and `providerCaps.default` sets the cap for every provider without its own entry; an absent entry, or a value below one, falls back to a cap of 4.
+The provider a lane is counted against comes from the lane's recorded harness and model, with the model string deciding the identity, so two models on one pool count together even across harnesses while a different pool stays separate.
+A lane whose recorded endpoint is provably dead or missing no longer occupies a seat, while a lane whose endpoint cannot be proven gone keeps it.
+`bin/fm-provider-load.sh` prints the current per-provider `used/cap` for dispatch intake, and `bin/fm-spawn.sh` refuses a crewmate, scout, or local secondmate spawn that would push a provider past its cap (`bin/fm-provider-lib.sh` is the single owner of both rules).
+The cap is per home: a remote secondmate's own lanes are recorded on its host and are not counted here.
+Bootstrap rejects a malformed `providerCaps` - a non-object, a key that is neither a provider id nor `default`, or a value that is not a whole number of at least one - with the usual `CREW_DISPATCH:` diagnostic.
 Bootstrap validates resolver-only `approval`, `floor`, and present `provider` values only while typed resolution is active; without the key those inert fields and the pre-existing verified-harness baseline preserve bootstrap behavior.
 Typed resolution additively recognizes `gemini` because AGENTS.md section 4 verifies it for crewmate and scout dispatch.
 The opted-in resolver has authoritative single-provider mappings for `claude`, `codex`, `grok`, `kimi`, `cursor`, `agy`, and `muse`; every other verified harness must declare `provider` explicitly, including multi-provider `pi`, `pi-signed`, `omp`, and `opencode` and unmapped `gemini`, `rovo`, and `devin`.

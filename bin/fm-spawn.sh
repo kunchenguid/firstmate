@@ -572,6 +572,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-remote-readiness-lib.sh"
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
+# shellcheck source=bin/fm-provider-lib.sh
+. "$SCRIPT_DIR/fm-provider-lib.sh"
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
@@ -2244,6 +2246,22 @@ if [ "$HARNESS" = omp ]; then
 fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
+fi
+# Per-provider concurrency cap: refuse a dispatch that would push a billing
+# provider past its configured lane cap. The identity comes from the resolved
+# model string (bin/fm-provider-lib.sh), so one pool's models count together
+# even across harnesses while a different pool stays separate. A relaunch
+# already owns its seat, so it is excluded from the count; a lane whose
+# endpoint is provably gone no longer holds a seat. Skipped for a raw launch
+# command, whose harness is unknown and therefore uncountable.
+if [ -n "$HARNESS" ]; then
+  LANE_CAP_MODEL=$MODEL
+  LANE_CAP_EXCLUDE=
+  if [ "$RELAUNCH" -eq 1 ]; then
+    LANE_CAP_EXCLUDE=$ID
+    [ -n "$LANE_CAP_MODEL" ] || LANE_CAP_MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+  fi
+  fm_provider_cap_refuse "$STATE" "$CONFIG" "$HARNESS" "$LANE_CAP_MODEL" "$LANE_CAP_EXCLUDE" || exit 1
 fi
 
 secondmate_registry_value() {
