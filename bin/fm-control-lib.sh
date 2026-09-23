@@ -25,12 +25,12 @@
 #   2. Per-harness control mechanics: which key interrupts a running turn, how
 #      many times it must be sent, whether the composer needs clearing after
 #      that key, which adapter-owned cancellation acknowledgement is observable,
-#      which command exits the agent, and which task kinds the adapter is
-#      verified to run. These are the empirically verified facts previously
-#      carried only in the harness-adapters skill's per-adapter tables; that
-#      skill now points here so one executable owner holds them, and
-#      bin/fm-send.sh's --key path reads the same table rather than a second
-#      copy of it.
+#      which command exits the agent, which exit-confirmation dialog it
+#      answers, and which task kinds the adapter is verified to run. These are
+#      the empirically verified facts previously carried only in the
+#      harness-adapters skill's per-adapter tables; that skill now points here
+#      so one executable owner holds them, and bin/fm-send.sh's --key path
+#      reads the same table rather than a second copy of it.
 #   3. Per-backend capability: which named keys a runtime backend can deliver,
 #      and whether the backend has a recovery-grade agent-state classifier
 #      (bin/fm-backend.sh's fm_backend_agent_state) able to PROVE that an agent
@@ -190,6 +190,35 @@ fm_control_exit_command() {  # <harness>
     codex|pi|pi-signed|omp|gemini|agy) printf '/quit' ;;
     *) return 1 ;;
   esac
+}
+
+# The key that confirms the harness's own exit-confirmation dialog, printed
+# only when <visible-capture> shows exactly that dialog with its exiting
+# option selected; any other screen, selection, or harness returns 1 and gets
+# no key. Claude answers /exit while background shells run with a
+# "Background work is running" dialog whose preselected first option, "Exit
+# and stop tasks", stops them and exits (verified on Claude Code 2.1.280;
+# captures in tests/captures/claude-exit-dialog/).
+fm_control_exit_confirm_key() {  # <harness> <visible-capture>
+  case "${1-}" in
+    claude) fm_control_claude_exit_dialog_selected "${2-}" && printf 'Enter' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Whether the last non-blank lines of <capture> are claude's background-work
+# dialog, opened by its exact two header lines, with the one selected option
+# being "1. Exit and stop tasks", directly followed by one of the two verified
+# second options, and the exact footer closing the screen.
+fm_control_claude_exit_dialog_selected() {  # <capture>
+  printf '%s\n' "$1" | awk '
+    { sub(/^[ \t]+/, ""); sub(/[ \t]+$/, "") } $0 == "" { next }
+    { n++; last = $0 }
+    $0 == "Background work is running" { head = n; sel = ""; pick = 0; second = 0; next }
+    head && n == head + 1 && $0 != "The following will stop when you exit:" { head = 0 }
+    head && n == pick + 1 && ($0 == "2. Stay" || $0 == "2. Move to background and exit") { second = 1 }
+    head && index($0, "❯") == 1 { sel = (sel == "") ? $0 : "several"; pick = n; second = 0 }
+    END { exit !(head && second && sel == "❯ 1. Exit and stop tasks" && last == "Enter to confirm · Esc to cancel") }'
 }
 
 # Which named keys a backend adapter can deliver. Every session provider
