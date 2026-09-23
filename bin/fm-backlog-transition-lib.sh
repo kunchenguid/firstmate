@@ -335,7 +335,8 @@ fm_backlog_transition_applies() {  # <config-dir> <data-dir> <kind>
 # same way. When a bound was requested but no bounding mechanism exists at
 # all, the call fails closed instead of running unbounded. Must be the last
 # command of a subshell: the exec keeps the tasks-axi process exactly where
-# the plain call sat, and the bound kills the child, not the caller.
+# the plain call sat, and the bound kills the child's whole process group -
+# a grandchild holding its inherited pipes cannot outlive it - not the caller.
 fm_tasks_axi_timeout_expired() {  # <status>
   case $1 in
     124 | 137) return 0 ;;
@@ -364,7 +365,15 @@ fm_tasks_axi() {
       exit 127 unless defined $bound && $bound =~ /\A[0-9]+\z/;
       my $pid = fork;
       exit 127 unless defined $pid;
-      if ($pid == 0) { exec @ARGV; exit 127 }
+      if ($pid == 0) {
+        # Put the child in its own process group so the bound can KILL every
+        # descendant the exec-ed command may have spawned (e.g. a #! interpreter
+        # running sleep). Without this, the inherited stdout/stderr pipe stays
+        # open through a forked grandchild and bash command substitution never
+        # sees EOF, hanging the caller indefinitely.
+        setpgrp(0, 0) or die "setpgrp failed";
+        exec @ARGV; exit 127
+      }
       my $step = 0.05;
       my $elapsed = 0;
       while (1) {
@@ -380,7 +389,10 @@ fm_tasks_axi() {
             $grace += $step;
             $gone = waitpid $pid, WNOHANG;
           }
-          kill "KILL", $pid if $gone == 0;
+          # Kill the entire process group the child forked into, so any
+          # grandchild it spawned (e.g. a #! interpreter) also dies and the
+          # stdout/stderr pipes it inherited from us are fully closed.
+          kill "KILL", -$pid;
           waitpid $pid, 0;
           exit 124;
         }

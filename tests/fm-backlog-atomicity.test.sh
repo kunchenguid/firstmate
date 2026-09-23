@@ -40,6 +40,72 @@ command -v tasks-axi >/dev/null 2>&1 || {
   exit 0
 }
 
+# --- watchdog ---------------------------------------------------------------
+
+# fm_test_watchdog <bound> <kill-after> <command...>
+#
+# Portable equivalent of GNU `timeout -k <kill-after> <bound> <command...>`.
+# Prefers GNU `timeout` (or `gtimeout` from a Homebrew coreutils install) when
+# present and falls back to a perl watchdog. The fallback keeps regression-net-
+# bound tests working on a host without coreutils, where a missing-`timeout`
+# shell error would currently fail the suite with empty output instead of the
+# bounded run the cases were designed to verify.
+fm_test_watchdog() {
+  local bound=$1 kill_after=$2
+  shift 2
+  if command -v timeout >/dev/null 2>&1; then
+    exec timeout -k "$kill_after" "$bound" "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    exec gtimeout -k "$kill_after" "$bound" "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    exec perl -MPOSIX=WNOHANG -e '
+      my ($bound, $kill_after) = @ARGV[0, 1];
+      exit 127 unless defined $bound && $bound =~ /\A[0-9]+\z/
+        && defined $kill_after && $kill_after =~ /\A[0-9]+\z/;
+      my @cmd = @ARGV[2 .. $#ARGV];
+      exit 127 unless @cmd;
+      my $pid = fork;
+      exit 127 unless defined $pid;
+      if ($pid == 0) {
+        # Put the child in its own process group so the bound can KILL every
+        # descendant the exec-ed command may have spawned (e.g. a #! interpreter
+        # running sleep). Without this, the inherited stdout/stderr pipe stays
+        # open through a forked grandchild and the caller waits forever for
+        # EOF instead of getting the bounded run it asked for.
+        setpgrp(0, 0) or die "setpgrp failed";
+        exec @cmd; exit 127
+      }
+      my $step = 0.05;
+      my $elapsed = 0;
+      while (1) {
+        my $done = waitpid $pid, WNOHANG;
+        exit(($? & 127) ? 128 + ($? & 127) : $? >> 8) if $done == $pid;
+        exit 127 if $done == -1;
+        if ($elapsed >= $bound) {
+          kill "TERM", $pid;
+          my $grace = 0;
+          my $gone = waitpid $pid, WNOHANG;
+          while ($gone == 0 && $grace < $kill_after) {
+            select undef, undef, undef, $step;
+            $grace += $step;
+            $gone = waitpid $pid, WNOHANG;
+          }
+          # Kill the entire process group the child forked into, so any
+          # grandchild it spawned (e.g. a #! interpreter) also dies and the
+          # stdout/stderr pipes it inherited from us are fully closed.
+          kill "KILL", -$pid;
+          waitpid $pid, 0;
+          exit 124;
+        }
+        select undef, undef, undef, $step;
+        $elapsed += $step;
+      }
+    ' -- "$bound" "$kill_after" "$@"
+  fi
+  printf 'fm_test_watchdog: cannot bound the run without timeout, gtimeout, or perl\n' >&2
+  exit 127
+}
+
 # --- fixture ----------------------------------------------------------------
 
 # fm_tasks_axi_backend reads <addressing-root>/.tasks.toml and otherwise falls
@@ -1482,7 +1548,7 @@ test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
     HOME="$case_dir/user-home" FM_SPAWN_NO_GUARD=1 \
     FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" CLAUDE_CONFIG_DIR='' \
     FM_TASKS_AXI_TIMEOUT=3 PATH="$case_dir/fakebin:$PATH" \
-    timeout -k 5 30 "$SPAWN" "$id" "$case_dir/project" \
+    fm_test_watchdog 30 5 "$SPAWN" "$id" "$case_dir/project" \
     --mode no-mistakes --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
   case "$rc" in
@@ -2779,7 +2845,7 @@ test_spawn_refuses_a_special_file_tasks_config() {
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
-    timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
+    fm_test_watchdog 60 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 124 ] || fail "spawn hung reading a special-file tasks-axi config"
   [ "$rc" -ne 0 ] || fail "spawn accepted a special-file tasks-axi config"
   assert_contains "$out" "tasks-axi config is not a regular file" \
