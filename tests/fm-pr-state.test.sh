@@ -266,6 +266,13 @@ test_refusals_exit_nonzero() {
     || fail "a bare number resolves against the ambient repository and is not an address"
   assert_contains "$out" 'expected a GitHub pull-request URL' \
     "a bare number must be refused as an address, not attempted as a lookup"
+
+  status=0
+  out=$(PATH="$FAKEBIN:$PATH" "$SCRIPT" https://git.example.com/o/r/pull/1 2>&1) || status=$?
+  [ "$status" -ne 0 ] \
+    || fail "a GitHub Enterprise Server URL must be refused, not read from github.com"
+  assert_contains "$out" 'expected a GitHub pull-request URL' \
+    "a GitHub Enterprise Server URL must be refused with the address message"
   pass "argument and lookup refusals exit nonzero"
 }
 

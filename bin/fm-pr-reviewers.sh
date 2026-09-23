@@ -38,7 +38,7 @@ fi
 command -v gh >/dev/null 2>&1 || die "gh is required"
 
 URL=$1
-if ! fm_pr_url_parse "$URL" || [ "$FM_PR_PROVIDER" != github ]; then
+if ! fm_pr_url_parse "$URL" || [ "$FM_PR_PROVIDER" != github ] || [ "$FM_PR_HOST" != github.com ]; then
   die "expected a GitHub pull-request URL"
 fi
 
