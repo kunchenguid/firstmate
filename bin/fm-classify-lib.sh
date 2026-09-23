@@ -27,7 +27,7 @@
 # A missing, malformed, identity-mismatched, or past-end classified position reads
 # from byte 0, preferring a bounded duplicate over a lost event.
 #
-# There are three documented exceptions. The absorb classification
+# There are four documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -39,7 +39,9 @@
 # stays bounded by new appends instead of re-reading each task's whole lifetime
 # log every time. crew_worktree_written_since reads the task's meta file and walks
 # a bounded slice of its worktree instead of a status file, so callers run it only
-# at the moment they would otherwise escalate.
+# at the moment they would otherwise escalate. crew_nm_run_progressing checks
+# the task's attributed no-mistakes run through bounded CLI and log reads, so
+# callers hold it to the same only-at-escalation budget.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -61,6 +63,17 @@ case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
 # shellcheck source=bin/fm-timeout-lib.sh
 # shellcheck disable=SC1091
 . "$_FM_CLASSIFY_LIB_DIR/fm-timeout-lib.sh"
+[ "$_fm_classify_nounset" = on ] || set +u
+unset _fm_classify_nounset
+
+# crew_nm_run_progressing below reads the run's own execution evidence through
+# the shared no-mistakes run primitives (bounded CLI call, TOON field readers,
+# active_steps parsing). bin/fm-nm-run-lib.sh is their one owner; it is plain
+# function definitions, so the same nounset courtesy applies.
+case $- in *u*) _fm_classify_nounset=on ;; *) _fm_classify_nounset=off ;; esac
+# shellcheck source=bin/fm-nm-run-lib.sh
+# shellcheck disable=SC1091
+. "$_FM_CLASSIFY_LIB_DIR/fm-nm-run-lib.sh"
 [ "$_fm_classify_nounset" = on ] || set +u
 unset _fm_classify_nounset
 
@@ -2056,6 +2069,124 @@ crew_worktree_written_since() {  # <id> <state> <anchor-file>
       -type f -newer "$anchor" -print -quit 2>/dev/null || true)
   fi
   [ -n "$hit" ]
+}
+
+# Prints <id>'s no-mistakes run id and returns 0 when the run attributed to the
+# task's branch and code identity is demonstrably EXECUTING: positive activity,
+# process, or log evidence from the run itself, never the pane. This is the
+# wedge detector's fourth liveness input and the one that sees work the other
+# three cannot: a crew handed to `axi run` produces no pane output, no worktree
+# writes in its own checkout, and often no fresh status line for the whole
+# validation, so pane quietness alone must never escalate while the run proves
+# execution.
+#
+# Execution evidence, any one of which is sufficient:
+#   - an active step has parseable, non-quiet last_activity, or a parseable
+#     quiet age below FM_PAUSE_RESURFACE_SECS and a live agent/daemon executor;
+#   - a file under NM_HOME/logs/<run-id>/ was written since <anchor-file>.
+# A parked approval gate, mismatched run identity, or malformed activity is not
+# execution evidence; relative NM_HOME resolves from the recorded worktree.
+# Callers must reach this only when they are otherwise about to escalate,
+# never on every poll: each call is bounded `axi status` and `axi` overview
+# reads plus, for a daemon-executed step, one bounded `daemon status`.
+crew_nm_run_progressing() {  # <id> <state> <anchor-file>
+  local id=$1 state=$2 anchor=$3 wt kind branch out rbranch rhead rid steps
+  local overview selection selected_id selected_status runs_list runs_limit
+  local pid activity activity_age quiet_bound daemon_up nm_home logdir hit row
+  [ -n "$id" ] || return 1
+  [ -f "$anchor" ] || return 1
+  command -v no-mistakes >/dev/null 2>&1 || return 1
+  wt=$(grep '^worktree=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  kind=$(grep '^kind=' "$state/$id.meta" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+  [ "${kind:-ship}" = ship ] || return 1
+  branch=$(git -C "$wt" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  [ -n "$branch" ] || return 1
+  out=$(fm_nm_run_checked "$wt" 10 axi status) || return 1
+  [ -n "$out" ] || return 1
+  rbranch=$(fm_nm_strip_quotes "$(fm_nm_field "$out" branch)")
+  [ "$rbranch" = "$branch" ] || return 1
+  fm_nm_run_is_active "$out" || return 1
+  rid=$(fm_nm_strip_quotes "$(fm_nm_field "$out" id)")
+  [ -n "$rid" ] || return 1
+  rhead=$(fm_nm_strip_quotes "$(fm_nm_field "$out" head)")
+  overview=$(fm_nm_run_checked "$wt" 10 axi) || return 1
+  selection=$(fm_nm_select_run "$branch" "$overview" "$wt")
+  case "$selection" in
+    selected\|*)
+      IFS='|' read -r _ selected_id selected_status _ <<< "$selection"
+      [ "$selected_id" = "$rid" ] || return 1
+      [ "$(fm_nm_run_status_class "$selected_status")" = live ] || return 1
+      if ! fm_nm_head_equals_worktree "$wt" "$rhead" \
+        && ! fm_nm_run_is_pipeline_owned_active "$out"; then return 1; fi
+      ;;
+    unavailable)
+      [ "$(fm_nm_run_status_class "$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")")" = live ] || return 1
+      [ -n "$rhead" ] || return 1
+      runs_limit=${FM_CREW_STATE_RUNS_LIMIT:-200}
+      case "$runs_limit" in ''|*[!0-9]*) runs_limit=200 ;; esac
+      while [ "${runs_limit#0}" != "$runs_limit" ]; do runs_limit=${runs_limit#0}; done
+      [ -n "$runs_limit" ] || runs_limit=200
+      [ "${#runs_limit}" -le 9 ] || runs_limit=200
+      runs_list=$(fm_nm_run "$wt" 10 runs --limit "$runs_limit")
+      selected_status=$(fm_nm_runs_status_for_worktree "$wt" "$branch" "$runs_list" "$rhead")
+      [ "$(fm_nm_run_status_class "$selected_status")" = live ] || return 1
+      if ! fm_nm_head_equals_worktree "$wt" "$rhead" \
+        && [ -n "$(fm_nm_resolve_commit "$wt" "$rhead")" ]; then return 1; fi
+      ;;
+    *) return 1 ;;
+  esac
+  steps=$(fm_nm_active_steps_evidence "$out")
+  fm_nm_run_is_gate_parked "$out" "$steps" && return 1
+  if [ -n "$steps" ]; then
+    quiet_bound=${FM_PAUSE_RESURFACE_SECS:-$FM_PAUSE_RESURFACE_SECS_DEFAULT}
+    case "$quiet_bound" in ''|*[!0-9]*) quiet_bound=$FM_PAUSE_RESURFACE_SECS_DEFAULT ;; esac
+    while [ "${quiet_bound#0}" != "$quiet_bound" ]; do quiet_bound=${quiet_bound#0}; done
+    [ -n "$quiet_bound" ] || quiet_bound=0
+    case "$quiet_bound" in 0) quiet_bound=$FM_PAUSE_RESURFACE_SECS_DEFAULT ;; esac
+    [ "${#quiet_bound}" -le 9 ] || quiet_bound=$FM_PAUSE_RESURFACE_SECS_DEFAULT
+    quiet_bound=$((quiet_bound + 0))
+    daemon_up=''
+    while IFS= read -r row; do
+      pid=${row%%$'\t'*}
+      activity=${row#*$'\t'}
+      activity=${activity%%$'\t'*}
+      activity_age=$(fm_nm_activity_age_secs "$activity" "$quiet_bound") || continue
+      case "$activity" in
+        quiet\ *) [ "$activity_age" -lt "$quiet_bound" ] || continue ;;
+        *) printf '%s' "$rid"; return 0 ;;
+      esac
+      case "$pid" in
+        ''|*[!0-9]*)
+          if [ -z "$daemon_up" ]; then
+            if fm_nm_daemon_running "$wt" 10; then
+              daemon_up=1
+            else
+              daemon_up=0
+            fi
+          fi
+          [ "$daemon_up" = 1 ] && { printf '%s' "$rid"; return 0; }
+          ;;
+        *)
+          if kill -0 "$pid" 2>/dev/null; then
+            case "$(ps -p "$pid" -o stat= 2>/dev/null)" in
+              Z*) ;;
+              *) printf '%s' "$rid"; return 0 ;;
+            esac
+          fi
+          ;;
+      esac
+    done <<EOF
+$steps
+EOF
+  fi
+  nm_home=${NM_HOME:-$HOME/.no-mistakes}
+  case "$nm_home" in /*) ;; *) nm_home=$wt/$nm_home ;; esac
+  logdir=$nm_home/logs/$rid
+  [ -d "$logdir" ] || return 1
+  hit=$(fm_run_timed 10 find "$logdir" -type f -name '*.log' -newer "$anchor" -print -quit 2>/dev/null || true)
+  [ -n "$hit" ] || return 1
+  printf '%s' "$rid"
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably

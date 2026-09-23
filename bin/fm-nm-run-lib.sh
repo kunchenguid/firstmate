@@ -38,6 +38,24 @@ fm_nm_run() {  # <dir> <timeout_secs> <args...>
   fm_nm_run_checked "$@" || true
 }
 
+# 0 when the shared no-mistakes daemon is provably up in dir $1. The status
+# subcommand exits 0 whether or not the daemon answers (verified against the
+# installed CLI: a missing, empty, or stale NM_HOME also prints "daemon not
+# running" and returns 0), so its ANSWER is the evidence, never its exit
+# status: "daemon running" is the only positive, while "daemon not running",
+# "daemon stopped", a non-zero exit, or an empty answer all read as not
+# provably up. Bounded like every other CLI call, and the ONE owner of this
+# probe for both the run-liveness deferral in fm-classify-lib.sh and
+# nm_daemon_probe_down in fm-crew-state.sh.
+fm_nm_daemon_running() {  # <dir> <timeout_secs>
+  local out
+  out=$(fm_nm_run_checked "$1" "$2" daemon status) || return 1
+  case "$out" in
+    *'daemon running'*) return 0 ;;
+  esac
+  return 1
+}
+
 fm_nm_trim() {
   local s=${1:-}
   s="${s#"${s%%[![:space:]]*}"}"
@@ -97,6 +115,14 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   [ -n "$run_full" ] || return 1
   [ "$run_full" = "$local_full" ] && return 0
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+}
+
+fm_nm_head_equals_worktree() {  # <worktree> <run_head>
+  local wt=$1 run_head=$2 local_full run_full
+  [ -n "$run_head" ] || return 1
+  local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 1
+  run_full=$(fm_nm_resolve_commit "$wt" "$run_head")
+  [ -n "$run_full" ] && [ "$run_full" = "$local_full" ]
 }
 
 # Liveness class of a recorded ledger status word.
@@ -310,6 +336,123 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
   fm_nm_run_is_active "$1"
 }
 
+# Rows of the `active_steps[N]{...}:` table in captured `axi status` TOON $1,
+# which the pipeline emits only while a step is actually running or fixing.
+# Column order is deliberately not assumed: the header's own indentation bounds
+# the block, and callers read the table as text.
+fm_nm_active_steps_rows() {  # <toon-output>
+  printf '%s\n' "$1" | awk '
+    /^[[:space:]]*active_steps\[[0-9]+\]\{/ { hdr = index($0, "active_steps"); inblock = 1; next }
+    inblock {
+      if ($0 ~ /^[[:space:]]*$/) { inblock = 0; next }
+      match($0, /[^ \t]/)
+      if (RSTART <= hdr) { inblock = 0; next }
+      print
+    }
+  '
+}
+
+# `agent_pid`, `last_activity`, and `status` of each active_steps row in $1,
+# emitted as one tab-delimited line per row with columns resolved by header name,
+# so a CLI that adds or reorders columns still parses. An empty agent_pid marks
+# a daemon-executed step (the ci monitor, push/pr bookkeeping): no spawned agent
+# process can prove it - its executor is the daemon itself.
+fm_nm_active_steps_evidence() {  # <toon-output>
+  local header rows
+  header=$(printf '%s\n' "$1" | awk '/^[[:space:]]*active_steps\[[0-9]+\]\{/ { print; exit }')
+  [ -n "$header" ] || return 0
+  rows=$(fm_nm_active_steps_rows "$1")
+  [ -n "$rows" ] || return 0
+  printf '%s\n' "$rows" | awk -v header="$header" '
+    function row_fields(s, f, i, ch, n, quoted, escaped) {
+      for (i in f) delete f[i]
+      n = 1; f[n] = ""
+      for (i = 1; i <= length(s); i++) {
+        ch = substr(s, i, 1)
+        if (escaped) { f[n] = f[n] ch; escaped = 0 }
+        else if (quoted && ch == "\\") escaped = 1
+        else if (ch == "\"") quoted = !quoted
+        else if (!quoted && ch == ",") { n++; f[n] = "" }
+        else f[n] = f[n] ch
+      }
+      for (i = 1; i <= n; i++) {
+        sub(/^[ \t]+/, "", f[i]); sub(/[ \t]+$/, "", f[i])
+      }
+      return n
+    }
+    BEGIN {
+      cols = header; sub(/^.*\{/, "", cols); sub(/\}.*/, "", cols)
+      m = split(cols, c, ","); pi = 0; ai = 0; si = 0
+      for (i = 1; i <= m; i++) {
+        sub(/^[ \t]+/, "", c[i]); sub(/[ \t]+$/, "", c[i])
+        if (c[i] == "agent_pid") pi = i
+        if (c[i] == "last_activity") ai = i
+        if (c[i] == "status") si = i
+      }
+    }
+    {
+      row_fields($0, f)
+      printf "%s\t%s\t%s\n", (pi ? f[pi] : ""), (ai ? f[ai] : ""), (si ? f[si] : "")
+    }
+  '
+}
+
+fm_nm_activity_age_secs() {  # <last_activity> <saturation-seconds>
+  local activity=${1:-} limit=${2:-} age=0 amount unit factor rest seconds
+  case "$limit" in ''|*[!0-9]*|0) return 1 ;; esac
+  while [ "${limit#0}" != "$limit" ]; do limit=${limit#0}; done
+  [ -n "$limit" ] || return 1
+  [ "${#limit}" -le 9 ] || return 1
+  limit=$((limit + 0))
+  case "$activity" in quiet\ *) activity=${activity#quiet } ;; esac
+  activity=${activity%% ago*}
+  activity=${activity%%:*}
+  activity=$(fm_nm_trim "$activity")
+  activity=${activity//[[:space:]]/}
+  [ -n "$activity" ] || return 1
+  while [ -n "$activity" ]; do
+    [[ "$activity" =~ ^([0-9]+)([dhms])(.*)$ ]] || return 1
+    amount=${BASH_REMATCH[1]}
+    unit=${BASH_REMATCH[2]}
+    rest=${BASH_REMATCH[3]}
+    while [ "${amount#0}" != "$amount" ]; do amount=${amount#0}; done
+    [ -n "$amount" ] || amount=0
+    case "$unit" in d) factor=86400 ;; h) factor=3600 ;; m) factor=60 ;; s) factor=1 ;; esac
+    if [ "$age" -le "$limit" ]; then
+      if [ "${#amount}" -gt 9 ]; then
+        age=$((limit + 1))
+      else
+        amount=$((amount + 0))
+        if [ "$amount" -gt "$((limit / factor))" ]; then
+          age=$((limit + 1))
+        else
+          seconds=$((amount * factor))
+          if [ "$seconds" -gt "$((limit - age))" ]; then age=$((limit + 1)); else age=$((age + seconds)); fi
+        fi
+      fi
+    fi
+    activity=$rest
+  done
+  printf '%s' "$age"
+}
+
+fm_nm_run_is_gate_parked() {  # <toon-output> [active-step-evidence]
+  local evidence row step_status
+  if printf '%s\n' "$1" | awk '
+    /^[[:space:]]*awaiting_agent:/ { parked = 1 }
+    /^[[:space:]]*(status|state):[[:space:]]*"?(awaiting_approval|fix_review)"?[[:space:]]*$/ { parked = 1 }
+    /^[[:space:]]*gate:[[:space:]]*/ { parked = 1 }
+    END { exit !parked }
+  '; then return 0; fi
+  evidence=${2:-}
+  [ -n "$evidence" ] || evidence=$(fm_nm_active_steps_evidence "$1")
+  while IFS= read -r row; do
+    step_status=${row##*$'\t'}
+    case "$step_status" in awaiting_approval|fix_review) return 0 ;; esac
+  done <<< "$evidence"
+  return 1
+}
+
 # ONE owner for attribution from the pipeline's own runs ledger, replacing a
 # per-row scan-and-skip. The ledger is the real top-level `no-mistakes runs
 # --limit N` listing (plain text, no run id, no quoting, newest-first, columns
@@ -338,17 +481,17 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
 # Read-only: git reads resolve objects in place; custody never changes.
 fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head]
   local wt=$1 branch=$2 list=$3 expected_head=${4:-}
-  local local_full row_full row st br sha day clock pr extra year_num month_num day_num max_day pending_st=''
-  local decided=''
+  local local_full row_full row row_status br sha day clock pr extra year_num month_num day_num max_day pending_st=''
+  local decided='' decision_made=0 live_count=0
   local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 0
   [ -n "$list" ] || return 0
   while IFS= read -r row; do
     row=$(fm_nm_trim "$row")
     [ -n "$row" ] || continue
-    IFS=$' \t' read -r st br sha day clock pr extra <<< "$row"
-    [ -n "$st" ] && [ -n "$br" ] && [ -n "$sha" ] && [ -n "$day" ] && [ -n "$clock" ] || break
+    IFS=$' \t' read -r row_status br sha day clock pr extra <<< "$row"
+    [ -n "$row_status" ] && [ -n "$br" ] && [ -n "$sha" ] && [ -n "$day" ] && [ -n "$clock" ] || break
     [ -z "$extra" ] || break
-    case "$st" in *[!a-z_-]*|'') break ;; esac
+    case "$row_status" in *[!a-z_-]*|'') break ;; esac
     case "$br" in *[!A-Za-z0-9._/-]*|'') break ;; esac
     case "$sha" in *[!A-Fa-f0-9]*|'') break ;; esac
     case "$day" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) break ;; esac
@@ -372,14 +515,17 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
     esac
     [ "$day_num" -ge 1 ] && [ "$day_num" -le "$max_day" ] || break
     [ "$br" = "$branch" ] || continue
+    if [ "$(fm_nm_run_status_class "$row_status")" = live ]; then
+      live_count=$((live_count + 1))
+    fi
+    [ "$decision_made" -eq 0 ] || continue
     if [ -n "$pending_st" ]; then
-      # This is the row immediately older than the active unresolvable row:
-      # the only admissible anchor, and only exact head equality proves the
-      # worktree still sits at the submitted head.
-      if [ "$(fm_nm_resolve_commit "$wt" "$sha")" = "$local_full" ]; then
+      if [ "$(fm_nm_run_status_class "$row_status")" = terminal ] \
+        && [ "$(fm_nm_resolve_commit "$wt" "$sha")" = "$local_full" ]; then
         decided=$pending_st
       fi
-      break
+      decision_made=1
+      continue
     fi
     if [ -n "$expected_head" ]; then
       case "$expected_head" in *[!A-Fa-f0-9]*|'') break ;; esac
@@ -392,13 +538,20 @@ fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [ex
     row_full=$(fm_nm_resolve_commit "$wt" "$sha")
     if [ -n "$row_full" ]; then
       if fm_nm_head_matches_worktree "$wt" "$sha"; then
-        decided=$st
+        decided=$row_status
       fi
-      break
+      decision_made=1
+      continue
     fi
-    [ "$st" = running ] || break
-    pending_st=$st
+    if [ "$row_status" != running ]; then
+      decision_made=1
+      continue
+    fi
+    pending_st=$row_status
   done <<< "$list"
+  if [ "$(fm_nm_run_status_class "$decided")" = live ] && [ "$live_count" -gt 1 ]; then
+    decided=''
+  fi
   printf '%s' "$decided"
   return 0
 }

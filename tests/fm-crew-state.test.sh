@@ -106,10 +106,14 @@ case "${1:-}" in
   runs)
     printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
   daemon)
-    # FM_FAKE_DAEMON_DOWN: the explicit down-probe fails, as the real
-    # `no-mistakes daemon status` does when the daemon is not running.
-    [ "${FM_FAKE_DAEMON_DOWN:-0}" = 1 ] && exit 1
-    printf '%s\n' 'daemon running (pid 4242)'
+    # FM_FAKE_DAEMON_DOWN: the real `no-mistakes daemon status` exits 0 whether
+    # or not the daemon runs and reports its verdict in the answer, so the down
+    # case is an ANSWER too, never a non-zero exit.
+    if [ "${FM_FAKE_DAEMON_DOWN:-0}" = 1 ]; then
+      printf '%s\n' 'daemon not running'
+    else
+      printf '%s\n' 'daemon running (pid 4242)'
+    fi
     exit 0 ;;
 esac
 exit 0

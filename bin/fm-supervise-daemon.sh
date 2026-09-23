@@ -43,9 +43,13 @@
 #     routine is escalated.
 #   - Bounded wedge latency: a stale pane without a declared wait is escalated
 #     only after it has been idle for STALE_ESCALATE_SECS
-#     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
-#     paused: external wait or a verified captain-held transfer, per
+#     (configurable), rechecked once; one whose own task's no-mistakes run is
+#     demonstrably executing (fm-classify-lib.sh's crew_nm_run_progressing) is
+#     deferred by re-arming the marker instead, so a run that stops proving
+#     execution still escalates within one interval. A wedged crewmate is
+#     therefore detected within STALE_ESCALATE_SECS + a tick, never lost. A
+#     declared wait - either a paused: external wait or a verified captain-held
+#     transfer, per
 #     fm-classify-lib.sh's combined predicate - instead gets its own longer
 #     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, whether its pane
 #     reads idle or busy; only a status append that stops declaring the wait
@@ -477,7 +481,8 @@ classify_unknown() {  # <reason>
 }
 
 # --- stale marker + escalation buffer (stateful, but via explicit state dir) -
-# Marker:   state/.subsuper-stale-<key>   contains the epoch first seen idle.
+# Marker:   state/.subsuper-stale-<key>   contains the epoch first seen idle,
+#           re-armed by a run-liveness deferral so the wedge window restarts.
 # Buffer:   state/.subsuper-escalations    one distilled line per escalation.
 # Seen:     state/.subsuper-seen-status-<task>  last reported file signature and
 #           classified byte offset, so failures and events do not re-fire while
@@ -530,6 +535,7 @@ clear_pause_tracking() {  # <window> <state>
     "$state/.paused-$watcher_key" "$state/.paused-rechecked-$watcher_key" "$state/.paused-resurfaced-$watcher_key" \
     "$state/.stale-$watcher_key" "$state/.stale-since-$watcher_key" "$state/.wedge-escalations-$watcher_key" \
     "$state/.writing-since-$watcher_key" "$state/.writing-resurfaced-$watcher_key" \
+    "$state/.nmrun-since-$watcher_key" "$state/.nmrun-resurfaced-$watcher_key" \
     "$state/.waiting-resurfaced-$watcher_key"
 }
 
@@ -1020,7 +1026,9 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #     attempt one normal delivery; if it cannot confirm, raise the wedge alarm.
 #     Never silently defer forever.
 #  2) stale recheck: for each pending stale marker past STALE_ESCALATE_SECS,
-#     re-peek the pane; still idle -> escalate (wedge); resumed -> clear marker.
+#     re-peek the pane; still idle -> defer while the task's no-mistakes run is
+#     demonstrably executing (re-arming the marker), else escalate (wedge);
+#     resumed -> clear marker.
 #  2b) pause re-surface: for each declared-wait marker past PAUSE_RESURFACE_SECS,
 #     re-peek; gone -> clear; still declaring the wait, on an idle OR a busy pane
 #     -> escalate a recheck digest naming which human the wait is on, and reset
@@ -1028,7 +1036,7 @@ _oldest_line_age() {  # <buf> -> seconds since the oldest buffered item first ar
 #  3) heartbeat scan: every HEARTBEAT_SCAN_SECS, grep state/*.status for a
 #     captain-relevant line the per-wake classifier missed and escalate it.
 housekeeping() {  # <state>
-  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason
+  local state=$1 now due f key task win marker age last max_defer oldest pause_secs marker_epoch until bounded_until pause_reason run_id
   now=$(_now)
   migrate_watcher_pause_markers "$state"
 
@@ -1085,7 +1093,10 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) if escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
+      *) if run_id=$(crew_nm_run_progressing "$task" "$state" "$marker"); then
+           _now > "$marker"
+           log "stale deferral: $win (its no-mistakes run $run_id is still executing, idle ${age}s)"
+         elif escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"; then
            stale_marker_remove "$win" "$state"
          fi ;;
     esac

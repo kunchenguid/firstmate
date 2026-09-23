@@ -56,11 +56,27 @@ SESSIONS=$TMP_ROOT/sessions
 STATE=$TMP_ROOT/state
 mkdir -p "$SESSIONS" "$STATE"
 
-# Two tasks reuse the same worktree across spawn generations: task-a spawned
-# 2026-09-15, task-b 2026-09-18, so a Sep-16 session binds to task-a and a
-# Sep-19 session binds to task-b.
-EPOCH_A=$(python3 -c 'import datetime; print(int(datetime.datetime(2026,9,15,tzinfo=datetime.timezone.utc).timestamp()))')
-EPOCH_B=$(python3 -c 'import datetime; print(int(datetime.datetime(2026,9,18,tzinfo=datetime.timezone.utc).timestamp()))')
+# Two tasks reuse the same worktree across spawn generations. Keep their
+# sessions relative to the test's captured clock so the weekly quota window
+# includes task-a's session and excludes the pre-spawn session on every date.
+NOW_EPOCH=$(python3 -c 'import time; print(int(time.time()))')
+fixture_day() {
+  python3 -c 'import datetime,sys; print((datetime.datetime.fromtimestamp(int(sys.argv[1]), datetime.timezone.utc) - datetime.timedelta(days=int(sys.argv[2]))).strftime("%Y-%m-%d"))' \
+    "$NOW_EPOCH" "$1"
+}
+format_reset() {
+  python3 -c 'import sys,datetime; print(datetime.datetime.fromtimestamp(int(sys.argv[1]), tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"))' "$1"
+}
+format_session_filename_stamp() {
+  python3 -c 'import datetime,sys; print(datetime.datetime.fromtimestamp(int(sys.argv[1]), datetime.timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-000Z"))' "$1"
+}
+DAY_TASK_B=$(fixture_day 1)
+DAY_PRESPAWN=$(fixture_day 14)
+SESSION_A_EPOCH=$((NOW_EPOCH - 5 * 86400 - 12 * 3600))
+SESSION_A_ISO=$(format_reset "$SESSION_A_EPOCH")
+SESSION_A_FILE_STAMP=$(format_session_filename_stamp "$SESSION_A_EPOCH")
+EPOCH_A=$((NOW_EPOCH - 12 * 86400))
+EPOCH_B=$((NOW_EPOCH - 2 * 86400))
 fm_write_meta "$STATE/task-a.meta" \
   "endpoint_task_id=task-a" "worktree=/work/alpha" "spawn_gen=s${EPOCH_A}.1.aa" \
   "harness=pi" "kind=ship" "effort=high"
@@ -73,32 +89,32 @@ DIR_OTHER=$(make_session_dir "$SESSIONS" /work/other)
 
 # Session 1: task-a window, mixed lanes, effort switch mid-session, one
 # cost-free record.
-S1=$DIR_ALPHA/2026-09-16T10-00-00-000Z_aaaaaaaa-0000-0000-0000-000000000001.jsonl
-write_session_header "$S1" "aaaaaaaa-0000-0000-0000-000000000001" /work/alpha "2026-09-16T10:00:00.000Z"
-append_effort "$S1" "2026-09-16T10:00:05.000Z" high
-append_message "$S1" "2026-09-16T10:01:00.000Z" openai-codex gpt-6-astra 1000 none
-append_message "$S1" "2026-09-16T10:02:00.000Z" openai-codex gpt-6-astra 2000 "0.10"
-append_effort "$S1" "2026-09-16T10:03:00.000Z" max
-append_message "$S1" "2026-09-16T10:04:00.000Z" xai grok-4 500 "0.05"
+S1=$DIR_ALPHA/${SESSION_A_FILE_STAMP}_aaaaaaaa-0000-0000-0000-000000000001.jsonl
+write_session_header "$S1" "aaaaaaaa-0000-0000-0000-000000000001" /work/alpha "$SESSION_A_ISO"
+append_effort "$S1" "$(format_reset "$((SESSION_A_EPOCH + 5))")" high
+append_message "$S1" "$(format_reset "$((SESSION_A_EPOCH + 60))")" openai-codex gpt-6-astra 1000 none
+append_message "$S1" "$(format_reset "$((SESSION_A_EPOCH + 120))")" openai-codex gpt-6-astra 2000 "0.10"
+append_effort "$S1" "$(format_reset "$((SESSION_A_EPOCH + 180))")" max
+append_message "$S1" "$(format_reset "$((SESSION_A_EPOCH + 240))")" xai grok-4 500 "0.05"
 
 # Session 2: predates task-a's spawn -> unattributed to it, but before task-b's
 # spawn too -> unattributed entirely.
-S0=$DIR_ALPHA/2026-09-10T10-00-00-000Z_aaaaaaaa-0000-0000-0000-000000000000.jsonl
-write_session_header "$S0" "aaaaaaaa-0000-0000-0000-000000000000" /work/alpha "2026-09-10T10:00:00.000Z"
-append_message "$S0" "2026-09-10T10:01:00.000Z" openai-codex gpt-6-astra 777 none
+S0=$DIR_ALPHA/${DAY_PRESPAWN}T10-00-00-000Z_aaaaaaaa-0000-0000-0000-000000000000.jsonl
+write_session_header "$S0" "aaaaaaaa-0000-0000-0000-000000000000" /work/alpha "${DAY_PRESPAWN}T10:00:00.000Z"
+append_message "$S0" "${DAY_PRESPAWN}T10:01:00.000Z" openai-codex gpt-6-astra 777 none
 
 # Session 3: task-b window on the same worktree.
-S3=$DIR_ALPHA/2026-09-19T10-00-00-000Z_bbbbbbbb-0000-0000-0000-000000000003.jsonl
-write_session_header "$S3" "bbbbbbbb-0000-0000-0000-000000000003" /work/alpha "2026-09-19T10:00:00.000Z"
-append_effort "$S3" "2026-09-19T10:00:05.000Z" medium
-append_message "$S3" "2026-09-19T10:01:00.000Z" xai grok-4 300 "0.02"
+S3=$DIR_ALPHA/${DAY_TASK_B}T10-00-00-000Z_bbbbbbbb-0000-0000-0000-000000000003.jsonl
+write_session_header "$S3" "bbbbbbbb-0000-0000-0000-000000000003" /work/alpha "${DAY_TASK_B}T10:00:00.000Z"
+append_effort "$S3" "${DAY_TASK_B}T10:00:05.000Z" medium
+append_message "$S3" "${DAY_TASK_B}T10:01:00.000Z" xai grok-4 300 "0.02"
 
 # Nested child: lives in the OTHER dir (cannot bind itself to task-a), linked
 # via task-a session's subagent registry.
-CHILD=$DIR_OTHER/2026-09-16T10-05-00-000Z_cccccccc-0000-0000-0000-0000000000cc.jsonl
-write_session_header "$CHILD" "cccccccc-0000-0000-0000-0000000000cc" /work/other "2026-09-16T10:05:00.000Z"
-append_effort "$CHILD" "2026-09-16T10:05:05.000Z" max
-append_message "$CHILD" "2026-09-16T10:06:00.000Z" openai-codex gpt-6-astra 400 "0.02"
+CHILD=$DIR_OTHER/$(format_session_filename_stamp "$((SESSION_A_EPOCH + 300))")_cccccccc-0000-0000-0000-0000000000cc.jsonl
+write_session_header "$CHILD" "cccccccc-0000-0000-0000-0000000000cc" /work/other "$(format_reset "$((SESSION_A_EPOCH + 300))")"
+append_effort "$CHILD" "$(format_reset "$((SESSION_A_EPOCH + 305))")" max
+append_message "$CHILD" "$(format_reset "$((SESSION_A_EPOCH + 360))")" openai-codex gpt-6-astra 400 "0.02"
 mkdir -p "$DIR_ALPHA/artifacts/aaaaaaaa-0000-0000-0000-000000000001"
 printf '{"fm-orchestrated-worker":{"sessionFile":"%s","sessionId":"cccccccc-0000-0000-0000-0000000000cc"}}\n' \
   "$CHILD" > "$DIR_ALPHA/artifacts/aaaaaaaa-0000-0000-0000-000000000001/subagent-registry.json"
@@ -148,11 +164,6 @@ assert_equals "800" "$(json_field "$(cat "$ROLLUP")" "d['byFamily']['grok']['tok
 
 # --- predict: weekly window calibration --------------------------------------
 
-# Pin the quota snapshot clock so the fixed session dates stay in its weekly window.
-NOW_EPOCH=$(python3 -c 'import datetime; print(int(datetime.datetime(2026,9,22,tzinfo=datetime.timezone.utc).timestamp()))')
-format_reset() {
-  python3 -c 'import sys,datetime; print(datetime.datetime.fromtimestamp(int(sys.argv[1]), tz=datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"))' "$1"
-}
 write_quota() {
   local path=$1 resets=$2
   cat > "$path" <<EOF
@@ -167,9 +178,11 @@ BASE_RESET_EPOCH=$((NOW_EPOCH + 86400))
 RESETS=$(format_reset "$BASE_RESET_EPOCH")
 write_quota "$STATE/quota.json" "$RESETS"
 PREDICT=$("$LEDGER" --state "$STATE" --sessions-root "$SESSIONS" predict --quota "$STATE/quota.json")
-# The Sep 16 UTC bucket overlaps this window; S0 (777, Sep 10) is outside.
+# The rolling window includes sessions S1 (3000 codex) + CHILD (400 codex)
+# and excludes the pre-spawn S0 (777); consumed=60 -> 3400/60 per point.
 assert_equals "ok" "$(json_field "$PREDICT" "d['status']")" "predict status"
-assert_equals "2026-09-16T00:00:00.000Z" "$(json_field "$PREDICT" "d['providers']['codex']['windowStart']")" "predict weekly window start"
+EXPECTED_WINDOW_START=$(format_reset "$((BASE_RESET_EPOCH - 7 * 86400))")
+assert_equals "$EXPECTED_WINDOW_START" "$(json_field "$PREDICT" "d['providers']['codex']['windowStart']")" "predict weekly window start"
 assert_equals "3400" "$(json_field "$PREDICT" "d['providers']['codex']['windowTokens']")" "predict window tokens"
 assert_equals "60.0" "$(json_field "$PREDICT" "d['providers']['codex']['percentConsumed']")" "predict percent consumed"
 python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert abs(d["providers"]["codex"]["tokensPerPoint"] - 3400/60) < 0.01, d' "$PREDICT" \
@@ -178,18 +191,20 @@ assert_not_contains "$PREDICT" '"unmeasured"' "predict invents no row for unmeas
 python3 -c 'import json,sys; d=json.loads(sys.argv[1]); assert "daily" not in d["providers"], d["providers"]' "$PREDICT" \
   || fail "predict calibrated a non-weekly window"
 
-# Advancing the weekly reset by one day moves the start past the Sep 16 bucket.
+# Advancing the weekly reset by one day moves the start past S1's UTC bucket.
 DAY_RESET=$(format_reset "$((BASE_RESET_EPOCH + 86400))")
 write_quota "$STATE/quota-day-boundary.json" "$DAY_RESET"
 PREDICT_DAY_BOUNDARY=$("$LEDGER" --state "$STATE" --sessions-root "$SESSIONS" predict --quota "$STATE/quota-day-boundary.json")
-assert_equals "2026-09-17T00:00:00.000Z" "$(json_field "$PREDICT_DAY_BOUNDARY" "d['providers']['codex']['windowStart']")" "predict after UTC day boundary"
+DAY_WINDOW_START=$(format_reset "$((BASE_RESET_EPOCH + 86400 - 7 * 86400))")
+assert_equals "$DAY_WINDOW_START" "$(json_field "$PREDICT_DAY_BOUNDARY" "d['providers']['codex']['windowStart']")" "predict after UTC day boundary"
 assert_equals "0" "$(json_field "$PREDICT_DAY_BOUNDARY" "d['providers']['codex']['windowTokens']")" "predict expires prior UTC day"
 
 # Advancing the same weekly reset by seven days drops every session from the prior week.
 WEEK_RESET=$(format_reset "$((BASE_RESET_EPOCH + 7 * 86400))")
 write_quota "$STATE/quota-week-boundary.json" "$WEEK_RESET"
 PREDICT_WEEK_BOUNDARY=$("$LEDGER" --state "$STATE" --sessions-root "$SESSIONS" predict --quota "$STATE/quota-week-boundary.json")
-assert_equals "2026-09-23T00:00:00.000Z" "$(json_field "$PREDICT_WEEK_BOUNDARY" "d['providers']['codex']['windowStart']")" "predict after weekly boundary"
+WEEK_WINDOW_START=$(format_reset "$((BASE_RESET_EPOCH + 7 * 86400 - 7 * 86400))")
+assert_equals "$WEEK_WINDOW_START" "$(json_field "$PREDICT_WEEK_BOUNDARY" "d['providers']['codex']['windowStart']")" "predict after weekly boundary"
 assert_equals "0" "$(json_field "$PREDICT_WEEK_BOUNDARY" "d['providers']['codex']['windowTokens']")" "predict expires prior week"
 
 # --- malformed quota and missing sessions root --------------------------------

@@ -8,7 +8,7 @@
 # to a successor (a reused pane slot, a relaunched endpoint, a remote route
 # claimed again) resolves to the NEW task through window_to_task while the OLD
 # task's .hash-/.count-/.stale-/.stale-since-/.wedge-escalations- and
-# pause/write/wait markers still sit on disk. The first stable-hash sight then
+# pause/write/nmrun/wait markers still sit on disk. The first stable-hash sight then
 # classifies the successor inside the predecessor's escalation timeline - the
 # false "possible wedge, escalation N" alarms on healthy workers that this
 # retirement exists to stop (the 2026-09 phantom stale/wedge incidents).
@@ -64,7 +64,7 @@ set -u
 # become '_' so an endpoint target or task id is usable as a filename suffix.
 # Every per-window file the watcher keeps is named by it (.hash-, .count-,
 # .stale-, .stale-since-, .wedge-escalations-, .paused-*, .writing-*,
-# .waiting-*, .churn-since-, .dead-reported-, .window-owner-), the
+# .nmrun-*, .waiting-*, .churn-since-, .dead-reported-, .window-owner-), the
 # sub-supervisor keys its per-task episode markers with the same derivation
 # (.subsuper-stale-, .subsuper-paused-, .subsuper-pause-until-due-), and live
 # homes hold those markers on disk under this exact format. The status-paired
@@ -91,6 +91,8 @@ fm_watch_window_marker_families() {
     .paused-resurfaced- \
     .writing-since- \
     .writing-resurfaced- \
+    .nmrun-since- \
+    .nmrun-resurfaced- \
     .waiting-resurfaced- \
     .wedge-escalations- \
     .churn-since- \
