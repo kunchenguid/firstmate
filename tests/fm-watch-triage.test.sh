@@ -4893,23 +4893,21 @@ SH
 # liveness and every capture changed, so the watcher read a healthy busy pane
 # and never woke the supervisor. These cases pin the structural looping proxy:
 # a busy turn that sees the same parked gate for FM_LOOP_PARKED_SECS with no
-# completed turn and no worktree write wakes as looping, while a run-step
-# change, a worktree write, or a completed turn keeps it reading as working.
+# observed idle state and no worktree write wakes as looping, while a run-step
+# change, a worktree write, or an observed idle state resets the episode.
 PARKED_LOOP_LINE='state: parked · source: run-step · parked at fix_review: 2 finding(s) · ask-user: authority decision · run: 01RUNLOOP'
 
 # Case dir with an ordinary no-mistakes ship task "loop": busy by its semantic
-# source, turn open for 15 minutes (below FM_BUSY_TURN_MAX_SECS, as in the
-# report), and a worktree whose only file predates everything.
+# source, a notification below FM_BUSY_TURN_MAX_SECS, and a worktree whose
+# only file predates everything.
 make_parked_loop_case() {  # <name> <window>
-  local name=$1 window=$2 dir state record
+  local name=$1 window=$2 dir state
   dir=$(make_case "$name"); state="$dir/state"
   mkdir -p "$dir/wt"
   printf 'source\n' > "$dir/wt/src.txt"
   touch -t 200001010000 "$dir/wt/src.txt"
   printf 'window=%s\nkind=ship\nmode=no-mistakes\nharness=pi\nworktree=%s\n' "$window" "$dir/wt" > "$state/loop.meta"
   record_pi_busy "$state" loop >/dev/null
-  record=$(cat "$state/loop.busy-state")
-  printf '%s ts=%s\n' "${record% ts=*}" "$(( $(date +%s) - 900 ))" > "$state/loop.busy-state"
   printf 'working: setup complete\n' > "$state/loop.status"
   printf '%s' "$(seen_sig "$state/loop.status")" > "$state/.seen-loop_status"
   touch "$state/loop.turn-ended"
@@ -5013,8 +5011,13 @@ test_parked_loop_completed_turn_ends_episode() {
   ack_stopped_cycle "$state" || fail "could not acknowledge the intentional episode-opening stop"
   [ -s "$state/.loop-since-$key" ] || fail "a busy turn at a parked gate did not open a looping episode"
   set_mtime $(( $(date +%s) - 30 )) "$state/.loop-since-$key"
-  # The worker ended its turn at the gate and a new turn began: it yielded.
   "$ROOT/bin/fm-busy-event.sh" apply "$state" loop idle --current-gen --source pi-ext --event agent-settled
+  FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" FM_LOOP_PARKED_SECS=20
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "the idle parked worker did not reach ordinary stale handling"
+  grep -F '(looping ' "$out" >/dev/null && fail "an observed idle worker was classified as looping"
+  [ ! -e "$state/.loop-since-$key" ] || fail "an idle observation did not clear the episode"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the idle parked worker"
   "$ROOT/bin/fm-busy-event.sh" apply "$state" loop busy --current-gen --source pi-ext --event agent-start
   : > "$out"
   FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" FM_LOOP_PARKED_SECS=20
@@ -5100,8 +5103,6 @@ test_parked_loop_inner_notifications_keep_episode() {
     printf 'harness=%s\n' "$harness" >> "$state/loop.meta"
     "$ROOT/bin/fm-busy-event.sh" apply "$state" loop busy --current-gen --source "$source" --event agent-start
     record=$(cat "$state/loop.busy-state")
-    record="${record% ts=*} ts=$(( $(date +%s) - 900 ))"
-    printf '%s\n' "$record" > "$state/loop.busy-state"
     FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" FM_LOOP_PARKED_SECS=999
     pid=$!
     wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "$harness episode failed to open: $(cat "$out")"; }
@@ -5117,26 +5118,48 @@ test_parked_loop_inner_notifications_keep_episode() {
     pid=$!
     wait_for_exit "$pid" 100 || fail "$harness inner notification hid an eligible loop"
     grep -F "stale: $window (looping " "$out" >/dev/null || fail "$harness lost looping: $(cat "$out")"
-    [ -s "$state/.churn-since-$key" ] || fail "$harness never absorbed the notification through pane churn"
+    [ "$(cat "$state/.seen-loop_turn-ended")" != "$(seen_sig "$state/loop.turn-ended")" ] \
+      || fail "$harness consumed the pending notification before delivering looping"
     [ "$(cat "$state/loop.busy-state")" = "$record" ] || fail "$harness semantic lifecycle changed during the notification"
   done
   pass "Pi, pi-signed, and omp inner notifications do not reset or defer looping"
 }
 
-test_parked_loop_fresh_semantic_turn_waits() {
-  local dir state out window key pid
-  window="test:fm-loop-fresh-turn"
-  dir=$(make_parked_loop_case loop-fresh-turn "$window"); state="$dir/state"; out="$dir/watch.out"
+test_parked_loop_busy_revisions_keep_episode() {
+  local dir state out window key pid episode_mtime record
+  window="test:fm-loop-retry"
+  dir=$(make_parked_loop_case loop-retry "$window"); state="$dir/state"; out="$dir/watch.out"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  "$ROOT/bin/fm-busy-event.sh" apply "$state" loop busy --current-gen --source pi-ext --event agent-start
+  printf 'harness=opencode\n' >> "$state/loop.meta"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" loop busy --current-gen --source opencode-plugin --event session-busy
+  FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" \
+    FM_LOOP_PROBE_SECS=60 FM_LOOP_PARKED_SECS=999
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "busy episode did not open: $(cat "$out")"; }
+  reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge busy episode opening"
+  [ -s "$state/.loop-since-$key" ] || fail "a fresh busy event incorrectly postponed observation"
+  set_mtime $(( $(date +%s) - 120 )) "$state/.loop-since-$key"
+  set_mtime $(( $(date +%s) - 120 )) "$state/.loop-probe-$key"
+  episode_mtime=$(file_mtime "$state/.loop-since-$key")
+  record=$(cat "$state/loop.busy-state")
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" loop busy --current-gen --source opencode-plugin --event session-retry
+  [ "$(cat "$state/loop.busy-state")" != "$record" ] || fail "retry did not revise the busy record"
+  FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" \
+    FM_LOOP_PROBE_SECS=60 FM_LOOP_PARKED_SECS=999
+  pid=$!
+  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "retry escalated below the bound: $(cat "$out")"; }
+  reap "$pid"
+  [ "$(file_mtime "$state/.loop-since-$key")" = "$episode_mtime" ] || fail "retry reset the busy episode"
+  ack_stopped_cycle "$state" || fail "could not acknowledge retry observation"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" loop busy --current-gen --source opencode-plugin --event session-busy
+  set_mtime $(( $(date +%s) - 120 )) "$state/.loop-probe-$key"
   FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" \
     FM_LOOP_PROBE_SECS=60 FM_LOOP_PARKED_SECS=1
   pid=$!
-  wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a fresh semantic turn escalated: $(cat "$out")"; }
-  reap "$pid"
-  [ ! -s "$out" ] || fail "a fresh semantic turn printed a wake: $(cat "$out")"
-  [ ! -e "$state/.loop-since-$key" ] || fail "an old notification aged a fresh semantic turn"
-  pass "loop eligibility uses the semantic timestamp, not the last notification"
+  wait_for_exit "$pid" 100 || fail "a fresh busy event hid an overdue loop"
+  grep -F "stale: $window (looping " "$out" >/dev/null || fail "retry cycle lost looping: $(cat "$out")"
+  pass "OpenCode busy and retry revisions preserve episode identity and age"
 }
 
 test_parked_loop_rearm_ends_episode() {
@@ -5158,7 +5181,10 @@ test_parked_loop_rearm_ends_episode() {
   wait_poll_cycle "$state" "$pid" || { reap "$pid"; fail "a rearmed task inherited a loop: $(cat "$out")"; }
   reap "$pid"
   [ ! -s "$out" ] || fail "a rearmed task printed a wake: $(cat "$out")"
-  [ ! -e "$state/.loop-since-$key" ] || fail "a fresh generation did not clear the old episode"
+  [ "$(head -n 1 "$state/.loop-since-$key")" = "$(cat "$state/loop.busy-gen")" ] \
+    || fail "the new episode did not bind to the fresh generation"
+  [ "$(( $(date +%s) - $(file_mtime "$state/.loop-since-$key") ))" -lt 60 ] \
+    || fail "a fresh generation inherited the old episode age"
   pass "a new busy generation clears looping even when its sequence repeats"
 }
 
@@ -5194,17 +5220,101 @@ test_parked_loop_default_and_zero_use_900_seconds() {
   pass "default, zero, and invalid loop intervals use the positive 900s window"
 }
 
+test_parked_loop_recordless_busy_wakes() {
+  local harness dir state out window pid log
+  command -v node >/dev/null || fail "node is required for the existing Muse classifier"
+  command -v jq >/dev/null || fail "jq is required for the existing Herdr classifier"
+  for harness in cursor muse grok rovo agy herdr; do
+    window="test:fm-loop-recordless-$harness"
+    dir=$(make_parked_loop_case "loop-recordless-$harness" "$window"); state="$dir/state"; out="$dir/watch.out"
+    "$ROOT/bin/fm-busy-event.sh" retire "$state" loop --current-gen
+    printf 'harness=%s\n' "$harness" >> "$state/loop.meta"
+    case "$harness" in
+      cursor)
+        mkdir -p "$dir/projects/project/agent-transcripts/conversation"
+        printf '{"workspacePath":"%s"}\n' "$dir/wt" > "$dir/projects/project/.workspace-trusted"
+        printf 'projects_root=%s\nworkspace_root=%s\n' "$dir/projects" "$dir/wt" > "$state/loop.cursor-session"
+        printf '{"role":"user"}\n' > "$dir/projects/project/agent-transcripts/conversation/conversation.jsonl"
+        ;;
+      muse)
+        mkdir -p "$dir/sessions/2026/09/23/session"
+        log="$dir/sessions/2026/09/23/session/session.jsonl"
+        printf '{"payload":{"kind":"metadata","record":{"workspace_root":"%s"}}}\n' "$dir/wt" > "$log"
+        printf '{"payload":{"kind":"run","run_id":"run-one","event":{"kind":"started"}}}\n' >> "$log"
+        printf 'sessions_root=%s\nworkspace_root=%s\n' "$dir/sessions" "$dir/wt" > "$state/loop.muse-session"
+        ;;
+      grok) printf 'Ctrl+c:cancel\n' > "$dir/pane.txt" ;;
+      rovo) printf 'Rovo is thinking...\n' > "$dir/pane.txt" ;;
+      agy) printf 'esc to cancel\n' > "$dir/pane.txt" ;;
+      herdr)
+        printf 'backend=herdr\nharness=claude\n' >> "$state/loop.meta"
+        cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "$1 ${2:-}" in
+  'status --json') printf '{"server":{"running":true}}\n' ;;
+  'pane read') cat "$FM_FAKE_TMUX_CAPTURE" ;;
+  'agent get') printf '{"result":{"agent":{"agent_status":"working"}}}\n' ;;
+  *) exit 1 ;;
+esac
+SH
+        chmod +x "$dir/fakebin/herdr"
+        ;;
+    esac
+    FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" FM_LOOP_PARKED_SECS=1
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "$harness busy source without a record never woke as looping"
+    grep -F "stale: $window (looping " "$out" >/dev/null || fail "$harness lost looping: $(cat "$out")"
+    [ ! -e "$state/loop.busy-state" ] || fail "$harness unexpectedly relied on a stored record"
+  done
+  pass "recordless transcript, session-log, rendered, and native busy sources qualify for looping"
+}
+
 test_parked_loop_away_mode_wakes() {
-  local dir state out window pid
-  window="test:fm-loop-away"
-  dir=$(make_parked_loop_case loop-away "$window"); state="$dir/state"; out="$dir/watch.out"
-  touch "$state/.afk"
-  FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" FM_LOOP_PARKED_SECS=1
-  pid=$!
-  wait_for_exit "$pid" 100 || fail "away mode suppressed looping"
-  grep -F "stale: $window (looping " "$out" >/dev/null || fail "away mode lost looping: $(cat "$out")"
-  grep -F "stale: $window (looping " "$state/.wake-queue" >/dev/null || fail "away looping wake was not durable"
-  pass "the daemon flag shared by away and quiet modes does not suppress looping"
+  local harness source dir state out window key pid round reason
+  for harness in pi pi-signed omp; do
+    window="test:fm-loop-away-$harness"
+    dir=$(make_parked_loop_case "loop-away-$harness" "$window"); state="$dir/state"; out="$dir/watch.out"
+    key=$(printf '%s' "$window" | tr ':/.' '___')
+    source=pi-ext; [ "$harness" != omp ] || source=omp-ext
+    printf 'harness=%s\n' "$harness" >> "$state/loop.meta"
+    "$ROOT/bin/fm-busy-event.sh" apply "$state" loop busy --current-gen --source "$source" --event agent-start
+    touch "$state/.afk"
+    for round in 1 2; do
+      touch "$state/loop.turn-ended"
+      FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" \
+        FM_LOOP_PROBE_SECS=60 FM_LOOP_PARKED_SECS=999 FM_FAKE_CREW_STATE_LOG="$dir/probes"
+      pid=$!
+      wait_for_exit "$pid" 100 || fail "$harness notification $round never surfaced"
+      grep -F "signal: $state/loop.turn-ended" "$out" >/dev/null || fail "$harness notification $round was not pending"
+      [ -s "$state/.loop-since-$key" ] || fail "$harness signal exit bypassed the looping check"
+      ack_stopped_cycle "$state" || fail "could not acknowledge $harness notification $round"
+    done
+    [ "$(wc -l < "$dir/probes" | tr -d ' ')" = 1 ] || fail "$harness restarts bypassed the gate-probe throttle"
+    set_mtime $(( $(date +%s) - 120 )) "$state/.loop-since-$key"
+    set_mtime $(( $(date +%s) - 120 )) "$state/.loop-probe-$key"
+    touch "$state/loop.turn-ended"
+    FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" \
+      FM_LOOP_PROBE_SECS=60 FM_LOOP_PARKED_SECS=1
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "$harness away mode suppressed looping"
+    reason=$(cat "$out")
+    grep -F "stale: $window (looping " "$out" >/dev/null || fail "$harness away mode lost looping: $reason"
+    grep -F "$reason" "$state/.wake-queue" >/dev/null || fail "$harness looping wake was not durable"
+    (
+      . "$ROOT/bin/fm-supervise-daemon.sh"
+      LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+        handle_wake "$reason" "$state"
+    ) || fail "$harness daemon rejected the watcher-generated reason"
+    grep -Fx "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+      || fail "$harness daemon absorbed the real looping wake"
+    ack_stopped_cycle "$state" || fail "could not acknowledge $harness looping wake"
+    FM_FAKE_CREW_STATE=$PARKED_LOOP_LINE loop_watch_bg "$dir" "$window" "$out" \
+      FM_LOOP_PROBE_SECS=60 FM_LOOP_PARKED_SECS=999
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "$harness looping wake lost its pending notification"
+    grep -F "signal: $state/loop.turn-ended" "$out" >/dev/null || fail "$harness pending notification was consumed by looping"
+  done
+  pass "away and quiet notification churn preserves bounded looping checks and daemon escalation"
 }
 
 # Behavioral proof that the production default (no FM_BUSY_TURN_MAX_SECS override
@@ -6533,9 +6643,10 @@ test_parked_loop_worktree_write_keeps_working
 test_parked_loop_completed_turn_ends_episode
 test_parked_loop_steer_still_resumes_worker
 test_parked_loop_inner_notifications_keep_episode
-test_parked_loop_fresh_semantic_turn_waits
+test_parked_loop_busy_revisions_keep_episode
 test_parked_loop_rearm_ends_episode
 test_parked_loop_default_and_zero_use_900_seconds
+test_parked_loop_recordless_busy_wakes
 test_parked_loop_away_mode_wakes
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once

@@ -77,9 +77,9 @@
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
 #   stale: <window> (looping <age>s, escalation N: ...)
-#                          one busy turn of an ordinary no-mistakes crew kept
+#                          an ordinary no-mistakes crew kept reading busy and
 #                          seeing the same parked gate for FM_LOOP_PARKED_SECS
-#                          with no completed turn, run-step change, or task
+#                          with no non-busy observation, run-step change, or task
 #                          worktree write (busy_loop_check owns the proxy)
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
@@ -1395,16 +1395,16 @@ clear_loop_tracking() {  # <window-key>
 }
 
 # Wake the supervisor when a busy turn keeps seeing the same parked no-mistakes
-# gate (LOOP_PARKED_SECS above). Called on every poll where the pane's semantic
-# verdict is busy; a pane that is not busy clears the tracking instead, so an
+# gate (LOOP_PARKED_SECS above). Called before each poll's signal handling;
+# a pane that is not busy clears the tracking instead, so an
 # idle parked worker keeps its ordinary parked and stale handling.
 #
-# The episode is .loop-since-<key>: its first line is the busy record's gen:seq,
+# The episode is .loop-since-<key>: its first line is the optional busy generation,
 # its second is the gate's whole current-state line (crew_parked_gate_line),
 # and its mtime is when this turn was first seen at that gate.
 busy_loop_check() {  # <window> <task> <window-key>
   local win=$1 task=$2 key=$3 meta since probe esc line prev age n reason
-  local record source seq gen ts turn episode
+  local gen tail40 episode
   since="$STATE/.loop-since-$key"
   probe="$STATE/.loop-probe-$key"
   esc="$STATE/.loop-escalations-$key"
@@ -1415,21 +1415,19 @@ busy_loop_check() {  # <window> <task> <window-key>
     clear_loop_tracking "$key"
     return 0
   fi
-  if ! record=$(fm_busy_record_read "$STATE" "$task"); then
+  tail40=$(fm_backend_capture "$(window_backend "$win")" "$win" 40 "$(window_label "$win")" 2>/dev/null) || return 0
+  if ! window_is_busy "$win" "$tail40"; then
     clear_loop_tracking "$key"
     return 0
   fi
-  read -r _ source _ seq gen ts <<< "$record"
-  if [ "${record%% *}" != busy ] || ! fm_busy_source_trusted "$(fm_meta_get "$meta" harness)" "$source"; then
-    clear_loop_tracking "$key"
-    return 0
+  gen=
+  if [ -f "$STATE/$task.busy-state" ]; then
+    gen=$(fm_busy_current_gen "$STATE" "$task") || gen=
   fi
-  turn="$gen:$seq"
-  if [ -e "$since" ] && [ "$(head -n 1 "$since")" != "$turn" ]; then
+  if [ -e "$since" ] && [ "$(head -n 1 "$since")" != "$gen" ]; then
     clear_loop_tracking "$key"
-    triage_log "looping episode ended (semantic busy lifecycle changed): $win"
+    triage_log "looping episode ended (busy generation changed): $win"
   fi
-  [ "$(( $(date +%s) - ts ))" -ge "$LOOP_PROBE_SECS" ] || return 0
   [ "$(age_of "$probe")" -ge "$LOOP_PROBE_SECS" ] || return 0
   touch "$probe"
   if ! line=$(crew_parked_gate_line "$task"); then
@@ -1437,7 +1435,7 @@ busy_loop_check() {  # <window> <task> <window-key>
     rm -f "$since" "$esc"
     return 0
   fi
-  episode="$turn"$'\n'"$line"
+  episode="$gen"$'\n'"$line"
   prev=$(cat "$since" 2>/dev/null || true)
   if [ "$prev" != "$episode" ]; then
     printf '%s\n' "$episode" > "$since"
@@ -1455,7 +1453,7 @@ busy_loop_check() {  # <window> <task> <window-key>
   fi
   n=$(( $(cat "$esc" 2>/dev/null || echo 0) + 1 ))
   echo "$n" > "$esc"
-  reason="stale: $win (looping ${age}s, escalation $n: structural proxy - one semantic busy turn at the same parked gate - ${line#state: parked · source: run-step · } - with no run-step change or task worktree write; distinct read-only work can also match, so inspect the pane before steering the worker)"
+  reason="stale: $win (looping ${age}s, escalation $n: structural proxy - continuously observed busy at the same parked gate - ${line#state: parked · source: run-step · } - with no run-step change or task worktree write; distinct read-only work can also match, so inspect the pane before steering the worker)"
   fm_wake_append stale "$win" "$reason" || exit 1
   printf '%s\n' "$episode" > "$since"
   wake "$reason"
@@ -2672,6 +2670,10 @@ EOF
     fi
   fi
 
+  while IFS= read -r w; do
+    busy_loop_check "$w" "$(window_to_task "$w" "$STATE")" "$(window_key "$w")"
+  done < <(recorded_windows)
+
   # On the first changed signal, linger one grace period and re-scan before
   # classifying: a crewmate's final status write and the same turn's turn-end
   # hook land seconds apart, and reporting them as separate actionable wakes
@@ -2835,10 +2837,9 @@ EOF
     # Busy match: a backend's native semantic state when available (herdr), else
     # the last 6 non-blank lines only (the TUI footer area, where every verified
     # harness renders its busy indicator) so busy-looking strings in displayed
-    # content cannot suppress stale detection. Read once per window per poll and
-    # reused below so a busy verdict is consistent within one cycle.
+    # content cannot suppress stale detection.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
-    if [ "$busy_now" -eq 0 ]; then busy_loop_check "$w" "$task" "$key"; else clear_loop_tracking "$key"; fi
+    if [ "$busy_now" -ne 0 ]; then clear_loop_tracking "$key"; fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
