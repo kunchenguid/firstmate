@@ -120,11 +120,22 @@ A file at `~/.local/bin/fm-remote-entrypoint.sh` that is not Firstmate's own sym
 
 ## Provision a route
 
-Create and fill the normal secondmate charter first, then run:
+A remote route's charter must name the surfaces that exist on its own host, so scaffold it one of two ways.
+Either let the seed scaffold it - set `FM_SECONDMATE_CHARTER` and it passes the destination home to `bin/fm-brief.sh` for you - or, when you fill the charter by hand first, name that home while scaffolding it:
+
+```sh
+FM_SECONDMATE_REMOTE_HOME=<remote-home> bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}
+```
+
+Then run:
 
 ```sh
 bin/fm-remote-home-seed.sh <id> <ssh-alias> <remote-root> <remote-home> {<project>[=<origin-url>]...|--no-projects}
 ```
+
+Without that variable the charter quotes this primary home's own `state/` paths, which name nothing on the remote host.
+Publishing renders the destination's own paths for every shape the charter scaffold emits - this primary home's `state/<id>` paths, or a remote home an earlier seed published to - because teardown retires a route without removing the durable charter under `data/<id>`.
+Re-seeding a retired id onto a replacement host, or back onto a local home here with `bin/fm-home-seed.sh`, therefore never publishes the retired host's paths.
 
 `<remote-root>` is the remote Firstmate code clone that supplies tracked scripts.
 `<remote-home>` is a separate absolute path for the persistent secondmate home and must not overlap the code root.

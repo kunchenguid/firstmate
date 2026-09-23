@@ -57,7 +57,7 @@ Pass `--no-projects` instead of a project list to scaffold a project-less charte
 Re-seeding a populated home as project-less is refused non-destructively when the home contains project clones or `data/projects.md` entries.
 Retire or clean that home first, and re-scaffold a stale project-bearing charter with `--no-projects` before seeding.
 Keep custom charter text focused on the persistent responsibility, available project clones, and genuinely domain-specific hard rules.
-The scaffolded charter, later copied to `data/charter.md`, owns the standard lifecycle and escalation wording.
+The scaffolded charter, later published to `data/charter.md`, owns the standard lifecycle and escalation wording.
 Preserve the generated charter sections unless the domain genuinely needs a hard rule.
 
 Provision a local persistent home and registry entry after the charter is filled:
@@ -83,7 +83,7 @@ The lease survives with no live process and is never recycled by later `treehous
 The slot stays reserved across restarts until the lease is released.
 Release happens only on explicit retirement or seed rollback, never on routine restart or recovery.
 
-`bin/fm-home-seed.sh` copies the charter into the secondmate home as `data/charter.md`.
+`bin/fm-home-seed.sh` publishes the charter into the secondmate home as `data/charter.md`, rendering the parent-channel paths of that home's own route rather than copying whichever home the durable charter brief names.
 It also writes the gitignored `.fm-secondmate-parent` durable binding before the required `.fm-secondmate-home` identity marker; the parser header in [`bin/fm-secondmate-parent-lib.sh`](../../../bin/fm-secondmate-parent-lib.sh) owns the record contract, and both files must remain in place.
 `bin/fm-spawn.sh --secondmate` launches it through the secondmate harness path, resolving `config/secondmate-harness` -> `config/crew-harness` -> the primary's own harness unless an explicit per-spawn harness override is passed.
 
@@ -147,7 +147,7 @@ Inherited harness and runtime-backend defaults must not harden `fm-spawn` to rej
 The [worker launch environment contract](../../../docs/configuration.md#worker-launch-environment-configlaunch-env-allowlist) separately governs explicit environment grants.
 For already-live secondmates, use `bin/fm-config-push.sh` to push a mid-session inherited local-material change without running the tracked-file fast-forward.
 It uses the same live-home discovery and propagation helper as bootstrap, reports each item as `pushed`, `unchanged`, `skipped`, or `error`, and follows the config-reread contract above for changed or pending generations.
-`bin/fm-home-seed.sh` refuses to copy a missing or placeholder charter.
+`bin/fm-home-seed.sh` refuses to publish a missing or placeholder charter.
 
 Direct seed without a preexisting brief requires `FM_SECONDMATE_CHARTER`.
 Run `bin/fm-home-seed.sh validate` when checking registry integrity; its header owns the complete validation and refusal mechanics.

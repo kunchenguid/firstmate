@@ -75,6 +75,7 @@ for path in "$REMOTE_ROOT" "$REMOTE_HOME"; do
   case "/$path/" in */../*|*/./*) die "remote root or home contains traversal components" ;; esac
   case "$path" in *'//'*) die "remote root or home contains an empty path component" ;; esac
 done
+case "$REMOTE_HOME" in *"'"*) die "remote home must not contain a single quote: the published charter renders it into shell commands" ;; esac
 [ "$REMOTE_ROOT" != "$REMOTE_HOME" ] || die "remote root and home must be separate"
 case "$REMOTE_HOME/" in "$REMOTE_ROOT/"*) die "remote home must not be inside the remote code root" ;; esac
 case "$REMOTE_ROOT/" in "$REMOTE_HOME/"*) die "remote code root must not be inside the remote home" ;; esac
@@ -127,10 +128,12 @@ BRIEF="$DATA/$ID/brief.md"
 BRIEF_CREATED=0
 if [ ! -f "$BRIEF" ]; then
   [ -n "${FM_SECONDMATE_CHARTER:-}" ] || die "no filled charter at $BRIEF; set FM_SECONDMATE_CHARTER or scaffold one first"
+  # A fresh scaffold renders the remote host's local paths itself
+  # (FM_SECONDMATE_REMOTE_HOME to bin/fm-brief.sh).
   if [ "$NO_PROJECTS" -eq 1 ]; then
-    "$SCRIPT_DIR/fm-brief.sh" "$ID" --secondmate --no-projects >/dev/null
+    FM_SECONDMATE_REMOTE_HOME="$REMOTE_HOME" "$SCRIPT_DIR/fm-brief.sh" "$ID" --secondmate --no-projects >/dev/null
   else
-    "$SCRIPT_DIR/fm-brief.sh" "$ID" --secondmate "${PROJECT_NAMES[@]}" >/dev/null
+    FM_SECONDMATE_REMOTE_HOME="$REMOTE_HOME" "$SCRIPT_DIR/fm-brief.sh" "$ID" --secondmate "${PROJECT_NAMES[@]}" >/dev/null
   fi
   BRIEF_CREATED=1
 fi
@@ -146,24 +149,10 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/fm-remote-home-seed.XXXXXX") || die "cannot cre
 REG_EXISTED=0
 [ -f "$REG" ] && { cp "$REG" "$TMP/registry.before"; REG_EXISTED=1; }
 
-# Keep the parent charter as its durable source, but publish a remote copy whose
-# status path is the remote append-only relay log and whose steering-inbox path
-# is the host-local parent-route inbox the remote control plane writes to,
-# rather than local Mac paths. The two parents differ only by suffix, so the
-# two whole-string rewrites are order-independent and every mention - bare
-# path, /*.msg listing, and handled/ acknowledgement - lands host-local.
-# Each rewrite stays its own plain assignment: on stock macOS bash a quoted
-# substitution nested inside a double-quoted argument leaks literal quotes
-# into the replacement text.
-PARENT_STATUS="$STATE/$ID.status"
-REMOTE_STATUS="$REMOTE_HOME/state/parent-replies.status"
-PARENT_INBOX="$STATE/$ID.inbox"
-REMOTE_INBOX="$REMOTE_HOME/state/parent-route/$ID.inbox"
-while IFS= read -r line || [ -n "$line" ]; do
-  line=${line//"$PARENT_STATUS"/"$REMOTE_STATUS"}
-  line=${line//"$PARENT_INBOX"/"$REMOTE_INBOX"}
-  printf '%s\n' "$line"
-done < "$BRIEF" > "$TMP/charter.remote"
+# Keep the parent charter as its durable source and publish a copy rendered for
+# this destination host, whichever home the durable charter names;
+# bin/fm-secondmate-charter-lib.sh owns that contract for every route.
+secondmate_charter_publish "$BRIEF" "$ID" "$STATE" "$REMOTE_HOME" > "$TMP/charter.remote"
 
 PROJECTS_CSV=
 : > "$TMP/project.records"

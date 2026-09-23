@@ -14,10 +14,11 @@
 #       subject is the firstmate repo itself; it is mutually exclusive with a
 #       project list, and omitting both still fails loudly. A project-less seed
 #       refuses a home with project clones or project-registry entries, so it
-#       never converts populated homes in place. The charter brief
-#       is copied to data/charter.md, newly cloned no-mistakes projects are
-#       initialized, an ignored .fm-secondmate-parent binding is published before
-#       the .fm-secondmate-home identity marker, and data/secondmates.md is updated.
+#       never converts populated homes in place. The charter brief is published
+#       to data/charter.md with this home's own parent-channel paths, newly
+#       cloned no-mistakes projects are initialized, an ignored
+#       .fm-secondmate-parent binding is published before the
+#       .fm-secondmate-home identity marker, and data/secondmates.md is updated.
 #       Seeding is transactional: on validation, clone, init, or registry failure,
 #       generated briefs, new homes, new project clones, and registry edits are
 #       rolled back. Treehouse-acquired homes are returned only when the rollback
@@ -943,7 +944,9 @@ seed_home() {
     fi
   done
 
-  cp "$SEED_PARENT_BRIEF" "$home/data/charter.md"
+  secondmate_charter_publish "$SEED_PARENT_BRIEF" "$id" "$STATE" '' \
+    > "$home/data/charter.md.tmp.$$"
+  mv -f -- "$home/data/charter.md.tmp.$$" "$home/data/charter.md"
 
   projects_csv=$(join_projects "$@")
   # Durable record of this home's route to its parent, written once here next

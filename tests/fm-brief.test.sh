@@ -804,6 +804,108 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable() {
   pass "fm-brief.sh: relative directory inputs ignore CDPATH, render stable absolute charter paths, or fail loudly"
 }
 
+# A remote route's charter must name the surfaces that exist on the remote
+# host: the parent-route steering inbox the remote control plane writes and
+# the parent-replies relay log the parent's reply adapter mirrors. Quoting
+# the parent home's absolute $STATE paths is what left remote mates reading
+# mac paths that do not exist on their Linux host (kunchenguid/firstmate#5012).
+test_secondmate_remote_route_renders_host_local_paths() {
+  local home brief remote_home
+  home="$TMP_ROOT/remote-route-home"
+  remote_home="/remote-host/mates/alpha"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Remote domain work.' \
+    FM_SECONDMATE_REMOTE_HOME="$remote_home" \
+    "$ROOT/bin/fm-brief.sh" remote-mate --secondmate --no-projects >/dev/null \
+    || fail "remote-route charter scaffold failed"
+  brief="$home/data/remote-mate/brief.md"
+  assert_present "$brief" "remote-route charter was not scaffolded"
+  assert_grep "'$remote_home/state/parent-replies.status'" "$brief" \
+    "remote charter did not name the host-local parent-replies relay log"
+  assert_grep ">> '$remote_home/state/parent-replies.status'" "$brief" \
+    "remote charter escalation echo did not append to the host-local relay log"
+  assert_grep "'$remote_home/state/parent-route/remote-mate.inbox'" "$brief" \
+    "remote charter did not name the host-local parent-route steering inbox"
+  assert_grep "$remote_home/state/parent-route/remote-mate.inbox'/NNN.msg '$remote_home/state/parent-route/remote-mate.inbox'/handled/" "$brief" \
+    "remote charter did not render the inbox acknowledgement move host-local"
+  assert_no_grep "$home/state/remote-mate" "$brief" \
+    "remote charter still quotes a parent-home path the remote host cannot reach"
+  assert_no_grep "$remote_home/state/remote-mate.status" "$brief" \
+    "remote charter invented a per-mate status file instead of the shared relay log"
+  pass "fm-brief.sh: a remote-route charter names the remote host's local paths"
+}
+
+# The local route keeps today's rendering exactly: the parent home's own status
+# and inbox paths, which are the real surfaces on the shared host.
+test_secondmate_local_route_keeps_parent_home_paths() {
+  local home brief
+  home="$TMP_ROOT/local-route-home"
+  mkdir -p "$home/data" "$home/state"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Local domain work.' \
+    "$ROOT/bin/fm-brief.sh" local-mate --secondmate --no-projects >/dev/null \
+    || fail "local-route charter scaffold failed"
+  brief="$home/data/local-mate/brief.md"
+  assert_present "$brief" "local-route charter was not scaffolded"
+  assert_grep "'$home/state/local-mate.status'" "$brief" \
+    "local charter lost its parent-home parent-channel path"
+  assert_grep "'$home/state/local-mate.inbox'" "$brief" \
+    "local charter lost its parent-home steering-inbox path"
+  assert_no_grep "parent-replies.status" "$brief" \
+    "local charter grew a remote-route relay-log path"
+  assert_no_grep "parent-route/" "$brief" \
+    "local charter grew a remote-route steering-inbox path"
+  pass "fm-brief.sh: a local-route charter keeps the parent-home rendering"
+}
+
+# The remote-home input is secondmate-only, absolute, and newline-free, so a
+# bad value stops the scaffold loudly before anything is written instead of
+# rendering a misleading path.
+test_secondmate_remote_home_input_is_validated() {
+  local home out status
+  home="$TMP_ROOT/remote-home-input"
+  mkdir -p "$home/data"
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER=x \
+    FM_SECONDMATE_REMOTE_HOME='mates/alpha' \
+    "$ROOT/bin/fm-brief.sh" remote-input-relative --secondmate --no-projects 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a relative remote home must stop the scaffold"
+  assert_contains "$out" "must be an absolute path on the remote host" \
+    "relative-home refusal did not explain the contract"
+  assert_absent "$home/data/remote-input-relative/brief.md" \
+    "a refused relative-home scaffold still wrote a brief"
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER=x \
+    FM_SECONDMATE_REMOTE_HOME=$'/mates/two\nlines' \
+    "$ROOT/bin/fm-brief.sh" remote-input-newline --secondmate --no-projects 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a newline in the remote home must stop the scaffold"
+  assert_contains "$out" "must not contain a newline" \
+    "newline refusal did not explain the contract"
+  assert_absent "$home/data/remote-input-newline/brief.md" \
+    "a refused newline scaffold still wrote a brief"
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_CHARTER=x \
+    FM_SECONDMATE_REMOTE_HOME="/mates/o'brien" \
+    "$ROOT/bin/fm-brief.sh" remote-input-quote --secondmate --no-projects 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a single quote in the remote home must stop the scaffold"
+  assert_contains "$out" "must not contain a single quote" \
+    "quote refusal did not explain the contract"
+  assert_absent "$home/data/remote-input-quote/brief.md" \
+    "a refused quoted-home scaffold still wrote a brief"
+
+  out=$(FM_HOME="$home" FM_SECONDMATE_REMOTE_HOME=/mates/alpha \
+    "$ROOT/bin/fm-brief.sh" remote-input-ship some-proj --mode no-mistakes 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "FM_SECONDMATE_REMOTE_HOME on a ship brief must stop the scaffold"
+  assert_contains "$out" "applies only to --secondmate charters" \
+    "ship refusal did not explain the secondmate-only contract"
+  assert_absent "$home/data/remote-input-ship/brief.md" \
+    "a refused ship scaffold still wrote a brief"
+
+  pass "fm-brief.sh: the remote-home input is validated before anything is written"
+}
+
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   local home brief status=0
   home="$TMP_ROOT/herdr-kind-home"
@@ -1110,6 +1212,9 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
+test_secondmate_remote_route_renders_host_local_paths
+test_secondmate_local_route_keeps_parent_home_paths
+test_secondmate_remote_home_input_is_validated
 test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy

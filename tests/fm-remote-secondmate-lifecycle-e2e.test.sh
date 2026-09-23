@@ -665,6 +665,16 @@ assert_no_grep "$PARENT/state/ios.status" "$REMOTE_HOME/data/charter.md" "remote
 assert_grep "$PARENT_ROUTE_INBOX" "$REMOTE_HOME/data/charter.md" "remote charter did not name its host-local steering inbox"
 assert_no_grep "$PARENT/state/ios.inbox" "$REMOTE_HOME/data/charter.md" "remote charter retained the inaccessible local steering inbox path"
 assert_grep "$PARENT_ROUTE_INBOX'/NNN.msg '$PARENT_ROUTE_INBOX'/handled/" "$REMOTE_HOME/data/charter.md" "remote charter did not render the inbox acknowledgement move host-local"
+# A fresh scaffold renders the host-local paths itself, so the parent-home
+# durable charter names them too; only a charter scaffolded before
+# FM_SECONDMATE_REMOTE_HOME existed still carries parent-home paths for the
+# publish-time rewrite to converge.
+assert_grep "$REMOTE_HOME/state/parent-replies.status" "$PARENT/data/ios/brief.md" \
+  "remote seed scaffold did not render the host-local reply log into the parent charter"
+assert_no_grep "$PARENT/state/ios.status" "$PARENT/data/ios/brief.md" \
+  "fresh remote scaffold still quotes the parent-home status path the remote host cannot reach"
+assert_no_grep "$PARENT/state/ios.inbox" "$PARENT/data/ios/brief.md" \
+  "fresh remote scaffold still quotes the parent-home steering-inbox path the remote host cannot reach"
 if FM_SECONDMATE_CHARTER='Own iOS delivery on the build Mac.' \
   FM_SECONDMATE_SCOPE='iOS implementation and Xcode validation' \
   remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$TMP_ROOT/other-home" alpha \
@@ -1314,5 +1324,31 @@ jq -e --arg workspace "$SIBLING_WORKSPACE" --arg pane "$SIBLING_PANE" '
 assert_no_grep 'session stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote session"
 assert_no_grep 'server stop' "$HERDR_LOG" "remote retirement stopped the shared fm-remote server"
 pass "remote retirement refuses child work, then removes only its own endpoint while a shared-session sibling survives"
+
+# Retirement drops the route and its state but leaves the durable charter under
+# data/<id>, so re-seeding the same id onto a replacement host publishes from a
+# charter that still names the retired host. Publishing must normalize it to the
+# destination home: otherwise the rehomed mate appends its escalations to, and
+# reads its steers from, a host nobody watches.
+assert_present "$PARENT/data/ios/brief.md" \
+  "remote retirement removed the durable charter a rehome re-seeds from"
+assert_grep "$REMOTE_HOME/state/parent-replies.status" "$PARENT/data/ios/brief.md" \
+  "the durable charter no longer names the retired host, so a rehome cannot regress"
+REHOME_HOME="$TMP_ROOT/rehome-home"
+REHOME_INBOX="$REHOME_HOME/state/parent-route/ios.inbox"
+out=$(remote_env "$ROOT/bin/fm-remote-home-seed.sh" ios remote-mac "$REMOTE_ROOT" "$REHOME_HOME" alpha 2>&1) \
+  || fail "re-seeding a retired id onto a replacement host failed"$'\n'"$out"
+assert_contains "$out" "home=remote-mac:$REHOME_HOME" "the rehome seed did not report the replacement home"
+assert_grep "$REHOME_HOME/state/parent-replies.status" "$REHOME_HOME/data/charter.md" \
+  "the rehomed charter did not name the replacement host's reply log"
+assert_grep "$REHOME_INBOX" "$REHOME_HOME/data/charter.md" \
+  "the rehomed charter did not name the replacement host's steering inbox"
+assert_grep "$REHOME_INBOX'/NNN.msg '$REHOME_INBOX'/handled/" "$REHOME_HOME/data/charter.md" \
+  "the rehomed charter did not render the inbox acknowledgement on the replacement host"
+assert_no_grep "$REMOTE_HOME/state/parent-replies.status" "$REHOME_HOME/data/charter.md" \
+  "the rehomed charter still appends escalations to the retired host's reply log"
+assert_no_grep "$REMOTE_HOME/state/parent-route/ios.inbox" "$REHOME_HOME/data/charter.md" \
+  "the rehomed charter still reads steers from the retired host's parent-route inbox"
+pass "re-seeding a retired id onto a replacement host publishes the destination host's paths"
 
 echo "ALL TESTS PASSED"

@@ -544,6 +544,40 @@ test_home_seed_no_projects_end_to_end() {
   pass "home seeding scaffolds, registers, and spawns a project-less home end to end"
 }
 
+test_home_seed_publishes_local_paths_for_a_remote_shaped_charter() {
+  # Retiring a remote route leaves its durable charter behind, so bringing the
+  # domain back to this host seeds from a brief that still names the retired
+  # host. The published charter has to name where a local mate really reads
+  # steers and answers, or the mate polls a directory that does not exist here
+  # and appends its escalations where nothing reads them.
+  local home sub remote_home charter
+  home="$TMP_ROOT/rehome-local-home"
+  sub="$TMP_ROOT/rehome-local-subhome"
+  remote_home="/retired-host/mates/ios"
+  mkdir -p "$home/projects" "$home/data" "$home/state"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Own iOS delivery.' \
+    FM_SECONDMATE_REMOTE_HOME="$remote_home" \
+    "$ROOT/bin/fm-brief.sh" ios --secondmate --no-projects >/dev/null \
+    || fail "remote-shaped charter scaffold failed"
+  assert_grep "$remote_home/state/parent-replies.status" "$home/data/ios/brief.md" \
+    "the durable charter does not name the retired host, so this rehome cannot regress"
+
+  FM_HOME="$home" "$ROOT/bin/fm-home-seed.sh" ios "$sub" --no-projects >/dev/null \
+    || fail "local seed of a remote-shaped charter failed"
+  charter="$sub/data/charter.md"
+  assert_grep "'$home/state/ios.status'" "$charter" \
+    "the local mate's charter does not name this home's parent channel"
+  assert_grep "'$home/state/ios.inbox'" "$charter" \
+    "the local mate's charter does not name this home's steering inbox"
+  assert_grep "$home/state/ios.inbox'/NNN.msg '$home/state/ios.inbox'/handled/" "$charter" \
+    "the local mate's charter did not render the inbox acknowledgement locally"
+  assert_no_grep "$remote_home" "$charter" \
+    "the local mate's charter still names the retired host's surfaces"
+  assert_grep "$remote_home/state/parent-replies.status" "$home/data/ios/brief.md" \
+    "publishing rewrote the durable parent charter instead of the published copy"
+  pass "home seeding publishes this home's own paths from a remote-shaped charter"
+}
+
 test_secondmate_spawn_resolves_punctuated_registry_projects() {
   local home sub sub_abs fakebin log meta projects
   home="$TMP_ROOT/punctuated-spawn-home"
@@ -2980,6 +3014,7 @@ test_home_seed_refuses_missing_filled_charter
 test_home_seed_refuses_placeholder_charter
 test_home_seed_refuses_empty_charter_fields
 test_home_seed_no_projects_end_to_end
+test_home_seed_publishes_local_paths_for_a_remote_shaped_charter
 test_secondmate_spawn_resolves_punctuated_registry_projects
 test_secondmate_spawn_refuses_ambiguous_and_mismatched_registry_bindings
 test_home_seed_refuses_projectful_reused_charter_for_projectless_home
