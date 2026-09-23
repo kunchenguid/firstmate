@@ -70,12 +70,12 @@ BEAT="$STATE/.last-watcher-beat"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
-# Git Bash/MSYS pays a much higher fork cost while the watcher completes its
-# required pre-lock migration, so its bounded default covers that cold start.
-case "${OSTYPE:-}" in
-  msys*|mingw*|cygwin*) ARM_CONFIRM_DEFAULT=30 ;;
-  *) ARM_CONFIRM_DEFAULT=10 ;;
-esac
+# After extended watcher downtime the first cycle has a large backlog to sweep,
+# which legitimately takes longer than the watcher's first beat touch. 60s gives
+# that sweep time to complete while still bounding a wedged arm. Git Bash/MSYS
+# pays a higher fork cost and uses the same floor. FM_ARM_CONFIRM_TIMEOUT is the
+# explicit override in both cases.
+ARM_CONFIRM_DEFAULT=60
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-$ARM_CONFIRM_DEFAULT}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
@@ -586,10 +586,28 @@ while :; do
 done
 
 trap - HUP TERM INT
+# Capture child pid before cleanup_child removes child_out; child itself is kept.
+_timeout_child=$child
 print_watch_output "$child_out"
 cleanup_child
 wait "$child" 2>/dev/null
 rc=$?
+# Release any partial lock our now-dead child may have left. A fresh watcher
+# writes its pid into the lock before writing pid-identity; if TERMed in that
+# window the lock holds a pid with no identity, which blocks the successor steal
+# path. The child is confirmed dead after wait, so the lock is ours to release.
+# Route through fm_lock_try_acquire/fm_lock_release rather than a manual
+# read+remove: the steal mutex re-verifies liveness at claim time, so a
+# concurrent watcher that has already legitimately reclaimed this lock is
+# left untouched instead of having its fresh owner dir destroyed.
+_lock_pid=$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)
+_lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
+if [ -n "$_timeout_child" ] && [ "$_lock_pid" = "$_timeout_child" ] && [ -z "$_lock_identity" ]; then
+  if fm_lock_try_acquire "$WATCH_LOCK"; then
+    fm_lock_release "$WATCH_LOCK"
+  fi
+fi
+unset _lock_pid _lock_identity _timeout_child
 cycle_log_append "$rc" "$(cycle_signal_name "$rc")" confirmation-timeout none
 echo "watcher: FAILED - no live watcher with a fresh beacon"
 exit 1
