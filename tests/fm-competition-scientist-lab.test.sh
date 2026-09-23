@@ -380,7 +380,27 @@ PY
   [ "$status" -ne 0 ] || fail "a second sealed audit should be refused, not performed silently"
   assert_contains "$output" "sealed-audit-already-called" "the one-shot sealed budget should already be charged"
   [ ! -e "$workspace/.run/final.json" ] || fail "an unfinished search should not publish a final record"
+  [ -z "$(find "$workspace" -name 'sealed-*.json' -print -quit)" ] \
+    || fail "an interrupted finish left the sealed dataset in the proposer-visible workspace"
   pass "competition scientist: the one-shot sealed audit budget is charged before the evaluation it gates"
+}
+
+test_sealed_dataset_never_persists_in_the_workspace() {
+  local workspace output status
+  workspace="$TMP_ROOT/sealed-residue"
+  $LAB run --workspace "$workspace" --task noisy-classification --controller proposed \
+    --fixture --wall-seconds 2 --cpu-seconds 2 --memory-mb 512 >/dev/null
+  [ -z "$(find "$workspace" -name 'sealed-*.json' -print -quit)" ] \
+    || fail "the sealed dataset outlived the single evaluation it was generated for"
+  [ -z "$(find "$workspace/.run/tmp" -name 'evaluation-*.json' -print -quit)" ] \
+    || fail "evaluator output temporaries accumulated in the workspace"
+
+  printf '[]\n' > "$workspace/.run/tmp/sealed-leaked.json"
+  output=$($LAB replay "$workspace" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a sealed dataset left in the workspace must not pass the surface check"
+  assert_contains "$output" "undeclared-file-edit:file:.run/tmp/sealed-leaked.json" \
+    "a leaked sealed dataset should be named, not silently tolerated"
+  pass "competition scientist: no sealed dataset survives its evaluation or passes the workspace surface"
 }
 
 test_help_and_inertness
@@ -392,5 +412,6 @@ test_branch_and_planning_limits
 test_duplicate_confounded_and_budget_rejections
 test_finish_is_idempotent_and_replayable
 test_sealed_audit_budget_survives_an_interrupted_finish
+test_sealed_dataset_never_persists_in_the_workspace
 
 echo "# fm-competition-scientist-lab.test.sh: all assertions passed"

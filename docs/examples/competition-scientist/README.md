@@ -27,7 +27,8 @@ The one exception is a temp file left beside a declared record by an interrupted
 This also prevents a proposal from opening a network connection or launching a subprocess.
 
 The evaluator, synthetic data, development split, falsification split, sealed-data generator, Python environment record, baseline template, and empty dependency set are frozen and SHA-256 verified before every evaluation.
-The sealed rows are generated into a temporary harness-owned file only during finalization and are removed after that single evaluation.
+The sealed rows are generated into a temporary harness-owned file only during finalization and are removed after that single evaluation, including when that evaluation raises or is interrupted.
+Unlike the evaluator's own output temporaries, a sealed dataset left in the workspace is never tolerated by the surface check, so an escaped holdout is named rather than silently walked past.
 The evaluator runs in a subprocess with a kernel CPU limit and a parent-enforced wall limit.
 Linux uses a kernel address-space limit for memory, while macOS uses parent-side resident-memory sampling because macOS rejects a lowered `RLIMIT_AS` for the Python process image.
 The default experiment cap is 30 seconds of CPU, 30 seconds of wall time, and 1 GiB of resident memory per evaluator call.

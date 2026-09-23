@@ -474,117 +474,116 @@ def run_bounded_evaluator(workspace: Path, candidate: Path, split: str) -> dict[
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / f"evaluation-{os.getpid()}-{time.time_ns()}.json"
     generated_data: Path | None = None
-    if split == "sealed":
-        rows = generate_dataset(manifest["task"], manifest["seed"], "sealed")
-        if sha256_bytes(canonical_json(rows).encode("utf-8")) != manifest["sealed_dataset_sha256"]:
-            raise LabError("immutable-violation:sealed-generation")
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            prefix="sealed-",
-            suffix=".json",
-            dir=output_dir,
-            delete=False,
-        ) as handle:
-            json.dump(rows, handle, sort_keys=True)
-            handle.write("\n")
-            generated_data = Path(handle.name)
-        data_path = generated_data
-    else:
-        data_path = workspace / ".frozen" / f"{split}.json"
+    try:
+        if split == "sealed":
+            rows = generate_dataset(manifest["task"], manifest["seed"], "sealed")
+            if sha256_bytes(canonical_json(rows).encode("utf-8")) != manifest["sealed_dataset_sha256"]:
+                raise LabError("immutable-violation:sealed-generation")
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                prefix="sealed-",
+                suffix=".json",
+                dir=output_dir,
+                delete=False,
+            ) as handle:
+                generated_data = Path(handle.name)
+                json.dump(rows, handle, sort_keys=True)
+                handle.write("\n")
+            data_path = generated_data
+        else:
+            data_path = workspace / ".frozen" / f"{split}.json"
 
-    def finish_result(value: dict[str, Any]) -> dict[str, Any]:
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "_evaluate",
+            "--task",
+            manifest["task"],
+            "--candidate",
+            str(candidate),
+            "--data",
+            str(data_path),
+            "--output",
+            str(output),
+        ]
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(workspace / ".run" / "empty-home"),
+            "PYTHONHASHSEED": str(manifest["seed"]),
+            "PYTHONNOUSERSITE": "1",
+            "NO_PROXY": "*",
+            "no_proxy": "*",
+            "HTTP_PROXY": "",
+            "HTTPS_PROXY": "",
+            "ALL_PROXY": "",
+        }
+        started = time.monotonic()
+        try:
+            proc = subprocess.Popen(
+                command,
+                cwd=workspace,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+                preexec_fn=lambda: limited_preexec(caps["cpu_seconds"], caps["memory_mb"]),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {
+                "ok": False,
+                "failure_class": "runtime",
+                "error": f"cannot start evaluator: {exc}",
+                "wall_seconds": round(time.monotonic() - started, 6),
+            }
+        failure_class = ""
+        sample_memory = sys.platform == "darwin"
+        while True:
+            remaining = caps["wall_seconds"] - (time.monotonic() - started)
+            if remaining <= 0:
+                failure_class = "timeout"
+                stop_process_group(proc)
+                break
+            try:
+                proc.wait(timeout=min(remaining, EVALUATOR_POLL_SECONDS))
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            if sample_memory and resident_memory_mb(proc.pid) > caps["memory_mb"]:
+                failure_class = "oom"
+                stop_process_group(proc)
+                break
+        stdout, stderr = proc.communicate()
+        elapsed = round(time.monotonic() - started, 6)
+        if failure_class:
+            return {
+                "ok": False,
+                "failure_class": failure_class,
+                "error": f"evaluator exceeded {failure_class} limit",
+                "wall_seconds": elapsed,
+            }
+        if output.exists():
+            result = read_json(output)
+            result["wall_seconds"] = elapsed
+            result["stderr"] = stderr[-2000:]
+            return result
+        if proc.returncode == -signal.SIGXCPU:
+            failure = "cpu-limit"
+        elif proc.returncode == -signal.SIGKILL:
+            failure = "oom"
+        else:
+            failure = "runtime"
+        return {
+            "ok": False,
+            "failure_class": failure,
+            "error": (stderr or stdout or f"evaluator exited {proc.returncode}")[-2000:],
+            "wall_seconds": elapsed,
+        }
+    finally:
+        output.unlink(missing_ok=True)
         if generated_data is not None:
             generated_data.unlink(missing_ok=True)
-        return value
-
-    command = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "_evaluate",
-        "--task",
-        manifest["task"],
-        "--candidate",
-        str(candidate),
-        "--data",
-        str(data_path),
-        "--output",
-        str(output),
-    ]
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "HOME": str(workspace / ".run" / "empty-home"),
-        "PYTHONHASHSEED": str(manifest["seed"]),
-        "PYTHONNOUSERSITE": "1",
-        "NO_PROXY": "*",
-        "no_proxy": "*",
-        "HTTP_PROXY": "",
-        "HTTPS_PROXY": "",
-        "ALL_PROXY": "",
-    }
-    started = time.monotonic()
-    try:
-        proc = subprocess.Popen(
-            command,
-            cwd=workspace,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-            preexec_fn=lambda: limited_preexec(caps["cpu_seconds"], caps["memory_mb"]),
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        return finish_result({
-            "ok": False,
-            "failure_class": "runtime",
-            "error": f"cannot start evaluator: {exc}",
-            "wall_seconds": round(time.monotonic() - started, 6),
-        })
-    failure_class = ""
-    sample_memory = sys.platform == "darwin"
-    while True:
-        remaining = caps["wall_seconds"] - (time.monotonic() - started)
-        if remaining <= 0:
-            failure_class = "timeout"
-            stop_process_group(proc)
-            break
-        try:
-            proc.wait(timeout=min(remaining, EVALUATOR_POLL_SECONDS))
-            break
-        except subprocess.TimeoutExpired:
-            pass
-        if sample_memory and resident_memory_mb(proc.pid) > caps["memory_mb"]:
-            failure_class = "oom"
-            stop_process_group(proc)
-            break
-    stdout, stderr = proc.communicate()
-    elapsed = round(time.monotonic() - started, 6)
-    if failure_class:
-        return finish_result({
-            "ok": False,
-            "failure_class": failure_class,
-            "error": f"evaluator exceeded {failure_class} limit",
-            "wall_seconds": elapsed,
-        })
-    if output.exists():
-        result = read_json(output)
-        output.unlink()
-        result["wall_seconds"] = elapsed
-        result["stderr"] = stderr[-2000:]
-        return finish_result(result)
-    if proc.returncode == -signal.SIGXCPU:
-        failure = "cpu-limit"
-    elif proc.returncode == -signal.SIGKILL:
-        failure = "oom"
-    else:
-        failure = "runtime"
-    return finish_result({
-        "ok": False,
-        "failure_class": failure,
-        "error": (stderr or stdout or f"evaluator exited {proc.returncode}")[-2000:],
-        "wall_seconds": elapsed,
-    })
 
 
 def environment_record() -> dict[str, Any]:
@@ -740,8 +739,6 @@ def allowed_workspace_file(relative: str) -> bool:
     if relative in ALLOWED_WORKSPACE_FILES:
         return True
     if relative.startswith(".run/tmp/evaluation-") and relative.endswith(".json"):
-        return True
-    if relative.startswith(".run/tmp/sealed-") and relative.endswith(".json"):
         return True
     parts = Path(relative).parts
     if len(parts) == 3 and parts[0] == "artifacts":
