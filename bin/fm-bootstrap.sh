@@ -1193,6 +1193,59 @@ crew_dispatch_validate() {
           then (provider_id($f.provider) | not)
           else ($f | has("provider"))
           end);
+    # Rule precedence: bin/fm-dispatch-resolve.sh renders each beats entry as
+    # tie-break sentences in its question and refuses a malformed one.
+    def beats_bad($self; $count):
+      (type != "array") or (length == 0)
+      or any(.[]; (type != "object")
+        or ((.rule | type) != "number") or (.rule != (.rule | floor))
+        or (.rule < 1) or (.rule > $count) or (.rule == $self)
+        or (has("when") and ((.when | type) != "string" or (.when | length) == 0)))
+      or ((map(.rule) | length) != (map(.rule) | unique | length));
+    def mutual_unconditional($rs):
+      [range(0; $rs | length) as $i | ($rs[$i] | if type == "object" then (.beats // []) else [] end)
+        | if type == "array" then .[] else empty end
+        | select(type == "object" and (has("when") | not)) | [$i + 1, .rule]] as $e
+      | any($e[]; . as [$w, $l] | ($e | index([[$l, $w]])) != null);
+    def beats_edges($rs):
+      [range(0; $rs | length) as $i
+        | ($rs[$i] | if type == "object" then (.beats // []) else [] end)
+        | if type == "array" then .[] else empty end
+        | select(type == "object" and (.rule | type) == "number" and .rule == (.rule | floor))
+        | [$i + 1, .rule]];
+    def visit_beats($edges; $state; $node):
+      ($state | .seen += [$node] | .active += [$node]) as $entered
+      | reduce ([$edges[] | select(.[0] == $node) | .[1]] | unique | sort)[] as $next
+          ($entered;
+           if .cycle != null then .
+           else
+             (.active | index($next)) as $active_index
+             | if $active_index != null then
+                 if (.active | length) - $active_index >= 3 then
+                   .cycle = (.active[$active_index:] + [$next])
+                 else . end
+               elif (.seen | index($next)) != null then .
+               else visit_beats($edges; .; $next)
+               end
+           end)
+      | .active = .active[:-1];
+    def beats_cycle($rs):
+      if ($rs | type) != "array" then null
+      else
+        beats_edges($rs) as $edges
+        | reduce range(1; ($rs | length) + 1) as $node
+            ({seen: [], active: [], cycle: null};
+             if .cycle != null or (.seen | index($node)) != null then .
+             else visit_beats($edges; .; $node)
+             end)
+        | .cycle
+      end;
+    def beats_cycle_error($rs):
+      beats_cycle($rs) as $cycle
+      | if $cycle == null then null
+        else "beats must not form a cycle of three or more rules: "
+          + ($cycle | map("rule_\(.)") | join(" -> "))
+        end;
     def malformed_profile_floors($items):
       ($items | any(has("floor") and floor_bad(.floor; false)));
     def bad_efforts:
@@ -1203,7 +1256,8 @@ crew_dispatch_validate() {
       | map(select(. as $p | effort_ok($p.h; $p.m; $p.e) | not))
       | map("\(.h):\(.e)")
       | unique;
-    if type != "object" then "top-level value must be an object"
+    (if $typed then beats_cycle_error(.rules // []) else null end) as $beats_cycle_error
+    | if type != "object" then "top-level value must be an object"
     elif has("rules") and (.rules | type) != "array" then "rules must be an array"
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
     elif [(.rules // [])[]? | select((.when? | type) != "string" or (.when | length) == 0)] | length > 0 then "each rule needs non-empty when"
@@ -1218,6 +1272,9 @@ crew_dispatch_validate() {
     elif $typed and malformed_profile_floors([(.rules // [])[]? | profiles(.use?)[]?]) then "use profile floor needs scope and min_percent 0..100"
     elif $typed and ([(.rules // [])[]? | select(has("approval") and .approval != "captain")] | length > 0) then "approval must be \"captain\" when present"
     elif $typed and ([(.rules // [])[]? | select(has("floor") and floor_bad(.floor; true))] | length > 0) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
+    elif $typed and ((.rules // []) as $rs | any(range(0; $rs | length); . as $i | ($rs[$i] | type) == "object" and ($rs[$i] | has("beats")) and ($rs[$i].beats | beats_bad($i + 1; $rs | length)))) then "beats must be a non-empty array of {rule, when?} naming other rules by 1-based number, each at most once, with when a non-empty string when present"
+    elif $typed and mutual_unconditional(.rules // []) then "two rules must not beat each other unconditionally; give at least one of the pair a when condition"
+    elif $typed and $beats_cycle_error != null then $beats_cycle_error
     elif [(.rules // [])[]? | select(has("select") and ((.select? | type) != "string" or (.select | length) == 0))] | length > 0 then "select must be a non-empty string"
     elif [(.rules // [])[]? | .select? // empty | select(. != "quota-balanced")] | length > 0 then
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))

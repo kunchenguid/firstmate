@@ -20,11 +20,13 @@
 #   is not, or when JEV_ROUTE=openrouter) with the project name plus either
 #   the whole brief or a compact intent summary as state, and a Choice
 #   question whose options are every rule's `when` from
-#   config/crew-dispatch.json plus one fixed generic none option. Jev returns
-#   the matched rule, a probability per option, and a confidence. The same
+#   config/crew-dispatch.json plus one fixed generic none option. Optional
+#   rule precedence follows the owner contract in docs/configuration.md
+#   "Crew dispatch profiles". Jev returns the matched rule, a probability per
+#   option, and a confidence. The same
 #   response carries a second typed Choice classifying the reasoning effort
 #   the brief itself needs (low|medium|high|xhigh|max). Everything after that
-#   is jq: the confidence floor, the rule's declared `approval` and `floor`,
+#   is jq: the top-2 margin gate, the rule's declared `approval` and `floor`,
 #   each profile's declared `provider` and `floor`, the quota rows from ONE
 #   quota-axi --json snapshot, the spend ledger's predicted burn for the
 #   assessed class (bin/fm-spend-ledger.py predict), and the spendPriority
@@ -56,12 +58,13 @@
 #       -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only; effort is the assessed class)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
-#   ambiguous -> confidence below the floor; decide as today from the probabilities
+#   ambiguous -> choice is not the most probable option or the top-2 margin is below threshold; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
 #   error     -> API, network, response, or quota-axi failure; decide as today
 #   Every outcome exits 0 so an intake is never blocked by this tool.
 #   Exit 2 only for a usage or configuration error (unreadable brief, an
-#   existing unreadable rules file, malformed rules, or missing jq), which is
+#   existing unreadable rules file, malformed rules, an invalid
+#   FM_JEV_DISPATCH_MARGIN, or missing jq), which is
 #   actionable, never selected around.
 #
 # Environment:
@@ -73,6 +76,8 @@
 #   Jev pick to state/jev-dispatch-shadow.jsonl and does not add spawn
 #   authority beyond today's optional clear-profile use.
 #   FM_JEV_DISPATCH_EXTRA=1 adds log-only home and deliverable questions.
+#   FM_JEV_DISPATCH_MARGIN configures the clear gate; docs/configuration.md
+#   "Typed dispatch resolution" owns its source, range, default, and calibration.
 #   FM_JEV_DISPATCH_COMPACT is read from the process environment first, else
 #   from $FM_HOME/.env via fmx_env_get; the environment wins. A truthy value
 #   sends a 400-800 character intent summary instead of the whole brief
@@ -102,7 +107,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-jev-lib.sh
 . "$SCRIPT_DIR/fm-jev-lib.sh"
 
-CONFIDENCE_FLOOR=0.6
+DEFAULT_MARGIN=0.4
 DEFAULT_WHEN="No listed rule applies to this task."
 DISPATCH_HOMES="main agency lay frontend zimmer"
 
@@ -161,6 +166,20 @@ fm_dispatch_compact_on() {
     return
   fi
   [ "$(fm_dispatch_route)" = openrouter ]
+}
+
+fm_dispatch_margin() {
+  local v=${FM_JEV_DISPATCH_MARGIN:-}
+  if [ -z "$v" ]; then
+    v=$(fmx_env_get FM_JEV_DISPATCH_MARGIN "$FM_HOME/.env")
+  fi
+  if [ -z "$v" ]; then
+    printf '%s' "$DEFAULT_MARGIN"
+    return 0
+  fi
+  awk -v m="$v" 'BEGIN { exit !(m ~ /^(0|1)?(\.[0-9]+)?$/ && m ~ /[0-9]/ && m+0 > 0 && m+0 <= 1) }' || return 1
+  case "$v" in .*) v="0$v" ;; esac
+  printf '%s' "$v"
 }
 
 fm_dispatch_flatten_truncate() {
@@ -239,6 +258,7 @@ fi
 
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"
+MARGIN=$(fm_dispatch_margin) || die "FM_JEV_DISPATCH_MARGIN must be a number in (0, 1]"
 [ -r "$BRIEF" ] || die "brief file not readable: $BRIEF"
 [ -e "$RULES_PATH" ] || [ -L "$RULES_PATH" ] || no_rules
 [ -r "$RULES_PATH" ] || die "rules file not readable: $RULES_PATH"
@@ -281,10 +301,60 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
     or ($p | has("effort") and ((.effort | type) != "string" or (.effort | length) == 0))
     or ($p | has("provider") and (provider_id(.provider) | not))
     or ($p | has("floor") and floor_bad(.floor; false));
+  def beats_bad($self; $count):
+    (type != "array") or (length == 0)
+    or any(.[]; (type != "object")
+      or ((.rule | type) != "number") or (.rule != (.rule | floor))
+      or (.rule < 1) or (.rule > $count) or (.rule == $self)
+      or (has("when") and ((.when | type) != "string" or (.when | length) == 0)))
+    or ((map(.rule) | length) != (map(.rule) | unique | length));
+  def mutual_unconditional($rs):
+    [range(0; $rs | length) as $i | ($rs[$i].beats // [])[] | select(has("when") | not) | [$i + 1, .rule]] as $e
+    | any($e[]; . as [$w, $l] | ($e | index([[$l, $w]])) != null);
+  def beats_edges($rs):
+    [range(0; $rs | length) as $i
+      | ($rs[$i] | if type == "object" then (.beats // []) else [] end)
+      | if type == "array" then .[] else empty end
+      | select(type == "object" and (.rule | type) == "number" and .rule == (.rule | floor))
+      | [$i + 1, .rule]];
+  def visit_beats($edges; $state; $node):
+    ($state | .seen += [$node] | .active += [$node]) as $entered
+    | reduce ([$edges[] | select(.[0] == $node) | .[1]] | unique | sort)[] as $next
+        ($entered;
+         if .cycle != null then .
+         else
+           (.active | index($next)) as $active_index
+           | if $active_index != null then
+               if (.active | length) - $active_index >= 3 then
+                 .cycle = (.active[$active_index:] + [$next])
+               else . end
+             elif (.seen | index($next)) != null then .
+             else visit_beats($edges; .; $next)
+             end
+         end)
+    | .active = .active[:-1];
+  def beats_cycle($rs):
+    if ($rs | type) != "array" then null
+    else
+      beats_edges($rs) as $edges
+      | reduce range(1; ($rs | length) + 1) as $node
+          ({seen: [], active: [], cycle: null};
+           if .cycle != null or (.seen | index($node)) != null then .
+           else visit_beats($edges; .; $node)
+           end)
+      | .cycle
+    end;
+  def beats_cycle_error($rs):
+    beats_cycle($rs) as $cycle
+    | if $cycle == null then null
+      else "beats must not form a cycle of three or more rules: "
+        + ($cycle | map("rule_\(.)") | join(" -> "))
+      end;
   def duplicate_profiles($items):
     ($items | map([.harness, (.model // null), (.effort // null)] | @json)) as $keys
     | ($keys | length) != ($keys | unique | length);
-  if type != "object" then "top-level value must be an object"
+  beats_cycle_error(.rules // []) as $beats_cycle_error
+  | if type != "object" then "top-level value must be an object"
   elif has("rules") and (.rules | type) != "array" then "rules must be an array"
   elif any((.rules // [])[]; type != "object") then "each rule must be an object"
   elif any((.rules // [])[]; (.when | type) != "string" or (.when | length) == 0) then "each rule needs non-empty when"
@@ -294,6 +364,9 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
   elif any((.rules // [])[]; has("select") and .select != "quota-balanced") then
     "unknown select: " + ([.rules[] | select(has("select") and .select != "quota-balanced") | .select] | unique | join(", "))
   elif any((.rules // [])[]; has("floor") and floor_bad(.floor; true)) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
+  elif (.rules // []) as $rs | any(range(0; $rs | length); . as $i | $rs[$i] | has("beats") and (.beats | beats_bad($i + 1; $rs | length))) then "beats must be a non-empty array of {rule, when?} naming other rules by 1-based number, each at most once, with when a non-empty string when present"
+  elif mutual_unconditional(.rules // []) then "two rules must not beat each other unconditionally; give at least one of the pair a when condition"
+  elif $beats_cycle_error != null then $beats_cycle_error
   elif any((.rules // [])[] | profiles(.use)[]; profile_bad(.)) then "each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
   elif any((.rules // [])[]; duplicate_profiles(profiles(.use))) then "each rule use must not contain duplicate harness, model, and effort profiles"
   elif any((.rules // [])[] | profiles(.use)[]; (verified(.harness) | not)) then "each use profile must name a verified harness"
@@ -372,11 +445,20 @@ BRIEF_TEXT=$(fm_jev_compact_state "$BRIEF_TEXT") || emit_error "state exceeds si
 STATE=$(jq -nc --arg project "$PROJECT" --arg brief "$BRIEF_TEXT" '{task:{project:$project, brief:$brief}}') \
   || emit_error "could not build state"
 QUESTIONS=$(jq -nc --arg none_criterion "$DEFAULT_WHEN" --argjson extra "$EXTRA" --argjson homes "$HOME_CRITERIA" --slurpfile rules "$RULES" '
-  ($rules[0].rules | to_entries | map({key: ("rule_" + ((.key + 1) | tostring)), value: .value.when}) | from_entries) as $criteria |
+  ($rules[0].rules) as $rs |
+  ([range(0; $rs | length) as $i | ($rs[$i].beats // [])[] | {w: ($i + 1), l: .rule, c: (.when // null)}]) as $edges |
+  def cond($e): if $e.c == null then "" else " and \($e.c)" end;
+  ($rs | to_entries | map((.key + 1) as $n | {
+    key: "rule_\($n)",
+    value: (.value.when
+      + ([$edges[] | select(.w == $n) | " Tie-break: when rule_\(.l) also fits\(cond(.)), choose this option over rule_\(.l)."] | join(""))
+      + ([$edges[] | select(.l == $n) | " Tie-break: when rule_\(.w) also fits\(cond(.)), choose rule_\(.w) over this option."] | join("")))
+  }) | from_entries) as $criteria |
   {
     rule: {
       type: "choice",
-      instructions: "Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule'"'"'s own matching condition; pick `default` when no rule'"'"'s condition is met, including when a rule'"'"'s own exemption text excludes this task.",
+      instructions: ("Which ONE dispatch rule best fits `task` (read `task.brief` and `task.project`)? Each option is the rule'"'"'s own matching condition; pick `default` when no rule'"'"'s condition is met, including when a rule'"'"'s own exemption text excludes this task."
+        + (if ($edges | length) > 0 then " When more than one option fits, follow the Tie-break sentences at the end of the options; any rule whose condition fits wins over `default`." else "" end)),
       criteria: ($criteria + {default: $none_criterion})
     },
     effort: {
@@ -480,9 +562,11 @@ jq -e 'type == "object"' "$PREDICT_FILE" >/dev/null 2>&1 \
   || printf '{"status":"unavailable"}\n' > "$PREDICT_FILE"
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
-RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" --argjson effort "$EFFORT_JSON" \
+RESULT=$(jq -n --arg margin "$MARGIN" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" --argjson effort "$EFFORT_JSON" \
   --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" --slurpfile predict "$PREDICT_FILE" '
+  '"$FM_JEV_CHOICE_TOP2_JQ"'
   ($resp[0]) as $r | ($rules[0]) as $cfg | ($quota[0]) as $q | ($r.answers.rule) as $a |
+  ($a.probabilities | jev_choice_top2) as $top2 |
   ($predict[0] // {status:"unavailable"}) as $pd | ($effort.choice) as $jev_effort |
   def profiles($v): if ($v | type) == "array" then $v elif ($v | type) == "object" then [$v] else [] end;
   def prov($p): ([$q.providers[] | select(.provider == $p)] | first) // null;
@@ -652,8 +736,11 @@ RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg non
     effort: {choice: $jev_effort, confidence: $effort.confidence, source: $effort.source}
   } as $ev |
   if $sel.invalid then $ev + {status: "error", reason: $sel.invalid}
-  elif $a.confidence < ($floor | tonumber) then
-    $ev + {status: "ambiguous", reason: "confidence \($a.confidence) below floor \($floor)", candidates: ($answer_use | map(assess(.)))}
+  elif $choice != $top2.first then
+    $ev + {status: "ambiguous", reason: "choice \($choice) is not the most probable option \($top2.first)", candidates: ($answer_use | map(assess(.)))}
+  # The 1e-9 tolerance is intentional: two-decimal gaps such as 0.7 - 0.3 compute just below the threshold in binary floating point.
+  elif ($top2.raw_margin + 1e-9) < ($margin | tonumber) then
+    $ev + {status: "ambiguous", reason: "top-2 margin \($top2.margin) below \($margin) (\($top2.first) vs \($top2.second))", candidates: ($answer_use | map(assess(.)))}
   elif $sel.escalate then
     $ev + {status: "escalate", reason: $sel.escalate, candidates: ($answer_use | map(assess(.)))}
   elif ($sel.use | length) == 0 then $ev + {status: "escalate", reason: "no profiles configured for \($sel.source)", note: $sel.note, candidates: []}

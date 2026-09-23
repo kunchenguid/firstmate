@@ -96,11 +96,12 @@ JSON
 }
 write_quota "$QUOTA" 0.7597
 
-write_response() {  # <path> <choice> <confidence>
+write_response() {  # <path> <choice> <confidence> [<probabilities-json>]
+  local probabilities=${4:-'{ "rule_1": 0.01, "rule_2": 0.01, "rule_3": 0.01, "rule_4": 0.96, "default": 0.01 }'}
   cat > "$1" <<JSON
 { "model": "jev-1.13.0",
   "answers": { "rule": { "type": "choice", "choice": "$2", "confidence": $3,
-    "probabilities": { "rule_1": 0.01, "rule_2": 0.01, "rule_3": 0.01, "rule_4": 0.96, "default": 0.01 } } },
+    "probabilities": $probabilities } },
   "usage": { "input_tokens": 812, "output_tokens": 60 } }
 JSON
 }
@@ -342,21 +343,97 @@ assert_not_contains "$err" 'malformed rules file' "the documented example reache
 cp "$BASE_RULES" "$RULES"
 pass "no-rule fallback, Agy, Gemini, and documented configurations resolve"
 
-# --- ambiguous: fixed confidence floor -----------------------------------------
+# --- ambiguous: top-2 probability margin gate -----------------------------------
 reset_log
-write_response "$RESPONSE" rule_4 0.41
+write_response "$RESPONSE" rule_4 0.26 '{ "rule_1": 0.02, "rule_2": 0.30, "rule_3": 0.02, "rule_4": 0.41, "default": 0.25 }'
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "ambiguous exits 0"
-assert_contains "$out" '  status: ambiguous' "below the floor is ambiguous"
-assert_contains "$out" '  reason: confidence 0.41 below floor 0.6' "ambiguous names the floor"
+assert_contains "$out" '  status: ambiguous' "a narrow top-2 margin is ambiguous"
+assert_contains "$out" '  reason: top-2 margin 0.11 below 0.4 (rule_4 vs rule_2)' "ambiguous names the margin, the threshold, and both contenders"
 assert_contains "$out" 'candidate: claude:sonnet  provider=claude  effort=high(high ceiling)  scope=all_models  remaining=79%  spendPriority=-0.4627  runway=projected_exhaustion  pred=unknown  -> eligible' "ambiguous preserves matched candidate evidence"
 assert_contains "$out" 'candidate: kimi:kimi-code/k3  provider=kimi  pred=unknown  -> eligible, unranked: provider kimi unmeasured (unknown): disclosed uncertainty' "ambiguous preserves eligible unranked candidate evidence"
 assert_not_contains "$out" '  profile:' "ambiguous emits no profile line"
-pass "ambiguous: confidence below the fixed floor hands the decision back"
+pass "ambiguous: a narrow top-2 margin hands the decision back"
+
+reset_log
+write_response "$RESPONSE" rule_2 0.4125 '{ "rule_1": 0.53, "rule_2": 0.13, "rule_3": 0.12, "rule_4": 0.11, "default": 0.11 }'
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "a non-winning choice cannot clear on a wide top-2 margin"
+assert_contains "$out" '  reason: choice rule_2 is not the most probable option rule_1' "the ambiguity names the selected choice and probability leader"
+assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol' "a non-winning choice preserves candidate evidence"
+assert_not_contains "$out" '  profile:' "a non-winning choice emits no profile line"
+pass "ambiguous: a choice below the probability leader hands the decision back"
+
+# --- the margin gate is invariant to option count and configurable ---------------
+reset_log
+write_response "$RESPONSE" rule_4 0.46 '{ "rule_1": 0.09, "rule_2": 0.08, "rule_3": 0.08, "rule_4": 0.57, "default": 0.18 }'
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "a margin just below the default threshold is ambiguous"
+assert_contains "$out" '  reason: top-2 margin 0.39 below 0.4 (rule_4 vs default)' "the runner-up may be the none option"
+reset_log
+unset FM_JEV_DISPATCH_MARGIN
+write_response "$RESPONSE" rule_1 0.99 '{ "rule_1": 0.52996, "rule_2": 0.13, "rule_3": 0.12, "rule_4": 0.11, "default": 0.11004 }'
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "a true margin below the threshold stays ambiguous despite display rounding"
+assert_contains "$out" '  reason: top-2 margin 0.4 below 0.4 (rule_1 vs rule_2)' "the ambiguous reason keeps the rounded display margin"
+reset_log
+write_response "$RESPONSE" rule_4 0.45 '{ "rule_1": 0.10, "rule_2": 0.10, "rule_3": 0.09, "rule_4": 0.56, "default": 0.15 }'
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a derived confidence far below 0.6 still clears on a wide enough margin"
+assert_contains "$out" '  rule: rule_4 (A simple bug fix with a stated root cause.)   confidence: 0.45' "the derived confidence is still reported unchanged"
+reset_log
+write_response "$RESPONSE" rule_4 0.56 '{ "rule_1": 0.0, "rule_2": 0.25, "rule_3": 0.0, "rule_4": 0.65, "default": 0.10 }'
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a margin exactly at the threshold clears"
+reset_log
+TYPESAFE_API_KEY=$KEY FM_JEV_DISPATCH_MARGIN=.5 run code out err "$BRIEF"
+assert_contains "$out" '  reason: top-2 margin 0.4 below 0.5 (rule_4 vs rule_2)' "a leading-dot environment margin is normalized before the gate"
+printf '%s\n' 'FM_JEV_DISPATCH_MARGIN=0.2' > "$HOME_DIR/.env"
+reset_log
+write_response "$RESPONSE" rule_4 0.26 '{ "rule_1": 0.02, "rule_2": 0.30, "rule_3": 0.02, "rule_4": 0.41, "default": 0.25 }'
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  reason: top-2 margin 0.11 below 0.2 (rule_4 vs rule_2)' "FM_JEV_DISPATCH_MARGIN in .env sets the threshold"
+reset_log
+TYPESAFE_API_KEY=$KEY FM_JEV_DISPATCH_MARGIN=0.1 run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "the environment wins over .env"
+rm -f "$HOME_DIR/.env"
+for bad_margin in 0 1.5 -0.2 abc . 0.3x; do
+  reset_log
+  TYPESAFE_API_KEY=$KEY FM_JEV_DISPATCH_MARGIN=$bad_margin run code out err "$BRIEF"
+  expect_code 2 "$code" "invalid margin exits 2: $bad_margin"
+  assert_contains "$err" 'FM_JEV_DISPATCH_MARGIN must be a number in (0, 1]' "invalid margin is named: $bad_margin"
+  assert_absent "$LOG/argv" "invalid margin never reaches the network: $bad_margin"
+done
+write_response "$RESPONSE" rule_4 0.9
+pass "margin gate: option-count invariant, inclusive threshold, environment then .env, invalid values refused"
+
+# --- beats: precedence renders as tie-break sentences on both options -------------
+reset_log
+jq '.rules[1].beats = [{"rule": 4, "when": "the deliverable is an image"}] | .rules[3].beats = [{"rule": 1}]' "$BASE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "rules with beats resolve"
+body=$(cat "$LOG/body")
+assert_equals 'The task generates images. Tie-break: when rule_4 also fits and the deliverable is an image, choose this option over rule_4.' "$(jq -r '.questions.rule.criteria.rule_2' <<<"$body")" "the winner carries a conditional tie-break"
+assert_equals 'A simple bug fix with a stated root cause. Tie-break: when rule_1 also fits, choose this option over rule_1. Tie-break: when rule_2 also fits and the deliverable is an image, choose rule_2 over this option.' "$(jq -r '.questions.rule.criteria.rule_4' <<<"$body")" "an option can both win and lose, winner sentences first"
+assert_equals 'New feature work on the app. Tie-break: when rule_4 also fits, choose rule_4 over this option.' "$(jq -r '.questions.rule.criteria.rule_1' <<<"$body")" "the loser carries an unconditional tie-break"
+# shellcheck disable=SC2016  # literal backticks in the expected question text
+assert_contains "$(jq -r '.questions.rule.instructions' <<<"$body")" 'follow the Tie-break sentences at the end of the options; any rule whose condition fits wins over `default`.' "the instructions point at the tie-break sentences and rank every fitting rule over default"
+assert_not_contains "$body" '"beats"' "the beats field itself never leaves the machine"
+cp "$BASE_RULES" "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+body=$(cat "$LOG/body")
+assert_not_contains "$body" 'Tie-break' "rules without beats send the question unchanged"
+reset_log
+jq '.rules[0].beats = [{"rule": 2, "when": "both fit"}] | .rules[1].beats = [{"rule": 1, "when": "both fit"}, {"rule": 3}]' "$BASE_RULES" > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a conditional pair and non-cyclic chain remain valid"
+cp "$BASE_RULES" "$RULES"
+pass "beats: tie-break sentences, conditional pairs, non-cyclic chains, and no-beats behavior"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log
-write_response "$RESPONSE" rule_3 0.95
+write_response "$RESPONSE" rule_3 0.95 '{ "rule_1": 0.01, "rule_2": 0.01, "rule_3": 0.96, "rule_4": 0.01, "default": 0.01 }'
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "escalate exits 0"
 assert_contains "$out" '  status: escalate' "approval-gated rule escalates"
@@ -367,7 +444,7 @@ pass "escalate: a rule declared approval: captain never yields a profile"
 
 # --- rule floor fails: fall through to default -------------------------------
 reset_log
-write_response "$RESPONSE" rule_1 0.97
+write_response "$RESPONSE" rule_1 0.97 '{ "rule_1": 0.96, "rule_2": 0.01, "rule_3": 0.01, "rule_4": 0.01, "default": 0.01 }'
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "rule floor fall-through still resolves"
 assert_contains "$out" '  note: rule rule_1 floor model:fable below 20%: fall through to default' "rule floor fall-through is explained"
@@ -384,7 +461,7 @@ pass "rule floor: known shortfall falls through while unavailable evidence escal
 
 # --- declared provider and profile floor --------------------------------------
 reset_log
-write_response "$RESPONSE" rule_2 0.99
+write_response "$RESPONSE" rule_2 0.99 '{ "rule_1": 0.01, "rule_2": 0.96, "rule_3": 0.01, "rule_4": 0.01, "default": 0.01 }'
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: pi:openai-codex/gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%' "declared provider routes a Pi profile to the codex row"
 assert_contains "$out" 'candidate: codex:gpt-5.6-sol  provider=codex  scope=all_models  remaining=31%  spendPriority=-  runway=projected_exhaustion  -> not eligible: profile floor all_models below 50%' "profile floor makes a candidate ineligible with its reason"
@@ -488,7 +565,7 @@ pass "provider-wide and exact quota rows combine into one limiting candidate"
 
 # --- default choice ------------------------------------------------------------
 reset_log
-write_response "$RESPONSE" default 0.88
+write_response "$RESPONSE" default 0.88 '{ "rule_1": 0.01, "rule_2": 0.01, "rule_3": 0.01, "rule_4": 0.01, "default": 0.96 }'
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  rule: default (No listed rule applies to this task.)' "default names the fixed neutral none option"
 assert_contains "$out" '  note: no rule matched' "default is explained"
@@ -499,7 +576,7 @@ pass "default: no rule matched resolves among the default profiles"
 reset_log
 TIE="$TMP_ROOT/tie.json"
 write_quota "$TIE" 0.5 0.5
-write_response "$RESPONSE" default 0.88
+write_response "$RESPONSE" default 0.88 '{ "rule_1": 0.01, "rule_2": 0.01, "rule_3": 0.01, "rule_4": 0.01, "default": 0.96 }'
 TYPESAFE_API_KEY=$KEY QUOTA_AXI_FIXTURE="$TIE" run code out err "$BRIEF"
 assert_contains "$out" '  status: escalate' "tie escalates"
 assert_contains "$out" '  reason: genuine spendPriority tie' "tie is named"
@@ -627,7 +704,15 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"grok","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
   '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|use profiles whose harness lacks one authoritative provider family require provider: opencode' \
   '{"rules":[{"when":"x","use":{"harness":"rovo"}}]}|use profiles whose harness lacks one authoritative provider family require provider: rovo' \
-  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"pi","model":"anthropic/claude-sonnet-5"}}|default profiles whose harness lacks one authoritative provider family require provider: pi'; do
+  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"pi","model":"anthropic/claude-sonnet-5"}}|default profiles whose harness lacks one authoritative provider family require provider: pi' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"},"beats":[]},{"when":"y","use":{"harness":"codex"}}]}|beats must be a non-empty array of {rule, when?} naming other rules by 1-based number, each at most once, with when a non-empty string when present' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"},"beats":[{"rule":3}]},{"when":"y","use":{"harness":"codex"}}]}|beats must be a non-empty array of {rule, when?} naming other rules by 1-based number, each at most once, with when a non-empty string when present' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"},"beats":[{"rule":1}]},{"when":"y","use":{"harness":"codex"}}]}|beats must be a non-empty array of {rule, when?} naming other rules by 1-based number, each at most once, with when a non-empty string when present' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"},"beats":[{"rule":1.5}]},{"when":"y","use":{"harness":"codex"}}]}|beats must be a non-empty array of {rule, when?} naming other rules by 1-based number, each at most once, with when a non-empty string when present' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"},"beats":[{"rule":2},{"rule":2,"when":"z"}]},{"when":"y","use":{"harness":"codex"}}]}|beats must be a non-empty array of {rule, when?} naming other rules by 1-based number, each at most once, with when a non-empty string when present' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"},"beats":[{"rule":2,"when":""}]},{"when":"y","use":{"harness":"codex"}}]}|beats must be a non-empty array of {rule, when?} naming other rules by 1-based number, each at most once, with when a non-empty string when present' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"},"beats":[{"rule":2}]},{"when":"y","use":{"harness":"codex"},"beats":[{"rule":1}]}]}|two rules must not beat each other unconditionally; give at least one of the pair a when condition' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"},"beats":[{"rule":2,"when":"fits"}]},{"when":"y","use":{"harness":"codex"},"beats":[{"rule":3,"when":"fits"}]},{"when":"z","use":{"harness":"codex"},"beats":[{"rule":1,"when":"fits"}]}]}|beats must not form a cycle of three or more rules: rule_1 -> rule_2 -> rule_3 -> rule_1'; do
   printf '%s\n' "${bad%%|*}" > "$RULES"
   TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
   expect_code 2 "$code" "malformed rules exit 2: ${bad#*|}"
