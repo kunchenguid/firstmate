@@ -207,6 +207,25 @@ test_local_default_fallback_when_origin_is_unreachable() {
   pass "merge-local falls back to the local default when origin is unreachable"
 }
 
+test_local_default_fallback_when_remote_branch_is_not_local() {
+  local case_dir project id=task-remote-only-default
+  case_dir=$(make_case remote-only-default "$id")
+  project=$case_dir/project
+  git --git-dir="$case_dir/origin.git" update-ref refs/heads/develop refs/heads/main
+  git --git-dir="$case_dir/origin.git" update-ref -d refs/heads/main
+  git --git-dir="$case_dir/origin.git" symbolic-ref HEAD refs/heads/develop
+  git -C "$project" fetch -q origin
+  git -C "$project" remote set-head origin --delete
+  commit_on "$project" "fm/$id" crew.txt
+  git -C "$project" checkout -q main
+
+  run_merge "$case_dir" "$id" >/dev/null \
+    || fail "merge-local refused the local default when origin's default branch was not local"
+  [ "$(git -C "$project" rev-parse main)" = "$(git -C "$project" rev-parse "fm/$id")" ] \
+    || fail "merge-local selected a remote-only landing branch"
+  pass "merge-local uses a local branch when origin's default is remote-only"
+}
+
 test_recorded_base_without_default_branch_merges() {
   local case_dir project id=task-no-default
   case_dir=$(make_case no-default "$id")
@@ -275,6 +294,7 @@ test_metadata_base_is_authoritative
 test_absent_metadata_base_uses_default
 test_remote_default_without_origin_head_is_used
 test_local_default_fallback_when_origin_is_unreachable
+test_local_default_fallback_when_remote_branch_is_not_local
 test_recorded_base_without_default_branch_merges
 test_invalid_metadata_base_refuses
 test_diverged_branch_refuses

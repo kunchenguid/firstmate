@@ -9,8 +9,11 @@ fm_local_default_branch() {
   local dir=$1 ref branch
   ref=$(git -C "$dir" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
-    printf '%s\n' "${ref#origin/}"
-    return 0
+    branch=${ref#origin/}
+    if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
+      printf '%s\n' "$branch"
+      return 0
+    fi
   fi
   for branch in main master; do
     if git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
@@ -36,7 +39,7 @@ fm_remote_default_branch() {
 fm_local_only_default_branch() {
   local dir=$1 branch
   branch=$(fm_remote_default_branch "$dir" 2>/dev/null || true)
-  if [ -n "$branch" ]; then
+  if [ -n "$branch" ] && git -C "$dir" show-ref --verify --quiet "refs/heads/$branch"; then
     printf '%s\n' "$branch"
     return 0
   fi
