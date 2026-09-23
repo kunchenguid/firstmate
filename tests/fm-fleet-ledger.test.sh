@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # tests/fm-fleet-ledger.test.sh - the opt-in fleet activity ledger, driven
 # through the real producers: bin/fm-spawn.sh (fake tmux, real git worktree),
-# the real watcher through bin/fm-watch-checkpoint.sh, bin/fm-merge-local.sh,
-# the shared PR merge outcome in bin/fm-merge-outcome-lib.sh, and
+# the real watcher through bin/fm-watch-checkpoint.sh, bin/fm-pr-check.sh,
+# bin/fm-merge-local.sh, the shared PR merge outcome in bin/fm-merge-outcome-lib.sh, and
 # bin/fm-teardown.sh. docs/fleet-ledger.md owns the record contract.
 set -u
 
@@ -138,6 +138,28 @@ EOF
   pass "flag on: a PR merge is recorded once, after the task's pending status lines"
 }
 
+test_flag_on_records_a_pr_registration() {
+  local pr_url=https://github.com/acme/sample/pull/9 rows out
+  make_case on-pr-ready on
+  # An unreadable forge answer: no draft refusal and no recorded head.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$FAKEBIN/gh"
+  chmod +x "$FAKEBIN/gh"
+  out=$(in_home "$ROOT/bin/fm-spawn.sh" "$TASK" "$PROJ_DIR" --mode direct-PR --yolo off 2>&1) \
+    || fail "spawn failed: $out"
+  printf 'done: PR %s\n' "$pr_url" >> "$HOME_DIR/state/$TASK.status"
+  out=$(in_home "$ROOT/bin/fm-pr-check.sh" "$TASK" "$pr_url" 2>&1) || fail "PR registration failed: $out"
+  out=$(in_home env FM_PR_CHECK_MERGE=1 "$ROOT/bin/fm-pr-check.sh" "$TASK" "$pr_url" 2>&1) \
+    || fail "merge-time PR re-record failed: $out"
+  rows=$(ledger_rows '[.event, .state, .pr]')
+  assert_equals "$(cat <<EOF
+["task.dispatched",null,null]
+["task.status","done",null]
+["task.pr_ready",null,"$pr_url"]
+EOF
+)" "$rows" "PR registration rows"
+  pass "flag on: registering a PR records task.pr_ready with its full URL after the task's pending status lines, and the merge-time re-record adds nothing"
+}
+
 test_flag_off_writes_nothing() {
   local leftovers
   make_case off-lifecycle off
@@ -149,4 +171,5 @@ test_flag_off_writes_nothing() {
 
 test_flag_on_records_the_task_lifecycle
 test_flag_on_records_a_pr_merge_once
+test_flag_on_records_a_pr_registration
 test_flag_off_writes_nothing

@@ -1,6 +1,6 @@
 # Fleet activity ledger
 
-The fleet activity ledger is an opt-in, append-only file that outside tools can read to follow what a firstmate home is doing: which tasks were dispatched, what their workers reported, when their work merged, and when they were cleaned up.
+The fleet activity ledger is an opt-in, append-only file that outside tools can read to follow what a firstmate home is doing: which tasks were dispatched, what their workers reported, when a PR became ready for review, when their work merged, and when they were cleaned up.
 It is the stable, documented hook for firstmate status; this page is its contract.
 
 ## Turning it on and off
@@ -20,7 +20,7 @@ Every record carries these members:
 | ------- | --------------------------------------------------------- |
 | `v`     | Record format version, currently `1`                      |
 | `ts`    | Unix time in seconds when the record was written          |
-| `event` | One of the four event names below                         |
+| `event` | One of the five event names below                         |
 | `task`  | The firstmate task id the record is about                 |
 
 Readers must ignore members and events they do not recognize, so later versions can add them without breaking existing readers.
@@ -31,10 +31,14 @@ Readers must ignore members and events they do not recognize, so later versions 
 | ------------------ | ---------------------------------------------- | ------------ |
 | `task.dispatched`  | `kind`, `project`, `harness`, `model`          | A new worker or second mate is launched. A relaunch of an existing task is not recorded. |
 | `task.status`      | `state`, `key`, `text`                         | A complete, nonblank line in the task's status log is captured. |
+| `task.pr_ready`    | `pr`                                           | Firstmate records the task's PR as ready for review. |
 | `task.merged`      | `via` (`"pr"` or `"local"`), plus `pr` when `via` is `"pr"` | The task's PR merge is recorded, or its local-only branch landed. |
 | `task.cleaned_up`  | none                                           | The task's worker and local copy were removed. |
 
 `task.dispatched` members: `kind` is `ship`, `scout`, or `secondmate`; `project` is the project directory name, or `null` for a remote second mate; `harness` names the agent tool; `model` is the requested model, or `null` for the tool's default.
+
+`task.pr_ready` members: `pr` is the PR's full URL.
+It is written each time firstmate records a PR for the task, so registering a replacement PR, or the same PR again, writes another record; recording the PR again as part of merging it writes none.
 
 `task.status` members: `state` is the status line's leading word, such as `working`, `needs-decision`, `blocked`, `paused`, `done`, `failed`, or `resolved`, or `null` when the line has none.
 `key` is the line's `[key=...]` decision key, or `null`.
@@ -46,6 +50,7 @@ Example:
 {"v":1,"ts":1790132857,"event":"task.dispatched","task":"fix-login","kind":"ship","project":"webapp","harness":"claude","model":null}
 {"v":1,"ts":1790132870,"event":"task.status","task":"fix-login","state":"working","key":null,"text":" bug reproduced"}
 {"v":1,"ts":1790133400,"event":"task.status","task":"fix-login","state":"done","key":null,"text":" PR https://github.com/acme/webapp/pull/7 checks green"}
+{"v":1,"ts":1790133410,"event":"task.pr_ready","task":"fix-login","pr":"https://github.com/acme/webapp/pull/7"}
 {"v":1,"ts":1790133900,"event":"task.merged","task":"fix-login","via":"pr","pr":"https://github.com/acme/webapp/pull/7"}
 {"v":1,"ts":1790133960,"event":"task.cleaned_up","task":"fix-login"}
 ```
@@ -54,7 +59,7 @@ Example:
 
 - Status records normally come from the supervision monitor's regular poll, so they may trail the status line by one poll interval.
   Lines written while no monitor runs are picked up on its next run.
-  Recording `task.merged` or `task.cleaned_up` first records that task's pending status lines.
+  Recording `task.pr_ready`, `task.merged`, or `task.cleaned_up` first records that task's pending status lines.
 - Captured status lines are delivered at least once unless a write fails or a crash loses unflushed records: an interrupted capture can repeat records, so a reader that must not double-count should tolerate duplicates.
 - A status record can appear just before its task's `task.dispatched` record when the worker writes a status line in the moment between its launch and that record.
 - When a home turns the ledger on, status lines already in its live tasks' logs are recorded on the first poll, while tasks dispatched or cleaned up while the flag was absent have no record of that.
@@ -69,7 +74,8 @@ Example:
 These are possible follow-ups, deliberately left out of this version:
 
 - session start, away-mode, and quiet-mode events;
-- relaunch events and a separate record when a PR is first recorded;
+- relaunch events;
+- whether a worker is currently working or idle, and when a turn ends; subscribe to the Herdr runtime's own `pane.agent_status_changed` events for that ([Push events and polling fallback](herdr-backend.md#push-events-and-polling-fallback));
 - sequence numbers and gap detection;
 - rotation and continuity across rotated files;
 - backfill or replay of events from before the ledger was turned on;

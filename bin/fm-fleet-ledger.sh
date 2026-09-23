@@ -11,12 +11,15 @@
 # Producers:
 #   bin/fm-spawn.sh              dispatched (fresh spawns only, never relaunch)
 #   bin/fm-watch.sh              capture, once per poll cycle
+#   bin/fm-pr-check.sh           pr_ready (a PR registered for review, not the
+#                                merge-time re-record from bin/fm-pr-merge.sh)
 #   bin/fm-merge-outcome-lib.sh  merged ... pr (a recorded PR merge)
 #   bin/fm-merge-local.sh        merged ... local (a local-only landing)
 #   bin/fm-teardown.sh           cleaned_up
 #
 # Usage:
 #   fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model>
+#   fm-fleet-ledger.sh pr_ready <task> <url>
 #   fm-fleet-ledger.sh merged <task> pr <url>
 #   fm-fleet-ledger.sh merged <task> local
 #   fm-fleet-ledger.sh cleaned_up <task>
@@ -29,8 +32,8 @@
 # for a later capture. Records are appended before the offset is saved, so an
 # interrupted capture repeats records rather than losing them. Without any
 # grown log, capture returns after one size listing and sources nothing.
-# merged and cleaned_up first capture their own task, so its status records
-# precede them. cleaned_up then deletes the task's offset, because teardown
+# pr_ready, merged, and cleaned_up first capture their own task, so its status
+# records precede them. cleaned_up then deletes the task's offset, because teardown
 # retires that status log right after. dispatched deletes any leftover offset
 # so a reused task id starts at byte 0 of its fresh log.
 # Every write holds state/.fleet-ledger.lock.
@@ -54,7 +57,7 @@ LOCK="$STATE/.fleet-ledger.lock"
 TEXT_MAX_CHARS=2000
 
 usage() {
-  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | merged <task> pr <url> | merged <task> local | cleaned_up <task> | capture" >&2
+  echo "usage: fm-fleet-ledger.sh dispatched <task> <kind> <project> <harness> <model> | pr_ready <task> <url> | merged <task> pr <url> | merged <task> local | cleaned_up <task> | capture" >&2
   exit 2
 }
 
@@ -65,6 +68,7 @@ task_ok() {
 cmd=${1:-}
 case "$cmd" in
   dispatched) { [ "$#" -eq 6 ] && task_ok "$2"; } || usage ;;
+  pr_ready) { [ "$#" -eq 3 ] && task_ok "$2" && [ -n "$3" ]; } || usage ;;
   merged)
     task_ok "${2:-}" || usage
     case "$#:${3:-}" in 4:pr) [ -n "$4" ] || usage ;; 3:local) ;; *) usage ;; esac
@@ -185,6 +189,10 @@ case "$cmd" in
     append task.dispatched "$2" \
       '{kind: ($kind | n), project: ($project | n), harness: ($harness | n), model: ($model | n)}' \
       --arg kind "$3" --arg project "$4" --arg harness "$5" --arg model "$6" || rc=1
+    ;;
+  pr_ready)
+    capture_task "$2" || rc=1
+    append task.pr_ready "$2" '{pr: $pr}' --arg pr "$3" || rc=1
     ;;
   merged)
     capture_task "$2" || rc=1
