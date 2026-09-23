@@ -96,9 +96,10 @@ Malformed configuration is an actionable error, not a candidate to rank around.
 
 ### 2. Reasoning-class fit
 
-Keep only candidates that meet the required reasoning class for this task (a simple bug fix versus very-difficult design).
-Never use `spendPriority` or remaining quota to silently replace that class.
-When every remaining candidate is tight, dispatch inside the strongest-reasoning class if one of those candidates can proceed, or stop and report that the strongest-class choice cannot proceed rather than downgrading it to spend or conserve quota.
+Keep only candidates that meet the required reasoning class for this task (a simple bug fix versus very-difficult design) and are authorized for this task under `AGENTS.md` section 4.
+A task's difficulty does not approve a model the captain reserved; a matched array containing one does not approve it either.
+Never use `spendPriority` or remaining quota to silently replace the authorized reasoning class.
+When every remaining candidate is tight, dispatch inside the strongest authorized reasoning class if one of those candidates can proceed, or stop and report that class's tight choice rather than downgrading it to spend or conserve quota.
 
 ### 3. Runway feasibility floor
 

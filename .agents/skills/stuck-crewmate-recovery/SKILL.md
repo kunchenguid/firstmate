@@ -2,7 +2,7 @@
 name: stuck-crewmate-recovery
 description: >-
   Agent-only playbook for stuck or missing ordinary Firstmate direct reports.
-  Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
+  Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, a failed steer, or a worker usage-limit error.
   Also use on the inverse case: a live crewmate reporting the no-mistakes pipeline dead, unreachable, or timed out.
   Reconciles recorded work before escalating from targeted inspection through safe relaunch or failure.
 user-invocable: false
@@ -12,7 +12,7 @@ metadata:
 
 # stuck-crewmate-recovery
 
-Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, or when a steer failed to land.
+Use this playbook when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or when a direct report is stale, looping, repeatedly confused, asking a question its brief already answers, unresponsive, a steer failed to land, or a provider usage-limit error stopped it.
 A stale or dead-endpoint report for a worker whose pull request has already landed is not a recovery case: the work is finished, so close the task through ordinary teardown (`AGENTS.md` section 7 for firstmate, the landed-work rule in `bin/fm-branch-prompt.sh` for the supervision branch) instead of this playbook, never with `--force`.
 
 Follow the crew-hosted Lavish board contract in [`docs/configuration.md`](../../../docs/configuration.md#crew-hosted-lavish-review-boards) when recovering a worker that hosts a board.
@@ -66,6 +66,15 @@ Nothing reaches the captain in that case.
 Never restart, stop, or update the shared daemon on a crewmate's claim.
 It is one instance serving every lane and home, so a restart kills other lanes' in-flight runs.
 Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
+
+## Worker usage-limit stop
+
+When a worker receives a provider usage-limit error, verify the recorded harness and model, the exact provider error, its current state, and any active validation run before deciding recovery.
+Preserve the task's local copy, commits, PR, and active run; a usage limit does not authorize aborting validation or changing its branch.
+Do not try successive models or another harness, even a lower-tier model on the same account, as a silent recovery.
+Report the blocked model and its evidence to the captain, then wait for explicit approval of a concrete replacement or for the limit to clear.
+After approval, use the guarded `fm-control.sh relaunch` path on the same work, retaining any still-active validation run and its ownership; never start a duplicate validation run to test a replacement.
+A provider usage limit is not a credential or login finding.
 
 ## Live-endpoint escalation
 
