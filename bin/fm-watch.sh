@@ -111,7 +111,8 @@
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
-#                          status, unless afk is active
+#                          status or a new leftover-state cleanup finding, unless
+#                          afk is active
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
@@ -2087,6 +2088,53 @@ heartbeat_scan_finds_actionable() {
   return "$found"
 }
 
+# Leftover-state backstop (the heartbeat's second question): does the offline
+# cleanup audit, bin/fm-hygiene-audit.sh (whose header owns the finding classes),
+# report an action or routine finding this home has not yet been woken for? The
+# surfaced set lives in .hygiene-surfaced, one finding key per line, so a
+# standing leftover wakes once rather than every heartbeat, while one that
+# clears and later returns wakes again. Pure detect: the caller enqueues first,
+# then records the captured set with mark_hygiene_surfaced. It runs only when
+# STATE is this FM_HOME's own state directory, because the audit correlates this
+# home's task records with this home's clones; it is bounded by
+# FM_HEARTBEAT_HYGIENE_TIMEOUT (default 15 seconds), and FM_HEARTBEAT_HYGIENE=0
+# disables it. An audit failure or overrun wakes nothing.
+FM_HYGIENE_CAPTURED_KEYS=''
+hygiene_scan_finds_new() {
+  local home_state state_real json new
+  FM_HYGIENE_CAPTURED_KEYS=''
+  [ "${FM_HEARTBEAT_HYGIENE:-1}" != 0 ] || return 1
+  home_state=$(CDPATH='' cd -- "$FM_HOME/state" 2>/dev/null && pwd -P) || return 1
+  state_real=$(CDPATH='' cd -- "$STATE" 2>/dev/null && pwd -P) || return 1
+  [ "$home_state" = "$state_real" ] || return 1
+  if ! command -v fm_run_timed >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$SCRIPT_DIR/fm-timeout-lib.sh"
+  fi
+  json=$(fm_run_timed "${FM_HEARTBEAT_HYGIENE_TIMEOUT:-15}" \
+    env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-hygiene-audit.sh" --json 2>/dev/null) || {
+    triage_log "leftover-state audit unavailable on heartbeat"
+    return 1
+  }
+  FM_HYGIENE_CAPTURED_KEYS=$(printf '%s\n' "$json" | jq -r '.findings[]?
+      | select(.severity == "action" or .severity == "routine")
+      | [.class, .repo // "", .branch // "", .path // "", .task // ""] | join("\t")' 2>/dev/null \
+    | LC_ALL=C sort -u) || return 1
+  new=$(printf '%s\n' "$FM_HYGIENE_CAPTURED_KEYS" \
+    | LC_ALL=C comm -23 - <(LC_ALL=C sort -u "$STATE/.hygiene-surfaced" 2>/dev/null) | sed '/^$/d')
+  [ -n "$new" ]
+}
+
+# Record the audit's captured finding set as surfaced; a cleared finding drops out.
+mark_hygiene_surfaced() {
+  local tmp="$STATE/.hygiene-surfaced.tmp.$$"
+  if printf '%s\n' "$FM_HYGIENE_CAPTURED_KEYS" | sed '/^$/d' > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$STATE/.hygiene-surfaced" 2>/dev/null || rm -f "$tmp"
+  else
+    rm -f "$tmp"
+  fi
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -2965,7 +3013,18 @@ EOF
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced || true
       wake "heartbeat"
+    elif hygiene_scan_finds_new; then
+      # Leftover state needs cleanup: same enqueue-before-suppress order, so the
+      # standing set does not re-fire on the next heartbeat.
+      fm_wake_append heartbeat heartbeat heartbeat || exit 1
+      touch "$STATE/.last-heartbeat"
+      mark_hygiene_surfaced
+      mark_all_captain_relevant_surfaced || true
+      wake "heartbeat"
     else
+      if [ -n "$FM_HYGIENE_CAPTURED_KEYS" ] || [ -s "$STATE/.hygiene-surfaced" ]; then
+        mark_hygiene_surfaced
+      fi
       if ! mark_all_captain_relevant_surfaced; then
         fm_wake_append heartbeat heartbeat heartbeat || exit 1
         touch "$STATE/.last-heartbeat"

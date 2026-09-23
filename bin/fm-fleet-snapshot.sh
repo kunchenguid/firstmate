@@ -110,6 +110,11 @@
 #     Which closed rows a home contributes is bin/fm-landed-lib.sh's rule, shared
 #     with the bearings projection so one Recently Landed section has one owner.
 #   contributions: cached owned-contribution coverage; fm-contributions.sh owns it.
+#   hygiene: the offline leftover-state audit from bin/fm-hygiene-audit.sh --json,
+#     whose header owns its finding classes and schema, plus available:true, or
+#     {available:false,reason} when it fails or exceeds FM_SNAPSHOT_HYGIENE_TIMEOUT
+#     (default 20 seconds). Each branch finding also carries backlog: the
+#     structured backlog record whose id is the branch's task id, else null.
 #   secondmate_guidance: return-channel action note for renderers and bearings.
 #
 # --contribution-input prints only the canonical backlog/tasks ownership pair,
@@ -172,6 +177,7 @@ FM_SNAPSHOT_REGISTRY_LINES=${FM_SNAPSHOT_REGISTRY_LINES:-256}
 FM_SNAPSHOT_REGISTRY_BYTES=${FM_SNAPSHOT_REGISTRY_BYTES:-65536}
 FM_SNAPSHOT_REGISTRY_RECORDS=${FM_SNAPSHOT_REGISTRY_RECORDS:-40}
 FM_SNAPSHOT_REGISTRY_TIMEOUT=${FM_SNAPSHOT_REGISTRY_TIMEOUT:-2}
+FM_SNAPSHOT_HYGIENE_TIMEOUT=${FM_SNAPSHOT_HYGIENE_TIMEOUT:-20}
 validate_positive_bound() {  # <name> <value>
   case "$2" in
     ''|*[!0-9]*|0)
@@ -204,6 +210,7 @@ validate_positive_bound FM_SNAPSHOT_REGISTRY_LINES "$FM_SNAPSHOT_REGISTRY_LINES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_BYTES "$FM_SNAPSHOT_REGISTRY_BYTES"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_RECORDS "$FM_SNAPSHOT_REGISTRY_RECORDS"
 validate_positive_bound FM_SNAPSHOT_REGISTRY_TIMEOUT "$FM_SNAPSHOT_REGISTRY_TIMEOUT"
+validate_positive_bound FM_SNAPSHOT_HYGIENE_TIMEOUT "$FM_SNAPSHOT_HYGIENE_TIMEOUT"
 FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS=${FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS:-14}
 case "$FM_SNAPSHOT_UNDATED_HOLD_AGE_DAYS" in
   ''|*[!0-9]*)
@@ -268,6 +275,9 @@ Each local per-task current-state read is bounded by FM_SNAPSHOT_CREW_STATE_TIME
 (default 10 seconds); a read that hits the bound reports state unknown. Local task
 observations run concurrently, up to FM_SNAPSHOT_LOCAL_READ_CONCURRENCY (default 8).
 Remote secondmate endpoint liveness is not probed by this command.
+The offline leftover-state audit (bin/fm-hygiene-audit.sh) is bounded by
+FM_SNAPSHOT_HYGIENE_TIMEOUT (default 20 seconds) and disclosed as unavailable
+rather than failing the snapshot.
 Terminal contradiction evidence uses
 FM_SNAPSHOT_TERMINAL_LINES, FM_SNAPSHOT_TERMINAL_BYTES, and
 FM_SNAPSHOT_TERMINAL_TIMEOUT and never becomes canonical current state.
@@ -2032,6 +2042,19 @@ secondmate_current_json "$TASKS_JSON_FILE" "$SECONDMATE_CURRENT_JSON_FILE" \
   || { echo "fm-fleet-snapshot: registered secondmate aggregation failed" >&2; exit 1; }
 secondmate_landed_from_current_json "$SECONDMATE_CURRENT_JSON_FILE" "$SECONDMATE_LANDED_JSON_FILE" \
   || { echo "fm-fleet-snapshot: secondmate landed projection failed" >&2; exit 1; }
+# The leftover-state audit is offline and bounded; a failure or overrun is
+# disclosed in the field rather than failing the whole snapshot.
+HYGIENE_JSON_FILE="$JSON_TRANSPORT_DIR/hygiene.json"
+hygiene_rc=0
+fm_run_timed "$FM_SNAPSHOT_HYGIENE_TIMEOUT" \
+  env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_PROJECTS_OVERRIDE="$PROJECTS" \
+  "$SCRIPT_DIR/fm-hygiene-audit.sh" --json > "$HYGIENE_JSON_FILE" 2>/dev/null || hygiene_rc=$?
+if [ "$hygiene_rc" = 0 ] && jq -e '.schema == "fm-hygiene-audit.v1"' "$HYGIENE_JSON_FILE" >/dev/null 2>&1; then
+  jq '. + {available:true}' "$HYGIENE_JSON_FILE" > "$HYGIENE_JSON_FILE.tmp" && mv -f "$HYGIENE_JSON_FILE.tmp" "$HYGIENE_JSON_FILE"
+else
+  if [ "$hygiene_rc" = 124 ]; then hygiene_reason=timeout; else hygiene_reason="audit failed"; fi
+  jq -n --arg reason "$hygiene_reason" '{available:false,reason:$reason}' > "$HYGIENE_JSON_FILE"
+fi
 
 jq -n \
   --arg generated "$SNAPSHOT_NOW" \
@@ -2048,6 +2071,7 @@ jq -n \
   --slurpfile scout_reports "$SCOUT_REPORTS_JSON_FILE" \
   --slurpfile secondmate_current "$SECONDMATE_CURRENT_JSON_FILE" \
   --slurpfile secondmate_landed "$SECONDMATE_LANDED_JSON_FILE" \
+  --slurpfile hygiene "$HYGIENE_JSON_FILE" \
   '($backlog[0]) as $backlog
    | ($tasks[0]) as $tasks
    | ($main_inventory[0]) as $main_inventory
@@ -2069,6 +2093,7 @@ jq -n \
      scout_reports:($scout_reports | map(. + {kind:report_kind(.id)})),
      secondmate_current:$secondmate_current,
      secondmate_landed:$secondmate_landed,
+     hygiene:($hygiene[0] | if .available then .findings |= map(if .class == "unlanded-branch" or .class == "landed-branch" then . + {backlog:backlog_by_id(.task)} else . end) else . end),
      secondmate_guidance:{
        note:"For kind=secondmate, bearings selects validated structured state from that registered home; parent events and bounded terminal evidence are fallback-only supplements and never current-state authority."
      }
