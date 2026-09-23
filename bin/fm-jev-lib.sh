@@ -30,10 +30,11 @@
 # child environment. Nothing prints, logs, or writes the key.
 #
 # Public helpers:
-#   fm_jev_decide <state> <questions-json>
-#     POST {model, state, questions}. <state> is a JSON object or array when
-#     the argument parses as one, otherwise a string; <questions-json> is a
-#     JSON object. Prints the full JSON response on stdout. Non-zero on
+#   fm_jev_decide <state> <questions-json> [--string]
+#     POST {model, state, questions}. By default, <state> is a JSON object or
+#     array when the argument parses as one, otherwise a string; --string
+#     forces a JSON string. <questions-json> is a JSON object. Prints the full
+#     JSON response on stdout. Non-zero on
 #     hard failure: 2 for usage/config (missing args, missing key, missing
 #     jq/curl, questions not a JSON object), 1 for transport or a non-JSON /
 #     non-200 response. Sets FM_JEV_LAST_ROUTE, FM_JEV_LAST_URL,
@@ -155,8 +156,8 @@ _fm_jev_state_max() {
 # The key variable is local to the caller of this function (fm_jev_decide).
 _fm_jev_resolve_route() {
   local typesafe_key openrouter_key home route
-  typesafe_key=${TYPESAFE_API_KEY:-}
-  openrouter_key=${OPENROUTER_API_KEY:-}
+  typesafe_key=${TYPESAFE_API_KEY_PRIVATE:-${TYPESAFE_API_KEY:-}}
+  openrouter_key=${OPENROUTER_API_KEY_PRIVATE:-${OPENROUTER_API_KEY:-}}
   home=$(_fm_jev_home)
   if [ -z "$typesafe_key" ]; then
     typesafe_key=$(fmx_env_get TYPESAFE_API_KEY "$home/.env")
@@ -220,19 +221,28 @@ _fm_jev_resolve_route() {
 }
 
 fm_jev_decide() {
-  local state questions request resp_file http t0 t1 timeout
+  local state questions request resp_file http t0 t1 timeout state_mode
   local _fm_jev_route _fm_jev_url _fm_jev_model _fm_jev_key
+  export -n TYPESAFE_API_KEY OPENROUTER_API_KEY TYPESAFE_API_KEY_PRIVATE OPENROUTER_API_KEY_PRIVATE 2>/dev/null || true
   FM_JEV_LAST_ROUTE=''
   FM_JEV_LAST_URL=''
   FM_JEV_LAST_MODEL=''
   FM_JEV_LAST_HTTP=''
   FM_JEV_LAST_LATENCY_MS=''
-  if [ $# -ne 2 ]; then
-    _fm_jev_err "usage: fm_jev_decide <state> <questions-json>"
+  if [ $# -lt 2 ] || [ $# -gt 3 ]; then
+    _fm_jev_err "usage: fm_jev_decide <state> <questions-json> [--string]"
     return 2
   fi
   state=$1
   questions=$2
+  state_mode=auto
+  if [ $# -eq 3 ]; then
+    if [ "$3" != --string ]; then
+      _fm_jev_err "usage: fm_jev_decide <state> <questions-json> [--string]"
+      return 2
+    fi
+    state_mode=string
+  fi
   command -v jq >/dev/null 2>&1 || { _fm_jev_err "jq required"; return 2; }
   command -v curl >/dev/null 2>&1 || { _fm_jev_err "curl not installed"; return 2; }
   printf '%s' "$questions" | jq -e 'type == "object"' >/dev/null 2>&1 || {
@@ -246,7 +256,7 @@ fm_jev_decide() {
   FM_JEV_LAST_URL=$_fm_jev_url
   # shellcheck disable=SC2034 # Output globals, read by the sourcing caller.
   FM_JEV_LAST_MODEL=$_fm_jev_model
-  if printf '%s' "$state" | jq -e 'type == "object" or type == "array"' >/dev/null 2>&1; then
+  if [ "$state_mode" = auto ] && printf '%s' "$state" | jq -e 'type == "object" or type == "array"' >/dev/null 2>&1; then
     request=$(jq -n --arg model "$_fm_jev_model" --argjson state "$state" --argjson questions "$questions" \
       '{model: $model, state: $state, questions: $questions}') || {
       _fm_jev_err "could not build request"
@@ -263,8 +273,6 @@ fm_jev_decide() {
   timeout=$(_fm_jev_timeout)
   t0=$(_fm_jev_now_ms)
   http=$(
-    unset TYPESAFE_API_KEY OPENROUTER_API_KEY
-    unset TYPESAFE_API_KEY_PRIVATE OPENROUTER_API_KEY_PRIVATE
     printf '%s' "$request" | curl -sS --max-time "$timeout" -o "$resp_file" -w '%{http_code}' \
       -X POST "$_fm_jev_url" -H 'Content-Type: application/json' \
       -H @/dev/fd/3 3< <(printf 'Authorization: Bearer %s\n' "$_fm_jev_key") \
@@ -335,6 +343,40 @@ FM_JEV_CHOICE_TOP2_JQ='def jev_choice_top2:
   | {first: ($s[0].key // null), second: ($s[1].key // null), raw_margin: $raw_margin,
      margin: (($raw_margin * 10000 | round) / 10000)};'
 
+fm_jev_has_sensitive_key() {
+  local text
+  if [ $# -ne 1 ]; then
+    _fm_jev_err "usage: fm_jev_has_sensitive_key <text>"
+    return 2
+  fi
+  text=$1
+  printf '%s' "$text" | awk '
+    BEGIN {
+      assignment_pattern = "(^|[^[:alnum:]_])([-[:alnum:]_.]+)[\042\047]?[ \t]*[:=]"
+      sensitive_suffix_pattern = "(password|passwd|pwd|pass|secret|token|apikey|secretkey|accesskey|privatekey|clientsecret|auth|credential)$"
+    }
+    {
+      remaining = $0
+      while (length(remaining) > 0) {
+        if (!match(remaining, assignment_pattern)) break
+        assignment = substr(remaining, RSTART, RLENGTH)
+        boundary = substr(assignment, 1, 1)
+        key_name = assignment
+        if (boundary ~ /[^[:alnum:]_]/) key_name = substr(assignment, 2)
+        sub(/[\042\047]?[ \t]*[:=]$/, "", key_name)
+        normalized_key = tolower(key_name)
+        gsub(/[-_.]/, "", normalized_key)
+        if (normalized_key ~ sensitive_suffix_pattern) {
+          found = 1
+          exit
+        }
+        remaining = substr(remaining, RSTART + RLENGTH)
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  '
+}
+
 fm_jev_compact_state() {
   local state max bytes
   if [ $# -ne 1 ]; then
@@ -351,14 +393,182 @@ fm_jev_compact_state() {
     return 1
   fi
   printf '%s' "$state" | awk '
+    function flow_value_end(text,    depth, active_quote, escaped, pos, character, expected_open, stack) {
+      if (substr(text, 1, 1) != "{" && substr(text, 1, 1) != "[") return 0
+      depth = 1
+      stack[depth] = substr(text, 1, 1)
+      active_quote = ""
+      escaped = 0
+      for (pos = 2; pos <= length(text); pos++) {
+        character = substr(text, pos, 1)
+        if (active_quote != "") {
+          if (escaped) escaped = 0
+          else if (character == "\\") escaped = 1
+          else if (character == active_quote) active_quote = ""
+        } else if (character == "\"" || character == "\047") {
+          active_quote = character
+        } else if (character == "{" || character == "[") {
+          depth++
+          stack[depth] = character
+        } else if (character == "}" || character == "]") {
+          expected_open = character == "}" ? "{" : "["
+          if (depth < 1 || stack[depth] != expected_open) return 0
+          depth--
+          if (depth == 0) return pos
+        }
+      }
+      return 0
+    }
     {
       if (NR > 1) buf = buf "\n"
       buf = buf $0
     }
     END {
-      gsub(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*-----END [A-Z0-9 ]*PRIVATE KEY-----/, "[redacted]", buf)
-      while (match(buf, /(TYPESAFE_API_KEY|OPENROUTER_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|FMX_PAIRING_TOKEN|FM_MAIL_PASS|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|GITHUB_TOKEN|GH_TOKEN|JEV_API_KEY)=[^[:space:]]+/)) {
+      while (match(buf, /-----BEGIN [A-Z0-9 ]*PRIVATE KEY( [A-Z0-9]+)?-----/)) {
+        prefix = substr(buf, 1, RSTART - 1)
+        tail = substr(buf, RSTART + RLENGTH)
+        if (match(tail, /-----END [A-Z0-9 ]*PRIVATE KEY( [A-Z0-9]+)?-----/)) {
+          suffix = substr(tail, RSTART + RLENGTH)
+          buf = prefix "[redacted]" suffix
+        } else {
+          buf = prefix "[redacted]"
+        }
+      }
+      credential_uri_pattern = "[[:alpha:]][[:alnum:].+-]*://[^/@:?#[:space:]]*:[^/@?#[:space:]]+@[^/@?#[:space:]]+"
+      while (match(buf, credential_uri_pattern)) {
         buf = substr(buf, 1, RSTART - 1) "[redacted]" substr(buf, RSTART + RLENGTH)
+      }
+      email_pattern = "(^|[^[:alnum:]_.%+-])[[:alnum:]_%+.-]+@[[:alnum:]][[:alnum:].-]*[.][[:alpha:]][[:alpha:]]+([^[:alnum:]_-]|$)"
+      while (match(buf, email_pattern)) {
+        buf = substr(buf, 1, RSTART - 1) "[redacted]" substr(buf, RSTART + RLENGTH)
+      }
+      phone_pattern = "(^|[^[:alnum:]])([+][0-9][0-9() ./-]*[0-9]|[0-9][0-9() ./-]*[-./() ][0-9() ./-]*[0-9])([^[:alnum:]]|$)"
+      date_pattern = "^([0-9][0-9][0-9][0-9][./ -][0-9][0-9]?[./ -][0-9][0-9]?|[0-9][0-9]?[./ -][0-9][0-9]?[./ -][0-9][0-9][0-9][0-9])([ Tt][0-9][0-9](:[0-9][0-9](:[0-9][0-9]([.][0-9]+)?)?)?([Zz]|[+-][0-9][0-9]:?[0-9][0-9])?)?$"
+      search_from = 1
+      while (search_from <= length(buf)) {
+        tail = substr(buf, search_from)
+        if (!match(tail, phone_pattern)) break
+        start = search_from + RSTART - 1
+        match_length = RLENGTH
+        phone = substr(tail, RSTART, match_length)
+        if (phone ~ /^[^[:alnum:]]/) phone = substr(phone, 2)
+        if (phone ~ /[^[:alnum:]]$/) phone = substr(phone, 1, length(phone) - 1)
+        digits = phone
+        gsub(/[^0-9]/, "", digits)
+        if (length(digits) >= 7 && phone !~ date_pattern) {
+          buf = substr(buf, 1, start - 1) "[redacted]" substr(buf, start + match_length)
+          search_from = start + 10
+        } else {
+          search_from = start + match_length
+        }
+      }
+      while (match(buf, /(TYPESAFE_API_KEY|OPENROUTER_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|FMX_PAIRING_TOKEN|FM_MAIL_PASS|GITHUB_TOKEN|GH_TOKEN|JEV_API_KEY)=[^[:space:]]+/)) {
+        buf = substr(buf, 1, RSTART - 1) "[redacted]" substr(buf, RSTART + RLENGTH)
+      }
+      while (match(tolower(buf), /aws_(secret_access_key|access_key_id)[[:space:]]*[:=][[:space:]]*[^[:space:]]+/)) {
+        buf = substr(buf, 1, RSTART - 1) "[redacted]" substr(buf, RSTART + RLENGTH)
+      }
+      assignment_pattern = "(^|[^[:alnum:]_])([-[:alnum:]_.]+)[\042\047]?[ \t]*[:=][ \t]*"
+      sensitive_suffix_pattern = "(password|passwd|pwd|pass|secret|token|apikey|secretkey|accesskey|privatekey|clientsecret|auth|credential)$"
+      search_from = 1
+      while (search_from <= length(buf)) {
+        tail = substr(buf, search_from)
+        if (!match(tail, assignment_pattern)) break
+        key_start = search_from + RSTART - 1
+        match_length = RLENGTH
+        assignment = substr(tail, RSTART, match_length)
+        boundary = substr(assignment, 1, 1)
+        key_name = assignment
+        if (boundary ~ /[^[:alnum:]_]/) key_name = substr(assignment, 2)
+        sub(/[\042\047]?[ \t]*[:=][ \t]*$/, "", key_name)
+        normalized_key = tolower(key_name)
+        gsub(/[-_.]/, "", normalized_key)
+        if (normalized_key !~ sensitive_suffix_pattern) {
+          search_from = key_start + match_length
+        } else {
+          prefix = substr(buf, 1, key_start - 1)
+          if (key_start > 1 && boundary ~ /[^[:alnum:]_]/) prefix = prefix boundary
+          tail = substr(buf, key_start + match_length)
+          value_start = 1
+          while (substr(tail, value_start, 1) ~ /[ \t]/) value_start++
+          first_value_char = substr(tail, value_start, 1)
+          if (first_value_char == "{" || first_value_char == "[") {
+            structured_tail = substr(tail, value_start)
+            structure_end = flow_value_end(structured_tail)
+            if (structure_end > 0) {
+              buf = prefix "[redacted]" substr(tail, value_start + structure_end)
+            } else {
+              buf = prefix "[redacted]"
+            }
+          } else {
+            newline = index(tail, "\n")
+            indicator = newline ? substr(tail, 1, newline - 1) : tail
+            sub(/\r$/, "", indicator)
+            empty_indicator = indicator
+            sub(/[ \t]*#[^\n]*$/, "", empty_indicator)
+            blank_value = empty_indicator ~ /^[ \t]*$/
+            if (blank_value || indicator ~ /^[ \t]*[|>][+-]?[1-9]?[+-]?[ \t]*(#[^\n]*)?$/) {
+              block_tail = newline ? substr(tail, newline + 1) : ""
+              token_start = key_start
+              if (boundary ~ /[^[:alnum:]_]/) token_start++
+              line_start = token_start - 1
+              while (line_start > 0 && substr(buf, line_start, 1) != "\n") line_start--
+              line_head = substr(buf, line_start + 1, token_start - line_start - 1)
+              match(line_head, /^[ \t]*/)
+              key_indent = RLENGTH
+              line_head = substr(line_head, key_indent + 1)
+              if (line_head ~ /^-[ \t]/) {
+                match(line_head, /^-[ \t]+/)
+                key_indent += RLENGTH
+              }
+              flow_start = 0
+              if (blank_value && length(block_tail) > 0) {
+                block_newline = index(block_tail, "\n")
+                block_line = block_newline ? substr(block_tail, 1, block_newline - 1) : block_tail
+                block_line_for_indent = block_line
+                sub(/\r$/, "", block_line_for_indent)
+                match(block_line_for_indent, /^[ \t]*/)
+                flow_indent = RLENGTH
+                flow_char = substr(block_line_for_indent, flow_indent + 1, 1)
+                if (flow_indent >= key_indent && (flow_char == "{" || flow_char == "[")) {
+                  flow_start = newline + flow_indent + 1
+                }
+              }
+              if (flow_start > 0) {
+                structured_tail = substr(tail, flow_start)
+                structure_end = flow_value_end(structured_tail)
+                if (structure_end > 0) {
+                  buf = prefix "[redacted]" substr(tail, flow_start + structure_end)
+                } else {
+                  buf = prefix "[redacted]"
+                }
+              } else {
+                while (length(block_tail) > 0) {
+                  block_newline = index(block_tail, "\n")
+                  block_line = block_newline ? substr(block_tail, 1, block_newline - 1) : block_tail
+                  block_line_for_indent = block_line
+                  sub(/\r$/, "", block_line_for_indent)
+                  if (block_line_for_indent != "") {
+                    match(block_line_for_indent, /^[ \t]*/)
+                    if (RLENGTH <= key_indent) break
+                  }
+                  if (block_newline) block_tail = substr(block_tail, block_newline + 1)
+                  else {
+                    block_tail = ""
+                    break
+                  }
+                }
+                buf = prefix "[redacted]"
+                if (length(block_tail) > 0) buf = buf "\n" block_tail
+              }
+            } else {
+              if (newline) tail = substr(tail, newline)
+              else tail = ""
+              buf = prefix "[redacted]" tail
+            }
+          }
+          search_from = 1
+        }
       }
       while (match(buf, /[Aa]uthorization:[[:space:]]*[Bb]earer[[:space:]]+[^[:space:]]+/)) {
         buf = substr(buf, 1, RSTART - 1) "[redacted]" substr(buf, RSTART + RLENGTH)
@@ -366,17 +576,15 @@ fm_jev_compact_state() {
       while (match(buf, /Bearer[[:space:]]+[^[:space:]]+/)) {
         buf = substr(buf, 1, RSTART - 1) "[redacted]" substr(buf, RSTART + RLENGTH)
       }
-      while (match(buf, /sk-or-[A-Za-z0-9_-]+/)) {
-        buf = substr(buf, 1, RSTART - 1) "[redacted]" substr(buf, RSTART + RLENGTH)
-      }
-      while (match(buf, /github_pat_[A-Za-z0-9_]+/)) {
-        buf = substr(buf, 1, RSTART - 1) "[redacted]" substr(buf, RSTART + RLENGTH)
-      }
-      while (match(buf, /ghp_[A-Za-z0-9]+/)) {
-        buf = substr(buf, 1, RSTART - 1) "[redacted]" substr(buf, RSTART + RLENGTH)
-      }
-      while (match(buf, /sk-[A-Za-z0-9_-]{16,}/)) {
-        buf = substr(buf, 1, RSTART - 1) "[redacted]" substr(buf, RSTART + RLENGTH)
+      token_pattern = "(^|[^[:alnum:]_-])(sk-or-[A-Za-z0-9_-]+|sk_(live|test)_[A-Za-z0-9_-]+|github_pat_[A-Za-z0-9_]+|glpat-[A-Za-z0-9_-]+|ghp_[A-Za-z0-9]+|gh(o|u|s|r)_[A-Za-z0-9_]+|xox(b|p|a|r|s)-[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{16,})"
+      while (match(buf, token_pattern)) {
+        matched = substr(buf, RSTART, RLENGTH)
+        boundary = substr(matched, 1, 1)
+        if (boundary ~ /[^[:alnum:]_-]/) {
+          buf = substr(buf, 1, RSTART) "[redacted]" substr(buf, RSTART + RLENGTH)
+        } else {
+          buf = substr(buf, 1, RSTART - 1) "[redacted]" substr(buf, RSTART + RLENGTH)
+        }
       }
       printf "%s", buf
     }
@@ -385,8 +593,8 @@ fm_jev_compact_state() {
 
 _fm_jev_redact_live_keys() {
   local text=$1
-  local typesafe_key=${TYPESAFE_API_KEY:-}
-  local openrouter_key=${OPENROUTER_API_KEY:-}
+  local typesafe_key=${TYPESAFE_API_KEY_PRIVATE:-${TYPESAFE_API_KEY:-}}
+  local openrouter_key=${OPENROUTER_API_KEY_PRIVATE:-${OPENROUTER_API_KEY:-}}
   [ -n "$typesafe_key" ] && text=${text//"$typesafe_key"/[redacted]}
   [ -n "$openrouter_key" ] && text=${text//"$openrouter_key"/[redacted]}
   printf '%s' "$text"

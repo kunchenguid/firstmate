@@ -137,6 +137,24 @@ test_typesafe_only_uses_typesafe_url() {
   pass "with only TYPESAFE_API_KEY, decide uses the TypeSafe URL and bearer header"
 }
 
+test_auto_state_detection_remains_for_library_callers() {
+  local code out err saved_state state expected_type
+  saved_state=$STATE
+  for state in '{"topic":"task facts"}' '["task facts"]'; do
+    case "$state" in
+      \{*) expected_type=object ;;
+      *) expected_type=array ;;
+    esac
+    STATE=$state
+    TYPESAFE_API_KEY=$TS_KEY run_decide code out err
+    expect_code 0 "$code" "the default library mode accepts structured JSON state"
+    assert_equals "$(jq -r '.state | type' "$LOG/body")" "$expected_type" \
+      "two-argument callers retain structured state detection"
+  done
+  STATE=$saved_state
+  pass "fm_jev_decide keeps auto-detection for existing callers"
+}
+
 test_typesafe_wins_when_both_keys_present() {
   local code out err argv
   unset JEV_ROUTE
@@ -380,7 +398,7 @@ test_probabilities_sum() {
 }
 
 test_compact_state_strips_secrets_and_refuses_oversized() {
-  local out secret big
+  local out secret big yaml json
   secret='note TYPESAFE_API_KEY=abc123 and Bearer tok_secret_value and sk-or-v1-abcdefghijklmnopqrstuvwxyz'
   out=$(fm_jev_compact_state "keep this $secret skill-selector")
   assert_contains "$out" 'keep this' "compact keeps ordinary prose"
@@ -390,6 +408,62 @@ test_compact_state_strips_secrets_and_refuses_oversized() {
   assert_not_contains "$out" 'tok_secret_value' "compact drops a Bearer token"
   assert_not_contains "$out" 'sk-or-v1-abcdefghijklmnopqrstuvwxyz' "compact drops an OpenRouter-shaped key"
   assert_contains "$out" '[redacted]' "compact leaves an explicit redaction marker"
+
+  out=$(fm_jev_compact_state 'redis://:opaque-pass@db.internal/0')
+  assert_equals "$out" '[redacted]/0' "compact removes a URI credential with an empty username"
+  out=$(fm_jev_compact_state 'https://example.com/path')
+  assert_equals "$out" 'https://example.com/path' "compact preserves a URL without user-and-password credentials"
+
+  json='{"password": "ordinary-user-password", "status": "ready"}'
+  out=$(fm_jev_compact_state "$json")
+  assert_not_contains "$out" 'ordinary-user-password' "compact redacts a value under a double-quoted sensitive key"
+  assert_contains "$out" '[redacted]' "compact marks the double-quoted sensitive value as redacted"
+
+  json="{'token': 'ordinary-user-token', 'status': 'ready'}"
+  out=$(fm_jev_compact_state "$json")
+  assert_not_contains "$out" 'ordinary-user-token' "compact redacts a value under a single-quoted sensitive key"
+  assert_contains "$out" '[redacted]' "compact marks the single-quoted sensitive value as redacted"
+
+  json=$'prefix\n  "clientSecret": [\n    {"value": "opaque-vendor-secret"}\n  ]\npublic: safe'
+  out=$(fm_jev_compact_state "$json")
+  assert_not_contains "$out" 'opaque-vendor-secret' "compact redacts a nested array and object value"
+  assert_contains "$out" 'public: safe' "compact preserves text after a matched structured value"
+
+  json=$'{\n  "clientSecret":\n  {"value":"opaque-vendor-secret"},\n  "safe":"retained"\n}'
+  out=$(fm_jev_compact_state "$json")
+  assert_not_contains "$out" 'opaque-vendor-secret' "compact redacts a flow value opened on the next same-indent line"
+  assert_contains "$out" 'safe' "compact preserves a sibling after a matched next-line flow value"
+
+  json=$'{\n  "clientSecret":\n  {"value":"opaque-vendor-secret"\n  "safe":"not retained"'
+  out=$(fm_jev_compact_state "$json")
+  assert_not_contains "$out" 'opaque-vendor-secret' "compact redacts an unmatched next-line flow secret"
+  assert_not_contains "$out" 'not retained' "compact fails closed through end of an unmatched next-line flow value"
+
+  json=$'prefix\n  "clientSecret": {\n    "value": "opaque-vendor-secret"\ntrailing content'
+  out=$(fm_jev_compact_state "$json")
+  assert_not_contains "$out" 'opaque-vendor-secret' "compact redacts an unmatched structured secret through end of input"
+  assert_not_contains "$out" 'trailing content' "compact fails closed on an unmatched structured secret"
+
+  yaml=$'config:\n  API_TOKEN: |\n    opaque-secret\n    second line\n  next: preserved'
+  out=$(fm_jev_compact_state "$yaml")
+  assert_equals "$out" $'config:\n  [redacted]\n  next: preserved' \
+    "compact removes a sensitive YAML block scalar without consuming its sibling"
+
+  yaml=$'- API_TOKEN: >\n    opaque-secret\n  next: preserved'
+  out=$(fm_jev_compact_state "$yaml")
+  assert_equals "$out" $'- [redacted]\n  next: preserved' \
+    "compact preserves a sibling after a sequence block scalar"
+
+  yaml=$'API_TOKEN: >\r\n  opaque-secret\r\nnext: preserved'
+  out=$(fm_jev_compact_state "$yaml")
+  assert_not_contains "$out" 'opaque-secret' "compact removes secrets in CRLF block scalars"
+  assert_contains "$out" 'next: preserved' "compact preserves content after a CRLF block scalar"
+
+  yaml=$'before: retained\nclientSecret:\n value:\n text: opaque-vendor-secret\nnext: preserved'
+  out=$(fm_jev_compact_state "$yaml")
+  assert_equals "$out" $'before: retained\n[redacted]\nnext: preserved' \
+    "compact removes all nested lines under an empty sensitive YAML value"
+
   big=$(printf '%*s' 9000 '' | tr ' ' 'x')
   if out=$(fm_jev_compact_state "$big" 2>/dev/null); then
     fail "oversized state must be refused"
@@ -426,6 +500,7 @@ test_default_log_path() {
 test_cli_is_not_a_user_command
 test_openrouter_only_uses_openrouter_url_and_bearer
 test_typesafe_only_uses_typesafe_url
+test_auto_state_detection_remains_for_library_callers
 test_typesafe_wins_when_both_keys_present
 test_jev_route_openrouter_overrides_typesafe_key
 test_jev_model_override

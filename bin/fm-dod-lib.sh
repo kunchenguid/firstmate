@@ -32,10 +32,14 @@
 # fm_jev_first_rule owns the advisory, fail-open Jev-first rule for closed-set
 # judgments. bin/fm-brief.sh renders it as rule 8 in every ship and scout brief,
 # and bin/fm-spawn.sh appends the identical sentences to a Claude task worker's
-# system prompt, so the carriers cannot drift. The rule is one paragraph with no
-# apostrophes because the spawn path embeds it in a single-quoted shell string.
+# system prompt, so the carriers cannot drift. It names bin/fm-jev.sh by the
+# absolute path of the firstmate checkout this library runs from, so workers
+# can call it from any directory.
 fm_jev_first_rule() {
-  printf '%s\n' 'For a closed-set judgment - picking one of options you can list, a yes/no check, or a score against levels you can write down - prefer one batched typed Jev call when the installed TypeSafe surface makes one available; when it does not, or the key is missing or the endpoint does not answer, use your own judgment and never block on it. The state you pass carries only the minimal facts the judgment needs - never secrets, credentials, API keys, or tokens, never wiki page bodies, excerpts, or private-vault content, and when in doubt leave the fact out and use your own judgment. Deterministic operations such as grep, builds, tests, file moves, and doctor runs stay in code, because Jev has no filesystem or tools.'
+  local cmd quoted_cmd
+  cmd="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-jev.sh"
+  quoted_cmd=$(printf '%s' "$cmd" | sed "s/'/'\\\\''/g")
+  printf '%s\n' "For a closed-set judgment - picking one of options you can list, a yes/no check, or a score against levels you can write down - prefer one batched typed Jev call through '$quoted_cmd' (its --help is the whole interface); when it exits non-zero - an escalation, a missing key, or an endpoint that does not answer - use your own judgment and never block on it."' The state you pass carries only the minimal facts the judgment needs - never secrets, credentials, API keys, or tokens, never wiki page bodies, excerpts, or private-vault content, and when in doubt leave the fact out and use your own judgment. Deterministic operations such as grep, builds, tests, file moves, and doctor runs stay in code, because Jev has no filesystem or tools.'
 }
 
 # fm_brief_worker_role owns the ship/scout role scope. bin/fm-spawn.sh is its one
