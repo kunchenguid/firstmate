@@ -1112,6 +1112,46 @@ test_send_text_submit_accepts_wrapped_bare_text() {
   pass "fm_backend_zellij_send_text_submit: observes wrapped text in a bare composer"
 }
 
+test_send_text_submit_accepts_animated_wrapped_doorbell() {
+  # This is the end-user failure shape: the self-describing doorbell repeats an
+  # absolute inbox path, wraps through multiple physical Codex composer rows,
+  # and shares those rows with bright animation cells. Paste observation must
+  # reconstruct the logical line and reach Enter rather than returning
+  # send-failed with animation residue attached.
+  local dir fb out text esc bg above prompt continuation1 continuation2 continuation3 below footer idle_prompt idle typed
+  dir="$TMP_ROOT/submit-animated-wrapped-doorbell"; mkdir -p "$dir/responses"
+  text=": Firstmate instruction waiting: list '/Users/example/firstmate/state/fm-doorbell-wrapped-composer.inbox'/*.msg and, › review this in numeric order, read and act on each, then mv each handled file to '/Users/example/firstmate/state/fm-doorbell-wrapped-composer.inbox'/handled/."
+  esc=$(printf '\033')
+  bg="${esc}[48;2;57;57;57m"
+  above="${esc}[0m${bg}       ${esc}[38;2;163;163;163m${bg}⠄${esc}[0m${bg}                       "
+  below="${esc}[0m${bg}          ${esc}[38;2;165;165;165m${bg}⠠${esc}[0m${bg}                    "
+  footer="  ${esc}[0m${esc}[38;2;246;226;183mgpt-6-astra high fast${esc}[0m"
+  idle_prompt="${esc}[0m${esc}[1m${bg}›${esc}[0m${bg} ${esc}[2m${bg}Ask Codex to do anything${esc}[0m${esc}[38;2;156;156;156m${bg}⠂${esc}[0m"
+  idle=$'transcript\n\n'"$above"$'\n'"$idle_prompt"$'\n'"$below"$'\n'"$footer"
+  prompt="${esc}[0m${esc}[1m${bg}›${esc}[0m${bg}: Firstmate instruction waiting: list '/Users/example/${esc}[38;2;156;156;156m${bg}⠂${esc}[0m"
+  continuation1="${esc}[0m${bg}firstmate/state/fm-doorbell-wrapped-composer.inbox'/*.msg and,${esc}[38;2;165;165;165m${bg}⠁${esc}[0m"
+  continuation2="${esc}[0m${bg}› review this in numeric order, read and act on each, then mv each handled file${esc}[38;2;150;150;150m${bg}⠂${esc}[0m"
+  continuation3="${esc}[0m${bg}to '/Users/example/firstmate/state/fm-doorbell-wrapped-composer.inbox'/handled/.${esc}[38;2;161;161;161m${bg}⠐${esc}[0m"
+  typed=$'transcript\n\n'"$above"$'\n'"$prompt"$'\n'"$continuation1"$'\n'"$continuation2"$'\n'"$continuation3"$'\n'"$below"$'\n'"$footer"
+
+  zellij_pane_response "$dir" 1 7 3
+  printf '%s' "$idle" > "$dir/responses/2.out"
+  zellij_pane_response "$dir" 3 7 3
+  zellij_pane_response "$dir" 5 7 3
+  printf '%s' "$typed" > "$dir/responses/6.out"
+  zellij_pane_response "$dir" 7 7 3
+  zellij_pane_response "$dir" 9 7 3
+  printf '%s' "$idle" > "$dir/responses/10.out"
+  fb=$(make_zellij_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_ZELLIJ_LOG="$dir/log" FM_ZELLIJ_RESPONSES="$dir/responses" \
+    FM_ZELLIJ_SESSION_LIST="firstmate" \
+    bash -c '. "$0/bin/backends/zellij.sh"; fm_backend_zellij_send_text_submit firstmate:7 "$1" 2 0.01 0.01' "$ROOT" "$text" )
+  [ "$out" = empty ] || fail "animated wrapped doorbell should be observed and submitted, got '$out'"
+  assert_contains "$(cat "$dir/log")" $'\x1f''send-keys' \
+    "animated wrapped doorbell should reach Enter after exact paste observation"
+  pass "fm_backend_zellij_send_text_submit: observes and submits an animated variable-height doorbell"
+}
+
 test_send_text_submit_preserves_agent_glyph_within_wrapped_content() {
   local dir fb out text
   dir="$TMP_ROOT/submit-wrapped-agent-glyph"; mkdir -p "$dir/responses"
@@ -1349,6 +1389,7 @@ test_send_text_submit_rejects_existing_intended_text_after_noop_paste
 test_send_text_submit_rejects_furniture_match_after_noop_paste
 test_send_text_submit_accepts_wrapped_boxed_text
 test_send_text_submit_accepts_wrapped_bare_text
+test_send_text_submit_accepts_animated_wrapped_doorbell
 test_send_text_submit_preserves_agent_glyph_within_wrapped_content
 test_send_text_submit_rejects_stale_composer_above_live_shell
 test_composer_state_reads_styled_dump

@@ -580,6 +580,54 @@ test_matrix_codex_idle_starfield_furniture() {
   pass "matrix: codex 0.154's starfield rows are furniture; typed, mixed, and unanchored rows keep their verdicts"
 }
 
+test_codex_animated_wrapped_doorbell_extracts_logical_line() {
+  # A real doorbell repeats its absolute inbox path. At this deliberately narrow
+  # width it occupies four physical content rows inside Codex's animated
+  # composer, between one decoration row above and one below. The old exact
+  # three-row normalizer rejected the first continuation as non-padding; the
+  # fallback extractor then retained bright animation cells and Zellij's exact
+  # pre-Enter append proof failed.
+  local bg="${ESC}[48;2;57;57;57m" inbox doorbell above prompt continuation1 continuation2 continuation3 below footer
+  local screen out compact expected_compact stripped unwrapped_prompt unwrapped_screen
+  inbox='/Users/example/firstmate/state/fm-doorbell-wrapped-composer.inbox'
+  doorbell=": Firstmate instruction waiting: list '$inbox'/*.msg and, › review this in numeric order, read and act on each, then mv each handled file to '$inbox'/handled/."
+  above="${ESC}[0m${bg}       $(codex_cell 163 ⠄)${bg}                         "
+  prompt="${ESC}[0m${ESC}[1m${bg}›${ESC}[0m${bg}: Firstmate instruction waiting: list '/Users/example/$(codex_cell 156 ⠂)"
+  continuation1="${ESC}[0m${bg}firstmate/state/fm-doorbell-wrapped-composer.inbox'/*.msg and,${ESC}[0m$(codex_cell 165 ⠁)"
+  continuation2="${ESC}[0m${bg}› review this in numeric order, read and act on each, then mv each handled file${ESC}[0m$(codex_cell 150 ⠂)"
+  continuation3="${ESC}[0m${bg}to '/Users/example/firstmate/state/fm-doorbell-wrapped-composer.inbox'/handled/.${ESC}[0m$(codex_cell 161 ⠐)"
+  below="${ESC}[0m${bg}          $(codex_cell 165 ⠠)${bg}                       "
+  footer="  ${ESC}[0m${ESC}[38;2;246;226;183mgpt-6-astra high fast${ESC}[0m"
+  screen=$'transcript line\n\n'"$above"$'\n'"$prompt"$'\n'"$continuation1"$'\n'"$continuation2"$'\n'"$continuation3"$'\n'"$below"$'\n'"$footer"
+
+  # Non-vacuousness: ordinary ghost stripping leaves the bright animated cell
+  # attached to a real continuation row. The composer-specific normalizer must
+  # remove that residue without removing the continuation text.
+  stripped=$(printf '%s\n' "$continuation1" | fm_composer_strip_ghost)
+  case "$stripped" in
+    *⠁*) : ;;
+    *) fail "wrapped Codex doorbell fixture no longer retains animation residue before normalization" ;;
+  esac
+  [ "$(printf '%s\n' "$screen" | wc -l | tr -d ' ')" -ge 9 ] \
+    || fail "wrapped Codex doorbell fixture no longer spans a variable-height composer"
+
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$screen")
+  compact=${out//[$' \t\r\n\v\f']/}
+  expected_compact=${doorbell//[$' \t\r\n\v\f']/}
+  [ "$compact" = "$expected_compact" ] \
+    || fail "wrapped animated Codex doorbell should extract as one logical line, got '$out'"
+
+  # The original unwrapped three-row shape remains the lower bound of the same
+  # variable-height contract rather than taking a separate compatibility path.
+  unwrapped_prompt="${ESC}[0m${ESC}[1m${bg}›${ESC}[0m${bg}run tests $(codex_cell 156 ⠂)"
+  unwrapped_screen=$'transcript line\n\n'"$above"$'\n'"$unwrapped_prompt"$'\n'"$below"$'\n'"$footer"
+  out=$(fm_composer_extract_selected_content "$CAPS_STYLED_NOID" "$unwrapped_screen")
+  [ "$out" = 'run tests' ] \
+    || fail "unwrapped animated Codex input should retain its existing extraction, got '$out'"
+  assert_screen "unwrapped animated Codex input" pending "$CAPS_STYLED_NOID" "$unwrapped_screen"
+  pass "fm_composer_extract_selected_content: removes animation across wrapped and unwrapped Codex composers"
+}
+
 test_matrix_pi_separated_needs_identity() {
   # Real idle pi: a blank row between two solid rules. The blank row alone is
   # exactly what the strict rule refuses; only structure PLUS a live
@@ -927,6 +975,7 @@ test_matrix_cursor_reverse_video_placeholder_remnant
 test_matrix_herdr_halfblock_rule_bounds_bare_wrap
 test_matrix_omp_status_row_bounds_bare_composer
 test_matrix_codex_idle_starfield_furniture
+test_codex_animated_wrapped_doorbell_extracts_logical_line
 test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
