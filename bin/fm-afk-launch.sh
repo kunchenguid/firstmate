@@ -227,7 +227,7 @@ fm_afk_launch_daemon_allowed() {
 
 fm_afk_launch_catchup_pending() {
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
-    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
+    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering $(fm_afk_launch_posture) mode"
     return 0
   fi
   return 1
@@ -258,14 +258,23 @@ fm_afk_launch_requested_mode() {
   fi
 }
 
+# The posture this invocation is acting on, always away or quiet: the mode it
+# requests, else the one already on disk. The single owner of which posture the
+# entry gate enforces and the operator-facing messages name.
+fm_afk_launch_posture() {
+  local mode
+  mode=$(fm_afk_launch_requested_mode)
+  [ -n "$mode" ] || mode=$(fm_afk_mode "$FM_AFK_LAUNCH_STATE")
+  printf '%s' "$mode"
+}
+
 # Away needs the record `enter` wrote; quiet must never coexist with one, so it
 # neither requires nor creates it. A bare refresh with no record is quiet only
 # when the on-disk flag already says quiet (fm_afk_mode), else it is an away
 # entry and needs the record.
 fm_afk_launch_posture_require() {
   local mode
-  mode=$(fm_afk_launch_requested_mode)
-  [ -n "$mode" ] || mode=$(fm_afk_mode "$FM_AFK_LAUNCH_STATE")
+  mode=$(fm_afk_launch_posture)
   if [ "$mode" = quiet ]; then
     if fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
       fm_afk_launch_log "an away-posture record stands; quiet mode cannot start until the captain's return (bin/fm-afk-return.sh) archives it"
@@ -626,7 +635,7 @@ fm_afk_launch_start() {
       fm_afk_launch_log "failed to refresh away-mode flag"
       return 1
     fi
-    fm_afk_launch_log "daemon already running; refreshed away-mode flag (no new terminal)"
+    fm_afk_launch_log "daemon already running; refreshed the $(fm_afk_launch_posture)-mode flag (no new terminal)"
     return 0
   fi
 
@@ -684,7 +693,7 @@ fm_afk_launch_start_native() {
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     fm_afk_launch_flag_write || return 1
-    fm_afk_launch_log "daemon already running; refreshed away-mode flag"
+    fm_afk_launch_log "daemon already running; refreshed the $(fm_afk_launch_posture)-mode flag"
     return 0
   fi
   backup=$(mktemp -d "$FM_AFK_LAUNCH_STATE/.afk-launch-backup.XXXXXX") || return 1
@@ -767,7 +776,7 @@ fm_afk_launch_stop() {
   # (3) Clear the away-mode flag, then (4) archive the posture record LAST so the
   # posture ends only once every daemon-side artifact is down. The flag names
   # which posture this stop is ending, so read it before it is gone.
-  mode=$(fm_afk_mode "$FM_AFK_LAUNCH_STATE")
+  mode=$(fm_afk_launch_posture)
   if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
     fm_afk_launch_log "failed to clear away-mode flag"
     result=1

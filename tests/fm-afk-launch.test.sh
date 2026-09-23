@@ -289,6 +289,46 @@ unit_away_entry_from_quiet_clears_the_quiet_flag() {
   rm -rf "$st"
 }
 
+# The launcher's own messages name the posture they act on, so a captain who
+# never went away is not told the daemon refreshed an "away-mode" flag.
+unit_launcher_messages_name_the_posture() {
+  local st sleep_pid lock out
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-posture-wording.XXXXXX")
+  mkdir -p "$st/state"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$st/state/.afk"
+  sleep 600 &
+  sleep_pid=$!
+  lock="$st/state/.supervise-daemon.lock"
+  mkdir -p "$lock"
+  printf '%s' "$sleep_pid" > "$lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleep_pid" > "$lock/pid-identity" 2>/dev/null ) || true
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  if printf '%s' "$out" | grep -F 'refreshed the quiet-mode flag' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 'away-mode flag' >/dev/null; then
+    pass "posture wording: a quiet refresh of a running daemon reports the quiet flag, not away"
+  else
+    fail "posture wording: the quiet refresh named the wrong posture: $out"
+  fi
+  : > "$st/state/.afk-return-catchup"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  if printf '%s' "$out" | grep -F 're-entering quiet mode' >/dev/null; then
+    pass "posture wording: the catch-up gate names the quiet posture it is holding"
+  else
+    fail "posture wording: the catch-up gate named the wrong posture: $out"
+  fi
+  rm -f "$st/state/.afk-return-catchup"
+  enter_posture "$st" || fail "posture wording: could not enter fixture posture"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
+  if printf '%s' "$out" | grep -F 'refreshed the away-mode flag' >/dev/null; then
+    pass "posture wording: an away refresh beside the record still reports the away flag"
+  else
+    fail "posture wording: the away refresh named the wrong posture: $out"
+  fi
+  kill "$sleep_pid" 2>/dev/null || true
+  wait "$sleep_pid" 2>/dev/null || true
+  rm -rf "$st"
+}
+
 unit_failed_daemon_launch_preserves_the_record() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-failed-record.XXXXXX")
@@ -1375,6 +1415,7 @@ unit_daemon_entry_requires_the_record
 unit_quiet_entry_needs_no_record
 unit_away_entry_from_quiet_writes_away
 unit_away_entry_from_quiet_clears_the_quiet_flag
+unit_launcher_messages_name_the_posture
 unit_failed_daemon_launch_preserves_the_record
 unit_stop_archives_the_record_last
 unit_relative_paths_are_absolute_before_daemon_launch
