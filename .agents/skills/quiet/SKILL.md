@@ -45,7 +45,7 @@ point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
 
 - Only an explicit `/quiet off` (or the captain plainly asking to leave quiet mode / resume normal supervision) exits it: run `bin/fm-afk-return.sh` unchanged, the same return the `afk` skill's "How to exit: the return" section documents (correct-ordered daemon shutdown, durable wake presentation and acknowledgement, escalation and wedge evidence, and the return catch-up gate).
   It needs no quiet-specific variant; with no away-posture record its brief reports that no away instructions were recorded for the window, which is expected.
-  On Pi and pi-signed quiet entry launches nothing and writes nothing durable, so `/quiet off` runs no return there either: the return would open its catch-up gate over a window that had no posture. Acknowledge the exit and resume ordinary per-wake responses.
+  On Pi and pi-signed a quiet entry launches nothing and writes nothing durable, so when neither `state/.afk` nor `state/.afk-contract` stands there is nothing to return from: run no return, acknowledge the exit, and resume ordinary per-wake responses. Check the two files rather than the harness alone - `state/` is shared by every session in this home, so a flag or record entered from another harness still stands here, and then the ordinary return above is what exits it.
 - A marked daemon escalation, or a message beginning `/quiet` while already
   in quiet mode (refresh, not exit) -> stay in quiet mode and process it, the
   same two carve-outs `/afk` documents for away mode.
