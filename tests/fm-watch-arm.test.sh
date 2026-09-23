@@ -1087,6 +1087,54 @@ test_reaper_stops_a_tracked_watcher() {
   pass "watch-arm: the test reaper stops a watcher armed for a tracked temporary home"
 }
 
+# A prior episode that was announced but never explicitly acknowledged - no
+# re-arm loop and no live session ever ran the drain's printed --ack-through
+# command - must not reopen into a fresh generation and resurface forever on
+# every plain restart. Past FM_RECOVERY_REOPEN_LIMIT reopens, the episode must
+# settle on its own so the watcher can finally hold the lock and stay live.
+test_stuck_unacked_recovery_settles_after_bounded_reopen() {
+  local dir home state fakebin i
+  dir=$(make_case bounded-reopen)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  mkdir -p "$home/data"
+  export FM_RECOVERY_REOPEN_LIMIT=2
+
+  printf 'announced:downtime:seedgen1\n' > "$state/.watcher-down"
+  chmod 0600 "$state/.watcher-down"
+
+  i=0
+  while [ "$i" -lt "$FM_RECOVERY_REOPEN_LIMIT" ]; do
+    i=$((i + 1))
+    start_rearm_arm "$home" "$state" "$fakebin" "$dir/reopen-$i-arm.out"
+    wait_for_exit "$ARM_PID" "$REARM_EXIT_POLLS" \
+      || fail "reopen attempt $i did not resolve to an exit: $(cat "$dir/reopen-$i-arm.out")"
+    grep -F 'check: rearm-resurface' "$dir/reopen-$i-arm.out" >/dev/null \
+      || fail "reopen attempt $i did not resurface the stuck episode: $(cat "$dir/reopen-$i-arm.out")"
+    case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+      announced:*) ;;
+      *) fail "reopen attempt $i left an unexpected recovery marker: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+    esac
+  done
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$dir/settled-arm.out"
+  is_live_non_zombie "$ARM_PID" \
+    || fail "watcher did not survive once the reopen bound settled the stuck episode: $(cat "$dir/settled-arm.out")"
+  ! grep -F 'check: rearm-resurface' "$dir/settled-arm.out" >/dev/null \
+    || fail "watcher spuriously resurfaced an already-bounded episode: $(cat "$dir/settled-arm.out")"
+  case "$(cat "$state/.watcher-down" 2>/dev/null || true)" in
+    acked:*) ;;
+    *) fail "stuck episode did not settle to acked: $(cat "$state/.watcher-down" 2>/dev/null)" ;;
+  esac
+  [ ! -e "$state/.watcher-down.reopen-count" ] \
+    || fail "reopen counter was not cleared once the episode settled"
+
+  kill "$ARM_PID" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: a stuck unacknowledged recovery episode settles after a bounded number of reopens instead of looping forever"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
@@ -1094,6 +1142,7 @@ test_arm_refuses_a_disposable_validation_checkout
 test_watcher_exits_when_its_state_directory_is_removed
 test_watcher_exits_when_its_home_is_removed
 test_reaper_stops_a_tracked_watcher
+test_stuck_unacked_recovery_settles_after_bounded_reopen
 test_attached_arm_still_fails_on_a_wake_it_did_not_deliver
 test_rearm_resurfaces_durable_queue_and_remote_open_decision
 test_slow_rearm_recovery_is_still_surfaced

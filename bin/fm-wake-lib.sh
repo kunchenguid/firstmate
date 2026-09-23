@@ -656,7 +656,7 @@ _fm_atomic_replace() {
 _fm_recovery_marker_write_locked() {
   local marker=$1 kind=$2 generation=${3:-} status=${4:-pending} tmp
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
-  case "$status" in pending|announced) ;; *) return 1 ;; esac
+  case "$status" in pending|announced|acked) ;; *) return 1 ;; esac
   tmp=$(mktemp "${marker}.tmp.XXXXXX") || return 1
   [ -n "$generation" ] || generation="$(fm_current_pid).$(date +%s).${tmp##*.}"
   if ! printf '%s:%s:%s\n' "$status" "$kind" "$generation" > "$tmp" \
@@ -775,6 +775,10 @@ _fm_recovery_marker_ack() {
     fm_lock_release "$lock"
     return 1
   fi
+  # A genuine acknowledgement proves this episode was actually seen, so a
+  # later down stretch's reopen starts with a fresh FM_RECOVERY_REOPEN_LIMIT
+  # budget rather than inheriting this one's count.
+  rm -f -- "${marker}.reopen-count" 2>/dev/null || true
   fm_lock_release "$lock"
 }
 
@@ -856,9 +860,24 @@ _fm_recovery_marker_arm_check() {
 # down stretch: mint a fresh pending generation so a still-open decision or
 # buried note can be presented once more. Handling successors must not call
 # this, because Option B re-arm is not a new down stretch.
+#
+# Nothing else ever retires that generation when no live session runs the
+# printed acknowledgement, so a plain restart with no re-arm loop and no
+# session reopens the SAME stuck episode into a fresh generation every single
+# time, forever: each generation is used for exactly one resurface and then
+# abandoned still announced, and the very next restart reopens it again. Bound
+# that: past FM_RECOVERY_REOPEN_LIMIT consecutive reopens of one episode with
+# no intervening explicit acknowledgement, settle it to acked directly instead
+# of minting yet another generation nobody is watching, so a watcher can start
+# and stay up. A real acknowledgement (_fm_recovery_marker_ack) or a fresh
+# downtime episode both clear the counter, so this bound never shortens the
+# once-per-genuine-generation resurface a live, attentive session relies on.
+FM_RECOVERY_REOPEN_LIMIT=${FM_RECOVERY_REOPEN_LIMIT:-3}
+
 _fm_recovery_marker_reopen_announced() {
-  local marker=$1 lock
+  local marker=$1 lock counter_file count generation
   lock="${marker}.lock"
+  counter_file="${marker}.reopen-count"
   fm_lock_acquire_wait "$lock" || return 1
   if ! fm_recovery_marker_read "$marker"; then
     fm_lock_release "$lock"
@@ -866,6 +885,23 @@ _fm_recovery_marker_reopen_announced() {
   fi
   case "$FM_RECOVERY_MARKER_TOKEN" in
     announced:*)
+      count=$(cat "$counter_file" 2>/dev/null || true)
+      case "$count" in ''|*[!0-9]*) count=0 ;; esac
+      count=$((count + 1))
+      if [ "$count" -gt "$FM_RECOVERY_REOPEN_LIMIT" ]; then
+        generation=${FM_RECOVERY_MARKER_TOKEN##*:}
+        if ! _fm_recovery_marker_write_locked "$marker" downtime "$generation" acked; then
+          fm_lock_release "$lock"
+          return 1
+        fi
+        rm -f -- "$counter_file" 2>/dev/null || true
+        fm_lock_release "$lock"
+        return 0
+      fi
+      if ! printf '%s\n' "$count" > "$counter_file" 2>/dev/null; then
+        fm_lock_release "$lock"
+        return 1
+      fi
       if ! _fm_recovery_marker_write_locked "$marker" downtime ""; then
         fm_lock_release "$lock"
         return 1
