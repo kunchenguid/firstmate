@@ -115,6 +115,13 @@ case "${1:-} ${2:-}" in
   "api graphql")
     printf '%s\n' 'state=MERGED' 'merged=true' 'queued=false' 'base=main'
     ;;
+  "api --include")
+    case " $* " in
+      *"/branches/"*"/protection"*)
+        printf '%s\n' 'HTTP/2.0 200 OK' '' '{"required_status_checks":null}'
+        ;;
+    esac
+    ;;
 esac
 SH
   cat > "$home/fakebin/gh-axi" <<'SH'

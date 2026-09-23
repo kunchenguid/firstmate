@@ -51,6 +51,7 @@ make_case() {
     'queued=false' \
     'base=main' > "$case_dir/github-outcome"
   : > "$case_dir/github-rules"
+  printf '%s\n' '{"required_status_checks":null}' > "$case_dir/github-required-checks"
   : > "$case_dir/gh.log"
   # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
   # stat and simply skips the pr_head lookup via `gh` in that case, so give it
@@ -190,6 +191,24 @@ case "${1:-} ${2:-}" in
     exit 0
     ;;
   api\ *)
+    case "$*" in
+      *'/branches/'*'/protection'*)
+        if [ -f "${FM_TEST_GH_REQUIRED_CHECKS_FAIL:-}" ]; then
+          printf '%s\n' 'HTTP/2.0 500 Internal Server Error' '' '{"message":"required checks unavailable"}'
+          exit 1
+        fi
+        printf '%s\n' 'HTTP/2.0 200 OK' '' "$(cat "$FM_TEST_GH_REQUIRED_CHECKS")"
+        exit 0
+        ;;
+      *'/commits/'*'/status?per_page=100'*)
+        printf '%s\n' '{"statuses":[{"context":"ci"}]}'
+        exit 0
+        ;;
+      *'/commits/'*'/check-runs?per_page=100'*)
+        printf '%s\n' '{"check_runs":[{"name":"ci"}]}'
+        exit 0
+        ;;
+    esac
     if [ -f "${FM_TEST_GH_RULES_FAIL:-}" ]; then
       exit 1
     fi
@@ -233,6 +252,11 @@ esac
 exit 0
 SH
   chmod +x "$case_dir/fakebin/gh-axi"
+}
+
+write_github_required_checks() {
+  local case_dir=$1 json=$2
+  printf '%s\n' "$json" > "$case_dir/github-required-checks"
 }
 
 add_failing_poll_publish_mv() {
@@ -375,12 +399,14 @@ run_pr_merge() {
   FM_TEST_GH_LOG="$case_dir/gh.log" \
   FM_TEST_GH_OUTCOME="$case_dir/github-outcome" \
   FM_TEST_GH_RULES="$case_dir/github-rules" \
+  FM_TEST_GH_REQUIRED_CHECKS="$case_dir/github-required-checks" \
   FM_TEST_GH_VIEW_JSON="$case_dir/github-view.json" \
   FM_TEST_GH_HEAD="$case_dir/github-head" \
   FM_TEST_GH_MERGE_RC_FILE="$case_dir/github-merge-rc" \
   FM_TEST_GH_MERGE_OUTPUT="$(cat "$case_dir/github-merge-output" 2>/dev/null || true)" \
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
   FM_TEST_GH_RULES_FAIL="$case_dir/github-rules-fail" \
+  FM_TEST_GH_REQUIRED_CHECKS_FAIL="$case_dir/github-required-checks-fail" \
   FM_TEST_META_AT_MERGE="$case_dir/meta-at-merge" \
   FM_TEST_AWAY_RECORD_AFTER_VIEW="$case_dir/away-record-after-view" \
   FM_TEST_ROOT="$ROOT" \
@@ -2340,6 +2366,60 @@ test_github_red_checks_refuse_and_allow_red_waives_named() {
   pass "fm-pr-merge refuses red GitHub checks and waives only a named --allow-red check"
 }
 
+test_github_required_checks_refuse_missing_allow_named_and_fail_closed() {
+  local case_dir rc head
+  head=abababababababababababababababababababab
+
+  case_dir=$(make_case github-required-check-absent)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_required_checks "$case_dir" '{"required_status_checks":{"contexts":["registry"],"checks":[]}}'
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/101 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-required-check-absent: missing required check must refuse"
+  assert_grep "required check 'registry' has not reported at current head" "$case_dir/stderr" \
+    "github-required-check-absent: missing required check was not named"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-required-check-absent: gh pr merge ran without the required check"
+
+  case_dir=$(make_case github-required-check-allow-missing)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_required_checks "$case_dir" '{"required_status_checks":{"contexts":["registry"],"checks":[]}}'
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/102 \
+    --allow-missing registry > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-required-check-allow-missing: named missing-check waiver should merge$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 102 example/repo --squash
+
+  case_dir=$(make_case github-required-check-none)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  write_github_required_checks "$case_dir" '{"required_status_checks":null}'
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/103 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr" \
+    || fail "github-required-check-none: no required checks should preserve merge behavior$(cat "$case_dir/stderr")"
+  assert_logged_gh_merge "$case_dir" 103 example/repo --squash
+
+  case_dir=$(make_case github-required-check-unreadable)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/github-required-checks-fail"
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/104 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "github-required-check-unreadable: forge failure must refuse"
+  assert_grep 'could not read required checks for GitHub base branch main' "$case_dir/stderr" \
+    "github-required-check-unreadable: unreadable required checks were not reported"
+  assert_no_grep 'pr merge' "$case_dir/gh.log" \
+    "github-required-check-unreadable: gh pr merge ran after an unreadable forge query"
+  pass "fm-pr-merge refuses absent required checks, supports one named waiver, preserves no-requirement behavior, and fails closed on unreadable rules"
+}
+
 # When the base branch advances, GitHub cancels a pull request's in-flight run
 # and re-triggers it, leaving the cancelled run in the rollup beside the passing
 # re-run while reporting the pull request itself CLEAN. The merge must follow the
@@ -3026,6 +3106,7 @@ test_untraversable_user_backend_config_directory_refuses_the_merge
 test_absent_user_backend_config_directory_and_backlog_still_merge
 test_backend_override_bypasses_unreadable_user_config
 test_github_red_checks_refuse_and_allow_red_waives_named
+test_github_required_checks_refuse_missing_allow_named_and_fail_closed
 test_superseded_failed_check_run_no_longer_refuses
 test_check_runs_never_supersede_status_contexts
 test_current_failed_check_run_still_refuses

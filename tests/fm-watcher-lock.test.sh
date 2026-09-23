@@ -244,15 +244,17 @@ test_lock_steals_dead_pid_lock() {
 }
 
 test_lock_stale_steal_single_winner_under_concurrency() {
-  local dir state lockdir dead marker i pids pid wins
+  local dir state lockdir dead marker errdir i pids pid wins
   dir=$(make_case lock-stale-concurrency)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   marker="$dir/wins"
+  errdir="$dir/errors"
   dead=$(dead_pid)
   mkdir "$lockdir"
   printf '%s\n' "$dead" > "$lockdir/pid"
   : > "$marker"
+  mkdir "$errdir"
   pids=
   i=1
   while [ "$i" -le 40 ]; do
@@ -262,7 +264,7 @@ test_lock_stale_steal_single_winner_under_concurrency() {
         printf "%s\n" "${BASHPID:-$$}" >> "$3"
         sleep 1
       fi
-    ' _ "$LIB" "$lockdir" "$marker" &
+    ' _ "$LIB" "$lockdir" "$marker" 2> "$errdir/$i" &
     pids="$pids $!"
     i=$((i + 1))
   done
@@ -271,6 +273,8 @@ test_lock_stale_steal_single_winner_under_concurrency() {
   done
   wins=$(awk 'NF { c++ } END { print c + 0 }' "$marker")
   [ "$wins" -eq 1 ] || fail "expected exactly one stale-lock stealer, got $wins"
+  ! grep -R -q 'lock steal contention exhausted' "$errdir" \
+    || fail "ordinary stale-lock contention exhausted instead of observing the live winner"
   pass "concurrent stale-lock steal yields exactly one winner"
 }
 
@@ -287,7 +291,7 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
     . "$1"
     fm_lock_try_acquire "$2.steal" || exit 7
     printf "%s\n" "${BASHPID:-$$}" > "$3"
-    sleep 2
+    sleep 5
     fm_lock_release "$2.steal"
   ' _ "$LIB" "$lockdir" "$holder_file" &
   holder=$!
@@ -297,11 +301,13 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
     i=$((i + 1))
   done
   [ -s "$holder_file" ] || fail "live steal mutex holder did not start"
-  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
+  out=$(FM_LOCK_STEAL_TIMEOUT=3 FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
     printf "rc=%s held=%s lockpid=%s stealpid=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}" "$(cat "$2/pid" 2>/dev/null || true)" "$(cat "$2.steal/pid" 2>/dev/null || true)"
-  ' _ "$LIB" "$lockdir")
+  ' _ "$LIB" "$lockdir" 2> "$dir/stderr")
+  grep -qxF "error: lock steal contention exhausted for $lockdir" "$dir/stderr" \
+    || fail "live steal mutex did not report bounded pathological contention"
   wait "$holder" || fail "live steal mutex holder failed"
   case "$out" in
     *"rc=1"*) ;;
@@ -312,6 +318,56 @@ test_lock_live_steal_mutex_is_not_reclaimed() {
   [ "$lockpid" = "$dead" ] || fail "primary lock changed while live steal mutex was held: $out"
   [ "$stealpid" = "$(cat "$holder_file")" ] || fail "live steal mutex owner changed: $out"
   pass "live steal mutex is not reclaimed"
+}
+
+test_lock_steal_contention_is_bounded() {
+  local dir state lockdir dead holder_file holder out rc i
+  dir=$(make_case lock-steal-contention-bounded)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  holder_file="$dir/holder"
+  dead=$(dead_pid)
+  mkdir "$lockdir"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_create "$2.steal" || exit 7
+    printf "%s\n" "${BASHPID:-$$}" > "$3"
+    sleep 2
+    fm_lock_release "$2.steal"
+  ' _ "$LIB" "$lockdir" "$holder_file" &
+  holder=$!
+  i=0
+  while [ "$i" -lt 50 ] && [ ! -s "$holder_file" ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -s "$holder_file" ] || {
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    fail "bounded steal-contention holder did not start"
+  }
+  set +e
+  out=$(FM_LOCK_STEAL_TIMEOUT=1 FM_LOCK_STEAL_RETRY_DELAY=0.001 FM_LOCK_STALE_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      fm_lock_try_acquire "$2"
+  ' _ "$LIB" "$lockdir" 2>&1)
+  rc=$?
+  set +e
+  wait "$holder" || fail "bounded steal-contention holder failed"
+  [ "$rc" -ne 0 ] || fail "steal contention unexpectedly acquired the stale lock"
+  [ "${#out}" -lt 512 ] || fail "steal contention produced unbounded output (${#out} bytes): $out"
+  case "$out" in
+    *"lock steal contention exhausted for $lockdir"*) ;;
+    *) fail "bounded steal contention did not name the exhausted lock: $out" ;;
+  esac
+  case "$out" in
+    *"File name too long"*) fail "bounded steal contention still hit filename growth: $out" ;;
+  esac
+  [ ! -e "$lockdir.steal.steal" ] || fail "bounded steal contention created a nested steal path"
+  [ ! -e "$lockdir.steal.steal.steal" ] || fail "bounded steal contention created a deeply nested steal path"
+  pass "steal-lock contention has bounded output and no recursive path growth"
 }
 
 test_lock_does_not_steal_live_lock() {
@@ -1120,6 +1176,7 @@ test_lock_single_winner_under_concurrency
 test_lock_steals_dead_pid_lock
 test_lock_stale_steal_single_winner_under_concurrency
 test_lock_live_steal_mutex_is_not_reclaimed
+test_lock_steal_contention_is_bounded
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate

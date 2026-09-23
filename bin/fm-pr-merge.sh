@@ -10,9 +10,10 @@
 # --squash, --merge, --rebase, or --method after the optional -- separator.
 # A GitHub merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the pull request
-# is open, not a draft, mergeable, free of conflicts, and every unwaived check
-# is green at the exact current head commit, where github_checks_not_green below
-# owns what makes a check green and judges each one by its current run.
+# is open, not a draft, mergeable, free of conflicts, every configured required
+# check has reported at the exact current head commit, and every unwaived check
+# is green at that head, where github_checks_not_green below owns what makes a
+# check green and judges each one by its current run.
 # Every failing condition is reported, not
 # just the first. The verified head is then passed to gh as
 # --match-head-commit, so a push that lands between that read and the merge
@@ -99,7 +100,12 @@
 # explicit captain instruction and never skips the live green check, the
 # away-grant check, or a captain hold.
 #
-# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [-- <extra forge merge args>]
+# An attended --allow-missing <check-name> may be passed once for a configured
+# required check that has not reported at the exact head; it waives only that
+# absent check, still requires every other required check to report and every
+# check to be green, and is refused while the away-posture record exists.
+#
+# Usage: fm-pr-merge.sh <task-id> <pr-url> [--attended-override] [--allow-red <check-name>] [--allow-missing <check-name>] [-- <extra forge merge args>]
 #
 # On GitLab, this script confirms the MR is actually merged before reporting it;
 # an auto-merge-queued or unconfirmed request leaves the poll armed and records
@@ -148,6 +154,7 @@ PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
 shift 2
 ATTENDED_OVERRIDE=false
 ALLOW_RED=()
+ALLOW_MISSING=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --attended-override)
@@ -168,12 +175,26 @@ while [ "$#" -gt 0 ]; do
       echo "error: --allow-red requires a separate check name argument" >&2
       exit 2
       ;;
+    --allow-missing)
+      [ -n "${2:-}" ] || { echo "error: --allow-missing requires a check name" >&2; exit 2; }
+      [ "${#ALLOW_MISSING[@]}" -eq 0 ] || { echo "error: --allow-missing may be specified only once" >&2; exit 2; }
+      ALLOW_MISSING+=("$2")
+      shift 2
+      ;;
+    --allow-missing=*)
+      echo "error: --allow-missing requires a separate check name argument" >&2
+      exit 2
+      ;;
     --) shift; break ;;
     *) break ;;
   esac
 done
 if [ "${#ALLOW_RED[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
   echo "error: --allow-red does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
+  exit 2
+fi
+if [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "$PROVIDER" = gitlab ]; then
+  echo "error: --allow-missing does not apply to GitLab, where a merge already requires the head pipeline to have succeeded" >&2
   exit 2
 fi
 
@@ -564,10 +585,100 @@ github_checks_not_green() {
   ' 2>/dev/null || return 1
 }
 
+# Read the required status checks configured for the pull request's base branch.
+# A protected branch with no required checks and an unprotected branch both
+# produce an empty set, while every other unreadable forge response refuses the
+# merge instead of assuming that no checks are required.
+FM_PR_GITHUB_REQUIRED_CHECKS=
+github_read_required_checks() {
+  local branch_path response status body checks
+  FM_PR_GITHUB_REQUIRED_CHECKS=
+  branch_path=$(github_urlencode_path_segment "$FM_PR_GITHUB_BASE") || return 1
+  if ! response=$(gh api --include \
+    "repos/$PR_OWNER/$PR_REPO/branches/$branch_path/protection" 2>/dev/null); then
+    status=$(printf '%s\n' "$response" | awk '$1 ~ /^HTTP\/[0-9.]+$/ { code=$2 } END { print code }')
+    if [ "$status" = 404 ]; then
+      return 0
+    fi
+    echo "error: could not read required checks for GitHub base branch $FM_PR_GITHUB_BASE" >&2
+    return 1
+  fi
+  status=$(printf '%s\n' "$response" | awk '$1 ~ /^HTTP\/[0-9.]+$/ { code=$2 } END { print code }')
+  case "$status" in
+    2??) ;;
+    *)
+      echo "error: could not read required checks for GitHub base branch $FM_PR_GITHUB_BASE" >&2
+      return 1
+      ;;
+  esac
+  body=$(printf '%s\n' "$response" | awk 'BEGIN { body=0 } body { print } /^[[:space:]]*$/ { body=1 }')
+  if ! checks=$(printf '%s' "$body" | jq -r '
+      if type != "object" then
+        error("protection response is not an object")
+      elif .required_status_checks == null then
+        empty
+      elif (.required_status_checks | type) != "object" then
+        error("required_status_checks is not an object")
+      elif ((.required_status_checks.contexts // []) | type) != "array"
+        or ((.required_status_checks.checks // []) | type) != "array" then
+        error("required status check lists are not arrays")
+      else
+        [
+          ((.required_status_checks.contexts // [])[]),
+          ((.required_status_checks.checks // [])[] | .context)
+        ]
+        | .[]
+        | if type != "string" or length == 0 then error("invalid required check name") else . end
+        | .
+      end' 2>/dev/null); then
+    echo "error: could not read required checks for GitHub base branch $FM_PR_GITHUB_BASE" >&2
+    return 1
+  fi
+  FM_PR_GITHUB_REQUIRED_CHECKS=$(printf '%s\n' "$checks" | awk 'NF && !seen[$0]++')
+}
+
+FM_PR_GITHUB_CURRENT_CHECKS=
+github_read_current_checks() {
+  local status_json runs_json status_names run_names
+  FM_PR_GITHUB_CURRENT_CHECKS=
+  if ! status_json=$(gh api \
+    "repos/$PR_OWNER/$PR_REPO/commits/$FM_PR_MERGE_HEAD/status?per_page=100" 2>/dev/null); then
+    echo "error: could not read GitHub status contexts at current head $FM_PR_MERGE_HEAD" >&2
+    return 1
+  fi
+  if ! status_names=$(printf '%s' "$status_json" | jq -r '
+      if type != "object" or (.statuses | type) != "array" then
+        error("status response is unreadable")
+      else
+        .statuses[]
+        | if (.context | type) != "string" or .context == "" then error("invalid status context") else .context end
+      end' 2>/dev/null); then
+    echo "error: could not read GitHub status contexts at current head $FM_PR_MERGE_HEAD" >&2
+    return 1
+  fi
+  if ! runs_json=$(gh api \
+    "repos/$PR_OWNER/$PR_REPO/commits/$FM_PR_MERGE_HEAD/check-runs?per_page=100" 2>/dev/null); then
+    echo "error: could not read GitHub check runs at current head $FM_PR_MERGE_HEAD" >&2
+    return 1
+  fi
+  if ! run_names=$(printf '%s' "$runs_json" | jq -r '
+      if type != "object" or (.check_runs | type) != "array" then
+        error("check-runs response is unreadable")
+      else
+        .check_runs[]
+        | if (.name | type) != "string" or .name == "" then error("invalid check-run name") else .name end
+      end' 2>/dev/null); then
+    echo "error: could not read GitHub check runs at current head $FM_PR_MERGE_HEAD" >&2
+    return 1
+  fi
+  FM_PR_GITHUB_CURRENT_CHECKS=$(printf '%s\n%s\n' "$status_names" "$run_names" \
+    | awk 'NF && !seen[$0]++')
+}
+
 # Pre-merge conditions for a GitHub pull request, read from one live view.
 # Sets FM_PR_MERGE_HEAD to the verified head on success.
 github_verify_mergeable() {
-  local json fields line red name covered
+  local json fields line red name covered required
   local total=0 named=0 refusals=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
@@ -618,6 +729,14 @@ FIELDS
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
   fi
+  FM_PR_GITHUB_BASE=$base
+  if ! github_read_required_checks; then
+    return 1
+  fi
+  FM_PR_MERGE_HEAD=$live_head
+  if [ -n "$FM_PR_GITHUB_REQUIRED_CHECKS" ] && ! github_read_current_checks; then
+    return 1
+  fi
 
   case "$state" in
     [oO][pP][eE][nN]) ;;
@@ -654,16 +773,34 @@ FIELDS
 $red
 EOF
 
+  while IFS= read -r required; do
+    [ -n "$required" ] || continue
+    covered=0
+    if [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
+      for check in "${ALLOW_MISSING[@]}"; do
+        [ "$check" = "$required" ] && covered=1
+      done
+    fi
+    if printf '%s\n' "$FM_PR_GITHUB_CURRENT_CHECKS" | grep -qxF "$required"; then
+      continue
+    fi
+    [ "$covered" -eq 1 ] || {
+      refusals="$refusals  - required check '$required' has not reported at current head
+"
+      uncovered="${uncovered:+$uncovered, }$required"
+    }
+  done <<EOF
+$FM_PR_GITHUB_REQUIRED_CHECKS
+EOF
+
   if [ -n "$refusals" ]; then
     printf 'error: refusing to merge %s\n' "$URL" >&2
     printf '%s' "$refusals" >&2
-    [ -z "$uncovered" ] || printf 'error: these checks are not green: %s\n' "$uncovered" >&2
+    [ -z "$uncovered" ] || printf 'error: these checks are not green or present: %s\n' "$uncovered" >&2
     return 1
   fi
-  printf 'verified: %s is open and mergeable, with every required check green at head %s\n' \
+  printf 'verified: %s is open and mergeable, with every required check present and green at head %s\n' \
     "$URL" "$live_head" >&2
-  FM_PR_MERGE_HEAD=$live_head
-  FM_PR_GITHUB_BASE=$base
 }
 
 # Read one live GitHub pull request view after gh returns. The selected
@@ -924,6 +1061,10 @@ require_current_away_authority() {
   require_away_merge_grant || return 1
   if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "${#ALLOW_RED[@]}" -gt 0 ]; then
     echo "error: --allow-red is attended-only; while the away-posture record exists the green check is absolute" >&2
+    return 2
+  fi
+  if [ "$FM_PR_AWAY_POSTURE" = true ] && [ "${#ALLOW_MISSING[@]}" -gt 0 ]; then
+    echo "error: --allow-missing is attended-only; while the away-posture record exists every required check must report" >&2
     return 2
   fi
 }

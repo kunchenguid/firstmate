@@ -156,6 +156,14 @@ case "${1:-} ${2:-}" in
     [ -z "${FM_TEST_GH_MERGE_HOOK:-}" ] || "$FM_TEST_GH_MERGE_HOOK"
     exit 0
     ;;
+  "api --include")
+    case " $* " in
+      *"/branches/"*"/protection"*)
+        printf '%s\n' 'HTTP/2.0 200 OK' '' '{"required_status_checks":null}'
+        exit 0
+        ;;
+    esac
+    ;;
 esac
 case " $* " in
   *" headRefOid "*) printf '%s\n' "${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}" ;;
