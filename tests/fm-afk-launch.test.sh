@@ -124,8 +124,9 @@ unit_pi_never_launches_the_daemon() {
       bash -c '. "$1"; fm_afk_launch_primary_harness() { printf "%s" "$FM_TEST_HARNESS"; }; fm_afk_launch_main start' _ "$LAUNCH" 2>&1)
     rc=$?
     if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -F "the away daemon is no longer launched on $harness" >/dev/null \
+      && printf '%s' "$out" | grep -F 'never run enter for /quiet' >/dev/null \
       && [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ] && [ ! -e "$st/state/.afk-contract" ]; then
-      pass "$harness: start refuses to launch the daemon and writes no state"
+      pass "$harness: start refuses to launch the daemon, writes no state, and keeps a quiet entry off enter"
     else
       fail "$harness: start did not refuse cleanly (rc=$rc): $out"
     fi
@@ -169,8 +170,9 @@ unit_daemon_entry_requires_the_record() {
   out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ] && [ ! -e "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk" ] \
-    && printf '%s' "$out" | grep -F 'an away-posture record is required; run enter' >/dev/null; then
-    pass "daemon entry: no daemon lifecycle starts without the away-posture record"
+    && printf '%s' "$out" | grep -F 'an away-posture record is required; run enter' >/dev/null \
+    && printf '%s' "$out" | grep -F 'FM_AFK_MODE=quiet' >/dev/null; then
+    pass "daemon entry: no daemon lifecycle starts without the away-posture record, and the refusal points a quiet entry away from enter"
   else
     fail "daemon entry: started without a record or the refusal was unclear (rc=$rc): $out"
   fi
