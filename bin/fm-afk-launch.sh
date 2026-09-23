@@ -210,7 +210,7 @@ fm_afk_launch_daemon_allowed() {
   harness=$(fm_afk_launch_primary_harness)
   case "$harness" in
     pi|pi-signed)
-      fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh enter and stop)"
+      fm_afk_launch_log "the away daemon is no longer launched on $harness; the away-posture record is the posture there (run bin/fm-afk-launch.sh enter and stop), and quiet mode launches nothing at all here, so never run enter for /quiet"
       return 1 ;;
     claude)
       [ -f "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}/supervision-host" ] || return 0
@@ -237,7 +237,7 @@ fm_afk_launch_record_require() {
   local record
   record=$(fm_afk_contract_path "$FM_AFK_LAUNCH_STATE")
   if ! fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
-    fm_afk_launch_log "an away-posture record is required; run enter before starting the daemon"
+    fm_afk_launch_log "an away-posture record is required; run enter before starting the daemon - but a quiet entry never runs enter: set FM_AFK_MODE=quiet, which is not the away posture and needs no record"
     return 1
   fi
   fm_afk_contract_validate "$record" || {
