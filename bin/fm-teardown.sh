@@ -276,11 +276,8 @@
 #     root still exists, so the account's healthy LaunchAgent worker and every
 #     live remote secondmate worker are out of scope. Best effort: a sweep
 #     failure never blocks this teardown.
-#   Fix 4 - reap the closed tmux pane's own session. tmux kill-window only
-#     hangs up the pane pty, so a pane-session member that ignores SIGHUP or
-#     left the foreground process group survives the close; Herdr's pane close
-#     already ends the whole session. bin/fm-pane-session-reap-lib.sh owns the
-#     pre-close snapshot and identity-checked TERM/KILL of its survivors.
+#   Fix 4 - reap the closed tmux pane's surviving session members;
+#     bin/fm-pane-session-reap-lib.sh owns why and how.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -318,8 +315,6 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
-# shellcheck source=bin/fm-pane-session-reap-lib.sh
-. "$SCRIPT_DIR/fm-pane-session-reap-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -345,6 +340,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 }
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-pane-session-reap-lib.sh
+. "$SCRIPT_DIR/fm-pane-session-reap-lib.sh"
 # Supervision lease guard: post-landing cleanup is overlap territory between
 # the two Pi supervision actors; refuse while the OTHER actor holds this
 # task's live lease (contract: bin/fm-lease-lib.sh; no-op in homes without
