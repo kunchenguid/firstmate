@@ -33,8 +33,8 @@ Scouts receive only their bounded question and relevant constraints.
 
 ## State
 
-- **Science state** - hypotheses, queue, next action, and artifacts - lives in the project's canonical index or startup chain.
-- **Fleet handles** - campaign id, lead endpoint, armed sources, remote host, and queue - live in one firstmate campaign record, plus `state/<id>.meta` for spawned leads.
+- **Science state** - hypotheses, experiment queue, next action, and artifacts - lives in the project's canonical index or startup chain.
+- **Fleet handles** - campaign id, lead endpoint, armed sources, remote host, and dispatch queue - live in one firstmate campaign record, plus `state/<id>.meta` for spawned leads.
 - Firstmate owns the campaign record keyed by campaign id; the lead reads it, updates the project pointer and science state, and resumes the same campaign rather than creating another.
 - The project startup file carries one stable pointer line containing the campaign id and record path; the lead writes it, and it contains no fleet handles beyond the campaign id and record path.
 
