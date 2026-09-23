@@ -832,6 +832,7 @@ tests/fm-test-fixture-cleanup.test.sh 937
 tests/fm-test-fixtures.test.sh 1562
 tests/fm-test-isolation-proof.test.sh 2692
 tests/fm-timeout-lib.test.sh 8541
+tests/fm-tmp-sweep.test.sh 4000
 tests/fm-tmux-agent-liveness.test.sh 1953
 tests/fm-tool-update-check.test.sh 13832
 tests/fm-trace-context-lib.test.sh 227
