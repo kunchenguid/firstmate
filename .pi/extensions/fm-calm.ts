@@ -53,7 +53,14 @@ import {
   CALM_WORKING_SHIP_WIDGET_KEY,
   createCalmWorkingShipAnimation,
   createCalmWorkingShipWidget,
+  type CalmWorkingShipAnimation,
 } from "./lib/fm-calm-working-ship.ts";
+import {
+  CALM_WORKING_SPACESHIP_WIDGET_KEY,
+  createCalmWorkingSpaceshipAnimation,
+  createCalmWorkingSpaceshipWidget,
+  type CalmWorkingSpaceshipAnimation,
+} from "./lib/fm-calm-working-spaceship.ts";
 import {
   calmPresentationHides,
   calmPresentationIsActive,
@@ -126,39 +133,96 @@ export default function (pi: ExtensionAPI) {
   let exportRendering = false;
   let removeTerminalInputHandler: (() => void) | undefined;
   // One logical agent run, tracked from agent_start through agent_settled rather than
-  // from turns or tool calls, so the boat never flickers between tool calls, automatic
-  // continuations, retries, or compaction that stay inside the same run.
+  // from turns or tool calls, so the working presentation never flickers between tool
+  // calls, automatic continuations, retries, or compaction that stay inside the same
+  // run.
   let agentRunActive = false;
-  let workingShipShown = false;
-  // One animation instance per extension lifetime. Hiding the working widget freezes
-  // this state; the next working period resumes it. session_start resets it so a fresh
-  // Pi session starts at the normal initial position. Never module-global.
-  const workingShipAnimation = createCalmWorkingShipAnimation();
-
-  // Single owner of Calm's working-row presentation choice. The widget is only created
-  // or removed on a real transition, so repeated starts cannot duplicate its timer.
-  const applyWorkingPresentation = (
-    ui: ExtensionUIContext,
-    forceStockVisibility = false,
-  ): void => {
-    const showShip = agentRunActive && calmPresentationIsActive();
-    if (showShip !== workingShipShown) {
-      workingShipShown = showShip;
-      ui.setWidget(
-        CALM_WORKING_SHIP_WIDGET_KEY,
-        showShip
-          ? (tui) => createCalmWorkingShipWidget(tui, workingShipAnimation)
-          : undefined,
-      );
-      ui.setWorkingVisible(!showShip);
-    } else if (forceStockVisibility && !showShip) {
-      ui.setWorkingVisible(true);
-    }
-  };
 
   const fmHome = process.env.FM_HOME || process.env.FM_ROOT_OVERRIDE || root;
   const configDirectory = process.env.FM_CONFIG_OVERRIDE || resolve(fmHome, "config");
   const calmPreferencePath = resolve(configDirectory, "calm");
+  // The selectable working-presentation variant. Read exactly where the Calm
+  // preference itself is read (load, session_start, and /calm), and anything other
+  // than "spaceship" keeps the boat, which stays the default.
+  const calmShipPath = resolve(configDirectory, "calm-ship");
+  const loadCalmShipSelection = (): "boat" | "spaceship" => {
+    let stored: string;
+    try {
+      stored = readFileSync(calmShipPath, "utf8").trim();
+    } catch {
+      return "boat";
+    }
+    return stored === "spaceship" ? "spaceship" : "boat";
+  };
+
+  type WorkingPresentation =
+    | { kind: "boat"; animation: CalmWorkingShipAnimation }
+    | { kind: "spaceship"; animation: CalmWorkingSpaceshipAnimation };
+  // One working presentation and one animation instance per extension lifetime.
+  // Hiding the working widget freezes this state; the next working period resumes it.
+  // session_start resets it so a fresh Pi session starts at the normal initial pose.
+  // Never module-global.
+  let working: WorkingPresentation =
+    loadCalmShipSelection() === "spaceship"
+      ? { kind: "spaceship", animation: createCalmWorkingSpaceshipAnimation() }
+      : { kind: "boat", animation: createCalmWorkingShipAnimation() };
+  // The widget key currently installed, if any. Tracked across kind changes so a
+  // selection switch can never strand the previous presentation's timer.
+  let workingShownKey: string | undefined;
+
+  // Re-read config/calm-ship at the same points the Calm preference itself is
+  // re-read. A mid-lifetime selection switch swaps the animation (a fresh pose) and
+  // forces the next applyWorkingPresentation to swap widget keys; the old widget is
+  // disposed through setWidget before the new one is installed.
+  const refreshWorkingKind = (): void => {
+    const kind = loadCalmShipSelection();
+    if (kind === working.kind) return;
+    working =
+      kind === "spaceship"
+        ? { kind: "spaceship", animation: createCalmWorkingSpaceshipAnimation() }
+        : { kind: "boat", animation: createCalmWorkingShipAnimation() };
+  };
+
+  // Single owner of Calm's working-presentation choice. The widget is only created
+  // or removed on a real transition, so repeated starts cannot duplicate its timer.
+  // The spaceship is a persistent banner: it shows whenever Calm is active, and the
+  // run signals drive its mode instead of its visibility. The boat shows only while
+  // a run is under way.
+  const applyWorkingPresentation = (
+    ui: ExtensionUIContext,
+    forceStockVisibility = false,
+  ): void => {
+    const calmActive = calmPresentationIsActive();
+    const key =
+      working.kind === "spaceship"
+        ? CALM_WORKING_SPACESHIP_WIDGET_KEY
+        : CALM_WORKING_SHIP_WIDGET_KEY;
+    const showShip = calmActive && (working.kind === "spaceship" || agentRunActive);
+    const targetKey = showShip ? key : undefined;
+    if (targetKey !== workingShownKey) {
+      if (workingShownKey !== undefined) {
+        ui.setWidget(workingShownKey, undefined);
+      }
+      workingShownKey = targetKey;
+      if (showShip) {
+        ui.setWidget(
+          key,
+          (tui) =>
+            working.kind === "spaceship"
+              ? createCalmWorkingSpaceshipWidget(tui, working.animation)
+              : createCalmWorkingShipWidget(tui, working.animation),
+        );
+      }
+      ui.setWorkingVisible(!showShip);
+    } else if (forceStockVisibility && !showShip) {
+      ui.setWorkingVisible(true);
+    }
+    // The spaceship consumes the same run-visibility signals the boat does, as its
+    // mode: cruise right while the run thinks, glide back to rest when it settles.
+    if (working.kind === "spaceship" && showShip) {
+      working.animation.setWorking(agentRunActive);
+    }
+  };
   // "max" is the legacy value written by the removed third presentation level, whose
   // behavior is now ordinary Calm; a home upgraded from it restores as on rather than
   // dropping to off. docs/configuration.md owns the persisted value schema.
@@ -416,9 +480,8 @@ export default function (pi: ExtensionAPI) {
     setCalmStockExportRendering(false);
     publishPresentationState();
     agentRunActive = false;
-    workingShipShown = false;
-    // A genuine new session lifetime starts the boat at the normal initial position.
-    workingShipAnimation.reset();
+    refreshWorkingKind();
+    working.animation.reset();
     applyWorkingPresentation(ctx.ui, true);
     ctx.ui.setHiddenThinkingLabel(calmPresentationIsActive() ? "" : undefined);
     ctx.ui.setStatus("firstmate-calm", undefined);

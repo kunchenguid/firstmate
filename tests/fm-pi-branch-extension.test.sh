@@ -758,8 +758,8 @@ if (sentToMain.some((sent) => sent.options.triggerTurn && sent.message.customTyp
 }
 if (sentToMain.length !== 3) throw new Error(`captain delivery changed routine delivery: ${JSON.stringify(sentToMain)}`);
 writeFileSync(`${home}/state/delivered-processing-request`, processingRequest.message.content);
-if (typeof sentToMain[0].message.content !== "string" || !sentToMain[0].message.content.startsWith("⛵ ")) {
-  throw new Error(`routine note missing sailboat prefix: ${sentToMain[0].message.content}`);
+if (typeof sentToMain[0].message.content !== "string" || !sentToMain[0].message.content.startsWith("🛸 ")) {
+  throw new Error(`routine note missing saucer prefix: ${sentToMain[0].message.content}`);
 }
 if (/branch merged|\[routine\]|\[captain\]/.test(sentToMain[0].message.content)) {
   throw new Error(`routine note still has boilerplate: ${sentToMain[0].message.content}`);
@@ -888,7 +888,7 @@ const assertRenderedNote = (note, glyph) => {
     throw new Error(`note remainder must be dim: ${JSON.stringify(fgCalls)}`);
   }
 };
-assertRenderedNote(sentToMain[0].message.content, "⛵");
+assertRenderedNote(sentToMain[0].message.content, "🛸");
 const captainRendered = entryRenderers.get("fm-branch-visible-outcome")(
   captainEntries[0],
   { expanded: false },
@@ -1057,17 +1057,17 @@ await settle(() => fleetOperations.length === 2, "unsolicited result acknowledge
 if (sentToMain.length !== 1 || sentToMain[0].options.triggerTurn) {
   throw new Error(`unsolicited healthy result opened a main turn: ${JSON.stringify(sentToMain)}`);
 }
-const sailboat = sentToMain[0];
-if (sailboat.message.display !== true || !sailboat.message.content.startsWith("⛵ branch-driver:")) {
-  throw new Error(`unsolicited healthy result was not a rendered sailboat note: ${JSON.stringify(sailboat)}`);
+const saucer = sentToMain[0];
+if (saucer.message.display !== true || !saucer.message.content.startsWith("🛸 branch-driver:")) {
+  throw new Error(`unsolicited healthy result was not a rendered saucer note: ${JSON.stringify(saucer)}`);
 }
 
 const outcomes = mainTools.find((tool) => tool.name === "fm_branch_outcomes");
 if (!outcomes) throw new Error("main did not receive its outcome-reading permission surface");
-const visibleToMain = await outcomes.execute("main-reads-sailboat", { recent: 1 }, undefined, undefined, {});
+const visibleToMain = await outcomes.execute("main-reads-saucer", { recent: 1 }, undefined, undefined, {});
 const mainOutcomeText = visibleToMain.content.map((item) => item.text ?? "").join("\n");
 if (visibleToMain.isError || !mainOutcomeText.includes("healthy resource report: CPU 12%, memory 41%")) {
-  throw new Error(`main could not use the sailboat content through its existing permission path: ${JSON.stringify(visibleToMain)}`);
+  throw new Error(`main could not use the saucer content through its existing permission path: ${JSON.stringify(visibleToMain)}`);
 }
 if (fleetOperations.length !== 2) throw new Error("main's outcome read reprocessed the fleet event");
 
@@ -1552,7 +1552,7 @@ await heartbeatReport.execute(
 );
 const fleetRoutineMerge = sentToMain[sentToMain.length - 1];
 if (fleetRoutineMerge.message.display !== true) throw new Error("a fleet routine action must render");
-if (!fleetRoutineMerge.message.content.startsWith("⛵ fleet: reconciled the backlog after completed work")) {
+if (!fleetRoutineMerge.message.content.startsWith("🛸 fleet: reconciled the backlog after completed work")) {
   throw new Error(`fleet routine action note changed: ${fleetRoutineMerge.message.content}`);
 }
 await heartbeatReport.execute(
@@ -1564,7 +1564,7 @@ await heartbeatReport.execute(
 );
 const taskRoutineMerge = sentToMain[sentToMain.length - 1];
 if (taskRoutineMerge.message.display !== true) throw new Error("a task-scoped routine outcome must render");
-if (!taskRoutineMerge.message.content.startsWith("⛵ task-9: worker healthy, no action needed")) {
+if (!taskRoutineMerge.message.content.startsWith("🛸 task-9: worker healthy, no action needed")) {
   throw new Error(`task-scoped routine note changed: ${taskRoutineMerge.message.content}`);
 }
 await heartbeatReport.execute(
@@ -4830,7 +4830,7 @@ if (new Set(seqs).size !== seqs.length) throw new Error(`a sequence was reused: 
 const deliveredRoutine = sentToMain
   .filter((sent) => sent.message.customType === "fm-branch-merge" && sent.message.content.includes("interleaved outcome "))
   .map((sent) => sent.message.content);
-const routineSummaries = interleaved.filter((row) => row.verdict === "routine").map((row) => `⛵ branch-driver: ${row.summary}`);
+const routineSummaries = interleaved.filter((row) => row.verdict === "routine").map((row) => `🛸 branch-driver: ${row.summary}`);
 if (deliveredRoutine.join("|") !== routineSummaries.join("|")) {
   throw new Error(`routine notes lost, duplicated, or reordered: ${JSON.stringify(deliveredRoutine)} vs ${JSON.stringify(routineSummaries)}`);
 }

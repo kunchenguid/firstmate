@@ -1,26 +1,34 @@
-// Packs one Calm working-ship frame as Claude Code Raster cells.
+// Packs one Calm working-ship or working-spaceship frame as Claude Code Raster cells.
 //
 // The Claude Code mods API draws a grid of colored cells as one `Raster` element whose
 // `cells` prop is base64 of `columns * rows` little-endian u32 triplets
 // `[codePoint, foreground, background]`; `$.ui.blit` repaints a mounted Raster with a
-// new `cells` string without a render pass. This module owns that packing and the
-// sprite's palette on that surface; ../hooks/register.ts owns when it is drawn.
+// new `cells` string without a render pass. This module owns that packing and both
+// sprites' palettes on that surface; ../hooks/register.ts owns when and which is
+// drawn, following the config/calm-ship selection.
 //
 // Raster colors are RGB, and the terminal paints them through a quantized 256-color
 // palette rather than the standard 16-color ANSI codes Pi's widget emits, which
 // docs/calm-mode-feasibility.md records as a bounded gap. The palette is Claude Code's
-// own: the water takes the theme's spinner blue and the whole boat takes the Claude
-// orange of the stock spinner, one set per theme family. The family follows the
-// `theme` setting's prefix (`dark*` or `light*`); `auto`, custom, missing, and
-// unreadable values use the light set as the both-readable fallback. The Pi extension
-// keeps its standard ANSI colors and is unaffected.
+// own: the water or starfield takes the theme's spinner blue and the whole boat or
+// saucer takes the Claude orange of the stock spinner, one set per theme family. The
+// family follows the `theme` setting's prefix (`dark*` or `light*`); `auto`, custom,
+// missing, and unreadable values use the light set as the both-readable fallback. The
+// Pi extension keeps its standard ANSI colors and is unaffected.
 import type {
   CalmWorkingShipColor,
   CalmWorkingShipFrame,
 } from "./fm-calm-working-ship-sprite.ts";
+import type {
+  CalmWorkingSpaceshipColor,
+  CalmWorkingSpaceshipFrame,
+} from "./fm-calm-working-spaceship-sprite.ts";
 
-/** The Raster's `key` inside the Spinner drawing, what `$.ui.blit` names to repaint it. */
+/** The Raster's `key` inside the Spinner drawing for the boat, what `$.ui.blit` names to repaint it. */
 export const CALM_SHIP_RASTER_KEY = "firstmate-calm-working-ship";
+
+/** The Raster's `key` inside the Spinner drawing for the spaceship. */
+export const CALM_SPACESHIP_RASTER_KEY = "firstmate-calm-working-spaceship";
 
 /** Claude Code's Raster width limit, per RasterProps. */
 export const CALM_SHIP_RASTER_MAX_COLUMNS = 512;
@@ -37,17 +45,30 @@ export const CALM_SHIP_RASTER_DEFAULT_COLOR = 0x01000000;
 /** Foreground per sprite color class, as `0x00RRGGBB`, or the terminal default. */
 export type CalmShipRasterPalette = Readonly<Record<CalmWorkingShipColor, number>>;
 
+/** Foreground per spaceship color class, as `0x00RRGGBB`, or the terminal default. */
+export type CalmSpaceshipRasterPalette = Readonly<Record<CalmWorkingSpaceshipColor, number>>;
+
 /** The two theme families Claude Code's built-in themes fall into. */
 export type CalmShipPaletteFamily = "dark" | "light";
 
 /**
  * Claude Code's own colors per theme family: the dark and light spinner blues for the
- * water and the Claude orange of the stock spinner for the boat, from the app's
- * built-in theme tables.
+ * water and starfield, and the Claude orange of the stock spinner for the whole boat
+ * and the whole saucer, from the app's built-in theme tables.
  */
 export const CALM_SHIP_RASTER_PALETTES: Readonly<Record<CalmShipPaletteFamily, CalmShipRasterPalette>> = {
   dark: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x93a5ff, boat: 0xd77757 },
   light: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, water: 0x5769f7, boat: 0xd77757 },
+};
+
+/**
+ * The spaceship's palette on the same theme tables: the field takes the family's
+ * spinner blue and the whole saucer takes the same Claude orange, so one selection
+ * changes only which sprite those shared colors paint.
+ */
+export const CALM_SPACESHIP_RASTER_PALETTES: Readonly<Record<CalmShipPaletteFamily, CalmSpaceshipRasterPalette>> = {
+  dark: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, field: 0x93a5ff, ship: 0xd77757 },
+  light: { plain: CALM_SHIP_RASTER_DEFAULT_COLOR, field: 0x5769f7, ship: 0xd77757 },
 };
 
 /**
@@ -103,14 +124,24 @@ export type CalmShipRasterCells = {
 };
 
 /**
+ * The structural frame shape the packer reads: rows of runs carrying one-column glyphs
+ * and a palette-keyed color, satisfied by both sprites' frame types.
+ */
+type CalmRasterRun = {
+  readonly text: string;
+  readonly color: string;
+};
+type CalmRasterFrame = readonly (readonly CalmRasterRun[])[];
+
+/**
  * Pack a frame painted for exactly `columns` cells. Every row is padded with plain
  * spaces to the full width, so the sail row's short run still fills its Raster row,
  * and a row wider than the grid is clipped rather than wrapped.
  */
-export function packCalmShipRasterCells(
-  frame: CalmWorkingShipFrame,
+function packCalmRasterCells(
+  frame: CalmRasterFrame,
   columns: number,
-  palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light,
+  palette: Readonly<Record<string, number>>,
 ): CalmShipRasterCells {
   const rows = Math.max(1, frame.length);
   const words = new Uint32Array(columns * rows * 3);
@@ -135,4 +166,22 @@ export function packCalmShipRasterCells(
     }
   }
   return { rows, cells: encodeBase64(new Uint8Array(words.buffer)) };
+}
+
+/** Pack one boat frame for the Raster, in the boat's palette. */
+export function packCalmShipRasterCells(
+  frame: CalmWorkingShipFrame,
+  columns: number,
+  palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light,
+): CalmShipRasterCells {
+  return packCalmRasterCells(frame, columns, palette);
+}
+
+/** Pack one spaceship frame for the Raster, in the spaceship's palette. */
+export function packCalmSpaceshipRasterCells(
+  frame: CalmWorkingSpaceshipFrame,
+  columns: number,
+  palette: CalmSpaceshipRasterPalette = CALM_SPACESHIP_RASTER_PALETTES.light,
+): CalmShipRasterCells {
+  return packCalmRasterCells(frame, columns, palette);
 }

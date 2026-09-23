@@ -161,7 +161,7 @@ const BRANCH_TOOL_NAMES = ["read", "bash", "fm_branch_report"] as const;
 const branchCacheKey = `fm-branch-${createHash("sha256").update(fmHome).digest("hex").slice(0, 24)}`;
 
 const MIRROR_MESSAGE_CAP = 4000;
-const MERGE_NOTE_BOAT = "⛵";
+const MERGE_NOTE_SAUCER = "🛸";
 const VISIBLE_OUTCOME_ANCHOR = "⚓";
 const VISIBLE_OUTCOME_ENTRY_TYPE = "fm-branch-visible-outcome";
 // The processing half of the captain-outcome contract. The visible entry
@@ -691,7 +691,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function deliverBranchHealthNote(text: string): void {
-    const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_BOAT} ${text}`, display: true };
+    const message = { customType: "fm-branch-merge", content: `${MERGE_NOTE_SAUCER} ${text}`, display: true };
     if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
     else pi.sendMessage(message, {});
   }
@@ -987,7 +987,7 @@ export default function (pi: ExtensionAPI) {
   function deliverRoutineOutcome(row: OutcomeRow): void {
     const message = {
       customType: "fm-branch-merge",
-      content: `${MERGE_NOTE_BOAT} ${row.task}: ${row.summary}`,
+      content: `${MERGE_NOTE_SAUCER} ${row.task}: ${row.summary}`,
       display: !(row.task === "fleet" && row.silent),
     };
     if (mainStreaming) pi.sendMessage(message, { deliverAs: "nextTurn" });
@@ -2307,11 +2307,11 @@ ${context.command}
   // routine note uses except an explicitly silent fleet heartbeat.
   pi.registerMessageRenderer?.("fm-branch-merge", (message, _options, theme) => {
     const note = textOfContent(message.content);
-    const hasGlyph = note.startsWith(MERGE_NOTE_BOAT);
-    const rest = hasGlyph ? note.slice(MERGE_NOTE_BOAT.length) : note;
+    const hasGlyph = note.startsWith(MERGE_NOTE_SAUCER);
+    const rest = hasGlyph ? note.slice(MERGE_NOTE_SAUCER.length) : note;
     const outputPad = 1;
     return new Text(
-      `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_BOAT) : ""}${theme.fg("dim", rest)}`,
+      `${hasGlyph ? theme.fg("customMessageText", MERGE_NOTE_SAUCER) : ""}${theme.fg("dim", rest)}`,
       outputPad,
       0,
     );
