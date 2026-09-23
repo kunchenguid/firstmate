@@ -26,6 +26,7 @@ Composer footer and trust-dialog facts re-verified on 2026-09-23 with Kimi Code 
 `../../../bin/fm-spawn.sh` launches Kimi bare, waits for the composer box or `Welcome to Kimi Code!`, sends only `Read the brief at <absolute-path> and follow it exactly.`, and requires a cleared composer plus either the echoed `✨` submission or nonzero context before accepting delivery.
 This launch-then-send shape is mandatory because Kimi rejects positional instructions as an unknown command.
 The path must be absolute because the instructions live outside the task worktree and Kimi reads them there without `--add-dir`.
+When the readiness, submit, or delivery gate fails, the spawn records `failed:` in the task status and closes the launched endpoint, so no unsupervised Kimi worker survives outside task control.
 
 Sending before readiness was reproduced as a silent drop with zero exit status, an empty composer, `context: 0%`, no echoed user message, and a healthy-looking idle pane.
 The startup input-readiness window is the established cause; the banner is not.
