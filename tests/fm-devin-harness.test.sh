@@ -74,6 +74,20 @@ printf 'broken' > "$TMP_ROOT/invalid.json"
 jq -e . "$config" >/dev/null || fail 'failed write replaced valid config'
 pass "private config preserves user hooks; lifecycle and stale-generation rejection"
 
+# A user config that opts into both must still produce a worker config with no
+# commit attribution and no imported Claude Code hooks; other import choices
+# the user made survive.
+printf '%s\n' '{"attribution":true,"read_config_from":{"claude":true,"cursor":false}}' > "$TMP_ROOT/opted-in.json"
+"$ROOT/bin/fm-devin-config.sh" "$state" worker "$gen" "$TMP_ROOT/opted-in.json" || fail 'config writer failed'
+jq -e '.attribution == false' "$config" >/dev/null \
+  || fail 'worker config keeps Devin commit attribution (Co-Authored-By: Devin trailer)'
+jq -e '.read_config_from.claude == false and .read_config_from.cursor == false' "$config" >/dev/null \
+  || fail 'worker config imports Claude Code hooks or dropped a user import choice'
+"$ROOT/bin/fm-devin-config.sh" "$state" worker "$gen" /nonexistent/config.json || fail 'absent source refused'
+jq -e '.attribution == false and .read_config_from.claude == false' "$config" >/dev/null \
+  || fail 'an absent user config must still disable attribution and Claude hook import'
+pass "worker config forces attribution off and Claude Code hook import off"
+
 case_dir="$TMP_ROOT/spawn"
 fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
 fm_fake_exit0 "$fakebin" devin

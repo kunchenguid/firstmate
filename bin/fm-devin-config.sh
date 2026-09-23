@@ -5,6 +5,13 @@
 # An absent source starts from {}; unreadable or malformed sources refuse.
 # Output: <state-dir>/<task-id>.devin-config.json, mode 600, atomically replaced.
 # No project or user config is edited. fm-control-lib.sh owns retirement.
+# Two settings are forced for every worker. read_config_from.claude=false,
+# because Devin otherwise runs every Claude Code hook it finds (~/.claude and
+# the project's .claude/settings*.json), including Herdr's hook that reports
+# the pane as a Claude agent; it also drops Devin's CLAUDE.md, .claude/skills,
+# and Claude MCP imports, while AGENTS.md and .agents/skills still load.
+# attribution=false, because Devin otherwise adds a Co-Authored-By: Devin
+# trailer and a Generated with Devin line to commits and PRs.
 # UserPromptSubmit opens a turn; Stop and SessionEnd close it. Devin 3000.11.1
 # emits no Stop on double-Escape cancellation, so fm-control invalidates its
 # state to unknown after delivering that interrupt, never fabricating idle.
@@ -38,6 +45,8 @@ trap 'rm -f "$temp"' EXIT
 jq -s --arg submit "$submit" --arg stop "$stop" --arg end "$end" '
   (if length == 0 then {} elif length == 1 then .[0] else error("expected one config object") end) |
   if type != "object" then error("expected config object") else . end |
+  .attribution = false |
+  .read_config_from = ((.read_config_from // {}) + {claude: false}) |
   .hooks = (.hooks // {}) |
   def hook($cmd): {hooks: [{type: "command", command: $cmd, timeout: 10}]};
   .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [hook($submit)]) |
