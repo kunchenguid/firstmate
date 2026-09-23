@@ -45,7 +45,7 @@ make_fake_toolchain() {
   local dir=$1 fakebin
   fakebin=$(fm_fakebin "$dir")
   fm_fake_exit0 "$fakebin" tmux node chrome-devtools-axi
-  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.46
+  fm_fake_version_tool "$fakebin" lavish-axi FM_FAKE_LAVISH_AXI_VERSION 0.1.77
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
@@ -85,7 +85,7 @@ fi
 exit 0
 SH
   chmod +x "$fakebin/no-mistakes"
-  add_tasks_axi "$fakebin" "0.2.4"
+  add_tasks_axi "$fakebin" "0.2.6"
   add_quota_axi "$fakebin"
   printf '%s\n' "$fakebin"
 }
@@ -95,7 +95,7 @@ add_quota_axi() {
   cat > "$fakebin/quota-axi" <<'SH'
 #!/usr/bin/env bash
 if [ "${1:-}" = --version ]; then
-  printf '%s\n' "${FM_FAKE_QUOTA_AXI_VERSION:-0.1.29}"
+  printf '%s\n' "${FM_FAKE_QUOTA_AXI_VERSION:-0.1.51}"
   exit 0
 fi
 exit 0
@@ -304,16 +304,16 @@ test_bootstrap_reporting() {
         ;;
     esac
   done <<'ROWS'
-treehouse --lease support is accepted silently^1^0.2.4^1^manual^empty^^
-treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.4^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-compatible tasks-axi is silent by default^1^0.2.4^1^-^empty^^
+treehouse --lease support is accepted silently^1^0.2.6^1^manual^empty^^
+treehouse without --lease reports an upgrade, gh auth is fine^0^0.2.6^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
+compatible tasks-axi is silent by default^1^0.2.6^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without archive-body is required by default^1^0.2.4:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-tasks-axi without multi-id mv is required by default^1^0.2.4:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-missing quota-axi is required by default^1^0.2.4^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
+tasks-axi without archive-body is required by default^1^0.2.6:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+tasks-axi without multi-id mv is required by default^1^0.2.6:nomulti^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
+missing quota-axi is required by default^1^0.2.6^0^manual^exact^MISSING: quota-axi (install: npm install -g quota-axi)^
 manual backlog backend still requires missing tasks-axi^1^-^1^manual^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
-manual backlog backend suppresses tasks-axi availability^1^0.2.4^1^manual^empty^^
+manual backlog backend suppresses tasks-axi availability^1^0.2.6^1^manual^empty^^
 ROWS
   pass "bootstrap reports treehouse lease + tasks-axi/quota-axi bootstrap contracts"
 }
@@ -381,7 +381,7 @@ ROWS
 
 test_lavish_axi_min_version() {
   local label version mode case_dir fakebin out unavailable n
-  unavailable='PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.46; install: npm install -g lavish-axi && lavish-axi setup hooks) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish'
+  unavailable='PRESENTATION_UNAVAILABLE: lavish-axi (requires >=0.1.77; install: npm install -g lavish-axi && lavish-axi setup hooks) - nonvisual work may proceed with plain-text decisions and reports; install or upgrade before using Lavish'
   n=0
   while IFS='^' read -r label version mode; do
     [ -n "$label" ] || continue
@@ -403,11 +403,11 @@ test_lavish_axi_min_version() {
     esac
   done <<'ROWS'
 absent lavish-axi permits text fallback^absent^unavailable
-minimum lavish-axi version is accepted^0.1.46^empty
-newer lavish-axi patch is accepted^0.1.47^empty
+minimum lavish-axi version is accepted^0.1.77^empty
+newer lavish-axi patch is accepted^0.1.78^empty
 newer lavish-axi minor is accepted^0.2.0^empty
 newer lavish-axi major is accepted^1.0.0^empty
-the patch just below the floor permits text fallback^0.1.45^unavailable
+the patch just below the floor permits text fallback^0.1.76^unavailable
 much older lavish-axi minor permits text fallback^0.0.9^unavailable
 unparseable lavish-axi version permits text fallback^lavish-axi development build^unavailable
 ROWS
@@ -449,15 +449,15 @@ test_tasks_axi_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum tasks-axi version is accepted^0.2.4^empty
-newer tasks-axi patch is accepted^0.2.5^empty
+minimum tasks-axi version is accepted^0.2.6^empty
+newer tasks-axi patch is accepted^0.2.7^empty
 newer tasks-axi minor is accepted^0.3.0^empty
 newer tasks-axi major is accepted^1.0.0^empty
 older tasks-axi with features reports an upgrade^0.1.1^missing
-the patch just below the floor reports an upgrade^0.2.3^missing
+the patch just below the floor reports an upgrade^0.2.5^missing
 unparseable tasks-axi version reports an upgrade^tasks-axi development build^missing
-tasks-axi at floor without archive-body reports an upgrade^0.2.4:noarchive^missing
-tasks-axi at floor without multi-id reports an upgrade^0.2.4:nomulti^missing
+tasks-axi at floor without archive-body reports an upgrade^0.2.6:noarchive^missing
+tasks-axi at floor without multi-id reports an upgrade^0.2.6:nomulti^missing
 ROWS
   pass "bootstrap enforces tasks-axi minimum version"
 }
@@ -484,11 +484,11 @@ test_quota_axi_min_version() {
         [ "$out" = "$missing" ] || fail "$label: expected '$missing', got: $out" ;;
     esac
   done <<'ROWS'
-minimum quota-axi version is accepted^0.1.29^empty
-newer quota-axi patch is accepted^0.1.30^empty
+minimum quota-axi version is accepted^0.1.51^empty
+newer quota-axi patch is accepted^0.1.52^empty
 newer quota-axi minor is accepted^0.2.0^empty
 newer quota-axi major is accepted^1.0.0^empty
-the patch just below the floor reports an upgrade^0.1.28^missing
+the patch just below the floor reports an upgrade^0.1.50^missing
 much older quota-axi minor reports an upgrade^0.0.9^missing
 unparseable quota-axi version reports an upgrade^quota-axi development build^missing
 ROWS
@@ -1211,6 +1211,10 @@ ROWS
     || fail "typed .env key must activate resolver-field validation, got: $out"
 
   rm -f "$case_dir/home/.env"
+  printf '%s\n' '{"default":{"harness":"devin","model":"swe-2-medium"}}' > "$case_dir/home/config/crew-dispatch.json"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "no-key bootstrap must accept the verified devin worker adapter, got: $out"
   printf '%s\n' '{"rules":[{"when":"gemini work","use":{"harness":"gemini","model":"gemini-3.8-flash-high","provider":"google"}}]}' > "$case_dir/home/config/crew-dispatch.json"
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")

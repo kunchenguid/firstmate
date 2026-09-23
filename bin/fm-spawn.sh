@@ -11,7 +11,14 @@
 #   the mode up. A ship spawn additionally reads the brief's recorded
 #   "Delivery contract: mode=<mode>" line and REFUSES a mismatch, so the worker's
 #   instructions and the recorded task delivery cannot drift apart; a brief
-#   scaffolded before that line existed warns once and launches on the flag. A
+#   scaffolded before that line existed warns once and launches on the flag.
+#   The project's forge IS read from data/projects.md, because it is the
+#   captain's confirmed project fact rather than a per-task choice: a spawn
+#   refuses a brief whose `forge=` disagrees with the registered binding in
+#   either direction, and refuses --yolo on for a forge=gerrit project, where
+#   yolo is inactive (bin/fm-project-mode.sh's header carries that decision). A
+#   registry entry the parser refuses stops the spawn rather than launching on a
+#   guessed posture. A
 #   ship or scout spawn also refuses leftover `{TASK}` / `{FIRSTMATE_SPEC}`
 #   placeholders, an empty Task, an incomplete pair of Task subsections, or a
 #   `## Captain's intent` line opening with a Captain label or address.
@@ -149,7 +156,7 @@
 #   profile consultation. A --secondmate spawn is exempt and resolves the SECONDMATE
 #   harness (config/secondmate-harness -> config/crew-harness -> own), so the
 #   secondmate-vs-crewmate split is DURABLE across every respawn (recovery,
-#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy)
+#   /updatefirstmate, restart). A bare adapter name (claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
 #   overrides it for this spawn (either kind). A non-flag string containing
 #   whitespace is treated as a RAW launch command - the escape hatch for verifying
 #   new adapters. For pi and pi-signed, fm-spawn resolves the selected executable
@@ -158,6 +165,13 @@
 #   a failed or inconclusive probe omits it so older Pi versions remain launchable.
 #   A missing selected executable refuses before endpoint creation, and pi-signed
 #   never falls back to pi.
+#   Devin is worker-only: --permission-mode dangerous and
+#   --respect-workspace-trust false allow unattended tools in a fresh worktree.
+#   --config points at a private per-task snapshot of the user config with
+#   lifecycle hooks appended; no global or project config is edited.
+#   config/claude-permission-mode is not mapped: Devin auto approves read-only
+#   tools, unlike Claude auto. Effort is part of Devin model ids, so the
+#   independent --effort axis is recorded but omitted from argv.
 #   For omp (Oh My Pi), fm-spawn resolves the `omp` executable from PATH once and
 #   refuses when it is absent. Every omp launch clears the foreign harness
 #   markers (omp publishes none of its own), sets the Firstmate-owned
@@ -324,6 +338,8 @@
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
+#     __DEVINBIN__ resolved Devin executable
+#     __DEVINCONFIG__ private per-task Devin config with lifecycle hooks
 #     __AGYBIN__    resolved, agy-verified executable for an agy launch
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
@@ -341,7 +357,7 @@
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
-# log; muse, gemini, and agy are crewmate/scout only and are refused for --secondmate.
+# log; muse, gemini, agy, and devin are crewmate/scout only and are refused for --secondmate.
 # rovo installs no hook either - its eventHooks fire at tool granularity only,
 # never turn-end - so it carries no busy-source wiring at all and no turn-end
 # hook. A positional brief is dead-on-arrival (rovo loads, never works, and drops
@@ -1090,6 +1106,7 @@ spawn_remote_secondmate() {
     echo "error: remote secondmate $id launched, but its reply source could not be armed; endpoint metadata is preserved" >&2
     return 1
   fi
+  [ ! -e "$CONFIG/fleet-ledger" ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$id" secondmate "" "$harness" "${model#-}" || true
   echo "spawned $id harness=$harness kind=secondmate mode=secondmate yolo=off window=remote:$id worktree=$home remote=$host backend=$remote_backend"
   return 0
 }
@@ -1717,7 +1734,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   }
 elif [ "$KIND" = secondmate ]; then
   case "${POS[1]:-}" in
-  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)
+  '' | claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
     ARG3=${POS[1]:-}
     ;;
   *' '*)
@@ -2013,6 +2030,10 @@ launch_template() {
   # Its turn-end and busy-state signals do NOT ride the launch command:
   # they are project hooks written into the worktree below.
   gemini) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_CLI_SYSTEM_SETTINGS_PATH=__GEMINISETTINGS__ gemini -y __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+  # Devin receives the typed launch envelope after --. Its private config
+  # appends native worker lifecycle hooks. Clear NO_COLOR so the shared
+  # composer guard can distinguish the dim placeholder from a real draft.
+  devin) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u FM_OMP_HARNESS -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u NO_COLOR __DEVINBIN__ --permission-mode dangerous --respect-workspace-trust false --config __DEVINCONFIG__ __MODELFLAG__-- "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
   # Kimi Code rejects a positional prompt, so it launches bare and receives
   # only an absolute brief pointer after the TUI readiness gate below.
   # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -2123,7 +2144,7 @@ case "$ARG3" in
   ;;
 esac
 
-# muse, gemini, and agy are verified as CREWMATE/SCOUT adapters only. A secondmate is
+# muse, gemini, agy, and devin are verified as CREWMATE/SCOUT adapters only. A secondmate is
 # a firstmate instance, so it needs a primary supervision protocol.
 # gemini has none: docs/supervision-protocols/ carries no gemini wake protocol
 # and this task verified only crewmate-side launch, busy state, interrupt, and
@@ -2135,7 +2156,9 @@ esac
 # secondmate whose supervision cycle could never be armed.
 # agy has none either: it exposes no hook surface for primary supervision and
 # docs/supervision-protocols/ carries no agy wake protocol (agy 1.2.0).
-if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ]; }; then
+# devin has none either: only its worker lifecycle hooks are verified, and
+# docs/supervision-protocols/ carries no devin wake protocol (devin 3000.11.1).
+if [ "$KIND" = secondmate ] && { [ "$HARNESS" = muse ] || [ "$HARNESS" = gemini ] || [ "$HARNESS" = agy ] || [ "$HARNESS" = devin ]; }; then
   echo "error: $HARNESS is a verified crewmate/scout adapter only and cannot run a secondmate; it has no primary supervision protocol. Select a harness verified for secondmates." >&2
   exit 1
 fi
@@ -2150,6 +2173,12 @@ if [ "$KIND" = secondmate ] && [ "$HARNESS" = rovo ]; then
 fi
 
 case "$HARNESS" in
+devin)
+  DEVIN_BIN=$(command -v devin) || {
+    echo "error: devin executable not found on PATH" >&2
+    exit 1
+  }
+  ;;
 pi | pi-signed)
   PI_BIN=$(resolve_pi_executable "$HARNESS") || {
     echo "error: $HARNESS executable not found on PATH; install it or select a different verified harness" >&2
@@ -2372,7 +2401,7 @@ model_flag_for_harness() {
   local harness=$1 model=$2
   [ -n "$model" ] && [ "$model" != default ] || return 0
   case "$harness" in
-  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy)
+  claude | codex | opencode | pi | pi-signed | grok | kimi | cursor | gemini | muse | rovo | omp | agy | devin)
     printf -- '--model %s ' "$(shell_quote "$model")"
     ;;
   esac
@@ -2815,15 +2844,51 @@ delivery_rigor_rank() { # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task 
 
 # Brief/spawn delivery agreement, checked before any endpoint exists.
 # fm-brief.sh records a ship brief's mode as a fixed "Delivery contract: mode=<mode>"
-# line. A spawn that disagrees would launch a worker whose instructions and whose
-# recorded task delivery differ, which is the exact drift this contract prevents.
+# line, with " forge=<forge>" appended on a bound forge. A spawn that disagrees
+# would launch a worker whose instructions and whose recorded task delivery
+# differ, which is the exact drift this contract prevents.
 if [ "$KIND" = ship ]; then
   PROJ_NAME=$(basename "$PROJ_ABS")
+  # The parser's own refusal reaches the operator here rather than being
+  # discarded: an entry it refuses (an unknown forge token, or a forge on
+  # local-only) resolves to no posture at all, and launching on the silent
+  # default is how a mistyped forge would hand a Gerrit project the
+  # pull-request contract.
+  if ! STANDING_FORGE=$("$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROJ_NAME" 2>/dev/null); then
+    "$FM_ROOT/bin/fm-project-mode.sh" --forge "$PROJ_NAME" >/dev/null || true
+    echo "error: $ID cannot launch: the registry entry for $PROJ_NAME does not resolve to a delivery posture (see the refusal above); correct data/projects.md and spawn again" >&2
+    exit 1
+  fi
+  [ -n "$STANDING_FORGE" ] || STANDING_FORGE=none
+  STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
   BRIEF_MODE=$(sed -n 's/^Delivery contract: mode=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  BRIEF_FORGE=$(sed -n 's/^Delivery contract: mode=[^ ]*.*[[:space:]]forge=\([^ ]*\).*$/\1/p' "$BRIEF" | head -n 1)
+  [ -n "$BRIEF_FORGE" ] || BRIEF_FORGE=none
   if [ -z "$BRIEF_MODE" ]; then
     echo "warning: $BRIEF records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode $MODE - confirm its definition of done matches" >&2
   elif [ "$BRIEF_MODE" != "$MODE" ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
+    exit 1
+  fi
+  # The registered forge is the captain's confirmed binding (bin/fm-project-mode.sh)
+  # and is never inferred here from a remote, host, or protocol. A brief that
+  # disagrees with it would tell the worker to open a pull request a Gerrit
+  # server does not have, or to publish a change to a forge that is not Gerrit.
+  if [ "$BRIEF_FORGE" != "$STANDING_FORGE" ]; then
+    if [ "$STANDING_FORGE" = none ]; then
+      forge_scaffold="fm-brief.sh $ID $PROJ_NAME --mode $MODE"
+    else
+      forge_scaffold="fm-brief.sh $ID $PROJ_NAME --mode $MODE --forge $STANDING_FORGE"
+    fi
+    echo "error: forge mismatch for $ID: $PROJ_NAME is registered forge=$STANDING_FORGE but $SOURCE_BRIEF records forge=$BRIEF_FORGE; keep the filled ## Captain's intent and ## Firstmate spec bodies, remove $SOURCE_BRIEF, re-scaffold it with $forge_scaffold, then re-fill those two subsections, so the worker's publication matches the project's forge" >&2
+    exit 1
+  fi
+  # Merge authority on a Gerrit forge is refused rather than quietly dropped, on
+  # the captain's decision of 2026-09-15: a Code-Review+2 is a positive
+  # attributed claim that a named human approved, and firstmate must not
+  # manufacture one.
+  if [ "$STANDING_FORGE" = gerrit ] && [ "$YOLO" = on ]; then
+    echo "error: --yolo on is refused for $ID: $PROJ_NAME is registered forge=gerrit, where yolo is inactive because a Code-Review+2 is a positive attributed claim that a named human approved and firstmate must not manufacture one (captain's decision 2026-09-15); spawn with --yolo off" >&2
     exit 1
   fi
   # The registry holds the captain's standing posture, so dropping below it is
@@ -2831,7 +2896,6 @@ if [ "$KIND" = ship ]; then
   # unregistered project resolves to the same no-mistakes standing default, which
   # is why the notice names the standing posture rather than the registry line. A
   # conditional policy is excluded: both of its legs are legitimate classifications.
-  STANDING_MODE=$("$FM_ROOT/bin/fm-project-mode.sh" --raw "$PROJ_NAME" 2>/dev/null | cut -d' ' -f1) || STANDING_MODE=
   if [ -n "$STANDING_MODE" ] && [ "$STANDING_MODE" != no-mistakes-prod-only ] &&
     [ "$(delivery_rigor_rank "$MODE")" -lt "$(delivery_rigor_rank "$STANDING_MODE")" ]; then
     echo "notice: $ID ships mode=$MODE while the standing posture for $PROJ_NAME is $STANDING_MODE - less rigor than the captain's standing posture; proceed only on a current explicit captain instruction or an intake judgment you can state" >&2
@@ -4085,7 +4149,7 @@ if [ "$KIND" != secondmate ]; then
     }
     [ "$RELAUNCH" -ne 1 ] || RELAUNCH_REPLACEMENT_BUSY_GEN=$BUSY_GEN
     ;;
-  gemini)
+  gemini | devin)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
       BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
@@ -4127,6 +4191,11 @@ if [ "$KIND" != secondmate ]; then
 {"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$j_submit"}]}],"Stop":[{"hooks":[{"type":"command","command":"$j_stop"}]}],"StopFailure":[{"hooks":[{"type":"command","command":"$j_stopfail"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$j_sessionend"}]}]}}
 EOF
     exclude_path '.claude/settings.local.json'
+    ;;
+  devin)
+    if [ "$RAW_LAUNCH" -eq 0 ]; then
+      "$SCRIPT_DIR/fm-devin-config.sh" "$STATE_REAL" "$ID" "$BUSY_GEN" || exit 1
+    fi
     ;;
   gemini)
     if [ "$RAW_LAUNCH" -eq 0 ]; then
@@ -4671,11 +4740,15 @@ pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
 cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
+devin)
+  LAUNCH=${LAUNCH//__DEVINBIN__/"$(shell_quote "$DEVIN_BIN")"}
+  LAUNCH=${LAUNCH//__DEVINCONFIG__/"$(shell_quote "$STATE_REAL/$ID.devin-config.json")"}
+  ;;
 agy) LAUNCH=${LAUNCH//__AGYBIN__/"$(shell_quote "$AGY_BIN")"} ;;
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy)
+claude | codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"
   ;;
 esac
@@ -5039,4 +5112,6 @@ SPAWN_DELIVERY=
 SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT" ] || SPAWN_ACCOUNT=" account=$WORKER_ACCOUNT_DECLARED"
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
+# Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
+[ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
 echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"

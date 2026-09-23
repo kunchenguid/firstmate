@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -47,13 +47,28 @@
 #                the configured merge authority approves, firstmate merges to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
+# --forge names the project's forge, defaults to none, and is orthogonal to --mode
+# exactly as the registry's `forge=` token is. It is the captain's confirmed
+# registry binding, read from data/projects.md at intake and passed here; this
+# script never infers a forge and never looks the binding up, and bin/fm-spawn.sh
+# refuses a brief whose forge disagrees with the registry. bin/fm-project-mode.sh's
+# header owns what the binding means, and bin/fm-dod-lib.sh owns what `gerrit`
+# changes for the worker. A forge on --mode local-only is refused, because that
+# mode publishes nothing.
+# --shape names how a forge=gerrit task is published, and only `squash` - one
+# change - is accepted: `stack` is refused until a stack can be watched by its
+# membership pinned when its watch is armed, because the merge watch follows one
+# change.
+# It defaults to squash on gerrit and is refused without it.
 # The generated ship brief records the chosen mode as a fixed machine-readable
-# "Delivery contract: mode=<mode>" line. bin/fm-spawn.sh reads that line and refuses
-# to launch a ship task whose explicit --mode disagrees, so an adjusted brief and the
+# "Delivery contract: mode=<mode>" line, followed by " forge=gerrit shape=squash"
+# on that forge. bin/fm-spawn.sh reads that line and refuses to launch a ship task
+# whose explicit --mode or registered forge disagrees, so an adjusted brief and the
 # recorded task metadata cannot drift apart.
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
-# --mode is refused on scout and secondmate scaffolds: a scout's deliverable is a
-# report rather than a merge, and a charter is not a delivery contract.
+# --mode, --forge, and --shape are refused on scout and secondmate scaffolds: a
+# scout's deliverable is a report rather than a merge, and a charter is not a
+# delivery contract.
 # There is no --yolo flag here. The worker never owns merge decisions, so yolo is
 # a spawn-time and firstmate-side input only (AGENTS.md section 7).
 # Every scaffold's status protocol distinguishes the configured
@@ -137,11 +152,16 @@ else
   STATE="$FM_HOME/state"
 fi
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
+case "$CONFIG" in /*) ;; *) CONFIG="$PWD/$CONFIG" ;; esac
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+FORGE=none
+FORGE_SET=0
+SHAPE=
+SHAPE_SET=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -151,6 +171,8 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      forge) FORGE=$a; FORGE_SET=1 ;;
+      shape) SHAPE=$a; SHAPE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -163,6 +185,10 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --forge) want_value=forge ;;
+    --forge=*) FORGE=${a#--forge=}; FORGE_SET=1 ;;
+    --shape) want_value=shape ;;
+    --shape=*) SHAPE=${a#--shape=}; SHAPE_SET=1 ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -188,6 +214,28 @@ if [ "$KIND" = ship ]; then
   esac
 elif [ "$MODE_SET" -eq 1 ]; then
   echo "error: --mode applies only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+
+# The forge is validated against the same closed set the renderers enforce, so a
+# typo or an impossible mode/forge pair stops here rather than reaching a worker.
+if [ "$KIND" = ship ]; then
+  fm_forge_valid_for_mode "$FORGE" "$MODE" "fm-brief.sh --forge" || exit 1
+  if [ "$FORGE" = gerrit ]; then
+    [ "$SHAPE_SET" -eq 1 ] || SHAPE=squash
+    case "$SHAPE" in
+      squash) ;;
+      stack)
+        echo "error: --shape stack is refused: a stack is several changes, and it must be watched by its membership pinned when its watch is armed, which this fleet does not yet do - the merge watch follows exactly one change, so a stack's wake could report one change as the whole stack; publish --shape squash" >&2
+        exit 1 ;;
+      *) echo "error: --shape must be squash (got '$SHAPE')" >&2; exit 1 ;;
+    esac
+  elif [ "$SHAPE_SET" -eq 1 ]; then
+    echo "error: --shape applies only with --forge gerrit, where the worker publishes the change itself" >&2
+    exit 1
+  fi
+elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
+  echo "error: --forge and --shape apply only to ship briefs; a scout delivers a report and a secondmate charter is not a delivery contract" >&2
   exit 1
 fi
 ID=${POS[0]}
@@ -243,6 +291,11 @@ shell_quote() {
 }
 
 STATUS_FILE=$(shell_quote "$STATE/$ID.status")
+# The worker's status command: the plain append always carries the line, then
+# the opt-in fleet ledger (docs/fleet-ledger.md) records it at once, costing one
+# file test when the flag is absent. A host without that flag, such as a remote
+# second mate's, runs only the append; the watcher capture is the backstop.
+STATUS_APPEND="echo \"{state} [at=<epoch>]: {one short line}\" >> $STATUS_FILE && { [ ! -e $(shell_quote "$CONFIG/fleet-ledger") ] || $(shell_quote "$FM_ROOT/bin/fm-fleet-ledger.sh") appended $(shell_quote "$CONFIG") $STATUS_FILE >/dev/null 2>&1 || true; }"
 INBOX_DIR=$(shell_quote "$STATE/$ID.inbox")
 
 # The receive-and-ack half of the steering-inbox contract, included in every
@@ -325,7 +378,7 @@ $INBOX_SECTION
 # Escalation to main firstmate
 Handle routine work yourself.
 Report only true captain-relevant outcomes or a declared external wait by appending one line:
-   \`echo "{state} [at=<epoch>]: {one short line}" >> $STATUS_FILE\`
+   \`$STATUS_APPEND\`
 States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
 Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
 Use \`$PAUSED_VERB: {why}\` (distinct from \`blocked:\`) only when your domain is deliberately idling on a known external wait you expect to clear on its own, naming when it clears with \`until <YYYY-MM-DDTHH:MMZ>\` (UTC) when you know; use \`blocked:\` when you are stuck and need firstmate to act.
@@ -424,7 +477,7 @@ The report is the only thing that survives, so anything worth keeping must be in
 2. Stay inside this worktree; the only files you may write outside it are the report and the status file below.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state} [at=<epoch>]: {one short line}" >> $STATUS_FILE\`
+   \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
@@ -476,7 +529,8 @@ fi
 # above, and render the Definition of done from its single owner, bin/fm-dod-lib.sh,
 # which bin/fm-promote.sh renders too so a promoted scout receives the same contract.
 # The block opens with the fixed "Delivery contract: mode=<mode>" line that
-# bin/fm-spawn.sh checks against its own explicit --mode before launching.
+# bin/fm-spawn.sh checks against its own explicit --mode and the project's
+# registered forge before launching.
 case "$MODE" in
   direct-PR)
     SETUP2=""
@@ -489,8 +543,8 @@ case "$MODE" in
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     ;;
 esac
-RULE1=$(fm_ship_rule_one "$MODE" "$ID") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$FORGE") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$FORGE") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -513,7 +567,7 @@ $RULE1
 2. Stay inside this worktree; modify nothing outside it.
 3. Use gh-axi for GitHub operations and chrome-devtools-axi for browser operations.
 4. Report status by appending one line:
-   \`echo "{state} [at=<epoch>]: {one short line}" >> $STATUS_FILE\`
+   \`$STATUS_APPEND\`
    States: working, needs-decision, blocked, $PAUSED_VERB, done, failed.
    Substitute \`<epoch>\` with the current Unix time in seconds - run \`date +%s\` and write the number it printed; a stamp that is not plain digits records no time at all.
    Each append wakes firstmate, so report sparingly: only phase changes a supervisor
@@ -560,4 +614,8 @@ Keep it proportionate: skip \`AGENTS.md\` edits for trivial tasks that produced 
 $DOD
 EOF
 append_brief_include
-echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
+if [ "$FORGE" = none ]; then
+  echo "scaffolded: $BRIEF (ship, mode=$MODE; replace {TASK} and {FIRSTMATE_SPEC})"
+else
+  echo "scaffolded: $BRIEF (ship, mode=$MODE forge=$FORGE shape=$SHAPE; replace {TASK} and {FIRSTMATE_SPEC})"
+fi

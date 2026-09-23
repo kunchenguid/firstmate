@@ -972,9 +972,9 @@ test_scout_lavish_line_follows_presentation_floor() {
       assert_no_grep "$hosting" "$brief" "$label: scout brief offered a below-floor Lavish"
     fi
   done <<'ROWS'
-lavish-axi at the floor^0.1.46^hosting
+lavish-axi at the floor^0.1.77^hosting
 lavish-axi above the floor^0.2.0^hosting
-lavish-axi just below the floor^0.1.45^text
+lavish-axi just below the floor^0.1.76^text
 absent lavish-axi^absent^text
 ROWS
   pass "fm-brief.sh: scout Lavish hosting follows the bootstrap lavish-axi floor"
