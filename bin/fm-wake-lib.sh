@@ -1995,6 +1995,34 @@ fm_wake_restore_queue() {
   fi
 }
 
+# fm_wake_queue_prune_task <state> <task-id> [target]
+# Prune pending durable wakes for <task-id> and its recorded <target> from
+# the wake queue. Removes stale wakes for <target>, signal wakes for the task's
+# status or turn-ended files, and task-specific check wakes.
+fm_wake_queue_prune_task() {  # <state> <task-id> [target]
+  local state=$1 task=$2 target=${3:-}
+  local queue="$state/.wake-queue" lock="$state/.wake-queue.lock" tmp
+  [ -f "$queue" ] || return 0
+  [ -s "$queue" ] || return 0
+  fm_lock_acquire_wait "$lock" || return 1
+  tmp=$(mktemp "$state/.wake-queue.prune.XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  chmod 0600 "$tmp" 2>/dev/null || true
+  awk -F '\t' -v task="$task" -v target="$target" -v state="$state" '
+    NF >= 5 {
+      if ($3 == "stale" && target != "" && $4 == target) next
+      if ($3 == "signal" && ($4 == task || $4 == task ".status" || $4 == task ".turn-ended" || $4 == state "/" task ".status" || $4 == state "/" task ".turn-ended")) next
+      if ($3 == "check" && $4 == state "/" task ".check.sh") next
+    }
+    { print }
+  ' "$queue" > "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
+  if ! _fm_atomic_replace "$tmp" "$queue"; then
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+}
+
 fm_wake_print_deduped() {
   local file=$1
   awk -F '\t' '
