@@ -35,15 +35,16 @@
 # 1..25). A pull observation has three dependent waves: core, six independent
 # reads, then the closing head read; an issue has two waves. Each wave reads in
 # parallel, and every read's ceiling is the remaining budget divided by the
-# waves still to run, so a slow page from a busy contribution can use its whole
-# share instead of a fixed cap. A read killed by its ceiling while budget
-# remains is a forge failure: it records the error, advances checked_at, and
-# rotates the URL behind the others, so a read that never finishes cannot starve
-# the rest. A read killed by the poll deadline itself (the closing wave, or a
-# ceiling that already reached the deadline) is a time cut, never evidence that
-# the forge is unavailable. poll reserves min(the configured budget, 15) before
-# starting a URL, so an in-progress normal-budget observation gets all three
-# waves and a later URL waits for the next oldest-checked-first poll.
+# waves still to run, always two seconds short of the deadline, so a slow page
+# from a busy contribution can use its whole share instead of a fixed cap. A
+# read killed by its ceiling while budget remains is a forge failure: it records
+# the error, advances checked_at, and rotates the URL behind the others, so a
+# read that never finishes, in any wave, cannot starve the rest. A read killed
+# once the poll deadline has passed, or refused because too little budget
+# remains for that margin, is a time cut, never evidence that the forge is
+# unavailable. poll reserves min(the configured budget, 15) before starting a
+# URL, so an in-progress normal-budget observation gets all three waves and a
+# later URL waits for the next oldest-checked-first poll.
 # A deliberately smaller configured budget remains bounded and may be
 # unmeasured, rather than being mislabeled unavailable. Each distinct URL is
 # observed once per poll and applied to every owner. A final observation applies
@@ -198,9 +199,15 @@ forge() { # waves-still-to-run gh-args...
   # The budget, not the forge, refused this read.
   [ "$remaining" -gt 0 ] || { time_cut; return 1; }
   ceiling=$(((remaining + waves - 1) / waves))
+  # date +%s truncates to whole seconds, so remaining can overstate the real
+  # budget by up to one second. Two seconds short of that reading is the
+  # smallest margin that still lands a ceiling kill a full second before the
+  # deadline as the next date +%s sees it, keeping the kill the forge's.
+  [ "$ceiling" -le $((remaining - 2)) ] || ceiling=$((remaining - 2))
+  [ "$ceiling" -gt 0 ] || { time_cut; return 1; }
   fm_run_timed "$ceiling" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
-  if [ "$rc" -eq 124 ] && { [ "$ceiling" -ge "$remaining" ] || [ "$DEADLINE" -le "$(date +%s)" ]; }; then
+  if [ "$rc" -eq 124 ] && [ "$DEADLINE" -le "$(date +%s)" ]; then
     time_cut
   elif [ "$rc" -ne 0 ]; then
     : > "$TMP/forge-unavailable"
