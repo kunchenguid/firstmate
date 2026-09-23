@@ -410,6 +410,7 @@ screen_issue() {
           ["hint", "", "", "", "", "issue \($src)#\(.number) (\(.state)) cross-references this issue"] | @tsv
         end' "$d/timeline.json" >> "$ev"
     if jq -e 'any(.[]; .event == "connected" or .event == "disconnected")' "$d/timeline.json" >/dev/null; then
+      # shellcheck disable=SC2016 # Dollar signs are literal GraphQL variables.
       if gh_read "$d/links" api graphql --paginate -f owner="$OWNER" -f name="$NAME" -F number="$n" -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
         repository(owner: $owner, name: $name) { issue(number: $number) {
           timelineItems(first: 100, after: $endCursor, itemTypes: [CONNECTED_EVENT, DISCONNECTED_EVENT]) {
@@ -647,7 +648,9 @@ EOF
         elif [ "$pr_base" = "$DEFAULT_BRANCH" ]; then
           if jq -e --arg fix "$fixpat" '(.body // "") | test($fix; "i")' "$d/pr-$x" >/dev/null; then
             pr_fix=true
-          elif gh_read "$d/closing-$x" api graphql --paginate -f owner="$OWNER" -f name="$NAME" -F number="$x" -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { closingIssuesReferences(first: 100, after: $endCursor) { nodes { number repository { nameWithOwner } } pageInfo { hasNextPage endCursor } } } } }' \
+          elif
+            # shellcheck disable=SC2016 # Dollar signs are literal GraphQL variables.
+            gh_read "$d/closing-$x" api graphql --paginate -f owner="$OWNER" -f name="$NAME" -F number="$x" -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { closingIssuesReferences(first: 100, after: $endCursor) { nodes { number repository { nameWithOwner } } pageInfo { hasNextPage endCursor } } } } }' \
             && pr_fix=$(jq -sr --argjson n "$n" --arg repo "$REPO" '
               if length == 0 or any(.[];
                 ((.errors // []) | length) > 0
