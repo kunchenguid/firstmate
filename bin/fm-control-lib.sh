@@ -146,6 +146,49 @@ fm_control_interrupt_repeat() {  # <harness>
   esac
 }
 
+# The rendered proof, read from the visible viewport between presses, that the
+# first interrupt press landed on a RUNNING turn; empty when the adapter sends
+# its presses blind. Devin needs it because the same fast double Escape that
+# cancels a running turn opens its /revert "Revert to step" picker on an idle
+# agent, where a later Enter reverts file changes. One Escape on a running turn
+# renders `esc again to interrupt` for about three seconds, while an idle agent
+# renders nothing, so the second press is sent only after that proof and never
+# sooner than fm_control_interrupt_press_gap: an unproven arm sends nothing
+# more. Verified live on devin 3000.11.1: an idle pair opened the picker at a
+# 0.05-0.1 s gap and did not at 0.15 s or more, and a running turn cancelled
+# with a 0.6 s gap.
+fm_control_interrupt_arm_signal() {  # <harness>
+  case "${1-}" in
+    devin) printf '%s' 'esc again to interrupt' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
+    *) return 1 ;;
+  esac
+}
+
+# The minimum seconds between two presses of an armed interrupt: several times
+# Devin's observed idle double-tap window, well inside its three-second armed
+# window. A turn that ends between the presses therefore cannot pair them.
+fm_control_interrupt_press_gap() {  # <harness>
+  case "${1-}" in
+    devin) printf '0.5' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) printf '0.2' ;;
+    *) return 1 ;;
+  esac
+}
+
+# A rendered surface that a mistimed interrupt press can open and that must be
+# dismissed with one more interrupt key before anything else is typed; empty
+# when the adapter has none. Devin's revert picker is recognized by either of
+# two independent rows, its `Revert to step:` title or its `↵ revert` footer,
+# and Escape cancels it without reverting (verified live, devin 3000.11.1).
+fm_control_interrupt_hazard_signal() {  # <harness>
+  case "${1-}" in
+    devin) printf '%s' 'Revert to step:|↵ revert' ;;
+    claude|codex|opencode|pi|pi-signed|omp|grok|kimi|cursor|gemini|muse|rovo|agy) ;;
+    *) return 1 ;;
+  esac
+}
+
 # The key that must follow the interrupt key to leave the composer empty, or
 # nothing when the adapter needs none. muse is the one verified adapter that
 # RESTORES the cancelled prompt into its composer as real bright text, so an
