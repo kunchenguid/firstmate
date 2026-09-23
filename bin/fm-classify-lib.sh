@@ -2335,11 +2335,10 @@ crew_gate_awaits_human_decision() {  # <id> -> <run-id> on stdout
 
 # Print crew <id>'s whole current-state line when it is a no-mistakes run parked
 # at a gate, read from the run-step source; 1 for every other verdict. The line
-# is the gate's fingerprint for the watcher's busy-turn looping check
-# (bin/fm-watch.sh busy_loop_check): the run id, gate name, findings count, and
-# who owes the answer are all components of it, so any real movement of the run
-# changes it. Same cost and caveat as crew_absorb_class: one fm-crew-state.sh
-# read, which may make a bounded no-mistakes call.
+# is the gate fingerprint for bin/fm-watch.sh's busy_loop_check, so only
+# changes visible in that line count as gate movement; docs/architecture.md
+# owns the proxy's limits. Same cost and caveat as crew_absorb_class: one
+# fm-crew-state.sh read, which may make a bounded no-mistakes call.
 crew_parked_gate_line() {  # <id> -> <state-line> on stdout
   local id=$1 line
   [ -n "$id" ] || return 1
@@ -2401,8 +2400,8 @@ FM_WORKTREE_WRITE_TIMEOUT=${FM_WORKTREE_WRITE_TIMEOUT:-10}
 # exclusion is a negative outcome like any other, so an unproductive mate keeps
 # escalating on the caller's unchanged schedule.
 #
-# The anchor is the caller's own idle-window timer file, whose mtime already marks
-# when the quiet window opened, so `-newer` needs no clock arithmetic, no temp
+# The anchor is the caller's own escalation-window timer file, whose mtime marks
+# the comparison start, so `-newer` needs no clock arithmetic, no temp
 # file, and no portable mtime-setting. Not a pure status-file read (see the header):
 # one pruned, depth-bounded, wall-clock-bounded walk per call, which callers must
 # reach only when they are otherwise about to escalate, never on every poll. A walk

@@ -77,10 +77,8 @@
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
 #   stale: <window> (looping <age>s, escalation N: ...)
-#                          an ordinary no-mistakes crew kept reading busy and
-#                          seeing the same parked gate for FM_LOOP_PARKED_SECS
-#                          with no non-busy observation, run-step change, or task
-#                          worktree write (busy_loop_check owns the proxy)
+#                          parked-gate proxy alarm; docs/architecture.md owns
+#                          its criteria, limits, and inspection-only handling
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -1401,7 +1399,8 @@ clear_loop_tracking() {  # <window-key>
 #
 # The episode is .loop-since-<key>: its first line is the optional busy generation,
 # its second is the gate's whole current-state line (crew_parked_gate_line),
-# and its mtime is when this turn was first seen at that gate.
+# and its mtime anchors the current observation window, restarted after a
+# detected worktree write or a durably queued looping alarm.
 busy_loop_check() {  # <window> <task> <window-key>
   local win=$1 task=$2 key=$3 meta since probe esc line prev age n reason
   local gen tail40 episode
@@ -1547,13 +1546,7 @@ busy_turn_bound_check() {  # <window> <task> <hash> <since-file> <escalation-fil
   statusf="$STATE/$task.status"
   if status_is_paused_or_captain_held "$(last_status_line "$statusf")"; then
     if afk_present; then
-      # Away mode is daemon-owned, so this bound hands off the PLAIN wake identity
-      # and lets the daemon classify the declaration itself - the undecorated
-      # identity the rest of this function's contract promises. Running the wedge
-      # timer here instead would decorate the wake as a possible wedge, and that
-      # decoration overrides the daemon's own pause verdict for the pane: the
-      # ladder then climbs on every re-arm, escalating a crew that declared the
-      # wait itself once per FM_STALE_ESCALATE_SECS for as long as the wait lasts.
+      # docs/architecture.md owns declared-wait routing through the daemon.
       # The one-shot is keyed on the DECLARATION (the status log's signature),
       # never on the pane hash: a busy pane's harness footer ticks on every
       # capture, so a hash-keyed one-shot would re-fire on every poll and the
