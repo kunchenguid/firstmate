@@ -3,7 +3,8 @@ name: vessel-workflows
 description: >-
   Captain-installed vessel extension: dispatch Remy-style workflows to the crew with the captain's vessel agents.
   Use when the captain asks to implement or plan a Jira ticket, review a pull request, address PR feedback,
-  resolve PR merge conflicts, update a PR description, or create a Jira ticket; when a request names a vessel
+  resolve PR merge conflicts, update a PR description, or create a Jira ticket, including loose references such
+  as "this PR", "that ticket", or "my PRs" that point at what the captain sees in vessel; when a request names a vessel
   agent (Snoop, Slim Charles, Proposition Joe, Conflict Resolver, Stringer, Ticket Creator, PR Description, or
   any agent in config/vessel/agents.json); and for every inbox note that starts with `[vessel]`.
 user-invocable: false
@@ -39,7 +40,33 @@ Resolve the **workflow** and the **target**:
 | `ticket`      | Jira feature    | Ticket      | scout               |
 | `free`        | pull request    | none        | captain's prompt    |
 
-If the workflow or target is ambiguous, ask one concise question instead of guessing.
+### What the captain is looking at
+
+The captain usually has vessel open beside this chat, and it publishes what it shows to `data/vessel/context.json`:
+
+```json
+{"v":1,"ts":1790000000,
+ "focus":{"kind":"pr","repo":"acme/webapp","number":42,"url":"…","title":"…","ticket_key":"AA4FI-1234","selected_feedback":["<thread id>"]},
+ "my_prs":[{"repo","number","title","url","head","status","has_conflicts","needs_attention","ticket_key"}],
+ "review_prs":[{"repo","number","title","url","head","my_status","total_status","ticket_key"}],
+ "tickets":[{"key","summary","status","feature"}]}
+```
+
+`focus` is the open PR or ticket page, the open run (`kind: "run"`, with `task`, `ticket_key`, `repo`, `number`), or the highlighted list row; `null` when vessel shows neither or has quit.
+`my_prs` are the captain's own PRs, `review_prs` the PRs waiting on the captain's review, `tickets` the captain's Jira tickets; a missing list was never loaded.
+Ignore the file when it is absent or `ts` is more than 15 minutes old (vessel rewrites it at least every 5 minutes while it runs).
+
+When the request names no target, or names it loosely ("this PR", "that ticket", "PR 42", "the rate limiting PR", "Joe's PR"), resolve it from this file before asking:
+
+- "this"/"that"/no target: `focus`, if its kind fits the workflow (a run's `repo`/`number` or `ticket_key` counts).
+- A number, key, or title words: the one entry in `review_prs`, `my_prs`, or `tickets` that matches; `focus` breaks a tie.
+- `address` with no `comments=`: a non-empty `focus.selected_feedback` is the list of thread or comment ids to address.
+
+Name the resolved target in your acknowledgement ("reviewing acme/webapp#42, the PR open in vessel") so a wrong match is caught at once.
+The file is only a pointer: section 4 still fetches the live PR or ticket.
+Outside workflow requests, read the same file when the captain refers to "my PRs", "my tickets", or what is on screen, rather than re-querying GitHub or Jira.
+
+If the workflow or target is still ambiguous, ask one concise question instead of guessing, listing the candidates you found.
 
 ## 2. Resolve the agent
 

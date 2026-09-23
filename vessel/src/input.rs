@@ -75,6 +75,7 @@ where
             KeyCode::Tab => app.toggle_run_view_focus(1),
             KeyCode::BackTab => app.toggle_run_view_focus(-1),
             KeyCode::Char('g' | 'G') => app.open_run_pull_request(),
+            KeyCode::Enter => app.open_viewed_run_session(),
             code if scroll_delta(code).is_some() => {
                 app.scroll_run_view(scroll_delta(code).unwrap())
             }
@@ -140,7 +141,12 @@ where
             }
             KeyCode::Up => app.move_review_selection(-1),
             KeyCode::Down => app.move_review_selection(1),
-            KeyCode::Enter if focus == GitHubReviewFocus::Reviews => app.open_selected_review_run(),
+            KeyCode::Enter if focus == GitHubReviewFocus::Reviews => {
+                app.open_selected_review_run(false)
+            }
+            KeyCode::Char('d' | 'D') if focus == GitHubReviewFocus::Reviews => {
+                app.open_selected_review_run(true)
+            }
             _ => {}
         }
         return Ok(false);
@@ -179,7 +185,8 @@ where
                 KeyCode::Down | KeyCode::Char('j') => app.move_overview_selection(1),
                 KeyCode::PageUp => app.move_overview_selection(-5),
                 KeyCode::PageDown => app.move_overview_selection(5),
-                KeyCode::Enter => app.open_selected_overview_run(),
+                KeyCode::Enter => app.open_selected_overview_run(false),
+                KeyCode::Char('d' | 'D') => app.open_selected_overview_run(true),
                 _ => {}
             },
             OverviewSection::GitHubMe | OverviewSection::GitHubOther => match key.code {
@@ -215,7 +222,12 @@ where
             app.open_selected_jira_plan()
         }
         KeyCode::Enter if jira_detail_active && app.jira_detail_focus == JiraDetailFocus::Runs => {
-            app.open_selected_jira_run()
+            app.open_selected_jira_run(false)
+        }
+        KeyCode::Char('d' | 'D')
+            if jira_detail_active && app.jira_detail_focus == JiraDetailFocus::Runs =>
+        {
+            app.open_selected_jira_run(true)
         }
         KeyCode::Up if jira_detail_active => {
             app.jira_detail_scroll = app.jira_detail_scroll.saturating_sub(1)
@@ -264,7 +276,8 @@ fn handle_settings_key(app: &mut App, key: KeyEvent) {
         match key.code {
             KeyCode::Up => app.move_agent_selection(-1),
             KeyCode::Down => app.move_agent_selection(1),
-            KeyCode::Enter => app.open_selected_agent_run(),
+            KeyCode::Enter => app.open_selected_agent_run(false),
+            KeyCode::Char('d' | 'D') => app.open_selected_agent_run(true),
             _ => {}
         }
         return;

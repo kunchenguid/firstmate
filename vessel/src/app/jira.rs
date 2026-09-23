@@ -59,7 +59,7 @@ impl App {
         }
     }
 
-    pub(crate) fn open_selected_jira_run(&mut self) {
+    pub(crate) fn open_selected_jira_run(&mut self, details: bool) {
         if self.jira_detail_focus != JiraDetailFocus::Runs {
             return;
         }
@@ -70,7 +70,7 @@ impl App {
         else {
             return;
         };
-        self.open_run(task, created_at);
+        self.enter_run(task, created_at, details);
     }
 
     pub(crate) fn move_jira_plan_selection(&mut self, offset: isize) {
@@ -244,7 +244,7 @@ impl App {
     /// Tickets with a run in flight get a crew marker in lists.
     pub(crate) fn active_run_for_ticket(&self, key: &str) -> Option<&Run> {
         self.runs().iter().find(|run| {
-            run.live
+            run.is_active()
                 && run
                     .ticket_key
                     .as_deref()

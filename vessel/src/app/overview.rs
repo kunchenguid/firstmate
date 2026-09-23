@@ -36,7 +36,7 @@ pub(crate) fn grouped_runs(mut runs: Vec<&Run>) -> Vec<&Run> {
     runs
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -46,15 +46,15 @@ fn unix_now() -> u64 {
 pub(crate) fn crew_groups(runs: &[Run], now: u64) -> CrewGroups<'_> {
     let needs_you = runs
         .iter()
-        .filter(|run| run.live && run.status.needs_attention())
+        .filter(|run| run.is_active() && run.status.needs_attention())
         .collect::<Vec<_>>();
     let running = runs
         .iter()
-        .filter(|run| run.live && !run.status.needs_attention())
+        .filter(|run| run.is_active() && !run.status.needs_attention())
         .collect::<Vec<_>>();
     let recent = runs
         .iter()
-        .filter(|run| !run.live)
+        .filter(|run| !run.is_active())
         .filter(|run| {
             run.finished_at
                 .or(run.created_at)
@@ -142,7 +142,7 @@ impl App {
         }
     }
 
-    pub(crate) fn open_selected_overview_run(&mut self) {
+    pub(crate) fn open_selected_overview_run(&mut self, details: bool) {
         let Some((task, created_at)) = self
             .crew_runs()
             .get(self.overview_selected)
@@ -150,7 +150,7 @@ impl App {
         else {
             return;
         };
-        self.open_run(task, created_at);
+        self.enter_run(task, created_at, details);
     }
 
     pub(crate) fn open_activity(&mut self) {
@@ -246,6 +246,26 @@ mod tests {
                 .map(|run| run.task.as_str())
                 .collect::<Vec<_>>(),
             ["review-d"]
+        );
+    }
+
+    #[test]
+    fn a_scout_that_reported_done_is_finished_before_cleanup() {
+        let now = 1_000_000;
+        let mut review = run("review-a", "review", true, RunStatus::Done, now - 50);
+        review.kind = Some("scout".into());
+        let mut ship = run("implement-b", "implement", true, RunStatus::Done, now - 60);
+        ship.kind = Some("ship".into());
+        let runs = vec![review, ship];
+
+        let groups = crew_groups(&runs, now);
+
+        let tasks = |runs: &[&Run]| runs.iter().map(|run| run.task.clone()).collect::<Vec<_>>();
+        assert_eq!(tasks(&groups.recent), ["review-a"]);
+        assert_eq!(
+            tasks(&groups.running),
+            ["implement-b"],
+            "a ship's done may still await its PR"
         );
     }
 }

@@ -12,6 +12,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 mod agents;
 mod app;
 mod config;
+mod context;
 mod firstmate;
 mod github;
 mod input;
@@ -67,6 +68,50 @@ fn main() -> io::Result<()> {
     result
 }
 
+/// Opens a run's live agent session: in a new Ghostty tab when vessel runs in
+/// Ghostty (as Remy does), else in this terminal until the captain detaches.
+/// When the session cannot be opened, the run view explains what is there.
+fn open_session(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    app: &mut App,
+    task: String,
+    created_at: Option<u64>,
+) -> io::Result<()> {
+    let opened = firstmate::session::attach_script(&app.config, &task).and_then(|script| {
+        if firstmate::session::use_ghostty() {
+            return firstmate::session::open_in_ghostty(&script, &app.config.fm_home);
+        }
+        disable_raw_mode()
+            .and_then(|()| execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture))
+            .map_err(|error| format!("Could not hand the terminal to tmux: {error}"))?;
+        // Inside tmux this attach is nested, so the prefix must reach the inner tmux.
+        let detach = if std::env::var_os("TMUX").is_some() {
+            "your tmux prefix twice, then d"
+        } else {
+            "your tmux prefix, then d"
+        };
+        println!("Attaching to {task}. Detach with {detach} to return to vessel.");
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", &script])
+            .env_remove("TMUX")
+            .status();
+        enable_raw_mode()
+            .and_then(|()| execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture))
+            .and_then(|()| terminal.clear())
+            .map_err(|error| format!("Could not restore vessel's screen: {error}"))?;
+        match status {
+            Ok(status) if status.success() => Ok(()),
+            Ok(_) => Err(format!("tmux could not attach to {task}")),
+            Err(error) => Err(format!("Could not run tmux: {error}")),
+        }
+    });
+    if let Err(message) = opened {
+        app.notice = Some(message);
+        app.open_run(task, created_at);
+    }
+    Ok(())
+}
+
 fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> io::Result<()> {
     loop {
         app.update();
@@ -76,7 +121,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> i
             match event::read()? {
                 Event::Key(key) => {
                     if input::handle_key(terminal, &mut app, key)? {
+                        app.publish_context_on_exit();
                         return Ok(());
+                    }
+                    if let Some((task, created_at)) = app.session_request.take() {
+                        open_session(terminal, &mut app, task, created_at)?;
                     }
                 }
                 Event::Resize(width, height)

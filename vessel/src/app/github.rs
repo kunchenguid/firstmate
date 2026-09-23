@@ -45,7 +45,7 @@ fn is_review_run(run: &Run) -> bool {
 
 fn is_finished_review(run: &Run) -> bool {
     is_review_run(run)
-        && !run.live
+        && !run.is_active()
         && matches!(
             run.status,
             RunStatus::Completed | RunStatus::Done | RunStatus::Merged
@@ -251,7 +251,7 @@ impl App {
         current_head_commit: &str,
     ) -> AgentReviewStatus {
         if self.runs().iter().any(|run| {
-            run.matches_pull_request(repository, number) && is_review_run(run) && run.live
+            run.matches_pull_request(repository, number) && is_review_run(run) && run.is_active()
         }) {
             return AgentReviewStatus::Running;
         }
@@ -297,7 +297,7 @@ impl App {
     ) -> Option<&Run> {
         self.runs()
             .iter()
-            .find(|run| run.live && run.matches_pull_request(repository, number))
+            .find(|run| run.is_active() && run.matches_pull_request(repository, number))
     }
 
     pub(crate) fn move_review_selection(&mut self, offset: isize) {
@@ -428,7 +428,7 @@ impl App {
         }
     }
 
-    pub(crate) fn open_selected_review_run(&mut self) {
+    pub(crate) fn open_selected_review_run(&mut self, details: bool) {
         let Some(selected) = self.github_review.as_ref().map(|review| review.selected) else {
             return;
         };
@@ -439,6 +439,6 @@ impl App {
         else {
             return;
         };
-        self.open_run(task, created_at);
+        self.enter_run(task, created_at, details);
     }
 }

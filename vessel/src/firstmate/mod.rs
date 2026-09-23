@@ -10,6 +10,7 @@
 
 pub(crate) mod ledger;
 pub(crate) mod runs;
+pub(crate) mod session;
 pub(crate) mod snapshot;
 
 use std::{

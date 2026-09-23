@@ -9,6 +9,7 @@ bin/fm-inbox.sh note --request-id vessel-<uuid> --json -- '[vessel] review acme/
 ```
 
 The `vessel-workflows` skill (`.agents/skills/vessel-workflows/SKILL.md`) handles both forms the same way.
+In chat the target may be loose or left out ("review this PR"); the skill resolves it from what vessel shows, in `data/vessel/context.json`.
 
 ## Canonical form
 

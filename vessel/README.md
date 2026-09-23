@@ -24,13 +24,18 @@ cargo run --manifest-path vessel/Cargo.toml -- --home /tmp/vessel-demo
 
 ## What it shows
 
-- **Overview**: the crew (needs you, running, finished today, queued), your Jira tickets by feature, and your GitHub pull requests. `⚓ <task>` marks a ticket or PR the crew is working on.
-- **Run** (Enter on a run): agent, harness, model, ticket and PR, the status history, the brief, the report, and the live terminal while the crewmate runs.
+- **Overview**: the crew (needs you, running, finished today, queued), your Jira tickets by feature, and your GitHub pull requests. `⚓ <task>` marks a ticket or PR the crew is working on. A review, plan, or other scout counts as finished once it reports done, even before firstmate cleans it up.
+- **Agent session** (Enter on a live run): the crewmate's real terminal. In Ghostty it opens in a new tab, as in Remy; elsewhere vessel steps aside until you detach (tmux prefix, then `d`). It attaches through a throwaway tmux session grouped with firstmate's, so firstmate's own window selection never moves; typing there is direct intervention, as with `tmux attach -t firstmate`. tmux backend only.
+- **Run** (`D` on a run, or Enter on a finished one): agent, harness, model, ticket and PR, the status history, the brief, the report, and the live terminal while the crewmate runs.
 - **PR** and **ticket** pages: Remy's views with a **Runs** tab, plus **Plans** for tickets, including runs that finished long ago.
 - **Activity** (`a`): the fleet ledger, newest first.
 - **Settings** (`0`): the agents, editable, and where everything lives.
 
-It reads firstmate only through documented contracts: `state/fleet-ledger.jsonl`, `bin/fm-fleet-snapshot.sh --json`, `bin/fm-peek.sh`, and `data/<task>/`. The only files it writes are the agent files in `config/vessel/`.
+It reads firstmate only through documented contracts: `state/fleet-ledger.jsonl`, `bin/fm-fleet-snapshot.sh --json`, `bin/fm-peek.sh`, and `data/<task>/`. The only files it writes are the agent files in `config/vessel/` and `data/vessel/context.json`.
+
+## Context for firstmate
+
+firstmate cannot see the TUI, so vessel publishes what it shows to `data/vessel/context.json`: the item in focus (the open PR, ticket, or run, or the highlighted row), your pull requests, the pull requests waiting on your review, and your Jira tickets. The file is rewritten when that changes, and at least every five minutes; on quit the focus is cleared. The `vessel-workflows` skill reads it, so "review this PR" means the PR open in vessel, "address the ones I marked" means the feedback marked with Space, and "review the rate limiting PR" matches a title from your review list.
 
 ## Workflows
 

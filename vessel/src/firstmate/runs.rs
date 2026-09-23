@@ -162,8 +162,14 @@ pub(crate) struct Run {
 }
 
 impl Run {
+    /// Still doing work. A scout that reported `done` has filed its report;
+    /// firstmate only has cleanup left, so it counts as finished while live.
     pub(crate) fn is_active(&self) -> bool {
-        self.live
+        self.live && !self.reported_done()
+    }
+
+    fn reported_done(&self) -> bool {
+        self.kind.as_deref() == Some("scout") && self.status == RunStatus::Done
     }
 
     pub(crate) fn agent(&self) -> Option<&str> {
@@ -416,6 +422,7 @@ fn assemble(
         .or_else(|| backlog_titles.get(task).map(|title| (*title).to_owned()))
         .unwrap_or_else(|| task.to_owned());
 
+    let scout_done = kind.as_deref() == Some("scout") && status == RunStatus::Done;
     Run {
         task: task.to_owned(),
         workflow: record
@@ -445,7 +452,7 @@ fn assemble(
         created_at: life
             .and_then(TaskHistory::first_ts)
             .or_else(|| record.as_ref().map(|record| record.ts)),
-        finished_at: if snapshot_task.is_some() {
+        finished_at: if snapshot_task.is_some() && !scout_done {
             None
         } else {
             cleaned_up_at

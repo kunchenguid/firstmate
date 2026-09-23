@@ -15,6 +15,34 @@ impl App {
         });
     }
 
+    /// Enter on a run: its live agent session when it has one, else (or with
+    /// `details`) the run view. `main` opens the session, since that may need
+    /// the terminal.
+    pub(crate) fn enter_run(&mut self, task: String, created_at: Option<u64>, details: bool) {
+        let has_session = self.runs().iter().any(|run| {
+            run.task == task
+                && run.created_at == created_at
+                && run.live
+                && run.endpoint_exists != Some(false)
+        });
+        if has_session && !details {
+            self.session_request = Some((task, created_at));
+        } else {
+            self.open_run(task, created_at);
+        }
+    }
+
+    /// Enter inside the run view.
+    pub(crate) fn open_viewed_run_session(&mut self) {
+        if let Some(run) = self.viewed_run() {
+            if run.live && run.endpoint_exists != Some(false) {
+                self.session_request = Some((run.task.clone(), run.created_at));
+            } else {
+                self.notice = Some(format!("{} has no live session", run.task));
+            }
+        }
+    }
+
     pub(crate) fn close_run(&mut self) {
         self.run_view = None;
         self.fleet.close_peek();

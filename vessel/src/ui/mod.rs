@@ -143,12 +143,12 @@ fn shell_areas(area: Rect) -> [Rect; 4] {
 
 fn render_shortcuts(frame: &mut Frame, area: Rect, app: &App) {
     let shortcuts = if app.run_view.is_some() {
-        "[Tab] Status/Brief/Report/Terminal  [↑↓/PgUp/PgDn] Scroll  [G] Pull request  [O] Open PR  [B] Back  [Esc] Quit"
+        "[Enter] Session  [Tab] Status/Brief/Report/Terminal  [↑↓/PgUp/PgDn] Scroll  [G] PR  [O] Open PR  [B] Back  [Esc] Quit"
     } else if app.activity.is_some() {
         "[↑↓/PgUp/PgDn] Scroll  [R] Refresh  [B] Back  [1-4,0] Pages  [Esc] Quit"
     } else if let Some(settings) = &app.agent_settings {
         if settings.agent_runs.is_some() {
-            "[Up/Down] Select  [Enter] Open  [B] Back  [1-4,0] Pages  [Esc] Quit"
+            "[Up/Down] Select  [Enter] Session  [D] Details  [B] Back  [1-4,0] Pages  [Esc] Quit"
         } else if settings.editing {
             "[Enter] Save field  [Shift+Enter] New line  [Esc] Stop editing"
         } else {
@@ -176,7 +176,7 @@ fn render_shortcuts(frame: &mut Frame, area: Rect, app: &App) {
                 "[Tab] Runs  [Up/Down] Scroll  [T] Ticket  [O] Open  [B] Back  [1-4,0] Pages  [Esc] Quit"
             }
             GitHubReviewFocus::Reviews => {
-                "[Tab] Comments  [Up/Down] Select run  [Enter] Open  [T] Ticket  [O] Open  [B] Back  [Esc] Quit"
+                "[Tab] Comments  [↑↓] Select run  [Enter] Session  [D] Details  [T] Ticket  [O] Open  [B] Back  [Esc] Quit"
             }
             GitHubReviewFocus::Comments => {
                 "[↑↓] Select  [Enter] Fold  [Space] Mark  [PgUp/Dn] Page  [R] Resolved  [Tab] Panel  [B] Back"
@@ -188,7 +188,7 @@ fn render_shortcuts(frame: &mut Frame, area: Rect, app: &App) {
                 "[Tab] Runs  [Up/Down] Scroll  [B] Back  [1-4,0] Pages  [Esc] Quit"
             }
             JiraDetailFocus::Runs => {
-                "[Tab] Plans  [Up/Down] Select run  [Enter] Open  [B] Back  [1-4,0] Pages  [Esc] Quit"
+                "[Tab] Plans  [Up/Down] Select run  [Enter] Session  [D] Details  [B] Back  [1-4,0] Pages  [Esc] Quit"
             }
             JiraDetailFocus::Plans => {
                 "[Tab] Ticket  [Up/Down] Select plan  [Enter] Open  [B] Back  [1-4,0] Pages  [Esc] Quit"
@@ -199,7 +199,7 @@ fn render_shortcuts(frame: &mut Frame, area: Rect, app: &App) {
     } else if app.active_tab == 0 {
         match app.overview_section {
             OverviewSection::Crew => {
-                "[1] Crew [2] Jira [3] GitHub [4] Other [0] Settings [↑↓] [Enter] Run [A] Activity [O] PR [R] [Esc] Quit"
+                "[1] Crew [2] Jira [3] GitHub [4] Other [0] Settings [↑↓] [Enter] Session [D] Details [A] Activity [O] PR [R] [Esc] Quit"
             }
             OverviewSection::Jira => {
                 "[1] Crew [2] Jira [3] GitHub [4] Other [0] Settings [PgUp/PgDn] [↑↓] [Enter] Details [R] [Esc] Quit"

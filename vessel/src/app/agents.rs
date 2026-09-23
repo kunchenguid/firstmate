@@ -123,7 +123,7 @@ impl App {
             .collect()
     }
 
-    pub(crate) fn open_selected_agent_run(&mut self) {
+    pub(crate) fn open_selected_agent_run(&mut self, details: bool) {
         let Some(selected) = self
             .agent_settings
             .as_ref()
@@ -138,7 +138,7 @@ impl App {
         else {
             return;
         };
-        self.open_run(task, created_at);
+        self.enter_run(task, created_at, details);
     }
 
     pub(crate) fn toggle_agent_settings_focus(&mut self) {

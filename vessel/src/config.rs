@@ -44,6 +44,11 @@ impl Config {
         self.data_dir().join("vessel/runs.jsonl")
     }
 
+    /// What the captain sees in vessel, for firstmate (see `context.rs`).
+    pub(crate) fn context_file(&self) -> PathBuf {
+        self.data_dir().join("vessel/context.json")
+    }
+
     pub(crate) fn ledger_file(&self) -> PathBuf {
         self.state_dir().join("fleet-ledger.jsonl")
     }
@@ -94,6 +99,14 @@ pub(crate) fn resolve_fm_home(explicit: Option<PathBuf>) -> Result<(PathBuf, Pat
                 "Could not find a firstmate home. Run vessel inside your firstmate checkout, or pass --home <dir>.".into()
             }),
     }
+}
+
+/// Writes `path` through a sibling temporary file, so readers never see half a file.
+pub(crate) fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, contents)
+        .and_then(|()| fs::rename(&temporary, path))
+        .map_err(|error| format!("Could not write {}: {error}", path.display()))
 }
 
 fn is_checkout(path: &Path) -> bool {

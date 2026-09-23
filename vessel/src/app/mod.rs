@@ -14,11 +14,13 @@ mod runs;
 mod text;
 
 pub(crate) use jira::{format_time, jira_content_height, jira_ticket_rows};
+pub(crate) use overview::unix_now;
 pub(super) use text::*;
 
 use crate::{
     agents::{Agent, AgentStore, harness_options},
     config::Config,
+    context::ContextWriter,
     firstmate::{Fleet, runs::Run},
     github::{
         PullRequest, PullRequestDetail, ReviewPullRequest, load_pull_request_detail,
@@ -71,6 +73,9 @@ pub(crate) struct App {
     pub(crate) overview_scroll_target: Option<OverviewSection>,
     pub(crate) overview_section: OverviewSection,
     pub(crate) github_refreshed_at: Option<std::time::Instant>,
+    pub(crate) context: ContextWriter,
+    /// A run whose live agent session `main` should open next.
+    pub(crate) session_request: Option<(String, Option<u64>)>,
 }
 
 pub(crate) struct PlanOption {
@@ -270,6 +275,7 @@ impl App {
         let store = AgentStore::new(&config.fm_home, &config.fm_root);
         let mut app = Self {
             fleet: Fleet::new(&config),
+            context: ContextWriter::new(config.context_file()),
             harnesses: harness_options(&config.fm_root),
             ..Self::default()
         };
@@ -306,6 +312,7 @@ impl App {
         self.overview_selected = self
             .overview_selected
             .min(self.crew_runs().len().saturating_sub(1));
+        self.publish_context();
     }
 
     pub(crate) fn select_tab(&mut self, tab: usize) {

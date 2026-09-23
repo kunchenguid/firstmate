@@ -11,6 +11,8 @@ use std::{
 
 use serde_json::{Value, json};
 
+use crate::config::write_atomic;
+
 pub(crate) const MODES: [&str; 7] = [
     "Implement",
     "Plan",
@@ -142,13 +144,6 @@ fn read_agents(file: &Path, instructions_dir: &Path) -> Result<Vec<Agent>, Strin
             })
         })
         .collect())
-}
-
-fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
-    let temporary = path.with_extension("tmp");
-    fs::write(&temporary, contents)
-        .and_then(|()| fs::rename(&temporary, path))
-        .map_err(|error| format!("Could not write {}: {error}", path.display()))
 }
 
 fn slug(name: &str, index: usize) -> String {
