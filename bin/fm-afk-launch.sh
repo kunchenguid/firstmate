@@ -24,10 +24,10 @@
 # QUIET mode (FM_AFK_MODE=quiet, the /quiet skill) is the same daemon for a
 # captain who stays present, so it is NOT the away posture: a quiet `start` or
 # `start-native` needs no record, never writes one, and refuses while one stands
-# (return from away first), and going /afk out of quiet mode clears the quiet
-# flag as `enter` writes the record. With FM_AFK_MODE unset, a standing record
-# means away and an on-disk quiet flag with no record means a quiet refresh
-# (fm_afk_launch_posture_require).
+# (return from away first). With FM_AFK_MODE unset, a standing record means away
+# and an on-disk quiet flag with no record means a quiet refresh
+# (fm_afk_launch_posture_require), so going /afk out of quiet mode writes away at
+# the next flag write without `enter` touching the daemon's presence gate.
 # `stop` (the return, driven by bin/fm-afk-return.sh) shuts the daemon down,
 # clears state/.afk last, and archives the record under state/afk-contracts/.
 #
@@ -225,9 +225,9 @@ fm_afk_launch_daemon_allowed() {
   return 0
 }
 
-fm_afk_launch_catchup_pending() {
+fm_afk_launch_catchup_pending() {  # [posture]
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
-    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering $(fm_afk_launch_posture) mode"
+    fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering ${1:-$(fm_afk_launch_posture)} mode"
     return 0
   fi
   return 1
@@ -285,20 +285,12 @@ fm_afk_launch_posture_require() {
   fm_afk_launch_record_require
 }
 
-# The record IS the away posture, and quiet never coexists with one, so writing
-# it clears a standing quiet flag: the captain's explicit /afk wins, and a later
-# `start` failure has no quiet flag left to roll back to.
+# `enter` writes the record and nothing else: state/.afk is the live daemon's
+# presence gate, and the record standing already makes the next flag write away
+# (fm_afk_launch_requested_mode).
 fm_afk_launch_enter() {
-  local status
-  fm_afk_launch_catchup_pending && return 1
+  fm_afk_launch_catchup_pending away && return 1
   "$FM_AFK_CONTRACT_CMD" enter "$@"
-  status=$?
-  [ "$status" -eq 0 ] || return "$status"
-  if [ "$(fm_afk_mode "$FM_AFK_LAUNCH_STATE")" = quiet ] \
-    && ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
-    fm_afk_launch_log "failed to clear the quiet-mode flag beside the away-posture record"
-    return 1
-  fi
 }
 
 # The command run inside the created terminal. Real launch runs the shared

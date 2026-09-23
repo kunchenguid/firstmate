@@ -266,24 +266,28 @@ unit_away_entry_from_quiet_writes_away() {
 # Going /afk from quiet mode must not leave quiet standing beside the record: a
 # failed daemon launch rolls the flag back to whatever stood before it, so the
 # quiet flag has to be gone by the time `enter` returns.
-unit_away_entry_from_quiet_clears_the_quiet_flag() {
-  local st out
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet-cleared.XXXXXX")
+# `enter` writes the record and leaves state/.afk alone: that file is the live
+# daemon's injection gate (bin/fm-supervise-daemon.sh afk_active), and on Pi
+# `enter` is the whole entry, so deleting it there would mute a running daemon
+# for the entire away window. The record standing is what makes the next flag
+# write away, so the posture still converges without touching the gate.
+unit_launcher_enter_leaves_the_presence_gate_alone() {
+  local st
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-enter-gate.XXXXXX")
   mkdir -p "$st/state"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" start-native >/dev/null 2>&1 \
-    || fail "quiet flag cleared: quiet entry failed"
+    || fail "enter gate: quiet entry failed"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'ship it' >/dev/null 2>&1 \
-    && [ -f "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk" ]; then
-    pass "quiet to away: enter clears the standing quiet flag as it writes the record"
+    && [ -f "$st/state/.afk-contract" ] && [ -e "$st/state/.afk" ]; then
+    pass "quiet to away: enter writes the record without clearing the daemon's presence gate"
   else
-    fail "quiet to away: enter left '$(read_mode "$st/state")' standing beside the record"
+    fail "quiet to away: enter removed state/.afk or failed to write the record"
   fi
-  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
-    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start 2>&1)
-  if [ -f "$st/state/.afk-contract" ] && [ ! -e "$st/state/.afk" ]; then
-    pass "quiet to away: a failed start rolls back to no flag, never to quiet, beside the record"
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+    && [ "$(read_mode "$st/state")" = away ]; then
+    pass "quiet to away: the next flag write reads away once the record stands"
   else
-    fail "quiet to away: the failed start restored '$(read_mode "$st/state")' beside the record: $out"
+    fail "quiet to away: the flag stayed '$(read_mode "$st/state")' beside a standing away record"
   fi
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
   rm -rf "$st"
@@ -315,6 +319,13 @@ unit_launcher_messages_name_the_posture() {
     pass "posture wording: the catch-up gate names the quiet posture it is holding"
   else
     fail "posture wording: the catch-up gate named the wrong posture: $out"
+  fi
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'go fix prod' 2>&1)
+  if printf '%s' "$out" | grep -F 're-entering away mode' >/dev/null \
+    && ! printf '%s' "$out" | grep -F 're-entering quiet mode' >/dev/null; then
+    pass "posture wording: the catch-up gate calls an enter an away entry beside a stale quiet flag"
+  else
+    fail "posture wording: the catch-up gate misnamed the posture for an /afk entry: $out"
   fi
   rm -f "$st/state/.afk-return-catchup"
   enter_posture "$st" || fail "posture wording: could not enter fixture posture"
@@ -1414,7 +1425,7 @@ unit_pi_enter_stop_does_not_claim_a_daemon_terminal
 unit_daemon_entry_requires_the_record
 unit_quiet_entry_needs_no_record
 unit_away_entry_from_quiet_writes_away
-unit_away_entry_from_quiet_clears_the_quiet_flag
+unit_launcher_enter_leaves_the_presence_gate_alone
 unit_launcher_messages_name_the_posture
 unit_failed_daemon_launch_preserves_the_record
 unit_stop_archives_the_record_last
