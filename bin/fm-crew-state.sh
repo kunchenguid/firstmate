@@ -659,19 +659,53 @@ log_claims_pipeline_unreachable() {  # <line>
   return 1
 }
 
-# Rows of the `active_steps[N]{...}:` table in the captured run output
-# ($RUN_OUT), which the pipeline emits only while a step is actually running or
-# fixing. Column order is deliberately not assumed: the header's own indentation
-# bounds the block, and callers below read the table as text.
-nm_active_steps_rows() {
+# The `last_activity` value of every row of the `active_steps[N]{...}:` table in
+# the captured run output ($RUN_OUT), one per line, located by that column's
+# position in the table's own header. The pipeline emits the table only while a
+# step is actually running or fixing, and the field's value carries the log body
+# after its timestamp, so the column must be isolated rather than matched
+# anywhere in the row. Column order is deliberately not assumed: the header's
+# own indentation bounds the block and names the columns. Exit 1 when the header
+# names no `last_activity` column or a row cannot be split to it - an unreadable
+# table is not evidence of anything.
+nm_active_step_last_activities() {
   printf '%s\n' "$RUN_OUT" | awk '
-    /^[[:space:]]*active_steps\[[0-9]+\]\{/ { hdr = index($0, "active_steps"); inblock = 1; next }
+    function nthfield(line, k,   i, ch, inq, cur, idx) {
+      idx = 1; cur = ""; inq = 0
+      for (i = 1; i <= length(line); i++) {
+        ch = substr(line, i, 1)
+        if (ch == "\"") { inq = !inq; continue }
+        if (ch == "," && !inq) { if (idx == k) return cur; idx++; cur = ""; continue }
+        cur = cur ch
+      }
+      if (idx == k) return cur
+      return "\001"
+    }
+    /^[[:space:]]*active_steps\[[0-9]+\]\{/ {
+      hdr = index($0, "active_steps")
+      cols = $0
+      sub(/^[^{]*\{/, "", cols)
+      sub(/\}:[[:space:]]*$/, "", cols)
+      n = split(cols, names, ",")
+      col = 0
+      for (i = 1; i <= n; i++) {
+        gsub(/^[ \t]+|[ \t]+$/, "", names[i])
+        if (names[i] == "last_activity") col = i
+      }
+      if (col == 0) { bad = 1; exit }
+      inblock = 1
+      next
+    }
     inblock {
       if ($0 ~ /^[[:space:]]*$/) { inblock = 0; next }
       match($0, /[^ \t]/)
       if (RSTART <= hdr) { inblock = 0; next }
-      print
+      v = nthfield(substr($0, RSTART), col)
+      if (v == "\001") { bad = 1; exit }
+      gsub(/^[ \t]+|[ \t]+$/, "", v)
+      print v
     }
+    END { if (bad) exit 1 }
   '
 }
 
@@ -700,11 +734,14 @@ nm_steps_rows() {
 # than a second threshold invented in firstmate. Positive evidence is required:
 # an absent table is not recency, so a run record that merely still says
 # `running` while nothing executes it never reads as alive.
+# Only a leading `quiet` token ON THAT FIELD counts: the value continues with
+# the log line itself ("quiet 2h58m ago: log: ..."), so a body that merely
+# mentions the word is an advancing step, not a stale one.
 nm_run_activity_is_recent() {
-  local rows
-  rows=$(nm_active_steps_rows)
-  [ -n "$rows" ] || return 1
-  ! printf '%s\n' "$rows" | grep -q 'quiet'
+  local acts
+  acts=$(nm_active_step_last_activities) || return 1
+  [ -n "$acts" ] || return 1
+  ! printf '%s\n' "$acts" | grep -q '^quiet\([[:space:]]\|$\)'
 }
 
 # 0 when a terminal FAILED run's only failure is the ci monitor step and the
@@ -1200,6 +1237,19 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
+  # Publish the pipeline's own recency verdict for a run that is still working,
+  # in its own ${SEP} component for the reason the gate component above is one:
+  # consumers compare a whole component for equality, so no detail text that
+  # happens to contain the words can mint it. Only positive evidence mints it
+  # (nm_run_activity_is_recent), so a run whose active step has gone `quiet`, or
+  # that publishes no active-step table at all, carries nothing here and every
+  # consumer reads it exactly as it reads a run that is not advancing.
+  # RUN_SOURCE must be `full`: on the coarse runs-list fallback $RUN_OUT holds
+  # ANOTHER branch's run by construction, so its table is not this crew's
+  # evidence and reporting `running` for this branch does not make it so.
+  if [ "$RUN_STATE" = working ] && [ "$RUN_SOURCE" = full ] && nm_run_activity_is_recent; then
+    RUN_DETAIL="$RUN_DETAIL${SEP}$FM_RUN_ACTIVITY_RECENT"
+  fi
   [ -z "$SELECTED_RUN_ID" ] || RUN_DETAIL="$RUN_DETAIL${SEP}run: $SELECTED_RUN_ID"
   emit "$RUN_STATE" run-step "$RUN_DETAIL"
 fi

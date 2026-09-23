@@ -3158,9 +3158,16 @@ working: still parked at that gate'
 # otherwise defers - human-owed gate, open decision keyed to that run, every
 # signal the armed cases assert on - must escalate on the unchanged schedule
 # with the unchanged reason and demand-deep-inspection wording, and the evidence
-# arm must not even be reached: no current-state read is spent and no recheck
-# throttle is written. The fixture is byte-identical to the armed case above
-# except for the flag, so the difference is attributable to the flag alone.
+# arm must not even be reached: no recheck throttle is written and no read is
+# spent ON IT. The fixture is byte-identical to the armed case above except for
+# the flag, so the difference is attributable to the flag alone.
+#
+# The read count is per THRESHOLD rather than zero, because the default-on
+# advancing-run probe reads current state at every threshold in every home. The
+# guard's position is still exactly what the count proves: with the flag tested
+# before the consult an unarmed threshold spends that ONE read, while a guard
+# placed after the consult would spend TWO - the parked-gate consult's read plus
+# the probe's - which is the regression this count exists to catch.
 test_wedge_threshold_parked_gate_is_off_until_armed() {
   local dir state fakebin out capture window key n unarmed_probes armed_probes
   local human='state: parked · source: run-step · parked at awaiting_approval: 2 finding(s) · ask-user: authority decision · run: 01RUNGATE'
@@ -3192,13 +3199,15 @@ working: still parked at that gate'
   unarmed_probes=$(wc -l < "$FM_FAKE_CREW_STATE_LOG" | tr -d ' ')
   unset FM_FAKE_CREW_STATE_LOG
 
-  [ "$unarmed_probes" -eq 0 ] \
-    || fail "an unarmed home spent $unarmed_probes current-state read(s) on a parked gate over three thresholds"
+  [ "$unarmed_probes" -eq 3 ] \
+    || fail "an unarmed home spent $unarmed_probes current-state read(s) over three thresholds rather than the one per threshold the advancing-run probe owns"
 
-  # The same fixture with only the flag added, counted the same way, so the
-  # zero above is the flag's doing rather than a fixture that could never have
-  # reached the reader: one armed threshold must spend a read. A guard placed
-  # after the consult instead of before it would make both counts nonzero.
+  # The same fixture with only the flag added, counted the same way, so the one
+  # read per threshold above is the probe's alone rather than a fixture that
+  # could never have reached the parked-gate reader: one armed threshold must
+  # still spend exactly one read, because the consult defers and the probe after
+  # it never runs. A guard placed after the consult instead of before it would
+  # make the unarmed count two per threshold.
   dir=$(wedge_threshold_fixture parked-gate-armed-probe-count "$escalated" 2000)
   arm_parked_gate "$dir"
   state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
@@ -3209,8 +3218,8 @@ working: still parked at that gate'
   ack_stopped_cycle "$state" || fail "could not acknowledge the armed control recheck"
   armed_probes=$(wc -l < "$FM_FAKE_CREW_STATE_LOG" | tr -d ' ')
   unset FM_FAKE_CREW_STATE_LOG
-  [ "$armed_probes" -gt 0 ] \
-    || fail "the armed control spent no current-state read, so the probe count proves nothing"
+  [ "$armed_probes" -eq 1 ] \
+    || fail "the armed control spent $armed_probes current-state read(s) at one threshold rather than one, so the probe count proves nothing"
   pass "with config/wedge-defer-parked-gate absent a parked gate keeps the unchanged ladder, wording and reads"
 }
 
@@ -3470,6 +3479,157 @@ test_live_and_unproven_endpoints_still_wedge_escalate() {
     unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
   done
   pass "a live wedged agent, an unattributable one, and an unreadable endpoint escalate unchanged"
+}
+
+# --- the wedge threshold consults the pipeline's own activity verdict --------
+# The last lane every other input is blind to. A worker must background its
+# no-mistakes drive call, because one call routinely outlives its harness's
+# command limit, and then polls the run on its own cadence. Between polls its pane
+# renders nothing and, between fix rounds, its worktree gets nothing, so a poll
+# cadence longer than FM_STALE_ESCALATE_SECS put the lane over the threshold on
+# every single cycle: not an occasional misread but a guaranteed alarm per round,
+# each costing a supervising turn, and past FM_WEDGE_DEMAND_INSPECT_COUNT each one
+# carrying demand-deep-inspection wording that forbids re-absorbing on the very
+# evidence that was there.
+#
+# Both directions are pinned here for the reason the declared-wait and
+# dead-endpoint cases give: a bound proved only in the quiet direction is
+# indistinguishable from deleting wedge detection. A pipeline that has FROZEN is
+# the case that must still alarm, and its record looks almost identical - the run
+# still says running or fixing, and only the client's own `quiet` prefix on
+# last_activity separates the two, which is why the component the watcher reads is
+# minted from that verdict alone.
+
+# crew_run_activity_is_fresh: only a working run-step verdict carrying the minted
+# component is fresh. A busy PANE has no pipeline behind it, a parked or finished
+# run is not an advancing step, and the component must be matched as a WHOLE
+# component so no detail text that happens to contain the words can mint it.
+test_crew_run_activity_is_fresh_classifier() {
+  local dir fakebin
+  dir=$(make_case run-activity-fresh); fakebin="$dir/fakebin"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_FAKE_CREW_STATE
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · run activity: recent'
+  crew_run_activity_is_fresh a || fail "an advancing run was not read as fresh"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · run activity: recent · run: 01RUN'
+  crew_run_activity_is_fresh a || fail "a later run-id component hid the activity component"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing)'
+  ! crew_run_activity_is_fresh a || fail "a run publishing no activity component was read as fresh"
+  # The frozen pipeline: the record still says fixing, and nothing but the absent
+  # component separates it from the advancing one above.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · status-log superseded by active run'
+  ! crew_run_activity_is_fresh a || fail "an unrelated detail component was read as activity"
+  FM_FAKE_CREW_STATE='state: working · source: pane · harness busy · run activity: recent'
+  ! crew_run_activity_is_fresh a || fail "a busy pane was read as pipeline activity"
+  FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review · run activity: recent'
+  ! crew_run_activity_is_fresh a || fail "a parked run was read as an advancing step"
+  FM_FAKE_CREW_STATE='state: done · source: run-step · checks green · run activity: recent'
+  ! crew_run_activity_is_fresh a || fail "a finished run was read as an advancing step"
+  # A substring is not the component: the whole component is compared, so a detail
+  # that merely contains the words cannot mint it.
+  FM_FAKE_CREW_STATE='state: working · source: run-step · no run activity: recent enough to report'
+  ! crew_run_activity_is_fresh a || fail "a substring mint was accepted as the component"
+  FM_FAKE_CREW_STATE='state: working · source: run-step · validating (fixing) · run activity: recent'
+  ! crew_run_activity_is_fresh "" || fail "an empty id reported fresh run activity"
+  unset FM_FAKE_CREW_STATE
+  pass "crew_run_activity_is_fresh: only a working run-step verdict carrying the whole minted component is fresh"
+}
+
+test_wedge_threshold_defers_to_an_advancing_run() {
+  local dir state fakebin out capture window key n reported
+  local advancing='state: working · source: run-step · validating (fixing) · run activity: recent'
+  local frozen='state: working · source: run-step · validating (fixing)'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # A run the pipeline reports as advancing behind a pane that renders nothing:
+  # deferred at every threshold, with no wedge wake and no escalation counted.
+  dir=$(wedge_threshold_fixture advancing-run 'working: validation running in the background' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  n=1
+  while [ "$n" -le 3 ]; do
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$advancing" absorb   \
+    || fail "an advancing run wedge-escalated at threshold $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  [ "$(wedge_stale_wakes "$state" "$window")" -eq 0 ] \
+    || fail "an advancing run queued a wedge wake: $(cat "$state/.wake-queue")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "an advancing run was reported as a possible wedge: $(cat "$out")"
+  [ ! -e "$state/.wedge-escalations-$key" ] \
+    || fail "an advancing run counted $(cat "$state/.wedge-escalations-$key") wedge escalation(s)"
+
+  # The deferral is bounded, not a silence: once the chain outlives the recheck
+  # cadence the lane re-surfaces once, worded as the run evidence it is rather
+  # than as a wedge, so a pipeline reporting activity forever without finishing
+  # anything cannot stay invisible.
+  # The wedge timer is pre-armed so this round starts AT the threshold: the
+  # timer-repair branch clears the deferral chain by design, which would drop the
+  # aged marker below before it could ever govern a recheck.
+  dir=$(wedge_threshold_fixture advancing-run-aged 'working: validation running in the background' 0 600)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  : > "$state/.run-active-since-$key"
+  set_mtime "$(( $(date +%s) - 2000 ))" "$state/.run-active-since-$key"
+  FM_TEST_PAUSE_RESURFACE=240 wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$advancing" exit \
+    || fail "an advancing run older than the recheck cadence was never rechecked: $(cat "$out")"
+  reported=$(sed -n 's/.*advancing step for \([0-9][0-9]*\)s.*/\1/p' "$out" | head -1)
+  [ -n "$reported" ] && [ "$reported" -ge 1900 ] \
+    || fail "the advancing-run recheck reported ${reported}s rather than the age of the deferral chain: $(cat "$out")"
+  grep -F 'rechecked on a long cadence not a wedge' "$out" >/dev/null \
+    || fail "the advancing-run recheck was not worded as a bounded recheck: $(cat "$out")"
+  grep -F 'confirm the run is still making real progress' "$out" >/dev/null \
+    || fail "the advancing-run recheck lost the action that clears it: $(cat "$out")"
+  grep -F 'possible wedge' "$out" >/dev/null \
+    && fail "the advancing-run recheck was worded as a possible wedge: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the advancing-run recheck"
+
+  # THE LOAD-BEARING DIRECTION. A run the pipeline no longer reports as advancing
+  # - the frozen pipeline, whose record still says fixing - keeps the identical
+  # schedule, reason, count and demand-deep-inspection wording.
+  dir=$(wedge_threshold_fixture frozen-run 'working: validation running in the background' 0)
+  state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  n=1
+  while [ "$n" -le 3 ]; do
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$frozen" exit   \
+    || fail "a frozen run stopped escalating at threshold $n: $(cat "$out")"
+    ack_stopped_cycle "$state" || fail "could not acknowledge frozen-run escalation $n"
+    grep -F "possible wedge, escalation $n" "$out" >/dev/null   \
+    || fail "a frozen run did not reach escalation $n: $(cat "$out")"
+    n=$((n + 1))
+  done
+  grep -F 'demand-deep-inspection: same pane has wedge-escalated 3 times in a row' "$out" >/dev/null \
+    || fail "a frozen run lost the demand-deep-inspection wording: $(cat "$out")"
+  [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || true)" = 3 ] \
+    || fail "a frozen run did not keep counting its escalations"
+  pass "a run the pipeline reports advancing is deferred on a bounded cadence, while a frozen run escalates unchanged"
+}
+
+# The probe is ordered AFTER the endpoint read on purpose, and that order is a
+# safety property rather than a cost one: the pipeline runs inside the shared
+# daemon, not inside the pane, so a run goes on advancing perfectly well after the
+# crewmate that owns the lane has died. Such a lane must still be reported gone -
+# it cannot answer the next gate - so an advancing run must not buy silence for it.
+test_gone_endpoint_outranks_an_advancing_run() {
+  local dir state fakebin out capture window key verdict
+  local advancing='state: working · source: run-step · validating (fixing) · run activity: recent'
+  window="test:fm-wedge"; key=$(printf '%s' "$window" | tr ':/.' '___')
+  for verdict in dead missing; do
+    dir=$(wedge_threshold_fixture "advancing-run-$verdict" 'working: validation running in the background' 0)
+    state="$dir/state"; fakebin="$dir/fakebin"; out="$dir/watch.out"; capture="$dir/pane.txt"
+    gone_endpoint_env "$verdict"
+    export FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+
+    wedge_threshold_round "$state" "$fakebin" "$out" "$capture" "$window" "$advancing" exit   \
+    || fail "a $verdict endpoint went unreported because its run was advancing: $(cat "$out")"
+    grep -F "agent $verdict" "$out" >/dev/null   \
+    || fail "an advancing run suppressed the $verdict endpoint report: $(cat "$out")"
+    grep -F 'rechecked on a long cadence not a wedge' "$out" >/dev/null   \
+    && fail "a $verdict endpoint was deferred as an advancing run: $(cat "$out")"
+    [ ! -e "$state/.run-active-since-$key" ]   \
+    || fail "a $verdict endpoint armed an advancing-run deferral chain"
+    ack_stopped_cycle "$state" || fail "could not acknowledge the $verdict report"
+    unset FM_TEST_PANE_COMMAND FM_TEST_TMUX_WINDOWS
+  done
+  pass "an endpoint proven gone is reported even while its pipeline still reports the run advancing"
 }
 
 # Reporting once must not mean reporting once forever: a replacement launched into
@@ -6195,6 +6355,9 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_gone_endpoint_reports_once_instead_of_escalating_forever
 test_live_and_unproven_endpoints_still_wedge_escalate
+test_crew_run_activity_is_fresh_classifier
+test_wedge_threshold_defers_to_an_advancing_run
+test_gone_endpoint_outranks_an_advancing_run
 test_gone_report_rearms_when_the_endpoint_comes_back
 test_second_death_after_a_same_window_relaunch_reports_in_full
 test_identical_dead_display_of_a_successor_still_reports
