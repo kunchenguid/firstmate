@@ -194,6 +194,156 @@ export function sanitizeResult(result) {
   return safe;
 }
 
+export function selectorFromRoute(target, allowTitle = false) {
+  if (!target || typeof target !== 'object' || Array.isArray(target) ||
+      typeof target.role !== 'string' || typeof target.label !== 'string') throw new Error('invalid route target');
+  const selector = `${target.role}=${target.label}`;
+  parseSelector(selector, { allowTitle });
+  return selector;
+}
+
+function routeExpectation(expect) {
+  if (expect == null) return null;
+  const keys = Object.keys(expect);
+  if (keys.length !== 1 || !['appears', 'gone', 'title', 'url_path'].includes(keys[0])) throw new Error('invalid route expectation');
+  const kind = keys[0];
+  if (kind === 'url_path') return { kind: 'url-path', path: expect[kind] };
+  return { kind: kind === 'appears' ? 'appears' : kind, selector: selectorFromRoute(expect[kind], kind === 'title') };
+}
+
+function substituteRouteValue(value, vars) {
+  if (typeof value !== 'string') return value;
+  return value.replace(/\$\{([A-Za-z][A-Za-z0-9_-]*)\}/g, (_, name) => {
+    if (!Object.hasOwn(vars, name)) throw new Error(`missing route variable: ${name}`);
+    return vars[name];
+  });
+}
+
+export function validateRoute(route) {
+  if (!route || typeof route !== 'object' || route.version !== 1 ||
+      !/^[a-z0-9.-]+$/.test(route.host ?? '') || route.host === '.' || route.host === '..' ||
+      !route.host.split('.').every((label) => /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)) ||
+      !/^[a-z0-9][a-z0-9_-]*$/.test(route.route ?? '') ||
+      !route.start || typeof route.start.url_path !== 'string' || !route.start.url_path.startsWith('/') || /[?#]/.test(route.start.url_path) ||
+      !route.vars || typeof route.vars !== 'object' || Array.isArray(route.vars) || !Array.isArray(route.steps)) {
+    throw new Error('invalid version 1 route');
+  }
+  const ids = new Set();
+  for (const [name, definition] of Object.entries(route.vars)) {
+    if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(name) || !definition || typeof definition !== 'object' || typeof definition.required !== 'boolean') {
+      throw new Error('invalid route variable definition');
+    }
+  }
+  for (const step of route.steps) {
+    if (!step || typeof step !== 'object' || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(step.id ?? '') || ids.has(step.id)) throw new Error('invalid or duplicate route step id');
+    ids.add(step.id);
+    if (!['click', 'fill', 'select', 'press', 'handoff'].includes(step.do)) throw new Error('invalid route action');
+    if (step.confirm != null && typeof step.confirm !== 'boolean') throw new Error('invalid confirmation flag');
+    if (step.timeoutMs != null && (!Number.isInteger(step.timeoutMs) || step.timeoutMs < 1 || step.timeoutMs > MAX_TIMEOUT_MS)) throw new Error('invalid route timeout');
+    if (step.do === 'handoff') {
+      if (typeof step.say !== 'string' || !step.say.trim() || !step.expect) throw new Error('handoff needs say and expect');
+    } else if (step.do !== 'press') selectorFromRoute(step.target);
+    if (step.target?.within) selectorFromRoute(step.target.within);
+    if (step.expect) routeExpectation(step.expect);
+    if (step.do === 'press' && (typeof step.key !== 'string' || !step.key.trim())) throw new Error('press step needs a key');
+    if (step.do === 'fill' && typeof step.value !== 'string') throw new Error('fill step needs a value');
+    if (step.do === 'select' && typeof step.option !== 'string') throw new Error('select step needs an option');
+  }
+  if (!Array.isArray(route.heal_log)) throw new Error('invalid route heal log');
+  return route;
+}
+
+function tokenSimilarity(left, right) {
+  const tokens = (value) => new Set(normalize(value).split(/[^\p{L}\p{N}]+/u).filter(Boolean));
+  const a = tokens(left);
+  const b = tokens(right);
+  if (!a.size || !b.size) return 0;
+  let intersection = 0;
+  for (const item of a) if (b.has(item)) intersection += 1;
+  return intersection / (a.size + b.size - intersection);
+}
+
+async function executeRouteStep(step, vars, pageApi) {
+  const expectation = routeExpectation(step.expect);
+  if (step.do === 'handoff') {
+    const normalized = normalizeExpectation(expectation);
+    const deadline = Date.now() + (step.timeoutMs ?? 120000);
+    for (;;) {
+      const nodes = parseSnapshot(await pageApi.snapshot());
+      const pathname = normalized.kind === 'url-path' ? await pageApi.eval(() => location.pathname) : null;
+      if (expectationMet(normalized, nodes, pathname)) return { ok: true, verified: true };
+      if (Date.now() >= deadline) return { ok: false, error: 'EXPECT_TIMEOUT' };
+      await pageApi.wait(100);
+    }
+  }
+  if (step.confirm === true) return { ok: false, error: 'CONFIRM_REQUIRED' };
+  const params = { action: step.do, expectation };
+  if (step.do === 'press') params.key = step.key;
+  else {
+    params.target = selectorFromRoute(step.target);
+    if (step.target.within) params.within = selectorFromRoute(step.target.within);
+  }
+  if (step.do === 'fill') params.value = substituteRouteValue(step.value, vars);
+  if (step.do === 'select') params.option = substituteRouteValue(step.option, vars);
+  let result = await executeStep(params, pageApi);
+  if (result.error === 'TARGET_NOT_FOUND' && step.confirm !== true) {
+    const nodes = parseSnapshot(await pageApi.snapshot());
+    const exact = parseSelector(params.target);
+    let scope = nodes;
+    if (step.target.within) {
+      const container = resolveSelector(nodes, parseSelector(selectorFromRoute(step.target.within)));
+      if (!container.target) return result;
+      scope = descendantsOf(nodes, container.target);
+    }
+    const candidates = scope.filter((node) => node.role === exact.role)
+      .map((node) => ({ node, score: tokenSimilarity(node.label, exact.label) }))
+      .filter((candidate) => candidate.score >= 0.6)
+      .sort((a, b) => b.score - a.score);
+    if (candidates.length && (!candidates[1] || candidates[0].score > candidates[1].score)) {
+      params.target = `${exact.role}=${candidates[0].node.label}`;
+      result = await executeStep(params, pageApi);
+      if (result.ok && result.verified) {
+        result.healedTarget = candidates[0].node.label;
+        result.healedConfidence = candidates[0].score;
+      }
+    }
+  }
+  return result;
+}
+
+export async function executeRoute(routeInput, vars = {}, from = null, pageApi) {
+  const route = validateRoute(routeInput);
+  const known = new Set(Object.keys(route.vars));
+  for (const key of Object.keys(vars)) if (!known.has(key)) return { ok: false, error: 'UNKNOWN_VARIABLE' };
+  for (const [key, definition] of Object.entries(route.vars)) {
+    if (definition.required && !Object.hasOwn(vars, key)) return { ok: false, error: 'MISSING_VARIABLE' };
+    if (Object.hasOwn(vars, key) && (typeof vars[key] !== 'string' || /(?:token|secret|pass|key)/i.test(key) || redact(vars[key]) !== vars[key])) {
+      return { ok: false, error: 'UNSAFE_VARIABLE' };
+    }
+  }
+  let begin = 0;
+  if (from != null) {
+    const index = route.steps.findIndex((step) => step.id === from);
+    if (index < 0) return { ok: false, error: 'UNKNOWN_RESUME_STEP' };
+    begin = index;
+  }
+  const actual = await pageApi.eval(() => ({ host: location.hostname, path: location.pathname }));
+  if (actual.host.toLowerCase() !== route.host || (begin === 0 && actual.path !== route.start.url_path)) {
+    return { ok: false, error: 'START_MISMATCH' };
+  }
+  const completed = [];
+  const heals = [];
+  for (const step of route.steps.slice(begin)) {
+    if (step.confirm === true) return { ok: false, error: 'CONFIRM_REQUIRED', step: step.id, completed };
+    const result = await executeRouteStep(step, vars, pageApi);
+    if (!result.ok) return { ok: false, error: result.error ?? 'BROWSER_ACTION_FAILED', step: step.id, completed };
+    completed.push(step.id);
+    if (result.healedTarget) heals.push({ step: step.id, to: redact(result.healedTarget).slice(0, 96), confidence: result.healedConfidence });
+    if (step.do === 'handoff') return { ok: true, completed, heals, handoff: { step: step.id, say: redact(step.say).slice(0, 500) } };
+  }
+  return { ok: true, completed, heals };
+}
+
 export async function executeStep(rawParams, pageApi) {
   const started = Date.now();
   let params;
@@ -255,6 +405,13 @@ export async function executeStep(rawParams, pageApi) {
 }
 
 if (typeof page !== 'undefined' && typeof PARAMS !== 'undefined') {
-  const result = await executeStep(PARAMS, page);
-  console.log(JSON.stringify(result));
+  const result = PARAMS.mode === 'route'
+    ? await executeRoute(PARAMS.route, PARAMS.vars, PARAMS.from, page)
+    : await executeStep(PARAMS, page);
+  if (PARAMS.record && result.ok && result.verified) {
+    const location = await page.eval(() => ({ host: location.hostname.toLowerCase(), path: location.pathname }));
+    console.log(JSON.stringify({ result, record: { ...PARAMS.record, currentHost: location.host, path: location.path } }));
+  } else {
+    console.log(JSON.stringify(result));
+  }
 }

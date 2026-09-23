@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Firstmate browser-route fixture</title>
+  </head>
+  <body>
+    <main>
+      <label for="route-name">Route name</label>
+      <input id="route-name" type="text">
+      <h2 id="route-status" aria-live="polite"></h2>
+      <button id="reveal" type="button">Reveal fixture</button>
+      <section id="revealed" hidden>
+        <h2>Route finished</h2>
+      </section>
+    </main>
+    <script>
+      document.querySelector('#route-name').addEventListener('input', () => {
+        document.querySelector('#route-status').textContent = 'Name recorded';
+      });
+      document.querySelector('#reveal').addEventListener('click', () => {
+        document.querySelector('#revealed').hidden = false;
+      });
+    </script>
+  </body>
+</html>

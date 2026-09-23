@@ -697,6 +697,7 @@ tests/fm-bearings-board-render.test.sh 12591
 tests/fm-bearings-board.test.sh 36490
 tests/fm-bearings-snapshot.test.sh 171176
 # The live test's 74 ms value is a successful CI capability-skip sample.
+tests/fm-browser-routes.test.sh 6000
 tests/fm-browser-step-live-e2e.test.sh 74
 tests/fm-browser-step.test.sh 1000
 tests/fm-bootstrap-network-parallel.test.sh 9539
