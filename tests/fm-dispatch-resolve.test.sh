@@ -727,6 +727,15 @@ printf '%s\n' '{"rules":[' > "$RULES"
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 2 "$code" "non-JSON rules exits 2"
 assert_contains "$err" 'not JSON' "non-JSON rules is named"
+for good_model in grok-4.6 grok-4.7 grok-4.7-build-fast; do
+  printf '{"rules":[{"when":"x","use":{"harness":"grok","model":"%s","effort":"xhigh"}}]}\n' "$good_model" > "$RULES"
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 0 "$code" "grok xhigh on $good_model exits 0"
+  assert_not_contains "$err" 'malformed rules file' "grok xhigh is accepted on $good_model"
+done
+# The accepted profiles above legitimately reach the network; clear that log
+# so the rejected configurations below are proven not to.
+reset_log
 for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"approval":"firstmate"}]}|approval must be "captain" when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude"},"select":"mystery"}]}|unknown select: mystery' \
@@ -740,6 +749,9 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":[{"harness":"claude","model":"opus"},{"harness":"claude","model":"opus"}]}|default must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \
   '{"rules":[{"when":"x","use":{"harness":"grok","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
+  '{"rules":[{"when":"x","use":{"harness":"grok","model":"grok-4.5","effort":"xhigh"}}]}|each use profile effort must be supported by its harness and model' \
+  '{"rules":[{"when":"x","use":{"harness":"grok","effort":"xhigh"}}]}|each use profile effort must be supported by its harness and model' \
+  '{"rules":[{"when":"x","use":{"harness":"grok","model":"grok-4.7","effort":"max"}}]}|each use profile effort must be supported by its harness and model' \
   '{"rules":[{"when":"x","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5"}}]}|use profiles whose harness lacks one authoritative provider family require provider: opencode' \
   '{"rules":[{"when":"x","use":{"harness":"rovo"}}]}|use profiles whose harness lacks one authoritative provider family require provider: rovo' \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"pi","model":"anthropic/claude-sonnet-5"}}|default profiles whose harness lacks one authoritative provider family require provider: pi'; do
