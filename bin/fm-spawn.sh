@@ -1162,6 +1162,11 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+# Durable Treehouse lease path taken by the Windows herdr worktree arm, or
+# empty. Set under the project lock, released by the abort cleanup while the
+# lock is still held and no task record survives; after metadata publication
+# teardown's ordinary return path owns it.
+SPAWN_WIN32_LEASE=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1310,6 +1315,17 @@ spawn_abort_cleanup() {
     else
       echo "warning: leaving task $ID's slot claim on $WT in place; the Treehouse project lock is no longer held, so the next spawn's claim replaces it" >&2
     fi
+  fi
+  # A durable lease taken by the Windows herdr arm outlives both the pane and
+  # this process: a spawn that aborts after leasing but before its record
+  # survives must hand the slot back while the project lock still serializes
+  # allocations and returns, or the slot stays leased to a holder no task
+  # record names. Once the meta exists the lease belongs to the task and
+  # bin/fm-teardown.sh's ordinary return path owns it.
+  if [ -n "$SPAWN_WIN32_LEASE" ] && [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ] &&
+    [ ! -e "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ]; then
+    treehouse return --force "$SPAWN_WIN32_LEASE" >/dev/null 2>&1 || true
+    SPAWN_WIN32_LEASE=
   fi
   if [ "$SPAWN_TREEHOUSE_PROJECT_LOCK_HELD" = 1 ]; then
     SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
@@ -3976,6 +3992,85 @@ agy_spawn_fail() {  # <detail>
   rovo_endpoint_cleanup
 }
 
+# Native-Windows herdr panes cannot report a live foreground cwd (herdr's
+# Windows cwd tracking is prompt-integration only, so `pane get` reports
+# foreground_cwd null), which makes the interactive `treehouse get` discovery
+# poll below blind: the pane enters its worktree subshell but no read ever
+# sees it leave the project. The pane's native powershell/cmd shell could not
+# run the staged exports or the sourced launch file anyway. This arm reverses
+# the information flow instead: firstmate takes Treehouse's durable lease
+# itself from the project side - `get --lease --json --lease-holder fm-<id>`,
+# the same acquisition bin/fm-home-seed.sh uses for secondmate homes - enters
+# Git Bash in the pane, then proves the pane reached the leased slot with an
+# output marker the echoed command line cannot fake (the typed text carries
+# `FM_WT_%s` and the id separately; only the pane's own printf output joins
+# them). Every failure releases the lease through the abort cleanup while the
+# project lock is still held, and nothing publishes task metadata before the
+# pane's worktree is proven. Sets WT on success; refuses with exit 1
+# otherwise, so the caller shares the ordinary validate + slot-claim flow.
+spawn_herdr_win32_acquire_worktree() {
+  local fg bash_win enter lease_json lease_path posix_wt marker esc tries
+  command -v cygpath >/dev/null 2>&1 || {
+    echo "error: pane $WT_TARGET cannot report a live foreground cwd and no cygpath exists to locate Git Bash; a Windows herdr pane cannot be driven to a worktree here; inspect window $T" >&2
+    exit 1
+  }
+  fg=$(fm_backend_herdr_foreground_process_name "$WT_TARGET" || true)
+  bash_win=$(cygpath -w "$(command -v bash)" 2>/dev/null || true)
+  [ -n "$bash_win" ] || {
+    echo "error: pane $WT_TARGET cannot report a live foreground cwd and no Git Bash could be located for this host; inspect window $T" >&2
+    exit 1
+  }
+  enter=
+  case "$fg" in
+    bash.exe|bash|sh.exe|sh) ;;
+    powershell.exe|powershell|pwsh.exe|pwsh) enter="& \"$bash_win\" -l" ;;
+    cmd.exe|cmd) enter="\"$bash_win\" -l" ;;
+    *)
+      echo "error: pane $WT_TARGET cannot report a live foreground cwd and its foreground shell '${fg:-none}' is not one this host can turn into Git Bash (powershell, cmd, or bash); inspect window $T" >&2
+      exit 1 ;;
+  esac
+  if [ -n "$enter" ]; then
+    spawn_send_text_line "$WT_TARGET" "$enter" || {
+      echo "error: pane $WT_TARGET could not be entered into Git Bash; inspect window $T" >&2
+      exit 1
+    }
+  fi
+  lease_json=$(cd -- "$PROJ_ABS" && treehouse get --lease --json --lease-holder "fm-$ID" 2>/dev/null) || lease_json=
+  lease_path=$(printf '%s' "$lease_json" | jq -r '.path // empty' 2>/dev/null)
+  if [ -z "$lease_path" ]; then
+    echo "error: treehouse get --lease did not report a durable worktree for pane $WT_TARGET; inspect window $T" >&2
+    exit 1
+  fi
+  SPAWN_WIN32_LEASE=$lease_path
+  posix_wt=$(cygpath -u "$lease_path" 2>/dev/null) || posix_wt=
+  if [ -z "$posix_wt" ]; then
+    echo "error: leased worktree '$lease_path' could not be mapped to a POSIX path; inspect window $T" >&2
+    exit 1
+  fi
+  marker=FM_WT_$ID
+  esc=${posix_wt//\'/\'\\\'\'}
+  tries=0
+  while :; do
+    # Retried deliberately: the Git Bash entry above is asynchronous, so the
+    # first cd can land in the still-live native shell's input buffer and be
+    # lost before bash reads stdin. The marker wait is the only verdict; a
+    # resent cd to the same leased path is idempotent.
+    spawn_send_text_line "$WT_TARGET" "cd -- '$esc' && printf 'FM_WT_%s\\n' '$ID'" || {
+      echo "error: pane $WT_TARGET could not be told to enter leased worktree '$posix_wt'; inspect window $T" >&2
+      exit 1
+    }
+    if fm_backend_herdr_wait_output "$WT_TARGET" "$marker" 15000; then
+      break
+    fi
+    tries=$((tries + 1))
+    if [ "$tries" -ge 3 ]; then
+      echo "error: pane $WT_TARGET did not reach leased worktree '$posix_wt' (the $marker proof never printed); inspect window $T" >&2
+      exit 1
+    fi
+  done
+  WT=$posix_wt
+}
+
 if [ "$RELAUNCH" -eq 1 ]; then
   # No worktree is acquired: the recorded one is reused as-is. What must be
   # proven instead is that the adopted endpoint's shell is actually sitting in
@@ -4010,6 +4105,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
+  if [ "$BACKEND" = herdr ] && ! fm_backend_herdr_foreground_cwd_supported "$WT_TARGET"; then
+    # Native-Windows herdr pane: no live foreground-cwd read exists, so the
+    # interactive discovery poll below could never observe worktree entry (and
+    # the pane's native shell could not run the POSIX launch flow anyway).
+    # The arm acquires the slot firstmate-side and proves pane entry instead.
+    spawn_herdr_win32_acquire_worktree
+  else
   spawn_send_text_line "$WT_TARGET" 'treehouse get'
 
   # Wait for the treehouse subshell: the pane's cwd moves from the project to the worktree.
@@ -4067,6 +4169,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   if [ -z "$WT" ]; then
     echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
     exit 1
+  fi
   fi
 
   validate_spawn_worktree "treehouse get" "$T"
