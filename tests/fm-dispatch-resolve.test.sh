@@ -780,17 +780,22 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi path exits 0"
 assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "quota-axi --json is called exactly once"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "quota-axi snapshot drives the argmax"
+jq '.providers |= [to_entries[] | .value + {state: {status: (["auth_required", "error", "unavailable"][.key % 3])},
+  quotaSemantics: {status: "unknown", effectiveAvailability: []}}]' "$QUOTA" > "$TMP_ROOT/quota-all-failed.json"
 reset_log
-TYPESAFE_API_KEY=$KEY FAKE_QUOTA_STATUS=1 run code out err "$BRIEF"
-expect_code 0 "$code" "valid quota snapshot with provider errors exits 0"
-assert_contains "$out" '  status: clear' "valid quota snapshot remains usable when quota-axi reports provider errors"
-assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "valid quota snapshot still drives the argmax"
+TYPESAFE_API_KEY=$KEY FAKE_QUOTA_STATUS=1 QUOTA_AXI_FIXTURE="$TMP_ROOT/quota-all-failed.json" run code out err "$BRIEF"
+expect_code 0 "$code" "valid all-failed quota snapshot exits 0"
+assert_contains "$out" '  status: escalate' "a valid snapshot from a nonzero quota-axi exit reaches resolution"
+assert_contains "$out" '  reason: no rankable eligible candidate' "all-failed providers leave nothing rankable"
+assert_contains "$out" 'candidate: cursor:cursor-grok-4.6-medium  provider=cursor  -> eligible, unranked: provider cursor unmeasured (unknown): disclosed uncertainty' "failed providers stay listed as unmeasured"
+assert_not_contains "$out" 'quota-axi --json' "a valid snapshot is never reported as a quota-axi failure"
+assert_not_contains "$out" '  profile:' "an all-failed snapshot emits no profile"
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_QUOTA_FAIL=1 run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi failure exits 0"
 assert_contains "$out" '  status: error' "quota-axi failure is an error outcome"
 assert_contains "$out" '  reason: quota-axi --json failed' "quota-axi failure is named"
-pass "quota evidence comes from one quota-axi --json read, and its failure is an error outcome"
+pass "quota evidence comes from one quota-axi --json read, and only a missing valid snapshot is an error outcome"
 
 # --- API and response failures are error outcomes, exit 0 ----------------------
 reset_log
