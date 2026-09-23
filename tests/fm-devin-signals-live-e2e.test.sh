@@ -24,7 +24,10 @@ if [ ! -r "$CREDENTIALS" ]; then
 fi
 LAB=$(mktemp -d "${TMPDIR:-/tmp}/dv.XXXXXX")
 LAB=$(cd "$LAB" && pwd -P)
+# Unix-domain socket paths have a small OS byte limit. Keep the socket name
+# relative when the isolated lab is under this checkout's working directory.
 SOCKET="$LAB/tmux.sock"
+case "$SOCKET" in "$PWD"/*) SOCKET=${SOCKET#"$PWD"/} ;; esac
 cleanup() {
   "$REAL_TMUX" -S "$SOCKET" kill-server >/dev/null 2>&1 || true
   rm -rf "$LAB"

@@ -6,11 +6,6 @@ This record contains reusable version-scoped evidence for active runtime guarant
 The backend guides own current setup, safety boundaries, and limitations.
 Exact task chronology, branch names, temporary homes, local paths, process ids, thread ids, and delivery transcripts remain in private reports or PR evidence.
 
-## Devin worker runtime
-
-Verified on 2026-09-21 with Devin CLI 3000.11.1 (cc4e349ca55e) on macOS arm64 through the isolated tmux live guard, and re-verified on 2026-09-22 through that guard plus a Herdr 0.9.0 lab session.
-[Devin verification](devin.md) owns the exact refresh commands, lifecycle evidence, and worker-only limits.
-
 ## Harness detection precedence
 
 Firstmate's own harness comes from two kinds of evidence, and `bin/fm-harness.sh` owns how they combine: an environment marker names its harness, and the nearest harness process in the parent chain proves who owns the process tree.

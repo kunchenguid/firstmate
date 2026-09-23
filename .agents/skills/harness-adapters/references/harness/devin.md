@@ -30,15 +30,15 @@ An open revert picker is closed with one Esc, never Enter; the control plane doe
 Tool responses are not used as main-turn completion signals.
 Herdr identifies a Devin pane natively from its own screen-detection manifest, and interrupt and steering work there, but `exit` and therefore `relaunch` refuse on Herdr: its cursorless composer read answers `unknown` for Devin's frame.
 
-`../../../bin/fm-spawn.sh` owns autonomy, trust, typed brief delivery, color preservation, and the omission of the Claude permission-mode mapping.
-`../../../bin/fm-devin-config.sh` owns the private user-config snapshot and appended lifecycle hooks; the user and project configs remain vendor-owned.
+`../../../../../bin/fm-spawn.sh` owns autonomy, trust, typed brief delivery, color preservation, and the omission of the Claude permission-mode mapping.
+`../../../../../bin/fm-devin-config.sh` owns the private user-config snapshot and appended lifecycle hooks; the user and project configs remain vendor-owned.
 The config snapshot can contain private settings and has mode 600.
 
 ## Composer and steering
 
-`../../../bin/fm-composer-lib.sh` owns the verified `❭` glyph, dim idle placeholder, active-turn composer, and interrupt hint.
+`../../../../../bin/fm-composer-lib.sh` owns the verified `❭` glyph, dim idle placeholder, active-turn composer, and interrupt hint.
 The shared delivery path must preserve ANSI styling: placeholder-like text surviving a styled capture remains a draft and must not be overwritten.
-The `../../../bin/fm-task-inbox-lib.sh` doorbell was read and acknowledged through real `fm-send` on both SWE-2 and Fusion.
+The `../../../../../bin/fm-task-inbox-lib.sh` doorbell was read and acknowledged through real `fm-send` on both SWE-2 and Fusion.
 The shared slash-command settling path also handles `/quit` autocomplete.
 
 ## Primary integration
