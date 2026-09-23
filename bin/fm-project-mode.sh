@@ -62,13 +62,15 @@
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate. Other annotation tokens are
-# ignored, as they always were. The one exception is a malformed forge binding,
-# which is REFUSED - nothing on stdout, exit status 3, the token named - in both
-# output forms: a `forge=` value outside the closed set, or a `<key>=<value>`
-# token whose key is not `forge` (`forge=` is the only keyed token, so any other
-# key is a mistyped one, such as `forg=gerrit`). Resolving either to "no
-# registered forge" would hand a Gerrit project the pull-request contract the
-# binding exists to prevent. An empty `forge=` value means no registered forge.
+# ignored, as they always were, keyed ones included: a `<key>=<value>` token whose
+# key is not exactly `forge` resolves as it did before the forge existed, and in
+# the mode slot it is read as an unknown mode. A key one or two edits from
+# `forge` (such as `forg=` or `Forge=`) is still ignored, with one stderr warning
+# naming the token and the forge=gerrit spelling. The one refusal is a malformed
+# forge binding - a `forge=` token whose value is empty or outside the closed
+# set - which is REFUSED in both output forms: nothing on stdout, exit status 3,
+# the token named. Resolving it to "no registered forge" would hand a Gerrit
+# project the pull-request contract the binding exists to prevent.
 # local-only with a forge is refused the same way.
 # Usage: fm-project-mode.sh [--raw|--forge] <project-name>
 set -eu
@@ -92,12 +94,25 @@ if [ ! -f "$REG" ]; then
   exit 0
 fi
 
-# awk emits "posture <mode> <yolo> <forge>", "keyed <bad-token>" for a keyed
-# token whose key is not forge, or nothing if the project is absent. Every other
-# token beside the mode is ignored, exactly as before the forge existed. An
-# empty `forge=` value reaches the shell as an empty forge field, which means no
-# registered forge.
+# awk emits one "near <token>" line per keyed token whose key is a near miss of
+# `forge`, then "posture <mode> <yolo> <forge>" (forge is `none` or the whole
+# `forge=<value>` token, so an empty value survives the split), or nothing if the
+# project is absent. Every other token beside the mode is ignored, exactly as
+# before the forge existed.
 parsed=$(awk -v n="$NAME" '
+  function dist(x, y,   i, j, lx, ly, d, c, v) {
+    lx = length(x); ly = length(y);
+    for (i=0; i<=lx; i++) d[i,0] = i;
+    for (j=0; j<=ly; j++) d[0,j] = j;
+    for (i=1; i<=lx; i++) for (j=1; j<=ly; j++) {
+      c = (substr(x,i,1) == substr(y,j,1)) ? 0 : 1;
+      v = d[i-1,j] + 1;
+      if (d[i,j-1] + 1 < v) v = d[i,j-1] + 1;
+      if (d[i-1,j-1] + c < v) v = d[i-1,j-1] + c;
+      d[i,j] = v;
+    }
+    return d[lx,ly];
+  }
   $1=="-" && $2==n {
     mode="no-mistakes"; yolo="off"; forge="none";
     if ($3 ~ /^\[/) {
@@ -105,11 +120,15 @@ parsed=$(awk -v n="$NAME" '
       for (i=3; i<=NF; i++) { s = s (s==""?"":" ") $i; if ($i ~ /\]$/) break }
       gsub(/^\[|\]$/, "", s);           # strip the surrounding brackets
       k = split(s, a, " ");
-      if (a[1] != "" && a[1] != "+yolo" && a[1] !~ /=/) mode = a[1];
+      if (a[1] != "" && a[1] != "+yolo" && a[1] !~ /^forge=/) mode = a[1];
       for (j=1; j<=k; j++) {
         if (a[j]=="+yolo") { yolo="on"; continue }
-        if (a[j] ~ /^forge=/) { forge = substr(a[j], 7); continue }
-        if (a[j] ~ /^[^=]+=/) { print "keyed", a[j]; exit }
+        if (a[j] ~ /^forge=/) { forge = a[j]; continue }
+        if (a[j] ~ /^[^=]+=/) {
+          key = substr(a[j], 1, index(a[j], "=") - 1);
+          e = dist(key, "forge");
+          if (e >= 1 && e <= 2) print "near", a[j];
+        }
       }
     }
     print "posture", mode, yolo, forge; exit
@@ -122,23 +141,30 @@ if [ -z "$parsed" ]; then
   exit 0
 fi
 
-read -r kind mode yolo forge <<EOF
+posture=
+while read -r kind rest; do
+  case "$kind" in
+    near) echo "warn: ignoring \"$rest\" registered for $NAME in $REG; it is not a forge binding, and the forge binding is spelled forge=gerrit" >&2 ;;
+    posture) posture=$rest ;;
+  esac
+done <<EOF
 $parsed
 EOF
-if [ "$kind" = keyed ]; then
-  echo "refused: malformed forge binding \"$mode\" registered for $NAME in $REG; forge= is the only keyed annotation token, and its one value is forge=gerrit; correct the registry entry" >&2
-  exit 3
-fi
+read -r mode yolo forge <<EOF
+$posture
+EOF
 case "$mode" in
   no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;
 esac
 case "$yolo" in on|off) ;; *) yolo=off ;; esac
-[ -n "$forge" ] || forge=none
 case "$forge" in
-  none|gerrit) ;;
+  none|forge=gerrit) forge=${forge#forge=} ;;
+  forge=)
+    echo "refused: empty forge binding \"forge=\" registered for $NAME in $REG; the accepted value is forge=gerrit, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
+    exit 3 ;;
   *)
-    echo "refused: unknown forge \"$forge\" registered for $NAME in $REG; the accepted value is forge=gerrit, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
+    echo "refused: unknown forge \"${forge#forge=}\" registered for $NAME in $REG; the accepted value is forge=gerrit, or no forge token at all for a forge whose pull requests no-mistakes already drives; correct the registry entry" >&2
     exit 3 ;;
 esac
 if [ "$forge" != none ] && [ "$mode" = local-only ]; then

@@ -905,7 +905,7 @@ forge as the only token leaves the default mode|- fp [forge=gerrit] - fixture (a
 forge before yolo on a direct-PR project|- fp [direct-PR forge=gerrit +yolo] - fixture (added 2026-01-01)|direct-PR off|gerrit
 forge under the conditional policy|- fp [no-mistakes-prod-only forge=gerrit] - fixture (added 2026-01-01)|no-mistakes off|gerrit
 a project with no forge keeps yolo|- fp [direct-PR +yolo] - fixture (added 2026-01-01)|direct-PR on|none
-an empty forge value is no registered forge|- fp [no-mistakes +yolo forge=] - fixture (added 2026-01-01)|no-mistakes on|none
+a keyed token that is not the forge is ignored|- fp [direct-PR owner=me] - fixture (added 2026-01-01)|direct-PR off|none
 an unregistered project|- other [direct-PR] - fixture (added 2026-01-01)|no-mistakes off|none
 ROWS
 
@@ -933,13 +933,14 @@ ROWS
 }
 
 # The registry keeps its old tolerance: a token the parser does not know is
-# ignored, and an unknown mode falls back to the most rigorous default with a
-# warning. The one exception is a malformed forge binding - a `forge=` value
-# outside the closed set, or a keyed token whose key is not `forge` - because
-# resolving it to "no registered forge" would hand a Gerrit project the
-# pull-request contract. Those refuse, naming the token, in both output forms.
+# ignored, keyed or not, and an unknown mode falls back to the most rigorous
+# default with a warning. The one exception is a malformed forge binding - a
+# `forge=` value that is empty or outside the closed set - because resolving it
+# to "no registered forge" would hand a Gerrit project the pull-request contract.
+# Those refuse, naming the token, in both output forms. A key one or two edits
+# from `forge` keeps the old result and only warns.
 test_project_mode_refuses_only_a_malformed_forge_binding() {
-  local home out err status label registry token flag
+  local home out err status label registry token flag expect
   home="$TMP_ROOT/forge-token/home"
   mkdir -p "$home/data"
   while IFS='|' read -r label registry token; do
@@ -958,9 +959,7 @@ test_project_mode_refuses_only_a_malformed_forge_binding() {
   done <<'ROWS'
 an unknown forge value|- fp [no-mistakes forge=gitlab] - fixture (added 2026-01-01)|gitlab
 a misspelled forge value|- fp [no-mistakes forge=gerit] - fixture (added 2026-01-01)|gerit
-a dropped character in the key|- fp [no-mistakes forg=gerrit] - fixture (added 2026-01-01)|forg=gerrit
-a transposed key|- fp [no-mistakes frge=gerrit] - fixture (added 2026-01-01)|frge=gerrit
-a capitalized key|- fp [no-mistakes Forge=gerrit] - fixture (added 2026-01-01)|Forge=gerrit
+an empty forge value|- fp [no-mistakes +yolo forge=] - fixture (added 2026-01-01)|forge=
 ROWS
 
   while IFS='|' read -r label registry; do
@@ -976,11 +975,40 @@ ROWS
 an unknown token beside the mode|- fp [no-mistakes +tomorrow] - fixture (added 2026-01-01)
 the forge key with a space|- fp [no-mistakes forge gerrit] - fixture (added 2026-01-01)
 a bare forge value in the mode slot|- fp [gerrit] - fixture (added 2026-01-01)
+a keyed token in the mode slot|- fp [owner=me] - fixture (added 2026-01-01)
 an annotation the line never closes|- fp [no-mistakes - fixture (added 2026-01-01)
 ROWS
   printf '%s\n' '- fp [gerrit] - fixture (added 2026-01-01)' > "$home/data/projects.md"
   err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null)
   assert_contains "$err" "unknown mode" "a forge value in the mode slot stopped warning as an unknown mode"
+  printf '%s\n' '- fp [owner=me] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null)
+  assert_contains "$err" 'unknown mode "owner=me"' "a keyed token in the mode slot stopped warning as an unknown mode"
+  printf '%s\n' '- fp [direct-PR owner=me] - fixture (added 2026-01-01)' > "$home/data/projects.md"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null)
+  [ -z "$err" ] || fail "a keyed token that is not near the forge key warned: $err"
+
+  # A near miss of the forge key keeps the old stdout and exit status; only
+  # stderr gains one warning that names the token and the right spelling.
+  while IFS='|' read -r label registry token expect; do
+    [ -n "$label" ] || continue
+    printf '%s\n' "$registry" > "$home/data/projects.md"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>/dev/null) \
+      || fail "$label: a near-miss key became a refusal"
+    [ "$out" = "$expect" ] || fail "$label: expected '$expect', got '$out'"
+    out=$(FM_HOME="$home" "$PROJECT_MODE" --forge fp 2>/dev/null) \
+      || fail "$label: --forge refused a near-miss key"
+    [ "$out" = none ] || fail "$label: a near-miss key bound a forge ('$out')"
+    err=$(FM_HOME="$home" "$PROJECT_MODE" fp 2>&1 >/dev/null)
+    [ "$(printf '%s\n' "$err" | grep -c .)" -eq 1 ] || fail "$label: expected one warning line, got: $err"
+    assert_contains "$err" "\"$token\"" "$label: the warning did not name the token"
+    assert_contains "$err" 'forge=gerrit' "$label: the warning did not name the forge=gerrit spelling"
+  done <<'ROWS'
+a dropped character in the key|- fp [no-mistakes forg=gerrit] - fixture (added 2026-01-01)|forg=gerrit|no-mistakes off
+a swapped pair in the key|- fp [direct-PR froge=gerrit +yolo] - fixture (added 2026-01-01)|froge=gerrit|direct-PR on
+a transposed key|- fp [no-mistakes frge=gerrit] - fixture (added 2026-01-01)|frge=gerrit|no-mistakes off
+a capitalized key|- fp [no-mistakes Forge=gerrit] - fixture (added 2026-01-01)|Forge=gerrit|no-mistakes off
+ROWS
   pass "fm-project-mode: only a malformed forge binding refuses; every other token keeps its old tolerance"
 }
 
