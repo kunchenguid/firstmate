@@ -246,37 +246,15 @@ unit_quiet_entry_needs_no_record() {
 
 # Going /afk from quiet mode: the record enter writes is the away posture, so a
 # bare daemon refresh must switch the flag to away rather than preserve quiet.
+# `enter` itself leaves state/.afk alone - that file is the live daemon's
+# injection gate (bin/fm-supervise-daemon.sh afk_active), and on Pi `enter` is
+# the whole entry, so clearing it there would mute a running daemon.
 unit_away_entry_from_quiet_writes_away() {
   local st
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-quiet-to-away.XXXXXX")
   mkdir -p "$st/state"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" start-native >/dev/null 2>&1 \
     || fail "quiet to away: quiet entry failed"
-  if enter_posture "$st" \
-    && FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
-    && [ "$(read_mode "$st/state")" = away ]; then
-    pass "quiet to away: an /afk entry over quiet mode writes away once the record stands"
-  else
-    fail "quiet to away: the flag stayed '$(read_mode "$st/state")' beside a standing away record"
-  fi
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
-  rm -rf "$st"
-}
-
-# Going /afk from quiet mode must not leave quiet standing beside the record: a
-# failed daemon launch rolls the flag back to whatever stood before it, so the
-# quiet flag has to be gone by the time `enter` returns.
-# `enter` writes the record and leaves state/.afk alone: that file is the live
-# daemon's injection gate (bin/fm-supervise-daemon.sh afk_active), and on Pi
-# `enter` is the whole entry, so deleting it there would mute a running daemon
-# for the entire away window. The record standing is what makes the next flag
-# write away, so the posture still converges without touching the gate.
-unit_launcher_enter_leaves_the_presence_gate_alone() {
-  local st
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-enter-gate.XXXXXX")
-  mkdir -p "$st/state"
-  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_AFK_MODE=quiet "$LAUNCH" start-native >/dev/null 2>&1 \
-    || fail "enter gate: quiet entry failed"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" enter --words 'ship it' >/dev/null 2>&1 \
     && [ -f "$st/state/.afk-contract" ] && [ -e "$st/state/.afk" ]; then
     pass "quiet to away: enter writes the record without clearing the daemon's presence gate"
@@ -285,7 +263,7 @@ unit_launcher_enter_leaves_the_presence_gate_alone() {
   fi
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
     && [ "$(read_mode "$st/state")" = away ]; then
-    pass "quiet to away: the next flag write reads away once the record stands"
+    pass "quiet to away: an /afk entry over quiet mode writes away once the record stands"
   else
     fail "quiet to away: the flag stayed '$(read_mode "$st/state")' beside a standing away record"
   fi
@@ -1425,7 +1403,6 @@ unit_pi_enter_stop_does_not_claim_a_daemon_terminal
 unit_daemon_entry_requires_the_record
 unit_quiet_entry_needs_no_record
 unit_away_entry_from_quiet_writes_away
-unit_launcher_enter_leaves_the_presence_gate_alone
 unit_launcher_messages_name_the_posture
 unit_failed_daemon_launch_preserves_the_record
 unit_stop_archives_the_record_last
