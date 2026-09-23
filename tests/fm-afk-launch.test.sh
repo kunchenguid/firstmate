@@ -512,37 +512,62 @@ unit_concurrent_start_serialized() {
   rm -rf "$st"
 }
 
-unit_concurrent_lock_never_double_acquires() {
-  local st i p1 p2 r1 r2 both=0
-  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-conc-acquire.XXXXXX")
+unit_concurrent_lock_never_double_holds() {
+  local st holder probe_rc=0
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-conc-hold.XXXXXX")
   mkdir -p "$st/state"
-  for i in $(seq 1 50); do
-    rm -rf "$st/state/.afk-launch.lock"
-    (
-      # shellcheck source=bin/fm-afk-launch.sh
-      . "$LAUNCH"
-      fm_afk_launch_lock_mkdir "$st/state/.afk-launch.lock"
-    ) &
-    p1=$!
-    (
-      # shellcheck source=bin/fm-afk-launch.sh
-      . "$LAUNCH"
-      fm_afk_launch_lock_mkdir "$st/state/.afk-launch.lock"
-    ) &
-    p2=$!
-    r1=0; r2=0
-    wait "$p1" || r1=$?
-    wait "$p2" || r2=$?
-    if [ "$r1" -eq 0 ] && [ "$r2" -eq 0 ]; then
-      both=$((both + 1))
-    fi
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_lock_acquire || exit 1
+    : > "$2/held"
+    while [ ! -e "$2/release" ]; do sleep 0.05; done
+    fm_afk_launch_lock_release
+  ' _ "$LAUNCH" "$st" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  holder=$!
+  for _ in $(seq 1 100); do
+    [ -e "$st/held" ] && break
+    sleep 0.05
   done
-  rm -rf "$st"
-  if [ "$both" -eq 0 ]; then
-    pass "launcher lock: concurrent acquisition primitive never double-succeeds"
-  else
-    fail "launcher lock: concurrent acquisition primitive double-succeeded $both/50 times"
+  if [ ! -e "$st/held" ]; then
+    kill "$holder" 2>/dev/null || true
+    wait "$holder" 2>/dev/null || true
+    rm -rf "$st"
+    fail "launcher lock: first contender never acquired its hold"
+    return 0
   fi
+  # A second contender probing the same lock path while it is held must be
+  # refused and must observe a live holder.
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_lock_helpers || exit 1
+    fm_lock_try_acquire "$2/state/.afk-launch.lock" && exit 1
+    [ -n "${FM_LOCK_HELD_PID:-}" ] || exit 1
+    exit 0
+  ' _ "$LAUNCH" "$st" || probe_rc=$?
+  : > "$st/release"
+  wait "$holder" || probe_rc=$?
+  [ "$probe_rc" -eq 0 ] || {
+    rm -rf "$st"
+    fail "launcher lock: two contenders both held it"
+    return 0
+  }
+  [ ! -e "$st/state/.afk-launch.lock" ] || {
+    rm -rf "$st"
+    fail "launcher lock: the holder release left the lock behind"
+    return 0
+  }
+  # Once released, the same path must be acquirable again.
+  FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_lock_acquire && fm_afk_launch_lock_release
+  ' _ "$LAUNCH" || {
+    rm -rf "$st"
+    fail "launcher lock: no contender could acquire after release"
+    return 0
+  }
+  rm -rf "$st"
+  pass "launcher lock: two concurrent contenders never both hold it"
 }
 
 unit_lock_initialization_grace() {
@@ -1241,7 +1266,7 @@ unit_stop_ordering
 unit_stop_rejects_reused_pid
 unit_failed_start_rolls_back_state
 unit_concurrent_start_serialized
-unit_concurrent_lock_never_double_acquires
+unit_concurrent_lock_never_double_holds
 unit_lock_initialization_grace
 unit_signal_exits_with_lock_cleanup
 unit_herdr_partial_create_recovery

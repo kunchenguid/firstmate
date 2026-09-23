@@ -121,55 +121,33 @@ FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
-fm_afk_launch_lock_owned() {
-  local pid expected actual
-  [ -d "$FM_AFK_LAUNCH_LOCK" ] || return 1
-  pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null) || return 1
-  expected=$(cat "$FM_AFK_LAUNCH_LOCK/pid-identity" 2>/dev/null) || return 1
-  actual=$(fm_pid_identity "$pid" 2>/dev/null) || return 1
-  [ -n "$expected" ] && [ "$actual" = "$expected" ]
-}
-
-# Kernel-atomic directory creation via Python. The uutils coreutils 0.8.0 mkdir
-# binary is not atomic under concurrency and can report double-success on the
-# same path; os.mkdir delegates directly to the kernel mkdir(2) syscall.
-fm_afk_launch_lock_mkdir() {
-  python3 -S -c 'import os, sys; os.mkdir(sys.argv[1])' "$1" 2>/dev/null
+# The one fleet lock primitive (bin/fm-wake-lib.sh: ln -s plus owner
+# verification). Loaded lazily, following bin/fm-afk-contract.sh's pattern;
+# usually already present through bin/fm-afk-start.sh.
+fm_afk_launch_lock_helpers() {
+  command -v fm_lock_try_acquire >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$FM_AFK_LAUNCH_DIR/fm-wake-lib.sh"
 }
 
 fm_afk_launch_lock_acquire() {
-  local attempt=0 incomplete=0 identity
+  local attempt=0 identity
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
+  fm_afk_launch_lock_helpers || return 1
   while [ "$attempt" -lt 200 ]; do
     attempt=$((attempt + 1))
-    if fm_afk_launch_lock_mkdir "$FM_AFK_LAUNCH_LOCK"; then
-      if ! printf '%s' "$$" > "$FM_AFK_LAUNCH_LOCK/pid"; then
-        rm -rf "$FM_AFK_LAUNCH_LOCK"
-        return 1
-      fi
+    if fm_lock_try_acquire "$FM_AFK_LAUNCH_LOCK"; then
+      # The primitive already records our pid as the owner; the pid-identity
+      # pins the exact process start so a recycled pid can never match.
       identity=$(fm_pid_identity "$$" 2>/dev/null) || {
-        rm -rf "$FM_AFK_LAUNCH_LOCK"
+        fm_lock_release "$FM_AFK_LAUNCH_LOCK"
         return 1
       }
       if [ -z "$identity" ] || ! printf '%s' "$identity" > "$FM_AFK_LAUNCH_LOCK/pid-identity"; then
-        rm -rf "$FM_AFK_LAUNCH_LOCK"
+        fm_lock_release "$FM_AFK_LAUNCH_LOCK"
         return 1
       fi
       return 0
-    fi
-    if [ ! -s "$FM_AFK_LAUNCH_LOCK/pid" ] || [ ! -s "$FM_AFK_LAUNCH_LOCK/pid-identity" ]; then
-      incomplete=$((incomplete + 1))
-      if [ "$incomplete" -lt 20 ]; then
-        sleep 0.05
-        continue
-      fi
-    else
-      incomplete=0
-    fi
-    if ! fm_afk_launch_lock_owned; then
-      rm -rf "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || return 1
-      incomplete=0
-      continue
     fi
     sleep 0.05
   done
@@ -178,10 +156,8 @@ fm_afk_launch_lock_acquire() {
 }
 
 fm_afk_launch_lock_release() {
-  local pid
-  pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null || true)
-  [ "$pid" = "$$" ] || return 0
-  rm -rf "$FM_AFK_LAUNCH_LOCK"
+  command -v fm_lock_release >/dev/null 2>&1 || return 0
+  fm_lock_release "$FM_AFK_LAUNCH_LOCK" 2>/dev/null || true
 }
 
 fm_afk_launch_usage() {

@@ -104,44 +104,31 @@ REC=$(fm_busy_record_path "$STATE" "$ID")
 GEN_FILE=$(fm_busy_gen_path "$STATE" "$ID")
 LOCK="$REC.lock"
 
-# Portable mtime in epoch seconds. macOS (BSD) stat uses `-f <fmt>`; Linux (GNU)
-# stat uses `-c <fmt>`. Do NOT collapse this into `stat -f <fmt> ... || stat -c
-# <fmt> ...`: on GNU `-f` is *filesystem* stat, so it reads the format string as
-# a path, reports that on stderr, prints a partial filesystem dump ("  File:
-# ...") on stdout, and still exits 0 - the fallback never runs and the caller
-# gets a non-numeric token. Detect the platform once and pick the right form,
-# exactly as bin/fm-watch.sh does.
-if [ "$(uname)" = Darwin ]; then
-  lock_mtime() { /usr/bin/stat -f %m "$1" 2>/dev/null; }
-else
-  lock_mtime() { stat -c %Y "$1" 2>/dev/null; }
-fi
+# Portable mtime in epoch seconds is owned by bin/fm-wake-lib.sh
+# (fm_path_mtime); this writer keeps no stat fallback of its own.
 
-# Kernel-atomic directory creation via Python. The uutils coreutils 0.8.0 mkdir
-# binary is not atomic under concurrency and can report double-success on the
-# same path; os.mkdir delegates directly to the kernel mkdir(2) syscall.
-lock_mkdir() {
-  python3 -S -c 'import os, sys; os.mkdir(sys.argv[1])' "$1" 2>/dev/null
+# The one fleet lock primitive (bin/fm-wake-lib.sh: ln -s plus owner
+# verification). Loaded lazily so this writer stays usable wherever only the
+# record helpers are needed, following bin/fm-afk-contract.sh's pattern.
+fm_busy_lock_helpers() {
+  command -v fm_lock_try_acquire >/dev/null 2>&1 && return 0
+  # shellcheck source=bin/fm-wake-lib.sh
+  . "$SCRIPT_DIR/fm-wake-lib.sh"
 }
 
 # Serialize writers. The lock protects seq advancement and the sidecar/record
-# pair; a holder that died mid-write is broken after FM_BUSY_LOCK_STALE_SECS.
+# pair; a holder that died mid-write is reclaimed through the primitive's
+# owner verification (a live holder is never stolen). Waiters refuse after a
+# bounded wait instead of proceeding unlocked.
 lock_acquire() {
-  local tries=0 now mtime age
-  while ! lock_mkdir "$LOCK"; do
+  local tries=0
+  fm_busy_lock_helpers || {
+    echo "error: busy-state lock primitive unavailable for $ID" >&2
+    return 1
+  }
+  while ! fm_lock_try_acquire "$LOCK"; do
     tries=$((tries + 1))
     if [ "$tries" -ge 40 ]; then
-      now=$(date +%s)
-      mtime=$(lock_mtime "$LOCK" || true)
-      # Anything unreadable or non-numeric reads as "just created", so an
-      # unforeseen stat surprise degrades to a lock-timeout refusal instead of
-      # aborting the writer - and its caller, fm-teardown.sh - under `set -u`.
-      case "$mtime" in ''|*[!0-9]*) mtime=$now ;; esac
-      age=$((now - mtime))
-      if [ "$age" -ge "${FM_BUSY_LOCK_STALE_SECS:-5}" ]; then
-        rmdir "$LOCK" 2>/dev/null || rm -rf "$LOCK" 2>/dev/null || true
-        lock_mkdir "$LOCK" && break
-      fi
       echo "error: busy-state lock timeout for $ID" >&2
       return 1
     fi
@@ -149,7 +136,7 @@ lock_acquire() {
   done
   return 0
 }
-lock_release() { rmdir "$LOCK" 2>/dev/null || true; }
+lock_release() { fm_lock_release "$LOCK" 2>/dev/null || true; }
 
 write_record() {  # <gen> <seq>
   local tmp

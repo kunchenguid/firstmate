@@ -124,38 +124,47 @@ test_concurrent_writer_lock_serializes_seq_advancement() {
   pass "concurrent writers serialize cleanly and advance seq without loss"
 }
 
-test_atomic_mkdir_never_double_acquires() {
-  local state i p1 p2 r1 r2 both=0
-  state=$(new_state_dir atomic-mkdir)
-  for i in $(seq 1 50); do
-    rm -rf "$state/test.lock"
-    ( python3 -S -c 'import os, sys; os.mkdir(sys.argv[1])' "$state/test.lock" 2>/dev/null ) &
+# Two concurrent contenders race the writer's own lock path: each pair of
+# applies must advance seq by exactly two. A double-held lock lets both read
+# the same seq and write it back once, so any lost advancement fails the run.
+test_two_concurrent_contenders_never_both_hold() {
+  local state gen round expected out seq p1 p2
+  state=$(new_state_dir two-contenders)
+  gen=$("$EV" arm "$state" t1)
+  expected=1
+  for round in $(seq 1 10); do
+    "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event "a$round" &
     p1=$!
-    ( python3 -S -c 'import os, sys; os.mkdir(sys.argv[1])' "$state/test.lock" 2>/dev/null ) &
+    "$EV" apply "$state" t1 busy --gen "$gen" --source claude-hook --event "b$round" &
     p2=$!
-    r1=0; r2=0
-    wait "$p1" || r1=$?
-    wait "$p2" || r2=$?
-    if [ "$r1" -eq 0 ] && [ "$r2" -eq 0 ]; then
-      both=$((both + 1))
-    fi
+    wait "$p1" || fail "contender A failed in round $round"
+    wait "$p2" || fail "contender B failed in round $round"
+    expected=$((expected + 2))
+    out=$(cat "$state/t1.busy-state")
+    seq=$(printf '%s\n' "$out" | sed -n 's/.*seq=\([0-9]*\).*/\1/p')
+    [ "$seq" = "$expected" ] || fail "round $round lost seq advancement, expected seq=$expected, got '$out'"
   done
-  [ "$both" -eq 0 ] || fail "atomic mkdir double-acquired $both/50 times"
-  pass "kernel-atomic directory creation primitive never double-acquires under concurrency"
+  pass "two concurrent contenders never both hold the writer lock across 10 rounds"
 }
 
-# Regression for issue #2625: the writer lock's stale-lock branch resolved the
-# lock's mtime with `stat -f %m ... || stat -c %Y ...`. On GNU coreutils `-f` is
-# *filesystem* stat, so it consumes the format string as a path, complains on
-# stderr, prints "  File: ..." on stdout, and still exits 0 - the GNU form in the
-# fallback never ran. The following `$((now - mtime))` then evaluated the word
-# `File`, which under `set -u` aborted the writer with "File: unbound variable".
-# fm-teardown.sh died there after returning the worktree, leaving state/<id>.meta
-# and friends behind to generate stale wakes forever, and every re-run died
-# identically because the abandoned lock directory was never broken.
+# Regression for issue #2625: the writer lock's old stale-lock branch resolved
+# the lock's mtime with `stat -f %m ... || stat -c %Y ...`. On GNU coreutils
+# `-f` is *filesystem* stat, so it consumes the format string as a path,
+# complains on stderr, prints "  File: ..." on stdout, and still exits 0 - the
+# GNU form in the fallback never ran. The following `$((now - mtime))` then
+# evaluated the word `File`, which under `set -u` aborted the writer with
+# "File: unbound variable". fm-teardown.sh died there after returning the
+# worktree, leaving state/<id>.meta and friends behind to generate stale wakes
+# forever, and every re-run died identically because the abandoned lock
+# directory was never broken.
 #
-# The stat and uname stubs make this deterministic on any host: the writer must
-# take the Linux path and still break a provably stale lock.
+# The writer lock now goes through the fleet's fm_lock_try_acquire (ln -s plus
+# owner verification), which reads no stat output of its own. This keeps
+# proving the behavior that regression pinned: retire breaks an abandoned
+# legacy directory lock instead of dying, and stays idempotent. The stat and
+# uname stubs make the lock provably stale on any host: the stubbed ancient
+# mtime reads as long-abandoned, so reclaim is immediate rather than waiting
+# out the mid-acquire freshness grace.
 test_stale_lock_broken_under_gnu_stat() {
   local state gen fakebin real_uname out status
   state=$(new_state_dir gnu-stat-lock)
@@ -503,7 +512,7 @@ test_apply_current_gen_reset
 test_apply_unarmed_refused
 test_retire_serializes_and_rejects_stale_gen
 test_concurrent_writer_lock_serializes_seq_advancement
-test_atomic_mkdir_never_double_acquires
+test_two_concurrent_contenders_never_both_hold
 test_retire_missing_sidecar_is_idempotent
 test_stale_lock_broken_under_gnu_stat
 test_stale_gen_event_rejected
