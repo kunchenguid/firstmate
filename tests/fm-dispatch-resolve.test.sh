@@ -147,6 +147,7 @@ printf '%s\n' "$*" >> "${QUOTA_AXI_CALLS:?}"
 [ "${FAKE_QUOTA_FAIL:-0}" = 1 ] && exit 1
 [ "${1:-}" = --json ] || exit 2
 cat "${QUOTA_AXI_FIXTURE:?}"
+exit "${FAKE_QUOTA_STATUS:-0}"
 SH
 chmod +x "$FAKEBIN/quota-axi"
 
@@ -637,6 +638,11 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi path exits 0"
 assert_equals '--json' "$(cat "$LOG/quota-axi.calls")" "quota-axi --json is called exactly once"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "quota-axi snapshot drives the argmax"
+reset_log
+TYPESAFE_API_KEY=$KEY FAKE_QUOTA_STATUS=1 run code out err "$BRIEF"
+expect_code 0 "$code" "valid quota snapshot with provider errors exits 0"
+assert_contains "$out" '  status: clear' "valid quota snapshot remains usable when quota-axi reports provider errors"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "valid quota snapshot still drives the argmax"
 reset_log
 TYPESAFE_API_KEY=$KEY FAKE_QUOTA_FAIL=1 run code out err "$BRIEF"
 expect_code 0 "$code" "quota-axi failure exits 0"

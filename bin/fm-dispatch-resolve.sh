@@ -265,8 +265,12 @@ jq -e --slurpfile rules "$RULES" '
 
 # ---- quota evidence: one quota-axi --json snapshot -----------------------------
 command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
-quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
-fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
+QUOTA_STATUS=0
+quota-axi --json > "$QUOTA" 2>/dev/null || QUOTA_STATUS=$?
+if ! fm_quota_json_valid < "$QUOTA"; then
+  [ "$QUOTA_STATUS" -eq 0 ] || emit_error "quota-axi --json failed"
+  emit_error "quota-axi --json returned an invalid snapshot"
+fi
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \
