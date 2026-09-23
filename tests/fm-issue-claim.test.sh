@@ -275,6 +275,7 @@ test_fork_branch_heading_a_merged_pr() {
   assert_not_contains "$block" "no PR found" "the branch is not a separate unlinked claim"
   out=$(run_claim --sweep 800)
   assert_contains "$out" "sweep: #800 no-action state=open verdict=open coverage=complete link=-" "a branch match cannot close or link"
+  assert_contains "$out" "evidence=hint: PR #80 merged base=main [fork]" "the sweep preserves the fork PR hint and its source"
   put "repos/o/r/pulls?head=carol:fix-800" '[{"number":80,"state":"closed","merged_at":"2026-02-02T00:00:00Z","body":"Fixes #800","title":"fix 800","user":{"login":"carol"}}]'
   put "repos/o/r/pulls/80" '{"number":80,"state":"closed","merged_at":"2026-02-02T00:00:00Z","base":{"ref":"main"},"body":"Fixes #800","title":"fix 800"}'
   out=$(run_claim --sweep 800)
@@ -284,7 +285,7 @@ test_fork_branch_heading_a_merged_pr() {
 }
 
 test_related_commit_after_helper_withdrawal() {
-  local n out
+  local n out line
   for n in 4412 4482 4316; do
     plain_issue "$n" alice
     put "repos/o/r/issues/$n/timeline?per_page=100" '[{"event":"cross-referenced","source":{"issue":{"number":70,"state":"closed","title":"another issue","body":"Related, and not closed by this: #4412, #4482, #4316","repository":{"full_name":"o/r"},"pull_request":{"merged_at":"2026-02-04T00:00:00Z"}}}}]'
@@ -301,6 +302,9 @@ test_related_commit_after_helper_withdrawal() {
   out=$(run_claim --sweep 4412 4482 4316)
   for n in 4412 4482 4316; do
     assert_contains "$out" "sweep: #$n no-action state=open verdict=open coverage=complete link=-" "withdrawing the helper cannot promote incidental references"
+    line=$(printf '%s\n' "$out" | grep -F "sweep: #$n ")
+    assert_contains "$line" "hint: PR #70 merged base=main [timeline]" "each sweep disposition retains the incidental PR identity"
+    assert_contains "$line" "hint: commit $RELATED_SHA" "each sweep disposition retains the incidental commit identity"
   done
   put "repos/o/r/issues/4412/timeline?per_page=100" '[{"event":"cross-referenced","source":{"issue":{"number":70,"state":"closed","body":"Fixes #4412","repository":{"full_name":"o/r"},"pull_request":{"merged_at":"2026-02-04T00:00:00Z"}}}}]'
   put "repos/o/r/pulls/70" '{"number":70,"state":"closed","merged_at":"2026-02-04T00:00:00Z","base":{"ref":"main"},"body":"Fixes #4412"}'
@@ -322,6 +326,10 @@ test_fixing_reference_boundaries_and_aggregation() {
     assert_contains "$out" "sweep: #$n close-candidate state=open verdict=fixed-on-main coverage=complete link=" "supported fixing syntax resolves issue $n"
   done
   assert_contains "$out" "sweep: #204 no-action state=open verdict=open coverage=complete link=-" "foreign references, larger numbers, and keyword suffixes cannot fix this issue"
+  out=$(printf '%s\n' "$out" | grep -F 'sweep: #201 ')
+  assert_contains "$out" "hint: PR #70 merged base=main [timeline]" "a real fix does not hide the adjacent PR hint"
+  assert_contains "$out" "merged: commit " "a genuine fixing commit retains its evidence label"
+  assert_not_contains "$out" "link=#70" "displaying a PR hint cannot turn it into a link candidate"
   pass "fixing references respect repository and number boundaries and preserve commit identity"
 }
 
@@ -334,6 +342,7 @@ test_stamped_pr_fixing_references() {
   assert_contains "$out" "hint: PR #66 merged" "an existing-pr stamp and title cannot establish a fix"
   out=$(run_claim --sweep 600)
   assert_contains "$out" "sweep: #600 no-action state=open verdict=open coverage=complete link=-" "an incidental stamped PR cannot recommend closure"
+  assert_contains "$out" "evidence=hint: PR #66 merged base=main [stamp]" "the sweep preserves the stamped PR hint"
   put "repos/o/r/pulls/66" '{"number":66,"state":"closed","merged_at":"2026-02-02T00:00:00Z","base":{"ref":"main"},"body":"RESOLVES: o/r#600"}'
   out=$(run_claim --sweep 600)
   assert_contains "$out" "sweep: #600 close-candidate state=open verdict=fixed-on-main coverage=complete link=-" "a fixing stamped PR may recommend closure without relinking"
@@ -377,6 +386,7 @@ test_closing_issue_references() {
   rc=0; out=$(run_claim --sweep 700) || rc=$?
   expect_code 1 "$rc" "GraphQL errors alongside partial data"
   assert_contains "$out" "sweep: #700 undetermined state=open verdict=unknown coverage=incomplete link=-" "partial GraphQL data cannot establish a fix"
+  assert_contains "$out" "evidence=hint: PR #71 merged base=main [timeline]" "an undetermined sweep still names the PR to inspect"
   put "$endpoint" '{"data":{"repository":{"pullRequest":null}}}'
   rc=0; out=$(run_claim 700) || rc=$?
   expect_code 1 "$rc" "a missing closing-reference connection"
@@ -654,7 +664,11 @@ test_sweep_dispositions() {
     "a fixing commit is a close and link candidate"
   assert_contains "$out" "sweep: #300 no-action state=open verdict=open coverage=complete link=-" \
     "a symbol-only match cannot recommend closure or a link"
+  assert_contains "$out" "sweep: #300 no-action state=open verdict=open coverage=complete link=- evidence=hint: suspected fix to verify: commit $FIX300_SHA" \
+    "a symbol-only sweep preserves the suspected-fix label and commit identity"
+  assert_contains "$out" "[history:-S magic_symbol]" "the sweep retains the symbol that produced the hint"
   assert_contains "$out" "sweep: #400 leave-open" "a live stamped PR keeps the issue open despite merged work"
+  assert_contains "$out" "hint: PR dan/r#9 (open) in another repository" "the sweep preserves foreign PR hints alongside live claims"
   assert_contains "$out" "nothing was written to the forge" "the sweep states it wrote nothing"
 
   out=$(run_claim --sweep 4019) || true
@@ -684,6 +698,13 @@ test_sweep_all_open_issues() {
   out=$(run_claim --sweep) || true
   assert_contains "$out" "open-issue list unverified: 2 rows, 2 unique, totals 7 -> 7" "a short issue list is disclosed"
   assert_contains "$out" "sweep: #100 undetermined state=open verdict=unknown coverage=incomplete" "an unverified issue list cannot support no-action from open"
+  put "search/issues?q=repo:o/r+is:issue+is:open&per_page=1" '{"total_count":2,"incomplete_results":false}'
+  put "repos/o/r/issues?state=open&per_page=100" "[$(issue_json 300 alice),$(issue_json 800 carol)]"
+  out=$(run_claim --sweep --symbol 300:magic_symbol)
+  assert_contains "$out" "sweep: #300 no-action state=open verdict=open coverage=complete link=- evidence=hint: suspected fix to verify: commit $FIX300_SHA" \
+    "a whole-repository sweep preserves symbol hints without promoting them"
+  assert_contains "$out" "sweep: #800 no-action state=open verdict=open coverage=complete link=- evidence=hint: PR #80 merged base=main [fork]" \
+    "a whole-repository sweep preserves named PR hints"
   pass "a sweep with no issue numbers screens every listed open issue"
 }
 

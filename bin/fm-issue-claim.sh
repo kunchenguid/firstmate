@@ -88,6 +88,8 @@
 # --sweep prints, per issue:
 #   sweep: #<n> <disposition> state=<s> verdict=<v> coverage=<complete|incomplete>
 #          link=<items|-> evidence=<items|->
+# evidence= includes claim:, merged:, and hint: items with their labels;
+# hints remain inspection context and never determine link= or disposition.
 # Dispositions, judged only from fixing evidence and live claims, never from
 # PR checks, reviews, or mergeability, which stay forge-owned:
 #   close-candidate  fixed-on-main with complete coverage.
@@ -751,7 +753,7 @@ sweep_line() {
     }
     END { print (out == "" ? "-" : out) }' "$d/lines")
   evidence=$(awk '
-    /^(claim|merged): / {
+    /^(claim|merged|hint): / {
       item = $0; sub(/ ::.*\[/, " [", item); sub(/ by [^ ]+/, "", item)
       out = out (out == "" ? "" : "; ") item
     }
