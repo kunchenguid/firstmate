@@ -133,28 +133,30 @@ Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-
 
 ### Pi one-run project-resource approval
 
-On 2026-09-19, the installed Pi 0.85.1 advertised the scoped `--approve` flag as `Trust project-local files for this run`.
+On 2026-09-23, the installed Pi 0.87.0 advertised the scoped `--approve` flag as `Trust project-local files for this run`, and the live guard proved the full contract end to end on Herdr 0.9.1: a bare pi launch in a fresh untrusted worktree parks on the `Trust project folder?` dialog, a managed `fm-spawn` launch carrying `--approve` never renders it and processes its brief, the approval is one-run (the isolated trust store stays empty), a saved parent-path decision masks the dialog on a bare launch (why previously answered pool slots never stall), and a pi whose `--help` omits `--approve` is refused before any endpoint or metadata exists.
 
 ```sh
 pi --version
 pi --help | grep -- '--approve'
+FM_PI_TRUST_LIVE_E2E=1 bash tests/fm-pi-trust-live-e2e.test.sh
 bash tests/fm-spawn-dispatch-profile.test.sh
-bash tests/fm-control-relaunch.test.sh
 ```
 
 Observed bounded output:
 
 ```text
-0.85.1
+0.87.0
   --approve, -a                  Trust project-local files for this run
-ok - Pi-family launches refuse rather than reporting success at a possible folder-trust prompt
-ok - Pi and pi-signed scouts retain external extensions and scoped one-run approval
-ok - pi-signed is a distinct persistent secondmate runtime with shared Pi supervision semantics
-ok - fm-control relaunch: Pi retains scoped one-run project approval
+ok - bare pi in a fresh untrusted worktree parks on Trust project folder? [herdr 0.9.1, pi 0.87.0]
+ok - the managed launch carries --approve, never renders the dialog, and processes its brief [herdr 0.9.1, pi 0.87.0]
+ok - one-run approval left both the isolated and the operator trust stores untouched
+ok - a saved parent-path trust decision skips the dialog on a bare launch (the per-slot masking) [herdr 0.9.1, pi 0.87.0]
+ok - a pi whose --help omits --approve is refused before endpoint or metadata exists [herdr 0.9.1, pi 0.87.0]
 ```
 
 [`fm-spawn.sh`](../../bin/fm-spawn.sh) owns the scoped approval and compatibility contract exercised here.
-The deterministic launch regression covers ordinary workers, scouts, secondmates, relaunches, the shared external-extension shape, and a missing-flag refusal before launch.
+The deterministic launch regression covers ordinary workers, scouts, secondmates, relaunches, the shared external-extension shape, and a missing-flag refusal before launch; the opt-in live guard re-proves the vendor-rendered dialog facts against the installed Pi after every upgrade.
+The guard spends one real model turn (its prevention case submits the launch brief), so it stays opt-in; its trigger, saved-trust, and refusal cases spend no tokens.
 
 ### Agent liveness name sources
 
@@ -537,6 +539,7 @@ The composer-classification record below observes the same gate from the other s
 
 `bin/fm-busy-lib.sh`'s launch-prompt backstop (`fm_busy_launch_prompt_parked`) reclassifies a launch whose busy record is still pinned at the fm-spawn seed as `unknown launch-prompt`, rather than `busy fm-spawn`, when the captured pane matches that harness's own recognized trust, sign-in, or first-run dialog.
 Each signature below was live-verified against the real installed binary through `tests/fm-launch-prompt-signals-live-e2e.test.sh` (`FM_LAUNCH_PROMPT_SIGNALS_LIVE=1`), which is what refreshes this record after an upgrade.
+This backstop is detection, not prevention: for the Pi family the launch itself now prevents the dialog through the scoped one-run `--approve` contract in the "Pi one-run project-resource approval" record above, so the Pi signature here covers the unexpected-prompt residue (for example a launch shape that bypasses that contract), not the routine fresh-worktree case.
 
 An initial Pi signature sourced only from the installed binary's own UI strings ("Project trust", the internal panel-title component, never the dialog's own rendered heading) was wrong and never matched the real screen.
 This guard's first live run caught that before it shipped, which is the evidence for why this class of check must be driven end to end rather than read off strings or a component name.
