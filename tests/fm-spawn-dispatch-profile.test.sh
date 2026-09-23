@@ -457,8 +457,9 @@ test_codex_omits_max_effort_for_unsupported_model() {
 
 # Codex parks a crewmate launch forever on its unanswerable hook-trust modal
 # unless the launch turns the hook layer off. These two cases pin the split:
-# a crewmate runs hook-free, a secondmate keeps the project hooks that carry its
-# own primary-session turn-end guard and session-start digest.
+# a crewmate runs hook-free and code-mode-host-free, a secondmate keeps the
+# project hooks that carry its own primary-session turn-end guard and
+# session-start digest, plus the operator's own code-mode host integrations.
 test_codex_crewmate_launch_disables_the_hook_layer() {
   local rec id out status launch
   id=profile-codex-hooks-z4c
@@ -475,11 +476,16 @@ test_codex_crewmate_launch_disables_the_hook_layer() {
   # disabling them, so a launch must never reach for it.
   assert_not_contains "$launch" "--dangerously-bypass-hook-trust" \
     "codex crewmate launch ran the operator's untrusted hooks instead of disabling them"
+  # A crewmate exec call must not depend on the operator's ChatGPT-Desktop-app
+  # code-mode host (node_repl/cua_repl MCP servers), which timed out every
+  # exec call for a real crew incident (data/codex-exec-diagnose/report.md).
+  assert_contains "$launch" "--disable code_mode_host" \
+    "codex crewmate launch did not disable the code-mode host that timed out every exec call"
   # Firstmate goes blind without the turn-end signal, which rides this same
   # launch rather than any hook.
   assert_contains "$launch" "notify=" \
     "codex crewmate launch lost the turn-end notify program"
-  pass "a codex crewmate launches with no hook layer and keeps its turn-end signal"
+  pass "a codex crewmate launches with no hook layer, no code-mode host, and keeps its turn-end signal"
 }
 
 test_codex_secondmate_launch_keeps_the_hook_layer() {
@@ -496,7 +502,9 @@ test_codex_secondmate_launch_keeps_the_hook_layer() {
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "--disable hooks" \
     "codex secondmate launch disabled the project hooks its own primary supervision depends on"
-  pass "a codex secondmate keeps the project hook layer its primary session runs on"
+  assert_not_contains "$launch" "--disable code_mode_host" \
+    "codex secondmate launch disabled the operator's own code-mode host integrations"
+  pass "a codex secondmate keeps the project hook layer and code-mode host its primary session runs on"
 }
 
 test_grok_threads_model_and_reasoning_effort() {

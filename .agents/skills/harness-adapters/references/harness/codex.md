@@ -29,6 +29,12 @@ So crewmate and scout launches disable Codex's hook layer outright (`bin/fm-spaw
 A crewmate loses nothing: its turn-end signal is the `-c notify=` program on the same launch, and the Firstmate hooks in a project's `.codex/hooks.json` are primary-session infrastructure that stands down in a child worktree.
 A secondmate is a primary in its own home and keeps its hooks, so an unanswerable modal there is still possible and is the operator's own hook review to settle.
 
+## Code-mode host
+
+Crewmate and scout launches also carry `--disable code_mode_host` alongside `--disable hooks`, for the same reason: the operator's personal `~/.codex/config.toml` wires every `exec` tool call through a `code_mode_host` feature backed by ChatGPT-Desktop-app MCP servers (`node_repl`, `cua_repl`), and a task worker should not inherit that dependency.
+Verified from codex's own structured logs on codex-cli 0.155.1: without the flag, five crew workers in a real incident all timed out on their first `exec` call with "timed out negotiating with the code-mode host", 100% of attempts, both in the initial launch and a relaunch.
+A secondmate keeps `code_mode_host` on along with its hooks, since it is a primary in its own home running under the operator's own posture.
+
 ## Skill popup
 
 A `$<skill>` invocation opens a `$` autocomplete popup.
