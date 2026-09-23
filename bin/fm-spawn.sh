@@ -288,6 +288,22 @@
 #   worktree, or record exists and names the accepted values. The file is read
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
+# Claude account profiles (config/claude-profiles.json):
+#   An optional local, inherited declaration of named absolute Claude config
+#   directories. On a fresh Claude assignment, every profile is validated and
+#   measured in isolation through quota-axi --provider claude --profile-only;
+#   the profile with the best current spendPriority wins, with lexical name as
+#   the deterministic equal-evidence tie-break. Exhausted profiles are
+#   ineligible, while unmeasurable profiles retain the existing quota contract's
+#   eligible uncertainty and cannot win without rankable evidence. One invalid,
+#   missing, unreadable, or unauthenticated declaration refuses the launch
+#   rather than being skipped. The chosen name and canonical directory are
+#   recorded as claude_profile= and claude_config_dir=, reused without
+#   reselection on every relaunch and secondmate recovery, and supplied to both
+#   trust registration and the worker through CLAUDE_CONFIG_DIR. An absent file
+#   leaves the historical ambient CLAUDE_CONFIG_DIR behavior byte-for-byte
+#   unchanged. bin/fm-claude-profile-lib.sh owns selection and validation;
+#   docs/configuration.md owns the schema and operator contract.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
 #     __CLAUDEPERMFLAG__ the claude permission flag selected by config/claude-permission-mode
@@ -455,6 +471,8 @@ PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
+# shellcheck source=bin/fm-claude-profile-lib.sh
+. "$SCRIPT_DIR/fm-claude-profile-lib.sh"
 if ! LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-allowlist"); then
   exit 1
 fi
@@ -795,7 +813,7 @@ fi
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
-  local remote_traceparent remote_recorded_traceparent sm_primary_head sync_out sync_rc
+  local remote_traceparent remote_recorded_traceparent remote_claude_profile remote_claude_config_dir sm_primary_head sync_out sync_rc
   local -a launch_args
   id=${POS[0]:-}
   fm_task_id_creation_valid "$id" || {
@@ -999,6 +1017,8 @@ spawn_remote_secondmate() {
   remote_target=$(printf '%s\n' "$out" | sed -n 's/^target=//p' | tail -1)
   remote_harness=$(printf '%s\n' "$out" | sed -n 's/^harness=//p' | tail -1)
   remote_herdr_session=$(printf '%s\n' "$out" | sed -n 's/^herdr_session=//p' | tail -1)
+  remote_claude_profile=$(printf '%s\n' "$out" | sed -n 's/^claude_profile=//p' | tail -1)
+  remote_claude_config_dir=$(printf '%s\n' "$out" | sed -n 's/^claude_config_dir=//p' | tail -1)
   if [ "$remote_backend" != herdr ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -1006,13 +1026,15 @@ spawn_remote_secondmate() {
     echo "error: remote launch returned backend '${remote_backend:-missing}', expected herdr; preserving the remote route for reconciliation" >&2
     return 1
   fi
-  [ -n "$remote_target" ] && [ "$remote_harness" = "$harness" ] || {
+  if [ -z "$remote_target" ] || [ "$remote_harness" != "$harness" ] ||
+    { [ -n "$remote_claude_profile" ] && [ -z "$remote_claude_config_dir" ]; } ||
+    { [ -z "$remote_claude_profile" ] && [ -n "$remote_claude_config_dir" ]; }; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     echo "error: remote launch returned malformed route metadata; preserving the remote route for reconciliation" >&2
     return 1
-  }
+  fi
   if [ "$remote_herdr_session" != fm-remote ] || [ "${remote_target%%:*}" != "$remote_herdr_session" ]; then
     fm_lock_release "$remote_lock" || true
     fm_lock_release "$registry_lock" || true
@@ -1048,6 +1070,8 @@ spawn_remote_secondmate() {
     echo "remote_backend=$remote_backend"
     echo "remote_herdr_session=$remote_herdr_session"
     echo "remote_target=$remote_target"
+    [ -z "$remote_claude_profile" ] || echo "claude_profile=$remote_claude_profile"
+    [ -z "$remote_claude_config_dir" ] || echo "claude_config_dir=$remote_claude_config_dir"
     [ -z "$remote_recorded_traceparent" ] || echo "traceparent=$remote_recorded_traceparent"
   } >"$tmp"
   if ! fm_backlog_atomic_transition publish "$tmp" "$meta" "task record" "$STATE"; then
@@ -1210,6 +1234,8 @@ spawn_abort_cleanup() {
             echo "tasktmp=${TASK_TMP:-}"
             echo "model=${MODEL:-default}"
             echo "effort=${EFFORT:-default}"
+            [ -z "${CLAUDE_PROFILE_NAME:-}" ] || echo "claude_profile=$CLAUDE_PROFILE_NAME"
+            [ -z "${CLAUDE_PROFILE_CONFIG_DIR:-}" ] || echo "claude_config_dir=$CLAUDE_PROFILE_CONFIG_DIR"
             echo "backend=orca"
             echo "orca_worktree_id=$ORCA_WORKTREE_ID"
             [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
@@ -3137,6 +3163,52 @@ if [ "$SPAWN_META_LOCK_HELD" != 1 ]; then
   fm_lock_acquire_wait "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=1
 fi
+
+# A named Claude account becomes task identity at the same point as the other
+# metadata axes. Fresh Claude work selects once from current isolated quota;
+# every replacement and secondmate recovery reads its prior binding instead.
+# A pre-feature Claude task with no binding remains on the historical ambient
+# store during relaunch, even if multi-profile configuration appeared later,
+# because introducing a binding then would silently switch a running task.
+CLAUDE_PROFILE_NAME=
+CLAUDE_PROFILE_CONFIG_DIR=
+CLAUDE_PROFILE_PRIOR_HARNESS=
+CLAUDE_PROFILE_META=
+if [ "$RELAUNCH" -eq 1 ]; then
+  CLAUDE_PROFILE_META=$RELAUNCH_META
+  CLAUDE_PROFILE_PRIOR_HARNESS=$RELAUNCH_PRIOR_HARNESS
+elif [ "$KIND" = secondmate ] && [ -f "$STATE/$ID.meta" ] && [ ! -L "$STATE/$ID.meta" ] &&
+  [ "$(fm_meta_get "$STATE/$ID.meta" kind)" = secondmate ]; then
+  CLAUDE_PROFILE_META="$STATE/$ID.meta"
+  CLAUDE_PROFILE_PRIOR_HARNESS=$(fm_meta_get "$CLAUDE_PROFILE_META" harness)
+fi
+if [ "$HARNESS" = claude ] && [ -n "$CLAUDE_PROFILE_META" ]; then
+  CLAUDE_PROFILE_NAME=$(fm_meta_get "$CLAUDE_PROFILE_META" claude_profile)
+  CLAUDE_PROFILE_CONFIG_DIR=$(fm_meta_get "$CLAUDE_PROFILE_META" claude_config_dir)
+  if { [ -n "$CLAUDE_PROFILE_NAME" ] && [ -z "$CLAUDE_PROFILE_CONFIG_DIR" ]; } ||
+    { [ -z "$CLAUDE_PROFILE_NAME" ] && [ -n "$CLAUDE_PROFILE_CONFIG_DIR" ]; }; then
+    echo "error: task $ID has an incomplete Claude profile binding; both claude_profile and claude_config_dir are required" >&2
+    exit 1
+  fi
+fi
+if [ "$HARNESS" = claude ]; then
+  if [ -n "$CLAUDE_PROFILE_NAME" ]; then
+    fm_claude_profile_validate_binding "$CLAUDE_PROFILE_NAME" "$CLAUDE_PROFILE_CONFIG_DIR" || exit 1
+    CLAUDE_PROFILE_NAME=$FM_CLAUDE_PROFILE_NAME
+    CLAUDE_PROFILE_CONFIG_DIR=$FM_CLAUDE_PROFILE_CONFIG_DIR
+    CLAUDE_CONFIG_DIR=$CLAUDE_PROFILE_CONFIG_DIR
+    export CLAUDE_CONFIG_DIR
+  elif [ "$CLAUDE_PROFILE_PRIOR_HARNESS" = claude ]; then
+    : # Legacy task: preserve the ambient single-profile behavior.
+  elif [ -e "$CONFIG/claude-profiles.json" ] || [ -L "$CONFIG/claude-profiles.json" ]; then
+    fm_claude_profile_select "$CONFIG/claude-profiles.json" "${MODEL:-default}" || exit 1
+    CLAUDE_PROFILE_NAME=$FM_CLAUDE_PROFILE_NAME
+    CLAUDE_PROFILE_CONFIG_DIR=$FM_CLAUDE_PROFILE_CONFIG_DIR
+    CLAUDE_CONFIG_DIR=$CLAUDE_PROFILE_CONFIG_DIR
+    export CLAUDE_CONFIG_DIR
+  fi
+fi
+
 if [ -e "$STATE/$ID.backlog-close" ] || [ -L "$STATE/$ID.backlog-close" ]; then
   echo "error: task $ID has a pending authoritative backlog close at $STATE/$ID.backlog-close; finish or repair that close before dispatching a new worker" >&2
   exit 1
@@ -4452,7 +4524,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort claude_profile claude_config_dir busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4470,6 +4542,8 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ -z "$CLAUDE_PROFILE_NAME" ] || echo "claude_profile=$CLAUDE_PROFILE_NAME"
+  [ -z "$CLAUDE_PROFILE_CONFIG_DIR" ] || echo "claude_config_dir=$CLAUDE_PROFILE_CONFIG_DIR"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -4642,9 +4716,9 @@ esac
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
+# Forward the task's bound named store, or firstmate's ambient store when no
+# multi-profile configuration is active, onto the claude launch. Only when set;
+# an unset value is the historical single-store default and needs no prefix.
 if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
 fi

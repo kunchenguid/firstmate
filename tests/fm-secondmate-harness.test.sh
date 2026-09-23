@@ -13,7 +13,7 @@
 #      launch through that mode, durably (every respawn re-resolves), while an
 #      explicit per-spawn harness arg still wins.
 #   B) Inheritance. The primary pushes a declared, extensible set of LOCAL
-#      (gitignored) config items - config/crew-dispatch.json, config/crew-harness,
+#      (gitignored) config items - config/crew-dispatch.json, config/claude-profiles.json, config/crew-harness,
 #      config/backlog-backend, config/backend, config/herdr-presentation-spaces,
 #      config/startup-memory-budget, and config/trace-context -
 #      down into each secondmate home's config/, so the secondmate's OWN crewmates,
@@ -301,6 +301,7 @@ test_propagate_lib() {
 
   # 1. present source is copied
   printf '{"default":{"harness":"codex"}}\n' > "$src/crew-dispatch.json"
+  printf '{"profiles":[{"name":"personal","config_dir":"/profiles/personal"},{"name":"work","config_dir":"/profiles/work"}]}\n' > "$src/claude-profiles.json"
   printf 'codex\n' > "$src/crew-harness"
   printf 'manual\n' > "$src/backlog-backend"
   printf 'tmux\n' > "$src/backend"
@@ -312,6 +313,7 @@ test_propagate_lib() {
   [ ! -s "$stdout" ] || fail "clean copy wrote to stdout"
   [ ! -s "$stderr" ] || fail "clean copy wrote to stderr"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"codex"}}' ] || fail "crew-dispatch.json not propagated"
+  [ "$(cat "$dest/claude-profiles.json")" = '{"profiles":[{"name":"personal","config_dir":"/profiles/personal"},{"name":"work","config_dir":"/profiles/work"}]}' ] || fail "claude-profiles.json not propagated"
   [ "$(cat "$dest/crew-harness")" = codex ] || fail "crew-harness not propagated"
   [ "$(cat "$dest/backlog-backend")" = manual ] || fail "backlog-backend not propagated"
   [ "$(cat "$dest/backend")" = tmux ] || fail "backend not propagated"
@@ -334,11 +336,13 @@ test_propagate_lib() {
 
   # 3. a changed source value converges downstream
   printf '{"default":{"harness":"claude"}}\n' > "$src/crew-dispatch.json"
+  printf '{"profiles":[{"name":"personal","config_dir":"/profiles/personal"},{"name":"work","config_dir":"/profiles/work-v2"}]}\n' > "$src/claude-profiles.json"
   printf 'claude\n' > "$src/crew-harness"
   printf 'tasks-axi\n' > "$src/backlog-backend"
   printf 'zellij\n' > "$src/backend"
   propagate_inheritable_config "$src" "$dest"
   [ "$(cat "$dest/crew-dispatch.json")" = '{"default":{"harness":"claude"}}' ] || fail "changed dispatch profile did not converge"
+  [ "$(cat "$dest/claude-profiles.json")" = '{"profiles":[{"name":"personal","config_dir":"/profiles/personal"},{"name":"work","config_dir":"/profiles/work-v2"}]}' ] || fail "changed Claude profiles did not converge"
   [ "$(cat "$dest/crew-harness")" = claude ] || fail "changed value did not converge"
   [ "$(cat "$dest/backlog-backend")" = tasks-axi ] || fail "changed backlog backend did not converge"
   [ "$(cat "$dest/backend")" = zellij ] || fail "changed backend did not converge"
@@ -355,10 +359,11 @@ test_propagate_lib() {
 
   # 4. removing the source mirrors absence downstream (primary-authoritative)
   printf 'herdr\n' > "$dest/backend"
-  rm -f "$src/crew-dispatch.json" "$src/crew-harness" "$src/backlog-backend" \
+  rm -f "$src/crew-dispatch.json" "$src/claude-profiles.json" "$src/crew-harness" "$src/backlog-backend" \
     "$src/backend" "$src/herdr-presentation-spaces" "$src/trace-context"
   propagate_inheritable_config "$src" "$dest"
   [ -e "$dest/crew-dispatch.json" ] && fail "dispatch profile absence not mirrored downstream"
+  [ -e "$dest/claude-profiles.json" ] && fail "Claude profile absence not mirrored downstream"
   [ -e "$dest/crew-harness" ] && fail "absence not mirrored downstream"
   [ -e "$dest/backlog-backend" ] && fail "backlog-backend absence not mirrored downstream"
   [ -e "$dest/backend" ] && fail "backend absence not mirrored downstream"
@@ -1031,7 +1036,7 @@ new_world() {
     [ "$dispatch_ignore" = no ] || printf 'config/crew-dispatch.json\n'
     printf 'config/crew-harness\nconfig/secondmate-harness\nconfig/backlog-backend\n'
     printf 'config/backend\nconfig/herdr-presentation-spaces\nconfig/startup-memory-budget\n'
-    printf 'config/claude-permission-mode\n'
+    printf 'config/claude-permission-mode\nconfig/claude-profiles.json\n'
   } > "$w/main/.gitignore"
   printf 'v1\n' > "$w/main/AGENTS.md"
   printf 'r1\n' > "$w/main/README.md"

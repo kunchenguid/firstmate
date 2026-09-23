@@ -111,6 +111,55 @@ There is no `projectionBasis` field; its absence means `cycle_average`.
 Projection confidence is not present on every known runway, so selection must preserve that absence as uncertainty rather than fabricate it.
 The schema compatibility and account-matching contract is owned by [`quota-array-dispatch`](../../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility); this schema-5 evidence does not reinterpret an absent runway, pace, or selection field.
 
+## Isolated Claude profile measurement
+
+Verified 2026-09-21 against quota-axi 0.1.49.
+The installed help reports the isolation boundary directly:
+
+```text
+--profile-only requires explicit CLAUDE_CONFIG_DIR or CODEX_HOME plus exactly one matching provider. It reads only that credential file: no Keychain, Pi, CLI RPC, fallback, refresh, or cache.
+```
+
+An empty throwaway profile was read with the same fixed command `fm-spawn.sh` uses, with no existing profile or credential copied into it:
+
+```sh
+tmp=$(mktemp -d ./.quota-profile-evidence.XXXXXX)
+CLAUDE_CONFIG_DIR="$PWD/$tmp" quota-axi --provider claude --profile-only --full --json
+```
+
+The command exited 1 and returned the following sanitized provider state before the throwaway directory was removed:
+
+```json
+{
+  "schemaVersion": 5,
+  "provider": "claude",
+  "source": "unavailable",
+  "state": {
+    "status": "unavailable",
+    "stale": false,
+    "error": "Claude profile credentials missing",
+    "sourcesTried": ["oauth-file"]
+  },
+  "attempts": [
+    {
+      "source": "oauth-file",
+      "status": "skipped",
+      "error": "credentials_missing"
+    }
+  ],
+  "quotaSemantics": {
+    "status": "unknown",
+    "description": "No quota windows are available, so no effective remaining percentage can be computed.",
+    "effectiveAvailability": []
+  }
+}
+```
+
+This proves a failed isolated profile does not borrow ambient Claude authentication and gives the selector a non-zero refusal signal.
+`tests/fm-spawn-dispatch-profile.test.sh` drives the public spawn path with two isolated synthetic profiles and proves per-profile quota calls, best-capacity selection, deterministic ties, durable metadata, selected-store trust registration, unknown-quota treatment, absent-config single-profile backward compatibility, and safe path and authentication failures.
+`tests/fm-control-relaunch.test.sh` proves a later higher-capacity account is not reconsidered when a bound Claude assignment relaunches.
+`tests/fm-secondmate-harness.test.sh` proves the reference-only profile declaration converges into secondmate homes and mirrors primary absence without copying any referenced directory.
+
 ## Provider-family counterfactual that this producer schema supports
 
 Verified 2026-07-30 on Pi 0.82.0 and quota-axi 0.1.16.

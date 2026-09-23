@@ -378,6 +378,50 @@ Any other value, or an unreadable file, refuses every spawn from that home, whic
 The file is a captain-wide safety preference, so it is inherited into secondmate homes under the [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md) inherited-local-material contract; a secondmate's own Claude crewmates then launch on the same posture.
 The [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md) records the verified shape of both launches and which once-per-machine dialog each one can meet.
 
+## Claude account profiles (config/claude-profiles.json)
+
+The optional local, gitignored `config/claude-profiles.json` is a readable regular non-symlink file declaring the existing Claude config directories that Firstmate may use for new Claude assignments.
+It stores names and absolute directory references only, never `.credentials.json` contents, OAuth data, tokens, or copied profile material.
+Each referenced profile remains owned by Claude Code in its original directory.
+
+```json
+{
+  "profiles": [
+    { "name": "personal", "config_dir": "/home/example/.claude" },
+    { "name": "work", "config_dir": "/home/example/.claude-profiles/work" }
+  ]
+}
+```
+
+The top level contains only `profiles`, which is a non-empty array of objects containing exactly `name` and `config_dir`.
+Names are unique, begin with an ASCII letter or digit, and then use only letters, digits, `.`, `_`, `@`, `+`, or `-`.
+Every `config_dir` is a unique absolute path without control characters.
+The configured paths must resolve to distinct readable and searchable directories.
+A missing file preserves the historical single-profile behavior exactly: an ambient absolute `CLAUDE_CONFIG_DIR` is forwarded when set, and otherwise Claude uses its ordinary default store.
+
+For each fresh Claude crewmate, scout, or second mate, `fm-spawn.sh` runs one isolated measurement per configured profile with `CLAUDE_CONFIG_DIR=<config_dir> quota-axi --provider claude --profile-only --json`.
+`--profile-only` prevents Keychain, Pi, CLI RPC, fallback, refresh, and cache discovery, so evidence for one configured profile cannot silently come from another account.
+The selector applies quota-axi's existing account eligibility semantics to applicable all-model, all-product, and selected-model rows.
+An exhausted profile is ineligible, a profile with unknown or incomplete quota remains eligible but unranked uncertainty, and rankable profiles are compared by their limiting `spendPriority` value so the account with the better current completion-aware capacity is selected.
+A numeric tie is settled by lexical profile name, which is deterministic and independent of array order; once one account's capacity drops below the other's, the next assignment naturally selects the other account.
+When no profile has rankable evidence, automatic selection stops and names the uncertain or exhausted profiles rather than pretending unknown capacity is zero.
+A malformed declaration, unsupported quota-axi build, missing or unreadable directory, failed isolated measurement, unauthenticated profile, or invalid quota snapshot stops the launch and never falls through to another profile.
+
+The selected profile name and canonical directory are persisted in that task's durable record as `claude_profile=` and `claude_config_dir=`.
+Trust registration and the Claude process both receive that exact directory through `CLAUDE_CONFIG_DIR`.
+Relaunch and recovery validate and reuse the recorded binding without comparing later quota values, including after the local configuration changes.
+A legacy task that predates this record stays on its historical ambient store when relaunched instead of acquiring a new account silently.
+The binding is a Claude-only axis, exactly like model and effort: switching harness away from Claude clears it along with those axes, and switching back to Claude selects fresh from current isolated quota rather than reusing whatever account the task happened to hold before the switch.
+
+The account axis deliberately does not extend `config/crew-dispatch.json`.
+That file selects task-fit harness, model, and effort profiles, while every configured Claude account offers the same selected Claude runtime profile and differs only by local credential store and quota.
+Keeping account expansion inside `fm-spawn.sh` gives the binding one metadata owner and prevents a typed resolver result, manual dispatch, or recovery path from bypassing account selection.
+
+`config/claude-profiles.json` is inherited into secondmate homes through the primary-authoritative local-configuration contract, so their own new Claude workers use the same profile set.
+Only the small JSON reference file is propagated; no referenced directory or file below it is copied.
+Every inherited absolute path must already exist and be authenticated on the machine that launches the worker.
+This means a remote secondmate whose host uses different paths needs those same declared paths provisioned locally before launch; otherwise it stops rather than choosing another account.
+
 ## Lavish server address (config/lavish-axi-host)
 
 The optional local, gitignored `config/lavish-axi-host` contains one non-empty address without whitespace for the per-machine Lavish server.

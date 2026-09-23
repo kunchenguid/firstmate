@@ -302,6 +302,8 @@ When the file exists, `fm-spawn.sh` refuses crewmate and scout launches without 
 Secondmate launches are exempt because they resolve the secondmate harness and any optional secondmate model or effort tokens instead.
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, and agy while preserving the requested profile for later audit.
+Claude's optional account-store axis stays downstream of this task-fit decision: `fm-spawn.sh` expands one selected Claude runtime across `config/claude-profiles.json`, persists the resulting account binding with the task identity, and reuses it in recovery, while [configuration.md](configuration.md#claude-account-profiles-configclaude-profilesjson) owns the schema and selection behavior.
+This separation prevents account quota from duplicating otherwise identical Claude entries in every natural-language dispatch rule and gives manual, typed-resolver, relaunch, and recovery paths one binding owner.
 
 ## Optional secondmates
 
@@ -341,6 +343,7 @@ For a local route, an explicit per-spawn harness or raw launch command does not 
 Remote routes accept verified harness adapters only and reject raw launch commands.
 `config/crew-harness` remains the crewmate harness and is inherited into secondmate homes.
 `config/crew-dispatch.json` is inherited too; secondmates use the same natural-language dispatch profiles when spawning their own crewmates.
+`config/claude-profiles.json` follows that same reference-only inheritance path, while its referenced credential stores remain in place and are never copied.
 The [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md) owns the inherited-local-material propagation contract and points to the implementation's item declaration.
 
 The `data/secondmates.md` line contract is owned by the [`secondmate-provisioning` skill](../.agents/skills/secondmate-provisioning/SKILL.md#routing-table), and the secondmate environment variables are documented in [configuration.md](configuration.md).

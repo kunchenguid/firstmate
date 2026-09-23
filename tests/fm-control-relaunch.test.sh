@@ -246,6 +246,7 @@ run_control() {  # <case-dir> <args...>
     FM_FAKE_TRACE_RELEASE="${FM_FAKE_TRACE_RELEASE:-}" \
     FM_FAKE_META_WRITER_READY="${FM_FAKE_META_WRITER_READY:-}" \
     FM_FAKE_TRACE_EXPORTED="${FM_FAKE_TRACE_EXPORTED:-}" \
+    FM_FAKE_QUOTA_LOG="${FM_FAKE_QUOTA_LOG:-}" \
     "$CONTROL" "$@" 2>&1
 }
 
@@ -260,6 +261,7 @@ run_spawn() {  # <case-dir> <args...>
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_FAKE_QUOTA_LOG="${FM_FAKE_QUOTA_LOG:-}" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -385,6 +387,51 @@ test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint() {
   assert_grep "/exit" "$dir/fake/literal" "the previous agent should have been exited"
   assert_grep "encode launch-brief" "$dir/fake/literal" "the replacement should have been launched"
   pass "fm-control relaunch: a same-harness relaunch replaces the agent in the same endpoint and worktree"
+}
+
+test_claude_relaunch_keeps_the_recorded_account_binding() {
+  local dir out rc bound other quota_log launch
+  dir=$(new_case account-binding rl81)
+  add_ship_task "$dir" rl81 claude
+  bound="$dir/bound-profile"
+  other="$dir/other-profile"
+  quota_log="$dir/quota.log"
+  mkdir -p "$bound" "$other" "$dir/home/config"
+  printf '%s\n' '{"schemaVersion":5,"providers":[{"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":5,"runway":{"status":"through_reset"},"selection":{"status":"known","spendPriority":-8}}]}}]}' > "$bound/quota.json"
+  printf '%s\n' '{"schemaVersion":5,"providers":[{"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":95,"runway":{"status":"through_reset"},"selection":{"status":"known","spendPriority":0.8}}]}}]}' > "$other/quota.json"
+  jq -n --arg bound "$bound" --arg other "$other" \
+    '{profiles:[{name:"bound",config_dir:$bound},{name:"other",config_dir:$other}]}' \
+    > "$dir/home/config/claude-profiles.json"
+  printf '%s\n' 'claude_profile=bound' "claude_config_dir=$bound" >> "$dir/home/state/rl81.meta"
+  cat > "$dir/fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'flags: --provider claude --profile-only --json'
+  exit 0
+fi
+printf '%s\n' "${CLAUDE_CONFIG_DIR:-unset}|$*" >> "${FM_FAKE_QUOTA_LOG:?}"
+cat "$CLAUDE_CONFIG_DIR/quota.json"
+SH
+  chmod +x "$dir/fakebin/quota-axi"
+
+  out=$(FM_FAKE_QUOTA_LOG="$quota_log" \
+    run_control "$dir" rl81 relaunch --note "continue on the same account"); rc=$?
+  expect_code 0 "$rc" "a bound Claude relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl81 claude_profile)" = bound ] \
+    || fail "relaunch changed the recorded Claude profile name"
+  [ "$(meta_field "$dir" rl81 claude_config_dir)" = "$bound" ] \
+    || fail "relaunch changed the recorded Claude profile directory"
+  [ "$(wc -l < "$quota_log" | tr -d ' ')" = 1 ] \
+    || fail "relaunch re-ran account selection instead of validating one binding: $(cat "$quota_log")"
+  assert_grep "$bound|--provider claude --profile-only --json" "$quota_log" \
+    "relaunch did not validate the recorded profile in isolation"
+  assert_no_grep "$other|" "$quota_log" \
+    "relaunch reconsidered the higher-capacity account"
+  launch=$(grep 'encode launch-brief' "$dir/fake/literal" | tail -1)
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$bound'" \
+    "replacement launch did not reuse the recorded Claude config directory"
+  pass "Claude relaunch validates and reuses its persisted account binding without reselection"
 }
 
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text() {
@@ -660,6 +707,55 @@ test_harness_switch_does_not_carry_the_old_profile_axes() {
   [ "$(meta_field "$dir" rl5 effort)" = default ] \
     || fail "an effort chosen for the old harness must not carry to a different one"
   pass "fm-control relaunch: a harness switch resets model and effort unless they are named too"
+}
+
+test_harness_switch_away_and_back_reselects_claude_profile_by_quota() {
+  local dir out rc bound other quota_log
+  dir=$(new_case profile-switch rl82)
+  add_ship_task "$dir" rl82 claude
+  bound="$dir/bound-profile"
+  other="$dir/other-profile"
+  quota_log="$dir/quota.log"
+  mkdir -p "$bound" "$other" "$dir/home/config"
+  printf '%s\n' '{"schemaVersion":5,"providers":[{"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":5,"runway":{"status":"through_reset"},"selection":{"status":"known","spendPriority":-8}}]}}]}' > "$bound/quota.json"
+  printf '%s\n' '{"schemaVersion":5,"providers":[{"provider":"claude","quotaSemantics":{"status":"known","effectiveAvailability":[{"scope":"all_models","status":"known","effectivePercentRemaining":95,"runway":{"status":"through_reset"},"selection":{"status":"known","spendPriority":0.8}}]}}]}' > "$other/quota.json"
+  jq -n --arg bound "$bound" --arg other "$other" \
+    '{profiles:[{name:"bound",config_dir:$bound},{name:"other",config_dir:$other}]}' \
+    > "$dir/home/config/claude-profiles.json"
+  printf '%s\n' 'claude_profile=bound' "claude_config_dir=$bound" >> "$dir/home/state/rl82.meta"
+  cat > "$dir/fakebin/quota-axi" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'flags: --provider claude --profile-only --json'
+  exit 0
+fi
+printf '%s\n' "${CLAUDE_CONFIG_DIR:-unset}|$*" >> "${FM_FAKE_QUOTA_LOG:?}"
+cat "$CLAUDE_CONFIG_DIR/quota.json"
+SH
+  chmod +x "$dir/fakebin/quota-axi"
+
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl82 relaunch --harness codex --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "the switch away from claude should succeed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl82 claude_profile)" ] \
+    || fail "the Claude account binding must not carry to a non-Claude harness"
+  [ -z "$(meta_field "$dir" rl82 claude_config_dir)" ] \
+    || fail "the Claude config directory must not carry to a non-Claude harness"
+
+  printf 'claude' > "$dir/fake/becomes"
+  out=$(FM_FAKE_QUOTA_LOG="$quota_log" \
+    run_control "$dir" rl82 relaunch --harness claude --note "switching back"); rc=$?
+  expect_code 0 "$rc" "the switch back to claude should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl82 claude_profile)" = other ] \
+    || fail "switching back to claude must reselect by current quota instead of reusing the stale binding"
+  [ "$(wc -l < "$quota_log" | tr -d ' ')" = 2 ] \
+    || fail "switching back to claude must measure both profiles, not validate one binding: $(cat "$quota_log")"
+  assert_grep "$bound|--provider claude --profile-only --json" "$quota_log" \
+    "reselection did not measure the previously bound profile"
+  assert_grep "$other|--provider claude --profile-only --json" "$quota_log" \
+    "reselection did not measure the higher-capacity profile"
+  pass "fm-control relaunch: switching harness away and back reselects the Claude account by current quota"
 }
 
 test_harness_switch_resolves_a_prefixed_recorded_harness() {
@@ -2253,6 +2349,7 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
 }
 
 test_same_harness_relaunch_keeps_identity_and_reuses_the_endpoint
+test_claude_relaunch_keeps_the_recorded_account_binding
 test_relaunch_refuses_before_exit_when_the_composer_holds_pending_text
 test_relaunch_refuses_before_exit_when_the_composer_state_is_unproven
 test_relaunch_from_linked_home_preserves_recorded_worktree
@@ -2263,6 +2360,7 @@ test_relaunch_appends_the_progress_note_to_the_instructions
 test_relaunch_requires_a_note_for_a_ship_task
 test_harness_switch_moves_the_record_and_clears_prior_wiring
 test_harness_switch_does_not_carry_the_old_profile_axes
+test_harness_switch_away_and_back_reselects_claude_profile_by_quota
 test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
