@@ -2071,6 +2071,10 @@ EOF
 #
 # A keyed `needs-decision` or `blocked` transition accepted by the whole-file
 # fold is included only when that fold still names the exact opening as live.
+# The liveness check folds only the captured span, never the log before it: an
+# accepted opening does not depend on earlier lines, and only later lines close
+# or supersede it, so the span fold names the same live openings as the
+# whole-file fold at a cost bounded by the span rather than the log's lifetime.
 # A transition rejected by the reserved-key vocabulary is surfaced instead as a
 # reconciliation signal and never treated here as an open decision.
 # status_open_decisions remains the single owner of open/closed semantics,
@@ -2121,8 +2125,8 @@ _fm_status_open_decision_origins() {  # <status-file> [<kind>]
 }
 
 status_span_first_actionable_record() {  # <status-file> <start-offset> [record-var] [needs-decision-var]
-  local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file full_file prefix_file result
-  local line verb key origins='' folded=0 rc=1 failed=0 prefix_lines=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
+  local f=$1 start=${2:-0} output_var=${3-} needs_var=${4-} size ident cur_ident scratch chunk_file result
+  local line verb key origins='' folded=0 rc=1 failed=0 line_number=0 live_line='' events='' _line _key _fm_span_needs_decision=0
   [ -e "$f" ] || { [ -L "$f" ] && return 2; return 1; }
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
   ident=$(_fm_open_decisions_file_ident "$f") || return 2
@@ -2142,13 +2146,14 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
     return 1
   fi
   scratch=$(_fm_status_span_scratch "$f") || return 2
-  chunk_file="${scratch}.span"; full_file="${scratch}.full"; prefix_file="${scratch}.prefix"
+  chunk_file="${scratch}.span"
   _fm_status_read_span "$f" "$start" "$((size - start))" > "$chunk_file" 2>/dev/null \
-    || { rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2; }
+    || { rm -f "$chunk_file"; return 2; }
   cur_ident=$(_fm_open_decisions_file_ident "$f") || {
-    rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2;
+    rm -f "$chunk_file"; return 2;
   }
-  [ "$cur_ident" = "$ident" ] || { rm -f "$chunk_file" "$full_file" "$prefix_file"; return 2; }
+  [ "$cur_ident" = "$ident" ] || { rm -f "$chunk_file"; return 2; }
+  # shellcheck disable=SC2094 # The loop and the origin fold below only read the span scratch.
   while IFS= read -r line || [ -n "$line" ]; do
     line_number=$((line_number + 1))
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
@@ -2178,14 +2183,7 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
           continue
         }
         if [ "$folded" -eq 0 ]; then
-          _fm_status_read_span "$f" 0 "$size" > "$full_file" 2>/dev/null \
-            || { failed=1; break; }
-          if [ "$start" -gt 0 ]; then
-            _fm_status_read_span "$full_file" 0 "$start" > "$prefix_file" 2>/dev/null \
-              || { failed=1; break; }
-            while IFS= read -r _line || [ -n "$_line" ]; do prefix_lines=$((prefix_lines + 1)); done < "$prefix_file"
-          fi
-          origins=$(_fm_status_open_decision_origins "$full_file" "$(_fm_status_kind "$f")") || { failed=1; break; }
+          origins=$(_fm_status_open_decision_origins "$chunk_file" "$(_fm_status_kind "$f")") || { failed=1; break; }
           folded=1
         fi
         live_line=$(while IFS=$(printf '\t') read -r _key _line; do
@@ -2194,7 +2192,7 @@ status_span_first_actionable_record() {  # <status-file> <start-offset> [record-
 $origins
 EOF
 )
-        [ -n "$live_line" ] && [ "$((prefix_lines + line_number))" -eq "$live_line" ] || continue
+        [ -n "$live_line" ] && [ "$line_number" -eq "$live_line" ] || continue
         [ -n "$events" ] && events="${events} ; "
         events="${events}${line}"
         if [ "$verb" = needs-decision ] || { [ "$verb" = blocked ] &&
@@ -2210,7 +2208,7 @@ EOF
         ;;
     esac
   done < "$chunk_file"
-  rm -f "$chunk_file" "$full_file" "$prefix_file"
+  rm -f "$chunk_file"
   [ "$failed" -eq 0 ] || return 2
   if [ "$rc" -eq 0 ]; then result="${size}"$'\t'"${ident}"$'\t'"${events}"; else result="${size}"$'\t'"${ident}"; fi
   if [ -n "$output_var" ]; then
