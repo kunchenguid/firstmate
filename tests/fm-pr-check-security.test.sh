@@ -2912,7 +2912,7 @@ mode_incapable_dir() {
 }
 
 test_mode_incapable_device_seals_and_verifies_by_signature() {
-  local root state device path
+  local root state device path exec_path
   if ! root=$(mode_incapable_dir); then
     printf 'skip: no filesystem on this host reverts chmod; set FM_TEST_MODE_INCAPABLE_PARENT to one to run\n'
     return 0
@@ -2941,7 +2941,47 @@ test_mode_incapable_device_seals_and_verifies_by_signature() {
   fm_pr_private_file_valid "$path" 600 "$state" "$device" \
     && fail "tampered content on a mode-incapable device validated anyway"
 
+  # A 700 seal carries executability, not only privacy: the watcher runs the
+  # registered check and the two shims directly, so a seal that leaves them
+  # unexecutable reports healthy supervision that can never fire.
+  exec_path="$state/executable-artifact"
+  printf '#!/usr/bin/env bash\nprintf ran\n' > "$exec_path" || fail "could not write $exec_path"
+  fm_pr_secure_file "$exec_path" 700 "$state" "$device" \
+    || fail "fm_pr_secure_file refused to seal a 700 artifact on a mode-incapable device"
+  [ -x "$exec_path" ] || fail "a 700 seal on a mode-incapable device left the artifact unexecutable"
+  [ "$("$exec_path")" = ran ] || fail "a 700-sealed artifact could not be executed"
+
   pass "a mode-incapable device seals a fresh artifact by signature and still catches tampering"
+}
+
+test_mode_incapable_device_retires_a_merged_poll_with_its_sidecar() {
+  local root dir state leaked
+  if ! root=$(mode_incapable_dir); then
+    printf 'skip: no filesystem on this host reverts chmod; set FM_TEST_MODE_INCAPABLE_PARENT to one to run\n'
+    return 0
+  fi
+  dir="$root/case"
+  state="$dir/home/state"
+  mkdir -p "$state" || fail "could not create $state"
+  write_poll_meta "$state" task-a https://github.com/o/r/pull/9
+  seed_canonical_poll "$dir" task-a https://github.com/o/r/pull/9
+  fm_pr_poll_snapshot_capture "$state" task-a "$POLL" \
+    || fail "could not snapshot the merged poll on a mode-incapable device"
+
+  # Every caller of fm_pr_secure_file owes the sidecar the same rename it gives
+  # the artifact. A retirement receipt published without its sidecar is
+  # unverifiable the moment it lands, so the retirement reports a false cause
+  # and the orphan receipt wedges recovery on every later watcher start.
+  fm_pr_poll_retirement_publish "$state" task-a "$POLL" merged \
+    || fail "a merged poll could not be retired on a mode-incapable device"
+  [ -f "$state/task-a.pr-poll-retirement.fm-sig" ] \
+    || fail "the retirement receipt was published without its signature sidecar"
+  fm_pr_poll_retirement_state_valid "$state" task-a \
+    || fail "the published retirement receipt does not survive the recovery predicate"
+  leaked=$(find "$state" -maxdepth 1 -name '.fm-pr-poll-retirement.*' 2>/dev/null | head -1)
+  [ -z "$leaked" ] || fail "retirement publication leaked a staging artifact: $leaked"
+
+  pass "a merged poll retires with its sidecar on a mode-incapable device"
 }
 
 test_mode_incapable_device_refuses_a_symlinked_sidecar_destination() {
@@ -3079,5 +3119,6 @@ test_returned_custom_check_descendants_are_drained
 test_teardown_removes_poll_artifacts
 test_mode_incapable_device_seals_and_verifies_by_signature
 test_mode_incapable_device_refuses_a_symlinked_sidecar_destination
+test_mode_incapable_device_retires_a_merged_poll_with_its_sidecar
 test_mode_capable_device_behavior_is_unchanged
 test_mode_capable_device_keeps_mode_enforcement_when_it_cannot_be_probed

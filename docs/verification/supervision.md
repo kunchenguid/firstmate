@@ -555,7 +555,7 @@ On a proven-incapable directory, `fm_pr_secure_file` writes a keyed sha256 signa
 The key is a per-state-directory secret established on first use; the signature is content-only (not path-bound), so a sidecar travels correctly with the same atomic mktemp-then-rename pattern every call site already used for its mode-capable path.
 This defends against corruption, partial writes, and a writer that does not hold the key; it does not defend against a co-resident actor who can already read every byte in a directory the filesystem cannot restrict; file-mode enforcement could not defend against that actor there either.
 
-Verified with `tests/fm-pr-check-security.test.sh` (`test_mode_incapable_device_seals_and_verifies_by_signature`, `test_mode_capable_device_behavior_is_unchanged`), on the same class of real mode-reverting mount as the entry above, reproducing the revert before trusting it:
+Verified with `tests/fm-pr-check-security.test.sh` (`test_mode_incapable_device_seals_and_verifies_by_signature`, `test_mode_incapable_device_refuses_a_symlinked_sidecar_destination`, `test_mode_incapable_device_retires_a_merged_poll_with_its_sidecar`, `test_mode_capable_device_behavior_is_unchanged`, `test_mode_capable_device_keeps_mode_enforcement_when_it_cannot_be_probed`), on the same class of real mode-reverting mount as the entry above, reproducing the revert before trusting it:
 
 ```sh
 bin/fm-test-run.sh tests/fm-pr-check-security.test.sh

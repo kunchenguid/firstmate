@@ -368,13 +368,20 @@ if [ "$HEALTHY" -eq 1 ]; then
   fi
   ALARMED=0
   [ -e "$FAILURE_ALARM" ] && ALARMED=1
-  if [ "$ALARMED" -eq 0 ] && fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
-    PENDING=$ALARMED
-    for marker in "$BUDGET_FILE" "$FAILURE_NOTICE"; do
-      [ -e "$marker" ] || continue
-      PENDING=1
-      break
-    done
+  PENDING=$ALARMED
+  for marker in "$BUDGET_FILE" "$FAILURE_NOTICE"; do
+    [ -e "$marker" ] || continue
+    PENDING=1
+    break
+  done
+  # The block text is emitted only once the commit has succeeded, inside the
+  # branch that actually exits 2. A commit that loses the claim to a superseding
+  # generation exits 0, and an exit-0 path stays byte-for-byte silent; a
+  # successful ownership-checked write is also stronger proof of ownership than
+  # a separate predicate read before it.
+  if autoarm_commit failed-suppressed; then
+    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
+    [ "$ALARMED" -eq 1 ] && exit 0
     {
       if [ "$PENDING" -eq 1 ]; then
         printf 'firstmate watcher auto-arm HELD THIS TURN OPEN - a live watcher with a fresh beacon was verified, but the failure-episode reset for this home could not be recorded, so recovery is not yet provably closed. Read %s (outcome=failed-suppressed).\n' \
@@ -385,10 +392,6 @@ if [ "$HEALTHY" -eq 1 ]; then
       printf 'The arm is not the cause here: the bookkeeping write refused. The reset clears %s, %s and %s and serializes on %s: a busy lock, or any of those three existing as a directory, refuses it. If this repeats, the state directory itself is refusing the write.\n' \
         "$BUDGET_FILE" "$FAILURE_NOTICE" "$FAILURE_ALARM" "$BUDGET_LOCK"
     } >&2
-  fi
-  if autoarm_commit failed-suppressed; then
-    [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
-    [ "$ALARMED" -eq 1 ] && exit 0
     exit 2
   fi
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
@@ -446,14 +449,12 @@ if [ ! -e "$FAILURE_NOTICE" ]; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 0
 fi
-if fm_autoarm_still_owner "$STATE" "$MY_GEN"; then
+if autoarm_commit failed-suppressed; then
   {
     printf 'firstmate watcher auto-arm STILL FAILING - this turn is held open for another Stop-owned retry. The full notice for this failure episode was already delivered, so only the current cause is repeated here.\n'
     autoarm_refusal_evidence
     printf 'Episode state is recorded in %s (outcome=failed-suppressed). Investigate the automatic Stop hook and watcher startup; do not launch a manual background arm.\n' "$STATE/.claude-autoarm-epoch"
   } >&2
-fi
-if autoarm_commit failed-suppressed; then
   [ -z "$OUT" ] || rm -f "$OUT" 2>/dev/null || true
   exit 2
 fi

@@ -336,13 +336,7 @@ fm_pr_signing_key() {
     printf '%s' "$key"
     return 0
   fi
-  if command -v openssl >/dev/null 2>&1; then
-    key=$(openssl rand -hex 32 2>/dev/null) || return 1
-  elif [ -r /dev/urandom ]; then
-    key=$(od -An -tx1 -N32 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
-  else
-    return 1
-  fi
+  key=$(LC_ALL=C od -An -v -tx1 -N 32 /dev/urandom 2>/dev/null | tr -d ' \n') || return 1
   [[ "$key" =~ ^[0-9a-f]{64}$ ]] || return 1
   tmp=$(mktemp "$state/.fm-artifact-signing-key.XXXXXX") || return 1
   printf '%s' "$key" > "$tmp" || { rm -f -- "$tmp"; return 1; }
@@ -395,6 +389,12 @@ fm_pr_secure_file() {
     chmod "$mode" "$path" || return 1
     return 0
   fi
+  # Four call sites ask for 700, where the mode carries EXECUTABILITY and not
+  # only privacy: the watcher runs those artifacts directly. "Cannot hold
+  # restricted modes" is wider than the measured 777 case - a vfat/exfat mount
+  # with umask=022 hands back 644, which is unexecutable - so whatever bits
+  # this mount CAN hold are still applied before the signature is taken.
+  chmod "$mode" "$path" 2>/dev/null || true
   key=$(fm_pr_signing_key "$state" "$device") || return 1
   sig=$(fm_pr_artifact_signature "$key" "$path") || return 1
   # The sidecar is published with the same staged-write-then-rename discipline
@@ -1294,9 +1294,10 @@ fm_pr_poll_retirement_publish() {
     || ! fm_pr_regular_destination_on_device_or_absent "$receipt" "$state_device" \
     || [ -e "$receipt" ] || [ -L "$receipt" ] \
     || ! mv -f -- "$tmp" "$receipt"; then
-    rm -f -- "$tmp"
+    rm -f -- "$tmp" "$tmp.fm-sig"
     return 1
   fi
+  mv -f -- "$tmp.fm-sig" "$receipt.fm-sig" 2>/dev/null || true
   fm_pr_poll_retirement_receipt_valid "$state" "$id" || return 1
 }
 
