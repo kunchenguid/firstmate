@@ -151,7 +151,8 @@
 #      capture as gone. The fallback's own comment owns the per-verdict rules.
 #
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
-# of state; exit 2 only on a usage error (no id).
+# of state; exit 2 only on a usage error (no id), and exit 3 when an explicit
+# override names a target that no longer exists, refused with a stderr diagnostic.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

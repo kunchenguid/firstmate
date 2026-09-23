@@ -1031,6 +1031,66 @@ test_shared_slot_tears_down_every_older_record_without_touching_the_slot() {
   pass "fm-teardown: three records on one pool slot tear down every older record without touching the slot"
 }
 
+# The same shared-slot shape reached through teardown's other exclusivity call
+# site. A secondmate home's state dir holds two task records that both name one
+# pool slot, while the slot's own claim names a third task that left no record
+# there to scan. The descendant preflight used to run the record scan first, so
+# the first older record refused against the second and the home could never be
+# retired. Ownership is decided first there too now, so both older records finish
+# their own cleanup and the claimed slot is left untouched.
+test_shared_slot_descendant_preflight_retires_secondmate_home() {
+  local dir parent=slot-mate mate child_a=slot-child-a child_b=slot-child-b claimant=slot-newcomer worker rc
+
+  dir=$(make_case shared-slot-descendant)
+  mark_case_as_treehouse_pool "$dir"
+  mate="$dir/mate"
+  mkdir -p "$mate/state" "$mate/data" "$mate/config" "$mate/projects"
+  printf '%s\n' "$parent" > "$mate/.fm-secondmate-home"
+  fm_write_meta "$dir/home/state/$parent.meta" \
+    "window=firstmate:fm-$parent" "endpoint_task_id=$parent" \
+    "worktree=$mate" "project=$dir/project" "home=$mate" \
+    "kind=secondmate" "mode=secondmate" "harness=echo" "yolo=off"
+  fm_write_meta "$mate/state/$child_a.meta" \
+    "window=firstmate:fm-$child_a" "endpoint_task_id=$child_a" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  fm_write_meta "$mate/state/$child_b.meta" \
+    "window=firstmate:fm-$child_b" "endpoint_task_id=$child_b" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$claimant" "$mate"
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$parent" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  if [ "$rc" -ne 0 ]; then
+    kill "$worker" 2>/dev/null || true
+    wait "$worker" 2>/dev/null || true
+    fail "retiring a secondmate home whose older records share a claimed pool slot failed: $(cat "$dir/stderr")"
+  fi
+  kill -0 "$worker" 2>/dev/null || fail "retiring the secondmate home killed the worker holding the claimed pool slot"
+  assert_present "$dir/worktree/sentinel" "retiring the secondmate home reset the claimed pool slot"
+  assert_present "$dir/pool/1/.fm-slot-owner" "retiring the secondmate home removed another task's slot claim"
+  assert_contains "$(cat "$dir/pool/1/.fm-slot-owner")" "task=$claimant" \
+    "retiring the secondmate home rewrote another task's slot claim"
+  assert_present "$dir/pool/1/project/.git" "retiring the secondmate home removed the claimed slot's checkout"
+  ! grep -Fq "treehouse <return>" "$dir/runtime.log" \
+    || fail "retiring the secondmate home returned the claimed pool slot: $(cat "$dir/runtime.log")"
+  assert_contains "$(cat "$dir/stderr")" "$claimant" \
+    "the reassignment warning should name the task the slot was reassigned to"
+  assert_contains "$(cat "$dir/stderr")" "reassigned" \
+    "the warning should name the reassignment as the cause"
+  assert_absent "$mate/state/$child_a.meta" "the secondmate home was retired without removing its older record $child_a"
+  assert_absent "$mate/state/$child_b.meta" "the secondmate home was retired without removing its older record $child_b"
+  assert_absent "$dir/home/state/$parent.meta" "the retired secondmate's own record survived"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  pass "fm-teardown: a secondmate home retires over older records sharing a claimed pool slot without touching it"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1452,6 +1512,7 @@ test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
 test_shared_slot_tears_down_every_older_record_without_touching_the_slot
+test_shared_slot_descendant_preflight_retires_secondmate_home
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts
