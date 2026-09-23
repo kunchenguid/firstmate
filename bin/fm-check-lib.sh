@@ -58,6 +58,7 @@ fm_custom_check_snapshot_prepare() {
   [ -f "$FM_CUSTOM_CHECK_SNAPSHOT" ] && [ ! -L "$FM_CUSTOM_CHECK_SNAPSHOT" ] \
     || { fm_custom_check_snapshot_cleanup; return 1; }
   [ "$(fm_pr_file_mode "$FM_CUSTOM_CHECK_SNAPSHOT")" = 600 ] \
+    || fm_pr_mode_bits_unfaithful "$state" \
     || { fm_custom_check_snapshot_cleanup; return 1; }
   [ "$(fm_pr_file_device "$FM_CUSTOM_CHECK_SNAPSHOT")" = "$state_device" ] \
     || { fm_custom_check_snapshot_cleanup; return 1; }

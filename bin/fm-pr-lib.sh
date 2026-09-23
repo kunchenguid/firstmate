@@ -336,10 +336,36 @@ fm_pr_sha256() {
 # remount that renumbers the volume. It refuses a file that is not on that
 # directory's own filesystem, such as one bind-mounted over the name, which is
 # also what keeps same-directory rename publication atomic.
+# fm_pr_mode_bits_unfaithful: true ONLY when chmod is proven unable to
+# express a requested mode in <dir>. Git Bash/MSYS mounts report noacl:
+# chmod synthesizes a non-POSIX mode (chmod 000 reports 400, chmod 0600 on
+# a script reports 700), so an exact-mode invariant is unanswerable there
+# and callers fall back to the platform ACL boundary instead of refusing
+# forever. Probed by mutating a scratch sibling, never the caller's file -
+# mutating the target would mask a writer that never chmod'd. False on a
+# POSIX-faithful filesystem (chmod 000 reports 0) and false on any probe
+# failure, so undetermined cases stay refused.
+fm_pr_mode_bits_unfaithful() {  # <dir>
+  local dir=$1 probe after
+  probe=$(mktemp "$dir/.fm-pr-modeprobe.XXXXXX" 2>/dev/null) || return 1
+  chmod 000 "$probe" 2>/dev/null || { rm -f "$probe"; return 1; }
+  after=$(fm_pr_file_mode "$probe") || after=
+  rm -f "$probe"
+  case "$after" in ''|*[!0-7]*) return 1 ;; esac
+  [ "$((8#$after))" -ne 0 ]
+}
+
 fm_pr_private_file_valid() {
-  local path=$1 mode=$2 device=$3
+  local path=$1 mode=$2 device=$3 actual
   [ -f "$path" ] && [ ! -L "$path" ] || return 1
-  [ "$(fm_pr_file_mode "$path")" = "$mode" ] || return 1
+  actual=$(fm_pr_file_mode "$path") || return 1
+  # A mode mismatch is a real violation only where stat reports what chmod
+  # asked for; on a proven mode-unfaithful filesystem the platform ACL owns
+  # the file's isolation and the remaining checks are the verifiable
+  # boundary.
+  [ "$actual" = "$mode" ] \
+    || fm_pr_mode_bits_unfaithful "$(dirname "$path")" \
+    || return 1
   [ "$(fm_pr_file_device "$path")" = "$device" ] || return 1
   [ "$(fm_pr_file_link_count "$path")" = 1 ]
 }
