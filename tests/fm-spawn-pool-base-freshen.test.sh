@@ -270,6 +270,25 @@ test_graphify_out_links_only_when_worktree_flag_is_present() {
   pass "spawn links graphify-out into task worktrees only when config/graphify-worktree is present"
 }
 
+test_aborted_spawn_removes_its_graphify_link() {
+  local rec id out status
+  id='pool-graphify-abort-r1'
+  rec=$(make_originless_case graphify-abort "$id")
+  read_case_record "$rec"
+  mkdir -p "$PROJECT_DIR/graphify-out"
+  : > "$HOME_DIR/config/graphify-worktree"
+  printf 'claude\n' > "$HOME_DIR/config/crew-harness"
+
+  FM_TEST_CLAUDE_CONFIG_DIR=relative out=$(run_spawn "$id" --scout)
+  status=$?
+  [ "$status" -ne 0 ] || fail "spawn succeeded despite a deliberately invalid Claude config path"
+  assert_contains "$out" "could not pre-register Claude workspace trust" \
+    "the graphify abort fixture did not reach the post-link trust failure"
+  [ ! -e "$POOL_DIR/graphify-out" ] && [ ! -L "$POOL_DIR/graphify-out" ] \
+    || fail "an aborted spawn left behind the graphify-out link it created"
+  pass "an aborted spawn removes the graphify-out link it created"
+}
+
 test_originless_pool_launches_without_a_freshness_fetch() {
   local rec id out status before
   id='pool-originless-r6'
@@ -782,6 +801,7 @@ test_stale_pool_base_refreshes_before_branching
 test_non_main_default_branch_refreshes_before_branching
 test_direct_pr_and_scout_refresh_before_launch
 test_graphify_out_links_only_when_worktree_flag_is_present
+test_aborted_spawn_removes_its_graphify_link
 test_dirty_pool_refuses_without_discarding_work
 test_unresolved_remote_default_refuses_pool
 test_unreachable_origin_refuses_stale_pool_base

@@ -1197,6 +1197,9 @@ SPAWN_TASK_SET_LOCK_HELD=0
 SPAWN_TREEHOUSE_PROJECT_LOCK=
 SPAWN_TREEHOUSE_PROJECT_LOCK_HELD=0
 SPAWN_SLOT_CLAIMED=0
+SPAWN_GRAPHIFY_LINK_CREATED=0
+SPAWN_GRAPHIFY_LINK_PATH=
+SPAWN_GRAPHIFY_LINK_TARGET=
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -1237,6 +1240,15 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$status" -ne 0 ] && [ "$SPAWN_GRAPHIFY_LINK_CREATED" = 1 ]; then
+    SPAWN_GRAPHIFY_LINK_CREATED=0
+    if [ -L "$SPAWN_GRAPHIFY_LINK_PATH" ] &&
+      [ "$(readlink "$SPAWN_GRAPHIFY_LINK_PATH" 2>/dev/null || true)" = "$SPAWN_GRAPHIFY_LINK_TARGET" ]; then
+      if ! rm -f -- "$SPAWN_GRAPHIFY_LINK_PATH"; then
+        echo "warning: could not remove graphify-out link after aborted spawn of $ID" >&2
+      fi
+    fi
+  fi
   if [ "$RELAUNCH_REPLACEMENT_PENDING" = 1 ] &&
     [ "$SPAWN_META_PUBLISH_STARTED" = 1 ] &&
     [ -n "$SPAWN_META_TMP" ] &&
@@ -3382,7 +3394,11 @@ link_spawn_graphify_out() { # <source-clone> <worktree>
       echo "warning: could not resolve graphify-out in source clone '$source_clone'; continuing without a worktree link" >&2
       return 0
     }
-    if ! ln -s "$graph_real" "$target"; then
+    if ln -s "$graph_real" "$target"; then
+      SPAWN_GRAPHIFY_LINK_CREATED=1
+      SPAWN_GRAPHIFY_LINK_PATH=$target
+      SPAWN_GRAPHIFY_LINK_TARGET=$graph_real
+    else
       echo "warning: could not link graphify-out from '$graph_real' into worktree '$worktree'; continuing without the graph link" >&2
     fi
   }

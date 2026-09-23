@@ -221,7 +221,7 @@ add_fork_with_pushed_branch() {
   git -C "$case_dir/project" fetch -q fork
 }
 
-test_graphify_symlink_is_removed_before_worktree_return_when_enabled() {
+test_owned_graphify_symlink_is_removed_without_current_opt_in() {
   local case_dir rc
   case_dir=$(make_case graphify-teardown)
   write_meta "$case_dir" local-only ship
@@ -230,7 +230,6 @@ test_graphify_symlink_is_removed_before_worktree_return_when_enabled() {
   mkdir -p "$case_dir/project/graphify-out"
   printf '%s\n' 'source graph survives teardown' > "$case_dir/project/graphify-out/graph.json"
   ln -s "$case_dir/project/graphify-out" "$case_dir/wt/graphify-out"
-  : > "$case_dir/config/graphify-worktree"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
 if [ "\${1:-}" = return ]; then
@@ -253,7 +252,30 @@ SH
     "Treehouse return did not observe graphify-out already removed"
   assert_present "$case_dir/project/graphify-out/graph.json" \
     "teardown removed the source clone's graph"
-  pass "teardown removes only the worktree graphify-out symlink when config/graphify-worktree is present"
+  pass "teardown removes its owned graphify-out symlink after the opt-in is removed"
+}
+
+test_unrelated_graphify_symlink_is_preserved_as_uncommitted_work() {
+  local case_dir rc foreign
+  case_dir=$(make_case graphify-unrelated)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "unrelated graphify teardown fixture"
+  add_fork_with_pushed_branch "$case_dir"
+  mkdir -p "$case_dir/project/graphify-out" "$case_dir/foreign-graph"
+  foreign="$case_dir/foreign-graph"
+  ln -s "$foreign" "$case_dir/wt/graphify-out"
+  : > "$case_dir/config/graphify-worktree"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] || fail "teardown discarded an unrelated graphify-out symlink"
+  [ -L "$case_dir/wt/graphify-out" ] \
+    || fail "teardown removed an unrelated graphify-out symlink"
+  [ "$(readlink "$case_dir/wt/graphify-out")" = "$foreign" ] \
+    || fail "teardown changed an unrelated graphify-out symlink"
+  assert_grep 'uncommitted changes' "$case_dir/stderr" \
+    "teardown did not leave the unrelated symlink to the normal safety refusal"
+  pass "teardown preserves unrelated graphify-out symlinks as uncommitted work"
 }
 
 # Commit a real file change on the worktree's task branch (unlike wt_commit, which
@@ -4331,7 +4353,8 @@ test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
 test_local_only_fork_remote_allows
-test_graphify_symlink_is_removed_before_worktree_return_when_enabled
+test_owned_graphify_symlink_is_removed_without_current_opt_in
+test_unrelated_graphify_symlink_is_preserved_as_uncommitted_work
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
