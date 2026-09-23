@@ -555,6 +555,8 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-cursor-lib.sh
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
+# shellcheck source=bin/fm-gh-read-lib.sh
+. "$SCRIPT_DIR/fm-gh-read-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-dod-lib.sh
@@ -2180,6 +2182,28 @@ cursor)
         echo "error: Cursor model '$MODEL' is not available from '$CURSOR_BIN --list-models'; choose an id listed by that command or omit --model" >&2
         exit 1
       fi
+    fi
+  fi
+  # When its protected PATH directory is installed, a Cursor ship or scout
+  # routes accepted closed reads through the enrolled helper and all other
+  # GitHub operations through generic attended gh (bin/fm-gh-read-lib.sh).
+  # Secondmates keep generic gh. A present but unsafe directory refuses the
+  # launch rather than silently falling back.
+  GH_READ_CURSOR_DIR=
+  if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+    # Absent (exit 1) is the uninstalled default and must not trip set -e.
+    if GH_READ_CURSOR_DIR=$(fm_gh_read_cursor_path_dir); then
+      :
+    else
+      _gh_read_dir_status=$?
+      GH_READ_CURSOR_DIR=
+      case "$_gh_read_dir_status" in
+      1) ;;
+      *)
+        echo "error: refusing a Cursor launch: the GitHub read helper directory is unsafe; run bin/fm-gh-read.sh plan" >&2
+        exit 1
+        ;;
+      esac
     fi
   fi
   ;;
@@ -4654,7 +4678,12 @@ LAUNCH=${LAUNCH//__OMPWORKERCFG__/$sq_ompcfg}
 LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 case "$HARNESS" in
 pi | pi-signed) LAUNCH=${LAUNCH//__PIBIN__/"$(shell_quote "$PI_BIN")"} ;;
-cursor) LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"} ;;
+cursor)
+  LAUNCH=${LAUNCH//__CURSORBIN__/"$(shell_quote "$CURSOR_BIN")"}
+  if [ -n "$GH_READ_CURSOR_DIR" ]; then
+    LAUNCH="PATH=$(shell_quote "$GH_READ_CURSOR_DIR"):\"\$PATH\" $LAUNCH"
+  fi
+  ;;
 gemini) LAUNCH=${LAUNCH//__GEMINISETTINGS__/"$(shell_quote "$STATE_REAL/$ID.gemini-settings.json")"} ;;
 omp) LAUNCH=${LAUNCH//__OMPBIN__/"$(shell_quote "$OMP_BIN")"} ;;
 devin)

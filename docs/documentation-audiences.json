@@ -365,6 +365,10 @@
       "audience": "maintainer-verification"
     },
     {
+      "path": "docs/gh-read-helper.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/gitlab-merge-watch.md",
       "audience": "maintainer-verification"
     },
