@@ -36,6 +36,8 @@ make_case() {
   case_dir="$TMP_ROOT/$name"
   fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/home/data" "$case_dir/home/config" "$fakebin"
+  fm_git_init_commit "$case_dir/wt"
+  git -C "$case_dir/wt" update-ref refs/remotes/origin/main "$(git -C "$case_dir/wt" rev-parse HEAD)"
   cp "$ROOT/.tasks.toml" "$case_dir/home/.tasks.toml"
   printf '%s\n' '## In flight' '' '## Queued' '' '## Done' \
     > "$case_dir/home/data/backlog.md"
@@ -52,9 +54,9 @@ make_case() {
     'base=main' > "$case_dir/github-outcome"
   : > "$case_dir/github-rules"
   : > "$case_dir/gh.log"
-  # No worktree/project on disk; fm-pr-check.sh tolerates a worktree it cannot
-  # stat and simply skips the pr_head lookup via `gh` in that case, so give it
-  # one that resolves for cases that want pr_head recorded.
+  # The worktree is a git copy whose HEAD is on a remote-tracking ref, as a
+  # pushed ship task's is, so fm-pr-check.sh's named-head gate accepts it when
+  # the forge supplies no head (GitLab). No project clone exists on disk.
   printf '%s\n' "$case_dir"
 }
 
@@ -428,9 +430,7 @@ write_away_record() {
   local case_dir=$1
   shift
   FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
-    "$ROOT/bin/fm-afk-contract.sh" propose "$@" >/dev/null
-  FM_HOME="$case_dir/home" FM_STATE_OVERRIDE="$case_dir/state" \
-    "$ROOT/bin/fm-afk-contract.sh" confirm >/dev/null
+    "$ROOT/bin/fm-afk-contract.sh" enter "$@" >/dev/null
 }
 
 test_verified_merge_records_pr_and_head() {
@@ -3107,8 +3107,7 @@ SH
   add_gh_mocks "$case_dir" 2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c
   write_away_record "$case_dir" --words 'merge task-x1 when green'
   mutate=$(away_change_script "$case_dir" replace-at-merge <<'SH'
-"$CONTRACT" propose --words 'hold everything for my return'
-"$CONTRACT" confirm
+"$CONTRACT" enter --words 'hold everything for my return'
 SH
   )
   export FM_TEST_AWAY_MUTATE_AT_MERGE="$mutate"

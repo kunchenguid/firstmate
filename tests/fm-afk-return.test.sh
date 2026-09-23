@@ -34,6 +34,8 @@ install_runner() {  # <case-dir>
   cp "$ROOT/bin/fm-branch-outcome.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-tasks-axi-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-backlog-transition-lib.sh" "$dir/bin/"
+  # The merge-notification marker reader behind the brief's landed section.
+  cp "$ROOT/bin/fm-pr-lib.sh" "$dir/bin/"
   cp "$ROOT/.tasks.toml" "$dir/home/.tasks.toml"
   printf '## In flight\n\n## Queued\n\n## Done\n' > "$dir/home/data/backlog.md"
   # The fake stop mirrors the real one's ordering: the away flag goes, then the
@@ -377,9 +379,7 @@ test_return_brief_composes_from_record_store_and_held_set() {
   (cd "$dir/home" && tasks-axi add fix-windows 'Fix the windows lane' --file data/backlog.md >/dev/null \
     && tasks-axi hold fix-windows --reason 'awaiting the captain on the merge' --kind captain --file data/backlog.md >/dev/null) \
     || fail "could not seed the held backlog"
-  contract_in "$dir" propose --words $'merge the windows fix when green, then cut a prerelease\nif the install deadlocks abort the competing run' >/dev/null 2>&1 \
-    || fail "could not propose the away-posture record"
-  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the away-posture record"
+  contract_in "$dir" enter --words $'merge the windows fix when green, then cut a prerelease\nif the install deadlocks abort the competing run' >/dev/null 2>&1 || fail "could not confirm the away-posture record"
   # Two live blockers, one on a task with a captain-verdict outcome and one on a
   # task with a routine outcome. A third task failed outright.
   printf 'window=synthetic:fm-fix-windows\nbackend=tmux\nkind=ship\n' > "$dir/home/state/fix-windows.meta"
@@ -465,18 +465,51 @@ test_return_brief_composes_from_record_store_and_held_set() {
   pass "the return brief renders health, the words with the session account, waiting, could-not-fix, handled, and cost from durable records, and the gate shrinks to what the away session could not fix"
 }
 
+test_return_brief_lists_landed_work_awaiting_cleanup() {
+  local dir out landed_line failed_line handled_line
+  dir="$TMP_ROOT/brief-landed"
+  install_runner "$dir"
+  contract_in "$dir" enter --words 'merge the exemption changes when green' >/dev/null 2>&1 || fail "could not confirm the away-posture record"
+  # The 2026-09-22 away window: exemption workers whose pull requests had
+  # merged were left sitting, and the return brief never listed them. Two done
+  # workers with recorded PRs: the merge outcome path marked the first merged
+  # through its own marker writer, while nothing durable proves the second
+  # landed, so the brief must list exactly the first.
+  printf 'window=synthetic:fm-landed\nbackend=tmux\nkind=ship\npr=https://github.com/example/landed/pull/7\n' > "$dir/home/state/landed.meta"
+  printf 'done [at=1]: PR https://github.com/example/landed/pull/7\n' > "$dir/home/state/landed.status"
+  printf 'window=synthetic:fm-open\nbackend=tmux\nkind=ship\npr=https://github.com/example/open/pull/8\n' > "$dir/home/state/open.meta"
+  printf 'done [at=1]: PR https://github.com/example/open/pull/8\n' > "$dir/home/state/open.status"
+  (
+    # shellcheck source=bin/fm-pr-lib.sh
+    . "$ROOT/bin/fm-pr-lib.sh"
+    fm_pr_poll_merge_mark_notified "$dir/home/state" landed github github.com example/landed 7
+  ) || fail "could not record the landed PR's merge notification through its owner"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+
+  out=$(run_return "$dir" begin) || fail "a return with only landed work should clear: $out"
+  landed_line=$(line_of "$out" 'Landed, cleanup due:')
+  failed_line=$(line_of "$out" 'Tried and failed, or could not be fixed:')
+  handled_line=$(line_of "$out" 'Handled while away:')
+  [ -n "$landed_line" ] && [ -n "$failed_line" ] && [ -n "$handled_line" ] || fail "the brief is missing a section: $out"
+  [ "$failed_line" -lt "$landed_line" ] && [ "$landed_line" -lt "$handled_line" ] \
+    || fail "landed work is out of order (failed $failed_line, landed $landed_line, handled $handled_line)"
+  assert_contains "$out" '  - landed: https://github.com/example/landed/pull/7 is merged and the worker is still up; close it with bin/fm-teardown.sh landed once catch-up clears' "the landed worker was not listed for cleanup"
+  assert_not_contains "$out" '  - open:' "a done worker with no durable merge evidence was listed as landed"
+  assert_contains "$out" 'catch-up clear' "landed work must not hold the gate"
+  pass "the return brief lists landed work whose worker is still up, from the durable merge marker only, without gating on it"
+}
+
 test_return_brief_keeps_refresh_history() {
   local dir out first_epoch
   dir="$TMP_ROOT/brief-refresh"
   install_runner "$dir"
-  contract_in "$dir" propose --words 'first mandate: merge task first PR when green' >/dev/null 2>&1 || fail "could not propose the first mandate"
-  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the first mandate"
+  contract_in "$dir" enter --words 'first mandate: merge task first PR when green' >/dev/null 2>&1 || fail "could not confirm the first mandate"
   first_epoch=$(contract_in "$dir" field entered_epoch)
   outcome_in "$dir" append --task first --verdict routine \
     --summary 'completed before the mandate refresh' --wake 'signal: first.status' >/dev/null \
     || fail "could not seed the pre-refresh outcome"
-  contract_in "$dir" propose --words $'replacement mandate\n\n' >/dev/null 2>&1 || fail "could not propose the replacement mandate"
-  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the replacement mandate"
+  contract_in "$dir" enter --words $'replacement mandate\n\n' >/dev/null 2>&1 || fail "could not confirm the replacement mandate"
   [ "$(contract_in "$dir" field entered_epoch)" = "$first_epoch" ] || fail "refresh changed the away-window boundary"
   touch "$dir/home/state/.last-watcher-beat"
   : > "$dir/home/state/.fake-drain"
@@ -520,8 +553,7 @@ test_missing_epoch_record_stays_required_after_disappearing() {
   gate="$dir/home/state/.afk-return-catchup"
   record="$dir/home/state/.afk-contract"
   backup="$dir/valid-record.backup"
-  contract_in "$dir" propose --words 'captain words survive' >/dev/null || fail "could not propose the posture record"
-  contract_in "$dir" confirm >/dev/null || fail "could not confirm the posture record"
+  contract_in "$dir" enter --words 'captain words survive' >/dev/null 2>&1 || fail "could not confirm the posture record"
   epoch=$(contract_in "$dir" field entered_epoch)
   entered=$(contract_in "$dir" field entered)
   cp "$record" "$backup"
@@ -652,12 +684,56 @@ test_unreadable_status_file_keeps_catchup_gated() {
   pass "an unreadable status stays private and gates until a successful reread"
 }
 
+test_statusless_leftover_record_keeps_catchup_gated_until_cleanup() {
+  local dir out rc gate
+  dir="$TMP_ROOT/statusless-leftover"
+  install_runner "$dir"
+  gate="$dir/home/state/.afk-return-catchup"
+  # A long-merged leftover: no window, no spawn_gen, no status file. The
+  # catch-up gate must keep refusing while that record exists, matching the
+  # proven path where writing a readable status file lets return proceed.
+  printf 'kind=ship\npr=https://github.com/example/repo/pull/1\n' \
+    > "$dir/home/state/leftover.meta"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  set +e
+  out=$(run_return "$dir" begin)
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "a leftover without a status file should keep catch-up gated (rc=$rc): $out"
+  [ -f "$gate" ] || fail "a leftover without a status file did not retain the return gate"
+  assert_contains "$out" "status file unreadable: $dir/home/state/leftover.status; catch-up stays gated" \
+    "the gate did not name the missing leftover status"
+  assert_contains "$out" 'catch-up must finish before the captain request' \
+    "the visible return block did not name the catch-up gate"
+
+  : > "$dir/home/state/leftover.status"
+  out=$(run_return "$dir" check) || fail "catch-up did not clear after the leftover gained a readable status: $out"
+  assert_contains "$out" 'catch-up clear' "the readable leftover status did not clear catch-up"
+  [ ! -e "$gate" ] || fail "the readable leftover status left the return gate behind"
+  pass "a status-file-less leftover record gates return; a readable status on that same record is the proven path that passes"
+}
+
+test_statusful_leftover_record_lets_catchup_clear() {
+  local dir out
+  dir="$TMP_ROOT/statusful-leftover"
+  install_runner "$dir"
+  printf 'kind=ship\npr=https://github.com/example/repo/pull/1\n' \
+    > "$dir/home/state/leftover.meta"
+  : > "$dir/home/state/leftover.status"
+  touch "$dir/home/state/.last-watcher-beat"
+  : > "$dir/home/state/.fake-drain"
+  out=$(run_return "$dir" begin) || fail "a leftover with a readable status gated return: $out"
+  assert_contains "$out" 'catch-up clear' "a leftover with a readable status did not let ordinary work proceed"
+  [ ! -e "$dir/home/state/.afk-return-catchup" ] || fail "a leftover with a readable status left the return gate behind"
+  pass "a leftover record with a readable status file lets return catch-up clear"
+}
+
 test_return_guard_refuses_while_the_record_exists() {
   local dir out rc
   dir="$TMP_ROOT/guard-record"
   install_runner "$dir"
-  contract_in "$dir" propose >/dev/null 2>&1 || fail "could not propose the away-posture record"
-  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not write the away-posture record"
+  contract_in "$dir" enter >/dev/null 2>&1 || fail "could not write the away-posture record"
   set +e
   out=$(FM_HOME="$dir/home" FM_STATE_OVERRIDE="$dir/home/state" "$dir/bin/fm-afk-return.sh" guard 2>&1)
   rc=$?
@@ -672,8 +748,7 @@ test_return_brief_health_leads_with_a_gap() {
   local dir out gap_line clean_line
   dir="$TMP_ROOT/brief-gap"
   install_runner "$dir"
-  contract_in "$dir" propose >/dev/null 2>&1 || fail "could not propose the away-posture record"
-  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not write the away-posture record"
+  contract_in "$dir" enter >/dev/null 2>&1 || fail "could not write the away-posture record"
   : > "$dir/home/state/.watcher-down"
   # A beacon older than the grace, on either date flavor.
   touch "$dir/home/state/.last-watcher-beat"
@@ -694,8 +769,7 @@ test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap() {
   local dir out
   dir="$TMP_ROOT/brief-acked-marker"
   install_runner "$dir"
-  contract_in "$dir" propose >/dev/null 2>&1 || fail "could not propose the away-posture record"
-  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not write the away-posture record"
+  contract_in "$dir" enter >/dev/null 2>&1 || fail "could not write the away-posture record"
   # An episode that was detected and fully handled during the away window
   # leaves the marker behind in an acked state (fm-wake-lib.sh
   # _fm_recovery_marker_ack); that is not an open gap.
@@ -727,11 +801,9 @@ test_unreadable_superseded_archive_keeps_return_gated() {
   local dir out rc epoch archive backup
   dir="$TMP_ROOT/superseded-unreadable"
   install_runner "$dir"
-  contract_in "$dir" propose --words 'first mandate' >/dev/null 2>&1 || fail "could not propose the first mandate"
-  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the first mandate"
+  contract_in "$dir" enter --words 'first mandate' >/dev/null 2>&1 || fail "could not confirm the first mandate"
   epoch=$(contract_in "$dir" field entered_epoch)
-  contract_in "$dir" propose --words 'replacement mandate' >/dev/null 2>&1 || fail "could not propose the replacement mandate"
-  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the replacement mandate"
+  contract_in "$dir" enter --words 'replacement mandate' >/dev/null 2>&1 || fail "could not confirm the replacement mandate"
   archive=""
   for archive in "$dir/home/state/afk-contracts/$epoch-superseded-"*.afk-contract; do break; done
   [ -f "$archive" ] || fail "no superseded archive was written"
@@ -764,8 +836,7 @@ test_missing_final_archive_keeps_retained_contract_gated() {
   local dir out rc epoch archive backup
   dir="$TMP_ROOT/final-archive-missing"
   install_runner "$dir"
-  contract_in "$dir" propose --words 'durable mandate' >/dev/null 2>&1 || fail "could not propose the mandate"
-  contract_in "$dir" confirm >/dev/null 2>&1 || fail "could not confirm the mandate"
+  contract_in "$dir" enter --words 'durable mandate' >/dev/null 2>&1 || fail "could not confirm the mandate"
   epoch=$(contract_in "$dir" field entered_epoch)
   seed_live_blocker "$dir" tmux repair-final
   touch "$dir/home/state/.last-watcher-beat"
@@ -804,12 +875,15 @@ test_check_retries_recorded_terminal_teardown
 test_unreadable_superseded_archive_keeps_return_gated
 test_missing_final_archive_keeps_retained_contract_gated
 test_return_brief_composes_from_record_store_and_held_set
+test_return_brief_lists_landed_work_awaiting_cleanup
 test_return_brief_keeps_refresh_history
 test_malformed_posture_record_keeps_catchup_gated
 test_missing_epoch_record_stays_required_after_disappearing
 test_unreadable_outcome_store_keeps_catchup_gated
 test_failed_held_listing_keeps_catchup_gated
 test_unreadable_status_file_keeps_catchup_gated
+test_statusless_leftover_record_keeps_catchup_gated_until_cleanup
+test_statusful_leftover_record_lets_catchup_clear
 test_return_guard_refuses_while_the_record_exists
 test_return_brief_health_leads_with_a_gap
 test_return_brief_does_not_report_an_acked_watcher_down_marker_as_a_gap

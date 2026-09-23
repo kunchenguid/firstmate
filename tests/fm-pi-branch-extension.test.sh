@@ -1375,6 +1375,7 @@ globalThis.__fmOnBranchPrompt = () => new Promise((resolve) => { finishReplaceme
 const replacementOffer = dispatch("signal: after replacement");
 if (!replacementOffer.accepted) throw new Error("branch refused a wake after the replacement");
 await settle(() => (globalThis.__fmSessions ?? []).length === 2, "replacement branch session");
+await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "replacement branch prompt");
 const report2 = globalThis.__fmSessions[1].options.customTools.find((tool) => tool.name === "fm_branch_report");
 const beforePair = requests().length;
 const second = await report2.execute("captain-2", { task: "branch-driver", verdict: "captain", summary: "PR https://example.com/pr/e is ready for review" }, undefined, undefined, {});
@@ -1714,8 +1715,7 @@ if (pending.options.triggerTurn !== true || pending.options.deliverAs !== "follo
 if (!pending.message.content.includes(`[seq ${seq1}]`)) {
   throw new Error(`the first queued request lost seq ${seq1}: ${pending.message.content}`);
 }
-contract(["propose", "--words", "merge task-d when green, then cut the prerelease\n\n"]);
-contract(["confirm"]);
+contract(["enter", "--words", "merge task-d when green, then cut the prerelease\n\n"]);
 const processingMsg = { role: "custom", customType: pending.message.customType, content: pending.message.content, display: false };
 let aborted = false;
 const abortCtx = { ...defaultSessionCtx, abort() { aborted = true; } };
@@ -1877,8 +1877,7 @@ const contract = (args) => {
 };
 
 await fire("session_start", {});
-contract(["propose"]);
-contract(["confirm"]);
+contract(["enter"]);
 writeFileSync(`${home}/state/.wake-queue`, "1\t1\tcheck\tmain-only\tcheck: task-d.check.sh: PR merged\n");
 contract(["archive"]);
 const offer = makeOffer("check: task-d.check.sh: PR merged", [], false, true, true);
@@ -1895,8 +1894,7 @@ if (mainUserMessages.length !== 0) {
   throw new Error("the rejected settlement leaked a main user message from the branch");
 }
 
-contract(["propose"]);
-contract(["confirm"]);
+contract(["enter"]);
 writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tbranch-driver.status\tsignal: branch-driver.status\n");
 const taskLocal = makeOffer("signal: branch-driver.status", [approvedProject], false, true);
 bus.emit("fm-branch-supervision:dispatch", taskLocal);
@@ -1944,8 +1942,7 @@ const contract = (args) => {
 };
 
 await fire("session_start", {}, defaultSessionCtx);
-contract(["propose"]);
-contract(["confirm"]);
+contract(["enter"]);
 writeFileSync(
   `${home}/state/.wake-queue`,
   "1\t1\tsignal\tbranch-driver.status\tsignal: branch-driver.status\n2\t2\theartbeat\theartbeat\theartbeat\n",

@@ -431,7 +431,7 @@ jobs:
           [ "$parse_fail" -eq 0 ] || { echo "::error::stock macOS Bash 3.2 parse sweep failed"; exit 1; }
 
           command -v npm >/dev/null || { echo "::error::npm is required to install tasks-axi"; exit 1; }
-          npm install -g tasks-axi@0.2.5 >/dev/null
+          npm install -g tasks-axi@0.2.6 >/dev/null
           PATH="$(npm prefix -g)/bin:$PATH"
           export PATH
           command -v tasks-axi >/dev/null || { echo "::error::tasks-axi is required for the stock Bash regressions"; exit 1; }
@@ -472,6 +472,16 @@ jobs:
           churn_count=$(printf '%s\n' "$churn_output" | grep -c '^ok - ')
           [ "$churn_count" -eq 1 ] || {
             echo "::error::expected 1 watcher churn-deferral bash 3.2 regression, got $churn_count"
+            exit 1
+          }
+
+          backend_output=$(FM_TEST_ONLY=test_backend_source_requires_adapter_file \
+            FM_TEST_BASH=/bin/bash \
+            /bin/bash tests/fm-backend.test.sh)
+          printf '%s\n' "$backend_output"
+          backend_count=$(printf '%s\n' "$backend_output" | grep -c '^ok - ')
+          [ "$backend_count" -eq 2 ] || {
+            echo "::error::expected 2 backend adapter-file bash 3.2 regressions, got $backend_count"
             exit 1
           }
 
