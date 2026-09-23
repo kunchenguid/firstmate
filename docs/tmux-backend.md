@@ -99,12 +99,23 @@ A second, baseline-gated conversion covers harnesses whose mid-turn screen the c
 Without that baseline, an `unknown` verdict is preserved untouched, so a busy-looking pane can never convert an unread composer into a confirmation.
 `tests/fm-tmux-submit-busy.test.sh` covers busy and idle panes with proven, ambiguous, and cleared composers.
 
+### Pane history for a Grok task
+
+A Grok launch gets one extra pane setting before the harness starts: its window is switched off tmux's alternate screen.
+
+Grok can stop at a project-folder trust dialog, and Firstmate refuses to dispatch a worker into a pane holding one rather than answering it.
+A pane too short for the dialog body makes Grok repaint a clipped frame and pushes the complete one above the visible slice, where only the pane's own history can still hold it - and the alternate screen has no history at all, so those rows would be destroyed and a waiting dialog would read as no dialog.
+The switch costs an ordinary session nothing, because a harness that repaints in place scrolls nothing and the pane's history stays empty until something really displaces a row.
+Two consequences are visible to an operator, both measured on grok 1.0.40: the pane keeps the session's own rows in scrollback, which the alternate screen discards entirely, and when Grok exits the pane is not swapped back to the screen it showed before the launch - the shell simply continues, with that earlier screen in the same scrollback.
+Only Grok panes are switched, and only on tmux; [`verification/runtime-backends.md`](verification/runtime-backends.md#alternate-screen-and-pane-history) records the measurement behind both halves.
+
 ## Limits and regression entry points
 
 - tmux is the reference path and supports secondmate homes.
 
 ```sh
 tests/fm-backend-tmux-smoke.test.sh
+tests/fm-grok-harness.test.sh
 tests/fm-tmux-agent-liveness.test.sh
 tests/fm-harness-liveness-drift-live-e2e.test.sh
 tests/fm-composer-ghost.test.sh

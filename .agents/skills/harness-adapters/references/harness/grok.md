@@ -32,8 +32,19 @@ Tmux and Herdr now route captures through `../../../bin/fm-composer-lib.sh`, whi
 `../../../docs/herdr-backend.md` owns the boundary and `../../../tests/fm-backend-herdr.test.sh` covers it.
 
 The "Run Grok Build in a project directory?" picker appears only outside a project, such as home, Desktop, Downloads, or `/tmp`.
-The spawn starts in the isolated git root, so Grok trusts it and needs no key.
+The spawn starts in the isolated git root, so that picker needs no key.
 For unavoidable non-project launch, `[hints] project_picker_disabled = true` in `~/.grok/config.toml` suppresses the picker.
+
+Grok 1.0.40 separately shows `Do you trust the contents of this directory?` when a fresh git directory contains project configuration such as project hooks.
+Firstmate does not grant that trust automatically because it authorizes project content and hooks to execute with additional authority.
+A launch that stops at it fails the spawn, records the failure in the task status, and closes the endpoint, so the pane parked on an unanswered dialog is never left running outside task control.
+The spawn reads bounded pane history because a short pane places the dialog above its visible slice: Grok repaints a clipped frame, its header row and build footer with the title and shortcuts gone, and that repaint is what pushes the complete frame out of view, so a complete frame is never the last thing such a capture holds.
+The refusal therefore anchors on the last complete frame and turns on what follows it rather than on whether anything does: Grok's own session surface makes the text historical and does not block dispatch, while a clipped repaint of the same frame leaves the dialog waiting and refuses.
+That recovery needs the pane to have retained what the repaint displaced, and a pane too short to render the frame whole at all is a different and still-open case: under tmux defaults Grok runs on the alternate screen where `history_size` is 0, and at 80x6 grok 1.0.40 paints the title with the path and shortcuts clipped away, so no capture holds a complete frame and dispatch is not refused.
+Closing that would mean reading a lone title row as an active frame, which trades directly against the scrollback half of this contract, so it is deliberately left to a separate decision rather than folded in here.
+That history can predate the launch on a relaunch, which adopts the recorded endpoint and its scrollback, so the check classifies only what the launch itself painted after the staged launch line, and withholds its no-dialog verdict while that boundary is unknown.
+A pane narrower than that line wraps it into rows a bounded capture reports separately, so the line is matched across the concatenated rows rather than within any single row, and anchored by the one pre-launch row that ends it; an interior piece of the path never anchors, because adopted scrollback can hold such a row by coincidence.
+`../../../bin/fm-grok-trust.sh` owns that active-frame predicate, `../../../tests/fm-grok-harness.test.sh` pins the dispatch outcomes, and `../../../tests/fm-grok-trust-dialog-live-e2e.test.sh` is the token-free real-harness drift guard.
 
 ## Composer
 

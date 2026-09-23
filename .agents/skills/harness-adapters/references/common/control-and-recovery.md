@@ -20,7 +20,7 @@ Each supported harness handles its folder-trust gate differently, and the tool r
 For Claude, load `references/harness/claude.md`; its workspace-trust section owns the non-key-answerable gate and spawn-time pre-registration for every spawn kind.
 agy gates every fresh worktree too; the spawn pre-registers it in agy's own store the same way, and a strict post-launch gate answers any dialog that still renders before the spawn reports success.
 Cursor suppresses its dialog with launch-time `--trust`, and Muse suppresses its own with `--yolo`.
-Grok dodges its gate instead of granting trust, because its project picker appears only outside a project and the spawn starts in the isolated git root.
+Grok avoids its non-project picker by starting in the isolated git root; its separate project-folder trust refusal is owned by `references/harness/grok.md`.
 Pi gates the fresh-worktree case too, but unlike Claude its dialog is answered with Enter, and `references/harness/pi.md` owns that recipe and where the decision persists.
 Codex shows a directory-trust dialog on the first run for a repository root.
 

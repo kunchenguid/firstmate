@@ -42,6 +42,31 @@ fm_backend_tmux_capture() {  # <target> <lines>
   tmux capture-pane -p -t "$1" -S -"$2"
 }
 
+# fm_backend_tmux_scrollback_retain: make a full-screen harness in <target>
+# paint on the pane's MAIN screen, so a row pushed above the viewport lands in
+# that pane's history instead of being destroyed.
+#
+# tmux's default `alternate-screen on` honours the smcup sequence every
+# full-screen TUI sends, and the alternate screen it switches to has no history
+# at all: a pane running one reports `history_size` 0, and the bounded capture
+# above can only ever return the viewport, however many lines it asks for. A
+# frame the harness scrolls or a resize displaces is therefore gone, not
+# scrolled, which is the difference between a dialog a gate can still read and
+# one no capture anywhere holds.
+#
+# Must be set BEFORE the harness starts: tmux consults the option when the
+# sequence arrives, so a window already switched to the alternate screen stays
+# there until the application leaves it.
+#
+# Measured on grok 1.0.40 (docs/verification/runtime-backends.md "Alternate
+# screen and pane history"): a session that repaints in place scrolls nothing, so
+# the pane's history stays empty and every bounded read keeps returning exactly
+# the viewport it returned before. History appears only once something really
+# displaces a row, which is the case this exists for.
+fm_backend_tmux_scrollback_retain() {  # <target>
+  tmux set-window-option -t "$1" alternate-screen off
+}
+
 # fm_backend_tmux_visible_capture: the visible viewport only. `-S -0` starts at
 # the first line of the pane rather than in its history, so nothing scrolled out
 # of view can appear in the result - the guarantee a trust-dialog predicate

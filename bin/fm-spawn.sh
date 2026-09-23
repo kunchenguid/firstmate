@@ -331,7 +331,32 @@
 # each ready and dialog-free before the ordinary readiness gates can pass. A
 # blank viewport read proves nothing either way: it costs the poll and restarts
 # that count. A viewport read that fails outright fails readiness at once.
-# grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
+# Grok project configuration can gate a fresh worktree on a project-folder trust
+# dialog. Its title may sit above the visible slice of a short pane, so the
+# post-launch check reads bounded history and delegates the exact active-frame
+# predicate to bin/fm-grok-trust.sh. That predicate anchors on the last complete
+# dialog frame in the capture and asks what follows it: Grok's own session surface
+# makes the text historical and inert, while a clipped repaint of the same frame -
+# the only thing that can put a rendered dialog above the fold at all - leaves it
+# waiting.
+# That history is not a given: a default tmux pane runs a full-screen harness on
+# the alternate screen, which has none, so the spawn asks the backend to keep
+# this pane's displaced rows before Grok is launched into it.
+# Bounded history can also predate this launch, because a relaunch adopts the
+# recorded endpoint and its scrollback, so the check classifies only what this
+# launch painted: the content after the staged launch line carrying this
+# incarnation's nonce, or the whole capture once nothing the pre-launch read held
+# survives in it. That line is located across captured rows, not within one, and
+# the pre-launch read's own echo rows anchor it too, because a pane narrower than
+# the line wraps it into rows that no single-row match can find. While that
+# boundary is unknown the check withholds its no-dialog verdict rather than read
+# a previous session's surface as this one's.
+# Firstmate never answers the dialog because doing so grants project content and
+# hooks additional execution authority; a positively active frame fails and
+# rolls back the spawn instead of reporting a worker that never read its brief,
+# and closes the endpoint so the pane parked on the unanswered dialog does not
+# outlive the spawn that refused it.
+# Grok uses a firstmate-owned global hook under ${GROK_HOME:-$HOME/.grok}/hooks
 # plus a gitignored .fm-grok-turnend worktree pointer and a state token.
 # muse installs no hook at all - its plugin engine is off in the default build - so
 # it writes state/<id>.muse-session to bind the pane to muse's own session event
@@ -3498,6 +3523,26 @@ fi
 # WT_TARGET to $T for them (and for any future backend) - the shared treehouse-get +
 # worktree-detection steps below must never reference an unbound WT_TARGET under set -u.
 : "${WT_TARGET:=$T}"
+# Grok's trust gate below recovers a dialog frame the harness pushed above the
+# visible slice, and it can only recover one the pane kept. On a default tmux
+# pane there is nothing to keep: a full-screen harness runs on the alternate
+# screen, whose displaced rows are destroyed rather than scrolled, so the
+# bounded read returns the viewport, the clipped repaint in it carries no title,
+# and a dialog that is still waiting reads as no dialog at all - the one verdict
+# that hands project content and hooks the authority this gate exists to
+# withhold. Ask the backend for that history now, while the pane still holds
+# nothing but its shell: the option governs the harness's own switch to a
+# full-screen surface, so it takes only if it is in place before Grok starts.
+# A backend with no such primitive keeps exactly its previous behavior rather
+# than being refused a spawn: only the displaced-frame recovery depends on this,
+# a dialog still in view is classified from the same read either way, and
+# whether a non-tmux surface loses a displaced row at all has not been observed
+# either way (bin/fm-backend.sh's FM_BACKEND_SCROLLBACK_RETAIN owns that
+# boundary).
+if [ "$HARNESS" = grok ] && fm_backend_scrollback_retain_supported "$BACKEND"; then
+  fm_backend_scrollback_retain "$BACKEND" "$T" ||
+    echo "warning: $BACKEND would not keep pane history for $T; a Grok trust dialog displaced above that pane's visible slice cannot be recovered from it" >&2
+fi
 spawn_send_text_line() { # <target> <text>
   case "$BACKEND" in
   tmux) fm_backend_tmux_send_text_line "$1" "$2" ;;
@@ -3532,6 +3577,148 @@ spawn_send_key() { # <target> <key>
   orca) fm_backend_orca_send_key "$1" "$2" ;;
   cmux) fm_backend_cmux_send_key "$1" "$2" "$W" ;;
   esac
+}
+
+grok_capture() {
+  fm_backend_capture "$BACKEND" "$T" 200 "$W" 2>/dev/null || true
+}
+
+# The pane this launch types into can already hold a previous Grok session: a
+# relaunch adopts the recorded endpoint and everything in its scrollback. These
+# four record what the pane held before the launch line was submitted, so the
+# trust check can tell that scrollback apart from what this launch paints.
+GROK_TRUST_BASELINE=
+GROK_TRUST_BASELINE_READ=0
+GROK_TRUST_LAUNCH_MARK=
+GROK_TRUST_LAUNCH_LINE=
+
+grok_trust_baseline() { # <launch-line> <launch-file-name>
+  GROK_TRUST_LAUNCH_LINE=$1
+  GROK_TRUST_LAUNCH_MARK=$2
+  GROK_TRUST_BASELINE=
+  GROK_TRUST_BASELINE_READ=0
+  GROK_TRUST_BASELINE=$(fm_backend_capture "$BACKEND" "$T" 200 "$W" 2>/dev/null) || return 0
+  GROK_TRUST_BASELINE_READ=1
+}
+
+# Print the part of <plain-pane-capture> that this launch painted, and fail when
+# the capture carries no proof of where that part starts. The staged launch line
+# is submitted into the pane by this incarnation and names a file whose nonce
+# belongs to it alone, so content after it is this launch's own. A pane narrower
+# than that line wraps it, and a bounded capture reports the wrapped rows
+# separately, so the name is searched across the concatenated rows and the
+# boundary is the row its last occurrence ends on. The pre-launch read anchors
+# the same line from the other side: its own row that ends the submitted text is
+# the last row of this launch's echo wherever it reappears, which still places the
+# boundary when the capture no longer carries the name whole. Only that final row
+# anchors, never an interior piece of the line: a path fragment is ordinary text
+# that a previous session's scrollback can hold by coincidence, and anchoring on
+# one would hand exactly the material this check exists to exclude back as this
+# launch's own output. A capture
+# that carries neither and retains no nonblank line the pre-launch read held has
+# scrolled or cleared past that read entirely, which makes all of it post-launch.
+# Anything else leaves the boundary unknown, including a pre-launch read that
+# failed outright.
+grok_post_launch_content() { # <plain-pane-capture>
+  [ "$GROK_TRUST_BASELINE_READ" -eq 1 ] || return 1
+  printf '%s\n' "$1" |
+    FM_GROK_TRUST_BASELINE="$GROK_TRUST_BASELINE" \
+      FM_GROK_TRUST_LAUNCH_LINE="$GROK_TRUST_LAUNCH_LINE" \
+      FM_GROK_TRUST_LAUNCH_MARK="$GROK_TRUST_LAUNCH_MARK" awk '
+      BEGIN {
+        mark = ENVIRON["FM_GROK_TRUST_LAUNCH_MARK"]
+        literal = ENVIRON["FM_GROK_TRUST_LAUNCH_LINE"]
+        n = split(ENVIRON["FM_GROK_TRUST_BASELINE"], prior, "\n")
+        for (i = 1; i <= n; i++) {
+          if (prior[i] !~ /[^[:space:]]/) { continue }
+          held[prior[i]] = 1
+          if (literal != "" && length(prior[i]) <= length(literal) &&
+            substr(literal, length(literal) - length(prior[i]) + 1) == prior[i]) {
+            echoed[prior[i]] = 1
+          }
+        }
+      }
+      {
+        line[NR] = $0
+        flat = flat $0
+        ends[NR] = length(flat)
+      }
+      $0 in echoed { anchored = NR }
+      /[^[:space:]]/ && ($0 in held) { survives = 1 }
+      END {
+        launched = 0
+        if (mark != "") {
+          from = 1
+          while ((at = index(substr(flat, from), mark)) > 0) {
+            hit = from + at - 1
+            from = hit + 1
+          }
+          if (hit > 0) {
+            stop = hit + length(mark) - 1
+            for (i = 1; i <= NR; i++) {
+              if (ends[i] >= stop) { launched = i; break }
+            }
+          }
+        }
+        if (anchored > launched) { launched = anchored }
+        if (launched == 0 && survives) { exit 1 }
+        for (i = launched + 1; i <= NR; i++) { print line[i] }
+      }
+    '
+}
+
+# A normal Grok session can follow trust-dialog text that the backend retains
+# in scrollback. Only session evidence AFTER the last dialog marker proves that
+# the frame is historical; evidence before a newer partial frame proves nothing.
+# The classifier owns that predicate as well, because the same rows decide both
+# verdicts: what proves a dialog answered here is exactly what stops the active
+# frame from counting there, and two copies of it could disagree.
+grok_session_surface_follows_trust() { # <post-launch-pane-content>
+  printf '%s\n' "$1" | "$FM_ROOT/bin/fm-grok-trust.sh" superseded
+}
+
+# The dialog normally paints before Grok submits its positional launch prompt.
+# Poll only until either its exact active final frame or a later normal session
+# surface appears, both read from what this launch painted: a surface the pane
+# already carried is never evidence that this launch cleared a dialog. While that
+# boundary is unknown the active frame is still classified from the whole
+# capture, which can only refuse, never pass. The budget matches the other launch
+# gates in this script at 30s, and a timeout keeps the pre-existing launch
+# posture: absence of a positively classified dialog is never promoted into a
+# trust decision.
+grok_active_trust_dialog_detected() {
+  local pane painted i=0 max=${FM_GROK_TRUST_POLLS:-60} interval=${FM_GROK_TRUST_POLL_INTERVAL:-0.5}
+  while [ "$i" -lt "$max" ]; do
+    pane=$(grok_capture)
+    if [ -n "$pane" ]; then
+      if painted=$(grok_post_launch_content "$pane"); then
+        if [ -n "$painted" ]; then
+          if printf '%s\n' "$painted" | "$FM_ROOT/bin/fm-grok-trust.sh" active; then
+            return 0
+          fi
+          if grok_session_surface_follows_trust "$painted"; then
+            return 1
+          fi
+        fi
+      elif printf '%s\n' "$pane" | "$FM_ROOT/bin/fm-grok-trust.sh" active; then
+        return 0
+      fi
+    fi
+    i=$((i + 1))
+    [ "$i" -ge "$max" ] || sleep "$interval"
+  done
+  return 1
+}
+
+# Refusing the trust grant is only half the refusal: the pane is still parked on
+# an unanswered dialog, and this gate runs past the point where the abort trap
+# owns the endpoint, so the launched Grok must be closed here (see
+# launch_gate_endpoint_cleanup) or it survives as an untrusted process outside
+# task control while the status record says the spawn failed.
+grok_spawn_fail() { # <detail>
+  printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
+  echo "error: $1; the unconfirmed endpoint will be closed" >&2
+  launch_gate_endpoint_cleanup
 }
 
 kimi_capture() {
@@ -3752,7 +3939,7 @@ rovo_wait_for_delivery() {
 rovo_spawn_fail() { # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
-  rovo_endpoint_cleanup
+  launch_gate_endpoint_cleanup
 }
 
 # The launch-then-confirm gates run after the task record is published, when
@@ -3762,7 +3949,10 @@ rovo_spawn_fail() { # <detail>
 # task control. Mirrors fm-teardown.sh's own generic kill call. On orca only
 # the exact terminal is closed: that stops the CLI while its worktree stays
 # for the record's own teardown, which owns worktree deletion.
-rovo_endpoint_cleanup() {
+# Named for the gate rather than for a harness because rovo's readiness and
+# delivery gates, agy's working gate, and grok's trust refusal all route their
+# post-launch failures here.
+launch_gate_endpoint_cleanup() {
   if [ "$BACKEND" = orca ]; then
     fm_backend_kill orca "$T" 2>/dev/null || true
     return 0
@@ -3825,7 +4015,7 @@ agy_wait_for_working() {
 agy_spawn_fail() {  # <detail>
   printf '%s\n' "$(status_stamp_line "failed: $1")" >>"$STATE/$ID.status"
   echo "error: $1; inspect window $T" >&2
-  rovo_endpoint_cleanup
+  launch_gate_endpoint_cleanup
 }
 
 if [ "$RELAUNCH" -eq 1 ]; then
@@ -4865,13 +5055,21 @@ if ! (umask 077 && printf '%s\n' "$LAUNCH" >"$LAUNCH_STAGE" &&
   exit 1
 fi
 sleep 0.3
-spawn_send_literal "$T" ". $(shell_quote "$LAUNCH_FILE")"
+LAUNCH_SOURCE_LINE=". $(shell_quote "$LAUNCH_FILE")"
+spawn_send_literal "$T" "$LAUNCH_SOURCE_LINE"
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
+if [ "$HARNESS" = grok ]; then
+  grok_trust_baseline "$LAUNCH_SOURCE_LINE" "$(basename "$LAUNCH_FILE")"
+fi
 spawn_send_key "$T" Enter
+if [ "$HARNESS" = grok ] && grok_active_trust_dialog_detected; then
+  grok_spawn_fail "grok stopped at an active project-folder trust dialog; refusing to grant project content and hooks additional execution authority automatically"
+  exit 1
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"

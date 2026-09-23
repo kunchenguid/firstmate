@@ -763,6 +763,39 @@ fm_backend_visible_capture() {  # <backend> <target> [expected-label]
   "fm_backend_${backend}_visible_capture" "$@"
 }
 
+# FM_BACKEND_SCROLLBACK_RETAIN: backends with a verified way to keep a
+# full-screen harness's displaced rows in the pane's own history, each
+# implementing fm_backend_<name>_scrollback_retain. Like the list above, this
+# one list answers both the capability question and the dispatch, so they cannot
+# disagree. Only tmux is here: its alternate screen is measured to hold no
+# history at all, and turning it off is measured to recover the displaced rows
+# without changing what an ordinary in-place repaint reads back
+# (docs/verification/runtime-backends.md "Alternate screen and pane history").
+# The other adapters render through their own surface APIs, and whether a
+# displaced row survives there has not been observed on a real one, so they are
+# absent rather than assumed either way.
+FM_BACKEND_SCROLLBACK_RETAIN="tmux"
+
+# fm_backend_scrollback_retain_supported: whether <backend> can be asked to keep
+# what a repaint or a resize pushes above the viewport.
+fm_backend_scrollback_retain_supported() {  # <backend>
+  fm_backend_list_contains "$FM_BACKEND_SCROLLBACK_RETAIN" "$1"
+}
+
+# fm_backend_scrollback_retain: ask <backend> to keep <target>'s displaced rows
+# in that pane's history. A backend outside FM_BACKEND_SCROLLBACK_RETAIN
+# declines rather than reporting a retention it never arranged.
+fm_backend_scrollback_retain() {  # <backend> <target>
+  local backend=$1
+  shift
+  fm_backend_scrollback_retain_supported "$backend" || {
+    echo "error: backend '$backend' has no verified scrollback-retention primitive" >&2
+    return 1
+  }
+  fm_backend_source "$backend" || return 1
+  "fm_backend_${backend}_scrollback_retain" "$@"
+}
+
 # fm_backend_send_key: one backend-supported named special key.
 fm_backend_send_key() {  # <backend> <target> <key> [expected-label]
   local backend=$1

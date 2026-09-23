@@ -98,9 +98,14 @@ run_spawn() {
     FM_FAKE_CURSOR_MODELS="${FM_TEST_CURSOR_MODELS:-}" \
     FM_FAKE_CURSOR_LIST_STATUS="${FM_TEST_CURSOR_LIST_STATUS:-0}" \
     GROK_HOME="$home/grok-home" \
+    FM_GROK_TRUST_POLLS=1 FM_GROK_TRUST_POLL_INTERVAL=0 \
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@"
 }
 
+# These tests are about profile resolution, so the grok launch gate is pinned to
+# one poll above: the shared spawn fake never paints a pane, and that gate
+# withholds its verdict for its full budget rather than read a static capture as
+# this launch's own output. tests/fm-grok-harness.test.sh owns its behavior.
 # Ship spawns carry an explicit delivery contract (AGENTS.md section 7); these
 # tests are about profile resolution, so they pass a fixed valid one.
 run_ship_spawn() {

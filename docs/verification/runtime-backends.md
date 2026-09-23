@@ -131,6 +131,25 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Alternate screen and pane history
+
+Verified 2026-09-22 with tmux 3.7b and grok 1.0.40 (eb1a2256660d) [stable] on macOS arm64, in an isolated tmux server on a private socket.
+
+A window on tmux's default `alternate-screen on` gives a full-screen application a screen with NO history, so rows it displaces are destroyed rather than scrolled.
+A real Grok pane rendered at 80x12 and shrunk to 80x5 with its trust dialog still waiting reported `history_size` 0 both before and after the resize, `capture-pane -S -200` returned the 5-row viewport and nothing above it, the dialog title appeared in neither that read nor the visible slice, and the production classifier correctly reported no active frame - while the throwaway home had written no `trusted_folders.toml`, so the dialog was genuinely unanswered.
+That is the pane a spawn would dispatch a worker into.
+
+`fm_backend_tmux_scrollback_retain` turns the option off before the application starts, which is when tmux consults it.
+The same measurement then reported `history_size` 12 after the resize, a bounded read of 12 rows carrying the complete frame, a 5-row visible slice without it, and `bin/fm-grok-trust.sh active` detecting the waiting dialog.
+
+The cost of that option on an ordinary session was measured separately and is nil: a Grok session that had answered its dialog and painted its own surface for ten seconds in a 100x24 pane with the alternate screen off still reported `history_size` 0, because a session that repaints in place scrolls nothing.
+Every bounded read keeps returning exactly the viewport it returned before; history appears only once something really displaces a row.
+
+What an operator sees change was measured on the same versions: after Grok is quit from such a pane, the pane is not swapped back to the screen it showed before the launch (a pre-launch marker row stayed in scrollback instead of being restored to the viewport) and the session's own rows remain in that scrollback, where an alternate-screen pane kept none of them.
+
+`tests/fm-backend-tmux-smoke.test.sh` pins both halves against a real server without needing Grok at all: two windows run the same alternate-screen application, the default one is required to destroy the rows it displaces, and only the second is asked to keep them.
+Neutering the primitive turns that arm red on the retained window, and asking for retention on the control window turns the control's own precondition red.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.
@@ -593,6 +612,48 @@ The real pane renders this inside a bordered box, omitted here for readability; 
 
 That capture demonstrated why each signature function matches the FULL captured tail rather than the Grok/Rovo/AGY busy-footer convention of the last 12 non-blank lines: a bordered dialog box renders many short lines of pure border and padding (`│  ...  │`) that are NOT whitespace-only, so the 12-line reduction pushed this exact heading text out of the window and silently defeated the match on the first attempt.
 None of these three runs ever answered its dialog (Escape only, never Enter), so no credential store was written to and no model tokens were spent.
+
+## Grok project-folder trust
+
+Verified 2026-09-21 with grok 1.0.40 (eb1a2256660d) [stable] and tmux 3.7b on macOS arm64, and re-verified 2026-09-22 on the same versions once the pane's history became something the spawn configures rather than something the guard arranged for itself.
+The token-free guard launched the installed Grok with no prompt in a fresh private git directory containing one inert project hook and a throwaway `GROK_HOME` carrying only a private copy of the existing authentication file.
+It never answered the dialog and verified that the throwaway home acquired no `trusted_folders.toml`.
+The real active frame matched the production classifier from bounded history, a clipped tail without the dialog did not match, and the same frame followed by a newer session surface did not match.
+The pane the guard classifies is configured only by the production primitive: it starts on tmux's default alternate screen, which the guard asserts, and `fm_backend_scrollback_retain tmux` - the exact call bin/fm-spawn.sh makes before launching Grok - is what moves it off, reached through a private-socket PATH shim rather than an option the guard sets by hand.
+The launch itself waits on a trigger so the pane is configured before Grok starts, which is the order a spawn works in and the only order the option governs anything in.
+Without that call the guard cannot reach its own subject: with the primitive neutered and its preconditions removed, the shortened pane failed twice out of two at "did not push its trust frame above the visible slice", because a default pane destroys the displaced frame instead of scrolling it.
+Unmutated, the guard was run sixteen times against the same live Grok with no failure, five of them in its final staged-launch form.
+The guard then shrank the pane to 80x5 with the dialog still waiting, which made Grok repaint a clipped frame - its header row and build footer, no title and no shortcuts - and pushed the complete frame above the visible slice.
+That is the state the gate exists for, and it is also proof that "nothing follows the complete frame" cannot be the test for one: the repaint that scrolls the dialog out of view is itself content after it.
+The guard asserts the modelled pane is one a terminal really produces by requiring the visible slice to be the tail of the same bounded history, then requires the classifier to call that history active, the clipped slice alone not active, and the history not superseded.
+The resize was measured to displace the frame a beat before Grok repaints, and in that beat the complete frame is still the last content the capture holds - a pane the retired rule classified correctly too - so the guard polls until the capture carries nonblank content after that frame rather than asserting against whichever of the two states it happened to catch.
+Reading the viewport and the bounded history takes two tmux round trips, so the same loop only settles on a pair where the slice is the tail of the history it was read beside; a repaint landing between the two reads was observed to pair a slice with a history of a different pane state.
+Reverting only the trailing-content rule turned that arm red against the same live Grok, so it is not an inert control.
+The recovery above needs the pane to have kept what the repaint displaced, which a default tmux pane does not: Grok runs on the alternate screen there with `history_size` 0, so the displaced frame is destroyed rather than scrolled.
+bin/fm-spawn.sh therefore asks the backend for that history before it launches Grok, and the tmux measurement behind the primitive - including what the option costs an ordinary session, which is nothing - is recorded under "Alternate screen and pane history" above.
+The other adapters have no such primitive, because whether a displaced row survives their own surfaces has not been observed on a real one; `FM_BACKEND_SCROLLBACK_RETAIN` in bin/fm-backend.sh is the single list that says so, and a backend absent from it keeps its previous behavior rather than being refused a Grok spawn.
+One boundary remains measured and NOT covered, and it is not a history one.
+Launching grok 1.0.40 straight into an 80x6 pane painted the title with the path and shortcuts clipped away and no `trusted_folders.toml` written, so the dialog was waiting while no capture anywhere held a complete frame and the classifier correctly reported none.
+Repeating that launch with the alternate screen off changed nothing: the pane still reported `history_size` 0, because Grok painted the clipped frame in place rather than scrolling a complete one out of view, so there was never a complete frame for any history to keep.
+That is a clipped-in-place frame rather than a displaced one, and refusing on it would mean reading a lone title row as active, which trades against the historical-scrollback half of the contract; it is recorded here as open rather than folded into this change.
+
+```sh
+bin/fm-test-run.sh tests/fm-grok-trust-dialog-live-e2e.test.sh
+```
+
+```text
+ok - grok 1.0.40 (eb1a2256660d) [stable]: active trust frame recognized in view and scrolled above the visible slice; clipped and historical forms rejected
+```
+
+The portable end-to-end regression is `tests/fm-grok-harness.test.sh`: its fake backend keeps the complete active frame in bounded history while the visible slice omits it, ending that history with the clipped repaint so the visible slice is the tail of it and the pane is one real geometry produces, then separately keeps the same frame ahead of a current composer to prove historical text neither fails dispatch nor receives an answer.
+With `bin/fm-grok-trust.sh` and `bin/fm-spawn.sh` restored to their pre-fix form the below-fold case reports `grok spawn accepted an active project-folder trust dialog`, and dropping the session-surface guard from the classifier turns the historical case red instead, so neither half is satisfied by an inert control.
+Those same two cases pin what the refusal leaves behind, because this gate runs after the task record is published, where neither the abort trap nor a teardown owns the endpoint yet: the below-fold case requires the fake backend's call log to carry the close of this task's exact window, and the historical case requires it to carry no close at all.
+Dropping the close turns the refusal arm red on an endpoint that survived a spawn reported as failed, and closing on every grok launch turns the historical arm red on the endpoint a confirmed worker was just launched into.
+A third case gives the pane a previous session's surface before the launch and renders the dialog only on the poll after that, which pins that an adopted endpoint's scrollback is never read as evidence about the launch that adopted it.
+A fourth wraps the launch echo into the three rows an 80-column pane with a 40-character prompt really produces, where no single row holds the staged file name, and asserts the gate still resolves its boundary on the first poll.
+A fifth paints over the echo row and leaves adopted scrollback holding an interior fragment of the staged path, which must not anchor the boundary, so the dialog that renders afterwards is still refused.
+A sixth pins the spawn's own request for the pane history all of this reads from: that it is made, that it names this task's window, and that it lands before the first keystroke, since the option governs the harness's switch to a full-screen surface and one set afterwards governs nothing.
+Removing the request turns that arm red on the request itself, and moving it after the launch line turns it red on the ordering instead.
 
 ## Codex hook trust
 

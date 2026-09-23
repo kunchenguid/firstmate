@@ -56,6 +56,8 @@ fm_backend_source tmux || fail "fm_backend_source tmux failed"
 SESSION="smoke"
 WINDOW="fm-smoke1"
 TARGET="$SESSION:$WINDOW"
+ALT_DEFAULT="fm-smoke-alt-default"
+ALT_RETAINED="fm-smoke-alt-retained"
 
 # --- create session ----------------------------------------------------------
 
@@ -143,6 +145,65 @@ case "$large" in
   *) fail "a 200-line capture should reach back far enough to see the first numbered line"$'\n'"$large" ;;
 esac
 pass "real tmux: fm_backend_tmux_capture's -S -N bound trims old history for a small window and reaches it for a large one"
+
+# --- scrollback retention for a full-screen harness --------------------------
+# bin/fm-spawn.sh asks for this before it launches Grok, because the trust gate
+# can only recover a dialog frame from a pane that KEPT it. Both windows below
+# run the same application shape - switch to the alternate screen, then print
+# more rows than the pane is tall - and only the second is asked to keep what
+# that displaces. The first is the control: it is what proves the default really
+# destroys those rows, so a retention that quietly did nothing could not pass
+# here. The application is started only after the option is in place, because
+# tmux consults it when the switch sequence arrives.
+ALT_TRIGGER="$SHIM_DIR/alt-go"
+cat > "$SHIM_DIR/alt-overflow.sh" <<SH
+#!/usr/bin/env bash
+while [ ! -e "$ALT_TRIGGER" ]; do sleep 0.05; done
+printf '\\033[?1049h'
+i=1
+while [ "\$i" -le 120 ]; do printf 'alt-row-%s\\n' "\$i"; i=\$((i + 1)); done
+printf 'alt-overflow-done\\n'
+sleep 300
+SH
+chmod +x "$SHIM_DIR/alt-overflow.sh"
+
+alt_screen_pane_history() {  # <window-name> <retain:0|1>
+  local name=$1 retain=$2 target="$SESSION:$1"
+  rm -f "$ALT_TRIGGER"
+  tmux new-window -d -t "$SESSION:" -n "$name" "$SHIM_DIR/alt-overflow.sh" \
+    || fail "real tmux: could not create the alternate-screen window $name"
+  if [ "$retain" = 1 ]; then
+    fm_backend_tmux_scrollback_retain "$target" \
+      || fail "fm_backend_tmux_scrollback_retain failed on a real tmux window"
+  fi
+  : > "$ALT_TRIGGER"
+  wait_for_capture_text "$target" "alt-overflow-done" \
+    || fail "real tmux: the alternate-screen application in $name never finished painting"
+}
+
+alt_screen_pane_history "$ALT_DEFAULT" 0
+default_history=$(tmux display-message -p -t "$SESSION:$ALT_DEFAULT" '#{history_size}')
+default_capture=$(fm_backend_tmux_capture "$SESSION:$ALT_DEFAULT" 200) \
+  || fail "fm_backend_tmux_capture failed on the default alternate-screen window"
+[ "$default_history" = 0 ] \
+  || fail "real tmux: a default window running a full-screen application reported history_size '$default_history', so this arm's control is not the no-history case it exists to establish"
+case "$default_capture" in
+  *"alt-row-1"$'\n'*) fail "real tmux: a default alternate-screen pane kept a displaced row, so the retention below would prove nothing" ;;
+esac
+
+alt_screen_pane_history "$ALT_RETAINED" 1
+retained_history=$(tmux display-message -p -t "$SESSION:$ALT_RETAINED" '#{history_size}')
+retained_capture=$(fm_backend_tmux_capture "$SESSION:$ALT_RETAINED" 200) \
+  || fail "fm_backend_tmux_capture failed on the retained window"
+[ "${retained_history:-0}" -gt 0 ] \
+  || fail "real tmux: fm_backend_tmux_scrollback_retain left the pane with no history at all"
+case "$retained_capture" in
+  *"alt-row-1"$'\n'*) : ;;
+  *) fail "real tmux: fm_backend_tmux_scrollback_retain did not keep the rows the application displaced above the viewport"$'\n'"$retained_capture" ;;
+esac
+tmux kill-window -t "$SESSION:$ALT_DEFAULT" 2>/dev/null || true
+tmux kill-window -t "$SESSION:$ALT_RETAINED" 2>/dev/null || true
+pass "real tmux: fm_backend_tmux_scrollback_retain keeps rows a full-screen application displaces, which a default window destroys"
 
 # --- resolve_bare_selector (live-window-listing) -----------------------------
 
