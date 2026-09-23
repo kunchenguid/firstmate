@@ -1645,7 +1645,7 @@ test_gerrit_arming_records_no_patch_set_revision() {
   ln -sf "$REAL_JQ" "$dir/fakebin/jq"
 
   write_task_meta "$dir" task-rev
-  run_check_entry "$dir" task-rev \
+  FM_TEST_GERRIT_REVISION=$(git -C "$dir/wt" rev-parse HEAD) run_check_entry "$dir" task-rev \
     https://gerrit.example/c/group/apps/console/+/4201 >/dev/null \
     || fail "arming a Gerrit watch failed"
   grep -qxF 'pr=https://gerrit.example/c/group/apps/console/+/4201' "$state/task-rev.meta" \
@@ -1653,8 +1653,6 @@ test_gerrit_arming_records_no_patch_set_revision() {
   grep -q '^pr_head=' "$state/task-rev.meta" \
     && fail "arming recorded a Gerrit patch set revision as pr_head"
   [ -e "$state/task-rev.check.sh" ] || fail "arming a Gerrit watch left no poll armed"
-  [ ! -s "$dir/gerrit-axi.log" ] \
-    || fail "arming read the forge for a head it does not record"
 
   # Submitting a Gerrit change is refused outright, before anything is read or
   # recorded, rather than left as a silently absent provider branch.
@@ -1673,12 +1671,15 @@ test_gerrit_arming_records_no_patch_set_revision() {
   pass "Gerrit arming records no patch set revision and the merge path refuses to submit"
 }
 
-# A push to refs/for/ leaves no ref a fetch can see, so a worker's published HEAD
-# is never reachable from a remote-tracking ref. Arming then accepts the named
-# head only when a live read shows the change's current patch set carrying that
+# A push to refs/for/ leaves no ref a fetch can see, so a remote-tracking ref
+# that holds the worker's HEAD - the no-mistakes gate branch after a pipeline
+# run - says nothing about what was published. Arming accepts the named head
+# only when a live read shows the change's current patch set carrying that
 # HEAD's tree - the squash is a new commit on the server's base, so the tree and
 # not the commit names what was published - and refuses otherwise, before
-# anything is recorded or armed.
+# anything is recorded or armed. Once arming has recorded the change as pr=, a
+# later done naming it is accepted from that record without a read, so a
+# reviewer's rebase or new patch set on the server does not revoke it.
 test_gerrit_ready_gate_reads_the_published_tree() {
   local dir state base published other out rc
   dir=$(make_case gerrit-ready-gate)
@@ -1691,8 +1692,7 @@ test_gerrit_ready_gate_reads_the_published_tree() {
   printf 'two\n' > "$dir/wt/b"
   git -C "$dir/wt" add b
   git -C "$dir/wt" commit -q -m second
-  git -C "$dir/wt" for-each-ref --contains HEAD refs/remotes | grep -q . \
-    && fail "the fixture HEAD is reachable from a remote ref, so the Gerrit leg would never run"
+  git -C "$dir/wt" update-ref refs/remotes/no-mistakes/fm/task "$(git -C "$dir/wt" rev-parse HEAD)"
   published=$(git -C "$dir/wt" commit-tree "$(git -C "$dir/wt" rev-parse 'HEAD^{tree}')" -p "$base" -m squashed)
   other=$(git -C "$dir/wt" rev-parse HEAD~1)
   [ "$(git -C "$dir/wt" rev-parse "$published^{tree}")" != "$(git -C "$dir/wt" rev-parse "$other^{tree}")" ] \
@@ -1738,6 +1738,21 @@ test_gerrit_ready_gate_reads_the_published_tree() {
   [ -e "$state/task-published.check.sh" ] || fail "an accepted Gerrit arming left no poll armed"
   grep -q '^pr_head=' "$state/task-published.meta" \
     && fail "the gate's live revision was recorded as pr_head"
+
+  git -C "$dir/wt" update-ref -d refs/remotes/no-mistakes/fm/task
+  : > "$dir/gerrit-axi.log"
+  set +e
+  out=$(FM_TEST_GERRIT_REVISION=0123456789abcdef0123456789abcdef01234567 \
+    FM_TEST_GERRIT_AXI_LOG="$dir/gerrit-axi.log" PATH="$dir/fakebin:$BASE_PATH" \
+    bash -c '. "$1/bin/fm-timeout-lib.sh"; . "$1/bin/fm-dod-lib.sh"
+      fm_dod_accept_ship_done ship no-mistakes "$2" "$3" "$4" "$5" task-published "$6"' \
+    _ "$ROOT" "$dir/wt" "$dir/project" \
+    "done: PR https://gerrit.example/c/group/apps/console/+/4201 published for review" \
+    "$state" "$state/task-published.meta" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "a server-side rebase after arming revoked the recorded change's done: $out"
+  [ ! -s "$dir/gerrit-axi.log" ] || fail "a done naming the recorded change read the server again"
   pass "Gerrit arming accepts a published HEAD only by the change's current patch set tree"
 }
 

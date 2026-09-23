@@ -1051,60 +1051,50 @@ FIELDS
 # first, so the host is passed explicitly from the parsed identity and a read
 # outside a clone still reaches the right server. A change number is
 # server-global and --host pins the server, so the number alone names the
-# change and the project path is not part of the read. The status is the only
-# field read: a merged change and an approved-but-unsubmitted one report the
-# same submit, submittable, and blocked_on values, so only the status separates
-# them. The record's own url field is not compared against the stored URL,
-# because Gerrit composes it from gerrit.canonicalWebUrl and omits it when that
-# setting is unset, which would turn every read on such a server into a
+# change and the project path is not part of the read. Prints the one record
+# whose change number is exactly <number> as compact JSON, and fails on any
+# other reading. The record's own url field is not compared against the stored
+# URL, because Gerrit composes it from gerrit.canonicalWebUrl and omits it when
+# that setting is unset, which would turn every read on such a server into a
 # permanent unknown.
-fm_pr_gerrit_read_record() {  # <host> <number>
-  local host=$1 number=$2 json fields line
-  local total=0 named=0 state='' merged=''
-  FM_PR_RECORD_STATE=
-  FM_PR_RECORD_MERGED=
+fm_pr_gerrit_read_change() {  # <host> <number>
+  local host=$1 number=$2 json
   command -v gerrit-axi >/dev/null 2>&1 || return 1
   command -v jq >/dev/null 2>&1 || return 1
   case "$number" in
     ''|*[!0-9]*) return 1 ;;
   esac
-
   if ! json=$(gerrit-axi show "$number" --host "$host" --json 2>/dev/null) \
     || [ -z "$json" ]; then
     return 1
   fi
-  if ! fields=$(printf '%s' "$json" | jq -r --argjson change "$number" '
-      if type == "object" and .ok == true and (.changes | type) == "array" then
-        [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
-        | if ($match | length) == 1
-             and ($match[0].status | type) == "string"
-             and $match[0].status != ""
-          then
-            "state=" + $match[0].status,
-            "merged=" + (if $match[0].status == "MERGED" then "true" else "false" end)
-          else
-            error("no exact change record")
-          end
-      else
-        error("invalid gerrit record")
-      end' 2>/dev/null); then
-    return 1
-  fi
-  while IFS= read -r line; do
-    total=$((total + 1))
-    case "$line" in
-      state=*) state=${line#state=} ;;
-      merged=*) merged=${line#merged=} ;;
-      *) continue ;;
-    esac
-    named=$((named + 1))
-  done <<FIELDS
-$fields
-FIELDS
-  if [ "$named" -ne 2 ] || [ "$total" -ne 2 ] || [ -z "$state" ] \
-    || { [ "$merged" != true ] && [ "$merged" != false ]; }; then
-    return 1
-  fi
+  printf '%s' "$json" | jq -c --argjson change "$number" '
+    if type == "object" and .ok == true and (.changes | type) == "array" then
+      [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
+      | if ($match | length) == 1 and ($match[0] | type) == "object"
+        then $match[0]
+        else error("no exact change record")
+        end
+    else
+      error("invalid gerrit record")
+    end' 2>/dev/null
+}
+
+# The status of one Gerrit change. The status is the only field read: a merged
+# change and an approved-but-unsubmitted one report the same submit,
+# submittable, and blocked_on values, so only the status separates them.
+fm_pr_gerrit_read_record() {  # <host> <number>
+  local record state merged=false
+  FM_PR_RECORD_STATE=
+  FM_PR_RECORD_MERGED=
+  record=$(fm_pr_gerrit_read_change "$1" "$2") || return 1
+  state=$(printf '%s' "$record" | jq -r '
+    if (.status | type) == "string" and .status != "" and (.status | test("\n") | not)
+    then .status
+    else error("no status")
+    end' 2>/dev/null) || return 1
+  [ -n "$state" ] || return 1
+  [ "$state" != MERGED ] || merged=true
 
   # Consumed by bin/fm-crew-state.sh passed_pr_detail.
   # shellcheck disable=SC2034
@@ -1114,35 +1104,18 @@ FIELDS
   FM_PR_RECORD_MERGED=$merged
 }
 
-# The current patch set revision of one Gerrit change, read the same way as its
-# status above: explicit host, exact change number, structured record only.
-# Consumed by bin/fm-dod-lib.sh's named-head gate, which accepts a published
-# change only when this revision carries the worker copy's HEAD tree. It is a
-# live read and never a recorded pr_head: the next amend replaces it.
+# The current patch set revision of one Gerrit change, read from the same exact
+# record as its status above. Consumed by bin/fm-dod-lib.sh's named-head gate,
+# which accepts a published change only when this revision carries the worker
+# copy's HEAD tree. It is a live read and never a recorded pr_head: the next
+# amend replaces it.
 fm_pr_gerrit_read_revision() {  # <host> <number>
-  local host=$1 number=$2 json revision
+  local record revision
   FM_PR_RECORD_REVISION=
-  command -v gerrit-axi >/dev/null 2>&1 || return 1
-  command -v jq >/dev/null 2>&1 || return 1
-  case "$number" in
-    ''|*[!0-9]*) return 1 ;;
-  esac
-  if ! json=$(gerrit-axi show "$number" --host "$host" --json 2>/dev/null) \
-    || [ -z "$json" ]; then
-    return 1
-  fi
-  if ! revision=$(printf '%s' "$json" | jq -r --argjson change "$number" '
-      if type == "object" and .ok == true and (.changes | type) == "array" then
-        [.changes[] | select((.change | type) == "number" and .change == $change)] as $match
-        | if ($match | length) == 1 and ($match[0].revision | type) == "string"
-          then $match[0].revision
-          else error("no exact change record")
-          end
-      else
-        error("invalid gerrit record")
-      end' 2>/dev/null); then
-    return 1
-  fi
+  record=$(fm_pr_gerrit_read_change "$1" "$2") || return 1
+  revision=$(printf '%s' "$record" | jq -r '
+    if (.revision | type) == "string" then .revision else error("no revision") end' 2>/dev/null) \
+    || return 1
   fm_pr_head_valid "$revision" || return 1
   # Consumed by bin/fm-dod-lib.sh fm_dod_gerrit_change_carries_head.
   # shellcheck disable=SC2034

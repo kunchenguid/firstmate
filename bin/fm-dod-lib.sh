@@ -18,11 +18,15 @@
 # recorded pr= passes when the forge holds that head: a forge-reported
 # pr_head= in no-mistakes mode, or a recorded merge
 # (state/<id>.pr-poll-merge-notified). A push to Gerrit's refs/for/ leaves no
-# ref a fetch can see, so a done naming a Gerrit change passes instead when a
-# live read shows that change's current patch set carrying the worker copy's
-# HEAD tree; a squash is a new commit on the server's base, so the tree rather
-# than the commit is what names the published content. Teardown's landed-work
-# test remains the complete discard gate.
+# ref a fetch can see, so a done naming a Gerrit change skips the remote-tracking
+# reachability test entirely: it passes when that change is already the task's
+# recorded pr=, which bin/fm-pr-check.sh writes only after this gate accepted it
+# at arming, and otherwise only when a live read shows the change's current
+# patch set carrying the worker copy's HEAD tree. A squash is a new commit on the
+# server's base, so the tree rather than the commit is what names the published
+# content. The live read is the one check at the ready decision; a later rebase
+# or patch set on the server does not revoke an armed task's done. Teardown's
+# landed-work test remains the complete discard gate.
 # fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [<forge>] prints the
 # block on stdout with no trailing blank line. The caller validates the mode; an
 # unknown mode is refused rather than silently rendered as the pipeline contract.
@@ -548,7 +552,8 @@ fm_dod_forge_head_is_named_head() {  # <mode>
 # or the merge poll recorded it merged (<state>/<id>.pr-poll-merge-notified,
 # bin/fm-pr-lib.sh). That head is stored outside the worker copy even when
 # this clone never fetched it or fleet sync pruned its branch after a squash
-# merge.
+# merge. A recorded Gerrit change needs neither: its pr= is written only after
+# the live published-tree check accepted it.
 fm_dod_recorded_pr_on_forge() {  # <state> <id> <meta> <mode> <url>
   local state=$1 id=$2 meta=$3 mode=$4 url=$5
   [ -n "$meta" ] && [ -f "$meta" ] || return 1
@@ -557,8 +562,9 @@ fm_dod_recorded_pr_on_forge() {  # <state> <id> <meta> <mode> <url>
     return 0
   fi
   ( fm_pr_url_parse "$url" \
-    && fm_pr_poll_merge_already_notified "$state" "$id" \
-      "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" )
+    && { [ "$FM_PR_PROVIDER" = gerrit ] \
+      || fm_pr_poll_merge_already_notified "$state" "$id" \
+        "$FM_PR_PROVIDER" "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER"; } )
 }
 
 # 0 when <url> names a Gerrit change whose current patch set carries the tree of
@@ -593,8 +599,9 @@ fm_dod_named_head_reachable_outside_worktree() {  # <worktree> <project> <mode> 
 }
 
 # 0 when <line> is not a ship done: to gate, when it names the task's recorded
-# PR whose head the forge holds, or when its named head - the worker copy's
-# HEAD - is reachable outside that disposable copy. There is no free-text SHA
+# PR whose head the forge holds, when it names a Gerrit change whose current
+# patch set carries the worker copy's HEAD tree, or otherwise when its named
+# head - the worker copy's HEAD - is reachable outside that disposable copy. There is no free-text SHA
 # scan: a SHA that happens to appear in the note is not the named head. 1 when
 # the claim is refused; stdout then holds a one-line reason and no other
 # output. <state> <id> <meta> supply pr=,
@@ -619,15 +626,15 @@ fm_dod_accept_ship_done() {  # <kind> <mode> <worktree> <project> <line> [<state
     printf '%s\n' "named head could not be resolved"
     return 1
   }
-  if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
-    return 0
-  fi
   if [ -n "$url" ] && fm_pr_url_parse "$url" && [ "$FM_PR_PROVIDER" = gerrit ]; then
     if fm_dod_gerrit_change_carries_head "$wt" "$url"; then
       return 0
     fi
     printf '%s\n' "named head $sha is not the published content of $url: the change's current patch set does not carry this copy's HEAD tree, or it could not be read"
     return 1
+  fi
+  if fm_dod_named_head_reachable_outside_worktree "$wt" "$project" "$mode" "$sha"; then
+    return 0
   fi
   printf '%s\n' "named head $sha is unreachable outside the worker copy"
   return 1
