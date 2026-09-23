@@ -361,6 +361,13 @@ test_ring_submits_its_own_stuck_doorbell() {
     || fail "the stuck doorbell should be submitted exactly once, not retyped:"$'\n'"$(cat "$log")"
   [ ! -s "$composer" ] || fail "the stuck doorbell was left in the composer"
 
+  : > "$log"; printf '%s' "$doorbell" > "$composer"; echo 1 > "$drops"
+  rc=0; ring || rc=$?
+  [ "$rc" = 0 ] || fail "a stuck doorbell whose first Enter is lost should still report rung, got rc $rc"
+  [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
+    || fail "the retry Enter should submit the stuck doorbell once, not retype it:"$'\n'"$(cat "$log")"
+  [ ! -s "$composer" ] || fail "a lost Enter left the stuck doorbell unsubmitted"
+
   for other in 'a half-typed draft' "$doorbell and a draft"; do
     : > "$log"; printf '%s' "$other" > "$composer"
     rc=0; ring || rc=$?
@@ -375,7 +382,7 @@ test_ring_submits_its_own_stuck_doorbell() {
   [ "$(cat "$log")" = "SUBMIT: $doorbell" ] \
     || fail "the retry Enter should submit the doorbell once:"$'\n'"$(cat "$log")"
   [ ! -s "$composer" ] || fail "a lost Enter left the doorbell unsubmitted"
-  pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once"
+  pass "inbox: the ring submits its own stuck doorbell, skips other pending text, and retries a lost Enter once on both paths"
 }
 
 test_idempotent_write_dedups_exact_body() {

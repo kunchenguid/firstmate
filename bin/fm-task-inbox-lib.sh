@@ -285,8 +285,8 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # positively identify (that classifier is advisory here by design).
 # A pending composer holding exactly our own doorbell line is a previous ring
 # whose Enter never landed, so on an agent not reported busy it is submitted
-# rather than skipped; skipping it would block every later ring. The submit
-# budget of two Enters gives a lost first Enter one confirmed retry.
+# rather than skipped; skipping it would block every later ring. On both paths
+# a lost first Enter gets one confirmed retry.
 fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
   local backend=$1 target=$2 rec=$3 label=${4:-} line cstate verdict
   case "$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)" in
@@ -301,6 +301,9 @@ fm_task_inbox_ring() {  # <backend> <target> <record-path> [expected-label]
       fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" \
         && [ "$(fm_backend_busy_state "$backend" "$target" 2>/dev/null)" != busy ] \
         || return 1
+      fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
+      sleep 0.3
+      fm_task_inbox_composer_holds "$backend" "$target" "$line" "$label" || return 0
       fm_backend_send_key "$backend" "$target" Enter "$label" >/dev/null 2>&1 || return 2
       return 0
       ;;
