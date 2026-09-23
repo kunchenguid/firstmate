@@ -46,7 +46,8 @@
 #
 # Re-ring ladder (fm_task_inbox_due_action): an unhandled message older than
 # FM_TASK_INBOX_GRACE_SECS is due one delivery attempt per grace period; an
-# attempt may ring or be skipped to protect proven pending composer text. After
+# attempt may ring or be skipped to protect another draft in a proven pending
+# composer; an unsubmitted copy of this doorbell is retried. After
 # FM_TASK_INBOX_RING_MAX attempts without an acknowledgement it escalates. The
 # caller owns the busy and recovery-grade endpoint checks: a busy pane waits,
 # while a positively dead or missing endpoint skips delivery and the ladder and
@@ -275,9 +276,9 @@ fm_task_inbox_doorbell_line() {  # <record-path>
 # Returns 0 rang, 1 skipped because the composer PROVENLY holds pending text
 # other than our own doorbell (the watcher re-rings later), 2 the backend send
 # failed, 3 skipped because the endpoint is positively dead or missing (nothing
-# typed; recovery owns the record). No return value is delivery proof; the acknowledgement move is the
-# only delivery signal.
-# The skip is deliberately narrow: only an exact `pending` verdict defers,
+# typed; recovery owns the record). No return value is delivery proof; the
+# acknowledgement move is the only delivery signal.
+# The skip is deliberately narrow: only an exact `pending` verdict can defer,
 # because there our Enter could submit someone's real half-typed content.
 # `pending-unproven` and `unknown` still ring - the worst outcome is a garbled
 # CONSTANT line the worker recovers semantically, while skipping on ambiguous
