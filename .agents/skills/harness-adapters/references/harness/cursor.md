@@ -46,7 +46,7 @@ Submission also uses an idle-to-busy transition.
 Match stable token `ctrl+c to stop`, never spinner verbs that changed from `Working` to `Running` between turns.
 
 Confirmation is verified only on tmux and Herdr.
-Herdr reports Cursor `blocked` in every state, so its native idle path is unreachable; the composer path sees the mid-turn placeholder beside `ctrl+c to stop` as pending.
+Herdr reports Cursor `blocked` in every state, so its native idle path is unreachable - the composer path reads the mid-turn placeholder beside `ctrl+c to stop` as unknown, never empty.
 `../../../bin/backends/herdr.sh` baselines before Enter and confirms the footer transition, so an already-busy pane cannot confirm.
 
 Zellij, cmux, and Orca do not consult that footer.
@@ -54,7 +54,7 @@ A typed-plane native invocation or explicit backend send lands but reports uncon
 Treat this as confirmation failure, not loss, because text lands and busy state comes from the transcript.
 Teaching those backends is separate cross-harness work requiring live checks.
 
-Reverse-video placeholder remnants and Herdr half-block edges belong to `../../../bin/fm-composer-lib.sh`; without the edges a bare composer swallows the footer and idle reads pending.
+Herdr half-block edges belong to `../../../bin/fm-composer-lib.sh`, whose stripper also drops the software-cursor cell when de-emphasised text follows it - without the edges a bare composer swallows the footer and idle reads pending.
 `../../../docs/verification/runtime-backends.md` owns captures.
 Refresh with `FM_HARNESS_LIVENESS_DRIFT=1 ../../../bin/fm-test-run.sh ../../../tests/fm-harness-liveness-drift-live-e2e.test.sh`.
 
