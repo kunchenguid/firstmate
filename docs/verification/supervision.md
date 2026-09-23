@@ -471,6 +471,24 @@ Observed output:
 fm-claude-stop-autoarm: ok
 ```
 
+### Claude drops the exit 2 of a hook it timed out, 2026-09-23
+
+This supports the `bin/fm-claude-stop-autoarm.sh` header statement that a park outliving the hook timeout ends without a rewake.
+It was first measured on Claude Code 2.1.278 and re-measured on 2.1.281 on macOS arm64, in a scratch git project on a private tmux socket with no Firstmate hooks loaded.
+Each arm registered one one-shot async `Stop` hook through `--settings`, with `asyncRewake: true` and `timeout: 30`, in an interactive `claude --model haiku --tools ''` session given one short prompt.
+
+```json
+{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"<probe>/hook-timeout.sh","asyncRewake":true,"timeout":30}]}]}}
+```
+
+The control hook slept 10 seconds, printed a reply request to stderr, and exited 2 on its own.
+The timeout hook trapped `TERM`, backgrounded `sleep 300`, waited, and on `TERM` printed a reply request to stderr and exited 2.
+
+| Arm | Hook log (seconds after the prompt) | Pane afterwards |
+| --- | --- | --- |
+| Control, exit 2 before the timeout | started +2, exited 2 at +12 | `Stop hook feedback` followed by the requested reply |
+| Timeout, exit 2 from the `TERM` handler | started +2, `TERM` and exit 2 at +32 | no `Stop hook feedback` and no reply, still idle at +111 |
+
 ## Watcher continuity
 
 The cross-harness evidence combines the 2026-07-17 live pass with Claude's replacement Stop-owned path revalidated on 2026-09-21, all against isolated project and home state.
