@@ -55,6 +55,16 @@
 # detect_own is the single owner of how the two combine; harness_marker and
 # harness_ancestry only report evidence. Record each newly verified env marker
 # in harness_marker, and each newly verified command name in harness_ancestry.
+# Supervision-branch primary pin: a supervision branch running as its own
+# process under another harness (a Pi engine under a Claude primary detects as
+# pi) would otherwise resolve "own" - and with it an absent or "default"
+# config/crew-harness or config/secondmate-harness - to its own harness and
+# dispatch crew there. While FM_SUPERVISION_ACTOR=branch, a non-empty
+# FM_SUPERVISION_PRIMARY_HARNESS names the primary's harness and replaces
+# detection for the own, crew, and secondmate resolutions; a value that names
+# no known harness refuses (exit 2, nothing on stdout) instead of resolving.
+# Outside the branch actor the pin is ignored, and the evidence-only ancestry
+# verbs never consult it.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -381,6 +391,22 @@ harness_family() {
   esac
 }
 
+# Print the supervision-branch primary pin when it applies (header), or
+# nothing. Returns 2, with the reason on stderr, for a pin naming no harness.
+supervision_primary_pin() {
+  local pin=${FM_SUPERVISION_PRIMARY_HARNESS:-}
+  [ "${FM_SUPERVISION_ACTOR:-}" = branch ] && [ -n "$pin" ] || return 0
+  case "$pin" in
+    claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin)
+      printf '%s\n' "$pin"
+      ;;
+    *)
+      echo "error: FM_SUPERVISION_PRIMARY_HARNESS='$pin' names no known harness; refusing to resolve the supervision branch's harness" >&2
+      return 2
+      ;;
+  esac
+}
+
 # Combine the two evidence layers. The precedence boundary, in one rule: a
 # marker names its harness, but only ancestry proves which harness owns this
 # process tree, so a structural (comm) ancestor of a DIFFERENT harness wins.
@@ -395,8 +421,12 @@ harness_family() {
 #   - Different harness, interpreter-args ancestor only: the marker wins, because
 #     a harness-shaped path in some node process's arguments is weaker evidence
 #     than a harness publishing its own identity.
+# The supervision-branch primary pin, when it applies, answers before either
+# evidence layer is read.
 detect_own() {
-  local marker ancestry strength harness
+  local marker ancestry strength harness pin
+  pin=$(supervision_primary_pin) || exit 2
+  [ -z "$pin" ] || { echo "$pin"; return; }
   marker=$(harness_marker)
   ancestry=$(harness_ancestry)
   if [ -z "$ancestry" ]; then
@@ -463,7 +493,7 @@ secondmate_field() {
 resolve_secondmate() {
   local sm
   sm=$(secondmate_field 1)
-  if [ -z "$sm" ] || [ "$sm" = "default" ]; then sm=$(resolve_crew); fi
+  if [ -z "$sm" ] || [ "$sm" = "default" ]; then sm=$(resolve_crew) || exit; fi
   echo "$sm"
 }
 

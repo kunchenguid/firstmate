@@ -25,6 +25,8 @@ set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$ROOT/bin/fm-timeout-lib.sh"
 
 # An exported TASKS_AXI_BACKEND would outrank each case's .tasks.toml fixture
 # in fm_tasks_axi_backend, so the backend cases must start from a clean slate.
@@ -329,17 +331,15 @@ make_fallback_bin() {  # <case-dir> <tasks-axi-stub-script>
 }
 
 run_bounded_fm_tasks_axi() {  # <fallback-bin> <bound> [args...]
-  local fb=$1 bound=$2 out rc=0 saved_path=$PATH
+  local fb=$1 bound=$2 out rc=0
   shift 2
-  # The fallback shape itself: a PATH with no timeout variant on it. Set and
-  # restored here, never in a subshell, so the change cannot leak into other
-  # tests.
-  PATH="$fb"
+  # The fallback shape itself: a PATH with no timeout variant on it, in force
+  # for the bounded call only. The library is sourced first under the ordinary
+  # PATH, as every real caller does.
   out=$(
     . "$ROOT/bin/fm-backlog-transition-lib.sh"
-    FM_TASKS_AXI_TIMEOUT="$bound" fm_tasks_axi "$@" 2>&1
+    PATH="$fb" FM_TASKS_AXI_TIMEOUT="$bound" fm_tasks_axi "$@" 2>&1
   ) || rc=$?
-  PATH=$saved_path
   printf '%s' "$out"
   return "$rc"
 }
@@ -1475,14 +1475,15 @@ test_deferred_signal_verification_outlives_an_unresponsive_tasks_axi() {
 
   # The read-back's own `start` never answers, so the spawn must bound it
   # (FM_TASKS_AXI_TIMEOUT=3), print the attempted wording naming the timeout,
-  # and exit - the outer `timeout -k 5 30` only turns a regression back into
-  # the lock-held-forever hang it exists to catch.
+  # and exit - the outer 30s bound (fm_run_timed, portable to a host with no
+  # timeout binary) only turns a regression back into the lock-held-forever
+  # hang it exists to catch.
   mkdir -p "$case_dir/user-home"
-  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
+  out=$(fm_run_timed 30 env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$(home_of "$case_dir")" \
     HOME="$case_dir/user-home" FM_SPAWN_NO_GUARD=1 \
     FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" CLAUDE_CONFIG_DIR='' \
     FM_TASKS_AXI_TIMEOUT=3 PATH="$case_dir/fakebin:$PATH" \
-    timeout -k 5 30 "$SPAWN" "$id" "$case_dir/project" \
+    "$SPAWN" "$id" "$case_dir/project" \
     --mode no-mistakes --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "an interrupted spawn reported success"
   case "$rc" in
@@ -2775,11 +2776,11 @@ test_spawn_refuses_a_special_file_tasks_config() {
   rm -f "$home/.tasks.toml"
   mkfifo "$home/.tasks.toml"
 
-  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+  out=$(fm_run_timed 60 env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \
-    timeout 60 "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
+    "$SPAWN" "$id" "$case_dir/project" --mode no-mistakes --yolo off 2>&1) || rc=$?
   [ "$rc" -ne 124 ] || fail "spawn hung reading a special-file tasks-axi config"
   [ "$rc" -ne 0 ] || fail "spawn accepted a special-file tasks-axi config"
   assert_contains "$out" "tasks-axi config is not a regular file" \

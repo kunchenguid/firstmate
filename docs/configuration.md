@@ -46,7 +46,7 @@ A genuinely no-op heartbeat is absorbed in bash and never reaches Pi, and every 
 A broken branch still falls back to today's wake-to-main path in both postures, and the legacy `state/.afk` daemon flag means nothing on Pi.
 While the away-posture record `state/.afk-contract` exists the branch takes every actionable row, no processing turn opens on the parked main, and main's standing authority relocates to the branch through the guarded scripts, each keeping its own gate; [docs/pi-supervision-branch.md](pi-supervision-branch.md#postures) owns that posture.
 While attended the branch's role stays bounded exactly as the captain-approved architecture set it: it cannot merge a PR, land local work, freshly spawn, or answer a decision, and every existing captain gate remains unchanged in either posture.
-Homes on any other primary harness never load this feature and are entirely unaffected.
+Homes on other primary harnesses do not load the Pi branch extension; shared per-task lease behavior is owned by `bin/fm-lease-lib.sh`.
 `AGENTS.md`'s `state/` inventory routes the branch's runtime files to their format and lifecycle owners.
 While attended, a captain-facing (verdict `captain`) branch outcome persists as one exact, sequence-keyed visible transcript entry and then opens one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence through its `fm_branch_processed` tool; while away, the entry persists but processing waits until the record is archived.
 The branch prompt's "Verdict: routine or captain" section owns the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.

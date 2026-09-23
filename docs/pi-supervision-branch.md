@@ -13,10 +13,10 @@ All of that describes the attended posture; the away posture, recorded by `state
 While attended, captain-relevant branch outcomes persist as exact, sequence-keyed visible transcript entries and then open one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence; while away, the entries persist but processing waits until the record is archived.
 The design source is the captain-approved forked-supervision architecture board, a captain-private fleet record (a self-contained HTML explainer with the measured cache and judgment evidence); this document records the shape it landed as, and the delivering PR cites the board artifact itself.
 
-The supervision branch itself is Pi-only by construction:
+This in-process supervision branch is Pi-only by construction:
 
 - The branch lives in `.pi/extensions/fm-branch-supervision.ts`, which only a Pi primary ever loads; no other harness gains branch supervision behavior.
-- The bash-side additions (leases, the outcome store, session-start recovery) are inert in a home with no branch state: no lease files exist, no actor variable is set, every guard passes silently, and no new state appears (`tests/fm-branch-supervision.test.sh` holds this).
+- In a home with no branch state, the bash-side additions remain inert (`tests/fm-branch-supervision.test.sh`); `bin/fm-lease-lib.sh` owns how a pre-existing lease is honored on any harness.
   A home on any harness that already has an outcome store still receives the shared drain compatibility recovery described in [Lost-wake outcome backstop](#lost-wake-outcome-backstop).
 - It does not change which harness is primary and never moves a home to Pi.
 
