@@ -84,10 +84,14 @@
 # `forg=` or `Forge=`) is still ignored, with one stderr warning naming the token
 # and the forge=gerrit spelling. The one refusal is a malformed forge binding - a
 # `forge=` token whose value is empty or outside the closed set - which is
-# REFUSED in both output forms: nothing on stdout, exit status 3, the token
-# named. Resolving it to "no registered forge" would hand a Gerrit project the
-# pull-request contract the binding exists to prevent.
-# local-only with a forge is refused the same way.
+# REFUSED in the default and --forge output forms: nothing on stdout, exit
+# status 3, the token named. Resolving it to "no registered forge" would hand a
+# Gerrit project the pull-request contract the binding exists to prevent.
+# local-only with a forge is refused the same way. --branch-prefix does not make
+# that check: it answers only the registered prefix, and a prefix is orthogonal
+# to the forge binding, so it prints even when the forge token is malformed;
+# every path that reads the forge binding (default, --forge, and spawn's
+# forge-agreement check) still refuses.
 # Usage: fm-project-mode.sh [--raw|--branch-prefix|--forge] <project-name>
 set -eu
 
@@ -184,14 +188,12 @@ while IFS=' ' read -r kind rest; do
 done <<EOF
 $parsed
 EOF
-branch_rest=
 while IFS=' ' read -r m y f b; do
   mode=$m; yolo=$y; rest_forge=$f; branch=$b
 done <<EOF
 $posture
 EOF
 forge=${rest_forge:-none}
-[ -n "$branch" ] || branch=
 case "$mode" in
   no-mistakes|direct-PR|local-only|no-mistakes-prod-only) ;;
   *) echo "warn: unknown mode \"$mode\" for $NAME; defaulting to no-mistakes off" >&2; mode=no-mistakes; yolo=off ;;

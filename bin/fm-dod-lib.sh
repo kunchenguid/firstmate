@@ -428,7 +428,7 @@ Your tree never goes dirty and nothing interrupts you, so a passed run whose fix
 You may not publish until you have closed that gap:
 1. After the run reaches its outcome, read \`branch_sync.next_action\` from \`no-mistakes axi status\`.
 2. When its code is \`recover_custody\`, run the exact command that status prints - \`no-mistakes axi sync --recover\` - and confirm \`branch_sync.state\` comes back \`custody_returned\` on a clean tree. The printed command is authoritative if it differs. The \`run_pipeline\` next action status reports after recovery is not an instruction to run again: the recovered head is the one the passed run validated, so publish it.
-3. Confirm with \`git log\` that \`fm/$id\` now carries every fix commit the run made, whether or not step 2 was needed.
+3. Confirm with \`git log\` that \`$branch\` now carries every fix commit the run made, whether or not step 2 was needed.
 An unrecovered fix round is an unfinished task, never housekeeping: publishing without it is how the UNFIXED code reaches review.
 Your ready report is refused while the run still holds your branch, while its outcome is missing or not passing, or while your HEAD's tree differs from the run's result.
 
