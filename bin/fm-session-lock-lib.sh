@@ -108,6 +108,19 @@ fm_harness_process_matches() {  # <comm> <args>
 # claude), with no non-harness process between them. Which pid in that run is the
 # session cannot be read off the ancestry at all, so the whole contiguous run is
 # reported and the callers below decide what they need from it.
+#
+# A "claude daemon run" or "claude bg-spare" pid is a shared background layer,
+# never the per-session process this walk exists to find, so it is skipped
+# rather than printed. It is PASSED THROUGH rather than treated as the top of
+# the walk: Claude Code's process layout has grown a second such layer
+# ("bg-spare") below "bg-pty-host", and a build that puts one of these layers
+# closer to the hook than any printable pid must not let that layer's own
+# match stop the walk before it ever reaches the outermost interactive
+# session above it (verified 2026-09-22, Claude Code 2.1.280: hook shell ->
+# claude bg-spare -> claude bg-pty-host -> claude daemon run --origin
+# transient -> the outermost interactive claude). Skipping still ends the
+# contiguous run at the first genuinely non-harness ancestor once printing
+# has started, exactly as before.
 fm_harness_ancestry_pids() {
   local pid=$$ comm args extending=0 printed=0
   for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
@@ -115,12 +128,13 @@ fm_harness_ancestry_pids() {
     args=$(ps -o args= -p "$pid" 2>/dev/null)
     if fm_harness_process_matches "$comm" "$args"; then
       if [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] && printf '%s\n' "$args" | grep -qE 'daemon run|bg-spare'; then
-        break
+        :
+      else
+        printf '%s\n' "$pid"
+        printed=1
+        [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
+        extending=1
       fi
-      printf '%s\n' "$pid"
-      printed=1
-      [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
-      extending=1
     elif [ "$extending" -eq 1 ]; then
       break
     fi

@@ -574,9 +574,16 @@ if [ -n "$FIRE_AND_FORGET_ID" ]; then
     || { echo "error: --fire-and-forget delivery id must be 16 lowercase hex characters" >&2; exit 1; }
   [ "$MARK_FROM_FIRSTMATE" = 1 ] \
     || { echo "error: --fire-and-forget requires a recorded secondmate task selector" >&2; exit 1; }
-  [ -z "$RESOLVE_KEYS" ] \
-    || { echo "error: --fire-and-forget cannot accompany --resolve-key" >&2; exit 1; }
 fi
+# --resolve-key and --fire-and-forget are independent by design and combine
+# freely: --resolve-key closes an open decision/blocker in the target's status
+# log (fm_send_close_resolved_keys, keyed off RESOLVE_KEYS alone), while
+# --fire-and-forget only decides whether THIS send mints a new pending-reply
+# correlation (PENDING_REPLY_CORR, skipped entirely when FIRE_AND_FORGET_ID is
+# set). Refusing the combination left an escalated pending-reply decision
+# unclosable except by arming another correlation
+# (bin/fm-pending-reply-lib.sh's escalation-lifecycle note names fm-send
+# --resolve-key as that decision's own operator-facing close).
 
 if [ -n "$RESOLVE_KEYS" ]; then
   if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then

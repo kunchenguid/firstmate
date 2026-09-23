@@ -389,6 +389,54 @@ test_local_secondmate_answer_marked_and_closed() {
   pass "fm-send --resolve-key: a marked local-secondmate answer closes with the plain answer text"
 }
 
+# The reported defect: an escalated pending-reply decision could not be closed
+# without arming ANOTHER pending-reply correlation, because --resolve-key and
+# --fire-and-forget used to refuse each other outright. The two are actually
+# independent (the header contract: --resolve-key closes the status-log
+# decision, --fire-and-forget only skips minting a new correlation for THIS
+# send), so an operator dismissing a false escalation must be able to close it
+# with a fire-and-forget answer and create no new expectation at all.
+test_fire_and_forget_combines_with_resolve_key_to_close_reserved_key() {
+  local dir fb log home rc out corr key got closing
+  dir="$TMP_ROOT/faf-resolve"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home faf-resolve)
+  fm_write_secondmate_meta "$home/state/domain.meta" "$home" "sess:fm-domain"
+  corr=abcdef0123456789
+  key="pending-reply-$corr"
+  printf 'blocked [key=%s]: pending-reply-missed: task=domain pending-reply-id=%s request=ship it\n' \
+    "$key" "$corr" > "$home/state/domain.status"
+
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F "[key=$key]" >/dev/null \
+    || fail "precondition: the reserved pending-reply decision should list as open: $out"
+
+  run_send "$fb" "$home" "$log" fm-domain --resolve-key "$key" --fire-and-forget 1234567890abcdef \
+    "ack, false escalation"; rc=$?
+  expect_code 0 "$rc" "--resolve-key combined with --fire-and-forget should succeed, not refuse"
+
+  got=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" \
+    "$home/state/domain.inbox/001.msg")
+  case "$got" in
+    "$FM_FROMFIRST_MARK"delivery=1234567890abcdef*) : ;;
+    *) fail "the fire-and-forget record should carry the delivery-id marker, not a correlation: $got" ;;
+  esac
+
+  closing=$(grep -F "pending-reply-resolved: task=domain pending-reply-id=$corr via=operator-resolve-key" \
+    "$home/state/domain.status" || true)
+  [ -n "$closing" ] || fail "the fire-and-forget answer did not close the reserved decision:"$'\n'"$(cat "$home/state/domain.status")"
+
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then
+    fail "the reserved decision still lists as open after a fire-and-forget --resolve-key answer: $out"
+  fi
+
+  if [ -d "$home/state/pending-replies" ] && [ -n "$(ls -A "$home/state/pending-replies" 2>/dev/null)" ]; then
+    fail "a fire-and-forget answer should not mint a new pending-reply expectation: $(ls "$home/state/pending-replies")"
+  fi
+  pass "fm-send --resolve-key: combines with --fire-and-forget to close a reserved decision without arming a new correlation"
+}
+
 # Remote secondmate: the answer crosses the (stubbed) ssh transport through the
 # real fm-on.sh + registry route, while the close is the SAME local ledger
 # append as every other target kind - the transport is the only difference.
@@ -729,6 +777,7 @@ test_failed_ring_still_closes_at_enqueue
 test_failed_enqueue_does_not_close
 test_multiple_keys_close_together
 test_local_secondmate_answer_marked_and_closed
+test_fire_and_forget_combines_with_resolve_key_to_close_reserved_key
 test_remote_secondmate_answer_closes_locally
 test_remote_reply_corr_tag_does_not_block_resolve_key
 test_remote_transport_failure_does_not_close

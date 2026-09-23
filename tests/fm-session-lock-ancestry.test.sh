@@ -343,6 +343,66 @@ SH
   pass "session-lock: daemon-hosted ancestry stops before the daemon, non-Claude unchanged, legacy lock treated as stale"
 }
 
+# 2026-09-22 live evidence (Claude Code 2.1.280): a second pass-through layer,
+# "bg-spare", now sits BELOW "bg-pty-host" in the chain and can be the very
+# first harness match the walk reaches - hook shell -> claude bg-spare ->
+# claude bg-pty-host -> claude daemon run --origin transient -> the outermost
+# interactive claude. The walk must pass through every daemon/spare layer
+# instead of stopping at the first one, so it still reaches and reports the
+# outermost interactive session above them.
+test_daemon_hosted_session_ancestry_with_bg_spare_layer() {
+  local dir fakebin got
+  dir="$TMP_ROOT/daemon-ancestry-bg-spare"
+  fakebin=$(fm_fakebin "$dir")
+  mkdir -p "$dir/state"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+field= pid=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field=$2; shift 2 ;;
+    -p) pid=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+case "$pid:$field" in
+  16182:comm=) printf '%s\n' claude ;;
+  16182:args=) printf '%s\n' 'claude' ;;
+  16182:ppid=) printf '%s\n' 1 ;;
+  65263:comm=) printf '%s\n' claude ;;
+  65263:args=) printf '%s\n' 'claude daemon run --origin transient' ;;
+  65263:ppid=) printf '%s\n' 16182 ;;
+  65300:comm=) printf '%s\n' claude ;;
+  65300:args=) printf '%s\n' 'claude bg-pty-host' ;;
+  65300:ppid=) printf '%s\n' 65263 ;;
+  65310:comm=) printf '%s\n' claude ;;
+  65310:args=) printf '%s\n' 'claude bg-spare --bg-spare /tmp/cc-daemon/spare.claim.sock' ;;
+  65310:ppid=) printf '%s\n' 65300 ;;
+  65320:comm=) printf '%s\n' zsh ;;
+  65320:args=) printf '%s\n' zsh ;;
+  65320:ppid=) printf '%s\n' 65310 ;;
+  *:comm=) printf '%s\n' bash ;;
+  *:args=) printf '%s\n' 'bash /repo/bin/fm-claude-stop-autoarm.sh' ;;
+  *:ppid=) printf '%s\n' 65320 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+
+  got=$(lib_eval "$fakebin" 'fm_harness_ancestry_pid') \
+    || fail "the walk did not reach the outermost interactive session past bg-spare and bg-pty-host"
+  [ "$got" = 16182 ] || fail "ancestry resolved '$got', expected the outermost interactive session 16182"
+
+  printf '16182\n' > "$dir/state/.lock"
+  lib_eval "$fakebin" "fm_session_lock_owned_by_self '$dir/state'" \
+    || fail "the outermost interactive session did not recognize its own lock past two pass-through layers"
+
+  if lib_eval "$fakebin" 'fm_harness_pid_alive 65263'; then
+    fail "the transient daemon-run pid was treated as a valid standalone lock owner"
+  fi
+  pass "session-lock: the walk passes through a bg-spare layer below bg-pty-host to reach the outermost session"
+}
+
 # --- end-to-end layer: the real Stop auto-arm in real process trees ----------
 
 install_autoarm_scripts() {
@@ -490,3 +550,4 @@ test_e2e_version_named_session_claims_the_home
 test_e2e_daemon_parented_session_claims_the_home
 test_e2e_daemon_parented_version_named_session_keeps_its_lock
 test_daemon_hosted_session_ancestry
+test_daemon_hosted_session_ancestry_with_bg_spare_layer

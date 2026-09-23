@@ -264,6 +264,14 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # any legitimate interval without observable progress, including silent long
 # tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
+# Backstop for a worker that finished and said so only through chat or an
+# interactive pane menu, never a done:/failed:/needs-decision:/blocked: status
+# line (the 2026-08-29 silent-done strand: two agents sat idle 15 days before an
+# unrelated Bridge snapshot check caught them). Unlike the hash-stability
+# escalation cascade above, this is a plain wall-clock idle-duration bound,
+# independent of pane-hash churn or escalation counts, so it still fires even
+# where that cascade's own state has gone quiet. See silent_idle_check below.
+SILENT_IDLE_SECS=${FM_SILENT_IDLE_SECS:-7200}
 # A local secondmate's foreign queue is checked on every poll, but only after this
 # bounded interval with no drain progress can it produce a parent notification.
 # A healthy mate drains its queue between turns, not inside one, so this default
@@ -955,6 +963,41 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
       fi
       ;;
   esac
+}
+
+# Wall-clock silent-idle backstop: one wake, once per idle stretch, when a
+# window has been observed idle (not busy) for SILENT_IDLE_SECS with no
+# terminal status line and no declared pause/captain-held transfer. Runs on
+# every poll regardless of pane-hash stability, so it does not depend on - and
+# cannot be starved by - the hash-stability cascade's own escalation state.
+# Surface only: never tears down or steers the worker, matching every other
+# stale reason in this file.
+# A declared paused: (or captain-held) line suppresses it exactly like the
+# rest of the stale machinery (status_is_paused_or_captain_held), and any real
+# terminal verb (done/needs-decision/blocked/failed, status_is_terminal_verb)
+# means the worker already reported and this backstop has nothing to add.
+silent_idle_check() {  # <window> <task> <busy_now>
+  local win=$1 task=$2 busy_now=$3 key sincef markf last age reason
+  [ -n "$task" ] || return 0
+  [ "$SILENT_IDLE_SECS" -gt 0 ] || return 0
+  key=$(window_key "$win")
+  sincef="$STATE/.silent-idle-since-$key"
+  markf="$STATE/.silent-idle-surfaced-$key"
+  last=$(last_status_line "$STATE/$task.status")
+  if [ "$busy_now" -eq 0 ] \
+    || status_is_terminal_verb "$last" \
+    || status_is_paused_or_captain_held "$last"; then
+    rm -f "$sincef" "$markf"
+    return 0
+  fi
+  [ -e "$sincef" ] || date +%s > "$sincef"
+  [ -e "$markf" ] && return 0
+  age=$(age_of "$sincef")
+  [ "$age" -ge "$SILENT_IDLE_SECS" ] || return 0
+  reason="stale: $win (silent-idle ${age}s, harness idle at its prompt with no terminal status line; inspect only, do not tear down or steer)"
+  fm_wake_append stale "$win" "$reason" || exit 1
+  : > "$markf"
+  wake "$reason"
 }
 
 # busy_turn_over_age: 0 iff the last completed turn or explicit native-harness
@@ -2259,6 +2302,7 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    silent_idle_check "$w" "$task" "$busy_now"
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"

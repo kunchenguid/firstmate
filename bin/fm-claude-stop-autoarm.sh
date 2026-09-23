@@ -51,6 +51,18 @@
 #     last-resort notice per failure episode; later consecutive failures still
 #     exit 2 to guarantee the next Stop-owned retry without repeating notice,
 #     until the synchronous guard has consumed its attended fail-open.
+#   - Successor ownership: this hook is the SOLE re-arm owner for Claude, by
+#     design, unlike Pi/omp/OpenCode's extensions which start a successor
+#     BEFORE delivering a wake (docs/watcher-continuity.md "Actionable wake
+#     ordering" and "Ownership" own that contrast in full). A watcher cycle
+#     that closes always records successor=none in
+#     state/.watch-cycle-exits.log: bin/fm-watch-arm.sh never starts a
+#     replacement itself for Claude, because the Stop-owned generation claim
+#     above is what starts the next arm, at the NEXT Stop after the handling
+#     turn. A second arm owner inside the arm layer would race this hook's
+#     single-flight claim instead of closing the gap, so none is added here;
+#     the dead-owner-with-a-live-next-Stop reclaim documented above is the
+#     whole fix for a frozen "arming" ledger entry.
 #
 # The epoch ledger state/.claude-autoarm-epoch records the latest claim
 # generation and outcome, and binds rewake outcomes to the session-lock pid and

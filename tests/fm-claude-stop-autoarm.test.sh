@@ -1055,6 +1055,39 @@ test_stuck_generation_claim_is_superseded_and_rearms() {
   pass "auto-arm: a hung generation owner with no watcher beat is superseded so re-arming self-heals"
 }
 
+# The 2026-09-21/22 main-home outage: a generation owner that dies mid-arm,
+# before ever completing its terminal ledger write, leaves outcome=arming with
+# a genuinely DEAD owner_pid (not merely stuck past grace like the case above).
+# fm_pid_alive fails immediately on a dead pid regardless of ledger or beacon
+# age, so this must be reclaimed on the very next firing without waiting out
+# any grace window; a ledger frozen this way must not leave the next Stop
+# firing inert.
+test_dead_owner_generation_claim_is_reclaimed_immediately() {
+  local dir out status pid identity
+  dir=$(make_primary_dir "$TMP_ROOT/v2-dead-owner-claim")
+  : > "$dir/state/task1.meta"
+  write_arm_fixture "$dir" actionable
+  sleep 60 &
+  pid=$!
+  identity=$(fm_test_pid_identity "$pid") || fail "could not record identity before killing the fixture pid"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  kill -0 "$pid" 2>/dev/null && fail "fixture pid did not actually die; test cannot prove a dead-owner reclaim"
+  printf 'epoch=313 owner_pid=%s outcome=arming updated_at=%s\n%s\n' \
+    "$pid" "$(date +%s)" "$identity" > "$dir/state/.claude-autoarm-epoch"
+  # Fresh timestamps on purpose: a dead owner must be reclaimed even though
+  # neither the ledger entry nor the beacon has aged into the stuck-claim grace
+  # window, unlike the live-but-hung case above.
+  out=$(run_autoarm "$dir" 2>/dev/null); status=$?
+  expect_code 2 "$status" "a ledger naming a dead owner_pid with outcome=arming must not leave the next Stop firing inert"
+  [ -e "$dir/state/arm-ran" ] || fail "a dead-owner generation claim left the home unarmed with work in flight"
+  assert_contains "$out" "firstmate watcher wake" "the reclaiming generation must still translate its wake"
+  [ "$(epoch_field "$dir" epoch)" -gt 313 ] || fail "reclaim did not advance the ledger past the dead owner's generation: $(epoch_field "$dir" epoch)"
+  [ "$(epoch_field "$dir" owner_pid)" != "$pid" ] || fail "reclaimed ledger still names the dead owner"
+  [ "$(epoch_outcome "$dir")" = rewake ] || fail "reclaimed cycle did not record its own outcome: $(epoch_outcome "$dir")"
+  pass "auto-arm: a dead-owner arming claim is reclaimed on the very next firing, no grace wait required"
+}
+
 # Identity is mandatory at read time: a bare identityless one-line arming
 # ledger naming an unrelated live pid is NOT an open claim - it must neither
 # defer the hook nor survive as the current entry, whatever the beacon says.
@@ -1231,6 +1264,7 @@ test_stuck_live_legacy_owner_is_retired_and_reclaimed
 test_stopped_legacy_owner_is_reclaimed_with_term_pending
 test_open_generation_claim_defers_without_any_lock
 test_stuck_generation_claim_is_superseded_and_rearms
+test_dead_owner_generation_claim_is_reclaimed_immediately
 test_identityless_ledger_never_defers
 test_superseded_owner_never_reinvokes_the_arm
 test_superseded_owner_goes_silent_and_never_double_translates

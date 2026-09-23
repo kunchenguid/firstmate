@@ -1969,6 +1969,69 @@ test_nonterminal_stale_not_working_surfaced() {
   pass "a not-provably-working non-terminal stale is surfaced immediately (never left to wait out the timer)"
 }
 
+# --- silent-idle backstop: a plain wall-clock idle-duration check, independent
+#     of the hash-stability cascade above (bin/fm-watch.sh's silent_idle_check) --
+# The 2026-08-29 silent-done strand: two agents finished only through chat or an
+# interactive pane menu, never wrote a done:/failed:/needs-decision:/blocked:
+# status line, and sat idle for 15 days before an unrelated Bridge snapshot check
+# caught them. This backstop fires once a window has been observed idle for
+# FM_SILENT_IDLE_SECS with no terminal status line, using a distinct "silent-idle"
+# reason so it is never confused with a possible-wedge escalation.
+test_silent_idle_backstop_surfaces_a_terminal_status_gap() {
+  local dir state fakebin out drain_out capture_file window key sig pid
+  dir=$(make_case silent-idle-backstop); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"; capture_file="$dir/pane.txt"
+  window="test:fm-silent"
+  printf 'idle prompt, finished' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/silent.meta"
+  # Non-terminal status: the worker never wrote a captain-relevant verb.
+  printf 'working: implementing\n' > "$state/silent.status"
+  sig=$(seen_sig "$state/silent.status"); printf '%s' "$sig" > "$state/.seen-silent_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_SILENT_IDLE_SECS=1 FM_STALE_ESCALATE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 150 || fail "watcher did not surface a silent-idle backstop wake within the bound"
+  grep -F "stale: $window (silent-idle" "$out" >/dev/null \
+    || fail "watcher did not print the distinct silent-idle wake: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a silent-idle wake was mislabeled a wedge"
+  [ -e "$state/.silent-idle-surfaced-$key" ] || fail "silent-idle surfaced marker was not recorded"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the silent-idle wake failed"
+  grep "$(printf '\tstale\t')" "$drain_out" | grep -F "$window" >/dev/null || fail "silent-idle wake was not queued"
+  pass "silent-idle backstop: a live worker idle past FM_SILENT_IDLE_SECS with no terminal status line surfaces once, distinctly labeled"
+}
+
+test_silent_idle_backstop_suppressed_by_declared_pause() {
+  local dir state fakebin out capture_file window sig pid key
+  dir=$(make_case silent-idle-paused); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"
+  window="test:fm-silent-paused"
+  printf 'idle prompt, waiting' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/silentpaused.meta"
+  printf 'paused: waiting on an upstream release\n' > "$state/silentpaused.status"
+  sig=$(seen_sig "$state/silentpaused.status"); printf '%s' "$sig" > "$state/.seen-silentpaused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_SILENT_IDLE_SECS=1 FM_STALE_ESCALATE_SECS=999999 FM_PAUSE_RESURFACE_SECS=999999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40
+  if grep -F "silent-idle" "$out" >/dev/null; then
+    fail "a declared paused: line should suppress the silent-idle backstop: $(cat "$out")"
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  assert_absent "$state/.silent-idle-surfaced-$key" "a declared pause should never let the silent-idle timer arm"
+  pass "silent-idle backstop: a declared paused: line suppresses it exactly like the ordinary stale cadence"
+}
+
 # --- non-terminal stale, crew DECLARED a pause: absorbed, re-surfaced on a long
 #     cadence, never wedge-escalated ------------------------------------------
 # The live 2026-07-09/10 case: a crew intentionally held awaiting an upstream tool
@@ -4859,6 +4922,8 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated
 test_afk_busy_declared_pause_hands_off_plain_stale
 test_afk_busy_declared_pause_ticking_pane_hands_off_once
 test_nonterminal_stale_not_working_surfaced
+test_silent_idle_backstop_surfaces_a_terminal_status_gap
+test_silent_idle_backstop_suppressed_by_declared_pause
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_is_bounded_but_live_gate_surfaces
 test_absorbed_replacement_wait_does_not_inherit_the_old_throttle
