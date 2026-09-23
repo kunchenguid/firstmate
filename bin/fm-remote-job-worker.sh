@@ -78,6 +78,7 @@ WORKER_LANE_HOMES=()
 WORKER_LANE_PIDS=()
 WORKER_LANE_STARTS=()
 WORKER_LANE_JOBS=()
+WORKER_LANE_SCAN_AT=0
 
 worker_error() { printf 'remote-job-worker: %s\n' "$1" >&2; }
 
@@ -901,9 +902,13 @@ worker_reap_finished_lanes() {
 # orphan recovery a crashed worker's job gets.
 worker_stop_overrun_lanes() {
   local i=0 count=${#WORKER_LANE_PIDS[@]} pid start job deadline now
-  # The serving loop calls this on every poll, so it costs nothing at all while
-  # no lane is tracked rather than reading the clock twenty times a second.
+  # The serving loop calls this on every poll, so it does nothing at all while
+  # no lane is tracked and at most once a second otherwise. Both guards read
+  # only shell state: a scan of its own on every poll would have cost several
+  # forks twenty times a second for a deadline that moves once a second.
   [ "$count" -gt 0 ] || return 0
+  [ "$SECONDS" -ge "$WORKER_LANE_SCAN_AT" ] || return 0
+  WORKER_LANE_SCAN_AT=$((SECONDS + 1))
   now=$(date +%s)
   while [ "$i" -lt "$count" ]; do
     pid=${WORKER_LANE_PIDS[$i]}
