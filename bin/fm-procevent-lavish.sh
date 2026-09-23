@@ -590,6 +590,9 @@ lavish_prompt_frame() {  # <mode: read|choices> <mode-args...> <result-file>
     my $yaml_re = $mode eq "choices"
       ? qr/^prompts\[(\d+)\]:\s*$/
       : qr/^(?:prompts|feedback)\[(\d+)\]:\s*$/;
+    my $hint_re = $mode eq "choices"
+      ? qr/^prompts[:\[(]/
+      : qr/^(?:prompts|feedback)[:\[(]/;
     for my $i (0 .. $#lines) {
       my $line = $lines[$i];
       if ($line =~ $csv_re) {
@@ -602,7 +605,7 @@ lavish_prompt_frame() {  # <mode: read|choices> <mode-args...> <result-file>
         $body = $i + 1;
         last;
       }
-      $frame_hint = 1 if $line =~ /^(?:prompts|feedback)[:\[(]/;
+      $frame_hint = 1 if $line =~ $hint_re;
     }
 
     my @rows;

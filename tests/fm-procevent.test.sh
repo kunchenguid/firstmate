@@ -3284,7 +3284,8 @@ assert_contains "$out" $'tag: li\n' "a YAML annotation lost its element tag"
 assert_contains "$out" "target_type: text-range" "a quoted text-range annotation lost its target type"
 assert_contains "$out" $'target_text:\n| synthetic text 5' \
   "a quoted text-range annotation lost the quoted text"
-assert_not_contains "$out" "malformed_items: [1-9]" "a clean YAML frame reported malformed items"
+assert_contains "$out" "malformed_items: 0" \
+  "a clean YAML frame did not report zero malformed items"
 pass "read presents every comment from the YAML-style frame"
 
 # The same shared reader must keep the flat CSV frame working beside the new
