@@ -144,12 +144,12 @@ write_brief() { # <home> <id>
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" repro-project --scout >/dev/null 2>&1 \
     || fail "could not scaffold the scout brief for $id"
   brief="$home/data/$id/brief.md"
-  python3 - "$brief" <<'PY' || fail "could not fill the scout brief"
+  python3 - "$brief" "$home/instruction-processed" <<'PY' || fail "could not fill the scout brief"
 import sys
 p = sys.argv[1]
 s = open(p).read()
-s = s.replace('{TASK}', 'Confirm you are processing instructions: reply with the single line INSTRUCTION_PROCESSED and then stop working. Do not read or change anything else.')
-s = s.replace('{FIRSTMATE_SPEC}', 'This is a launch-readiness probe. Process the intent above exactly once, print INSTRUCTION_PROCESSED, and stop.')
+s = s.replace('{TASK}', f'Confirm you are processing instructions: write the single line INSTRUCTION_PROCESSED to {sys.argv[2]} and then stop working. Do not read or change anything else.')
+s = s.replace('{FIRSTMATE_SPEC}', 'This is a launch-readiness probe. Create the requested marker file exactly once and stop.')
 open(p, 'w').write(s)
 if '{TASK}' in s or '{FIRSTMATE_SPEC}' in s:
     sys.exit(1)
@@ -198,6 +198,8 @@ lab pane close "$PANE1" >/dev/null 2>&1 || true
 make_shim "$SCRATCH/shim-2" "$SCRATCH/agent-2" 0
 make_home "$SCRATCH/home-2"
 write_brief "$SCRATCH/home-2" pitrust2
+MARKER2="$SCRATCH/home-2/instruction-processed"
+[ ! -e "$MARKER2" ] || fail "the instruction-processing marker already exists before launch"
 (
   cd "$SCRATCH" \
     && PATH="$SCRATCH/shim-2:$PATH" FM_HOME="$SCRATCH/home-2" \
@@ -222,7 +224,7 @@ for ((i = 0; i < 150; i++)); do
   if printf '%s' "$TAIL2" | grep -qiE 'Trust project folder\?'; then
     fail "the approved launch still rendered the folder-trust dialog$(version_note)"
   fi
-  if printf '%s' "$TAIL2" | grep -q 'INSTRUCTION_PROCESSED'; then
+  if [ -f "$MARKER2" ] && [ "$(cat "$MARKER2")" = INSTRUCTION_PROCESSED ]; then
     SEEN_MARKER=1
     break
   fi
@@ -241,11 +243,24 @@ OP_TRUST_MID=$(sha256sum "$OP_TRUST" | cut -d' ' -f1)
 pass "one-run approval left both the isolated and the operator trust stores untouched"
 
 # --- Case 4: a saved parent decision masks the stall (why slots vary) ------
-PARENT4=$(dirname "$(sed -n 's/^worktree=//p' "$META2" | head -1)")
-[ -n "$PARENT4" ] || fail "no recorded worktree to derive a trusted parent from"
+WORKTREE4=$(sed -n 's/^worktree=//p' "$META2" | head -1)
+[ -n "$WORKTREE4" ] && [ -d "$WORKTREE4/.pi" ] \
+  || fail "no recorded worktree with project-local resources"
+PARENT4=$(dirname "$WORKTREE4")
 make_shim "$SCRATCH/shim-4" "$SCRATCH/agent-4" 0
-printf '{\n  "%s": true\n}\n' "$PARENT4" > "$SCRATCH/agent-4/trust.json"
-WS4=$(lab workspace create --label fm-pi-trust-saved --cwd "$PARENT4" 2>&1) \
+WS4_UNTRUSTED=$(lab workspace create --label fm-pi-trust-unsaved --cwd "$WORKTREE4" 2>&1) \
+  || fail "could not create the untrusted child workspace: $WS4_UNTRUSTED"
+PANE4_UNTRUSTED=$(printf '%s' "$WS4_UNTRUSTED" | jq -r '.result.root_pane.pane_id // empty')
+[ -n "$PANE4_UNTRUSTED" ] || fail "workspace create did not return a root pane id"
+PATH="$SCRATCH/shim-4:$PATH" lab pane run "$PANE4_UNTRUSTED" pi >/dev/null 2>&1 \
+  || fail "could not launch the real pi in the untrusted child pane"
+wait_for_regex "$PANE4_UNTRUSTED" 'Trust project folder\?' 45 'the same child worktree without parent trust'
+lab pane close "$PANE4_UNTRUSTED" >/dev/null 2>&1 \
+  || fail "could not close the untrusted child pane"
+[ "$(cat "$SCRATCH/agent-4/trust.json")" = '{}' ] \
+  || fail "the untrusted child launch persisted a trust decision"
+jq -n --arg parent "$PARENT4" '{($parent): true}' > "$SCRATCH/agent-4/trust.json"
+WS4=$(lab workspace create --label fm-pi-trust-saved --cwd "$WORKTREE4" 2>&1) \
   || fail "could not create the saved-trust workspace: $WS4"
 PANE4=$(printf '%s' "$WS4" | jq -r '.result.root_pane.pane_id // empty')
 [ -n "$PANE4" ] || fail "workspace create did not return a root pane id"

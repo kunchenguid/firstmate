@@ -133,7 +133,10 @@ Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-
 
 ### Pi one-run project-resource approval
 
-On 2026-09-23, the installed Pi 0.87.0 advertised the scoped `--approve` flag as `Trust project-local files for this run`, and the live guard proved the full contract end to end on Herdr 0.9.1: a bare pi launch in a fresh untrusted worktree parks on the `Trust project folder?` dialog, a managed `fm-spawn` launch carrying `--approve` never renders it and processes its brief, the approval is one-run (the isolated trust store stays empty), a saved parent-path decision masks the dialog on a bare launch (why previously answered pool slots never stall), and a pi whose `--help` omits `--approve` is refused before any endpoint or metadata exists.
+The initial Pi 0.87.0 and Herdr 0.9.1 guard run observed the folder-trust dialog, the managed launch's `--approve` argument, unchanged trust stores, and refusal when the approval flag was unavailable.
+Its readiness assertion could accept echoed prompt text, and its saved-parent case launched in the parent directory, so that run did not establish instruction processing or inherited trust.
+The corrected guard requires a model-created marker absent before launch and compares the same child worktree with and without its parent's saved trust decision.
+Those two guarantees await a fresh live run using the command below.
 
 ```sh
 pi --version
@@ -148,9 +151,7 @@ Observed bounded output:
 0.87.0
   --approve, -a                  Trust project-local files for this run
 ok - bare pi in a fresh untrusted worktree parks on Trust project folder? [herdr 0.9.1, pi 0.87.0]
-ok - the managed launch carries --approve, never renders the dialog, and processes its brief [herdr 0.9.1, pi 0.87.0]
 ok - one-run approval left both the isolated and the operator trust stores untouched
-ok - a saved parent-path trust decision skips the dialog on a bare launch (the per-slot masking) [herdr 0.9.1, pi 0.87.0]
 ok - a pi whose --help omits --approve is refused before endpoint or metadata exists [herdr 0.9.1, pi 0.87.0]
 ```
 
