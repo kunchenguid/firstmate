@@ -1134,8 +1134,14 @@ def abandon_charged_search(
     state: dict[str, Any],
     phase: str,
     error: BaseException,
-    falsification: dict[str, Any] | None,
+    falsification_block: dict[str, Any] | None,
 ) -> None:
+    if falsification_block is not None and phase == "falsification":
+        falsification_block = {
+            **falsification_block,
+            "ok": False,
+            "failure_class": falsification_block["failure_class"] or "falsification-not-completed",
+        }
     publish_final(
         workspace,
         state,
@@ -1149,11 +1155,7 @@ def abandon_charged_search(
                 "phase": phase,
                 "error": f"{type(error).__name__}: {error}"[-2000:],
             },
-            "falsification": None if falsification is None else {
-                "ok": falsification.get("ok", False),
-                "metrics": falsification.get("metrics"),
-                "failure_class": falsification.get("failure_class", ""),
-            },
+            "falsification": falsification_block,
             "sealed": {
                 "ok": False,
                 "metrics": None,
@@ -1182,7 +1184,7 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
         raise LabError("falsification-budget-exhausted")
     best_sha = state["global_best_sha256"]
     selected_sha = best_sha
-    falsification: dict[str, Any] | None = None
+    falsification_block: dict[str, Any] | None = None
     charged_phase = ""
     try:
         if manifest["controller"] == "proposed":
@@ -1214,6 +1216,11 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
                 ),
                 ("", None),
             )
+            falsification_block = {
+                "ok": unusable is None,
+                "metrics": falsification.get("metrics"),
+                "failure_class": "" if unusable is None else f"{failed_arm}-{unusable.get('failure_class', 'runtime')}",
+            }
             if unusable is None:
                 keep, _, _ = metric_comparison(falsification["metrics"], baseline_metrics["metrics"], manifest)
                 if best_sha != state["baseline_sha256"] and not keep:
@@ -1234,14 +1241,14 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
                     "changes": {},
                     "metrics": falsification.get("metrics"),
                     "verdict": "FAIL" if unusable is not None else ("KEEP" if selected_sha == best_sha else "REVERT"),
-                    "failure_class": "" if unusable is None else f"{failed_arm}-{unusable.get('failure_class', 'runtime')}",
+                    "failure_class": falsification_block["failure_class"],
                     "wall_seconds": falsification.get("wall_seconds", 0.0) + baseline_metrics.get("wall_seconds", 0.0),
                     "resources": {"tokens": 0, "planning_tokens": 0},
                     "replay": "sealed-by-design:not-part-of-attempt-replay",
                 },
             )
             if unusable is not None:
-                raise LabError(f"falsification-evaluation-failed:{failed_arm}-{unusable.get('failure_class', 'runtime')}")
+                raise LabError(f"falsification-evaluation-failed:{falsification_block['failure_class']}")
 
         charged_phase = "sealed"
         state["sealed_calls"] += 1
@@ -1261,11 +1268,7 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
                 "selected_candidate_sha256": selected_sha,
                 "development_best_sha256": best_sha,
                 "aborted": None,
-                "falsification": None if falsification is None else {
-                    "ok": falsification.get("ok", False),
-                    "metrics": falsification.get("metrics"),
-                    "failure_class": falsification.get("failure_class", ""),
-                },
+                "falsification": falsification_block,
                 "sealed": {
                     "ok": True,
                     "metrics": sealed["metrics"],
@@ -1281,7 +1284,7 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
         )
     except BaseException as exc:
         if charged_phase:
-            abandon_charged_search(workspace, manifest, state, charged_phase, exc, falsification)
+            abandon_charged_search(workspace, manifest, state, charged_phase, exc, falsification_block)
         raise
     (workspace / "candidate.py").write_bytes(sealed_candidate.read_bytes())
     print_final(final)

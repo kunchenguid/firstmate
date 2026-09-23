@@ -500,13 +500,58 @@ candidate_wall = row["wall_seconds"]
 assert row["failure_class"].startswith("baseline-"), row["failure_class"]
 assert row["metrics"] is not None, "the candidate arm scored, so its metrics belong in the record"
 assert candidate_wall > 0.0, candidate_wall
-assert final["falsification"]["ok"] is True, final["falsification"]
+assert final["falsification"]["ok"] is False, "an aborted phase must never publish ok:true"
 assert final["falsification"]["metrics"] is not None, final["falsification"]
-assert final["falsification"]["failure_class"] == "", final["falsification"]
+assert final["falsification"]["failure_class"] == row["failure_class"], (final["falsification"], row)
 assert final["aborted"]["phase"] == "falsification", final["aborted"]
 assert "baseline-" in final["aborted"]["error"], final["aborted"]
 PY
   pass "competition scientist: a failed falsification control arm is not charged to the selected candidate"
+}
+
+test_final_falsification_block_reports_the_whole_phase() {
+  local workspace best output status
+  workspace="$TMP_ROOT/falsification-phase-candidate"
+  init_workspace "$workspace" grouped-classification proposed 4 2
+  write_proposal "$TMP_ROOT/phase-flip.json" phase-flip "remove the flipping feature for the phase check" main '{"GROUPED_SPURIOUS_WEIGHT":0.0}'
+  $LAB attempt "$workspace" --proposal "$TMP_ROOT/phase-flip.json" >/dev/null
+  best=$(python3 -c 'import json,pathlib,sys; print(json.loads((pathlib.Path(sys.argv[1]) / ".run/state.json").read_text())["global_best_sha256"])' "$workspace")
+  chmod u+w "$workspace/artifacts/$best/candidate.py"
+  printf 'BROKEN =\n' > "$workspace/artifacts/$best/candidate.py"
+  output=$($LAB finish "$workspace" 2>&1); status=$?
+  [ "$status" -ne 0 ] || fail "a failed candidate arm must abort the charged phase"
+  python3 - "$workspace" <<'PY'
+import json
+import pathlib
+import sys
+workspace = pathlib.Path(sys.argv[1])
+ledger = [json.loads(line) for line in (workspace / ".run/ledger.jsonl").read_text().splitlines() if line]
+row = [r for r in ledger if r["kind"] == "falsification"][0]
+final = json.loads((workspace / ".run/final.json").read_text())
+assert row["failure_class"].startswith("candidate-"), row["failure_class"]
+assert final["falsification"]["ok"] is False, final["falsification"]
+assert final["falsification"]["failure_class"] == row["failure_class"], (final["falsification"], row)
+PY
+
+  workspace="$TMP_ROOT/falsification-phase-record"
+  init_workspace "$workspace" grouped-classification proposed 4 2
+  write_proposal "$TMP_ROOT/phase-flip2.json" phase-flip2 "remove the flipping feature again" main '{"GROUPED_SPURIOUS_WEIGHT":0.0}'
+  $LAB attempt "$workspace" --proposal "$TMP_ROOT/phase-flip2.json" >/dev/null
+  chmod 0400 "$workspace/.run/results.tsv"
+  $LAB finish "$workspace" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "an interrupted falsification phase must not report success"
+  chmod 0600 "$workspace/.run/results.tsv"
+  python3 - "$workspace" <<'PY'
+import json
+import pathlib
+import sys
+final = json.loads((pathlib.Path(sys.argv[1]) / ".run/final.json").read_text())
+assert final["aborted"]["phase"] == "falsification", final["aborted"]
+assert final["falsification"]["ok"] is False, "both arms scored but the phase aborted, so ok must be false"
+assert final["falsification"]["failure_class"] == "falsification-not-completed", final["falsification"]
+PY
+  pass "competition scientist: the final falsification block reports the whole two-arm phase"
 }
 
 test_results_tsv_keeps_a_fixed_column_count() {
@@ -619,6 +664,7 @@ test_charged_audit_interruption_publishes_a_failed_final_record
 test_interrupted_falsification_record_replays_as_aborted
 test_failed_audit_evaluation_is_a_terminal_failed_record
 test_falsification_failure_names_the_failing_arm
+test_final_falsification_block_reports_the_whole_phase
 test_results_tsv_keeps_a_fixed_column_count
 test_sealed_dataset_never_persists_in_the_workspace
 
