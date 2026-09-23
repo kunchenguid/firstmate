@@ -9,6 +9,7 @@ CAPTURE_LOG="$TMP_ROOT/captures"
 : > "$CAPTURE_LOG"
 fm_backend_source orca
 fm_backend_source cmux
+fm_backend_source zellij
 
 fm_backend_orca_composer_capture() {
   printf 'orca\n' >> "$CAPTURE_LOG"
@@ -19,7 +20,12 @@ fm_backend_cmux_composer_capture() {
   printf '────────\n❯ pending text\n────────\n'
 }
 
-for backend in orca cmux; do
+fm_backend_zellij_composer_capture() {
+  printf 'zellij\n' >> "$CAPTURE_LOG"
+  printf '────────\n❯ pending text\n────────\n'
+}
+
+for backend in orca cmux zellij; do
   rc=0
   output=$(fm_backend_composer_content "$backend" fixture-target) || rc=$?
   [ "$rc" = 1 ] || fail "$backend exact-content read must refuse"

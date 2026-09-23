@@ -235,6 +235,8 @@ Note the shape drift on this version: idle muse 1.3.0 renders a `❯` glyph betw
 
 ### Herdr acceptance remains unmet
 
+The [R5 CLI/API investigation](herdr-exact-content-investigation.md) records the installed command output and the remaining live-capture blocker; it does not establish API inability.
+
 The Herdr content reader does not establish lossless capture and therefore cannot authorize own-doorbell submission. Its ANSI/plain capture paths have not been proven to preserve trailing input spaces and the full composer extent; this is not evidence that Herdr has no suitable API. Do not add `lossless=1` without that proof.
 
 The R4 fix environment was outside Herdr (`HERDR_ENV` unset), so no real Herdr capture test or Muse `001.msg` acceptance was performed. Herdr support and the requested real-capture regression remain unresolved. Acceptance requires a Herdr-managed verification environment, byte-preservation and composer-boundary tests (including trailing spaces and multiline drafts), and the live Muse inbox check.
