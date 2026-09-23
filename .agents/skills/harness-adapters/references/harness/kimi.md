@@ -1,6 +1,7 @@
 # Kimi Code
 
 Verified on 2026-07-25 with Kimi Code CLI 0.29.1.
+Composer footer and trust-dialog facts re-verified on 2026-09-23 with Kimi Code 2.0.2 through Herdr (`docs/verification/runtime-backends.md`, "2026-09-23 Kimi Code 2.0.2 footer rows").
 
 ## Operating facts
 
@@ -14,10 +15,10 @@ Verified on 2026-07-25 with Kimi Code CLI 0.29.1.
 | Interrupt | Single Escape, which prints `Interrupted by user`. |
 | Skill invocation | `/<skill>`, for example `/no-mistakes`; Firstmate skills are discovered. |
 | Autonomy | `--auto`; `-y` and `--yolo` are weaker and are not used. |
-| Trust dialog | None observed on a clean first launch in a fresh pooled worktree. |
+| Trust dialog | 2.0.2 parks on a `Trust this folder` dialog in an untrusted folder (Enter accepts the default); none was observed on 0.29.1's clean first launch in a fresh pooled worktree. `herdr agent get` already reports `kimi`/`idle` while the dialog is displayed, so the native identity probe alone is not a ready signal. |
 | Slash submission | One Enter submits, with no popup swallow or settle hazard. |
 | Environment marker | None; identity comes from process ancestry command name `kimi`, which `../../../bin/fm-harness.sh` keeps a retained foreign marker from overriding. |
-| Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. |
+| Composer | Bordered box with a bare `>` prompt glyph and no observed ghost or placeholder text. Since 2.0.2 the box is followed by two footer rows (a `<mode>  <model> thinking: <effort>` row and a right-aligned `context: <pct>% (<used>/<total>)` row) that cursorless backends must skip as furniture; `bin/fm-composer-lib.sh` owns that rule. |
 | Effort | No verified reasoning-effort flag; `references/common/model-and-effort.md` owns unsupported-value handling. |
 
 ## Readiness-gated start

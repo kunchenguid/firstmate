@@ -55,6 +55,9 @@
 #                writes its model name there); a titled bottom border that
 #                still starts and ends with the family's rule glyph is
 #                tolerated, including Grok 1.0.5's three-column title overhang.
+#                Kimi 2.0.2's two-row footer directly below the box is
+#                furniture (FM_COMPOSER_KIMI_FOOTER_* below), never a shape
+#                that defeats the box.
 #   bare       - an agent prompt glyph row with no border at all (claude `❯`,
 #                codex `›`, muse `⟩`, cursor `→`). The agent glyph is itself the container
 #                proof; a bare SHELL glyph (`>` `$` `%` `#`) never is.
@@ -442,6 +445,24 @@ FM_COMPOSER_LEFTBAR_FOOTER_RE_DEFAULT='^(Build|Plan)[[:space:]]+·[[:space:]]+'
 # a middle dot. It is consulted only as the boundary BELOW a bare composer,
 # never on the composer row itself.
 FM_COMPOSER_OMP_STATUS_RE_DEFAULT='^[[:space:]]*(π|󰵗)[[:space:]]+·[[:space:]]|^[[:space:]]*'"$FM_OMP_SPINNER_FRAMES_RE"'[[:space:]]+[0-9]+[smh]([[:space:]]|$)|[[:space:]]·[[:space:]].*[0-9]+(\.[0-9]+)?%/[0-9]+K'
+# Kimi 2.0.2 draws a two-row footer directly BELOW its bordered composer box:
+# a mode row (`Never Ask  K3 thinking: high  <cwd>  <rotating hint>`) and a
+# right-aligned context-usage row (`context: 0% (0/1M)`), captured byte-level
+# on 2026-09-23 (docs/verification/runtime-backends.md). Cursorless backends
+# (herdr, cmux, orca, zellij) select the bottom-most shape, and these
+# unrecognised rows used to defeat the proven box above them, so an idle or
+# pending Kimi composer read `unknown` and fm-spawn's kimi readiness and
+# delivery gates timed out behind a healthy worker. Both rows are composer
+# furniture, declared here as the boundary rule below a BORDERED box. The
+# match stays exactly as narrow as the captured evidence: the mode row opens
+# with the permission-mode cell and the `<model> thinking: <effort>` cell in
+# their double-space-separated layout, and the context row is the anchored
+# `context: <pct>% (<used>/<total>)` usage cell - the same `context: N%`
+# vocabulary fm-spawn.sh's kimi delivery confirmation already greps. Effort
+# words beyond the observed `high` are admitted only from kimi's own
+# low|medium|high set; anything else below the box still defeats it.
+FM_COMPOSER_KIMI_FOOTER_MODE_RE_DEFAULT='^[A-Za-z][A-Za-z ]*  [A-Za-z0-9._/-]+ thinking: (low|medium|high)  '
+FM_COMPOSER_KIMI_FOOTER_CONTEXT_RE_DEFAULT='^context:[[:space:]]*[0-9]+(\.[0-9]+)?%[[:space:]]*\([0-9]+[KM]?/[0-9]+[KM]?\)$'
 # Braille-pattern cells (U+2800..U+28FF) are animation furniture: codex-cli
 # 0.154.0 draws an idle "starfield" of them on the row above its `›` prompt
 # row, on the `›` row itself after the dim `Ask Codex to do anything`
@@ -1072,6 +1093,18 @@ _fm_composer_row_is_omp_status() {  # <trimmed-row>
   fm_composer_idle_matches "$1" "${FM_COMPOSER_OMP_STATUS_RE:-$FM_COMPOSER_OMP_STATUS_RE_DEFAULT}" sensitive
 }
 
+# _fm_composer_row_is_kimi_footer: 0 when the trimmed row is one of Kimi
+# 2.0.2's two footer rows (FM_COMPOSER_KIMI_FOOTER_*_RE_DEFAULT above) -
+# composer furniture that sits below a BORDERED composer and must not defeat
+# it. Consulted only as the boundary below a proven box, never on a composer
+# row itself.
+_fm_composer_row_is_kimi_footer() {  # <trimmed-row>
+  local row=$1
+  [ -n "$row" ] || return 1
+  fm_composer_idle_matches "$row" "${FM_COMPOSER_KIMI_FOOTER_MODE_RE:-$FM_COMPOSER_KIMI_FOOTER_MODE_RE_DEFAULT}" sensitive \
+    || fm_composer_idle_matches "$row" "${FM_COMPOSER_KIMI_FOOTER_CONTEXT_RE:-$FM_COMPOSER_KIMI_FOOTER_CONTEXT_RE_DEFAULT}" sensitive
+}
+
 # _fm_composer_row_is_braille_furniture: 0 when the row is non-blank and its
 # non-whitespace content is entirely braille cells (fm_composer_strip_braille
 # above) - an animation row that never counts as typed content and bounds a
@@ -1266,6 +1299,19 @@ _fm_composer_select_cursorless() {
     boundary=$FM_COMPOSER_SELECTED_LAST
     if [ "$FM_COMPOSER_SELECTED_KIND" = box ]; then
       boundary=$FM_COMPOSER_SCAN_BOX_BOTTOM
+      # Kimi 2.0.2's footer rows beneath a proven bordered composer are
+      # furniture (declared next to the other footer rules above): skip them
+      # before the boundary check instead of letting them defeat the box.
+      # Anything else below the box still fails the check exactly as before.
+      next=$((boundary + 1))
+      while :; do
+        raw=$(_fm_composer_screen_row "$next" "$plain")
+        trimmed=$raw
+        fm_composer_normalize_trim_var trimmed
+        _fm_composer_row_is_kimi_footer "$trimmed" || break
+        boundary=$next
+        next=$((next + 1))
+      done
     else
       next=$((boundary + 1))
       raw=$(_fm_composer_screen_row "$next" "$plain")

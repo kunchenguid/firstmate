@@ -559,6 +559,69 @@ test_matrix_kimi_bordered_shell_glyph_box() {
   pass "matrix: kimi's bordered shell-glyph box reads empty through the shared owner (spawn's fourth copy retired)"
 }
 
+test_matrix_kimi_202_footer_furniture() {
+  # Kimi 2.0.2 draws a two-row footer directly BELOW its bordered composer
+  # (captured byte-level on 2026-09-23, kimi 2.0.2, `K3 thinking: high`; see
+  # docs/verification/runtime-backends.md): a mode row
+  # (`Never Ask  K3 thinking: high  <cwd>  <rotating hint>`) and a
+  # right-aligned `context: 0% (0/1M)` row. Cursorless backends select the
+  # bottom-most shape, so both rows used to defeat the proven box above them:
+  # an idle or pending Kimi composer on herdr read `unknown` and fm-spawn's
+  # kimi readiness and delivery gates timed out behind a healthy worker.
+  # Both rows are furniture beneath a proven box; anything else below the box
+  # must still defeat it. The SGR sequences below are the captured ones:
+  # grey (38;2;90;90;90) borders, bold orange mode cell, and the cursor's
+  # reverse-video cell behind the `>` prompt.
+  local g="${ESC}[38;2;90;90;90m" rst="${ESC}[39m"
+  local top idle_row typed_row bottom mode_row ctx_row foreign_row
+  top=" ${g}╭────────────────────────────────────────────╮"
+  idle_row=" ${g}│${rst} > ${ESC}[7m ${ESC}[0m                                        ${g}│${rst}"
+  typed_row=" ${g}│${rst} > probe typed text${ESC}[0m                         ${g}│${rst}"
+  bottom=" ${g}╰────────────────────────────────────────────╯"
+  mode_row="${ESC}[1m${ESC}[38;2;232;168;56mNever Ask${ESC}[0m  ${ESC}[38;2;224;224;224mK3 thinking: high${ESC}[39m  ${ESC}[38;2;136;136;136m/tmp/fm-kimi-lab${ESC}[39m          ${ESC}[38;2;107;107;107m! to run a shell command | /compact compresses context when it gets long${ESC}[39m"
+  ctx_row="                              ${ESC}[38;2;224;224;224mcontext: 0% (0/1M)${ESC}[39m"
+  foreign_row="worker output that is not kimi furniture"
+  # Plain variants (cmux/orca see no styling).
+  local p_top p_idle p_typed p_bottom p_mode p_ctx
+  p_top=' ╭────────────────────────────────────────────╮'
+  p_idle=' │ >                                          │'
+  p_typed=' │ > probe typed text                         │'
+  p_bottom=' ╰────────────────────────────────────────────╯'
+  p_mode='Never Ask  K3 thinking: high  /tmp/fm-kimi-lab          ! to run a shell command | /compact compresses context when it gets long'
+  p_ctx='                              context: 0% (0/1M)'
+  # Non-vacuousness: the footer rows really are non-blank, edge-free content
+  # that defeats a cursorless box selection when it is not recognised.
+  fm_composer_row_has_edge "$p_mode" \
+    && fail "fixture drift: the kimi mode row must carry no structural edge"
+  fm_composer_row_has_edge "$p_ctx" \
+    && fail "fixture drift: the kimi context row must carry no structural edge"
+  local idle pending idle_plain pending_plain
+  idle=$'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"$mode_row"$'\n'"$ctx_row"
+  pending=$'transcript\n'"$top"$'\n'"$typed_row"$'\n'"$bottom"$'\n'"$mode_row"$'\n'"$ctx_row"
+  idle_plain=$'transcript\n'"$p_top"$'\n'"$p_idle"$'\n'"$p_bottom"$'\n'"$p_mode"$'\n'"$p_ctx"
+  pending_plain=$'transcript\n'"$p_top"$'\n'"$p_typed"$'\n'"$p_bottom"$'\n'"$p_mode"$'\n'"$p_ctx"
+  assert_screen "kimi 2.0.2 idle footer on herdr" empty "$CAPS_STYLED" "$idle"
+  assert_screen "kimi 2.0.2 idle footer on zellij" empty "$CAPS_STYLED_NOID" "$idle"
+  assert_screen "kimi 2.0.2 idle footer on cmux/orca" empty "$CAPS_PLAIN" "$idle_plain"
+  assert_screen "kimi 2.0.2 pending footer on herdr" pending "$CAPS_STYLED" "$pending"
+  assert_screen "kimi 2.0.2 pending footer on cmux/orca" pending "$CAPS_PLAIN" "$pending_plain"
+  # Either footer row alone is furniture; neither defeats the box on its own.
+  assert_screen "kimi 2.0.2 mode row only on herdr" empty "$CAPS_STYLED" \
+    $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"$mode_row"
+  assert_screen "kimi 2.0.2 context row only on herdr" empty "$CAPS_STYLED" \
+    $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"$ctx_row"
+  # A non-furniture row below the box still refuses, whether it sits beneath
+  # the footer or in its place.
+  assert_screen "kimi 2.0.2 foreign row below footer on herdr" unknown "$CAPS_STYLED" \
+    "$idle"$'\n'"$foreign_row"
+  assert_screen "kimi 2.0.2 foreign row instead of footer on herdr" unknown "$CAPS_STYLED" \
+    $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"$foreign_row"
+  # Narrowness pin: an effort word outside kimi's own set is not furniture.
+  assert_screen "kimi mode row with an unknown effort still refuses" unknown "$CAPS_STYLED" \
+    $'transcript\n'"$top"$'\n'"$idle_row"$'\n'"$bottom"$'\n'"${mode_row/thinking: high/thinking: extreme}"
+  pass "matrix: kimi 2.0.2's footer rows are furniture below its bordered composer; foreign rows still refuse"
+}
+
 test_matrix_claude_inside_zellij_ansi_dump() {
   # Real claude captured through `zellij action dump-screen --ansi`
   # (capability established by the audit): `ESC[m` `❯` U+00A0.
@@ -793,6 +856,7 @@ test_matrix_pi_separated_needs_identity
 test_matrix_opencode_leftbar_signals
 test_matrix_grok_titled_bottom_border
 test_matrix_kimi_bordered_shell_glyph_box
+test_matrix_kimi_202_footer_furniture
 test_matrix_claude_inside_zellij_ansi_dump
 test_strict_blank_row_divergence
 test_bare_wrap_region_classifies

@@ -583,6 +583,38 @@ tests/fm-composer-codex-idle-live-e2e.test.sh
 The verification machine runs its fleet on Herdr and has no tmux installed, so on 2026-09-15 that guard reported `skip: live: tmux absent` there, and the Herdr capture above is this entry's live evidence.
 The guard also notes whether the starfield and the placeholder were actually drawn during its read, because codex need not animate them under every model or mode; a refresh on a tmux host should record that note beside the verdict rather than assume the starfield was exercised.
 
+### 2026-09-23 Kimi Code 2.0.2 footer rows below its bordered composer through Herdr
+
+Verified on 2026-09-23 on Linux against Kimi Code 2.0.2 (`kimi --model kimi-code/k3 --auto`, `KIMI_CODE_HOME` pointed at a task home, run in a scratch directory) inside an isolated Herdr lab session driven through `bin/fm-herdr-lab.sh` (Herdr 0.9.1), read through Herdr's ANSI capture with its exact capability descriptor (`styled=1`, `cursor=0`, `identity=1`).
+Kimi 2.0.2 draws its bordered composer (`╭` / `│ > ` / `╰`) in truecolor grey `38;2;90;90;90` with a reverse-video cell under the cursor, and draws two furniture rows directly BELOW the box: a mode row (`ESC[1m ESC[38;2;232;168;56mNever Ask ESC[0m` + two spaces + `ESC[38;2;224;224;224mK3 thinking: high ESC[0m` + two spaces + `ESC[38;2;136;136;136m<cwd> ESC[0m`, on some renders followed by a rotating hint such as `ctrl-s to add guidance without waiting for the turn to finish` or `! to run a shell command | /compact compresses context when it gets long`, and on others absent) and a right-aligned context-usage row (`ESC[38;2;224;224;224mcontext: 0% (0/1M) ESC[0m`).
+Herdr's `--format ansi` capture terminates each row with CR and resets each cell with `ESC[0m`; the same TUI on tmux uses `ESC[39m` resets and no CR.
+A first launch in an untrusted folder parks on a `Trust this folder` dialog (Enter accepts the default), and `herdr agent get` already reports `kimi`/`idle` while that dialog is displayed, so the native identity probe alone is not a ready signal.
+
+Herdr supplies no cursor row, so cursorless selection takes the bottom-most shape and both footer rows - non-blank, edge-free, and unrecognized at the time - defeated the proven box above them: `fm_backend_herdr_composer_state` read `unknown` on a live idle 2.0.2 pane, fm-spawn's kimi readiness wait survived only on its `Welcome to Kimi Code!` banner fallback, and its delivery confirmation, which requires a proven-empty composer, could never observe one, so the spawn failed as `kimi brief pointer delivery was not confirmed` while the worker ran its brief unsupervised.
+The same Kimi under tmux read correctly before and after, because tmux's cursor row anchors the box and never consults the rows below it.
+
+The capture is a read-only `herdr pane read <pane> --source recent --lines 24 --format ansi` of the live lab pane (issued through the lab helper), fed to the shared classifier with the descriptor above:
+
+```sh
+bash -c '. bin/fm-composer-lib.sh
+  caps=$(printf "styled=1\ncursor=0\nidentity=1\nrows=24")
+  fm_composer_classify_screen "$caps" "$(cat kimi-2.0.2-idle-herdr.ansi)"'
+```
+
+Observed verdicts on the real idle and typed-but-unsubmitted captures, before (`bin/fm-composer-lib.sh` at af1f2ea3) and after this change, with the live `fm_backend_herdr_composer_state` agreeing after:
+
+```text
+unknown   # before, idle composer below the two footer rows
+empty     # after,  idle
+unknown   # before, typed unsubmitted text in the box
+pending   # after,  typed unsubmitted text
+```
+
+The fix declares both footer rows composer furniture beneath a proven bordered box (`FM_COMPOSER_KIMI_FOOTER_MODE_RE_DEFAULT` and `FM_COMPOSER_KIMI_FOOTER_CONTEXT_RE_DEFAULT` in `bin/fm-composer-lib.sh`), matched as narrowly as the capture supports: the mode row's `<mode>  <model> thinking: low|medium|high  ` opening layout and the anchored `context: <pct>% (<used>/<total>)` usage cell.
+Any other non-blank, edge-free row below the box - including a mode row carrying an effort word outside that set - still defeats it.
+`test_matrix_kimi_202_footer_furniture` in `tests/fm-composer-lib.test.sh` carries the captured shapes byte-faithfully (both footer rows, each row alone, a foreign row below the box and in the footer's place, and the out-of-set effort word) across the herdr, zellij, and plain capability profiles under both locales.
+The kimi line of the composer-matrix live guard (`FM_COMPOSER_MATRIX_LIVE=1 tests/fm-composer-matrix-live-e2e.test.sh`, tmux) is the refresh command after a Kimi upgrade; when the footer layout changes, re-run this entry's Herdr read against a live pane as well.
+
 ## Steering-inbox doorbell
 
 The steering channel's one behavioral assumption - a real worker agent follows the constant self-describing doorbell line (list the inbox, read and act on its records in numeric order, then `mv` each into `handled/`) - was verified on 2026-08-23 against every installed verified harness, on tmux 3.6a, macOS arm64, on an isolated private socket, driving the REAL `bin/fm-send.sh` end to end (durable record plus doorbell, with one mid-wait re-ring playing the watcher's role).
