@@ -5301,6 +5301,7 @@ test_parked_loop_away_mode_wakes() {
     grep -F "stale: $window (looping " "$out" >/dev/null || fail "$harness away mode lost looping: $reason"
     grep -F "$reason" "$state/.wake-queue" >/dev/null || fail "$harness looping wake was not durable"
     (
+      # shellcheck source=/dev/null
       . "$ROOT/bin/fm-supervise-daemon.sh"
       LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
         handle_wake "$reason" "$state"
