@@ -46,11 +46,16 @@ TMP_ROOT=$(fm_test_tmproot fm-pi-branch-live)
 repo="$TMP_ROOT/repo"
 home="$TMP_ROOT/home"
 agentdir="$TMP_ROOT/agent-dir"
-mkdir -p "$repo/.pi/extensions/lib" "$repo/node_modules/@earendil-works" \
+mkdir -p "$repo/.pi/extensions/lib" "$repo/lib" "$repo/node_modules/@earendil-works" \
   "$home/state" "$home/config" "$agentdir"
 cp "$ROOT/.pi/extensions/fm-branch-supervision.ts" "$repo/.pi/extensions/fm-branch-supervision.ts"
 cp "$ROOT/.pi/extensions/fm-primary-pi-watch.ts" "$repo/.pi/extensions/fm-primary-pi-watch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+cp "$ROOT/lib/fm-branch-classifier.ts" "$repo/lib/fm-branch-classifier.ts"
+cp "$ROOT/lib/fm-branch-eligibility.ts" "$repo/lib/fm-branch-eligibility.ts"
+cp "$ROOT/lib/fm-branch-eligibility-core.ts" "$repo/lib/fm-branch-eligibility-core.ts"
+cp "$ROOT/lib/fm-branch-report-sequence.ts" "$repo/lib/fm-branch-report-sequence.ts"
+cp "$ROOT/lib/fm-branch-provider-latch.ts" "$repo/lib/fm-branch-provider-latch.ts"
 cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
 cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
 cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
@@ -276,12 +281,16 @@ cat > "$erroragentdir/models.json" <<'JSON'
       "api": "openai-completions",
       "apiKey": "fm-live-placeholder",
       "models": [
-        { "id": "fm-live-error-model", "name": "fm live error", "contextWindow": 8192, "maxTokens": 512 }
+        { "id": "fm-live-error-model", "name": "fm live error", "contextWindow": 8192, "maxTokens": 512 },
+        { "id": "fm-live-classifier-model", "name": "fm live classifier", "contextWindow": 8192, "maxTokens": 512 }
       ]
     }
   }
 }
 JSON
+# The pre-branch classifier runs before any row is claimed, through the same
+# real runtime; it must answer "routine" for the wake to reach the branch.
+printf 'fm-live-error/fm-live-classifier-model\n' > "$errorhome/config/classifier-model"
 BRANCH_PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" \
   WATCH_PLUGIN="$repo/.pi/extensions/fm-primary-pi-watch.ts" \
   FM_HOME="$errorhome" FM_REAL_ROOT="$ROOT" FM_WATCH_ROOT="$repo" \
@@ -298,10 +307,24 @@ mkdirSync(approvedProject, { recursive: true });
 writeFileSync(`${home}/state/live-error-probe.meta`, `project=${approvedProject}\nwindow=fm-live-error-probe\n`);
 writeFileSync(`${home}/state/.wake-queue`, "1\t1\tsignal\tlive-error-probe.status\tsignal: c1 429 probe\n");
 let providerRequests = 0;
-globalThis.fetch = async (input) => {
+globalThis.fetch = async (input, init) => {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   if (!url.startsWith("https://fm-provider-error.invalid/")) {
     throw new Error(`unexpected network request in provider-free guard: ${url}`);
+  }
+  // The classifier's own request is answered routine so the wake reaches the
+  // branch; only the branch's request is the incident's 429.
+  if (JSON.parse(String(init?.body ?? "{}")).model === "fm-live-classifier-model") {
+    const chunk = (delta, finish) => `data: ${JSON.stringify({
+      id: "fm-classifier",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "fm-live-classifier-model",
+      choices: [{ index: 0, delta, finish_reason: finish }],
+      ...(finish ? { usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } : {}),
+    })}\n\n`;
+    const body = chunk({ role: "assistant", content: '{"verdict":"routine","reason":"probe"}' }, null) + chunk({}, "stop") + "data: [DONE]\n\n";
+    return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
   }
   providerRequests += 1;
   return new Response(

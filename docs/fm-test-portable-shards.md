@@ -61,6 +61,9 @@ The serial hints were refreshed from successful per-script records in the `fm-te
 Together these cover all 176 serial scripts at refresh time; retain the slower successful sample where both exist.
 The native-Windows-only `tests/fm-pi-windows-shell-invocation.test.sh` retains its separate 5121 ms measurement from 2026-09-06T21:02Z instead of a portable capability skip.
 An unfinished or failed invocation is not a healthy duration sample.
+The three `tests/fm-branch-claude-mod*.test.sh` hints and the `tests/fm-branch-mod-bin.test.sh` hint, plus the `tests/fm-precompact-skills.test.sh`, `tests/fm-promote.test.sh`, and `tests/fm-trace-span-lib.test.sh` hints, are local measurements from 2026-09-16 doubled, pending their first green CI artifacts.
+The `tests/fm-branch-eligibility.test.sh` and `tests/fm-branch-report-sequence.test.sh` hints are single local measurements from 2026-09-20, pending their first green CI artifacts.
+The six `tests/fm-branch-{text,scope,routing,delivery,monitor,settlement}.test.sh` hints are single local measurements from 2026-09-21 doubled, pending their first green CI artifacts.
 A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
 Balance is still worth keeping current, because enough unmeasured scripts let one shard carry more than twice another shard's real work and reach the job cap while another runner sits idle.

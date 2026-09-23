@@ -1371,6 +1371,66 @@ EOF
   printf '0'
 }
 
+# Captain-facing lines a ROUTINE branch outcome covered. Prints every
+# captain-relevant status line of <task> whose end offset lies in
+# (<from-offset>, endpoint] as "<end-offset>\t<line>", except a needs-decision
+# or blocked line with a parseable key, which the durable OPEN DECISIONS fold
+# alone presents; endpoint is the
+# task's covering outcome recorded in $state/.<task>.branch-outcome-index and
+# the span starts at the later of <from-offset> and the previous outcome's
+# statusEndpoint, so a line an earlier outcome judged is never re-presented.
+# Prints nothing and returns 0 when the index is absent, the covering verdict
+# is captain, or no line qualifies; returns 1 when a record cannot be read
+# safely. Consumed by the drain's STATUS OUTCOME BACKSTOP under
+# state/.branch-mod-mode and by bin/fm-wake-evidence.sh --routine-covered.
+backstop_routine_covered_lines() {  # <state> <task> <from-offset>
+  local state=$1 task=$2 from=$3 idx data version seq endpoint ident extra store row verdict prev
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$from" in ''|*[!0-9]*) return 1 ;; esac
+  idx="$state/.$task.branch-outcome-index"
+  [ -f "$idx" ] && [ ! -L "$idx" ] || return 0
+  data=$(LC_ALL=C command cat "$idx" 2>/dev/null) || return 1
+  IFS=$(printf '\t') read -r version seq endpoint ident extra <<EOF
+$data
+EOF
+  [ "$version" = fm-branch-outcome-index-v1 ] && [ -z "$extra" ] || return 1
+  case "$seq:$endpoint" in *[!0-9:]*|:*|*:) return 1 ;; esac
+  [ "$endpoint" -gt "$from" ] || return 0
+  store="$state/branch-outcomes.jsonl"
+  [ -f "$store" ] && [ ! -L "$store" ] || return 1
+  row=$(LC_ALL=C grep -F "\"seq\":$seq," "$store" | head -n 1) || true
+  [ -n "$row" ] || return 1
+  case "$row" in *"\"task\":\"$task\""*) ;; *) return 1 ;; esac
+  verdict=$(printf '%s' "$row" | sed -n 's/.*"verdict":"\([a-z]*\)".*/\1/p')
+  [ "$verdict" = routine ] || return 0
+  prev=$(LC_ALL=C grep -F "\"task\":\"$task\"" "$store" | awk -v s="$seq" -F'"seq":' '{ split($2, a, ","); if (a[1]+0 < s+0) last=$0 } END { print last }' \
+    | sed -n 's/.*"statusEndpoint":\([0-9]*\).*/\1/p')
+  case "$prev" in ''|*[!0-9]*) prev=0 ;; esac
+  [ "$prev" -le "$from" ] || from=$prev
+  [ "$endpoint" -gt "$from" ] || return 0
+  # Lines whose END offset lies in (from, endpoint]: byte-exact so a line
+  # already presented (ending at or before from) is never re-presented.
+  LC_ALL=C perl -e '
+    my ($path, $from, $endpoint) = @ARGV;
+    open my $f, "<", $path or exit 1;
+    binmode $f;
+    while (defined(my $line = <$f>)) {
+      my $end = tell($f);
+      last if $end > $endpoint;
+      next if $end <= $from;
+      next unless $line =~ /[^\s]/;
+      $line =~ s/[\r\n]+\z//;
+      print "$end\t$line\n";
+    }
+  ' "$state/$task.status" "$from" "$endpoint" | while IFS=$(printf '\t') read -r end line; do
+    status_is_captain_relevant "$line" || continue
+    case "$(status_line_verb "$line")" in
+      needs-decision|blocked) _fm_decision_key "$line" >/dev/null 2>&1 && continue ;;
+    esac
+    printf '%s\t%s\n' "$end" "$line"
+  done
+}
+
 status_signal_seen_marker_path() {  # <state> <task-id>
   printf '%s/.seen-%s' "$1" "$(printf '%s.status' "$2" | tr '.' '_')"
 }

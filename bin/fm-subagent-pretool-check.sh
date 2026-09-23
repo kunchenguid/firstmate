@@ -175,6 +175,24 @@ FM_ROOT=${FM_ROOT_OVERRIDE:-$(CDPATH='' cd -- "$SCRIPT_DIR/.." 2>/dev/null && pw
 FM_HOME=${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}
 STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 
+# The Claude Code supervision-branch mod (docs/claude-supervision-branch.md)
+# dispatches its own persistent branch agent, messages it, and arms one
+# continuity Monitor from hook frames that pass through this check. Those
+# three calls are recognisable by their own names and are allowed only while
+# the home has opted into the mod (state/.branch-mod-mode present); every
+# other delegation call, including an Agent of any other type, stays denied.
+if [ -e "$STATE/.branch-mod-mode" ] && [ -n "${PAYLOAD:-}" ] && command -v jq >/dev/null 2>&1; then
+  BRANCH_MOD_CALL=$(printf '%s' "$PAYLOAD" | jq -r '
+    (.tool_input // {}) as $i
+    | if $i.subagent_type == "fm-branch-mod:fm-branch" then "agent"
+      elif (($i.to // "") | test("^fm-branch(-[0-9]+)?( \\[[0-9a-f]+\\])?$")) then "send"
+      elif $i.description == "fm-branch-mod watcher continuity" then "monitor"
+      else empty end' 2>/dev/null) || BRANCH_MOD_CALL=
+  case "$NORMALIZED:$BRANCH_MOD_CALL" in
+    agent:agent|task:agent|sendmessage:send|monitor:monitor) exit 0 ;;
+  esac
+fi
+
 # Scope to a genuine primary home, exactly as the session-start nudge and the
 # turn-end guard do. fm_primary_scope_matches accepts a plain checkout or a
 # marked secondmate home - both operate a fleet and must dispatch through it -

@@ -1,6 +1,8 @@
-import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { join } from "node:path";
 import { runCommandAsync } from "./fm-async-exec.ts";
+import { scanStateDirectory } from "../../../lib/fm-branch-eligibility.ts";
+import type { UnreadWakeScope, UnreadWakeScopeStatus } from "../../../lib/fm-branch-eligibility.ts";
 
 // Shared wake-dispatch handshake between the Pi watcher extension (the
 // dispatcher) and the supervision-branch extension (the handler), carried over
@@ -42,362 +44,33 @@ export function afkPostureRecordPresent(state: string): boolean {
   }
 }
 
-export type UnreadWakeScopeStatus = "safe" | "empty" | "unsafe";
+// The Pi adapter consumes the mod's canonical scope type; re-exported so the
+// dispatch module keeps its original type surface.
+export type { UnreadWakeScope, UnreadWakeScopeStatus };
 
-export interface UnreadWakeScope {
-  status: UnreadWakeScopeStatus;
-  eligible: boolean;
-  /** Exact project values touched by the currently eligible rows (context only). */
-  projects: string[];
-  /**
-   * The exact durable-queue sequence numbers this scan proved safe for the
-   * branch to drain and acknowledge right now (docs/watcher-continuity.md
-   * "Per-actor acknowledgement" - the single owner of the consume contract
-   * bin/fm-wake-drain.sh implements against this list). Empty whenever
-   * `eligible` is false.
-   */
-  eligibleSeqs: string[];
-  /**
-   * The exact task ids the eligible signal/stale rows name (a signal row by
-   * its status-log key, a stale row through the task metadata recording that
-   * endpoint). The branch may report only these tasks while it handles the
-   * wake; `fleet` or a task it merely remembers is refused (docs/
-   * pi-supervision-branch.md "Components and their owners"). Empty for a
-   * heartbeat, which is not scoped by task.
-   */
-  eligibleTasks: string[];
-  /**
-   * True only when this scan itself is untrustworthy: the queue or its
-   * metadata could not be read, a line fails the structural tab-field check,
-   * or an unresolvable signal/stale row was found. False whenever the scan
-   * completed cleanly and simply found nothing (or nothing further) eligible
-   * for the branch right now: status "unsafe" with corrupted false is the
-   * ordinary "ordinary main-only content, nothing here for the branch" case,
-   * not a fault, and callers should treat it as ordinary absence rather than
-   * escalating. A main-owned check row is never a source of corruption in
-   * either mode.
-   */
-  corrupted: boolean;
-  /**
-   * The exact "key" field of every decision-owned signal or stale row this
-   * scan excluded. Signal rows are marked by bin/fm-watch.sh; stale rows are
-   * decision-owned when their task has an open needs-decision or its current
-   * declaration is captain-held. fm-primary-pi-watch.ts cross-references these
-   * keys against the current trigger so its entire coalesced batch is forced
-   * to main.
-   */
-  needsDecisionKeys: string[];
-  /**
-   * The check-kind rows included in eligibleSeqs. Non-empty only in the away
-   * posture, where the branch takes main's rows too; a check row names no
-   * task, so a prompt that claims one is not scoped by task.
-   */
-  checkSeqs: string[];
-  /**
-   * The heartbeat rows included in eligibleSeqs. A heartbeat names no task,
-   * so a prompt that claims one is not scoped by task, including when a
-   * non-heartbeat wake claims it in the away posture.
-   */
-  heartbeatSeqs: string[];
-  taskByWakeKey: Record<string, string>;
-}
-
-const EMPTY_SCOPE: UnreadWakeScope = {
-  status: "empty",
-  eligible: false,
-  projects: [],
-  eligibleSeqs: [],
-  eligibleTasks: [],
-  corrupted: false,
-  needsDecisionKeys: [],
-  checkSeqs: [],
-  heartbeatSeqs: [],
-  taskByWakeKey: {},
-};
-const UNSAFE_SCOPE: UnreadWakeScope = {
-  status: "unsafe",
-  eligible: false,
-  projects: [],
-  eligibleSeqs: [],
-  eligibleTasks: [],
-  corrupted: true,
-  needsDecisionKeys: [],
-  checkSeqs: [],
-  heartbeatSeqs: [],
-  taskByWakeKey: {},
-};
-
-// scopeForUnreadWake is the single owner of branch-eligibility classification
-// (docs/pi-supervision-branch.md "Autonomy"; docs/watcher-continuity.md
-// "Per-actor acknowledgement"). bin/fm-wake-drain.sh never reclassifies a row
-// itself - it only consumes the exact sequence-number snapshot this function
-// (via writeEligibleRowsSnapshot) hands it.
-//
-// A check-kind row - merge-confirmation polls, Relay mentions, credential/auth
-// failures, and every other legitimately main-only class - never vetoes a scan
-// in either mode. It is simply excluded from eligibleSeqs and left queued for
-// main, which is woken for it on that check's own watcher cycle
-// (fm-primary-pi-watch.ts forces every check-kind TRIGGER to main), so nothing
-// starves by being left behind.
-//
-// A signal row whose payload is "needs-decision:"-prefixed, or a stale row
-// for a task with an open needs-decision or a current captain-held declaration,
-// gets the identical treatment: excluded from eligibleSeqs, never a scan veto,
-// and forced to main on its own triggering close (fm-primary-pi-watch.ts's
-// offerWakeToBranch). Heartbeat handling remains independent.
-//
-// That applies to a heartbeat review too, and it is the whole point: a
-// heartbeat used to be deferred to main merely because some unrelated check
-// row happened to be sitting unread, which put a routine fleet review in the
-// captain's chat for a reason that had nothing to do with the fleet. A
-// permanently main-owned row is not fleet context the branch is missing, so it
-// no longer rides the heartbeat into main (docs/pi-supervision-branch.md
-// "Heartbeat routing").
-//
-// The heartbeat's all-or-nothing contract is unchanged in what it actually
-// guarantees: a heartbeat review takes EVERY branch-ownable unread row or none
-// of them. An unresolvable signal/stale row (unmapped project) still vetoes the
-// whole scan in both modes, because that is a data/metadata problem this
-// function cannot safely reason past, not an ordinary main-only event. A row
-// this repo's fm_wake_append could never have produced (an unknown kind, or a
-// line that fails the structural tab-field check) also still vetoes the whole
-// scan - that is queue corruption, not an everyday mixed queue.
-//
-// In the away posture (`afk`, the dispatcher's read of the away-posture
-// record) the partition above collapses: main is parked, so check rows,
-// decision-owned signal and stale rows, and heartbeat rows are all claimed by
-// the branch on whatever wake finds them unread. The two vetoes that describe
-// a broken queue rather than a routing choice - an unresolvable task-local row
-// and a structurally invalid or unknown row - stay vetoes in both postures.
-function statusLineVerb(line: string): string {
-  const beforeColon = line.split(":", 1)[0].split("[", 1)[0].trim();
-  const words = beforeColon.split(/\s+/);
-  if (!words.some((word) => word.startsWith("corr="))) return beforeColon;
-  return words.filter((word, index) => index === 0 || !/^corr=[0-9a-f]{16}$/i.test(word)).join(" ");
-}
-
-function decisionKey(line: string): string | null {
-  const colon = line.indexOf(":");
-  const beforeColon = colon < 0 ? line : line.slice(0, colon);
-  const beforeMatch = beforeColon.match(/\[key=([^\]]*)\]/);
-  const noteMatch = beforeMatch || colon < 0 ? null : line.slice(colon + 1).trimStart().match(/^\[key=([^\]]*)\]/);
-  const key = (beforeMatch ?? noteMatch)?.[1] ?? "default";
-  return /^[A-Za-z0-9._-]+$/.test(key) ? key : null;
-}
-
-function statusLineNote(line: string): string {
-  const colon = line.indexOf(":");
-  if (colon < 0) return line;
-  const note = line.slice(colon + 1).trimStart();
-  if (/\[key=[^\]]*\]/.test(line.slice(0, colon))) return note;
-  const match = note.match(/^\[key=([A-Za-z0-9._-]+)\]/);
-  return match ? note.slice(match[0].length).trimStart() : note;
-}
-
-interface StaleDecisionCacheEntry {
-  version: string;
-  config: string;
-  decisionOwned: boolean;
-}
-
-const staleDecisionCache = new Map<string, StaleDecisionCacheEntry>();
-
-function statusFileVersion(path: string): string | null {
-  try {
-    const stat = lstatSync(path);
-    if (stat.isSymbolicLink()) throw new Error("status path is a symbolic link");
-    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-}
-
-function hasOpenNeedsDecision(
-  lines: readonly string[],
-  resolveVerb: string,
-  heldVerb: string,
-  reservedPrefixes: readonly string[],
-): boolean {
-  const open = new Map<string, "needs-decision" | "blocked">();
-  for (const line of lines) {
-    const verb = statusLineVerb(line);
-    if (!["needs-decision", "blocked", resolveVerb, heldVerb].includes(verb)) continue;
-    const key = decisionKey(line);
-    if (!key) continue;
-    const note = statusLineNote(line);
-    const reservedPrefix = reservedPrefixes.find((prefix) => key.startsWith(prefix));
-    if (reservedPrefix && !(note.startsWith(reservedPrefix) && note.slice(reservedPrefix.length).includes(":"))) continue;
-    if (verb === "needs-decision" || verb === "blocked") open.set(key, verb);
-    else open.delete(key);
-  }
-  return [...open.values()].includes("needs-decision");
-}
-
+// scopeForUnreadWake classifies the durable wake queue for the branch offer
+// handshake, bound to one state directory. The classification itself - the
+// status-decision fold, the eligible-rows scan and its guards, the verdict
+// cache, and the wake-key derivation - has one owner, the shared module
+// lib/fm-branch-eligibility.ts (the bash v8 fold that
+// tests/fm-branch-eligibility.test.sh pins against bin/fm-classify-lib.sh);
+// this file only binds it to the extension's state directory and exposes the
+// extension's scope shape. docs/pi-supervision-branch.md "Autonomy" and
+// docs/watcher-continuity.md "Per-actor acknowledgement" own the routing
+// contracts the classification feeds, restated here only as far as the
+// dispatcher reads them off this scope: a check-kind row never vetoes a scan
+// and stays queued for main; a needs-decision signal row and a decision-owned
+// stale row are excluded from eligibleSeqs without a veto and forced to main
+// on their own triggering close (fm-primary-pi-watch.ts's offerWakeToBranch);
+// a heartbeat review takes every branch-ownable row or none of them, so a
+// row this repo's fm_wake_append could never have produced still vetoes the
+// whole scan; and in the away posture (`afk`, the dispatcher's read of the
+// away-posture record) the partition collapses - main is parked, so check
+// rows, decision-owned rows, and heartbeat rows are all claimed by the branch
+// on whatever wake finds them unread, while the vetoes that describe a broken
+// queue rather than a routing choice stay vetoes in both postures.
 export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = false): UnreadWakeScope {
-  let queue = "";
-  try {
-    queue = readFileSync(`${state}/.wake-queue`, "utf8");
-  } catch {
-    return UNSAFE_SCOPE;
-  }
-
-  const rows = queue.split(/\r?\n/).filter((line) => line.length > 0);
-  if (rows.length === 0) return EMPTY_SCOPE;
-
-  const projects = new Set<string>();
-  const metadata = new Map<string, string>();
-  // The task id behind each key a signal or stale row may carry: the task id
-  // itself, or the endpoint its metadata records.
-  const taskByKey = new Map<string, string>();
-  try {
-    for (const name of readdirSync(state)) {
-      if (!name.endsWith(".meta")) continue;
-      const task = name.slice(0, -5);
-      const fields = readFileSync(`${state}/${name}`, "utf8").split(/\r?\n/);
-      const project = fields.find((line) => line.startsWith("project="))?.slice(8) ?? "";
-      const window = fields.find((line) => line.startsWith("window="))?.slice(7) ?? "";
-      if (project) {
-        metadata.set(task, project);
-        taskByKey.set(task, task);
-        taskByKey.set(`${task}.status`, task);
-        taskByKey.set(`${task}.turn-ended`, task);
-        if (window) {
-          metadata.set(window, project);
-          taskByKey.set(window, task);
-        }
-      }
-    }
-  } catch {
-    return UNSAFE_SCOPE;
-  }
-
-  const eligibleSeqs: string[] = [];
-  const eligibleTasks = new Set<string>();
-  const needsDecisionKeys: string[] = [];
-  const checkSeqs: string[] = [];
-  const heartbeatSeqs: string[] = [];
-  const staleDecisionOwnership = new Map<string, boolean>();
-  const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
-  const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
-  const reservedPrefixes = (process.env.FM_CLASSIFY_RESERVED_KEY_PREFIXES || "pending-reply-")
-    .split(/\s+/)
-    .filter(Boolean);
-  const decisionConfig = `${resolveVerb}\0${heldVerb}\0${reservedPrefixes.join("\0")}`;
-  for (const line of rows) {
-    const fields = line.split("\t");
-    if (fields.length < 5 || !/^[0-9]+$/.test(fields[1])) return UNSAFE_SCOPE;
-    const seq = fields[1];
-    const kind = fields[2];
-    const key = fields[3];
-    if (kind === "heartbeat") {
-      // Attended, a heartbeat row is claimed only by a heartbeat review; away,
-      // no main drain will ever take it, so any wake claims it.
-      if (heartbeat || afk) {
-        eligibleSeqs.push(seq);
-        heartbeatSeqs.push(seq);
-      }
-      continue;
-    }
-    if (kind === "check") {
-      // Main-owned while attended: excluded from what the branch may claim,
-      // never a reason to reject the rest of the queue and never a reason to
-      // send an otherwise-eligible heartbeat review to main. Away, the branch
-      // is the only actor, so the row is claimed unscoped.
-      if (afk) {
-        eligibleSeqs.push(seq);
-        checkSeqs.push(seq);
-      }
-      continue;
-    }
-    let project = "";
-    let task = "";
-    if (kind === "signal") {
-      const payload = fields[4] ?? "";
-      if (/^needs-decision:/.test(payload)) {
-        // Main-owned exactly like a check-kind row above while attended: a
-        // needs-decision status append surfaced through the actionable signal
-        // path is excluded from what the branch may claim without vetoing the
-        // scan (docs/pi-supervision-branch.md "Autonomy"). Away, the branch
-        // takes the decision row like any other task-local row; the guarded
-        // scripts decide what it may do about it (bin/fm-lease-lib.sh).
-        needsDecisionKeys.push(key);
-        if (!afk) continue;
-      }
-      task = key.replace(/\.(?:status|turn-ended)$/, "");
-      project = metadata.get(task) ?? "";
-    } else if (kind === "stale") {
-      task = taskByKey.get(key) ?? taskByKey.get(key.replace(/^fm-/, "")) ?? "";
-      project = metadata.get(key) ?? metadata.get(key.replace(/^fm-/, "")) ?? "";
-      if (task) {
-        const statusPath = `${state}/${task}.status`;
-        if (!staleDecisionOwnership.has(statusPath)) {
-          let version: string | null;
-          try {
-            version = statusFileVersion(statusPath);
-          } catch {
-            return UNSAFE_SCOPE;
-          }
-          let decisionOwned = false;
-          if (version) {
-            const cached = staleDecisionCache.get(statusPath);
-            if (cached?.version === version && cached.config === decisionConfig) {
-              decisionOwned = cached.decisionOwned;
-            } else {
-              let statusLines: string[];
-              try {
-                statusLines = readFileSync(statusPath, "utf8").split(/\r?\n/).filter((line) => /\S/.test(line));
-                if (statusFileVersion(statusPath) !== version) return UNSAFE_SCOPE;
-              } catch {
-                return UNSAFE_SCOPE;
-              }
-              decisionOwned = hasOpenNeedsDecision(statusLines, resolveVerb, heldVerb, reservedPrefixes) ||
-                statusLineVerb(statusLines.at(-1) ?? "") === heldVerb;
-              staleDecisionCache.set(statusPath, { version, config: decisionConfig, decisionOwned });
-              if (staleDecisionCache.size > 512) {
-                staleDecisionCache.delete(staleDecisionCache.keys().next().value!);
-              }
-            }
-          } else {
-            staleDecisionCache.delete(statusPath);
-          }
-          staleDecisionOwnership.set(statusPath, decisionOwned);
-        }
-        if (staleDecisionOwnership.get(statusPath)) {
-          needsDecisionKeys.push(key);
-          if (!afk) continue;
-        }
-      }
-    } else {
-      // A kind fm_wake_append never emits: structural corruption, not an
-      // ordinary main-only row.
-      return UNSAFE_SCOPE;
-    }
-    if (!project || !task) return UNSAFE_SCOPE;
-    projects.add(project);
-    eligibleTasks.add(task);
-    eligibleSeqs.push(seq);
-  }
-  const eligible = eligibleSeqs.length > 0;
-  // Reached only after every row passed classification without a veto. A scan
-  // that ends up ineligible simply found nothing the branch may claim - a
-  // queue of purely main-only content, not a fault. (Before check rows stopped
-  // vetoing a heartbeat, this point was unreachable for a heartbeat with an
-  // empty eligible set, so reading eligibility off the claim set rather than
-  // off the heartbeat flag changes no pre-existing outcome and keeps a
-  // heartbeat from being offered with nothing to hand over.)
-  return {
-    status: eligible ? "safe" : "unsafe",
-    eligible,
-    projects: [...projects],
-    eligibleSeqs,
-    eligibleTasks: [...eligibleTasks],
-    corrupted: false,
-    needsDecisionKeys,
-    checkSeqs,
-    heartbeatSeqs,
-    taskByWakeKey: Object.fromEntries(taskByKey),
-  };
+  return scanStateDirectory(state, { heartbeat, afk });
 }
 
 // The exact state-relative filename bin/fm-wake-drain.sh reads for a

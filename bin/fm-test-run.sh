@@ -691,6 +691,18 @@ tests/fm-bearings-board.test.sh 36490
 tests/fm-bearings-snapshot.test.sh 171176
 tests/fm-bootstrap-network-parallel.test.sh 9539
 tests/fm-bootstrap.test.sh 46634
+tests/fm-branch-claude-mod-live-e2e.test.sh 60
+tests/fm-branch-claude-mod-plugin.test.sh 60
+tests/fm-branch-claude-mod.test.sh 250
+tests/fm-branch-delivery.test.sh 656
+tests/fm-branch-eligibility.test.sh 950
+tests/fm-branch-monitor.test.sh 928
+tests/fm-branch-report-sequence.test.sh 551
+tests/fm-branch-routing.test.sh 4706
+tests/fm-branch-scope.test.sh 3526
+tests/fm-branch-settlement.test.sh 848
+tests/fm-branch-text.test.sh 894
+tests/fm-branch-mod-bin.test.sh 8000
 tests/fm-branch-supervision.test.sh 8915
 tests/fm-busy-adapter-wiring.test.sh 27817
 tests/fm-busy-state.test.sh 2990
@@ -1463,12 +1475,38 @@ families_for_changed_path() {
       printf '%s\n' "__script__:fm-dispatch-resolve.test.sh"
       ;;
     .pi/extensions/fm-branch-supervision.ts|.pi/extensions/lib/fm-async-exec.ts|\
-    .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts)
+    .pi/extensions/lib/fm-branch-dispatch.ts|.pi/extensions/lib/fm-native-contract.ts|\
+    lib/fm-branch-eligibility.ts|lib/fm-branch-eligibility-core.ts|lib/fm-branch-report-sequence.ts|\
+    lib/fm-branch-provider-latch.ts|lib/fm-branch-text.ts|lib/fm-branch-scope.ts|\
+    lib/fm-branch-routing.ts|lib/fm-branch-delivery.ts|lib/fm-branch-monitor.ts|\
+    lib/fm-branch-settlement.ts|.claude/mods/fm-branch-mod/lib/fm-branch-*.ts)
       # The portable suites that actually load these files, named one by one.
       # Left unmapped, a Pi extension library resolves through the reference
       # scan, which widens to each referencing suite's WHOLE family - and
       # these suites sit in four different families, so that pulls in dozens
-      # of suites with nothing to do with Pi.
+      # of suites with nothing to do with Pi. lib/fm-branch-eligibility.ts
+      # joins the list because the dispatch lib imports it, so every suite
+      # below loads it through .pi/extensions/lib/fm-branch-dispatch.ts, and
+      # tests/fm-branch-eligibility.test.sh pins it directly.
+      # lib/fm-branch-report-sequence.ts and lib/fm-branch-provider-latch.ts
+      # (A4) are consumed by the Pi extension directly, and their tracked
+      # lib/ entries are symlinks into the mod's lib/ where the canonical
+      # copies live, so they select their own equivalence suite, the mod's
+      # portable checks, and the Pi suites plus typecheck that load the
+      # importing extension. The mod's own binding modules (text, scope,
+      # routing, delivery, monitor, settlement) are consumed only by the
+      # mod hook today, so each selects its own per-module suite beside
+      # the mod's portable checks.
+      printf '%s\n' __script__:fm-branch-eligibility.test.sh
+      printf '%s\n' __script__:fm-branch-report-sequence.test.sh
+      printf '%s\n' __script__:fm-branch-classifier.test.sh
+      printf '%s\n' __script__:fm-branch-text.test.sh
+      printf '%s\n' __script__:fm-branch-scope.test.sh
+      printf '%s\n' __script__:fm-branch-routing.test.sh
+      printf '%s\n' __script__:fm-branch-delivery.test.sh
+      printf '%s\n' __script__:fm-branch-monitor.test.sh
+      printf '%s\n' __script__:fm-branch-settlement.test.sh
+      printf '%s\n' __script__:fm-branch-claude-mod.test.sh
       printf '%s\n' __script__:fm-pi-branch-extension.test.sh
       printf '%s\n' __script__:fm-pi-watch-extension.test.sh
       printf '%s\n' __script__:fm-calm-pi-extension.test.sh
@@ -1500,6 +1538,25 @@ families_for_changed_path() {
       printf '%s\n' __script__:fm-calm-claude-mod.test.sh
       printf '%s\n' __script__:fm-calm-pi-extension.test.sh
       printf '%s\n' __script__:fm-pi-primary-types.test.sh
+      printf '%s\n' live-harness-optin
+      ;;
+    .claude/mods/fm-branch-mod/*|bin/fm-branch-agent-md.sh)
+      # The Claude Code supervision-branch mod and the generator of its agent
+      # definition (the mod's lib/ also carries the canonical shared modules
+      # the repo's lib/ symlinks to): the portable Node checks - the mod's
+      # own shape checks plus every per-module suite the hook binds - then
+      # the Claude-dependent guards (strict validation, the engine-hosted
+      # suite, and the pinned live run).
+      printf '%s\n' __script__:fm-branch-claude-mod.test.sh
+      printf '%s\n' __script__:fm-branch-report-sequence.test.sh
+      printf '%s\n' __script__:fm-branch-classifier.test.sh
+      printf '%s\n' __script__:fm-branch-eligibility.test.sh
+      printf '%s\n' __script__:fm-branch-text.test.sh
+      printf '%s\n' __script__:fm-branch-scope.test.sh
+      printf '%s\n' __script__:fm-branch-routing.test.sh
+      printf '%s\n' __script__:fm-branch-delivery.test.sh
+      printf '%s\n' __script__:fm-branch-monitor.test.sh
+      printf '%s\n' __script__:fm-branch-settlement.test.sh
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-sessionstart-run.sh|.claude/settings.json|.codex/hooks.json|\

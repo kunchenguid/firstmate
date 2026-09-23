@@ -91,6 +91,7 @@ import {
   getAgentDir,
   keyHint,
   ModelRuntime,
+  resolveModelScopeWithDiagnostics,
   type ModelRegistry,
   SessionManager,
   ToolExecutionComponent,
@@ -129,7 +130,25 @@ import {
   classifyFirstmateOperationalText,
   encodeFirstmateOperationalInputWith,
 } from "./lib/fm-operational-input.ts";
-
+import {
+  appendFailureMessage,
+  markProcessedArgv,
+  markReadArgv,
+  parseOutcomeSeq,
+  reportAppendArgv,
+  reportSuccessMessage,
+  reportTaskScopeVerdict,
+  runSettlementStep,
+  validateBranchReport,
+  validateThroughValue,
+} from "../../lib/fm-branch-report-sequence.ts";
+import { createProviderErrorLatch, type ProviderErrorLatchPolicy } from "../../lib/fm-branch-provider-latch.ts";
+import {
+  classifierPassCoverArgv,
+  classifyWake,
+  passedToMainSummary,
+  type ClassifierDeps,
+} from "../../lib/fm-branch-classifier.ts";
 const extensionFile = fileURLToPath(import.meta.url);
 const extensionDir = dirname(extensionFile);
 const root = resolve(extensionDir, "../..");
@@ -148,6 +167,15 @@ const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
 const loadedMarker = join(state, ".pi-branch-extension-loaded");
 const modelPinFile = join(config, "supervision-branch-model");
 const effortPinFile = join(config, "supervision-branch-effort");
+// The shared pre-branch classifier (lib/fm-branch-classifier.ts;
+// docs/pi-supervision-branch.md "Classifier"). The classifier's system prompt is the one
+// tracked asset the Claude Code mod reads from its plugin root; both hosts
+// consume the same bytes, never a copy.
+const classifierSystemFile = join(fmRoot, ".claude", "mods", "fm-branch-mod", "classifier-system.txt");
+const classificationsFile = join(state, "branch-mod-classifications.jsonl");
+const passedSeqsFile = join(state, ".branch-mod-passed");
+// Same rotation cap the mod applies to its classification log.
+const CLASSIFIER_LOG_CAP_BYTES = 4_000_000;
 
 // Same tool set in the same order on every request (part of the cached
 // prefix). "bash" resolves to the customTools override below, which injects
@@ -176,13 +204,20 @@ const PROCESSING_MESSAGE_TYPE = "fm-branch-process";
 // (deliverAs nextTurn). Bounded so an answer that repeatedly ignores the
 // request cannot become an unbounded loop of empty turns.
 const PROCESSING_TRIGGERED_ATTEMPTS = 2;
-// One provider failure rejects immediately to watcher-owned fallback but leaves
-// room for a transient outage to recover on the next wake. A second consecutive
-// provider failure latches the branch off. While latched, main keeps every wake
-// except one branch recovery probe after each exponentially backed-off cooldown.
-const PROVIDER_ERROR_LATCH_THRESHOLD = 2;
-const PROVIDER_REPROBE_BASE_MS = 5 * 60 * 1000;
-const PROVIDER_REPROBE_MAX_MS = 60 * 60 * 1000;
+// One failure (a settled provider error, or a settled prompt with no report -
+// the same counting rule the mod uses) rejects immediately to watcher-owned
+// fallback but leaves room for a transient outage to recover on the next wake.
+// A second consecutive failure latches the branch off. While latched, main
+// keeps every wake except one branch recovery probe after each exponentially
+// backed-off cooldown.
+// The state machine behind that schedule is the shared failure latch
+// (lib/fm-branch-provider-latch.ts); these values are this host's policy for it.
+const PROVIDER_ERROR_LATCH_POLICY: ProviderErrorLatchPolicy = {
+  threshold: 2,
+  baseCooldownMs: 5 * 60 * 1000,
+  maxCooldownMs: 60 * 60 * 1000,
+  recoveryProbe: true,
+};
 // Appended to a wake message while the away-posture record exists. Per-wake
 // tail content, never prefix; bin/fm-branch-prompt.sh's fixed "Postures"
 // section is what this tail refers back to.
@@ -213,11 +248,6 @@ type OutcomeRow = {
   silent: boolean;
 };
 type VisibleOutcomeRecord = OutcomeRow & { version: 1 };
-type ProviderRecovery = {
-  cooldownMs: number;
-  retryNotBefore: number;
-  probeInFlight: boolean;
-};
 
 const scriptEnv = {
   ...process.env,
@@ -588,8 +618,12 @@ export default function (pi: ExtensionAPI) {
   };
   let branch: BranchSession | null = null;
   let branchBroken = "";
-  let consecutiveProviderErrors = 0;
-  let providerRecovery: ProviderRecovery | null = null;
+  // The failure latch (counting, cooldowns, probes, recovery) is the shared
+  // machine under the unified predicate - a settled provider error or a
+  // report-less, error-free turn is one failure; branchBroken stays this
+  // host's wider broken view and also covers non-provider breakage such as
+  // build and reconcile failures.
+  const providerLatch = createProviderErrorLatch(PROVIDER_ERROR_LATCH_POLICY, () => Date.now());
   // A revision advances only after fm_branch_report has appended successfully,
   // so a prompt can prove that it created a durable outcome after claiming its
   // wake rows without relying on provider text or incidental session shape.
@@ -705,40 +739,32 @@ export default function (pi: ExtensionAPI) {
     else pi.sendMessage(message, {});
   }
 
-  function recordSettledProviderError(detail: string): void {
-    consecutiveProviderErrors += 1;
-    if (consecutiveProviderErrors < PROVIDER_ERROR_LATCH_THRESHOLD && !providerRecovery) return;
-    const previousCooldownMs = providerRecovery?.cooldownMs;
-    const firstLatch = previousCooldownMs === undefined;
-    const cooldownMs = firstLatch
-      ? PROVIDER_REPROBE_BASE_MS
-      : Math.min(PROVIDER_REPROBE_MAX_MS, previousCooldownMs * 2);
-    branchBroken = detail;
-    providerRecovery = {
-      cooldownMs,
-      retryNotBefore: Date.now() + cooldownMs,
-      probeInFlight: false,
-    };
-    if (firstLatch) {
-      deliverBranchHealthNote("Supervision branch paused after repeated provider errors; main will handle wakes while it cools down.");
+  // One settled branch failure, counted by the unified latch predicate (the
+  // mod's rule, adopted on Pi): a settled provider error AND a report-less,
+  // error-free settlement both count one consecutive failure, so two silent
+  // turns latch the branch exactly as two provider errors do. The detail is
+  // both the broken-branch reason and the first-latch pause note's cause.
+  function recordSettledBranchFailure(detail: string): void {
+    const verdict = providerLatch.recordFailure();
+    if (verdict.armed) branchBroken = detail;
+    if (verdict.firstLatch) {
+      deliverBranchHealthNote("Supervision branch paused after repeated failures; main will handle wakes while it cools down.");
     }
   }
 
   function recordDurableBranchReport(reportGeneration: number, reportSelectionRevision: number): void {
     if (reportGeneration !== generation || reportSelectionRevision !== branchSelectionRevision) return;
-    consecutiveProviderErrors = 0;
-    if (!providerRecovery) return;
-    branchBroken = "";
-    providerRecovery = null;
-    deliverBranchHealthNote("Supervision branch recovered after a successful cooldown probe.");
+    const verdict = providerLatch.recordSuccess();
+    if (verdict.recovered) {
+      branchBroken = "";
+      deliverBranchHealthNote("Supervision branch recovered after a successful cooldown probe.");
+    }
   }
 
-  function finishProviderProbe(probeGeneration: number, probeSelectionRevision: number): void {
-    if (probeGeneration !== generation || probeSelectionRevision !== branchSelectionRevision || !providerRecovery) return;
-    providerRecovery.probeInFlight = false;
-    if (branchBroken && providerRecovery.retryNotBefore <= Date.now()) {
-      providerRecovery.retryNotBefore = Date.now() + providerRecovery.cooldownMs;
-    }
+  function finishProviderProbe(probeGeneration: number, probeSelectionRevision: number, probed: boolean): void {
+    if (probeGeneration !== generation || probeSelectionRevision !== branchSelectionRevision || !providerLatch.isArmed()) return;
+    if (probed) providerLatch.finishProbe();
+    else providerLatch.releaseProbe();
   }
 
   // Resolves one model against the isolated branch runtime using only the
@@ -1109,20 +1135,24 @@ export default function (pi: ExtensionAPI) {
   // one processing request; callers that run inside a main turn (turn_end)
   // leave presentation to the run boundary (agent_settled) instead, so one
   // multi-tool run never receives duplicate requests.
-  async function reconcileUnreadOutcomes(expectedGeneration: number, present = true): Promise<boolean> {
-    if (!(await generationOwnsLock(expectedGeneration))) return false;
+  // Resolves to null on success, or to a short detail naming the step that
+  // failed: the unified mark-read failure wording renders this detail to the
+  // branch exactly as the mod's settlement failure wording does.
+  async function reconcileUnreadOutcomes(expectedGeneration: number, present = true): Promise<string | null> {
+    if (!(await generationOwnsLock(expectedGeneration))) return "supervision session was replaced or lost lock ownership";
     // One-time migration per generation: a home whose outcomes were all
     // delivered before the processed marker existed treats them as processed
     // rather than re-presenting its whole history. Runs before any new row
     // can be read below, so nothing delivered from here on is ever skipped.
     if (processedInitializedGeneration !== expectedGeneration) {
-      if (!(await runOutcomeScript(["processed-init"])).ok) return false;
+      const initialized = await runSettlementStep(runOutcomeScript, ["processed-init"]);
+      if (!initialized.ok) return `processed-init failed: ${initialized.detail}`;
       processedInitializedGeneration = expectedGeneration;
     }
     const unread = await runOutcomeScript(["unread"]);
-    if (!unread.ok) return false;
+    if (!unread.ok) return `unread read failed: ${unread.detail}`;
     if (unread.stdout) {
-      if (!currentMainSession) return false;
+      if (!currentMainSession) return "no main session is available to deliver unread outcomes into";
       for (const line of unread.stdout.split("\n")) {
         let row: OutcomeRow | null = null;
         try {
@@ -1130,7 +1160,7 @@ export default function (pi: ExtensionAPI) {
         } catch {
           row = null;
         }
-        if (!row) return false;
+        if (!row) return "unread returned a row that failed to parse";
         // The last cancellation point of this row: everything from here to
         // its mark-read is synchronous delivery plus the awaited script that
         // records it, with no second ownership test in between. That is
@@ -1138,7 +1168,7 @@ export default function (pi: ExtensionAPI) {
         // because the session was replaced mid-write would leave the row
         // unread and deliver it a second time; the cursor records that the
         // row WAS delivered, which stays true across a replacement.
-        if (!(await generationOwnsLock(expectedGeneration))) return false;
+        if (!(await generationOwnsLock(expectedGeneration))) return "supervision session was replaced or lost lock ownership";
         // KNOWN PRE-EXISTING LIMITATION, unchanged by moving this work off Pi's
         // render thread and tracked as
         // fm-pi-routine-delivery-idempotency-followup-r1: if the mark-read
@@ -1152,22 +1182,28 @@ export default function (pi: ExtensionAPI) {
         // contract rather than this ordering, so it is deliberately not done
         // here.
         if (row.verdict === "captain") {
-          if (!ensureVisibleCaptainOutcome(row)) return false;
+          if (!ensureVisibleCaptainOutcome(row)) return `captain outcome seq ${row.seq} delivery failed`;
         } else {
           deliverRoutineOutcome(row);
         }
-        if (!(await runOutcomeScript(["mark-read", "--through", String(row.seq)])).ok) return false;
+        const marked = await runSettlementStep(runOutcomeScript, markReadArgv(row.seq));
+        if (!marked.ok) return marked.detail;
       }
     }
-    if (!present) return true;
-    return presentUnprocessedOutcomes(expectedGeneration);
+    if (!present) return null;
+    return (await presentUnprocessedOutcomes(expectedGeneration)) ? null : "presenting unprocessed captain outcomes failed";
   }
 
   function wakeScopeRefusal(task: string): string {
-    if (!wakeTaskScope || wakeTaskScope.tasks.has(task)) return "";
-    const named = [...wakeTaskScope.tasks].sort().join(", ");
-    const rows = wakeTaskScope.rows.join(", ");
-    return `report refused: the wake being handled (row ${rows}) names ${named}, not ${task}; report only that task, never fleet or a task from memory`;
+    const scopeVerdict = reportTaskScopeVerdict(
+      wakeTaskScope ? { rows: wakeTaskScope.rows, tasks: [...wakeTaskScope.tasks] } : null,
+      task,
+    );
+    if (scopeVerdict.allowed) return "";
+    // The rule is the shared module's; the refusal is the mod's wording and
+    // shape, unified by the captain's 2026-09-20 ruling: a normal result
+    // carrying the corrective re-report instruction (no row list, no isError).
+    return `report not recorded: task must be ${scopeVerdict.tasks.join(" or ")} (this wake's own task), not '${task}'. Call fm_branch_report again with task=${scopeVerdict.tasks[0]} and the same verdict and summary.`;
   }
 
   function createReportTool(toolGeneration: number): ToolDefinition {
@@ -1197,20 +1233,22 @@ export default function (pi: ExtensionAPI) {
         const summary = String((params as { summary: unknown }).summary || "").trim();
         const wake = String((params as { wake?: unknown }).wake ?? "").trim();
         const silent = (params as { silent?: unknown }).silent === true;
-        if (!task || !summary || (verdictRaw !== "routine" && verdictRaw !== "captain") || (silent && (task !== "fleet" || verdictRaw !== "routine"))) {
+        const validated = validateBranchReport({ task, verdict: verdictRaw, summary, silent });
+        if (!validated.valid) {
           return {
-            content: [{ type: "text", text: "invalid report: task, verdict (routine|captain), and summary are required" }],
+            content: [{ type: "text", text: validated.message }],
             details: undefined,
             isError: true,
           };
         }
-        const verdict = verdictRaw as Verdict;
+        const verdict = validated.verdict;
         const scopeRefusal = wakeScopeRefusal(task);
         if (scopeRefusal) {
-          return { content: [{ type: "text", text: scopeRefusal }], details: undefined, isError: true };
+          // Unified refusal shape: a normal result carrying the retry
+          // instruction, byte-identical to the mod's textResult default.
+          return { content: [{ type: "text", text: scopeRefusal }], details: undefined };
         }
-        const appendArgs = ["append", "--task", task, "--verdict", verdict, "--summary", summary, "--silent", String(silent)];
-        if (wake) appendArgs.push("--wake", wake);
+        const appendArgs = reportAppendArgv(validated, wake || null);
         // Ownership, the durable append, and the delivery it authorizes are
         // ONE unit of the delivery queue: store-before-visible-delivery and
         // this report's place in sequence order are exactly what another
@@ -1223,25 +1261,31 @@ export default function (pi: ExtensionAPI) {
               isError: true,
             };
           }
-          const appended = await runOutcomeScript(appendArgs);
+          const appended = await runSettlementStep(runOutcomeScript, appendArgs);
           if (!appended.ok) {
             return {
-              content: [{ type: "text", text: `outcome store append failed (nothing merged): ${appended.detail}` }],
+              content: [{ type: "text", text: appendFailureMessage(appended.detail) }],
               details: undefined,
               isError: true,
             };
           }
           durableReportRevision += 1;
-          const seq = Number(appended.stdout);
-          if (!Number.isSafeInteger(seq) || seq < 1 || !(await reconcileUnreadOutcomes(toolGeneration))) {
+          // The unified mark-read failure wording carries the failed step's
+          // detail exactly as the mod's does; the sequence-parse short-
+          // circuit keeps its own step name. The row IS durable here, so only
+          // its delivery or cursor advance failed.
+          const deliveryFailure = parseOutcomeSeq(appended.stdout) === null
+            ? "the outcome store returned no usable sequence number"
+            : await reconcileUnreadOutcomes(toolGeneration);
+          if (deliveryFailure !== null) {
             return {
-              content: [{ type: "text", text: `recorded seq ${appended.stdout}, but visible delivery or cursor advancement failed` }],
+              content: [{ type: "text", text: `recorded seq ${appended.stdout}, but cursor advancement failed: ${deliveryFailure}` }],
               details: undefined,
               isError: true,
             };
           }
           return {
-            content: [{ type: "text", text: `recorded seq ${appended.stdout} and delivered [${verdict}] into main` }],
+            content: [{ type: "text", text: reportSuccessMessage(appended.stdout, verdict) }],
             details: undefined,
           };
         });
@@ -1382,7 +1426,7 @@ ${context.command}
 
   async function ensureBranch(expectedGeneration: number, recoveryProbe = false): Promise<BranchSession> {
     if (!(await actingAsOwner(expectedGeneration))) throw new Error("supervision session was replaced or lost lock ownership");
-    if (branchBroken && !(recoveryProbe && providerRecovery?.probeInFlight)) throw new Error(branchBroken);
+    if (branchBroken && !(recoveryProbe && providerLatch.isProbing())) throw new Error(branchBroken);
     if (branch) return branch;
     while (true) {
       const buildRevision = branchSelectionRevision;
@@ -1453,8 +1497,115 @@ ${context.command}
     return `\n\n${AWAY_POSTURE_TAIL}\n${readback || "(the record's read-back could not be rendered; treat the captain's words as unavailable, act on standing authority only, and hold on doubt)"}`;
   }
 
+  // ---- pre-branch classifier (shared module) ----
+  // One lazily-created runtime serves every classifier call; the branch's own
+  // runtime is created per branch and must not gate classification on a
+  // branch existing.
+  let classifierRuntime: ModelRuntime | null = null;
+
+  function readConfigLine(name: string, fallback: string): string {
+    try {
+      return readFileSync(`${config}/${name}`, "utf8").trim() || fallback;
+    } catch {
+      return fallback;
+    }
+  }
+
+  // One shell append per record, rotated once past the cap: the same
+  // mechanics and cap the mod's appendLine gives these logs.
+  function appendRecordLine(path: string, line: string): Promise<void> {
+    const script = 'f=$1; cap=$2; if [ -f "$f" ] && [ "$(wc -c < "$f")" -gt "$cap" ]; then mv -f "$f" "$f.1"; fi; cat >> "$f"';
+    return runCommandAsync("sh", ["-c", script, "_", path, String(CLASSIFIER_LOG_CAP_BYTES)], {
+      cwd: fmRoot,
+      env: scriptEnv,
+      input: line,
+    }).then(() => undefined);
+  }
+
+  // Queue rows already passed to main with a cover row and not yet
+  // acknowledged: the same durable guard file the mod writes, so one home's
+  // classification history reads the same whichever harness ran the wake.
+  function readPassedSeqs(): Set<string> {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(passedSeqsFile, "utf8"));
+      return new Set(Array.isArray(parsed) ? parsed.map(String) : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  function writePassedSeqs(seqs: Set<string>): void {
+    try {
+      writeFileSync(passedSeqsFile, JSON.stringify([...seqs]));
+    } catch {
+      // A failed guard-file write must not block the wake; the next pass
+      // rewrites it, and a duplicate classification is the worst case.
+    }
+  }
+
+  // The classifier's model seam: the configured name resolves against the
+  // same runtime surface the branch uses (main's extension-registered
+  // providers copied across), and the completion is one simple request.
+  async function classifierComplete(req: { model: string; system: string; prompt: string; maxTokens: number }): Promise<string> {
+    if (!classifierRuntime) {
+      classifierRuntime = await ModelRuntime.create();
+      await copyExtensionProviders(classifierRuntime);
+    }
+    const { scopedModels } = await resolveModelScopeWithDiagnostics([req.model], classifierRuntime);
+    const scope = scopedModels[0];
+    if (!scope) throw new Error(`classifier model not found: ${req.model}`);
+    const message = await classifierRuntime.completeSimple(
+      scope.model,
+      {
+        systemPrompt: req.system,
+        messages: [{ role: "user", content: req.prompt, timestamp: Date.now() }],
+      },
+      { maxTokens: req.maxTokens },
+    );
+    return message.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("");
+  }
+
+  function piClassifierDeps(): ClassifierDeps {
+    // The supervision session's own model name - the pin when set, else
+    // main's session model, the same follow-main default the branch build
+    // applies - read before any completion call so the Pi default path
+    // never issues a failing haiku call first. The build's isolated runtime
+    // remains the authority on whether the branch can run the model; the
+    // classifier only needs the name.
+    const supervisionModelName = (): string | null => {
+      const pin = readModelPin();
+      if (pin) return `${pin.provider}/${pin.modelId}`;
+      return mainModel ? modelLabel(mainModel) : null;
+    };
+    return {
+      paths: { bin: join(fmRoot, "bin") },
+      runScript: async (argv, opts) => {
+        const r = await runCommandAsync(argv[0], argv.slice(1), {
+          cwd: fmRoot,
+          env: scriptEnv,
+          timeoutMs: opts.timeoutMs,
+        });
+        return { exitCode: r.status ?? 1, stdout: r.stdout || "", stderr: r.stderr || "" };
+      },
+      readSystemPrompt: () => Promise.resolve(readFileSync(classifierSystemFile, "utf8")),
+      // The supervision session's own model - the pin when set, else main's
+      // own, the branch build's same resolution - is this host's default and
+      // its one-shot model-not-found fallback name, so the default path
+      // never issues a failing haiku call first.
+      readConfiguredModel: () => Promise.resolve(readConfigLine("classifier-model", "") || null),
+      readDefaultModel: () => Promise.resolve(supervisionModelName()),
+      complete: classifierComplete,
+      clock: { now: () => Date.now(), iso: () => new Date().toISOString() },
+    };
+  }
+
+
   function enqueueWake(message: string, acceptedGeneration: number, recoveryProbe = false, acceptedAwayOnly = false): Promise<void> {
     const acceptedSelectionRevision = branchSelectionRevision;
+    let promptAttempted = false;
     const delivery = branchChain
       .then(async () => {
         if (shuttingDown || acceptedGeneration !== generation) {
@@ -1467,7 +1618,7 @@ ${context.command}
         if (!(await enqueueDelivery(() => actingAsOwner(acceptedGeneration)))) {
           throw new Error("supervision session no longer owns the fleet lock");
         }
-        if (!(await enqueueDelivery(() => reconcileUnreadOutcomes(acceptedGeneration)))) {
+        if (!(await enqueueDelivery(async () => (await reconcileUnreadOutcomes(acceptedGeneration)) === null))) {
           if (acceptedGeneration === generation) {
             branchBroken = "could not reconcile unread supervision outcomes into main";
           }
@@ -1477,6 +1628,11 @@ ${context.command}
         const { session, sessionManager } = branchForWake;
         await flushMirror(session, acceptedGeneration);
         if (!(await actingAsOwner(acceptedGeneration))) throw new Error("supervision session no longer owns the fleet lock");
+        // The settlement baseline is taken at the wake's acceptance into the
+        // branch: any durable report the branch's reporting path lands during
+        // this wake's handling counts as this wake's outcome. The classifier's
+        // evidence gather never bumps the revision; only fm_branch_report does.
+        const reportRevisionBeforePrompt = durableReportRevision;
         const heartbeat = /^heartbeat($|:)/.test(message);
         // The posture is read here, at the tail of this wake, never earlier
         // and never into the prompt prefix.
@@ -1506,6 +1662,58 @@ ${context.command}
         if (scope.corrupted) {
           throw new Error("the unread wake queue could not be read safely");
         }
+        // The shared pre-branch classifier joins the capability here: every
+        // attended wake with eligible rows is classified before any row is
+        // claimed. The away posture skips it entirely - the branch takes
+        // every row while the record exists. A non-routine verdict passes
+        // the rows to main: durable covering captain rows in the outcome
+        // store (the mod's exact argv), the durable passed-seqs guard, and
+        // a rejected settlement, which hands the wake back to the watcher's
+        // consumption-acknowledged main path. A routine verdict proceeds to
+        if (!afk) {
+          const passedSeqs = readPassedSeqs();
+          const gone = [...passedSeqs].filter((s) => !scope.allSeqs.includes(s));
+          if (gone.length > 0) {
+            for (const s of gone) passedSeqs.delete(s);
+            writePassedSeqs(passedSeqs);
+          }
+          const unacknowledged = scope.eligibleSeqs.filter((s) => passedSeqs.has(s));
+          if (unacknowledged.length > 0) {
+            throw new Error("wake rows were already passed to main and are not yet acknowledged");
+          }
+          const { result, recordLine } = await classifyWake(piClassifierDeps(), {
+            wake: message,
+            tasks: scope.eligibleTasks,
+            seqs: scope.eligibleSeqs,
+          });
+          try {
+            await appendRecordLine(classificationsFile, recordLine);
+          } catch {
+            // The durable log is the scorer's input, not the routing path;
+            // a failed append is absorbed exactly like the mod absorbs one.
+          }
+          if (result.verdict !== "routine") {
+            for (const s of scope.eligibleSeqs) passedSeqs.add(s);
+            writePassedSeqs(passedSeqs);
+            const why = `classifier ${result.verdict}`;
+            const coverSummary = passedToMainSummary(why, result.reason);
+            for (const t of scope.eligibleTasks) {
+              try {
+                await enqueueDelivery(async () => {
+                  const appended = await runOutcomeScript(classifierPassCoverArgv(t, coverSummary, message));
+                  if (appended.ok) {
+                    await runOutcomeScript(markReadArgv(appended.stdout));
+                    await runOutcomeScript(markProcessedArgv(appended.stdout));
+                  }
+                });
+              } catch {
+                // One task's covering row failing must not block the pass;
+                // the guard file still keeps main authoritative for the rows.
+              }
+            }
+            throw new Error(`classifier routed the wake to main: ${result.verdict} (${result.reason})`);
+          }
+        }
         const grant = await writeEligibleRowsSnapshot(
           state,
           scope.eligibleSeqs,
@@ -1514,9 +1722,6 @@ ${context.command}
         );
         if (grant === "main-owned") throw new Error("the wake rows are already claimed by main");
         if (grant !== "published") throw new Error("could not record the branch's eligible row snapshot");
-        // A row can still arrive between this re-check and the model starting
-        // the drain; that residual is accepted by the confused-agent-grade boundary.
-        const reportRevisionBeforePrompt = durableReportRevision;
         const entryOffset = sessionManager.getEntries().length;
         // A claimed check row names no task, so a prompt carrying one is not
         // scoped by task (only possible in the away posture).
@@ -1527,6 +1732,7 @@ ${context.command}
         // lets this prompt proceed; the guarded scripts revalidate, and the
         // durable queue keeps every row (bin/fm-lease-lib.sh role-partition).
         const postureTail = afk ? await awayPostureTail() : "";
+        promptAttempted = true;
         try {
           await session.prompt(
             `FIRSTMATE SUPERVISION WAKE: ${message}\n\nHandle this per your operating procedure and finish with fm_branch_report.${postureTail}`,
@@ -1541,12 +1747,24 @@ ${context.command}
             branchForWake.generation === generation &&
             branchForWake.selectionRevision === branchSelectionRevision
           ) {
-            recordSettledProviderError(detail);
+            recordSettledBranchFailure(detail);
           }
           throw new Error(detail);
         }
         if (durableReportRevision <= reportRevisionBeforePrompt) {
-          throw new Error("supervision branch prompt settled but produced no durable outcome for its claimed wake rows");
+          // Unified failure counting (the mod's rule, adopted on Pi): a
+          // report-less, error-free settlement counts one consecutive
+          // failure exactly as a settled provider error does, so two silent
+          // turns latch the branch the same way. The wake still rejects to
+          // the watcher's fallback either way, so no wake is lost.
+          const detail = "supervision branch prompt settled but produced no durable outcome for its claimed wake rows";
+          if (
+            branchForWake.generation === generation &&
+            branchForWake.selectionRevision === branchSelectionRevision
+          ) {
+            recordSettledBranchFailure(detail);
+          }
+          throw new Error(detail);
         }
         recordDurableBranchReport(branchForWake.generation, branchForWake.selectionRevision);
         if (!(await releaseEligibleRowsSnapshot(state, wakeGrantScript, String(acceptedGeneration)))) {
@@ -1558,7 +1776,7 @@ ${context.command}
         throw error;
       })
       .finally(() => {
-        if (recoveryProbe) finishProviderProbe(acceptedGeneration, acceptedSelectionRevision);
+        if (recoveryProbe) finishProviderProbe(acceptedGeneration, acceptedSelectionRevision, promptAttempted);
       });
     branchChain = delivery.catch(() => {});
     return delivery;
@@ -1572,8 +1790,7 @@ ${context.command}
   // Clearing the broken latch is what lets a corrected pin recover in place.
   function releaseBranchForSelectionChange(): void {
     branchBroken = "";
-    consecutiveProviderErrors = 0;
-    providerRecovery = null;
+    providerLatch.reset();
     const stale = branch;
     branch = null;
     if (!stale) return;
@@ -1629,15 +1846,11 @@ ${context.command}
     // effects.
     if (!offerEligible(offer)) return;
     if (!generationOwnsLockSync(generation)) return; // cold start pre-lock, secondary session, or shutdown
-    const recoveryProbe = Boolean(
-      branchBroken &&
-      providerRecovery &&
-      !providerRecovery.probeInFlight &&
-      Date.now() >= providerRecovery.retryNotBefore
-    );
+    const admission = providerLatch.admitWake();
+    const recoveryProbe = admission.decision === "probe";
     if (branchBroken && !recoveryProbe) return; // main owns every wake inside the cooldown window
     if (!collectCurrentMainDialog()) return;
-    if (recoveryProbe && providerRecovery) providerRecovery.probeInFlight = true;
+    if (recoveryProbe) providerLatch.beginProbe();
     offer.accept(enqueueWake(offer.message, generation, recoveryProbe, offer.awayOnly === true));
   });
 
@@ -1716,7 +1929,7 @@ ${context.command}
     const turnGeneration = generation;
     const reconciled = await enqueueDelivery(async () => {
       if (!(await actingAsOwner(turnGeneration))) return "not-owner";
-      return (await reconcileUnreadOutcomes(turnGeneration, false)) ? "reconciled" : "failed";
+      return (await reconcileUnreadOutcomes(turnGeneration, false)) === null ? "reconciled" : "failed";
     });
     // A verdict about a generation that has since been replaced says nothing
     // about the new one, so it neither breaks the branch nor flushes a mirror.
@@ -1752,8 +1965,7 @@ ${context.command}
     // cancelled by its own recheck rather than racing this one.
     shuttingDown = false;
     branchBroken = "";
-    consecutiveProviderErrors = 0;
-    providerRecovery = null;
+    providerLatch.reset();
     generation += 1;
     mirrorCollection.collectAnchor = null;
     mirrorCollection.pendingCursor = null;
@@ -1762,7 +1974,7 @@ ${context.command}
     const startedGeneration = generation;
     const failed = await enqueueDelivery(
       async () =>
-        (await actingAsOwner(startedGeneration)) && !(await reconcileUnreadOutcomes(startedGeneration)),
+        (await actingAsOwner(startedGeneration)) && (await reconcileUnreadOutcomes(startedGeneration)) !== null,
     );
     if (failed && startedGeneration === generation) {
       branchBroken = "could not reconcile unread supervision outcomes into main";
@@ -2250,10 +2462,13 @@ ${context.command}
     },
     execute: async (_toolCallId, params) => {
       const raw = (params as { through?: unknown }).through;
-      const through = typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 ? raw : null;
+      // The safe-positive-integer rule is the shared module's; the coercion
+      // of raw input is a declared host seam, the refusal wording is unified.
+      const through = typeof raw === "number" && validateThroughValue(raw) ? raw : null;
       if (through === null) {
         return {
-          content: [{ type: "text", text: "acknowledgement refused: through must be a positive outcome sequence number" }],
+          // Unified wording (the mod's through-validation refusal).
+          content: [{ type: "text", text: "through must be a positive integer" }],
           details: undefined,
           isError: true,
         };
@@ -2277,23 +2492,22 @@ ${context.command}
             isError: true,
           };
         }
-        const marked = await runOutcomeScript(["mark-processed", "--through", String(through)]);
+        const marked = await runSettlementStep(runOutcomeScript, markProcessedArgv(through));
         if (!marked.ok) {
           return {
-            content: [{ type: "text", text: `acknowledgement refused: ${marked.detail}` }],
+            // Unified wording (the mod's mark-processed failure).
+            content: [{ type: "text", text: `processed marker not advanced: ${marked.detail}` }],
             details: undefined,
             isError: true,
           };
         }
         const remaining = await readUnprocessedOutcomes(acknowledgedGeneration);
         if (remaining !== null && remaining.length === 0) processing = null;
-        const open = remaining === null
-          ? "the remaining outcomes could not be read"
-          : remaining.length === 0
-            ? "no captain outcome remains unprocessed"
-            : `${remaining.length} newer captain outcome(s) remain unprocessed (seq ${remaining.map((row) => row.seq).join(", ")}) and will be presented again`;
+        // Unified wording (the mod's processed success tail). The remaining
+        // read above only maintains the volatile processing state; the
+        // per-row re-presentation stays main's own processing-request path.
         return {
-          content: [{ type: "text", text: `processed through seq ${through}; ${open}` }],
+          content: [{ type: "text", text: `captain outcomes through seq ${through} marked processed` }],
           details: undefined,
         };
       });

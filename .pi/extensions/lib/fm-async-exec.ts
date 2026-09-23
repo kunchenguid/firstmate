@@ -31,6 +31,12 @@ export interface AsyncExecOptions {
   /** Written to the child's stdin, which is closed either way. */
   input?: string;
   /**
+   * Kill the child after this many milliseconds; the promise then resolves
+   * with a null status and a timeout note on stderr, exactly like a caller
+   * of spawnSync's timeout option would have observed.
+   */
+  timeoutMs?: number;
+  /**
    * Upper bound on each captured output stream, mirroring spawnSync's
    * maxBuffer. Defaults to 1 MiB.
    */
@@ -51,9 +57,11 @@ export function runCommandAsync(
     let stderrBytes = 0;
     const maxBuffer = options.maxBuffer ?? DEFAULT_MAX_BUFFER;
     let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     const finish = (status: number | null, detail = ""): void => {
       if (settled) return;
       settled = true;
+      if (timeout !== undefined) clearTimeout(timeout);
       resolve({ status, stdout, stderr: detail ? `${stderr}${detail}` : stderr });
     };
     let child;
@@ -67,6 +75,15 @@ export function runCommandAsync(
       finish(null, error instanceof Error ? error.message : String(error));
       return;
     }
+    timeout =
+      options.timeoutMs !== undefined
+        ? setTimeout(() => {
+            try {
+              child.kill();
+            } catch {}
+            finish(null, `timed out after ${options.timeoutMs}ms`);
+          }, options.timeoutMs)
+        : undefined;
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       if (settled) return;

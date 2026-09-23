@@ -1,0 +1,9 @@
+{
+  "name": "fm-branch-mod",
+  "version": "1.0.0",
+  "description": "Firstmate supervision branch for Claude Code: a hooks module that routes routine fleet wakes to one persistent background agent, bounded inside the mod, and refuses to load on any Claude Code version other than its pin. Loads only through --plugin-dir with CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1, and stays inert in every home without state/.branch-mod-mode.",
+  "author": {
+    "name": "Firstmate",
+    "url": "https://github.com/kunchenguid/firstmate"
+  }
+}

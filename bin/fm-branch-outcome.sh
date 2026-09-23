@@ -6,8 +6,10 @@
 #   - Store: $STATE/branch-outcomes.jsonl, strictly APPEND-ONLY. One JSON
 #     object per line: {"seq":N,"epoch":N,"task":"...","wake":"...",
 #     "verdict":"routine"|"captain","summary":"...","silent":true|false,
-#     "statusEndpoint":N,"statusIdent":"..."}. Legacy rows without `silent`
-#     or status provenance remain valid and are treated as visible.
+#     "statusEndpoint":N,"statusIdent":"..."}, plus an optional "wakeKey"
+#     (digits, colon, comma only) before statusEndpoint when the appender
+#     passed --wake-key. Legacy rows without `silent` or status provenance
+#     remain valid and are treated as visible.
 #     Every read and append validates the complete log as a gap-free sequence;
 #     malformed, duplicate, or reordered rows fail closed.
 #     Existing lines are never rewritten, reordered, or deleted by any
@@ -59,8 +61,10 @@
 #
 # Usage:
 #   fm-branch-outcome.sh append --task <id> --verdict routine|captain \
-#       --summary <text> [--wake <text>] [--silent true|false]
-#     Append one outcome record; prints the assigned seq.
+#       --summary <text> [--wake <text>] [--wake-key <text>] [--silent true|false]
+#     Append one outcome record; prints the assigned seq. --wake-key stamps a
+#     durable wake identity (the mod's wake-queue epoch:seq set) onto the row
+#     so retrospective scorers can join by identity instead of wake text.
 #   fm-branch-outcome.sh unread
 #     Print every unread record (raw JSONL). Exit 0 with no output when none.
 #   fm-branch-outcome.sh mark-read --through <seq>
@@ -107,7 +111,7 @@ OUTCOME_INDEX_MAX_BYTES=512
 OUTCOME_INDEX_READY="$STATE/.branch-outcome-index-ready"
 
 usage() {
-  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
+  echo "usage: fm-branch-outcome.sh append --task <id> --verdict routine|captain --summary <text> [--wake <text>] [--wake-key <text>] [--silent true|false] | unread | mark-read --through <seq> | unprocessed | mark-processed --through <seq> | processed-init [--held-lock] | list [--recent <n>] | startup-replay" >&2
   exit 2
 }
 
@@ -187,6 +191,13 @@ last_seq() {
           and (.silent | type) == "boolean"
           and ((.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint <= 9007199254740991 and .statusEndpoint == (.statusEndpoint | floor))
           and ((.statusIdent | type) == "string" and (.statusIdent | test("[\\t\\n]") | not))
+        )
+        or (
+          keys == ["epoch", "seq", "silent", "statusEndpoint", "statusIdent", "summary", "task", "verdict", "wake", "wakeKey"]
+          and (.silent | type) == "boolean"
+          and ((.statusEndpoint | type) == "number" and .statusEndpoint >= 0 and .statusEndpoint <= 9007199254740991 and .statusEndpoint == (.statusEndpoint | floor))
+          and ((.statusIdent | type) == "string" and (.statusIdent | test("[\\t\\n]") | not))
+          and ((.wakeKey | type) == "string" and (.wakeKey | test("[\\t\\n]") | not))
         )
       )
       and ((.seq | type) == "number" and .seq >= 1 and .seq <= 9007199254740991 and .seq == (.seq | floor))
@@ -426,6 +437,7 @@ case "$CMD" in
     VERDICT=''
     SUMMARY=''
     WAKE=''
+    WAKE_KEY=''
     SILENT=false
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -433,6 +445,11 @@ case "$CMD" in
         --verdict) VERDICT=${2:-}; shift 2 || usage ;;
         --summary) SUMMARY=${2:-}; shift 2 || usage ;;
         --wake) WAKE=${2:-}; shift 2 || usage ;;
+        --wake-key)
+          WAKE_KEY=${2:-}
+          shift 2 || usage
+          case "$WAKE_KEY" in *[!0-9:,]*) usage ;; esac
+          ;;
         --silent) SILENT=${2:-}; shift 2 || usage ;;
         *) usage ;;
       esac
@@ -460,10 +477,11 @@ case "$CMD" in
     SEQ=$(( LAST_SEQ + 1 ))
     capture_status_position "$TASK"
     rm -f -- "$OUTCOME_INDEX_READY" || { fm_lock_release "$LOCK"; exit 1; }
-    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s,"statusEndpoint":%s,"statusIdent":"%s"}\n' \
+    ROW_TAIL=",\"statusEndpoint\":$CAPTURED_STATUS_ENDPOINT,\"statusIdent\":\"$(json_escape "$CAPTURED_STATUS_IDENT")\"}"
+    [ -n "$WAKE_KEY" ] && ROW_TAIL=",\"wakeKey\":\"$(json_escape "$WAKE_KEY")\"$ROW_TAIL"
+    printf '{"seq":%s,"epoch":%s,"task":"%s","wake":"%s","verdict":"%s","summary":"%s","silent":%s%s\n' \
       "$SEQ" "$(date +%s)" "$(json_escape "$TASK")" "$(json_escape "$WAKE")" \
-      "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$CAPTURED_STATUS_ENDPOINT" \
-      "$(json_escape "$CAPTURED_STATUS_IDENT")" >> "$STORE"
+      "$VERDICT" "$(json_escape "$SUMMARY")" "$SILENT" "$ROW_TAIL" >> "$STORE"
     # A task with neither a live meta nor a status log is retired: the branch
     # reports the teardown it just performed, and writing the index here would
     # recreate the footprint teardown removed. The outcome itself is still

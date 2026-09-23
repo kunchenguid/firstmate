@@ -48,12 +48,18 @@ install_pi_branch_extension_fixture() {
   local repo=$1
   mkdir -p \
     "$repo/.pi/extensions/lib" \
+    "$repo/lib" \
     "$repo/node_modules/@earendil-works/pi-coding-agent" \
     "$repo/node_modules/@earendil-works/pi-ai" \
     "$repo/node_modules/@earendil-works/pi-tui" \
     "$repo/node_modules/typebox"
   cp "$EXT" "$repo/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/lib/fm-branch-classifier.ts" "$repo/lib/fm-branch-classifier.ts"
+  cp "$ROOT/lib/fm-branch-eligibility.ts" "$repo/lib/fm-branch-eligibility.ts"
+  cp "$ROOT/lib/fm-branch-eligibility-core.ts" "$repo/lib/fm-branch-eligibility-core.ts"
+  cp "$ROOT/lib/fm-branch-report-sequence.ts" "$repo/lib/fm-branch-report-sequence.ts"
+  cp "$ROOT/lib/fm-branch-provider-latch.ts" "$repo/lib/fm-branch-provider-latch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
@@ -138,7 +144,54 @@ export class ModelRuntime {
   hasConfiguredAuth(provider) {
     return this.authenticated.has(provider);
   }
+  // The pre-branch classifier's completion seam. Default answer keeps every
+  // wake routine so existing wake-delivery cases are unchanged; a test binds
+  // globalThis.__fmClassifierAnswer(context, options) to script a verdict.
+  async completeSimple(model, context, options) {
+    (globalThis.__fmClassifierCalls ??= []).push({
+      model: { provider: model.provider, id: model.id },
+      systemPrompt: context.systemPrompt,
+      prompt: context.messages.map((message) => message.content).join("\n"),
+      maxTokens: options?.maxTokens,
+    });
+    const answer = globalThis.__fmClassifierAnswer
+      ? await globalThis.__fmClassifierAnswer(context, options)
+      : JSON.stringify({ verdict: "routine", reason: "stub default: routine" });
+    return {
+      role: "assistant",
+      content: [{ type: "text", text: String(answer) }],
+      usage: {},
+      provider: model.provider,
+      model: model.id,
+    };
+  }
 }
+// Stub of the classifier's model-name resolution: first exact provider or
+// id match, else a synthetic scope so a suite that binds no static models
+// still exercises the completion seam (the real resolver's diagnostics are
+// not this suite's unit). Patterns land in __fmResolverPatterns, and names
+// listed in __fmUnresolvableModels fail resolution exactly as a host with
+// no such model would.
+export async function resolveModelScopeWithDiagnostics(patterns, modelRuntime) {
+  (globalThis.__fmResolverPatterns ??= []).push(...patterns.map((p) => String(p)));
+  const pattern = String(patterns[0] ?? "");
+  if (globalThis.__fmUnresolvableModels?.has(pattern)) {
+    throw new Error(`classifier model not found: ${pattern}`);
+  }
+  // A "provider/id" pattern matches an exact catalog entry first, as the
+  // real resolver does for provider-qualified names.
+  const separator = pattern.indexOf("/");
+  const qualified = separator > 0 && separator < pattern.length - 1
+    ? { provider: pattern.slice(0, separator), id: pattern.slice(separator + 1) }
+    : null;
+  const model =
+    (qualified && modelRuntime.models.find((m) => m.provider === qualified.provider && m.id === qualified.id)) ??
+    modelRuntime.models.find((m) => m.provider === pattern || m.id === pattern) ??
+    modelRuntime.models[0] ??
+    { provider: "stub-classifier", id: pattern || "stub-model" };
+  return { scopedModels: [{ model, thinkingLevel: "off" }], diagnostics: [] };
+}
+
 export class DefaultResourceLoader {
   constructor(options) {
     this.options = options;
@@ -650,6 +703,281 @@ const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 JS
 DRIVER_PRELUDE=$(cat "$DRIVER_PRELUDE_FILE")
+
+# The pre-branch classifier joins the branch here: a captain-classified wake
+# passes to main with durable covering rows and the passed-seqs guard, a
+# re-offer of guarded rows classifies nothing, and rows that left the queue
+# are swept from the guard.
+test_classifier_pass_covers_rows_and_guards_passed_seqs() {
+  local repo home out status
+  repo="$TMP_ROOT/classifier-pass-root"
+  home="$TMP_ROOT/classifier-pass-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, settle, defaultSessionCtx, home, makeOffer, bus }; })()`);
+const { pi, fire, dispatch, settle, defaultSessionCtx, home, makeOffer, bus } = globalThis.__t;
+import { readFileSync, writeFileSync } from "node:fs";
+
+writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+await fire("session_start", {}, defaultSessionCtx);
+const classFile = `${home}/state/branch-mod-classifications.jsonl`;
+const passedFile = `${home}/state/.branch-mod-passed`;
+const classRecords = () => {
+  try { return readFileSync(classFile, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)); }
+  catch { return []; }
+};
+const passedSeqs = () => { try { return JSON.parse(readFileSync(passedFile, "utf8")); } catch { return []; } };
+const outcomeRows = () => {
+  try { return readFileSync(`${home}/state/branch-outcomes.jsonl`, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)); }
+  catch { return []; }
+};
+
+// A captain-classified wake passes to main: the settlement rejects, exactly
+// one durable record lands with the whitelisted verdict and the configured
+// default model, the guard file holds the claimed rows, and one covering
+// captain row per eligible task carries the shared pass-cover summary.
+globalThis.__fmClassifierAnswer = async () => JSON.stringify({ verdict: "captain", reason: "the worker reports a blocked credential" });
+const offer = dispatch("signal: task-9 done: PR https://example.com/pr/9 checks green");
+if (!offer.accepted) throw new Error("branch did not accept the wake offer");
+let rejected = "";
+try { await offer.settlement; } catch (error) { rejected = String(error.message); }
+if (!rejected.includes("classifier routed the wake to main")) {
+  throw new Error(`a captain-classified wake settled instead of passing to main: ${rejected}`);
+}
+const records = classRecords();
+if (records.length !== 1) throw new Error(`expected one classification record, got ${records.length}`);
+if (records[0].verdict !== "captain") throw new Error(`record lost the verdict: ${JSON.stringify(records[0])}`);
+if (records[0].wake !== offer.message) throw new Error(`record lost the wake: ${JSON.stringify(records[0])}`);
+if (records[0].model !== "anthropic/main-model") throw new Error(`record lost the host-default model: ${JSON.stringify(records[0])}`);
+if (JSON.stringify(passedSeqs()) !== JSON.stringify(["1"])) throw new Error(`guard file wrong: ${readFileSync(passedFile, "utf8")}`);
+let cover = null;
+await settle(() => {
+  const rows = outcomeRows();
+  if (rows.length === 0) return false;
+  const last = rows.at(-1);
+  if (last.task === "branch-driver" && last.verdict === "captain") cover = last;
+  return cover !== null;
+}, "classifier cover row");
+if (cover.summary !== "Passed to main directly (classifier captain): the worker reports a blocked credential") {
+  throw new Error(`cover summary is not the shared builder's: ${cover.summary}`);
+}
+if (cover.wake !== offer.message) throw new Error(`cover row lost the wake: ${JSON.stringify(cover)}`);
+await settle(() => {
+  try { return readFileSync(`${home}/state/.branch-outcomes-processed`, "utf8").trim() === String(cover.seq); }
+  catch { return false; }
+}, "cover row processed marker");
+
+// The unacknowledged guard: a re-offer of the same rows rejects without
+// classifying again or appending more cover rows.
+const beforeCount = classRecords().length;
+const beforeRows = outcomeRows().length;
+const again = dispatch("signal: task-9 done: PR https://example.com/pr/9 checks green");
+try {
+  await again.settlement;
+  throw new Error("a re-offered passed wake settled");
+} catch (error) {
+  if (!String(error.message).includes("already passed to main")) throw error;
+}
+if (classRecords().length !== beforeCount) throw new Error("a guarded re-offer classified again");
+if (outcomeRows().length !== beforeRows) throw new Error("a guarded re-offer appended cover rows again");
+
+// Rows that left the queue are swept from the guard, so a later wake
+// classifies fresh and the guard no longer names the gone seq. The queue is
+// written directly so the row's seq differs from the guarded one (the driver
+// helper always writes seq 1).
+writeFileSync(`${home}/state/.wake-queue`, "1\t2\tsignal\tbranch-driver.status\tsignal: next wake\n");
+globalThis.__fmClassifierAnswer = async () => JSON.stringify({ verdict: "routine", reason: "healthy" });
+const third = makeOffer("signal: next wake");
+bus.emit("fm-branch-supervision:dispatch", third);
+if (!third.accepted) throw new Error("the swept-guard wake was not accepted by the branch");
+let thirdRejection = "";
+try { await third.settlement; } catch (error) { thirdRejection = String(error.message); }
+if (classRecords().length !== beforeCount + 1) throw new Error("the swept guard did not classify the next wake");
+if (classRecords().at(-1).verdict !== "routine") throw new Error(`the swept-guard wake lost its verdict: ${JSON.stringify(classRecords().at(-1))}`);
+if (JSON.stringify(passedSeqs()) !== JSON.stringify([])) throw new Error(`gone seqs were not swept: ${readFileSync(passedFile, "utf8")}`);
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "classifier pass cover and guard must hold: $out"
+  pass "a captain-classified wake passes to main with cover rows, the guard file, and its sweep"
+}
+
+# The Pi host default, in three single-purpose drivers: an unconfigured
+# classifier runs on the supervision branch's own model (the pin, else
+# main's session model) with no failing haiku call first; an explicit
+# config/classifier-model still wins; an explicit unresolvable name falls
+# back once to the branch's model; and the durable record names the model
+# actually used. Each driver holds at most two wake turns because two
+# report-less, error-free branch turns arm the provider latch and a latched
+# branch rejects further wakes.
+test_classifier_default_resolves_per_host_on_pi() {
+  local repo home out status
+  repo="$TMP_ROOT/classifier-default-root"
+  home="$TMP_ROOT/classifier-default-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, settle, defaultSessionCtx, home, registryModels }; })()`);
+const { pi, fire, dispatch, settle, defaultSessionCtx, home, registryModels } = globalThis.__t;
+import { readFileSync, writeFileSync } from "node:fs";
+
+writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+// The catalog bindings let the stub resolver match the qualified names the
+// way a real host catalog does.
+registryModels.push({ provider: "anthropic", id: "main-model" });
+registryModels.push({ provider: "openai", id: "cheap-1" });
+await fire("session_start", {}, defaultSessionCtx);
+const classFile = `${home}/state/branch-mod-classifications.jsonl`;
+const classRecords = () => {
+  try { return readFileSync(classFile, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)); }
+  catch { return []; }
+};
+globalThis.__fmClassifierAnswer = async () => JSON.stringify({ verdict: "routine", reason: "healthy" });
+
+// 1. No config and no pin: the default path resolves main's session model
+// before any completion call, so the resolution sequence never names haiku
+// and the record carries the model used.
+const unpinned = dispatch("signal: unpinned default wake");
+if (!unpinned.accepted) throw new Error("branch did not accept the unpinned wake");
+try { await unpinned.settlement; } catch { /* the stubbed prompt reports nothing; the rejection is expected */ }
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "unpinned default wake prompt");
+if (JSON.stringify(globalThis.__fmResolverPatterns) !== JSON.stringify(["anthropic/main-model"])) {
+  throw new Error(`the unpinned default resolved through the wrong names: ${JSON.stringify(globalThis.__fmResolverPatterns)}`);
+}
+if ((globalThis.__fmClassifierCalls ?? []).length !== 1
+  || globalThis.__fmClassifierCalls[0].model.provider !== "anthropic"
+  || globalThis.__fmClassifierCalls[0].model.id !== "main-model") {
+  throw new Error(`the unpinned default did not complete on the session model: ${JSON.stringify(globalThis.__fmClassifierCalls)}`);
+}
+const records = classRecords();
+if (records.length !== 1 || records[0].model !== "anthropic/main-model" || records[0].verdict !== "routine") {
+  throw new Error(`the unpinned default record drifted: ${JSON.stringify(records)}`);
+}
+
+// 2. The pin: the same default path now resolves the pinned model.
+writeFileSync(`${home}/config/supervision-branch-model`, "openai/cheap-1\n");
+const pinned = dispatch("signal: pinned default wake");
+if (!pinned.accepted) throw new Error("branch did not accept the pinned wake");
+try { await pinned.settlement; } catch { }
+await settle(() => (globalThis.__fmPrompts ?? []).length === 2, "pinned default wake prompt");
+if (JSON.stringify(globalThis.__fmResolverPatterns) !== JSON.stringify(["anthropic/main-model", "openai/cheap-1"])) {
+  throw new Error(`the pinned default resolved through the wrong names: ${JSON.stringify(globalThis.__fmResolverPatterns)}`);
+}
+if ((globalThis.__fmClassifierCalls ?? []).length !== 2
+  || globalThis.__fmClassifierCalls[1].model.provider !== "openai"
+  || globalThis.__fmClassifierCalls[1].model.id !== "cheap-1") {
+  throw new Error(`the pinned default did not complete on the pinned model: ${JSON.stringify(globalThis.__fmClassifierCalls)}`);
+}
+if (classRecords().at(-1).model !== "openai/cheap-1") {
+  throw new Error(`the pinned default record lost the pinned model: ${JSON.stringify(classRecords().at(-1))}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the Pi classifier default must resolve per host without a failing haiku call: $out"
+  pass "the Pi classifier default resolves the branch's model (pin, else main's session model) before any completion call"
+}
+
+# Driver 2 of 3: an explicit config/classifier-model wins over the pin,
+# resolving and completing exactly once.
+test_classifier_explicit_config_wins_on_pi() {
+  local repo home out status
+  repo="$TMP_ROOT/classifier-explicit-root"
+  home="$TMP_ROOT/classifier-explicit-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, settle, defaultSessionCtx, home, registryModels }; })()`);
+const { pi, fire, dispatch, settle, defaultSessionCtx, home, registryModels } = globalThis.__t;
+import { readFileSync, writeFileSync } from "node:fs";
+
+writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+registryModels.push({ provider: "anthropic", id: "main-model" });
+registryModels.push({ provider: "openai", id: "cheap-1" });
+writeFileSync(`${home}/config/supervision-branch-model`, "openai/cheap-1\n");
+writeFileSync(`${home}/config/classifier-model`, "anthropic/main-model\n");
+await fire("session_start", {}, defaultSessionCtx);
+globalThis.__fmClassifierAnswer = async () => JSON.stringify({ verdict: "routine", reason: "healthy" });
+
+const explicit = dispatch("signal: explicit config wake");
+if (!explicit.accepted) throw new Error("branch did not accept the explicit-config wake");
+try { await explicit.settlement; } catch { }
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "explicit config wake prompt");
+if (JSON.stringify(globalThis.__fmResolverPatterns) !== JSON.stringify(["anthropic/main-model"])) {
+  throw new Error(`the explicit config did not win outright: ${JSON.stringify(globalThis.__fmResolverPatterns)}`);
+}
+if ((globalThis.__fmClassifierCalls ?? []).length !== 1) {
+  throw new Error(`the explicit config resolved or completed more than once: ${JSON.stringify(globalThis.__fmClassifierCalls)}`);
+}
+const record = JSON.parse(readFileSync(`${home}/state/branch-mod-classifications.jsonl`, "utf8").trim().split("\n").at(-1));
+if (record.model !== "anthropic/main-model") {
+  throw new Error(`the explicit-config record lost the model used: ${JSON.stringify(record)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the explicit classifier config must win over the pin with a single resolution: $out"
+  pass "the explicit classifier config wins over the pin and records the model used"
+}
+
+# Driver 3 of 3: an explicit name that does not resolve on this host falls
+# back once to the branch's own model; the record names the model used.
+test_classifier_unresolvable_falls_back_once_on_pi() {
+  local repo home out status
+  repo="$TMP_ROOT/classifier-fallback-root"
+  home="$TMP_ROOT/classifier-fallback-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, fire, dispatch, settle, defaultSessionCtx, home, registryModels }; })()`);
+const { pi, fire, dispatch, settle, defaultSessionCtx, home, registryModels } = globalThis.__t;
+import { readFileSync, writeFileSync } from "node:fs";
+
+writeFileSync(`${home}/state/.lock`, `${process.ppid}\n`);
+registryModels.push({ provider: "openai", id: "cheap-1" });
+writeFileSync(`${home}/config/supervision-branch-model`, "openai/cheap-1\n");
+writeFileSync(`${home}/config/classifier-model`, "ghost/model\n");
+globalThis.__fmUnresolvableModels = new Set(["ghost/model"]);
+await fire("session_start", {}, defaultSessionCtx);
+globalThis.__fmClassifierAnswer = async () => JSON.stringify({ verdict: "routine", reason: "healthy" });
+
+const ghost = dispatch("signal: unresolvable config wake");
+if (!ghost.accepted) throw new Error("branch did not accept the unresolvable-config wake");
+try { await ghost.settlement; } catch { }
+await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "unresolvable config wake prompt");
+if (JSON.stringify(globalThis.__fmResolverPatterns) !== JSON.stringify(["ghost/model", "openai/cheap-1"])) {
+  throw new Error(`the unresolvable name did not fall back once to the branch's model: ${JSON.stringify(globalThis.__fmResolverPatterns)}`);
+}
+// The stub resolver fails the ghost name before any completion exists, so
+// exactly one completion lands - on the fallback model.
+if ((globalThis.__fmClassifierCalls ?? []).length !== 1
+  || globalThis.__fmClassifierCalls[0].model.provider !== "openai"
+  || globalThis.__fmClassifierCalls[0].model.id !== "cheap-1") {
+  throw new Error(`the fallback retry did not complete once on the branch's model: ${JSON.stringify(globalThis.__fmClassifierCalls)}`);
+}
+const record = JSON.parse(readFileSync(`${home}/state/branch-mod-classifications.jsonl`, "utf8").trim().split("\n").at(-1));
+if (record.model !== "openai/cheap-1" || record.verdict !== "routine") {
+  throw new Error(`the fallback record lost the model used: ${JSON.stringify(record)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "the unresolvable classifier name must fall back once to the branch's model: $out"
+  pass "the unresolvable classifier name falls back once to the branch's model and records the model used"
+}
 
 test_branch_dispatch_two_stage_filter_and_prefix_contract() {
   local repo home out status
@@ -1357,7 +1685,7 @@ const tooFar = await processed.execute("ack-too-far", { through: seq + 100 }, un
 if (!tooFar.isError) throw new Error("an acknowledgement beyond the read cursor was accepted");
 if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([seq])) throw new Error("a refused acknowledgement moved the marker");
 const ack = await processed.execute("ack", { through: seq }, undefined, undefined, {});
-if (ack.isError) throw new Error(`acknowledgement failed: ${JSON.stringify(ack)}`);
+if (ack.isError || ack.content[0].text !== `captain outcomes through seq ${seq} marked processed`) throw new Error(`acknowledgement failed: ${JSON.stringify(ack)}`);
 if (unprocessedSeqs().length !== 0) throw new Error("the acknowledgement did not close the sequence");
 const before = requests().length;
 await runOf();
@@ -1450,8 +1778,9 @@ test_branch_cache_key_is_per_home_stable() {
     PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$1" FM_ROOT_OVERRIDE="$ROOT" \
       DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, settle }; })()`);
-const { dispatch, settle } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, defaultSessionCtx } = globalThis.__t;
+await fire("session_start", {}, defaultSessionCtx);
 dispatch("signal: cache probe");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "branch wake prompt");
 const loader = globalThis.__fmLoaders[0];
@@ -1594,7 +1923,11 @@ if (dispatch("check: unresolved fleet event", []).accepted) {
 // The legacy away daemon flag means nothing on Pi, where the daemon is never
 // launched: the branch keeps accepting (docs/pi-supervision-branch.md
 // "Postures"; the away-posture record itself is covered by
-// test_away_record_parks_main_and_presents_after_archive).
+// test_away_record_parks_main_and_presents_after_archive). The two silent
+// prompt settlements above each count one unified latch failure under the
+// adopted counting rule, so open a fresh supervision session first - a new
+// session resets the failure latch - and assert eligibility on it.
+await fire("session_start", {}, defaultSessionCtx);
 writeFileSync(`${home}/state/.afk`, "");
 if (!dispatch("signal: legacy flag present").accepted) throw new Error("branch declined a wake over the legacy daemon flag");
 rmSync(`${home}/state/.afk`);
@@ -1978,11 +2311,11 @@ test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under(
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, mainUserMessages }; })()`);
-const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, mainUserMessages, defaultSessionCtx }; })()`);
+const { dispatch, fire, home, mainUserMessages, defaultSessionCtx } = globalThis.__t;
 import { appendFileSync, readFileSync } from "node:fs";
 
-await fire("session_start", {});
+await fire("session_start", {}, defaultSessionCtx);
 let releasePrompt;
 globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
 const offer = dispatch("heartbeat", [], true, true);
@@ -2021,7 +2354,8 @@ EOF
 # another pane. A signal or stale wake may report only the tasks its rows
 # resolve to, with fleet refused too; a heartbeat review is unscoped and
 # refuses nothing by task id. The wake's own task still goes through, and
-# nothing refused ever reaches the durable store.
+# nothing refused ever reaches the durable store. The refusal is the unified
+# normal-result retry instruction (the mod's wording, no isError).
 test_branch_report_refuses_a_task_the_wake_did_not_name() {
   local repo home out status
   repo="$TMP_ROOT/ghost-report-root"
@@ -2049,13 +2383,15 @@ await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "task-local bran
 const session = globalThis.__fmSessions[globalThis.__fmSessions.length - 1];
 const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
 const ghost = await report.execute("ghost", { task: "other-task", verdict: "captain", summary: "PR ready to merge" }, undefined, undefined, {});
-if (!ghost.isError || !ghost.content[0].text.includes("names branch-driver, not other-task")) {
-  throw new Error(`a report for a live task the wake never named was not refused: ${JSON.stringify(ghost)}`);
+if (ghost.isError || !ghost.content[0].text.includes("task must be branch-driver (this wake's own task), not 'other-task'. Call fm_branch_report again with task=branch-driver and the same verdict and summary.")) {
+  throw new Error(`a report for a live task the wake never named did not carry the unified retry instruction: ${JSON.stringify(ghost)}`);
 }
 const gone = await report.execute("gone", { task: "retired-task", verdict: "captain", summary: "PR ready to merge" }, undefined, undefined, {});
-if (!gone.isError) throw new Error(`a report for a task with no record was not refused: ${JSON.stringify(gone)}`);
+if (gone.isError || !gone.content[0].text.includes("not 'retired-task'")) {
+  throw new Error(`a report for a task with no record did not carry the unified retry instruction: ${JSON.stringify(gone)}`);
+}
 const fleet = await report.execute("fleet", { task: "fleet", verdict: "routine", summary: "fleet-wide note" }, undefined, undefined, {});
-if (!fleet.isError || !fleet.content[0].text.includes("never fleet")) {
+if (fleet.isError || !fleet.content[0].text.includes("not 'fleet'")) {
   throw new Error(`a fleet-wide report was not refused during a task-local wake: ${JSON.stringify(fleet)}`);
 }
 const named = await report.execute("named", { task: "branch-driver", verdict: "routine", summary: "worker healthy" }, undefined, undefined, {});
@@ -2122,11 +2458,11 @@ test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligi
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, mainUserMessages }; })()`);
-const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, mainUserMessages, defaultSessionCtx }; })()`);
+const { dispatch, fire, home, mainUserMessages, defaultSessionCtx } = globalThis.__t;
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 
-await fire("session_start", {});
+await fire("session_start", {}, defaultSessionCtx);
 let releasePrompt;
 globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
 const offer = dispatch("signal: task-local wake");
@@ -2183,12 +2519,12 @@ test_branch_predrain_needs_decision_keeps_routine_row_branch_eligible() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { bus, fire, home, makeOffer, realRoot }; })()`);
-const { bus, fire, home, makeOffer, realRoot } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { bus, fire, home, makeOffer, realRoot, defaultSessionCtx }; })()`);
+const { bus, fire, home, makeOffer, realRoot, defaultSessionCtx } = globalThis.__t;
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
-fire("session_start", {});
+fire("session_start", {}, defaultSessionCtx);
 writeFileSync(
   `${home}/state/.wake-queue`,
   "1\t1\tsignal\tbranch-driver.status\tsignal: routine progress\n" +
@@ -2243,12 +2579,12 @@ test_settled_branch_prompt_releases_unacknowledged_grant() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, realRoot, mainUserMessages }; })()`);
-const { dispatch, fire, home, realRoot, mainUserMessages } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, realRoot, mainUserMessages, defaultSessionCtx }; })()`);
+const { dispatch, fire, home, realRoot, mainUserMessages, defaultSessionCtx } = globalThis.__t;
 const { spawnSync } = await import("node:child_process");
 const { existsSync } = await import("node:fs");
 
-await fire("session_start", {});
+await fire("session_start", {}, defaultSessionCtx);
 const offer = dispatch("signal: unacknowledged branch wake");
 if (!offer.accepted) throw new Error("eligible wake was not accepted");
 for (let i = 0; i < 250 && (globalThis.__fmPrompts ?? []).length === 0; i += 1) {
@@ -2294,14 +2630,16 @@ test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldow
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain }; })()`);
-const { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain, mainModel, modelRegistry }; })()`);
+const { pi, makeOffer, dispatch, fire, settle, home, mainUserMessages, sentToMain, mainModel, modelRegistry } = globalThis.__t;
 import { existsSync } from "node:fs";
 
 let now = 1_000_000;
 Date.now = () => now;
 const entries = [];
 await fire("session_start", {}, {
+  model: mainModel,
+  modelRegistry,
   sessionManager: {
     getSessionFile: () => `${home}/main.jsonl`,
     getEntries: () => entries,
@@ -2398,7 +2736,7 @@ await new Promise((resolve) => setTimeout(resolve, 50));
 if (attempt !== 4 || mainUserMessages.length !== 0) {
   throw new Error(`latched branch still prompted or emitted its own fallback: attempts=${attempt} fallbacks=${mainUserMessages.length}`);
 }
-const pauseNotes = sentToMain.filter((sent) => sent.message.content.includes("Supervision branch paused after repeated provider errors"));
+const pauseNotes = sentToMain.filter((sent) => sent.message.content.includes("Supervision branch paused after repeated failures"));
 if (pauseNotes.length !== 1 || pauseNotes[0].message.content.includes("\n")) {
   throw new Error(`the first latch must surface exactly one one-line note: ${JSON.stringify(pauseNotes)}`);
 }
@@ -2471,6 +2809,192 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "provider errors must latch, cool down, re-probe once, back off, and recover through a durable report: $out"
   pass "provider-error latches cool down, re-probe once with backoff, and recover through a durable report"
+}
+
+# A latched branch's one recovery probe is admitted before the classifier
+# runs. When the classifier then routes that wake to main, nothing was
+# probed: the probe slot is released without extending the cooldown, so the
+# very next eligible wake is the probe and the branch can recover.
+test_probe_routed_away_by_classifier_releases_the_slot_without_extending_the_latch() {
+  local repo home out status
+  repo="$TMP_ROOT/probe-routed-away-root"
+  home="$TMP_ROOT/probe-routed-away-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, makeOffer, bus, settle, sentToMain, defaultSessionCtx, home }; })()`);
+const { fire, dispatch, makeOffer, bus, settle, sentToMain, defaultSessionCtx, home } = globalThis.__t;
+import { writeFileSync } from "node:fs";
+
+let now = 1_000_000;
+Date.now = () => now;
+await fire("session_start", {}, defaultSessionCtx);
+let attempt = 0;
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  attempt += 1;
+  if (attempt === 3) {
+    const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+    const recorded = await report.execute("probe-ok", { task: "branch-driver", verdict: "routine", summary: "probe recovered" }, undefined, undefined, {});
+    if (recorded.isError) throw new Error(`probe report failed: ${JSON.stringify(recorded)}`);
+    session.messages.push({ role: "assistant", content: [], stopReason: "stop" });
+    return;
+  }
+  session.messages.push({ role: "assistant", content: [], stopReason: "error", errorMessage: "429: Monthly usage limit reached" });
+};
+
+for (const text of ["signal: e1", "signal: e2"]) {
+  const wake = dispatch(text);
+  if (!wake.accepted) throw new Error(`${text} was not accepted before the latch`);
+  await wake.settlement.catch(() => {});
+}
+if (dispatch("signal: latched").accepted) throw new Error("two provider errors did not latch the branch");
+
+// Cooldown elapses; the first admitted wake is the probe, and the classifier
+// routes it to main before any prompt.
+now += 5 * 60 * 1000;
+globalThis.__fmClassifierAnswer = async () => JSON.stringify({ verdict: "captain", reason: "terminal line" });
+const routedAway = dispatch("signal: task-9 done: PR https://example.com/pr/9 checks green");
+if (!routedAway.accepted) throw new Error("the elapsed cooldown did not admit a probe");
+let rejection = "";
+try { await routedAway.settlement; } catch (error) { rejection = String(error.message); }
+if (!rejection.includes("classifier routed the wake to main")) throw new Error(`probe was not routed to main: ${rejection}`);
+if (attempt !== 2) throw new Error(`a routed-away probe still prompted the branch: attempts=${attempt}`);
+
+// Same instant, a fresh routine row: it must be admitted as the probe rather
+// than refused for another cooldown term, and its report must recover.
+writeFileSync(`${home}/state/.wake-queue`, "1\t2\tsignal\tbranch-driver.status\tsignal: real probe\n");
+globalThis.__fmClassifierAnswer = async () => JSON.stringify({ verdict: "routine", reason: "healthy" });
+const probe = makeOffer("signal: real probe");
+bus.emit("fm-branch-supervision:dispatch", probe);
+if (!probe.accepted) throw new Error("the routed-away probe extended the latch: the next wake was refused instead of probing");
+await probe.settlement;
+await settle(() => sentToMain.some((sent) => sent.message.content.includes("Supervision branch recovered after a successful cooldown probe")), "recovery note");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a probe routed away by the classifier must release its slot without extending the latch: $out"
+  pass "a probe wake the classifier routes to main releases the probe slot; the next wake probes and recovers"
+}
+
+# The unified latch predicate (the mod's rule, adopted on Pi): a report-less,
+# error-free settlement is one consecutive failure exactly as a settled
+# provider error is, counted under Pi's schedule - two silent turns latch,
+# a healthy probe reopens, and a silent probe re-latches and doubles the
+# cooldown. The watchable surface is unchanged: a silent wake still rejects
+# to the watcher's fallback and releases its row grant, and the pause note
+# no longer names provider errors only.
+test_report_less_error_free_turns_count_toward_the_latch() {
+  local repo home out status
+  repo="$TMP_ROOT/report-less-latch-root"
+  home="$TMP_ROOT/report-less-latch-home"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, defaultSessionCtx, home }; })()	`);
+const { fire, dispatch, settle, sentToMain, defaultSessionCtx, home } = globalThis.__t;
+import { existsSync } from "node:fs";
+
+const pauseNotes = () => sentToMain.filter((sent) => sent.message.content.includes("Supervision branch paused after repeated failures")).length;
+const recoveryNotes = () => sentToMain.filter((sent) => sent.message.content.includes("Supervision branch recovered after a successful cooldown probe")).length;
+
+let now = Date.now();
+Date.now = () => now;
+let attempt = 0;
+globalThis.__fmOnBranchPrompt = async ({ session }) => {
+  attempt += 1;
+  if (attempt === 3 || attempt === 7) {
+    const report = session.options.customTools.find((tool) => tool.name === "fm_branch_report");
+    const recorded = await report.execute(
+      `probe-recovery-${attempt}`,
+      { task: "branch-driver", verdict: "routine", summary: "post-probe report proved the branch is healthy again" },
+      undefined,
+      undefined,
+      {},
+    );
+    if (recorded.isError) throw new Error(`the recovery report failed: ${JSON.stringify(recorded)}`);
+    session.messages.push({ role: "assistant", content: [], stopReason: "stop" });
+    return;
+  }
+  session.messages.push({ role: "assistant", content: [], stopReason: "stop" });
+};
+
+await fire("session_start", {}, defaultSessionCtx);
+
+// Two consecutive silent turns arm the latch: the first settles rejected
+// with the report-less reason and no pause note, the second arms it with
+// exactly one widened pause note. Neither leaves a row grant behind.
+const firstSilent = dispatch("signal: silent turn one");
+if (!firstSilent.accepted) throw new Error("the first silent wake was refused before the latch armed");
+const firstError = await firstSilent.settlement.then(() => null, (error) => error);
+if (!(firstError instanceof Error) || !firstError.message.includes("produced no durable outcome")) {
+  throw new Error(`the first silent turn did not reject settlement: ${String(firstError)}`);
+}
+if (pauseNotes() !== 0) throw new Error("a single report-less turn armed the latch early");
+if (existsSync(`${home}/state/.branch-eligible-rows`)) {
+  throw new Error("the first silent turn left the claimed row grant active");
+}
+const secondSilent = dispatch("signal: silent turn two");
+if (!secondSilent.accepted) throw new Error("one silent failure must not latch the branch yet");
+await secondSilent.settlement.then(() => null, (error) => error);
+await settle(() => pauseNotes() === 1, "the second silent turn armed the latch");
+if (sentToMain.some((sent) => sent.message.content.includes("provider errors"))) {
+  throw new Error("the pause note still names provider errors only");
+}
+
+// The latch refuses the next wake inside the cooldown, then admits exactly
+// one probe after the five-minute cooldown.
+const latchedRefusal = dispatch("signal: refused while latched");
+if (latchedRefusal.accepted) throw new Error("a latched branch accepted a fresh wake before the cooldown ended");
+now += 5 * 60 * 1000 - 1000;
+const stillLatched = dispatch("signal: one second before the cooldown ends");
+if (stillLatched.accepted) throw new Error("a latched branch accepted a wake one second before the cooldown ended");
+now += 1000;
+const probe = dispatch("signal: the cooldown probe");
+if (!probe.accepted) throw new Error("the branch did not admit the recovery probe after its cooldown");
+const probeOutcome = await probe.settlement.then(() => "resolved", (error) => error);
+if (probeOutcome !== "resolved") throw new Error(`the healthy probe did not resolve its settlement: ${String(probeOutcome)}`);
+await settle(() => attempt === 3 && recoveryNotes() === 1, "the healthy probe reopened the branch");
+
+// After recovery, two more silent turns latch again.
+now += 60 * 1000;
+const postRecoveryOne = dispatch("signal: silent turn after recovery");
+if (!postRecoveryOne.accepted) throw new Error("a recovered branch refused a fresh wake");
+await postRecoveryOne.settlement.then(() => null, (error) => error);
+const postRecoveryTwo = dispatch("signal: second silent turn after recovery");
+if (!postRecoveryTwo.accepted) throw new Error("one post-recovery silent failure must not latch yet");
+await postRecoveryTwo.settlement.then(() => null, (error) => error);
+await settle(() => pauseNotes() === 2, "the second silent pair latched again");
+
+// The re-latch cooldown admits a probe whose settlement is silent too: that
+// probe failure doubles the cooldown to ten minutes.
+now += 5 * 60 * 1000;
+const silentProbe = dispatch("signal: probe after the second latch");
+if (!silentProbe.accepted) throw new Error("the branch did not admit the probe after the re-latch cooldown");
+const silentProbeError = await silentProbe.settlement.then(() => null, (error) => error);
+if (!(silentProbeError instanceof Error) || !silentProbeError.message.includes("produced no durable outcome")) {
+  throw new Error(`the silent probe did not reject settlement: ${String(silentProbeError)}`);
+}
+if (pauseNotes() !== 2) throw new Error("a re-latch must not re-issue the first-latch note");
+
+now += 5 * 60 * 1000;
+const doubledRefusal = dispatch("signal: five minutes into a doubled cooldown");
+if (doubledRefusal.accepted) throw new Error("the failed probe did not double the cooldown to ten minutes");
+now += 5 * 60 * 1000;
+const secondProbe = dispatch("signal: probe admitted after the doubled cooldown");
+if (!secondProbe.accepted) throw new Error("the branch did not admit a probe after the doubled cooldown ended");
+await secondProbe.settlement.then(() => null, (error) => error);
+await settle(() => attempt === 7 && recoveryNotes() === 2, "the second healthy probe reopened the branch");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "report-less error-free turns must count toward the latch under Pi's schedule with probes and a doubled cooldown: $out"
+  pass "report-less error-free turns latch the branch, recover through probes, and double the cooldown"
 }
 
 test_selection_change_does_not_corrupt_inflight_provider_state() {
@@ -2563,11 +3087,11 @@ test_main_owned_grant_result_falls_back_to_main() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, mainUserMessages }; })()`);
-const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, mainUserMessages, defaultSessionCtx }; })()`);
+const { dispatch, fire, home, mainUserMessages, defaultSessionCtx } = globalThis.__t;
 import { writeFileSync } from "node:fs";
 
-await fire("session_start", {});
+await fire("session_start", {}, defaultSessionCtx);
 const offer = dispatch("signal: interrupted main claim");
 if (!offer.accepted) throw new Error("eligible wake was not accepted before the ownership recheck");
 writeFileSync(`${home}/state/.main-eligible-rows`, "1\n");
@@ -2601,11 +3125,11 @@ test_branch_predrain_recheck_noops_already_drained_wake() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, mainUserMessages }; })()`);
-const { dispatch, fire, home, mainUserMessages } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { dispatch, fire, home, mainUserMessages, defaultSessionCtx }; })()`);
+const { dispatch, fire, home, mainUserMessages, defaultSessionCtx } = globalThis.__t;
 import { writeFileSync } from "node:fs";
 
-await fire("session_start", {});
+await fire("session_start", {}, defaultSessionCtx);
 let releaseFirst;
 globalThis.__fmPromptGate = new Promise((resolve) => {
   releaseFirst = resolve;
@@ -2655,8 +3179,8 @@ test_branch_mirror_filters_order_and_cursor() {
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home }; })()`);
-const { fire, dispatch, settle, home } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, mainModel, modelRegistry }; })()`);
+const { fire, dispatch, settle, home, mainModel, modelRegistry } = globalThis.__t;
 import { existsSync, readFileSync } from "node:fs";
 
 const entries = [
@@ -2669,6 +3193,8 @@ const entries = [
   { type: "message", message: { role: "user", content: `pad ${"x".repeat(5000)}\ntail: retain this request` } },
 ];
 const ctx = {
+  model: mainModel,
+  modelRegistry,
   sessionManager: {
     getSessionFile: () => `${home}/main-1.jsonl`,
     getEntries: () => entries,
@@ -3827,13 +4353,13 @@ SH
     FM_TEST_FAIL_MARKER="$home/state/release-failed-once" DRIVER_PRELUDE="$DRIVER_PRELUDE" \
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, realRoot }; })()`);
-const { fire, dispatch, settle, home } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, realRoot, defaultSessionCtx }; })()`);
+const { fire, dispatch, settle, home, realRoot, defaultSessionCtx } = globalThis.__t;
 import { existsSync, writeFileSync } from "node:fs";
 
 writeFileSync(`${home}/state/.lease-task-old`, `branch\t${process.pid}\t123\n`);
 
-await fire("session_start", {});
+await fire("session_start", {}, defaultSessionCtx);
 if (!existsSync(`${home}/state/.lease-task-old`)) throw new Error("failed activation incorrectly committed lease cleanup");
 const offer = dispatch("signal: retry activation");
 if (!offer.accepted) throw new Error("later boundary did not retry failed activation");
@@ -3903,8 +4429,12 @@ test_queued_actions_recheck_lock_ownership() {
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, mainUserMessages }; })()`);
 const { fire, dispatch, settle, home, mainUserMessages } = globalThis.__t;
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 
+// The classifier runs on an explicit configured model so this driver can
+// keep main's session model unknown, which its mirror-cursor scenario
+// depends on.
+writeFileSync(`${home}/config/classifier-model`, "haiku\n");
 let releasePrompt;
 globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
 if (!dispatch("signal: active wake").accepted) throw new Error("first wake was not accepted");
@@ -3949,8 +4479,12 @@ test_stale_generation_boundaries_are_side_effect_free() {
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, home, sentToMain }; })()`);
 const { fire, dispatch, settle, home, sentToMain } = globalThis.__t;
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
+// An explicit configured classifier model keeps classification working while
+// main's session model stays unknown, which the generation scenarios here
+// depend on.
+writeFileSync(`${home}/config/classifier-model`, "haiku\n");
 if (!dispatch("signal: establish old branch").accepted) throw new Error("old branch wake was not accepted");
 await settle(() => (globalThis.__fmPrompts ?? []).length === 1, "old branch prompt");
 const oldSession = globalThis.__fmSessions[0];
@@ -4145,8 +4679,13 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   local repo home out status
   repo="$TMP_ROOT/dispatch-classify-root"
   home="$TMP_ROOT/dispatch-classify-home"
-  mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
+  mkdir -p "$repo/.pi/extensions/lib" "$repo/lib" "$home/state" "$home/projects/approved"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/lib/fm-branch-classifier.ts" "$repo/lib/fm-branch-classifier.ts"
+  cp "$ROOT/lib/fm-branch-eligibility.ts" "$repo/lib/fm-branch-eligibility.ts"
+  cp "$ROOT/lib/fm-branch-eligibility-core.ts" "$repo/lib/fm-branch-eligibility-core.ts"
+  cp "$ROOT/lib/fm-branch-report-sequence.ts" "$repo/lib/fm-branch-report-sequence.ts"
+  cp "$ROOT/lib/fm-branch-provider-latch.ts" "$repo/lib/fm-branch-provider-latch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$repo/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
@@ -4332,8 +4871,14 @@ delete process.env.FM_CLASSIFY_RESERVED_KEY_PREFIXES;
 writeFileSync(`${state}/symlink-target.status`, "needs-decision: external choice\n");
 unlinkSync(`${state}/task-a.status`);
 symlinkSync(`${state}/symlink-target.status`, `${state}/task-a.status`);
+// The v8-aligned fold reads bash truth: a symlinked status log is refused,
+// which names an empty fold, so the stale row stops being decision-owned and
+// the scan stays clean instead of refusing whole (the deliberate A2 alignment
+// with bin/fm-classify-lib.sh; the mod's read-through remains the documented
+// drift pinned by tests/fm-branch-eligibility.test.sh).
 const symlinkedStatus = scopeForUnreadWake(state, false);
-if (!symlinkedStatus.corrupted || symlinkedStatus.eligible || symlinkedStatus.needsDecisionKeys.length !== 0) {
+if (!symlinkedStatus.eligible || symlinkedStatus.corrupted || symlinkedStatus.needsDecisionKeys.length !== 0 ||
+  symlinkedStatus.eligibleSeqs.slice().sort().join(",") !== "1,2") {
   throw new Error(`a symlinked status file influenced stale routing: ${JSON.stringify(symlinkedStatus)}`);
 }
 unlinkSync(`${state}/task-a.status`);
@@ -4573,9 +5118,14 @@ test_outcomes_tool_uses_stock_execution_and_export_consumers() {
     return
   fi
   fixture="$TMP_ROOT/stock-render-consumers"
-  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/node_modules/@earendil-works"
+  mkdir -p "$fixture/.pi/extensions/lib" "$fixture/lib" "$fixture/node_modules/@earendil-works"
   cp "$EXT" "$fixture/.pi/extensions/fm-branch-supervision.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$fixture/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/lib/fm-branch-classifier.ts" "$fixture/lib/fm-branch-classifier.ts"
+  cp "$ROOT/lib/fm-branch-eligibility.ts" "$fixture/lib/fm-branch-eligibility.ts"
+  cp "$ROOT/lib/fm-branch-eligibility-core.ts" "$fixture/lib/fm-branch-eligibility-core.ts"
+  cp "$ROOT/lib/fm-branch-report-sequence.ts" "$fixture/lib/fm-branch-report-sequence.ts"
+  cp "$ROOT/lib/fm-branch-provider-latch.ts" "$fixture/lib/fm-branch-provider-latch.ts"
   cp "$ROOT/.pi/extensions/lib/fm-native-contract.ts" "$fixture/.pi/extensions/lib/fm-native-contract.ts"
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$fixture/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$fixture/.pi/extensions/lib/fm-branch-model-picker.ts"
@@ -4879,6 +5429,10 @@ await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle
 const { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, home } = globalThis.__t;
 import { existsSync, writeFileSync } from "node:fs";
 
+// An explicit configured classifier model keeps classification working while
+// main's session model stays unknown; the replacement scenario here needs a
+// build that passes no model override.
+writeFileSync(`${home}/config/classifier-model`, "haiku\n");
 const firstEntries = [];
 const firstCtx = {
   sessionManager: { getSessionFile: () => `${home}/first.jsonl`, getEntries: () => firstEntries },
@@ -4993,8 +5547,8 @@ SH
     FM_TEST_FAIL_ARM="$home/state/store-fail-arm" DRIVER_PRELUDE="$DRIVER_PRELUDE" \
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
-await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx }; })()`);
-const { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx } = globalThis.__t;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx, bus }; })()`);
+const { fire, dispatch, settle, outcomeScript, sentToMain, mainEntries, defaultSessionCtx, bus } = globalThis.__t;
 import { writeFileSync } from "node:fs";
 
 const failArm = process.env.FM_TEST_FAIL_ARM;
@@ -5022,8 +5576,9 @@ if (outcomeScript(["list", "--recent", "50"]) !== "") throw new Error("a failed 
 // reconciliation completes the delivery rather than losing it.
 armStoreFailure("mark-read");
 const markFailed = await report.execute("mark-read-fails", { task: "branch-driver", verdict: "captain", summary: "cursor advance must fail" }, undefined, undefined, {});
-if (!markFailed.isError || !markFailed.content[0].text.includes("visible delivery or cursor advancement failed")) {
-  throw new Error(`a failed cursor advance did not surface as an error: ${JSON.stringify(markFailed)}`);
+if (!markFailed.isError || !markFailed.content[0].text.includes("recorded seq ") ||
+    !markFailed.content[0].text.includes("but cursor advancement failed: fm-branch-outcome.sh exited 9: injected store failure")) {
+  throw new Error(`a failed cursor advance did not surface the unified failure wording: ${JSON.stringify(markFailed)}`);
 }
 const afterFailure = outcomeScript(["list", "--recent", "50"]).split("\n").filter(Boolean).map((line) => JSON.parse(line));
 if (afterFailure.length !== 1 || afterFailure[0].summary !== "cursor advance must fail") {
@@ -5045,14 +5600,40 @@ await fire("turn_end", {}, defaultSessionCtx);
 if (mainEntries.filter((entry) => entry.customType === "fm-branch-visible-outcome" && entry.data.seq === failedSeq).length !== 1) {
   throw new Error("a later reconciliation delivered the recovered outcome a second time");
 }
+
+// 4. The acknowledgement side of the same store: the unified
+// fm_branch_processed wordings, byte-exact, against the real extension. The
+// processing request opens at the run boundary, so settle the run first.
+await fire("agent_end", {});
+await fire("agent_settled", {});
+const nativeTools = new Map();
+bus.emit("firstmate:native-tools", { register: (tool) => nativeTools.set(tool.name, tool), allowMessageType: () => {} });
+const processed = nativeTools.get("fm_branch_processed");
+if (!processed) throw new Error("main did not receive its acknowledgement tool");
+const unprocessedSeqs = () => outcomeScript(["unprocessed"]).split("\n").filter(Boolean).map((line) => JSON.parse(line).seq);
+const badThrough = await processed.execute("ack-zero", { through: 0 }, undefined, undefined, {});
+if (!badThrough.isError || badThrough.content[0].text !== "through must be a positive integer") {
+  throw new Error(`a non-positive through did not carry the unified refusal wording: ${JSON.stringify(badThrough)}`);
+}
+armStoreFailure("mark-processed");
+const markProcessedFailed = await processed.execute("ack-mark-fails", { through: failedSeq }, undefined, undefined, {});
+if (!markProcessedFailed.isError || markProcessedFailed.content[0].text !== "processed marker not advanced: fm-branch-outcome.sh exited 9: injected store failure") {
+  throw new Error(`a failed mark-processed did not carry the unified failure wording: ${JSON.stringify(markProcessedFailed)}`);
+}
+if (JSON.stringify(unprocessedSeqs()) !== JSON.stringify([failedSeq])) throw new Error("a failed mark-processed moved the processed marker");
+const ack = await processed.execute("ack", { through: failedSeq }, undefined, undefined, {});
+if (ack.isError || ack.content.length !== 1 || ack.content[0].text !== `captain outcomes through seq ${failedSeq} marked processed`) {
+  throw new Error(`the acknowledgement did not carry the unified success wording: ${JSON.stringify(ack)}`);
+}
+if (unprocessedSeqs().length !== 0) throw new Error("the acknowledgement did not close the sequence");
 finishWakePrompt();
 await offer.settlement.then(() => null, () => null);
 process.exit(0);
 EOF
   status=$?
   out=$(cat "$TMP_ROOT/node-output")
-  expect_code 0 "$status" "a store failure during delivery must neither lose nor duplicate an outcome: $out"
-  pass "a failing store script surfaces to the branch and its outcome is neither lost nor delivered twice"
+  expect_code 0 "$status" "a store failure during delivery must neither lose nor duplicate an outcome, and fm_branch_processed must carry the unified wordings: $out"
+  pass "a failing store script surfaces to the branch, its outcome is neither lost nor delivered twice, and fm_branch_processed renders the unified wordings byte-exactly"
 }
 
 # The failure boundary the async conversion had to leave exactly as it found
@@ -5114,8 +5695,8 @@ const report = globalThis.__fmSessions[0].options.customTools.find((tool) => too
 const routineSummary = "routine note whose cursor write fails";
 armStoreFailure("mark-read");
 const routineFailed = await report.execute("routine-mark-read-fails", { task: "branch-driver", verdict: "routine", summary: routineSummary }, undefined, undefined, {});
-if (!routineFailed.isError || !routineFailed.content[0].text.includes("visible delivery or cursor advancement failed")) {
-  throw new Error(`a failed routine cursor advance did not surface as an error: ${JSON.stringify(routineFailed)}`);
+if (!routineFailed.isError || !routineFailed.content[0].text.includes("but cursor advancement failed: fm-branch-outcome.sh exited 9: injected store failure")) {
+  throw new Error(`a failed routine cursor advance did not surface the unified failure wording: ${JSON.stringify(routineFailed)}`);
 }
 if (routineCopies(routineSummary) !== 1) {
   throw new Error(`the routine note was not delivered exactly once before the cursor failure: ${routineCopies(routineSummary)}`);
@@ -5271,6 +5852,10 @@ EOF
 test_outcomes_tool_uses_stock_execution_and_export_consumers
 test_real_pi_picker_primitives_stay_bounded_and_searchable
 test_branch_dispatch_two_stage_filter_and_prefix_contract
+test_classifier_pass_covers_rows_and_guards_passed_seqs
+test_classifier_default_resolves_per_host_on_pi
+test_classifier_explicit_config_wins_on_pi
+test_classifier_unresolvable_falls_back_once_on_pi
 test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
@@ -5286,6 +5871,8 @@ test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligi
 test_branch_predrain_needs_decision_keeps_routine_row_branch_eligible
 test_settled_branch_prompt_releases_unacknowledged_grant
 test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldown
+test_probe_routed_away_by_classifier_releases_the_slot_without_extending_the_latch
+test_report_less_error_free_turns_count_toward_the_latch
 test_selection_change_does_not_corrupt_inflight_provider_state
 test_main_owned_grant_result_falls_back_to_main
 test_branch_predrain_recheck_noops_already_drained_wake

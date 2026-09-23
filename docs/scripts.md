@@ -117,6 +117,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-send.sh`             | Steer a task via a durable inbox record plus doorbell, or send a supported key or typed harness invocation through the recorded backend |
 | `fm-branch-prompt.sh`    | Emit the Pi supervision branch's byte-stable system prompt ([pi-supervision-branch.md](pi-supervision-branch.md)) |
 | `fm-branch-outcome.sh`   | Own the supervision branch's append-only outcome store, cursors, bounded status-coverage indexes, and session-start replay |
+| `fm-branch-agent-md.sh`  | Generate, print, or check the Claude Code supervision-branch mod's agent definition from the branch prompt plus its hooks-module addendum ([claude-supervision-branch.md](claude-supervision-branch.md)) |
+| `fm-branch-classifier-score.sh` | Score the supervision-branch pre-branch classifier's durable classification log (both hosts) against the status lines main had to act on |
+| `fm-wake-evidence.sh`    | Print the supervision-branch pre-branch classifier's evidence bundle (both hosts) for one task, owning its read offset, or the routine-covered captain-facing lines the drain backstop re-presents |
 | `fm-lease.sh`            | Claim, release, inspect, and sweep per-task supervision leases                       |
 | `fm-lease-lib.sh`        | One owner of the supervision lease contract and the main-only role-partition guards  |
 | `fm-control.sh`          | Agent lifecycle control plane: allowlisted `interrupt`, `exit`, and transactional `relaunch` verbs for an exact task id ([agent-control.md](agent-control.md)) |

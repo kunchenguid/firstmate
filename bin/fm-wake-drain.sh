@@ -48,11 +48,12 @@ case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10
 # that claimed set. branch (FM_SUPERVISION_ACTOR=branch, injected
 # deterministically by the Pi branch extension's bash tool - never agent
 # memory) drains and acks only the row set the extension granted to it.
-# .pi/extensions/lib/fm-branch-dispatch.ts is the single owner of that
-# eligibility classification (which signal/stale rows resolve to a known
-# project, and the existing all-unread-rows-safe rule for a heartbeat); this
-# script never reclassifies a row itself, it only consumes the extension's
-# already-computed verdict. The extension writes the exact eligible sequence
+# lib/fm-branch-eligibility.ts is the single owner of that eligibility
+# classification (which signal/stale rows resolve to a known project, and the
+# existing all-unread-rows-safe rule for a heartbeat); the Pi extension's
+# fm-branch-dispatch.ts binds it to the state directory and hands the verdict
+# to this script. This script never reclassifies a row itself, it only
+# consumes the extension's already-computed verdict. The extension writes the exact eligible sequence
 # numbers to ELIGIBLE_ROWS_FILE under the queue lock, immediately before every
 # branch prompt, so the file is always fresh for the one wake that prompt is about to
 # handle (the branch drains and acks exactly once per prompt, serialized by
@@ -304,7 +305,14 @@ EOF
 print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
   local snapshot=$1 task endpoint ident event event_endpoint line verb key receipt store lock ready
   local output='' used=0 shown=0 omitted=0 bytes item_bytes=220 global_bytes=4000 rc=0
+  local routine_covered='' cov_end cov_line covered_end cov_omitted
   [ "$ACTOR" = main ] || return 0
+  # Under the Claude Code supervision-branch mod (state/.branch-mod-mode) a
+  # captain-facing line covered only by a ROUTINE branch outcome is also
+  # re-presented, because that mod's branch reports without main ever seeing
+  # the line; bin/fm-classify-lib.sh's backstop_routine_covered_lines owns the
+  # span. Homes without the mod keep the uncovered-only scan unchanged.
+  [ ! -e "$STATE/.branch-mod-mode" ] || routine_covered=1
 
   store="$STATE/branch-outcomes.jsonl"
   lock="$STATE/.branch-outcomes.lock"
@@ -331,12 +339,42 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
   STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED=
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
+    cov_omitted=
     receipt=$(status_outcome_backstop_cursor_offset "$STATE/$task.status") || { rc=1; break; }
     [ "$receipt" -lt "$endpoint" ] || continue
     status_snapshot_latest_event "$STATE/$task.status" "$endpoint" "$ident" || continue
     event=$FM_STATUS_SNAPSHOT_EVENT_LINE
     event_endpoint=$FM_STATUS_SNAPSHOT_EVENT_ENDPOINT
     [ "$receipt" -lt "$event_endpoint" ] || continue
+    if [ -n "$routine_covered" ]; then
+      load_branch_outcome_index "$task"
+      if [ "$BRANCH_OUTCOME_INDEX_STATE" != ok ]; then
+        rc=2
+        break
+      fi
+      if [ "$BRANCH_OUTCOME_INDEX_IDENT" = "$ident" ]; then
+        covered_end=
+        while IFS=$(printf '\t') read -r cov_end cov_line; do
+          [ -n "$cov_end" ] || continue
+          line="$task $cov_line (covered by a ROUTINE branch outcome)"
+          fm_cap_line_var "$line" $((item_bytes - 1))
+          line=$FM_LINE_CAP_LINE
+          bytes=$(( ${#line} + 1 ))
+          if [ -n "$cov_omitted" ] || [ $((used + bytes)) -gt "$global_bytes" ]; then
+            omitted=$((omitted + 1))
+            cov_omitted=1
+            continue
+          fi
+          output="$output$line
+"
+          covered_end=$cov_end
+          used=$((used + bytes))
+          shown=$((shown + 1))
+        done < <(backstop_routine_covered_lines "$STATE" "$task" "$receipt")
+        [ -z "$covered_end" ] || STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED="$STATUS_OUTCOME_BACKSTOP_ACKNOWLEDGED$task$(printf '\t')$covered_end
+"
+      fi
+    fi
     status_is_captain_relevant "$event" || continue
     verb=$(status_line_verb "$event")
     case "$verb" in
@@ -358,6 +396,13 @@ print_status_outcome_backstop_section() {  # <task-and-endpoint-snapshot>
     if [ -n "$BRANCH_OUTCOME_INDEX_ENDPOINT" ] \
       && [ "$BRANCH_OUTCOME_INDEX_IDENT" = "$ident" ] \
       && [ "$BRANCH_OUTCOME_INDEX_ENDPOINT" -ge "$event_endpoint" ]; then
+      continue
+    fi
+    # Once the global cap omitted a covered line, nothing later for this task
+    # may be acknowledged: the cursor is one offset per task, so an ack past
+    # the omitted line would lose it. It comes on the next drain instead.
+    if [ -n "$cov_omitted" ]; then
+      omitted=$((omitted + 1))
       continue
     fi
 
@@ -387,7 +432,11 @@ EOF
     return 0
   fi
   [ "$shown" -gt 0 ] || [ "$omitted" -gt 0 ] || return 0
-  printf 'STATUS OUTCOME BACKSTOP (newest captain-facing task event has no covering branch outcome):\n' || return 1
+  if [ -n "$routine_covered" ]; then
+    printf 'STATUS OUTCOME BACKSTOP (captain-facing task event with no covering branch outcome, or covered only by a ROUTINE one):\n' || return 1
+  else
+    printf 'STATUS OUTCOME BACKSTOP (newest captain-facing task event has no covering branch outcome):\n' || return 1
+  fi
   printf '%s' "$output" || return 1
   if [ "$omitted" -gt 0 ]; then
     printf 'STATUS OUTCOME BACKSTOP: %d more omitted (byte cap)\n' "$omitted" || return 1
