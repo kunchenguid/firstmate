@@ -865,6 +865,10 @@ _fm_recovery_marker_ack() {
     fm_lock_release "$lock"
     return 1
   fi
+  # A genuine acknowledgement proves this episode was actually seen, so a
+  # later down stretch's reopen starts with a fresh FM_RECOVERY_REOPEN_LIMIT
+  # budget rather than inheriting this one's count.
+  rm -f -- "${marker}.reopen-count" 2>/dev/null || true
   fm_lock_release "$lock"
 }
 
@@ -944,9 +948,24 @@ _fm_recovery_marker_arm_check() {
 
 # Apply the owner-documented announced-episode arm transition atomically with
 # the queue read. Handling successors must not call this transition.
+#
+# Nothing else ever retires that generation when no live session runs the
+# printed acknowledgement, so a plain restart with no re-arm loop and no
+# session reopens the SAME stuck episode into a fresh generation every single
+# time, forever: each generation is used for exactly one resurface and then
+# abandoned still announced, and the very next restart reopens it again. Bound
+# that: past FM_RECOVERY_REOPEN_LIMIT consecutive reopens of one episode with
+# no intervening explicit acknowledgement, settle it to acked directly instead
+# of minting yet another generation nobody is watching, so a watcher can start
+# and stay up. A real acknowledgement (_fm_recovery_marker_ack) or a fresh
+# downtime episode both clear the counter, so this bound never shortens the
+# once-per-genuine-generation resurface a live, attentive session relies on.
+FM_RECOVERY_REOPEN_LIMIT=${FM_RECOVERY_REOPEN_LIMIT:-3}
+
 _fm_recovery_marker_reopen_announced() {
-  local marker=$1 lock
+  local marker=$1 lock counter_file count generation
   lock="${marker}.lock"
+  counter_file="${marker}.reopen-count"
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   if ! fm_lock_acquire_wait "$lock"; then
     fm_lock_release "$FM_WAKE_QUEUE_LOCK"
@@ -959,11 +978,32 @@ _fm_recovery_marker_reopen_announced() {
   fi
   case "$FM_RECOVERY_MARKER_TOKEN" in
     announced:*)
-      if [ -s "$FM_WAKE_QUEUE" ] \
-        && ! _fm_recovery_marker_write_locked "$marker" downtime ""; then
-        fm_lock_release "$lock"
-        fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-        return 1
+      if [ -s "$FM_WAKE_QUEUE" ]; then
+        count=$(cat "$counter_file" 2>/dev/null || true)
+        case "$count" in ''|*[!0-9]*) count=0 ;; esac
+        count=$((count + 1))
+        if [ "$count" -gt "$FM_RECOVERY_REOPEN_LIMIT" ]; then
+          generation=${FM_RECOVERY_MARKER_TOKEN##*:}
+          if ! _fm_recovery_marker_write_locked "$marker" downtime "$generation" acked; then
+            fm_lock_release "$lock"
+            fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+            return 1
+          fi
+          rm -f -- "$counter_file" 2>/dev/null || true
+          fm_lock_release "$lock"
+          fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+          return 0
+        fi
+        if ! printf '%s\n' "$count" > "$counter_file" 2>/dev/null; then
+          fm_lock_release "$lock"
+          fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+          return 1
+        fi
+        if ! _fm_recovery_marker_write_locked "$marker" downtime ""; then
+          fm_lock_release "$lock"
+          fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+          return 1
+        fi
       fi
       ;;
   esac
