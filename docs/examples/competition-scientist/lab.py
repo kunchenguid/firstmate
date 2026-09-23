@@ -1102,98 +1102,152 @@ def evaluate_and_record(workspace: Path, proposal: dict[str, Any], *, baseline: 
     return record
 
 
+def publish_final(workspace: Path, state: dict[str, Any], final: dict[str, Any]) -> dict[str, Any]:
+    write_mutable_json(workspace / ".run" / "final.json", final)
+    state["complete"] = True
+    save_state(workspace, state)
+    return final
+
+
+def abandon_charged_search(
+    workspace: Path,
+    manifest: dict[str, Any],
+    state: dict[str, Any],
+    phase: str,
+    error: BaseException,
+    falsification: dict[str, Any] | None,
+) -> None:
+    publish_final(
+        workspace,
+        state,
+        {
+            "schema": SCHEMA_VERSION,
+            "task": manifest["task"],
+            "controller": manifest["controller"],
+            "selected_candidate_sha256": "",
+            "development_best_sha256": state["global_best_sha256"],
+            "aborted": {
+                "phase": phase,
+                "failure_class": f"{phase}-not-completed",
+                "error": f"{type(error).__name__}: {error}"[-2000:],
+            },
+            "falsification": None if falsification is None else {
+                "ok": falsification.get("ok", False),
+                "metrics": falsification.get("metrics"),
+                "failure_class": falsification.get("failure_class", ""),
+            },
+            "sealed": {"ok": False, "metrics": None, "prediction_sha256": "", "failure_class": f"{phase}-not-completed"},
+            "sealed_calls": state["sealed_calls"],
+            "falsification_calls": state["falsification_calls"],
+            "attempts_used": state["attempts_used"],
+            "tokens_used": state["tokens_used"],
+            "planning_tokens_used": state["planning_tokens_used"],
+        },
+    )
+
+
 def finish_workspace(workspace: Path) -> dict[str, Any]:
     manifest = verify_frozen(workspace)
     state = load_state(workspace)
     if state["complete"]:
         return read_json(workspace / ".run" / "final.json")
+    if state["sealed_calls"] >= 1:
+        raise LabError("sealed-audit-already-called")
+    if state["falsification_calls"] >= 1:
+        raise LabError("falsification-budget-exhausted")
     best_sha = state["global_best_sha256"]
     selected_sha = best_sha
     falsification: dict[str, Any] | None = None
-    if manifest["controller"] == "proposed":
-        if state["falsification_calls"] >= 1:
-            raise LabError("falsification-budget-exhausted")
-        state["falsification_calls"] += 1
-        save_state(workspace, state)
-        prior_records = [
-            json.loads(line)
-            for line in (workspace / ".run" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
-            if line
-        ]
-        selected_record = next(
-            (record for record in reversed(prior_records) if record.get("candidate_sha256") == best_sha),
-            {},
-        )
-        requested_falsifier = selected_record.get("falsifier") or "Challenge the selected candidate on the frozen counterfactual split."
-        candidate = workspace / "artifacts" / best_sha / "candidate.py"
-        falsification = run_bounded_evaluator(workspace, candidate, "falsification")
-        baseline_metrics = run_bounded_evaluator(
-            workspace,
-            workspace / "artifacts" / state["baseline_sha256"] / "candidate.py",
-            "falsification",
-        )
-        if not falsification.get("ok") or not baseline_metrics.get("ok"):
-            selected_sha = state["baseline_sha256"]
-        else:
-            keep, _, _ = metric_comparison(falsification["metrics"], baseline_metrics["metrics"], manifest)
-            if best_sha != state["baseline_sha256"] and not keep:
+    charged_phase = ""
+    try:
+        if manifest["controller"] == "proposed":
+            charged_phase = "falsification"
+            state["falsification_calls"] += 1
+            save_state(workspace, state)
+            prior_records = [
+                json.loads(line)
+                for line in (workspace / ".run" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+                if line
+            ]
+            selected_record = next(
+                (record for record in reversed(prior_records) if record.get("candidate_sha256") == best_sha),
+                {},
+            )
+            requested_falsifier = selected_record.get("falsifier") or "Challenge the selected candidate on the frozen counterfactual split."
+            candidate = workspace / "artifacts" / best_sha / "candidate.py"
+            falsification = run_bounded_evaluator(workspace, candidate, "falsification")
+            baseline_metrics = run_bounded_evaluator(
+                workspace,
+                workspace / "artifacts" / state["baseline_sha256"] / "candidate.py",
+                "falsification",
+            )
+            if not falsification.get("ok") or not baseline_metrics.get("ok"):
                 selected_sha = state["baseline_sha256"]
-        append_record(
+            else:
+                keep, _, _ = metric_comparison(falsification["metrics"], baseline_metrics["metrics"], manifest)
+                if best_sha != state["baseline_sha256"] and not keep:
+                    selected_sha = state["baseline_sha256"]
+            append_record(
+                workspace,
+                {
+                    "schema": SCHEMA_VERSION,
+                    "seq": state["attempts_used"],
+                    "kind": "falsification",
+                    "task": manifest["task"],
+                    "controller": manifest["controller"],
+                    "branch": "",
+                    "parent_sha256": state["baseline_sha256"],
+                    "candidate_sha256": best_sha,
+                    "hypothesis": "Try to disconfirm the development-selected candidate on counterfactual data.",
+                    "falsifier": requested_falsifier,
+                    "changes": {},
+                    "metrics": falsification.get("metrics") if falsification else None,
+                    "verdict": "KEEP" if selected_sha == best_sha else "REVERT",
+                    "failure_class": "" if falsification and falsification.get("ok") else (falsification or {}).get("failure_class", "runtime"),
+                    "wall_seconds": (falsification or {}).get("wall_seconds", 0.0),
+                    "resources": {"tokens": 0, "planning_tokens": 0},
+                    "replay": "sealed-by-design:not-part-of-attempt-replay",
+                },
+            )
+
+        charged_phase = "sealed"
+        state["sealed_calls"] += 1
+        save_state(workspace, state)
+        sealed_candidate = workspace / "artifacts" / selected_sha / "candidate.py"
+        sealed = run_bounded_evaluator(workspace, sealed_candidate, "sealed")
+        state["selected_candidate_sha256"] = selected_sha
+        final = publish_final(
             workspace,
+            state,
             {
                 "schema": SCHEMA_VERSION,
-                "seq": state["attempts_used"],
-                "kind": "falsification",
                 "task": manifest["task"],
                 "controller": manifest["controller"],
-                "branch": "",
-                "parent_sha256": state["baseline_sha256"],
-                "candidate_sha256": best_sha,
-                "hypothesis": "Try to disconfirm the development-selected candidate on counterfactual data.",
-                "falsifier": requested_falsifier,
-                "changes": {},
-                "metrics": falsification.get("metrics") if falsification else None,
-                "verdict": "KEEP" if selected_sha == best_sha else "REVERT",
-                "failure_class": "" if falsification and falsification.get("ok") else (falsification or {}).get("failure_class", "runtime"),
-                "wall_seconds": (falsification or {}).get("wall_seconds", 0.0),
-                "resources": {"tokens": 0, "planning_tokens": 0},
-                "replay": "sealed-by-design:not-part-of-attempt-replay",
+                "selected_candidate_sha256": selected_sha,
+                "development_best_sha256": best_sha,
+                "aborted": None,
+                "falsification": None if falsification is None else {
+                    "ok": falsification.get("ok", False),
+                    "metrics": falsification.get("metrics"),
+                    "failure_class": falsification.get("failure_class", ""),
+                },
+                "sealed": {
+                    "ok": sealed.get("ok", False),
+                    "metrics": sealed.get("metrics"),
+                    "prediction_sha256": sealed.get("prediction_sha256", ""),
+                    "failure_class": sealed.get("failure_class", ""),
+                },
+                "sealed_calls": state["sealed_calls"],
+                "falsification_calls": state["falsification_calls"],
+                "attempts_used": state["attempts_used"],
+                "tokens_used": state["tokens_used"],
+                "planning_tokens_used": state["planning_tokens_used"],
             },
         )
-
-    if state["sealed_calls"] >= 1:
-        raise LabError("sealed-audit-already-called")
-    state["sealed_calls"] += 1
-    save_state(workspace, state)
-    sealed_candidate = workspace / "artifacts" / selected_sha / "candidate.py"
-    sealed = run_bounded_evaluator(workspace, sealed_candidate, "sealed")
-    final = {
-        "schema": SCHEMA_VERSION,
-        "task": manifest["task"],
-        "controller": manifest["controller"],
-        "selected_candidate_sha256": selected_sha,
-        "development_best_sha256": best_sha,
-        "falsification": None if falsification is None else {
-            "ok": falsification.get("ok", False),
-            "metrics": falsification.get("metrics"),
-            "failure_class": falsification.get("failure_class", ""),
-        },
-        "sealed": {
-            "ok": sealed.get("ok", False),
-            "metrics": sealed.get("metrics"),
-            "prediction_sha256": sealed.get("prediction_sha256", ""),
-            "failure_class": sealed.get("failure_class", ""),
-        },
-        "sealed_calls": state["sealed_calls"],
-        "falsification_calls": state["falsification_calls"],
-        "attempts_used": state["attempts_used"],
-        "tokens_used": state["tokens_used"],
-        "planning_tokens_used": state["planning_tokens_used"],
-    }
-    state["complete"] = True
-    state["selected_candidate_sha256"] = selected_sha
-    save_state(workspace, state)
-    write_mutable_json(workspace / ".run" / "final.json", final)
+    except BaseException as exc:
+        if charged_phase:
+            abandon_charged_search(workspace, manifest, state, charged_phase, exc, falsification)
+        raise
     (workspace / "candidate.py").write_bytes(sealed_candidate.read_bytes())
     print(
         f"final: task={manifest['task']} controller={manifest['controller']} "
@@ -1201,7 +1255,6 @@ def finish_workspace(workspace: Path) -> dict[str, Any]:
         f"sealed_worst_group={sealed.get('metrics', {}).get('worst_group', 0.0):.6f}"
     )
     return final
-
 
 def load_proposals(path: Path) -> list[Any]:
     proposals: list[Any] = []

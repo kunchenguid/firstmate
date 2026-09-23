@@ -359,30 +359,50 @@ PY
   pass "competition scientist: final falsification and sealed audit run once and visible candidates replay"
 }
 
-test_sealed_audit_budget_survives_an_interrupted_finish() {
-  local workspace output status
+test_charged_audit_interruption_publishes_a_failed_final_record() {
+  local workspace output status first second
   workspace="$TMP_ROOT/interrupted-finish"
-  init_workspace "$workspace" noisy-classification linear 3 2
+  init_workspace "$workspace" noisy-classification proposed 3 2
 
   chmod 0500 "$workspace/.run/tmp"
   $LAB finish "$workspace" >/dev/null 2>&1
+  status=$?
+  [ "$status" -ne 0 ] || fail "an interrupted sealed audit should not report success"
   chmod 0700 "$workspace/.run/tmp"
+  [ -z "$(find "$workspace" -name 'sealed-*.json' -print -quit)" ] \
+    || fail "an interrupted finish left the sealed dataset in the proposer-visible workspace"
+  first=$(shasum -a 256 "$workspace/.run/final.json" | awk '{print $1}')
+  python3 - "$workspace" <<'PY'
+import json
+import pathlib
+import sys
+workspace = pathlib.Path(sys.argv[1])
+state = json.loads((workspace / ".run/state.json").read_text())
+final = json.loads((workspace / ".run/final.json").read_text())
+assert state["complete"] is True, state["complete"]
+assert state["sealed_calls"] == 1, state["sealed_calls"]
+assert final["aborted"]["phase"] == "sealed", final["aborted"]
+assert final["aborted"]["error"], final["aborted"]
+assert final["sealed"]["ok"] is False, final["sealed"]
+assert final["falsification"] is not None, "the charged falsification phase left no evidence"
+assert final["attempts_used"] == state["attempts_used"]
+ledger = [line for line in (workspace / ".run/ledger.jsonl").read_text().splitlines() if line]
+assert any(json.loads(line)["kind"] == "baseline" for line in ledger), "prior evidence was discarded"
+PY
+
+  output=$($LAB finish "$workspace" 2>&1); status=$?
+  expect_code 0 "$status" "a later finish should return the recorded outcome instead of failing"
+  second=$(shasum -a 256 "$workspace/.run/final.json" | awk '{print $1}')
+  [ "$first" = "$second" ] || fail "a later finish re-ran a charged one-shot call"
   python3 - "$workspace" <<'PY'
 import json
 import pathlib
 import sys
 state = json.loads((pathlib.Path(sys.argv[1]) / ".run/state.json").read_text())
 assert state["sealed_calls"] == 1, state["sealed_calls"]
-assert state["complete"] is False, state["complete"]
+assert state["falsification_calls"] == 1, state["falsification_calls"]
 PY
-
-  output=$($LAB finish "$workspace" 2>&1); status=$?
-  [ "$status" -ne 0 ] || fail "a second sealed audit should be refused, not performed silently"
-  assert_contains "$output" "sealed-audit-already-called" "the one-shot sealed budget should already be charged"
-  [ ! -e "$workspace/.run/final.json" ] || fail "an unfinished search should not publish a final record"
-  [ -z "$(find "$workspace" -name 'sealed-*.json' -print -quit)" ] \
-    || fail "an interrupted finish left the sealed dataset in the proposer-visible workspace"
-  pass "competition scientist: the one-shot sealed audit budget is charged before the evaluation it gates"
+  pass "competition scientist: an interrupted charged audit ends the search with an auditable failed final record"
 }
 
 test_sealed_dataset_never_persists_in_the_workspace() {
@@ -411,7 +431,7 @@ test_worst_group_trade_and_per_metric_floors
 test_branch_and_planning_limits
 test_duplicate_confounded_and_budget_rejections
 test_finish_is_idempotent_and_replayable
-test_sealed_audit_budget_survives_an_interrupted_finish
+test_charged_audit_interruption_publishes_a_failed_final_record
 test_sealed_dataset_never_persists_in_the_workspace
 
 echo "# fm-competition-scientist-lab.test.sh: all assertions passed"
