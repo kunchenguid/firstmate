@@ -399,12 +399,12 @@ def estimate_noise_floor(task: str, rows: list[dict[str, Any]], values: dict[str
 
 
 @functools.lru_cache(maxsize=1)
-def baseline_values() -> dict[str, Any]:
+def baseline_template_values() -> dict[str, Any]:
     return parse_candidate(BASELINE_TEMPLATE)
 
 
 def candidate_complexity(task: str, values: dict[str, Any]) -> int:
-    baseline = baseline_values()
+    baseline = baseline_template_values()
 
     def changed(name: str) -> int:
         return int(values[name] != baseline[name])
@@ -661,8 +661,8 @@ def init_workspace(args: argparse.Namespace) -> Path:
         "plateau": args.plateau,
     }
     dev_rows = read_json(frozen / "dev.json")
-    baseline_values = parse_candidate(workspace / "candidate.py")
-    noise_floor = estimate_noise_floor(args.task, dev_rows, baseline_values, args.seed)
+    workspace_baseline_values = parse_candidate(workspace / "candidate.py")
+    noise_floor = estimate_noise_floor(args.task, dev_rows, workspace_baseline_values, args.seed)
     manifest = {
         "schema": SCHEMA_VERSION,
         "task": args.task,
