@@ -62,11 +62,33 @@ enter_mailbox() {
   local home=$1 generator=$2
   mkdir -p "$home/bin" "$FAKEBIN"
   [ -e "$home/bin/fm-wake-lib.sh" ] || ln -s "$ROOT/bin/fm-wake-lib.sh" "$home/bin/fm-wake-lib.sh"
-  printf '%s\n' "$generator" > "$FAKEBIN/python3"
+  # The shebang is load-bearing on Git Bash/MSYS: noacl mounts cannot set an
+  # execute bit, so a file is runnable there only through #! (or an .exe);
+  # a bare printf script would leave command -v blind and the real python3
+  # would answer instead of the fake.
+  printf '#!/usr/bin/env bash\n%s\n' "$generator" > "$FAKEBIN/python3"
   chmod +x "$FAKEBIN/python3"
 }
 
 FAKEBIN="$TMP_ROOT/fakebin"
+
+# mode_denial_works <dir>: true when chmod 0000 can actually deny reads in
+# <dir>. Git Bash/MSYS noacl mounts synthesize only 400 for chmod 000 - the
+# file stays readable - so fixtures premised on read denial cannot be built
+# there; probed on a scratch sibling so the fixture file is never mutated.
+mode_denial_works() {
+  local probe="$1/.fm-mode-probe"
+  printf 'x\n' > "$probe" || return 1
+  chmod 0000 "$probe" 2>/dev/null
+  cat "$probe" >/dev/null 2>&1 || {
+    chmod 0600 "$probe" 2>/dev/null
+    rm -f "$probe"
+    return 0
+  }
+  chmod 0600 "$probe" 2>/dev/null
+  rm -f "$probe"
+  return 1
+}
 
 test_help_and_usage() {
   local out rc=0
@@ -116,6 +138,18 @@ test_arm_resolves_a_relative_home_into_the_shim() {
 test_arm_refuses_a_symlink_at_the_shim_path() {
   local home target out rc=0
   home=$(make_home symlink)
+  # The refusal needs a real symlink at the shim path. Git Bash/MSYS without
+  # Developer Mode cannot create one at all - ln -s copies the file and
+  # winsymlinks:nativestrict fails outright - so the fixture cannot exist on
+  # that host and the case is skipped by capability probe, not by uname.
+  printf 'x\n' > "$TMP_ROOT/.link-probe-target"
+  ln -s "$TMP_ROOT/.link-probe-target" "$TMP_ROOT/.link-probe" 2>/dev/null || true
+  if [ ! -L "$TMP_ROOT/.link-probe" ]; then
+    rm -f "$TMP_ROOT/.link-probe" "$TMP_ROOT/.link-probe-target"
+    pass "symlink-at-shim refusal needs a creatable symlink; skipped where ln -s only copies"
+    return
+  fi
+  rm -f "$TMP_ROOT/.link-probe" "$TMP_ROOT/.link-probe-target"
   write_env "$home"
   target="$TMP_ROOT/outside"
   mkdir -p "$target"
@@ -344,6 +378,13 @@ test_fail_closed_poll_after_wake_reports_the_failure() {
 printf "77\\t2026-09-05T00:00:00Z\\tfrom@x\\tHello\\tok\\n"'
   printf 'uidvalidity=90009\n' > "$home/state/.mail-seen"
   printf '77\n' > "$home/state/.mail-retry"
+  # The fail-close needs a genuinely unwritable file; on Git Bash/MSYS noacl
+  # mounts chmod is a no-op, the clear succeeds, and the fixture's premise
+  # cannot be built - skip by capability probe rather than uname.
+  if ! mode_denial_works "$home/state"; then
+    pass "fail-closed-after-wake needs chmod to express write denial; skipped where mode bits are inexpressible"
+    return
+  fi
   chmod 0000 "$home/state/.mail-retry"
   out="$home/out.txt"
   run_check "$home" "$out" "$CHECK"
@@ -366,6 +407,10 @@ test_repeated_status4_fail_closed_still_wakes() {
 printf "77\\t2026-09-05T00:00:00Z\\tfrom@x\\tHello\\tretry\\n"'
   printf 'uidvalidity=90009\n77\n' > "$home/state/.mail-seen"
   printf '77\n' > "$home/state/.mail-retry"
+  if ! mode_denial_works "$home/state"; then
+    pass "status-4 fail-close needs chmod to express write denial; skipped where mode bits are inexpressible"
+    return
+  fi
   chmod 0000 "$home/state/.mail-retry"
 
   out="$home/out1.txt"
