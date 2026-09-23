@@ -131,6 +131,31 @@ zsh
 A persistent parent shell waiting for a child remained reported as the parent process, while a shell that directly execed a simple command changed identity with the process itself.
 Pi and pi-signed 0.82.0 were reverified on 2026-07-27 through real isolated `fm-spawn.sh` launches.
 
+### Missing-window seat binding
+
+The guarded absence proof was verified on 2026-09-23.
+The host used tmux 3.7c on macOS 26.6.1 arm64.
+The test used a private tmux socket and did not access the fleet session.
+
+```sh
+env -u TMUX -u TMUX_PANE bin/fm-test-run.sh tests/fm-backend-tmux-smoke.test.sh
+```
+
+The test read the private server process, seat pane, and seat session from real tmux.
+It removed the task window and verified the `missing` state.
+It then supplied the matching `TMUX` and `TMUX_PANE` values to the absence proof.
+The proof accepted the exact missing window.
+The adapter recreated the same session and window only.
+
+```text
+ok - real tmux: a verified seat proves absence and recreates only the exact recorded window
+ok - real tmux: kill removes the window and the readable session inventory authoritatively classifies it missing
+```
+
+`tests/fm-control-relaunch.test.sh` supplies the complementary refusal and transaction cases.
+It rejects an unbound process, stale server value, different session, missing session, and dead server.
+It also covers rollback, lifecycle contention, and the preserved Car Remodel state.
+
 ### Agent liveness name sources
 
 The earlier record that every harness is observed under its own `#{pane_current_command}` no longer holds and has been replaced by the per-harness evidence below.

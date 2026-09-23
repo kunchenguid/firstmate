@@ -129,6 +129,29 @@ fm_backend_tmux_send_literal() {  # <target> <text>
   tmux send-keys -t "$1" -l "$2"
 }
 
+# fm_backend_tmux_bound_session: print the session that owns this process.
+# This function succeeds only when the ambient tmux values match a live pane.
+# It checks the server process and pane identity before it prints the session.
+# A stale value or a different server returns no session.
+fm_backend_tmux_bound_session() {
+  local ambient=${TMUX:-} pane=${TMUX_PANE:-} rest expected_pid live_pid session live_pane
+  [ -n "$ambient" ] && [ -n "$pane" ] || return 1
+  rest=${ambient%,*}
+  [ "$rest" != "$ambient" ] || return 1
+  expected_pid=${rest##*,}
+  [ "$expected_pid" != "$rest" ] || return 1
+  case "$expected_pid:$pane" in
+    *[!0-9]*:*|*:*[!%0-9]*) return 1 ;;
+  esac
+  live_pid=$(tmux display-message -p -t "$pane" '#{pid}' 2>/dev/null) || return 1
+  session=$(tmux display-message -p -t "$pane" '#{session_name}' 2>/dev/null) || return 1
+  live_pane=$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null) || return 1
+  [ "$live_pid" = "$expected_pid" ] || return 1
+  [ "$live_pane" = "$pane" ] || return 1
+  [ -n "$session" ] || return 1
+  printf '%s\n' "$session"
+}
+
 # fm_backend_tmux_window_inventory: <session-target>'s window names, one per
 # line on stdout, together with a verdict on the READ ITSELF, which is what
 # every caller that must not guess depends on:

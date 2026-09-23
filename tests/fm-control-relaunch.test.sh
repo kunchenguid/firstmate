@@ -14,9 +14,9 @@
 #   4. A refusal before the agent is stopped changes nothing.
 #   5. A launch failure after the agent is stopped keeps the prior record,
 #      reports the concrete state, and preserves the work.
-#   6. fm-spawn --relaunch refuses on its own: a live agent, a contradicting
-#      flag, an extra positional, or a backend that cannot prove the previous
-#      agent exited.
+#   6. fm-spawn --relaunch refuses on its own when ownership is not proven.
+#   7. Missing-window recovery preserves the Car Remodel task.
+#      It also covers refusal, rollback, and concurrent lifecycle actions.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -102,6 +102,9 @@ case "${1:-}" in
   display-message)
     for a in "$@"; do
       case "$a" in
+        *'#{pid}'*) cat "$D/server-pid"; printf '\n'; exit 0 ;;
+        *'#{session_name}'*) cat "$D/session-name"; printf '\n'; exit 0 ;;
+        *'#{pane_id}'*) cat "$D/current-pane"; printf '\n'; exit 0 ;;
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*)
@@ -151,6 +154,20 @@ case "${1:-}" in
     done
     printf '%s\n' "$ses" >> "$D/created-sessions"
     exit 0 ;;
+  kill-window)
+    target=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) target=${2:-}; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    window=${target##*:}
+    window=${window#=}
+    grep -Fvx -- "$window" "$D/windows" > "$D/windows.next" || true
+    mv "$D/windows.next" "$D/windows"
+    printf '%s\n' "$window" >> "$D/killed-windows"
+    exit 0 ;;
   new-window)
     # Model the one thing an endpoint re-creation depends on: the window now
     # appears in the session inventory, so the very next agent-state read stops
@@ -166,6 +183,7 @@ case "${1:-}" in
     done
     printf '%s\n' "$name" >> "$D/windows"
     printf '%s\n' "$name" >> "$D/created-windows"
+    printf '%s' zsh > "$D/command"
     printf '@9\n'
     exit 0 ;;
 esac
@@ -190,6 +208,8 @@ new_case() {
   printf 'claude' > "$dir/fake/becomes"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' fmses > "$dir/fake/session-name"
+  printf '%s' 4242 > "$dir/fake/server-pid"
+  printf '%s' %1 > "$dir/fake/current-pane"
   make_tmux_stub "$dir"
   printf '%s\n' "$dir"
 }
@@ -239,6 +259,7 @@ run_control() {  # <case-dir> <args...>
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
     FM_CONTROL_POLL=0.01 FM_CONTROL_EXIT_WAIT=0.05 FM_CONTROL_LAUNCH_WAIT=0.05 \
+    TMUX="${FM_FAKE_TMUX:-}" TMUX_PANE="${FM_FAKE_TMUX_PANE:-}" \
     FM_REAL_GIT="${FM_REAL_GIT:-}" FM_FAKE_GIT_FAILURE="${FM_FAKE_GIT_FAILURE:-}" \
     FM_REAL_MV="${FM_REAL_MV:-}" FM_FAKE_COMPLETE_JOURNAL_MV_FAIL="${FM_FAKE_COMPLETE_JOURNAL_MV_FAIL:-}" \
     FM_FAKE_META_PUBLISH_MV_FAIL="${FM_FAKE_META_PUBLISH_MV_FAIL:-}" \
@@ -260,6 +281,7 @@ run_spawn() {  # <case-dir> <args...>
     PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" \
     HOME="$dir/user-home" CLAUDE_CONFIG_DIR='' \
     FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    TMUX="${FM_FAKE_TMUX:-}" TMUX_PANE="${FM_FAKE_TMUX_PANE:-}" \
     "$SPAWN" "$@" 2>&1
 }
 
@@ -1804,13 +1826,158 @@ assert_tmux_missing_refuses() {  # <case-dir> <id> <what-was-staged>
   [ ! -s "$dir/fake/literal" ] || fail "a refused transaction must launch nothing ($what)"
 }
 
-test_tmux_refuses_a_window_missing_from_its_session() {
+test_tmux_refuses_an_unbound_missing_window() {
   local dir
   dir=$(new_case tmux-gone rl60)
   add_ship_task "$dir" rl60 claude
   strand_endpoint "$dir" rl60
-  assert_tmux_missing_refuses "$dir" rl60 "window absent from a readable session inventory"
-  pass "tmux: a window absent from its session refuses both verbs rather than being assumed gone"
+  assert_tmux_missing_refuses "$dir" rl60 "the process has no verified tmux seat"
+  pass "tmux: an unbound process cannot reclaim a missing window"
+}
+
+test_tmux_refuses_a_cross_session_missing_window() {
+  local dir out rc
+  dir=$(new_case tmux-cross-session rl64)
+  add_ship_task "$dir" rl64 claude recorded
+  strand_endpoint "$dir" rl64
+  printf '%s' fmses > "$dir/fake/session-name"
+
+  out=$(FM_FAKE_TMUX='/tmp/fake,4242,0' FM_FAKE_TMUX_PANE=%1 \
+    run_control "$dir" rl64 relaunch --note "continue in the recorded copy"); rc=$?
+
+  expect_code 1 "$rc" "a different tmux session must not prove endpoint absence"
+  assert_contains "$out" "recorded session 'recorded'" \
+    "the refusal must identify the recorded session"
+  assert_contains "$out" "bound to session 'fmses'" \
+    "the refusal must identify the current session"
+  assert_absent "$dir/fake/created-windows" \
+    "a cross-session request must not create an endpoint"
+  pass "tmux: a cross-session seat cannot reclaim a missing window"
+}
+
+test_tmux_refuses_a_stale_server_binding() {
+  local dir out rc
+  dir=$(new_case tmux-stale-seat rl65)
+  add_ship_task "$dir" rl65 claude
+  strand_endpoint "$dir" rl65
+
+  out=$(FM_FAKE_TMUX='/tmp/fake,9999,0' FM_FAKE_TMUX_PANE=%1 \
+    run_control "$dir" rl65 relaunch --note "continue after a stale seat"); rc=$?
+
+  expect_code 1 "$rc" "a stale tmux server value must not prove endpoint absence"
+  assert_contains "$out" "no verified tmux server and pane binding" \
+    "the refusal must identify the unverified seat"
+  assert_absent "$dir/fake/created-windows" \
+    "a stale seat must not create an endpoint"
+  pass "tmux: a stale server binding cannot reclaim a missing window"
+}
+
+test_car_remodel_missing_window_relaunch_preserves_the_task() {
+  local dir out rc head_before backlog_before id=car-remodel
+  dir=$(new_case car-remodel "$id")
+  add_ship_task "$dir" "$id" claude
+  mkdir -p "$dir/home/config"
+  printf '%s\n' manual > "$dir/home/config/backlog-backend"
+  cat > "$dir/home/data/backlog.md" <<EOF
+# Backlog
+
+## In flight
+
+- [ ] $id: Preserve the existing remodel validation work.
+
+## Queued
+
+## Done
+EOF
+  backlog_before=$(cat "$dir/home/data/backlog.md")
+  printf '%s\n' 'completed remodel commit' > "$dir/wt/remodel.txt"
+  git -C "$dir/wt" add remodel.txt
+  git -C "$dir/wt" -c user.name='Firstmate Tests' -c user.email='tests@example.invalid' \
+    commit -qm 'preserve remodel work'
+  head_before=$(git -C "$dir/wt" rev-parse HEAD)
+  printf '%s\n' 'unfinished validation fix' >> "$dir/wt/remodel.txt"
+  printf '%s\n' 'pr=https://example.invalid/car-remodel/7' >> "$dir/home/state/$id.meta"
+  strand_endpoint "$dir" "$id"
+
+  out=$(FM_FAKE_TMUX='/tmp/fake,4242,0' FM_FAKE_TMUX_PANE=%1 \
+    run_control "$dir" "$id" relaunch --note "resume validation from the preserved branch") || rc=$?
+  rc=${rc:-0}
+
+  expect_code 0 "$rc" "the preserved Car Remodel task must relaunch from its owning tmux seat"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" window)" = "fmses:fm-$id" ] \
+    || fail "the relaunch changed the recorded endpoint"
+  [ "$(cat "$dir/fake/created-windows")" = "fm-$id" ] \
+    || fail "the relaunch did not create only the exact recorded window"
+  assert_absent "$dir/fake/created-sessions" \
+    "the relaunch must not create another tmux session"
+  [ "$(meta_field "$dir" "$id" worktree)" = "$dir/wt" ] \
+    || fail "the relaunch changed the recorded worktree"
+  [ "$(git -C "$dir/wt" rev-parse HEAD)" = "$head_before" ] \
+    || fail "the relaunch changed the preserved commit"
+  assert_grep 'unfinished validation fix' "$dir/wt/remodel.txt" \
+    "the relaunch changed the dirty file"
+  [ "$(cat "$dir/home/data/backlog.md")" = "$backlog_before" ] \
+    || fail "the relaunch changed backlog ownership"
+  [ "$(journal_field "$dir" "$id" exit_result)" = endpoint-gone ] \
+    || fail "the transaction did not record the missing window"
+  pass "tmux: the preserved Car Remodel task restarts at its exact recorded endpoint"
+}
+
+test_tmux_missing_window_rollback_removes_only_the_unused_endpoint() {
+  local dir out rc before real_mv id=tmux-rollback
+  dir=$(new_case tmux-rollback "$id")
+  add_ship_task "$dir" "$id" claude
+  strand_endpoint "$dir" "$id"
+  before=$(cat "$dir/home/state/$id.meta")
+  real_mv=$(command -v mv)
+  make_mv_failure_stub "$dir"
+
+  out=$(FM_REAL_MV="$real_mv" FM_FAKE_META_PUBLISH_MV_FAIL="$dir/home/state/$id.meta" \
+    FM_FAKE_TMUX='/tmp/fake,4242,0' FM_FAKE_TMUX_PANE=%1 \
+    run_control "$dir" "$id" relaunch --note "retry after publication repair"); rc=$?
+
+  expect_code 1 "$rc" "a failed record publication must roll back the unused endpoint"
+  [ "$(cat "$dir/home/state/$id.meta")" = "$before" ] \
+    || fail "the rollback changed the prior task record"
+  assert_grep "fm-$id" "$dir/fake/killed-windows" \
+    "the rollback did not remove the unused exact window"
+  assert_no_grep "fm-$id" "$dir/fake/windows" \
+    "the rollback left the unused exact window present"
+  assert_no_grep 'encode launch-brief' "$dir/fake/literal" \
+    "the rollback started an agent before record publication"
+  pass "tmux: failed publication removes only the unused recreated endpoint"
+}
+
+test_tmux_missing_window_relaunch_refuses_concurrent_lifecycle_work() {
+  local dir out rc lock holder i=0 id=tmux-concurrent
+  dir=$(new_case tmux-concurrent "$id")
+  add_ship_task "$dir" "$id" claude
+  strand_endpoint "$dir" "$id"
+  lock="$dir/home/state/.control-$id.lock"
+  (
+    # shellcheck source=/dev/null
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    /bin/sleep 2
+    fm_lock_release "$lock"
+  ) &
+  holder=$!
+  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+    /bin/sleep 0.01
+    i=$((i + 1))
+  done
+
+  out=$(FM_FAKE_TMUX='/tmp/fake,4242,0' FM_FAKE_TMUX_PANE=%1 \
+    run_control "$dir" "$id" relaunch --note "continue after serialization"); rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  expect_code 1 "$rc" "a concurrent lifecycle action must refuse the recovery"
+  assert_contains "$out" "another lifecycle action is already running" \
+    "the refusal must identify lifecycle contention"
+  assert_absent "$dir/fake/created-windows" \
+    "a refused concurrent recovery must not create an endpoint"
+  pass "tmux: missing-window recovery serializes with other lifecycle actions"
 }
 
 test_tmux_refuses_a_session_that_cannot_be_found() {
@@ -2307,7 +2474,12 @@ test_spawn_relaunch_refuses_a_pending_authoritative_close
 test_spawn_relaunch_refuses_contradicting_flags
 test_spawn_relaunch_refuses_an_unrecorded_task
 test_spawn_relaunch_refuses_a_pane_outside_the_worktree
-test_tmux_refuses_a_window_missing_from_its_session
+test_tmux_refuses_an_unbound_missing_window
+test_tmux_refuses_a_cross_session_missing_window
+test_tmux_refuses_a_stale_server_binding
+test_car_remodel_missing_window_relaunch_preserves_the_task
+test_tmux_missing_window_rollback_removes_only_the_unused_endpoint
+test_tmux_missing_window_relaunch_refuses_concurrent_lifecycle_work
 test_tmux_refuses_a_session_that_cannot_be_found
 test_tmux_refuses_when_the_server_is_gone
 test_reclaim_refuses_an_unreadable_endpoint

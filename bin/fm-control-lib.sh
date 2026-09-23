@@ -293,23 +293,37 @@ fm_control_backend_state_verified() {  # <backend>
 #     passes `--session <session>`, so the recheck starts and reads the session
 #     the RECORD names, through that session's own socket. The answer is about
 #     the task's endpoint and nothing else.
-#   tmux CANNOT. `list-windows -a` describes only the server the CURRENT
-#     process addresses (its TMUX_TMPDIR/socket), and a task's record does not
-#     carry the endpoint's socket identity - so a different but running server
-#     would answer "not anywhere" about a window it was never able to see.
-#     There is no read available here that closes that gap, so tmux always
-#     returns `unproven` and both verbs refuse. tmux is left exactly as
-#     deadlocked as it was before this change - no worse - but deliberately.
+#   tmux can prove absence only from a seat in the recorded session.
+#     The seat's TMUX value supplies the server process identity.
+#     TMUX_PANE supplies the seat's pane identity.
+#     The adapter verifies both values against the server before it reads the
+#     recorded session. A plain shell, a stale seat, or a different session
+#     cannot supply this proof.
 #
 # Both control-plane callers share this one implementation so the proof cannot
 # drift into two answers for the same endpoint.
 fm_control_endpoint_absence_verdict() {  # <backend> <target>
-  local backend=${1-} target=${2-}
+  local backend=${1-} target=${2-} session bound state
   fm_backend_source "$backend" \
     || { printf 'unproven\tbackend %s could not be loaded to prove anything about that endpoint' "'$backend'"; return 0; }
   case "$backend" in
     tmux)
-      printf 'unproven\ttmux absence cannot be proven from a task record: the record does not carry the endpoint'"'"'s socket identity, and a server-wide window inventory only describes the tmux server this process addresses, so a window absent from it may still be alive on another'
+      session=${target%%:*}
+      bound=$(fm_backend_tmux_bound_session 2>/dev/null) || {
+        printf 'unproven\ttmux absence needs a live seat in the recorded session. This process has no verified tmux server and pane binding'
+        return 0
+      }
+      if [ "$bound" != "$session" ]; then
+        printf 'unproven\ttmux absence needs a live seat in the recorded session %s. This process is bound to session %s' "'$session'" "'$bound'"
+        return 0
+      fi
+      state=$(fm_backend_tmux_agent_state "$target")
+      case "$state" in
+        missing) printf 'gone\t' ;;
+        dead) printf 'dead\t' ;;
+        alive) printf 'alive\t' ;;
+        *) printf 'unproven\tthe recorded tmux endpoint changed to state %s during its absence check' "'$state'" ;;
+      esac
       ;;
     herdr)
       # Start the RECORDED session's server (only the server - nothing is
