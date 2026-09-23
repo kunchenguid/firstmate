@@ -476,12 +476,15 @@ cmd_terminal() {
 }
 
 # Whether a completed result carries any queued content block at all. The
-# published response frames content as a top-level `prompts[N]{...}:` or
-# `feedback[N]{...}:` header whose rows are INDENTED, so this anchors on column
-# zero: an indented payload line is captain-supplied text and must never be able
-# to forge - or, here, to hide behind - a content header. Any recognized block
-# is content regardless of its declared count, while a malformed top-level
-# prompts or feedback header makes the result indeterminate.
+# published response frames content under a top-level `prompts` or `feedback`
+# header in either published shape (the contract at lavish_prompt_frame),
+# always with INDENTED rows, so this anchors on column zero: an indented payload
+# line is captain-supplied text and must never be able to forge - or, here, to
+# hide behind - a content header. Only the flat header is positively recognized
+# here, so any recognized block is content regardless of its declared count,
+# while any other top-level prompts or feedback header - malformed, or the
+# YAML-style shape this narrow check does not parse - makes the result
+# indeterminate.
 #
 # 0 = content present, 1 = provably no content, anything else = the check did
 # not complete. The caller must distinguish those three, because "the check
