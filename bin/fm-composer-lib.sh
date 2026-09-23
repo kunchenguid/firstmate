@@ -1082,7 +1082,9 @@ _fm_composer_titled_bottom_ok() {  # <family> <bottom-inner> <top-spaces>
 _fm_composer_grok_title_ok() {  # <title>
   local title=$1 model_part permission model
   case "$title" in
-    *" · "*) model_part=${title%%" · "*}; permission=${title##*" · "} ;;
+    *" $FM_COMPOSER_GROK_TITLE_MIDDOT "*)
+      model_part=${title%%" $FM_COMPOSER_GROK_TITLE_MIDDOT "*}
+      permission=${title##*" $FM_COMPOSER_GROK_TITLE_MIDDOT "} ;;
     *) model_part=$title; permission='' ;;
   esac
   case "$model_part" in
