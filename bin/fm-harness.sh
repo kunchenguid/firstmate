@@ -76,6 +76,8 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 . "$SCRIPT_DIR/fm-cursor-lib.sh"
 # shellcheck source=bin/fm-gemini-lib.sh
 . "$SCRIPT_DIR/fm-gemini-lib.sh"
+# shellcheck source=bin/fm-win32-proc-lib.sh
+. "$SCRIPT_DIR/fm-win32-proc-lib.sh"
 
 # Print the harness named by a verified environment marker, or nothing when no
 # marker is present. Markers only report what the environment CLAIMS; detect_own
@@ -161,10 +163,26 @@ harness_marker() {
 ancestry_names_omp() {
   local pid=$$ comm
   for _ in 1 2 3 4 5 6 7 8; do
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || break
     [ "$(basename -- "$comm")" = omp ] && return 0
     pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-    [ -n "$pid" ] && [ "$pid" -gt 1 ] || return 1
+    [ -n "$pid" ] && [ "$pid" -gt 1 ] || break
+  done
+  _fm_ancestry_names_omp_win32
+}
+
+# ancestry_names_omp's POSIX walk replayed against the real Win32 process
+# table, the same gap harness_ancestry's fallback covers below: when Cygwin
+# ps cannot answer, the FM_OMP_HARNESS precedence marker still demands real
+# omp ancestry, so the same table decides it. Kept to the same eight hops
+# the POSIX walk allows.
+_fm_ancestry_names_omp_win32() {
+  local winpid ppid comm args hops=0
+  for winpid in $(fm_win32_ancestor_winpids); do
+    [ "$hops" -lt 8 ] || break
+    hops=$((hops + 1))
+    fm_win32_proc_get "$winpid" ppid comm args || break
+    [ "$(basename -- "$comm")" = omp ] && return 0
   done
   return 1
 }
@@ -178,9 +196,22 @@ ancestry_names_omp() {
 #          (any node process holding a harness-shaped path matches it), so it is
 #          used only when no marker is present.
 harness_process_verdict() {  # <pid>
-  local pid=$1 comm args argv0
+  local pid=$1 comm args= argv0
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 0
+  case "$(basename -- "$comm")" in
+    node*|python*) args=$(ps -o args= -p "$pid" 2>/dev/null) ;;
+  esac
   argv0=$(fm_cursor_argv0_for_pid "$pid" "$comm" 2>/dev/null || true)
+  harness_verdict_for_fields "$comm" "$args" "$argv0"
+}
+
+# The matching half of harness_process_verdict, shared with the Win32 ancestry
+# fallback below: <comm> is the process name or executable path, <args> the
+# command line (only meaningful when <comm> is a bare interpreter - POSIX
+# callers keep the original laziness of fetching args only for that shape),
+# and <argv0> the executable the command line points at.
+harness_verdict_for_fields() {  # <comm> <args> <argv0>
+  local comm=$1 args=$2 argv0=$3
   if fm_cursor_process_matches "$comm" '' "$argv0"; then
     echo "comm cursor"
     return
@@ -241,7 +272,6 @@ harness_process_verdict() {  # <pid>
     devin) echo "comm devin"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
-      args=$(ps -o args= -p "$pid" 2>/dev/null)
       if fm_gemini_args_are_gemini "$args"; then
         echo "args gemini"
         return
@@ -260,7 +290,7 @@ harness_process_verdict() {  # <pid>
 # nothing when the walk finds none. The nearest match wins, so a worker nested
 # inside another harness resolves to its own harness.
 harness_ancestry() {  # [<pid>]
-  local pid=${1:-$$} verdict
+  local pid=${1:-$$} verdict explicit=${1:-}
   for _ in 1 2 3 4 5 6 7 8; do
     verdict=$(harness_process_verdict "$pid")
     [ -z "$verdict" ] || { echo "$verdict"; return; }
@@ -275,6 +305,21 @@ harness_ancestry() {  # [<pid>]
     case "$pid" in '' | *[!0-9]*) break ;; esac
     [ "$pid" -ge 1 ] || break
   done
+  _fm_harness_ancestry_win32 "$explicit"
+}
+
+# harness_ancestry's walk replayed against the real Win32 process table, for
+# hosts where Cygwin ps cannot answer -o or cannot see native parents
+# (bin/fm-win32-proc-lib.sh's header owns the verified evidence). The ordered
+# ancestor list already bridges the Cygwin fork-stub gap and the Cygwin/Win32
+# pid spaces, so this walk only applies the shared verdict per hop.
+_fm_harness_ancestry_win32() {  # [<pid>]
+  local winpid ppid comm args verdict
+  for winpid in $(fm_win32_ancestor_winpids ${1:+"$1"}); do
+    fm_win32_proc_get "$winpid" ppid comm args || break
+    verdict=$(harness_verdict_for_fields "$comm" "$args" "${args%% *}")
+    [ -z "$verdict" ] || { echo "$verdict"; return; }
+  done
   return 0
 }
 
@@ -286,12 +331,30 @@ harness_ancestry() {  # [<pid>]
 process_descent_path() {  # <root> [<eligible-leaf-pid>...]
   local root=${1:-$$} eligible any hit pairs frontier next pid child parent verdict
   local parents='' depth=0 best best_depth=0 best_strength='' hops=0
+  local win32_pairs=0 winpid leaf line rest comm args
   case "$root" in '' | *[!0-9]*) return 0 ;; esac
   shift 2>/dev/null || true
   eligible=" ${*+$*} "
   any=0
   [ "$#" -eq 0 ] && any=1
-  pairs=$(ps -eo pid=,ppid= 2>/dev/null) || { printf '%s\n' "$root"; return 0; }
+  pairs=$(ps -eo pid=,ppid= 2>/dev/null)
+  if [ -z "$pairs" ]; then
+    # Same Win32 gap as harness_ancestry: the table is keyed by Win32 pid, so
+    # a Cygwin <root> and each caller-given eligible leaf are translated
+    # through ps -l exactly like an explicit ancestry pid is above.
+    pairs=$(fm_win32_proc_pairs 2>/dev/null) || { printf '%s\n' "$root"; return 0; }
+    win32_pairs=1
+    winpid=$(ps -l -p "$root" 2>/dev/null | awk 'NR==2 {print $4}')
+    case "$winpid" in ''|*[!0-9]*) ;; *) root=$winpid ;; esac
+    if [ "$any" = 0 ]; then
+      eligible=' '
+      for leaf in "$@"; do
+        winpid=$(ps -l -p "$leaf" 2>/dev/null | awk 'NR==2 {print $4}')
+        case "$winpid" in ''|*[!0-9]*) winpid=$leaf ;; esac
+        eligible="$eligible$winpid "
+      done
+    fi
+  fi
   best=$root
   frontier=$root
   while [ -n "$frontier" ] && [ "$depth" -lt 8 ]; do
@@ -311,7 +374,14 @@ process_descent_path() {  # <root> [<eligible-leaf-pid>...]
           esac
         fi
         if [ "$hit" = 1 ]; then
-          verdict=$(harness_process_verdict "$child")
+          verdict=
+          if [ "$win32_pairs" = 1 ]; then
+            if fm_win32_proc_get "$child" rest comm args 2>/dev/null; then
+              verdict=$(harness_verdict_for_fields "$comm" "$args" "${args%% *}")
+            fi
+          else
+            verdict=$(harness_process_verdict "$child")
+          fi
           if [ $((depth + 1)) -gt "$best_depth" ]; then
             best=$child
             best_depth=$((depth + 1))

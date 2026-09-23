@@ -131,6 +131,96 @@ test_owned_lock_is_silent() {
   pass "fm-sessionstart-nudge: a lock holder in process ancestry is already run"
 }
 
+# --- Win32 lock-owner walk -----------------------------------------------------
+# The Git Bash/MSYS shape a Windows host ships: Cygwin ps cannot answer -o, so
+# the lock-owner ancestry check replays against the Win32_Process table through
+# bin/fm-win32-proc-lib.sh. The fake ps dies on -o and answers `ps -l -p` with
+# a fixed WINPID, exactly like the devin suite's fake; the fake powershell
+# prints the caller's canned table.
+write_win32_only_ps() {  # <fakebin>
+  cat > "$1/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  -l)
+    # The lib reads the whole Cygwin table in one `ps -l` inside a command
+    # substitution, so $PPID here is that substitution's subshell, not the
+    # script pid awk walks from. Print a row per ancestor of the subshell so
+    # the caller's own cygpid is covered wherever it sits.
+    printf '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n'
+    cyg=$PPID
+    for _ in 1 2 3 4; do
+      case "$cyg" in ''|*[!0-9]*) break ;; esac
+      printf '   %s       1    %s    %s  ?         1000 00:00:00 bash\n' "$cyg" "$cyg" "${FM_TEST_OWN_WINPID:?}"
+      cyg=$(awk '{print $4}' "/proc/$cyg/stat" 2>/dev/null) \
+        || cyg=$(/bin/ps -o ppid= -p "$cyg" 2>/dev/null | tr -d ' ')
+    done
+    ;;
+  -l\ -p\ *)
+    printf '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n'
+    printf '   1234       1    1234    %s  ?         1000 00:00:00 bash\n' "${FM_TEST_OWN_WINPID:?}"
+    ;;
+  *) echo "ps: unknown option" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$1/ps"
+}
+
+write_win32_powershell() {  # <fakebin>
+  cat > "$1/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$FM_TEST_WIN32_TABLE"
+SH
+  chmod +x "$1/powershell.exe"
+}
+
+# own WINPID 500 -> 600 (the lock holder) -> 700 -> explorer. Row 800 is a
+# live process that is NOT an ancestor: the check must compare ancestry, not
+# mere table membership.
+nudge_win32_table() {
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    500 600 bash.exe 'C:\Program Files\Git\bin\bash.exe' 'bash.exe -c foo' \
+    600 700 holder.exe 'C:\Tools\holder.exe' holder.exe \
+    700 710 chain.exe 'C:\Tools\chain.exe' chain.exe \
+    710 0 explorer.exe 'C:\Windows\explorer.exe' explorer.exe \
+    800 0 stray.exe 'C:\Tools\stray.exe' stray.exe
+}
+
+test_owned_lock_in_win32_ancestry_is_silent() {
+  local root fakebin out status=0
+  root="$TMP_ROOT/win32-lock"
+  make_primary "$root"
+  fakebin=$(fm_fakebin "$TMP_ROOT/win32-lock-bin")
+  write_win32_only_ps "$fakebin"
+  write_win32_powershell "$fakebin"
+
+  printf '600\n' > "$root/state/.lock"
+  out=$(FM_TEST_OWN_WINPID=500 FM_TEST_WIN32_TABLE="$(nudge_win32_table)" \
+    PATH="$fakebin:$PATH" run_nudge "$root") || status=$?
+  expect_code 0 "$status" "win32-ancestor lock nudge"
+  [ -z "$out" ] || fail "a lock held by a Win32-table ancestor was not recognized: $out"
+
+  # A live pid that is present in the table but absent from the ancestry must
+  # still nudge - the check is containment, not liveness alone.
+  printf '800\n' > "$root/state/.lock"
+  status=0
+  out=$(FM_TEST_OWN_WINPID=500 FM_TEST_WIN32_TABLE="$(nudge_win32_table)" \
+    PATH="$fakebin:$PATH" run_nudge "$root") || status=$?
+  expect_code 0 "$status" "win32 non-ancestor lock nudge"
+  [ "$out" = "$NUDGE_LINE" ] \
+    || fail "a lock held by a live non-ancestor pid wrongly silenced the nudge: $out"
+
+  # A pid absent from the table entirely is a dead owner: nudge.
+  printf '424242\n' > "$root/state/.lock"
+  status=0
+  out=$(FM_TEST_OWN_WINPID=500 FM_TEST_WIN32_TABLE="$(nudge_win32_table)" \
+    PATH="$fakebin:$PATH" run_nudge "$root") || status=$?
+  expect_code 0 "$status" "win32 dead-owner lock nudge"
+  [ "$out" = "$NUDGE_LINE" ] \
+    || fail "a lock held by a pid outside the Win32 table wrongly silenced the nudge: $out"
+  pass "fm-sessionstart-nudge: the Win32 walk recognizes a lock holder, a live stranger, and a dead owner"
+}
+
 # A firstmate running inside a PID namespace - a container, or `codex sandbox` -
 # holds its home lock from a harness that IS pid 1, so this hook must recognize
 # that owner. The old walk rejected a lock pid of 1 outright and stopped before
@@ -1055,6 +1145,7 @@ test_unmarked_linked_worktree_is_silent
 test_linked_secondmate_primary_nudges
 test_missing_state_is_silent
 test_owned_lock_is_silent
+test_owned_lock_in_win32_ancestry_is_silent
 test_namespace_pid1_lock_holder_is_silent
 test_opencode_plugin_delivers_exact_nudge_once
 test_run_startup_runs_the_full_digest

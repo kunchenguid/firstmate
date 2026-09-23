@@ -96,6 +96,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
+# shellcheck source=bin/fm-win32-proc-lib.sh
+. "$SCRIPT_DIR/fm-win32-proc-lib.sh"
 
 STORE="$STATE/branch-outcomes.jsonl"
 CURSOR="$STATE/.branch-outcomes-cursor"
@@ -387,7 +389,7 @@ processed_init_locked() {
 }
 
 held_lock_owned_by_ancestor() {
-  local owner owner_pid pid parent depth=0
+  local owner owner_pid pid parent depth=0 ps_dead=0 winpid
   case "$PPID" in ''|*[!0-9]*|0|1) return 1 ;; esac
   if [ -L "$LOCK" ]; then
     owner=$(fm_lock_link_owner "$LOCK" 2>/dev/null) || return 1
@@ -398,7 +400,7 @@ held_lock_owned_by_ancestor() {
     return 1
   fi
   owner_pid=$(cat "$owner/pid" 2>/dev/null) || return 1
-  fm_pid_alive "$owner_pid" || return 1
+  fm_pid_alive "$owner_pid" || fm_win32_pid_alive "$owner_pid" || return 1
 
   # Bash 3.2 keeps $$ unchanged in a redirected subshell while that subshell's
   # real pid becomes this script's parent. Walk the bounded live ancestry so
@@ -407,12 +409,20 @@ held_lock_owned_by_ancestor() {
   pid=$PPID
   while [ "$depth" -lt 64 ]; do
     [ "$pid" = "$owner_pid" ] && return 0
-    parent=$(ps -o ppid= -p "$pid" 2>/dev/null) || return 1
+    parent=$(ps -o ppid= -p "$pid" 2>/dev/null) || { ps_dead=1; break; }
     parent=${parent//[[:space:]]/}
     case "$parent" in ''|*[!0-9]*|0|1) return 1 ;; esac
     [ "$parent" != "$pid" ] || return 1
     pid=$parent
     depth=$((depth + 1))
+  done
+  [ "$ps_dead" = 1 ] || return 1
+  # Git Bash/MSYS cannot answer `ps -o` for a chain that crosses into native
+  # Win32 parents, and the recorded owner pid is a Win32 id there; the shared
+  # table fm-harness.sh uses replays the same ancestry question and fails
+  # closed when it is absent.
+  for winpid in $(fm_win32_ancestor_winpids "$PPID"); do
+    [ "$winpid" = "$owner_pid" ] && return 0
   done
   return 1
 }

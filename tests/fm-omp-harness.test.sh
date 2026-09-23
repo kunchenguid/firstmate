@@ -81,12 +81,98 @@ test_detection_anchored_name_and_marker_precedence() {
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
-  # ...and is inert when it leaks into a worker with no omp ancestor.
+  # ...and is inert when it leaks into a worker with no omp ancestor. The
+  # dead PowerShell stub keeps the Win32 table empty so the case asserts "no
+  # harness ancestry" even on hosts where the walk can genuinely see one.
+  local no_win32
+  no_win32=$(fm_fakebin "$TMP_ROOT/no-win32")
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$no_win32/powershell.exe"
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$no_win32/powershell"
+  chmod +x "$no_win32/powershell.exe" "$no_win32/powershell"
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
-    bash -c '"$1"; :' _ "$HARNESS")
+    PATH="$no_win32:$PATH" bash -c '"$1"; :' _ "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
+}
+
+# --- 1b. Win32 ancestry fallback ------------------------------------------------
+# The Git Bash/MSYS gap this host ships: Cygwin ps cannot answer -o fields, so
+# both the FM_OMP_HARNESS marker gate's names walk and the ancestry verdict go
+# blind. Both replay against the Win32_Process table bin/fm-win32-proc-lib.sh
+# owns, through the same ps -l WINPID translation the devin suite fakes.
+write_win32_only_ps() {  # <fakebin>
+  cat > "$1/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  -l)
+    # The lib reads the whole Cygwin table in one `ps -l` inside a command
+    # substitution, so $PPID here is that substitution's subshell, not the
+    # script pid awk walks from. Print a row per ancestor of the subshell so
+    # the caller's own cygpid is covered wherever it sits.
+    printf '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n'
+    cyg=$PPID
+    for _ in 1 2 3 4; do
+      case "$cyg" in ''|*[!0-9]*) break ;; esac
+      printf '   %s       1    %s    %s  ?         1000 00:00:00 bash\n' "$cyg" "$cyg" "${FM_TEST_OWN_WINPID:?}"
+      cyg=$(awk '{print $4}' "/proc/$cyg/stat" 2>/dev/null) \
+        || cyg=$(/bin/ps -o ppid= -p "$cyg" 2>/dev/null | tr -d ' ')
+    done
+    ;;
+  -l\ -p\ *)
+    printf '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n'
+    printf '   1234       1    1234    %s  ?         1000 00:00:00 bash\n' "${FM_TEST_OWN_WINPID:?}"
+    ;;
+  *) echo "ps: unknown option" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$1/ps"
+}
+
+write_win32_powershell() {  # <fakebin>
+  cat > "$1/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$FM_TEST_WIN32_TABLE"
+SH
+  chmod +x "$1/powershell.exe"
+}
+
+# bash (own WINPID) -> node.exe running a gemini script -> omp.exe ->
+# explorer.exe. The nearer hop carries only args-strength evidence, so the
+# FM_OMP_HARNESS marker's own omp-ancestry proof is what arbitrates the
+# session - exactly what the marker contract promises over a leaked env var.
+omp_args_shadow_table() {
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    500 600 bash.exe 'C:\Program Files\Git\bin\bash.exe' 'bash.exe -c foo' \
+    600 700 node.exe 'C:\Program Files\nodejs\node.exe' 'node C:/tools/@google/gemini-cli/dist/cli.js' \
+    700 800 omp.exe 'C:\Users\Admin\AppData\Local\omp\bin\omp.exe' omp.exe \
+    800 0 explorer.exe 'C:\Windows\explorer.exe' explorer.exe
+}
+
+test_detection_win32_table_fallback() {
+  local fakebin out
+  fakebin=$(fm_fakebin "$TMP_ROOT/win32")
+  write_win32_only_ps "$fakebin"
+  write_win32_powershell "$fakebin"
+  # shellcheck disable=SC2016 # the marker must survive env -u while foreign markers go
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u GROK_AGENT -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u AGENT -u AI_AGENT \
+    FM_OMP_HARNESS=omp FM_TEST_OWN_WINPID=500 FM_TEST_WIN32_TABLE="$(omp_args_shadow_table)" \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = omp ] || fail "an omp ancestor proven only in the Win32 table must let FM_OMP_HARNESS arbitrate, got '$out'"
+
+  # The same leaked marker with no omp anywhere in the table stays inert.
+  out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
+    -u GROK_AGENT -u GEMINI_CLI -u ATLASSIAN_AGENT_TYPE -u ROVODEV_CLI -u AGENT -u AI_AGENT \
+    FM_OMP_HARNESS=omp FM_TEST_OWN_WINPID=500 \
+    FM_TEST_WIN32_TABLE="$(printf '%s\t%s\t%s\t%s\t%s\n' \
+      500 600 bash.exe 'C:\Program Files\Git\bin\bash.exe' 'bash.exe -c foo' \
+      600 700 node.exe 'C:\Program Files\nodejs\node.exe' 'node C:/tools/@google/gemini-cli/dist/cli.js' \
+      700 0 explorer.exe 'C:\Windows\explorer.exe' explorer.exe)" \
+    PATH="$fakebin:$PATH" "$HARNESS")
+  [ "$out" = gemini ] || fail "a leaked FM_OMP_HARNESS with no omp.exe in the table must leave the args verdict alone, got '$out'"
+  pass "fm-harness: the Win32 table arbitrates FM_OMP_HARNESS when ps is blind"
 }
 
 test_lock_identity_and_liveness_classification() {
@@ -575,6 +661,7 @@ EOF
 }
 
 test_detection_anchored_name_and_marker_precedence
+test_detection_win32_table_fallback
 test_lock_identity_and_liveness_classification
 test_spawn_launch_line_and_worker_wiring
 test_spawn_model_validation_scoped_to_listed_providers

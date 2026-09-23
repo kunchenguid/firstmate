@@ -453,6 +453,127 @@ test_outcome_processed_marker_is_sequence_bound() {
   pass "the processed marker is sequence-bound, never ahead of the read cursor, never backwards, and migrates delivered history once"
 }
 
+# --- Win32 held-lock ancestry for processed-init --held-lock --------------------
+# The Git Bash/MSYS shape a Windows host ships: `fm_pid_alive` (kill -0) and
+# `ps -o ppid=` cannot see a Win32-pid lock owner, so held_lock_owned_by_ancestor
+# must replay against the Win32_Process table through bin/fm-win32-proc-lib.sh.
+# The fake ps dies on -o and answers `ps -l -p` with a fixed WINPID, exactly
+# like the devin suite's fake; the fake powershell prints the caller's table.
+write_win32_only_ps() {  # <fakebin>
+  cat > "$1/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  -l)
+    # The lib reads the whole Cygwin table in one `ps -l` inside a command
+    # substitution, so $PPID here is that substitution's subshell, not the
+    # script pid awk walks from. Print a row per ancestor of the subshell so
+    # the caller's own cygpid is covered wherever it sits.
+    printf '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n'
+    cyg=$PPID
+    for _ in 1 2 3 4; do
+      case "$cyg" in ''|*[!0-9]*) break ;; esac
+      printf '   %s       1    %s    %s  ?         1000 00:00:00 bash\n' "$cyg" "$cyg" "${FM_TEST_OWN_WINPID:?}"
+      cyg=$(awk '{print $4}' "/proc/$cyg/stat" 2>/dev/null) \
+        || cyg=$(/bin/ps -o ppid= -p "$cyg" 2>/dev/null | tr -d ' ')
+    done
+    ;;
+  -l\ -p\ *)
+    printf '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n'
+    printf '   1234       1    1234    %s  ?         1000 00:00:00 bash\n' "${FM_TEST_OWN_WINPID:?}"
+    ;;
+  *) echo "ps: unknown option" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$1/ps"
+}
+
+write_win32_powershell() {  # <fakebin>
+  cat > "$1/powershell.exe" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$FM_TEST_WIN32_TABLE"
+SH
+  chmod +x "$1/powershell.exe"
+}
+
+# caller WINPID 500 -> 600 (the held-lock owner) -> 700 -> 710 -> explorer.
+# Row 800 is a live process that is NOT an ancestor: legitimacy is ancestry
+# containment, not mere table membership.
+held_lock_win32_table() {
+  printf '%s\t%s\t%s\t%s\t%s\n' \
+    500 600 bash.exe 'C:\Program Files\Git\bin\bash.exe' 'bash.exe -c foo' \
+    600 700 holder.exe 'C:\Tools\holder.exe' holder.exe \
+    700 710 chain.exe 'C:\Tools\chain.exe' chain.exe \
+    710 0 explorer.exe 'C:\Windows\explorer.exe' explorer.exe \
+    800 0 stray.exe 'C:\Tools\stray.exe' stray.exe
+}
+
+make_outcome_home() {  # <home>: one read outcome, cursor at seq 1
+  local home=$1
+  mkdir -p "$home/state"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" append \
+    --task task-1 --verdict routine --summary 'seed outcome' --wake 'signal: done' >/dev/null \
+    || fail "seed append failed"
+  FM_HOME="$home" "$ROOT/bin/fm-branch-outcome.sh" mark-read --through 1 \
+    || fail "seed mark-read failed"
+}
+
+fake_held_lock() {  # <home> <owner-winpid>: a dir-shaped held outcome lock
+  mkdir -p "$1/state/.branch-outcomes.lock"
+  printf '%s\n' "$2" > "$1/state/.branch-outcomes.lock/pid"
+}
+
+run_held_processed_init() {  # <home> <fakebin>
+  FM_TEST_OWN_WINPID=500 FM_TEST_WIN32_TABLE="$(held_lock_win32_table)" \
+    PATH="$2:$PATH" FM_HOME="$1" \
+    "$ROOT/bin/fm-branch-outcome.sh" processed-init --held-lock 2>&1
+}
+
+test_held_lock_processed_init_win32_ancestry() {
+  local fakebin home out status
+
+  fakebin=$(fm_fakebin "$TMP_ROOT/held-lock-bin")
+  write_win32_only_ps "$fakebin"
+  write_win32_powershell "$fakebin"
+
+  # A real ancestor holding the outcome lock admits the caller.
+  home="$TMP_ROOT/held-lock-ancestor"
+  make_outcome_home "$home"
+  fake_held_lock "$home" 600
+  out=$(run_held_processed_init "$home" "$fakebin") && status=0 || status=$?
+  [ "$status" -eq 0 ] \
+    || fail "processed-init --held-lock refused a real Win32-table ancestor: $out"
+  [ -f "$home/state/.branch-outcomes-processed" ] \
+    || fail "processed-init --held-lock did not write the processed marker"
+  [ "$(cat "$home/state/.branch-outcomes-processed")" = 1 ] \
+    || fail "processed marker did not start at the read cursor"
+
+  # A live but unrelated table pid is not the lock owner: refuse.
+  home="$TMP_ROOT/held-lock-stranger"
+  make_outcome_home "$home"
+  fake_held_lock "$home" 800
+  out=$(run_held_processed_init "$home" "$fakebin") && status=0 || status=$?
+  [ "$status" -ne 0 ] \
+    || fail "processed-init --held-lock accepted a live non-ancestor owner"
+  assert_contains "$out" "requires an ancestor process to own the outcome lock" \
+    "non-ancestor refusal lost its diagnostic"
+  assert_absent "$home/state/.branch-outcomes-processed" \
+    "a refused held-lock caller still wrote the processed marker"
+
+  # A pid absent from the table is a dead owner: refuse.
+  home="$TMP_ROOT/held-lock-dead"
+  make_outcome_home "$home"
+  fake_held_lock "$home" 424242
+  out=$(run_held_processed_init "$home" "$fakebin") && status=0 || status=$?
+  [ "$status" -ne 0 ] \
+    || fail "processed-init --held-lock accepted a dead lock owner"
+  assert_contains "$out" "requires an ancestor process to own the outcome lock" \
+    "dead-owner refusal lost its diagnostic"
+  assert_absent "$home/state/.branch-outcomes-processed" \
+    "a dead-owner held-lock caller still wrote the processed marker"
+  pass "processed-init --held-lock admits a Win32-table ancestor and refuses a stranger and a dead owner"
+}
+
 # --- lease contract -----------------------------------------------------------
 
 test_lease_exclusivity_release_stale_and_sweep() {
@@ -1292,6 +1413,7 @@ test_cursor_advancement_refuses_ahead_processed_marker
 test_outcome_sequence_conflicts_fail_closed
 test_outcome_non_jsonl_layout_fails_closed
 test_outcome_processed_marker_is_sequence_bound
+test_held_lock_processed_init_win32_ancestry
 test_lease_exclusivity_release_stale_and_sweep
 test_mutating_scripts_refuse_the_other_actors_lease
 test_main_owned_actions_refuse_the_branch_actor

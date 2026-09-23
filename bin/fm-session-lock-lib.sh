@@ -23,13 +23,16 @@
 
 # Known harness command names; extend when a new adapter is verified. omp is
 # anchored exactly like pi: its process name is the bare word `omp` (verified,
-# omp 18.1.11), and a substring match would claim ompd or comp.
-FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$'
+# omp 18.1.11), and a substring match would claim ompd or comp. devin is
+# anchored for the same reason plus case: the bare CLI is `devin`, while
+# `Devin.exe` is the Electron app and `devinfoo` must never match.
+FM_HARNESS_RE='claude|codex|opencode|grok|kimi|^pi$|^pi-signed$|^omp$|^devin$'
 
 # The same harnesses as exact executable names. Keep in sync with
 # FM_HARNESS_RE. Used only for the stricter path evidence below, where the
 # loose regex would also match ordinary firstmate paths such as
-# bin/fm-claude-stop-autoarm.sh.
+# bin/fm-claude-stop-autoarm.sh. devin stays out deliberately: the CLI has no
+# version-named install, so a lowercase `devin` path component is ordinary.
 FM_HARNESS_NAMES=(claude codex opencode grok kimi pi-signed pi omp)
 
 # Print the exact harness name carried by executable path $1 - its own basename
@@ -95,6 +98,49 @@ fm_harness_process_matches() {  # <comm> <args>
   return 1
 }
 
+# --- Windows-native ancestry fallback -----------------------------------------
+# The Win32_Process table this block reads is owned by
+# bin/fm-win32-proc-lib.sh, shared by every ancestry walk that Cygwin ps
+# cannot serve (harness detection, the sessionstart nudge, the drain
+# legitimacy walk): the whole process table loads once per process through
+# PowerShell, capability detected by trying rather than uname, and the
+# rationale plus verified evidence live in that file's header.
+# shellcheck source=bin/fm-win32-proc-lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/fm-win32-proc-lib.sh"
+
+# fm_harness_ancestry_pids's algorithm, replayed against the real Win32 parent
+# chain instead of Cygwin's ppid=1 dead end. The ordered ancestor list already
+# bridges the Cygwin fork-stub gap and the Cygwin/Win32 pid spaces, so this
+# walk only applies the contiguous-run rule per hop.
+_fm_harness_ancestry_pids_win32() {
+  local winpid ppid comm args extending=0 printed=0
+  for winpid in $(fm_win32_ancestor_winpids); do
+    fm_win32_proc_get "$winpid" ppid comm args || break
+    if fm_harness_process_matches "$comm" "$args"; then
+      printf '%s\n' "$winpid"
+      printed=1
+      [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || break
+      extending=1
+    elif [ "$extending" -eq 1 ]; then
+      break
+    fi
+  done
+  [ "$printed" -eq 1 ]
+}
+
+# True when Win32 pid $1 is alive and harness-shaped, read from the cached
+# Win32 process table. The Windows-side counterpart of fm_harness_pid_alive,
+# used only once its own kill -0/ps -o evidence has already failed.
+_fm_win32_pid_alive() {  # <pid>
+  local pid=$1 ppid comm args line
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  line=$(fm_win32_proc_fields "$pid") || return 1
+  IFS=$'\t' read -r ppid comm args <<EOF
+$line
+EOF
+  fm_harness_process_matches "$comm" "$args"
+}
+
 # Walk the current process ancestry (up to 16 hops) and print this session's
 # contiguous verified-harness ancestry, innermost pid first.
 #
@@ -134,7 +180,8 @@ fm_harness_ancestry_pids() {
     case "$pid" in '' | *[!0-9]*) break ;; esac
     [ "$pid" -ge 1 ] || break
   done
-  [ "$printed" -eq 1 ]
+  [ "$printed" -eq 1 ] && return 0
+  _fm_harness_ancestry_pids_win32
 }
 
 # Print the outermost pid of this session's contiguous harness run for callers
@@ -160,13 +207,20 @@ EOF
   printf '%s\n' "$outermost"
 }
 
-# True if $1 is a live process that looks like a verified harness.
+# True if $1 is a live process that looks like a verified harness. Falls back
+# to the Win32 table (see above) only once kill -0 itself has failed: that is
+# the exact, and only, evidence Cygwin gives for "this pid is outside what my
+# -p filter can address," which is indistinguishable there from "dead" without
+# a second source.
 fm_harness_pid_alive() {
   local pid=$1 comm args
-  kill -0 "$pid" 2>/dev/null || return 1
-  comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-  args=$(ps -o args= -p "$pid" 2>/dev/null)
-  fm_harness_process_matches "$comm" "$args"
+  if kill -0 "$pid" 2>/dev/null; then
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
+    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    fm_harness_process_matches "$comm" "$args"
+    return $?
+  fi
+  _fm_win32_pid_alive "$pid"
 }
 
 # --- trusted same-session identity -------------------------------------------
@@ -205,8 +259,20 @@ fm_session_lock_trusted_session_id() {  # [<ancestry-pids>]
   fi
   while IFS= read -r pid; do
     [ "$pid" = "$claude_pid" ] || continue
-    comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
-    args=$(ps -o args= -p "$pid" 2>/dev/null)
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null)
+    if [ -n "$comm" ]; then
+      args=$(ps -o args= -p "$pid" 2>/dev/null)
+    else
+      # The ancestry walk itself may have resolved this pid through the Win32
+      # fallback (a bare Win32 pid Cygwin's -o cannot address at all); re-read
+      # it the same way rather than trusting an empty re-verification as proof
+      # of nothing.
+      local win32_line
+      win32_line=$(fm_win32_proc_fields "$pid") || return 1
+      IFS=$'\t' read -r _ comm args <<EOF
+$win32_line
+EOF
+    fi
     fm_harness_process_matches "$comm" "$args" || return 1
     [ "$FM_HARNESS_IS_CLAUDE" -eq 1 ] || return 1
     printf '%s\n' "$id"
