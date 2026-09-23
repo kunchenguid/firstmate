@@ -28,9 +28,7 @@ The away posture is `state/.afk-contract`, and quiet mode never requires, writes
 If an away-posture record stands when `/quiet` arrives, that message is the captain's return: run the return in the `afk` skill's "How to exit: the return" section first, then enter quiet mode.
 
 1. **Start the daemon on the path the `afk` skill's "Entering: `/afk [words]`" step 2 names for this harness, with `FM_AFK_MODE=quiet` set on the launcher call, and skip that skill's step 1.**
-   - **Pi and pi-signed**: nothing to launch; the attended supervision branch already keeps routine wakes out of this conversation.
-   - **Harness with a native in-pane tracked-background tool** (claude, grok): run `FM_AFK_MODE=quiet bin/fm-afk-launch.sh start-native`, then `FM_AFK_STATE_PREPARED=1 bin/fm-afk-start.sh` through that native tool; if the native launch fails, run `bin/fm-afk-launch.sh stop` to roll back.
-   - **Every other harness**: run `FM_AFK_MODE=quiet bin/fm-afk-launch.sh start`.
+   That step owns the per-harness matrix, including the Pi and pi-signed branch where nothing is launched at all.
    The launcher writes `quiet` as `state/.afk`'s first line and refuses a quiet start while an away-posture record stands; its header owns the mode rules.
    A bare refresh of an already-running quiet daemon with `FM_AFK_MODE` unset keeps quiet, because `fm_afk_flag_write` preserves the on-disk mode when no record stands.
    As with `/afk`, do not separately arm `fm-watch.sh` where the daemon runs.
@@ -47,7 +45,7 @@ point of this mode (AGENTS.md section 8's away-mode stub, quiet branch).
 
 - Only an explicit `/quiet off` (or the captain plainly asking to leave quiet mode / resume normal supervision) exits it: run `bin/fm-afk-return.sh` unchanged, the same return the `afk` skill's "How to exit: the return" section documents (correct-ordered daemon shutdown, durable wake presentation and acknowledgement, escalation and wedge evidence, and the return catch-up gate).
   It needs no quiet-specific variant; with no away-posture record its brief reports that no away instructions were recorded for the window, which is expected.
-  On Pi and pi-signed nothing was launched, so there is nothing to stop.
+  On Pi and pi-signed quiet entry launches nothing and writes nothing durable, so `/quiet off` runs no return there either: the return would open its catch-up gate over a window that had no posture. Acknowledge the exit and resume ordinary per-wake responses.
 - A marked daemon escalation, or a message beginning `/quiet` while already
   in quiet mode (refresh, not exit) -> stay in quiet mode and process it, the
   same two carve-outs `/afk` documents for away mode.
