@@ -231,12 +231,14 @@ test_drain_dedupes_obvious_duplicates() {
 # waits on what the watcher observably did, never on a wall-clock budget: a
 # loaded machine can take seconds to reach the first poll, and a leg cut off
 # before its stall tick silently drops the observation the next leg depends on.
-# With [observation], the leg ends once the progress marker records exactly that
-# "<now><TAB><row-key>" pair; otherwise the watcher runs to its own first wake.
-# The poll ceiling only bounds a hang.
+# With [observation], the leg ends once the tick's whole reset is visible: the
+# progress marker records exactly that "<now><TAB><row-key>" pair and the prior
+# episode's stall marker is gone; otherwise the watcher runs to its own first
+# wake. The poll ceiling only bounds a hang.
 foreign_stall_watch_leg() {  # <dir> <leg> <now> [observation]
-  local dir=$1 leg=$2 now=$3 observation=${4-} marker pid i=0
+  local dir=$1 leg=$2 now=$3 observation=${4-} marker stall pid i=0
   marker="$dir/state/.secondmate-wake-progress-mate"
+  stall="$dir/state/.secondmate-wake-stall-mate"
   printf '%s\n' "$now" > "$dir/now"
   PATH="$dir/fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$dir/state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
@@ -246,7 +248,7 @@ foreign_stall_watch_leg() {  # <dir> <leg> <now> [observation]
   pid=$!
   if [ -n "$observation" ]; then
     while [ "$i" -lt 600 ] && is_live_non_zombie "$pid" \
-      && [ "$(cat "$marker" 2>/dev/null || true)" != "$observation" ]; do
+      && { [ "$(cat "$marker" 2>/dev/null || true)" != "$observation" ] || [ -e "$stall" ]; }; do
       sleep 0.1
       i=$((i + 1))
     done
@@ -256,6 +258,7 @@ foreign_stall_watch_leg() {  # <dir> <leg> <now> [observation]
   if [ -n "$observation" ]; then
     [ "$(cat "$marker" 2>/dev/null || true)" = "$observation" ] \
       || fail "watcher leg $leg did not record observation '$observation': $(cat "$marker" 2>/dev/null)"
+    [ ! -e "$stall" ] || fail "watcher leg $leg left the prior episode's stall marker in place"
   fi
 }
 
