@@ -299,10 +299,10 @@
 #   opted-in home that also enables config/launch-env-allowlist lists the
 #   names the adviser needs, TYPESAFE_API_KEY and
 #   CLAUDE_CODE_ENABLE_FUNCTION_HOOKS, in that allowlist itself like any other
-#   ambient name. The
-#   file's content is ignored; it is read once per spawn or relaunch and is
-#   inherited into secondmate homes (bin/fm-config-inherit-lib.sh), so a local
-#   or remote second mate's own launches follow the same choice.
+#   ambient name. The file's content is ignored; it is read once per spawn or
+#   relaunch and is inherited into secondmate homes
+#   (bin/fm-config-inherit-lib.sh), so a local or remote second mate's own
+#   launches follow the same choice.
 # Claude permission mode (config/claude-permission-mode):
 #   One token selecting the permission flag every claude launch (ship, scout,
 #   secondmate, and relaunch) carries. Absent or `bypass` keeps today's
