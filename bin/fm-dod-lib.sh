@@ -375,6 +375,7 @@ Publish from this copy with \`gerrit-axi\`, never with \`git push\`:
    A failure prints a typed error record instead; fix what it names and publish again, which updates the same change rather than creating another.
 Then append \`done [at=<epoch>]: PR {change url} published for review\` to the status file and stop. You are finished.
 That \`done:\` is accepted only when the change's current patch set on the server carries this copy's HEAD tree, so commit nothing after publishing; if you must change the work, commit it and publish again before reporting done.
+A \`done:\` whose URL is not the canonical \`https://<host>/c/<project>/+/<number>\` change URL is refused.
 There is no pull request, no \`gh-axi\` call, and no forge CI result to report: a human reviewer approves and submits the change on the server, and firstmate relays that outcome.
 EOF
 }
@@ -420,9 +421,9 @@ You may not publish until you have closed that gap:
 2. When its code is \`recover_custody\`, run the exact command that status prints - \`no-mistakes axi sync --recover\` - and confirm \`branch_sync.state\` comes back \`custody_returned\` on a clean tree. The printed command is authoritative if it differs. The \`run_pipeline\` next action status reports after recovery is not an instruction to run again: the recovered head is the one the passed run validated, so publish it.
 3. Confirm with \`git log\` that \`fm/$id\` now carries every fix commit the run made, whether or not step 2 was needed.
 An unrecovered fix round is an unfinished task, never housekeeping: publishing without it is how the UNFIXED code reaches review.
-Your ready report is refused while the run still holds your branch or while your HEAD's tree differs from the run's result.
+Your ready report is refused while the run still holds your branch, while its outcome is missing or not passing, or while your HEAD's tree differs from the run's result.
 
-When the run's outcome is passed and step 3 holds, publish.
+When the run's outcome is passed, passed-with-skips, or passed-with-override and step 3 holds, publish.
 EOF
       fm_gerrit_publish_block
       ;;
