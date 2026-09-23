@@ -305,6 +305,14 @@ test_faster_paths_use_configured_authority_without_stacked_review() {
     "direct-PR brief lost configured merge authority"
   assert_no_grep "The captain reviews and merges the PR" "$brief" \
     "direct-PR brief hard-coded captain-only authority"
+  assert_grep "$ROOT/bin/fm-github-write.sh direct-pr $id" "$brief" \
+    "direct-PR brief did not route publication through the bounded GitHub-write command"
+  assert_grep "keep Automic Vault approval attended" "$brief" \
+    "direct-PR brief did not keep GitHub-write authorization attended"
+  assert_grep "instead of requesting broad Write Access or a Launcher Endorsement" "$brief" \
+    "direct-PR brief did not keep a missing Automic prerequisite from widening launcher authority"
+  assert_no_grep "open a PR with \`gh-axi\`" "$brief" \
+    "direct-PR brief retained the unbounded forge-write instruction"
   id="brief-local-authority-a4"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" local-proj --mode local-only >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
@@ -342,11 +350,16 @@ test_pr_based_dod_requires_non_draft() {
     # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
     assert_grep 'confirm it is not a draft (`gh pr view <url> --json isDraft` must print false)' "$brief" \
       "$mode: done must require reading the PR back from the forge as non-draft"
-    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
-    assert_grep 'mark it ready with `gh-axi pr ready`' "$brief" \
-      "$mode: a draft must be marked ready before done"
-    assert_grep "If you deliberately keep the PR a draft, append \`paused" "$brief" \
-      "$mode: a deliberate draft must declare a wait instead of done"
+    if [ "$mode" = direct-PR ]; then
+      assert_grep "If the PR remains a draft, append \`paused" "$brief" \
+        "$mode: a draft the bounded command cannot ready must declare a wait"
+    else
+      # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+      assert_grep 'mark it ready with `gh-axi pr ready`' "$brief" \
+        "$mode: a draft must be marked ready before done"
+      assert_grep "If you deliberately keep the PR a draft, append \`paused" "$brief" \
+        "$mode: a deliberate draft must declare a wait instead of done"
+    fi
   done
   pass "fm-brief.sh: PR-based done requires a non-draft PR; a deliberate draft declares a wait"
 }

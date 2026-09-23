@@ -63,7 +63,7 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id>
   local mode=$1 id=$2
   case "$mode" in
     direct-PR)
-      printf '%s\n' "1. Never push to the default branch (push only your \`fm/$id\` branch). Never merge a PR."
+      printf '%s\n' "1. Never push to the default branch (push only your \`fm/$id\` branch through the generated bounded delivery command). Never merge a PR."
       ;;
     local-only)
       printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`fm/$id\` branch; firstmate handles the merge into local \`main\`."
@@ -248,16 +248,20 @@ fm_dod_block() {  # <mode> <task-id>
   local mode=$1 id=$2
   case "$mode" in
     direct-PR)
+      local github_write
+      github_write="${FM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/bin/fm-github-write.sh"
       cat <<EOF
 # Definition of done
 Delivery contract: mode=direct-PR
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\` that is ready for review, not a draft.
-Before you report done, read the PR back from the forge and confirm it is not a draft (\`gh pr view <url> --json isDraft\` must print false); if it is a draft, mark it ready with \`gh-axi pr ready\`.
+When it is implemented and committed, write the PR body to a regular file inside this worktree, then run \`$github_write direct-pr $id --title "<title>" --body-file <path>\` from the worktree root.
+That reviewed command derives and verifies the task, project, branch, remotes, base, and PR identity from Firstmate's records, pushes only \`fm/$id\`, and creates or updates only its corresponding PR.
+Do not push with Git or invoke a forge write directly; keep Automic Vault approval attended, and report a missing Blessing instead of requesting broad Write Access or a Launcher Endorsement.
+Before you report done, read the exact URL printed by the command back from the forge and confirm it is not a draft (\`gh pr view <url> --json isDraft\` must print false).
 A draft cannot be merged, so a done report on one leaves the merge unasked.
-Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
-If you deliberately keep the PR a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done.
+Append \`done [at=<epoch>]: PR {url}\` with that exact URL to the status file, then stop.
+If the PR remains a draft, append \`paused [at=<epoch>]: {why the draft is held}\` instead of done and report that the bounded delivery command cannot mark it ready.
 Do NOT run /no-mistakes. The configured merge authority decides whether to merge the PR; firstmate relays the outcome.
 EOF
       ;;
