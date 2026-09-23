@@ -161,7 +161,7 @@ _fm_win_start_pid() {
   printf '%s\n' "$winpid"
 }
 
-# True when pid $1 is live, and prints its "<comm><TAB><args>" on the host's
+# True when pid $1 is listed, and prints its "<comm><TAB><args>" on the host's
 # own process table. The single process-identity primitive for everything
 # below except the ancestry walk, which reads parents too.
 _fm_proc_identity() {  # <pid>
@@ -175,7 +175,6 @@ _fm_proc_identity() {  # <pid>
     printf '%s\t%s\n' "$_FM_WIN_COMM" "$_FM_WIN_ARGS"
     return 0
   fi
-  kill -0 "$pid" 2>/dev/null || return 1
   comm=$(ps -o comm= -p "$pid" 2>/dev/null) || return 1
   args=$(ps -o args= -p "$pid" 2>/dev/null)
   printf '%s\t%s\n' "$comm" "$args"
@@ -288,6 +287,7 @@ EOF
 # True if $1 is a live process that looks like a verified harness.
 fm_harness_pid_alive() {
   local identity
+  fm_proc_windows_native || kill -0 "$1" 2>/dev/null || return 1
   identity=$(_fm_proc_identity "$1") || return 1
   fm_harness_process_matches "${identity%%$'\t'*}" "${identity#*$'\t'}"
 }

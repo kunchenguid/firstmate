@@ -516,7 +516,7 @@ fm_lock_discard_owner() {
 fm_lock_remove_stray_owner_link() {
   local lockdir=$1 ownerdir=$2 stray
   stray="$lockdir/$(basename "$ownerdir")"
-  if [ -L "$stray" ] && [ "$(readlink "$stray" 2>/dev/null || true)" = "$ownerdir" ]; then
+  if [ -L "$stray" ] && fm_lock_points_to_owner "$stray" "$ownerdir"; then
     rm -f "$stray" 2>/dev/null || true
   fi
 }
