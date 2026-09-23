@@ -536,6 +536,34 @@ test_lock_self_held_recovery_is_reclaimed() {
   pass "self-held steal and recovery mutexes are reclaimed by their own process"
 }
 
+test_lock_dangling_recovery_link_is_retried() {
+  local dir state lockdir dead out me
+  dir=$(make_case lock-dangling-recovery)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  mkdir "$lockdir" "$lockdir.steal"
+  printf '%s\n' "$dead" > "$lockdir/pid"
+  printf '%s\n' "$dead" > "$lockdir.steal/pid"
+  ln -s "$state/.contend.lock.steal.recovery.owner.gone" "$lockdir.steal.recovery"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2"
+    printf "first=%s " "$?"
+    fm_lock_try_acquire "$2"
+    printf "second=%s me=%s lockpid=%s\n" "$?" "${BASHPID:-$$}" "$(cat "$2/pid" 2>/dev/null || true)"
+  ' _ "$LIB" "$lockdir" 2>&1)
+  case "$out" in
+    "first=1 second=0 "*) ;;
+    *) fail "dangling recovery link refused or wedged the lock: $out" ;;
+  esac
+  me=${out#*me=}; me=${me%% *}
+  [ "$me" = "${out#*lockpid=}" ] || fail "lock after dangling recovery link is not owned by the acquirer: $out"
+  [ ! -e "$lockdir.steal.recovery" ] && [ ! -L "$lockdir.steal.recovery" ] \
+    || fail "dangling recovery link was left behind"
+  pass "dangling recovery link is cleared and retried instead of refused"
+}
+
 test_lock_does_not_steal_live_lock() {
   local dir state lockdir live out lockpid
   dir=$(make_case lock-live-noop)
@@ -1346,6 +1374,7 @@ test_lock_live_recovery_holder_is_not_reclaimed
 test_lock_recovery_with_live_process_group_is_refused
 test_lock_legacy_nested_steal_does_not_wedge
 test_lock_self_held_recovery_is_reclaimed
+test_lock_dangling_recovery_link_is_retried
 test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate

@@ -986,7 +986,7 @@ fm_lock_reclaim_dead_recovery() {  # <recovery-mutex> <observed-pid> <current-pi
 }
 
 fm_lock_try_recover_steal_mutex() {  # <steal-lock> <observed-pid> <current-pid>
-  local lockdir=$1 pid=$2 current=$3 recovery recovery_owner primary_owner cur rc recovery_pid
+  local lockdir=$1 pid=$2 current=$3 recovery recovery_owner primary_owner cur rc recovery_pid recovery_target
   if [ -n "$pid" ] && [ "$pid" = "$current" ]; then
     fm_lock_remove_path "$lockdir" || true
     if fm_lock_try_create "$lockdir"; then
@@ -1013,6 +1013,18 @@ fm_lock_try_recover_steal_mutex() {  # <steal-lock> <observed-pid> <current-pid>
       [ -w "$(dirname "$recovery")" ] && return 1
       fm_lock_refuse_recovery "$recovery"
       return 2
+    fi
+    if [ -L "$recovery" ]; then
+      recovery_target=$(readlink "$recovery" 2>/dev/null || true)
+      recovery_owner=$(fm_lock_link_owner "$recovery" 2>/dev/null || true)
+      if [ -n "$recovery_target" ] && [ -n "$recovery_owner" ] \
+        && [ ! -e "$recovery_owner" ] && [ ! -L "$recovery_owner" ]; then
+        if [ "$(readlink "$recovery" 2>/dev/null || true)" = "$recovery_target" ]; then
+          rm -f "$recovery" 2>/dev/null || true
+        fi
+        FM_LOCK_HELD_PID=$pid
+        return 1
+      fi
     fi
     if [ -n "$recovery_pid" ] && [ "$recovery_pid" != "$current" ] \
       && fm_pid_alive "$recovery_pid"; then
