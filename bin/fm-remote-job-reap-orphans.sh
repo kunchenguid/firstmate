@@ -25,10 +25,7 @@
 # home is sweeping.
 #
 # Only this user's processes are inspected, and this process, its own process
-# group, and any ancestor are never signalled. Each candidate is stopped through
-# the shared fm_remote_job_stop_worker_tree, so the whole worker tree goes at
-# once (TERM first, KILL only for a survivor) and a group whose leader is not
-# itself a worker is stopped as a single process instead.
+# group, and any ancestor are never signalled.
 #
 # Prints one line per reaped or surviving candidate and nothing when there is
 # nothing to do. Exits 0 unless the process scan itself could not run, so a
@@ -45,6 +42,7 @@ REAP_SUFFIX=/bin/fm-remote-job-worker.sh
 REAP_WORKER_ROOT=
 REAP_LANE_JOB=
 REAP_LANE_QUEUE=
+REAP_JOB=
 
 reap_die() { printf 'fm-remote-job-reap-orphans: %s\n' "$1" >&2; exit 2; }
 
@@ -94,7 +92,8 @@ reap_read_worker() { # <command>
 }
 
 reap_lane_abandoned() {
-  local id=$1 queue=$2 job deadline now canonical
+  local id=$1 queue=$2 pid=$3 job deadline now canonical group lane_pgid own_pgid identity
+  REAP_JOB=
   [ -n "$queue" ] || return 1
   canonical=$(fm_remote_job_canonical_existing_dir "$queue/jobs" 2>/dev/null) || return 1
   [ "$canonical" = "$queue/jobs" ] || return 1
@@ -104,7 +103,20 @@ reap_lane_abandoned() {
   deadline=$(fm_remote_job_read_number "$job" deadline 2>/dev/null || true)
   case "$deadline" in ''|*[!0-9]*) return 1 ;; esac
   now=$(date +%s)
-  [ "$now" -ge $((deadline + FM_REMOTE_JOB_LANE_GRACE_SECONDS)) ]
+  [ "$now" -ge $((deadline + FM_REMOTE_JOB_LANE_GRACE_SECONDS)) ] || return 1
+  [ -d "$job/.claim" ] && [ ! -L "$job/.claim" ] || return 1
+  [ "$(fm_remote_job_read_process_id "$job/.claim/supervisor" 2>/dev/null)" = "$pid" ] || return 1
+  fm_remote_job_supervisor_identity_status "$job" "$pid" || return 1
+  if [ -e "$job/.claim/group" ] || [ -L "$job/.claim/group" ]; then
+    group=$(fm_remote_job_read_process_id "$job/.claim/group" 2>/dev/null) || return 1
+    lane_pgid=$(fm_remote_job_process_pgid "$pid") || return 1
+    own_pgid=$(fm_remote_job_process_pgid "$$") || return 1
+    [ "$group" != "$lane_pgid" ] && [ "$group" != "$own_pgid" ] || return 1
+    fm_remote_job_group_identity_status "$job" "$group"
+    identity=$?
+    case "$identity" in 0|1) ;; *) return 1 ;; esac
+  fi
+  REAP_JOB=$job
 }
 
 reap_is_self_or_ancestor() { # <pid>
@@ -119,7 +131,7 @@ reap_is_self_or_ancestor() { # <pid>
 }
 
 reap_orphans() {
-  local uid scan pid command live root own_pgid pgid lane reason
+  local uid scan pid command live root own_pgid pgid lane reason stop_command stop_arg
   uid=$(id -u 2>/dev/null || true)
   case "$uid" in ''|*[!0-9]*) reap_die "cannot resolve the current uid" ;; esac
   scan=$(ps -u "$uid" -o pid=,command= 2>/dev/null) ||
@@ -135,8 +147,12 @@ reap_orphans() {
     lane=$REAP_LANE_JOB
     if ! fm_remote_job_root_is_live "$root"; then
       reason="pruned code root $root"
-    elif [ -n "$lane" ] && reap_lane_abandoned "$lane" "$REAP_LANE_QUEUE"; then
+      stop_command=fm_remote_job_stop_worker_tree
+      stop_arg=$pid
+    elif [ -n "$lane" ] && reap_lane_abandoned "$lane" "$REAP_LANE_QUEUE" "$pid"; then
       reason="abandoned lane for $lane"
+      stop_command=fm_remote_job_stop_recorded_execution
+      stop_arg=$REAP_JOB
     else
       continue
     fi
@@ -155,7 +171,7 @@ reap_orphans() {
       printf 'would reap abandoned remote job worker %s (%s)\n' "$pid" "$reason"
       continue
     fi
-    if fm_remote_job_stop_worker_tree "$pid"; then
+    if "$stop_command" "$stop_arg"; then
       printf 'reaped abandoned remote job worker %s (%s)\n' "$pid" "$reason"
     else
       printf 'warning: abandoned remote job worker %s survived reaping (%s)\n' "$pid" "$reason" >&2

@@ -157,8 +157,8 @@ worker_quarantined_execution_stopped() { # <account-home>
       case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
       [ ! -e "$file" ] && [ ! -L "$file" ] && continue
       [ ! -L "$file" ] || return 1
-      pid=$(worker_read_process_id "$file") || return 1
-      worker_recorded_execution_alive "$job" "$kind" "$pid" && return 1
+      pid=$(fm_remote_job_read_process_id "$file") || return 1
+      fm_remote_job_recorded_execution_alive "$job" "$kind" "$pid" && return 1
     done
   done
 }
@@ -247,126 +247,6 @@ worker_code_root_abandoned() {
   return 0
 }
 
-worker_read_process_id() { # <file>
-  local file=$1 pid
-  fm_remote_job_regular_bounded "$file" 64 || return 1
-  pid=$(tr -d '\n' < "$file")
-  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$pid" -gt 1 ] || return 1
-  printf '%s\n' "$pid"
-}
-
-worker_process_or_group_alive() { # process|group <pid>
-  case "$1" in
-    process) kill -0 "$2" 2>/dev/null ;;
-    group) kill -0 -- "-$2" 2>/dev/null ;;
-    *) return 1 ;;
-  esac
-}
-
-worker_signal_process_or_group() { # process|group <signal> <pid>
-  case "$1" in
-    process) kill "-$2" "$3" 2>/dev/null || true ;;
-    group) kill "-$2" -- "-$3" 2>/dev/null || true ;;
-  esac
-}
-
-worker_supervisor_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start actual_start
-  recorded_start=$(fm_remote_job_read_single_line "$job/.claim/supervisor_start" 256 2>/dev/null) || return 2
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
-    worker_process_or_group_alive process "$pid" && return 2
-    return 1
-  }
-  [ "$recorded_start" = "$actual_start" ] && return 0
-  return 1
-}
-
-# A leaderless live group still belongs to the recorded execution: its PGID
-# cannot be reused while any old member survives, so it remains safe to signal.
-# A live leader whose start identity mismatches proves PID reuse and makes the
-# recorded group stale; an unreadable live leader stays indeterminate so the
-# stop loop retries rather than signaling or declaring the group dead.
-worker_group_identity_status() { # <job-dir> <pid>
-  local job=$1 pid=$2 recorded_start actual_start file="$1/.claim/group_start"
-  [ -e "$file" ] || [ -L "$file" ] || return 3
-  recorded_start=$(fm_remote_job_read_single_line "$file" 256 2>/dev/null) || return 2
-  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
-    kill -0 "$pid" 2>/dev/null && return 2
-    worker_process_or_group_alive group "$pid" && return 0
-    return 1
-  }
-  [ "$recorded_start" = "$actual_start" ] && return 0
-  return 1
-}
-
-worker_recorded_execution_alive() { # <job-dir> process|group <pid>
-  local job=$1 kind=$2 pid=$3 identity_status
-  if [ "$kind" = process ]; then
-    worker_supervisor_identity_status "$job" "$pid"
-    identity_status=$?
-    case "$identity_status" in
-      0) ;;
-      1) return 1 ;;
-      2) worker_process_or_group_alive process "$pid"; return ;;
-    esac
-  else
-    worker_group_identity_status "$job" "$pid"
-    identity_status=$?
-    case "$identity_status" in
-      0|3) ;;
-      1) return 1 ;;
-      2) worker_process_or_group_alive group "$pid"; return ;;
-    esac
-  fi
-  worker_process_or_group_alive "$kind" "$pid"
-}
-
-worker_signal_recorded_execution() { # <job-dir> process|group <signal> <pid>
-  local job=$1 kind=$2 signal=$3 pid=$4 identity_status
-  if [ "$kind" = process ]; then
-    worker_supervisor_identity_status "$job" "$pid" || return 0
-  else
-    worker_group_identity_status "$job" "$pid"
-    identity_status=$?
-    case "$identity_status" in 0|3) ;; *) return 0 ;; esac
-  fi
-  worker_signal_process_or_group "$kind" "$signal" "$pid"
-}
-
-worker_stop_recorded_execution() { # <job-dir>
-  local job=$1 kind file pid attempt still_alive
-  for kind in process group; do
-    case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
-    [ ! -e "$file" ] && [ ! -L "$file" ] && continue
-    [ ! -L "$file" ] || return 1
-    pid=$(worker_read_process_id "$file") || return 1
-    worker_signal_recorded_execution "$job" "$kind" TERM "$pid"
-    worker_signal_recorded_execution "$job" "$kind" KILL "$pid"
-    wait "$pid" 2>/dev/null || true
-  done
-  attempt=0
-  while [ "$attempt" -lt 100 ]; do
-    attempt=$((attempt + 1))
-    still_alive=0
-    for kind in process group; do
-      case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
-      [ -e "$file" ] || continue
-      pid=$(worker_read_process_id "$file") || return 1
-      if worker_recorded_execution_alive "$job" "$kind" "$pid"; then
-        still_alive=1
-        worker_signal_recorded_execution "$job" "$kind" TERM "$pid"
-        worker_signal_recorded_execution "$job" "$kind" KILL "$pid"
-      fi
-    done
-    [ "$still_alive" -eq 1 ] || break
-    sleep 0.01
-  done
-  [ "$still_alive" -eq 0 ] || return 1
-  rm -f -- "$job/.claim/supervisor" "$job/.claim/supervisor_start" \
-    "$job/.claim/group" "$job/.claim/group_start" "$job/.claim/armed"
-}
-
 # Stop every tracked lane process and its recorded command execution. The lane
 # is signalled first so it cannot dispatch further work, then the job's
 # recorded supervisor and group are verified stopped; a job interrupted here
@@ -389,7 +269,7 @@ worker_stop_active_execution() {
     if worker_lane_identity_matches "$pid" "$start"; then kill -KILL "$pid" 2>/dev/null || true; fi
     wait "$pid" 2>/dev/null || true
     if [ -d "$job" ] && [ ! -L "$job" ]; then
-      worker_stop_recorded_execution "$job" || failed=1
+      fm_remote_job_stop_recorded_execution "$job" || failed=1
     fi
     i=$((i + 1))
   done
@@ -494,7 +374,7 @@ worker_clear_dead_claim() { # <job-dir>
 # crashed single-process worker's job always has.
 worker_reclaim_running_job() { # <job-dir>
   local job=$1 file state
-  worker_stop_recorded_execution "$job" || return 1
+  fm_remote_job_stop_recorded_execution "$job" || return 1
   state=$(fm_remote_job_read_state "$job" 2>/dev/null) || return 1
   worker_clear_dead_claim "$job" || return 1
   [ "$state" = 'done' ] && return 0
@@ -571,18 +451,18 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
   group_pid=$!
   set +m
   group_start=$(fm_remote_job_process_start "$group_pid") || {
-    worker_signal_process_or_group group KILL "$group_pid"
+    fm_remote_job_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
   }
   group_tmp=$(umask 077; mktemp "$job/.claim/.group.XXXXXX") || {
-    worker_signal_process_or_group group KILL "$group_pid"
+    fm_remote_job_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
   }
   group_start_tmp=$(umask 077; mktemp "$job/.claim/.group_start.XXXXXX") || {
     rm -f -- "$group_tmp"
-    worker_signal_process_or_group group KILL "$group_pid"
+    fm_remote_job_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
   }
@@ -592,29 +472,29 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
     || ! mv -f -- "$group_start_tmp" "$group_start_file" \
     || ! mv -f -- "$group_tmp" "$group_file"; then
     rm -f -- "$group_tmp" "$group_start_tmp" "$group_file" "$group_start_file"
-    worker_signal_process_or_group group KILL "$group_pid"
+    fm_remote_job_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     return 125
   fi
   tmp=$(umask 077; mktemp "$job/.claim/.armed.XXXXXX") || {
-    worker_signal_process_or_group group KILL "$group_pid"
+    fm_remote_job_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     rm -f -- "$group_file" "$group_start_file"
     return 125
   }
   if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$armed_file"; then
     rm -f -- "$tmp"
-    worker_signal_process_or_group group KILL "$group_pid"
+    fm_remote_job_signal_process_or_group group KILL "$group_pid"
     wait "$group_pid" 2>/dev/null || true
     rm -f -- "$group_file" "$group_start_file"
     return 125
   fi
   deadline=$((SECONDS + timeout))
   next_check=$((SECONDS + 1))
-  while worker_process_or_group_alive group "$group_pid"; do
+  while fm_remote_job_process_or_group_alive group "$group_pid"; do
     if [ "$SECONDS" -ge "$deadline" ]; then
-      worker_signal_process_or_group group TERM "$group_pid"
-      worker_signal_process_or_group group KILL "$group_pid"
+      fm_remote_job_signal_process_or_group group TERM "$group_pid"
+      fm_remote_job_signal_process_or_group group KILL "$group_pid"
       timed_out=1
       break
     fi
@@ -623,24 +503,24 @@ worker_run_with_timeout() { # <job-dir> <seconds> <command> [args...]
         fm_remote_job_cancel "$WORKER_ACCOUNT_HOME" "${job##*/}" 2>/dev/null || true
       fi
       if fm_remote_job_cancelled "$job"; then
-        worker_signal_process_or_group group TERM "$group_pid"
+        fm_remote_job_signal_process_or_group group TERM "$group_pid"
         attempt=0
-        while worker_process_or_group_alive group "$group_pid" && [ "$attempt" -lt 20 ]; do
+        while fm_remote_job_process_or_group_alive group "$group_pid" && [ "$attempt" -lt 20 ]; do
           attempt=$((attempt + 1))
           sleep 0.05
         done
-        worker_signal_process_or_group group KILL "$group_pid"
+        fm_remote_job_signal_process_or_group group KILL "$group_pid"
         cancelled=1
         break
       fi
       if [ "$WORKER_PREEMPTIBLE" -eq 1 ] && worker_preempting_waiter_exists "$WORKER_LANE_HOME"; then
-        worker_signal_process_or_group group TERM "$group_pid"
+        fm_remote_job_signal_process_or_group group TERM "$group_pid"
         attempt=0
-        while worker_process_or_group_alive group "$group_pid" && [ "$attempt" -lt 20 ]; do
+        while fm_remote_job_process_or_group_alive group "$group_pid" && [ "$attempt" -lt 20 ]; do
           attempt=$((attempt + 1))
           sleep 0.05
         done
-        worker_signal_process_or_group group KILL "$group_pid"
+        fm_remote_job_signal_process_or_group group KILL "$group_pid"
         WORKER_PREEMPTED=1
         break
       fi

@@ -939,6 +939,126 @@ fm_remote_job_process_start() {
   printf '%s\n' "$value"
 }
 
+fm_remote_job_read_process_id() { # <file>
+  local file=$1 pid
+  fm_remote_job_regular_bounded "$file" 64 || return 1
+  pid=$(tr -d '\n' < "$file")
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 1 ] || return 1
+  printf '%s\n' "$pid"
+}
+
+fm_remote_job_process_or_group_alive() { # process|group <pid>
+  case "$1" in
+    process) kill -0 "$2" 2>/dev/null ;;
+    group) kill -0 -- "-$2" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
+}
+
+fm_remote_job_signal_process_or_group() { # process|group <signal> <pid>
+  case "$1" in
+    process) kill "-$2" "$3" 2>/dev/null || true ;;
+    group) kill "-$2" -- "-$3" 2>/dev/null || true ;;
+  esac
+}
+
+fm_remote_job_supervisor_identity_status() { # <job-dir> <pid>
+  local job=$1 pid=$2 recorded_start actual_start
+  recorded_start=$(fm_remote_job_read_single_line "$job/.claim/supervisor_start" 256 2>/dev/null) || return 2
+  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
+    fm_remote_job_process_or_group_alive process "$pid" && return 2
+    return 1
+  }
+  [ "$recorded_start" = "$actual_start" ] && return 0
+  return 1
+}
+
+# A leaderless live group still belongs to the recorded execution: its PGID
+# cannot be reused while any old member survives, so it remains safe to signal.
+# A live leader whose start identity mismatches proves PID reuse and makes the
+# recorded group stale; an unreadable live leader stays indeterminate so the
+# stop loop retries rather than signaling or declaring the group dead.
+fm_remote_job_group_identity_status() { # <job-dir> <pid>
+  local job=$1 pid=$2 recorded_start actual_start file="$1/.claim/group_start"
+  [ -e "$file" ] || [ -L "$file" ] || return 3
+  recorded_start=$(fm_remote_job_read_single_line "$file" 256 2>/dev/null) || return 2
+  actual_start=$(fm_remote_job_process_start "$pid" 2>/dev/null) || {
+    kill -0 "$pid" 2>/dev/null && return 2
+    fm_remote_job_process_or_group_alive group "$pid" && return 0
+    return 1
+  }
+  [ "$recorded_start" = "$actual_start" ] && return 0
+  return 1
+}
+
+fm_remote_job_recorded_execution_alive() { # <job-dir> process|group <pid>
+  local job=$1 kind=$2 pid=$3 identity_status
+  if [ "$kind" = process ]; then
+    fm_remote_job_supervisor_identity_status "$job" "$pid"
+    identity_status=$?
+    case "$identity_status" in
+      0) ;;
+      1) return 1 ;;
+      2) fm_remote_job_process_or_group_alive process "$pid"; return ;;
+    esac
+  else
+    fm_remote_job_group_identity_status "$job" "$pid"
+    identity_status=$?
+    case "$identity_status" in
+      0|3) ;;
+      1) return 1 ;;
+      2) fm_remote_job_process_or_group_alive group "$pid"; return ;;
+    esac
+  fi
+  fm_remote_job_process_or_group_alive "$kind" "$pid"
+}
+
+fm_remote_job_signal_recorded_execution() { # <job-dir> process|group <signal> <pid>
+  local job=$1 kind=$2 signal=$3 pid=$4 identity_status
+  if [ "$kind" = process ]; then
+    fm_remote_job_supervisor_identity_status "$job" "$pid" || return 0
+  else
+    fm_remote_job_group_identity_status "$job" "$pid"
+    identity_status=$?
+    case "$identity_status" in 0|3) ;; *) return 0 ;; esac
+  fi
+  fm_remote_job_signal_process_or_group "$kind" "$signal" "$pid"
+}
+
+fm_remote_job_stop_recorded_execution() { # <job-dir>
+  local job=$1 kind file pid attempt still_alive
+  for kind in process group; do
+    case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
+    [ ! -e "$file" ] && [ ! -L "$file" ] && continue
+    [ ! -L "$file" ] || return 1
+    pid=$(fm_remote_job_read_process_id "$file") || return 1
+    fm_remote_job_signal_recorded_execution "$job" "$kind" TERM "$pid"
+    fm_remote_job_signal_recorded_execution "$job" "$kind" KILL "$pid"
+    wait "$pid" 2>/dev/null || true
+  done
+  attempt=0
+  while [ "$attempt" -lt 100 ]; do
+    attempt=$((attempt + 1))
+    still_alive=0
+    for kind in process group; do
+      case "$kind" in process) file="$job/.claim/supervisor" ;; group) file="$job/.claim/group" ;; esac
+      [ -e "$file" ] || continue
+      pid=$(fm_remote_job_read_process_id "$file") || return 1
+      if fm_remote_job_recorded_execution_alive "$job" "$kind" "$pid"; then
+        still_alive=1
+        fm_remote_job_signal_recorded_execution "$job" "$kind" TERM "$pid"
+        fm_remote_job_signal_recorded_execution "$job" "$kind" KILL "$pid"
+      fi
+    done
+    [ "$still_alive" -eq 1 ] || break
+    sleep 0.01
+  done
+  [ "$still_alive" -eq 0 ] || return 1
+  rm -f -- "$job/.claim/supervisor" "$job/.claim/supervisor_start" \
+    "$job/.claim/group" "$job/.claim/group_start" "$job/.claim/armed"
+}
+
 fm_remote_job_process_command() {
   local pid=$1 ps_bin value
   if [ -x /bin/ps ]; then ps_bin=/bin/ps; elif [ -x /usr/bin/ps ]; then ps_bin=/usr/bin/ps; else return 1; fi

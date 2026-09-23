@@ -238,6 +238,7 @@ pass "a dry run reports the abandoned worker and signals nothing"
 
 out=$("$REAPER" 2>&1) || fail "the reaper failed: $out"
 assert_contains "$out" "$STALE" "the reaper did not report stopping the abandoned worker"
+assert_contains "$out" "pruned code root" "the report did not distinguish pruned-root cleanup"
 wait_gone "$STALE" 20 || fail "the abandoned worker survived the reaper"
 wait_gone "$STALE_SERVE" 20 || fail "the abandoned worker's serving child survived the reaper"
 pass "the reaper stops an abandoned worker's whole tree"
@@ -256,9 +257,34 @@ LANE_JOB=job-wedgedlane
 mkdir -p "$CASE3_ROOT/bin" "$CASE3_ACCOUNT"
 # A stand-in for a lane that can no longer finish its job: it presents the lane
 # command line from a live code root and never exits on its own.
+export FM_TEST_CASE3_LIB="$ROOT/bin/fm-remote-job-lib.sh"
+export FM_TEST_CASE3_STATE="$CASE3_STATE"
 cat > "$CASE3_ROOT/bin/fm-remote-job-worker.sh" <<'SH'
 #!/bin/bash
 set -u
+if [ "${1:-}" != --lane ]; then
+  "$0" --lane job-wedgedlane "$FM_TEST_CASE3_STATE" &
+  "$0" --lane job-gonerecord "$FM_TEST_CASE3_STATE" &
+  sleep 300 &
+  printf '%s\n' "$!" > "$FM_TEST_CASE3_STATE/sibling.pid"
+  wait
+  exit
+fi
+if [ "$2" = job-wedgedlane ]; then
+  . "$FM_TEST_CASE3_LIB"
+  claim="$3/jobs/$2/.claim"
+  mkdir "$claim"
+  printf '%s\n' "$$" > "$claim/supervisor"
+  fm_remote_job_process_start "$$" > "$claim/supervisor_start"
+  set -m
+  sleep 300 &
+  group=$!
+  set +m
+  printf '%s\n' "$group" > "$claim/group"
+  fm_remote_job_process_start "$group" > "$claim/group_start"
+  printf '%s\n' "$group" > "$3/execution.pid"
+fi
+printf '%s\n' "$$" > "$3/$2.pid"
 while :; do sleep 0.2; done
 SH
 chmod +x "$CASE3_ROOT/bin/fm-remote-job-worker.sh"
@@ -282,20 +308,34 @@ write_lane_record() { # <job-id> <deadline>
   )
 }
 
-start_lane() { # <job-id>; echoes the lane stand-in's pid
-  local pid
-  set -m
-  "$CASE3_ROOT/bin/fm-remote-job-worker.sh" --lane "$1" "$CASE3_STATE" >/dev/null 2>&1 &
-  pid=$!
-  set +m
-  printf '%s\n' "$pid"
+start_lane() {
+  local attempt
+  for attempt in $(seq 1 100); do
+    if [ -s "$CASE3_STATE/$1.pid" ]; then
+      cat "$CASE3_STATE/$1.pid"
+      return 0
+    fi
+    sleep 0.05
+  done
+  return 1
 }
 
 write_lane_record "$LANE_JOB" "$(( $(date +%s) + 3600 ))" \
   || fail "could not stage the live lane record fixture"
-LANE=$(start_lane "$LANE_JOB")
+set -m
+"$CASE3_ROOT/bin/fm-remote-job-worker.sh" >/dev/null 2>&1 &
+LANE_PARENT=$!
+set +m
+track "$LANE_PARENT"
+LANE=$(start_lane "$LANE_JOB") || fail "the overdue lane fixture did not start"
 track "$LANE"
 alive "$LANE" || fail "the lane stand-in did not start"
+SIBLING=$(cat "$CASE3_STATE/sibling.pid")
+EXECUTION=$(cat "$CASE3_STATE/execution.pid")
+track "$EXECUTION"
+[ "$(pgid_of "$LANE")" = "$LANE_PARENT" ] || fail "the lane is outside the serving worker group"
+[ "$(pgid_of "$SIBLING")" = "$LANE_PARENT" ] || fail "the sibling is outside the serving worker group"
+[ "$(pgid_of "$EXECUTION")" = "$EXECUTION" ] || fail "the command execution has no isolated group"
 
 out=$(case3_reaper --dry-run) || fail "the reaper failed against a live lane record: $out"
 assert_not_contains "$out" "$LANE" "the reaper reported a lane still inside its job's deadline"
@@ -317,10 +357,23 @@ pass "the sweep binds lanes to their own queue despite matching ids elsewhere"
 # anything that record justifies.
 write_lane_record "$LANE_JOB" "$(( $(date +%s) - 3600 ))" \
   || fail "could not age the lane record fixture"
+cp "$CASE3_STATE/jobs/$LANE_JOB/.claim/supervisor_start" "$CASE3_STATE/supervisor-start.saved"
+printf 'stale identity\n' > "$CASE3_STATE/jobs/$LANE_JOB/.claim/supervisor_start"
+out=$(case3_reaper) || fail "the reaper failed against a stale lane identity: $out"
+assert_not_contains "$out" "$LANE" "the reaper accepted a mismatched supervisor identity"
+alive "$LANE" && alive "$EXECUTION" || fail "stale claim identity authorized cleanup"
+cp "$CASE3_STATE/supervisor-start.saved" "$CASE3_STATE/jobs/$LANE_JOB/.claim/supervisor_start"
+out=$(case3_reaper --dry-run) || fail "the overdue lane dry run failed: $out"
+assert_contains "$out" "abandoned lane for $LANE_JOB" "the dry run missed the overdue lane"
+alive "$LANE" && alive "$EXECUTION" || fail "the dry run signalled the lane execution"
 out=$(case3_reaper) || fail "the reaper failed against a lane past its deadline: $out"
 assert_contains "$out" "$LANE" "the reaper did not report stopping the lane past its deadline"
 wait_gone "$LANE" 20 || fail "the lane past its job's deadline survived the reaper"
-pass "a lane past its job's deadline is reaped though its code root is healthy"
+wait_gone "$EXECUTION" 20 || fail "the overdue lane's recorded execution survived"
+alive "$SIBLING" || fail "reaping an overdue lane killed its healthy sibling"
+alive "$LANE_PARENT" || fail "reaping an overdue lane killed the serving worker"
+assert_contains "$out" "abandoned lane for $LANE_JOB" "the report did not distinguish lane cleanup"
+pass "an overdue lane and its execution stop without killing the shared group"
 
 GONE_JOB=job-gonerecord
 rm -rf "$CASE3_STATE/jobs/$LANE_JOB"
