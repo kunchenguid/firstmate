@@ -896,8 +896,6 @@ fm_backend_composer_content() {  # <backend> <target> [expected-label] -> select
   case "$backend" in
     tmux) fm_tmux_composer_content "$@" ;;
     herdr) fm_backend_herdr_composer_content "$@" ;;
-    orca) fm_backend_orca_composer_content "$@" ;;
-    cmux) fm_backend_cmux_composer_content "$@" ;;
     zellij) fm_backend_zellij_composer_content "$@" ;;
     *) return 1 ;;
   esac

@@ -563,16 +563,6 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
   printf '%s' "$verdict"
 }
 
-# fm_backend_cmux_composer_content: the selected composer's visible text -
-# the same capture and capability descriptor the verdict above reads, fed to
-# the shared content extractor instead of the classifier. Prints the text
-# (possibly empty) and fails when no composer shape is selectable.
-fm_backend_cmux_composer_content() {  # <target> [expected-label] -> selected composer text or fail
-  local cap
-  cap=$(fm_backend_cmux_composer_capture "$1" "${2:-}") || return 1
-  fm_composer_extract_selected_content "$(fm_backend_cmux_composer_caps)" "$cap"
-}
-
 # fm_backend_cmux_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then drive the shared verify-and-retry-Enter
 # loop (bin/fm-composer-lib.sh: fm_composer_submit_retry_core) against the

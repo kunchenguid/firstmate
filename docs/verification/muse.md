@@ -232,3 +232,9 @@ The failure needs a popup-open or not-yet-ready pane at Enter time (e.g. the fir
 The recovery is the own-doorbell submit: a later ladder ring finds the composer holding exactly our constant line and sends Enter then, when the pane is ready and no popup is open.
 `tests/fm-task-inbox.test.sh` (`test_ring_submits_own_doorbell`, `test_ring_skips_foreign_pending_text`) and `tests/fm-control.test.sh` (`test_exit_submits_own_doorbell_then_proceeds`, `test_exit_refuses_foreign_pending_text`) pin that predicate.
 Note the shape drift on this version: idle muse 1.3.0 renders a `❯` glyph between `─` rules (the claude-2.x separated-over-bare shape), not the bordered `⟩` box recorded for 0.1.0; the shared classifier still reads it `empty`.
+
+### Herdr acceptance remains unmet
+
+The Herdr content reader does not establish lossless capture and therefore cannot authorize own-doorbell submission. Its ANSI/plain capture paths have not been proven to preserve trailing input spaces and the full composer extent; this is not evidence that Herdr has no suitable API. Do not add `lossless=1` without that proof.
+
+The R4 fix environment was outside Herdr (`HERDR_ENV` unset), so no real Herdr capture test or Muse `001.msg` acceptance was performed. Herdr support and the requested real-capture regression remain unresolved. Acceptance requires a Herdr-managed verification environment, byte-preservation and composer-boundary tests (including trailing spaces and multiline drafts), and the live Muse inbox check.
