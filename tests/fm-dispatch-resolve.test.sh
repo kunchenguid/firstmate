@@ -359,7 +359,7 @@ write_floor_response "$RESPONSE" rule_2 0.76 0.02 0.76 0.02 0.18 0.02
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "a top rule below its own floor falls to a runner-up that clears its floor"
 assert_contains "$out" '  rule: rule_2 (The task generates images.)   confidence: 0.76' "the model's own pick stays visible"
-assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.18 clears its floor 0.1; rule_2 confidence 0.76 is below its floor 0.9' "the fallback names both floors"
+assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.18 clears its floor 0.1; rule_2 probability 0.76 is below its floor 0.9' "the fallback names both floors"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the runner-up rule's profiles are resolved"
 assert_not_contains "$(cat "$LOG/body")" 'min_confidence' "the model never sees confidence floors"
 
@@ -367,7 +367,7 @@ reset_log
 write_floor_response "$RESPONSE" rule_2 0.76 0.02 0.76 0.02 0.08 0.12
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: ambiguous' "no runner-up clearing its own floor is ambiguous"
-assert_contains "$out" '  reason: confidence 0.76 below rule_2 floor 0.9; no other option clears its own floor' "the undeclared default keeps the global floor as a runner-up"
+assert_contains "$out" '  reason: rule_2 probability 0.76 below its floor 0.9; no other option clears its own floor' "the undeclared default keeps the global floor as a runner-up"
 assert_not_contains "$out" '  fallback:' "no fallback is reported when none is taken"
 assert_not_contains "$out" '  profile:' "ambiguous per-rule floor emits no profile"
 
@@ -376,13 +376,34 @@ reset_log
 write_floor_response "$RESPONSE" rule_2 0.76 0.12 0.76 0.0 0.12 0.0
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: ambiguous' "equally probable runner-ups never break by option order"
-assert_contains "$out" '  reason: confidence 0.76 below rule_2 floor 0.9; runner-up tie' "a runner-up tie is named"
+assert_contains "$out" '  reason: rule_2 probability 0.76 below its floor 0.9; runner-up tie' "a runner-up tie is named"
 
 cp "$FLOOR_RULES" "$RULES"
 reset_log
 write_floor_response "$RESPONSE" rule_4 0.45 0.01 0.01 0.01 0.45 0.52
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "a declared floor below the global floor lets the picked rule resolve"
+
+# A declared floor needs the same support from a rule as the pick or as a runner-up
+jq '.rules[3].min_confidence = 0.3' "$FLOOR_RULES" > "$RULES"
+reset_log
+write_floor_response "$RESPONSE" rule_4 0.25 0.25 0.05 0.05 0.35 0.30
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a picked rule clears its declared floor on its own probability, not the answer confidence"
+assert_not_contains "$out" '  fallback:' "a picked rule that clears its own floor takes no fallback"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the picked rule resolves at probability 0.35 over floor 0.3"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.95 0.05 0.55 0.05 0.30 0.05
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a high answer confidence does not lift a picked rule over its own floor"
+assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.30 clears its floor 0.3; rule_2 probability 0.55 is below its floor 0.9' "the runner-up clears the same floor it would need as the pick"
+
+reset_log
+write_floor_response "$RESPONSE" rule_2 0.55 0.05 0.55 0.05 0.25 0.10
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: ambiguous' "a runner-up below its own floor is not taken"
+assert_contains "$out" '  reason: rule_2 probability 0.55 below its floor 0.9; no other option clears its own floor' "the missed runner-up floor is named"
 cp "$BASE_RULES" "$RULES"
 
 reset_log
@@ -424,17 +445,43 @@ assert_contains "$sent" $'## Firstmate spec\nTouch pager.sh only.' "the Firstmat
 assert_contains "$sent" $'# Not a heading inside a fence\n## Setup\n```\n### Out of scope\nAnything else.' "fenced lines and subheadings stay inside the section"
 assert_not_contains "$sent" 'BOILERPLATE' "scaffold boilerplate after the task sections is not sent"
 assert_not_contains "$sent" '# Task' "the enclosing Task heading is not sent"
+assert_not_contains "$sent" 'Brief kind:' "a brief without a contract line gets no kind line"
 
 SPEC_ONLY_BRIEF="$TMP_ROOT/spec-only-brief.md"
-printf '%s\n' 'Preamble.' '## Firstmate spec   ' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
+printf '%s\n' '# Task' '## Firstmate spec' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
-assert_equals $'## Firstmate spec   \nSpec text.' "$(jq -r .state.task.brief "$LOG/body")" "one recognized section is enough and trailing blanks on a heading are tolerated"
+assert_equals $'## Firstmate spec\nSpec text.' "$(jq -r .state.task.brief "$LOG/body")" "one recognized section is enough"
+
+printf '%s\n' '# Task' '## Firstmate spec   ' 'Spec text.' '## Rules' 'RULES-TEXT' > "$SPEC_ONLY_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
+assert_equals "$(cat "$SPEC_ONLY_BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a heading with trailing blanks is not a section, matching spawn validation"
+
+printf '%s\n' 'Preamble.' '## Firstmate spec' 'Spec text.' > "$SPEC_ONLY_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$SPEC_ONLY_BRIEF"
+assert_equals "$(cat "$SPEC_ONLY_BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a section outside the Task heading is not a task section"
+
+KIND_BRIEF="$TMP_ROOT/kind-brief.md"
+{ cat "$SCAFFOLD_BRIEF"; printf '%s\n' '# Definition of done' 'Delivery contract: mode=no-mistakes' 'Delivery contract: mode=direct-PR'; } > "$KIND_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$KIND_BRIEF"
+sent=$(jq -r .state.task.brief "$LOG/body")
+assert_contains "$sent" $'Brief kind: ship, mode=no-mistakes\n\n## Captain\'s intent\nAdd a flag to the pager.' "a ship brief's first delivery contract line names its kind and mode"
+assert_not_contains "$sent" 'Delivery contract' "the contract line itself is not sent"
+
+{ cat "$SCAFFOLD_BRIEF"; printf '%s\n' 'This is a SCOUT task: the deliverable is a written report, not a PR.'; } > "$KIND_BRIEF"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$KIND_BRIEF"
+sent=$(jq -r .state.task.brief "$LOG/body")
+assert_contains "$sent" $'Brief kind: scout (report only)\n\n## Captain\'s intent' "a scout brief's contract line names its kind"
+assert_not_contains "$sent" 'This is a SCOUT task' "the scout contract line itself is not sent"
 
 reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_equals "$(cat "$BRIEF")" "$(jq -r .state.task.brief "$LOG/body")" "a brief with neither heading is sent whole"
-pass "only the brief's task-specific sections reach the model, with a whole-brief fallback"
+pass "only the brief's task sections and kind reach the model, with a whole-brief fallback"
 
 # --- escalate: captain approval ------------------------------------------------
 reset_log

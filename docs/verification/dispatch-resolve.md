@@ -68,8 +68,24 @@ Sixteen fixtures: ten clear-cut briefs (two per rule) and six borderline ones (a
 | Input tokens per scout brief | 2,861 to 2,874 | 584 to 597 |
 | Borderline top-rule confidence below 0.99 | 0.77 split, 0.72 slowdown | 0.59 split, 0.70 slowdown |
 
-Every clear-cut fixture answered at probability 0.99 or 1.0 under both shapes, so on generic briefs the scaffold boilerplate neither caused nor prevented a wrong pick.
-The large file split moved from 0.82 to 0.66 on its labeled routine-build rule (the rest going to the neutral option), at confidence 0.59, just under the 0.6 floor, so it now returns `ambiguous`.
+The top rule matched the label on 16 of 16 fixtures under both shapes, so on these generic briefs the change did not improve routing accuracy.
+Every clear-cut fixture answered at probability 0.99 or 1.0 under both shapes, so the scaffold boilerplate neither caused nor prevented a wrong pick.
+The one routing difference is a regression: the large-file-split fixture went from clear (confidence 0.77, probability 0.82 on its labeled routine-build rule) to `ambiguous` (confidence 0.59, probability 0.66, the rest going to the neutral option), just under the 0.6 floor.
+The gain that holds across the set is size: about 4,350 input tokens down to about 600 per ship brief.
+
+### A routine port the hardest tier over-claims
+
+Run 2026-09-23 against `jev-latest` (answering as `jev-1.13.0`), three runs per shape.
+The brief was a generic scaffolded ship brief for a routine port of a macOS-only capture helper to Windows plus a Windows installer, described as a straightforward port, with a long never-do-X safety list in its spec.
+The rules were the same generic five-rule set with two changes: a loosely worded top-tier rule ("Large or hard engineering work that needs the strongest model, such as a multi-platform build or anything where a mistake is costly.") and the routine rule broadened to "Implementation where the worker must design parts of the solution itself within an existing codebase."
+
+| Shape | Input tokens | Top-tier rule probability | Confidence | Implementation rule probability |
+| --- | --- | --- | --- | --- |
+| Whole brief | 4,436 | 0.90 to 0.93 | 0.87 to 0.92 | 0.07 to 0.10 |
+| Task sections | 671 | 0.86 to 0.90 | 0.82 to 0.88 | 0.10 to 0.14 |
+
+Extraction does not prevent the top-tier pick; a loosely worded rule is matched from the task text alone.
+Declaring `min_confidence: 0.95` on the top-tier rule turns that pick into `ambiguous`, and additionally declaring `min_confidence: 0.05` on the implementation rule resolves it to that rule through the runner-up fallback.
 
 ## Offline behavior
 
@@ -79,8 +95,8 @@ It proves the absent key (environment and `.env`) prints one stderr line, nothin
 It proves absent, default-only, and empty-rules files return `no rules to match` without a model or quota request, while a broken rules-file symlink exits 2 as unreadable.
 It proves the documented starter configuration resolves its Pi default through the declared Claude provider, a `.env` key turns the tool on, and the environment wins over it.
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
-It proves the request uses the fixed endpoint and model, carries only the project, the brief's task sections (or the whole brief when it has neither heading), and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
-It proves a picked rule below its own `min_confidence` falls to the most probable runner-up that clears its floor, is `ambiguous` when none does or two tie, and that a file without declared floors keeps the global 0.6 floor unchanged.
+It proves the request uses the fixed endpoint and model, carries only the project, the brief's task sections read by the shared brief-heading parser with a kind and mode line when the brief has one (or the whole brief when it has neither section), and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
+It proves a declared `min_confidence` is checked against the rule's own probability both as the pick and as a runner-up, a picked rule below it falls to the most probable runner-up that clears its floor, is `ambiguous` when none does or two tie, and that a file without declared floors keeps the global 0.6 floor on confidence unchanged.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, schema-6 account-row binding with schema-5 compatibility, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
 `tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
 
