@@ -966,6 +966,65 @@ test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot() {
   pass "fm-teardown: a pool slot claimed by another task is left alone while the task's own cleanup finishes"
 }
 
+# Several historical records can pile up naming the same slot after it was
+# reassigned - not just the one record the exclusive scan would compare
+# against, but many, none of which is the current owner's own record (which
+# may itself have been removed outside guarded cleanup, exactly as in the
+# operator incident this regresses). Each stale record must still retire on
+# its own, independently, the same way the single-record case above does; the
+# exclusive-record scan comparing them against each other must never stand in
+# front of the slot-owner claim that already proves none of them is current.
+test_several_obsolete_records_on_a_reassigned_slot_retire_independently() {
+  local dir id=stale-task-a peer=stale-task-b other=reassigned-task worker rc
+
+  dir=$(make_case slot-reassigned-multi)
+  mark_case_as_treehouse_pool "$dir"
+  fm_write_meta "$dir/home/state/$id.meta" \
+    "window=firstmate:fm-$id" "endpoint_task_id=$id" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  # A second obsolete record naming the very same slot - the exclusive scan's
+  # own trigger condition - while neither it nor $id is the slot's real owner.
+  fm_write_meta "$dir/home/state/$peer.meta" \
+    "window=firstmate:fm-$peer" "endpoint_task_id=$peer" \
+    "worktree=$dir/worktree" "project=$dir/project" "kind=scout"
+  claim_pool_slot "$dir" "$other" "$dir/other-home"
+  # Staged in this shell, not a command substitution: a background child of a
+  # $(...) subshell does not outlive it, and the point of this worker is to be
+  # alive in the slot while teardown runs.
+  ( cd "$dir/worktree" && exec sleep 30 ) &
+  worker=$!
+
+  set +e
+  run_case "$dir" "$id" > "$dir/stdout" 2> "$dir/stderr"
+  rc=$?
+  set -e
+
+  [ "$rc" -eq 0 ] \
+    || fail "teardown of one of several obsolete records on a reassigned slot failed: $(cat "$dir/stderr")"
+  kill -0 "$worker" 2>/dev/null \
+    || fail "teardown killed the worker holding the reassigned pool slot"
+  assert_present "$dir/worktree/sentinel" "teardown reset a pool slot another task had claimed"
+  assert_present "$dir/home/state/$peer.meta" \
+    "tearing down one obsolete record removed a sibling obsolete record"
+  assert_reassigned_slot_left_alone "$dir" "$id" "$other" "first of several obsolete records on a reassigned slot"
+
+  # The remaining sibling record retires the same way, on its own, once its
+  # own teardown runs - proving this is not an artifact of retirement order.
+  set +e
+  run_case "$dir" "$peer" > "$dir/stdout2" 2> "$dir/stderr2"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] \
+    || fail "teardown of the second of several obsolete records on a reassigned slot failed: $(cat "$dir/stderr2")"
+  kill -0 "$worker" 2>/dev/null \
+    || fail "tearing down the sibling record killed the worker holding the reassigned pool slot"
+  assert_reassigned_slot_left_alone "$dir" "$peer" "$other" "second of several obsolete records on a reassigned slot"
+  kill "$worker" 2>/dev/null || true
+  wait "$worker" 2>/dev/null || true
+
+  pass "fm-teardown: several obsolete records naming a reassigned slot each retire independently without touching the current owner"
+}
+
 # The two states that must never become a false refusal: the task's own claim,
 # and no claim at all (a slot taken before claims existed, or already returned).
 test_own_and_absent_slot_claims_still_tear_down() {
@@ -1386,6 +1445,7 @@ test_reused_pool_slot_refuses_before_touching_the_other_task
 test_cross_home_pool_slot_collision_refuses
 test_sole_slot_record_still_tears_down
 test_reassigned_pool_slot_finishes_own_cleanup_without_touching_the_slot
+test_several_obsolete_records_on_a_reassigned_slot_retire_independently
 test_own_and_absent_slot_claims_still_tear_down
 test_recorded_endpoint_that_changed_directory_still_tears_down
 test_project_lock_anchors_at_the_local_root_across_home_layouts

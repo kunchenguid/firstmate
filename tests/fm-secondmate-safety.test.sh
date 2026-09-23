@@ -2024,6 +2024,69 @@ EOF
   pass "forced secondmate teardown refuses duplicated descendant pool slots"
 }
 
+# Several obsolete descendant records can pile up naming the same slot after
+# it was reassigned - not just one record the exclusive scan would compare
+# against another, but many, none of which is the current owner's own record
+# (which may itself have been removed outside guarded cleanup, exactly as in
+# the operator incident this regresses). The slot-owner claim already proves
+# neither obsolete record is current, so the exclusive scan comparing them
+# against each other must never stand in front of that proof.
+test_secondmate_force_teardown_retires_several_obsolete_child_records_on_a_reassigned_slot() {
+  local home subhome childproj childwt claimant fakebin log err
+  home="$TMP_ROOT/force-reassigned-slot-home"
+  subhome="$TMP_ROOT/force-reassigned-slot-subhome"
+  childproj="$subhome/projects/alpha"
+  childwt="$TMP_ROOT/force-reassigned-slot-pool/1/alpha"
+  claimant="$TMP_ROOT/force-reassigned-slot-elsewhere-home"
+  err="$TMP_ROOT/force-reassigned-slot.err"
+  mkdir -p "$home/state" "$home/data" "$subhome/state" "$(dirname "$childwt")"
+  fm_git_worktree "$childproj" "$childwt" reassigned-child
+  printf '{"worktrees":[{"name":"1","path":"%s"}]}\n' "$childwt" \
+    > "$TMP_ROOT/force-reassigned-slot-pool/treehouse-state.json"
+  printf 'task=elsewhere-task\nhome=%s\n' "$claimant" \
+    > "$TMP_ROOT/force-reassigned-slot-pool/1/.fm-slot-owner"
+  printf 'domain\n' > "$subhome/.fm-secondmate-home"
+  cat > "$home/state/domain.meta" <<EOF
+window=firstmate:fm-domain
+worktree=$subhome
+project=$subhome
+harness=echo
+kind=secondmate
+mode=secondmate
+yolo=off
+home=$subhome
+projects=alpha
+EOF
+  printf '%s\n' '- domain - design domain (home: '"$subhome"'; scope: design domain; projects: alpha; added 2026-06-22)' > "$home/data/secondmates.md"
+  for child in old-child-a old-child-b; do
+    cat > "$subhome/state/$child.meta" <<EOF
+window=firstmate:fm-$child
+worktree=$childwt
+project=$childproj
+harness=echo
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  done
+  fakebin=$(make_fake_tmux "$TMP_ROOT/force-reassigned-slot-fake")
+  log="$TMP_ROOT/force-reassigned-slot-fake/tmux.log"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_FAKE_TMUX_LOG="$log" \
+    FM_FAKE_TMUX_CAPTURE="$TMP_ROOT/force-reassigned-slot-fake/pane.txt" \
+    "$ROOT/bin/fm-teardown.sh" domain --force >/dev/null 2>"$err" \
+    || fail "forced secondmate teardown of several obsolete records on a reassigned slot failed: $(cat "$err")"
+  [ -e "$childwt/.git" ] \
+    || fail "forced secondmate teardown reset or removed a slot reassigned to another task"
+  [ -e "$TMP_ROOT/force-reassigned-slot-pool/1/.fm-slot-owner" ] \
+    || fail "forced secondmate teardown removed another task's slot claim"
+  grep -F 'task=elsewhere-task' "$TMP_ROOT/force-reassigned-slot-pool/1/.fm-slot-owner" >/dev/null \
+    || fail "forced secondmate teardown rewrote another task's slot claim"
+  [ ! -d "$subhome" ] || fail "forced secondmate teardown did not retire the secondmate home"
+  [ ! -e "$home/state/domain.meta" ] || fail "forced secondmate teardown did not clear the parent record"
+  pass "fm-teardown: forced secondmate teardown retires several obsolete descendant records on a reassigned slot without touching the current owner"
+}
+
 test_secondmate_force_teardown_preserves_child_on_unproven_lock() {
   local home subhome childproj childwt fakebin log err rc lock
   home="$TMP_ROOT/force-lock-home"
@@ -3046,6 +3109,7 @@ test_secondmate_teardown_refuses_failed_leased_home_return
 test_secondmate_teardown_removes_plain_clone_home_without_treehouse_return
 test_secondmate_force_teardown_discards_child_work
 test_secondmate_force_teardown_refuses_duplicated_child_slot
+test_secondmate_force_teardown_retires_several_obsolete_child_records_on_a_reassigned_slot
 test_secondmate_force_teardown_preserves_child_on_unproven_lock
 test_secondmate_force_teardown_allows_non_state_operational_dir_symlinks_inside_home
 test_secondmate_force_teardown_refuses_operational_dir_symlink_outside_home
