@@ -475,6 +475,16 @@ jobs:
             exit 1
           }
 
+          backend_output=$(FM_TEST_ONLY=test_backend_source_requires_adapter_file \
+            FM_TEST_BASH=/bin/bash \
+            /bin/bash tests/fm-backend.test.sh)
+          printf '%s\n' "$backend_output"
+          backend_count=$(printf '%s\n' "$backend_output" | grep -c '^ok - ')
+          [ "$backend_count" -eq 2 ] || {
+            echo "::error::expected 2 backend adapter-file bash 3.2 regressions, got $backend_count"
+            exit 1
+          }
+
   invariants:
     name: Repo invariants
     runs-on: ubuntu-latest

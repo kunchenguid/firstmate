@@ -116,8 +116,15 @@ resolve_base_ref() {
   done
   return 1
 }
-BASE_REF=$(resolve_base_ref) \
-  || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
+BASE_REF=
+
+backend_base_ref() {
+  if [ -z "${BASE_REF:-}" ]; then
+    BASE_REF=$(resolve_base_ref) \
+      || fail "fm-backend baseline requires local main or origin/main; fetch the default branch before running this test"
+  fi
+  printf '%s\n' "$BASE_REF"
+}
 
 # Newest first-parent revision whose bin/backends/tmux.sh still uses the
 # pre-exact permissive kill-window target. Content-addressed from history so the
@@ -157,14 +164,15 @@ resolve_permissive_tmux_kill_ref() {
 # after this complete baseline has been materialized.
 
 build_old_bin() {  # <name> -> echoes root dir (root/bin/<script> is the entry point)
-  local name=$1 root archive
+  local name=$1 root archive base_ref
   root="$TMP_ROOT/$name"
   archive="$root/bin.tar"
   mkdir -p "$root"
-  git -C "$ROOT" archive --format=tar "$BASE_REF" bin > "$archive" \
-    || fail "old-bin shim: could not archive bin/ from $BASE_REF"
+  base_ref=$(backend_base_ref)
+  git -C "$ROOT" archive --format=tar "$base_ref" bin > "$archive" \
+    || fail "old-bin shim: could not archive bin/ from $base_ref"
   tar -xf "$archive" -C "$root" \
-    || fail "old-bin shim: could not extract bin/ from $BASE_REF"
+    || fail "old-bin shim: could not extract bin/ from $base_ref"
   rm -f "$archive"
   printf '%s\n' "$root"
 }
@@ -519,9 +527,10 @@ test_backend_source_shell_portable() {
 }
 
 test_backend_source_requires_adapter_file() {
-  local dir adapter exit_status continuation out rc condition
+  local dir adapter exit_status continuation out rc condition test_bash
   dir="$TMP_ROOT/adapter-precheck"
   adapter="$dir/backends/tmux.sh"
+  test_bash=${FM_TEST_BASH:-${BASH:-bash}}
   mkdir -p "$dir/backends"
 
   for condition in missing unreadable; do
@@ -535,7 +544,7 @@ test_backend_source_requires_adapter_file() {
     fi
     exit_status="$dir/$condition.exit"
     continuation="$dir/$condition.continued"
-    out=$(bash -c '
+    out=$("$test_bash" -c '
       . "$1"
       FM_BACKEND_LIB_DIR=$2
       trap '\''printf "%s\n" "$?" > "$3"'\'' EXIT
@@ -1165,6 +1174,13 @@ test_spawn_autodetect_nesting_resolves_tmux_silently() {
   rm -rf "/tmp/fm-$id"
   pass "fm-spawn.sh: auto-detect resolves nested tmux-in-herdr to tmux and stays silent end to end"
 }
+
+if [ -n "${FM_TEST_ONLY:-}" ]; then
+  "$FM_TEST_ONLY"
+  exit 0
+fi
+
+backend_base_ref >/dev/null
 
 test_backend_name_precedence
 test_backend_detect_precedence
