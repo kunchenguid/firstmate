@@ -186,6 +186,8 @@ cmd_arm() {
   done
 
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || die "state directory is unavailable"
+  fm_procevent_state_root_resolve "$STATE" >/dev/null \
+    || die "state directory is not a private directory the process-event runtime accepts; a watch armed here would never start"
   fm_procevent_source_lock_acquire "$sid" || die "cannot lock the watch source"
   trap 'fm_procevent_source_lock_release "$sid"' EXIT
   local leftover

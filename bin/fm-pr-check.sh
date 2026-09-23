@@ -165,7 +165,10 @@ fm_pr_regular_destination_on_device_or_absent "$META" "$STATE_DEVICE" || exit 1
 mv -f -- "$META_TMP" "$META" || exit 1
 mv -f -- "$META_TMP.fm-sig" "$META.fm-sig" 2>/dev/null || true
 META_TMP=
-fm_pr_private_file_valid "$META" 600 "$STATE" "$STATE_DEVICE" || exit 1
+META_VALID=0
+fm_pr_private_file_valid "$META" 600 "$STATE" "$STATE_DEVICE" && META_VALID=1
+rm -f -- "$META.fm-sig"
+[ "$META_VALID" = 1 ] || exit 1
 fm_pr_metadata_identity_parse "$META" || exit 1
 [ "$FM_PR_META_PROVIDER" = "$PROVIDER" ] && [ "$FM_PR_META_URL" = "$URL" ] \
   && [ "$FM_PR_META_HOST" = "$HOST" ] && [ "$FM_PR_META_PATH" = "$PROJECT_PATH" ] \

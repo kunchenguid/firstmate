@@ -108,6 +108,23 @@ out=$(when "$H" retire arm-test)
 assert_contains "$out" "retired: when-arm-test" "retire is idempotent"
 pass "arm binds, refuses duplicates, and retire cleans up"
 
+# --- arm refuses a state root the process-event runtime would refuse ---------
+H="$TMP_ROOT/h-open-state"; new_home "$H"
+chmod 777 "$H/state"
+if pe "$H" reconcile >/dev/null 2>&1; then
+  fail "test fixture error: the runtime accepted a world-writable state root"
+fi
+if when "$H" arm open-state --condition true --action "$ACT" "$TMP_ROOT/open-state-act" \
+  >"$TMP_ROOT/open-state.out" 2>"$TMP_ROOT/open-state.err"; then
+  fail "arming into a state root the runtime refuses must fail instead of reporting armed"
+fi
+assert_grep "not a private directory" "$TMP_ROOT/open-state.err" "the refusal names the state root"
+[ ! -s "$TMP_ROOT/open-state.out" ] || fail "a refused arm must not print an armed report"
+assert_absent "$H/state/when/when-open-state.spec" "a refused arm leaves no spec"
+assert_absent "$H/state/procevent/when-open-state.source" "a refused arm leaves no registration"
+chmod 700 "$H/state"
+pass "arm refuses loudly where the runner could never start"
+
 # --- concurrent arms publish exactly one complete registration ---------------
 H="$TMP_ROOT/h-concurrent-arm"; new_home "$H"
 (
