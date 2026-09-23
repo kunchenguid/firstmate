@@ -111,11 +111,14 @@ Because these paths are gitignored, that propagation is a separate, primary-auth
 Propagation failures warn without blocking a local secondmate launch or session-start continuation; a remote prelaunch transfer failure refuses that launch.
 The destination keeps whatever safely validated state the helper left behind.
 For inherited config files, local propagation and the remote sender preserve the destination item on source inspection errors and mirror only proven absence; [`fm-config-inherit-lib.sh`](../../../bin/fm-config-inherit-lib.sh) owns this boundary.
+Secret-class `.env` key convergence holds the same boundary: an unreadable primary `.env` reports an error for the key and leaves the secondmate line untouched, never mirrored as absence.
 Inheritance copies the literal `config/crew-harness` file, so a secondmate's own crewmates use the primary's crewmate harness only when it names a concrete adapter such as `codex`; an unset or `default` value has nothing concrete to inherit, and the secondmate's own crewmates fall back to the secondmate's own or detected harness instead.
 Inherited `config/backend` becomes that secondmate home's local runtime-backend default for future spawns only; it never retargets, rewrites, migrates, stops, or restarts an already-live worker endpoint.
 A present primary value always converges byte-exact into validated secondmate homes, and primary absence removes the destination so those homes keep runtime auto-detection.
 Explicit per-spawn `--backend` and `FM_BACKEND` remain stronger than every home's local `config/backend`, including an inherited default.
 `config/secondmate-harness` is not inherited because it is only the primary's knob for launching secondmate agents.
+The primary's `.env` is not inherited as a file, because the Relay pairing token and mail-plane credentials are per-home; only the declared secret-class keys in `FM_INHERITABLE_ENV_KEYS`, today the typed-dispatch `TYPESAFE_API_KEY` line, converge line-by-line into each local secondmate home's `.env` at mode 600 at the same three convergence points, with primary absence removing the line downstream, and [`docs/configuration.md`](../../../docs/configuration.md#typed-dispatch-resolution-env-typesafe_api_key) owns that operator contract.
+A remote home never receives a secret-class key over the remote route, which reports it as skipped, so that home's `.env` stays hand-managed.
 `data/captain-shared.md` is main-authoritative in the primary home and read-only in secondmate homes.
 Its primary file header must state that the file is main-authoritative, read-only in secondmate homes, must not be edited there, and that new captain-preference discoveries are routed to the main firstmate through marked status or a document pointer.
 Every propagation point converges the secondmate copy to the primary bytes; when the primary file is absent, any existing secondmate copy is quarantined and removed so absence converges too.

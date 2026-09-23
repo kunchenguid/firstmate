@@ -8,7 +8,11 @@
 # one code revision cannot drift silently. Different local and remote revisions
 # fail closed as documented by that owner. FM_CONFIG_INHERIT_LIVE=1 marks a live
 # convergence push into an already-running home and skips session-scoped items,
-# exactly as the local propagation path does.
+# exactly as the local propagation path does. Secret-class .env keys
+# (FM_INHERITABLE_ENV_KEYS) never take this route: the receiver writes whole
+# files under config/ and data/ only, and a remote home's .env holds its own
+# per-home secrets, so a key the primary sets is reported as skipped here and
+# stays hand-managed in that home's .env.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -89,3 +93,8 @@ while IFS= read -r rel; do
 done <<EOF
 $ITEMS
 EOF
+for key in $FM_INHERITABLE_ENV_KEYS; do
+  [ -n "$(fmx_env_line "$key" "$FM_HOME/.env")" ] || continue
+  printf "skipped: %s (secret-class keys never take the remote route; set it by hand in that home's .env)\n" \
+    "$(fm_inherit_env_item "$key")"
+done
