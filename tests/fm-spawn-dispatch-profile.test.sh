@@ -37,7 +37,15 @@ make_spawn_fakebin() {
   fakebin=$(fm_test_make_spawn_fakebin "$dir")
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
-shift
+if [ "${1:-}" = -- ]; then
+  shift
+elif [ "${1:-}" = -k ]; then
+  shift 3
+elif [ "${1:-}" = -s ]; then
+  shift 3
+elif [ "${1:-}" != "" ]; then
+  shift
+fi
 exec "$@"
 SH
   cat > "$fakebin/cursor-agent" <<'SH'
@@ -852,22 +860,72 @@ test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity() {
 }
 
 test_batch_forwards_shared_profile_flags() {
-  local rec id1 id2 out status
+  local rec id1 id2 out status launch
   id1=profile-batch-a-z9
   id2=profile-batch-b-z10
   rec=$(make_spawn_case profile-batch claude "$id1" "$id2")
   read_case_record "$rec"
   enable_dispatch_profile "$HOME_DIR"
+  mkdir -p "$CASE_DIR/claude-b"
+  fm_test_attest_claude_pool "$CASE_DIR/claude-b"
+  cat > "$HOME_DIR/config/claude-profiles.json" <<EOF
+{"profiles":[{"id":"claude-max-b","config_dir":"$CASE_DIR/claude-b"}]}
+EOF
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
-    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness codex --model gpt-5 --effort high)
+    "$id1=$PROJ_DIR" "$id2=$PROJ_DIR" --harness claude --model sonnet --effort high --claude-profile claude-max-b)
   status=$?
-  expect_code 0 "$status" "batch spawn with shared profile flags should succeed"
-  assert_contains "$out" "spawned $id1 harness=codex" "first batch task did not use shared harness"
-  assert_contains "$out" "spawned $id2 harness=codex" "second batch task did not use shared harness"
-  assert_meta_profile "$HOME_DIR/state/$id1.meta" codex gpt-5 high
-  assert_meta_profile "$HOME_DIR/state/$id2.meta" codex gpt-5 high
-  pass "batch dispatch forwards shared --harness, --model, and --effort to every pair"
+  expect_code 0 "$status" "batch spawn with shared profile flags should succeed: $out"
+  assert_contains "$out" "spawned $id1 harness=claude" "first batch task did not use shared harness"
+  assert_contains "$out" "spawned $id2 harness=claude" "second batch task did not use shared harness"
+  assert_meta_profile "$HOME_DIR/state/$id1.meta" claude sonnet high
+  assert_meta_profile "$HOME_DIR/state/$id2.meta" claude sonnet high
+  assert_grep "claude_profile=claude-max-b" "$HOME_DIR/state/$id1.meta" \
+    "first batch task did not retain the shared Claude pool"
+  assert_grep "claude_profile=claude-max-b" "$HOME_DIR/state/$id2.meta" \
+    "second batch task did not retain the shared Claude pool"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-b'" \
+    "batch dispatch must launch every Claude pair against the checked named pool"
+  pass "batch dispatch forwards shared --harness, --model, --effort, and --claude-profile to every pair"
+}
+
+test_claude_rejects_unauthenticated_profile_before_launch() {
+  local rec id out status
+  id=profile-claude-unauth-z16
+  rec=$(make_spawn_case profile-claude-unauth claude "$id")
+  read_case_record "$rec"
+
+  out=$(FM_TEST_NO_CLAUDE_AUTH=1 run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude)
+  status=$?
+  expect_code 1 "$status" "unauthenticated claude profile should be rejected"
+  assert_contains "$out" "Claude profile default is not ready for worker launch" \
+    "spawn should refuse before launching into Claude login"
+  assert_contains "$out" "auth=unauthenticated:vendor-probe" "the refusal should carry the auth owner's measured cause"
+  [ ! -s "$LAUNCH_LOG" ] || fail "unauthenticated profile should not launch; launch log: $(cat "$LAUNCH_LOG")"
+  assert_absent "$HOME_DIR/state/$id.meta" "unauthenticated profile should refuse before task metadata publication"
+  pass "claude spawn refuses an unauthenticated profile before endpoint launch"
+}
+
+test_claude_rejects_first_run_onboarding_before_launch() {
+  local rec id out status
+  id=profile-claude-onboard-z16
+  rec=$(make_spawn_case profile-claude-onboard claude "$id")
+  read_case_record "$rec"
+
+  # Logged in, but the ambient store never finished Claude's first-run
+  # onboarding, exactly as a fresh ~/.claude.json leaves it.
+  mkdir -p "$HOME_DIR/user-home"
+  printf '%s\n' '{"hasCompletedOnboarding":null}' > "$HOME_DIR/user-home/.claude.json"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude)
+  status=$?
+  expect_code 1 "$status" "a claude profile that has not finished first-run onboarding should be rejected"
+  assert_contains "$out" "Claude profile default is not ready for worker launch" \
+    "spawn should refuse before launching into Claude's first-run onboarding"
+  assert_contains "$out" "auth=unonboarded:first-run-onboarding-incomplete" "the refusal should name the onboarding cause"
+  [ ! -s "$LAUNCH_LOG" ] || fail "un-onboarded profile should not launch; launch log: $(cat "$LAUNCH_LOG")"
+  assert_absent "$HOME_DIR/state/$id.meta" "un-onboarded profile should refuse before task metadata publication"
+  pass "claude spawn refuses a logged-in profile whose first-run onboarding is incomplete"
 }
 
 test_claude_forwards_firstmate_config_dir_when_set() {
@@ -911,8 +969,10 @@ test_lavish_absent_config_preserves_destination_ambient() {
   read_case_record "$rec"
   pane_log="$CASE_DIR/pane.log"
   seen="$CASE_DIR/lavish-seen"
+  mv "$FAKEBIN_DIR/claude" "$FAKEBIN_DIR/claude-probe"
   cat > "$FAKEBIN_DIR/claude" <<'SH'
 #!/usr/bin/env bash
+case "${1:-}" in --version|auth) exec "$(dirname "$0")/claude-probe" "$@" ;; esac
 printf '%s\n' "${LAVISH_AXI_HOST-unset}" > "$FM_LAVISH_SEEN"
 SH
   chmod +x "$FAKEBIN_DIR/claude"
@@ -932,21 +992,126 @@ SH
   pass "absent Lavish configuration preserves the destination environment"
 }
 
+assert_trust_in_home_store() {  # <store> <path>
+  jq -e --arg p "$2" '.projects[$p].hasTrustDialogAccepted == true' "$1" >/dev/null 2>&1 \
+    || fail "workspace trust for $2 was not registered in $1"
+}
+
 test_claude_omits_config_dir_prefix_when_unset() {
   local rec id out status launch
   id=profile-claude-nocfgdir-z18
   rec=$(make_spawn_case profile-claude-nocfgdir claude "$id")
   read_case_record "$rec"
 
-  # run_spawn pins CLAUDE_CONFIG_DIR empty by default, exercising the single-store
-  # default path where fm-spawn adds no prefix.
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
   status=$?
-  expect_code 0 "$status" "claude spawn without CLAUDE_CONFIG_DIR should succeed"
+  expect_code 0 "$status" "claude spawn without ambient CLAUDE_CONFIG_DIR should succeed"
   launch=$(cat "$LAUNCH_LOG")
   assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
-    "claude launch must not add a config-dir prefix when firstmate has no CLAUDE_CONFIG_DIR set"
-  pass "claude omits the config-dir prefix when firstmate runs with the single-store default"
+    "the ambient default must launch against the store an ordinary claude launch uses"
+  assert_trust_in_home_store "$HOME_DIR/user-home/.claude.json" "$WT_DIR"
+  [ ! -e "$HOME_DIR/user-home/.claude/.claude.json" ] \
+    || fail "the ambient default must not create or use a relocated \$HOME/.claude/.claude.json store"
+  pass "claude adds no CLAUDE_CONFIG_DIR prefix and trusts the ambient store when the variable is unset"
+}
+
+test_claude_pins_named_profile_config_dir() {
+  local rec id out status launch
+  id=profile-claude-named-z20
+  rec=$(make_spawn_case profile-claude-named claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/claude-b"
+  fm_test_attest_claude_pool "$CASE_DIR/claude-b"
+  cat > "$HOME_DIR/config/claude-profiles.json" <<EOF
+{"profiles":[{"id":"claude-max-b","config_dir":"$CASE_DIR/claude-b"}]}
+EOF
+
+  out=$(FM_TEST_CLAUDE_CONFIG_DIR="$CASE_DIR/claude-work" \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --claude-profile claude-max-b)
+  status=$?
+  expect_code 0 "$status" "claude spawn with an authenticated named profile should succeed: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='$CASE_DIR/claude-b' env -u CURSOR_AGENT" \
+    "claude launch must pin the checked named profile config dir"
+  assert_not_contains "$launch" "claude-work" \
+    "the ambient CLAUDE_CONFIG_DIR must not reach a launch whose named profile selects its own store"
+  pass "claude pins the checked named profile config dir over the ambient variable"
+}
+
+test_claude_pools_only_config_still_spawns_without_a_profile_flag() {
+  local rec id out status launch
+  id=profile-claude-poolsonly-z21
+  rec=$(make_spawn_case profile-claude-poolsonly claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/claude-a" "$CASE_DIR/claude-b"
+  fm_test_attest_claude_pool "$CASE_DIR/claude-a"
+  fm_test_attest_claude_pool "$CASE_DIR/claude-b"
+  cat > "$HOME_DIR/config/claude-profiles.json" <<EOF
+{"profiles":[{"id":"claude-max-a","config_dir":"$CASE_DIR/claude-a"},{"id":"claude-max-b","config_dir":"$CASE_DIR/claude-b"}]}
+EOF
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "a pools-only profile config must not break a spawn that names no profile: $out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "CLAUDE_CONFIG_DIR=" \
+    "the synthesized default profile must keep the ambient store"
+  pass "a pools-only Claude profile config keeps serving spawns that name no profile"
+}
+
+test_claude_unconfigured_pool_refusal_names_its_real_cause() {
+  local rec id out status
+  id=profile-claude-unconf-z23
+  rec=$(make_spawn_case profile-claude-unconf claude "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --claude-profile claude-max-a)
+  status=$?
+  expect_code 1 "$status" "a pool this home has not configured should refuse"
+  assert_contains "$out" "not configured in this home" "the refusal should name the per-home configuration requirement"
+  assert_not_contains "$out" "is not authenticated enough for worker launch" \
+    "an unconfigured pool must not be announced as an authentication state nothing measured"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused spawn should not launch; launch log: $(cat "$LAUNCH_LOG")"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn should leave no task record"
+  pass "an unconfigured Claude pool refuses by naming the configuration gap, not a measured login state"
+}
+
+test_raw_claude_command_may_not_rescope_the_checked_store() {
+  local rec id out status
+  id=profile-raw-cfgdir-z24
+  rec=$(make_spawn_case profile-raw-cfgdir claude "$id")
+  read_case_record "$rec"
+  mkdir -p "$CASE_DIR/claude-b" "$CASE_DIR/elsewhere"
+  fm_test_attest_claude_pool "$CASE_DIR/claude-b"
+  cat > "$HOME_DIR/config/claude-profiles.json" <<EOF
+{"profiles":[{"id":"claude-max-b","config_dir":"$CASE_DIR/claude-b"}]}
+EOF
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
+    "$id" "$PROJ_DIR" "CLAUDE_CONFIG_DIR=$CASE_DIR/elsewhere claude --dangerously-skip-permissions" \
+    --claude-profile claude-max-b)
+  status=$?
+  expect_code 1 "$status" "a raw claude command carrying its own CLAUDE_CONFIG_DIR must refuse"
+  assert_contains "$out" "sets CLAUDE_CONFIG_DIR itself" "the refusal should name the conflicting assignment"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused spawn should not launch; launch log: $(cat "$LAUNCH_LOG")"
+  assert_absent "$HOME_DIR/state/$id.meta" \
+    "a record must never claim a Claude profile the launched process would not have received"
+  pass "a raw claude command cannot silently rescope the store the preflight checked"
+}
+
+test_claude_profile_refused_on_a_non_claude_spawn() {
+  local rec id out status
+  id=profile-codex-pool-z22
+  rec=$(make_spawn_case profile-codex-pool codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness codex --claude-profile claude-max-a)
+  status=$?
+  expect_code 1 "$status" "a Claude pool named for a codex spawn should refuse"
+  assert_contains "$out" "names a Claude capacity pool" "the refusal should say why the flag does not apply"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused spawn should not launch; launch log: $(cat "$LAUNCH_LOG")"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn should leave no task record naming a pool"
+  pass "a Claude capacity pool cannot be attached to a non-Claude spawn"
 }
 
 test_non_claude_harness_ignores_config_dir() {
@@ -1515,16 +1680,23 @@ test_pi_signed_threads_shared_pi_profile_and_preserves_identity
 test_pi_signed_missing_binary_refuses_before_endpoint_or_metadata
 test_pi_signed_persistent_secondmate_uses_pi_extensions_and_identity
 test_batch_forwards_shared_profile_flags
+test_claude_rejects_unauthenticated_profile_before_launch
+test_claude_rejects_first_run_onboarding_before_launch
 test_claude_forwards_firstmate_config_dir_when_set
 test_lavish_server_address_is_exported_to_worker_launch
 test_lavish_absent_config_preserves_destination_ambient
 test_claude_omits_config_dir_prefix_when_unset
+test_claude_pins_named_profile_config_dir
+test_claude_pools_only_config_still_spawns_without_a_profile_flag
 test_claude_permission_mode_bypass_matches_absent_launch
 test_claude_permission_mode_auto_swaps_only_the_permission_flag
 test_claude_permission_mode_auto_reaches_scout_launch
 test_claude_permission_mode_invalid_refuses_before_endpoint_or_metadata
 test_non_claude_harness_ignores_claude_permission_mode
 test_non_claude_harness_ignores_config_dir
+test_claude_profile_refused_on_a_non_claude_spawn
+test_raw_claude_command_may_not_rescope_the_checked_store
+test_claude_unconfigured_pool_refusal_names_its_real_cause
 test_claude_task_launch_carries_control_channel_authority
 test_claude_secondmate_launch_omits_task_control_channel_authority
 test_claude_long_launch_is_delivered_intact

@@ -441,8 +441,20 @@ SH
   chmod +x "$fakebin/tmux"
   # BASE_PATH deliberately omits the developer's node, which the trust
   # registration below needs, so link the real one in rather than presenting a
-  # node-less spawn host no real fleet member looks like.
+  # node-less spawn host no real fleet member looks like. The Claude profile
+  # preflight runs the bounded vendor probe before every claude launch and
+  # BASE_PATH omits claude too, so stub that rather than letting a probe which
+  # cannot find the CLI refuse the spawns these cases are about.
   ln -sf "$(command -v node)" "$fakebin/node"
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '2.1.276 (Claude Code)\n'; exit 0 ;;
+  auth) [ "${2:-}" != status ] || { printf '{\n  "loggedIn": true,\n  "authMethod": "claude.ai"\n}\n'; exit 0; } ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/claude"
   printf '%s\n' "$fakebin"
 }
 
@@ -466,6 +478,8 @@ spawn_secondmate() {
   local world=$1 id=$2 home=$3 harness=${4:-} fakebin
   mkdir -p "$world/home/state" "$world/home/data"
   fakebin=$(make_noop_tmux "$world/tmux-$id")
+  # A claude secondmate is refused until its store finished first-run onboarding.
+  [ -e "$world/home/user-home/.claude.json" ] || fm_test_onboard_claude_store "$world/home/user-home"
   # An empty harness must contribute zero args, not an empty positional; build the
   # arg list explicitly so the optional harness is omitted cleanly.
   local spawn_args=("$id" "$home")
@@ -683,8 +697,20 @@ SH
   fm_fake_exit0 "$fakebin" pi
   # BASE_PATH deliberately omits the developer's node, which the trust
   # registration below needs, so link the real one in rather than presenting a
-  # node-less spawn host no real fleet member looks like.
+  # node-less spawn host no real fleet member looks like. The Claude profile
+  # preflight runs the bounded vendor probe before every claude launch and
+  # BASE_PATH omits claude too, so stub that rather than letting a probe which
+  # cannot find the CLI refuse the spawns these cases are about.
   ln -sf "$(command -v node)" "$fakebin/node"
+  cat > "$fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version) printf '2.1.276 (Claude Code)\n'; exit 0 ;;
+  auth) [ "${2:-}" != status ] || { printf '{\n  "loggedIn": true,\n  "authMethod": "claude.ai"\n}\n'; exit 0; } ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/claude"
   printf '%s\n' "$fakebin"
 }
 
@@ -696,6 +722,8 @@ spawn_secondmate_capture() {
   shift 4
   mkdir -p "$world/home/state" "$world/home/data"
   fakebin=$(make_launch_capturing_tmux "$world/tmux-$id")
+  # A claude secondmate is refused until its store finished first-run onboarding.
+  [ -e "$world/home/user-home/.claude.json" ] || fm_test_onboard_claude_store "$world/home/user-home"
   : > "$launchlog"
   PATH="$fakebin:$BLIND_BIN:$BASE_PATH" TMUX='' CLAUDECODE=1 \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" HOME="$world/home/user-home" CLAUDE_CONFIG_DIR='' \
@@ -1512,6 +1540,28 @@ sm_presentation_verdict() {  # <config-dir> -> on|off
       *) printf "on\n" ;;
     esac
   ' "$ROOT" "$1" 2>/dev/null
+}
+
+test_claude_profiles_are_never_inherited() {
+  local w head out status err
+  w=$(new_world claude-profiles-inherit)
+  head=$(git -C "$w/main" rev-parse HEAD)
+  add_sm_worktree "$w" sm "$head"
+
+  printf '{"profiles":[{"id":"claude-max-a","config_dir":"%s"}]}\n' "$w/home/pool-a" \
+    > "$w/home/config/claude-profiles.json"
+  printf '{"default":{"harness":"claude","claude_profile":"claude-max-a"}}\n' \
+    > "$w/home/config/crew-dispatch.json"
+  err="$w/claude-profiles-inherit.err"
+  out=$(run_config_push "$w" 2>"$err"); status=$?
+  expect_code 0 "$status" "a primary holding claude-profiles.json should still push cleanly"
+  [ -e "$w/sm/config/crew-dispatch.json" ] \
+    || fail "dispatch rules must still be inherited alongside the uninherited pool file"
+  [ ! -e "$w/sm/config/claude-profiles.json" ] \
+    || fail "claude-profiles.json names per-account credential stores and must never be copied downstream"
+  assert_not_contains "$out" "claude-profiles.json" "the push report must not claim to carry the pool file"
+  assert_not_contains "$(cat "$err")" "claude-profiles.json" "the pool file must not even be considered for propagation"
+  pass "B12d claude-profiles.json is per-home configuration and is never inherited"
 }
 
 test_presentation_inheritance_default_on_and_opt_out() {
@@ -2661,6 +2711,7 @@ test_bootstrap_sweep_materializes_and_inherits_memory_default
 test_backend_inheritance_present_and_absent
 test_spawn_secondmate_claude_permission_mode_auto
 test_claude_permission_mode_inheritance_present_and_absent
+test_claude_profiles_are_never_inherited
 test_presentation_inheritance_default_on_and_opt_out
 test_bootstrap_sweep_surfaces_config_propagation_failure
 test_bootstrap_rereads_after_partial_propagation

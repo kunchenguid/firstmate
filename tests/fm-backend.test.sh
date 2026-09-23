@@ -44,6 +44,9 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-tests)
 # and adds no launch prefix, since fm-spawn only prefixes a non-empty value.
 SPAWN_HOME="$TMP_ROOT/user-home"
 mkdir -p "$SPAWN_HOME"
+# A claude spawn is refused unless the default profile's ambient store probes
+# logged in and has finished first-run onboarding (bin/fm-claude-auth.sh).
+fm_test_onboard_claude_store "$SPAWN_HOME"
 
 write_spawn_brief() {  # <file> <id>
   cat > "$1" <<EOF
@@ -849,6 +852,7 @@ exit 0
 SH
   chmod +x "$fb/tmux"
   fm_fake_exit0 "$fb" treehouse
+  fm_test_fake_claude_cli "$fb"
   printf '%s\n' "$fb"
 }
 
@@ -921,6 +925,7 @@ exit 0
 SH
   chmod +x "$fb/tmux"
   fm_fake_exit0 "$fb" treehouse
+  fm_test_fake_claude_cli "$fb"
   printf '%s\n' "$fb"
 }
 

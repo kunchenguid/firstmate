@@ -175,6 +175,124 @@ Neither this per-source shape nor `state.authStatus` exists before quota-axi 0.1
 Grok also reports `credits.remaining: 0` alongside `percentRemaining: 41` on a healthy account.
 That zero is a prepaid balance, not the subscription window, and is never headroom.
 
+## Claude Code auth probe
+
+Verified 2026-09-20 on Claude Code 2.1.276, on Linux.
+
+```sh
+claude --version
+claude auth status   # stdin closed, single attempt, hard-bounded
+```
+
+`claude --version` prints the semver at the start of its only line, with no leading command name:
+
+```
+2.1.276 (Claude Code)
+```
+
+`claude auth status` prints a JSON document. With a usable Claude session (exit 0):
+
+```
+{
+  "loggedIn": true,
+  "authMethod": "claude.ai",
+  "apiProvider": "firstParty",
+  ...
+}
+```
+
+With no usable session in the scoped `CLAUDE_CONFIG_DIR` and keychain context (exit 1):
+
+```
+{
+  "loggedIn": false,
+  "authMethod": "none",
+  "apiProvider": "firstParty",
+  ...
+}
+```
+
+Observed:
+
+- The `loggedIn` member alone discriminates; `authMethod` is `claude.ai` for a logged-in claude.ai session and `none` otherwise, and neither value is read.
+- The elided members carry the account email, org id, and store paths, so `bin/fm-vendor-auth-probe.sh` classifies the document and never prints, logs, or forwards any of it.
+- The probe strips whitespace before matching `"loggedIn":true` / `"loggedIn":false`, so the discriminator survives a change in the vendor's indentation; any unrecognized document is `indeterminate`, never authenticated.
+- The exit status tracks the verdict here (0 logged in, 1 not), and is still never read as one, per this file's standing rule.
+- The probe is run with the caller-selected `CLAUDE_CONFIG_DIR` in the environment, so named Claude profile pools can be checked without printing token values or launching the interactive TUI.
+
+This JSON shape is un-owned vendor output.
+`bin/fm-vendor-auth-probe.sh` pins the verified version, reports `versionVerified=no` when the running CLI differs, and classifies unrecognized output as `indeterminate` rather than authenticated.
+Re-run the two commands above and update this section and the pinned version together when the vendor CLI changes.
+
+### Account separation by CLAUDE_CONFIG_DIR
+
+Verified on Linux only, on the same date and version.
+The probe was run with the caller-selected `CLAUDE_CONFIG_DIR` and answered for that directory: the ambient store reported `"loggedIn": true`, and a scratch directory reported `"loggedIn": false` in the same shell, so on this platform the config directory alone decides which account answers.
+`$HOME/.claude` is a plain directory here and no credential keychain is involved.
+
+That measurement has NOT been repeated on macOS, and this repository's own record argues against assuming it carries over: [runtime-backends.md](runtime-backends.md) records that the login keychain is authoritative there, that the item is addressed per user with no config-directory component, and that `~/.claude/.credentials.json` is only the fallback Claude reads when keychain access fails.
+If that one keychain item answers regardless of `CLAUDE_CONFIG_DIR`, a named pool would report authenticated from a different account than it names and the worker would spend that account.
+
+`bin/fm-claude-auth.sh` therefore reports `unsupported:pool-separation-unverified` for any named (non-`default`) profile on a platform other than Linux, and every caller refuses on it.
+The `default` profile is unaffected on every platform: it names the ambient store an ordinary launch uses (no `CLAUDE_CONFIG_DIR` at all when firstmate has none), so no account-separation claim is being made about it.
+To enable named pools on another platform, measure `claude auth status` under a second `CLAUDE_CONFIG_DIR` on a host of that platform, record the result in this section, and extend `POOL_SEPARATION_VERIFIED_PLATFORM` in `bin/fm-claude-auth.sh` to match.
+Do not infer the outcome from the keychain's design, and do not read or move credential values to find out.
+
+## Claude first-run onboarding
+
+Verified 2026-09-21 on Claude Code 2.1.276, on Linux.
+
+Two scratch config stores holding no credentials, no copied consent, and no other Claude-owned keys were launched interactively in detached tmux panes, with the environment cleared so neither the ambient store nor an inherited token could answer:
+
+```sh
+printf '{"hasCompletedOnboarding":true}\n' > <scratch>/present/.claude.json   # <scratch>/absent has no .claude.json
+env -i PATH=<path> HOME=<scratch>/home TERM=xterm-256color CLAUDE_CONFIG_DIR=<scratch>/<arm> claude
+```
+
+Each pane was captured after about 15 seconds without sending a key, then killed, and the scratch tree was deleted.
+
+- `absent`: `Welcome to Claude Code v2.1.276`, `Let's get started.`, `Choose the text style that looks best with your terminal`, and the theme picker.
+- `present`: no welcome or theme screen; the pane went straight to the `Accessing workspace:` folder-trust dialog, the next first-run step (owned by `bin/fm-claude-trust.sh`, not by this key).
+- Claude created `.claude.json` in the `absent` store during the run without setting `hasCompletedOnboarding`, so an abandoned first run still reads as unonboarded.
+
+So `hasCompletedOnboarding: true` in the store's `.claude.json` alone decides whether the text-style/theme screen opens, and `bin/fm-claude-auth.sh` reads exactly that key.
+It does not check that the store is logged in or that later dialogs are settled; those have their own checks above and below.
+This key is un-owned vendor state: re-run the two arms above and update this section when the vendor CLI changes.
+No executable live guard is registered, because detecting the screen means scraping a timed TUI capture, which is not deterministic.
+
+## Claude Bypass Permissions acceptance
+
+Attempted 2026-09-20 on Claude Code 2.1.276; no probe registered.
+
+Claude records acceptance of the machine-scoped Bypass Permissions disclaimer under the settings key `skipDangerousModePermissionPrompt` (user, local, flag, or policy scope), having migrated it out of the legacy `bypassPermissionsModeAccepted` field of `.claude.json`.
+Neither is present anywhere on this host, yet the treatment arm in [runtime-backends.md](runtime-backends.md) records an interactive bypass worker against this same store meeting no dialog, so reading either one would report `absent` for a machine whose acceptance is in effect and would refuse every Claude launch.
+There is also no non-interactive vendor command that reports the effective value, so nothing here satisfies the first-hand discriminator rule in `bin/fm-vendor-auth-probe.sh`.
+The preflight therefore measures login state only and does not claim to prevent that dialog; [configuration.md](../configuration.md#claude-profiles-configclaude-profilesjson) carries the one-time per-pool operator step instead.
+Re-check when the vendor exposes a readable acceptance state.
+
+## Named pool first-run consent
+
+Attempted 2026-09-21 on Claude Code 2.1.276, on Linux; no probe registered.
+
+Claude's `Allow external CLAUDE.md file imports?` dialog renders when a loaded CLAUDE.md chain reaches outside the project tree, and its consent is stored per project entry in `<store>/.claude.json` (`bin/fm-claude-trust.sh` owns that contract).
+A named pool launches against its own store, so that store holds neither the consent nor, necessarily, the same user-scope memory chain as the ambient store.
+Whether the dialog applies to a pool at all therefore depends on where Claude resolves user-scope `CLAUDE.md` when `CLAUDE_CONFIG_DIR` is pinned - the pool store, or `$HOME/.claude` regardless - and that is **not measured here**.
+
+What was measured today: a scratch `CLAUDE_CONFIG_DIR` does scope `.claude.json` (running `claude doctor` under one creates that store), and `claude --debug -p` in an unauthenticated scratch store exits at `Not logged in` before it loads or reports any memory file, so the question cannot be settled without a second logged-in store.
+
+Bounded procedure to settle it, on a host that already has a second pool logged in:
+
+```sh
+printf '# POOL-MEMORY-MARKER\n@%s/outside.md\n' "$HOME" > <pool-config-dir>/CLAUDE.md
+printf 'OUTSIDE-IMPORT-MARKER\n' > "$HOME/outside.md"
+CLAUDE_CONFIG_DIR=<pool-config-dir> claude --debug -p 'reply with the word ok'   # records loaded memory paths
+```
+
+Record whether the debug output lists `<pool-config-dir>/CLAUDE.md` (the pool store owns user memory, so a fresh pool with no CLAUDE.md loads none and the dialog cannot fire) or `$HOME/.claude/CLAUDE.md` (the ambient chain reaches every pool, so the dialog applies to all of them), along with the platform and CLI version, then delete both scratch files.
+Update this section and the per-pool operator step in [configuration.md](../configuration.md#one-time-setup-for-a-named-pool) together with the result.
+
+Until that measurement exists, `bin/fm-claude-auth.sh` does not decide the question either way: it refuses a named pool whose operator attestation is absent or stale, which covers the prompt-applicable case without claiming the prompt applies.
+
 ## Standalone Grok discovery probe
 
 Verified 2026-07-30 on `grok 0.2.117 (f1c06093089f) [stable]`.

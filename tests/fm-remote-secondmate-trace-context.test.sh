@@ -234,6 +234,19 @@ RELAUNCH_INJECTED=$(remote_injected_traceparent)
   || fail "a remote relaunch must re-export the original carrier (first='$PARENT_TP' injected='$RELAUNCH_INJECTED')"
 pass "relaunch: a remote-routed second mate keeps one stable identity across restarts"
 
+# --- a local Claude profile cannot ride the remote route ---------------------
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/ios.meta.before"
+: > "$HERDR_LOG"
+if out=$(remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate --harness claude --claude-profile claude-max-a 2>&1); then
+  fail "a remote secondmate spawn must refuse --claude-profile rather than silently dropping it"
+fi
+assert_contains "$out" "remote secondmate ios launches on its own host" \
+  "the remote --claude-profile refusal must explain why the flag was refused"
+[ ! -s "$HERDR_LOG" ] || fail "a refused remote --claude-profile spawn must not touch the remote endpoint"
+cmp -s "$PARENT/state/ios.meta" "$TMP_ROOT/ios.meta.before" \
+  || fail "a refused remote --claude-profile spawn must not rewrite the task record"
+pass "profile: a remote-routed second mate refuses a local Claude profile before any remote work"
+
 # --- per-task boundary: ambient carriers are never adopted or shared ---------
 # A persistent supervisor exports its own launch-time TRACEPARENT for its whole
 # life. A second remote route resolved from that same environment must root its

@@ -55,7 +55,11 @@ if IFS= read -r -t 2 leaked; then
   printf '%s\n' "$leaked" >> "$FM_FAKE_GROK_STDIN"
 fi
 if [ "${1:-}" = --version ]; then
-  printf 'grok %s (fakebuild) [stable]\n' "${FM_FAKE_GROK_VERSION:-0.2.117}"
+  if [ -n "${FM_FAKE_GROK_VERSION_LEADS:-}" ]; then
+    printf '%s (fakebuild) [stable]\n' "${FM_FAKE_GROK_VERSION:-0.2.117}"
+  else
+    printf 'grok %s (fakebuild) [stable]\n' "${FM_FAKE_GROK_VERSION:-0.2.117}"
+  fi
   exit 0
 fi
 case "${FM_FAKE_GROK_MODE:-authenticated}" in
@@ -222,7 +226,7 @@ test_probe_result_is_never_an_exit_status_verdict() {
 
 test_unregistered_probe_is_a_usage_error() {
   local name
-  for name in openai codex claude pi ''; do
+  for name in openai codex pi ''; do
     if [ -z "$name" ]; then
       run_probe "unregistered-empty"
     else
@@ -368,6 +372,16 @@ test_probe_version_match_is_recorded() {
   pass "the pinned verified vendor version is recognized"
 }
 
+# Claude Code prints its semver at the start of the line with no command name
+# (docs/verification/dispatch-auth.md), so version extraction must not require a
+# preceding non-digit character or the pin silently reads as unverified.
+test_probe_reads_a_version_that_starts_the_line() {
+  run_probe version-leading grok -- "FM_FAKE_GROK_MODE=authenticated" "FM_FAKE_GROK_VERSION_LEADS=1"
+  assert_field "$RUN_LINE" version 0.2.117 "a version at the start of the line must still be extracted"
+  assert_field "$RUN_LINE" versionVerified yes "a leading version must still match the pin"
+  pass "a vendor CLI whose version starts its output line is still version-verified"
+}
+
 test_help_succeeds_and_names_the_registered_probes() {
   local out rc=0
   out=$("$SCRIPT" --help 2>&1) || rc=$?
@@ -392,4 +406,5 @@ test_probe_argv_is_fixed_and_non_destructive
 test_fact_line_carries_no_vendor_output_or_credential_material
 test_probe_version_change_is_disclosed
 test_probe_version_match_is_recorded
+test_probe_reads_a_version_that_starts_the_line
 test_help_succeeds_and_names_the_registered_probes

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
-#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--claude-profile <id>] [--backend <name>]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--claude-profile <id>] [--backend <name>]
+#        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--claude-profile <id>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's
@@ -242,7 +242,7 @@
 # Batch dispatch: pass one or more `id=repo` pairs instead of a single <id> <project>, e.g.
 #     fm-spawn.sh fix-a-k3=projects/foo add-b-q7=projects/bar [--scout]
 #   Each pair re-execs this script in single-task mode, so the single path stays the only
-#   source of truth; shared --scout/--harness/--model/--effort/--backend/--mode/--yolo
+#   source of truth; shared --scout/--harness/--model/--effort/--claude-profile/--backend/--mode/--yolo
 #   applies to every pair. A ship batch therefore carries one delivery contract, and each
 #   pair still checks it against its own brief; a batch spanning modes is two invocations.
 #   If config/crew-dispatch.json exists, shared --harness is required for crewmate
@@ -580,9 +580,11 @@ BACKEND_ARG=
 MODE=
 YOLO=
 TRACEPARENT_ARG=
+CLAUDE_PROFILE=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+CLAUDE_PROFILE_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -610,6 +612,10 @@ for a in "$@"; do
     effort)
       EFFORT=$a
       EFFORT_SET=1
+      ;;
+    claude-profile)
+      CLAUDE_PROFILE=$a
+      CLAUDE_PROFILE_SET=1
       ;;
     backend)
       BACKEND_ARG=$a
@@ -660,6 +666,11 @@ for a in "$@"; do
     EFFORT=${a#--effort=}
     EFFORT_SET=1
     ;;
+  --claude-profile) want_value=claude-profile ;;
+  --claude-profile=*)
+    CLAUDE_PROFILE=${a#--claude-profile=}
+    CLAUDE_PROFILE_SET=1
+    ;;
   --backend) want_value=backend ;;
   --backend=*)
     BACKEND_ARG=${a#--backend=}
@@ -697,6 +708,10 @@ done
 }
 [ "$EFFORT_SET" -eq 0 ] || [ -n "$EFFORT" ] || {
   echo "error: --effort requires a non-empty value" >&2
+  exit 1
+}
+[ "$CLAUDE_PROFILE_SET" -eq 0 ] || [ -n "$CLAUDE_PROFILE" ] || {
+  echo "error: --claude-profile requires a non-empty value" >&2
   exit 1
 }
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || {
@@ -831,6 +846,12 @@ spawn_remote_secondmate() {
     fm_lock_release "$registry_lock" || true
     fm_lock_release "$SPAWN_TASK_LOCK" || true
     return 3
+  fi
+  if [ "$CLAUDE_PROFILE_SET" -eq 1 ]; then
+    fm_lock_release "$registry_lock" || true
+    fm_lock_release "$SPAWN_TASK_LOCK" || true
+    echo "error: --claude-profile selects a local Claude store, but remote secondmate $id launches on its own host; drop the flag for a remote secondmate" >&2
+    return 2
   fi
   host=$(secondmate_registry_field "$DATA/secondmates.md" "$id" host)
   root=$(secondmate_registry_field "$DATA/secondmates.md" "$id" root)
@@ -1356,6 +1377,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$HARNESS_ARG" ] || shared_args+=(--harness "$HARNESS_ARG")
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
+  [ -z "$CLAUDE_PROFILE" ] || shared_args+=(--claude-profile "$CLAUDE_PROFILE")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -1704,6 +1726,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # the caller's explicit decision, made with --harness (bin/fm-control.sh
   # resolves that decision, including a secondmate's durable pin).
   ARG3=${HARNESS_ARG:-$RELAUNCH_PRIOR_HARNESS}
+  if [ "$CLAUDE_PROFILE_SET" -eq 0 ] && [ "$ARG3" = claude ]; then
+    CLAUDE_PROFILE=$(fm_meta_get "$RELAUNCH_META" claude_profile)
+  fi
   [ -n "$ARG3" ] || {
     echo "error: task $ID has no recorded harness; pass --harness to relaunch it" >&2
     exit 1
@@ -2237,6 +2262,32 @@ if [ "$HARNESS" = omp ]; then
 fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
+fi
+if [ "$HARNESS" != claude ] && [ "$CLAUDE_PROFILE_SET" -eq 1 ]; then
+  printf 'error: --claude-profile names a Claude capacity pool, but this spawn resolved harness %s; drop the flag or spawn on claude\n' "$HARNESS" >&2
+  exit 1
+fi
+if [ "$HARNESS" = claude ] && [ "$RAW_LAUNCH" = 1 ]; then
+  case "$LAUNCH" in
+    CLAUDE_CONFIG_DIR=* | *' CLAUDE_CONFIG_DIR='*)
+      printf 'error: the raw launch command sets CLAUDE_CONFIG_DIR itself, which would take effect after the store the Claude profile preflight checked; that worker would use an unchecked account while its record named the checked one. Drop the assignment from the command and select the store with --claude-profile, or launch it on a non-claude command.\n' >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ "$HARNESS" = claude ]; then
+  CLAUDE_PROFILE=${CLAUDE_PROFILE:-default}
+  CLAUDE_AUTH_OUT=$("$FM_ROOT/bin/fm-claude-auth.sh" check --profile "$CLAUDE_PROFILE" 2>&1) || {
+    case "$CLAUDE_AUTH_OUT" in
+      *' auth='*) printf 'error: Claude profile %s is not ready for worker launch; refusing before launch. %s\n' "$CLAUDE_PROFILE" "$CLAUDE_AUTH_OUT" >&2 ;;
+      *) printf 'error: Claude profile %s could not be resolved; refusing before launch. %s\n' "$CLAUDE_PROFILE" "$CLAUDE_AUTH_OUT" >&2 ;;
+    esac
+    exit 1
+  }
+  case "$CLAUDE_AUTH_OUT" in
+    *\ config_dir=*) CLAUDE_SELECTED_CONFIG_DIR=${CLAUDE_AUTH_OUT##* config_dir=} ;;
+    *) CLAUDE_SELECTED_CONFIG_DIR= ;;
+  esac
 fi
 
 secondmate_registry_value() {
@@ -3979,7 +4030,8 @@ claude*)
   else
     spawn_trust_args=("$WT" "$PROJ_ABS")
   fi
-  if ! "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
+  if ! CLAUDE_CONFIG_DIR="${CLAUDE_SELECTED_CONFIG_DIR:-${CLAUDE_CONFIG_DIR:-}}" \
+       "$FM_ROOT/bin/fm-claude-trust.sh" "${spawn_trust_args[@]}" >/dev/null; then
     echo "error: could not pre-register Claude workspace trust for $WT; refusing to launch a claude worker that would wedge on the trust dialog; inspect window $T" >&2
     exit 1
   fi
@@ -4479,7 +4531,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort claude_profile busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -4497,6 +4549,7 @@ preserve_relaunch_meta() {
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ "$HARNESS" != claude ] || [ -z "$CLAUDE_PROFILE" ] || echo "claude_profile=$CLAUDE_PROFILE"
   [ -z "${BUSY_GEN:-}" ] || echo "busy_gen=$BUSY_GEN"
   echo "spawn_gen=$SPAWN_GEN"
   # Default-off writes no traceparent= line.
@@ -4637,6 +4690,7 @@ EFFORTFLAG=$(effort_flag_for_harness "$HARNESS" "$EFFORT" "$MODEL") || exit 1
 LAUNCH=${LAUNCH//__MODELFLAG__/$MODELFLAG}
 LAUNCH=${LAUNCH//__EFFORTFLAG__/$EFFORTFLAG}
 LAUNCH=${LAUNCH//__CLAUDEPERMFLAG__/$CLAUDE_PERM_FLAG}
+
 if [ "$HARNESS" = rovo ]; then
   ROVOCONFIGOVERRIDE=$(rovo_config_override_flag "$EFFORT" "$DATA" "$STATE" "$ID") || {
     echo "error: could not resolve this task's home paths for rovo's allowedExternalPaths grant" >&2
@@ -4673,11 +4727,12 @@ esac
 # inherit firstmate's current environment, so a bare `claude` in the pane falls
 # back to the default ~/.claude store even when firstmate itself runs under a
 # different CLAUDE_CONFIG_DIR (for example a work-vs-personal subscription split).
-# Forward firstmate's own resolved store onto the claude launch so the crewmate
-# uses the same credential/config firstmate is authenticated with. Only when set;
-# an unset value is the single-store default and needs no prefix.
-if [ "$HARNESS" = claude ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
-  LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_CONFIG_DIR") $LAUNCH"
+# Forward the checked Claude profile store onto the claude launch so the
+# crewmate uses the credential/config that passed preflight.
+if [ "$HARNESS" = claude ]; then
+  if [ -n "${CLAUDE_SELECTED_CONFIG_DIR:-}" ]; then
+    LAUNCH="CLAUDE_CONFIG_DIR=$(shell_quote "$CLAUDE_SELECTED_CONFIG_DIR") $LAUNCH"
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")

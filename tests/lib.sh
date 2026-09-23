@@ -553,6 +553,55 @@ assert_not_equals() {
   [ "$1" != "$2" ] || fail "$3 (unexpectedly got '$1')"
 }
 
+# Records the per-pool first-run setup attestation bin/fm-claude-auth.sh reads
+# back before a named Claude pool may launch (its own owned key=value contract,
+# written here for fixtures whose pools are set up out of band).
+fm_test_attest_claude_pool() {  # <config-dir> [contract]
+  local dir=$1 contract=${2:-1}
+  mkdir -p "$dir"
+  {
+    printf 'contract=%s\n' "$contract"
+    printf 'config_dir=%s\n' "$(cd -P -- "$dir" && pwd -P)"
+    printf 'claude_version=2.1.276\n'
+    printf 'attested_at=2026-09-21T00:00:00Z\n'
+  } > "$dir/.fm-pool-ready"
+  fm_test_onboard_claude_store "$dir"
+}
+
+# Marks a Claude store's first-run onboarding complete, as Claude itself does
+# once the interactive onboarding finishes; bin/fm-claude-auth.sh reads it.
+fm_test_onboard_claude_store() {  # <config-dir-or-HOME>
+  mkdir -p "$1"
+  printf '{"hasCompletedOnboarding":true}\n' > "$1/.claude.json"
+}
+
+# Installs a fake claude CLI that answers the `claude auth status` probe
+# bin/fm-claude-auth.sh runs before every claude launch: logged in unless
+# FM_FAKE_CLAUDE_LOGGED_IN=0. Every other invocation exits 0.
+fm_test_fake_claude_cli() {  # <fakebin>
+  cat > "$1/claude" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  --version)
+    printf '%s (Claude Code)\n' "${FM_FAKE_CLAUDE_VERSION:-2.1.276}"
+    exit 0
+    ;;
+  auth)
+    if [ "${2:-}" = status ]; then
+      if [ "${FM_FAKE_CLAUDE_LOGGED_IN:-1}" = 1 ]; then
+        printf '{\n  "loggedIn": true,\n  "authMethod": "claude.ai"\n}\n'
+        exit 0
+      fi
+      printf '{\n  "loggedIn": false,\n  "authMethod": "none"\n}\n'
+      exit 1
+    fi
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$1/claude"
+}
+
 # assert_contains <haystack> <needle> <msg>
 assert_contains() {
   case "$1" in

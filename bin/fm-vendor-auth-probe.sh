@@ -28,6 +28,11 @@
 # docs/verification/dispatch-auth.md.
 #
 # Registered probes:
+#   claude `claude auth status` - Claude Code. Verified on 2.1.276: stdout is a
+#          JSON document whose `loggedIn` member is `true` for a usable session
+#          and `false` for the no-session case. Whitespace is stripped before
+#          matching, so the discriminator does not depend on the vendor's
+#          indentation. The exit status is never a verdict.
 #   grok   `grok models` - the standalone Grok Build CLI. Verified on grok
 #          0.2.117: the command exits 0 in BOTH the authenticated and the
 #          unauthenticated case, so only the literal first stdout line
@@ -63,6 +68,7 @@
 #                                  `alarm 0` both mean "no deadline".
 set -u
 
+VERIFIED_CLAUDE_VERSION=2.1.276
 VERIFIED_GROK_VERSION=0.2.117
 
 usage() {
@@ -76,6 +82,7 @@ Usage:
   fm-vendor-auth-probe.sh <probe>
 
 Registered probes:
+  claude `claude auth status` on Claude Code
   grok   `grok models` on the standalone Grok Build CLI
 
 Prints one sanitized key=value line: probe, status, version, versionVerified.
@@ -103,7 +110,7 @@ EOF
 
 die_usage() {
   printf 'fm-vendor-auth-probe: %s\n' "$1" >&2
-  printf 'usage: fm-vendor-auth-probe.sh <probe>   (registered probes: grok)\n' >&2
+  printf 'usage: fm-vendor-auth-probe.sh <probe>   (registered probes: claude, grok)\n' >&2
   exit 2
 }
 
@@ -148,10 +155,35 @@ emit() {
 
 # The two argv forms below are literals in this file. Nothing the caller supplies
 # reaches the vendor CLI's argv or stdin.
+vendor_semver() {  # <command> [version args...]
+  local output cmd=$1
+  shift
+  output=$(fm_run_timed "$TIMEOUT" "$cmd" "$@" 2>/dev/null </dev/null) || { printf 'none\n'; return 0; }
+  printf '%s\n' "$output" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 | grep . || printf 'none\n'
+}
+
+claude_version() {
+  vendor_semver claude --version
+}
+
+probe_claude() {
+  local output rc=0
+  output=$(fm_run_timed "$TIMEOUT" claude auth status 2>/dev/null </dev/null) || rc=$?
+  if [ "$rc" -eq 124 ]; then
+    printf 'timeout\n'
+    return 0
+  fi
+  case "$(printf '%s' "$output" | tr -d ' \t\n')" in
+    *'"loggedIn":true'*) printf 'authenticated\n' ;;
+    *'"loggedIn":false'*) printf 'unauthenticated\n' ;;
+    *) printf 'indeterminate\n' ;;
+  esac
+}
+
 grok_version() {
   local output
-  output=$(fm_run_timed "$TIMEOUT" grok --version 2>/dev/null </dev/null) || { printf 'none\n'; return 0; }
-  printf '%s\n' "$output" | sed -nE 's/.*[^0-9]([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' | head -n 1 | grep . || printf 'none\n'
+  output=$(vendor_semver grok --version)
+  printf '%s\n' "$output"
 }
 
 probe_grok() {
@@ -173,6 +205,17 @@ probe_grok() {
 }
 
 case "$PROBE" in
+  claude)
+    command -v claude >/dev/null 2>&1 || emit
+    VERSION=$(claude_version)
+    if [ "$VERSION" = "$VERIFIED_CLAUDE_VERSION" ]; then
+      VERSION_VERIFIED=yes
+    else
+      VERSION_VERIFIED=no
+    fi
+    STATUS=$(probe_claude)
+    emit
+    ;;
   grok)
     command -v grok >/dev/null 2>&1 || emit
     VERSION=$(grok_version)

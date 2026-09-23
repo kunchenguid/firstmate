@@ -597,14 +597,15 @@ test_refused_spawn_leaves_no_task_state() {
   wt="$case_dir/wt"
   config="$case_dir/claude-config"
   id="refusedspawn$$"
-  # Root owns /etc/passwd, so a store resolving to it is refused as another
-  # user's file. Running as root would own it and make the refusal vacuous.
+  # An onboarded but read-only store clears the auth preflight and is then
+  # refused by the trust registration as unwritable. Root writes through the
+  # mode bits, which would make the refusal vacuous.
   if [ "$(id -u)" = 0 ]; then
     pass "fm-spawn.sh: a trust-refused claude spawn leaves no task state (skipped as root)"
     return 0
   fi
-  mkdir -p "$config"
-  ln -s /etc/passwd "$config/.claude.json"
+  fm_test_onboard_claude_store "$config"
+  chmod 444 "$config/.claude.json"
   fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
   fm_test_spawn_home "$home" claude
   fm_git_worktree "$proj" "$wt" wt-refused
@@ -655,6 +656,42 @@ test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief() {
   assert_grep "CLAUDE_CONFIG_DIR='$config'" "$launch_log" \
     "the launch command did not point the worker at the store that was trusted"
   pass "fm-spawn.sh: a claude spawn pre-trusts its worktree and launches with the brief"
+}
+
+# A named Claude capacity pool selects its own store, so the registration must
+# follow the pool rather than firstmate's ambient store; otherwise the worker
+# reads a store with no entry for its worktree and stops on the trust dialog.
+test_named_pool_spawn_trusts_the_store_the_worker_reads() {
+  local case_dir home proj wt pool fakebin launch_log out ambient_before
+  case_dir="$TMP_ROOT/spawn-pool"
+  home="$case_dir/home"
+  proj="$case_dir/project"
+  wt="$case_dir/wt"
+  pool="$case_dir/pool-a"
+  launch_log="$case_dir/launch.log"
+  mkdir -p "$pool"
+  fm_test_attest_claude_pool "$pool"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" claude)
+  fm_test_spawn_home "$home" claude
+  fm_git_worktree "$proj" "$wt" wt-pool
+  fm_test_spawn_brief "$home" poolspawn
+  mkdir -p "$home/config"
+  cat > "$home/config/claude-profiles.json" <<EOF
+{"profiles":[{"id":"claude-max-a","config_dir":"$pool"}]}
+EOF
+  fm_test_onboard_claude_store "$home/user-home"
+  ambient_before=$(cat "$home/user-home/.claude.json")
+  out=$(FM_FAKE_LAUNCH_LOG="$launch_log" \
+    fm_test_run_spawn "$home" "$wt" "$fakebin" poolspawn "$proj" claude \
+    --claude-profile claude-max-a --mode no-mistakes --yolo off)
+  expect_code 0 $? "the named-pool claude spawn must succeed: $out"
+  assert_trusted "$pool/.claude.json" "$wt" \
+    "the spawn registered trust somewhere other than the pool store the worker was launched against"
+  assert_grep "CLAUDE_CONFIG_DIR='$pool'" "$launch_log" \
+    "the launch command did not point the worker at the pool store"
+  [ "$(cat "$home/user-home/.claude.json")" = "$ambient_before" ] \
+    || fail "the registration wrote firstmate's ambient store instead of the selected pool store"
+  pass "fm-spawn.sh: a named Claude pool is trusted in the same store the worker is launched against"
 }
 
 # A secondmate home is the second directory a claude launch starts in, and it is
@@ -797,15 +834,16 @@ test_secondmate_spawn_fails_closed_when_home_trust_cannot_be_recorded() {
   local case_dir home out
   case_dir="$TMP_ROOT/sm-failclosed"
   home="$case_dir/fm-homes/failclosed-n1"
-  # Root owns /etc/passwd, so a store resolving to it is refused as another
-  # user's file. Running as root would own it and make the refusal vacuous.
+  # An onboarded but read-only store clears the auth preflight and is then
+  # refused by the trust registration as unwritable. Root writes through the
+  # mode bits, which would make the refusal vacuous.
   if [ "$(id -u)" = 0 ]; then
     pass "fm-spawn.sh: a claude secondmate spawn refuses when home trust cannot be recorded (skipped as root)"
     return 0
   fi
   seed_secondmate_home "$home" failclosed-n1 clone
-  mkdir -p "$case_dir/claude-config"
-  ln -s /etc/passwd "$case_dir/claude-config/.claude.json"
+  fm_test_onboard_claude_store "$case_dir/claude-config"
+  chmod 444 "$case_dir/claude-config/.claude.json"
   out=$(spawn_secondmate_claude "$case_dir" "$home" failclosed-n1)
   expect_code 1 $? "a secondmate spawn whose trust registration is refused must fail: $out"
   assert_contains "$out" "workspace trust" "the spawn did not report the trust refusal"
@@ -838,6 +876,7 @@ test_corrupt_store_fails_closed
 test_missing_node_is_refused
 test_scope_refusal_stays_fail_closed_without_node
 test_claude_spawn_pretrusts_its_worktree_and_reaches_the_brief
+test_named_pool_spawn_trusts_the_store_the_worker_reads
 test_refused_spawn_leaves_no_task_state
 test_secondmate_standalone_clone_home_is_trusted
 test_secondmate_leased_worktree_home_is_trusted

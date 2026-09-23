@@ -94,6 +94,7 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse
+  fm_test_fake_claude_cli "$fakebin"
   printf '%s\n' "$fakebin"
 }
 
@@ -127,7 +128,7 @@ run_spawn() {
   # A claude spawn pre-registers workspace trust in the launching user's own
   # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
   # without it this suite would write the developer's real ~/.claude.json.
-  mkdir -p "$home/user-home"
+  fm_test_onboard_claude_store "$home/user-home"
   env -u FM_TRACE_CONTEXT \
     FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -149,7 +150,7 @@ run_spawn_tc() {
   # A claude spawn pre-registers workspace trust in the launching user's own
   # store (bin/fm-claude-trust.sh), so it runs against a throwaway HOME;
   # without it this suite would write the developer's real ~/.claude.json.
-  mkdir -p "$home/user-home"
+  fm_test_onboard_claude_store "$home/user-home"
   env FM_TRACE_CONTEXT="$tc" \
     FM_ROOT_OVERRIDE='' FM_HOME="$home" HOME="$home/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -221,7 +222,7 @@ run_two_level() {
   # A claude secondmate spawn pre-registers workspace trust for the HOME it
   # launches into (bin/fm-claude-trust.sh), so this runs against a throwaway
   # HOME; without it this suite would write the developer's real ~/.claude.json.
-  mkdir -p "$base/user-home"
+  fm_test_onboard_claude_store "$base/user-home"
   env FM_TRACE_CONTEXT="$penv" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" HOME="$base/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \
@@ -248,7 +249,7 @@ run_two_level() {
   wlog="$base/worker-launch.log"
   wfake=$(make_spawn_fakebin "$base/w-fake")
   : > "$wlog"
-  mkdir -p "$sm/user-home"
+  fm_test_onboard_claude_store "$sm/user-home"
   env FM_TRACE_CONTEXT="$TL_ENV_TC" TRACEPARENT="$TL_CARRIER" \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$sm" HOME="$sm/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$sm/state" FM_DATA_OVERRIDE="$sm/data" \
@@ -398,7 +399,7 @@ test_duplicate_secondmate_spawn_does_not_converge_trace_context() {
   # A claude secondmate spawn pre-registers workspace trust for the HOME it
   # launches into (bin/fm-claude-trust.sh), so this runs against a throwaway
   # HOME; without it this suite would write the developer's real ~/.claude.json.
-  mkdir -p "$base/user-home"
+  fm_test_onboard_claude_store "$base/user-home"
   out=$(env -u FM_TRACE_CONTEXT \
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$prim" HOME="$base/user-home" CLAUDE_CONFIG_DIR='' \
     FM_STATE_OVERRIDE="$prim/state" FM_DATA_OVERRIDE="$prim/data" \

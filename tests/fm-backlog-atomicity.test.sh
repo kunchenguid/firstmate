@@ -96,6 +96,10 @@ exit 0
 SH
   chmod +x "$fakebin/tmux"
   fm_fake_exit0 "$fakebin" treehouse gh gh-axi no-mistakes
+  # A claude spawn preflights the default profile's ambient store: its login
+  # and first-run onboarding (bin/fm-claude-auth.sh).
+  fm_test_fake_claude_cli "$fakebin"
+  fm_test_onboard_claude_store "$case_dir/user-home"
 
   fm_git_init_commit "$case_dir/project"
   fm_git_add_origin "$case_dir/project" "$case_dir/project.origin.git"
@@ -2775,7 +2779,7 @@ test_spawn_refuses_a_special_file_tasks_config() {
   rm -f "$home/.tasks.toml"
   mkfifo "$home/.tasks.toml"
 
-  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" HOME="$case_dir/user-home" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$case_dir/wt" TMUX="fake,1,0" \
     CLAUDE_CONFIG_DIR='' \
     PATH="$case_dir/fakebin:$PATH" \

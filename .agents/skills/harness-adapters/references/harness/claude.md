@@ -14,6 +14,14 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 | Effort | `--effort <low\|medium\|high\|xhigh\|max>`, verified on 2.1.196. |
 | Permissions | `--dangerously-skip-permissions` by default, or `--permission-mode auto` when `config/claude-permission-mode` is `auto`; the `auto` shape verified on 2.1.269, and `../../../../../docs/configuration.md` "Claude permission mode" owns the file. |
 
+## Profile authentication preflight
+
+`../../../../../docs/configuration.md` "Claude profiles" owns `config/claude-profiles.json`, named capacity pools such as `claude-max-a`, and setup-token probes.
+Before a Claude launch, `../../../../../bin/fm-spawn.sh` calls `../../../../../bin/fm-claude-auth.sh check --profile <id>` and refuses before endpoint creation unless the bounded Claude vendor probe reports an authenticated session with that profile's selected config directory.
+That section also owns how a checked profile's config directory reaches the launch and trust registration, what the preflight prints, and the one-time interactive setup a named pool needs before it is launch-ready.
+A named pool keeps its Bypass Permissions and external-CLAUDE.md-import consents in its own store and firstmate can answer neither dialog, so the preflight additionally requires an operator attestation recorded by `../../../../../bin/fm-claude-auth.sh attest`; a pool whose attestation is absent or stale is refused before any resource is created.
+Any profile, `default` included, whose store has not completed Claude's first-run onboarding is refused the same way, because the worker would open on an onboarding screen the key plane cannot drive.
+
 ## Workspace trust
 
 Claude gates a folder it has never seen behind an interactive workspace-trust dialog (titled "Quick safety check: Is this a project you created or one you trust?"), so every fresh task worktree would hit it, and so would every secondmate home no operator has opened by hand.

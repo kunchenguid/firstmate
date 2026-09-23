@@ -45,7 +45,15 @@
 # convergence point inherits it - no other change needed. config/secondmate-harness
 # is deliberately NOT in the list: it is the primary's own setting for launching
 # secondmates, and a secondmate never spawns secondmates, so it must not flow
-# downstream.
+# downstream. config/claude-profiles.json is deliberately NOT in the list
+# either: its values are absolute local paths to per-account Claude credential
+# stores and setup-token material, so copying them downstream - and, through
+# bin/fm-remote-inherit-push.sh, onto remote homes - would name credential
+# locations that do not exist there, or worse, that do and belong to someone
+# else. Named Claude pools are per-home configuration installed through the
+# authorized credential path in each home, reusing the same pool ids where the
+# fleet shares them, so inherited config/crew-dispatch.json rules naming
+# claude-max-a resolve locally in every home that has been set up for it.
 #
 # That single declaration is also the ONE owner of the inherited-material
 # allowlist for remote routes: bin/fm-remote-inherit-push.sh (sender) and

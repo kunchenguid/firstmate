@@ -14,6 +14,9 @@ TMP_ROOT=$(fm_test_tmproot fm-backend-orca-tests)
 # and adds no launch prefix, since fm-spawn only prefixes a non-empty value.
 SPAWN_HOME="$TMP_ROOT/user-home"
 mkdir -p "$SPAWN_HOME"
+# A claude spawn is refused unless the default profile's ambient store probes
+# logged in and has finished first-run onboarding (bin/fm-claude-auth.sh).
+fm_test_onboard_claude_store "$SPAWN_HOME"
 
 write_spawn_brief() {  # <data-dir> <id>
   local data=$1 id=$2
@@ -55,6 +58,7 @@ fi
 exit 0
 SH
   chmod +x "$fb/orca"
+  fm_test_fake_claude_cli "$fb"
   printf '%s\n' "$fb"
 }
 
