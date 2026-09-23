@@ -2,11 +2,12 @@
 # Merge a task's PR or MR after recording pr= and any available pr_head= through
 # bin/fm-pr-check.sh, so teardown can verify landed work after squash merges.
 # The full canonical URL is parsed by bin/fm-pr-lib.sh. A GitHub pull request is
-# addressed through gh by the derived owner and repository; a GitLab merge
-# request is addressed through glab by the project URL rebuilt from the parsed
-# host and path, so any instance works and no host is hardcoded. A Gerrit change
-# is refused outright: that adapter is read-only, and the refusal at the parse
-# below owns why.
+# addressed through gh by the derived owner and repository, with GH_HOST and a
+# host-qualified repository when the parsed host is a GitHub Enterprise Server
+# instance; a GitLab merge request is addressed through glab by the project URL
+# rebuilt from the parsed host and path, so any instance works and no host is
+# hardcoded. A Gerrit change is refused outright: that adapter is read-only, and
+# the refusal at the parse below owns why.
 #
 # Merge method on GitHub defaults to --squash when the caller passes none of
 # --squash, --merge, --rebase, or --method after the optional -- separator.
@@ -145,6 +146,14 @@ PR_PATH=$FM_PR_PATH
 PR_OWNER=$FM_PR_OWNER
 PR_REPO=$FM_PR_REPO
 PR_NUMBER=$FM_PR_NUMBER
+# gh resolves the instance from GH_HOST rather than any ambient default, and
+# it takes owner/repository on github.com but host/owner/repository on an
+# enterprise instance, both rebuilt from the parsed identity.
+if [ "$PROVIDER" = github ] && [ "$PR_HOST" != github.com ]; then
+  GH_REPO_SPEC="$PR_HOST/$PR_OWNER/$PR_REPO"
+else
+  GH_REPO_SPEC="$PR_OWNER/$PR_REPO"
+fi
 # glab resolves the instance from the project URL passed to -R, so the host is
 # rebuilt from the parsed identity rather than read from any ambient default.
 PROJECT_URL="https://$FM_PR_HOST/$FM_PR_PATH"
@@ -589,7 +598,8 @@ github_verify_mergeable() {
   local total=0 named=0 refusals=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
-  if ! json=$(gh pr view "$URL" --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
+  if ! json=$(GH_HOST="$PR_HOST" gh pr view "$PR_NUMBER" --repo "$GH_REPO_SPEC" \
+    --json state,isDraft,mergeable,mergeStateStatus,headRefOid,baseRefName,statusCheckRollup 2>/dev/null) \
     || [ -z "$json" ]; then
     echo "error: could not read the GitHub pull request state before merging" >&2
     return 1
@@ -699,7 +709,7 @@ github_read_outcome_with_gh() {
   local state='' merged='' queued='' base=''
 
   # shellcheck disable=SC2016  # GraphQL variables are literal query syntax.
-  if ! fields=$(gh api graphql \
+  if ! fields=$(GH_HOST="$PR_HOST" gh api graphql \
     -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged isInMergeQueue baseRefName}}}' \
     -F "owner=$PR_OWNER" -F "repo=$PR_REPO" -F "number=$PR_NUMBER" \
     --jq '.data.repository.pullRequest | "state=" + (.state // ""), "merged=" + (.merged | tostring), "queued=" + (.isInMergeQueue | tostring), "base=" + (.baseRefName // "")' \
@@ -735,7 +745,7 @@ FIELDS
 
 github_read_outcome_with_gh_axi() {
   local output state
-  if ! output=$(gh-axi pr view "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" 2>/dev/null); then
+  if ! output=$(GH_HOST="$PR_HOST" gh-axi pr view "$PR_NUMBER" --repo "$GH_REPO_SPEC" 2>/dev/null); then
     return 1
   fi
   if ! state=$(printf '%s\n' "$output" | awk '
@@ -816,7 +826,7 @@ github_read_queue_method() {
   [ -n "$FM_PR_GITHUB_BASE" ] || return 0
   branch_path=$(github_urlencode_path_segment "$FM_PR_GITHUB_BASE")
   api_err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-queue-rules.XXXXXX") || return 0
-  if ! methods=$(gh api \
+  if ! methods=$(GH_HOST="$PR_HOST" gh api \
     --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" \
     --jq '.[] | select(.type == "merge_queue") | "merge_method=" + (.parameters.merge_method // "")' \
     2>"$api_err"); then
@@ -1159,7 +1169,7 @@ case "$PROVIDER" in
     [ "$away_status" -eq 0 ] || exit "$away_status"
     refuse_github_queue_while_away || exit 2
     merge_status=0
-    merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
+    merge_output=$(GH_HOST="$PR_HOST" gh pr merge "$PR_NUMBER" --repo "$GH_REPO_SPEC" \
       --match-head-commit "$FM_PR_MERGE_HEAD" \
       "${merge_args[@]+"${merge_args[@]}"}" "$@" 2>&1) || merge_status=$?
     if [ "$merge_status" -eq 0 ]; then

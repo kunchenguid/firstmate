@@ -139,6 +139,9 @@ SH
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+# A case can name the GH_HOST a call must carry, so a call that addresses any
+# other instance, or none, fails like a forge error and the poll stays silent.
+[ -z "${FM_TEST_GH_HOST_WANT:-}" ] || [ "${GH_HOST-}" = "$FM_TEST_GH_HOST_WANT" ] || exit 1
 case "${1:-} ${2:-}" in
   "api graphql")
     printf '%s\n' \
@@ -407,10 +410,19 @@ INVALID_URLS=(
   'https://github.com/o/r/pull/1/files'
   'https://github.com/o/r/pull/1?q=x'
   'https://github.com/o/r/pull/1#f'
-  'https://github.com.evil/o/r/pull/1'
-  'https://evilgithub.com/o/r/pull/1'
   'https://gıthub.com/o/r/pull/1'
-  'https://xn--gthub-3va.com/o/r/pull/1'
+  'https://git.example.com/o/r/pull/1/'
+  'https://user@git.example.com/o/r/pull/1'
+  'https://git.example.com:443/o/r/pull/1'
+  'https://git.example.com./o/r/pull/1'
+  'https://..git.example.com/o/r/pull/1'
+  'https://x.github.com/o/r/pull/1'
+  'https://Git.example.com/o/r/pull/1'
+  'https://git.example.com/-/o/r/pull/1'
+  'https://git.example.com/o/r/issues/1'
+  'https://git.example.com/o/r/pull/01'
+  'https://git.example.com/o/r/pull/1?q=x'
+  'http://git.example.com/o/r/pull/1'
   'http://github.com/o/r/pull/1'
   'ssh://github.com/o/r/pull/1'
   'git://github.com/o/r/pull/1'
@@ -466,11 +478,14 @@ UNSAFE_LIFECYCLE_IDS=(
 )
 
 test_parser_matrix() {
-  local id row url owner repo number
+  local id row url host owner repo number
   while IFS='|' read -r url owner repo number; do
     [ -n "$url" ] || continue
     fm_pr_url_parse "$url" || fail "parser rejected canonical URL"
+    [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag a canonical URL as github"
     [ "$FM_PR_URL" = "$url" ] || fail "parser changed canonical URL"
+    [ "$FM_PR_HOST" = github.com ] || fail "parser returned wrong SaaS host"
+    [ "$FM_PR_PATH" = "$owner/$repo" ] || fail "parser returned wrong project path"
     [ "$FM_PR_OWNER" = "$owner" ] || fail "parser returned wrong owner"
     [ "$FM_PR_REPO" = "$repo" ] || fail "parser returned wrong repository"
     [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong PR number"
@@ -478,6 +493,24 @@ test_parser_matrix() {
 https://github.com/a/b/pull/1|a|b|1
 https://github.com/my-org/repo/pull/42|my-org|repo|42
 https://github.com/Owner/repo-name_with.parts/pull/123456|Owner|repo-name_with.parts|123456
+EOF
+  while IFS='|' read -r url host owner repo number; do
+    [ -n "$url" ] || continue
+    fm_pr_url_parse "$url" || fail "parser rejected a canonical enterprise pull request URL"
+    [ "$FM_PR_PROVIDER" = github ] || fail "parser did not tag an enterprise pull request URL as github"
+    [ "$FM_PR_URL" = "$url" ] || fail "parser changed a canonical enterprise pull request URL"
+    [ "$FM_PR_HOST" = "$host" ] || fail "parser returned wrong enterprise host"
+    [ "$FM_PR_PATH" = "$owner/$repo" ] || fail "parser returned wrong enterprise project path"
+    [ "$FM_PR_OWNER" = "$owner" ] || fail "parser returned wrong enterprise owner"
+    [ "$FM_PR_REPO" = "$repo" ] || fail "parser returned wrong enterprise repository"
+    [ "$FM_PR_NUMBER" = "$number" ] || fail "parser returned wrong enterprise PR number"
+  done <<'EOF'
+https://git.example.com/o/r/pull/1|git.example.com|o|r|1
+https://git.example.co.uk/my-org/repo_name.with-dots/pull/42|git.example.co.uk|my-org|repo_name.with-dots|42
+https://code.internal/team/ci-runner/pull/123456|code.internal|team|ci-runner|123456
+https://github.com.evil/o/r/pull/1|github.com.evil|o|r|1
+https://evilgithub.com/o/r/pull/1|evilgithub.com|o|r|1
+https://xn--gthub-3va.com/o/r/pull/1|xn--gthub-3va.com|o|r|1
 EOF
   while IFS='|' read -r url host path number; do
     [ -n "$url" ] || continue
@@ -2040,6 +2073,76 @@ EOF
   pass "GitLab merge requests are followed on any instance and never wake falsely"
 }
 
+test_ghes_merge_watch() {
+  local dir state out rc url head
+  dir=$(make_case ghes-merge-watch)
+  state="$dir/home/state"
+  head=0123456789abcdef0123456789abcdef0123456789
+  url=https://git.example.com/kids/ms-service/pull/273
+
+  # The entrypoint that used to refuse this URL as an invalid PR check request
+  # records and arms it now.
+  write_task_meta "$dir" task-a
+  set +e
+  out=$(FM_TEST_GH_HOST_WANT=git.example.com run_check_entry "$dir" task-a "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "arming a GHES watch failed: $out"
+  [ "$(cat "$state/task-a.pr-poll")" = "github
+$url
+git.example.com
+kids/ms-service
+273" ] || fail "published GHES sidecar bytes were not exact"
+  grep -qxF "pr=$url" "$state/task-a.meta" || fail "arming did not record the GHES pr= line"
+
+  # Only an exact merged state wakes firstmate, and every gh call must carry
+  # the instance's own host; the fake refuses to answer any call that does not.
+  for value in OPEN CLOSED '' not-a-state; do
+    out=$(FM_TEST_GH_STATE="$value" FM_TEST_GH_HOST_WANT=git.example.com run_poll "$dir")
+    [ -z "$out" ] || fail "GHES poll emitted for a non-merged state"
+  done
+  out=$(FM_TEST_GH_STATE=MERGED FM_TEST_GH_HOST_WANT=git.example.com run_poll "$dir")
+  [ "$out" = merged ] || fail "GHES poll did not emit exactly one merged line"
+  out=$(FM_TEST_GH_STATE=MERGED FM_TEST_GH_FAIL=1 run_poll "$dir")
+  [ -z "$out" ] || fail "GHES poll emitted after a gh failure"
+
+  # The poll addresses the instance by number and host-qualified repository,
+  # never by a URL the CLI would resolve against its own default host.
+  grep -qxF -- "pr view 273 --repo git.example.com/kids/ms-service --json state -q .state" "$dir/gh.log" \
+    || fail "GHES poll did not address gh by number and host-qualified repository"
+  ! grep -qF -- "$url" "$dir/gh.log" \
+    || fail "GHES poll passed a pull request URL to gh"
+
+  # A doctored sidecar cannot redirect the poll: the stored parts must rebuild
+  # the stored URL exactly.
+  printf '%s\n%s\n%s\n%s\n%s\n' github "$url" elsewhere.example kids/ms-service 273 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GH_STATE=MERGED FM_TEST_GH_HOST_WANT=git.example.com run_poll "$dir")
+  [ -z "$out" ] || fail "GHES poll emitted for a sidecar whose host was swapped"
+  printf '%s\n%s\n%s\n%s\n%s\n' github "$url" git.example.com kids/other 273 \
+    > "$state/task-a.pr-poll"
+  out=$(FM_TEST_GH_STATE=MERGED FM_TEST_GH_HOST_WANT=git.example.com run_poll "$dir")
+  [ -z "$out" ] || fail "GHES poll emitted for a sidecar whose project was swapped"
+
+  # The merge path addresses the forge the URL names, with every gh call
+  # carrying the instance's host.
+  write_task_meta "$dir" task-c
+  : > "$dir/gh.log"
+  ln -sf "$REAL_JQ" "$dir/fakebin/jq"
+  set +e
+  out=$(FM_TEST_GH_HOST_WANT=git.example.com run_merge_entry "$dir" task-c "$url" 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || fail "merge wrapper refused a mergeable GHES pull request: $out"
+  printf '%s\n' "$out" | grep -qF "verified: $url is merged" \
+    || fail "merge wrapper did not verify a landed GHES merge: $out"
+  grep -qxF -- "pr merge 273 --repo git.example.com/kids/ms-service --match-head-commit $head --squash" "$dir/gh.log" \
+    || fail "merge wrapper did not address gh with the host-qualified repository"
+  [ ! -s "$dir/gh-axi.log" ] || fail "merge wrapper reached gh-axi while gh answered"
+
+  pass "GitHub Enterprise Server pull requests are followed and merged on their own host"
+}
+
 seed_canonical_poll() {
   local dir=$1 id=$2 url=$3 template=${4:-$POLL} state provider host path number
   state="$dir/home/state"
@@ -3386,6 +3489,7 @@ test_gerrit_merge_watch
 test_gerrit_arming_records_no_patch_set_revision
 test_gerrit_ready_gate_reads_the_published_tree
 test_gerrit_nm_ready_gate_requires_recovered_custody
+test_ghes_merge_watch
 test_merged_poll_retires_once
 test_merged_poll_reregistration_after_notification_is_absorbed
 test_merged_poll_retries_a_failed_upward_report

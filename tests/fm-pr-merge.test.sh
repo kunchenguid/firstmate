@@ -141,6 +141,9 @@ SH
   cat > "$case_dir/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
+# A case can name the GH_HOST a call must carry, so a call that addresses any
+# other instance, or none, fails like a forge error would.
+[ -z "${FM_TEST_GH_HOST_WANT:-}" ] || [ "${GH_HOST-}" = "$FM_TEST_GH_HOST_WANT" ] || exit 1
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
@@ -453,6 +456,32 @@ test_verified_merge_records_pr_and_head() {
     "records-before-merge: pr_head= was not recorded"
   assert_logged_gh_merge "$case_dir" 9 example/repo --squash
   pass "fm-pr-merge records pr= and pr_head= for a verified GitHub merge"
+}
+
+test_ghes_merge_addresses_its_own_host() {
+  local case_dir rc head
+  head=deadbeefcafefeed0000000000000000deadbeef
+  case_dir=$(make_case ghes-merge-own-host)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" "$head"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  FM_TEST_GH_HOST_WANT=git.example.com \
+    run_pr_merge "$case_dir" task-x1 https://git.example.com/example/repo/pull/9 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "ghes-merge-own-host: fm-pr-merge should succeed"
+  assert_grep 'pr=https://git.example.com/example/repo/pull/9' "$case_dir/state/task-x1.meta" \
+    "ghes-merge-own-host: pr= was not recorded"
+  assert_grep "pr_head=$head" "$case_dir/state/task-x1.meta" \
+    "ghes-merge-own-host: pr_head= was not recorded"
+  assert_logged_gh_merge "$case_dir" 9 git.example.com/example/repo --squash
+  assert_grep 'pr view 9 --repo git.example.com/example/repo' "$case_dir/gh.log" \
+    "ghes-merge-own-host: the pre-merge read was not addressed to the instance's host"
+  pass "fm-pr-merge verifies and merges a GitHub Enterprise Server pull request on its own host"
 }
 
 # The forge call is the point of no return: once gh-axi has merged, nothing this
@@ -2159,6 +2188,7 @@ test_github_closed_unqueued_outcome_omits_retry_flags
 test_github_agreeing_queue_rules_keep_retry_guidance
 test_github_conflicting_queue_rules_report_ambiguity
 test_verified_merge_records_pr_and_head
+test_ghes_merge_addresses_its_own_host
 test_pr_metadata_is_recorded_before_the_forge_call
 test_merge_failure_propagates_after_recording
 test_github_open_unqueued_outcome_refuses

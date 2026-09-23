@@ -53,7 +53,11 @@ esac
 # a doctored sidecar cannot redirect this poll at another host or project.
 case "$provider" in
   github)
-    [ "$host" = github.com ] || exit 0
+    [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || exit 0
+    case "$host" in
+      .*|*.|*..*|*[!a-z0-9.-]*) exit 0 ;;
+      *.github.com) exit 0 ;;
+    esac
     owner=${path%%/*}
     repo=${path#*/}
     [ "${#owner}" -ge 1 ] && [ "${#owner}" -le 39 ] || exit 0
@@ -64,8 +68,14 @@ case "$provider" in
     case "$repo" in
       .|..|*[!A-Za-z0-9._-]*) exit 0 ;;
     esac
-    [ "$url" = "https://github.com/$owner/$repo/pull/$number" ] || exit 0
-    state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    [ "$url" = "https://$host/$owner/$repo/pull/$number" ] || exit 0
+    # github.com is addressed exactly as before; an enterprise instance takes
+    # GH_HOST plus a host-qualified repository, both from the validated record.
+    if [ "$host" = github.com ]; then
+      state=$(gh pr view "$url" --json state -q .state 2>/dev/null) || exit 0
+    else
+      state=$(GH_HOST="$host" gh pr view "$number" --repo "$host/$owner/$repo" --json state -q .state 2>/dev/null) || exit 0
+    fi
     [ "$state" = MERGED ] && printf '%s\n' merged
     ;;
   gitlab)

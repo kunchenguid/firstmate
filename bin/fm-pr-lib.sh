@@ -9,10 +9,11 @@
 # arbitrarily nested project name on Gerrit, where "number" is the change
 # number. A GitLab or Gerrit project can sit at any depth, so no
 # owner/repository pair can address one and the sidecar carries the whole path
-# instead. Both also run on self-hosted instances, and Gerrit runs nowhere else,
-# so the host is part of that identity rather than a constant. Every consumer re-derives the identity
-# from the stored URL and refuses any record whose parts do not reconstruct that
-# exact URL.
+# instead. Each forge also runs on more than one host: GitHub on github.com and
+# on GitHub Enterprise Server instances, GitLab on gitlab.com and self-hosted,
+# and Gerrit only self-hosted, so the host is part of the identity rather than a
+# constant. Every consumer re-derives the identity from the stored URL and
+# refuses any record whose parts do not reconstruct that exact URL.
 #
 # A validated exact merged result is retired through a private receipt only
 # after its durable wake is appended.
@@ -115,19 +116,14 @@ fm_task_id_creation_valid() {
   [ "${#id}" -le 64 ]
 }
 
-# GitLab and Gerrit both serve self-hosted instances, so the host is part of the
-# identity rather than a constant. It is accepted only as a lowercase DNS name
-# with no userinfo, port, or trailing dot, which keeps one canonical spelling per
-# change. github.com is refused here even though its shape is otherwise valid:
-# it is GitHub's own host and never another forge's instance, so a URL like
-# https://github.com/o/r/-/merge_requests/1 (a typo'd or spoofed GitHub URL)
-# would otherwise be armed as a watch that can never succeed.
-fm_pr_forge_host_valid() {
+# The one host class every forge accepts: a lowercase DNS name with no userinfo,
+# port, or trailing dot, which keeps one canonical spelling per record. Each
+# forge's validator layers its own domain reservations on top of it.
+fm_pr_host_dns_valid() {
   local host=${1-} label
   local LC_ALL=C
   local -a labels
   [ "${#host}" -ge 1 ] && [ "${#host}" -le 253 ] || return 1
-  [ "$host" != github.com ] || return 1
   case "$host" in
     .*|*.|*..*|*[!a-z0-9.-]*) return 1 ;;
   esac
@@ -138,6 +134,29 @@ fm_pr_forge_host_valid() {
       -*|*-) return 1 ;;
     esac
   done
+}
+
+# GitLab and Gerrit both serve self-hosted instances, so the host is part of the
+# identity rather than a constant. github.com is refused here even though its
+# shape is otherwise valid: it is GitHub's own host and never another forge's
+# instance, so a URL like https://github.com/o/r/-/merge_requests/1 (a typo'd or
+# spoofed GitHub URL) would otherwise be armed as a watch that can never succeed.
+fm_pr_forge_host_valid() {
+  local host=${1-}
+  [ "$host" != github.com ] || return 1
+  fm_pr_host_dns_valid "$host"
+}
+
+# A GitHub Enterprise Server instance serves GitHub's own /pull/<n> route on
+# the customer's host, so that host is part of the identity too. github.com is
+# the SaaS branch's pinned host, and a github.com subdomain is a GitHub-owned
+# domain that no customer can deploy an instance on, so both are refused here.
+fm_pr_github_host_valid() {
+  local host=${1-}
+  case "$host" in
+    github.com|*.github.com) return 1 ;;
+  esac
+  fm_pr_host_dns_valid "$host"
 }
 
 # A GitLab project path is group[/subgroup...]/project, so at least two
@@ -222,6 +241,27 @@ fm_pr_url_parse() {
     # shellcheck disable=SC2034
     FM_PR_REPO=${BASH_REMATCH[2]}
     FM_PR_NUMBER=${BASH_REMATCH[3]}
+    return 0
+  fi
+  # A GitHub Enterprise Server instance serves the same /pull/<n> route on the
+  # customer's own host, so the host joins the identity exactly as on GitLab.
+  # The owner and repository keep the GitHub rules the SaaS branch above uses.
+  pattern='^https://([a-z0-9.-]{1,253})/([A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]{0,37}[A-Za-z0-9])/([A-Za-z0-9._-]{1,100})/pull/([1-9][0-9]*)$'
+  if [[ "$raw" =~ $pattern ]]; then
+    host=${BASH_REMATCH[1]}
+    fm_pr_github_host_valid "$host" || return 1
+    [[ "${BASH_REMATCH[2]}" != *--* ]] || return 1
+    [ "${BASH_REMATCH[3]}" != . ] && [ "${BASH_REMATCH[3]}" != .. ] || return 1
+    FM_PR_PROVIDER=github
+    FM_PR_URL=$raw
+    FM_PR_HOST=$host
+    FM_PR_PATH="${BASH_REMATCH[2]}/${BASH_REMATCH[3]}"
+    # Consumed by bin/fm-pr-merge.sh, which addresses GitHub by owner/repository.
+    # shellcheck disable=SC2034
+    FM_PR_OWNER=${BASH_REMATCH[2]}
+    # shellcheck disable=SC2034
+    FM_PR_REPO=${BASH_REMATCH[3]}
+    FM_PR_NUMBER=${BASH_REMATCH[4]}
     return 0
   fi
   # The path class contains "/" and "-", so this match is greedy to the last
@@ -911,14 +951,16 @@ fm_pr_poll_retirement_receipt_valid() {
   FM_PR_RETIRE_RECEIPT_IDENTITY=$(fm_pr_file_identity "$receipt") || return 1
 }
 
-fm_pr_github_read_record_with_gh() {  # <owner> <repo> <number>
-  local owner=$1 repo=$2 number=$3 fields line total=0 named=0
+fm_pr_github_read_record_with_gh() {  # <host> <owner> <repo> <number>
+  local host=$1 owner=$2 repo=$3 number=$4 fields line total=0 named=0
   local state='' merged=''
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
 
+  # GH_HOST names the instance from the parsed identity, so the read reaches
+  # the forge the record came from rather than gh's configured default.
   # shellcheck disable=SC2016  # GraphQL variables are literal query syntax.
-  if ! fields=$(gh api graphql \
+  if ! fields=$(GH_HOST="$host" gh api graphql \
     -f query='query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$number){state merged}}}' \
     -F "owner=$owner" -F "repo=$repo" -F "number=$number" \
     --jq '.data.repository.pullRequest | "state=" + (.state // ""), "merged=" + (.merged | tostring)' \
@@ -949,11 +991,17 @@ FIELDS
   FM_PR_RECORD_MERGED=$merged
 }
 
-fm_pr_github_read_record_with_gh_axi() {  # <owner> <repo> <number>
-  local owner=$1 repo=$2 number=$3 output state
+fm_pr_github_read_record_with_gh_axi() {  # <host> <owner> <repo> <number>
+  local host=$1 owner=$2 repo=$3 number=$4 repo_spec output state
   FM_PR_RECORD_STATE=
   FM_PR_RECORD_MERGED=
-  if ! output=$(gh-axi pr view "$number" --repo "$owner/$repo" 2>/dev/null); then
+  # gh addresses an enterprise instance by a host-qualified repository.
+  if [ "$host" = github.com ]; then
+    repo_spec="$owner/$repo"
+  else
+    repo_spec="$host/$owner/$repo"
+  fi
+  if ! output=$(GH_HOST="$host" gh-axi pr view "$number" --repo "$repo_spec" 2>/dev/null); then
     return 1
   fi
   if ! state=$(printf '%s\n' "$output" | awk '
@@ -993,7 +1041,7 @@ fm_pr_github_read_record_with_gh_axi() {  # <owner> <repo> <number>
   esac
 }
 
-fm_pr_github_read_record() {  # <owner> <repo> <number>
+fm_pr_github_read_record() {  # <host> <owner> <repo> <number>
   if command -v gh >/dev/null 2>&1 && fm_pr_github_read_record_with_gh "$@"; then
     return 0
   fi
