@@ -39,9 +39,9 @@ A caller that disconnects or whose caller-side wait expires before its job compl
 A caller that dies without running any cleanup of its own is covered by the worker rather than by the caller: each record carries its staging process's identity and the worker cancels a record whose caller is provably gone.
 One case reaches neither: a channel closing on a multiplexed SSH connection leaves the remote command running with its parent process intact, so its job is bounded by the job deadline rather than cancelled early.
 Linux uses the same queue and worker protocol without the Aqua-session requirement.
-A worker stops itself once its configured code root stops being a Firstmate checkout, so a worker started from a worktree cannot outlive that worktree, and `bin/fm-remote-job-reap-orphans.sh` clears any worker already left behind that way without ever touching one whose checkout still exists.
-A job's execution is bounded in age as well: its command group ends at the job deadline, its output capture drains only briefly after that group is gone, and a lane still alive past the deadline is stopped, so one descendant that escaped a job's process group while holding its output cannot keep a home's queue shut and leave later callers holding their transport open.
-The same sweep clears a lane worker whose running job record in its explicitly named queue is past its deadline, which the pruned-code-root rule alone could not see.
+A worker stops itself once its configured code root stops being a Firstmate checkout; [`bin/fm-remote-job-reap-orphans.sh`](../bin/fm-remote-job-reap-orphans.sh) clears workers already left behind and overdue lanes under the safeguards owned by its header.
+A job's execution and output drain are bounded, so a descendant holding an output pipe open cannot keep a home's queue shut indefinitely; the [worker header](../bin/fm-remote-job-worker.sh) owns the drain and lane-grace bounds.
+Output arriving after capture stops is not included in the published result.
 The remote account must provide the required toolchain, the selected worker runtime, the selected session backend, and credentials that work on that host.
 A [worker account pin](configuration.md#worker-account-pin-configclaude-account-configpi-account) for the second mate or its workers lives in the remote home's own configuration on that host.
 The origin URL named for each project must be reachable from the remote account because projects are cloned on that host rather than copied from the primary.

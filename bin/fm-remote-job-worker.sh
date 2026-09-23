@@ -26,10 +26,8 @@
 # bounded by the job deadline, its output capture is drained only for
 # FM_REMOTE_JOB_OUTPUT_DRAIN_SECONDS after that group is gone, and a lane still
 # alive FM_REMOTE_JOB_LANE_GRACE_SECONDS past the deadline is stopped outright.
-# Without those bounds one descendant that escaped a job's process group while
-# holding its stdout kept a lane running forever, so its home's queue never
-# drained and every later caller held an SSH session open until its own
-# deadline - the shape that exhausted a remote host's sessions.
+# These bounds prevent an escaped descendant holding an output pipe from
+# blocking the home's queue and keeping later callers' SSH sessions open.
 #
 # The worker is abandoned when its configured FM_ROOT stops being a genuine
 # Firstmate checkout - the state a pruned no-mistakes gate worktree, a returned
@@ -573,10 +571,8 @@ worker_cleanup_output_capture() { # <job-dir> <stdout-reader> <stderr-reader>
 # command's own process group is already dead by the time this runs, so EOF is
 # immediate unless a descendant escaped that group - a daemonized agent runtime
 # or multiplexer server - and still holds the job's stdout or stderr. An
-# unbounded wait there wedged the lane for good: the record stayed running, the
-# home's lane never freed, and every later caller held an SSH session open until
-# its own deadline, which is how a remote host ran out of sessions. Whatever was
-# captured before the bound is what the record publishes.
+# unbounded wait would prevent publication and keep the home's lane occupied.
+# Whatever was captured before the bound is what the record publishes.
 worker_drain_output_capture() { # <stdout-reader> <stderr-reader>
   local stdout_reader=$1 stderr_reader=$2 watchdog
   {
@@ -592,6 +588,10 @@ worker_drain_output_capture() { # <stdout-reader> <stderr-reader>
   wait "$watchdog" 2>/dev/null || true
 }
 
+# Use write-through cat so stopping capture preserves short output. The copy's
+# file-size limit bounds storage to the next KiB; keeping the FIFO open while
+# switching to a discard reader lets excess output drain without blocking the
+# writer. The signal trap stops and reaps the copy before the reader exits.
 worker_capture_output() {
   local fifo=$1 destination=$2 copy_pid
   exec 3< "$fifo"
@@ -610,9 +610,8 @@ worker_capture_output() {
 }
 
 # Re-establish the record's byte bound on a captured stream. Publication refuses
-# an over-bound file, so this is what keeps a command that wrote more than the
-# bound publishable, exactly as the reader's own cap used to. Called only from
-# that refusal, never speculatively.
+# an over-bound file; this backstop trims the capture limit's KiB rounding to
+# the exact byte bound. Called only for an over-bound stream at publication.
 worker_bound_capture_file() { # <file>
   local file=$1 bytes tmp
   [ -f "$file" ] && [ ! -L "$file" ] || return 0

@@ -24,6 +24,22 @@
 # candidates under it, with no dependence on log paths, process age, or which
 # home is sweeping.
 #
+# The second requires a --lane invocation naming its own absolute queue, a
+# running record there past deadline + FM_REMOTE_JOB_LANE_GRACE_SECONDS, and
+# a claim supervisor PID/start identity matching the lane. Missing or completed
+# records do not qualify: publication may have been reaped before the lane exits.
+# A legacy lane without an explicit queue is not eligible under this condition.
+# The recorded execution group must have a determinate start identity and must
+# differ from both the lane's shared worker group and the sweep's own group.
+#
+# Pruned roots use fm_remote_job_stop_worker_tree to stop the whole worker tree.
+# Overdue lanes use fm_remote_job_stop_recorded_execution to stop only the
+# identified lane supervisor and its recorded command execution, preserving
+# sibling lanes and the serving worker in their shared group. Reports name
+# either "pruned code root" or "abandoned lane" to distinguish those actions.
+# tests/fm-remote-job-orphan-reap.test.sh covers queue binding, completion windows,
+# identity checks, and shared-group sibling survival.
+#
 # Only this user's processes are inspected, and this process, its own process
 # group, and any ancestor are never signalled.
 #
