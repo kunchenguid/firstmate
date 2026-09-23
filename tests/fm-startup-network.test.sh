@@ -382,6 +382,32 @@ EOF
   pass "fm-startup-network: deferred invalid secondmate markers produce durable wakes"
 }
 
+# Only the locked stage inventories slots and processes no record names; its
+# report carries the inventory's lines, so a late finding still wakes.
+test_locked_run_reports_the_orphan_inventory() {
+  local rec home root log pools report
+  rec=$(new_world orphan-inventory)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  printf '%s\n' $$ > "$home/state/.lock"
+  pools="$TMP_ROOT/orphan-inventory/pools"
+  mkdir -p "$pools/pool/1/repo"
+  : > "$pools/pool/treehouse-state.json"
+  printf 'task=lost-task\nhome=%s\n' "$TMP_ROOT/orphan-inventory/gone-home" > "$pools/pool/1/.fm-slot-owner"
+
+  FM_ORPHAN_POOL_ROOT="$pools" FM_ORPHAN_CLAIM_MIN_AGE_MIN=0 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" run --locked 0
+  assert_not_contains "$(run_stage "$home" "$root" report)" "ORPHAN_SLOT:" \
+    "an unlocked probe ran the orphan inventory"
+  FM_ORPHAN_POOL_ROOT="$pools" FM_ORPHAN_CLAIM_MIN_AGE_MIN=0 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" run --locked 1
+  report=$(run_stage "$home" "$root" report)
+  assert_contains "$report" "ORPHAN_SLOT: slot=$pools/pool/1/repo task=lost-task" \
+    "the locked stage did not report the orphan inventory"
+  pass "fm-startup-network: the locked stage reports the orphan inventory"
+}
+
 # The worker outlives the command that launched it. If another session took the
 # lock meanwhile, running the mutating sweeps would sweep underneath that
 # session, so they are refused - and the refusal is reported, not silent.
@@ -767,6 +793,7 @@ test_a_report_publication_failure_is_failed_and_still_wakes
 test_a_successful_result_never_queues_a_wake
 test_an_actionable_successful_result_still_queues_a_wake
 test_deferred_invalid_secondmate_markers_queue_durable_findings
+test_locked_run_reports_the_orphan_inventory
 test_mutating_sweeps_are_refused_when_the_lock_changed_hands
 test_the_stage_bound_is_reported_not_swallowed
 test_an_abandoned_run_reads_as_needing_a_rerun
