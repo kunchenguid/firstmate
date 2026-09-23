@@ -111,12 +111,12 @@ esac
 . "$SCRIPT_DIR/fm-dod-lib.sh"
 PAUSED_VERB=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
 CREWMATE_PAUSE_WAIT_EXAMPLES='an upstream release, a rate-limit reset, a scheduled window, or your own validation round'
-# Single-quoted so the bootout command renders unexpanded in both scaffolds.
-# shellcheck disable=SC2016
+# shellcheck disable=SC2016 # render the bootout command unexpanded in both scaffolds
 NM_TEMP_HOME_RULE='8. Never run the real `no-mistakes` with a temporary `HOME` or `NM_HOME`: on macOS its daemon
    registers a KeepAlive launchd job in your real user domain that respawns forever after the
-   temporary directory is deleted. If it is unavoidable, boot that job out in the same cleanup,
-   with `NM_HOME` naming the temporary no-mistakes root and before deleting it:
+   temporary directory is deleted. If it is unavoidable, boot out that temporary daemon job (never
+   the shared one) in the same cleanup, before deleting the directory and while `NM_HOME` names the
+   temporary root (`$HOME/.no-mistakes` when only `HOME` was temporary):
    `launchctl bootout gui/$(id -u)/com.kunchenguid.no-mistakes.daemon.$(printf %s "$(cd "$NM_HOME" && pwd -P)" | shasum -a 256 | cut -c1-8)`'
 
 resolve_directory_input() {

@@ -43,7 +43,7 @@ test:
     Do not mutate the operator primary checkout, real fleet FM_HOME state, or production credentials, and keep git changes otherwise inside the run worktree.
     Read docs/herdr-backend.md and the bin/fm-herdr-lab.sh header as the owners of Herdr lab mechanics rather than reproducing that manual here.
     Ship or scout briefs that will drive Herdr lifecycle still require --herdr-lab at scaffold time; these Test-agent instructions are not a substitute for that brief flag.
-    Never run the real no-mistakes with a temporary HOME or NM_HOME: on macOS its daemon registers a KeepAlive launchd job in the real user domain that respawns after the temporary directory is deleted.
-    If that is unavoidable, in the same cleanup and before deleting the directory, with NM_HOME naming the temporary no-mistakes root, run: launchctl bootout gui/$(id -u)/com.kunchenguid.no-mistakes.daemon.$(printf %s "$(cd "$NM_HOME" && pwd -P)" | shasum -a 256 | cut -c1-8)
+    Never run the real no-mistakes with a temporary HOME or NM_HOME: on macOS its daemon registers a KeepAlive launchd job in the real user domain that respawns forever after the temporary directory is deleted.
+    If that is unavoidable, boot out that temporary daemon job (never the shared one) in the same cleanup, before deleting the directory and while NM_HOME names the temporary root ($HOME/.no-mistakes when only HOME was temporary): launchctl bootout gui/$(id -u)/com.kunchenguid.no-mistakes.daemon.$(printf %s "$(cd "$NM_HOME" && pwd -P)" | shasum -a 256 | cut -c1-8)
   evidence:
     store_in_repo: true
