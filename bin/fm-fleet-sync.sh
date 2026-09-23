@@ -437,6 +437,10 @@ sync_project() {
   else
     echo "$label: synced $before..$after"
   fi
+  # Best-effort Windows clone sync after a successful fast-forward.
+  if [ -x "$FM_ROOT/bin/fm-windows-sync.sh" ]; then
+    FM_HOME="$FM_HOME" "$FM_ROOT/bin/fm-windows-sync.sh" "$label" 2>&1 || true
+  fi
   return 0
 }
 

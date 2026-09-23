@@ -1242,3 +1242,8 @@ case "$outcome_rc" in
     printf 'actionable: merged %s but could not record the outcome for supervision\n' "$URL" >&2
     ;;
 esac
+
+# Best-effort Windows clone sync after a confirmed merge.
+if [ -x "$SCRIPT_DIR/fm-windows-sync.sh" ]; then
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-windows-sync.sh" "$PR_REPO" 2>&1 || true
+fi
