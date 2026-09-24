@@ -457,6 +457,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/test-host-gates.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/trace-context.md",
       "audience": "maintainer-architecture"
     },

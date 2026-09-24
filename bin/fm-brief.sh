@@ -649,6 +649,9 @@ $SHARED_INFRA_RULE
 
 $INBOX_SECTION
 
+# Test-host heavy work
+When running a full validation gate, k3d reset or baseline, or image build, acquire the target host's lock with \`bin/fm-gate-lock.sh run --host <host> --holder <task-id> -- <command...>\`; do not inspect processes or guess PIDs to decide whether the host is busy. The default lock covers all heavy work on that host. Follow \`docs/test-host-gates.md\` for the devbox/Omarchy split and the shared k3d writer rule.
+
 # Project memory
 If \`AGENTS.md\` or \`CLAUDE.md\` already exists, or if this task produced durable project-intrinsic knowledge, run \`$FM_ROOT/bin/fm-ensure-agents-md.sh .\` in the worktree.
 Record only project knowledge useful to almost every future session.
