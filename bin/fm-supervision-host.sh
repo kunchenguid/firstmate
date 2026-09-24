@@ -50,9 +50,10 @@
 # owner delivers as an ordinary wake; main drains, acknowledges, and ends its
 # turn, and that turn end starts the next park. The boundary is checked on
 # every loop pass, however many closes are already waiting, and an away close
-# arriving when an engine turn could no longer finish before the boundary
-# (the turn bound plus the engine grace) is not handled: the host exits
-# through the same boundary with that close printed ahead of the line.
+# whose engine turn could no longer finish before the boundary (the turn bound
+# plus the engine grace), judged when the close arrives and again just before
+# the turn starts, is not handled: the host exits through the same boundary
+# with that close printed ahead of the line.
 #
 # OWNERSHIP. Before activation, every successor cycle, and every engine turn
 # the host proves this session still holds the fleet lock
@@ -332,12 +333,16 @@ turn_crosses_boundary() {
   [ $(( $(date +%s) - HOST_STARTED + TURN_TIMEOUT + ENGINE_GRACE )) -ge "$PARK_SECONDS" ]
 }
 
-# End the park at the boundary: stop the current arm and this home's watcher,
-# print any close already read so main drains it, then the boundary line.
+# End the park at the boundary: stop the current and successor arms and this
+# home's watcher, print any close already read so main drains it, then the
+# boundary line.
 boundary_exit() {
   retire_arm "$ARM_PID" "$ARM_OUT"
+  retire_arm "$SUCCESSOR_PID" "$SUCCESSOR_OUT"
   ARM_PID=
   ARM_OUT=
+  SUCCESSOR_PID=
+  SUCCESSOR_OUT=
   "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
   print_close
   log_line "boundary	after $(( $(date +%s) - HOST_STARTED ))s"
@@ -562,6 +567,11 @@ handle_away() {  # <reason-lines>
     return 1
   fi
   [ -z "$readback" ] || rm -f "$readback"
+  if turn_crosses_boundary; then
+    rm -f "$TURN_FILE"
+    "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
+    boundary_exit
+  fi
   result=$(mktemp "$STATE/.supervision-host-result.XXXXXX") || result=/dev/null
   errors=$(mktemp "$STATE/.supervision-host-errors.XXXXXX") || errors=/dev/null
   ENGINE_RUNNING=1

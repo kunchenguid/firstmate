@@ -56,7 +56,7 @@ Claude drops the exit 2 of a Stop hook it terminated at the hook timeout ([verif
 A plain watcher park rarely lasts that long, because heartbeat closes wake main, but a host absorbs its own wakes, so it ends its park itself before the tracked 28,800-second registration.
 At the boundary it stops the home's watcher and exits with one `supervision-host: cycle boundary` line; main drains, acknowledges, and ends its turn, and that turn end starts the next park.
 The host checks the boundary on every loop pass, so closes that are already waiting cannot carry it past the boundary.
-It also starts no engine turn that could still be running at the boundary (the turn bound plus the engine grace): that close reaches main ahead of the boundary line instead, and its wake stays durable in the queue.
+It also starts no engine turn that could still be running at the boundary (the turn bound plus the engine grace), judged when the close arrives and again just before the turn starts: that close reaches main ahead of the boundary line instead, and its wake stays durable in the queue.
 One short main turn per boundary is the cost of never losing the park silently.
 
 ## Engine conversations

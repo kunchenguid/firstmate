@@ -471,6 +471,39 @@ test_park_boundary_holds_under_back_to_back_closes() {
   pass "host: waiting closes cannot carry the park past its boundary"
 }
 
+test_park_boundary_rechecked_just_before_the_engine_turn() {
+  local home real_node pid
+  home=$(make_home boundary-late away)
+  real_node=$(command -v node)
+  # Rendering the wake prompt runs after the successor cycle has started; this
+  # shim makes it spend the margin the arrival check allowed, and snapshots
+  # the host record so the successor arm it started can be checked afterwards.
+  cat > "$home/fakebin/node" <<SH
+#!/usr/bin/env bash
+if [ "\${2:-}" = wake-prompt ]; then
+  cp "\$FM_HOME/state/.supervision-host" "\$FM_HOME/host-record-at-render" 2>/dev/null
+  sleep 10
+fi
+exec "$real_node" "\$@"
+SH
+  chmod +x "$home/fakebin/node"
+  FM_SUPERVISION_HOST_PARK_SECONDS=14 FM_SUPERVISION_HOST_TURN_TIMEOUT=3 FM_SUPERVISION_ENGINE_GRACE=1 start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "boundary-late: the host never started a watcher cycle"
+  append_status "$home" 'arrives with just enough margin'
+  wait_until 300 host_exited "$home" || fail "boundary-late: the host did not end its park"
+  [ -s "$home/host-record-at-render" ] || fail "fixture: the close was stopped before the successor started: $(cat "$home/host.out")"
+  assert_re '^signal: .*demo.status' "$home/host.out" "the close read at the boundary must reach main"
+  [ "$(tail -n 1 "$home/host.out")" = "$(grep '^supervision-host: cycle boundary - ' "$home/host.out")" ] \
+    || fail "the close must be printed ahead of the boundary line: $(cat "$home/host.out")"
+  ! ls "$home"/engine-call.* >/dev/null 2>&1 || fail "an engine turn started that could run past the boundary"
+  assert_no_re '	(handled|failed)	turn=' "$home/state/.supervision-host.log" "no engine turn may be logged"
+  while IFS= read -r pid; do
+    kill -0 "$pid" 2>/dev/null && fail "the boundary left the successor arm $pid running"
+  done < <(awk -F '\t' '$1 == "arm" { print $2 }' "$home/host-record-at-render")
+  watcher_live "$home" && fail "the boundary left the watcher running"
+  pass "host: a close whose margin runs out while the successor starts reaches main at the boundary without a turn"
+}
+
 test_unverified_engine_hands_every_away_wake_to_main() {
   local home
   home=$(make_home no-engine away 'pi')
@@ -550,6 +583,7 @@ test_engine_turn_is_bounded_and_its_descendants_reaped
 test_restarted_host_stops_what_a_killed_predecessor_left
 test_park_boundary_ends_the_park_before_the_hook_timeout
 test_park_boundary_holds_under_back_to_back_closes
+test_park_boundary_rechecked_just_before_the_engine_turn
 test_unverified_engine_hands_every_away_wake_to_main
 test_host_outside_the_lock_owner_stands_down
 test_superseded_host_leaves_the_owner_untouched
