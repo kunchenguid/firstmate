@@ -62,6 +62,7 @@ Local tasks continue to delegate to `bin/fm-crew-state.sh` unchanged.
 Load `process-event-sources` before arming a remote source and on every `procevent aime aime-<id> <sequence>` or `procevent ida ida-<id> <sequence>` wake.
 Route the captured result through its provider adapter, never generic acknowledgement.
 Repeating the same provider handler for the same source and sequence is the required idempotent recovery path after restart or uncertain handler completion.
+On a Pi primary, the supervision branch may own only a fully identity-validated task-scoped iDA result wake; it claims that task, repeats the same iDA handler even after runner application, assesses the task-bound report or incomplete outcome, and escalates every authority-bearing next step to main.
 Do not copy raw replay, session, MCP, SSE, tool, message, or output payloads into status events, reports, logs, or captain chat.
 
 ## AIME procedure and compatibility

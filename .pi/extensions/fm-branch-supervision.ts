@@ -670,6 +670,12 @@ export default function (pi: ExtensionAPI) {
   // dispatch order, one at a time (the branch runs drain -> handle -> ack
   // serially by design).
   let branchChain: Promise<void> = Promise.resolve();
+  // Accepted wake turns that have not settled yet. A newly offered iDA result
+  // must fall back to main while the branch is busy unless the current live
+  // row grant already owns that exact result row; accepting an unclaimed
+  // notification merely to queue it would leave neither actor responsible for
+  // the row during the wait.
+  let unsettledWakeOffers = 0;
   // Serializes DELIVERY work. The store scripts and the ownership walk are
   // awaited rather than synchronous now (lib/fm-async-exec.ts), which means a
   // second outcome, a turn boundary, or main's acknowledgement can reach this
@@ -1718,8 +1724,22 @@ ${context.command}
     );
     if (branchBroken && !recoveryProbe) return; // main owns every wake inside the cooldown window
     if (!collectCurrentMainDialog()) return;
+    const idaResultRows = Array.isArray(offer.idaResultRows)
+      ? offer.idaResultRows.filter((row) => /^[0-9]+$/.test(row))
+      : [];
+    if (idaResultRows.length > 0 && unsettledWakeOffers > 0) {
+      const ownedRows = readLiveEligibleRows(state);
+      if (!ownedRows || idaResultRows.some((row) => !ownedRows.includes(row))) return;
+    }
     if (recoveryProbe && providerRecovery) providerRecovery.probeInFlight = true;
-    offer.accept(enqueueWake(offer.message, generation, recoveryProbe));
+    const settlement = enqueueWake(offer.message, generation, recoveryProbe);
+    unsettledWakeOffers += 1;
+    void settlement.then(() => {
+      unsettledWakeOffers = Math.max(0, unsettledWakeOffers - 1);
+    }, () => {
+      unsettledWakeOffers = Math.max(0, unsettledWakeOffers - 1);
+    });
+    offer.accept(settlement);
   });
 
   // Pi awaits every extension event handler, so an awaited ownership read

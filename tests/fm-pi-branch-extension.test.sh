@@ -2103,6 +2103,77 @@ EOF
   pass "a settled branch turn without a durable outcome falls back and releases its grant for main replay"
 }
 
+test_busy_branch_declines_an_unowned_ida_result() {
+  local repo home out status
+  repo="$TMP_ROOT/busy-ida-fallback-root"
+  home="$TMP_ROOT/busy-ida-fallback-home"
+  mkdir -p "$home/state/procevent-inbox" "$home/state/remote-tasks/ida-task" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { bus, dispatch, fire, home, makeOffer, settle }; })()`);
+const { bus, dispatch, fire, home, makeOffer, settle } = globalThis.__t;
+import { appendFileSync, chmodSync, readFileSync, writeFileSync } from "node:fs";
+
+const privateWrite = (path, content) => {
+  writeFileSync(path, content, { mode: 0o600 });
+  chmodSync(path, 0o600);
+};
+const state = `${home}/state`;
+const task = "ida-task";
+const source = `ida-${task}`;
+const marker = "firstmate:ida-task:0123456789abcdef";
+privateWrite(`${state}/${task}.meta`,
+  `kind=scout\nexecutor=remote-agent\nprovider=ida\ntask_type=research\nremote_state=${state}/remote-tasks/${task}\n`);
+privateWrite(`${state}/remote-tasks/${task}/state.json`, JSON.stringify({
+  schema: "fm-remote-agent-task-state.v1", task_id: task, executor: "remote-agent", provider: "ida",
+  task_type: "research", phase: "terminal-success", revision: 2,
+  instruction_file: `${home}/data/${task}/instructions.txt`,
+  instruction_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  outcome: "succeeded", error_class: null, waiter: "terminal", result_availability: "available",
+  result_path: `${state}/remote-tasks/${task}/artifacts/observation.json`, report_path: `${home}/data/${task}/report.md`,
+  provider_state: { region: "sg", identity: "user", session_marker: marker, session_id: "70001", task_id: "80001" },
+}));
+privateWrite(`${state}/procevent-inbox/${source}.7.adapter`, "ida\n");
+privateWrite(`${state}/procevent-inbox/${source}.7.result`, JSON.stringify({
+  schema: "fm-ida-observation.v1", task_id: task, provider: "ida", region: "sg", kind: "session",
+  session_marker: marker, session_id: "70001", task_id_remote: "80001", provider_status: "completed",
+  terminal: true, ambiguous: false, result_availability: "available", result_kind: "text",
+  answer: "verified result", artifact_reference: null, error_class: null,
+}));
+
+await fire("session_start", {});
+let releasePrompt;
+globalThis.__fmPromptGate = new Promise((resolve) => { releasePrompt = resolve; });
+const active = dispatch("signal: task-local wake");
+if (!active.accepted) throw new Error("the setup wake was not accepted");
+await settle(() => globalThis.__fmPromptStarted === true, "active branch prompt");
+const activeRows = readFileSync(`${state}/.branch-eligible-rows`, "utf8").trim().split("\n");
+if (!activeRows.includes("1")) throw new Error(`the active branch did not own its setup row: ${activeRows}`);
+
+appendFileSync(`${state}/.wake-queue`, `1\t2\tcheck\tprocevent:${source}:7\tcheck: procevent ida ${source} 7\n`);
+const idaOffer = makeOffer(`check: procevent ida ${source} 7`, [], false, true);
+idaOffer.idaResultRows = ["2"];
+bus.emit("fm-branch-supervision:dispatch", idaOffer);
+if (idaOffer.accepted) throw new Error("a busy branch accepted an iDA row outside its live grant");
+if (readFileSync(`${state}/.branch-eligible-rows`, "utf8").trim() !== "1") {
+  throw new Error("the declined iDA result changed the active row grant");
+}
+
+releasePrompt();
+const failure = await active.settlement.then(() => null, (error) => error);
+if (!(failure instanceof Error) || !failure.message.includes("produced no durable outcome")) {
+  throw new Error(`setup wake did not finish through its expected no-report fallback: ${String(failure)}`);
+}
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "a busy branch must leave an unowned iDA result on the main fallback path: $out"
+  pass "a busy supervision branch declines an iDA result outside its live row grant"
+}
+
 test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldown() {
   local repo home out status
   repo="$TMP_ROOT/provider-error-root"
@@ -4672,6 +4743,133 @@ EOF
   pass "scopeForUnreadWake excludes every main-only class without vetoing eligible task-local rows, and writes the eligible snapshot"
 }
 
+test_branch_dispatch_routes_only_identity_bound_ida_results() {
+  local repo home out status
+  repo="$TMP_ROOT/dispatch-ida-root"
+  home="$TMP_ROOT/dispatch-ida-home"
+  mkdir -p "$repo/.pi/extensions/lib" "$home/state/procevent-inbox" \
+    "$home/state/remote-tasks/ida-task" "$home/projects/approved"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
+  LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+import { chmodSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const { scopeForUnreadWake } = await import(pathToFileURL(process.env.LIB).href);
+const state = `${process.env.FM_HOME}/state`;
+const task = "ida-task";
+const source = `ida-${task}`;
+const marker = "firstmate:ida-task:0123456789abcdef";
+const privateWrite = (path, content) => {
+  writeFileSync(path, content, { mode: 0o600 });
+  chmodSync(path, 0o600);
+};
+const observation = (localTask = task) => JSON.stringify({
+  schema: "fm-ida-observation.v1",
+  task_id: localTask,
+  provider: "ida",
+  region: "sg",
+  kind: "session",
+  session_marker: marker,
+  session_id: "70001",
+  task_id_remote: "80001",
+  terminal: true,
+  ambiguous: false,
+  result_availability: "available",
+  result_kind: "text",
+  answer: "verified result",
+  error_class: null,
+});
+const writeCapture = (seq, body = observation(), adapter = "ida\n") => {
+  privateWrite(`${state}/procevent-inbox/${source}.${seq}.result`, body);
+  privateWrite(`${state}/procevent-inbox/${source}.${seq}.adapter`, adapter);
+};
+const writeMeta = (provider = "ida") => privateWrite(
+  `${state}/${task}.meta`,
+  `kind=scout\nexecutor=remote-agent\nprovider=${provider}\ntask_type=research\nremote_state=${state}/remote-tasks/${task}\n`,
+);
+writeMeta();
+privateWrite(`${state}/task-a.meta`, `project=${process.env.FM_HOME}/projects/approved\nwindow=fm-window\n`);
+privateWrite(`${state}/remote-tasks/${task}/state.json`, JSON.stringify({
+  schema: "fm-remote-agent-task-state.v1",
+  task_id: task,
+  executor: "remote-agent",
+  provider: "ida",
+  task_type: "research",
+  phase: "terminal-success",
+  revision: 2,
+  instruction_file: `${process.env.FM_HOME}/data/${task}/instructions.txt`,
+  instruction_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  outcome: "succeeded",
+  error_class: null,
+  waiter: "terminal",
+  result_availability: "available",
+  result_path: `${state}/remote-tasks/${task}/artifacts/observation.json`,
+  report_path: `${process.env.FM_HOME}/data/${task}/report.md`,
+  provider_state: { region: "sg", identity: "user", session_marker: marker, session_id: "70001", task_id: "80001" },
+}));
+writeCapture("1");
+writeCapture("2");
+privateWrite(`${state}/procevent-inbox/${source}.1.handled`, "handled\n");
+
+// Out-of-order captures, a repeated capture notification, and a runner-applied
+// result all remain task-scoped branch work. An unrelated check remains main-
+// owned while an ordinary signal remains independently eligible.
+privateWrite(`${state}/.wake-queue`, [
+  `1\t1\tcheck\tprocevent:${source}:2\tcheck: procevent ida ${source} 2`,
+  `1\t2\tcheck\tprocevent:${source}:1\tcheck: procevent ida ${source} 1`,
+  `1\t3\tcheck\tprocevent:${source}:2\tcheck: procevent ida ${source} 2`,
+  "1\t4\tsignal\ttask-a.status\tsignal: task-a.status",
+  "1\t5\tcheck\tx-inbox\tcheck: pending x mention",
+].join("\n") + "\n");
+const mixed = scopeForUnreadWake(state, false);
+if (mixed.eligibleSeqs.join(",") !== "1,2,3,4") {
+  throw new Error(`valid iDA captures or the unrelated signal were not scoped exactly: ${JSON.stringify(mixed)}`);
+}
+if (JSON.stringify([...mixed.eligibleTasks].sort()) !== JSON.stringify(["ida-task", "task-a"])) {
+  throw new Error(`iDA result resolved to the wrong task scope: ${JSON.stringify(mixed)}`);
+}
+if (mixed.eligibleIdaResults.map((result) => result.trigger).join("|") !==
+    `check: procevent ida ${source} 2|check: procevent ida ${source} 1|check: procevent ida ${source} 2`) {
+  throw new Error(`iDA trigger identity was not preserved exactly: ${JSON.stringify(mixed)}`);
+}
+
+const assertMainFallback = (label, row) => {
+  privateWrite(`${state}/.wake-queue`, `${row}\n1\t9\tsignal\ttask-a.status\tsignal: task-a.status\n`);
+  const scope = scopeForUnreadWake(state, false);
+  if (scope.corrupted || scope.eligibleSeqs.join(",") !== "9" || scope.eligibleIdaResults.length !== 0) {
+    throw new Error(`${label} did not stay on the safe main path: ${JSON.stringify(scope)}`);
+  }
+};
+
+assertMainFallback("mismatched queue key", `1\t1\tcheck\tprocevent:${source}:9\tcheck: procevent ida ${source} 1`);
+assertMainFallback("mismatched source task", `1\t1\tcheck\tprocevent:ida-other:1\tcheck: procevent ida ida-other 1`);
+assertMainFallback("path-unsafe task", "1\t1\tcheck\tprocevent:ida-../escape:1\tcheck: procevent ida ida-../escape 1");
+
+writeMeta("aime");
+assertMainFallback("mismatched metadata provider", `1\t1\tcheck\tprocevent:${source}:1\tcheck: procevent ida ${source} 1`);
+writeMeta();
+
+writeCapture("1", observation("other-task"));
+assertMainFallback("mismatched result task", `1\t1\tcheck\tprocevent:${source}:1\tcheck: procevent ida ${source} 1`);
+writeCapture("1");
+
+writeCapture("1", observation(), "aime\n");
+assertMainFallback("mismatched captured adapter", `1\t1\tcheck\tprocevent:${source}:1\tcheck: procevent ida ${source} 1`);
+writeCapture("1");
+
+unlinkSync(`${state}/procevent-inbox/${source}.1.result`);
+symlinkSync(`${state}/procevent-inbox/${source}.2.result`, `${state}/procevent-inbox/${source}.1.result`);
+assertMainFallback("symlinked captured result", `1\t1\tcheck\tprocevent:${source}:1\tcheck: procevent ida ${source} 1`);
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "only exact task-scoped iDA result identities may enter branch supervision: $out"
+  pass "identity-bound iDA results route to the branch while malformed or mismatched notifications stay on main"
+}
+
 # The model picker's bounded scrolling and its search ranking are Pi's own
 # SelectList and fuzzyFilter, so the guarantee only holds while the installed
 # Pi still exports them and still bounds what it renders. Stubs cannot answer
@@ -5496,6 +5694,7 @@ test_requested_healthy_outcome_and_unsolicited_routine_outcome_delivery
 test_captain_outcome_is_exactly_once_across_crash_reload_and_unrelated_response
 test_captain_outcome_processing_turn_is_sequence_keyed_and_re_presented
 test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
+test_branch_dispatch_routes_only_identity_bound_ida_results
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
 test_branch_predrain_recheck_keeps_a_heartbeat_a_co_present_check_arrives_under
@@ -5503,6 +5702,7 @@ test_branch_report_refuses_a_task_the_wake_did_not_name
 test_branch_predrain_recheck_excludes_new_main_owned_row_without_deferring_eligible_work
 test_branch_predrain_needs_decision_keeps_routine_row_branch_eligible
 test_settled_branch_prompt_releases_unacknowledged_grant
+test_busy_branch_declines_an_unowned_ida_result
 test_post_construction_provider_error_falls_back_latches_and_recovers_on_cooldown
 test_selection_change_does_not_corrupt_inflight_provider_state
 test_main_owned_grant_result_falls_back_to_main

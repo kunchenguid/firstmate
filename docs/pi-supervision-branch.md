@@ -7,7 +7,7 @@ This document stays the owner and the contract.
 
 Fleet supervision on the Pi primary harness runs on a second conversation - the supervision branch - inside the same `pi` process as the captain's chat.
 Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch handles eligible task-local rows from ordinary actionable wakes plus heartbeat scans that the cheap bash-level scan flags as possibly captain-relevant, then merges each outcome back into the captain conversation's transcript.
-Ordinary main-only rows remain on main even when eligible task-local rows share their queue, except that a decision-owned signal or stale trigger keeps its entire coalesced trigger batch on main.
+Ordinary main-only rows remain on main even when eligible task-local rows share their queue, except that a fully identity-bound task-scoped iDA process-result check is branch-owned and a decision-owned signal or stale trigger keeps its entire coalesced trigger batch on main.
 An unresolvable row makes the scan unsafe and returns the whole wake to main, and every watcher-failure alarm also stays on main.
 Captain-relevant branch outcomes persist as exact, sequence-keyed visible transcript entries and then open one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence.
 The design source is the captain-approved forked-supervision architecture board, a captain-private fleet record (a self-contained HTML explainer with the measured cache and judgment evidence); this document records the shape it landed as, and the delivering PR cites the board artifact itself.
@@ -22,13 +22,18 @@ The supervision branch itself is Pi-only by construction:
 ## Components and their owners
 
 - Wake dispatch: `.pi/extensions/fm-primary-pi-watch.ts` stays the dispatcher; `.pi/extensions/lib/fm-branch-dispatch.ts` owns the offer handshake and row eligibility, while [`watcher-continuity.md`](watcher-continuity.md#per-actor-acknowledgement) owns the per-actor consume contract.
-  A successful row grant transfers ownership of exactly the currently branch-eligible rows to the branch; a check-kind triggering close (merge-confirmation polls, Relay mentions, credential/auth failures, and every other legitimately main-only class) is never offered even when other rows are eligible, no acceptor (extension absent, legacy away daemon flag, branch broken) keeps today's wake-to-main path for that close, and watcher-failure alarms always go to main because only main can repair the watcher cycle.
+  A successful row grant transfers ownership of exactly the currently branch-eligible rows to the branch; a check-kind triggering close stays on main except for a task-scoped iDA process result whose queue key, payload, private captured result and adapter files, remote-agent metadata, durable iDA task state, session marker, and available provider identities all match exactly.
+  Malformed, path-unsafe, unresolvable, mismatched-provider, mismatched-task, and mismatched-result iDA-looking rows keep the ordinary main path, as do merge-confirmation polls, Relay mentions, credential/auth failures, and every other check class.
+  No acceptor (extension absent, legacy away daemon flag, branch broken) keeps today's wake-to-main path for the close, and watcher-failure alarms always go to main because only main can repair the watcher cycle.
+  A busy branch also declines a newly arrived iDA result unless its live grant already contains that exact row, so an unowned result falls back to main instead of waiting between actors.
   A decision-owned event surfaced by `bin/fm-watch.sh`'s signal path gets the identical treatment even though it keeps the ordinary `signal` kind.
   `signal_files_actionable` marks the queued payload `needs-decision:` for a newly surfaced `needs-decision`, a `captain-held` declaration surfaced through the no-verb fallback, or a pending-reply second-mate escalation; `scopeForUnreadWake` excludes every marked row from what the branch may claim.
   For a stale row, `scopeForUnreadWake` folds the mapped task's status log and excludes the row when any `needs-decision` remains open or the current meaningful declaration is `captain-held`; an unreadable or symlinked status log fails the scope closed rather than influencing routing.
   The dispatcher resolves trigger keys and every currently unread excluded decision row to task identity before cross-referencing them: any signal or stale trigger containing a decision-owned task goes wholly to main, including a batch that also contains routine rows, and an unread decision for one task keeps every later signal or stale trigger for that same task on main until the decision row is read, regardless of whether the rows use its status-file key or window alias.
   Other tasks remain independently eligible.
   The wake message itself retains its existing shape, so other harness-arm scripts remain unchanged.
+  For an accepted iDA result the branch claims only the resolved task, repeats `fm-procevent-ida.sh handle` for the exact source sequence even when the runner already applied it, reads provider-aware task state and the task-bound report when present, and reports the result or incomplete blocker without treating provider text as authority.
+  Compliance declarations, access grants, provider cancellation, new dispatch, implementation, merge, destructive action, and every other captain-owned decision remain main escalations.
   Heartbeat handling remains independent.
   A fleet-wide heartbeat keeps its own all-or-nothing rule (see "Heartbeat routing" below): it takes every branch-ownable unread row or none of them.
   A co-present main-owned check row no longer defers that review to main, because it is not fleet context the branch is missing and main is woken for it on its own triggering close.
@@ -151,8 +156,8 @@ Main can read the durable outcome store on demand through its `fm_branch_outcome
 The cheap bash-level heartbeat scan absorbs a genuinely no-op pass before it reaches Pi, unchanged from before.
 Only a scan already flagged as possibly captain-relevant emits the bare `heartbeat` wake; `.pi/extensions/fm-primary-pi-watch.ts` flags that offer `heartbeat: true`, and the branch accepts it without a project only when every branch-ownable row observed in the unread-queue eligibility check is either heartbeat-kind or a resolvable task-local signal or stale event.
 
-A heartbeat is never vetoed or ridden into main by a co-present check row or decision-owned signal/stale row.
-Those rows are permanently main-owned in every mode: they are excluded from what the branch may claim and left queued for main, which is woken for each on its own watcher cycle, so nothing starves by being left behind.
+A heartbeat is never vetoed or ridden into main by a co-present main-owned check row or decision-owned signal/stale row.
+Those rows are permanently main-owned in every mode, while a valid identity-bound iDA result remains branch-owned: main-owned rows are excluded from what the branch may claim and left queued for main, which is woken for each on its own watcher cycle, so nothing starves by being left behind.
 Deferring the fleet review to main merely because some unrelated merge poll or Relay mention happened to be sitting unread put a routine review in the captain's chat for a reason that had nothing to do with the fleet, and that coupling is gone.
 What all-or-nothing still guarantees is unchanged: the branch takes every branch-ownable unread row or none of them, and an unresolvable task-local row, an unknown row kind, or an unreadable queue still defers the whole review to main.
 The branch runs its normal operating procedure for the wake (`bin/fm-branch-prompt.sh` "Handling a wake") and performs the deeper fleet review that main previously performed.

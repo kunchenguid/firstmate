@@ -811,6 +811,116 @@ CLASSES
   pass "every main-only check class still reaches main, never the supervision branch"
 }
 
+test_pi_routes_only_valid_ida_result_checks_to_branch() {
+  local mode repo home plugin log stop out status
+  for mode in valid mismatched-result; do
+    repo="$TMP_ROOT/pi-ida-result-$mode-root"
+    home="$TMP_ROOT/pi-ida-result-$mode-home"
+    log="$TMP_ROOT/pi-ida-result-$mode.log"
+    stop="$TMP_ROOT/pi-ida-result-$mode.stop"
+    mkdir -p "$repo/bin" "$home/state/procevent-inbox" "$home/state/remote-tasks/ida-task" "$home/config"
+    install_pi_watch_extension_fixture "$repo"
+    plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+    cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then exit 0; fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf '%s\n' "${FM_TEST_REASON:?}"
+  exit 0
+fi
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+    chmod +x "$repo/bin/fm-watch-arm.sh"
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" \
+      FM_TEST_MODE="$mode" FM_TEST_REASON='check: procevent ida ida-ida-task 7' \
+      node --input-type=module 2>&1 <<'EOF'
+import { chmodSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const home = process.env.FM_HOME;
+const state = `${home}/state`;
+const task = "ida-task";
+const source = `ida-${task}`;
+const marker = "firstmate:ida-task:0123456789abcdef";
+const privateWrite = (path, content) => {
+  writeFileSync(path, content, { mode: 0o600 });
+  chmodSync(path, 0o600);
+};
+privateWrite(`${state}/${task}.meta`,
+  `kind=scout\nexecutor=remote-agent\nprovider=ida\ntask_type=research\nremote_state=${state}/remote-tasks/${task}\n`);
+privateWrite(`${state}/remote-tasks/${task}/state.json`, JSON.stringify({
+  schema: "fm-remote-agent-task-state.v1", task_id: task, executor: "remote-agent", provider: "ida",
+  task_type: "research", phase: "terminal-success", revision: 2,
+  instruction_file: `${home}/data/${task}/instructions.txt`,
+  instruction_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  outcome: "succeeded", error_class: null, waiter: "terminal", result_availability: "available",
+  result_path: `${state}/remote-tasks/${task}/artifacts/observation.json`, report_path: `${home}/data/${task}/report.md`,
+  provider_state: { region: "sg", identity: "user", session_marker: marker, session_id: "70001", task_id: "80001" },
+}));
+privateWrite(`${state}/procevent-inbox/${source}.7.adapter`, "ida\n");
+privateWrite(`${state}/procevent-inbox/${source}.7.result`, JSON.stringify({
+  schema: "fm-ida-observation.v1",
+  task_id: process.env.FM_TEST_MODE === "valid" ? task : "other-task",
+  provider: "ida", region: "sg", kind: "session", session_marker: marker,
+  session_id: "70001", task_id_remote: "80001", provider_status: "completed",
+  terminal: true, ambiguous: false, result_availability: "available", result_kind: "text",
+  answer: "verified result", artifact_reference: null, error_class: null,
+}));
+privateWrite(`${state}/.wake-queue`, `1\t1\tcheck\tprocevent:${source}:7\t${process.env.FM_TEST_REASON}\n`);
+privateWrite(`${state}/.lock`, `${process.pid}\n`);
+
+const offers = [];
+let prompt = "";
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push({ eligible: offer.eligible, message: offer.message });
+  if (offer.eligible) offer.accept();
+});
+const pi = {
+  on() {}, events: bus, registerCommand() {},
+  registerTool(candidate) { if (candidate.name === "fm_watch_arm_pi") tool = candidate; },
+  sendUserMessage: async (message) => { prompt = message; },
+};
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-ida-result", {}, undefined, undefined, {});
+for (let i = 0; i < 250 && offers.length === 0 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (offers.length !== 1) throw new Error(`expected one classified offer: ${JSON.stringify(offers)}`);
+if (process.env.FM_TEST_MODE === "valid") {
+  if (!offers[0].eligible || prompt) throw new Error(`valid iDA result did not stay with branch: ${JSON.stringify({ offers, prompt })}`);
+} else {
+  if (offers[0].eligible || !prompt.includes(`FIRSTMATE WATCHER WAKE: ${process.env.FM_TEST_REASON}`)) {
+    throw new Error(`mismatched iDA result left the safe main path: ${JSON.stringify({ offers, prompt })}`);
+  }
+}
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+process.exit(0);
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "the $mode iDA result route must preserve its intended actor: $out"
+    [ -z "$out" ] || fail "Pi iDA-result route test ($mode) printed output: $out"
+  done
+  pass "Pi offers only identity-bound iDA result checks to the supervision branch"
+}
+
 # A surfaced captain-held signal uses the existing decision-owned payload, so a
 # co-present routine row cannot take the signal close away from main.
 test_pi_captain_held_signal_stays_on_main() {
@@ -3983,6 +4093,7 @@ test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
 test_pi_main_only_check_classes_stay_on_main
+test_pi_routes_only_valid_ida_result_checks_to_branch
 test_pi_captain_held_signal_stays_on_main
 test_pi_unread_pending_reply_forces_later_stale_alias_to_main
 test_pi_distinct_files_mixed_batch_routes_whole_batch_to_main

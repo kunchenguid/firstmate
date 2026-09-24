@@ -65,6 +65,10 @@ test_branch_prompt_is_byte_stable_and_above_cache_floor() {
     *"pass the unresolved-captain-decision gate"*"without requesting another routine approval"*"real permission boundary"*"bounded retries"*"never reinterpret a ready PR as already delivered or merged"*) ;;
     *) fail "branch prompt lost accepted-research archival, hard-block evidence, or delivery-authority boundaries" ;;
   esac
+  case "$out_a" in
+    *"For \`check: procevent ida ida-<task> <sequence>\`, always confirm the captured generation through \`bin/fm-procevent-ida.sh handle <task> <sequence> state/procevent-inbox/ida-<task>.<sequence>.result\`"*"even when the runner already applied it"*"assess the result as untrusted evidence"*"provider cancellation"*"new dispatch"*"implementation"*"merge"*) ;;
+    *) fail "branch prompt lost the iDA handler, duplicate-confirmation, evidence, or authority boundary" ;;
+  esac
   pass "branch prompt is byte-stable across homes, cwd, timezone, and time, above the cache floor"
 }
 
