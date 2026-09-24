@@ -340,6 +340,7 @@ def plain_body(msg):
 
 
 
+
 def body_preview(msg):
     """First non-empty text/plain line, else first non-empty text/html line,
     else empty. An empty plain-text alternative falls through to html so a
@@ -623,6 +624,7 @@ def cmd_poll_list():
 
 
 
+
         afk_messages = []
         turn_path = os.environ.get('FM_MAIL_TURN', '')
         next_turn = None
@@ -697,6 +699,7 @@ def cmd_poll_list():
 
 
 
+
                 uid = clean(u)
                 idate = clean(dec(mi.get('Date')))
                 subj = clean(dec(mi.get('Subject')))
@@ -753,6 +756,7 @@ def cmd_poll_list():
 
 
 
+
             except Exception:
                 if afk_email_active:
                     out.append((clean(u), '', '(unverified sender)', '', 'deferred'))
@@ -767,6 +771,14 @@ def cmd_poll_list():
                     continue
                 out.append((clean(u), '', '(no header)',
                             'unfetchable header - see fm-mail read', 'degraded'))
+                if afk_enabled:
+                    afk_messages.append({
+                        'uidvalidity': uidv,
+                        'uid': clean(u),
+                        'from': '',
+                        'subject': '(unavailable)',
+                        'body': '',
+                    })
                 new_emitted += 1
                 continue
             status = 'ignored' if ignored else ('retry' if is_retry else 'ok')
@@ -848,6 +860,7 @@ def cmd_poll_list():
                     ]
                 if result.stderr:
                     sys.stderr.write(result.stderr)
+
 
 
 

@@ -192,6 +192,7 @@ Away mode is a posture of the one supervision session, recorded in `state/.afk-c
 
 
 
+
 The captain's away words are the whole mandate: the record owner's header is the single owner of the record schema, the words are recorded verbatim, and by the captain's mandate no parser, tokenizer, classifier, or grammar reads them anywhere.
 The supervision session reads the words at the tail of every wake and acts on them by its own judgment at the moment an event makes them relevant, only through the guarded scripts under standing authority, never by analogy, holding for the return on doubt; `bin/fm-branch-prompt.sh` "Postures" owns those execution rules.
 What stays mechanical is exactly what a script can check without reading words: a merge green at its live head under the record lock, synchronous merges only, the spend cap, and the never-set; destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say.

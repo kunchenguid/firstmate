@@ -16,6 +16,7 @@ AFK_OWNER_EMAIL=johnpoyser@gmail.com
 
 
 
+
 mkdir -p "$CAPTURE"
 export CAPTURE
 cat > "$REPO/bin/fm-mail.sh" <<'SH'
@@ -37,6 +38,7 @@ fi
 
 
 
+
 count=$(find "$CAPTURE" -maxdepth 1 -name '*.txt' | wc -l | tr -d ' ')
 path="$CAPTURE/$count.txt"
 printf 'to=%s\nsubject=%s\n' "$2" "$3" > "$path"
@@ -48,6 +50,7 @@ if [ -n "${FM_TEST_SMTP_STARTED:-}" ] && [ -n "${FM_TEST_SMTP_RELEASE:-}" ]; the
     sleep 0.02
   done
 fi
+
 
 
 
@@ -81,6 +84,7 @@ FM_AFK_EMAIL_TO=${3:-$AFK_OWNER_EMAIL}
 
 
 
+
 ENV
   fi
   printf '%s\n' "$home"
@@ -101,6 +105,7 @@ run_email() {  # <home> <command>
     -u FM_SMTP_HOST -u FM_SMTP_PORT -u FM_AFK_EMAIL_TO \
     FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
     "$REPO/bin/fm-mail.sh" afk-email "$command" "$@"
+
 
 
 
@@ -311,11 +316,13 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
 
 
 
+
   home=$(make_home configured configured)
   out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1) || fail "configured Pi entry failed: $out"
   assert_contains "$out" 'email reach active.' 'configured Pi entry announces email reach'
   assert_contains "$out" 'Captain-facing outcomes are emailed to the configured address' 'record announces email delivery'
   [ "$(run_email "$home" configured)" = "$AFK_OWNER_EMAIL" ] || fail "mail config did not return the fixed away-email destination"
+
 
 
 
@@ -372,6 +379,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
 
 
 
+
     || fail "valid reply handoff errored: $out"
   assert_contains "$out" 'received 1 verified and 0 untrusted' 'matching sender and code are accepted'
   note=$(find "$inbox" -maxdepth 1 -name '*.note' -print -quit)
@@ -398,6 +406,7 @@ assert result["seq"] == 1, result
 assert result["task"] == "ui", result
 assert result["id"] == sys.argv[2], result
 PY
+
 
 
 
@@ -1643,6 +1652,7 @@ test_expired_and_unknown_codes_are_untrusted() {
 
 
 
+
   home=$(make_home expiry configured)
   run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
   entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
@@ -1652,6 +1662,7 @@ test_expired_and_unknown_codes_are_untrusted() {
   run_email "$home" flush >/dev/null || fail "flush failed"
   sent="$home/state/afk-email/sent/1.json"
   token=$(grep -oE 'FM-AFK-[A-Za-z0-9_-]{16}' "$CAPTURE/$send_index.txt" | sed -n '1p')
+
 
 
 
@@ -1929,6 +1940,7 @@ test_redaction_marker_cannot_be_eaten_by_a_short_secret
 test_flush_holds_away_lock_until_send_completes
 test_receive_batch_holds_away_lock_through_reply_handoff
 test_branch_prompt_preserves_wake_after_verification_error
+
 
 
 

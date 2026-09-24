@@ -12,6 +12,7 @@
 # FM_AFK_EMAIL_TO to be exactly johnpoyser@gmail.com; email reach is recorded
 # only when the full mail plane is configured, otherwise the exact
 # hold-for-return fallback remains in force.
+
 #
 # AWAY OR QUIET. The same record also backs daemon-backed quiet mode, which a
 # quiet entry marks with `mode: quiet`: the captain is present there, so a quiet
@@ -144,6 +145,7 @@ FM_AFK_CONTRACT_VERSION=3
 FM_AFK_CONTRACT_READABLE_VERSIONS="1 2 3"
 FM_AFK_CONTRACT_REACH_CHANNELS=none
 FM_AFK_CONTRACT_REACH_ANNOUNCED='No phone channel is configured; anything that needs you waits for your return.'
+FM_AFK_EMAIL_HELPER="$FM_AFK_CONTRACT_DIR/fm-afk-email.py"
 FM_AFK_CONTRACT_SPEND_DEFAULT=4
 FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING='you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation.'
 # Generous against the longest legitimate holder, a merge waiting on the forge,
@@ -598,6 +600,7 @@ fm_afk_contract_cmd_enter() {
   case "$harness" in
     pi|pi-signed)
       if [ -x "$FM_AFK_CONTRACT_DIR/fm-mail.sh" ] && "$FM_AFK_CONTRACT_DIR/fm-mail.sh" afk-email configured >/dev/null 2>&1; then
+
 
 
 

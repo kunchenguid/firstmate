@@ -578,6 +578,7 @@ A leftover `state/.afk` flag declines nothing.
   When email reach is selected, captain-facing outcomes use the [Away email on Pi](afk-email.md) delivery path.
 
 
+
 - Main's standing authority relocates to the branch, and nothing more.
   [Authority relocation](#authority-relocation) below gives the details.
 - The branch prompt's fixed "Postures" section states these rules once per firstmate version, so the prefix stays byte-stable.
