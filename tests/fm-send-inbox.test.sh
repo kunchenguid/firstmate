@@ -13,7 +13,8 @@
 #   4. The composer pre-check is advisory: visibly pending text skips the ring
 #      with a notice, and the steer is still durably sent (exit 0).
 #   5. A failed doorbell is still a sent steer (exit 0, record durable): the
-#      watcher's re-ring ladder owns delivery from the record on.
+#      watcher's re-ring ladder owns delivery from the record on. A
+#      fire-and-forget record whose ring did not land is owed one retry ring.
 #   6. Carve-outs keep the typed plane: a leading "/" (any harness), a leading
 #      "$" to codex, an explicit backend target, and the --key path.
 #   7. A marked secondmate steer carries its marker + corr token in the record
@@ -197,6 +198,36 @@ test_failed_ring_is_still_sent() {
   assert_contains "$(cat "$err")" "watcher will re-ring" \
     "the failed-ring notice should point at the re-ring"
   pass "fm-send inbox: a failed doorbell is still a durably sent steer"
+}
+
+# Contract: a fire-and-forget record stays outside the re-ring ladder, so a
+# ring that did not land at enqueue is owed exactly one retry by the watcher.
+test_fire_and_forget_unlanded_ring_owes_one_retry() {
+  local dir err rc
+  dir=$(setup_case faf-retry)
+  err="$dir/send.err"
+  # The stub lists only window fm-t1, so the secondmate takes it over.
+  rm -f "$dir/home/state/t1.meta"
+  fm_write_secondmate_meta "$dir/home/state/domain.meta" "$dir/home" "sess:fm-t1" alpha claude
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=pending -- \
+    fm-domain --fire-and-forget 0123456789abcdef "reconcile your books"; rc=$?
+  expect_code 0 "$rc" "a skipped fire-and-forget ring is still a sent steer"
+  [ "$(cat "$dir/home/state/domain.inbox/.retry-ring" 2>/dev/null)" = 001.msg ] \
+    || fail "a skipped fire-and-forget ring did not owe its one retry"
+  assert_contains "$(cat "$err")" "the watcher will ring it once more" \
+    "the skip notice should promise exactly one retry"
+
+  run_send "$dir" "$err" -- fm-domain --fire-and-forget 1123456789abcdef "reconcile again"; rc=$?
+  expect_code 0 "$rc" "a rung fire-and-forget steer should succeed"
+  [ "$(cat "$dir/home/state/domain.inbox/.retry-ring" 2>/dev/null)" = 001.msg ] \
+    || fail "a ring that landed must not owe a retry for its own record"
+
+  dir=$(setup_case ordinary-no-retry)
+  err="$dir/send.err"
+  run_send "$dir" "$err" FM_FAKE_TMUX_COMPOSER=pending -- t1 "ordinary steer"
+  [ ! -e "$dir/home/state/t1.inbox/.retry-ring" ] \
+    || fail "an ordinary record rides the ladder and must not owe a separate retry"
+  pass "fm-send inbox: a fire-and-forget ring that did not land owes one retry ring"
 }
 
 test_harness_invocations_stay_typed() {
@@ -411,11 +442,56 @@ test_empty_message_refused() {
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
 }
 
+# Contract: a worker waiting on its own decision is woken only by firstmate's
+# deliberate answer, never by an automatic sender.
+test_automatic_send_waits_for_an_open_decision() {
+  local dir err rc status
+  dir=$(setup_case automatic); err="$dir/send.err"
+  status="$dir/home/state/t1.status"
+  printf 'needs-decision [key=pick]: ship alpha or beta?\n' > "$status"
+  run_send "$dir" "$err" -- t1 --automatic "re-read your instructions"; rc=$?
+  expect_code 4 "$rc" "an automatic send to a worker waiting on its decision must defer"
+  assert_contains "$(cat "$err")" "deferred: t1 is waiting on its open decision or blocker (pick)" \
+    "the deferral should name the open decision"
+  [ -z "$(find "$dir/home/state/t1.inbox" -name '*.msg' 2>/dev/null)" ] \
+    || fail "a deferred automatic send left an inbox record"
+  [ ! -s "$dir/send.log" ] || fail "a deferred automatic send typed into the pane:"$'\n'"$(cat "$dir/send.log")"
+
+  run_send "$dir" "$err" -- t1 --resolve-key pick "use alpha"; rc=$?
+  expect_code 0 "$rc" "the deliberate answer must still be delivered"
+  [ -f "$dir/home/state/t1.inbox/001.msg" ] || fail "the deliberate answer was not recorded"
+  assert_contains "$(cat "$dir/send.log")" "Firstmate instruction waiting" \
+    "the deliberate answer must ring the waiting worker"
+
+  # A parent-owned escalation about the worker is not a wait of the worker's own.
+  printf 'blocked [key=pending-reply-0123456789abcdef]: pending-reply-missed: no report\n' >> "$status"
+  run_send "$dir" "$err" -- t1 --automatic "re-read your instructions"; rc=$?
+  expect_code 0 "$rc" "an automatic send resumes once the worker's own decision is closed"
+  [ -f "$dir/home/state/t1.inbox/002.msg" ] || fail "the resumed automatic send was not recorded"
+
+  # A captain hold a secondmate relays for its child is not a wait of its own.
+  printf 'needs-decision [key=captain-hold-t42-1]: captain hold t42: ship alpha or beta?\n' >> "$status"
+  run_send "$dir" "$err" -- t1 --automatic "re-read your instructions"; rc=$?
+  expect_code 0 "$rc" "a relayed captain hold must not defer an automatic send"
+  [ -f "$dir/home/state/t1.inbox/003.msg" ] || fail "the automatic send beside a captain hold was not recorded"
+
+  # The parent's own blocker about a broken remote reply mirror is not a wait of the worker's.
+  printf 'blocked [key=remote-reply-continuity-t1]: remote reply continuity broke for t1 (gap)\n' >> "$status"
+  run_send "$dir" "$err" -- t1 --automatic "re-read your instructions"; rc=$?
+  expect_code 0 "$rc" "a parent-raised continuity blocker must not defer an automatic send"
+  [ -f "$dir/home/state/t1.inbox/004.msg" ] || fail "the automatic send beside a continuity blocker was not recorded"
+
+  run_send "$dir" "$err" -- sess:fm-t1 --automatic "re-read your instructions"; rc=$?
+  expect_code 1 "$rc" "--automatic needs a recorded task, not an explicit backend target"
+  pass "fm-send inbox: an automatic send defers while the worker's own decision is open, and the answer still wakes it"
+}
+
 test_text_steer_rides_inbox
 test_multiline_steer_is_legal
 test_resend_enqueues_new_sequence
 test_pending_composer_skips_ring_advisorily
 test_failed_ring_is_still_sent
+test_fire_and_forget_unlanded_ring_owes_one_retry
 test_harness_invocations_stay_typed
 test_explicit_target_stays_typed
 test_key_path_never_touches_inbox
@@ -424,3 +500,4 @@ test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_empty_message_refused
+test_automatic_send_waits_for_an_open_decision
