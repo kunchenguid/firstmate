@@ -198,7 +198,7 @@ cmd_source_id() {
 }
 
 cmd_arm() {
-  local artifact='' task='' reply_file='' id real
+  local artifact='' task='' reply_file='' id real owner listening
   local -a listener=()
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -242,17 +242,21 @@ cmd_arm() {
   # Registration is not a running listener. Readiness is the process-event
   # owner's evidence for this generation; a miss retires a source that never
   # started so arm does not leave it registered.
-  if ! FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$id"; then
+  listening=0
+  FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" ensure-listening "$id" || listening=$?
+  if [ "$listening" -eq 3 ]; then
+    printf 'still-listening: %s\n' "$id"
+    printf 'artifact: %s\n' "$real"
+    [ -z "$task" ] || printf 'owner-task: %s\n' "$task"
+    printf 'note: an earlier listener is still live and serving this board; this registration takes effect only after the source is retired and armed again\n'
+    exit 0
+  fi
+  if [ "$listening" -ne 0 ]; then
     owner=$(FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" list 2>/dev/null \
       | awk -v id="$id" '$1 == id { print $3; exit }')
     case "$owner" in
       live|orphaned|task:*/listening|task:*/round-open) ;;
-      *)
-        FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null 2>&1 || true
-        if [ -e "$FM_HOME/state/procevent/$id.source" ] || [ -L "$FM_HOME/state/procevent/$id.source" ]; then
-          rm -f -- "$FM_HOME/state/procevent/$id.source"
-        fi
-        ;;
+      *) FM_HOME="$FM_HOME" "$SCRIPT_DIR/fm-procevent.sh" retire "$id" >/dev/null 2>&1 || true ;;
     esac
     exit 1
   fi

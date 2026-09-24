@@ -46,7 +46,9 @@
 #            Starts one when nothing live is in the way, and returns only after
 #            that generation's live claim or its launch stamp says it started.
 #            The wait is the reconcile confirm window and ends early on evidence.
-#            No evidence within the window is a nonzero result.
+#            No evidence within the window is a nonzero result. Exit 3 means a
+#            live listener from another registration generation still owns the
+#            source, so this generation cannot start until it is retired.
 # start      Claim the source, run its child to completion, durably capture the
 #            output, publish normalized wakes for pending results, then release
 #            the claim. It blocks for as long as the source blocks and is meant
@@ -1787,28 +1789,33 @@ confirm_launched_runners() {  # <source-id><TAB><registration-identity><TAB><lau
   [ "${#pending[@]}" -eq 0 ] || printf '%s\n' "${pending[@]}"
 }
 
-# 0 when this registration generation currently holds a live claim.
+# 0 when this registration generation holds a live claim, 3 when another
+# generation does, 1 otherwise.
 generation_is_listening() {  # <source-id> <registration-identity>
-  local id=$1 identity=$2 state
+  local id=$1 identity=$2 state result=1
   fm_procevent_source_lock_try_acquire "$id" || return 1
   fm_procevent_claim_state_locked "$id"
   state=$?
-  if [ "$state" -eq 0 ] && [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" = "$identity" ]; then
-    fm_procevent_source_lock_release "$id"
-    return 0
+  if [ "$state" -eq 0 ]; then
+    result=3
+    [ "$FM_PROCEVENT_CLAIM_REG_IDENTITY" != "$identity" ] || result=0
   fi
   fm_procevent_source_lock_release "$id"
-  return 1
+  return "$result"
 }
 
-# 0 when no live, uncertain, leaderless, or terminal claim blocks a launch.
+# 0 when no live, uncertain, leaderless, terminal, or undisplaceable claim
+# blocks a launch, the same rule reconcile applies.
 generation_can_launch() {  # <source-id>
-  local id=$1 state
+  local id=$1 state result=1
   fm_procevent_source_lock_try_acquire "$id" || return 1
   fm_procevent_claim_state_locked "$id"
   state=$?
+  if [ "$state" -eq 1 ] && ! fm_procevent_claim_undisplaceable_locked "$id"; then
+    result=0
+  fi
   fm_procevent_source_lock_release "$id"
-  [ "$state" -eq 1 ]
+  return "$result"
 }
 
 # Public readiness for one source. Same evidence reconcile uses after a launch:
@@ -1816,7 +1823,7 @@ generation_can_launch() {  # <source-id>
 # launch stamp advancing. Returns as soon as either appears. A fixed sleep is
 # not success.
 cmd_ensure_listening() {
-  local id=${1-} identity before mark stamp deadline window started_once=0
+  local id=${1-} identity before mark stamp deadline window started_once=0 listening
   [ "$#" -eq 1 ] || usage
   fm_procevent_source_id_valid "$id" || die "source id must be path-safe: $id"
   window=$(fm_procevent_launch_confirm_seconds) \
@@ -1831,9 +1838,12 @@ cmd_ensure_listening() {
   fi
   deadline=$((SECONDS + 10#$window + 1))
   while :; do
-    if generation_is_listening "$id" "$identity"; then
-      return 0
-    fi
+    listening=0
+    generation_is_listening "$id" "$identity" || listening=$?
+    case "$listening" in
+      0) return 0 ;;
+      3) return 3 ;;
+    esac
     mark=
     if stamp=$(fm_procevent_launch_floor_stamp_path "$STATE" "$id" "$identity"); then
       mark=$(cat -- "$stamp" 2>/dev/null || true)

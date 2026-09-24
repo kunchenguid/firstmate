@@ -4500,19 +4500,114 @@ SH
   assert_not_contains "$(cat "$dir/arm.out")" "armed:" \
     "arm printed ready when no listener could claim ($dir)"
   [ ! -s "$READY_MARK" ] || fail "the listener command ran without a claim ($dir)"
-  [ ! -e "$dir/home/state/procevent/$id.source" ] \
-    || fail "arm left a registered source after the listener failed ($dir)"
+  # retire refuses a claim it cannot read, and arm must not override it.
+  [ -e "$dir/home/state/procevent/$id.source" ] \
+    || fail "arm removed a registration that retire refused to remove ($dir)"
   printf '%s\n' "$elapsed" > "$dir/elapsed"
   rmdir "$FM_PROCEVENT_CLAIM_ROOT/$id.claim" 2>/dev/null || true
+  PATH="$dir/bin:$PATH" FM_HOME="$dir/home" \
+    "$ROOT/bin/fm-procevent-lavish.sh" retire "$art" >/dev/null 2>&1 || true
 }
 
 arm_blocked_claim "$TMP_ROOT/immediate-arm" 1
-pass "arm fails when the listener cannot claim, and leaves no source"
+pass "arm fails when the listener cannot claim, and leaves the registration retire refused"
 
 arm_blocked_claim "$TMP_ROOT/timeout-arm" 2
 tout_elapsed=$(cat "$TMP_ROOT/timeout-arm/elapsed")
 [ "$tout_elapsed" -ge 2 ] \
   || fail "arm did not wait out the confirm window (${tout_elapsed}s)"
 pass "arm waits out the confirm window before reporting that the listener is not running"
+
+# Re-arming a firstmate-owned board publishes a new registration while the
+# earlier generation's listener still holds the claim. That listener keeps
+# serving the board, so arm must say so at once instead of waiting out the
+# confirm window and reporting failure, and must never claim this generation is
+# the one listening.
+LIVE="$TMP_ROOT/live-rearm"
+mkdir -p "$LIVE/bin" "$LIVE/home/state"
+cp "$READY/bin/lavish-axi" "$LIVE/bin/lavish-axi"
+live_art="$LIVE/board.html"
+printf '<h1>live</h1>\n' > "$live_art"
+lavish_session "$live_art"
+live_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$live_art")
+fm_test_track_procevent_home "$LIVE/home"
+export READY_MARK="$LIVE/mark" READY_RELEASE="$LIVE/release"
+: > "$READY_MARK"
+PATH="$LIVE/bin:$PATH" FM_HOME="$LIVE/home" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$live_art" > "$LIVE/arm1.out"
+assert_contains "$(cat "$LIVE/arm1.out")" "armed: $live_id" "the first arm was not reported ready"
+wait_for_lines "$READY_MARK" 1 || fail "the first generation's listener never ran"
+live_began=$(date +%s)
+set +e
+PATH="$LIVE/bin:$PATH" FM_HOME="$LIVE/home" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=5 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$live_art" > "$LIVE/arm2.out" 2> "$LIVE/arm2.err"
+live_rc=$?
+set -e
+live_elapsed=$(( $(date +%s) - live_began ))
+[ "$live_rc" -eq 0 ] \
+  || fail "re-arm over a live earlier listener failed ($live_rc): $(cat "$LIVE/arm2.err")"
+[ "$live_elapsed" -lt 4 ] \
+  || fail "re-arm over a live earlier listener waited out the confirm window (${live_elapsed}s)"
+assert_contains "$(cat "$LIVE/arm2.out")" "still-listening: $live_id" \
+  "re-arm did not say the earlier listener is still serving the board"
+assert_contains "$(cat "$LIVE/arm2.out")" "retired and armed again" \
+  "re-arm did not say how the new registration takes effect"
+assert_not_contains "$(cat "$LIVE/arm2.out")" "armed: $live_id" \
+  "re-arm reported ready for a registration whose own listener is not running"
+assert_not_contains "$(cat "$LIVE/arm2.err")" "error:" \
+  "re-arm over a live earlier listener printed an error"
+[ "$(pe "$LIVE/home" list | awk -v id="$live_id" '$1 == id { print $3 }')" = live ] \
+  || fail "re-arm disturbed the live earlier listener"
+sleep 0.3
+[ "$(wc -l < "$READY_MARK" | tr -d ' ')" = 1 ] \
+  || fail "re-arm started a second listener beside the live earlier one"
+touch "$READY_RELEASE"
+PATH="$LIVE/bin:$PATH" FM_HOME="$LIVE/home" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$live_art" >/dev/null 2>&1 || true
+pass "re-arm over a live earlier listener reports it still serving the board"
+
+# A stale claim whose process group is still alive may still have its polling
+# child on the board's session. Reconcile refuses to launch beside it, and arm
+# must apply the same rule instead of adding a second destructive poller.
+UNDISP="$TMP_ROOT/undisplaceable-arm"
+mkdir -p "$UNDISP/bin" "$UNDISP/home/state"
+cp "$READY/bin/lavish-axi" "$UNDISP/bin/lavish-axi"
+undisp_art="$UNDISP/board.html"
+printf '<h1>undisplaceable</h1>\n' > "$undisp_art"
+lavish_session "$undisp_art"
+undisp_id=$("$ROOT/bin/fm-procevent-lavish.sh" source-id "$undisp_art")
+fm_test_track_procevent_home "$UNDISP/home"
+export READY_MARK="$UNDISP/mark" READY_RELEASE="$UNDISP/release"
+: > "$READY_MARK"
+PATH="$UNDISP/bin:$PATH" FM_HOME="$UNDISP/home" \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$undisp_art" >/dev/null
+wait_for_lines "$READY_MARK" 1 || fail "the undisplaceable fixture's listener never ran"
+undisp_claim="$FM_PROCEVENT_CLAIM_ROOT/$undisp_id.claim"
+undisp_identity=$(sed -n '4p' "$undisp_claim")
+awk 'NR == 4 { print "different-live-process-identity"; next } { print }' \
+  "$undisp_claim" > "$undisp_claim.tmp" && mv "$undisp_claim.tmp" "$undisp_claim"
+chmod 0600 "$undisp_claim"
+[ "$(pe "$UNDISP/home" list | awk -v id="$undisp_id" '$1 == id { print $3 }')" = orphaned ] \
+  || fail "fixture invalid: the reused-pid claim is not reported orphaned"
+set +e
+PATH="$UNDISP/bin:$PATH" FM_HOME="$UNDISP/home" FM_PROCEVENT_LAUNCH_CONFIRM_SECONDS=1 \
+  "$ROOT/bin/fm-procevent-lavish.sh" arm "$undisp_art" > "$UNDISP/arm2.out" 2>/dev/null
+undisp_rc=$?
+set -e
+sleep 0.5
+[ "$(wc -l < "$READY_MARK" | tr -d ' ')" = 1 ] \
+  || fail "arm started a second listener beside a stale claim's live process group"
+[ "$undisp_rc" -ne 0 ] || fail "arm reported success beside an undisplaceable claim"
+assert_not_contains "$(cat "$UNDISP/arm2.out")" "armed: $undisp_id" \
+  "arm reported ready beside an undisplaceable claim"
+[ -e "$UNDISP/home/state/procevent/$undisp_id.source" ] \
+  || fail "arm retired a source whose earlier listener may still be polling"
+awk -v v="$undisp_identity" 'NR == 4 { print v; next } { print }' \
+  "$undisp_claim" > "$undisp_claim.tmp" && mv "$undisp_claim.tmp" "$undisp_claim"
+chmod 0600 "$undisp_claim"
+touch "$READY_RELEASE"
+PATH="$UNDISP/bin:$PATH" FM_HOME="$UNDISP/home" \
+  "$ROOT/bin/fm-procevent-lavish.sh" retire "$undisp_art" >/dev/null 2>&1 || true
+pass "arm does not launch beside a stale claim whose process group is alive"
 
 printf '\nall procevent tests passed\n'
