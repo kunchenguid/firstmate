@@ -278,30 +278,59 @@ status_is_paused_or_captain_held() {  # <status-line>
 # event: a resolved line is also how firstmate answers a decision (fm-send
 # --resolve-key), and one that lands after a pause for a different phase key -
 # including the stated default key a keyless decision shares - does not end the
-# pause. Only a resolved line for the pause's own phase key (see
-# _fm_activity_phase_key) retracts it, as does any other later event. A
-# captain-held line counts only while it is the latest event.
+# pause. Only a resolved line for the pause's own phase key (the keyed
+# activity fold's key, where a keyless line is its own phase) retracts it, as
+# does any other later event. A captain-held line counts only while it is the
+# latest event. Bounded like last_status_line: only a tail window made wholly of
+# resolved events widens the read to the whole file.
 status_declared_wait_line() {  # <status-file>
-  local f=$1 last line wait='' legacy_re resolve
+  local f=$1 last verb resolve legacy_re
   last=$(last_status_line "$f")
-  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   if status_is_paused_or_captain_held "$last"; then
     printf '%s\n' "$last"
     return 0
   fi
-  [ "$(status_line_verb "$last")" = "$resolve" ] || return 0
+  resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+  status_line_verb "$last" verb
+  [ "$verb" = "$resolve" ] || return 0
   legacy_re="^[[:space:]]*(${FM_CAPTAIN_RE:-$FM_CLASSIFY_CAPTAIN_RE_DEFAULT})"
+  tail -n "$FM_CLASSIFY_EVENT_WINDOW_LINES" "$f" 2>/dev/null \
+    | _fm_status_declared_wait_scan "$resolve" "$legacy_re" \
+    || _fm_status_declared_wait_scan "$resolve" "$legacy_re" < "$f" || :
+}
+
+# Walk the status lines on stdin back from the newest event past resolved lines
+# to the first other event, and print it when it is a pause none of those
+# resolved lines share a phase key with. Returns 1 when every event is a
+# resolved line, so a caller reading a bounded window knows to widen it.
+_fm_status_declared_wait_scan() {  # <resolve-verb> <legacy-captain-re>
+  local resolve=$1 legacy_re=$2 line verb key keys=$'\n' i=0
+  local -a lines=()
   while IFS= read -r line || [ -n "$line" ]; do
+    lines[i]=$line
+    i=$((i + 1))
+  done
+  while [ "$i" -gt 0 ]; do
+    i=$((i - 1))
+    line=${lines[i]}
     case "$line" in *[![:space:]]*) ;; *) continue ;; esac
     _fm_status_line_is_event "$line" "$legacy_re" || continue
-    if status_is_paused "$wait" && [ "$(status_line_verb "$line")" = "$resolve" ] \
-      && [ "$(_fm_activity_phase_key "$line")" != "$(_fm_activity_phase_key "$wait")" ]; then
+    status_line_verb "$line" verb
+    case "$verb" in
+      "$resolve") ;;
+      "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}") ;;
+      *) return 0 ;;
+    esac
+    key=$(_fm_decision_key "$line" "$_FM_CLASSIFY_KEYLESS_PHASE") || key=
+    if [ "$verb" = "$resolve" ]; then
+      keys="$keys$key"$'\n'
       continue
     fi
-    wait=
-    status_is_paused "$line" && wait=$line
-  done < "$f"
-  [ -z "$wait" ] || printf '%s\n' "$wait"
+    case "$keys" in *$'\n'"$key"$'\n'*) return 0 ;; esac
+    printf '%s\n' "$line"
+    return 0
+  done
+  return 1
 }
 
 # A condition-aware declared wait: a `paused:` line may say WHEN it expects to
@@ -624,7 +653,7 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   fi
   printf '%s' "$n"
 }
-_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
+_fm_decision_key() {  # <status-line> [<keyless>] -> key slug, or <keyless> (default "default") when no token
   local k unstamped
   _fm_status_unstamped "$1" unstamped
   if _fm_key_before_colon "$unstamped"; then
@@ -632,7 +661,7 @@ _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
     k=${k#*\[key=}
     k=${k%%\]*}
   else
-    k=$(_fm_key_at_note_head "$unstamped") || { printf 'default'; return 0; }
+    k=$(_fm_key_at_note_head "$unstamped") || { printf '%s' "${2-default}"; return 0; }
   fi
   _fm_decision_slug_ok "$k" || return 1
   printf '%s' "$k"
@@ -1912,23 +1941,6 @@ EOF
 # cannot collide with a stated slug, and rewritten to "default" only on output.
 _FM_CLASSIFY_KEYLESS_PHASE=$'\036default'
 
-# Phase key for one status line. A stated slug is itself, including an explicit
-# "default". A line with no token uses the keyless stand-in. A stated slug that
-# fails the charset is rejected, the same way _fm_decision_key rejects it.
-_fm_activity_phase_key() {  # <status-line> -> phase key
-  local k unstamped
-  _fm_status_unstamped "$1" unstamped
-  if _fm_key_before_colon "$unstamped"; then
-    k=${unstamped%%:*}
-    k=${k#*\[key=}
-    k=${k%%\]*}
-  else
-    k=$(_fm_key_at_note_head "$unstamped") || { printf '%s' "$_FM_CLASSIFY_KEYLESS_PHASE"; return 0; }
-  fi
-  _fm_decision_slug_ok "$k" || return 1
-  printf '%s' "$k"
-}
-
 # Rewrite the keyless stand-in back to the public "default" key. Only the key
 # field is rewritten, so a note that happens to contain the stand-in stays put.
 _fm_activity_publish_keys() {  # <open-set>
@@ -1956,7 +1968,7 @@ _fm_status_open_activities_stream() {
       *) continue ;;
     esac
     verb=$(status_line_verb "$line")
-    key=$(_fm_activity_phase_key "$line") || continue
+    key=$(_fm_decision_key "$line" "$_FM_CLASSIFY_KEYLESS_PHASE") || continue
     case "$verb" in
       working|"$pause")
         note=$(status_line_note "$line")

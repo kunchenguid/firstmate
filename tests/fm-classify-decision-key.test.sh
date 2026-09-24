@@ -536,5 +536,28 @@ test_keyless_wait_survives_stated_default_retraction() {
   pass "a stated default retraction closes its decision and leaves an unrelated keyless wait standing"
 }
 
+# The supervisors' declared-wait read keeps a pause standing behind answers
+# for other keys even when those answers outrun the bounded tail window, and a
+# resolved line for the pause's own key still retracts it from there.
+test_declared_wait_survives_answers_past_the_event_window() {
+  local dir f i
+  dir=$(case_dir declared-wait-window)
+  f="$dir/answered.status"
+  printf 'needs-decision: which color\npaused: waiting on the vendor release\n' > "$f"
+  i=0
+  while [ "$i" -le "$FM_CLASSIFY_EVENT_WINDOW_LINES" ]; do
+    printf 'resolved [key=q%s]: answered\n' "$i" >> "$f"
+    i=$((i + 1))
+  done
+  printf 'resolved [key=default]: answered: blue\n' >> "$f"
+  [ "$(status_declared_wait_line "$f")" = 'paused: waiting on the vendor release' ] \
+    || fail "answers past the event window cancelled the wait: '$(status_declared_wait_line "$f")'"
+  printf 'resolved: the vendor shipped\n' >> "$f"
+  [ -z "$(status_declared_wait_line "$f")" ] \
+    || fail "the worker's own keyless resolved line did not retract the wait past the window"
+  pass "a declared wait outlives answers for other keys beyond the event window, and its own resolved line retracts it"
+}
+
 test_keyless_wait_survives_stated_default_retraction
+test_declared_wait_survives_answers_past_the_event_window
 test_bare_prose_cannot_open_or_close_a_decision
