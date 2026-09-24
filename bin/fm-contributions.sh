@@ -50,6 +50,13 @@
 # never re-read, stays fresh, and a stale error beside it is cleared once.
 # A genuine failure prints its unavailable line only when it starts an episode
 # (no prior owner has an error); a successful read ends the episode.
+# Every recorded failure also stores last_failure: {at, class, failures[]}, one
+# entry per failed step with its stage, endpoint, exit code, bounded sanitized
+# stderr, and class - aggregate-budget, per-call-bound, forge-failure,
+# head-mismatch (with before_head and after_head), jq-validation, or
+# record-validation. Each parallel read keeps its own entry. last_failure
+# survives later successful reads until the next failure replaces it. A
+# budget-cut observation records nothing, so it stores no last_failure.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
@@ -181,11 +188,30 @@ write_record() { # task record-json-file
   mv -f -- "$staged" "$file"
 }
 
-forge() {
-  local remaining bounded=0 rc=0 forge_err=${FORGE_ERR:-$TMP/forge.err}
+note_failure() { # stage class endpoint exit-or-empty stderr-file [extra-json]
+  # Diagnostics are best effort: they never change an observation's outcome.
+  local stderr=/dev/null extra=${6:-}
+  [ ! -f "$5" ] || stderr=$5
+  [ -n "$extra" ] || extra='{}'
+  head -c 4096 "$stderr" > "$TMP/$1.stderr" 2>/dev/null || : > "$TMP/$1.stderr"
+  jq_lib -n --arg stage "$1" --arg class "$2" --arg endpoint "$3" --arg exit "$4" \
+    --rawfile stderr "$TMP/$1.stderr" --argjson extra "$extra" '
+    {stage:$stage,class:$class,endpoint:($endpoint | .[:300]),
+     exit:(if $exit == "" then null else ($exit | tonumber) end),
+     stderr:($stderr | sanitized_diagnostic)} + $extra' > "$TMP/failure-$1.json" 2>/dev/null \
+    || rm -f -- "$TMP/failure-$1.json"
+}
+
+forge() { # FORGE_STAGE names the read; its stderr lands in $TMP/<stage>.err
+  local remaining bounded=0 rc=0 stage=${FORGE_STAGE:-forge}
+  local forge_err="$TMP/$stage.err"
   remaining=$((DEADLINE - $(date +%s)))
   # The budget, not the forge, refused this read.
-  [ "$remaining" -gt 0 ] || { BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"; return 1; }
+  if [ "$remaining" -le 0 ]; then
+    BUDGET_EXHAUSTED=1; : > "$TMP/budget-exhausted"
+    note_failure "$stage" aggregate-budget "gh $*" '' /dev/null
+    return 1
+  fi
   if [ "$remaining" -le 5 ]; then bounded=1; else remaining=5; fi
   fm_run_timed "$remaining" env GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 \
     gh "$@" 2> "$forge_err" || rc=$?
@@ -193,9 +219,23 @@ forge() {
   if [ "$rc" -eq 124 ] && [ "$bounded" -eq 1 ]; then
     BUDGET_EXHAUSTED=1
     : > "$TMP/budget-exhausted"
+    note_failure "$stage" aggregate-budget "gh $*" "$rc" "$forge_err"
   elif [ "$rc" -ne 0 ]; then
     : > "$TMP/forge-unavailable"
+    if [ "$rc" -eq 124 ]; then
+      note_failure "$stage" per-call-bound "gh $*" "$rc" "$forge_err"
+    else
+      note_failure "$stage" forge-failure "gh $*" "$rc" "$forge_err"
+    fi
   fi
+  return "$rc"
+}
+
+check_json() { # stage class endpoint jq-args... : a failed check names its stage
+  local stage=$1 class=$2 endpoint=$3 rc=0
+  shift 3
+  "$@" 2> "$TMP/$stage.jq.err" || rc=$?
+  [ "$rc" -eq 0 ] || note_failure "$stage" "$class" "$endpoint" "$rc" "$TMP/$stage.jq.err"
   return "$rc"
 }
 
@@ -212,32 +252,42 @@ wait_forges() { # background forge pids from one independent read wave
 
 observe() { # canonical GitHub URL -> normalized JSON
   local url=$1 part number kind endpoint head after label
-  case "$url" in https://github.com/*) ;; *) return 1 ;; esac
+  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable" "$TMP"/failure-*.json
+  case "$url" in https://github.com/*) ;; *) note_failure url unsupported-url "$url" '' /dev/null; return 1 ;; esac
   part=${url#https://github.com/}; number=${part##*/}; part=${part%/*}; kind=${part##*/}; part=${part%/*}
-  case "$kind" in pull) endpoint="repos/$part/pulls/$number" ;; issues) endpoint="repos/$part/issues/$number" ;; *) return 1 ;; esac
-  rm -f -- "$TMP/budget-exhausted" "$TMP/forge-unavailable"
-  forge api "$endpoint" > "$TMP/core.json" || return 1
-  jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
+  case "$kind" in
+    pull) endpoint="repos/$part/pulls/$number" ;;
+    issues) endpoint="repos/$part/issues/$number" ;;
+    *) note_failure url unsupported-url "$url" '' /dev/null; return 1 ;;
+  esac
+  FORGE_STAGE=core forge api "$endpoint" > "$TMP/core.json" || return 1
+  check_json core-shape jq-validation "$endpoint" \
+    jq -e '(.state == "open" or .state == "closed") and (.user.login | type == "string")' "$TMP/core.json" >/dev/null || return 1
   if [ "$kind" = pull ]; then
-    head=$(jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
-    FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
+    head=$(check_json core-head jq-validation "$endpoint" jq -er '.head.sha | select(test("^[a-fA-F0-9]{40}$"))' "$TMP/core.json") || return 1
+    FORGE_STAGE=comments forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
-    FORGE_ERR="$TMP/reviews.err" forge api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" &
+    FORGE_STAGE=reviews forge api "$endpoint/reviews?per_page=100" --paginate --slurp > "$TMP/reviews.json" &
     local reviews_pid=$!
-    FORGE_ERR="$TMP/inline.err" forge api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" &
+    FORGE_STAGE=inline forge api "$endpoint/comments?per_page=100" --paginate --slurp > "$TMP/inline.json" &
     local inline_pid=$!
-    FORGE_ERR="$TMP/checks.err" forge api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" &
+    FORGE_STAGE=checks forge api "repos/$part/commits/$head/check-runs?filter=all&per_page=100" --paginate --slurp > "$TMP/checks.json" &
     local checks_pid=$!
-    FORGE_ERR="$TMP/statuses.err" forge api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" &
+    FORGE_STAGE=statuses forge api "repos/$part/commits/$head/statuses?per_page=100" --paginate --slurp > "$TMP/statuses.json" &
     local statuses_pid=$!
-    FORGE_ERR="$TMP/repo.err" forge api "repos/$part" > "$TMP/repo.json" &
+    FORGE_STAGE=repo forge api "repos/$part" > "$TMP/repo.json" &
     local repo_pid=$!
     wait_forges "$comments_pid" "$reviews_pid" "$inline_pid" "$checks_pid" "$statuses_pid" "$repo_pid" || return 1
-    jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
-    forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
-    after=$(jq -er .headRefOid "$TMP/after.json")
-    [ "$head" = "$after" ] || { printf 'head changed during observation\n' > "$TMP/forge.err"; return 1; }
-    jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
+    check_json comments-shape jq-validation "repos/$part/issues/$number/comments" \
+      jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
+    FORGE_STAGE=closing forge pr view "$url" --json headRefOid,reviewDecision > "$TMP/after.json" || return 1
+    after=$(check_json closing-head jq-validation "pr view $url" jq -er .headRefOid "$TMP/after.json") || return 1
+    if [ "$head" != "$after" ]; then
+      note_failure head-mismatch head-mismatch "pr view $url" '' /dev/null \
+        "$(jq -nc --arg before "$head" --arg after "$after" '{before_head:$before,after_head:($after | .[:64])}')"
+      return 1
+    fi
+    check_json pr-normalize jq-validation "$url" jq -n --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" \
       --slurpfile reviews "$TMP/reviews.json" --slurpfile inline "$TMP/inline.json" --slurpfile after "$TMP/after.json" --slurpfile checks "$TMP/checks.json" \
       --slurpfile statuses "$TMP/statuses.json" --slurpfile repo "$TMP/repo.json" '
       $core[0] as $c
@@ -258,13 +308,14 @@ observe() { # canonical GitHub URL -> normalized JSON
                  author:.user.login,body:(.body // "" | .[:500])}))}' > "$TMP/observation.json" || return 1
   else
     label=${FM_CONTRIBUTIONS_READY_LABEL:-ready-for-pr}
-    FORGE_ERR="$TMP/comments.err" forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
+    FORGE_STAGE=comments forge api "repos/$part/issues/$number/comments?per_page=100" --paginate --slurp > "$TMP/comments.json" &
     local comments_pid=$!
-    FORGE_ERR="$TMP/issue-events.err" forge api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" &
+    FORGE_STAGE=issue-events forge api "repos/$part/issues/$number/events?per_page=100" --paginate --slurp > "$TMP/issue-events.json" &
     local events_pid=$!
     wait_forges "$comments_pid" "$events_pid" || return 1
-    jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
-    jq -n --slurpfile timeline "$TMP/issue-events.json" --arg label "$label" --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" '
+    check_json comments-shape jq-validation "repos/$part/issues/$number/comments" \
+      jq -e 'type == "array" and all(.[]; type == "array")' "$TMP/comments.json" >/dev/null || return 1
+    check_json issue-normalize jq-validation "$url" jq -n --slurpfile timeline "$TMP/issue-events.json" --arg label "$label" --slurpfile core "$TMP/core.json" --slurpfile comments "$TMP/comments.json" '
       $core[0] as $c | {state:$c.state,head:null,
         ready:any($c.labels[]; (.name | ascii_downcase) == ($label | ascii_downcase)),
         checks:[],reviews:[],events:($comments[0] | add // []
@@ -274,7 +325,7 @@ observe() { # canonical GitHub URL -> normalized JSON
           + [$timeline[0][] | .[] | select(.event == "labeled" and (.label.name | ascii_downcase) == ($label | ascii_downcase))
              | {token:("ready-for-pr:" + (.id | tostring)),type:"ready-for-pr",source:$c.html_url,head:null,body:"filed issue reached ready-for-pr"}])}' > "$TMP/observation.json" || return 1
   fi
-  jq_lib -ne --arg url "$url" --arg kind "$kind" --slurpfile observed "$TMP/observation.json" '
+  check_json record record-validation "$url" jq_lib -e --arg url "$url" --arg kind "$kind" --slurpfile observed "$TMP/observation.json" -n '
     {schema:"fm-contributions.v1",task:"observation",records:[{url:$url,
       kind:(if $kind == "pull" then "pr" else "issue" end),pending:[],seen:[],observation:$observed[0]}]}
     | valid_record' >/dev/null
@@ -325,6 +376,17 @@ settle_final() { # canonical-url task... : copy the URL's final observation to e
   done
 }
 
+collect_failure() { # every failed step of the last observation -> $TMP/last-failure.json
+  local -a files=()
+  local file
+  for file in "$TMP"/failure-*.json; do [ -f "$file" ] && files+=("$file"); done
+  [ "${#files[@]}" -gt 0 ] || { printf '{"stage":"unknown","class":"unclassified","endpoint":"","exit":null,"stderr":""}\n' > "$TMP/failure-unknown.json"; files=("$TMP/failure-unknown.json"); }
+  # A known non-budget failure outranks a sibling read the deadline cut short.
+  jq -s --arg at "$NOW" '{at:$at,
+    class:(([.[] | .class | select(. != "aggregate-budget")] | first) // "aggregate-budget"),
+    failures:(sort_by(.stage) | .[:12])}' "${files[@]}" > "$TMP/last-failure.json"
+}
+
 poll() {
   local task url old kind error observed
   local -a row
@@ -356,6 +418,7 @@ poll() {
     # An observation the budget cut short is unmeasured, not unavailable: keep
     # every owner's prior record so the URL is observed first next poll.
     [ "$BUDGET_EXHAUSTED" -eq 0 ] || break
+    [ "$observed" -eq 0 ] || collect_failure
     # Wake once per failure episode: only when no owner has a prior error.
     if [ "$observed" -ne 0 ] && jq -ne --slurpfile saved "$TMP/saved.json" --arg url "$url" --args \
       'all($ARGS.positional[] as $task | [$saved[0][] | select(.task == $task) | .records[] | select(.url == $url)] | first;
@@ -381,7 +444,8 @@ poll() {
             pending:(($old.pending // []) + [$events[] | select(.token as $t | ($old.seen // [] | index($t)) == null)] | unique_by(.token))}' > "$TMP/row.json"
       else
         error='forge observation unavailable or changed during read'
-        jq --arg now "$NOW" --arg error "$error" '.checked_at=$now | .error=$error' "$old" > "$TMP/row.json"
+        jq --arg now "$NOW" --arg error "$error" --slurpfile failure "$TMP/last-failure.json" \
+          '.checked_at=$now | .error=$error | .last_failure=$failure[0]' "$old" > "$TMP/row.json"
       fi
       write_record "$task" "$TMP/row.json"
       publish_pending "$task" "$url" "$TMP/row.json"

@@ -3,6 +3,12 @@ def canonical_url:
   type == "string" and (test("^https://github.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(pull|issues)/[1-9][0-9]*$")
     or test("^https://[A-Za-z0-9.-]+/[A-Za-z0-9._/-]+/-/merge_requests/[1-9][0-9]*$"));
 def sha: type == "string" and test("^[a-fA-F0-9]{40}$");
+# Bounded failure stderr: no control bytes, credential-shaped strings redacted.
+def sanitized_diagnostic:
+  gsub("[\u0000-\u0008\u000b-\u001f\u007f]"; "")
+  | gsub("(gh[pousr]_|github_pat_)[A-Za-z0-9_]+"; "[redacted]")
+  | gsub("(?<k>authorization|bearer|token)(?<s>[:= ]+)((bearer|basic|token) +)?[^ ,;\"'\n]+"; "\(.k)\(.s)[redacted]"; "i")
+  | .[:600];
 def valid_record:
   try (.schema == "fm-contributions.v1" and (.task | type == "string")
   and (.records | type == "array")
@@ -12,6 +18,7 @@ def valid_record:
     and all(.seen[]; type == "string")
     and ((.notified // []) | type == "array" and all(.[]; type == "string"))
     and (.error == null or (.error | type == "string"))
+    and (.last_failure == null or (.last_failure | type == "object" and (.failures | type == "array")))
     and (.checked_at == null or (.checked_at | fromdateiso8601 | type == "number"))
     and (.verdict == null or (.verdict | (.head | sha) and (.source | type == "string")
       and (.actor | IN("captain","fleet","maintainer","nobody")) and (.summary | type == "string")))
