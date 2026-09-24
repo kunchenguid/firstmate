@@ -450,15 +450,6 @@ worker_stop_active_execution() {
   [ "$failed" -eq 0 ]
 }
 
-# Ignore, rather than restore the default disposition for, the signals this
-# handler answers. A replacement stops a Linux worker by signalling its whole
-# isolated group, and the supervisor in that group forwards a second stop signal
-# to this same serving child, so a repeat is the normal case and not an
-# exception. Restoring the default let that second signal kill the shutdown part
-# way through, which left the ownership lock behind holding a half-written temp
-# file that no later worker could clear, so every replacement then failed to
-# report ready. A shutdown that hangs is still stopped: the caller escalates to
-# KILL, which no disposition can block.
 # Ownership is already gone. Stop only this process's command tree and exit
 # without releasing or rewriting the directory a replacement may now own.
 worker_exit_lost_lock() {
@@ -471,6 +462,15 @@ worker_exit_lost_lock() {
   exit 0
 }
 
+# Ignore, rather than restore the default disposition for, the signals this
+# handler answers. A replacement stops a Linux worker by signalling its whole
+# isolated group, and the supervisor in that group forwards a second stop signal
+# to this same serving child, so a repeat is the normal case and not an
+# exception. Restoring the default let that second signal kill the shutdown part
+# way through, which left the ownership lock behind holding a half-written temp
+# file that no later worker could clear, so every replacement then failed to
+# report ready. A shutdown that hangs is still stopped: the caller escalates to
+# KILL, which no disposition can block.
 worker_shutdown() {
   trap '' HUP INT TERM
   # The ownership directory is gone or a replacement owns it. TERM stays
