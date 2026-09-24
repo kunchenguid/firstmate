@@ -32,6 +32,9 @@ install_runner() {  # <case-dir>
   # store owner, and the backlog reader with its tasks-axi probe.
   cp "$ROOT/bin/fm-afk-contract.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-branch-outcome.sh" "$dir/bin/"
+  # fm-win32-proc-lib.sh: sourced unconditionally by fm-branch-outcome.sh for
+  # the held-lock ancestry walk's Win32 fallback.
+  cp "$ROOT/bin/fm-win32-proc-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-tasks-axi-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-backlog-transition-lib.sh" "$dir/bin/"
   # The merge-notification marker reader behind the brief's landed section.
