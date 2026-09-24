@@ -185,18 +185,31 @@ test_spawn_checks_the_named_base_and_crew_branch_before_launch() {
   remote="$TMP_ROOT/spawn/remote.git"
   git init -q --bare "$remote"
   git -C "$proj" remote add origin "$remote"
+  git -C "$proj" push -q origin refs/heads/office:refs/heads/office
   git -C "$proj" push -q origin refs/heads/office:refs/heads/feature/remote
   id=named-spawn-remote-ref
-  FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode direct-PR \
     --branch-name feature/remote --base-branch office >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
-    "$SPAWN" "$id" "$proj" --mode local-only --yolo off \
+    "$SPAWN" "$id" "$proj" --mode direct-PR --yolo off \
     --branch-name feature/remote --base-branch office 2>&1); status=$?
   expect_code 1 "$status" "an existing remote crew branch was launched"
   assert_contains "$out" "already exists on origin" "the remote crew branch was not refused"
   assert_absent "$home/state/$id.meta" "a remote branch collision published a task record"
+
+  git -C "$proj" remote set-url origin "$TMP_ROOT/spawn/missing.git"
+  id=named-spawn-local-only-offline
+  FM_HOME="$home" "$BRIEF" "$id" proj --mode local-only \
+    --branch-name feature/offline --base-branch office >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 PATH="$fakebin:$PATH" \
+    "$SPAWN" "$id" "$proj" --mode local-only --yolo off \
+    --branch-name feature/offline --base-branch office 2>&1); status=$?
+  assert_not_contains "$out" "could not check whether crew branch feature/offline exists on origin" \
+    "a local-only spawn required an unreachable origin for crew collision checking"
   pass "fm-spawn: named base and crew-branch occupancy are refused before launch"
 }
 
@@ -263,13 +276,14 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   assert_grep 'kind=scout' "$home/state/$id.meta" "local collision published ship metadata"
   assert_absent "$home/data/$id/ship-instructions.md" "local collision published ship instructions"
 
+  git -C "$project" push -q origin refs/heads/office:refs/heads/office
   git -C "$project" push -q origin refs/heads/office:refs/heads/feature/remote
   id=named-promote-remote-collision
   printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=office\n' "$id" "$project" > "$home/state/$id.meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
   fill_brief "$home/data/$id/brief.md"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
-    --mode local-only --yolo off --branch-name feature/remote --base-branch office 2>&1); status=$?
+    --mode direct-PR --yolo off --branch-name feature/remote --base-branch office 2>&1); status=$?
   expect_code 1 "$status" "promotion reused an existing remote branch"
   assert_contains "$out" "already exists on origin" "a remote promotion branch collision was not refused"
   assert_grep 'kind=scout' "$home/state/$id.meta" "remote collision published ship metadata"
@@ -309,6 +323,16 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   assert_contains "$out" "does not exist locally" "a remote-only local-only base was not refused"
   assert_grep 'kind=scout' "$home/state/$id.meta" "remote-only local-only refusal published ship metadata"
   assert_absent "$home/data/$id/ship-instructions.md" "remote-only local-only refusal published ship instructions"
+
+  git -C "$project" remote set-url origin "$home/unreachable.git"
+  id=named-promote-local-only-offline
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=office\n' "$id" "$project" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode local-only --yolo off --branch-name feature/offline >/dev/null \
+    || fail "local-only promotion required an unreachable origin"
+  assert_grep 'kind=ship' "$home/state/$id.meta" "offline local-only promotion did not publish ship metadata"
   pass "fm-promote: changed bases and occupied crew branches are refused"
 }
 
@@ -397,7 +421,7 @@ test_local_merge_fast_forwards_a_bare_repository() {
 }
 
 test_review_uses_the_recorded_base() {
-  local home proj remote id out feature
+  local home proj remote id out feature status
   home="$TMP_ROOT/review/home"
   proj="$TMP_ROOT/review/proj"
   id=named-review
@@ -429,6 +453,15 @@ test_review_uses_the_recorded_base() {
     || fail "qualified remote-base review failed: $out"
   assert_contains "$out" "diff base: origin/main" "qualified remote-base review did not name origin/main"
   assert_not_contains "$out" "no changes vs origin/main" "review used the shadowing local origin/main branch"
+
+  git -C "$remote" update-ref -d refs/heads/main
+  id=named-review-stale
+  printf 'worktree=%s\nproject=%s\nmode=direct-PR\nbranch=feature/widget\nbase_branch=main\n' "$proj" "$proj" \
+    > "$home/state/$id.meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REVIEW" "$id" --stat 2>&1); status=$?
+  expect_code 1 "$status" "review used a cached remote base after fetch failure"
+  assert_contains "$out" "refusing to review against a cached ref" \
+    "stale remote-base review did not report the fetch failure"
   pass "fm-review-diff: a recorded base is the compare ref"
 }
 
