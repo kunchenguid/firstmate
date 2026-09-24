@@ -624,7 +624,7 @@ fm_afk_launch_start() {
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
     if ! fm_afk_launch_flag_write; then
-      fm_afk_launch_log "failed to refresh away-mode flag"
+      fm_afk_launch_log "failed to refresh the $(fm_afk_launch_posture)-mode flag"
       return 1
     fi
     fm_afk_launch_log "daemon already running; refreshed the $(fm_afk_launch_posture)-mode flag (no new terminal)"
@@ -647,13 +647,13 @@ fm_afk_launch_start() {
     if fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
       result=0
     else
-      fm_afk_launch_log "failed to clear stale away-mode artifacts"
+      fm_afk_launch_log "failed to clear stale $(fm_afk_launch_posture)-mode artifacts"
       result=1
     fi
   fi
   if [ "$result" -eq 0 ]; then
     if ! fm_afk_launch_flag_write; then
-      fm_afk_launch_log "failed to write away-mode flag"
+      fm_afk_launch_log "failed to write the $(fm_afk_launch_posture)-mode flag"
       result=1
     fi
   fi
@@ -701,7 +701,7 @@ fm_afk_launch_start_native() {
   fm_afk_launch_reconcile || result=1
   if [ "$result" -eq 0 ]; then
     if ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
-      fm_afk_launch_log "failed to clear stale away-mode artifacts"
+      fm_afk_launch_log "failed to clear stale $(fm_afk_launch_posture)-mode artifacts"
       result=1
     elif ! fm_afk_launch_flag_write; then
       result=1
@@ -720,10 +720,13 @@ fm_afk_launch_start_native() {
 
 fm_afk_launch_stop() {
   local pid pid_identity current_identity result=0 read_result archived closed_daemon_terminal=0 record_note mode
+  # The flag names which posture this stop is ending, so read it before step (3)
+  # clears it.
+  mode=$(fm_afk_launch_posture)
   fm_afk_launch_record_read
   read_result=$?
   if [ "$read_result" -eq 2 ]; then
-    fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
+    fm_afk_launch_log "malformed daemon terminal record; refusing to stop $mode mode"
     return 1
   fi
   # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
@@ -737,7 +740,7 @@ fm_afk_launch_stop() {
   fi
   if [ -n "$pid" ]; then
     if ! kill -TERM "$pid" 2>/dev/null; then
-      fm_afk_launch_log "failed to signal away-mode daemon pid=$pid"
+      fm_afk_launch_log "failed to signal the $mode-mode daemon pid=$pid"
       result=1
     fi
     for _ in $(seq 1 40); do
@@ -747,11 +750,11 @@ fm_afk_launch_stop() {
   fi
   if [ -n "$pid" ] && fm_pid_alive "$pid"; then
     current_identity=$(fm_pid_identity "$pid" 2>/dev/null) || {
-      fm_afk_launch_log "could not confirm away-mode daemon exit; preserving lifecycle state"
+      fm_afk_launch_log "could not confirm the $mode-mode daemon exit; preserving lifecycle state"
       return 1
     }
     if [ "$current_identity" = "$pid_identity" ]; then
-      fm_afk_launch_log "away-mode daemon did not exit after SIGTERM; preserving lifecycle state"
+      fm_afk_launch_log "the $mode-mode daemon did not exit after SIGTERM; preserving lifecycle state"
       return 1
     fi
   fi
@@ -765,12 +768,10 @@ fm_afk_launch_stop() {
     fm_afk_launch_close_recorded || result=1
     [ "$result" -eq 0 ] || closed_daemon_terminal=0
   fi
-  # (3) Clear the away-mode flag, then (4) archive the posture record LAST so the
-  # posture ends only once every daemon-side artifact is down. The flag names
-  # which posture this stop is ending, so read it before it is gone.
-  mode=$(fm_afk_launch_posture)
+  # (3) Clear the posture flag, then (4) archive the posture record LAST so the
+  # posture ends only once every daemon-side artifact is down.
   if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
-    fm_afk_launch_log "failed to clear away-mode flag"
+    fm_afk_launch_log "failed to clear the $mode-mode flag"
     result=1
   fi
   # A quiet entry never wrote a record, so there is none to archive.

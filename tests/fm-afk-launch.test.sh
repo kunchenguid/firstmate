@@ -1061,7 +1061,7 @@ unit_malformed_record_fails_closed() {
 }
 
 unit_stop_malformed_record_fails_closed() {
-  local st
+  local st out
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-stop-malformed.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.afk"
@@ -1073,6 +1073,19 @@ unit_stop_malformed_record_fails_closed() {
     pass "stop: malformed terminal record preserves away state and fails closed"
   else
     fail "stop: malformed terminal record cleared protected lifecycle state"
+  fi
+  # The same refusal reached by /quiet off must name the posture it declined to
+  # end, not call a present captain's home away.
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$st/state/.afk"
+  out=$(FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
+    . "$1"
+    fm_afk_launch_stop
+  ' _ "$LAUNCH" 2>&1)
+  if printf '%s' "$out" | grep -F 'refusing to stop quiet mode' >/dev/null \
+    && [ -e "$st/state/.afk" ] && [ -e "$st/state/.afk-daemon-terminal" ]; then
+    pass "stop: the malformed-record refusal names the quiet posture it declined to end"
+  else
+    fail "stop: the malformed-record refusal misnamed the posture: $out"
   fi
   rm -rf "$st"
 }
