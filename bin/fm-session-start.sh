@@ -738,6 +738,10 @@ else
       printf '%s\n' "$BRANCH_REPLAY_OUT"
     fi
   fi
+  # One reminder for escalations a previous session left unresolved. The same
+  # session token and an empty token do not enqueue. This drain presents it.
+  bash -c '. "$1"; fm_pending_reply_remind_escalated "$2"' _ \
+    "$SCRIPT_DIR/fm-pending-reply-lib.sh" "$STATE" || true
   DRAIN_OUT=$("$SCRIPT_DIR/fm-wake-drain.sh" 2>&1)
   if [ -n "$DRAIN_OUT" ]; then
     printf '%s\n' "$DRAIN_OUT"

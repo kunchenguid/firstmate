@@ -15,7 +15,12 @@
 # and escalate once if the recovery turn also completes without a correlated
 # report. Never loop, never repeatedly inject, never silently expire unresolved
 # records, and never treat wrong-home or structured-home heuristics as
-# acknowledgement. A same-basename restatement-copy of the mate home's
+# acknowledgement. An escalated record that is still unresolved is reminded
+# once per later live session: one check wake, no second recovery, and no
+# second status injection. Bearings lists that record until it resolves.
+# The same-session escalation wake is the first surface, so the reminder
+# waits for a different session token. A poll with the same token does not
+# wake again. A same-basename restatement-copy of the mate home's
 # state/<task_id>.status onto the parent channel is a repair of the
 # FM_HOME-relative mixup, not acknowledgement of an arbitrary mate-home file.
 #
@@ -54,6 +59,8 @@
 #   recovery_turn_seen_busy=
 #   recovery_turn_completed_epoch=
 #   escalated_epoch=
+#   surfaced_session=       live session token that last surfaced this
+#                           escalation; empty until then
 #   escalation_closed_epoch=
 #                           when the durable status decision opened by that
 #                           escalation was closed again (see the escalation
@@ -343,6 +350,7 @@ recovery_delivery_outcome=
 recovery_turn_seen_busy=0
 recovery_turn_completed_epoch=
 escalated_epoch=
+surfaced_session=
 resolved_epoch=
 resolved_via=
 wrong_home_hits=0
@@ -1267,6 +1275,8 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
   fm_pending_reply_set "$rec" phase escalated || return 1
+  # This session already receives the status wake. A later session reminds.
+  fm_pending_reply_set "$rec" surfaced_session "$(fm_pending_reply_session_token "$state")" || return 1
   return 0
 }
 
@@ -1356,6 +1366,97 @@ fm_pending_reply_restatement_copy_same_basename() {  # <state-dir> <corr_id> <se
   # shellcheck source=bin/fm-parent-channel-lib.sh
   . "$_FM_PENDING_REPLY_LIB_DIR/fm-parent-channel-lib.sh"
   fm_parent_channel_append_once "$parent_status" "$line"
+}
+
+# Live session token for escalation reminders. FM_PENDING_REPLY_SESSION, when
+# set, is the token (tests). Otherwise a held session lock's pid, or empty
+# when no live session should be woken.
+fm_pending_reply_session_token() {  # <state-dir>
+  local state=$1
+  if [ -n "${FM_PENDING_REPLY_SESSION+x}" ]; then
+    printf '%s' "$FM_PENDING_REPLY_SESSION"
+    return 0
+  fi
+  # shellcheck source=bin/fm-session-lock-lib.sh
+  . "$_FM_PENDING_REPLY_LIB_DIR/fm-session-lock-lib.sh"
+  fm_session_lock_inspect "$state"
+  if [ "${FM_LOCK_INSPECT_STATE:-}" = held ]; then
+    printf '%s' "$FM_LOCK_INSPECT_PID"
+  fi
+}
+
+# JSON array of unresolved escalated records for bearings decisions_open.
+# Prints [] when none are escalated. Does not wake or mutate.
+fm_pending_reply_escalated_decisions_json() {  # <state-dir>
+  local state=$1 dir rec corr task summary key item out=''
+  dir=$(fm_pending_reply_dir "$state")
+  [ -d "$dir" ] || { printf '[]'; return 0; }
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    case "$(basename "$rec")" in .*) continue ;; esac
+    [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    task=$(fm_pending_reply_get "$rec" task_id)
+    summary=$(fm_pending_reply_get "$rec" request_summary)
+    [ -n "$corr" ] && [ -n "$task" ] || continue
+    key=$(fm_pending_reply_escalation_key "$corr")
+    item=$(jq -nc --arg id "$task" --arg key "$key" \
+      --arg summary "pending-reply escalated: task=$task pending-reply-id=$corr request=$summary" \
+      '{id:$id,key:$key,verb:"blocked",summary:$summary,owner:"(main)"}') || return 1
+    if [ -n "$out" ]; then out="$out,$item"; else out=$item; fi
+  done
+  printf '[%s]' "$out"
+}
+
+# Remind unresolved escalations once per later live session. One check wake,
+# no second recovery and no second status line. Empty token and an unchanged
+# token are no-ops, including on every later poll of the same session.
+fm_pending_reply_remind_escalated() {  # <state-dir>
+  local state=$1 token dir rec surfaced corr task summary payload key queued
+  local -a recs=()
+  local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
+  token=$(fm_pending_reply_session_token "$state")
+  [ -n "$token" ] || return 0
+  dir=$(fm_pending_reply_dir "$state")
+  [ -d "$dir" ] || return 0
+  for rec in "$dir"/*; do
+    [ -f "$rec" ] || continue
+    case "$(basename "$rec")" in .*) continue ;; esac
+    [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
+    surfaced=$(fm_pending_reply_get "$rec" surfaced_session)
+    [ "$surfaced" = "$token" ] && continue
+    recs+=("$rec")
+  done
+  [ "${#recs[@]}" -gt 0 ] || return 0
+  STATE=$state
+  if ! declare -F fm_wake_append >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$_FM_PENDING_REPLY_LIB_DIR/fm-wake-lib.sh"
+  fi
+  STATE=$state
+  FM_WAKE_QUEUE="$state/.wake-queue"
+  FM_WAKE_QUEUE_LOCK="$state/.wake-queue.lock"
+  key=pending-reply-escalated
+  payload='pending-reply-escalated:'
+  for rec in "${recs[@]}"; do
+    corr=$(fm_pending_reply_get "$rec" corr_id)
+    task=$(fm_pending_reply_get "$rec" task_id)
+    summary=$(fm_pending_reply_get "$rec" request_summary)
+    payload="$payload task=$task pending-reply-id=$corr request=$summary;"
+  done
+  queued=$(fm_wake_queued_keys check)
+  case "
+$queued
+" in
+    *"
+$key
+"*) ;;
+    *) fm_wake_append check "$key" "$payload" || return 1 ;;
+  esac
+  for rec in "${recs[@]}"; do
+    fm_pending_reply_set "$rec" surfaced_session "$token" || return 1
+  done
+  return 0
 }
 
 # One reconciliation tick for a single record: resolve, observe, recover, escalate.
@@ -1544,6 +1645,7 @@ fm_pending_reply_tick() {  # <state-dir>
     fi
     fm_pending_reply_tick_one "$state" "$corr" "$busy" "$sm_home" || true
   done
+  fm_pending_reply_remind_escalated "$state" || true
   return 0
 }
 
