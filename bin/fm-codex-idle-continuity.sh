@@ -26,6 +26,12 @@
 # free, so the turn's checkpoint owns supervision until the next allowing
 # stop starts a fresh supervisor. An arm cycle that ends because another
 # owner took or ended the watcher is a handover, not a failure.
+#
+# After three failed arms the supervisor queues one `check:` line and records
+# the episode in state/.codex-idle-continuity-failure-notified. While that
+# record stands no allowing stop starts a supervisor, so a watcher that stays
+# broken wakes the thread once rather than once per turn. An actionable
+# supervisor close or a successful bin/fm-watch-checkpoint.sh clears it.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,6 +39,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 LOCK="$STATE/.codex-idle-continuity.lock"
+FAILURE_NOTICE="$STATE/.codex-idle-continuity-failure-notified"
 ARM="$SCRIPT_DIR/fm-watch-arm.sh"
 
 codex_ancestor() {
@@ -97,6 +104,7 @@ ensure_supervisor() {  # <session-id>
   . "$SCRIPT_DIR/fm-supervision-lib.sh"
   fm_primary_scope_matches "$FM_ROOT" "$STATE" || return 0
   [ -e "$STATE/.afk" ] && return 0
+  [ -e "$FAILURE_NOTICE" ] && return 0
   fm_supervision_needed "$STATE" || return 0
   owner=$(codex_ancestor) || return 0
   if supervisor_live; then
@@ -176,13 +184,16 @@ supervise() {
     text=$(actionable_text < "$LOCK/arm.out" || true)
     if [ -n "$text" ]; then
       fails=0
+      rm -f "$FAILURE_NOTICE"
       queue_text "$text" || true
       continue
     fi
     if ! handed_over < "$LOCK/arm.out"; then
       fails=$((fails + 1))
       if [ "$fails" -ge 3 ]; then
-        queue_text "check: codex idle continuity stopped after $fails failed watcher arms: $(tail -n 1 "$LOCK/arm.out")" || true
+        if (set -C; : > "$FAILURE_NOTICE") 2>/dev/null; then
+          queue_text "check: codex idle continuity stopped after $fails failed watcher arms: $(tail -n 1 "$LOCK/arm.out")" || true
+        fi
         break
       fi
     fi

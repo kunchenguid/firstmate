@@ -22,6 +22,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SECONDS_ARG=${FM_CODEX_WATCH_CHECKPOINT:-180}
+FAILURE_NOTICE="$STATE/.codex-idle-continuity-failure-notified"
 
 usage() {
   cat <<'EOF'
@@ -133,10 +134,12 @@ if [ -f "$CONFIG/supervision-host" ]; then
     | grep -Ev '^supervision-host: cycle boundary' >/dev/null; then
     grep -Ev '^watcher: (started|attached) ' "$OUT"
     [ ! -s "$ERR" ] || cat "$ERR" >&2
+    rm -f "$FAILURE_NOTICE"
     exit 0
   fi
   if grep -E '^supervision-host: cycle boundary' "$OUT" >/dev/null 2>&1; then
     printf 'checkpoint: no actionable wake within %ss\n' "$BOUND"
+    rm -f "$FAILURE_NOTICE"
     exit 124
   fi
   [ ! -s "$OUT" ] || cat "$OUT"
@@ -157,6 +160,7 @@ set -e
 if grep -E '^(signal:|stale:|check:|heartbeat($|:))' "$OUT" >/dev/null 2>&1; then
   cat "$OUT"
   [ ! -s "$ERR" ] || cat "$ERR" >&2
+  rm -f "$FAILURE_NOTICE"
   exit 0
 fi
 
@@ -169,6 +173,7 @@ fi
 
 if [ "$RC" -eq 124 ]; then
   printf 'checkpoint: no actionable wake within %ss\n' "$SECONDS_ARG"
+  rm -f "$FAILURE_NOTICE"
   exit 124
 fi
 

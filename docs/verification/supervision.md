@@ -517,6 +517,7 @@ Codex's hook documentation for that version parses `async` and does not run asyn
 `bash tests/fm-codex-idle-continuity.test.sh` also ran three turns in a row: each `bin/fm-watch-checkpoint.sh` stopped the idle supervisor and ended as a quiet bounded checkpoint instead of `watcher: already running`, and each following allowing stop started a fresh supervisor that owned the watcher again.
 A supervisor whose arm attached to a checkpoint's watcher re-armed its own watcher after that checkpoint ended.
 Against an arm that reported only attached closes or signal exits, the supervisor kept running past five cycles, because an exit it did not cause is a handover rather than a failure, and it still stopped after three `watcher: FAILED - no live watcher` closes, queuing one `check: codex idle continuity stopped` line into the thread first.
+Three more allowing stops against that still-broken arm started no supervisor and queued no second check, and after one successful `bin/fm-watch-checkpoint.sh` the next allowing stop started a supervisor again, which queued the next episode's single check.
 
 Pi 0.81.1 repeated the continuity and clean-exit lifecycle on 2026-07-23 after the Calm presentation changes.
 

@@ -206,6 +206,24 @@ wait_until 75 test ! -d "$SLOCK" || fail "arm failures with no watcher never end
 [ "$(arms)" -eq 3 ] || fail "the supervisor gave up after $(arms) failed arms instead of 3"
 [ "$(cat "$STUB/queue" 2>/dev/null)" = "check: codex idle continuity stopped after 3 failed watcher arms: watcher: FAILED - no live watcher with a fresh beacon" ] \
   || fail "giving up left no check in the thread: $(cat "$STUB/queue" 2>/dev/null)"
+printf 'ok - handover closes never spend the failure budget, and real arm failures still do\n'
+
+giveups() { grep -c '^check: codex idle continuity stopped' "$STUB/queue" 2>/dev/null || true; }
+for turn in 1 2 3; do
+  stub_stop
+  sleep 1
+  [ ! -d "$SLOCK" ] || fail "turn end $turn restarted a supervisor during a notified failure episode"
+done
+[ "$(arms)" -eq 3 ] || fail "turn ends during a notified failure episode armed again: $(arms) arms"
+[ "$(giveups)" -eq 1 ] || fail "a persistently broken watcher queued $(giveups) give-up checks"
+CP_RC=0
+FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" "$STUB/bin/fm-watch-checkpoint.sh" --seconds 1 \
+  >"$TMP_ROOT/stub-cp.out" 2>"$TMP_ROOT/stub-cp.err" || CP_RC=$?
+case "$CP_RC" in 0|124) ;; *) fail "the recovery checkpoint failed (rc=$CP_RC): $(cat "$TMP_ROOT/stub-cp.out" "$TMP_ROOT/stub-cp.err")" ;; esac
+stub_stop
+wait_until 75 at_least_arms 6 || fail "a successful checkpoint did not re-enable idle continuity"
+wait_until 75 test ! -d "$SLOCK" || fail "the re-enabled supervisor never gave up on the broken watcher"
+[ "$(giveups)" -eq 2 ] || fail "the next failure episode queued $(giveups) give-up checks in total instead of 2"
 kill "$owner" 2>/dev/null || true
 wait "$owner" 2>/dev/null || true
-printf 'ok - handover closes never spend the failure budget, and real arm failures still do\n'
+printf 'ok - a broken watcher queues one give-up check per failure episode, and a successful checkpoint ends the episode\n'
