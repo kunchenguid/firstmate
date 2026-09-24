@@ -72,6 +72,9 @@ case "${1:-} ${2:-}" in
     cwd=$(cat "${FM_FAKE_CWD_FILE:?}" 2>/dev/null || printf '%s' "$project")
     printf '{"result":{"pane":{"pane_id":"%s","tab_id":"w1:t2","workspace_id":"w1","cwd":"%s","foreground_cwd":"%s"}}}\n' "$pane" "$project" "$cwd"
     ;;
+  "pane process-info")
+    printf '%s\n' '{"result":{"type":"pane_process_info","process_info":{"pane_id":"w1:p2","shell_pid":4242,"foreground_process_group_id":4243,"foreground_processes":[{"pid":4243,"name":"traex","argv0":"traex","argv":["traex"],"cmdline":"traex"}]}}}'
+    ;;
   "pane send-text")
     if [ "$phase" = shell ]; then
       printf '%s\n' "${4:-}" >> "$launch"

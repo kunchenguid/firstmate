@@ -1,6 +1,6 @@
 # TraeX
 
-Verified on 2026-08-11 with traecli 0.200.19 internal edition and Herdr 0.8.0.
+Current per-version evidence is recorded in [`runtime-backends.md`](../../../../../docs/verification/runtime-backends.md#traex-thin-worker-adapter).
 The router owns TraeX's role and backend boundary.
 
 ## Operating facts
