@@ -160,6 +160,10 @@ TYPESAFE_API_KEY_PRIVATE=${TYPESAFE_API_KEY:-}
 export -n TYPESAFE_API_KEY_PRIVATE 2>/dev/null || true
 unset TYPESAFE_API_KEY
 
+OPENROUTER_API_KEY_PRIVATE=${OPENROUTER_API_KEY:-}
+export -n OPENROUTER_API_KEY_PRIVATE 2>/dev/null || true
+unset OPENROUTER_API_KEY
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
@@ -1040,8 +1044,12 @@ crew_dispatch_validate() {
     echo "CREW_DISPATCH: invalid config/crew-dispatch.json - malformed JSON"
     return 0
   fi
-  typed_key=$TYPESAFE_API_KEY_PRIVATE
-  [ -n "$typed_key" ] || typed_key=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+  typed_key=$OPENROUTER_API_KEY_PRIVATE
+  [ -n "$typed_key" ] || typed_key=$(fmx_env_get OPENROUTER_API_KEY "$FM_HOME/.env")
+  if [ -z "$typed_key" ]; then
+    typed_key=$TYPESAFE_API_KEY_PRIVATE
+    [ -n "$typed_key" ] || typed_key=$(fmx_env_get TYPESAFE_API_KEY "$FM_HOME/.env")
+  fi
   [ -z "$typed_key" ] || typed_active=true
   if $typed_active; then
     verified_harnesses=$(fm_control_harnesses | jq -Rsc 'split("\n") | map(select(length > 0))')

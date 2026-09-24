@@ -15,6 +15,14 @@ Observed error shapes: 401 `authentication_error` for a bad key, 403 when the he
 No rate-limit headers were present on any response; every response carried `x-typesafe-request-id`.
 Observed end-to-end latency from a Mac was 123 to 348 ms per request, with the server's own upstream time at 4 to 60 ms.
 
+### OpenRouter Decisions transport
+
+Verified 2026-09-25 against OpenRouter's own published OpenAPI specification, fetched unauthenticated from `https://openrouter.ai/openapi.json`.
+The spec lists `POST /api/alpha/decisions` (operation `createApiAlphaDecisions`) with request schema `DecisionsRequest` (`{model, state, questions, ...}`) and response schema `DecisionsResponse`, whose worked example matches the `{choice, confidence, probabilities, type}` per-question answer shape the tool already parses; the top-level security scheme is `bearer` (an `Authorization: Bearer <key>` header), and the operation's own example request names `model: "typesafe/jev-1.13"`, consistent with the `~typesafe/jev-latest` alias this change sends.
+The spec also lists a compatibility path `POST /systemone` on the same host, described as accepting bare System One model IDs onto the `typesafe/` namespace; the tool does not use this path, since `TYPESAFE_API_KEY` already reaches the same model directly at `api.typesafe.ai`.
+No authenticated call was made against either OpenRouter path: this task's isolated environment had neither `OPENROUTER_API_KEY` nor `TYPESAFE_API_KEY` available and no vault access to obtain one, so the request/response shape above is confirmed from the published contract rather than from a live response, and the equivalence and latency table below has no OpenRouter row yet.
+The next holder of a vault-injected `OPENROUTER_API_KEY` should run the same 25-brief comparison used for the 2026-09-16 and 2026-09-17 rows below, once against `TYPESAFE_API_KEY` alone and once against `OPENROUTER_API_KEY`, and record rule-match agreement and latency here before this transport is treated as production-verified end to end.
+
 ## Live rule match against real briefs
 
 Run 2026-09-16 with the key injected for the one command through the vault (`av inject +TYPESAFE_API_KEY -- ...`), model `jev-latest`, confidence floor 0.6, timeout 5 s, one `quota-axi --json` snapshot for the whole run.
@@ -107,6 +115,7 @@ It proves absent, default-only, and empty-rules files return `no rules to match`
 It proves the documented starter configuration resolves its Pi default through the declared Claude provider, a `.env` key turns the tool on, and the environment wins over it.
 It proves the key is absent from child environments, never appears on `curl` argv, and arrives only as the bearer header on the descriptor.
 It proves the request uses the fixed endpoint and model, carries only the project, the brief's task sections read by the shared brief-heading parser with a scout line only for a scout brief and never a ship brief's delivery mode (or the whole brief when it has neither section), and rule Choice with one option per rule plus the fixed neutral none option, and never carries `why`, `use`, or quota.
+It proves `OPENROUTER_API_KEY` alone routes to `https://openrouter.ai/api/alpha/decisions` with model `~typesafe/jev-latest`, that it is preferred over `TYPESAFE_API_KEY` whenever both are present at any source (environment or `.env`, in either combination), that the OpenRouter key is likewise absent from `curl` argv and reaches only the bearer header, and that an OpenRouter HTTP failure resolves to the same structured `error` outcome as the typesafe.ai path.
 It proves a declared `min_confidence` is checked against the rule's own probability both as the pick and as a runner-up, a picked rule below it falls to the most probable runner-up that clears its floor, is `ambiguous` when none does or two tie, and that a file without declared floors keeps the global 0.6 floor on confidence unchanged.
 It proves the clear, fixed-floor ambiguous with candidate evidence, escalate (approval with candidate evidence, unverifiable rule floor, tie, nothing rankable), known rule-floor fall-through, known and unverifiable profile-floor evidence, explicit-provider and provider-ID enforcement, authoritative Agy and explicit-provider Gemini routing, partial providers, eligible unranked candidates and their clear-result note, concrete quota vetoes and profile-floor shortfalls taking precedence over uncertainty, account-wide quota veto, limiting-bound ranking, schema-6 account-row binding with schema-5 compatibility, missing-curl and quota-axi failures, HTTP 429 and 500, transport failure, malformed usage, zero-mass or malformed probabilities or confidence, malformed or duplicate profile, invalid selector, removed-option rejection, and out-of-range rule ID paths behave as the contract states, with configuration errors exiting 2 before any network call.
 `tests/fm-bootstrap.test.sh` proves bootstrap ignores resolver-only fields without the typed key, validates each malformed shape when the environment or home `.env` activates typed resolution, and prevents an environment-provided key from reaching child processes.
@@ -116,4 +125,4 @@ $ bash tests/fm-dispatch-resolve.test.sh | tail -1
 # all fm-dispatch-resolve tests passed
 ```
 
-A live run needs a key and is not part of the suite; rerun the table above by pointing the tool at a brief with the key injected for that one command.
+A live run needs a key and is not part of the suite; rerun the table above by pointing the tool at a brief with the key injected for that one command, and see "OpenRouter Decisions transport" above for the live comparison still owed once an `OPENROUTER_API_KEY` is available.

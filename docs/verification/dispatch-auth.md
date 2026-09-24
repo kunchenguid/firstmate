@@ -7,7 +7,7 @@ It records only facts that must be re-established when a producer or vendor vers
 Task chronology, incident transcripts, and credential metadata stay in private reports or PR evidence.
 
 Firstmate resolves a candidate's provider family, credential surface, and applicable quota by reading the evidence below and reasoning in the open.
-The [worker helper](../../bin/fm-quota-choose.sh) and [typed resolver](../configuration.md#typed-dispatch-resolution-env-typesafe_api_key) document their deterministic mapping boundaries; the [eligibility procedure](../../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility) owns the remaining catalog and credential judgments.
+The [worker helper](../../bin/fm-quota-choose.sh) and [typed resolver](../configuration.md#typed-dispatch-resolution-env-openrouter_api_key-or-typesafe_api_key) document their deterministic mapping boundaries; the [eligibility procedure](../../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility) owns the remaining catalog and credential judgments.
 Credential paths below are shown with the home directory replaced by `<home>`.
 
 ## Quota granularity the judgment depends on

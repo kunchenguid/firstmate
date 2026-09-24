@@ -136,7 +136,8 @@ add_real_jq() {
   cat > "$fakebin/jq" <<SH
 #!/usr/bin/env bash
 if [ -n "\${FM_TEST_CHILD_ENV_LOG:-}" ]; then
-  if [ -n "\${TYPESAFE_API_KEY+x}" ] || [ -n "\${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+  if [ -n "\${TYPESAFE_API_KEY+x}" ] || [ -n "\${TYPESAFE_API_KEY_PRIVATE+x}" ] \
+    || [ -n "\${OPENROUTER_API_KEY+x}" ] || [ -n "\${OPENROUTER_API_KEY_PRIVATE+x}" ]; then
     printf 'secret-present\n' >> "\$FM_TEST_CHILD_ENV_LOG"
   else
     printf 'clean\n' >> "\$FM_TEST_CHILD_ENV_LOG"
@@ -1211,6 +1212,12 @@ ROWS
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
   [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' ] \
     || fail "typed .env key must activate resolver-field validation, got: $out"
+
+  printf '%s\n' 'OPENROUTER_API_KEY=or-test-key' > "$case_dir/home/.env"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = 'CREW_DISPATCH: invalid config/crew-dispatch.json - use profile model and effort must be non-empty strings, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' ] \
+    || fail "an OPENROUTER_API_KEY .env key must also activate resolver-field validation, got: $out"
 
   rm -f "$case_dir/home/.env"
   printf '%s\n' '{"default":{"harness":"devin","model":"swe-2-medium"}}' > "$case_dir/home/config/crew-dispatch.json"

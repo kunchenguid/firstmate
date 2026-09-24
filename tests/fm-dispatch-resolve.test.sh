@@ -110,7 +110,9 @@ cat > "$FAKEBIN/curl" <<'SH'
 # Fake curl: records argv (minus the -o target), the stdin body, and the header
 # read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP.
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] \
+  || [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ] \
+  || [ -n "${RESOLVER_KEY_PRIVATE+x}" ]; then
   printf 'curl:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'curl:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -138,7 +140,9 @@ chmod +x "$FAKEBIN/curl"
 cat > "$FAKEBIN/quota-axi" <<'SH'
 #!/usr/bin/env bash
 set -u
-if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
+if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ] \
+  || [ -n "${OPENROUTER_API_KEY+x}" ] || [ -n "${OPENROUTER_API_KEY_PRIVATE+x}" ] \
+  || [ -n "${RESOLVER_KEY_PRIVATE+x}" ]; then
   printf 'quota-axi:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
   printf 'quota-axi:clean\n' >> "${CHILD_ENV_LOG:?}"
@@ -189,7 +193,7 @@ write_response "$RESPONSE" rule_4 0.9
 run code out err "$BRIEF" --project pager
 expect_code 0 "$code" "absent key exits 0"
 assert_equals '' "$out" "absent key prints nothing on stdout"
-assert_contains "$err" 'dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and' "absent key explains itself on stderr"
+assert_contains "$err" 'dispatch-resolve: off (OPENROUTER_API_KEY and TYPESAFE_API_KEY absent from the environment and' "absent key explains itself on stderr"
 assert_absent "$LOG/argv" "absent key never calls curl"
 assert_absent "$LOG/quota-axi.calls" "absent key never reads quota-axi"
 pass "absent key is off: one stderr line, exit 0, no network call"
@@ -245,6 +249,47 @@ assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
+
+# --- OpenRouter transport: preferred over TYPESAFE_API_KEY, own endpoint/model -
+OR_KEY='or-test-key-7a2b9c-never-on-argv'
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+OPENROUTER_API_KEY=$OR_KEY run code out err "$BRIEF" --project pager
+expect_code 0 "$code" "OPENROUTER_API_KEY alone resolves"
+assert_contains "$out" '  status: clear' "OPENROUTER_API_KEY alone produces a clear result"
+argv=$(cat "$LOG/argv")
+assert_not_contains "$argv" "$OR_KEY" "the OpenRouter key never appears on curl argv"
+assert_contains "$argv" 'https://openrouter.ai/api/alpha/decisions' "OpenRouter requests use the alpha Decisions endpoint"
+assert_not_contains "$argv" 'api.typesafe.ai' "OpenRouter requests never fall back to the typesafe.ai host"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" "curl receives the OpenRouter bearer header on fd 3"
+body=$(cat "$LOG/body")
+assert_equals '~typesafe/jev-latest' "$(jq -r .model <<<"$body")" "OpenRouter requests name the ~typesafe/jev-latest alias"
+pass "OPENROUTER_API_KEY alone hits the OpenRouter Decisions endpoint with the ~typesafe/jev-latest alias"
+
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+OPENROUTER_API_KEY=$OR_KEY TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+argv=$(cat "$LOG/argv")
+assert_contains "$argv" 'https://openrouter.ai/api/alpha/decisions' "OpenRouter is preferred when both keys are present"
+assert_not_contains "$argv" 'api.typesafe.ai' "TYPESAFE_API_KEY is not used when OPENROUTER_API_KEY is also present"
+assert_equals "Authorization: Bearer $OR_KEY" "$(cat "$LOG/header")" "the OpenRouter key is the one sent, not the TypeSafe key"
+pass "OPENROUTER_API_KEY is preferred over TYPESAFE_API_KEY when both are present"
+
+printf '%s\n' "export OPENROUTER_API_KEY=\"$OR_KEY\"" > "$HOME_DIR/.env"
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF" --project pager
+argv=$(cat "$LOG/argv")
+assert_contains "$argv" 'https://openrouter.ai/api/alpha/decisions' "OPENROUTER_API_KEY from .env is preferred over an environment TYPESAFE_API_KEY"
+rm -f "$HOME_DIR/.env"
+pass "OPENROUTER_API_KEY from .env still wins over an environment-provided TYPESAFE_API_KEY"
+
+reset_log
+write_response "$RESPONSE" rule_4 0.9
+OPENROUTER_API_KEY=$OR_KEY FAKE_CURL_HTTP=500 run code out err "$BRIEF" --project pager
+assert_contains "$out" '  status: error' "an OpenRouter HTTP failure is a structured error outcome, not a crash"
+assert_contains "$out" '  reason: http 500 after' "the OpenRouter failure reason names the HTTP status"
+pass "an unavailable or invalid OpenRouter response falls back to a structured error outcome, same as the typesafe.ai path"
 
 # --- rules are snapshotted and line output is injection-safe -------------------
 MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
