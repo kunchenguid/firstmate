@@ -1311,7 +1311,8 @@ test_launch_environment_inherited_by_secondmate
 test_launch_environment_inheritance_preserves_on_source_errors
 
 test_worker_launch_delivers_role_scope() {
-  local rec id out launch kind prompt envelope encoded brief_kind brief content first_line role_line task_line inbox
+  local rec id out launch kind prompt envelope encoded brief_kind brief content first_line role_line task_line inbox provenance
+  provenance='This task was dispatched by Firstmate, the local orchestration tool the user runs to hand coding tasks to agents in disposable git worktrees; this message is its task brief, and every result it produces is reported to the user.'
   for brief_kind in heading legacy scaffold; do
   for kind in no-mistakes direct-PR local-only scout; do
     [ "$brief_kind" = heading ] && [ "$kind" != no-mistakes ] && continue
@@ -1361,6 +1362,12 @@ SH
     first_line=$(sed -n '1p' "$prompt")
     [ "$first_line" = '# Current worker role contract' ] ||
       fail "$brief_kind $kind did not establish worker identity before task content"
+    # A harness prompt that never mentions Firstmate otherwise leaves the
+    # identity assertion unexplained, which models read as prompt injection.
+    [ "$(sed -n '2p' "$prompt")" = "$provenance" ] ||
+      fail "$brief_kind $kind did not say who dispatched the brief before asserting the worker identity"
+    [ "$(grep -cxF "$provenance" "$prompt")" -eq 1 ] ||
+      fail "$brief_kind $kind duplicated the dispatch provenance"
     role_line=$(grep -n '^# Current worker role contract$' "$prompt" | cut -d: -f1)
     task_line=$(grep -n '^# Task$' "$prompt" | head -1 | cut -d: -f1)
     [ "$role_line" -lt "$task_line" ] || fail "$brief_kind $kind put the worker identity after the task"
