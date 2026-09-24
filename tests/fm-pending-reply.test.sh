@@ -1668,6 +1668,55 @@ test_escalated_record_is_reminded_once_per_later_session() {
   pass "an escalated pending reply is reminded once per later session until it resolves"
 }
 
+# Drive a new request through its missed recovery to one escalation.
+escalate_new() {  # <home> <state> <summary> -> corr
+  local corr
+  corr=$(fm_pending_reply_create "$1" "$2" mate "$3")
+  fm_pending_reply_mark_delivered "$2" "$corr"
+  fm_pending_reply_mark_turn_completed "$2" "$corr" request
+  FM_PENDING_REPLY_NOW=2000 fm_pending_reply_send_recovery "$2" "$corr" || fail "recovery send failed"
+  FM_PENDING_REPLY_NOW=3000 fm_pending_reply_mark_turn_completed "$2" "$corr" recovery
+  FM_PENDING_REPLY_NOW=4000 fm_pending_reply_maybe_escalate "$2" "$corr" || fail "escalation should fire"
+  printf '%s\n' "$corr"
+}
+
+# An operator close of the escalation key dismisses the escalation: later
+# sessions get no reminder and Bearings no row, while the record itself stays
+# escalated because only a correlated reply resolves it. A neighbouring
+# escalation the operator left open still reminds once per later session.
+test_operator_closed_escalation_is_not_reminded() {
+  local dir fb log home state corr kept rc json
+  dir="$TMP_ROOT/operator-close"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_parent operator-close)
+  state="$home/state"
+  fm_write_meta "$state/mate.meta" "window=sess:fm-mate" "kind=ship"
+  export FM_PENDING_REPLY_NOW=1000
+  export FM_PENDING_REPLY_SESSION=s1
+  export FM_PENDING_REPLY_SEND_HOOK='true'
+  corr=$(escalate_new "$home" "$state" "request to close")
+  kept=$(escalate_new "$home" "$state" "request left open")
+
+  run_send "$fb" "$home" "$log" mate --resolve-key "pending-reply-$corr" "ack, handled out of band"; rc=$?
+  expect_code 0 "$rc" "operator close of the escalation key should succeed"
+  [ "$(phase_of "$state" "$corr")" = escalated ] \
+    || fail "an operator close must not count as the mate's reply"
+
+  : > "$state/.wake-queue"
+  export FM_PENDING_REPLY_SESSION=s2
+  fm_pending_reply_tick "$state" || fail "later-session tick failed"
+  grep -F "pending-reply-id=$corr" "$state/.wake-queue" >/dev/null \
+    && fail "an operator-closed escalation was reminded: $(cat "$state/.wake-queue")"
+  grep -F "pending-reply-id=$kept" "$state/.wake-queue" >/dev/null \
+    || fail "an escalation left open was not reminded on a later session"
+  json=$(fm_pending_reply_escalated_decisions_json "$state")
+  printf '%s' "$json" | jq -e --arg closed "pending-reply-$corr" --arg kept "pending-reply-$kept" '
+    (any(.[]; .key == $closed) | not) and any(.[]; .key == $kept)
+  ' >/dev/null || fail "bearings input did not honor the operator close: $json"
+  unset FM_PENDING_REPLY_SESSION
+  pass "an operator-closed escalation is neither reminded nor listed, an open one still is"
+}
+
 # --- run --------------------------------------------------------------------
 
 test_normal_correlated_reply_resolves_once
@@ -1676,6 +1725,7 @@ test_recovery_attempt_is_never_reinjected
 test_recovery_reply_resolves_original
 test_second_missed_turn_escalates_once_and_stays_durable
 test_escalated_record_is_reminded_once_per_later_session
+test_operator_closed_escalation_is_not_reminded
 test_escalation_wakes_and_its_close_stays_quiet
 test_escalation_publication_failure_retries
 test_legacy_escalation_closes_default_decision

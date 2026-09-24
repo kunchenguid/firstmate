@@ -1148,9 +1148,42 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
   return "$rc"
 }
 
+# The decision key of <escalation-line> while the parent status fold still
+# holds that exact decision open, else empty.
+_fm_pending_reply_open_escalation_key() {  # <status-file> <escalation-line>
+  local key note open_line open_key open_note
+  key=$(_fm_decision_key "$2") || return 0
+  note=$(status_line_note "$2")
+  while IFS= read -r open_line; do
+    [ -n "$open_line" ] || continue
+    open_key=${open_line%%$'\t'*}
+    [ "$open_key" = "$key" ] || continue
+    open_note=${open_line#*$'\t'}
+    open_note=${open_note#*$'\t'}
+    [ "$open_note" = "$note" ] || continue
+    printf '%s' "$key"
+    return 0
+  done <<EOF
+$(status_open_decisions "$1")
+EOF
+}
+
+# 0 when the escalation published for <record> is no longer open in the parent
+# status log, as after an operator fm-send --resolve-key pending-reply-<corr>.
+# The record itself stays escalated because only a correlated reply resolves it.
+fm_pending_reply_escalation_dismissed() {  # <record-path>
+  local rec=$1 parent_status escalation
+  parent_status=$(fm_pending_reply_get "$rec" parent_status)
+  [ -n "$parent_status" ] || return 1
+  escalation=$(fm_pending_reply_escalation_line "$parent_status" "$rec" \
+    "$(fm_pending_reply_get "$rec" corr_id)")
+  [ -n "$escalation" ] || return 1
+  [ -z "$(_fm_pending_reply_open_escalation_key "$parent_status" "$escalation")" ]
+}
+
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 rec escalated closed parent_status escalation key note
-  local open_line open_key open_note now close_line close_rc _task _via
+  local state=$1 corr=$2 rec escalated closed parent_status escalation key=''
+  local now close_line close_rc _task _via
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
@@ -1162,31 +1195,21 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   [ -n "$parent_status" ] || return 1
   escalation=$(fm_pending_reply_escalation_line "$parent_status" "$rec" "$corr")
   if [ -n "$escalation" ]; then
-    key=$(_fm_decision_key "$escalation") || key=''
-    note=$(status_line_note "$escalation")
-    while IFS= read -r open_line; do
-      [ -n "$open_line" ] || continue
-      open_key=${open_line%%$'\t'*}
-      [ "$open_key" = "$key" ] || continue
-      open_note=${open_line#*$'\t'}
-      open_note=${open_note#*$'\t'}
-      [ "$open_note" = "$note" ] || continue
-      # This close is the home's own bookkeeping, written by the same resolve
-      # or tick that already consumed the reply, so it uses the guarded
-      # self-announced append (bin/fm-wake-lib.sh, sourced by this function's
-      # wrappers) and does not wake the home that wrote it; the escalation
-      # OPEN above stays a plain append because a new blocker must wake.
-      _task=$(fm_pending_reply_get "$rec" task_id)
-      _via=$(fm_pending_reply_get "$rec" resolved_via)
-      close_line="resolved [key=${key}]: $(fm_pending_reply_resolved_note "$_task" "$corr" "$_via")"
-      close_rc=0
-      fm_wake_status_append_self_announced "${parent_status%/*}" "$parent_status" "$close_line" \
-        2>/dev/null || close_rc=$?
-      [ "$close_rc" -ne 2 ] || return 1
-      break
-    done <<EOF
-$(status_open_decisions "$parent_status")
-EOF
+    key=$(_fm_pending_reply_open_escalation_key "$parent_status" "$escalation")
+  fi
+  if [ -n "$key" ]; then
+    # This close is the home's own bookkeeping, written by the same resolve
+    # or tick that already consumed the reply, so it uses the guarded
+    # self-announced append (bin/fm-wake-lib.sh, sourced by this function's
+    # wrappers) and does not wake the home that wrote it; the escalation
+    # OPEN above stays a plain append because a new blocker must wake.
+    _task=$(fm_pending_reply_get "$rec" task_id)
+    _via=$(fm_pending_reply_get "$rec" resolved_via)
+    close_line="resolved [key=${key}]: $(fm_pending_reply_resolved_note "$_task" "$corr" "$_via")"
+    close_rc=0
+    fm_wake_status_append_self_announced "${parent_status%/*}" "$parent_status" "$close_line" \
+      2>/dev/null || close_rc=$?
+    [ "$close_rc" -ne 2 ] || return 1
   fi
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalation_closed_epoch "$now"
@@ -1395,6 +1418,7 @@ fm_pending_reply_escalated_decisions_json() {  # <state-dir>
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in .*) continue ;; esac
     [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
+    fm_pending_reply_escalation_dismissed "$rec" && continue
     corr=$(fm_pending_reply_get "$rec" corr_id)
     task=$(fm_pending_reply_get "$rec" task_id)
     summary=$(fm_pending_reply_get "$rec" request_summary)
@@ -1412,20 +1436,23 @@ fm_pending_reply_escalated_decisions_json() {  # <state-dir>
 # no second recovery and no second status line. Empty token and an unchanged
 # token are no-ops, including on every later poll of the same session.
 fm_pending_reply_remind_escalated() {  # <state-dir>
-  local state=$1 token dir rec surfaced corr task summary payload key queued
-  local -a recs=()
+  local state=$1 token dir rec corr task summary payload key queued
+  local -a open=() recs=()
   local STATE FM_WAKE_QUEUE FM_WAKE_QUEUE_LOCK
-  token=$(fm_pending_reply_session_token "$state")
-  [ -n "$token" ] || return 0
   dir=$(fm_pending_reply_dir "$state")
   [ -d "$dir" ] || return 0
   for rec in "$dir"/*; do
     [ -f "$rec" ] || continue
     case "$(basename "$rec")" in .*) continue ;; esac
     [ "$(fm_pending_reply_get "$rec" phase)" = escalated ] || continue
-    surfaced=$(fm_pending_reply_get "$rec" surfaced_session)
-    [ "$surfaced" = "$token" ] && continue
-    recs+=("$rec")
+    fm_pending_reply_escalation_dismissed "$rec" && continue
+    open+=("$rec")
+  done
+  [ "${#open[@]}" -gt 0 ] || return 0
+  token=$(fm_pending_reply_session_token "$state")
+  [ -n "$token" ] || return 0
+  for rec in "${open[@]}"; do
+    [ "$(fm_pending_reply_get "$rec" surfaced_session)" = "$token" ] || recs+=("$rec")
   done
   [ "${#recs[@]}" -gt 0 ] || return 0
   STATE=$state
