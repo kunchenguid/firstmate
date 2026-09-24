@@ -900,6 +900,34 @@ test_active_seat_overrides_the_ambient_config_dir() {
   pass "a configured seat takes precedence over firstmate's own ambient config dir"
 }
 
+# Two mechanisms select a Claude worker's configuration directory: this home's
+# seat and the worker account pin (config/claude-account). Composed, the pin's
+# `env` launch consumes the seat's assignment and silently wins, while trust is
+# pre-registered in the seat's profile - so the worker meets a trust dialog it
+# cannot answer. A home configuring both is a configuration conflict, refused
+# before any endpoint, local copy, or task record exists.
+test_account_pin_and_active_seat_refuse_the_spawn() {
+  local rec id out
+  id=seat-account-conflict-1
+  rec=$(spawn_case spawn-account-conflict "$id")
+  read_spawn_case "$rec"
+  mkdir -p "$SEATS_DIR/work"
+  printf 'work\n' > "$HOME_DIR/config/claude-seat"
+  printf 'ordinary\n' > "$HOME_DIR/config/claude-account"
+
+  out=$(run_spawn_here "$HOME_DIR" "$WT_DIR" "$FAKEBIN" "$LAUNCH_LOG" "$id" "$PROJ_DIR" 2>&1)
+  expect_code 1 "$?" "configuring both an account pin and an active seat must refuse the spawn: $out"
+  assert_contains "$out" "$HOME_DIR/config/claude-account" \
+    "the refusal must name the account pin file by path"
+  assert_contains "$out" "$HOME_DIR/config/claude-seat" \
+    "the refusal must name the seat file by path"
+  assert_contains "$out" "remove either file" \
+    "the refusal must say that removing either file resolves the conflict"
+  assert_absent "$HOME_DIR/state/$id.meta" "a refused spawn must leave no task record"
+  [ ! -s "$LAUNCH_LOG" ] || fail "a refused spawn must launch no worker endpoint"
+  pass "a home configuring both an account pin and an active seat is refused before anything exists"
+}
+
 test_absent_setting_is_the_default_seat
 test_switch_to_logged_in_seat_updates_only_the_setting
 test_switch_to_seat_that_is_not_logged_in_is_refused
@@ -932,5 +960,6 @@ test_a_later_spawn_uses_the_new_seat_while_the_old_task_keeps_its_own
 test_ambient_config_dir_still_reaches_workers_when_no_seat_is_set
 test_active_seat_overrides_the_ambient_config_dir
 test_non_claude_spawn_records_no_seat
+test_account_pin_and_active_seat_refuse_the_spawn
 
 echo "# all fm-seat tests passed"

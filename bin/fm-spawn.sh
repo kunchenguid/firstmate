@@ -2273,6 +2273,23 @@ fi
 if [ "$HARNESS" = agy ]; then
   agy_model_validate "$AGY_BIN" "$MODEL" || exit 1
 fi
+# A home must not configure both mechanisms that choose a Claude worker's
+# configuration directory. The account pin builds its launch as an `env`
+# invocation, whose own flags consume the seat's plain assignment instead of
+# being overridden by it, so the pin would silently win every time while
+# workspace trust was pre-registered in the SEAT's profile - launching the
+# worker against a store that holds no trust entry for its own copy. Refuse the
+# spawn here, before any endpoint, worktree, or record exists, rather than
+# letting either mechanism quietly take the other's launch.
+if [ -f "$CONFIG/claude-account" ] && [ "$(fm_seat_active)" != "$FM_SEAT_DEFAULT_NAME" ]; then
+  {
+    echo "error: this home configures a worker account pin and an active Claude seat, and both choose a Claude worker's configuration directory:"
+    echo "  $CONFIG/claude-account"
+    echo "  $CONFIG/claude-seat"
+    echo "remove either file to resolve the conflict"
+  } >&2
+  exit 1
+fi
 # Worker account pin (header above): resolved before any endpoint, worktree, or
 # record exists. An absent pin selects nothing and leaves every later launch
 # step exactly as it was. A pinned Claude root is exported here as well, so the
