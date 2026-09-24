@@ -178,10 +178,13 @@ esac
 exit 1
 EOF
 chmod +x "$STUB/bin/fm-watch-arm.sh"
+printf '#!/bin/sh\ncat >> %s\n' "$STUB/queue" > "$STUB/queue.sh"
+chmod +x "$STUB/queue.sh"
 arms() { wc -l < "$STUB/arms" 2>/dev/null | tr -d ' ' || printf '0\n'; }
 stub_stop() {
   printf '%s' "$payload" | FM_ROOT_OVERRIDE="$STUB" FM_HOME="$STUB" \
-    FM_CODEX_IDLE_OWNER_PID="$owner" "$STUB/bin/fm-codex-idle-continuity.sh" >/dev/null 2>&1 || true
+    FM_CODEX_IDLE_OWNER_PID="$owner" FM_CODEX_IDLE_QUEUE="$STUB/queue.sh" \
+    "$STUB/bin/fm-codex-idle-continuity.sh" >/dev/null 2>&1 || true
 }
 at_least_arms() { [ "$(arms)" -ge "$1" ]; }
 
@@ -201,6 +204,8 @@ printf 'broken\n' > "$STUB/mode"
 stub_stop
 wait_until 75 test ! -d "$SLOCK" || fail "arm failures with no watcher never ended the supervisor"
 [ "$(arms)" -eq 3 ] || fail "the supervisor gave up after $(arms) failed arms instead of 3"
+[ "$(cat "$STUB/queue" 2>/dev/null)" = "check: codex idle continuity stopped after 3 failed watcher arms: watcher: FAILED - no live watcher with a fresh beacon" ] \
+  || fail "giving up left no check in the thread: $(cat "$STUB/queue" 2>/dev/null)"
 kill "$owner" 2>/dev/null || true
 wait "$owner" 2>/dev/null || true
 printf 'ok - handover closes never spend the failure budget, and real arm failures still do\n'
