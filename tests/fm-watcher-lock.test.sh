@@ -522,34 +522,33 @@ test_lock_create_hard_failure_fails_fast_without_recursion() {
 
 # Structural backstop: even genuine stale-owner contention must not recurse
 # through an arbitrarily deep chain of nested .steal locks. Build a chain of
-# already-stale, already-dead-pid lock directories deeper than a small
-# configured bound and confirm the walk refuses past that bound instead of
-# reclaiming an unbounded distance.
+# already-stale, already-dead-pid lock directories deeper than the fixed bound
+# of eight and confirm the walk refuses past that bound instead of reclaiming
+# an unbounded distance.
 test_lock_steal_recursion_is_depth_bounded() {
-  local dir state lockdir dead path i max out
+  local dir state lockdir dead path i out
   dir=$(make_case lock-steal-depth-bound)
   state="$dir/state"
   lockdir="$state/.contend.lock"
   dead=$(dead_pid)
-  max=3
   path="$lockdir"
   i=0
-  while [ "$i" -le $((max + 2)) ]; do
+  while [ "$i" -le 10 ]; do
     mkdir "$path" || fail "could not build fixture chain level $i"
     printf '%s\n' "$dead" > "$path/pid"
     path="$path.steal"
     i=$((i + 1))
   done
-  out=$(FM_LOCK_STALE_AFTER=0 FM_LOCK_STEAL_MAX_DEPTH=$max FM_STATE_OVERRIDE="$state" bash -c '
+  out=$(FM_LOCK_STALE_AFTER=0 FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
     printf "rc=%s held=%s\n" "$rc" "${FM_LOCK_HELD_PID:-}"
   ' _ "$LIB" "$lockdir")
   case "$out" in
     *"rc=1"*) ;;
-    *) fail "steal recursion reclaimed a chain deeper than the configured bound: $out" ;;
+    *) fail "steal recursion reclaimed a chain deeper than the fixed bound: $out" ;;
   esac
-  pass "steal recursion halts at the configured depth bound instead of reclaiming an arbitrarily deep chain"
+  pass "steal recursion halts at the fixed depth bound instead of reclaiming an arbitrarily deep chain"
 }
 
 # fm_lock_acquire_wait_unless_refused refuses only a lock it cannot create: a

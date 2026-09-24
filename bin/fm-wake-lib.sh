@@ -9,11 +9,6 @@ STATE="${FM_STATE_OVERRIDE:-${STATE:-$FM_HOME/state}}"
 FM_WAKE_QUEUE="${FM_WAKE_QUEUE:-$STATE/.wake-queue}"
 FM_WAKE_QUEUE_LOCK="${FM_WAKE_QUEUE_LOCK:-$STATE/.wake-queue.lock}"
 FM_LOCK_STALE_AFTER="${FM_LOCK_STALE_AFTER:-2}"
-# Hard bound on fm_lock_try_acquire's .steal-of-.steal recursion (see its
-# depth argument below). A live reclaim chain never needs more than one or
-# two levels; this is a structural backstop against any future cause of
-# unbounded regress, not a value callers are expected to tune.
-FM_LOCK_STEAL_MAX_DEPTH="${FM_LOCK_STEAL_MAX_DEPTH:-8}"
 # Resolved once at source time: fm_pid_identity and fm_path_mtime run inside 0.2s
 # confirm and 0.5s attach polls, and forking uname per call is a measurable cost on
 # the platform (Git Bash/MSYS) that already pays the highest fork price.
@@ -986,7 +981,7 @@ fm_lock_try_acquire() {  # <lockdir> [recursion-depth]
     return 1
   fi
 
-  if [ "$depth" -ge "$FM_LOCK_STEAL_MAX_DEPTH" ]; then
+  if [ "$depth" -ge 8 ]; then
     # Structural backstop: even genuine stale-owner contention should never
     # need to reclaim a .steal lock this many levels deep. Bail rather than
     # keep recursing, so any other unforeseen cause of runaway regress (for
