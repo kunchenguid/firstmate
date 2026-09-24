@@ -9,43 +9,37 @@
 # watcher, and writes nothing. Nothing in firstmate calls it; it exists to be
 # run by hand.
 #
-# It layers over bin/fm-fleet-snapshot.sh, which stays the single owner of
-# fleet state, and adds two things that document does not carry: the named
-# pipeline step each agent is on, and its GitHub check rollup.
+# It layers over bin/fm-fleet-snapshot.sh, which stays the single owner of fleet
+# state, and adds two things that document does not carry: the named pipeline
+# step each agent is on, and its GitHub check rollup.
 #
 # An agent here is a task with a LIVE worker behind it, whatever its kind. A
-# `state/<id>.meta` outlives the window it names, so liveness rather than the
-# presence of a record decides membership: every task is checked against its
-# recorded endpoint through `endpoint.exists`, which bin/fm-fleet-snapshot.sh
-# reads from fm_backend_target_exists, and one that no longer resolves moves to
-# `omitted` - named, counted, and not drawn.
-#
-# Kind decides only what an agent CARRIES. A `pipeline:true` agent carries a
-# no-mistakes run, its steps, and its GitHub checks. A `pipeline:false` agent -
-# a scout, a second mate - carries a `state` object read through
-# bin/fm-crew-state.sh instead, the fleet's own owner of a crew's current state.
-# They are emitted pipeline agents first, so the wire order is the draw order.
+# `state/<id>.meta` outlives the window it names, so membership is decided by
+# `endpoint.exists`, bin/fm-fleet-snapshot.sh's own reading of
+# fm_backend_target_exists; a record that no longer resolves moves to `omitted`,
+# named and counted rather than drawn. Kind decides only what an agent CARRIES:
+# a `pipeline:true` agent carries a no-mistakes run, its steps and its GitHub
+# checks, and a `pipeline:false` agent - a scout, a second mate - carries a
+# `state` object read through bin/fm-crew-state.sh instead. Pipeline agents are
+# emitted first, so the wire order is the draw order.
 #
 # Run attribution goes through bin/fm-nm-run-lib.sh, the repository's single
-# owner of which no-mistakes run belongs to a branch. The worker cannot forge
-# that answer, which is why it is read here rather than reported by each
-# crewmate.
+# owner of which no-mistakes run belongs to a branch. A worker cannot forge that
+# answer, which is why it is read here rather than self-reported.
 #
-# Limits, stated because a blank cell should never be read as a measured zero:
+# Limits, stated because a blank cell should never read as a measured zero:
 #
-#   - Checks are read for GitHub pull requests only. A GitLab merge request or
-#     a Gerrit change is reported as not read rather than guessed at. The read
-#     is a direct `gh pr view --json statusCheckRollup`, because
-#     fm_pr_github_read_record in bin/fm-pr-lib.sh returns a PR's state and
-#     merged flag and not its check rollup, so nothing else owns check classes.
-#   - The building phase starts at the task record's modification time, which
-#     is approximate: bin/fm-pr-check.sh rewrites that record when it notes the
-#     PR. Once a run exists the phase is reported as completed with no
-#     duration, because no machine record states when the run began.
-#   - A run whose pipeline executed somewhere other than the task's own copy of
-#     the repository, such as a scratch clone raising a PR against another
-#     repository, does not resolve through this read. That row reports that its
-#     run could not be established rather than inventing one.
+#   - Checks are read for GitHub pull requests only; a GitLab merge request or
+#     a Gerrit change reports as not read. The read is a direct `gh pr view
+#     --json statusCheckRollup` because fm_pr_github_read_record in
+#     bin/fm-pr-lib.sh returns a PR's state and merged flag, not its rollup.
+#   - The building phase starts at the task record's modification time, which is
+#     approximate: bin/fm-pr-check.sh rewrites that record when it notes the PR.
+#     Once a run exists the phase reports completed with no duration, because no
+#     machine record states when the run began.
+#   - A run whose pipeline executed outside the task's own copy of the
+#     repository, such as a scratch clone raising a PR elsewhere, does not
+#     resolve here, and that row reports its run as unestablished.
 #
 # Usage:
 #   fm-flow-snapshot.sh [--json] [--no-ci] [--task <id>]
@@ -88,7 +82,7 @@ WANT_CI=1
 ONLY_TASK=
 
 usage() {
-  sed -n '2,76p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -156,12 +150,10 @@ steps_json() {  # <axi-status-output>
 
 active_steps_json() {  # <axi-status-output>
   printf '%s\n' "$1" | awk '
-    # A RUNNING step publishes no duration: its steps[] duration_ms stays 0
-    # until the step ends, and the only elapsed the tool states for it is this
-    # humanised `active_for` ("23h11m", "2m59s"). It is parsed back to
-    # milliseconds here so the renderer can print a live step through the same
-    # formatter every finished step already uses. The value is validated END TO
-    # END before a single token is summed, so a string carrying a unit this
+    # A RUNNING step publishes no duration; the only elapsed the tool states
+    # for it is the humanised `active_for` ("23h11m", "2m59s"), parsed back to
+    # milliseconds here so the renderer needs no second time format. The value
+    # is validated END TO END before a single token is summed, so a unit this
     # parser does not know ("2w3d") yields null rather than the materially
     # understated time a partial parse would give.
     function active_ms(v,   total, tok, num, unit, rest) {
@@ -238,16 +230,11 @@ ci_json() {  # <pr-url>
   fi
   # --repo is what makes the answer the TASK's repository, because gh otherwise
   # resolves it from the working directory, which is the firstmate root for
-  # every task this view draws.
-  #
-  # headRefOid rides the same call: it is the commit these checks describe, and
-  # the renderer compares it with the run's own head to tell checks that passed
-  # on a head the run will replace from checks on the head that will land.
-  #
-  # `state` rides it too, and it is the PR's OWN lifecycle rather than anything
-  # about its checks: OPEN, MERGED or CLOSED. Without it a merged PR whose
-  # checks were green reads exactly like an open green one, and a green check
-  # tally is not evidence that anything is still open.
+  # every task this view draws. headRefOid rides the same call as the commit
+  # these checks describe, so the renderer can tell checks that passed on a head
+  # the run will replace from checks on the head that will land. `state` rides
+  # it as the PR's OWN lifecycle - OPEN, MERGED or CLOSED - because a green
+  # check tally is not evidence that anything is still open.
   raw=$(fm_nm_bounded "$FM_ROOT" "$GH_TIMEOUT" \
     gh pr view "$FM_PR_NUMBER" --repo "$FM_PR_OWNER/$FM_PR_REPO" \
     --json statusCheckRollup,headRefOid,state 2>/dev/null) || raw=
@@ -255,25 +242,21 @@ ci_json() {  # <pr-url>
     ci_unread "gh read failed or timed out"
     return
   fi
-  # The counts here have ONE job: agree with what `gh pr checks <n>` prints for
-  # the same PR. Two things are needed for that.
+  # The counts have ONE job: agree with what `gh pr checks <n>` prints for the
+  # same PR. Three rules get there.
   #
   # 1. Supersession. Checks are keyed on workflow PLUS name, because names alone
-  #    are not unique, but the rollup keeps EVERY attempt of that key, so a
-  #    re-run leaves the old one in it. The latest attempt of a key wins; the
-  #    rest are counted nowhere.
-  # 2. Exclusive buckets. Passed, failed and pending must partition the checks.
-  #    Reading `conclusion` without first checking `status` counts a re-running
-  #    check as both passed and pending, on the strength of a conclusion left
-  #    over from its previous attempt. A check that has not COMPLETED has no
-  #    verdict yet, whatever field is still lying around on it.
+  #    are not unique, and the rollup keeps EVERY attempt of a key. The latest
+  #    attempt wins; the rest are counted nowhere.
+  # 2. Exclusive buckets. Reading `conclusion` without first checking `status`
+  #    counts a re-running check as both passed and pending, on a conclusion
+  #    left over from its previous attempt.
+  # 3. A deliberately-not-run check is its OWN class: a job GitHub reports
+  #    SKIPPED verified nothing, so it is never folded into passing.
   #
   # A StatusContext, a commit status rather than a check run, carries `state`
   # and `context` instead; gh counts those too, so they are normalised rather
   # than dropped into the pending bucket for want of a `status` field.
-  #
-  # A deliberately-not-run check is its OWN class, never folded into passing: a
-  # job GitHub reports SKIPPED verified nothing.
   norm=$(printf '%s' "$raw" | jq -c '
     def normalize:
       if (.__typename // "") == "StatusContext" then
@@ -321,12 +304,11 @@ ci_json() {  # <pr-url>
 }
 
 # The failed read's own words: its first line of stdout, and failing that the
-# first line of stderr that is not the version-update banner. An exit code alone
-# tells the captain a read failed and nothing they can act on.
-#
-# The diagnosis is on STDOUT because stderr carries the version banner on every
-# call including the ones that work, so the two streams stay separate: merging
-# them would put that banner into the TOON the step parsers read.
+# first line of stderr that is not the version banner. An exit code alone tells
+# the captain a read failed and nothing they can act on. The diagnosis is on
+# STDOUT because stderr carries that banner on every call including the ones
+# that work, which is also why the two streams are never merged: doing so would
+# put the banner into the TOON the step parsers read.
 axi_error() {  # <stdout> <stderr-file>
   local line
   line=$(printf '%s\n' "$1" | grep -v '^[[:space:]]*$' | head -1)
@@ -351,12 +333,10 @@ row_common() {  # <task-json>
   FM_ROW_WORKTREE=$(printf '%s' "$task" | jq -r '.paths.worktree.path // ""')
   FM_ROW_WINDOW=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
   FM_ROW_ENDPOINT_ALIVE=$(printf '%s' "$task" | jq -r 'if .endpoint.exists then "true" else "false" end')
-  # `endpoint.exists` only says a pane is there. The deeper probe asks what is
-  # RUNNING in it, which distinguishes a torn-down worker from a live one. It
-  # reports the pane's foreground command, so it cannot see a WEDGED agent: a
-  # stuck agent is still that agent's process. It upgrades "a pane exists" to
-  # "an agent process exists" and nothing further, which is why the renderer
-  # treats `unknown` as unknown rather than as alive.
+  # `endpoint.exists` only says a pane is there; this probe asks what is RUNNING
+  # in it. It reads the pane's foreground command, so it cannot see a WEDGED
+  # agent - a stuck agent is still that agent's process - and upgrades "a pane
+  # exists" to "an agent process exists" and nothing further.
   FM_ROW_AGENT_ALIVE=$(printf '%s' "$task" | jq -r '.endpoint.agent_alive // "not_checked"')
   if [ "$FM_ROW_AGENT_ALIVE" = "not_checked" ] \
      && [ "$FM_ROW_ENDPOINT_ALIVE" = true ] && [ -n "$FM_ROW_WINDOW" ]; then
@@ -477,15 +457,10 @@ agent_json() {  # <task-json>
   fi
 
   # The worker's own implementation phase, which no pipeline record describes
-  # because it happens before the pipeline exists. Its start is the task
-  # record's modification time, which is approximate and named as such in this
-  # script's header. Once a run exists the phase is over, and it is reported
-  # completed with no duration because nothing states when the run began; the
-  # renderer draws a null duration as a blank timer rather than as zero.
-  #
-  # No readable record leaves the step `unknown` rather than `pending`: not
-  # started yet is a claim, and it is the wrong one for a worker that is
-  # demonstrably running.
+  # because it happens before the pipeline exists. Its start and its precision
+  # are the header's third limit. No readable record leaves the step `unknown`
+  # rather than `pending`: not started yet is a claim, and it is the wrong one
+  # for a worker that is demonstrably running.
   local built_at build_step build_active=''
   built_at=$(path_mtime "$meta")
   if [ -n "$run_id" ]; then
@@ -579,20 +554,15 @@ agent_json() {  # <task-json>
     }'
 }
 
-# A live worker that runs no no-mistakes pipeline: a scout, a second mate.
-#
-# It gets an agent record like any other live worker, because being drawn is
-# what liveness earns. What it does NOT get is a run, steps, or checks: there is
-# no pipeline behind it, and nine permanently empty boxes would be an invented
-# journey. `pipeline:false` is the field that says so, stated rather than left
-# for the renderer to infer from the kind string.
-#
-# Its one substantive fact is the state, and that is READ rather than derived.
-# bin/fm-crew-state.sh already owns reconciling a crew's current state out of
-# its run step, its pane, and its append-only status log, so a second reading
-# here would be a second answer to a question the fleet already has one owner
-# for. A read that fails or times out reports ok:false; it never falls back to
-# the status log's last line, which is a wake EVENT and not a current state.
+# A live worker that runs no no-mistakes pipeline: a scout, a second mate. It
+# gets an agent record like any other live worker, because being drawn is what
+# liveness earns, but no run, steps or checks: nine permanently empty boxes
+# would be an invented journey, and `pipeline:false` states that rather than
+# leaving the renderer to infer it from the kind string. Its one substantive
+# fact is the state, and bin/fm-crew-state.sh already owns reconciling that out
+# of a crew's run step, pane and status log. A read that fails or times out
+# reports ok:false; it never falls back to the status log's last line, which is
+# a wake EVENT and not a current state.
 crew_state_json() {  # <task-id>
   local id=$1 line rest
   # FM_HOME and FM_ROOT_OVERRIDE are passed because this script defaults them
@@ -695,13 +665,11 @@ fi
 
 SCOPED=$(printf '%s' "$FLEET" | jq -c --arg only "$ONLY_TASK" '
   [ .tasks[] | select($only == "" or .id == $only) ]')
-# Membership is liveness and nothing else. `endpoint.exists` is
-# bin/fm-fleet-snapshot.sh's own reading of fm_backend_target_exists, the
-# fleet's single owner of whether a recorded endpoint still resolves. It is
-# consumed here rather than re-derived, so the view can never disagree with the
-# rest of firstmate about which workers are running. null means no endpoint was
-# ever recorded, which is not a live worker either, and is a different reason
-# worth naming.
+# Membership is liveness and nothing else, and `endpoint.exists` is consumed
+# rather than re-derived so the view can never disagree with the rest of
+# firstmate about which workers are running. null means no endpoint was ever
+# recorded, which is not a live worker either and is a different reason worth
+# naming.
 ORDER='([ .[] | select(.kind == "ship") ] + [ .[] | select(.kind != "ship") ])[]'
 TASKS=$(printf '%s' "$SCOPED" | jq -c "[ .[] | select(.endpoint.exists == true) ] | $ORDER")
 OMITTED=$(printf '%s' "$SCOPED" | jq -c '[
