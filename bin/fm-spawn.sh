@@ -334,7 +334,6 @@
 #   compatible under this opt-in. A malformed file, or a matched cap on a host
 #   that cannot start the scope, refuses before any endpoint, worktree, or
 #   record exists. Secondmates are never capped, and the file is not inherited.
-#   The accepted cap is reported as memory_max=<N>MiB on the spawned line.
 #   bin/fm-worker-memory-cap.sh owns the rule format, probe, and outcome record.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
@@ -428,7 +427,7 @@
 # keeps no data/backlog.md. A configured non-markdown adapter remains
 # active without a markdown file; any active automatic backend without
 # compatible tasks-axi refuses before creating lifecycle state.
-# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path> [account=<pin>] [memory_max=<N>MiB]
+# On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path> [account=<pin>]
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
 # success line and state/<id>.meta omit them.
@@ -5029,7 +5028,7 @@ if [ -n "$MEMORY_MAX_MIB" ]; then
   else
     MEMORY_SCOPE_CMD="/bin/sh -c $(shell_quote "$LAUNCH")"
   fi
-  LAUNCH="systemd-run --user --scope --quiet --unit=$MEMORY_SCOPE_UNIT -p MemoryMax=${MEMORY_MAX_MIB}M -p MemorySwapMax=${MEMORY_MAX_MIB}M -- $MEMORY_SCOPE_CMD; $(shell_quote "$SCRIPT_DIR/fm-worker-memory-cap.sh") outcome $MEMORY_SCOPE_UNIT $MEMORY_MAX_MIB $(shell_quote "$STATE/$ID.status") $(shell_quote "$CONFIG")"
+  LAUNCH="systemd-run --user --scope --quiet --unit=$MEMORY_SCOPE_UNIT -p MemoryMax=${MEMORY_MAX_MIB}M -p MemorySwapMax=${MEMORY_MAX_MIB}M -p OOMPolicy=stop -- $MEMORY_SCOPE_CMD; $(shell_quote "$SCRIPT_DIR/fm-worker-memory-cap.sh") outcome $MEMORY_SCOPE_UNIT $MEMORY_MAX_MIB $(shell_quote "$STATE/$ID.status") $(shell_quote "$CONFIG")"
 fi
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in
@@ -5229,6 +5228,4 @@ SPAWN_ACCOUNT=
 [ -z "$WORKER_ACCOUNT_PROVIDER" ] || SPAWN_ACCOUNT="$SPAWN_ACCOUNT account_provider=$WORKER_ACCOUNT_PROVIDER"
 # Opt-in fleet activity ledger (docs/fleet-ledger.md); off costs one file test.
 [ ! -e "$CONFIG/fleet-ledger" ] || [ "$RELAUNCH" -eq 1 ] || FM_HOME=$FM_HOME FM_STATE_OVERRIDE=$STATE FM_CONFIG_OVERRIDE=$CONFIG "$SCRIPT_DIR/fm-fleet-ledger.sh" dispatched "$ID" "$KIND" "${PROJ_ABS##*/}" "$HARNESS" "$MODEL" || true
-SPAWN_MEMORY=
-[ -z "$MEMORY_MAX_MIB" ] || SPAWN_MEMORY=" memory_max=${MEMORY_MAX_MIB}MiB"
-echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT$SPAWN_MEMORY"
+echo "spawned $ID harness=$HARNESS kind=$KIND$SPAWN_DELIVERY window=$META_WINDOW worktree=$WT$SPAWN_ACCOUNT"
