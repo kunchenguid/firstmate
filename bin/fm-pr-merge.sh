@@ -18,10 +18,17 @@
 # every unwaived check the forge requires for the base branch has reported at
 # that head. A required check that never reported is absent from the checks
 # list rather than red, so github_read_required_contexts below reads the
-# required set from the forge itself and owns what counts as unreadable; an
-# unreadable required set refuses rather than reading as nothing required.
-# Every failing condition is reported, not
-# just the first. The verified head is then passed to gh as
+# required set from classic branch protection and active rulesets. Requirements
+# retain their producer app binding: a same-named check from another app cannot
+# satisfy them, and a duplicate name-only entry cannot weaken that binding.
+# Unbound requirements match by name. Bound requirements also need a matching
+# producer in the check-runs read at the verified head; an unreadable producer
+# read refuses. Successfully read requirements remain checked even if another
+# source fails, so known missing checks and all read errors are reported together.
+# github_branch_rules_unavailable_on_plan owns the narrow plan-unavailable
+# exception; every other unreadable required source refuses.
+# Every failing condition is reported, not just the first.
+# The verified head is then passed to gh as
 # --match-head-commit, so a push that lands between that read and the merge
 # fails the merge instead of landing commits nothing verified. Reading that
 # state needs gh and jq, and either one absent stops the merge before any
@@ -31,7 +38,9 @@
 # twin, an attended --allow-missing <check-name>, follows the same rules for one
 # required check that has not reported: it waives only that exact name, still
 # requires every other required check to have reported and every check to be
-# green, and never waives a required set that could not be read. Both are
+# green unless separately waived by --allow-red. It matches the required
+# context name even for an app-bound requirement, and never waives an unreadable
+# required source or producer read. Both are
 # refused while the away-posture record exists, and neither
 # applies on GitLab, where a merge already requires the head pipeline to have
 # succeeded. After gh returns success, GitHub's live state is read back and
@@ -688,7 +697,7 @@ github_required_checks_missing() {
   ' 2>/dev/null || return 1
 }
 
-# Pre-merge conditions for a GitHub pull request, read from one live view.
+# Pre-merge conditions from a live PR view, base requirements, and head producers.
 # Sets FM_PR_MERGE_HEAD to the verified head on success.
 github_verify_mergeable() {
   local json fields line red name covered missing unreported producers runs
