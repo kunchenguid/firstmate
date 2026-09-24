@@ -138,7 +138,6 @@ FM_AFK_CONTRACT_VERSION=3
 FM_AFK_CONTRACT_READABLE_VERSIONS="1 2 3"
 FM_AFK_CONTRACT_REACH_CHANNELS=none
 FM_AFK_CONTRACT_REACH_ANNOUNCED='No phone channel is configured; anything that needs you waits for your return.'
-FM_AFK_EMAIL_HELPER="$FM_AFK_CONTRACT_DIR/fm-afk-email.py"
 FM_AFK_CONTRACT_SPEND_DEFAULT=4
 FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING='you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation.'
 # Generous against the longest legitimate holder, a merge waiting on the forge,
@@ -559,7 +558,7 @@ fm_afk_contract_cmd_enter() {
   harness=$("$FM_AFK_CONTRACT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
   case "$harness" in
     pi|pi-signed)
-      if command -v python3 >/dev/null 2>&1 && python3 "$FM_AFK_EMAIL_HELPER" configured >/dev/null 2>&1; then
+      if [ -x "$FM_AFK_CONTRACT_DIR/fm-mail.sh" ] && "$FM_AFK_CONTRACT_DIR/fm-mail.sh" afk-email configured >/dev/null 2>&1; then
         FM_AFK_CONTRACT_REACH_CHANNELS=email
         FM_AFK_CONTRACT_REACH_ANNOUNCED='Captain-facing outcomes are emailed to the configured address; replies with a current item code reach the away session.'
       fi

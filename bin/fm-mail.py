@@ -25,7 +25,7 @@ import email
 import smtplib
 from email.header import decode_header, make_header
 from email.message import EmailMessage
-from email.utils import formatdate
+from email.utils import formatdate, getaddresses
 
 USER = os.environ['FM_MAIL_USER']
 PW = os.environ['FM_MAIL_PASS']
@@ -53,6 +53,69 @@ socket.setdefaulttimeout(MAIL_TIMEOUT)
 
 MAX_PREVIEW = 200
 READ_LIMIT = 20
+MAX_AFK_BODY_BYTES = 256 * 1024
+MAX_AFK_BATCH_BODY_BYTES = 1024 * 1024
+MAX_AFK_REPLY_CHARS = 8000
+AFK_EMAIL_RE = re.compile(r'[^@\s<>]+@[^@\s<>]+')
+
+
+def afk_record_field(name):
+    contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
+    env = os.environ.copy()
+    env.setdefault('FM_HOME', os.path.dirname(os.path.dirname(__file__)))
+    result = subprocess.run(
+        [contract, 'field', name],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=env,
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def afk_email_enabled():
+    if os.environ.get('FM_AFK_POSTURE') != '1':
+        return False
+    contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
+    env = os.environ.copy()
+    env.setdefault('FM_HOME', os.path.dirname(os.path.dirname(__file__)))
+    validated = subprocess.run(
+        [contract, 'validate'],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    recipient = os.environ.get('FM_AFK_EMAIL_TO', '').strip()
+    addresses = getaddresses([recipient])
+    return (
+        validated.returncode == 0
+        and afk_record_field('reach_channels') == 'email'
+        and bool(AFK_EMAIL_RE.fullmatch(recipient))
+        and len(addresses) == 1
+        and addresses[0][1].casefold() == recipient.casefold()
+    )
+
+
+def fetched_literal(data):
+    for item in data or []:
+        if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes):
+            return item[1]
+    return None
+
+
+def fetched_size(data):
+    for item in data or []:
+        if not isinstance(item, tuple) or not item or not isinstance(item[0], bytes):
+            continue
+        match = re.search(rb'\bRFC822\.SIZE\s+(\d+)', item[0], re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def from_is_configured(header, recipient):
+    addresses = getaddresses([header or ''])
+    return len(addresses) == 1 and addresses[0][1].strip().casefold() == recipient.casefold()
 
 
 def dec(s):
@@ -343,19 +406,9 @@ def cmd_poll_list():
         retry_window = retry_scan_window(retry_order, retry_pos, window)
         retry_candidates = [u for u in retry_window if u in seen]
         recipient = os.environ.get('FM_AFK_EMAIL_TO', '').strip()
-        state_root = os.environ.get('FM_STATE_OVERRIDE') or os.path.join(
-            os.environ.get('FM_HOME') or os.path.dirname(os.path.dirname(__file__)), 'state')
-        posture_path = os.path.join(state_root, '.afk-contract')
-        try:
-            posture = open(posture_path, encoding='utf-8').read().splitlines()
-        except OSError:
-            posture = []
-        afk_enabled = (
-            os.environ.get('FM_AFK_POSTURE') == '1'
-            and re.fullmatch(r'[^@\s<>]+@[^@\s<>]+', recipient)
-            and 'reach_channels: email' in posture
-        )
+        afk_enabled = afk_email_enabled()
         afk_messages = []
+        afk_body_budget = MAX_AFK_BATCH_BODY_BYTES
         turn_path = os.environ.get('FM_MAIL_TURN', '')
         next_turn = None
         if cap == 1 and new_candidates and retry_candidates:
@@ -404,22 +457,41 @@ def cmd_poll_list():
             # surfaced degraded, a retry uid is left for a later scan step, and
             # the scan advances.
             try:
-                fetch_spec = '(BODY.PEEK[])' if afk_enabled else '(BODY.PEEK[HEADER])'
+                fetch_spec = '(RFC822.SIZE BODY.PEEK[HEADER])' if afk_enabled else '(BODY.PEEK[HEADER])'
                 typ, msg = m.uid('fetch', u.encode(), fetch_spec)
                 if typ != 'OK' or not msg or not msg[0]:
-                    raise ValueError('no mail data')
-                mi = email.message_from_bytes(msg[0][1])
+                    raise ValueError('no header data')
+                header_bytes = fetched_literal(msg)
+                if not header_bytes:
+                    raise ValueError('no header data')
+                mi = email.message_from_bytes(header_bytes)
                 uid = clean(u)
                 idate = clean(dec(mi.get('Date')))
                 subj = clean(dec(mi.get('Subject')))
                 fr = clean(dec(mi.get('From')))
                 if afk_enabled:
+                    body = ''
+                    if from_is_configured(fr, recipient):
+                        try:
+                            message_size = fetched_size(msg)
+                            body_limit = min(MAX_AFK_BODY_BYTES, afk_body_budget)
+                            if message_size is not None and 0 < message_size <= body_limit:
+                                afk_body_budget -= body_limit
+                                body_type, body_data = m.uid(
+                                    'fetch', u.encode(), f'(BODY.PEEK[]<0.{body_limit}>)')
+                                body_bytes = fetched_literal(body_data) if body_type == 'OK' else None
+                                if body_bytes is not None and len(body_bytes) == message_size and len(body_bytes) <= body_limit:
+                                    body_message = email.message_from_bytes(body_bytes)
+                                    body = plain_body(body_message)[:MAX_AFK_REPLY_CHARS + 1]
+                                    afk_body_budget += body_limit - len(body_bytes)
+                        except Exception:
+                            body = ''
                     afk_messages.append({
                         'uidvalidity': uidv,
                         'uid': uid,
                         'from': fr,
                         'subject': subj,
-                        'body': plain_body(mi),
+                        'body': body,
                     })
             except Exception:
                 if is_retry:

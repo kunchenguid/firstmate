@@ -101,15 +101,15 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 for r in FM_MAIL_USER FM_MAIL_PASS FM_IMAP_HOST FM_SMTP_HOST; do
-  if [ -z "${!r:-}" ]; then
+  if [ "${1:-}" != afk-email ] && [ -z "${!r:-}" ]; then
     echo "fm-mail: missing required \$FM_HOME/.env value: $r" >&2
     echo "fm-mail: add $r (and the other three FM_MAIL_* values) to $ENV_FILE" >&2
     exit 1
   fi
 done
-IMAP_HOST="$FM_IMAP_HOST"
+IMAP_HOST="${FM_IMAP_HOST:-}"
 IMAP_PORT="${FM_IMAP_PORT:-993}"
-SMTP_HOST="$FM_SMTP_HOST"
+SMTP_HOST="${FM_SMTP_HOST:-}"
 SMTP_PORT="${FM_SMTP_PORT:-465}"
 case "$IMAP_PORT" in
   ''|*[!0-9]*|0)
@@ -169,7 +169,7 @@ TURN="$STATE_DIR/.mail-turn"
 # Invoke the python engine with the resolved endpoints, cursor, and cap in the
 # environment so credentials never reach argv.
 run_py() {
-  FM_HOME="$FM_HOME" FM_MAIL_USER="$FM_MAIL_USER" FM_MAIL_PASS="$FM_MAIL_PASS" \
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE_DIR" FM_MAIL_USER="$FM_MAIL_USER" FM_MAIL_PASS="$FM_MAIL_PASS" \
   FM_IMAP_HOST="$IMAP_HOST" FM_IMAP_PORT="$IMAP_PORT" \
   FM_SMTP_HOST="$SMTP_HOST" FM_SMTP_PORT="$SMTP_PORT" \
   FM_MAIL_CURSOR="$CURSOR" FM_MAIL_RETRY="$RETRY" \
@@ -180,12 +180,22 @@ run_py() {
     "$PY" "$PY_BIN" "$@"
 }
 
+run_afk_email() {
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE_DIR" \
+  FM_MAIL_USER="${FM_MAIL_USER:-}" FM_MAIL_PASS="${FM_MAIL_PASS:-}" \
+  FM_IMAP_HOST="$IMAP_HOST" FM_IMAP_PORT="$IMAP_PORT" \
+  FM_SMTP_HOST="$SMTP_HOST" FM_SMTP_PORT="$SMTP_PORT" \
+  FM_AFK_EMAIL_TO="${FM_AFK_EMAIL_TO:-}" \
+    "$PY" "$SCRIPT_DIR/fm-afk-email.py" "$@"
+}
+
 usage() {
   cat <<'EOF'
 fm-mail.sh read
 fm-mail.sh send <to> <subject> <body | ->
 fm-mail.sh poll
 fm-mail.sh status
+fm-mail.sh afk-email <configured|queue-unprocessed|flush>
 EOF
 }
 
@@ -642,6 +652,10 @@ case "${1:-}" in
     ;;
   poll)
     mail_poll
+    ;;
+  afk-email)
+    shift
+    run_afk_email "$@"
     ;;
   -h|--help)
     usage

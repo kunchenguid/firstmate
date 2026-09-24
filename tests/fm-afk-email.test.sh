@@ -9,12 +9,16 @@ TMP_ROOT=$(fm_test_tmproot fm-afk-email-tests)
 REPO="$TMP_ROOT/repo"
 mkdir -p "$REPO"
 cp -R "$ROOT/bin" "$REPO/bin"
+mv "$REPO/bin/fm-mail.sh" "$REPO/bin/fm-mail-real.sh"
 CAPTURE="$TMP_ROOT/sent"
 mkdir -p "$CAPTURE"
 export CAPTURE
 cat > "$REPO/bin/fm-mail.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${1:-}" = afk-email ]; then
+  exec "$(dirname "$0")/fm-mail-real.sh" "$@"
+fi
 [ "${1:-}" = send ] || exit 2
 count=$(find "$CAPTURE" -maxdepth 1 -name '*.txt' | wc -l | tr -d ' ')
 path="$CAPTURE/$count.txt"
@@ -56,7 +60,7 @@ run_email() {  # <home> <command>
   local home=$1 command=$2
   shift 2
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
-    python3 "$REPO/bin/fm-afk-email.py" "$command" "$@"
+    "$REPO/bin/fm-mail.sh" afk-email "$command" "$@"
 }
 
 write_outcomes() {  # <home> <entry epoch>
@@ -169,6 +173,101 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   pass "captain outcomes batch with full URLs and redaction, while reply codes are item-bound, one-use, and sender-checked"
 }
 
+test_invalid_away_record_does_not_enable_email() {
+  local home out
+  home=$(make_home invalid-record configured)
+  cat > "$home/state/.afk-contract" <<'EOF'
+version: 99
+entered_epoch: 100
+reach_channels: email
+EOF
+  out=$(run_email "$home" queue-unprocessed 2>&1) || fail "invalid-record queue check failed: $out"
+  [ ! -e "$home/state/afk-email" ] || fail "an invalid away record enabled email state"
+  out=$(printf '[{"uidvalidity":"44","uid":"1","from":"owner@example.com","body":"FM-AFK-REPLY FM-AFK-AAAAAAAAAAAAAAAA\\nanswer"}]' \
+    | run_email "$home" receive-batch 2>&1) || fail "invalid-record receive check failed: $out"
+  [ ! -e "$home/state/inbox" ] || fail "an invalid away record accepted or surfaced a reply"
+  pass "away email remains disabled when the contract owner rejects the record"
+}
+
+test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit() {
+  local home
+  home=$(make_home body-scope configured)
+  run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
+  python3 - "$ROOT" "$home" <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+home = Path(sys.argv[2])
+state = home / "state"
+os.environ.update({
+    "FM_HOME": str(home),
+    "FM_STATE_OVERRIDE": str(state),
+    "FM_ROOT_OVERRIDE": str(root),
+    "FM_AFK_POSTURE": "1",
+    "FM_AFK_EMAIL_TO": "owner@example.com",
+    "FM_MAIL_USER": "owner@example.com",
+    "FM_MAIL_PASS": "test-secret",
+    "FM_IMAP_HOST": "imap.example.test",
+    "FM_IMAP_PORT": "993",
+    "FM_SMTP_HOST": "smtp.example.test",
+    "FM_SMTP_PORT": "465",
+    "FM_MAIL_CURSOR": str(state / ".mail-seen"),
+    "FM_MAIL_RETRY": str(state / ".mail-retry"),
+    "FM_MAIL_RETRY_POS": str(state / ".mail-retry-pos"),
+    "FM_MAIL_TURN": str(state / ".mail-turn"),
+    "FM_MAIL_POLL_MAX_WAKES": "20",
+})
+spec = importlib.util.spec_from_file_location("fm_mail_under_test", root / "bin" / "fm-mail.py")
+mail = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mail)
+headers = {
+    "1": b"From: outsider@example.com\r\nSubject: outside\r\n\r\n",
+    "2": b"From: owner@example.com\r\nSubject: captain\r\n\r\n",
+    "3": b"From: owner@example.com\r\nSubject: oversized\r\n\r\n",
+}
+bodies = {
+    "1": b"From: outsider@example.com\r\nSubject: outside\r\nContent-Type: text/plain\r\n\r\nprivate body",
+    "2": b"From: owner@example.com\r\nSubject: captain\r\nContent-Type: text/plain\r\n\r\nreply text",
+    "3": b"From: owner@example.com\r\nSubject: oversized\r\nContent-Type: text/plain\r\n\r\nreply text",
+}
+class FakeMailbox:
+    untagged_responses = {"UIDVALIDITY": [b"44"]}
+    body_fetches = []
+
+    def login(self, *_): pass
+    def select(self, *_): pass
+    def logout(self): pass
+
+    def uid(self, command, uid, fetch_spec):
+        if command == "search":
+            return "OK", [b"1 2 3"]
+        key = uid.decode()
+        if "RFC822.SIZE" in fetch_spec:
+            size = mail.MAX_AFK_BODY_BYTES + 1 if key == "3" else len(bodies[key])
+            metadata = f"{key} (RFC822.SIZE {size} BODY[HEADER] {{{len(headers[key])}}}".encode()
+            return "OK", [(metadata, headers[key]), b")"]
+        if "BODY.PEEK[HEADER]" in fetch_spec:
+            return "OK", [(f"{key} (BODY[HEADER] {{{len(headers[key])}}}".encode(), headers[key]), b")"]
+        if "BODY.PEEK[]<0." in fetch_spec:
+            self.body_fetches.append(key)
+            return "OK", [(f"{key} (BODY[]<0> {{{len(bodies[key])}}}".encode(), bodies[key]), b")"]
+        raise AssertionError(f"unexpected fetch spec: {fetch_spec}")
+
+mailbox = FakeMailbox()
+mail.connect_mailbox = lambda: mailbox
+assert mail.cmd_poll_list() == 0
+assert mailbox.body_fetches == ["2"], mailbox.body_fetches
+(state / ".afk-contract").write_text("version: 99\nentered_epoch: 1\nreach_channels: email\n")
+mailbox.body_fetches.clear()
+assert mail.cmd_poll_list() == 0
+assert mailbox.body_fetches == [], mailbox.body_fetches
+PY
+  pass "mail polling reads bodies only for the configured sender and within the size limit"
+}
+
 test_expired_and_unknown_codes_are_untrusted() {
   local home out entered token sent reply_body
   home=$(make_home expiry configured)
@@ -199,4 +298,6 @@ PY
 test_unconfigured_and_non_pi_retain_existing_behavior
 # The active feature is tested with synthetic mail and a local fake SMTP command; no network or mailbox is used.
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
+test_invalid_away_record_does_not_enable_email
+test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit
 test_expired_and_unknown_codes_are_untrusted

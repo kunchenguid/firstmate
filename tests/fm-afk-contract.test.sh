@@ -422,7 +422,7 @@ test_inputs_are_validated() {
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || fail "a foreign record version must be refused"
-  assert_contains "$out" "carries version '9', expected one of 1, 2" 'version refusal wording'
+  assert_contains "$out" "carries version '9', expected one of 1, 2, 3" 'version refusal wording'
   pass "malformed inputs and foreign record versions are refused rather than guessed"
 }
 

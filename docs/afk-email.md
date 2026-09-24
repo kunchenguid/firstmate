@@ -38,11 +38,13 @@ No credential needs to be shared with Firstmate.
 
 Captain-facing Pi supervision outcomes are grouped into plain-text email updates, with the full pull-request URL retained when present and a short one-time reply code for each item.
 To answer an item, reply from the configured destination address and make the first non-empty line exactly `FM-AFK-REPLY FM-AFK-<code>`; put your words on the following lines before any quoted message.
-Each code is accepted only for its own sent item, once, and for seven days after sending.
+Each code is accepted only for its own sent item, once, and for seven days after sending. Reply bodies are fetched and parsed only when the header's single sender address matches the configured destination; each message is limited to 256 KiB and each poll to 1 MiB of reply bodies. Replies over 8,000 characters are not accepted.
 
 A matching reply enters Firstmate's existing captain inbox as words for that outcome.
 Messages with a different sender, missing or invalid code, expired code, or already-used code are surfaced as untrusted mail and are never treated as instructions.
 The email footer states the same safety boundary: replies never authorize destructive, irreversible, or security-sensitive actions, which still require your return or trusted-channel confirmation.
+
+Away updates are batched, with a minimum interval of one message per minute. If another batch is ready sooner, it remains queued until the interval expires.
 
 Email transport settings and received-mail polling are owned by the [Mail plane](configuration.md#mail-plane-env).
 The durable away-posture reach selection and its hold-for-return fallback are owned by `bin/fm-afk-contract.sh` and the [`/afk` skill](../.agents/skills/afk/SKILL.md).

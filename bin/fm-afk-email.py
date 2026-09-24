@@ -13,7 +13,7 @@ import secrets
 import subprocess
 import sys
 import time
-from email.utils import getaddresses, parseaddr
+from email.utils import getaddresses
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,63 +33,47 @@ REPLY_LINE_RE = re.compile(r"^FM-AFK-REPLY (FM-AFK-[A-Za-z0-9_-]{16})$")
 EMAIL_RE = re.compile(r"^[^\s@<>]+@[^\s@<>]+$")
 
 
-def load_dotenv():
-    values = {}
-    path = HOME / ".env"
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return values
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[7:].lstrip()
-        if "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        if key and not os.environ.get(key):
-            values[key] = value
-    return values
-
-
-def setting(name, dotenv):
-    return os.environ.get(name) or dotenv.get(name, "")
-
-
 def mail_configuration():
-    dotenv = load_dotenv()
     required = ["FM_MAIL_USER", "FM_MAIL_PASS", "FM_IMAP_HOST", "FM_SMTP_HOST"]
-    if any(not setting(name, dotenv) for name in required):
+    if any(not os.environ.get(name) for name in required):
         return None
-    recipient = setting("FM_AFK_EMAIL_TO", dotenv).strip()
-    parsed = parseaddr(recipient)[1]
-    if not recipient or not EMAIL_RE.fullmatch(recipient) or parsed.casefold() != recipient.casefold():
+    recipient = os.environ.get("FM_AFK_EMAIL_TO", "").strip()
+    addresses = getaddresses([recipient])
+    if (
+        not recipient
+        or not EMAIL_RE.fullmatch(recipient)
+        or len(addresses) != 1
+        or addresses[0][1].casefold() != recipient.casefold()
+    ):
         return None
-    return {"recipient": recipient, "dotenv": dotenv}
+    return {"recipient": recipient}
+
+
+def contract_value(command, field=None):
+    script = ROOT / "bin" / "fm-afk-contract.sh"
+    args = [str(script), command]
+    if field:
+        args.append(field)
+    result = subprocess.run(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=os.environ.copy(),
+    )
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def live_record():
-    path = STATE / ".afk-contract"
-    try:
-        fields = {}
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.startswith("words:"):
-                break
-            if ": " in line:
-                key, value = line.split(": ", 1)
-                fields[key] = value
-        entered = int(fields.get("entered_epoch", ""))
-        if fields.get("reach_channels") != "email":
-            return None
-        return {"entered_epoch": entered, "fields": fields}
-    except (OSError, ValueError):
+    if contract_value("validate") is None:
         return None
+    try:
+        entered = int(contract_value("field", "entered_epoch") or "")
+    except ValueError:
+        return None
+    if contract_value("field", "reach_channels") != "email":
+        return None
+    return {"entered_epoch": entered}
 
 
 def atomic_json(path, value):
@@ -126,9 +110,9 @@ def safe_text(value, limit=4000):
     return value.strip()[:limit]
 
 
-def redact_secrets(text, dotenv):
+def redact_secrets(text):
     secret_values = set()
-    for key, value in {**dotenv, **os.environ}.items():
+    for key, value in os.environ.items():
         if re.search(r"(PASS|TOKEN|SECRET|API.?KEY|CREDENTIAL)", key, re.IGNORECASE) and len(value) >= 8:
             secret_values.add(value)
     for secret in sorted(secret_values, key=len, reverse=True):
@@ -182,7 +166,7 @@ def queue_unprocessed():
         item = {
             "seq": seq,
             "task": safe_text(row.get("task"), 160),
-            "summary": safe_text(redact_secrets(str(row.get("summary", "")), config["dotenv"])),
+            "summary": safe_text(redact_secrets(str(row.get("summary", "")))),
             "token": token,
             "token_hash": token_digest(token),
             "away_epoch": posture["entered_epoch"],
@@ -343,7 +327,7 @@ def receive_batch():
         senders = getaddresses([str(message.get("from", ""))])
         sender = senders[0][1].strip().casefold() if len(senders) == 1 else ""
         configured_sender = config["recipient"].casefold()
-        token, answer = extract_reply(str(message.get("body", "")))
+        token, answer = extract_reply(str(message.get("body", ""))) if sender == configured_sender else (None, "")
         record_path, item = token_record(token) if token else (None, None)
         now = int(time.time())
         if item and item.get("used_mail_key") == mail_key:

@@ -146,7 +146,7 @@ const mirrorCursorFile = join(state, ".branch-mirror-cursor");
 const promptScript = join(fmRoot, "bin", "fm-branch-prompt.sh");
 const afkContractScript = join(fmRoot, "bin", "fm-afk-contract.sh");
 const outcomeScript = join(fmRoot, "bin", "fm-branch-outcome.sh");
-const afkEmailScript = join(fmRoot, "bin", "fm-afk-email.py");
+const mailScript = join(fmRoot, "bin", "fm-mail.sh");
 const leaseScript = join(fmRoot, "bin", "fm-lease.sh");
 const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
 const loadedMarker = join(state, ".pi-branch-extension-loaded");
@@ -646,8 +646,8 @@ export default function (pi: ExtensionAPI) {
     afkEmailFlushTimer = setTimeout(async () => {
       afkEmailFlushTimer = undefined;
       if (!afkPostureRecordPresent(state)) return;
-      const queued = await runCommandAsync("python3", [afkEmailScript, "queue-unprocessed"], { env: scriptEnv });
-      const flushed = await runCommandAsync("python3", [afkEmailScript, "flush"], { env: scriptEnv });
+      const queued = await runCommandAsync(mailScript, ["afk-email", "queue-unprocessed"], { env: scriptEnv });
+      const flushed = await runCommandAsync(mailScript, ["afk-email", "flush"], { env: scriptEnv });
       if (!afkPostureRecordPresent(state)) return;
       if (queued.status !== 0 || flushed.status !== 0) {
         scheduleAfkEmailFlush(AFK_EMAIL_RETRY_MS);
