@@ -107,8 +107,8 @@
 # registration must not grow. The structural test is verified for treehouse
 # worktrees, which are linked git worktrees. Orca's worktree shape is UNVERIFIED:
 # docs/orca-backend.md calls it an "independent worktree", which does not
-# establish a shared git common dir, and orca is macOS-only and was not installed
-# where this was written. If Orca clones instead of linking, its git dir equals
+# establish a shared git common dir, and orca was not installed where this was
+# written. If Orca clones instead of linking, its git dir equals
 # its common dir, so this refuses it as a primary checkout and an orca claude
 # spawn fails loudly here rather than wedging on the dialog later. fm-spawn.sh's
 # own validate_spawn_worktree would not catch that case first: it compares the
