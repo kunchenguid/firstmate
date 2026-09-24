@@ -47,7 +47,8 @@ The model no longer re-arms after ordinary wakes.
 No PreToolUse hook denies fleet commands based on watcher status.
 A genuine auto-arm failure describes the automatic mechanism as broken and never directs a routine manual background arm.
 Terminal arm-output classification (`started`, `attached`, or `FAILED`) remains defense in depth for the manual recovery path.
-Codex retains its bounded foreground checkpoint protocol.
+Codex keeps bounded foreground checkpoints during a turn, and `bin/fm-codex-idle-continuity.sh` owns reconciliation after the allowing stop.
+That supervisor backgrounds one arm and waits on it so it can stop the arm when Codex exits.
 Grok retains its tracked background-task notification protocol.
 No adapter starts a replacement with shell `&`.
 
