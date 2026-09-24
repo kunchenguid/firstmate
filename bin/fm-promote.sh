@@ -22,7 +22,9 @@
 # never passes the provenance gate as the ask (bin/fm-dod-lib.sh).
 # A scout records no delivery posture, so promotion is where this task's delivery
 # contract is decided: --mode, --yolo, and the ship branch resolved from
-# --branch-prefix are written into the meta alongside the kind= flip. Firstmate resolves all three at promotion time, having just
+# --branch-prefix or --branch-name are written into the meta alongside the kind= flip.
+# --base-branch names the integration branch; omitted, a base already recorded
+# on the scout is kept. Firstmate resolves these at promotion time, having just
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks that posture
 # up. The registry IS read for one thing only: the project's forge binding, which
@@ -38,7 +40,7 @@
 # its value against the registry; bin/fm-project-mode.sh's header owns the
 # binding and bin/fm-dod-lib.sh owns what it changes for the worker, including
 # the refusal of a forge on local-only.
-# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>]
+# Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>|--branch-name <name>] [--base-branch <branch>]
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,8 +69,13 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 MODE=
 YOLO=
 BRANCH_PREFIX=fm/
+BRANCH_NAME=
+BASE_BRANCH=
 MODE_SET=0
 YOLO_SET=0
+BRANCH_PREFIX_SET=0
+BRANCH_NAME_SET=0
+BASE_BRANCH_SET=0
 FORGE=none
 POS=()
 want_value=
@@ -80,7 +87,9 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       yolo) YOLO=$a; YOLO_SET=1 ;;
-      branch-prefix) BRANCH_PREFIX=$a ;;
+      branch-prefix) BRANCH_PREFIX=$a; BRANCH_PREFIX_SET=1 ;;
+      branch-name) BRANCH_NAME=$a; BRANCH_NAME_SET=1 ;;
+      base-branch) BASE_BRANCH=$a; BASE_BRANCH_SET=1 ;;
     esac
     want_value=
     continue
@@ -91,11 +100,21 @@ for a in "$@"; do
     --yolo) want_value=yolo ;;
     --yolo=*) YOLO=${a#--yolo=}; YOLO_SET=1 ;;
     --branch-prefix) want_value="branch-prefix" ;;
-    --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=} ;;
+    --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=}; BRANCH_PREFIX_SET=1 ;;
+    --branch-name) want_value="branch-name" ;;
+    --branch-name=*) BRANCH_NAME=${a#--branch-name=}; BRANCH_NAME_SET=1 ;;
+    --base-branch) want_value="base-branch" ;;
+    --base-branch=*) BASE_BRANCH=${a#--base-branch=}; BASE_BRANCH_SET=1 ;;
     *) POS+=("$a") ;;
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$BRANCH_NAME_SET" -eq 0 ] || [ -n "$BRANCH_NAME" ] || { echo "error: --branch-name requires a non-empty value" >&2; exit 1; }
+[ "$BASE_BRANCH_SET" -eq 0 ] || [ -n "$BASE_BRANCH" ] || { echo "error: --base-branch requires a non-empty value" >&2; exit 1; }
+if [ "$BRANCH_NAME_SET" -eq 1 ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
+  echo "error: --branch-name and --branch-prefix are mutually exclusive; pass the full crew branch or the prefix, not both" >&2
+  exit 1
+fi
 [ "${#POS[@]}" -ge 1 ] || { echo "usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>" >&2; exit 1; }
 [ "$MODE_SET" -eq 1 ] || {
   echo "error: promotion requires --mode <no-mistakes|direct-PR|local-only>; decide it now from the scout's findings and the project's registered posture in data/projects.md" >&2
@@ -135,9 +154,21 @@ refuse_impossible_forge_posture || exit 1
 
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
-BRANCH="$BRANCH_PREFIX$ID"
-if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
-  echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
+if [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  BRANCH=$BRANCH_NAME
+  if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+    echo "error: --branch-name is not a usable git branch name: $BRANCH" >&2
+    exit 1
+  fi
+else
+  BRANCH="$BRANCH_PREFIX$ID"
+  if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+    echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
+    exit 1
+  fi
+fi
+if [ "$BASE_BRANCH_SET" -eq 1 ] && ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
+  echo "error: --base-branch is not a usable git branch name: $BASE_BRANCH" >&2
   exit 1
 fi
 printf -v BRANCH_Q '%q' "$BRANCH"
@@ -205,6 +236,21 @@ PROMOTE_BASE_WORDS='default-branch base'
 # An unbound project keeps the exact wording it always had.
 PROMOTE_FORGE_WORDS=
 [ "$FORGE" = none ] || PROMOTE_FORGE_WORDS=" forge=$FORGE"
+if [ "$BASE_BRANCH_SET" -eq 0 ]; then
+  BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | tail -n 1)
+fi
+if [ -n "$BASE_BRANCH" ] && ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
+  echo "error: task $ID has an invalid base branch '$BASE_BRANCH'" >&2
+  exit 1
+fi
+if [ -n "$BASE_BRANCH" ] && [ "$BASE_BRANCH" = "$BRANCH" ]; then
+  echo "error: --base-branch cannot be the crew branch ($BRANCH); choose a different --branch-name" >&2
+  exit 1
+fi
+PROMOTE_BASE_WORDS=default-branch
+if [ -n "$BASE_BRANCH" ]; then
+  PROMOTE_BASE_WORDS="\`$BASE_BRANCH\`"
+fi
 
 SCOUT_BRIEF="$DATA/$ID/brief.md"
 if fm_brief_task_placeholders_present "$SCOUT_BRIEF"; then
@@ -324,12 +370,13 @@ fi
 BRIEF_REPLACEMENT=
 
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
-grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' "$META" > "$TMP"
+grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' -e '^base_branch=' "$META" > "$TMP"
 {
   echo "kind=ship"
   echo "mode=$MODE"
   echo "yolo=$YOLO"
   echo "branch=$BRANCH"
+  [ -z "$BASE_BRANCH" ] || echo "base_branch=$BASE_BRANCH"
 } >> "$TMP"
 if ! fm_backlog_atomic_transition publish "$TMP" "$META" "task record" "$STATE"; then
   rm -f -- "$TMP"

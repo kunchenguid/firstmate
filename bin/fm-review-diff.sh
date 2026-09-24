@@ -76,8 +76,16 @@ default_branch() {
   return 1
 }
 
-DEFAULT=$(grep '^base_branch=' "$META" | cut -d= -f2- || true)
-[ -n "$DEFAULT" ] || DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+RECORDED_BASE=$(grep '^base_branch=' "$META" | tail -n 1 | cut -d= -f2- || true)
+if [ -n "$RECORDED_BASE" ]; then
+  if ! git check-ref-format --branch "$RECORDED_BASE" >/dev/null 2>&1; then
+    echo "error: task $ID has an invalid recorded base branch '$RECORDED_BASE'" >&2
+    exit 1
+  fi
+  DEFAULT=$RECORDED_BASE
+else
+  DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
+fi
 
 BRANCH=$(grep '^branch=' "$META" | cut -d= -f2- || true)
 [ -n "$BRANCH" ] || BRANCH="fm/$ID"
