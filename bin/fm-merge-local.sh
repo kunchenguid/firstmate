@@ -136,6 +136,25 @@ if [ "$BARE" = false ]; then
     echo "error: $PROJ has a dirty working tree; refusing to merge into it" >&2
     exit 1
   fi
+  if [ -n "$RECORDED_BASE" ] && [ "$cur" != "$DEFAULT" ]; then
+    landing_worktree=
+    worktree_path=
+    while IFS= read -r worktree_line; do
+      case "$worktree_line" in
+        worktree\ *) worktree_path=${worktree_line#worktree } ;;
+        branch\ *)
+          if [ "${worktree_line#branch }" = "refs/heads/$DEFAULT" ]; then
+            landing_worktree=$worktree_path
+            break
+          fi
+          ;;
+      esac
+    done < <(git -C "$PROJ" worktree list --porcelain 2>/dev/null)
+    if [ -n "$landing_worktree" ]; then
+      echo "error: landing branch '$DEFAULT' is checked out in linked worktree '$landing_worktree'; refusing to update its ref" >&2
+      exit 1
+    fi
+  fi
 fi
 
 # Clean fast-forward only: DEFAULT must be an ancestor of BRANCH.

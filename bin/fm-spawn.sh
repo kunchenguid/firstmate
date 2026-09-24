@@ -1636,6 +1636,11 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
     exit 1
   fi
 fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = scout ] && [ "$BASE_BRANCH_SET" -eq 1 ] &&
+  [ "$BASE_BRANCH" = "fm/$ID" ]; then
+  echo "error: --base-branch cannot be the scout's default crew branch (fm/$ID); choose a different base branch" >&2
+  exit 1
+fi
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
     echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -3423,12 +3428,32 @@ refuse_named_crew_branch_collision() {
 }
 
 ensure_named_base_present() { # <repo> <branch>
-  local repo=$1 branch=$2
+  local repo=$1 branch=$2 remote_refs
   if [ "$MODE" = local-only ]; then
     if git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null; then
       return 0
     fi
     echo "error: named base '$branch' does not exist locally in $repo; refusing to launch" >&2
+    return 1
+  fi
+  if [ "$KIND" = scout ]; then
+    if spawn_worktree_has_origin_config "$repo"; then
+      if ! remote_refs=$(git -C "$repo" ls-remote --heads origin "refs/heads/$branch" 2>/dev/null); then
+        echo "error: could not check named base '$branch' on origin for $repo; refusing to launch" >&2
+        return 1
+      fi
+      if [ -n "$remote_refs" ]; then
+        if ! git -C "$repo" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+          echo "error: could not fetch named base '$branch' for $repo; refusing to launch" >&2
+          return 1
+        fi
+        return 0
+      fi
+    fi
+    if git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null; then
+      return 0
+    fi
+    echo "error: named base '$branch' does not exist locally or on origin for $repo; refusing to launch" >&2
     return 1
   fi
   if spawn_worktree_has_origin_config "$repo"; then
