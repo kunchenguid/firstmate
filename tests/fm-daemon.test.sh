@@ -618,6 +618,112 @@ test_stale_transient_self_records_marker() {
   pass "transient stale self-handles and records a persistence marker"
 }
 
+test_looping_wake_survives_busy_housekeeping() {
+  local case_name dir state key task win reason status_line gen
+  for case_name in working prior-terminal paused; do
+    dir=$(make_supercase "looping-$case_name"); state="$dir/state"
+    task="loop-$case_name"; win="sess:fm-$task"
+    reason="stale: $win (looping 900s, escalation 1: structural proxy - inspect the pane)"
+    fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=pi"
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")
+    "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" busy --gen "$gen" --source pi-ext --event agent-start
+    case "$case_name" in
+      working) status_line='working: preparing gate response' ;;
+      prior-terminal) status_line='done: already surfaced' ;;
+      paused) status_line='paused: awaiting gate decision' ;;
+    esac
+    printf '%s\n' "$status_line" > "$state/$task.status"
+    [ "$case_name" != prior-terminal ] || seen_through "$state" "$task"
+    key=$(printf '%s' "$task" | tr ':/.' '___')
+    echo $(( $(date +%s) - 1000 )) > "$state/.subsuper-stale-$key"
+    (
+      kill() { fail "looping dispatch must not signal the worker"; }
+      fm_backend_send_text_submit() { fail "looping dispatch must not steer the worker"; }
+      LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 \
+        handle_wake "$reason" "$state"
+      PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" \
+        LOG="$dir/daemon.log" FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+    ) || fail "$case_name looping dispatch failed"
+    [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+      || fail "$case_name looping did not preserve exactly one escalation"
+    grep -Fx "${reason#stale: }" "$state/.subsuper-escalations" >/dev/null \
+      || fail "$case_name looping lost its original reason"
+    [ ! -e "$state/.subsuper-stale-$key" ] || fail "$case_name looping retained a stale recheck"
+  done
+  pass "looping wakes survive routine, terminal, and paused daemon absorption without worker interruption"
+}
+
+test_enriched_stale_preserves_unread_status() {
+  local kind dir state task win detail reason out gen
+  for kind in looping wedge; do
+    dir=$(make_supercase "enriched-unread-$kind"); state="$dir/state"
+    task="unread-$kind"; win="sess:fm-$task"
+    case "$kind" in
+      looping) detail='looping 900s, escalation 1: structural proxy - inspect the pane' ;;
+      wedge) detail='idle 500s, possible wedge, escalation 3, demand-deep-inspection: inspect the pane' ;;
+    esac
+    reason="stale: $win ($detail)"
+    fm_write_meta "$state/$task.meta" "window=$win" "backend=tmux" "harness=pi"
+    gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$task")
+    "$ROOT/bin/fm-busy-event.sh" apply "$state" "$task" busy --gen "$gen" --source pi-ext --event agent-start
+    printf 'working: preparing gate response\n' > "$state/$task.status"
+    seen_through "$state" "$task"
+    printf 'failed: gate validation failed\nneeds-decision: approve the fix-review findings?\nworking: waiting for the response\n' \
+      >> "$state/$task.status"
+    FM_ESCALATE_BATCH_SECS=999999 handle_wake "$reason" "$state" \
+      || fail "$kind unread status dispatch failed"
+    out=$(cat "$state/.subsuper-escalations")
+    assert_contains "$out" "${reason#stale: }" "$kind escalation lost its enriched reason"
+    assert_contains "$out" 'needs-decision: approve the fix-review findings?' "$kind escalation discarded the unread question"
+    assert_contains "$out" 'failed: gate validation failed' "$kind escalation discarded another unread event"
+    [ "$(status_seen_offset "$state" "$task")" = "$(log_size "$state/$task.status")" ] \
+      || fail "$kind escalation did not acknowledge its delivered status span"
+    FM_ESCALATE_BATCH_SECS=999999 handle_wake "signal: $state/$task.status" "$state" \
+      || fail "$kind follow-up signal dispatch failed"
+    PATH="$dir/fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$win" \
+      FM_STATE_OVERRIDE="$state" FM_ESCALATE_BATCH_SECS=999999 housekeeping "$state"
+    [ "$(wc -l < "$state/.subsuper-escalations" | tr -d ' ')" = 1 ] \
+      || fail "$kind signal or heartbeat repeated the delivered events"
+  done
+  pass "looping and wedge escalations preserve unread questions before acknowledging them"
+}
+
+test_enriched_stale_preserves_unreadable_diagnostic() {
+  local kind dir state task win detail reason out
+  for kind in looping wedge; do
+    dir=$(make_supercase "enriched-unreadable-$kind"); state="$dir/state"
+    task="unreadable-$kind"; win="sess:fm-$task"
+    case "$kind" in
+      looping) detail='looping 900s, escalation 1: structural proxy - inspect the pane' ;;
+      wedge) detail='idle 500s, possible wedge, escalation 3, demand-deep-inspection: inspect the pane' ;;
+    esac
+    reason="stale: $win ($detail)"
+    printf 'working: waiting for the response\n' > "$dir/status-target"
+    ln -s "$dir/status-target" "$state/$task.status"
+    FM_ESCALATE_BATCH_SECS=999999 handle_wake "$reason" "$state" \
+      || fail "$kind unreadable status dispatch failed"
+    out=$(cat "$state/.subsuper-escalations")
+    assert_contains "$out" "${reason#stale: }" "$kind unreadable escalation lost its enriched reason"
+    assert_contains "$out" "unreadable status span for $task" "$kind escalation discarded its unreadable-status diagnostic"
+    [ "$(status_seen_offset "$state" "$task")" = 0 ] \
+      || fail "$kind unreadable status advanced its classification position"
+    : > "$state/.subsuper-escalations"
+    FM_ESCALATE_BATCH_SECS=999999 handle_wake "signal: $state/$task.status" "$state" \
+      || fail "$kind follow-up unreadable signal dispatch failed"
+    [ ! -s "$state/.subsuper-escalations" ] \
+      || fail "$kind delivered diagnostic was reported again"
+    rm "$state/$task.status"
+    printf 'needs-decision: approve the recovered findings?\n' > "$state/$task.status"
+    FM_ESCALATE_BATCH_SECS=999999 handle_wake "signal: $state/$task.status" "$state" \
+      || fail "$kind readable recovery dispatch failed"
+    out=$(cat "$state/.subsuper-escalations")
+    assert_contains "$out" 'needs-decision: approve the recovered findings?' "$kind recovery lost the question"
+    [ "$(status_seen_offset "$state" "$task")" = "$(log_size "$state/$task.status")" ] \
+      || fail "$kind recovery did not acknowledge its delivered status span"
+  done
+  pass "looping and wedge escalations preserve unreadable diagnostics and readable recovery"
+}
+
 test_stale_diagnostic_wedge_survives_busy_housekeeping() {
   local case_name dir state fakebin key task win pane reason status_line action_log
   for case_name in working prior-terminal paused; do
@@ -2790,6 +2896,9 @@ test_classify_terminal_signal_escalates
 test_classify_check_and_unknown_escalate
 test_stale_transient_self_records_marker
 test_stale_diagnostic_wedge_survives_busy_housekeeping
+test_looping_wake_survives_busy_housekeeping
+test_enriched_stale_preserves_unread_status
+test_enriched_stale_preserves_unreadable_diagnostic
 test_enriched_wedge_under_declared_wait_uses_pause_cadence
 test_stale_terminal_escalates
 test_stale_actionable_wait_escalates_and_keeps_pause_cadence

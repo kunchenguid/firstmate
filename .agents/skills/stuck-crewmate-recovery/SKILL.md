@@ -69,6 +69,8 @@ Only positive socket refusal or absence is a daemon-down finding; escalate that 
 
 ## Live-endpoint escalation
 
+For a watcher-generated `stale: ... (looping ...)` alarm, apply the [parked-gate proxy's inspection limits](../../../docs/architecture.md#event-driven-supervision) before selecting a recovery step.
+
 Escalate in order:
 
 1. Peek the pane, and check the task's steering inbox (`state/<id>.inbox/`) for unhandled `*.msg` records - a stale wake naming an unread firstmate instruction means the worker never acknowledged a durable steer, and the record itself shows exactly what was intended.

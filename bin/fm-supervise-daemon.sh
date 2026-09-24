@@ -5,10 +5,10 @@
 # durable wake after an actionable close, acknowledges only after routing, and
 # either SELF-HANDLES the routine majority in bash (no firstmate turn) or
 # ESCALATES a batched, distilled digest to the supervisor pane on
-# captain-relevant events plus bounded declared-wait rechecks. This is the
+# the escalation paths in docs/architecture.md. This is the
 # token-efficient replacement for the prior always-inject daemon: routine
 # signal/stale/heartbeat wakes cost zero firstmate context; only done/
-# needs-decision/blocked/failed/persistent-wedge/check-output events and a
+# needs-decision/blocked/failed/persistent-wedge/looping/check-output events and a
 # declared-wait recheck reach the LLM, and even then as one pre-read digest per
 # batch window.
 #
@@ -41,20 +41,9 @@
 #     drain and acknowledges it only after routing completes.
 #   - Fail-safe-to-escalate: any wake the classifier cannot confidently mark
 #     routine is escalated.
-#   - Bounded wedge latency: a stale pane without a declared wait is escalated
-#     only after it has been idle for STALE_ESCALATE_SECS
-#     (configurable), rechecked once. A wedged crewmate is therefore detected
-#     within STALE_ESCALATE_SECS + a tick, never lost. A declared wait - either a
-#     paused: external wait or a verified captain-held transfer, per
-#     fm-classify-lib.sh's combined predicate - instead gets its own longer
-#     PAUSE_RESURFACE_SECS recheck, never a wedge escalation, whether its pane
-#     reads idle or busy; only a status append that stops declaring the wait
-#     ends that routing. A captain-held transfer is not rechecked at all while
-#     the away-posture record (state/.afk-contract) exists: nobody is there to
-#     answer it, and the return brief lists it.
-#     Crewmates are autonomous, so a delayed stale response does not stall a
-#     healthy crewmate's own progress.
-#     Buffered escalation delivery also has a max-defer alarm: if a digest stays
+#   - Stale-wake precedence and bounded rechecks: docs/architecture.md owns
+#     the declared-wait, possible-wedge, and parked-gate looping contracts.
+#   - Buffered escalation delivery has a max-defer alarm: if a digest stays
 #     undelivered past FM_MAX_DEFER_SECS, the daemon retries a normal flush and
 #     writes state/.subsuper-inject-wedged and attempts a configurable active
 #     alert if submit still cannot be confirmed.
@@ -1382,25 +1371,23 @@ handle_wake() {  # <reason> <state>
               else
                 decision=$(classify_stale "$arg" "$state" "$span_record" "$span_rc")
               fi
-              # An enriched wedge reason carries the watcher's own escalation count
-              # and its "do not re-absorb on the run-step/pane state alone" demand,
-              # so it outranks this daemon's cheaper status-log absorption - EXCEPT
-              # under a current declared wait. A `pause` verdict is not run-step or
-              # pane state at all: it is the crew's own declaration that this pane
-              # waits by design, which is the one question the wedge timer cannot
-              # answer for itself. Overriding it escalated healthy declared waits
-              # once per STALE_ESCALATE_SECS for as long as the wait lasted.
-              # Housekeeping (2b) then owns the re-surface, so the wait is still
-              # bounded - by one recheck per PAUSE_RESURFACE_SECS instead.
-              case "${decision%%|*}" in
-                pause) : ;;
-                *) case "$stale_detail" in
-                     idle\ *s,\ possible\ wedge,\ escalation\ *)
-                       last=$(last_status_line "$state/$task.status")
-                       status_is_paused_or_captain_held "$last" \
-                         || decision="escalate|${reason#stale: }"
-                       ;;
-                   esac ;;
+              # docs/architecture.md owns enriched stale-reason precedence.
+              # Retain any captured escalation alongside the enriched reason:
+              # mark_escalated_seen below acknowledges that status only after
+              # buffering succeeds, so replacing it would lose unread content.
+              distilled=${reason#stale: }
+              if [ "${decision%%|*}" = escalate ]; then
+                distilled="$distilled; ${decision#*|}"
+              fi
+              case "$stale_detail" in
+                looping\ *s,\ escalation\ *) decision="escalate|$distilled" ;;
+                idle\ *s,\ possible\ wedge,\ escalation\ *)
+                  if [ "${decision%%|*}" != pause ]; then
+                    last=$(last_status_line "$state/$task.status")
+                    status_is_paused_or_captain_held "$last" \
+                      || decision="escalate|$distilled"
+                  fi
+                  ;;
               esac ;;
     check:*)  decision=$(classify_check "$reason") ;;
     heartbeat|heartbeat:*) decision=$(classify_heartbeat) ;;
