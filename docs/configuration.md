@@ -146,7 +146,7 @@ When `FM_CONFIG_OVERRIDE` is present for tests or specialized setup, it selects 
 Both written values end with one newline.
 `max` is a legacy value from a removed third presentation level.
 Its behavior is now ordinary Calm, so it is still read as `on`.
-An upgraded home keeps Calm on.
+A home upgraded from `max` keeps Calm on rather than dropping to off.
 
 ### Saving and reloading the preference
 
@@ -166,7 +166,7 @@ Main-only rows stay on the captain-facing path.
 [docs/pi-supervision-branch.md](pi-supervision-branch.md) defines its conversation lifecycle, row eligibility, mixed-queue dispatch, heartbeat routing, and pre-drain recheck.
 Supervision is default-on: once a Pi primary session owns this home's fleet lock, the branch is eligible for every task with no captain grant file required.
 
-Bash absorbs a no-op heartbeat before it reaches Pi.
+Bash absorbs a genuinely no-op heartbeat before it reaches Pi.
 Every watcher-failure alarm stays on the captain-facing main path.
 If the branch breaks, wakes still fall back to main in both postures.
 The legacy `state/.afk` daemon flag has no effect on Pi.
@@ -2023,7 +2023,7 @@ It names the source and the recovery step:
 - For a leaderless group, the check to make.
 
 Later cycles stay silent for the same generation.
-A new stranded claim announces again.
+A genuinely new stranded claim announces again.
 
 **Reclaim a generation proved gone**
 
