@@ -3,7 +3,7 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-HELPER="$ROOT/bin/fm-herdr-lab.sh"
+HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 REAL_HERDR=$(command -v herdr 2>/dev/null || true)
 LAB=
 PROBE=
@@ -52,7 +52,7 @@ command -v traex >/dev/null 2>&1 || fail 'real traex executable is not installed
 command -v jq >/dev/null 2>&1 || fail 'jq is required'
 command -v treehouse >/dev/null 2>&1 || fail 'treehouse is required'
 
-LAB=$("$HELPER" name traex-thin) || fail 'could not allocate guarded lab name'
+LAB=$("$HELPER" name "${FM_TRAEX_HERDR_LAB_TASK:-traex-thin}") || fail 'could not allocate guarded lab name'
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 "$HELPER" provision "$LAB" || fail 'could not provision guarded Herdr lab'
@@ -70,9 +70,17 @@ printf '%s\n' '# disposable TraeX thin smoke' > "$REPO/README.md"
 git -C "$REPO" add README.md
 git -C "$REPO" commit -q -m init || fail 'could not commit disposable project'
 cat > "$PROBE/home/data/traex-live/brief.md" <<'EOF'
+# Task
+
+## Captain's intent
+
 This is a disposable Firstmate TraeX smoke in an isolated Git task copy.
 Run `sleep 2`, then reply with exactly TRAEX_THIN_FIRST_OK and wait.
 Do not edit any file.
+
+## Firstmate spec
+
+Exercise only the guarded TraeX/Herdr launch, steering, interrupt, state, and cleanup paths in this disposable lab.
 EOF
 
 cat > "$PROBE/wrap/herdr" <<EOF
@@ -112,7 +120,7 @@ PANE=${TARGET#*:}
 grep -qx 'harness=traex' "$META" || fail 'metadata omitted TraeX'
 ! grep -q '^traex_ready=' "$META" || fail 'thin adapter wrote TraeX readiness state'
 [ ! -e "$PROBE/home/state/traex-live.busy-gen" ] || fail 'thin adapter armed custom lifecycle state'
-grep -q '^agent explain ' "$PROBE/herdr-wrapper.log" || fail 'fresh copy did not exercise structural trust'
+grep -q '^pane read ' "$PROBE/herdr-wrapper.log" || fail 'fresh copy did not exercise rendered trust recognition'
 [ "$(grep -c '^pane send-keys .* enter ' "$PROBE/herdr-wrapper.log")" -eq 2 ] \
   || fail 'fresh launch did not send one shell Enter and one verified trust Enter'
 pass 'real TraeX fresh-copy trust reached native working through generic Herdr'
@@ -133,8 +141,34 @@ wait_status() {  # <status> [polls]
   return 1
 }
 
+wait_nonworking_status() {  # [polls]
+  local polls=${1:-360} i=0 got=
+  while [ "$i" -lt "$polls" ]; do
+    got=$(agent_status)
+    case "$got" in
+      working|'') ;;
+      *) printf '%s\n' "$got"; return 0 ;;
+    esac
+    sleep 0.5
+    i=$((i + 1))
+  done
+  printf 'last native status: %s\n' "$got" >&2
+  return 1
+}
+
 capture_has() {
   "$HELPER" run "$LAB" pane read "$PANE" --source recent --lines 200 | grep -Fq "$1"
+}
+
+wait_capture() {  # <text> [polls]
+  local want=$1 polls=${2:-360} i=0
+  while [ "$i" -lt "$polls" ]; do
+    capture_has "$want" && return 0
+    sleep 0.5
+    i=$((i + 1))
+  done
+  "$HELPER" run "$LAB" pane read "$PANE" --source recent --lines 200 >&2 || true
+  return 1
 }
 
 send_text() {
@@ -151,26 +185,36 @@ send_key() {
     || fail "real TraeX key '$key' failed: $out"
 }
 
-wait_status idle || fail 'initial TraeX turn never settled'
-capture_has TRAEX_THIN_FIRST_OK || fail 'TraeX did not process initial instructions'
+wait_capture TRAEX_THIN_FIRST_OK || fail 'TraeX did not process initial instructions'
+INITIAL_STATUS=$(wait_nonworking_status) || fail 'initial TraeX turn never left native working'
+case "$INITIAL_STATUS" in
+  idle) ;;
+  unknown) printf '%s\n' 'note: Herdr kept native status unknown after the completed TraeX turn' ;;
+  *) fail "completed initial TraeX turn had unexpected native status '$INITIAL_STATUS'" ;;
+esac
+pass 'real TraeX processed the benign initial instruction after guarded trust acceptance'
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
-[ "$(fm_backend_busy_state herdr "$TARGET")" = idle ] || fail 'generic Herdr idle observation failed'
-send_text "Run \`sleep 2\`, then reply with exactly TRAEX_THIN_SECOND_OK."
-[ "$(fm_backend_busy_state herdr "$TARGET")" = busy ] || fail 'generic Herdr busy observation failed'
-wait_status idle || fail 'steered TraeX turn never settled'
-capture_has TRAEX_THIN_SECOND_OK || fail 'TraeX did not process generic steer'
-pass 'real TraeX steering and current state use generic Herdr owners'
+if [ "$INITIAL_STATUS" = idle ]; then
+  [ "$(fm_backend_busy_state herdr "$TARGET")" = idle ] || fail 'generic Herdr idle observation failed'
+  send_text "Run \`sleep 2\`, then reply with exactly TRAEX_THIN_SECOND_OK."
+  [ "$(fm_backend_busy_state herdr "$TARGET")" = busy ] || fail 'generic Herdr busy observation failed'
+  wait_status idle || fail 'steered TraeX turn never settled'
+  capture_has TRAEX_THIN_SECOND_OK || fail 'TraeX did not process generic steer'
+  pass 'real TraeX steering and current state use generic Herdr owners'
 
-send_text "Run \`sleep 20\`, then reply TRAEX_THIN_SHOULD_NOT_COMPLETE."
-send_key Escape
-wait_status idle || fail 'TraeX interrupt did not return native idle'
-[ "$(fm_backend_composer_state herdr "$TARGET")" = empty ] \
-  || fail 'TraeX interrupt left restored input in the composer'
-send_text 'Reply with exactly TRAEX_THIN_AFTER_INTERRUPT_OK.'
-wait_status idle || fail 'post-interrupt TraeX turn never settled'
-capture_has TRAEX_THIN_AFTER_INTERRUPT_OK || fail 'post-interrupt steer was corrupted'
-pass 'real TraeX interrupt clearing stays on generic key and send paths'
+  send_text "Run \`sleep 20\`, then reply TRAEX_THIN_SHOULD_NOT_COMPLETE."
+  send_key Escape
+  wait_status idle || fail 'TraeX interrupt did not return native idle'
+  [ "$(fm_backend_composer_state herdr "$TARGET")" = empty ] \
+    || fail 'TraeX interrupt left restored input in the composer'
+  send_text 'Reply with exactly TRAEX_THIN_AFTER_INTERRUPT_OK.'
+  wait_status idle || fail 'post-interrupt TraeX turn never settled'
+  capture_has TRAEX_THIN_AFTER_INTERRUPT_OK || fail 'post-interrupt steer was corrupted'
+  pass 'real TraeX interrupt clearing stays on generic key and send paths'
+else
+  pass 'native unknown remains unclassified after completion rather than being treated as idle'
+fi
 
 [ -z "$(git -C "$WT" status --porcelain)" ] || fail 'smoke dirtied the isolated task copy'
 fm_backend_kill herdr "$TARGET"

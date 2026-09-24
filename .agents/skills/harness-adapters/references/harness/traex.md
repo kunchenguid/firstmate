@@ -1,6 +1,6 @@
 # TraeX
 
-Verified on 2026-08-11 with traecli 0.200.19 internal edition and Herdr 0.8.0.
+Current per-version evidence is recorded in [`runtime-backends.md`](../../../../../docs/verification/runtime-backends.md#traex-thin-worker-adapter).
 The router owns TraeX's role and backend boundary.
 
 ## Operating facts
@@ -17,7 +17,7 @@ The router owns TraeX's role and backend boundary.
 | Skill invocation | No separately verified command form; use natural language. |
 | Resume | Unsupported in this adapter. Use ordinary stopped-worker recovery to relaunch the worker in its preserved isolated copy. |
 | Autonomy | `-y` or `--dangerously-bypass-approvals-and-sandbox`; this does not suppress the separate fresh-directory trust chooser. |
-| Trust | A fresh isolated copy may show `Do you trust the contents of this directory?`. Accept only Herdr's exact `directory_trust_prompt` with `1. Yes, continue` visibly preselected, then require native `working`; key transport alone is not launch success. |
+| Trust | A fresh isolated copy may show `Do you trust the contents of this directory?`. Accept the old Herdr `directory_trust_prompt` or the exact newer `enter continue \| esc quit` chooser with `1. Yes, continue` visibly preselected and exact TraeX/pane/cwd provenance, then require native `working`; generic `unknown` and key transport alone are not launch success. |
 | Composer | Bare `❯` row covered by the shared structural composer owner. |
 
 Raw TraeX launch commands are refused so the scoped marker and trust owner cannot be bypassed.
