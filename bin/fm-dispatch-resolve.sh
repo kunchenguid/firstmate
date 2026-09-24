@@ -14,8 +14,9 @@
 #   a file descriptor, never on argv; nothing logs or writes it.
 #
 # What it does when on with at least one rule: one POST to
-#   https://api.typesafe.ai/v1/systemone with the project name and the brief's
-#   `## Captain's intent` and `## Firstmate spec` sections, tagged when it is a
+#   <base>/v1/systemone (default base https://api.typesafe.ai) with the project
+#   name and the brief's `## Captain's intent` and `## Firstmate spec` sections,
+#   tagged when it is a
 #   scout brief (the whole brief when it has neither section), as state and
 #   ONE Choice question whose options are every rule's `when` from
 #   config/crew-dispatch.json plus one fixed generic none option. Jev returns
@@ -53,7 +54,10 @@
 #   actionable, never selected around.
 #
 # Environment:
-#   TYPESAFE_API_KEY is the only resolver-specific environment setting.
+#   TYPESAFE_API_KEY opts in as described above.
+#   TYPESAFE_BASE_URL overrides https://api.typesafe.ai; non-empty environment
+#   wins over $FM_HOME/.env, then the hosted default. A trailing slash is removed
+#   before appending /v1/systemone. Authentication and opt-in are unchanged.
 #
 # Authority: this tool never replaces firstmate's judgment, quota-array-dispatch,
 #   the captain-approval gate, or fm-spawn.sh validation; it publishes one
@@ -82,7 +86,6 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 CONFIDENCE_FLOOR=0.6
 TS_MODEL=jev-latest
-TS_BASE=https://api.typesafe.ai
 TS_TIMEOUT=5
 DEFAULT_WHEN="No listed rule applies to this task."
 
@@ -117,6 +120,10 @@ if [ -z "$TYPESAFE_API_KEY_PRIVATE" ]; then
   echo "dispatch-resolve: off (TYPESAFE_API_KEY absent from the environment and $FM_HOME/.env)" >&2
   exit 0
 fi
+
+TS_BASE=${TYPESAFE_BASE_URL:-$(fmx_env_get TYPESAFE_BASE_URL "$FM_HOME/.env")}
+TS_BASE=${TS_BASE:-https://api.typesafe.ai}
+TS_BASE=${TS_BASE%/}
 
 # ---- inputs --------------------------------------------------------------------
 [ -n "$BRIEF" ] || die "brief file required (see --help)"

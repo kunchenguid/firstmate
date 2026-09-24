@@ -612,7 +612,18 @@ Firstmate passes its profile line unless it states a reason to override, such as
 
 The resolver and bootstrap copy an environment-provided key into a non-exported private variable and unset `TYPESAFE_API_KEY` before launching child processes, so the secret is absent from child environments.
 The resolver sends the key to `curl` only as a header read from a file descriptor, never on argv, and nothing prints, logs, or writes it.
-The resolver fixes the endpoint at `https://api.typesafe.ai`, model at `jev-latest`, default confidence floor at 0.6, and request timeout at 5 seconds; `TYPESAFE_API_KEY` is its only resolver-specific environment setting.
+The endpoint defaults to `https://api.typesafe.ai`; set `TYPESAFE_BASE_URL` in the environment or the home's gitignored `.env` to use a Jev-compatible service instead.
+A non-empty environment value wins over `.env`; when neither supplies a non-empty value, the hosted default applies.
+The resolver removes a trailing slash and appends `/v1/systemone`, preserving any base path prefix.
+The model remains `jev-latest`, default confidence floor 0.6, and request timeout 5 seconds.
+The override does not activate the resolver or change bearer authentication: configure a credential appropriate to that endpoint, not a hosted production key for a local test service.
+For example, with a local Jev-compatible server and its test credential:
+
+```sh
+TYPESAFE_BASE_URL=http://127.0.0.1:8080 TYPESAFE_API_KEY=local-test-key \
+  bin/fm-dispatch-resolve.sh data/example/brief.md --project example
+```
+
 The live rule-match evidence is recorded in [`verification/dispatch-resolve.md`](verification/dispatch-resolve.md).
 
 ## Toolchain

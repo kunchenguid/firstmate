@@ -4,14 +4,17 @@
 # Drives the public argv and environment interface with a fake curl on PATH
 # that records argv, the request body it read from stdin, and the header it
 # read from file descriptor 3, and answers with a canned typesafe.ai response.
-# A fake quota-axi serves the selected schema-5 fixture. No case touches the
-# network, and the absent-key case proves the tool makes no call
-# at all.
+# A fake quota-axi serves the selected schema-5 fixture. Endpoint override
+# cases also use real curl against a loopback-only fake Jev server with a dummy
+# key; no case calls the hosted service. Absent-key cases make no call at all.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+unset TYPESAFE_API_KEY TYPESAFE_API_KEY_PRIVATE TYPESAFE_BASE_URL
+REAL_CURL=$(command -v curl)
+export REAL_CURL
 TOOL="$ROOT/bin/fm-dispatch-resolve.sh"
 TMP_ROOT=$(fm_test_tmproot fm-dispatch-resolve)
 HOME_DIR="$TMP_ROOT/home"
@@ -110,6 +113,16 @@ cat > "$FAKEBIN/curl" <<'SH'
 # Fake curl: records argv (minus the -o target), the stdin body, and the header
 # read from fd 3, then answers with FAKE_CURL_RESPONSE and FAKE_CURL_HTTP.
 set -u
+if [ -n "${LOCAL_JEV_BASE:-}" ]; then
+  # Refuse any destination except this test's loopback server, even on regression.
+  for arg in "$@"; do
+    case "$arg" in
+      "$LOCAL_JEV_BASE"/*) exec "$REAL_CURL" -q --noproxy '*' "$@" ;;
+      http://*|https://*) exit 97 ;;
+    esac
+  done
+  exit 97
+fi
 if [ -n "${TYPESAFE_API_KEY+x}" ] || [ -n "${TYPESAFE_API_KEY_PRIVATE+x}" ]; then
   printf 'curl:secret-present\n' >> "${CHILD_ENV_LOG:?}"
 else
@@ -228,7 +241,7 @@ assert_contains "$out" '  note: 1 eligible candidate(s) unranked (kimi)' "clear 
 assert_not_contains "$out" '--effort' "cursor profile without effort emits no --effort"
 argv=$(cat "$LOG/argv")
 assert_not_contains "$argv" "$KEY" "the key never appears on curl argv"
-assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the request uses the fixed typesafe.ai endpoint"
+assert_contains "$argv" 'https://api.typesafe.ai/v1/systemone' "the request defaults to the hosted typesafe.ai endpoint"
 assert_contains "$argv" $'--max-time\n5' "the request uses the fixed five-second timeout"
 assert_contains "$argv" '@/dev/fd/3' "the header is read from a file descriptor"
 assert_equals "Authorization: Bearer $KEY" "$(cat "$LOG/header")" "curl receives the bearer header on fd 3"
@@ -245,6 +258,95 @@ assert_not_contains "$body" 'SECRET-WHY-TEXT' "why text never leaves the machine
 assert_not_contains "$body" 'spendPriority' "quota never leaves the machine"
 assert_not_contains "$body" 'cursor-grok' "use profiles never leave the machine"
 pass "clear: one rule Choice request, key on the fd header only, spendPriority argmax over every candidate"
+
+# --- configurable base: real HTTP, dummy key, no hosted calls -----------------
+python3 - "$TMP_ROOT" <<'PY' &
+import json
+import pathlib
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+root = pathlib.Path(sys.argv[1])
+
+class Jev(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        with (root / 'requests.jsonl').open('a') as log:
+            log.write(json.dumps({'path': self.path, 'body': body,
+                'auth_ok': self.headers.get('Authorization') ==
+                'Bearer test-key-9f1c2d3e-never-on-argv'}) + '\n')
+        response = (root / 'response.json').read_bytes()
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(response)
+
+server = HTTPServer(('127.0.0.1', 0), Jev)
+(root / 'port').write_text(str(server.server_port))
+server.serve_forever()
+PY
+JEV_PID=$!
+cleanup_jev() {
+  kill "$JEV_PID" 2>/dev/null || true
+  wait "$JEV_PID" 2>/dev/null || true
+  fm_test_cleanup
+}
+trap cleanup_jev EXIT
+for ((i=0; i<100; i++)); do
+  [ -s "$TMP_ROOT/port" ] && break
+  sleep 0.1
+done
+assert_present "$TMP_ROOT/port" "local Jev server starts"
+LOCAL_JEV_BASE="http://127.0.0.1:$(cat "$TMP_ROOT/port")"
+export LOCAL_JEV_BASE
+for base in "$LOCAL_JEV_BASE" "$LOCAL_JEV_BASE/" "$LOCAL_JEV_BASE/jev/"; do
+  reset_log
+  TYPESAFE_API_KEY=$KEY TYPESAFE_BASE_URL="$base" run code out err "$BRIEF" --project pager
+  expect_code 0 "$code" "local endpoint exits 0"
+  assert_contains "$out" '  status: clear' "local response follows ordinary resolution"
+  assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "local response selects the ordinary profile"
+  assert_equals "${base%/}/v1/systemone" "$LOCAL_JEV_BASE$(jq -sr 'last.path' "$TMP_ROOT/requests.jsonl")" "base preserves prefixes and trims trailing slash"
+  assert_not_contains "$out$err" "$KEY" "local request does not print the key"
+done
+printf 'TYPESAFE_BASE_URL=%s/jev\n' "$LOCAL_JEV_BASE" > "$HOME_DIR/.env"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' ".env base selects local Jev"
+assert_equals '/jev/v1/systemone' "$(jq -sr 'last.path' "$TMP_ROOT/requests.jsonl")" ".env base preserves its path prefix"
+TYPESAFE_API_KEY=$KEY TYPESAFE_BASE_URL='' run code out err "$BRIEF"
+expect_code 0 "$code" "empty environment base falls back to .env"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "empty environment base resolves the local response"
+assert_equals '/jev/v1/systemone' "$(jq -sr 'last.path' "$TMP_ROOT/requests.jsonl")" "empty environment base retains .env prefix"
+TYPESAFE_API_KEY=$KEY TYPESAFE_BASE_URL="$LOCAL_JEV_BASE" run code out err "$BRIEF"
+expect_code 0 "$code" "environment base override exits 0"
+assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "environment override resolves the local response"
+assert_equals '/v1/systemone' "$(jq -sr 'last.path' "$TMP_ROOT/requests.jsonl")" "environment base wins over .env"
+reset_log
+run code out err "$BRIEF"
+expect_code 0 "$code" "dotenv base alone exits 0"
+assert_equals '' "$out" "base alone does not activate dispatch"
+assert_contains "$err" 'dispatch-resolve: off' "local endpoint still requires opt-in"
+for base in "$LOCAL_JEV_BASE" 'not a URL'; do
+  TYPESAFE_BASE_URL="$base" run code out err "$BRIEF"
+  expect_code 0 "$code" "environment base alone exits 0"
+  assert_equals '' "$out" "environment base alone prints no profile"
+  assert_contains "$err" 'dispatch-resolve: off' "environment base alone stays off even when malformed"
+done
+assert_absent "$LOG/quota-axi.calls" "disabled resolver never reads quota"
+assert_equals 6 "$(jq -s length "$TMP_ROOT/requests.jsonl")" "disabled resolver sends no local request"
+assert_equals true "$(jq -s 'all(.[]; .auth_ok and .body.model == "jev-latest")' "$TMP_ROOT/requests.jsonl")" "local requests retain bearer authentication and model"
+rm -f "$HOME_DIR/.env"
+unset LOCAL_JEV_BASE
+reset_log
+TYPESAFE_API_KEY=$KEY TYPESAFE_BASE_URL='' run code out err "$BRIEF"
+assert_contains "$(cat "$LOG/argv")" 'https://api.typesafe.ai/v1/systemone' "empty base keeps hosted default"
+printf 'TYPESAFE_BASE_URL=\n' > "$HOME_DIR/.env"
+reset_log
+TYPESAFE_API_KEY=$KEY TYPESAFE_BASE_URL='' run code out err "$BRIEF"
+assert_contains "$(cat "$LOG/argv")" 'https://api.typesafe.ai/v1/systemone' "empty environment and dotenv bases keep hosted default without a hosted call"
+rm -f "$HOME_DIR/.env"
+pass "configurable Jev base preserves routing, paths, authentication and opt-in (fixture responses, not inference)"
 
 # --- rules are snapshotted and line output is injection-safe -------------------
 MUTATED_RULES="$TMP_ROOT/mutated-rules.json"
@@ -394,10 +496,10 @@ assert_not_contains "$out" '  fallback:' "a picked rule that clears its own floo
 assert_contains "$out" "  profile: --harness 'cursor' --model 'cursor-grok-4.6-medium'" "the picked rule resolves at probability 0.35 over floor 0.3"
 
 reset_log
-write_floor_response "$RESPONSE" rule_2 0.95 0.05 0.55 0.05 0.30 0.05
+write_floor_response "$RESPONSE" rule_2 0.95 0.05 0.55 0.05 0.3 0.05
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "a high answer confidence does not lift a picked rule over its own floor"
-assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.30 clears its floor 0.3; rule_2 probability 0.55 is below its floor 0.9' "the runner-up clears the same floor it would need as the pick"
+assert_contains "$out" '  fallback: rule_4 (A simple bug fix with a stated root cause.) probability 0.3 clears its floor 0.3; rule_2 probability 0.55 is below its floor 0.9' "the runner-up clears the same floor it would need as the pick"
 
 reset_log
 write_floor_response "$RESPONSE" rule_2 0.55 0.05 0.55 0.05 0.25 0.10
