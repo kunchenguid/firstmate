@@ -1220,7 +1220,8 @@ See [`bin/fm-event-shadow.sh`](../bin/fm-event-shadow.sh)'s header for bounded i
 [`bin/fm-event-shadow-replay.sh`](../bin/fm-event-shadow-replay.sh) provides sanitized offline confusion examples and an explicit live replay; missing returned cost fields remain unknown rather than estimates.
 The shared [dispatch confidence floor](#typed-dispatch-resolution-env-typesafe_api_key) maps lower-confidence choices to `unknown`, preserving raw choices and probabilities; abstentions are reported separately from errors.
 The [recorded live evidence](../tests/fixtures/event-shadow/live-evidence.json) owns the measured costs, confusion results, and local-rescore provenance; see the replay script's header for offline reproduction.
-Lock contention, including an abandoned lock, emits `attention=unknown skipped=locked` rather than silently omitting the annotation; it never suppresses a wake.
+Lock contention emits `attention=unknown skipped=locked` rather than silently omitting the annotation; an abandoned lock is not automatically reclaimed, so shadow collection resumes only after an operator verifies no adapter is running and removes the lock directory.
+Neither case suppresses a wake.
 [`tests/fm-event-shadow.test.sh`](../tests/fm-event-shadow.test.sh) verifies default-off behavior, error fallback, deterministic-reason bypass, and unchanged queue acknowledgement.
 
 ## Toolchain
