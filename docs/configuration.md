@@ -468,9 +468,9 @@ An empty file enables filtering with only Firstmate's operational floor.
 For example, a provider using `OPENAI_API_KEY` and Git using an SSH agent could use:
 
 ```text
-# Provider credential already available in the destination pane
+# Provider credential available in the pane, or launcher for a local secondmate
 OPENAI_API_KEY
-# Git over SSH using an existing agent
+# SSH agent socket available from the same launch source
 SSH_AUTH_SOCK
 ```
 
@@ -479,7 +479,11 @@ Firstmate retains basic home, executable search, terminal, locale, temporary-dir
 Other ambient names must be listed explicitly, including custom credential-store locations, proxy settings, and certificate overrides when required by the selected tools.
 The command shell and worker may still create their own variables.
 Allowed values come from the destination pane at execution time; they are neither copied from the invoking Firstmate process nor written into the launch command.
+The exception is a local secondmate spawn or relaunch: additional allowlisted values are captured from the process running `fm-spawn.sh` into a private one-launch file that the secondmate removes before starting.
+For a local secondmate, an allowlisted `TRACEPARENT` is not captured as an ambient grant; the dedicated [trace-context contract](trace-context.md) remains authoritative.
+This lets a persistent local secondmate recover with credentials available to its launching process instead of depending on stale pane state.
 Listing a name does not provision it in a daemon's environment or transfer credentials to another machine.
+Remote secondmates keep the destination-pane behavior because the remote command boundary intentionally starts with an empty environment and does not transfer credentials between machines.
 
 Choose the minimum additions for the authentication method actually in use:
 
@@ -497,7 +501,7 @@ Verify the selected provider login and Git transport after opting in; Firstmate 
 Raw launch commands run under noninteractive POSIX `sh` with this option and must use compatible syntax.
 The filter runs at the worker command boundary, after the terminal daemon and pane shell have started; it does not scrub either of those processes.
 This is not a sandbox: it cannot revoke same-user access to credential files, prevent tools or later shells from loading credentials again, or isolate processes from the same user's other processes.
-Regression coverage executes emitted launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh).
+Regression coverage executes ordinary and initial-secondmate launch commands with synthetic nonsecret values in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh), while [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh) covers the secondmate relaunch boundary.
 
 Every crewmate, scout, and secondmate Firstmate launches starts with `COMPACT_ADVISER_DISABLE=1` in its environment, on a fresh spawn and on a relaunch alike, so an unattended session never activates the compact adviser.
 This guarantee also covers raw launch commands, remote secondmates, and launches filtered by `config/launch-env-allowlist`; it does not depend on the destination environment already containing the variable.

@@ -280,9 +280,11 @@
 #   blank lines and lines beginning with # are ignored. Invalid input refuses
 #   before launch, as do path inspection errors such as inaccessible config
 #   directories. An empty file retains only the operational floor below.
-#   Names are read once per spawn; values are expanded in the destination pane,
-#   not copied from the invoking process or written into the launch text.
-#   Unset names stay unset and empty values stay empty.
+#   Names are read once per spawn. For ordinary and remote secondmate launches,
+#   values expand in the destination pane. For a local secondmate spawn or
+#   relaunch, additional configured names except TRACEPARENT are captured from
+#   this launcher into a mode-0600 one-launch state file. Values never enter the
+#   launch text; unset names stay unset and empty values stay empty.
 #   The fixed operational floor is HOME PATH USER LOGNAME SHELL TERM COLORTERM
 #   LANG LC_ALL LC_CTYPE TMPDIR TMP TEMP GOTMPDIR, plus backend identity/routing:
 #   TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH HERDR_PANE_ID
@@ -497,6 +499,7 @@ if ! LAUNCH_ENV_ENABLED=$(fm_config_source_present "$CONFIG/launch-env-allowlist
   exit 1
 fi
 LAUNCH_ENV_NAMES=
+LAUNCH_ENV_FILE=
 if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   if [ ! -f "$CONFIG/launch-env-allowlist" ] || [ ! -r "$CONFIG/launch-env-allowlist" ]; then
     echo "error: config/launch-env-allowlist must be a readable regular file" >&2
@@ -1328,6 +1331,7 @@ spawn_abort_cleanup() {
     CONFIG_INHERIT_LOCK_HELD=0
     fm_lock_release "$CONFIG_INHERIT_LOCK" || true
   fi
+  [ -z "$LAUNCH_ENV_FILE" ] || rm -f "$LAUNCH_ENV_FILE" 2>/dev/null || true
   return "$status"
 }
 trap spawn_abort_cleanup EXIT
@@ -1803,6 +1807,86 @@ shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
+}
+
+launch_env_operational_names() {
+  cat <<'EOF'
+HOME
+PATH
+USER
+LOGNAME
+SHELL
+TERM
+COLORTERM
+LANG
+LC_ALL
+LC_CTYPE
+TMPDIR
+TMP
+TEMP
+GOTMPDIR
+TMUX
+TMUX_PANE
+HERDR_ENV
+HERDR_SESSION
+HERDR_SOCKET_PATH
+HERDR_PANE_ID
+CMUX_WORKSPACE_ID
+CMUX_SURFACE_ID
+CMUX_TAB_ID
+CMUX_PANEL_ID
+CMUX_SOCKET_PATH
+ZELLIJ
+ZELLIJ_SESSION_NAME
+ZELLIJ_PANE_ID
+FM_ZELLIJ_SESSION
+FM_TASK_ID
+COMPACT_ADVISER_DISABLE
+LAVISH_AXI_HOST
+EOF
+}
+
+launch_env_is_operational_name() {
+  local env_name
+  while IFS= read -r env_name; do
+    [ "$env_name" != "$1" ] || return 0
+  done < <(launch_env_operational_names)
+  return 1
+}
+
+launch_env_snapshot_create() {
+  local tmp env_name env_value wrote=0
+  LAUNCH_ENV_FILE=
+  tmp=$(umask 077; mktemp "$STATE/.$ID.launch-env.XXXXXX") || {
+    echo "error: could not create the private launch environment snapshot for $ID" >&2
+    return 1
+  }
+  for env_name in $LAUNCH_ENV_NAMES; do
+    # TRACEPARENT is task identity, not an ambient grant. Its dedicated launch
+    # path below must win even when an operator listed the name by mistake.
+    [ "$env_name" = TRACEPARENT ] && continue
+    launch_env_is_operational_name "$env_name" && continue
+    if eval '[ "${'"$env_name"'+x}" = x ]'; then
+      eval 'env_value=${'"$env_name"'-}'
+      if ! printf 'export %s=%s\n' "$env_name" "$(shell_quote "$env_value")" >> "$tmp"; then
+        rm -f "$tmp"
+        echo "error: could not write the private launch environment snapshot for $ID" >&2
+        return 1
+      fi
+      wrote=1
+    fi
+  done
+  if [ "$wrote" = 0 ]; then
+    rm -f "$tmp"
+    rm -f "$STATE/$ID.launch-env"
+    return 0
+  fi
+  if ! chmod 600 "$tmp" || ! mv -f "$tmp" "$STATE/$ID.launch-env"; then
+    rm -f "$tmp"
+    echo "error: could not publish the private launch environment snapshot for $ID" >&2
+    return 1
+  fi
+  LAUNCH_ENV_FILE="$STATE/$ID.launch-env"
 }
 
 resolve_pi_executable() {
@@ -4960,18 +5044,20 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   # COMPACT_ADVISER_DISABLE is the intentional declarative floor-membership
   # entry; the explicit COMPACT_ADVISER_DISABLE=1 assignment below is the
   # authoritative setter.
-  for env_name in HOME PATH USER LOGNAME SHELL TERM COLORTERM LANG LC_ALL LC_CTYPE \
-    TMPDIR TMP TEMP GOTMPDIR TMUX TMUX_PANE HERDR_ENV HERDR_SESSION HERDR_SOCKET_PATH \
-    HERDR_PANE_ID CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_TAB_ID CMUX_PANEL_ID \
-    CMUX_SOCKET_PATH ZELLIJ ZELLIJ_SESSION_NAME ZELLIJ_PANE_ID FM_ZELLIJ_SESSION \
-    FM_TASK_ID COMPACT_ADVISER_DISABLE LAVISH_AXI_HOST \
-    $LAUNCH_ENV_NAMES; do
-    # Only validated names enter shell syntax. Values expand once, quoted, in
-    # the pane shell and never become source text or spawn-process snapshots.
+  if [ "$KIND" = secondmate ] && [ "${FM_REMOTE_JOB_ACTIVE:-0}" != 1 ]; then
+    launch_env_snapshot_create || exit 1
+    launch_env_names=$(launch_env_operational_names)
+  else
+    launch_env_names=$(printf '%s\n%s\n' "$(launch_env_operational_names)" "$LAUNCH_ENV_NAMES")
+  fi
+  while IFS= read -r env_name; do
+    [ -n "$env_name" ] || continue
+    # Values for ordinary launches and the fixed operational names for
+    # secondmates expand in the destination pane.
     # shellcheck disable=SC2016
     printf -v env_arg '${%s+"%s=$%s"}' "$env_name" "$env_name" "$env_name"
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX $env_arg"
-  done
+  done <<< "$launch_env_names"
   # COMPACT_ADVISER_DISABLE is retained by the floor loop above, which forwards
   # whatever the pane export set, and then pinned here to the one value Firstmate
   # launches on. The literal assignment comes last deliberately: `env` applies
@@ -4986,7 +5072,12 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
     # shellcheck disable=SC2016
     LAUNCH_ENV_PREFIX="$LAUNCH_ENV_PREFIX "'${TRACEPARENT+"TRACEPARENT=$TRACEPARENT"}'
   fi
-  LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
+  if [ -n "$LAUNCH_ENV_FILE" ]; then
+    launch_env_loader="[ -f $(shell_quote "$LAUNCH_ENV_FILE") ] && . $(shell_quote "$LAUNCH_ENV_FILE") && /bin/rm -f -- $(shell_quote "$LAUNCH_ENV_FILE") && exec /bin/sh -c $(shell_quote "$LAUNCH")"
+    LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$launch_env_loader")"
+  else
+    LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
+  fi
 fi
 # Implement the launch-delivery contract in this script's header. The full
 # home-identity hash isolates equal task ids across homes, and the spawn token in
@@ -5043,6 +5134,10 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+# The pane now owns the one-launch snapshot and removes it before exec. An
+# interrupted delivery retains the private file for teardown instead of
+# launching a worker without its configured environment.
+LAUNCH_ENV_FILE=
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "$KIMI_READY_FAILURE_DETAIL"

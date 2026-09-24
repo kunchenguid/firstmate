@@ -1109,12 +1109,15 @@ test_launch_environment_allowlist() {
 printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "${FM_TEST_ALLOWED-unset}" \
   "${FM_TEST_EMPTY-unset}" "${FM_TEST_UNSET-unset}" "$HOME" "$PATH" "$TERM" "$TMUX" "$GOTMPDIR"
 SH
-    out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated \
+    out=$(FM_TEST_AMBIENT_SENTINEL=launcher-unrelated FM_TEST_ALLOWED=launcher-value FM_TEST_EMPTY=launcher-value \
       run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" \
       "$id" "$PROJ_DIR" --harness "/bin/sh '$probe'")
     status=$?
     expect_code 0 "$status" "allowlist=$setting spawn should succeed: $out"
     launch=$(cat "$LAUNCH_LOG")
+    assert_not_contains "$launch" "launcher-value" "allowlist=$setting leaked a launcher value into pane text"
+    [ ! -e "$HOME_DIR/state/$id.launch-env" ] \
+      || fail "allowlist=$setting created a source snapshot for an ordinary raw-command ship"
     for pane_shell in /bin/sh /bin/bash /bin/zsh; do
       [ -x "$pane_shell" ] || continue
       pane_path=$(env -i HOME="$HOME_DIR/user-home" PATH=/usr/bin:/bin TERM=xterm \
@@ -1197,7 +1200,8 @@ test_launch_environment_inherited_by_secondmate() {
   printf 'FM_TEST_ALLOWED\n' > "$HOME_DIR/config/launch-env-allowlist"
   sm="$CASE_DIR/secondmate-home"
   make_seeded_secondmate_home "$sm" "$id"
-  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
+  out=$(FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED=synthetic-provider \
+    run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$sm" --secondmate)
   status=$?
   expect_code 0 "$status" "secondmate with an allowlist should spawn: $out"
   cmp -s "$HOME_DIR/config/launch-env-allowlist" "$sm/config/launch-env-allowlist" \
@@ -1208,7 +1212,6 @@ printf '%s\n' "${FM_TEST_AMBIENT_SENTINEL-unset}" "$FM_TEST_ALLOWED" "$FM_HOME" 
 SH
   chmod +x "$FAKEBIN_DIR/codex"
   result=$(env -i HOME="$HOME_DIR/user-home" PATH="$FAKEBIN_DIR:$PATH" \
-    FM_TEST_AMBIENT_SENTINEL=synthetic-unrelated FM_TEST_ALLOWED=synthetic-provider \
     /bin/sh -c "$(cat "$LAUNCH_LOG")") || fail "secondmate's emitted command failed"
   [ "$result" = "unset"$'\nsynthetic-provider\n'"$sm" ] \
     || fail "secondmate's environment lost filtering or explicit home assignments: $result"
