@@ -1402,6 +1402,7 @@ The mail plane (`bin/fm-mail.sh`) reads unseen IMAP messages and sends one SMTP 
 **Polling and delivery guarantees**
 Its `poll` command surfaces each eligible message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
 During an active Pi away-email posture, only mail from `johnpoyser@gmail.com` with Google's Gmail-aligned DKIM or DMARC pass is eligible; other or unauthenticated messages are silently cursor-recorded without body reads or wakes.
+
 Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed.
 
 A duplicate wake is possible if the process is killed between the queue append and the journal write and the drain acknowledges that row before the next poll heals it, or under a triple write fault that leaves a queued row with no durable record; neither case drops mail.
