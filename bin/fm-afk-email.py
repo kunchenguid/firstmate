@@ -135,11 +135,17 @@ def outcomes_by_seq():
     path = STATE / "branch-outcomes.jsonl"
     rows = {}
     try:
-        for line in path.read_text(encoding="utf-8").splitlines():
+        contents = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return rows
+    except (OSError, ValueError):
+        return None
+    try:
+        for line in contents.splitlines():
             row = json.loads(line)
             if isinstance(row, dict) and isinstance(row.get("seq"), int):
                 rows[row["seq"]] = row
-    except (OSError, ValueError):
+    except ValueError:
         return None
     return rows
 

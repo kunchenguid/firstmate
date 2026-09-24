@@ -221,6 +221,26 @@ test_live_email_posture_requires_runtime_config() {
   pass "a live email away posture fails closed when mail settings disappear"
 }
 
+test_missing_outcome_store_is_empty_but_invalid_store_fails() {
+  local home out outcomes
+  home=$(make_home missing-outcomes configured)
+  run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
+  outcomes="$home/state/branch-outcomes.jsonl"
+  [ ! -e "$outcomes" ] || fail "fresh away home unexpectedly has an outcomes store"
+  out=$(run_email "$home" queue-unprocessed 2>&1) || fail "missing outcomes store was treated as an error: $out"
+  assert_contains "$out" 'queued 0 away-email item(s)' 'a missing outcome store queues an empty batch'
+  out=$(run_email "$home" flush 2>&1) || fail "empty away-email flush failed: $out"
+  [ -z "$out" ] || fail "empty flush reported a delivery error: $out"
+  [ ! -e "$outcomes" ] || fail "reading a missing outcomes store created it"
+
+  printf '{invalid json\n' > "$outcomes"
+  if out=$(run_email "$home" queue-unprocessed 2>&1); then
+    fail "an invalid existing outcomes store was accepted"
+  fi
+  assert_contains "$out" 'outcome store is unreadable' 'invalid existing outcome data remains an error'
+  pass "a missing outcomes store is empty while an invalid existing store fails"
+}
+
 test_invalid_away_record_does_not_enable_email() {
   local home out
   home=$(make_home invalid-record configured)
@@ -468,6 +488,7 @@ test_unconfigured_and_non_pi_retain_existing_behavior
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
 test_failed_send_keeps_outcomes_queued
 test_live_email_posture_requires_runtime_config
+test_missing_outcome_store_is_empty_but_invalid_store_fails
 test_invalid_away_record_does_not_enable_email
 test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit
 test_expired_and_unknown_codes_are_untrusted
