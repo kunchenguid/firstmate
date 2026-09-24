@@ -181,11 +181,16 @@ test_spawn_checks_the_named_base_and_crew_branch_before_launch() {
 }
 
 promote_keeps_the_named_branches() {
-  local home id instructions meta
+  local home project id instructions meta
   home="$TMP_ROOT/promote/home"
+  project="$home/project"
   id=named-promote
-  mkdir -p "$home/state" "$home/data"
-  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nbase_branch=office\n' "$id" > "$home/state/$id.meta"
+  mkdir -p "$home/state" "$home/data" "$project"
+  git init -q -b main "$project"
+  git_identity "$project"
+  commit_file "$project" base base base
+  git -C "$project" checkout -qb office
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=office\n' "$id" "$project" > "$home/state/$id.meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
   fill_brief "$home/data/$id/brief.md"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
@@ -199,6 +204,57 @@ promote_keeps_the_named_branches() {
   assert_grep 'branch=feature/widget' "$meta" "promotion did not record the crew branch"
   assert_grep 'base_branch=office' "$meta" "promotion did not record the base"
   pass "fm-promote: a named crew branch and base survive promotion"
+}
+
+test_promote_rejects_base_changes_and_branch_collisions() {
+  local home project remote id out status
+  home="$TMP_ROOT/promote-refuse/home"
+  project="$home/project"
+  remote="$home/remote.git"
+  mkdir -p "$home/state" "$home/data" "$project"
+  git init -q -b main "$project"
+  git_identity "$project"
+  commit_file "$project" base base base
+  git -C "$project" checkout -qb office
+  git init -q --bare "$remote"
+  git -C "$project" remote add origin "$remote"
+  git -C "$project" push -q origin main
+
+  id=named-promote-base-change
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=office\n' "$id" "$project" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode local-only --yolo off --branch-name feature/change --base-branch release 2>&1); status=$?
+  expect_code 1 "$status" "promotion changed the scout's recorded base"
+  assert_contains "$out" "cannot change the scout's recorded base" "a changed promotion base was not refused"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "base-change refusal published ship metadata"
+  assert_absent "$home/data/$id/ship-instructions.md" "base-change refusal published ship instructions"
+
+  id=named-promote-local-collision
+  git -C "$project" branch feature/local
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=office\n' "$id" "$project" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode local-only --yolo off --branch-name feature/local --base-branch office 2>&1); status=$?
+  expect_code 1 "$status" "promotion reused an existing local branch"
+  assert_contains "$out" "already exists locally" "a local promotion branch collision was not refused"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "local collision published ship metadata"
+  assert_absent "$home/data/$id/ship-instructions.md" "local collision published ship instructions"
+
+  git -C "$project" push -q origin refs/heads/office:refs/heads/feature/remote
+  id=named-promote-remote-collision
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=office\n' "$id" "$project" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch office >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode local-only --yolo off --branch-name feature/remote --base-branch office 2>&1); status=$?
+  expect_code 1 "$status" "promotion reused an existing remote branch"
+  assert_contains "$out" "already exists on origin" "a remote promotion branch collision was not refused"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "remote collision published ship metadata"
+  assert_absent "$home/data/$id/ship-instructions.md" "remote collision published ship instructions"
+  pass "fm-promote: changed bases and occupied crew branches are refused"
 }
 
 test_local_merge_lands_on_the_recorded_base() {
@@ -257,7 +313,7 @@ test_local_merge_fast_forwards_a_bare_repository() {
 }
 
 test_review_uses_the_recorded_base() {
-  local home proj id out
+  local home proj remote id out
   home="$TMP_ROOT/review/home"
   proj="$TMP_ROOT/review/proj"
   id=named-review
@@ -269,7 +325,11 @@ test_review_uses_the_recorded_base() {
   commit_file "$proj" office office office
   git -C "$proj" checkout -qb feature/widget
   commit_file "$proj" change change change
-  printf 'worktree=%s\nproject=%s\nbranch=feature/widget\nbase_branch=office\n' "$proj" "$proj" \
+  remote="$TMP_ROOT/review/remote.git"
+  git init -q --bare "$remote"
+  git -C "$proj" remote add origin "$remote"
+  git -C "$proj" push -q origin main
+  printf 'worktree=%s\nproject=%s\nmode=local-only\nbranch=feature/widget\nbase_branch=office\n' "$proj" "$proj" \
     > "$home/state/$id.meta"
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REVIEW" "$id" --stat) \
     || fail "named-base review failed: $out"
@@ -282,6 +342,7 @@ test_brief_names_the_crew_and_base_branches
 test_brief_refuses_unusable_branch_selections
 test_spawn_checks_the_named_base_and_crew_branch_before_launch
 promote_keeps_the_named_branches
+test_promote_rejects_base_changes_and_branch_collisions
 test_local_merge_lands_on_the_recorded_base
 test_local_merge_fast_forwards_a_bare_repository
 test_review_uses_the_recorded_base

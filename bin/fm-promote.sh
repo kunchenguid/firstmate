@@ -231,6 +231,12 @@ PROMOTE_FORGE_WORDS=
 [ "$FORGE" = none ] || PROMOTE_FORGE_WORDS=" forge=$FORGE"
 if [ "$BASE_BRANCH_SET" -eq 0 ]; then
   BASE_BRANCH=$(sed -n 's/^base_branch=//p' "$META" | tail -n 1)
+else
+  RECORDED_BASE=$(sed -n 's/^base_branch=//p' "$META" | tail -n 1)
+  [ "$BASE_BRANCH" = "$RECORDED_BASE" ] || {
+    echo "error: --base-branch cannot change the scout's recorded base during promotion; promote with base_branch=${RECORDED_BASE:-<none>} to preserve the existing worktree" >&2
+    exit 1
+  }
 fi
 if [ -n "$BASE_BRANCH" ] && ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
   echo "error: task $ID has an invalid base branch '$BASE_BRANCH'" >&2
@@ -240,6 +246,31 @@ if [ -n "$BASE_BRANCH" ] && [ "$BASE_BRANCH" = "$BRANCH" ]; then
   echo "error: --base-branch cannot be the crew branch ($BRANCH); choose a different --branch-name" >&2
   exit 1
 fi
+
+refuse_promoted_branch_collision() {
+  local remote_refs
+  [ "$BRANCH_NAME_SET" -eq 1 ] || return 0
+  [ -n "$PROMOTE_PROJECT" ] && [ -d "$PROMOTE_PROJECT" ] || {
+    echo "error: cannot verify crew branch $BRANCH without the scout's project checkout; refusing promotion" >&2
+    return 1
+  }
+  if git -C "$PROMOTE_PROJECT" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    echo "error: crew branch $BRANCH already exists locally; refusing promotion with a reused branch" >&2
+    return 1
+  fi
+  if git -C "$PROMOTE_PROJECT" remote get-url origin >/dev/null 2>&1; then
+    if ! remote_refs=$(git -C "$PROMOTE_PROJECT" ls-remote --heads origin "refs/heads/$BRANCH" 2>/dev/null); then
+      echo "error: could not check whether crew branch $BRANCH exists on origin; refusing promotion" >&2
+      return 1
+    fi
+    if [ -n "$remote_refs" ]; then
+      echo "error: crew branch $BRANCH already exists on origin; refusing promotion with a reused branch" >&2
+      return 1
+    fi
+  fi
+}
+
+refuse_promoted_branch_collision || exit 1
 PROMOTE_BASE_WORDS=default-branch
 if [ -n "$BASE_BRANCH" ]; then
   PROMOTE_BASE_WORDS="\`$BASE_BRANCH\`"
