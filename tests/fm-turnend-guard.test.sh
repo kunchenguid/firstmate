@@ -204,7 +204,7 @@ install_guard_scripts() {
 mark_codex_hook_root() {
   local dir=$1
   mkdir -p "$dir/.codex"
-  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-turnend-guard.sh"}]}]}}\n' > "$dir/.codex/hooks.json"
+  printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"fm-codex-idle-continuity.sh"}]}]}}\n' > "$dir/.codex/hooks.json"
 }
 
 # A primary-shaped checkout: plain (non-worktree) git repo, AGENTS.md, bin/,
@@ -955,6 +955,8 @@ printf 'guard=%s\n' "$0"
 cat
 EOF
   chmod +x "$dir/bin/fm-turnend-guard.sh"
+  cp "$ROOT/bin/fm-codex-idle-continuity.sh" "$dir/bin/fm-codex-idle-continuity.sh"
+  chmod +x "$dir/bin/fm-codex-idle-continuity.sh"
   payload=$(jq -cn --arg cwd "$outside" '{cwd:$cwd,stop_hook_active:false}')
   out=$(printf '%s' "$payload" | (cd "$dir" && bash -c "$command") 2>&1); status=$?
   expect_code 0 "$status" "codex hook must execute successfully when payload cwd is outside the firstmate root"
@@ -991,6 +993,8 @@ printf 'guard=%s\n' "$0"
 cat
 EOF
   chmod +x "$dir/bin/fm-turnend-guard.sh"
+  cp "$ROOT/bin/fm-codex-idle-continuity.sh" "$dir/bin/fm-codex-idle-continuity.sh"
+  chmod +x "$dir/bin/fm-codex-idle-continuity.sh"
   subdir="$nested/deep/path"
   mkdir -p "$subdir"
   payload=$(jq -cn --arg cwd "$subdir" '{cwd:$cwd,stop_hook_active:false}')
