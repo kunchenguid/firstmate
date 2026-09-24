@@ -709,17 +709,21 @@ if [ -n "$ACK_THROUGH" ]; then
   DRAIN_LOCK_HELD=true
   DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || exit 1
   chmod 0600 "$DRAIN_TMP" || exit 1
+  RETAINED_NOTE_ROWS=$(mktemp "$STATE/.wake-inbox-retained.XXXXXX") || exit 1
   if [ "$ACTOR" = branch ]; then
     require_branch_eligible_rows || exit 1
+    pending_inbox_note_rows "$ACK_THROUGH" "$ELIGIBLE_ROWS_FILE" "$RETAINED_NOTE_ROWS" || exit 1
     # Delete a row only when its sequence is <= cutoff AND it is named in the
     # extension's eligible snapshot; every other row - including one whose
     # sequence is below cutoff but not in the snapshot - is kept untouched.
-    awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$ELIGIBLE_ROWS_FILE" '
-      BEGIN { while ((getline line < seqs) > 0) if (line ~ /^[0-9]+$/) keep[line] = 1 }
-      NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in keep) { print }
+    awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$ELIGIBLE_ROWS_FILE" -v retained="$RETAINED_NOTE_ROWS" '
+      BEGIN {
+        while ((getline line < seqs) > 0) if (line ~ /^[0-9]+$/) owned[line]=1
+        while ((getline line < retained) > 0) keep[line]=1
+      }
+      NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in owned) || ($2 in keep) { print }
     ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
   else
-    RETAINED_NOTE_ROWS=$(mktemp "$STATE/.wake-inbox-retained.XXXXXX") || exit 1
     pending_inbox_note_rows "$ACK_THROUGH" "$MAIN_ROWS_FILE" "$RETAINED_NOTE_ROWS" || exit 1
     awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$MAIN_ROWS_FILE" -v retained="$RETAINED_NOTE_ROWS" '
       BEGIN {
@@ -759,13 +763,16 @@ if [ -n "$ACK_THROUGH" ]; then
   DRAIN_TMP=
   if [ "$ACTOR" = branch ]; then
     consume_actor_rows_locked "$ELIGIBLE_ROWS_FILE" "$ACK_THROUGH" || exit 1
+    if [ -s "$RETAINED_NOTE_ROWS" ]; then
+      claim_main_rows_locked || exit 1
+    fi
   else
     consume_actor_rows_locked "$MAIN_ROWS_FILE" "$ACK_THROUGH" || exit 1
     if [ -s "$RETAINED_NOTE_ROWS" ]; then
       claim_main_rows_locked || exit 1
     fi
-    rm -f -- "$RETAINED_NOTE_ROWS"
   fi
+  rm -f -- "$RETAINED_NOTE_ROWS"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   if [ "$ACK_REMOVED" -eq 0 ] && [ "$PRESENTED_MAX" -gt "$ACK_THROUGH" ]; then
