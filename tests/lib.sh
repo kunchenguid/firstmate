@@ -47,6 +47,16 @@ umask 022
 # strips this to verify real refusal.
 export FM_GATE_REFUSE_BYPASS=1
 
+# Keep the host-dependent SQLite WAL locking probe out of every other test's
+# bootstrap output. The probe reports a real property of the machine the suite
+# runs on (bin/fm-sqlite-wal-lib.sh), so on a host that cannot share a WAL
+# database across processes it would add a VALIDATION_UNAVAILABLE line to cases
+# that assert bootstrap is silent, and the suite's verdict would depend on where
+# it ran. tests/fm-sqlite-wal-lock.test.sh owns that behavior and opts each of
+# its own bootstrap cases back in, and
+# tests/fm-sqlite-wal-lock-live-e2e.test.sh runs the probe directly.
+export FM_SKIP_WAL_LOCK_PROBE=1
+
 # Clear the task-worker marker bin/fm-spawn.sh exports into ship and scout
 # panes. This suite builds git-init fixture repositories whose primary checkout
 # it runs a copied bin/fm-test-run.sh in, and that runner refuses the primary
