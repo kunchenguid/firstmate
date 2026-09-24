@@ -242,7 +242,8 @@ foreign_stall_watch_leg() {  # <dir> <leg> <now> [observation]
   printf '%s\n' "$now" > "$dir/now"
   PATH="$dir/fakebin:$PATH" FM_FAKE_NOW_FILE="$dir/now" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$dir/state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
-    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_SECONDMATE_WAKE_STALL_SECS=1 FM_SECONDMATE_LIVENESS_SECS=99999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
     "$WATCH" > "$dir/watch-$leg.out" 2> "$dir/watch-$leg.err" &
   pid=$!
@@ -437,7 +438,11 @@ secondmate_stall_watch_leg() { # <dir> <leg> <mode> [arg...]
   esac
   [ -z "$progress" ] || progress_start=$(cat "$progress" 2>/dev/null || true)
   rm -f "$beat"
-  "$WATCH" >"$out" 2>"$err" &
+  # These legs pin wake-loop stall behavior only. A large cadence alone does
+  # not suppress the first endpoint tick when its marker is absent; seed it so
+  # every watcher launch and restart leaves the fixture endpoints untouched.
+  touch "$dir/state/.secondmate-liveness-tick"
+  FM_SECONDMATE_LIVENESS_SECS=99999999 "$WATCH" >"$out" 2>"$err" &
   pid=$!
   case "$mode" in
     alert)
@@ -447,7 +452,7 @@ secondmate_stall_watch_leg() { # <dir> <leg> <mode> [arg...]
           if grep -F 'secondmate wake-loop stalled' "$out" >/dev/null 2>&1; then
             return 0
           fi
-          "$WATCH" >>"$out" 2>>"$err" &
+          FM_SECONDMATE_LIVENESS_SECS=99999999 "$WATCH" >>"$out" 2>>"$err" &
           pid=$!
         fi
         sleep 0.1
@@ -543,7 +548,7 @@ secondmate_stall_watch_leg() { # <dir> <leg> <mode> [arg...]
         break
       fi
       rm -f "$beat"
-      "$WATCH" >>"$out" 2>>"$err" &
+      FM_SECONDMATE_LIVENESS_SECS=99999999 "$WATCH" >>"$out" 2>>"$err" &
       pid=$!
       first=0
       mark=0
@@ -2728,6 +2733,504 @@ test_wake_queue_prune_task() {
   pass "fm_wake_queue_prune_task: prunes wakes for target task without touching other tasks"
 }
 
+# --- secondmate endpoint liveness tick ---------------------------------------
+# bin/fm-watch.sh's secondmate_liveness_tick drives the shared
+# bin/fm-secondmate-liveness-lib.sh probe+relaunch machinery during ordinary
+# supervision: only a positively dead or missing recorded endpoint relaunches
+# (through the same guarded fm-spawn.sh --secondmate path the session-start
+# sweep uses), every relaunch emits exactly one `check` wake plus a durable
+# ledger line, inconclusive verdicts are triage-only, an unreachable remote
+# route is preserved, and the attempt bound parks a mate that keeps dying.
+
+# make_secondmate_liveness_case <name>: a watcher case dir carrying one local
+# secondmate whose tmux fixture answers the backend's agent-state probe AND the
+# guarded spawn's window lifecycle (kill-window, a window id from new-window).
+# FM_FAKE_TMUX_CURRENT_COMMAND selects the pane's foreground command per leg;
+# FM_FAKE_WINDOW_GONE=1 makes the session inventory omit fm-sm1 (missing);
+# after a logged new-window the probe reads alive, matching a real respawn.
+make_secondmate_liveness_case() {
+  local name=$1 dir fakebin home
+  dir="$TMP_ROOT/$name"
+  fakebin="$dir/fakebin"
+  # The mate home must sit OUTSIDE the watcher's FM_HOME: fm-spawn.sh refuses
+  # a secondmate home nested inside the active home that would supervise it.
+  home="$TMP_ROOT/$name-mate"
+  mkdir -p "$dir/state" "$dir/config" "$dir/data" "$fakebin" \
+    "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf 'sm1\n' > "$home/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'charter\n' > "$home/data/charter.md"
+  printf 'codex\n' > "$dir/config/crew-harness"
+  printf 'window=firstmate:fm-sm1\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$home" > "$dir/state/sm1.meta"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+log=${FM_TMUX_CALL_LOG:-/dev/null}
+probe=${FM_TMUX_CALL_LOG:-/dev/null}.probe
+cmd=${FM_FAKE_TMUX_CURRENT_COMMAND:-zsh}
+[ ! -f "$probe.spawned" ] || cmd=claude
+case "${1:-}" in
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        *pane_current_command*) printf '%s\n' "$cmd"; exit 0 ;;
+        *cursor_y*) printf '0\n'; exit 0 ;;
+      esac
+    done
+    exit 0 ;;
+  list-windows)
+    if [ "${FM_FAKE_WINDOW_GONE:-0}" = 1 ] || { [ -f "$probe.killed" ] && [ ! -f "$probe.spawned" ]; }; then
+      printf 'main\n'
+    else
+      printf 'main\nfm-sm1\n'
+    fi
+    exit 0 ;;
+  capture-pane) [ -z "${FM_FAKE_TMUX_CAPTURE:-}" ] || cat "$FM_FAKE_TMUX_CAPTURE"; exit 0 ;;
+  new-window)
+    printf '%s\n' "$*" >> "$log"
+    [ "${FM_TEST_FAIL_NEW_WINDOW:-0}" = 1 ] && exit 1
+    : > "$probe.spawned"
+    printf '@1\n'
+    exit 0 ;;
+  kill-window)
+    printf '%s\n' "$*" >> "$log"
+    : > "$probe.killed"
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  make_fake_crew_state "$fakebin" >/dev/null
+  printf '%s\n' "$dir"
+}
+
+# run_liveness_leg <dir> <tag> [NAME=VALUE...]: one watcher invocation under the
+# case's fake toolchain; extra env assignments precede the command for env(1).
+# The watcher exits 0 on its first wake, so a leg that should wake ends via
+# wait_for_exit and a leg that should stay quiet is polled then killed. The
+# pid lands in LIVENESS_PID - capturing it through $(...) would orphan the
+# watcher and break wait_for_exit's ownership check.
+run_liveness_leg() {
+  local dir=$1 tag=$2
+  shift 2
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$dir/state" FM_CREW_STATE_BIN="$dir/fakebin/fm-crew-state.sh" \
+    TMUX='' FM_BACKEND=tmux \
+    FM_TMUX_CALL_LOG="$dir/tmux.log" FM_SECONDMATE_LIVENESS_SECS=1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=0 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$@" "$WATCH" > "$dir/watch-$tag.out" 2> "$dir/watch-$tag.err" &
+  LIVENESS_PID=$!
+}
+
+# kill_liveness_leg <pid>: end a leg that must have stayed quiet.
+kill_liveness_leg() {
+  kill -TERM "$1" 2>/dev/null || true
+  wait_for_exit "$1" 50 >/dev/null || true
+}
+
+# drain_liveness_wakes <dir>: replay the case's durable queue through the real
+# drain and post the acknowledgement it names - the same handling boundary a
+# firstmate applies to a surfaced wake. A leg after an unacked wake would exit
+# on check: rearm-resurface instead of exercising the tick it is testing.
+drain_liveness_wakes() {
+  local dir=$1 state="$1/state" seq gen
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" > /dev/null 2> "$dir/drain.err" || true
+  seq=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\).*$/\1/p' "$dir/drain.err")
+  gen=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\).*$/\1/p' "$dir/drain.err")
+  [ -n "$seq" ] && [ -n "$gen" ] || return 0
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$seq" --recovery-generation "$gen" \
+    > /dev/null 2>&1 || true
+}
+
+test_secondmate_liveness_tick_relaunches_dead_endpoint_once() {
+  local dir state pid out ledger
+  dir=$(make_secondmate_liveness_case liveness-dead)
+  state="$dir/state"
+
+  run_liveness_leg "$dir" dead FM_FAKE_TMUX_CURRENT_COMMAND=zsh; pid=$LIVENESS_PID
+  wait_for_exit "$pid" 300 || fail "the watcher did not exit on its auto-relaunch wake"
+  out="$dir/watch-dead.out"
+  grep -F 'check: secondmate sm1 auto-relaunched after confirmed agent absence on existing endpoint (backend=tmux)' "$out" >/dev/null \
+    || fail "a confirmed-dead secondmate was not auto-relaunched: $(cat "$out" "$dir/watch-dead.err")"
+  [ "$(grep -c 'check: secondmate sm1 auto-relaunched' "$out")" -eq 1 ] \
+    || fail "an auto-relaunch did not produce exactly one captain-facing line: $(cat "$out")"
+  assert_contains "$(cat "$dir/tmux.log")" "kill-window" \
+    "the confirmed-dead endpoint must be killed before relaunch"
+  assert_contains "$(cat "$dir/tmux.log")" "new-window" \
+    "the dead secondmate was not relaunched"
+  ledger="$state/.secondmate-relaunch-sm1"
+  [ -f "$ledger" ] || fail "the durable relaunch ledger was not written"
+  [ "$(awk -F '\t' '$2 == "attempt"' "$ledger" | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "the ledger did not record exactly one attempt: $(cat "$ledger")"
+  [ "$(awk -F '\t' '$2 == "relaunched"' "$ledger" | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "the ledger did not record the relaunched outcome: $(cat "$ledger")"
+  [ "$(grep -c 'secondmate-relaunch-sm1-' "$state/.wake-queue")" -eq 1 ] \
+    || fail "the durable auto-relaunch wake row was not queued exactly once: $(cat "$state/.wake-queue")"
+  [ -e "$state/.secondmate-liveness-tick" ] \
+    || fail "the liveness cadence marker was not stamped"
+
+  # A restarted watcher sees the relaunched endpoint alive and stays quiet -
+  # the durable row remains for the drain and no second notification fires.
+  drain_liveness_wakes "$dir"
+  rm -f "$state/.secondmate-liveness-tick"
+  run_liveness_leg "$dir" dead-idle FM_FAKE_TMUX_CURRENT_COMMAND=zsh; pid=$LIVENESS_PID
+  sleep 4
+  is_live_non_zombie "$pid" \
+    || fail "the watcher exited against an alive relaunched secondmate: $(cat "$dir/watch-dead-idle.out" "$dir/watch-dead-idle.err")"
+  kill_liveness_leg "$pid"
+  [ "$(grep -c 'secondmate-relaunch-sm1' "$state/.wake-queue" 2>/dev/null || true)" -eq 0 ] \
+    || fail "a live post-relaunch probe produced a second wake: $(cat "$state/.wake-queue")"
+  pass "watch liveness: a dead secondmate is relaunched once, ledgered, and quiet afterwards"
+}
+
+test_secondmate_liveness_tick_relaunches_missing_endpoint() {
+  local dir state pid out
+  dir=$(make_secondmate_liveness_case liveness-missing)
+  state="$dir/state"
+
+  run_liveness_leg "$dir" missing FM_FAKE_WINDOW_GONE=1; pid=$LIVENESS_PID
+  wait_for_exit "$pid" 300 || fail "the watcher did not exit on its auto-relaunch wake"
+  out="$dir/watch-missing.out"
+  grep -F 'check: secondmate sm1 auto-relaunched after recorded endpoint confidently missing (backend=tmux)' "$out" >/dev/null \
+    || fail "a missing secondmate endpoint was not auto-relaunched: $(cat "$out" "$dir/watch-missing.err")"
+  assert_contains "$(cat "$dir/tmux.log")" "new-window" \
+    "the missing secondmate endpoint was not relaunched"
+  assert_not_contains "$(cat "$dir/tmux.log")" "kill-window" \
+    "an absent window must not take the destructive pre-kill path"
+  pass "watch liveness: a missing secondmate endpoint is relaunched without a pre-kill"
+}
+
+test_secondmate_liveness_tick_relaunches_every_dead_mate_before_waking() {
+  local dir state pid out home id
+  dir=$(make_secondmate_liveness_case liveness-several)
+  state="$dir/state"
+  home="$TMP_ROOT/liveness-several-mate2"
+  mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf 'sm2\n' > "$home/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'charter\n' > "$home/data/charter.md"
+  printf 'window=firstmate:fm-sm2\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$home" > "$state/sm2.meta"
+
+  run_liveness_leg "$dir" several FM_FAKE_WINDOW_GONE=1; pid=$LIVENESS_PID
+  wait_for_exit "$pid" 300 || fail "the watcher did not exit on its auto-relaunch wake"
+  out="$dir/watch-several.out"
+  [ "$(grep -c 'check: secondmate sm[12] auto-relaunched' "$out")" -eq 1 ] \
+    || fail "one liveness tick did not wake exactly once: $(cat "$out" "$dir/watch-several.err")"
+  [ "$(grep -c 'new-window' "$dir/tmux.log")" -eq 2 ] \
+    || fail "the tick did not relaunch every dead mate before waking: $(cat "$dir/tmux.log")"
+  for id in sm1 sm2; do
+    [ "$(awk -F '\t' '$2 == "relaunched"' "$state/.secondmate-relaunch-$id" 2>/dev/null | wc -l | tr -d ' ')" -eq 1 ] \
+      || fail "$id's relaunch was not ledgered: $(cat "$state/.secondmate-relaunch-$id" 2>/dev/null)"
+    [ "$(grep -c "secondmate-relaunch-$id-" "$state/.wake-queue")" -eq 1 ] \
+      || fail "$id's relaunch did not queue its own check row: $(cat "$state/.wake-queue")"
+  done
+  pass "watch liveness: one tick relaunches every dead mate, queues a row each, and wakes once"
+}
+
+test_secondmate_liveness_tick_leaves_alive_and_inconclusive_untouched() {
+  local dir state pid
+  dir=$(make_secondmate_liveness_case liveness-quiet)
+  state="$dir/state"
+
+  # A live endpoint probes every cadence and never acts.
+  run_liveness_leg "$dir" alive FM_FAKE_TMUX_CURRENT_COMMAND=claude; pid=$LIVENESS_PID
+  sleep 4
+  is_live_non_zombie "$pid" \
+    || fail "the watcher exited against an alive secondmate: $(cat "$dir/watch-alive.out" "$dir/watch-alive.err")"
+  kill_liveness_leg "$pid"
+  [ ! -s "$dir/tmux.log" ] || fail "an alive secondmate was touched: $(cat "$dir/tmux.log")"
+  [ ! -s "$state/.wake-queue" ] || fail "an alive secondmate queued a wake: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.secondmate-relaunch-sm1" ] || fail "an alive secondmate was ledgered"
+  [ -e "$state/.secondmate-liveness-tick" ] || fail "the liveness tick did not stamp its cadence marker"
+
+  # An ambiguous existing process is evidence of nothing; it is triage-only
+  # and never a relaunch. Drain the killed leg's downtime marker first so the
+  # next watcher does not resurface instead of exercising the tick.
+  drain_liveness_wakes "$dir"
+  run_liveness_leg "$dir" ambiguous FM_FAKE_TMUX_CURRENT_COMMAND=node; pid=$LIVENESS_PID
+  sleep 4
+  is_live_non_zombie "$pid" \
+    || fail "the watcher exited against an ambiguous secondmate endpoint: $(cat "$dir/watch-ambiguous.out" "$dir/watch-ambiguous.err")"
+  kill_liveness_leg "$pid"
+  [ ! -s "$dir/tmux.log" ] || fail "an ambiguous endpoint was killed or relaunched: $(cat "$dir/tmux.log")"
+  [ ! -s "$state/.wake-queue" ] || fail "an ambiguous endpoint queued a wake: $(cat "$state/.wake-queue")"
+  grep -F 'secondmate sm1 liveness: existing endpoint has ambiguous agent process (backend=tmux)' \
+    "$state/.watch-triage.log" >/dev/null \
+    || fail "the ambiguous probe did not land in the triage log: $(cat "$state/.watch-triage.log" 2>/dev/null)"
+  pass "watch liveness: alive and ambiguous endpoints are probed, logged, and never touched"
+}
+
+test_secondmate_liveness_tick_cadence_gates_the_probe() {
+  local dir state pid
+  dir=$(make_secondmate_liveness_case liveness-cadence)
+  state="$dir/state"
+
+  # A fresh cadence marker holds the probe even over a dead endpoint.
+  touch "$state/.secondmate-liveness-tick"
+  run_liveness_leg "$dir" gated FM_SECONDMATE_LIVENESS_SECS=99999999 FM_FAKE_TMUX_CURRENT_COMMAND=zsh; pid=$LIVENESS_PID
+  sleep 4
+  is_live_non_zombie "$pid" \
+    || fail "the watcher woke inside the liveness cadence: $(cat "$dir/watch-gated.out" "$dir/watch-gated.err")"
+  kill_liveness_leg "$pid"
+  [ ! -s "$dir/tmux.log" ] || fail "a gated tick probed the endpoint: $(cat "$dir/tmux.log")"
+  [ ! -s "$state/.wake-queue" ] || fail "a gated tick queued a wake"
+  [ ! -e "$state/.secondmate-relaunch-sm1" ] || fail "a gated tick ledgered an attempt"
+
+  # Once the cadence lapses the same dead endpoint is recovered on the next poll.
+  drain_liveness_wakes "$dir"
+  rm -f "$state/.secondmate-liveness-tick"
+  run_liveness_leg "$dir" ungated FM_FAKE_TMUX_CURRENT_COMMAND=zsh; pid=$LIVENESS_PID
+  wait_for_exit "$pid" 300 || fail "the lapsed-cadence watcher did not auto-relaunch"
+  grep -F 'check: secondmate sm1 auto-relaunched' "$dir/watch-ungated.out" >/dev/null \
+    || fail "the lapsed cadence did not recover the dead secondmate: $(cat "$dir/watch-ungated.out")"
+  pass "watch liveness: the cadence marker gates probing and survives across legs"
+}
+
+test_secondmate_liveness_tick_attempt_bound_parks_then_rearm_on_alive() {
+  local dir state pid ledger now
+  dir=$(make_secondmate_liveness_case liveness-bound)
+  state="$dir/state"
+  ledger="$state/.secondmate-relaunch-sm1"
+
+  # Three ledgered attempts inside the window meet the default bound; the next
+  # dead probe parks the mate behind the bound marker and escalates once.
+  now=$(date +%s)
+  printf '%s\tattempt\n%s\tattempt\n%s\tattempt\n' "$now" "$now" "$now" > "$ledger"
+  run_liveness_leg "$dir" bound FM_FAKE_TMUX_CURRENT_COMMAND=zsh; pid=$LIVENESS_PID
+  wait_for_exit "$pid" 300 || fail "the watcher did not exit on its bound wake"
+  grep -F 'check: secondmate sm1 auto-relaunch paused after 3 attempts in 3600s' "$dir/watch-bound.out" >/dev/null \
+    || fail "a mate past its relaunch bound was not escalated once: $(cat "$dir/watch-bound.out" "$dir/watch-bound.err")"
+  [ -e "$state/.secondmate-relaunch-bound-sm1" ] || fail "the bound marker was not written"
+  [ ! -s "$dir/tmux.log" ] || fail "a parked mate was relaunched anyway: $(cat "$dir/tmux.log")"
+  [ "$(awk -F '\t' '$2 == "attempt"' "$ledger" | wc -l | tr -d ' ')" -eq 3 ] \
+    || fail "a parked probe ledgered another attempt: $(cat "$ledger")"
+  [ "$(grep -c 'secondmate-relaunch-bound-sm1' "$state/.wake-queue")" -eq 1 ] \
+    || fail "the bound wake was not queued exactly once"
+
+  # While the marker stands, further dead probes are silent - no repeat wake.
+  drain_liveness_wakes "$dir"
+  rm -f "$state/.secondmate-liveness-tick"
+  run_liveness_leg "$dir" parked FM_FAKE_TMUX_CURRENT_COMMAND=zsh; pid=$LIVENESS_PID
+  sleep 4
+  is_live_non_zombie "$pid" \
+    || fail "the watcher re-escalated a parked mate: $(cat "$dir/watch-parked.out" "$dir/watch-parked.err")"
+  kill_liveness_leg "$pid"
+  [ "$(grep -c 'secondmate-relaunch' "$state/.wake-queue" 2>/dev/null || true)" -eq 0 ] \
+    || fail "a parked mate produced a second wake: $(cat "$state/.wake-queue")"
+  [ ! -s "$dir/tmux.log" ] || fail "a parked mate was relaunched: $(cat "$dir/tmux.log")"
+
+  # A live probe rearms the guarantee: the marker clears and the mate can be
+  # auto-relaunched again on a later death.
+  drain_liveness_wakes "$dir"
+  rm -f "$state/.secondmate-liveness-tick"
+  run_liveness_leg "$dir" rearm FM_FAKE_TMUX_CURRENT_COMMAND=claude; pid=$LIVENESS_PID
+  sleep 4
+  is_live_non_zombie "$pid" \
+    || fail "the watcher exited against a live rearmed mate: $(cat "$dir/watch-rearm.out" "$dir/watch-rearm.err")"
+  kill_liveness_leg "$pid"
+  [ ! -e "$state/.secondmate-relaunch-bound-sm1" ] \
+    || fail "a live probe did not clear the bound marker"
+  [ "$(awk -F '\t' '$2 == "rearmed"' "$ledger" | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "the live rearm was not ledgered exactly once: $(cat "$ledger")"
+  drain_liveness_wakes "$dir"
+  rm -f "$state/.secondmate-liveness-tick"
+  # The three seeded attempts still sit inside the window, yet the rearm
+  # restores the full default budget: the next death relaunches, not re-parks.
+  run_liveness_leg "$dir" rearmed-dead FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_FAKE_WINDOW_GONE=1; pid=$LIVENESS_PID
+  wait_for_exit "$pid" 300 || fail "a rearmed mate was not auto-relaunched on its next death"
+  grep -F 'check: secondmate sm1 auto-relaunched' "$dir/watch-rearmed-dead.out" >/dev/null \
+    || fail "the rearmed mate's relaunch did not wake: $(cat "$dir/watch-rearmed-dead.out" "$dir/watch-rearmed-dead.err")"
+  [ ! -e "$state/.secondmate-relaunch-bound-sm1" ] \
+    || fail "a rearmed mate was re-parked on its pre-rearm attempts"
+  [ "$(awk -F '\t' '$2 == "attempt"' "$ledger" | wc -l | tr -d ' ')" -eq 4 ] \
+    || fail "the ledger did not keep its pre-rearm history plus the new attempt: $(cat "$ledger")"
+  pass "watch liveness: the attempt bound parks a flapping mate once and a live probe rearms a full budget"
+}
+
+test_secondmate_liveness_tick_relaunch_failure_reports_once() {
+  local dir state pid ledger
+  dir=$(make_secondmate_liveness_case liveness-failure)
+  state="$dir/state"
+  ledger="$state/.secondmate-relaunch-sm1"
+
+  run_liveness_leg "$dir" failed FM_FAKE_TMUX_CURRENT_COMMAND=zsh FM_TEST_FAIL_NEW_WINDOW=1; pid=$LIVENESS_PID
+  wait_for_exit "$pid" 300 || fail "the watcher did not exit on its relaunch-failure wake"
+  grep -F 'check: secondmate sm1 auto-relaunch failed after confirmed agent absence on existing endpoint:' \
+    "$dir/watch-failed.out" >/dev/null \
+    || fail "a failed auto-relaunch did not wake with its cause: $(cat "$dir/watch-failed.out" "$dir/watch-failed.err")"
+  [ "$(awk -F '\t' '$2 == "attempt"' "$ledger" | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "the ledger did not record the failed attempt: $(cat "$ledger" 2>/dev/null)"
+  [ "$(awk -F '\t' '$2 == "failed"' "$ledger" | wc -l | tr -d ' ')" -eq 1 ] \
+    || fail "the ledger did not record the failed outcome: $(cat "$ledger")"
+  [ "$(grep -c 'secondmate-relaunch-failed-sm1-' "$state/.wake-queue")" -eq 1 ] \
+    || fail "the failure wake was not queued exactly once: $(cat "$state/.wake-queue")"
+  pass "watch liveness: a failed auto-relaunch wakes once with its cause and is ledgered"
+}
+
+test_secondmate_liveness_tick_fails_closed_on_ledger_errors() {
+  local dir state pid ledger mode rc
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "watch liveness: ledger permission errors skipped (root ignores file modes)"
+    return 0
+  fi
+  for mode in 444 000; do
+    dir=$(make_secondmate_liveness_case "liveness-ledger-$mode")
+    state="$dir/state"
+    ledger="$state/.secondmate-relaunch-sm1"
+    : > "$ledger"
+    chmod "$mode" "$ledger"
+    run_liveness_leg "$dir" ledger FM_FAKE_TMUX_CURRENT_COMMAND=zsh; pid=$LIVENESS_PID
+    rc=0
+    wait_for_exit "$pid" 300 || rc=$?
+    chmod 644 "$ledger"
+    [ "$rc" -eq 1 ] || fail "a mode-$mode relaunch ledger did not fail the watcher (rc=$rc): $(cat "$dir/watch-ledger.out" "$dir/watch-ledger.err")"
+    grep -F 'secondmate liveness check failed' "$dir/watch-ledger.err" >/dev/null \
+      || fail "a mode-$mode ledger failure was not reported: $(cat "$dir/watch-ledger.err")"
+    [ ! -s "$dir/tmux.log" ] \
+      || fail "a mode-$mode relaunch ledger still killed or spawned: $(cat "$dir/tmux.log")"
+    [ ! -s "$ledger" ] || fail "a mode-$mode ledger gained rows: $(cat "$ledger")"
+    ! grep -F 'secondmate-relaunch' "$state/.wake-queue" >/dev/null 2>&1 \
+      || fail "a mode-$mode ledger failure queued a relaunch wake: $(cat "$state/.wake-queue")"
+  done
+  pass "watch liveness: an unwritable or unreadable relaunch ledger refuses to kill or spawn"
+}
+
+test_secondmate_liveness_tick_error_keeps_scanning_and_wakes() {
+  local dir state pid out home rc
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "watch liveness: mid-tick ledger error skipped (root ignores file modes)"
+    return 0
+  fi
+  dir=$(make_secondmate_liveness_case liveness-mid-error)
+  state="$dir/state"
+  home="$TMP_ROOT/liveness-mid-error-mate2"
+  mkdir -p "$home/bin" "$home/data" "$home/state" "$home/config" "$home/projects"
+  printf 'sm2\n' > "$home/.fm-secondmate-home"
+  printf '# Firstmate\n' > "$home/AGENTS.md"
+  printf 'charter\n' > "$home/data/charter.md"
+  printf 'window=firstmate:fm-sm2\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
+    "$home" > "$state/sm2.meta"
+  : > "$state/.secondmate-relaunch-sm1"
+  chmod 000 "$state/.secondmate-relaunch-sm1"
+
+  # sm1 errors first; the tick must still recover sm2 and surface its wake.
+  run_liveness_leg "$dir" mid-error FM_FAKE_WINDOW_GONE=1; pid=$LIVENESS_PID
+  rc=0
+  wait_for_exit "$pid" 300 || rc=$?
+  chmod 644 "$state/.secondmate-relaunch-sm1"
+  out="$dir/watch-mid-error.out"
+  [ "$rc" -eq 0 ] || fail "a per-mate ledger error discarded the tick's pending wake (rc=$rc): $(cat "$out" "$dir/watch-mid-error.err")"
+  grep -F 'check: secondmate sm2 auto-relaunched' "$out" >/dev/null \
+    || fail "a mate after the ledger error was not recovered and surfaced: $(cat "$out" "$dir/watch-mid-error.err")"
+  grep -F 'watcher: secondmate sm1 liveness: relaunch ledger is unreadable' "$dir/watch-mid-error.err" >/dev/null \
+    || fail "the per-mate ledger error was not reported: $(cat "$dir/watch-mid-error.err")"
+  [ "$(grep -c 'new-window' "$dir/tmux.log")" -eq 1 ] \
+    || fail "exactly the healthy mate should have been relaunched: $(cat "$dir/tmux.log")"
+  [ ! -s "$state/.secondmate-relaunch-sm1" ] \
+    || fail "the errored mate gained ledger rows: $(cat "$state/.secondmate-relaunch-sm1")"
+  [ "$(grep -c 'secondmate-relaunch-sm2-' "$state/.wake-queue")" -eq 1 ] \
+    || fail "the healthy mate's relaunch row was not queued: $(cat "$state/.wake-queue")"
+  pass "watch liveness: a per-mate error keeps scanning, recovers later mates, and still wakes"
+}
+
+test_secondmate_liveness_tick_unqueued_outcome_is_an_error_not_a_wake() {
+  local dir state pid rc
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "watch liveness: unqueued-outcome check skipped (root ignores file modes)"
+    return 0
+  fi
+  dir=$(make_secondmate_liveness_case liveness-unqueued)
+  state="$dir/state"
+  : > "$state/.wake-queue"
+  chmod 444 "$state/.wake-queue"
+  run_liveness_leg "$dir" unqueued FM_FAKE_WINDOW_GONE=1; pid=$LIVENESS_PID
+  rc=0
+  wait_for_exit "$pid" 300 || rc=$?
+  chmod 644 "$state/.wake-queue"
+  [ "$rc" -eq 1 ] \
+    || fail "an outcome whose check row was never queued did not fail the watcher (rc=$rc): $(cat "$dir/watch-unqueued.out" "$dir/watch-unqueued.err")"
+  ! grep -F 'check: secondmate sm1 auto-relaunched' "$dir/watch-unqueued.out" >/dev/null \
+    || fail "an unqueued outcome was printed as a delivered wake: $(cat "$dir/watch-unqueued.out")"
+  grep -F 'watcher: secondmate sm1 liveness: check wake row could not be queued' "$dir/watch-unqueued.err" >/dev/null \
+    || fail "the unqueued outcome was not reported as an error: $(cat "$dir/watch-unqueued.err")"
+  pass "watch liveness: an outcome that could not be queued surfaces as an error, not a wake"
+}
+
+test_secondmate_liveness_tick_skips_mate_whose_lock_is_held() {
+  local dir state pid holder
+  dir=$(make_secondmate_liveness_case liveness-locked)
+  state="$dir/state"
+
+  # A concurrent liveness episode (e.g. the session-start sweep) holds the
+  # per-mate lock; this tick must skip the mate entirely rather than probe a
+  # moving target.
+  ( STATE="$state" bash -c '. "$1" && fm_lock_acquire_wait "$2" && sleep 30' \
+      _ "$ROOT/bin/fm-wake-lib.sh" "$state/.secondmate-liveness-sm1.lock" ) &
+  holder=$!
+  local i=0
+  while [ ! -d "$state/.secondmate-liveness-sm1.lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  [ -d "$state/.secondmate-liveness-sm1.lock" ] || fail "the fixture never acquired the liveness lock"
+
+  run_liveness_leg "$dir" locked FM_FAKE_TMUX_CURRENT_COMMAND=zsh; pid=$LIVENESS_PID
+  sleep 4
+  is_live_non_zombie "$pid" \
+    || fail "the watcher exited against a locked secondmate: $(cat "$dir/watch-locked.out" "$dir/watch-locked.err")"
+  kill_liveness_leg "$pid"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ ! -s "$dir/tmux.log" ] || fail "a locked mate was probed or relaunched: $(cat "$dir/tmux.log")"
+  [ ! -s "$state/.wake-queue" ] || fail "a locked mate queued a wake"
+  pass "watch liveness: a mate mid-episode under the shared liveness lock is skipped entirely"
+}
+
+test_secondmate_liveness_tick_preserves_unreachable_remote() {
+  local dir state
+  dir=$(make_secondmate_liveness_case liveness-remote-down)
+  state="$dir/state"
+  rm -f "$state/sm1.meta"
+  cat > "$state/rsm1.meta" <<EOF
+window=remote:rsm1
+kind=secondmate
+harness=claude
+remote_host=lab-host
+remote_backend=herdr
+remote_herdr_session=fm-remote
+remote_target=fm-remote:w1:p1
+home=/remote/rsm1-home
+EOF
+  cat > "$dir/data/secondmates.md" <<EOF
+- rsm1 - Remote mate (host: lab-host; root: /remote/root; home: /remote/rsm1-home; scope: remote work; projects: alpha; added 2026-01-01)
+EOF
+  cp "$state/rsm1.meta" "$dir/rsm1.meta.before"
+  cat > "$dir/fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_FAKE_SSH_LOG:?}"
+exit 255
+SH
+  chmod +x "$dir/fakebin/ssh"
+  : > "$dir/ssh.log"
+
+  run_liveness_leg "$dir" unreachable FM_SSH_BIN="$dir/fakebin/ssh" FM_FAKE_SSH_LOG="$dir/ssh.log"; pid=$LIVENESS_PID
+  sleep 4
+  is_live_non_zombie "$pid" \
+    || fail "the watcher exited against an unreachable remote secondmate: $(cat "$dir/watch-unreachable.out" "$dir/watch-unreachable.err")"
+  kill_liveness_leg "$pid"
+  [ -s "$dir/ssh.log" ] || fail "the remote endpoint was never probed"
+  cmp -s "$dir/rsm1.meta.before" "$state/rsm1.meta" \
+    || fail "an unreachable remote probe changed the route metadata"
+  assert_grep '- rsm1 ' "$dir/data/secondmates.md" "an unreachable probe changed the registry route"
+  [ ! -s "$state/.wake-queue" ] || fail "an unreachable remote probe queued a wake"
+  [ ! -e "$state/.secondmate-relaunch-rsm1" ] \
+    || fail "an unreachable remote probe ledgered a relaunch attempt"
+  [ ! -s "$dir/tmux.log" ] || fail "an unreachable remote probe touched a local endpoint"
+  pass "watch liveness: an unreachable remote secondmate is probed, preserved, and never failed over"
+}
+
 test_self_held_lock_reclaims_instead_of_deadlocking
 test_subshell_lock_ownership_without_bashpid
 test_bounded_lock_handoff_after_contention
@@ -2779,3 +3282,15 @@ test_branch_stale_ack_that_consumes_nothing_names_its_granted_wake
 test_recovery_ack_failure_is_reported
 test_interruption_before_and_after_raw_commit
 test_wake_queue_prune_task
+test_secondmate_liveness_tick_relaunches_dead_endpoint_once
+test_secondmate_liveness_tick_relaunches_missing_endpoint
+test_secondmate_liveness_tick_relaunches_every_dead_mate_before_waking
+test_secondmate_liveness_tick_leaves_alive_and_inconclusive_untouched
+test_secondmate_liveness_tick_cadence_gates_the_probe
+test_secondmate_liveness_tick_attempt_bound_parks_then_rearm_on_alive
+test_secondmate_liveness_tick_relaunch_failure_reports_once
+test_secondmate_liveness_tick_fails_closed_on_ledger_errors
+test_secondmate_liveness_tick_error_keeps_scanning_and_wakes
+test_secondmate_liveness_tick_unqueued_outcome_is_an_error_not_a_wake
+test_secondmate_liveness_tick_skips_mate_whose_lock_is_held
+test_secondmate_liveness_tick_preserves_unreachable_remote
