@@ -211,7 +211,9 @@ A local skill exists only in this home, so offloading an entry out of `data/capt
 ## Knowledge sweep and routing
 
 1. **Sweep the session for uncaptured durable knowledge.**
-   Look for operational learnings, captain preferences expressed in passing, project-intrinsic facts, standing decisions, and undone next steps.
+   Review the captain's messages from the current session alongside operational learnings, preferences, project-intrinsic facts, standing decisions, and undone next steps.
+   For `/stow` and `/retro`, count distinct captain follow-up turns by issue and retain each source and time window; separate nudges from distinct asks. Use the parent transcript when available. Otherwise label visible-thread counts as a lower bound, not a whole-session total.
+   Treat repeated captain asks about schedule, progress, or completion as control-loop defect evidence; inspect the work, monitoring, and reporting records for the missed step, then route the correction to its existing owner rather than recording only a preference.
 2. **Route each finding using AGENTS.md's knowledge-routing table.**
    AGENTS.md section 6 is the source of truth for destinations.
    Do not re-derive or duplicate that mapping here.

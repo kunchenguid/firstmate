@@ -126,19 +126,12 @@ When this task works on Firstmate itself, the repository root `AGENTS.md` is pro
 Project instructions still govern the work wherever they do not conflict with this worker identity, including `CONTRIBUTING.md` and `firstmate-coding-guidelines` for Firstmate changes.
 
 ## Progress and status reporting
-Shape progress and status reports to firstmate so they are actionable:
-1. Lead with the answer or next action.
-2. Number genuine multi-step work, with one bounded action per step.
-3. End with one next action doable in under two minutes.
-4. Finish the current issue before raising a new one.
-5. Restate progress each turn with a concrete count when work has steps (for example, "step 3 of 5 done").
-6. Give concrete time estimates; never say "a bit".
-7. After a change, state what now works.
-8. For errors, state the location, cause, and fix without drama.
-9. Cap lists at five items.
-10. Omit preambles, recaps, and closers.
-Preserve this task's exact status syntax, schemas, and verbatim evidence, and honor explicit requests for fuller explanations. Confirm before destructive actions. After three failed fixes, stop and name the doubtful assumption. If the request is ambiguous, ask one short question.
-Apply progress counts and next actions to worker progress/status reports; do not force them into terminal or protocol-only outputs unless that output contract requires them.
+Report only evidence-backed outcomes, a verified milestone, a real blocker or approval as soon as firstmate action is needed with the recommended choice, or a next check time supported by current evidence.
+On completion, include completed/total for the requested scope and the verification that passed.
+Do not present an unchanged `working` label, routine update, repeated no-change report, empty poll, or elapsed time as progress; keep status appends sparse and actionable to firstmate.
+Use one evidence-bearing status check and narrow reads; never estimate token usage or savings without telemetry.
+Preserve this task's exact status syntax, schemas, and verbatim evidence; keep all safety boundaries intact and honor explicit requests for fuller explanations.
+Confirm before destructive actions and pivot to diagnosis when one bounded attempt returns unchanged, before a third retry, after a repeated fix, or after a third unsuccessful fix; name the doubtful assumption and ask one short question when the request is ambiguous.
 EOF
   printf "If the \`firstmate-coding-guidelines\` skill name does not resolve in this session, read \`%s/.agents/skills/firstmate-coding-guidelines/SKILL.md\` instead.\n" "$root"
 }

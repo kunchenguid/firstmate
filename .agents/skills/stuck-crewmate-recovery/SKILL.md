@@ -2,8 +2,8 @@
 name: stuck-crewmate-recovery
 description: >-
   Agent-only playbook for stuck or missing ordinary Firstmate direct reports.
-  Use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or after a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
-  Also use on the inverse case: a live crewmate reporting the no-mistakes pipeline dead, unreachable, or timed out.
+  Use after one bounded attempt returns unchanged, after a phase stays unchanged for 15 minutes without fresh evidence, after repeated fixes or two failed retries, on a recurring watcher-down report, a stale wake, looping pane, repeated confusion, an answered-by-brief question, an unresponsive crewmate, or a failed steer.
+  Also use when the session-start digest reports an ordinary direct report's endpoint dead or its metadata has no window, or a live crewmate reports the no-mistakes pipeline dead, unreachable, or timed out.
   Reconciles recorded work before escalating from targeted inspection through safe relaunch or failure.
 user-invocable: false
 metadata:
@@ -48,6 +48,20 @@ That reclaim is the owning home's operation only, and a secondmate is the one ex
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
 
+## Stall and recurrence diagnostic pivot
+
+Pivot after one bounded attempt returns unchanged, before a third retry, after a repeated fix, or when a phase remains unchanged for 15 minutes without fresh evidence of progress.
+1. Read `bin/fm-crew-state.sh <task-id>` once, then inspect only one targeted pane, status excerpt, or validation result that can change the next action.
+2. Trace the repeated failure to its shared owner and inspect why the prior attempt failed; batch related corrections together.
+3. When the same fix or checkpoint failed, choose a materially different approach instead of replaying it without new evidence.
+4. Verify the durable postcondition through its owning state or control path; command exit alone does not prove recovery.
+
+A bounded `bin/fm-watch-checkpoint.sh` return proves only that checkpoint interval, not persistent supervision.
+For recurring watcher-down conditions, inspect `docs/watcher-continuity.md` and the block emitted by `bin/fm-supervision-instructions.sh` to identify the intended continuity owner and why it failed.
+Use only that home's emitted recovery path, preserving the session-lock, AFK/quiet, and cross-home ownership boundaries above.
+Before calling recovery complete, verify the selected protocol's live owner and heartbeat predicate, including a fresh, advancing `state/.last-watcher-beat` where persistent watcher supervision is required.
+Codex's foreground checkpoint is intentionally bounded, so report its observed wake or timeout and continue only on its emitted cadence rather than claiming a persistent watcher from its exit alone.
+
 ## A live crewmate claiming the pipeline is dead
 
 This is the inverse of the dead-endpoint case above: the worker is alive and the pipeline it declares dead usually is too.
@@ -68,6 +82,10 @@ It is one instance serving every lane and home, so a restart kills other lanes' 
 Only positive socket refusal or absence is a daemon-down finding; escalate that finding, or a failed run record that names a daemon error, to the captain.
 
 ## Live-endpoint escalation
+
+Before treating a worker's `needs-decision` report as a captain wait, reconcile `bin/fm-crew-state.sh <task-id>` with the exact open key in its status source, the original question or finding, and its intended recipient.
+Confirm the question remains unresolved and cannot be handled within approved scope; CI, tests, review findings, registry/worktree problems, and other technical gate failures are repairable work or external blockers unless their source requires a captain choice.
+Use `AGENTS.md` section 9's decision-report fields, and correct any false wait through `captain-hold-lifecycle` and the keyed resolution owner.
 
 Escalate in order:
 
