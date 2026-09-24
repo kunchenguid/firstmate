@@ -8,9 +8,11 @@
 # (stop_hook_active true), after the one forced continuation, and then
 # forwards the original payload to bin/fm-turnend-guard.sh.
 #
-# The supervisor is not a shell job of the hook. A perl fork-and-setsid
-# returns as soon as the new session exists, because util-linux setsid is
-# absent on macOS, and that session foregrounds bin/fm-watch-arm.sh. While the recorded Codex process lives, each
+# The supervisor is not a shell job of the hook. It is detached with a perl
+# fork-and-setsid, because util-linux setsid is absent on macOS, so the hook
+# returns as soon as the new session exists. The supervisor backgrounds one
+# bin/fm-watch-arm.sh at a time and waits on it, so it can stop the arm when
+# the recorded Codex process exits. While that process lives, each
 # actionable arm close is queued back into the same thread with
 # `codex queue`. FM_CODEX_IDLE_QUEUE, when set, receives that text on stdin
 # instead. FM_CODEX_IDLE_OWNER_PID overrides the Codex ancestor walk.
