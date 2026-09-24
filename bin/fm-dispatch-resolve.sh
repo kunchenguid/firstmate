@@ -31,10 +31,13 @@
 # Output (stdout, TOON-style block):
 #   dispatch-resolve:
 #     status: shadow | clear | ambiguous | escalate | error
+#     decision_status: <clear|ambiguous|escalate>   (shadow only)
 #     model/latency_ms/tokens, rule (when excerpt) and confidence, probabilities
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
 #     profile: --harness <h> [--model <m>] [--effort <e>]     (status clear only)
+#     shadow_profile: <same flags>   (shadow only; observational, never pass to fm-spawn.sh)
+#     shadow_record: <path under data/jev-shadow/>   (shadow mode, including errors)
 #   shadow    -> the nested decision_status is observational only; never apply it
 #   clear     -> in on mode, pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
