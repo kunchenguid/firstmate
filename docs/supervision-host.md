@@ -60,7 +60,7 @@ One short main turn per boundary is the cost of never losing the park silently.
 The engine keeps one conversation across wakes so the byte-stable prompt stays cached, keyed to the current main session: every main session start opens a new one, and so does every `FM_SUPERVISION_HOST_ROTATE_TURNS` turns, because each wake adds history and the per-wake cost grows with it.
 Nothing captain-facing rides on that conversation, because the outcome store carries every result.
 The engine sees no mirror of main's dialog; the away record's read-back at the tail of every wake is the captain context it acts on.
-Each turn appends one line to `state/.supervision-host.log` with its result, the engine's reported usage, the turn's cost, and the conversation's running cost, which is where engine cost is read today.
+`state/.supervision-host.log` records where every close went, and each engine turn's line carries its result, the engine's reported usage, the turn's cost, and the conversation's running cost, which is where engine cost is read today.
 
 ## Engines
 
