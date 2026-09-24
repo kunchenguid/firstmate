@@ -60,6 +60,12 @@ write_task ship-badrun ship no-mistakes fm:7
 write_task ship-odd    ship no-mistakes fm:8
 write_task ship-wide   ship no-mistakes fm:9
 write_task scout-one   scout local-only fm:10
+# No window at all, which is how the fleet document reports a task it could not
+# observe as well as one that never had an endpoint.
+fm_write_meta "$HOME_DIR/state/no-endpoint.meta" \
+  "endpoint_task_id=no-endpoint" "worktree=$TMP_ROOT/wt/no-endpoint" \
+  "project=$PROJECT" "harness=claude" "kind=ship" "mode=no-mistakes" "yolo=off"
+mkdir -p "$TMP_ROOT/wt/no-endpoint"
 write_task gone-one    ship no-mistakes fm:99
 
 # --- the pipeline runs the fake CLI reports ---------------------------------
@@ -139,9 +145,10 @@ run:
   branch: fm/ship-wide
   status: running
   head: ab12cd34
-  steps[2]{step,status,attempt,findings,duration_ms}:
-    intent,completed,1,0,44
-    review,running,2,3,0
+  steps[3]{step,status,detail,attempt,findings,duration_ms}:
+    intent,completed,,1,0,44
+    review,running,"failed, then fixed",2,3,0
+    test,completed,"two, commas, here",1,5,176257
   active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
     review,running,2m30s,30s,"9s ago: log: still going","4242",second
 TOON
@@ -207,8 +214,11 @@ cat > "$ROLLUP_DIR/28.json" <<'JSON'
 {"headRefOid":"deadbeef","state":"CLOSED","statusCheckRollup":[]}
 JSON
 
+# Every invocation is recorded, so a flag that claims the snapshot is local can
+# be checked against what was actually called rather than against its own help.
 cat > "$FAKEBIN/gh" <<SH
 #!/usr/bin/env bash
+printf '%s\\n' "\$*" >> "$TMP_ROOT/gh-calls.log"
 # gh pr view <number> --repo <owner>/<repo> --json statusCheckRollup,headRefOid,state
 num=\${3:-}
 [ "\${1:-}" = pr ] || exit 1
@@ -286,6 +296,9 @@ assert_equals "gone-one" \
 assert_equals "recorded window no longer exists" \
   "$(printf '%s' "$DOC" | jq -r '[.omitted[] | select(.id == "gone-one")][0].reason')" \
   "omitted says why the task is not drawn"
+assert_equals "no endpoint liveness recorded for this task" \
+  "$(printf '%s' "$DOC" | jq -r '[.omitted[] | select(.id == "no-endpoint")][0].reason')" \
+  "a task the fleet read could not observe is not reported as never having had an endpoint"
 assert_equals "true" \
   "$(printf '%s' "$DOC" | jq -r '[.agents[].pipeline] == ([.agents[].pipeline] | sort | reverse)')" \
   "pipeline agents are emitted first, so the wire order is the draw order"
@@ -298,8 +311,17 @@ assert_equals "0" "$(agent scout-one '.steps | length')" \
   "a scout carries no steps, rather than nine permanently empty ones"
 assert_equals "false" "$(agent scout-one '.run.present')" \
   "a scout carries no run"
-assert_equals "true" "$(agent scout-one '.state | has("ok")')" \
-  "a scout carries the state read through the fleet's own owner of it"
+assert_equals "true" "$(agent scout-one '.state.ok')" \
+  "a scout carries the state the fleet document published"
+assert_equals "$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_ROOT_OVERRIDE="$ROOT" \
+  "$ROOT/bin/fm-fleet-snapshot.sh" --json 2>/dev/null \
+  | jq -r '[.tasks[] | select(.id == "scout-one")][0].current_state.state')" \
+  "$(agent scout-one '.state.value')" \
+  "and it is that document's own value, not a second reading that could disagree"
+assert_equals "not_checked" "$(agent scout-one '.agent_alive')" \
+  "the fleet document's endpoint liveness is passed through, never re-probed here"
+assert_equals "not_checked" "$(agent ship-run '.agent_alive')" \
+  "including for a pipeline agent"
 assert_equals "this worker opens no PR" "$(agent scout-one '.ci.collection.reason')" \
   "a scout's checks are named as absent rather than reported as zero"
 
@@ -378,6 +400,14 @@ assert_equals "44" \
 assert_equals "3" \
   "$(agent ship-wide '[.steps[] | select(.step == "review")][0].findings')" \
   "and its finding count by name"
+# A plain comma split shifts every later column, so the name map indexes
+# correctly into a wrongly split row and reads confident wrong numbers.
+assert_equals "176257" \
+  "$(agent ship-wide '[.steps[] | select(.step == "test")][0].duration_ms')" \
+  "a quoted comma inside a steps field does not shift the columns after it"
+assert_equals "5" \
+  "$(agent ship-wide '[.steps[] | select(.step == "test")][0].findings')" \
+  "nor the finding count that sits between them"
 
 # --- GitHub check classes ---------------------------------------------------
 
@@ -409,6 +439,11 @@ assert_equals "CLOSED" "$(agent ship-closed '.ci.pr_state')" "a closed PR report
 assert_equals "25" "$(agent ship-run '.pr.number')" \
   "the PR number comes from the same parser the check read used"
 
+assert_equals "no pull request recorded for this task" \
+  "$(agent ship-norun '.ci.collection.reason')" \
+  "a task with no PR has nothing to read checks for, which is not a suppressed read"
+assert_equals "0" "$(agent ship-norun '.ci.total')" "and no check count is invented for it"
+
 # --- a link this view cannot read checks for --------------------------------
 
 assert_equals "false" "$(agent ship-gitlab '.ci.collection.ok')" \
@@ -430,7 +465,13 @@ assert_equals "0" "$(agent ship-badrun '.steps | length')" \
 
 # --- --no-ci ----------------------------------------------------------------
 
+assert_present "$TMP_ROOT/gh-calls.log" \
+  "an ordinary run does reach GitHub, so the next assertion is not vacuous"
+rm -f "$TMP_ROOT/gh-calls.log"
+
 DOC=$(snapshot --json --no-ci) || fail "--no-ci refused to emit"
+assert_absent "$TMP_ROOT/gh-calls.log" \
+  "--no-ci makes no GitHub call at all, including through the fleet read it does not own"
 assert_equals "skipped" "$(agent ship-run '.ci.collection.reason')" \
   "--no-ci names the GitHub read as skipped rather than failed"
 assert_equals "0" "$(agent ship-run '.ci.total')" "--no-ci reads no checks"
@@ -446,6 +487,23 @@ assert_equals "ship-run" "$(printf '%s' "$DOC" | jq -r '.agents[0].id')" \
   "--task keeps the task it was given"
 
 # --- usage ------------------------------------------------------------------
+
+# --help is printed by slicing this script's own header, so the slice and the
+# header drift apart silently: the help simply stops mid-sentence. Assert the
+# whole contract arrives, including its last line.
+HELP=$(snapshot --help) || fail "--help refused to run"
+for documented in --json --no-ci --task \
+  FM_FLOW_SNAPSHOT_NM_TIMEOUT FM_FLOW_SNAPSHOT_GH_TIMEOUT \
+  FM_FLOW_SNAPSHOT_FLEET_JSON FM_FLOW_SNAPSHOT_NOW_EPOCH FM_FLOW_SNAPSHOT_NOW; do
+  assert_contains "$HELP" "$documented" "--help documents $documented"
+done
+assert_contains "$HELP" "fm-flow-snapshot.sh - read-only per-agent pipeline snapshot." \
+  "--help starts at the first header line"
+assert_equals "one wedged worker must not blank the whole view." \
+  "$(printf '%s\n' "$HELP" | sed -e '/^$/d' -e '$!d')" \
+  "--help reaches its last line rather than stopping mid-sentence"
+assert_not_contains "$HELP" "FM_FLOW_SNAPSHOT_STATE_TIMEOUT" \
+  "--help does not document a knob this command no longer has"
 
 snapshot --not-a-flag >/dev/null 2>&1
 expect_code 2 $? "the collector refuses an unknown flag"

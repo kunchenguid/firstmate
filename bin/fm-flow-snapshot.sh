@@ -19,9 +19,9 @@
 # fm_backend_target_exists; a record that no longer resolves moves to `omitted`,
 # named and counted rather than drawn. Kind decides only what an agent CARRIES:
 # a `pipeline:true` agent carries a no-mistakes run, its steps and its GitHub
-# checks, and a `pipeline:false` agent - a scout, a second mate - carries a
-# `state` object read through bin/fm-crew-state.sh instead. Pipeline agents are
-# emitted first, so the wire order is the draw order.
+# checks, and a `pipeline:false` agent - a scout, a second mate - carries the
+# fleet document's own `current_state` instead. Pipeline agents are emitted
+# first, so the wire order is the draw order.
 #
 # Run attribution goes through bin/fm-nm-run-lib.sh, the repository's single
 # owner of which no-mistakes run belongs to a branch. A worker cannot forge that
@@ -40,13 +40,19 @@
 #   - A run whose pipeline executed outside the task's own copy of the
 #     repository, such as a scratch clone raising a PR elsewhere, does not
 #     resolve here, and that row reports its run as unestablished.
+#   - Crew state and endpoint liveness are whatever bin/fm-fleet-snapshot.sh
+#     published, read at ITS observation time rather than at draw time. That
+#     keeps one owner for each, at the cost of a state as old as the document.
 #
 # Usage:
 #   fm-flow-snapshot.sh [--json] [--no-ci] [--task <id>]
 #
 #   --json        emit the snapshot (default; accepted explicitly for symmetry
 #                 with bin/fm-fleet-snapshot.sh)
-#   --no-ci       skip every GitHub read, so the whole snapshot is local
+#   --no-ci       skip every GitHub read this command can reach, so the whole
+#                 snapshot is local. It suppresses the check read here and sets
+#                 FM_CREW_STATE_NO_FORGE for the fleet read, whose crew-state
+#                 reader would otherwise make a bounded forge call of its own
 #   --task <id>   restrict the snapshot to one task, for a targeted refresh
 #
 # Environment knobs:
@@ -54,10 +60,6 @@
 #                                   status` read (default 10)
 #   FM_FLOW_SNAPSHOT_GH_TIMEOUT     seconds bounding one `gh pr view` (default
 #                                   20)
-#   FM_FLOW_SNAPSHOT_STATE_TIMEOUT  seconds bounding one bin/fm-crew-state.sh
-#                                   read (default 15, above that reader's own
-#                                   10s no-mistakes bound so its answer arrives
-#                                   rather than being cut)
 #   FM_FLOW_SNAPSHOT_FLEET_JSON     consume this file instead of running
 #                                   bin/fm-fleet-snapshot.sh
 #   FM_FLOW_SNAPSHOT_NOW_EPOCH      override the clock, in epoch seconds
@@ -76,13 +78,12 @@ STATE_DIR="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 NM_TIMEOUT=${FM_FLOW_SNAPSHOT_NM_TIMEOUT:-10}
 GH_TIMEOUT=${FM_FLOW_SNAPSHOT_GH_TIMEOUT:-20}
-STATE_TIMEOUT=${FM_FLOW_SNAPSHOT_STATE_TIMEOUT:-15}
 
 WANT_CI=1
 ONLY_TASK=
 
 usage() {
-  sed -n '2,69p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,71p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -139,38 +140,89 @@ path_mtime() {  # <path>
 # `round_active_for` arrives fourth in active_steps on some builds and not at
 # all on others - and a positional read silently relabels every column after it,
 # so the row would still parse and every value in it would be wrong.
-steps_json() {  # <axi-status-output>
-  printf '%s\n' "$1" | awk '
-    function read_header(line,   body, names, i, n) {
+# ONE prelude serves both block parsers below, because they read the same
+# emitter and drifted apart once already: the row splitter, the header column
+# map and the field accessor live here, so a hardening applied to one is applied
+# to both by construction.
+#
+# Rows are indexed by the COLUMN NAMES the header declares, never by position.
+# The tool has inserted a column mid-block between versions - `round_active_for`
+# arrives fourth in active_steps on some builds and not at all on others - and a
+# positional read silently relabels every column after it, so the row still
+# parses and every value in it is wrong.
+#
+# Splitting is quote-aware for the same reason. A field may be quoted and may
+# itself contain commas, and a plain comma split shifts every later column, so
+# a correct name map then indexes into a wrongly split row and reads numbers
+# that are confident and wrong.
+TOON_AWK_PRELUDE='
+    function read_header(line,   body, names, i, m) {
       # Cleared first, so a column an earlier block declared cannot survive into
       # a block whose header does not name it.
       for (i in col) delete col[i]
       body = line
       sub(/^[^{]*\{/, "", body)
       sub(/\}:[[:space:]]*$/, "", body)
-      n = split(body, names, ",")
-      for (i = 1; i <= n; i++) {
+      m = split(body, names, ",")
+      for (i = 1; i <= m; i++) {
         gsub(/^[ \t]+/, "", names[i]); gsub(/[ \t]+$/, "", names[i])
         col[names[i]] = i
       }
+      return m
+    }
+    # Splits on commas that sit outside quotes, and sets the global n.
+    function split_row(line,   i, c, cur, q) {
+      n = 0; cur = ""; q = 0
+      for (i in f) delete f[i]
+      for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (c == "\"") { q = !q; continue }
+        if (c == "," && !q) { f[++n] = cur; cur = ""; continue }
+        cur = cur c
+      }
+      f[++n] = cur
       return n
     }
+    # An optional column the running build does not declare reads as empty
+    # rather than as whichever value happens to sit at that position.
+    function field(name,   v) {
+      if (!col[name] || col[name] > n) return ""
+      v = f[col[name]]
+      gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v)
+      return v
+    }
+    # A row is readable only when the header named the columns it is read for.
+    function has_cols(names,   parts, i, m) {
+      m = split(names, parts, " ")
+      for (i = 1; i <= m; i++) if (!col[parts[i]] || col[parts[i]] > n) return 0
+      return 1
+    }
+    # A numeric cell the header did not declare, or that is not a number, is 0
+    # rather than an unquoted empty string that would break the JSON.
+    function num(name,   v) {
+      v = field(name)
+      return (v ~ /^-?[0-9]+$/) ? v : 0
+    }
+'
+
+steps_json() {  # <axi-status-output>
+  printf '%s\n' "$1" | awk "$TOON_AWK_PRELUDE"'
     /^  steps\[[0-9]+\]\{/ { read_header($0); in_steps = 1; next }
     in_steps {
       if ($0 !~ /^    [a-z]/) { in_steps = 0; next }
       line = $0
       sub(/^    /, "", line)
-      n = split(line, f, ",")
-      if (!col["step"] || !col["status"] || n < col["duration_ms"]) next
-      printf "%s{\"step\":\"%s\",\"status\":\"%s\",\"findings\":%d,\"duration_ms\":%d}",
-        (emitted++ ? "," : ""), f[col["step"]], f[col["status"]],
-        f[col["findings"]], f[col["duration_ms"]]
+      split_row(line)
+      if (!has_cols("step status")) next
+      printf "%s{\"step\":\"%s\",\"status\":\"%s\",\"findings\":%s,\"duration_ms\":%s}",
+        (emitted++ ? "," : ""), field("step"), field("status"),
+        num("findings"), num("duration_ms")
     }
   ' | awk 'BEGIN { printf "[" } { printf "%s", $0 } END { printf "]\n" }'
 }
 
 active_steps_json() {  # <axi-status-output>
-  printf '%s\n' "$1" | awk '
+  printf '%s\n' "$1" | awk "$TOON_AWK_PRELUDE"'
     # A RUNNING step publishes no duration; the only elapsed the tool states
     # for it is the humanised `active_for` ("23h11m", "2m59s"), parsed back to
     # milliseconds here so the renderer needs no second time format. The value
@@ -193,45 +245,13 @@ active_steps_json() {  # <axi-status-output>
       }
       return sprintf("%d", total)
     }
-    function read_header(line,   body, names, i, n) {
-      # Cleared first, so a column an earlier block declared cannot survive into
-      # a block whose header does not name it.
-      for (i in col) delete col[i]
-      body = line
-      sub(/^[^{]*\{/, "", body)
-      sub(/\}:[[:space:]]*$/, "", body)
-      n = split(body, names, ",")
-      for (i = 1; i <= n; i++) {
-        gsub(/^[ \t]+/, "", names[i]); gsub(/[ \t]+$/, "", names[i])
-        col[names[i]] = i
-      }
-      return n
-    }
-    # An optional column the running build does not declare reads as empty
-    # rather than as whichever value happens to sit at that position.
-    function field(name,   v) {
-      if (!col[name] || col[name] > n) return ""
-      v = f[col[name]]
-      gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v)
-      return v
-    }
     /^  active_steps\[[0-9]+\]\{/ { read_header($0); in_a = 1; next }
     in_a {
       if ($0 !~ /^    [a-z]/) { in_a = 0; next }
       line = $0
       sub(/^    /, "", line)
-      # Fields can be quoted and can themselves contain commas, so split on
-      # commas that sit outside quotes rather than on every comma.
-      n = 0; cur = ""; q = 0
-      delete f
-      for (i = 1; i <= length(line); i++) {
-        c = substr(line, i, 1)
-        if (c == "\"") { q = !q; continue }
-        if (c == "," && !q) { f[++n] = cur; cur = ""; continue }
-        cur = cur c
-      }
-      f[++n] = cur
-      if (!col["step"] || !col["status"] || !col["active_for"] || n < col["active_for"]) next
+      split_row(line)
+      if (!has_cols("step status active_for")) next
       printf "%s{\"step\":\"%s\",\"status\":\"%s\",\"active_for\":\"%s\",\"active_ms\":%s,\"last_activity\":\"%s\",\"agent_pid\":\"%s\",\"round\":\"%s\"}",
         (emitted++ ? "," : ""), field("step"), field("status"), field("active_for"),
         active_ms(field("active_for")), field("last_activity"), field("agent_pid"),
@@ -377,17 +397,11 @@ row_common() {  # <task-json>
   FM_ROW_WORKTREE=$(printf '%s' "$task" | jq -r '.paths.worktree.path // ""')
   FM_ROW_WINDOW=$(printf '%s' "$task" | jq -r '.endpoint.target // ""')
   FM_ROW_ENDPOINT_ALIVE=$(printf '%s' "$task" | jq -r 'if .endpoint.exists then "true" else "false" end')
-  # `endpoint.exists` only says a pane is there; this probe asks what is RUNNING
-  # in it. It reads the pane's foreground command, so it cannot see a WEDGED
-  # agent - a stuck agent is still that agent's process - and upgrades "a pane
-  # exists" to "an agent process exists" and nothing further.
+  # Passed straight through. bin/fm-fleet-snapshot.sh states as policy in its own
+  # header that it probes this for local second mates only and reports
+  # `not_checked` for everything else, and a probe here would reverse the fleet
+  # owner's decision from a new reader.
   FM_ROW_AGENT_ALIVE=$(printf '%s' "$task" | jq -r '.endpoint.agent_alive // "not_checked"')
-  if [ "$FM_ROW_AGENT_ALIVE" = "not_checked" ] \
-     && [ "$FM_ROW_ENDPOINT_ALIVE" = true ] && [ -n "$FM_ROW_WINDOW" ]; then
-    local backend
-    backend=$(printf '%s' "$task" | jq -r '.backend // "tmux"')
-    FM_ROW_AGENT_ALIVE=$(fm_backend_agent_alive "$backend" "$FM_ROW_WINDOW" 2>/dev/null || printf 'unknown')
-  fi
   FM_ROW_PR_URL=$(printf '%s' "$task" | jq -r '.pr.url // ""')
   # The path comes from the fleet document when it carries one, because
   # bin/fm-fleet-snapshot.sh is this view's owner of fleet state and already
@@ -404,6 +418,18 @@ row_common() {  # <task-json>
   [ "$FM_ROW_MODEL" != default ] || FM_ROW_MODEL=
   FM_ROW_EFFORT=$(fm_meta_get "$FM_ROW_META" effort)
   [ "$FM_ROW_EFFORT" != default ] || FM_ROW_EFFORT=
+  # The crew's current state as bin/fm-fleet-snapshot.sh published it, which is
+  # that document's own parse of bin/fm-crew-state.sh: generation-pinned, with
+  # the captured record and status overrides this reader does not have. Reading
+  # it again here would be a second parser of one line grammar and a second
+  # answer that can disagree with the fleet document inside a single frame.
+  FM_ROW_STATE=$(printf '%s' "$task" | jq -c '
+    if (.current_state | type) == "object" and ((.current_state.state // "") != "")
+    then {ok: true, value: .current_state.state, source: (.current_state.source // ""),
+          detail: (.current_state.detail // ""), reason: ""}
+    else {ok: false, value: "", source: "", detail: "",
+          reason: "the fleet snapshot published no current state for this task"}
+    end')
 }
 
 agent_json() {  # <task-json>
@@ -534,8 +560,15 @@ agent_json() {  # <task-json>
     actives='[]'
   fi
 
-  ci=$(ci_unread "skipped")
-  if [ "$WANT_CI" = 1 ] && [ -n "$pr_url" ]; then
+  # Three different answers, never one. "skipped" means the operator passed
+  # --no-ci; a task with no recorded pull request has nothing to read checks FOR,
+  # which is what the sibling compact path already distinguishes; and only a task
+  # with both gets a real read.
+  if [ -z "$pr_url" ]; then
+    ci=$(ci_unread "no pull request recorded for this task")
+  elif [ "$WANT_CI" = 0 ]; then
+    ci=$(ci_unread "skipped")
+  else
     ci=$(ci_json "$pr_url")
   fi
 
@@ -603,49 +636,11 @@ agent_json() {  # <task-json>
 # liveness earns, but no run, steps or checks: nine permanently empty boxes
 # would be an invented journey, and `pipeline:false` states that rather than
 # leaving the renderer to infer it from the kind string. Its one substantive
-# fact is the state, and bin/fm-crew-state.sh already owns reconciling that out
-# of a crew's run step, pane and status log. A read that fails or times out
-# reports ok:false; it never falls back to the status log's last line, which is
-# a wake EVENT and not a current state.
-crew_state_json() {  # <task-id>
-  local id=$1 line rest
-  # FM_HOME and FM_ROOT_OVERRIDE are passed because this script defaults them
-  # internally and an internal default is not in the environment. Anything the
-  # CALLER set - FM_STATE_OVERRIDE above all - is already exported and inherits
-  # on its own, so re-passing it would be a second copy that could disagree.
-  line=$(
-    fm_nm_bounded "$FM_ROOT" "$STATE_TIMEOUT" env \
-      FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
-      "$SCRIPT_DIR/fm-crew-state.sh" "$id" 2>/dev/null | head -1
-  ) || line=
-  case "$line" in
-    "state: "*) ;;
-    *)
-      jq -n --arg r "${line:-current-state read failed or timed out}" \
-        '{ok:false, value:"", source:"", detail:"", reason:$r}'
-      return ;;
-  esac
-  # `state: <v> · source: <s> · <detail>`, whose separator and field order are
-  # bin/fm-crew-state.sh's own contract. The detail is everything after the
-  # second separator and may contain further separators of its own, so it is
-  # taken as the remainder rather than as a third field.
-  rest=${line#state: }
-  local value=${rest%% · *}
-  rest=${rest#"$value"}
-  rest=${rest# · }
-  local source=${rest%% · *}
-  source=${source#source: }
-  local detail=${rest#*" · "}
-  [ "$detail" != "$rest" ] || detail=
-  jq -n --arg v "$value" --arg s "$source" --arg d "$detail" \
-    '{ok:true, value:$v, source:$s, detail:$d, reason:""}'
-}
-
+# fact is the state, which row_common takes from the fleet document.
 compact_json() {  # <task-json>
-  local task=$1 state
+  local task=$1
 
   row_common "$task"
-  state=$(crew_state_json "$FM_ROW_ID")
 
   jq -n \
     --arg id "$FM_ROW_ID" \
@@ -663,7 +658,7 @@ compact_json() {  # <task-json>
     --arg now_iso "$NOW_ISO" \
     --argjson now_epoch "$NOW_EPOCH" \
     --argjson endpoint_alive "$FM_ROW_ENDPOINT_ALIVE" \
-    --argjson state "$state" \
+    --argjson state "$FM_ROW_STATE" \
     --argjson ci "$CI_EMPTY" \
     '{
       id:$id, branch:$branch, project:$project, worktree:$worktree,
@@ -693,8 +688,15 @@ if [ -n "${FM_FLOW_SNAPSHOT_FLEET_JSON:-}" ]; then
     exit 1
   }
 else
+  # Under --no-ci the fleet read is told to skip its forge fallback too. Its
+  # crew-state reader otherwise makes a bounded `gh api graphql` call for a ship
+  # task whose run passed, which would make "the whole snapshot is local" false
+  # on the one flag that promises it.
+  FLEET_NO_FORGE=${FM_CREW_STATE_NO_FORGE:-0}
+  [ "$WANT_CI" = 1 ] || FLEET_NO_FORGE=1
   FLEET=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" \
+    FM_CREW_STATE_NO_FORGE="$FLEET_NO_FORGE" \
       "$SCRIPT_DIR/fm-fleet-snapshot.sh" --json 2>/dev/null
   ) || FLEET=
 fi
@@ -722,7 +724,7 @@ OMITTED=$(printf '%s' "$SCOPED" | jq -c '[
   | {id, kind:(.kind // ""), window:(.endpoint.target // null),
      reason:(if .endpoint.exists == false
              then "recorded window no longer exists"
-             else "no endpoint recorded" end)}
+             else "no endpoint liveness recorded for this task" end)}
 ]')
 
 AGENTS_FILE=$(mktemp "${TMPDIR:-/tmp}/fm-flow-agents.XXXXXX")
@@ -731,13 +733,37 @@ printf '[' > "$AGENTS_FILE"
 FIRST=1
 while IFS= read -r task; do
   [ -n "$task" ] || continue
+  # The record is built BEFORE its separator is written. Writing the comma first
+  # left a dangling one behind any agent whose record failed to build, which the
+  # closing slurp then refused, so one failed agent emptied the whole document -
+  # the opposite of this command's stated invariant. A record that cannot be
+  # built is replaced by a minimal one naming the agent and saying so, which is
+  # the same containment a failed collection already gets.
+  RECORD=
+  if [ "$(printf '%s' "$task" | jq -r '.kind // ""')" = ship ]; then
+    RECORD=$(agent_json "$task" | jq -c '.' 2>/dev/null) || RECORD=
+  else
+    RECORD=$(compact_json "$task" | jq -c '.' 2>/dev/null) || RECORD=
+  fi
+  if [ -z "$RECORD" ] || ! printf '%s' "$RECORD" | jq -e . >/dev/null 2>&1; then
+    RECORD=$(jq -nc \
+      --arg id "$(printf '%s' "$task" | jq -r '.id // ""')" \
+      --arg kind "$(printf '%s' "$task" | jq -r '.kind // ""')" \
+      --arg now_iso "$NOW_ISO" --argjson now_epoch "$NOW_EPOCH" \
+      --argjson ci "$CI_EMPTY" \
+      '{id:$id, branch:("fm/" + $id), project:"", worktree:"", window:"",
+        kind:$kind, mode:"", pipeline:false, state:null,
+        endpoint_alive:true, agent_alive:"not_checked",
+        worker:{harness:null, model:null, effort:null},
+        pr:{url:null, number:null},
+        collection:{ok:false, reason:"this agent'"'"'s record could not be built",
+                    source:"", at:$now_iso, epoch:$now_epoch},
+        run:{present:false, id:"", status:"", error:"", head:""},
+        steps:[], active_steps:[], ci:$ci}')
+  fi
   [ "$FIRST" = 1 ] || printf ',' >> "$AGENTS_FILE"
   FIRST=0
-  if [ "$(printf '%s' "$task" | jq -r '.kind // ""')" = ship ]; then
-    agent_json "$task" | jq -c '.' >> "$AGENTS_FILE"
-  else
-    compact_json "$task" | jq -c '.' >> "$AGENTS_FILE"
-  fi
+  printf '%s' "$RECORD" >> "$AGENTS_FILE"
 done <<EOF
 $TASKS
 EOF
