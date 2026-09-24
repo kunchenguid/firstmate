@@ -4010,10 +4010,6 @@ agy_spawn_fail() {  # <detail>
 # otherwise, so the caller shares the ordinary validate + slot-claim flow.
 spawn_herdr_win32_acquire_worktree() {
   local fg bash_win enter lease_json lease_path posix_wt marker esc tries
-  command -v cygpath >/dev/null 2>&1 || {
-    echo "error: pane $WT_TARGET cannot report a live foreground cwd and no cygpath exists to locate Git Bash; a Windows herdr pane cannot be driven to a worktree here; inspect window $T" >&2
-    exit 1
-  }
   fg=$(fm_backend_herdr_foreground_process_name "$WT_TARGET" || true)
   bash_win=$(cygpath -w "$(command -v bash)" 2>/dev/null || true)
   [ -n "$bash_win" ] || {
@@ -4105,7 +4101,8 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fi
   [ "$KIND" = secondmate ] || validate_spawn_worktree "relaunch" "$T"
 elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
-  if [ "$BACKEND" = herdr ] && ! fm_backend_herdr_foreground_cwd_supported "$WT_TARGET"; then
+  if [ "$BACKEND" = herdr ] && command -v cygpath >/dev/null 2>&1 &&
+    ! fm_backend_herdr_foreground_cwd_supported "$WT_TARGET"; then
     # Native-Windows herdr pane: no live foreground-cwd read exists, so the
     # interactive discovery poll below could never observe worktree entry (and
     # the pane's native shell could not run the POSIX launch flow anyway).

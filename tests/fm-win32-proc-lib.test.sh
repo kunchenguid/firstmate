@@ -59,9 +59,12 @@ lib_eval() {  # <fakebin> <expression>
   env PATH="$1:$PATH" bash -c '. "$1"; eval "$2"' _ "$LIB" "$2"
 }
 
+# Every fakebin carries the dead-`ps -o` fake: the Win32 side is reachable
+# only where POSIX ps cannot answer, exactly like Git Bash/MSYS.
 make_fakebin() {  # <name>
   local dir="$TMP_ROOT/$1"
   mkdir -p "$dir"
+  write_fake_ps "$dir"
   printf '%s\n' "$dir"
 }
 
@@ -173,6 +176,33 @@ test_own_pid_reports_winpid() {
   pass "win32-proc: own_pid reports the shell's WINPID from ps -l"
 }
 
+test_answering_ps_never_reaches_powershell() {
+  # A host whose ps answers -o (Linux, macOS, WSL with powershell.exe on PATH
+  # through interop) must never consult the Win32 table, whatever a caller's
+  # own walk or kill -0 concluded: a Linux pid is not a Win32 pid.
+  local fakebin marker got
+  fakebin=$(make_fakebin answering)
+  marker="$TMP_ROOT/answering-calls"
+  write_fake_powershell "$fakebin" "$marker"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  -o\ pid=\ -p\ *) printf '%s\n' "${*##* }" ;;
+  -l*)
+    printf '      PID    PPID    PGID     WINPID   TTY         UID    STIME COMMAND\n'
+    printf '   1234       1    1234    500  ?         1000 00:00:00 bash\n'
+    ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  got=$(FM_TEST_WIN32_TABLE=$'500\t4\tclaude.exe\tC:\\claude.exe\tclaude' \
+    lib_eval "$fakebin" 'fm_win32_pid_alive 500 && printf alive; fm_win32_ancestor_winpids 1234; fm_win32_proc_pairs')
+  [ -z "$got" ] || fail "a host with an answering ps consulted the Win32 side: [$got]"
+  [ ! -e "$marker" ] || fail "powershell ran on a host whose ps answers -o"
+  pass "win32-proc: an answering POSIX ps keeps every Win32 lookup closed"
+}
+
 test_no_powershell_pays_nothing() {
   # A PATH containing only an empty dir: command -v finds no powershell at
   # all, so the capability probe must fail closed without invoking anything.
@@ -193,4 +223,5 @@ test_pid_alive_membership
 test_table_loads_once_per_process
 test_failed_probe_latches_unavailable
 test_own_pid_reports_winpid
+test_answering_ps_never_reaches_powershell
 test_no_powershell_pays_nothing

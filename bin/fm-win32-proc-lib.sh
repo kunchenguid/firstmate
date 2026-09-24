@@ -36,17 +36,25 @@
 _FM_WIN32_TABLE=
 _FM_WIN32_TABLE_LOADED=0
 _FM_WIN32_UNAVAILABLE=0
-# Row index built once at load: _FM_WIN32_ROW[pid]="<ppid>\t<comm>\t<args>",
-# the exact bytes fm_win32_proc_fields would print for that pid. Hot loops
-# (ancestry climbs on hosts where every fork is expensive) read it through
-# fm_win32_proc_get with zero process spawns per hop.
-declare -A _FM_WIN32_ROW=()
+# The row index _FM_WIN32_ROW[pid]="<ppid>\t<comm>\t<args>" (the exact bytes
+# fm_win32_proc_fields would print for that pid) is declared at load, not
+# here: stock macOS bash 3.2 has no associative arrays, and every POSIX host
+# sources this file. Hot loops (ancestry climbs on hosts where every fork is
+# expensive) read it through fm_win32_proc_get with zero spawns per hop.
 
-# True when a PowerShell binary capable of answering Win32_Process is on PATH.
-# Sticky: a failed probe or load is remembered so a missing or broken
-# PowerShell is asked at most once per process.
+# True when POSIX `ps -o` cannot answer for this very shell - the only
+# evidence that lets any caller consult the Win32 side. A host whose ps
+# answers never reaches PowerShell, however its own walk or kill -0 ended.
+fm_win32_posix_ps_dead() {
+  ! ps -o pid= -p "$$" >/dev/null 2>&1
+}
+
+# True when POSIX ps is dead and a PowerShell binary capable of answering
+# Win32_Process is on PATH. Sticky: a failed probe or load is remembered so a
+# missing or broken PowerShell is asked at most once per process.
 fm_win32_proc_available() {
   [ "$_FM_WIN32_UNAVAILABLE" -eq 0 ] || return 1
+  fm_win32_posix_ps_dead || { _FM_WIN32_UNAVAILABLE=1; return 1; }
   command -v powershell.exe >/dev/null 2>&1 && return 0
   command -v powershell >/dev/null 2>&1 && return 0
   _FM_WIN32_UNAVAILABLE=1
@@ -58,6 +66,7 @@ fm_win32_proc_available() {
 fm_win32_proc_load() {
   [ "$_FM_WIN32_TABLE_LOADED" -eq 1 ] && return 0
   fm_win32_proc_available || return 1
+  declare -gA _FM_WIN32_ROW=() 2>/dev/null || { _FM_WIN32_UNAVAILABLE=1; return 1; }
   local bin=powershell.exe
   command -v powershell.exe >/dev/null 2>&1 || bin=powershell
   _FM_WIN32_TABLE=$("$bin" -NoProfile -NonInteractive -Command \
@@ -68,7 +77,6 @@ fm_win32_proc_load() {
     return 1
   fi
   _FM_WIN32_TABLE_LOADED=1
-  _FM_WIN32_ROW=()
   local _r_pid _r_ppid _r_name _r_path _r_cmd _r_comm
   while IFS=$'\t' read -r _r_pid _r_ppid _r_name _r_path _r_cmd; do
     _r_comm=${_r_path:-$_r_name}
@@ -176,6 +184,7 @@ fm_win32_proc_own_pid() {
 # descent walks hand over when their own pairs listing came from the table.
 fm_win32_ancestor_winpids() {  # [<pid>]
   local cygpid=${1:-$$} seed hops last line
+  fm_win32_posix_ps_dead || return 0
   # Both climbs run without a process launch per hop - the shape a per-hop
   # `ps -l -p`/fields substitution chain cannot afford on hosts where every
   # spawn is slow. The Cygwin table loads once and awk resolves the whole

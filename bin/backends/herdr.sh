@@ -799,30 +799,34 @@ fm_backend_herdr_presentation_lock_namespace_uid() {
   fi
 }
 
+# True ONLY when chmod is proven unable to express a requested mode in <dir>:
+# Git Bash/MSYS mounts report noacl, so every directory stats a synthesized
+# mode whatever chmod runs. Probed on a scratch sibling, never the namespace
+# itself, the same positive probe fm_pr_mode_bits_unfaithful applies; false on
+# a POSIX-faithful filesystem (chmod 000 reads back 0) and on any probe
+# failure, so undetermined cases stay refused.
+fm_backend_herdr_mode_bits_unfaithful() {  # <dir>
+  local probe after
+  probe=$(mktemp -d "$1/.fm-herdr-modeprobe.XXXXXX" 2>/dev/null) || return 1
+  chmod 000 "$probe" 2>/dev/null || { rmdir "$probe" 2>/dev/null; return 1; }
+  after=$(fm_backend_herdr_presentation_lock_namespace_mode "$probe") || after=
+  rmdir "$probe" 2>/dev/null
+  case "$after" in ''|*[!0-7]*) return 1 ;; esac
+  [ "$((8#$after))" -ne 0 ]
+}
+
 fm_backend_herdr_presentation_lock_namespace_valid() {
-  local dir=$1 expected_uid owner mode repaired
+  local dir=$1 expected_uid owner mode
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
   expected_uid=$(id -u 2>/dev/null) || return 1
   owner=$(fm_backend_herdr_presentation_lock_namespace_uid "$dir") || return 1
   mode=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir") || return 1
-  if [ "$mode" != 700 ]; then
-    # Repair rather than refuse first: a foreign-mode but ownable namespace
-    # can be tightened in place, which keeps the lock resolvable across a
-    # umask or a copied namespace.
-    chmod 700 "$dir" 2>/dev/null || return 1
-    repaired=$(fm_backend_herdr_presentation_lock_namespace_mode "$dir") || return 1
-    if [ "$repaired" = "$mode" ]; then
-      # chmod was a no-op: this filesystem cannot express mode bits at all
-      # (Git Bash/MSYS mounts report noacl - every directory stats 755
-      # whatever chmod runs). The 700 invariant is unanswerable there, so
-      # the verifiable boundary is ownership alone; the platform ACL on the
-      # user's temp/profile tree is what actually isolates the namespace.
-      [ "$owner" = "$expected_uid" ]
-      return
-    fi
-    mode=$repaired
-  fi
-  [ "$owner" = "$expected_uid" ] && [ "$mode" = 700 ]
+  [ "$owner" = "$expected_uid" ] || return 1
+  [ "$mode" = 700 ] && return 0
+  # The 700 invariant is unanswerable where chmod cannot express mode bits;
+  # there ownership plus the platform ACL on the user's temp tree is the
+  # verifiable boundary. Everywhere else a non-700 namespace stays refused.
+  fm_backend_herdr_mode_bits_unfaithful "$(dirname -- "$dir")"
 }
 
 # Resolve the one verified running named-session socket path as an absolute
