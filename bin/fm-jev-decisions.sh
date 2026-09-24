@@ -76,7 +76,7 @@ task_ok() {
 command -v jq >/dev/null 2>&1 || { echo "error: jq required" >&2; exit 1; }
 
 locked_append() { # <json line>
-  [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
+  [ -d "$STATE" ] && [ ! -L "$STATE" ] && [ -w "$STATE" ] || return 1
   # shellcheck source=bin/fm-wake-lib.sh
   . "$SCRIPT_DIR/fm-wake-lib.sh" || return 1
   # Bounded: a producer such as the resolver must never hang on this log.
