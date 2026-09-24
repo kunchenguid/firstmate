@@ -413,9 +413,10 @@ worker_shutdown() {
   trap '' HUP INT TERM
   # The ownership directory is gone or a replacement owns it. TERM stays
   # authoritative: stop only this process's command tree, then exit without
-  # touching the directory, whose quarantine now guards the replacement. Drop
-  # the in-memory hold first so exit cleanup cannot release a replacement's
-  # lock. Signals stay ignored until exit, so a repeat is a no-op.
+  # touching the directory, whose files, quarantine included, now belong to
+  # the replacement or to nobody. Drop the in-memory hold first so exit
+  # cleanup cannot release a replacement's lock. Signals stay ignored until
+  # exit, so a repeat is a no-op.
   if ! worker_shutdown_owns_lock; then
     WORKER_RELEASE_OWNERSHIP=0
     WORKER_LOCK_HELD=0
