@@ -1876,7 +1876,7 @@ command_park() {  # <task-id> --reason <reason>
   require_tasks_axi
   task_show_or_fail "$id" "task $id is absent from this home's backlog"
   show=$TASK_SHOW_OUTPUT
-  [ "$(show_field "$show" state)" != done ] || fail "task $id is already closed"
+  [ "$(show_field "$show" state)" != "done" ] || fail "task $id is already closed"
   if [ "$(show_field_value "$show" held)" = yes ]; then
     [ "$(show_field_value "$show" hold_kind)" = parked ] || fail "task $id has another hold"
   else
