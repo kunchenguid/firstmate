@@ -255,7 +255,9 @@ JSON
 cat > "$ROLLUP_DIR/26.json" <<'JSON'
 {"headRefOid":"bb73f233","state":"OPEN","statusCheckRollup":[
 {"__typename":"CheckRun","name":"Lint","status":"COMPLETED","conclusion":"SUCCESS","workflowName":"CI","startedAt":"2026-09-24T06:10:00Z"},
-{"__typename":"StatusContext","context":"legacy/commit-status","state":"SUCCESS","createdAt":"2026-09-24T06:10:00Z"}
+{"__typename":"StatusContext","context":"legacy/commit-status","state":"SUCCESS","createdAt":"2026-09-24T06:10:00Z"},
+{"__typename":"CheckRun","name":"codecov/project","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-09-24T06:12:00Z"},
+{"__typename":"StatusContext","context":"codecov/project","state":"SUCCESS","createdAt":"2026-09-24T06:10:00Z"}
 ]}
 JSON
 
@@ -578,10 +580,18 @@ assert_equals "SUCCESS" \
 assert_equals "bb73f233" "$(agent ship-run '.ci.head')" \
   "the commit these checks describe is carried beside them"
 
-assert_equals "2" "$(agent ship-direct '.ci.total')" \
+assert_equals "4" "$(agent ship-direct '.ci.total')" \
   "a commit status is counted alongside check runs rather than dropped"
-assert_equals "2" "$(agent ship-direct '.ci.passed')" \
+assert_equals "3" "$(agent ship-direct '.ci.passed')" \
   "a successful commit status counts as passing"
+# A check run created by an app rather than by Actions carries no workflow, and
+# neither does a commit status, so keying on workflow and name alone would have
+# let one supersede the other and hidden a real failure.
+assert_equals "1" "$(agent ship-direct '.ci.failed')" \
+  "a failing app check run is not superseded by a commit status of the same name"
+assert_equals "codecov/project" \
+  "$(agent ship-direct '[.ci.checks[] | select(.verdict == "failed")][0].name')" \
+  "and it is the one reported failing"
 
 # --- the pull request's own lifecycle ---------------------------------------
 

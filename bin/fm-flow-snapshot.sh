@@ -323,9 +323,13 @@ ci_json() {  # <pr-url>
   # The counts have ONE job: agree with what `gh pr checks <n>` prints for the
   # same PR. Three rules get there.
   #
-  # 1. Supersession. Checks are keyed on workflow PLUS name, because names alone
-  #    are not unique, and the rollup keeps EVERY attempt of a key. The latest
-  #    attempt wins; the rest are counted nowhere.
+  # 1. Supersession. Checks are keyed on kind, workflow and name together. Name
+  #    alone is not unique, and workflow does not separate them either: a
+  #    commit status has no workflow, and neither does a check run created by
+  #    an app rather than by Actions, so a status whose context equals such a
+  #    check run's name would supersede it and one of the two would vanish.
+  #    They are different checks and gh counts both. The rollup keeps EVERY
+  #    attempt of a key; the latest wins and the rest are counted nowhere.
   # 2. Exclusive buckets. Reading `conclusion` without first checking `status`
   #    counts a re-running check as both passed and pending, on a conclusion
   #    left over from its previous attempt.
@@ -342,12 +346,14 @@ ci_json() {  # <pr-url>
   norm=$(printf '%s' "$raw" | jq -c '
     def normalize:
       if (.__typename // "") == "StatusContext" then
-        { workflow: "", name: (.context // ""), started: (.createdAt // ""),
+        { kind: "status",
+          workflow: "", name: (.context // ""), started: (.createdAt // ""),
           status: (if (.state // "") == "PENDING" or (.state // "") == "EXPECTED"
                    then "IN_PROGRESS" else "COMPLETED" end),
           conclusion: (if (.state // "") == "SUCCESS" then "SUCCESS" else (.state // "") end) }
       else
-        { workflow: (.workflowName // ""), name: (.name // ""),
+        { kind: "check",
+          workflow: (.workflowName // ""), name: (.name // ""),
           started: (.startedAt // ""),
           status: (.status // ""), conclusion: (.conclusion // "") }
       end;
@@ -355,10 +361,10 @@ ci_json() {  # <pr-url>
     | map(normalize)
     | to_entries
     | map(.value + {seq: .key})
-    | group_by([.workflow, .name])
+    | group_by([.kind, .workflow, .name])
     | map(max_by([.started, .seq]))
     | sort_by(.seq)
-    | map(del(.seq))
+    | map(del(.seq, .kind))
     | map(. + {verdict:
         (if .status != "COMPLETED" then "pending"
          elif .conclusion == "SKIPPED" or .conclusion == "NEUTRAL" then "skipped"
@@ -821,9 +827,10 @@ while IFS= read -r task; do
     RECORD=$(jq -nc \
       --arg id "$(printf '%s' "$task" | jq -r '.id // ""')" \
       --arg kind "$(printf '%s' "$task" | jq -r '.kind // ""')" \
+      --arg branch "$(printf '%s' "$task" | jq -r '.branch // ""')" \
       --arg now_iso "$NOW_ISO" --argjson now_epoch "$NOW_EPOCH" \
       --argjson ci "$CI_EMPTY" \
-      '{id:$id, branch:("fm/" + $id), project:"", worktree:"", window:"",
+      '{id:$id, branch:$branch, project:"", worktree:"", window:"",
         kind:$kind, mode:"", pipeline:false, state:null,
         endpoint_alive:"unknown", agent_alive:"not_checked",
         worker:{harness:null, model:null, effort:null},
