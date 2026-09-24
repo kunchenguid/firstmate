@@ -21,6 +21,7 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 BRIEF="$ROOT/bin/fm-brief.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
+MERGE_LOCAL="$ROOT/bin/fm-merge-local.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
 # A home with one registered project, one project directory, and a fake tmux that
@@ -348,7 +349,7 @@ STUB
       "$mode: promoted worker was not told to verify its repository root"
     assert_grep "If either does not resolve to the worktree you were launched in, stop and escalate to firstmate" "$payload" \
       "$mode: promoted worker was not told to stop for any wrong worktree"
-    assert_grep "git checkout -b fm/$id" "$payload" \
+    assert_grep "git checkout -b fm/$id --" "$payload" \
       "$mode: promoted worker was not told to leave the scratch base for its ship branch"
     assert_grep "## Captain's intent" "$payload" \
       "$mode: promoted worker did not receive the Captain's intent subsection"
@@ -396,6 +397,96 @@ STUB
   assert_no_grep "no-mistakes axi respond" "$TMP_ROOT/promote-dod/payload-promote-dod-direct-pr" \
     "promoted direct-PR worker received the pipeline gate contract"
   pass "fm-promote: a promoted worker receives the same mode-specific delivery contract a briefed one does"
+}
+
+test_promotion_persists_the_selected_ship_branch() {
+  local home id meta instructions out
+  home="$TMP_ROOT/promote-branch/home"
+  id=promote-branch-e1
+  meta="$home/state/$id.meta"
+  mkdir -p "$home/state"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+    || fail "branch-prefix promotion scout brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Promote the branch-prefix fixture." "Use the configured branch exactly."
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode local-only --yolo off --branch-prefix fix/) \
+    || fail "branch-prefix promotion should succeed"
+  instructions="$home/data/$id/ship-instructions.md"
+  assert_grep "branch=fix/$id" "$meta" \
+    "promotion did not persist the selected full ship branch"
+  assert_grep "git checkout -b fix/$id --" "$instructions" \
+    "promotion did not deliver the selected branch-creation command"
+  assert_grep "Ship branch: fix/$id" "$instructions" \
+    "promotion did not deliver the selected immutable branch contract"
+  assert_contains "$out" "promoted $id to ship" "branch-prefix promotion did not complete normally"
+  pass "fm-promote: a selected branch prefix reaches both worker instructions and durable task state"
+}
+
+# The promotion instructions embed the branch in the `git checkout -b` command
+# the worker executes, so a ref-format-valid metacharacter prefix must stay
+# literal there, exactly as it does in a generated ship brief.
+test_promotion_branch_command_is_shell_safe() {
+  local home id prefix marker meta instructions command repo branch
+  home="$TMP_ROOT/promote-branch-shell-safe/home"
+  marker="$TMP_ROOT/promote-branch-shell-safe-marker"
+  id=promote-branch-safe-e3
+  prefix="\$(touch\${IFS}$marker)/"
+  meta="$home/state/$id.meta"
+  mkdir -p "$home/state"
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\n' "$id" > "$meta"
+  FM_HOME="$home" "$BRIEF" "$id" fixture-project --scout >/dev/null 2>&1 \
+    || fail "shell-safe promotion scout brief should scaffold"
+  fill_brief_subsections "$home/data/$id/brief.md" \
+    "Promote the shell-safe fixture." "Use the configured branch exactly."
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode local-only --yolo off --branch-prefix "$prefix" >/dev/null 2>&1 \
+    || fail "a ref-format-valid metacharacter prefix should promote safely"
+  instructions="$home/data/$id/ship-instructions.md"
+  # shellcheck disable=SC2016  # Single quotes are required: the sed expression holds literal backticks.
+  command=$(sed -n 's/.*create your branch: `\(.*\)`\.$/\1/p' "$instructions")
+  [ -n "$command" ] || fail "promotion instructions exposed no branch-creation command"
+  repo="$TMP_ROOT/promote-branch-shell-safe-repo"
+  git init -q "$repo" || fail "could not initialize shell-safety fixture repository"
+  ( cd "$repo" && eval "$command" ) || fail "promotion branch-creation command did not run"
+  assert_absent "$marker" "promotion branch command executed the prefix's command substitution"
+  branch=$(git -C "$repo" branch --show-current)
+  [ "$branch" = "$prefix$id" ] \
+    || fail "promotion branch command did not create the literal configured branch (got '$branch')"
+  pass "fm-promote: ref-format-valid shell metacharacters stay literal in promotion branch commands"
+}
+
+test_local_merge_uses_the_recorded_ship_branch() {
+  local home proj id main fix out
+  home="$TMP_ROOT/local-merge-branch/home"
+  proj="$TMP_ROOT/local-merge-branch/proj"
+  id=local-merge-branch-e2
+  mkdir -p "$home/state" "$home/data" "$proj"
+  git -C "$proj" init -q || fail "could not initialize local-merge branch fixture"
+  git -C "$proj" config user.email test@example.com
+  git -C "$proj" config user.name test
+  printf 'base\n' > "$proj/base"
+  git -C "$proj" add base || fail "could not stage local-merge branch fixture base"
+  git -C "$proj" commit -qm base || fail "could not commit local-merge branch fixture base"
+  main=$(git -C "$proj" branch --show-current)
+  git -C "$proj" checkout -qb "fix/$id" || fail "could not create recorded branch fixture"
+  printf 'change\n' > "$proj/change"
+  git -C "$proj" add change || fail "could not stage recorded branch fixture"
+  git -C "$proj" commit -qm change || fail "could not commit recorded branch fixture"
+  fix=$(git -C "$proj" rev-parse HEAD)
+  git -C "$proj" checkout -q "$main" || fail "could not restore fixture default branch"
+  cat > "$home/data/projects.md" <<EOF
+- $(basename "$proj") [local-only branch=contrib/] - changed after task intake (added 2026-01-01)
+EOF
+  printf 'project=%s\nmode=local-only\nbranch=fix/%s\n' "$proj" "$id" > "$home/state/$id.meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id") \
+    || fail "local merge did not use the branch recorded at task intake: $out"
+  [ "$(git -C "$proj" rev-parse HEAD)" = "$fix" ] \
+    || fail "local merge did not fast-forward the default branch to the recorded ship branch"
+  assert_contains "$out" "merged fix/$id into local $main" \
+    "local merge did not report the immutable recorded branch"
+  pass "fm-merge-local: a registry change cannot redirect an in-flight local-only task"
 }
 
 # The registry parser survives for the mechanical consumers only. It accepts the
@@ -1208,6 +1299,104 @@ EOF
   pass "fm-spawn: a registered forge must reach the worker's brief"
 }
 
+# The ship branch is immutable once the task record exists (state/<id>.meta
+# branch=), so the spawn is the last checkpoint where a drift between the branch
+# selected at intake (the brief's "Ship branch:" line) and the branch this spawn
+# would create can be caught: the worktree, the record, review-diff, and the
+# local merge all inherit the recorded name. A mismatch is refused before any
+# record exists, and a brief from before briefs recorded a ship branch is only
+# acceptable on the legacy default, which warns.
+test_spawn_requires_the_brief_to_carry_the_selected_branch() {
+  local rec home proj fakebin out status
+  rec=$(make_home branch-agree "- proj [no-mistakes] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  FM_HOME="$home" "$BRIEF" branch-agree-a1 proj --mode no-mistakes --branch-prefix fix/ >/dev/null \
+    || fail "a fix/-prefixed brief should scaffold"
+  fill_brief_subsections "$home/data/branch-agree-a1/brief.md" "Run the review loop." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a1 "$proj" claude --mode no-mistakes --yolo off --branch-prefix contrib/)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn selecting a different prefix than its brief records was accepted"
+  assert_contains "$out" "branch mismatch for branch-agree-a1" "the refusal did not name the drift it caught"
+  assert_contains "$out" "the brief says branch=fix/branch-agree-a1 but this spawn selected branch=contrib/branch-agree-a1" \
+    "the refusal did not name both sides of the drift"
+  assert_absent "$home/state/branch-agree-a1.meta" "the refused spawn still recorded a task"
+
+  write_brief "$home" branch-agree-a2 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a2 "$proj" claude --mode no-mistakes --yolo off --branch-prefix contrib/)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a non-legacy spawn on a brief that records no ship branch was accepted"
+  assert_contains "$out" "records no ship branch; regenerate it with --branch-prefix" \
+    "the legacy-brief refusal did not name the repair"
+  assert_absent "$home/state/branch-agree-a2.meta" "the refused legacy-brief spawn still recorded a task"
+
+  write_brief "$home" branch-agree-a3 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a3 "$proj" claude --mode no-mistakes --yolo off)
+  assert_contains "$out" "records no ship branch; defaulting to legacy branch fm/branch-agree-a3" \
+    "the legacy default did not warn about the brief's missing ship branch"
+  assert_not_contains "$out" "branch mismatch" "the legacy default was refused as drift"
+
+  FM_HOME="$home" "$BRIEF" branch-agree-a4 proj --mode no-mistakes --branch-prefix fix/ >/dev/null \
+    || fail "a second fix/-prefixed brief should scaffold"
+  fill_brief_subsections "$home/data/branch-agree-a4/brief.md" "Run the review loop." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a4 "$proj" claude --mode no-mistakes --yolo off --branch-prefix fix/)
+  assert_not_contains "$out" "branch mismatch" "an agreeing brief and selection were reported as drift"
+  assert_not_contains "$out" "records no ship branch" "an agreeing spawn reported the brief as legacy"
+
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a5 "$proj" claude --relaunch --branch-prefix fix/)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a relaunch carrying --branch-prefix was accepted"
+  assert_contains "$out" "--relaunch reuses the task's recorded ship branch; --branch-prefix cannot override it" \
+    "the relaunch refusal did not name the immutability it protects"
+
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a6 "$proj" claude --scout --branch-prefix fix/)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a scout spawn carrying --branch-prefix was accepted"
+  assert_contains "$out" "--branch-prefix applies only to ship spawns" \
+    "the scout refusal did not name the flag it refused"
+
+  out=$(run_spawn "$home" "$fakebin" branch-agree-a7 "$proj" claude --mode no-mistakes --yolo off --branch-prefix "has space")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a spawn whose prefix and task id compose an invalid branch was accepted"
+  assert_contains "$out" "--branch-prefix and task id must form a valid git branch (got 'has spacebranch-agree-a7')" \
+    "the ref-format refusal did not name the branch it refused"
+  assert_absent "$home/state/branch-agree-a7.meta" "the refused spawn still recorded a task"
+
+  pass "fm-spawn: the brief must carry the spawn's selected ship branch, and the selection is validated before anything is created"
+}
+
+# The registered ship-branch prefix exists so a third-party project's branches and
+# PRs do not read as firstmate-authored, but a spawn that deviates from it breaks
+# no contract: the brief-vs-spawn agreement above already guarantees the worker's
+# instructions match the branch this spawn selected. So the deviation is announced
+# and the spawn proceeds, while matching the registry (or its fm/ default) stays
+# quiet.
+test_spawn_notices_a_ship_branch_against_the_registry_prefix() {
+  local rec home proj fakebin out
+  rec=$(make_home prefix-deviation "- proj [no-mistakes branch=fix/] - fixture (added 2026-01-01)")
+  IFS='|' read -r home proj fakebin <<EOF
+$rec
+EOF
+
+  write_brief "$home" prefix-dev-a1 no-mistakes
+  out=$(run_spawn "$home" "$fakebin" prefix-dev-a1 "$proj" claude --mode no-mistakes --yolo off)
+  assert_contains "$out" "ships branch=fm/prefix-dev-a1 while proj registers the ship-branch prefix 'fix/'" \
+    "no deviation notice for shipping the legacy prefix past a registered override"
+  assert_contains "$out" "will read as firstmate-authored" \
+    "the deviation notice did not name the cost of the drift"
+
+  FM_HOME="$home" "$BRIEF" prefix-dev-a2 proj --mode no-mistakes --branch-prefix fix/ >/dev/null \
+    || fail "a fix/-prefixed brief should scaffold"
+  fill_brief_subsections "$home/data/prefix-dev-a2/brief.md" "Run the review loop." "Ship it."
+  out=$(run_spawn "$home" "$fakebin" prefix-dev-a2 "$proj" claude --mode no-mistakes --yolo off --branch-prefix fix/)
+  assert_not_contains "$out" "registers the ship-branch prefix" \
+    "a spawn matching the registered prefix was announced as a deviation"
+
+  pass "fm-spawn: a ship branch that deviates from the registered prefix is announced, never blocked"
+}
+
 # The registry is hand-edited markdown, so a one-character typo in the forge token
 # is the likeliest way it goes wrong. Such an entry must stop the spawn with the
 # parser's own reason in front of the operator: resolving it to "no registered
@@ -1337,6 +1526,60 @@ test_forge_gerrit_direct_pr_publishes_one_change() {
 
 test_authorized_intent_keeps_words_without_composed_address
 test_spawn_refreshes_legacy_worker_roles
+
+# --branch-prefix never touches the default "<mode> <yolo>" output (order- and
+# presence-independent), defaults an unregistered/plain project to the legacy
+# "fm/" prefix, and resolves an empty override to "" for a bare <task-id> branch.
+test_project_mode_resolves_branch_prefix() {
+  local home out err
+  home="$TMP_ROOT/project-mode-branch/home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- plainproj - fixture with no annotation (added 2026-01-01)
+- modeonlyproj [direct-PR] - fixture with a mode only (added 2026-01-01)
+- overrideproj [direct-PR branch=fix/] - fixture with mode then branch override (added 2026-01-01)
+- reorderedproj [branch=contrib/ direct-PR +yolo] - fixture with branch before mode (added 2026-01-01)
+- bareproj [no-mistakes branch=] - fixture with an empty override (added 2026-01-01)
+- typomodeproj [no-mistake branch=fix/] - fixture with a typo'd mode (added 2026-01-01)
+
+EOF
+  out=$(FM_HOME="$home" "$PROJECT_MODE" plainproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "an unrelated branch=<prefix> query must not change the default mode/yolo output (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix plainproj 2>/dev/null)
+  [ "$out" = "fm/" ] || fail "a project with no branch= annotation must resolve to the legacy fm/ prefix (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix modeonlyproj 2>/dev/null)
+  [ "$out" = "fm/" ] || fail "a project registering only a mode must still default to fm/ (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" overrideproj 2>/dev/null)
+  [ "$out" = "direct-PR off" ] || fail "a branch= token must not leak into the mode/yolo output (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix overrideproj 2>/dev/null)
+  [ "$out" = "fix/" ] || fail "a registered branch= override after the mode was not resolved (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" reorderedproj 2>/dev/null)
+  [ "$out" = "direct-PR on" ] || fail "a branch= token before the mode must not be mistaken for the mode (got '$out')"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix reorderedproj 2>/dev/null)
+  [ "$out" = "contrib/" ] || fail "a registered branch= override before the mode was not resolved (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix bareproj 2>/dev/null)
+  [ "$out" = "" ] || fail "an empty branch= override must resolve to an empty prefix, not fm/ (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" typomodeproj 2>/dev/null)
+  [ "$out" = "no-mistakes off" ] || fail "a typo'd mode's registered branch leaked into the mode/yolo output (got '$out')"
+  err=$(FM_HOME="$home" "$PROJECT_MODE" typomodeproj 2>&1 >/dev/null)
+  assert_contains "$err" "unknown mode" "a typo'd mode with a branch override stopped warning"
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix typomodeproj 2>/dev/null)
+  [ "$out" = "fm/" ] || fail "an unknown mode must fall back to the legacy fm/ prefix, not trust the malformed entry's branch (got '$out')"
+
+  out=$(FM_HOME="$home" "$PROJECT_MODE" --branch-prefix never-registered 2>/dev/null)
+  [ "$out" = "fm/" ] || fail "an unregistered project must default its branch prefix to fm/ (got '$out')"
+
+  out=$(FM_HOME="$TMP_ROOT/project-mode-branch/no-registry-home" "$PROJECT_MODE" --branch-prefix anyproj 2>/dev/null)
+  [ "$out" = "fm/" ] || fail "an absent registry must default the branch prefix to fm/ (got '$out')"
+  pass "fm-project-mode: --branch-prefix resolves order-independently and defaults to the legacy fm/ prefix"
+}
+
 test_ship_spawn_requires_a_valid_delivery_contract
 test_scout_and_secondmate_refuse_delivery_flags
 test_spawn_refuses_a_brief_mode_mismatch
@@ -1345,6 +1588,9 @@ test_scout_records_no_delivery_posture
 test_promote_requires_and_records_the_delivery_contract
 test_promote_refuses_a_symlinked_task_record
 test_promotion_delivers_the_real_definition_of_done
+test_promotion_persists_the_selected_ship_branch
+test_promotion_branch_command_is_shell_safe
+test_local_merge_uses_the_recorded_ship_branch
 test_project_mode_maps_the_conditional_policy
 test_project_mode_binds_the_forge_orthogonally
 test_project_mode_refuses_only_a_malformed_forge_binding
@@ -1352,7 +1598,10 @@ test_forge_gerrit_refuses_yolo
 test_forge_gerrit_changes_what_no_mistakes_means
 test_forge_gerrit_direct_pr_publishes_one_change
 test_spawn_requires_the_brief_to_carry_the_registered_forge
+test_spawn_requires_the_brief_to_carry_the_selected_branch
+test_spawn_notices_a_ship_branch_against_the_registry_prefix
 test_spawn_refuses_a_registry_forge_it_cannot_read
 test_promotion_carries_the_forge_binding
 test_spawn_and_promote_require_filled_task_subsections
+test_project_mode_resolves_branch_prefix
 echo "# all fm-task-delivery tests passed"

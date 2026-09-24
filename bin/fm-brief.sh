@@ -14,7 +14,7 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
@@ -47,6 +47,18 @@
 #                the configured merge authority approves, firstmate merges to local main
 # no-mistakes-prod-only is a registry policy, not a task mode; resolve it to one of
 # the three concrete modes at intake before calling this script.
+# --branch-prefix <prefix> optionally overrides the ship branch's "fm/" prefix, so
+# the resolved branch is "<prefix><task-id>" instead of the default "fm/<task-id>".
+# Pass an empty prefix ("--branch-prefix ''") for a bare "<task-id>" branch, or a
+# conventional prefix such as "fix/" - useful for a third-party project that does
+# not use this tooling and should not see an "fm/"-branded branch or PR. Defaults
+# to "fm/" when omitted, so every existing installation's branch names are
+# unchanged. Like --mode, this script never reads data/projects.md for it: the
+# registry's optional "branch=<prefix>" annotation (bin/fm-project-mode.sh's
+# header owns that format and its --branch-prefix query) is the captain's
+# standing per-project preference, and firstmate resolves it per task at intake
+# and passes the explicit flag. Refused on --scout and --secondmate: a scout
+# makes no branch and a charter is not a delivery contract.
 # --forge names the project's forge, defaults to none, and is orthogonal to --mode
 # exactly as the registry's `forge=` token is. It is the captain's confirmed
 # registry binding, read from data/projects.md at intake and passed here; this
@@ -158,6 +170,8 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+BRANCH_PREFIX=fm/
+BRANCH_PREFIX_SET=0
 FORGE=none
 FORGE_SET=0
 SHAPE=
@@ -171,6 +185,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      branch-prefix) BRANCH_PREFIX=$a; BRANCH_PREFIX_SET=1 ;;
       forge) FORGE=$a; FORGE_SET=1 ;;
       shape) SHAPE=$a; SHAPE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
@@ -185,6 +200,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --branch-prefix) want_value="branch-prefix" ;;
+    --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=}; BRANCH_PREFIX_SET=1 ;;
     --forge) want_value=forge ;;
     --forge=*) FORGE=${a#--forge=}; FORGE_SET=1 ;;
     --shape) want_value=shape ;;
@@ -217,6 +234,16 @@ elif [ "$MODE_SET" -eq 1 ]; then
   exit 1
 fi
 
+# A ship branch's prefix is optional per-project cosmetics, not a delivery
+# decision, but it still only makes sense where a branch is actually created.
+if [ "$KIND" != ship ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
+  echo "error: --branch-prefix applies only to ship briefs; a scout makes no branch and a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+case "$BRANCH_PREFIX" in
+  *' '*) echo "error: --branch-prefix must not contain a space (got '$BRANCH_PREFIX')" >&2; exit 1 ;;
+  -*) echo "error: --branch-prefix must not start with '-' (got '$BRANCH_PREFIX')" >&2; exit 1 ;;
+esac
 # The forge is validated against the same closed set the renderers enforce, so a
 # typo or an impossible mode/forge pair stops here rather than reaching a worker.
 if [ "$KIND" = ship ]; then
@@ -239,6 +266,12 @@ elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   exit 1
 fi
 ID=${POS[0]}
+BRANCH="$BRANCH_PREFIX$ID"
+if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+  echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
+  exit 1
+fi
+printf -v BRANCH_Q '%q' "$BRANCH"
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -543,8 +576,8 @@ case "$MODE" in
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     ;;
 esac
-RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$FORGE") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID" "$FORGE") || exit 1
+RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -560,7 +593,7 @@ You are in a disposable git worktree of $REPO, at a detached HEAD on a clean def
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
 If the top-level path is the primary checkout or not the worktree you were launched in, STOP - do not branch or commit here - append \`blocked [at=<epoch>]: launched in primary checkout, not an isolated worktree\` to the status file and stop.
 
-1. First action: create your branch: \`git checkout -b fm/$ID\`$SETUP2
+1. First action: create your branch: \`git checkout -b $BRANCH_Q --\`$SETUP2
 
 # Rules
 $RULE1

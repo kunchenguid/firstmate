@@ -12,8 +12,13 @@
 # neither PR head can be resolved, fall back to the local branch with a warning.
 # A GitLab merge request and a Gerrit change expose no comparable ref and record
 # no pr_head, so a task recording one always takes that warning path;
-# docs/architecture.md owns that fallback. Without pr=, compare the local
-# branch.
+# docs/architecture.md owns that fallback. Without pr=, compare the task's
+# immutable ship branch recorded in state/<id>.meta ("fm/<id>" for records
+# created before that field existed), or the worktree's checked-out branch when
+# that branch does not exist in the worktree. A recorded branch that is not a
+# valid git branch name is refused instead of taking that fallback, the same
+# refusal fm-merge-local.sh applies, so a corrupt meta record can never turn a
+# review into a diff of the wrong content.
 # Usage: fm-review-diff.sh <task-id> [--stat]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
 set -eu
@@ -71,10 +76,16 @@ default_branch() {
 
 DEFAULT=$(default_branch) || { echo "error: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master" >&2; exit 1; }
 
-BRANCH="fm/$ID"
+BRANCH=$(grep '^branch=' "$META" | cut -d= -f2- || true)
+[ -n "$BRANCH" ] || BRANCH="fm/$ID"
+if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+  echo "error: task $ID has an invalid recorded ship branch '$BRANCH'" >&2
+  exit 1
+fi
 if ! git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null; then
+  WANT=$BRANCH
   BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
-  [ -n "$BRANCH" ] || { echo "error: branch fm/$ID does not exist and worktree $WT is detached" >&2; exit 1; }
+  [ -n "$BRANCH" ] || { echo "error: ship branch $WANT does not exist and worktree $WT is detached" >&2; exit 1; }
   git -C "$WT" rev-parse --verify --quiet "refs/heads/$BRANCH" >/dev/null || { echo "error: branch $BRANCH does not exist in $WT" >&2; exit 1; }
 fi
 
