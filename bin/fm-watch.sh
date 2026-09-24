@@ -27,7 +27,8 @@
 #                          line, since the crew's own log gets no new entry once
 #                          firstmate hands it to a no-mistakes validation. A declared
 #                          external-wait pause or verified captain-held transfer is
-#                          absorbed instead with its own long re-surface cadence,
+#                          normally absorbed with its own long re-surface cadence
+#                          (recognized idle pane stops below take precedence),
 #                          never as a wedge, and that recheck reason names which
 #                          human the wait is on. Only when neither absorb class
 #                          applies does the log's latest recognized status event decide:
@@ -76,6 +77,24 @@
 #                          agent, for human inspection only - never an automatic
 #                          interrupt, signal, or restart of the worker or its
 #                          tool process.
+#   stale: <window> (quota-exhausted: <provider>, observed <UTC>, resets no later than <UTC> (<delay>))
+#   stale: <window> (blocked-at-prompt: <harness> trust)
+#                          recognized idle stops from fm-pane-stop-lib.sh bypass
+#                          ordinary stale/wedge triage, including declared pauses,
+#                          after two unchanged-hash polls. Secondmates and
+#                          away-silenced captain holds are excluded; positive
+#                          working evidence or a dead/missing agent rejects a stop.
+#                          A rendered delay is observed at detection time; that
+#                          time plus the delay is only an upper bound on reset,
+#                          printed with the observation time and raw delay.
+#                          Otherwise the reset is 'unknown', not inferred.
+#                          .pane-stop-<key> stores hash<TAB>busy-generation, so an
+#                          unchanged stop skips repeat probes and wakes. Pane
+#                          churn or busy activity clears it; a new generation
+#                          permits reclassification. No prompt is answered and
+#                          no worker is relaunched. Recovery procedure:
+#                          .agents/skills/stuck-crewmate-recovery/SKILL.md.
+#                          Regression: tests/fm-watch-triage.test.sh.
 #   stale: <window> (unread firstmate instruction: ...)
 #                          the steering-inbox ladder spent its delivery-attempt
 #                          budget on an idle pane without an acknowledgement
@@ -396,6 +415,42 @@ window_backend() {
   echo tmux
 }
 
+# shellcheck source=bin/fm-pane-stop-lib.sh
+. "$SCRIPT_DIR/fm-pane-stop-lib.sh"
+
+pane_stop_stale_check() {
+  local w=$1 task=$2 h=$3 pane=$4 key record parsed provider delay display now observed reset kind reason gen agent_state
+  key=$(window_key "$w")
+  record="$STATE/.pane-stop-$key"
+  parsed=$(fm_pane_stop "$(window_harness "$w")" "$pane") || { rm -f "$record"; return 1; }
+  gen=$(fm_busy_current_gen "$STATE" "$task") || gen=-
+  if [ -f "$record" ] && [ "$(cut -f1 "$record")" = "$h" ] && [ "$(cut -f2 "$record")" = "$gen" ]; then return 0; fi
+  if crew_is_provably_working "$task"; then rm -f "$record"; return 1; fi
+  agent_state=$(fm_backend_agent_state "$(window_backend "$w")" "$w" 2>/dev/null) || agent_state=unreadable
+  case "$agent_state" in dead|missing) rm -f "$record"; return 1 ;; esac
+  IFS=$'\t' read -r kind provider delay display <<< "$parsed"
+  if [ "$delay" != - ]; then
+    now=$(date +%s)
+    reset=$(date -u -r "$((now + delay))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u -d "@$((now + delay))" +%Y-%m-%dT%H:%M:%SZ) || return 1
+    observed=$(date -u -r "$now" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+      || date -u -d "@$now" +%Y-%m-%dT%H:%M:%SZ) || return 1
+    display="observed $observed, resets no later than $reset ($display)"
+  fi
+  if [ "$kind" = quota-exhausted ]; then
+    if [ "$delay" = - ]; then display="resets unknown"; fi
+    reason="stale: $w ($kind: $provider, $display)"
+  else
+    reason="stale: $w ($kind: $provider $display)"
+  fi
+  fm_wake_append stale "$w" "$reason" || exit 1
+  printf '%s\t%s\n' "$h" "$gen" > "$record"
+  printf '%s' "$h" > "$STATE/.stale-$key"
+  rm -f "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key"
+  wake "$reason"
+  return 0
+}
+
 window_harness() {
   local w=$1 meta
   meta=$(fm_backend_meta_for_window "$w" "$STATE" 2>/dev/null || true)
@@ -706,7 +761,7 @@ signal_turnend_panes_churned() {  # <file> ...
     return 1
   done
   for key in "${churned_keys[@]}"; do
-    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key"; then
+    if ! rm -f "$STATE/.stale-$key" "$STATE/.wedge-escalations-$key" "$STATE/.pane-stop-$key"; then
       for created in "${created_keys[@]+"${created_keys[@]}"}"; do
         rm -f "$STATE/.churn-since-$created"
       done
@@ -1523,7 +1578,7 @@ clear_pause_state() {  # <window-key>
 clear_stale_hash_tracking() {  # <window-key>
   local key=$1
   clear_write_tracking "$key"
-  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" \
+  rm -f "$STATE/.stale-$key" "$STATE/.stale-since-$key" "$STATE/.wedge-escalations-$key" "$STATE/.pane-stop-$key" \
     "$STATE/.waiting-resurfaced-$key"
 }
 
@@ -2757,6 +2812,9 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    if [ "$busy_now" -eq 0 ] || [ "$h" != "$prev" ]; then
+      rm -f "$STATE/.pane-stop-$key"
+    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -2768,6 +2826,8 @@ EOF
             paused) handle_paused_stale "$w" "$task" "$h" ;;
             *)      clear_pause_tracking "$key" ;;
           esac
+        elif ! captain_held_silenced "$last" && pane_stop_stale_check "$w" "$task" "$h" "$tail40"; then
+          : # Explicit stops bypass the wedge ladder; never answer or relaunch here.
         elif afk_present; then
           # Daemon owns triage: one-shot per distinct stale hash, as before,
           # except that a captain-held pane is never handed over while the
