@@ -1466,7 +1466,7 @@ validate_secondmate_spawn_parent_authority() {  # <secondmate-id>
   fi
 }
 
-if [ "$KIND" = secondmate ]; then
+if [ "$KIND" = secondmate ] && [ "$RELAUNCH" -eq 0 ]; then
   validate_secondmate_spawn_parent_authority "$ID" || exit 1
   if spawn_remote_secondmate "$ID"; then
     exit 0
@@ -1617,6 +1617,14 @@ else
   ARG3=${POS[2]:-}
 fi
 [ -z "$HARNESS_ARG" ] || ARG3=$HARNESS_ARG
+
+# A relaunch only learns that it is a secondmate after its saved record has
+# been validated and adopted above.
+# Re-run the parent-authority guard at that point so a project Firstmate child
+# retains its authority binding without ever accepting a fresh or foreign route.
+if [ "$RELAUNCH" -eq 1 ] && [ "$KIND" = secondmate ]; then
+  validate_secondmate_spawn_parent_authority "$ID" || exit 1
+fi
 
 shell_quote() {
   printf "'"

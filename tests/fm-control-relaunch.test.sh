@@ -176,6 +176,44 @@ EOF
   TASK_TMPS+=("/tmp/fm-$id")
 }
 
+add_project_child_relaunch_task() {
+  local dir=$1 id=$2 home="$1/home" smhome="$1/smhome"
+  local home_real repo_identity authority_hash authority_id
+  fm_git_worktree "$dir/proj" "$smhome" "project-child-$id"
+  home_real=$(cd "$home" && pwd -P)
+  repo_identity="sha256:$(printf '%064d' 0)"
+  authority_hash=$(printf '%s\n%s\n%s' "$home_real" alpha "$repo_identity" | shasum -a 256 | awk '{print $1}')
+  authority_id="sha256:$authority_hash"
+  mkdir -p "$home/projects/alpha" "$home/data/$id" "$smhome/state" "$smhome/data" "$smhome/bin"
+  printf 'alpha-pfm\n' > "$home/.fm-secondmate-home"
+  printf 'schema=fm-project-firstmate.v1\nproject=alpha\nrepo_identity=%s\nauthority_id=%s\nrepo_path=%s/projects/alpha\n' \
+    "$repo_identity" "$authority_id" "$home_real" > "$home/.fm-project-firstmate"
+  printf '%s\n' "$id" > "$smhome/.fm-secondmate-home"
+  printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\nparent_role=project-firstmate\nrepo_authority_home=%s\nrepo_authority_id=%s\nrepo_identity=%s\n' \
+    "$home_real" "$home_real" "$authority_id" "$repo_identity" > "$smhome/.fm-secondmate-parent"
+  printf '%s\n' "- $id - alpha child (home: $smhome; scope: alpha work; projects: alpha; added 2026-09-24)" > "$home/data/secondmates.md"
+  printf '# charter\n' > "$smhome/data/charter.md"
+  printf '# agents\n' > "$smhome/AGENTS.md"
+  {
+    echo "window=fmses:fm-$id"
+    echo "endpoint_task_id=$id"
+    echo "worktree=$smhome"
+    echo "project=$smhome"
+    echo 'harness=claude'
+    echo 'kind=secondmate'
+    echo 'mode=secondmate'
+    echo 'yolo=off'
+    echo 'model=default'
+    echo 'effort=default'
+    echo "home=$smhome"
+    echo 'projects=alpha'
+  } > "$home/state/$id.meta"
+  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s' "$smhome" > "$dir/fake/cwd"
+  printf 'zsh' > "$dir/fake/command"
+  printf 'codex' > "$dir/fake/becomes"
+}
+
 run_control() {  # <case-dir> <args...>
   local dir=$1; shift
   # A claude spawn pre-registers workspace trust in the launching user's own
@@ -836,6 +874,48 @@ test_secondmate_relaunch_picks_up_the_configured_harness_pin() {
     || fail "the configured effort token should come with the pin"
   assert_not_contains "$out" "not a verified harness" "codex is a verified harness"
   pass "fm-control relaunch: a secondmate relaunch re-resolves its durable configured harness pin"
+}
+
+test_project_child_secondmate_relaunch_adopts_authority_after_kind() {
+  local dir root_dir home smhome out rc meta_before
+  dir=$(new_case project-child child)
+  add_project_child_relaunch_task "$dir" child
+  home="$dir/home"
+  smhome="$dir/smhome"
+
+  out=$(run_spawn "$dir" child --relaunch --harness codex); rc=$?
+  expect_code 0 "$rc" "a project Firstmate child secondmate should relaunch"$'\n'"$out"
+  [ "$(meta_field "$dir" child home)" = "$smhome" ] \
+    || fail "project-child relaunch replaced the recorded secondmate home"
+  [ "$(meta_field "$dir" child worktree)" = "$smhome" ] \
+    || fail "project-child relaunch replaced the recorded worktree"
+  assert_present "$smhome/.fm-secondmate-parent" "project-child relaunch must retain its parent binding"
+
+  root_dir=$(new_case root-parent child)
+  mkdir -p "$root_dir/home/data"
+  printf '%s\n' "- child - alpha child (home: $smhome; scope: alpha work; projects: alpha; added 2026-09-24)" > "$root_dir/home/data/secondmates.md"
+  cp "$home/state/child.meta" "$root_dir/home/state/child.meta"
+  printf '%s\n' 'fm-child' > "$root_dir/fake/windows"
+  printf '%s' "$smhome" > "$root_dir/fake/cwd"
+  printf 'zsh' > "$root_dir/fake/command"
+  printf 'codex' > "$root_dir/fake/becomes"
+  out=$(run_spawn "$root_dir" child --relaunch --harness codex); rc=$?
+  expect_code 1 "$rc" "a root-owned relaunch must refuse a project-child parent binding"$'\n'"$out"
+  assert_contains "$out" "root Firstmate cannot spawn a secondmate whose durable parent binding names another home" \
+    "the root-owned relaunch refusal must preserve the parent boundary"
+
+  printf 'zsh' > "$dir/fake/command"
+  meta_before=$(cksum "$home/state/child.meta")
+  sed 's/^repo_authority_id=.*/repo_authority_id=sha256:1111111111111111111111111111111111111111111111111111111111111111/' \
+    "$smhome/.fm-secondmate-parent" > "$smhome/.fm-secondmate-parent.tmp"
+  mv "$smhome/.fm-secondmate-parent.tmp" "$smhome/.fm-secondmate-parent"
+  out=$(run_spawn "$dir" child --relaunch --harness codex); rc=$?
+  expect_code 1 "$rc" "an invalid project-child parent binding must refuse relaunch"$'\n'"$out"
+  assert_contains "$out" "repository authority identity changed" \
+    "the invalid parent binding must fail through its durable authority proof"
+  [ "$(cksum "$home/state/child.meta")" = "$meta_before" ] \
+    || fail "an invalid parent binding rewrote the existing task record"
+  pass "fm-spawn relaunch: project-child authority follows saved kind and root or invalid bindings still refuse"
 }
 
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop() {
@@ -1713,6 +1793,7 @@ test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm
 test_turnend_auth_paths_are_owned_by_the_control_adapter
 test_secondmate_relaunch_picks_up_the_configured_harness_pin
+test_project_child_secondmate_relaunch_adopts_authority_after_kind
 test_secondmate_relaunch_ignores_invalid_configured_effort_before_stop
 test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
