@@ -606,34 +606,17 @@ github_checks_not_green() {
   ' 2>/dev/null || return 1
 }
 
-# The status check contexts the forge requires before a merge into the given
-# base branch, one name per line, from both places GitHub keeps them: the
-# classic branch protection summary carried on the branch itself, and every
-# active ruleset rule that applies to the branch. Both reads need only read
-# access to the repository. The dedicated branch-protection endpoint is not
-# used, because it answers a token without admin rights with the same 404 an
-# unprotected branch gets, which would read a missing permission as "nothing is
-# required".
-#
-# An empty result means the forge said no check is required. A read that fails
-# or answers in an unexpected shape returns nonzero with FM_PR_GITHUB_REQUIRED_ERROR
-# naming the source, so an unreadable required set is never taken for an empty
-# one. The one failure that is not unreadable is the plan-gated ruleset refusal
-# github_branch_rules_unavailable_on_plan owns: such a repository has no ruleset
-# rules, and its classic protection is still read from the branch.
 FM_PR_GITHUB_REQUIRED=
 FM_PR_GITHUB_REQUIRED_ERROR=
 github_read_required_contexts() {
-  local base=$1 branch_path branch_json rules_json classic ruleset api_err api_err_text
-  FM_PR_GITHUB_REQUIRED=
+  local base=$1 branch_path branch_json rules_json classic='' ruleset='' api_err api_err_text
+  FM_PR_GITHUB_REQUIRED='[]'
   FM_PR_GITHUB_REQUIRED_ERROR=
   branch_path=$(github_urlencode_path_segment "$base")
 
   if ! branch_json=$(gh api "repos/$PR_OWNER/$PR_REPO/branches/$branch_path" 2>/dev/null) \
     || [ -z "$branch_json" ] \
-    || ! classic=$(printf '%s' "$branch_json" | jq -r '
-      def names: if type == "array" and all(.[]; type == "string" and length > 0)
-        then .[] else error("invalid required check list") end;
+    || ! classic=$(printf '%s' "$branch_json" | jq -c '
       if type != "object" or (.protected | type) != "boolean" then
         error("branch payload is unreadable")
       elif .protected == false then
@@ -642,67 +625,73 @@ github_read_required_contexts() {
         error("branch protection summary is unreadable")
       else
         .protection.required_status_checks
-        | ((.contexts // []) | names),
-          ((.checks // []) | if type == "array" then map(.context) else error("invalid required check list") end | names)
+        | ((.checks // []) | if type == "array" then .[] else error("invalid checks") end
+           | {context, app_id}),
+          ((.contexts // []) | if type == "array" then .[] else error("invalid contexts") end
+           | {context: ., app_id: null})
+        | if (.context | type) == "string" and (.context | length) > 0
+             and (.app_id == null or (.app_id | type) == "number")
+          then . else error("invalid required check") end
+        | if .app_id == -1 then .app_id = null else . end
       end' 2>/dev/null); then
+    classic=''
     FM_PR_GITHUB_REQUIRED_ERROR="the branch protection summary for base branch $base could not be read"
-    return 1
   fi
 
-  api_err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-required-rules.XXXXXX") || {
-    FM_PR_GITHUB_REQUIRED_ERROR="the branch rules for base branch $base could not be read"
-    return 1
-  }
-  ruleset=
-  if ! rules_json=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" 2>"$api_err"); then
-    api_err_text=$(cat "$api_err" 2>/dev/null)
-    rm -f "$api_err"
-    if ! github_branch_rules_unavailable_on_plan "$api_err_text"; then
-      FM_PR_GITHUB_REQUIRED_ERROR="the branch rules for base branch $base could not be read"
-      return 1
-    fi
+  if ! api_err=$(mktemp "${TMPDIR:-/tmp}/fm-pr-merge-required-rules.XXXXXX"); then
+    FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
   else
-    rm -f "$api_err"
-    # --paginate prints one JSON array per page, which jq reads as a stream.
-    if [ -z "$rules_json" ] || ! ruleset=$(printf '%s' "$rules_json" | jq -r '
+    if ! rules_json=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/rules/branches/$branch_path" 2>"$api_err"); then
+      api_err_text=$(cat "$api_err" 2>/dev/null)
+      if ! github_branch_rules_unavailable_on_plan "$api_err_text"; then
+        FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
+      fi
+    elif [ -z "$rules_json" ] || ! ruleset=$(printf '%s' "$rules_json" | jq -c '
         if type != "array" then error("rules payload is unreadable") else .[] end
         | select(type != "object" or .type == "required_status_checks")
         | if type == "object" and (.parameters.required_status_checks | type) == "array"
           then .parameters.required_status_checks[] else error("invalid required check rule") end
         | if type == "object" and (.context | type) == "string" and (.context | length) > 0
-          then .context else error("invalid required check rule") end' 2>/dev/null); then
-      FM_PR_GITHUB_REQUIRED_ERROR="the branch rules for base branch $base could not be read"
-      return 1
+             and (.integration_id == null or (.integration_id | type) == "number")
+          then {context, app_id: .integration_id} else error("invalid required check rule") end
+        | if .app_id == -1 then .app_id = null else . end' 2>/dev/null); then
+      ruleset=''
+      FM_PR_GITHUB_REQUIRED_ERROR="${FM_PR_GITHUB_REQUIRED_ERROR:+$FM_PR_GITHUB_REQUIRED_ERROR
+}the branch rules for base branch $base could not be read"
     fi
+    rm -f "$api_err"
   fi
 
-  FM_PR_GITHUB_REQUIRED=$(printf '%s\n%s\n' "$classic" "$ruleset" | awk 'NF && !seen[$0]++')
+  FM_PR_GITHUB_REQUIRED=$(printf '%s\n%s\n' "$classic" "$ruleset" | jq -sc '
+    unique_by([.context, .app_id]) | group_by(.context)
+    | map(if any(.[]; .app_id != null) then map(select(.app_id != null)) else . end) | add // []')
+  [ -z "$FM_PR_GITHUB_REQUIRED_ERROR" ]
 }
 
-# The required contexts, given one per line, that have no entry at all in the
-# live pull-request JSON's check rollup, one per line. The rollup is read at
-# the same head the merge is later bound to, so a context absent from it has
-# not reported at that head, and absence is reported rather than read as green.
-# A context present in any state is left to github_checks_not_green. Exits
-# nonzero when the rollup cannot be read.
 github_required_checks_missing() {
-  local json=$1 required=$2
-  printf '%s' "$json" | jq -r --arg required "$required" '
+  local json=$1 required=$2 producers=$3
+  printf '%s' "$json" | jq -r --argjson required "$required" --argjson producers "$producers" '
     if (.statusCheckRollup | type) != "array" then error("no check rollup") else . end
-    | [ .statusCheckRollup[]
-        | if .__typename == "CheckRun" then .name else .context end
-        | select(type == "string") ] as $reported
-    | $required | split("\n")[]
-    | select(. != "")
-    | . as $name
-    | select(any($reported[]; . == $name) | not)
+    | .statusCheckRollup as $reported
+    | $required
+    | map(. as $requirement
+      | select(any($reported[];
+          if $requirement.app_id == null then
+            (if .__typename == "CheckRun" then .name else .context end) == $requirement.context
+          else
+            .__typename == "CheckRun" and .name == $requirement.context
+            and any($producers[]; .name == $requirement.context and .app.id == $requirement.app_id)
+          end) | not)
+      | .context) | unique[]
   ' 2>/dev/null || return 1
 }
 
 # Pre-merge conditions for a GitHub pull request, read from one live view.
 # Sets FM_PR_MERGE_HEAD to the verified head on success.
 github_verify_mergeable() {
-  local json fields line red name covered missing unreported
+  local json fields line red name covered missing unreported producers runs
   local total=0 named=0 refusals=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
 
@@ -788,18 +777,32 @@ FIELDS
 $red
 EOF
 
-  # A required check that never reported is absent from the rollup rather than
-  # red, so it is looked for by name in the forge's own required set, and an
-  # unreadable required set refuses instead of reading as none required.
   unreported=''
   if ! github_read_required_contexts "$base"; then
-    refusals="$refusals  - $FM_PR_GITHUB_REQUIRED_ERROR, so a required check that has not reported cannot be ruled out
+    while IFS= read -r line; do
+      refusals="$refusals  - $line, so a required check that has not reported cannot be ruled out
 "
-  elif [ -n "$FM_PR_GITHUB_REQUIRED" ]; then
-    if ! missing=$(github_required_checks_missing "$json" "$FM_PR_GITHUB_REQUIRED"); then
-      echo "error: could not read the GitHub pull request state before merging" >&2
-      return 1
+    done <<EOF
+$FM_PR_GITHUB_REQUIRED_ERROR
+EOF
+  fi
+  producers='[]'
+  if printf '%s' "$FM_PR_GITHUB_REQUIRED" | jq -e 'any(.[]; .app_id != null)' >/dev/null; then
+    if ! runs=$(gh api --paginate "repos/$PR_OWNER/$PR_REPO/commits/$live_head/check-runs" 2>/dev/null) \
+      || [ -z "$runs" ] \
+      || ! producers=$(printf '%s' "$runs" | jq -sc --arg head "$live_head" '
+        [ .[] | if (.check_runs | type) == "array" then .check_runs[] else error("invalid check runs") end
+          | if (.name | type) == "string" and (.app.id | type) == "number" and .head_sha == $head
+            then . else error("invalid check producer") end ]' 2>/dev/null); then
+      producers='[]'
+      refusals="$refusals  - required check producers at head $live_head could not be read
+"
     fi
+  fi
+  if ! missing=$(github_required_checks_missing "$json" "$FM_PR_GITHUB_REQUIRED" "$producers"); then
+    refusals="$refusals  - the GitHub pull request check rollup could not be read
+"
+  else
     while IFS= read -r name; do
       [ -n "$name" ] || continue
       [ "${#ALLOW_MISSING[@]}" -gt 0 ] && [ "${ALLOW_MISSING[0]}" = "$name" ] && continue

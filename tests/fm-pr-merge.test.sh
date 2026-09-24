@@ -232,6 +232,14 @@ case "${1:-} ${2:-}" in
     # The required-check reads: the branch itself, and its rules read without
     # the merge-queue filter the queue reader below applies.
     case " $* " in
+      *" repos/"*"/commits/"*"/check-runs"*)
+        case "$*" in
+          *"/commits/$(cat "$FM_TEST_GH_HEAD")/check-runs"*) ;;
+          *) exit 1 ;;
+        esac
+        cat "$FM_TEST_GH_RUNS"
+        exit $?
+        ;;
       *" repos/"*"/rules/branches/"*merge_queue*) ;;
       *" repos/"*"/rules/branches/"*)
         if [ -f "${FM_TEST_GH_REQUIRED_RULES_FAIL:-}" ]; then
@@ -441,6 +449,7 @@ run_pr_merge() {
   FM_TEST_GH_RULES="$case_dir/github-rules" \
   FM_TEST_GH_VIEW_JSON="$case_dir/github-view.json" \
   FM_TEST_GH_HEAD="$case_dir/github-head" \
+  FM_TEST_GH_RUNS="$case_dir/github-runs.json" \
   FM_TEST_GH_MERGE_RC_FILE="$case_dir/github-merge-rc" \
   FM_TEST_GH_MERGE_OUTPUT="$(cat "$case_dir/github-merge-output" 2>/dev/null || true)" \
   FM_TEST_GH_GRAPHQL_FAIL="$case_dir/github-graphql-fail" \
@@ -3281,6 +3290,86 @@ run_required_case() {
   set -e
 }
 
+test_required_producer_identity() {
+  local case_dir head kind variant expected app
+  head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
+  for kind in classic ruleset; do
+    for variant in wrong correct unreadable malformed stale waived; do
+      case_dir=$(make_case "required-producer-$kind-$variant")
+      add_gh_mocks "$case_dir" "$head"
+      write_github_required "$case_dir" "$kind:ci"
+      if [ "$kind" = classic ]; then
+        jq '.protection.required_status_checks.checks[0].app_id = 15368' \
+          "$case_dir/github-branch.json" > "$case_dir/updated.json"
+        mv "$case_dir/updated.json" "$case_dir/github-branch.json"
+      else
+        jq '.[1].parameters.required_status_checks[0].integration_id = 15368' \
+          "$case_dir/github-required-rules.json" > "$case_dir/updated.json"
+        mv "$case_dir/updated.json" "$case_dir/github-required-rules.json"
+      fi
+      app=42
+      [ "$variant" != correct ] || app=15368
+      printf '{"check_runs":[{"name":"ci","app":{"id":%s},"head_sha":"%s"}]}\n' \
+        "$app" "$head" > "$case_dir/github-runs.json"
+      case "$variant" in
+        unreadable) rm "$case_dir/github-runs.json" ;;
+        malformed) printf '{}' > "$case_dir/github-runs.json" ;;
+        stale) printf '{"check_runs":[{"name":"ci","app":{"id":15368},"head_sha":"bbbb"}]}' > "$case_dir/github-runs.json" ;;
+      esac
+      expected=1
+      if [ "$variant" = waived ]; then
+        run_required_case "$case_dir" 110 --attended-override --allow-missing ci -- --admin
+        expected=0
+      else
+        run_required_case "$case_dir" 110 --attended-override -- --admin
+        [ "$variant" != correct ] || expected=0
+      fi
+      expect_code "$expected" "$RC" "producer-$kind-$variant: $(cat "$case_dir/stderr")"
+      if [ "$expected" = 1 ]; then
+        assert_grep "required check 'ci' has not reported" "$case_dir/stderr" "producer absence not reported"
+        assert_no_grep 'pr merge' "$case_dir/gh.log" "wrong producer reached merge"
+      else
+        assert_grep 'pr merge' "$case_dir/gh.log" "accepted producer did not merge"
+      fi
+      case "$variant" in
+        unreadable|malformed|stale)
+          assert_grep 'required check producers at head' "$case_dir/stderr" "producer read error not reported" ;;
+      esac
+    done
+  done
+  pass "fm-pr-merge enforces required producer identity and named waivers"
+}
+
+test_required_partial_reads_report_all_failures() {
+  local case_dir head variant
+  head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
+  for variant in branch rules both; do
+    case_dir=$(make_case "required-partial-$variant")
+    add_gh_mocks "$case_dir" "$head"
+    write_github_required "$case_dir" classic:validate ruleset:lint
+    case "$variant" in
+      branch|both) printf 'read failed' > "$case_dir/github-branch-fail" ;;
+    esac
+    case "$variant" in
+      rules|both) printf 'read failed' > "$case_dir/github-required-rules-fail" ;;
+    esac
+    run_required_case "$case_dir" 111
+    expect_code 1 "$RC" "partial-$variant must refuse"
+    case "$variant" in
+      branch|both) assert_grep 'branch protection summary for base branch main could not be read' "$case_dir/stderr" "lost branch error" ;;
+    esac
+    case "$variant" in
+      rules|both) assert_grep 'branch rules for base branch main could not be read' "$case_dir/stderr" "lost rules error" ;;
+    esac
+    case "$variant" in
+      branch) assert_grep "required check 'lint' has not reported" "$case_dir/stderr" "lost rules requirement" ;;
+      rules) assert_grep "required check 'validate' has not reported" "$case_dir/stderr" "lost classic requirement" ;;
+    esac
+    assert_no_grep 'pr merge' "$case_dir/gh.log" "partial read reached merge"
+  done
+  pass "fm-pr-merge reports known missing checks and all independent read errors"
+}
+
 test_required_check_that_never_reported_refuses() {
   local case_dir head kind
   head=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1
@@ -3582,3 +3671,6 @@ test_red_and_unreported_checks_are_reported_together
 test_unreadable_required_set_refuses
 test_allow_missing_waives_only_the_named_unreported_check
 test_allow_missing_follows_the_allow_red_rules
+
+test_required_producer_identity
+test_required_partial_reads_report_all_failures
