@@ -56,6 +56,8 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     if ($r.blocked_by // "") == "" then "-"
     elif ($r.blocked_reason // "") == "" then $r.blocked_by
     else "\($r.blocked_by) - \($r.blocked_reason)" end;
+  def cleanup_row($f):
+    "| \($f.severity) | \($f.class) | \(dash($f.repo)) | \(dash($f.branch // $f.path)) | \(dash($f.task)) | \(if $f.commits == null then "-" else $f.commits end) | \($f.detail)\(if $f.backlog != null then "; backlog \($f.backlog.id) is \($f.backlog.state)" else "" end)\(if $f.evidence != null then " (\($f.evidence))" else "" end) |";
   def backlog_row($r):
     "| \($r.id // "-") | \(dash($r.title // $r.raw)) | \(dash($r.repo)) | \(dash($r.kind)) | \(blocker($r)) | \(dash($r.pr_url // $r.report_path // $r.local_note)) |";
 
@@ -89,6 +91,23 @@ printf '%s\n' "$SNAPSHOT" | jq -r '
     "| ID | Title | Repo | Kind | Blocked By | Artifact |",
     "| --- | --- | --- | --- | --- | --- |",
     (.backlog.records[] | select(.state == "done") | backlog_row(.))
+   end),
+  "",
+  "## Cleanup",
+  (if (.hygiene.available // false) | not then
+    "Leftover-state audit unavailable: \(.hygiene.reason // "absent")."
+   else
+    ([.hygiene.findings[] | select(.severity != "info")]) as $shown
+    | ([.hygiene.findings[] | select(.severity == "info")] | length) as $landed
+    | (if ($shown | length) == 0 then
+        "No leftover state needs cleanup."
+       else
+        "| Severity | Finding | Repo | Branch / Path | Task | Commits | Detail |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+        ($shown[] | cleanup_row(.))
+       end),
+      (if $landed > 0 then "\($landed) unowned local branch(es) already landed; safe to prune once reviewed." else empty end),
+      (if .hygiene.truncated > 0 then "\(.hygiene.truncated) more finding(s) not shown; run bin/fm-hygiene-audit.sh for the full list." else empty end)
    end),
   "",
   "## Secondmates",
