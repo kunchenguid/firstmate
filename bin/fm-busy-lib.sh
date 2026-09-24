@@ -6,7 +6,8 @@
 # machine-readable semantic source it owns, classification always exposes
 # which source produced it, and missing, malformed, stale, unsupported, or
 # unverified semantic data is UNKNOWN - never idle. Endpoint death is the only
-# process-level override and yields dead, never busy. Child processes, CPU,
+# process-level override; consumers read it from the backend liveness probes,
+# not from this classifier. Child processes, CPU,
 # process sleep state, marker mtimes, and the old global UI-regex OR are not
 # state signals here; state/<id>.turn-ended files remain wake NOTIFICATIONS
 # owned by the watcher, not current-state truth.
@@ -42,21 +43,20 @@
 #   fm-interrupt     the legacy Claude fm-send --key Escape idle event
 #   fm-recovery      a documented recovery reset after relaunch
 # Classifier-only sources (never written into a record):
-#   endpoint-gone, herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
+#   herdr-native, grok-regex, rovo-regex, agy-regex, muse-session-log,
 #   cursor-transcript, missing, malformed, gen-mismatch, source-mismatch,
 #   kimi-unverified, codex-unverified, capture-failed, no-target
 #
-# Classification (fm_busy_classify): busy | idle | unknown | dead, always
-# with the producing source as the second token. Precedence:
-#   1. dead endpoint (fm_busy_classify_live only) -> dead endpoint-gone
-#   2. standalone Kimi before verification       -> unknown kimi-unverified
-#   3. a valid, gen-matching, source-trusted record -> its state and source
-#   4. no record at all: herdr's native busy verdict is trusted as busy
+# Classification (fm_busy_classify): busy | idle | unknown, always with the
+# producing source as the second token. Precedence:
+#   1. standalone Kimi before verification       -> unknown kimi-unverified
+#   2. a valid, gen-matching, source-trusted record -> its state and source
+#   3. no record at all: herdr's native busy verdict is trusted as busy
 #      (generation state is sufficient for busy, not for idle), then the
 #      muse session-log and cursor transcript pull sources, then the
 #      Grok/Rovo/AGY temporary regex fallbacks classify a grok, rovo, or agy
 #      task from its rendered tail, then unknown missing
-#   5. malformed, stale, or untrusted records -> unknown, never a fallback
+#   4. malformed, stale, or untrusted records -> unknown, never a fallback
 # Grok, Rovo, and AGY are the ONLY rendered-text classifications that survive the
 # redesign, because none of their structured lifecycles was credited-live-verified
 # in the approved audit (Rovo's clean ACP stopReason lives outside the TUI
@@ -1023,22 +1023,6 @@ fm_busy_classify() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
   printf 'unknown missing'
 }
 
-# fm_busy_classify_live: fm_busy_classify behind the one process-level
-# override - a gone endpoint is dead, never busy. Requires fm-backend.sh to
-# be sourced for fm_backend_target_exists.
-fm_busy_classify_live() {  # <backend> <target> <harness> <id> <state-dir> [expected-label]
-  local backend=$1 target=$2 harness=$3 id=$4 state=$5 label=${6-}
-  if [ -z "$target" ]; then
-    printf 'unknown no-target'
-    return 0
-  fi
-  if ! fm_backend_target_exists "$backend" "$target" "$label" 2>/dev/null; then
-    printf 'dead endpoint-gone'
-    return 0
-  fi
-  fm_busy_classify "$backend" "$target" "$harness" "$id" "$state"
-}
-
 # fm_busy_classify_meta: classify a task from its recorded metadata, so every
 # consumer resolves backend, target, and harness the same way instead of
 # re-deriving them. Requires fm-backend.sh to be sourced. <tail40> is
@@ -1054,15 +1038,4 @@ fm_busy_classify_meta() {  # <meta-file> <id> <state-dir> [tail40]
     return 0
   fi
   fm_busy_classify "$backend" "$target" "$harness" "$id" "$state" "$tail40"
-}
-
-# fm_busy_is_busy: boolean view for callers that only gate on provable
-# activity. 0 iff the classification verdict is exactly busy; idle, unknown,
-# and dead all return 1, so an unknown can never be silently promoted to
-# either boolean pole - callers that must distinguish idle from unknown read
-# the full classification instead.
-fm_busy_is_busy() {  # <backend> <target> <harness> <id> <state-dir> [tail40]
-  local verdict
-  verdict=$(fm_busy_classify "$@")
-  [ "${verdict%% *}" = busy ]
 }

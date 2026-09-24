@@ -753,10 +753,10 @@ test_static_poll_contract() {
   set +e
   out=$(FM_STATE_OVERRIDE="$dir/home/state" FM_CHECK_TIMEOUT=1 FM_TEST_GH_LOG="$dir/gh.log" \
     FM_TEST_GH_SLEEP=3 PATH="$dir/fakebin:$BASE_PATH" \
-    bash -c '. "$1"; run_check "$2"' bash "$WATCH" "$dir/home/state/task-a.check.sh")
+    bash -c '. "$1"; run_check_capture "$2"; printf "%s" "$FM_CHECK_RESULT"' bash "$WATCH" "$dir/home/state/task-a.check.sh")
   rc=$?
   set -e
-  [ "$rc" -eq 0 ] || fail "watcher run_check timeout wrapper failed"
+  [ "$rc" -eq 0 ] || fail "watcher run_check_capture timeout wrapper failed"
   [ -z "$out" ] || fail "timed-out static poll emitted output"
 
   write_poll_meta "$dir/home/state" task-a https://github.com/o/r/pull/1

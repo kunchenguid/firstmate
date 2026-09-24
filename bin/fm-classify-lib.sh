@@ -28,7 +28,7 @@
 # from byte 0, preferring a bounded duplicate over a lost event.
 #
 # There are three documented exceptions. The absorb classification
-# (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
+# (crew_absorb_class and its crew_is_provably_working wrapper) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
 # deliberately paused, or neither. Callers run it ONLY on no-verb signal handling
@@ -1960,13 +1960,6 @@ crew_absorb_class() {  # <id>
 # working/paused/none decision.
 crew_is_provably_working() {  # <id>
   [ "$(crew_absorb_class "$1")" = working ]
-}
-
-# 0 if crew <id>'s authoritative current state is a declared external-wait pause.
-# The stale path absorbs such a crew (on a long re-surface cadence) instead of
-# escalating a possible wedge.
-crew_is_paused() {  # <id>
-  [ "$(crew_absorb_class "$1")" = paused ]
 }
 
 # Directories excluded from the worktree write probe below, and the depth it walks.

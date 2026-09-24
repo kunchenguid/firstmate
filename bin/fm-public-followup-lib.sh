@@ -22,7 +22,7 @@
 #                                    [ -f ] test and nothing else runs.
 #   2. fm_pf_has_registrations       O(1) presence check on the registry created
 #      / fm_pf_has_events            only by the relay path (fm-public-followup.sh
-#      / fm_pf_has_open_loops        register). Open loops ARE registrations:
+#                                    register). Open loops ARE registrations:
 #                                    a delivered final keeps the record, so this
 #                                    same check is the fail-loud session-start
 #                                    gate. Relay-enabled homes with no public
@@ -137,11 +137,6 @@ fm_pf_dir_has_entry() {
 
 fm_pf_has_registrations() { fm_pf_dir_has_entry "$(fm_pf_registry_dir "$1")"; }
 fm_pf_has_events()        { fm_pf_dir_has_entry "$(fm_pf_events_dir "$1")"; }
-# Every retained registration is an open public loop (owed or delivered). Same
-# O(1) directory presence check as fm_pf_has_registrations; the name is the
-# post-retention semantic so callers do not treat "a reply is owed" as the
-# only reason a record exists.
-fm_pf_has_open_loops()    { fm_pf_has_registrations "$1"; }
 
 # fm_pf_active <home> <state>: both gates, in order. The single predicate every
 # caller outside the relay path should use before doing any public-followup work.

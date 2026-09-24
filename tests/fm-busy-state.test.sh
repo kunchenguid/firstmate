@@ -355,25 +355,7 @@ test_cursor_ignores_rendered_and_native_signals() {
   pass "cursor classifies only from its transcript fold, never rendered text or native state"
 }
 
-# --- endpoint death and native fallbacks ----------------------------------------
-
-test_dead_endpoint_overrides() {
-  local state gen out
-  state=$(new_state_dir dead)
-  gen=$("$EV" arm "$state" t1)
-  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
-  fm_backend_target_exists() { return 1; }
-  out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
-  [ "$out" = "dead endpoint-gone" ] || fail "gone endpoint must classify dead, got '$out'"
-  # shellcheck disable=SC2329 # invoked indirectly through fm_busy_classify_live
-  fm_backend_target_exists() { return 0; }
-  out=$(fm_busy_classify_live tmux w1 claude t1 "$state")
-  [ "$out" = "busy fm-spawn" ] || fail "live endpoint must fall through to the record, got '$out'"
-  out=$(fm_busy_classify_live tmux '' claude t1 "$state")
-  [ "$out" = "unknown no-target" ] || fail "empty target must classify unknown, got '$out'"
-  unset -f fm_backend_target_exists
-  pass "endpoint death is the only process-level override and yields dead, never busy"
-}
+# --- native fallbacks -----------------------------------------------------------
 
 test_herdr_native_busy_only() {
   local state out
@@ -423,22 +405,6 @@ test_record_read_leaves_caller_shell_intact() {
   pass "record parsing never clobbers the caller's positional parameters, glob setting, or fields"
 }
 
-test_boolean_view_never_promotes_unknown() {
-  local state gen
-  state=$(new_state_dir boolean)
-  gen=$("$EV" arm "$state" t1)
-  fm_busy_is_busy tmux w1 claude t1 "$state" || fail "busy record must read busy"
-  "$EV" apply "$state" t1 idle --gen "$gen" --source claude-hook --event stop
-  if fm_busy_is_busy tmux w1 claude t1 "$state"; then
-    fail "idle record must not read busy"
-  fi
-  printf 'garbage\n' > "$state/t1.busy-state"
-  if fm_busy_is_busy tmux w1 claude t1 "$state"; then
-    fail "malformed record must not read busy"
-  fi
-  pass "the boolean view reports busy only on an exact busy verdict"
-}
-
 test_progress_is_generation_bound_and_not_semantic_state() {
   local state gen replacement before
   state=$(new_state_dir native-progress)
@@ -478,9 +444,7 @@ test_grok_regex_isolated
 test_codex_unverified_gate
 test_kimi_unverified_gate
 test_cursor_ignores_rendered_and_native_signals
-test_dead_endpoint_overrides
 test_herdr_native_busy_only
 test_record_read_leaves_caller_shell_intact
-test_boolean_view_never_promotes_unknown
 
 echo "all fm-busy-state tests passed"

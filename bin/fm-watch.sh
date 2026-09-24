@@ -1760,10 +1760,6 @@ run_check_process() {
   fi
 }
 
-run_check() {
-  ( run_check_process "$@" ) 2>/dev/null || true
-}
-
 FM_ACTIVE_CHECK_PID=
 FM_ACTIVE_CHECK_PGID=
 FM_CHECK_OUTPUT=

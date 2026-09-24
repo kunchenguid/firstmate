@@ -166,10 +166,10 @@ if [ -n "$tangle_branch" ]; then
   } >&2
 fi
 
-# Compute supervision need and watcher-beacon freshness via the shared
-# grace-based predicate (bin/fm-supervision-lib.sh), which owns what needs
+# Compute supervision need and the watcher-beacon age for banners via the
+# shared predicate (bin/fm-supervision-lib.sh), which owns what needs
 # supervision.
-fm_supervision_status "$STATE" "$GRACE"
+fm_supervision_status "$STATE"
 in_flight=$FM_SUP_IN_FLIGHT
 sources=$FM_SUP_SOURCES
 checks=$FM_SUP_CHECKS

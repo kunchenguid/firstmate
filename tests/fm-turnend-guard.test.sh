@@ -2,7 +2,7 @@
 # Behavior tests for the primary turn-end supervision guard (docs/turnend-guard.md).
 #
 # Two layers:
-#   PREDICATE  - bin/fm-supervision-lib.sh, the shared beacon/status computation
+#   PREDICATE  - bin/fm-supervision-lib.sh, the shared supervision-need computation
 #                used by fm-guard.sh and by the hook's banner details.
 #   HOOK       - bin/fm-turnend-guard.sh, the shared primary hook predicate that
 #                scopes in-flight work to the PRIMARY checkout only and requires
@@ -32,57 +32,13 @@ fm_fake_blind_ancestry "$BLIND_BIN"
 
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
-test_predicate_healthy_no_inflight() {
-  local state="$TMP_ROOT/pred-empty/state"
-  mkdir -p "$state"
-  if fm_supervision_unhealthy "$state" 300; then
-    fail "predicate reported unhealthy with zero in-flight tasks"
-  fi
-  [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "expected zero in-flight, got $FM_SUP_IN_FLIGHT"
-  pass "fm_supervision_unhealthy: false with no state/*.meta at all"
-}
-
-test_predicate_unhealthy_no_beacon() {
-  local state="$TMP_ROOT/pred-nobeat/state"
-  mkdir -p "$state"
-  : > "$state/task1.meta"
-  fm_supervision_unhealthy "$state" 300 || fail "predicate did not fire: in-flight task, beacon never seen"
-  [ "$FM_SUP_IN_FLIGHT" -eq 1 ] || fail "expected 1 in-flight, got $FM_SUP_IN_FLIGHT"
-  [ "$FM_SUP_WATCHER_FRESH" = false ] || fail "beacon absent must not read as fresh"
-  [ "$FM_SUP_BEACON_DESC" = never ] || fail "beacon description should be 'never', got $FM_SUP_BEACON_DESC"
-  pass "fm_supervision_unhealthy: true with in-flight task and no beacon ever"
-}
-
-test_predicate_unhealthy_stale_beacon() {
-  local state="$TMP_ROOT/pred-stale/state"
-  mkdir -p "$state"
-  : > "$state/task1.meta"
-  touch -t 202001010000 "$state/.last-watcher-beat"
-  fm_supervision_unhealthy "$state" 300 || fail "predicate did not fire: in-flight task, beacon far outside grace"
-  [ "$FM_SUP_WATCHER_FRESH" = false ] || fail "an ancient beacon must not read as fresh"
-  pass "fm_supervision_unhealthy: true with in-flight task and a beacon far outside the grace window"
-}
-
-test_predicate_healthy_fresh_beacon() {
-  local state="$TMP_ROOT/pred-fresh/state"
-  mkdir -p "$state"
-  : > "$state/task1.meta"
-  touch "$state/.last-watcher-beat"
-  if fm_supervision_unhealthy "$state" 300; then
-    fail "predicate fired despite a fresh beacon"
-  fi
-  [ "$FM_SUP_WATCHER_FRESH" = true ] || fail "a beacon touched just now must read as fresh"
-  pass "fm_supervision_unhealthy: false with in-flight task and a fresh beacon"
-}
-
 test_predicate_x_mode_needs_supervision() {
   local state="$TMP_ROOT/pred-x-mode/state"
   mkdir -p "$state"
   : > "$state/x-watch.check.sh"
-  fm_supervision_needed "$state" 300 || fail "X-mode relay poll did not register as supervision need"
+  fm_supervision_needed "$state" || fail "X-mode relay poll did not register as supervision need"
   [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "X-mode relay poll must not count as an in-flight task"
   [ "$FM_SUP_NEEDED" = true ] || fail "X-mode relay poll must set FM_SUP_NEEDED"
-  fm_supervision_unhealthy "$state" 300 || fail "X-mode relay poll with no beacon must be unhealthy"
   pass "fm_supervision_needed: X-mode relay poll needs supervision"
 }
 
@@ -90,10 +46,10 @@ test_predicate_source_needs_supervision() {
   local state="$TMP_ROOT/pred-source/state"
   mkdir -p "$state/procevent"
   : > "$state/procevent/source-only.source"
-  fm_supervision_unhealthy "$state" 300 || fail "registered source with no beacon must be unhealthy"
+  fm_supervision_needed "$state" || fail "a registered process-event source did not register as supervision need"
   [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a process-event source must not count as a task"
   [ "$FM_SUP_SOURCES" -eq 1 ] || fail "expected one registered process-event source"
-  pass "fm_supervision_unhealthy: source-only home needs supervision"
+  pass "fm_supervision_needed: source-only home needs supervision"
 }
 
 # Register a custom check the way an operator does, through the real
@@ -111,10 +67,9 @@ test_predicate_registered_check_needs_supervision() {
   local state="$TMP_ROOT/pred-check/state"
   mkdir -p "$state"
   register_custom_check "$state" issue-comments
-  fm_supervision_needed "$state" 300 || fail "a registered custom check did not register as supervision need"
+  fm_supervision_needed "$state" || fail "a registered custom check did not register as supervision need"
   [ "$FM_SUP_IN_FLIGHT" -eq 0 ] || fail "a registered custom check must not count as an in-flight task"
   [ "$FM_SUP_CHECKS" -eq 1 ] || fail "expected one registered custom check, got $FM_SUP_CHECKS"
-  fm_supervision_unhealthy "$state" 300 || fail "a registered custom check with no beacon must be unhealthy"
   pass "fm_supervision_needed: a registered custom check needs supervision with no task in flight"
 }
 
@@ -123,7 +78,7 @@ test_predicate_registered_check_survives_rebinding_drift() {
   mkdir -p "$state"
   register_custom_check "$state" issue-comments
   printf '#!/usr/bin/env bash\necho drifted\n' > "$state/issue-comments.check.sh"
-  fm_supervision_needed "$state" 300 \
+  fm_supervision_needed "$state" \
     || fail "an edited registered check must keep supervision on so the sweep can report the rejection"
   [ "$FM_SUP_CHECKS" -eq 1 ] || fail "expected the edited check to stay counted, got $FM_SUP_CHECKS"
   pass "fm_supervision_needed: a registered check whose bytes drifted still needs supervision"
@@ -134,7 +89,7 @@ test_predicate_unregistered_check_needs_nothing() {
   mkdir -p "$state"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$state/rogue.check.sh"
   chmod 700 "$state/rogue.check.sh"
-  if fm_supervision_needed "$state" 300; then
+  if fm_supervision_needed "$state"; then
     fail "a check with no trust binding must not arm supervision"
   fi
   [ "$FM_SUP_CHECKS" -eq 0 ] || fail "an unregistered check must not be counted, got $FM_SUP_CHECKS"
@@ -2153,10 +2108,6 @@ test_hook_no_afk_ignores_poll_derived_grace() {
   pass "fm-turnend-guard: with away mode off, the poll-derived grace never applies"
 }
 
-test_predicate_healthy_no_inflight
-test_predicate_unhealthy_no_beacon
-test_predicate_unhealthy_stale_beacon
-test_predicate_healthy_fresh_beacon
 test_predicate_x_mode_needs_supervision
 test_predicate_source_needs_supervision
 test_predicate_registered_check_needs_supervision

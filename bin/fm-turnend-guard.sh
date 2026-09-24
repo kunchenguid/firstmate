@@ -189,7 +189,7 @@ budget_reset() {
   fm_lock_release "$BUDGET_LOCK"
 }
 
-fm_supervision_status "$STATE" "$GRACE"
+fm_supervision_status "$STATE"
 if [ "$FM_SUP_NEEDED" = false ]; then
   [ -e "$FAILURE_NOTICE" ] || budget_reset
   exit 0

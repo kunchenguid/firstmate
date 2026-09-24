@@ -144,7 +144,7 @@ fi
 
 # --- need: whatever bin/fm-supervision-lib.sh counts as supervision need ------
 need_supervision() {
-  fm_supervision_needed "$STATE" "$GRACE"
+  fm_supervision_needed "$STATE"
 }
 need_supervision || exit 0
 

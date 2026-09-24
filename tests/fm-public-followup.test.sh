@@ -1301,7 +1301,7 @@ SH
   # New fields and the open-loop gate must not create work in a disabled home.
   # shellcheck disable=SC1091
   . "$ROOT/bin/fm-public-followup-lib.sh"
-  fm_pf_has_open_loops "$home/state" \
+  fm_pf_has_registrations "$home/state" \
     && fail "a relay-disabled home must not grow an open-loop registry"
   fm_pf_has_delivered_open_loops "$home/state" \
     && fail "a relay-disabled home must not grow a delivered open-loop registry"
