@@ -47,6 +47,7 @@ lock_is_in_ancestry() {
   # Git Bash/MSYS cannot answer `ps -o` or `kill -0` for a Win32-pid lock
   # owner, so the same shared table fm-harness.sh uses replays the ancestry
   # question against Win32 parent ids; it fails closed when absent.
+  fm_win32_proc_load || true
   for winpid in $(fm_win32_ancestor_winpids); do
     [ "$winpid" = "$lock_pid" ] && return 0
   done

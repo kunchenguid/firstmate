@@ -43,6 +43,7 @@ esac
 SH
 cat > "$fakebin/powershell.exe" <<'SH'
 #!/usr/bin/env bash
+printf '1\n' >> "${FM_TEST_PS_CALLS:?}"
 printf '%s\n' "$FM_TEST_WIN32_TABLE"
 SH
 chmod +x "$fakebin/ps" "$fakebin/powershell.exe"
@@ -50,10 +51,12 @@ win32_table=$(printf '%s\t%s\t%s\t%s\t%s\n' \
   500 600 devin-helper.exe 'C:\Tmp\devin-helper.exe' 'devin-helper.exe -c x' \
   600 700 bash.exe 'C:\Program Files\Git\bin\bash.exe' 'bash.exe' \
   700 0 explorer.exe 'C:\Windows\explorer.exe' explorer.exe)
+ps_calls="$TMP_ROOT/devin-helper-ps-calls"
 # shellcheck disable=SC2016
-out=$(FM_TEST_OWN_WINPID=500 FM_TEST_WIN32_TABLE="$win32_table" PATH="$fakebin:$PATH" \
+out=$(FM_TEST_PS_CALLS="$ps_calls" FM_TEST_OWN_WINPID=500 FM_TEST_WIN32_TABLE="$win32_table" PATH="$fakebin:$PATH" \
   "$TMP_ROOT/names/devin-helper" -c 'export FM_TEST_CYGPID=$$; "$1" ancestry "$$"; :' _ "$HARNESS")
 [ "$out" != 'comm devin' ] || fail "unrelated devin-helper claimed the adapter"
+[ "$(wc -l < "$ps_calls" 2>/dev/null | tr -d ' ')" = 1 ] || fail "the Win32 ancestry fallback must load the process table exactly once"
 [ "$(fm_agent_process_classify_name /opt/bin/devin)" = agent ] || fail "liveness lost Devin"
 [ "$(fm_agent_process_classify_name devin-helper)" = other ] || fail "liveness claims unrelated executable"
 pass "Devin native identity; anchored liveness"

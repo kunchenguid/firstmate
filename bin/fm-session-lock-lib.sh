@@ -114,6 +114,7 @@ fm_harness_process_matches() {  # <comm> <args>
 # walk only applies the contiguous-run rule per hop.
 _fm_harness_ancestry_pids_win32() {
   local winpid ppid comm args extending=0 printed=0
+  fm_win32_proc_load || return 1
   for winpid in $(fm_win32_ancestor_winpids); do
     fm_win32_proc_get "$winpid" ppid comm args || break
     if fm_harness_process_matches "$comm" "$args"; then

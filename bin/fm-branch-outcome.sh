@@ -421,6 +421,7 @@ held_lock_owned_by_ancestor() {
   # Win32 parents, and the recorded owner pid is a Win32 id there; the shared
   # table fm-harness.sh uses replays the same ancestry question and fails
   # closed when it is absent.
+  fm_win32_proc_load || true
   for winpid in $(fm_win32_ancestor_winpids "$PPID"); do
     [ "$winpid" = "$owner_pid" ] && return 0
   done

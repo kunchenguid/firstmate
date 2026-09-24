@@ -178,6 +178,7 @@ ancestry_names_omp() {
 # the POSIX walk allows.
 _fm_ancestry_names_omp_win32() {
   local winpid ppid comm args hops=0
+  fm_win32_proc_load || return 1
   for winpid in $(fm_win32_ancestor_winpids); do
     [ "$hops" -lt 8 ] || break
     hops=$((hops + 1))
@@ -315,6 +316,7 @@ harness_ancestry() {  # [<pid>]
 # pid spaces, so this walk only applies the shared verdict per hop.
 _fm_harness_ancestry_win32() {  # [<pid>]
   local winpid ppid comm args verdict
+  fm_win32_proc_load || return 0
   for winpid in $(fm_win32_ancestor_winpids ${1:+"$1"}); do
     fm_win32_proc_get "$winpid" ppid comm args || break
     verdict=$(harness_verdict_for_fields "$comm" "$args" "${args%% *}")
@@ -342,7 +344,7 @@ process_descent_path() {  # <root> [<eligible-leaf-pid>...]
     # Same Win32 gap as harness_ancestry: the table is keyed by Win32 pid, so
     # a Cygwin <root> and each caller-given eligible leaf are translated
     # through ps -l exactly like an explicit ancestry pid is above.
-    pairs=$(fm_win32_proc_pairs 2>/dev/null) || { printf '%s\n' "$root"; return 0; }
+    { fm_win32_proc_load && pairs=$(fm_win32_proc_pairs 2>/dev/null); } || { printf '%s\n' "$root"; return 0; }
     win32_pairs=1
     winpid=$(ps -l -p "$root" 2>/dev/null | awk 'NR==2 {print $4}')
     case "$winpid" in ''|*[!0-9]*) ;; *) root=$winpid ;; esac
