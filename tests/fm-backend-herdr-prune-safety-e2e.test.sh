@@ -48,6 +48,14 @@ cleanup_all() {
 trap cleanup_all EXIT
 fm_herdr_lab_prepare "$SESSION" || fail "could not prepare isolated Herdr lab session"
 
+# The home under test is a scratch primary home, never the ambient checkout:
+# FM_HOME otherwise defaults to FM_ROOT (bin/fm-backend.sh), so the captain's
+# own config/herdr-workspace-label or .fm-secondmate-home would retarget every
+# workspace label this suite asserts against.
+PRIMARY_HOME="$SCRATCH/primary-home"
+mkdir -p "$PRIMARY_HOME"
+export FM_HOME="$PRIMARY_HOME"
+
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
 fm_backend_source herdr || fail "fm_backend_source herdr failed"
