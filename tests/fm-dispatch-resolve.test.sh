@@ -752,6 +752,14 @@ assert_equals 'opencode-go' "$(jq -r '.provider' <<<"$TEXT_CATALOG_OUT")" "OpenC
 ln -s "$FAKEBIN/pi" "$FAKEBIN/pi-signed"
 SIGNED_CATALOG_OUT=$(PATH="$FAKEBIN:$BASE_PATH" FM_MODEL_CATALOG_FIXTURE_DIR= "$ROOT/bin/fm-model-catalog.sh" pi-signed)
 assert_equals 'pi-signed' "$(jq -r '.harness' <<<"$SIGNED_CATALOG_OUT")" "pi-signed discovery uses its selected harness identity"
+cat > "$FAKEBIN/pi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'No models available. Use /login to log into a provider via OAuth or API key.'
+SH
+chmod +x "$FAKEBIN/pi"
+NO_MODELS_CATALOG_OUT=$(PATH="$FAKEBIN:$BASE_PATH" FM_MODEL_CATALOG_FIXTURE_DIR= "$ROOT/bin/fm-model-catalog.sh" pi)
+assert_equals '0' "$?" "Pi no-model output is a successful empty catalog"
+assert_equals '0' "$(jq -s 'map(select(.status == "ok")) | length' <<<"$NO_MODELS_CATALOG_OUT")" "Pi no-model output emits no fabricated candidate"
 cat > "$FAKEBIN/opencode" <<'SH'
 #!/usr/bin/env bash
 sleep 5

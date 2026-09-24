@@ -279,7 +279,7 @@ with open(path, encoding='utf-8', errors='replace') as fh:
         provider, model = cols[0], cols[1]
         if '/' in provider and '/' not in model:
             continue
-        if not re.match(r'^[A-Za-z0-9][A-Za-z0-9_.-]*$', provider):
+        if not re.match(r'^[A-Za-z0-9][A-Za-z0-9_.-]*$', provider) or model.lower() in {'model', 'models'}:
             continue
         raw_provider = provider
         normalized = normalized_provider(raw_provider)
