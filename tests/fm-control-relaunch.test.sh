@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-tasks-axi-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -759,6 +761,58 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop() {
   pass "native Ultra relaunch preserves its profile and rejects an unsupported model before stopping"
 }
 
+# A fake claude that answers `claude auth status` the way the real runner
+# does: signed in only when the selected config root holds a stored login.
+make_claude_auth_stub() {  # <case-dir>
+  cat > "$1/fakebin/claude" <<'SH'
+#!/usr/bin/env bash
+[ "${1:-}" = auth ] && [ "${2:-}" = status ] || exit 0
+[ -f "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json" ]
+SH
+  chmod +x "$1/fakebin/claude"
+}
+
+test_signed_out_worker_account_pin_refuses_before_stop() {
+  local dir out rc id=rl-acct-out
+  dir=$(new_case acct-out "$id")
+  add_ship_task "$dir" "$id" claude
+  make_claude_auth_stub "$dir"
+  mkdir -p "$dir/home/config" "$dir/work"
+  printf '%s\n' "$dir/work" > "$dir/home/config/claude-account"
+  cp "$dir/home/state/$id.meta" "$dir/meta-before"
+  out=$(run_control "$dir" "$id" relaunch --note "account signed out"); rc=$?
+  expect_code 1 "$rc" "a relaunch under a signed-out account pin must refuse"
+  assert_contains "$out" "config/claude-account pins Claude workers to $dir/work, which is not signed in" \
+    "the refusal should name the pin and the signed-out root"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a signed-out pin must refuse before the running agent stops"
+  [ ! -s "$dir/fake/literal" ] || fail "a signed-out pin must refuse before any lifecycle input is sent"
+  cmp -s "$dir/meta-before" "$dir/home/state/$id.meta" || fail "a refused relaunch must leave the task record untouched"
+  pass "fm-control relaunch: a signed-out worker account pin refuses before the old agent stops"
+}
+
+test_worker_account_pin_follows_the_relaunch() {
+  local dir out rc id=rl-acct
+  dir=$(new_case acct "$id")
+  add_ship_task "$dir" "$id" claude
+  make_claude_auth_stub "$dir"
+  mkdir -p "$dir/home/config" "$dir/work"
+  : > "$dir/work/.credentials.json"
+  printf '%s\n' "$dir/work" > "$dir/home/config/claude-account"
+  out=$(run_control "$dir" "$id" relaunch --note "pinned account"); rc=$?
+  expect_code 0 "$rc" "a relaunch under a signed-in account pin should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" "$id" account)" = "$dir/work" ] || fail "the relaunched record should carry the pinned account"
+  assert_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR='$dir/work'" \
+    "the replacement should launch under the pinned root"
+  rm "$dir/home/config/claude-account"
+  : > "$dir/fake/literal"
+  out=$(run_control "$dir" "$id" relaunch --note "pin removed"); rc=$?
+  expect_code 0 "$rc" "a relaunch after the pin is removed should succeed"$'\n'"$out"
+  assert_no_grep "account=" "$dir/home/state/$id.meta" "a relaunch without a pin must drop the previous account from the record"
+  assert_not_contains "$(cat "$dir/fake/literal")" "CLAUDE_CONFIG_DIR=" \
+    "an unpinned replacement must launch exactly as before"
+  pass "fm-control relaunch: the replacement follows the home's current worker account pin"
+}
+
 test_explicit_model_wins_over_the_recorded_one() {
   local dir out rc
   dir=$(new_case explicit rl7)
@@ -1023,6 +1077,25 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
     || fail "fm-spawn --relaunch without --harness must reuse the recorded harness, got '$(meta_field "$dir" rl21 harness)'"
   assert_contains "$out" "spawned rl21 harness=claude" "the launch should report the recorded harness"
   pass "fm-spawn --relaunch: with no explicit harness it reuses the task's recorded one, never the crew default"
+}
+
+# A promoted scout records kind=ship and a custom ship branch in its meta, but
+# its brief is the scout scaffold: it never gained a Ship branch line, and a
+# relaunch cannot regenerate the brief (--branch-prefix is refused there). The
+# recorded branch is authoritative, so the relaunch must proceed on it.
+test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch() {
+  local dir out
+  dir=$(new_case promotebranch rl42)
+  add_ship_task "$dir" rl42 claude
+  printf 'branch=fix/rl42\n' >> "$dir/home/state/rl42.meta"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl42 --relaunch)
+  assert_contains "$out" "spawned rl42" "the relaunch should complete on the recorded branch"
+  assert_contains "$out" "records no ship branch" "the brief gap should be reported, not silent"
+  assert_contains "$out" "recorded branch fix/rl42" "the relaunch should name the branch it adopted"
+  [ "$(meta_field "$dir" rl42 branch)" = "fix/rl42" ] \
+    || fail "the recorded branch must survive the relaunch"
+  pass "fm-spawn --relaunch: a promoted scout with a recorded custom branch relaunches on it instead of being refused"
 }
 
 test_promoted_scout_relaunch_receives_the_current_delivery_contract() {
@@ -2223,6 +2296,10 @@ test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
     pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
     return 0
   }
+  fm_tasks_axi_compatible || {
+    pass "skipped: installed tasks-axi predates ${FM_TASKS_AXI_MIN}, so dispatch refuses automatic backlog transitions"
+    return 0
+  }
   dir=$(new_case reverify rl40)
   add_ship_task "$dir" rl40 claude
   seed_backlog "$dir" rl40 in_flight
@@ -2239,6 +2316,10 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   local dir out rc=0
   command -v tasks-axi >/dev/null 2>&1 || {
     pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  fm_tasks_axi_compatible || {
+    pass "skipped: installed tasks-axi predates ${FM_TASKS_AXI_MIN}, so dispatch refuses automatic backlog transitions"
     return 0
   }
   dir=$(new_case drifted rl41)
@@ -2267,6 +2348,8 @@ test_harness_switch_resolves_a_prefixed_recorded_harness
 test_prefixed_recorded_harness_requires_explicit_replacement
 test_same_harness_relaunch_keeps_the_profile_axes
 test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
+test_signed_out_worker_account_pin_refuses_before_stop
+test_worker_account_pin_follows_the_relaunch
 test_explicit_model_wins_over_the_recorded_one
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
@@ -2278,6 +2361,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_of_promoted_scout_uses_the_recorded_branch
 test_promoted_scout_relaunch_receives_the_current_delivery_contract
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch

@@ -85,7 +85,12 @@ fm_pid_identity() {
   # Pin LC_ALL=C so lstart's date format is locale-invariant: the identity is
   # written under one locale but re-read under the machine's ambient locale, which
   # would otherwise mismatch on a non-C locale (e.g. ko_KR) and reject a live watcher.
-  out=$(LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
+  # Pin COLUMNS wide so the command column is never cut to the ambient terminal
+  # width: the identity is written from a wide shell but re-read inside a
+  # narrow-COLUMNS hook, where a truncated command would likewise reject a live
+  # watcher (issue #799). This mirrors fm_pending_reply_pid_identity, which pins the
+  # same width for the same reason.
+  out=$(COLUMNS=10000 LC_ALL=C ps -p "$pid" -o lstart= -o command= 2>/dev/null) || return 1
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | sed 's/^[[:space:]]*//'
 }
@@ -1904,6 +1909,22 @@ fm_wake_secondmate_progress_marker_write() { # <task> <observed-at> <oldest-row-
   fi
 }
 
+fm_wake_secondmate_ring_marker_write() { # <task> <row-key>
+  local task=$1 row_key=$2 marker tmp
+  case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  case "$row_key" in ''|*[!0-9-]*) return 1 ;; esac
+  marker="$STATE/.secondmate-wake-ring-$task"
+  if [ -e "$marker" ] || [ -L "$marker" ]; then
+    [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  fi
+  tmp=$(mktemp "$STATE/.secondmate-wake-ring.XXXXXX") || return 1
+  if ! printf '%s\n' "$row_key" > "$tmp" || ! chmod 0600 "$tmp" \
+    || ! _fm_atomic_replace "$tmp" "$marker"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
 fm_wake_secondmate_stall_marker_write() { # <task> <row-key>
   local task=$1 row_key=$2 marker tmp
   case "$task" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
@@ -1977,6 +1998,34 @@ fm_wake_restore_queue() {
   else
     mv "$drained" "$FM_WAKE_QUEUE"
   fi
+}
+
+# fm_wake_queue_prune_task <state> <task-id> [target]
+# Prune pending durable wakes for <task-id> and its recorded <target> from
+# the wake queue. Removes stale wakes for <target>, signal wakes for the task's
+# status or turn-ended files, and task-specific check wakes.
+fm_wake_queue_prune_task() {  # <state> <task-id> [target]
+  local state=$1 task=$2 target=${3:-}
+  local queue="$state/.wake-queue" lock="$state/.wake-queue.lock" tmp
+  [ -f "$queue" ] || return 0
+  [ -s "$queue" ] || return 0
+  fm_lock_acquire_wait "$lock" || return 1
+  tmp=$(mktemp "$state/.wake-queue.prune.XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  chmod 0600 "$tmp" 2>/dev/null || true
+  awk -F '\t' -v task="$task" -v target="$target" -v state="$state" '
+    NF >= 5 {
+      if ($3 == "stale" && target != "" && $4 == target) next
+      if ($3 == "signal" && ($4 == task || $4 == task ".status" || $4 == task ".turn-ended" || $4 == state "/" task ".status" || $4 == state "/" task ".turn-ended")) next
+      if ($3 == "check" && $4 == state "/" task ".check.sh") next
+    }
+    { print }
+  ' "$queue" > "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
+  if ! _fm_atomic_replace "$tmp" "$queue"; then
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
 }
 
 fm_wake_print_deduped() {
@@ -2079,6 +2128,18 @@ fm_wake_actor_pending_count() {  # <actor> [<rows-file> <owner-file>]
   # reaches END after failing to open the queue would otherwise report 0 rows.
   case "$count" in ''|*[!0-9]*) count=1 ;; esac
   printf '%s\n' "$count"
+}
+
+# Print which of the given sequence numbers are still queued, one per line.
+# Read without the queue lock, like the count above, so it answers for a
+# caller that asks only after the actor that could consume those rows is done.
+# Fails when the queue exists but cannot be read.
+fm_wake_rows_queued() {  # <seq>...
+  [ -f "$FM_WAKE_QUEUE" ] || return 0
+  awk -F '\t' -v seqs="$*" '
+    BEGIN { n = split(seqs, list, " "); for (i = 1; i <= n; i++) want[list[i]] = 1 }
+    NF >= 5 && $2 ~ /^[0-9]+$/ && ($2 in want) { print $2 }
+  ' "$FM_WAKE_QUEUE"
 }
 
 # --- signal announcement signatures -----------------------------------------

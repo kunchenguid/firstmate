@@ -593,10 +593,13 @@ Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@earendil-works/pi-server' im
 Installing `@earendil-works/pi-server@0.85.0` beside it restores the identical Calm rendering, and 0.85.1 no longer reaches that import.
 That packaging gap is a separate installation defect, not the renderer change above: it stops Pi from loading at all rather than altering any rendered row.
 
-The `could not render calm-mode HTML export DOM` failure was a headless-Chrome start-up flake, not a change in Pi's export shape.
+The `could not render calm-mode HTML export DOM` failure was a headless-Chrome start-up failure, not a change in Pi's export shape.
 It appeared in exactly one of the thirteen most recent CI runs, and that run installed the same Pi 0.85.1 as the runs immediately before and after it, which both passed.
 The render step is a vendor-tool step: the assertions that follow it are what protect the Calm conversation boundary.
-It now retries a bounded number of Chrome start-ups on a fresh profile and, when every attempt fails, reports the Chrome binary, its version, the installed Pi version, each attempt's exit status, whether that attempt was timed out, and Chrome's own stderr, so the next occurrence is diagnosable from the CI log alone.
+The failure later reproduced deterministically against Google Chrome for Testing 151.0.7922.34, whose first-run initialization never completes when Chrome is pointed at a brand-new `--user-data-dir`: the browser and its renderers start, but `--dump-dom` never returns, so every bounded attempt times out with no bytes.
+The render step now gives each attempt a private `HOME` (with `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` beneath it) instead of an explicit `--user-data-dir` on Linux and every other non-Darwin system, because Chrome creates and initializes its own profile there and renders the same document in about a second, while removing that `HOME` still gives every attempt a private profile.
+macOS derives its profile directory from `~/Library` regardless of `HOME`, so Darwin keeps the explicit `--user-data-dir` that was this file's original isolation.
+It still retries a bounded number of Chrome start-ups and, when every attempt fails, reports the Chrome binary, its version, the installed Pi version, each attempt's exit status, whether that attempt was timed out, and Chrome's own stderr, so the next occurrence is diagnosable from the CI log alone.
 `test_export_dom_render_guard` in the same script pins that behavior with real processes and no browser.
 
 The complete Calm suite against installed Pi 0.85.1, with `FM_CHROME_BIN` naming the Chrome the render step used:

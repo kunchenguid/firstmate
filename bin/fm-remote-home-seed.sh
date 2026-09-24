@@ -17,7 +17,8 @@
 # this home already has projects/<project>, whose origin is then read instead.
 # bin/fm-project-origin-lib.sh owns which URLs are accepted, and this home's
 # data/projects.md still owns the project's registered delivery mode, so an
-# unregistered or local-only project is refused rather than provisioned.
+# unregistered or local-only project, or one whose registry entry
+# bin/fm-project-mode.sh refuses, is refused rather than provisioned.
 # Seeding writes nothing under projects/ and needs no fleet sync first.
 #
 # Known provisioning failure rolls the registry back. SSH status 255 preserves
@@ -171,7 +172,8 @@ PROJECT_INDEX=0
 for project in "${PROJECT_NAMES[@]+"${PROJECT_NAMES[@]}"}"; do
   ORIGIN=${PROJECT_ORIGINS[$PROJECT_INDEX]}
   PROJECT_INDEX=$((PROJECT_INDEX + 1))
-  MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project")
+  MODE_LINE=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-project-mode.sh" "$project") ||
+    die "project $project does not resolve to a delivery posture (see the refusal above)"
   read -r MODE _ <<EOF
 $MODE_LINE
 EOF
