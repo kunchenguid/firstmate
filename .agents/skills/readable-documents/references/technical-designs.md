@@ -14,6 +14,8 @@ Retain required supporting evidence privately when it does not belong in the mai
 Write product and requirement sections for a reader without prior subsystem context.
 Explain business intent, current and target user-visible behavior, important variants, unchanged behavior, and non-goals before repository paths, symbols, schemas, persistence mechanics, or internal call order.
 Place implementation detail under the template's code-level section in review-sized units grouped by semantic owner or logical flow.
+For a Feishu technical design, write concise Chinese unless the requested review audience requires another language.
+Use native Feishu whiteboards for retained diagrams rather than inline diagram text, and follow the parent skill's rendered-artifact verification.
 
 ## Build the evidence pack before prose
 
@@ -96,6 +98,7 @@ Do not use source grep, source snapshots, or AST shape as a substitute for behav
 
 Write PPE scenarios as reproducible decisions when the accepted scope requires them.
 Name preconditions, input, action, observable evidence, forbidden side effects, pass criteria, cleanup owner, and recovery path.
+Use disposable external resources when a scenario mutates another system, and exclude credentials and high-cardinality business payloads from monitoring.
 Separate automation claims from claims requiring PPE, production observation, or another owner.
 Derive deployment order, rollback constraints, and monitoring from the same invariants and data-compatibility boundaries as the design.
 
