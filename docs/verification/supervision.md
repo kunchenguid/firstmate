@@ -512,7 +512,8 @@ grok 0.2.103 (89c3d36fb6f1) [stable]
 | Grok | `FM_GROK_LIVE_E2E=1 tests/fm-grok-continuity-live-e2e.test.sh` | Native task completion surfaced the actionable close and the cycle ledger recorded `reason=actionable-signal`. |
 
 On 2026-09-24 with codex-cli 0.154.0, `bash tests/fm-codex-idle-continuity.test.sh` kept a single-shot source at one run and `OWNER none` while nothing was supervising, then recorded a second run and a queued actionable close only after an allowing stop with a live owner pid.
-`FM_CODEX_LIVE_E2E=1 tests/fm-codex-idle-continuity-live-e2e.test.sh` printed `ok - codex-cli 0.154.0 Stop re-armed an ownerless source across the idle boundary`.
+`FM_CODEX_LIVE_E2E=1 tests/fm-codex-idle-continuity-live-e2e.test.sh` ran an interactive codex in an isolated tmux server with a throwaway `CODEX_HOME` and printed `ok - codex-cli 0.154.0 Stop re-armed an ownerless source while the interactive session idled`, with the idle supervisor's recorded owner equal to that codex pid.
+A one-shot `codex exec` cannot show this, because the supervisor exits with its Codex owner and `codex exec` exits as soon as the Stop hook returns.
 Codex's hook documentation for that version parses `async` and does not run asynchronous command hooks, so the supervisor is detached with a perl fork and `setsid`, which also runs on macOS where util-linux `setsid` is absent, and the Stop hook returns.
 `bash tests/fm-codex-idle-continuity.test.sh` also ran three turns in a row: each `bin/fm-watch-checkpoint.sh` stopped the idle supervisor and ended as a quiet bounded checkpoint instead of `watcher: already running`, and each following allowing stop started a fresh supervisor that owned the watcher again.
 A supervisor whose arm attached to a checkpoint's watcher re-armed its own watcher after that checkpoint ended.
