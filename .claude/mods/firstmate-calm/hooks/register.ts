@@ -9,21 +9,24 @@
 // captain-facing contract and docs/calm-mode-feasibility.md the version-scoped evidence.
 //
 // This file is the only place the engine interface `$` is touched: the geometry lives
-// in ../lib/fm-calm-working-ship-sprite.ts (shared with the Pi extension), the Raster
-// packing in ../lib/fm-calm-ship-raster.ts, and every visibility decision in
+// in ../lib/fm-calm-working-ship-sprite.ts and ../lib/fm-calm-working-spaceship-sprite.ts
+// (both shared with the Pi extension), the Raster packing in ../lib/fm-calm-ship-raster.ts,
+// and every visibility decision in
 // ../lib/fm-calm-presentation.ts, so the policy is testable under Node and the engine
 // glue under `claude plugin test`. Nothing here rewrites a message: `ui.render` changes
 // drawings and leaves the stored transcript, model context, and session storage alone.
 //
 // Presentation while Calm is on, sharing Pi Calm's goals where the mods API allows:
-// the stock working row (`Spinner`) becomes the two-row sailboat, repainted through
-// `$.ui.blit` on the sprite's own tick; `ToolUse`, `ToolResult`, and `ToolGroup` rows
+// the stock working row (`Spinner`) becomes the two-row sailboat, or, when the
+// config/calm-ship selection names `spaceship`, the shared spaceship sprite, each
+// repainted through `$.ui.blit` on the sprite's own tick; `ToolUse`, `ToolResult`, and
+// `ToolGroup` rows
 // draw as zero-height boxes; a `UserMessage` whose text the canonical operational-input
 // classifier recognizes draws as zero height; an `AssistantMessage` block recorded as a
 // mid-turn working note draws as zero height. Calm off returns every drawing to the
 // engine. A toggle invalidates every hooked drawing, so rows already on screen redraw.
-// The boat is painted in Claude Code's own theme colors: the family is read from the
-// `theme` setting at load and re-read when a `config.set` changes it.
+// The working sprite is painted in Claude Code's own theme colors: the family is read
+// from the `theme` setting at load and re-read when a `config.set` changes it.
 //
 // Loading is lazy and cached within a session: a resumed transcript or a hot reload can
 // draw restored rows before `session.start`, so every hook awaits that session's load of
@@ -33,18 +36,29 @@ import type { EngineInterface, Register, RenderElement, RenderInput } from "clau
 import {
   CALM_WORKING_SHIP_TICK_MS,
   createCalmWorkingShipSprite,
+  type CalmWorkingShipSprite,
 } from "../lib/fm-calm-working-ship-sprite.ts";
+import {
+  createCalmWorkingSpaceshipSprite,
+  type CalmWorkingSpaceshipSprite,
+} from "../lib/fm-calm-working-spaceship-sprite.ts";
 import {
   CALM_SHIP_RASTER_KEY,
   CALM_SHIP_RASTER_PALETTES,
+  CALM_SPACESHIP_RASTER_KEY,
+  CALM_SPACESHIP_RASTER_PALETTES,
   calmShipPaletteFamily,
   calmShipRasterColumns,
   packCalmShipRasterCells,
-  type CalmShipRasterPalette,
+  packCalmSpaceshipRasterCells,
+  type CalmShipPaletteFamily,
+  type CalmShipRasterCells,
 } from "../lib/fm-calm-ship-raster.ts";
 import {
   calmPreferencePath,
+  calmShipPreferencePath,
   parseCalmPreference,
+  parseCalmShipSelection,
   classifyRestoredTranscript,
   serializeCalmPreference,
   stepTextIsWorkingNote,
@@ -64,11 +78,40 @@ let loading: Promise<void> | undefined;
 let ticker: { cancel(): void } | undefined;
 const workingNotes = new Set<string>();
 const finalReplies = new Set<string>();
-const sprite = createCalmWorkingShipSprite();
-let palette: CalmShipRasterPalette = CALM_SHIP_RASTER_PALETTES.light;
-// Every Spinner site currently drawing the boat, by its requestId, with the mounted
-// Raster size a blit must repeat exactly.
+// The selected working sprite and its theme family, read from config/calm and
+// config/calm-ship at load. A selection switch swaps the sprite (a fresh pose, the
+// same reset Pi does) and forgets every mounted site, so no stale blit key survives;
+// the next Spinner drawing re-registers them.
+type WorkingSprite =
+  | { kind: "boat"; sprite: CalmWorkingShipSprite }
+  | { kind: "spaceship"; sprite: CalmWorkingSpaceshipSprite };
+let ship: WorkingSprite = { kind: "boat", sprite: createCalmWorkingShipSprite() };
+let paletteFamily: CalmShipPaletteFamily = "light";
+// Every Spinner site currently drawing the working sprite, by its requestId, with the
+// mounted Raster size a blit must repeat exactly.
 const sites = new Map<string, { columns: number; rows: number }>();
+
+/** The Raster key the selected sprite paints under. */
+function rasterKey(): string {
+  return ship.kind === "spaceship" ? CALM_SPACESHIP_RASTER_KEY : CALM_SHIP_RASTER_KEY;
+}
+
+/** One packed Raster frame of the selected sprite in the current theme family. */
+function paintSite(columns: number): CalmShipRasterCells {
+  return ship.kind === "spaceship"
+    ? packCalmSpaceshipRasterCells(ship.sprite.frame(columns), columns, CALM_SPACESHIP_RASTER_PALETTES[paletteFamily])
+    : packCalmShipRasterCells(ship.sprite.frame(columns), columns, CALM_SHIP_RASTER_PALETTES[paletteFamily]);
+}
+
+/** Swap the working sprite when the selection changed, forgetting every mounted site. */
+function setShipSelection(selection: "boat" | "spaceship"): void {
+  if (selection === ship.kind) return;
+  ship =
+    selection === "spaceship"
+      ? { kind: "spaceship", sprite: createCalmWorkingSpaceshipSprite() }
+      : { kind: "boat", sprite: createCalmWorkingShipSprite() };
+  sites.clear();
+}
 
 function isActivated($: EngineInterface): Promise<boolean> {
   if (activation === undefined) {
@@ -98,16 +141,15 @@ async function readTheme($: EngineInterface): Promise<unknown> {
 }
 
 async function load($: EngineInterface): Promise<void> {
-  preferencePath = calmPreferencePath(
-    {
-      FM_HOME: await $.env.get("FM_HOME"),
-      FM_ROOT_OVERRIDE: await $.env.get("FM_ROOT_OVERRIDE"),
-      FM_CONFIG_OVERRIDE: await $.env.get("FM_CONFIG_OVERRIDE"),
-    },
-    $.plugin.root,
-  );
+  const home = {
+    FM_HOME: await $.env.get("FM_HOME"),
+    FM_ROOT_OVERRIDE: await $.env.get("FM_ROOT_OVERRIDE"),
+    FM_CONFIG_OVERRIDE: await $.env.get("FM_CONFIG_OVERRIDE"),
+  };
+  preferencePath = calmPreferencePath(home, $.plugin.root);
   calm = parseCalmPreference(await readPreference($, preferencePath));
-  palette = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(await readTheme($))];
+  setShipSelection(parseCalmShipSelection(await readPreference($, calmShipPreferencePath(home, $.plugin.root))));
+  paletteFamily = calmShipPaletteFamily(await readTheme($));
   try {
     const restored = classifyRestoredTranscript(await $.session.messages());
     for (const note of restored.workingNotes) workingNotes.add(note);
@@ -136,20 +178,21 @@ async function resetSession($: EngineInterface): Promise<void> {
   workingNotes.clear();
   finalReplies.clear();
   sites.clear();
-  sprite.reset();
-  palette = CALM_SHIP_RASTER_PALETTES.light;
+  ship.sprite.reset();
+  paletteFamily = "light";
   await ensureLoaded($);
 }
 
-/** One scheduler tick: advance the sprite, then repaint every mounted boat in place. */
+/** One scheduler tick: advance the selected sprite, then repaint every mounted site in place. */
 async function repaintShip($: EngineInterface): Promise<void> {
   if (!calm || sites.size === 0) return;
-  sprite.tick();
+  ship.sprite.tick();
+  const key = rasterKey();
   for (const [requestId, site] of sites) {
-    const packed = packCalmShipRasterCells(sprite.frame(site.columns), site.columns, palette);
+    const packed = paintSite(site.columns);
     const result = await $.ui.blit({
       requestId,
-      key: CALM_SHIP_RASTER_KEY,
+      key,
       cells: packed.cells,
       columns: site.columns,
       rows: site.rows,
@@ -203,9 +246,9 @@ export const register: Register = (on) => {
     if (!(await isActivated($))) return next(e);
     const result = await next(e);
     if (result.deny === undefined) {
-      const chosen = CALM_SHIP_RASTER_PALETTES[calmShipPaletteFamily(result.value)];
-      if (chosen !== palette) {
-        palette = chosen;
+      const family = calmShipPaletteFamily(result.value);
+      if (family !== paletteFamily) {
+        paletteFamily = family;
         if (calm) $.ui.invalidate("ui.render");
       }
     }
@@ -257,12 +300,15 @@ export const register: Register = (on) => {
       return next(e);
     }
     const columns = calmShipRasterColumns(e.viewport?.columns);
-    const packed = packCalmShipRasterCells(sprite.frame(columns), columns, palette);
+    // A Spinner drawing exists only while a run is under way, so it is the same
+    // run-visibility signal that drives the spaceship's mode on Pi.
+    if (ship.kind === "spaceship") ship.sprite.setWorking(true);
+    const packed = paintSite(columns);
     sites.set(e.requestId, { columns, rows: packed.rows });
     const { Box, Raster } = $.ui.resolve(e);
     return Box({
       flexDirection: "column",
-      children: Raster({ key: CALM_SHIP_RASTER_KEY, columns, rows: packed.rows, cells: packed.cells }),
+      children: Raster({ key: rasterKey(), columns, rows: packed.rows, cells: packed.cells }),
     });
   });
 

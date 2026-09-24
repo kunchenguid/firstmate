@@ -418,8 +418,184 @@ JS
   pass "the mod's operational-input classifier agrees with bin/fm-operational-input.sh on all $count corpus cases: every current kind the owner encodes, every legacy shape, and every near miss"
 }
 
+test_shared_spaceship_and_pi_rendering() {
+  local out
+  cat >"$TMP_ROOT/spaceship-sprite.mjs" <<JS
+import { pathToFileURL } from "node:url";
+const pi = await import(pathToFileURL(${ROOT@Q} + "/.pi/extensions/lib/fm-calm-working-spaceship.ts").href);
+const core = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-working-spaceship-sprite.ts").href);
+const ESC = "\\u001b";
+const ANSI = { field: ESC + "[34m", ship: ESC + "[33m" };
+const RESET = ESC + "[39m";
+const paint = (row) => row.map((run) => (run.color === "plain" ? run.text : ANSI[run.color] + run.text + RESET)).join("");
+const cells = (row) => row.map((run) => run.text).join("");
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+for (const key of ["CALM_WORKING_SPACESHIP_TICK_MS", "CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_PHASE", "CALM_WORKING_SPACESHIP_IDLE_TICKS_PER_MOVE", "CALM_WORKING_SPACESHIP_WORKING_PHASES_PER_TICK", "CALM_WORKING_SPACESHIP_TICKS_PER_MOVE", "CALM_WORKING_SPACESHIP_SETTLE_EASE_MOVES"]) {
+  check(pi[key] === core[key], \`Pi re-exports a different \${key}\`);
+}
+let frames = 0;
+for (const startWorking of [false, true]) {
+  for (const width of [0, 1, 2, 3, 4, 5, 6, 9, 12, 24, 40, 80, 121]) {
+    const animation = pi.createCalmWorkingSpaceshipAnimation();
+    const sprite = core.createCalmWorkingSpaceshipSprite();
+    if (startWorking) { animation.setWorking(true); sprite.setWorking(true); }
+    for (let step = 0; step < 41; step += 1) {
+      const rendered = animation.render(width);
+      const frame = sprite.frame(width);
+      const expected = frame.map(paint);
+      check(JSON.stringify(rendered) === JSON.stringify(expected), \`Pi spaceship rendering diverged from the shared frame at width \${width} step \${step}: \${JSON.stringify(rendered)} vs \${JSON.stringify(expected)}\`);
+      check(animation.position() === sprite.position() && animation.starPhase() === sprite.starPhase() && animation.isWorking() === sprite.isWorking() && animation.isGliding() === sprite.isGliding(), \`Pi spaceship animation state diverged at width \${width} step \${step}\`);
+      if (width === 0) check(frame.length === 0, "zero width painted a row");
+      if (width > 0) {
+        for (const row of frame) {
+          check(cells(row).length === width, \`a row is \${cells(row).length} cells at width \${width}\`);
+          for (const run of row) check(["plain", "field", "ship"].includes(run.color), \`unknown color \${run.color}\`);
+        }
+        const shipRuns = frame.flatMap((row) => row.filter((run) => run.color === "ship").map((run) => run.text));
+        if (sprite.isWorking()) {
+          check(frame.length === 1, \`working width \${width} did not paint one row\`);
+          if (width >= 6) check(shipRuns.join("") === "=( * )", "working mode lost the compact =( * ) saucer");
+          for (const run of frame[0]) if (run.color === "field") check(!run.text.includes("*"), "warp field still rendered idle star glyphs");
+        } else if (width >= 3) {
+          check(frame.length === 2, \`idle width \${width} did not paint two rows\`);
+          check(shipRuns.join("") === "(|)" + "|^|", "idle mode lost the (|) saucer over the |^| hull");
+          for (const run of frame[0]) if (run.color === "field") check(!run.text.includes("*"), "saucer row still rendered star glyphs");
+        } else {
+          check(frame.length === 1 && /^[* .]+$/.test(cells(frame[0])), \`width \${width} lost the bare starfield fallback\`);
+        }
+      }
+      animation.tick();
+      sprite.tick();
+      frames += 1;
+    }
+  }
+}
+// Freeze and resume: restoring the last painted frame discards later ticks on both.
+{
+  const animation = pi.createCalmWorkingSpaceshipAnimation();
+  const sprite = core.createCalmWorkingSpaceshipSprite();
+  animation.render(30); sprite.frame(30);
+  for (let step = 0; step < 9; step += 1) { animation.tick(); sprite.tick(); }
+  animation.render(30); sprite.frame(30);
+  for (let step = 0; step < 6; step += 1) { animation.tick(); sprite.tick(); }
+  animation.restoreLastRendered(); sprite.restoreLastRendered();
+  check(animation.position() === sprite.position() && animation.starPhase() === sprite.starPhase(), "restore diverged");
+  check(sprite.position() === 1 && sprite.starPhase() === 1, \`restore landed at phase \${sprite.starPhase()} column \${sprite.position()}\`);
+  sprite.clampToWidth(6);
+  check(sprite.position() === 1, "a hidden clamp did not move the saucer into the new track");
+  sprite.reset();
+  check(sprite.position() === 0 && sprite.starPhase() === 0 && !sprite.isWorking() && !sprite.isGliding(), "reset did not restore the initial state");
+}
+console.log("spaceship-ok frames=" + frames);
+JS
+  out=$(run_node "$TMP_ROOT/spaceship-sprite.mjs" 2>&1) || fail "shared spaceship sprite: $out"
+  assert_contains "$out" "spaceship-ok frames=1066" "the spaceship sprite parity sweep did not cover every width and step"
+  pass "the Pi working spaceship renders byte-for-byte the shared sprite core's frame painted in standard ANSI, in both modes, at every width, cadence step, freeze, clamp, and reset"
+}
+
+test_spaceship_raster_packing() {
+  local out
+  cat >"$TMP_ROOT/spaceship-raster.mjs" <<JS
+import { pathToFileURL } from "node:url";
+const raster = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-ship-raster.ts").href);
+const core = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-working-spaceship-sprite.ts").href);
+const pi = await import(pathToFileURL(${ROOT@Q} + "/.pi/extensions/lib/fm-calm-working-spaceship.ts").href);
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+check(raster.CALM_SPACESHIP_RASTER_KEY === "firstmate-calm-working-spaceship", "the spaceship raster key");
+// Claude Code's own theme tables, the same colors the boat shares: the spinner blue
+// per family for the field and the Claude orange of the stock spinner for the saucer.
+const palettes = raster.CALM_SPACESHIP_RASTER_PALETTES;
+check(palettes.dark.field === 0x93a5ff && palettes.dark.ship === 0xd77757, "dark palette is not the dark spinner blue and Claude orange");
+check(palettes.light.field === 0x5769f7 && palettes.light.ship === 0xd77757, "light palette is not the light spinner blue and Claude orange");
+check(palettes.dark.plain === raster.CALM_SHIP_RASTER_DEFAULT_COLOR && palettes.light.plain === raster.CALM_SHIP_RASTER_DEFAULT_COLOR, "plain padding is not the terminal default");
+const decode = (cells, columns, rows) => {
+  const words = new Uint32Array(new Uint8Array(Buffer.from(cells, "base64")).buffer);
+  check(words.length === columns * rows * 3, \`\${words.length} words for \${columns}x\${rows}\`);
+  const grid = [];
+  for (let row = 0; row < rows; row += 1) {
+    const line = [];
+    for (let column = 0; column < columns; column += 1) {
+      const offset = (row * columns + column) * 3;
+      line.push({ glyph: String.fromCodePoint(words[offset]), fg: words[offset + 1], bg: words[offset + 2] });
+    }
+    grid.push(line);
+  }
+  return grid;
+};
+for (const [family, colors] of Object.entries(palettes)) for (const width of [1, 2, 3, 4, 5, 6, 7, 20, 77, 512]) {
+  for (const startWorking of [false, true]) {
+    const sprite = core.createCalmWorkingSpaceshipSprite();
+    if (startWorking) sprite.setWorking(true);
+    for (let step = 0; step < 6; step += 1) {
+      const frame = sprite.frame(width);
+      const packed = raster.packCalmSpaceshipRasterCells(frame, width, colors);
+      check(packed.rows === Math.max(1, frame.length), \`rows \${packed.rows} for a \${frame.length}-row frame\`);
+      const grid = decode(packed.cells, width, packed.rows);
+      for (let row = 0; row < Math.max(1, frame.length); row += 1) {
+        let column = 0;
+        for (const run of frame[row] ?? []) {
+          for (const glyph of Array.from(run.text)) {
+            const cell = grid[row][column];
+            check(cell.glyph === glyph, \`glyph mismatch at \${row},\${column}: \${cell.glyph} vs \${glyph}\`);
+            check(cell.fg === colors[run.color], \`\${family} color mismatch at \${row},\${column}\`);
+            column += 1;
+          }
+        }
+        for (; column < width; column += 1) {
+          check(grid[row][column].glyph === " " && grid[row][column].fg === colors.plain, \`padding at \${row},\${column} is not a plain space\`);
+        }
+        check(grid[row].every((cell) => cell.bg === raster.CALM_SHIP_RASTER_DEFAULT_COLOR), "a background was set");
+      }
+      sprite.tick();
+    }
+  }
+}
+// The packer's pre-load default is the both-readable light fallback.
+{
+  const packed = raster.packCalmSpaceshipRasterCells([[{ text: "*", color: "field" }]], 1);
+  check(decode(packed.cells, 1, 1)[0][0].fg === palettes.light.field, "the default packing palette is not the light fallback");
+}
+// The packer pads and clips exactly like the boat's, from the same shared packer.
+{
+  const packed = raster.packCalmSpaceshipRasterCells([[{ text: "=".repeat(8), color: "field" }], [{ text: "=( * )", color: "ship" }]], 4);
+  check(packed.rows === 2, "clip changed the row count");
+  const grid = decode(packed.cells, 4, 2);
+  check(grid[0].map((c) => c.glyph).join("") === "====" && grid[1].map((c) => c.glyph).join("") === "=( *", "clip wrapped or dropped cells");
+}
+console.log("spaceship-raster-ok");
+JS
+  out=$(run_node "$TMP_ROOT/spaceship-raster.mjs" 2>&1) || fail "spaceship raster packing: $out"
+  assert_contains "$out" "spaceship-raster-ok" "the spaceship raster packing check did not complete"
+  pass "the Raster packing lays the shared spaceship frame out row-major in Claude Code's dark or light theme palette, sharing the boat's spinner blue and Claude orange, with plain padding, default backgrounds, clipping, and the same base64 encoding"
+}
+
+test_ship_selection_policy() {
+  local out
+  cat >"$TMP_ROOT/ship-selection.mjs" <<JS
+import { pathToFileURL } from "node:url";
+const policy = await import(pathToFileURL(${MOD@Q} + "/lib/fm-calm-presentation.ts").href);
+const check = (condition, message) => { if (!condition) throw new Error(message); };
+const plugin = "/repo/.claude/mods/firstmate-calm";
+check(policy.calmShipPreferencePath({}, plugin) === "/repo/config/calm-ship", "plugin-root fallback");
+check(policy.calmShipPreferencePath({ FM_CONFIG_OVERRIDE: "/cfg" }, plugin) === "/cfg/calm-ship", "FM_CONFIG_OVERRIDE beats the home");
+check(policy.calmShipPreferencePath({ FM_HOME: "/home/fm" }, plugin) === "/home/fm/config/calm-ship", "FM_HOME");
+check(policy.calmShipPreferencePath({ FM_ROOT_OVERRIDE: "/override" }, plugin) === "/override/config/calm-ship", "FM_ROOT_OVERRIDE");
+for (const [stored, expected] of [["spaceship\\n", "spaceship"], [" spaceship ", "spaceship"], ["spaceship", "spaceship"], ["", "boat"], [undefined, "boat"], ["yacht", "boat"], ["SPACESHIP", "boat"], ["boat", "boat"]]) {
+  check(policy.parseCalmShipSelection(stored) === expected, \`selection \${JSON.stringify(stored)} read as \${policy.parseCalmShipSelection(stored)}, not \${expected}\`);
+}
+console.log("ship-selection-ok");
+JS
+  out=$(run_node "$TMP_ROOT/ship-selection.mjs" 2>&1) || fail "ship selection policy: $out"
+  assert_contains "$out" "ship-selection-ok" "the ship selection check did not complete"
+  pass "the mod resolves config/calm-ship from the same effective home as config/calm and reads spaceship from the same stored values Pi does, keeping the boat for every other, missing, or unreadable value"
+}
+
 test_plugin_shape
+
 test_shared_sprite_and_pi_rendering
+test_shared_spaceship_and_pi_rendering
 test_raster_packing
+test_spaceship_raster_packing
 test_presentation_policy
+test_ship_selection_policy
 test_classifier_parity_with_shell_owner

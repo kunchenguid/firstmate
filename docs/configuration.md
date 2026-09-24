@@ -38,6 +38,13 @@ The Pi extension reloads this preference on every Pi `session_start`, including 
 The Claude Code mod likewise reloads it on every `session.start`, including same-process session replacement, and also loads it lazily before any row that can draw ahead of that event, including during `claude --continue` restoration.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+### Working-presentation variant (config/calm-ship)
+
+The optional gitignored `config/calm-ship` file selects Calm's animated working-presentation variant on both harnesses, resolved from the same effective Firstmate home and `FM_CONFIG_OVERRIDE` rules as `config/calm`.
+The only recognized value is `spaceship`, written with or without one trailing newline; an absent, unreadable, or unrecognized value keeps the default boat.
+Each harness reads this file at load and re-reads it on every fresh session start, so a mid-session change takes effect at the next of those points rather than mid-run.
+This file is local to each Firstmate home and is not part of secondmate inherited configuration.
+
 ## Pi supervision branch
 
 On a Pi primary, an in-process supervision branch handles eligible task-local wake rows and selected heartbeat reviews while keeping main-only rows on the captain-facing path; [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns its conversation lifecycle, row eligibility, mixed-queue dispatch, heartbeat routing, and pre-drain recheck.
@@ -51,7 +58,7 @@ Homes on other primary harnesses do not load the Pi branch extension; shared per
 While attended, a captain-facing (verdict `captain`) branch outcome persists as one exact, sequence-keyed visible transcript entry and then opens one sequence-keyed processing turn on main, which stays open until main acknowledges that sequence through its `fm_branch_processed` tool; while away, the entry persists but processing waits until the record is archived.
 The branch prompt's "Verdict: routine or captain" section owns the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
-A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, sailboat-prefixed note.
+A no-change heartbeat outcome explicitly reported with `task=fleet` and `silent=true` is delivered silently with no rendered note, while every other routine outcome still appends a rendered, saucer-prefixed note.
 
 ## Pi supervision branch model and effort (config/supervision-branch-model, config/supervision-branch-effort)
 

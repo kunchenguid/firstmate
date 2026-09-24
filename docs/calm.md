@@ -19,6 +19,19 @@ Hidden elapsed time does not advance the animation, and a resize while hidden cl
 A fresh Pi session or new Calm extension lifetime starts at the normal initial position.
 Very narrow terminals fall back to a smaller deterministic sprite.
 While Calm is off, Pi's stock working row is left exactly as Pi renders it.
+
+### Spaceship variant (config/calm-ship)
+
+Calm's working presentation has one selectable variant on both harnesses, chosen by the gitignored `config/calm-ship` file under the effective Firstmate home (the same home and `FM_CONFIG_OVERRIDE` rules `config/calm` uses).
+Anything other than `spaceship` - including an absent file - keeps the boat as the default.
+On Pi, the spaceship is a persistent banner that stays visible the whole time Calm is active, not only while a run is under way.
+When idle, the saucer drifts slowly and continuously left to right across the banner in the two-row rest pose, the three-cell `(|)` saucer directly over the three-cell `|^|` hull, one column every ~1.5 seconds, wrapping marquee-style back to the left edge when it crosses the right edge, while the hull row's asymmetric `*`/`.` starfield streams one column every ~1.3 seconds, so the stars visibly move left past the chasing ship instead of just twinkling in place.
+While a run is thinking, the sprite becomes the single-row compact `=( * )` saucer, yellow, facing right, on the banner row: the saucer sweeps right one column every 880ms continuously across the full banner width, wrapping marquee-style back to the left edge when it crosses the right edge so it never parks while thinking, the starfield speeds up to two phases per 220ms tick, and the field renders as warp streaks that toggle between two phase states in place, with no accumulated leftward drift, because the two-steps-per-tick advance parity-locks the phase on the four-cell cycle.
+When the run settles, the sprite relaxes back to the two-row rest pose, the stars return to the idle cadence immediately, and the movement pace eases back into the slow drift over a bounded handful of graduated moves, one column per move and never teleporting, before the marquee sweep continues indefinitely.
+Freeze/resume continuity, resize clamping, fresh-session reset, and narrow fallbacks follow the boat's contract, and a run start or settle drives the mode instead of the banner's visibility.
+On Claude Code the same shared sprite renders in the working row the way the boat does: the compact `=( * )` warp saucer replaces the stock spinner while a run is under way, and the persistent idle banner stays Pi-only because Claude Code exposes no persistent drawing to hook.
+[`configuration.md`](configuration.md#working-presentation-variant-configcalm-ship) owns the `config/calm-ship` schema and re-read points.
+
 Calm hides collapsed thinking labels, the mid-turn assistant working-note blocks governed by the shared preservation rule above, the shells for the Pi built-in tool names Calm owns, the `fm_watch_arm_pi` and `fm_branch_outcomes` tool shells, and canonically classified Firstmate operational user rows.
 Pi applies that rule independently to each text block, so a short working note can hide beside preserved substantive content in the same message.
 A working note is briefly visible while it streams before its settled row collapses.
@@ -52,7 +65,7 @@ If the other extension wins, a session-start console diagnostic names the tool a
 
 [`calm-mode-feasibility.md`](calm-mode-feasibility.md) owns the version-scoped renderer taxonomy, built-in override constraints, and empirical evidence.
 [`configuration.md`](configuration.md#calm-preference-configcalm) owns the persisted preference file and resolution rules.
-`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts` owns the shared substantive mid-turn text rule that Pi imports through its tracked symlink, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` owns Pi's animated working presentation over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts`.
+`.pi/extensions/lib/fm-calm-visibility.ts` owns the visibility policy, `.claude/mods/firstmate-calm/lib/fm-calm-preservation.ts` owns the shared substantive mid-turn text rule that Pi imports through its tracked symlink, `.pi/extensions/lib/fm-calm-operational-user-layout.ts` owns the zero-height operational-user row adapter, and `.pi/extensions/lib/fm-calm-working-ship.ts` and `.pi/extensions/lib/fm-calm-working-spaceship.ts` own Pi's animated working presentations over the sprite geometry both harnesses share in `.claude/mods/firstmate-calm/lib/fm-calm-working-ship-sprite.ts` and `.claude/mods/firstmate-calm/lib/fm-calm-working-spaceship-sprite.ts`.
 
 Regression entry points:
 
@@ -75,6 +88,8 @@ The toggle answers with a transient "Calm on" or "Calm off" notice under the pro
 While Calm is on, the stock working row (`Sauteing... (12s · 300 tokens)`) becomes the same two-row sailboat Pi draws, from the same shared sprite geometry: it fills the row inside the transcript margin, repaints on the boat's 220ms cadence with the hull moving every 880ms, reflows on resize, and appears and disappears exactly where the stock row would.
 On Claude Code the boat is painted in Claude Code's own theme colors rather than Pi's standard ANSI codes: every water cell takes the spinner blue of the active theme family (`#93a5ff` on a dark theme, `#5769f7` on a light one) and the whole boat, both sail halves, mast, and hull, takes the Claude orange of the stock spinner (`#d77757`).
 The family follows the `theme` setting by its prefix, `dark` or `light`, is re-read when the theme changes, and uses the light set as the both-readable fallback for `auto`, custom, missing, or unreadable values; the Pi extension keeps its standard ANSI blue and yellow.
+When `config/calm-ship` names `spaceship`, the same working row shows the shared spaceship sprite instead: the compact `=( * )` warp saucer, facing right, over a streak field that toggles between two phase states in place with no accumulated leftward drift, in the same theme colors - the whole saucer takes the Claude orange and the starfield takes the family's spinner blue.
+Because Claude Code exposes no persistent drawing to hook, the spaceship appears only in the working row while a run is under way; the persistent idle banner with the two-row rest pose remains Pi-only, and the selection is re-read from `config/calm-ship` on each fresh session.
 Tool rows, tool result blocks, and folded tool groups draw at zero height, so a turn that used tools takes the same space as one that did not.
 A user row whose text the canonical operational-input parser recognizes, a Firstmate session-start, watcher, turn-end guard, away-supervisor, launch-brief, or branch-outcome envelope, a from-firstmate routed message, or one of the narrow pre-protocol shapes kept for old transcripts, draws at zero height; every other user row, including near misses such as a quoted or ASCII-only marker, stays visible.
 Assistant text follows the shared per-block preservation rule above, including when `claude --continue` restores the transcript.

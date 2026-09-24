@@ -41,15 +41,26 @@ export function calmCodeRootFromPluginRoot(pluginRoot: string): string {
 }
 
 /**
+ * The per-home config directory, resolved exactly as the Pi extension resolves it:
+ * `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root, with
+ * `FM_CONFIG_OVERRIDE` naming the config directory outright when present.
+ */
+function calmConfigDirectory(env: CalmHomeEnvironment, pluginRoot: string): string {
+  return env.FM_CONFIG_OVERRIDE || `${env.FM_HOME || env.FM_ROOT_OVERRIDE || calmCodeRootFromPluginRoot(pluginRoot)}/config`;
+}
+
+/**
  * The per-home `config/calm` path, resolved exactly as the Pi extension resolves it:
  * `FM_HOME`, then `FM_ROOT_OVERRIDE`, then the tracked code root, with
  * `FM_CONFIG_OVERRIDE` naming the config directory outright when present.
  */
 export function calmPreferencePath(env: CalmHomeEnvironment, pluginRoot: string): string {
-  const configDirectory =
-    env.FM_CONFIG_OVERRIDE ||
-    `${env.FM_HOME || env.FM_ROOT_OVERRIDE || calmCodeRootFromPluginRoot(pluginRoot)}/config`;
-  return `${configDirectory}/calm`;
+  return `${calmConfigDirectory(env, pluginRoot)}/calm`;
+}
+
+/** The per-home `config/calm-ship` path, resolved from the same config directory as `calmPreferencePath`. */
+export function calmShipPreferencePath(env: CalmHomeEnvironment, pluginRoot: string): string {
+  return `${calmConfigDirectory(env, pluginRoot)}/calm-ship`;
 }
 
 /**
@@ -65,6 +76,15 @@ export function parseCalmPreference(stored: string | undefined): boolean {
 /** The exact file content the Pi extension writes for the same choice. */
 export function serializeCalmPreference(active: boolean): string {
   return active ? "on\n" : "off\n";
+}
+
+/**
+ * The working-presentation selection a stored `config/calm-ship` value reads as.
+ * `spaceship` selects the shared spaceship sprite; every other, missing, or unreadable
+ * value keeps the boat, which stays the default, exactly as the Pi extension reads it.
+ */
+export function parseCalmShipSelection(stored: string | undefined): "boat" | "spaceship" {
+  return stored !== undefined && stored.trim() === "spaceship" ? "spaceship" : "boat";
 }
 
 /** The shape of one `turn.step` result this policy reads. */
