@@ -3845,6 +3845,69 @@ test_stale_churn_without_a_captain_call_still_alarms() {
   pass "a stale window with no open captain call keeps alarming on every new hash"
 }
 
+# The 2026-09-23 defect: a task that is BOTH captain-held and last shows a
+# declared `paused:` external wait. handle_paused_stale owns that line and the
+# busy-over-age path, and it never read the backlog, so the pause branch's own
+# cadence decided the pane's alarm and the open hold bounded nothing: a churning
+# idle pane re-surfaced for the captain's whole thinking time, far inside the
+# 4-hour re-surface window.
+# The hold is the authoritative record that the captain already has this work in
+# hand, so it must bound a paused: last line through the SAME captain-call
+# throttle a captain-relevant line already uses: its first look still reaches the
+# captain and further pane hashes are absorbed inside the re-surface window.
+# The fixture's LAST line is the paused declaration while the backlog row is
+# held. Written into the test shape the existing captain-call family uses: a real
+# tasks-axi backlog fixture and the SAME reused helpers (make_hold_home,
+# hold_watch_surface, hold_watch_launch, hold_stale_wakes).
+test_open_captain_call_bounds_a_paused_last_line() {
+  local dir state out capture throttle wakes round
+  command -v tasks-axi >/dev/null 2>&1 \
+    || { echo "skip: tasks-axi not found (held paused-line bound)"; return 0; }
+  dir=$(make_hold_home held-paused \
+    'paused: awaiting the captain on https://example.invalid/pull/1' hold) \
+    || fail "could not build a held paused-line fixture"
+  state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
+  throttle="$state/.paused-resurfaced-$(hold_key)"
+
+  # First sight still alarms: the hold bounds repetition, never the first look.
+  # Pre-fix the pause branch absorbed it silently on a fresh status, so this is
+  # the first place the missing hold read shows.
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 1s' \
+    || fail "first sight of held paused work did not surface"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] || fail "first sight of held paused work produced $wakes wakes instead of one"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the first surface"
+
+  # The pane churns while the SAME hold and the SAME paused line stand. Each new
+  # hash is a fresh sighting, exactly as an idle pane's ticking clock is in
+  # production; the hold must absorb all of them inside the window.
+  round=1
+  while [ "$round" -le 3 ]; do
+    printf 'idle, tick %s\n' "$round" > "$capture"
+    hold_watch_launch "$dir" "$out" "$capture"
+    if ! wait_poll_cycle "$state" "$HOLD_WATCH_PID" 300; then
+      reap "$HOLD_WATCH_PID"
+      fail "held paused churn round $round surfaced instead of absorbing"
+    fi
+    reap "$HOLD_WATCH_PID"
+    wakes=$(hold_stale_wakes "$state")
+    [ "$wakes" -eq 0 ] \
+      || fail "pane churn re-alarmed held paused work $wakes time(s) inside the re-surface window"
+    round=$((round + 1))
+  done
+
+  # Once the window elapses, the next new hash re-surfaces held work exactly once,
+  # so a forgotten hold on a churning pane cannot hide behind the bound.
+  [ -e "$throttle" ] || fail "the absorbed churn recorded no re-surface cadence to elapse"
+  set_mtime "$(( $(date +%s) - 5000 ))" "$throttle"
+  hold_watch_surface "$dir" "$out" "$capture" 'idle, elapsed 9s' \
+    || fail "held paused work did not re-surface once its re-surface window elapsed"
+  wakes=$(hold_stale_wakes "$state")
+  [ "$wakes" -eq 1 ] \
+    || fail "elapsed re-surface window produced $wakes wakes instead of one"
+  pass "an open captain call bounds a paused: last line through the captain-call re-surface throttle"
+}
+
 
 # The cadence marker may never outlive the wake it claims to record. Recording it
 # before publishing the durable wake turned a delayed alarm into a lost one: the
@@ -6224,6 +6287,7 @@ test_wedge_threshold_parked_gate_needs_an_unanswered_decision
 test_wedge_threshold_parked_gate_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
+test_open_captain_call_bounds_a_paused_last_line
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
