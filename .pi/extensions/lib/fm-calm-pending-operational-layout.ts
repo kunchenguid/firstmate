@@ -269,11 +269,21 @@ export function installCalmPendingOperationalLayout(): void {
   // turn by themselves, so the first is taken out and sent as the turn's prompt and the rest
   // are put back behind it: steering first, then follow-ups, the order Pi delivers them in.
   function continueWhenSettled(host: PendingRowsHost, session: RetainingSession): void {
-    session
-      .waitForIdle()
-      .then(() => {
-        // The captain may already have started a turn, which drains the queue itself.
-        if (host.session !== session || !session.isIdle) return;
+    const settled = async (): Promise<boolean> => {
+      do {
+        await session.waitForIdle();
+        // Pi resolves idle waiters in microtasks, and tree navigation resumes from its
+        // abort in the same microtask run and marks the session busy before its first await.
+        // Yielding a macrotask lets that navigation claim the session, so the turn starts on
+        // the navigated branch instead of racing it on the abandoned one.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        if (host.session !== session) return false;
+      } while (!session.isIdle);
+      return true;
+    };
+    settled()
+      .then((idle) => {
+        if (!idle) return;
         const { steering, followUp } = session.clearQueue();
         const first = steering.length > 0 ? steering.shift() : followUp.shift();
         if (first === undefined) return;

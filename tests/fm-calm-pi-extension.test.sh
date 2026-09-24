@@ -651,8 +651,9 @@ visibility.setCalmPresentation(true);
   check(session.prompts.length === 0 && host.statuses.length === 0, "a dequeue while the run is still active started or announced a turn");
 }
 
-// 2b. Navigating the session tree during a run restores without abort, then aborts the run:
-//     the hidden notification is still delivered exactly once in a new turn.
+// 2b. Navigating the session tree during a run restores without abort, aborts the run, and
+//     then holds the session busy while it navigates: the hidden notification waits for the
+//     navigation to finish and is then delivered exactly once in a new turn.
 {
   const session = makeSession();
   const host = makeHost(session);
@@ -660,8 +661,13 @@ visibility.setCalmPresentation(true);
   host.updatePendingMessagesDisplay();
   host.restoreQueuedMessagesToEditor();
   await session.abort();
+  session.idle = false;
   assertNoOperationalText(host.editorText, "editor after tree navigation");
   check(host.editorText === captainText, `tree navigation restored ${JSON.stringify(host.editorText)}`);
+  await settle();
+  check(session.prompts.length === 0 && host.statuses.length === 0, `a turn started during tree navigation: ${JSON.stringify(session.prompts)}`);
+  session.idle = true;
+  for (const resolve of session.idleWaiters.splice(0)) resolve();
   await settle();
   check(JSON.stringify(session.prompts) === JSON.stringify([watcherOne]), `tree navigation continuation prompt was ${JSON.stringify(session.prompts)}`);
   check(JSON.stringify(session.followUp) === "[]", `tree navigation left the notification queued: ${JSON.stringify(session.followUp)}`);

@@ -294,6 +294,7 @@ Those live on the session instance reached through `InteractiveMode.session`, so
 A counterfactual built from the closed PR #1620 adapter hid the row and kept the notification out of the editor, but Pi 0.87.1's `AgentSession._runAgentPrompt` stops continuing once an abort was requested, so the kept follow-up stayed queued until the captain's next prompt while the adapter announced a new turn.
 The shipped adapter therefore starts that turn itself once the aborted run settles: it takes the first queued message out, sends it with `sendUserMessage`, and puts the rest back behind it in Pi's delivery order.
 Navigating the session tree during a run takes the same path without an abort flag, restoring the queue and then calling `session.abort()`, so the adapter waits for every restore that kept a notification and starts the turn only if the session is then idle with messages still queued.
+Pi starts `navigateTree` in the same microtask run that resumes from that abort and marks the session busy before its first await, so the adapter yields one macrotask after each idle wait and waits again while the session is busy, which starts the turn on the navigated branch instead of racing the navigation on the abandoned one.
 The same real-Pi reproduction then delivered the notification exactly once in a new turn, returned a queued captain message to the editor, and left Calm off stock.
 
 ## Regression coverage
