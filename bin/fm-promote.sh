@@ -477,6 +477,12 @@ if ! mv "$BRIEF_REPLACEMENT" "$SCOUT_BRIEF"; then
 fi
 BRIEF_REPLACEMENT=
 
+if [ "$PROMOTE_BASE_REMOTE" = 1 ] &&
+  ! git -C "$PROMOTE_PROJECT" rev-parse --verify --quiet "refs/remotes/origin/$BASE_BRANCH^{commit}" >/dev/null; then
+  echo "error: remote base '$BASE_BRANCH' is no longer available in the scout project checkout; refusing promotion" >&2
+  exit 1
+fi
+
 TMP="$STATE/.$ID.meta.promote.${BASHPID:-$$}"
 grep -v -e '^kind=' -e '^mode=' -e '^yolo=' -e '^branch=' -e '^base_branch=' "$META" > "$TMP"
 {
