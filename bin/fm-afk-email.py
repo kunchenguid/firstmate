@@ -214,6 +214,7 @@ def outcomes_by_seq():
             rows[row["seq"]] = row
     except ValueError:
 
+
         return None
     return rows
 
