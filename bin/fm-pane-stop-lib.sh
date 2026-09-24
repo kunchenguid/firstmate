@@ -22,6 +22,7 @@ fm_pane_stop() {
         [ "$((10#$minutes))" -lt 60 ] && [ "$((10#$seconds))" -lt 60 ] || continue
         printf '%s\t%s\t%s\t%s\n' "$kind" "$provider" "$((10#$hours * 3600 + 10#$minutes * 60 + 10#$seconds))" "$duration"
       elif [ "$kind" = blocked-at-prompt ]; then
+        printf '%s\n' "$recent" | grep -qE '^Do not trust$' || continue
         printf '%s\t%s\t-\t%s\n' "$kind" "$harness" "$provider"
       else
         printf '%s\t%s\t-\tunknown\n' "$kind" "$provider"
@@ -31,7 +32,7 @@ fm_pane_stop() {
   done <<'PATTERNS'
 grok|quota-exhausted|grok|^You hit your weekly limit[.!]?$
 pi,pi-signed|quota-exhausted|gemini|^Error: Quota reached\. Please wait (([0-9]{1,3})h)?(([0-9]{1,2})m)?(([0-9]{1,2})s)?[.!]?$
-pi,pi-signed|blocked-at-prompt|trust|^Trust project folder[?]?$
+pi,pi-signed|blocked-at-prompt|trust|^Trust project folder[?]$
 PATTERNS
   return 1
 }
