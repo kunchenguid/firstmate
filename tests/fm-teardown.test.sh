@@ -84,9 +84,12 @@ make_case() {
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
+  # `treehouse return --force <wt>`: succeed silently, and record the invocation
+  # when the case sets FM_FAKE_TREEHOUSE_LOG, so a test can prove whether the
+  # worktree was returned to the pool at all.
   cat > "$fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
-# `treehouse return --force <wt>`: succeed silently.
+[ -z "${FM_FAKE_TREEHOUSE_LOG:-}" ] || printf '%s\n' "$*" >> "$FM_FAKE_TREEHOUSE_LOG"
 exit 0
 SH
   cat > "$fakebin/tmux" <<'SH'
@@ -2993,7 +2996,9 @@ set -u
 printf '%s\n' "$*" >> "${FM_FAKE_HERDR_LOG:?}"
 case "${1:-} ${2:-}" in
   "workspace list")
-    if [ -e "${FM_FAKE_HERDR_RESTORED:?}" ]; then
+    if [ "${FM_FAKE_HERDR_VIEWING_TASK:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","active_tab_id":"w1:t2","label":"firstmate/task-x1 \u00b7 p:AbCdEfGhIjKlMnOpQrStUv","focused":true},{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
+    elif [ -e "${FM_FAKE_HERDR_RESTORED:?}" ]; then
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":true},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":false}]}}'
     elif [ -e "${FM_FAKE_HERDR_CLOSED:?}" ]; then
       printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w2","active_tab_id":"w2:t2","label":"2ndmate-bravo","focused":false},{"workspace_id":"w3","active_tab_id":"w3:t1","label":"2ndmate-alpha","focused":true}]}}'
@@ -3005,6 +3010,7 @@ case "${1:-} ${2:-}" in
     ;;
   "tab list")
     case "$*" in
+      *"--workspace w1"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w1:t2","focused":true}]}}' ;;
       *"--workspace w2"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w2:t2","focused":true}]}}' ;;
       *"--workspace w3"*) printf '%s\n' '{"result":{"tabs":[{"tab_id":"w3:t1","focused":true}]}}' ;;
       *) printf '%s\n' '{"result":{"tabs":[]}}' ;;
@@ -3047,28 +3053,71 @@ case "${1:-} ${2:-}" in
     printf '%s\n' '{"error":{"code":"agent_not_found"}}' >&2
     exit 1
     ;;
+  "terminal title")
+    # Answered only in the viewing case; every other case leaves the reason
+    # unreadable, which is the unknown-viewer reading they already exercised.
+    if [ "${FM_FAKE_HERDR_VIEWING_TASK:-0}" = 1 ]; then
+      printf '%s\n' '{"result":{"reason":"cleared"}}'
+    fi
+    ;;
 esac
 SH
   chmod +x "$case_dir/fakebin/herdr"
 }
 
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close() {
-  local case_dir log closed restored
+  local case_dir log closed restored treehouse_log
   case_dir=$(make_case herdr-projection-confirmed-close)
   write_meta "$case_dir" local-only ship
   configure_herdr_projection_teardown_case "$case_dir"
   log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  treehouse_log="$case_dir/treehouse.log"; : > "$treehouse_log"
 
   FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_TREEHOUSE_LOG="$treehouse_log" \
     run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "herdr-projection-confirmed-close: forced teardown failed"
   [ ! -e "$case_dir/state/task-x1.herdr-presentation" ] \
     || fail "confirmed exact-pane close did not retire the presentation journal"
+  # The counterpart of the refused-close case below: once the close is
+  # confirmed, cleanup goes on to return the worktree to its pool.
+  assert_contains "$(cat "$treehouse_log")" "return --force" \
+    "confirmed exact-pane close did not go on to return the task's worktree"
   assert_not_contains "$(cat "$log")" "workspace close" \
     "projected teardown must never call workspace close"
   assert_contains "$(cat "$log")" "tab focus w2:t2" \
     "projected teardown did not restore the exact pre-close active tab"
   pass "herdr projection teardown retires its journal only after confirming the exact recorded pane is gone"
+}
+
+test_herdr_projection_teardown_refuses_viewed_task_tab_before_touching_the_worktree() {
+  local case_dir log closed restored treehouse_log rc=0
+  case_dir=$(make_case herdr-projection-viewed-tab)
+  write_meta "$case_dir" local-only ship
+  configure_herdr_projection_teardown_case "$case_dir"
+  log="$case_dir/herdr.log"; closed="$case_dir/closed"; restored="$case_dir/restored"; : > "$log"
+  treehouse_log="$case_dir/treehouse.log"; : > "$treehouse_log"
+
+  FM_FAKE_HERDR_LOG="$log" FM_FAKE_HERDR_CLOSED="$closed" FM_FAKE_HERDR_RESTORED="$restored" \
+    FM_FAKE_TREEHOUSE_LOG="$treehouse_log" FM_FAKE_HERDR_VIEWING_TASK=1 \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  [ "$rc" -ne 0 ] \
+    || fail "herdr-projection-viewed-tab: teardown reported success after refusing the viewed task tab"
+  [ ! -e "$closed" ] \
+    || fail "herdr-projection-viewed-tab: the tab a live viewer is watching was closed anyway"
+  assert_grep "refusing a close that cannot preserve focus" "$case_dir/stderr" \
+    "a viewed task tab did not refuse the focus-unsafe close"
+  assert_grep "not confirmed gone" "$case_dir/stderr" \
+    "the refused close did not explain why every record was retained"
+  assert_not_contains "$(cat "$treehouse_log")" "return" \
+    "the refused close returned the task's worktree to its pool anyway"
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "fm/task-x1" ] \
+    || fail "the refused close detached or deleted the task branch in its isolated copy"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "the refused close erased the durable endpoint metadata"
+  [ -e "$case_dir/state/task-x1.herdr-presentation" ] \
+    || fail "the refused close retired the presentation journal"
+  pass "herdr projection teardown refuses a viewed task tab before its worktree, branch, or records are touched"
 }
 
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed() {
@@ -4723,6 +4772,7 @@ test_forced_secondmate_teardown_holds_descendant_lifecycle_locks
 test_forced_secondmate_herdr_child_retains_records_when_close_unconfirmed
 test_forced_teardown_retains_nested_secondmate_home_when_grandchild_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_only_after_confirmed_close
+test_herdr_projection_teardown_refuses_viewed_task_tab_before_touching_the_worktree
 test_herdr_projection_teardown_retains_journal_when_close_unconfirmed
 test_herdr_projection_teardown_retires_journal_when_pane_already_gone
 test_herdr_projection_teardown_keeps_journal_when_token_workspace_is_gone_but_pane_lives

@@ -1608,7 +1608,8 @@ The following facts were measured on 2026-09-24 against Herdr 0.9.1 (client and 
   `worktree list --cwd <clone>` keeps electing the oldest workspace at the clone root as `source_workspace_id`, so the flat home workspace created for the same project remains that source while the attach still names the exact parent it was given.
 - Treehouse `get --lease --lease-holder fm-<task-id>` prints only the leased path on stdout with its banners on stderr, `status` reports the slot as `leased ... (held by fm-<task-id>)`, `return --force` releases the lease and terminates the processes still inside the slot, and both the leased and the interactive shapes leave the slot at the same detached `HEAD`.
   A returned slot that still holds a live process reads `in-use` in `status`, and the next `get --lease` hands out a different slot, so a foreign shell parked in a pool slot never receives a task lease.
-  A lease also outlives a lab server `stop` and `provision`: with the leased shape, a same-id resume after that restart took a different slot and both tasks tore down cleanly, while the same probe against the interactive shape saw the resumed task's `treehouse get` hand out the slot of a still-recorded sibling task whose pane the restart had ended, so cleanup refused both tasks as sharing one recorded worktree.
+  A lease also outlives a lab server `stop` and `provision`, so the slot stays `leased ... (held by fm-<task-id>)` while that task's pane is dead: a same-id resume re-enters exactly the slot its surviving record names and takes no second lease, while the same probe against the interactive shape saw the resumed task's `treehouse get` hand out the slot of a still-recorded sibling task whose pane the restart had ended, so cleanup refused both tasks as sharing one recorded worktree.
+  An attempt that ends without a record naming the slot it leased returns that slot itself: with a record naming a copy that is gone, the respawn leases a fresh slot and its abort returns it, leaving `status` with no slot held by that task.
 
 Refresh the record with:
 
@@ -1630,12 +1631,13 @@ ok - real Herdr lab: each secondmate home groups its tasks under its own home-qu
 ok - real Herdr lab: concurrent primary/A/B spawns preserve parent order and exact focus
 ok - real Herdr lab: linked-worktree children and their repo parent keep their provenance across stop and provision, and reclaim leaves both untouched
 ok - real Herdr lab: secondmate restart binding and reclaim stay isolated to the exact child home and parent
+ok - real Herdr lab: an aborted respawn returns the slot it leased even though an older record survives
 ```
 
-On the macOS host that produced this record the full suite passed its first 25 cases and then stopped at the concurrent cross-home recovery case with `herdr presentation recovery could not acquire its session lock; refusing a concurrent resume`, because one uncontended same-identity resume there held the presentation session lock for about nine seconds at a load average between ten and fifteen, while a second concurrent resume waits five seconds before refusing.
+On the macOS host that produced this record the full suite passed its first 26 cases and then stopped at the concurrent cross-home recovery case with `herdr presentation recovery could not acquire its session lock; refusing a concurrent resume`, because one uncontended same-identity resume there held the presentation session lock for about nine seconds at a load average between ten and fifteen, while a second concurrent resume waits five seconds before refusing.
 An unmodified `main` checkout run on the same host the same day stopped at that same case with the same refusal, and a run with only that case removed passed every remaining case, so the margin belongs to the recovery lock wait rather than to the grouping or the leased spawn shape; the required CI lane keeps running the unmodified suite.
 
-The unit suite's repo worktree group cases (`test_worktree_group_capable_gates_on_protocol_and_schema` through `test_live_binding_accepts_repo_parent_between_home_and_child`) passed in the same run, with the whole file reporting 214 `ok` lines and no `not ok` line, and `tests/fm-teardown.test.sh` reporting 93 `ok` lines and no `not ok` line for the already-gone journal retirement that the leased spawn shape makes the ordinary Herdr cleanup path.
+The unit suite's repo worktree group cases (`test_worktree_group_capable_gates_on_protocol_and_schema` through `test_live_binding_accepts_repo_parent_between_home_and_child`) passed in the same run, with the whole file reporting 228 `ok` lines and no `not ok` line, and `tests/fm-teardown.test.sh` reporting 94 `ok` lines and no `not ok` line for the exact-pane close that now runs ahead of the process reap and the worktree return, including its refusal on a tab a live viewer is watching.
 
 ### Composer and operational input
 

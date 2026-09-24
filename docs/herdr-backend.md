@@ -169,8 +169,8 @@ A Herdr crewmate or scout enters its Treehouse slot differently from the other s
 The spawn leases the slot durably under the holder `fm-<task-id>` with `treehouse get --lease` and sends the pane's root shell a plain `cd` into it, instead of the interactive `treehouse get` whose subshell leaves that root shell in the project clone.
 Herdr matches a worktree to a workspace by the root shell's working directory and offers no way to set it, so this entry shape is what lets the repository grouping under "Presentation spaces" attach the task at all (measured on Herdr 0.9.1 - [verification](verification/runtime-backends.md#repo-worktree-groups)).
 Both shapes leave the slot at the same detached default-branch base, and the spawn accepts only a pane read of that exact leased worktree before recording it.
-The lease is released by cleanup's ordinary `treehouse return`, and a spawn that fails before publishing its task record returns its still-clean slot itself rather than leaving it leased to a task no record describes.
-The lease also keeps the slot while a Herdr server restart has ended the task's pane, so a same-identity resume takes a fresh slot rather than one a still-recorded task's dead pane held only by occupancy, which the interactive shape could hand to another task.
+The lease is released by cleanup's ordinary `treehouse return`, and an attempt that ends without a task record naming the slot it just leased returns that still-clean slot itself rather than leaving it leased to a task no record describes.
+The lease also outlives the pane, so a Herdr server restart leaves the slot held under the task's own name: a same-identity resume re-enters exactly the copy its surviving record names, keeping that incarnation's work and costing the pool nothing, while the interactive shape could hand a still-recorded task's slot to another task as soon as its dead pane stopped occupying it.
 
 ## Presentation spaces
 
@@ -325,7 +325,9 @@ Packing an existing parent into its home block with `workspace.move_block`, drop
 
 Normal task metadata remains the sole endpoint authority after creation.
 Cleanup closes only the exact recorded task pane and never calls `workspace close`.
-Because a task pane's root shell sits inside its leased slot, the worktree return that precedes the endpoint close ends that shell, so the exact pane and its emptied workspace ordinarily disappear through Herdr's pane-death path before the explicit close runs; cleanup then retires the presentation journal once the recorded pane reads structured not-found and no workspace carries the journal's token, and otherwise runs the explicit close exactly as before.
+Because a task pane's root shell sits inside its leased slot, cleanup closes that pane before it reaps the task's processes and returns the worktree, since either step would end the root shell and let Herdr remove the pane through its pane-death path with no close left to refuse.
+A close that cannot be confirmed stops the cleanup there, leaving the pane, the isolated copy, its pool slot, and every record untouched for a rerun, so the active-tab refusal below still protects a workspace the captain is viewing.
+Cleanup retires the presentation journal once that close is confirmed, or, when the recorded pane already read structured not-found before cleanup acted and no workspace carries the journal's token, without any mutation at all.
 
 Herdr 0.7.5's explicit close moves focus to a neighbor whenever it empties a non-focused workspace.
 Its pane-death removal preserves the focused workspace whenever the dying workspace sits behind it or the focused workspace is last.
