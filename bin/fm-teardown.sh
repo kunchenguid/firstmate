@@ -1277,6 +1277,19 @@ default_branch() {
   return 1
 }
 
+# The branch a local landing is measured against: the task's recorded
+# integration branch when meta names one, otherwise the repository default.
+landing_branch() {
+  local recorded
+  recorded=$(meta_value "$META" base_branch)
+  if [ -n "$recorded" ]; then
+    git check-ref-format --branch "$recorded" >/dev/null 2>&1 || return 1
+    printf '%s\n' "$recorded"
+    return 0
+  fi
+  default_branch
+}
+
 meta_value() {
   local meta=$1 key=$2
   fm_meta_get "$meta" "$key"
@@ -1505,7 +1518,7 @@ pr_is_merged() {
 # so the caller refuses rather than guesses.
 content_in_default() {
   local name ref default_tree merged_tree
-  name=$(default_branch) || return 1
+  name=$(landing_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
     ref="refs/remotes/origin/$name"
@@ -1824,7 +1837,14 @@ validate_worktree_teardown_safety() {
   unpushed=$(printf '%s\n' "$unpushed_raw" | head -5)
 
   if [ -n "$unpushed" ] && [ "$MODE" = local-only ]; then
-    DEFAULT=$(default_branch) || { echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2; return 1; }
+    DEFAULT=$(landing_branch) || {
+      if [ -n "$(meta_value "$META" base_branch)" ]; then
+        echo "REFUSED: task $ID records an invalid landing branch; expected a usable git branch name." >&2
+      else
+        echo "REFUSED: cannot determine default branch for $PROJ; expected origin/HEAD, main, or master." >&2
+      fi
+      return 1
+    }
     if ! unmerged_raw=$(git -C "$WT" log --oneline HEAD --not "$DEFAULT" -- 2>/dev/null); then
       if worktree_safety_blocked_by_lock "commits not on $DEFAULT"; then
         return "$TEARDOWN_WORKTREE_SAFETY_LOCK_BLOCKED"

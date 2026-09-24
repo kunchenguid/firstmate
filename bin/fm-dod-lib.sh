@@ -6,13 +6,20 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [base-branch]
 # prints the block on stdout with no trailing blank line. The caller validates the
 # mode; an unknown mode is refused rather than silently rendered as the pipeline
 # contract.
 # The optional third argument is the task's full ship-branch name (a project's
-# registered prefix may replace the legacy `fm/` one); it defaults to `fm/<task-id>`
-# and is the immutable task branch rendered in every delivery contract.
+# registered prefix, or an explicit --branch-name, may replace the legacy `fm/`
+# one); it defaults to `fm/<task-id>` and is the immutable task branch rendered
+# in every delivery contract.
+# The optional fifth argument is the integration branch this task ships against.
+# Empty keeps the historical default-branch wording. A named base changes the
+# local landing target, the direct-PR `gh-axi pr create --base` step, the
+# no-mistakes `no-mistakes axi run --base-branch` step, and a Gerrit
+# `gerrit-axi publish --branch` step, and appends one
+# `Base branch contract: base_branch=<branch>` line that spawn checks.
 # Callers of the gate are bin/fm-crew-state.sh (current-state done),
 # bin/fm-pr-check.sh (PR registration), and bin/fm-inactive-reconcile.sh
 # (secondmate ledger-first publish of a child done). A ship `done:` is not
@@ -95,6 +102,8 @@
 # ordinary ship brief and the durable contract written during scout promotion.
 # It takes the same optional trailing forge argument, because the rule that keeps
 # a worker off a remote is exactly the rule that changes when the forge does.
+# An optional base branch after the forge names the integration branch the rule
+# must keep the worker off; empty keeps today's default-branch sentence.
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-pr-lib.sh"
@@ -140,8 +149,8 @@ fm_forge_valid_for_mode() {  # <forge> <mode> <caller>
   return 0
 }
 
-fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>]
-  local mode=$1 id=$2 forge=${4:-none}
+fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<forge>] [base-branch]
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-}
   local branch=${3:-fm/$id}
   fm_forge_valid_for_mode "$forge" "$mode" fm_ship_rule_one || return 1
   if [ "$forge" = gerrit ]; then
@@ -150,13 +159,25 @@ fm_ship_rule_one() {  # <no-mistakes|direct-PR|local-only> <task-id> [branch] [<
   fi
   case "$mode" in
     direct-PR)
-      printf '%s\n' "1. Never push to the default branch (push only your \`$branch\` branch). Never merge a PR."
+      if [ -n "$base" ]; then
+        printf '%s\n' "1. Never push to \`$base\` or the default branch (push only your \`$branch\` branch). Never merge a PR."
+      else
+        printf '%s\n' "1. Never push to the default branch (push only your \`$branch\` branch). Never merge a PR."
+      fi
       ;;
     local-only)
-      printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`."
+      if [ -n "$base" ]; then
+        printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`$base\`."
+      else
+        printf '%s\n' "1. Never push to any remote and never open a PR. Work only on your \`$branch\` branch; firstmate handles the merge into local \`main\`."
+      fi
       ;;
     no-mistakes)
-      printf '%s\n' '1. Never push to the default branch. Never merge a PR.'
+      if [ -n "$base" ]; then
+        printf '%s\n' "1. Never push to \`$base\` or the default branch. Never merge a PR."
+      else
+        printf '%s\n' '1. Never push to the default branch. Never merge a PR.'
+      fi
       ;;
     *)
       echo "error: fm_ship_rule_one: unknown delivery mode '$mode'" >&2
@@ -319,11 +340,18 @@ EOF
 # modes so the one push, the Change-Id rule, and the ready report are written
 # once. gerrit-axi owns the squash mechanics; this names the one call and what
 # to read back from it.
-fm_gerrit_publish_block() {
+fm_gerrit_publish_block() {  # [base-branch]
+  local base=${1:-} publish_step
+  if [ -n "$base" ]; then
+    printf -v publish_step '%q' "$base"
+    publish_step="2. Run \`gerrit-axi publish --squash --json --branch $publish_step\` so the change targets that named branch."
+  else
+    publish_step="2. Run \`gerrit-axi publish --squash --json\`, adding \`--branch <b>\` only when the task names a target branch other than the server's default."
+  fi
   cat <<EOF
 Publish from this copy with \`gerrit-axi\`, never with \`git push\`:
 1. Run \`git fetch origin\` so the server's branch tip is in this repository; \`gerrit-axi\` reads its base off the server and refuses when that tip is not here.
-2. Run \`gerrit-axi publish --squash --json\`, adding \`--branch <b>\` only when the task names a target branch other than the server's default.
+$publish_step
    It is one push to \`refs/for/<branch>\` that turns every commit since your branch left the server's branch into ONE change carrying the oldest commit's message, so that message is the review description: make it the one you want reviewed.
    It keeps any \`Change-Id\` a commit already carries and stamps one into the oldest commit when it has none, rewriting your local branch's messages only.
    Never edit, remove, or regenerate a \`Change-Id\`: a different one creates a different change and orphans the first one's review, while the same one adds a patch set to it.
@@ -337,10 +365,24 @@ There is no pull request, no \`gh-axi\` call, and no forge CI result to report: 
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id> [branch] [<forge>]
-  local mode=$1 id=$2 forge=${4:-none}
+fm_dod_block() {  # <mode> <task-id> [branch] [<forge>] [base-branch]
+  local mode=$1 id=$2 forge=${4:-none} base=${5:-} base_q
   local branch=${3:-fm/$id}
+  local landing_branch_words='the current default branch'
+  # shellcheck disable=SC2016  # backticks are worker-facing command markup, not expansions
+  local landing_target="local \`main\`"
+  # shellcheck disable=SC2016
+  local rebase_words="if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward"
+  # shellcheck disable=SC2016
+  local open_pr="open a PR with \`gh-axi\` that is ready for review, not a draft."
   fm_forge_valid_for_mode "$forge" "$mode" fm_dod_block || return 1
+  if [ -n "$base" ]; then
+    printf -v base_q '%q' "$base"
+    landing_branch_words="\`$base\`"
+    landing_target="local \`$base\`"
+    rebase_words="if \`$base\` has advanced, rebase onto it so the eventual merge stays a fast-forward"
+    open_pr="open a PR with \`gh-axi pr create --base $base_q\` that is ready for review, not a draft."
+  fi
   case "$mode:$forge" in
     direct-PR:gerrit)
       cat <<EOF
@@ -352,7 +394,7 @@ Gerrit has no pull requests, so there is nothing to open; publishing creates the
 The task is complete only when committed on your branch.
 When it is implemented and committed, publish it.
 EOF
-      fm_gerrit_publish_block
+      fm_gerrit_publish_block "$base"
       cat <<EOF
 Do NOT run /no-mistakes.
 EOF
@@ -387,7 +429,7 @@ When the run's outcome is passed, passed-with-skips, or passed-with-override and
 The squashed change carries only the oldest commit's message, so the pipeline's own fix commits never reach the reviewer's description; your report is how they reach the captain.
 After publishing and immediately before your ready report, append one line \`note [at=<epoch>]: pipeline changes: {finding} - {fix it made}; {finding} - {fix it made}\` to the status file, one short clause per finding the run fixed, taken from the run's \`fixes\` table and the gate findings its drive calls returned (\`no-mistakes axi logs --step <step> --full\` has the detail); write \`note [at=<epoch>]: pipeline changes: none\` when it fixed nothing.
 EOF
-      fm_gerrit_publish_block
+      fm_gerrit_publish_block "$base"
       ;;
     direct-PR:*)
       cat <<EOF
@@ -396,7 +438,7 @@ Delivery contract: mode=direct-PR
 Ship branch: $branch
 This task ships **direct-PR**: you raise the PR yourself, without the no-mistakes pipeline.
 The task is complete only when committed on your branch.
-When it is implemented and committed, push your branch and open a PR with \`gh-axi\` that is ready for review, not a draft.
+When it is implemented and committed, push your branch and $open_pr
 Before you report done, read the PR back from the forge and confirm it is not a draft (\`gh pr view <url> --json isDraft\` must print false); if it is a draft, mark it ready with \`gh-axi pr ready\`.
 A draft cannot be merged, so a done report on one leaves the merge unasked.
 Then append \`done [at=<epoch>]: PR {url}\` to the status file and stop.
@@ -413,9 +455,9 @@ Ship branch: $branch
 This task ships **local-only**: no remote, no PR, no pipeline.
 The task is complete only when committed on your branch \`$branch\`. Do NOT push, do NOT open a PR, do NOT merge.
 A \`done:\` is accepted when the named head is on this project's shared local branch, not only on a detached copy; the check tests that head, not merely that a branch moved.
-Keep your branch a clean fast-forward onto the current default branch - if \`main\` has advanced, rebase onto it so the eventual merge stays a fast-forward.
+Keep your branch a clean fast-forward onto $landing_branch_words - $rebase_words.
 When it is implemented and committed, append \`done [at=<epoch>]: ready in branch $branch\` to the status file and stop.
-The configured merge authority approves the ready branch, then firstmate merges it into local \`main\` through the guarded fast-forward path.
+The configured merge authority approves the ready branch, then firstmate merges it into $landing_target through the guarded fast-forward path.
 EOF
       ;;
     no-mistakes:*)
@@ -430,6 +472,13 @@ That first \`done:\` is the handoff that starts the pipeline, which owns the pus
 
 EOF
       fm_nm_driving_block "$forge"
+      if [ -n "$base" ]; then
+        cat <<EOF
+
+When starting no-mistakes, pass \`no-mistakes axi run --base-branch $base_q\` so the pipeline opens the PR against that named integration branch for this run only.
+Do not open against the repo default and retarget later, and do not change repo \`pr.base_branch\` settings.
+EOF
+      fi
       cat <<EOF
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), read the PR back from the forge and confirm it is not a draft (\`gh pr view <url> --json isDraft\` must print false); if it is a draft, mark it ready with \`gh-axi pr ready\`.
@@ -443,6 +492,9 @@ EOF
       echo "error: fm_dod_block: unknown delivery mode '$mode'" >&2
       return 1 ;;
   esac
+  if [ -n "$base" ]; then
+    printf 'Base branch contract: base_branch=%s\n' "$base"
+  fi
 }
 
 # 0 when <sha> is contained in a ref under <namespace> in <repo>.

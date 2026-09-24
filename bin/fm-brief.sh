@@ -14,8 +14,8 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
-#        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--branch-prefix <prefix>|--branch-name <name>] [--base-branch <branch>] [--forge <none|gerrit> [--shape squash]] [--herdr-lab]
+#        fm-brief.sh <task-id> <repo-name> --scout [--base-branch <branch>] [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -59,6 +59,16 @@
 # standing per-project preference, and firstmate resolves it per task at intake
 # and passes the explicit flag. Refused on --scout and --secondmate: a scout
 # makes no branch and a charter is not a delivery contract.
+# --branch-name <name> replaces that prefix-plus-id crew branch with one full
+# git branch name. It is mutually exclusive with --branch-prefix, refused on
+# scout and secondmate, and cannot equal --base-branch.
+# --base-branch <branch> is the integration branch this task ships against.
+# Omitted, the worker still starts from the repository default and every
+# generated sentence stays on that historical wording. Set, the brief detaches
+# onto that branch, bin/fm-dod-lib.sh names it as the PR target or local landing
+# branch, and a "Base branch contract: base_branch=<branch>" line is recorded
+# for spawn to check. A scout may carry it so promotion keeps the same base.
+# Refused on a secondmate charter. The branch must be a usable git branch name.
 # --forge names the project's forge, defaults to none, and is orthogonal to --mode
 # exactly as the registry's `forge=` token is. It is the captain's confirmed
 # registry binding, read from data/projects.md at intake and passed here; this
@@ -176,6 +186,10 @@ MODE=
 MODE_SET=0
 BRANCH_PREFIX=fm/
 BRANCH_PREFIX_SET=0
+BRANCH_NAME=
+BRANCH_NAME_SET=0
+BASE_BRANCH=
+BASE_BRANCH_SET=0
 FORGE=none
 FORGE_SET=0
 SHAPE=
@@ -190,6 +204,8 @@ for a in "$@"; do
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
       branch-prefix) BRANCH_PREFIX=$a; BRANCH_PREFIX_SET=1 ;;
+      branch-name) BRANCH_NAME=$a; BRANCH_NAME_SET=1 ;;
+      base-branch) BASE_BRANCH=$a; BASE_BRANCH_SET=1 ;;
       forge) FORGE=$a; FORGE_SET=1 ;;
       shape) SHAPE=$a; SHAPE_SET=1 ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
@@ -206,6 +222,10 @@ for a in "$@"; do
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
     --branch-prefix) want_value="branch-prefix" ;;
     --branch-prefix=*) BRANCH_PREFIX=${a#--branch-prefix=}; BRANCH_PREFIX_SET=1 ;;
+    --branch-name) want_value="branch-name" ;;
+    --branch-name=*) BRANCH_NAME=${a#--branch-name=}; BRANCH_NAME_SET=1 ;;
+    --base-branch) want_value="base-branch" ;;
+    --base-branch=*) BASE_BRANCH=${a#--base-branch=}; BASE_BRANCH_SET=1 ;;
     --forge) want_value=forge ;;
     --forge=*) FORGE=${a#--forge=}; FORGE_SET=1 ;;
     --shape) want_value=shape ;;
@@ -218,6 +238,8 @@ for a in "$@"; do
   esac
 done
 [ -z "$want_value" ] || { echo "error: --$want_value requires a value" >&2; exit 1; }
+[ "$BRANCH_NAME_SET" -eq 0 ] || [ -n "$BRANCH_NAME" ] || { echo "error: --branch-name requires a non-empty value" >&2; exit 1; }
+[ "$BASE_BRANCH_SET" -eq 0 ] || [ -n "$BASE_BRANCH" ] || { echo "error: --base-branch requires a non-empty value" >&2; exit 1; }
 
 # Ship delivery mode is an explicit per-task decision (AGENTS.md section 7). A
 # missing or invalid value stops the scaffold rather than silently defaulting.
@@ -242,6 +264,18 @@ fi
 # decision, but it still only makes sense where a branch is actually created.
 if [ "$KIND" != ship ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
   echo "error: --branch-prefix applies only to ship briefs; a scout makes no branch and a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+if [ "$KIND" != ship ] && [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  echo "error: --branch-name applies only to ship briefs; a scout makes no branch and a secondmate charter is not a delivery contract" >&2
+  exit 1
+fi
+if [ "$KIND" = secondmate ] && [ "$BASE_BRANCH_SET" -eq 1 ]; then
+  echo "error: --base-branch applies only to ship and scout briefs; a secondmate already owns its home" >&2
+  exit 1
+fi
+if [ "$BRANCH_NAME_SET" -eq 1 ] && [ "$BRANCH_PREFIX_SET" -eq 1 ]; then
+  echo "error: --branch-name and --branch-prefix are mutually exclusive; pass the full crew branch or the prefix, not both" >&2
   exit 1
 fi
 case "$BRANCH_PREFIX" in
@@ -270,12 +304,34 @@ elif [ "$FORGE_SET" -eq 1 ] || [ "$SHAPE_SET" -eq 1 ]; then
   exit 1
 fi
 ID=${POS[0]}
-BRANCH="$BRANCH_PREFIX$ID"
-if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
-  echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
-  exit 1
+if [ "$BRANCH_NAME_SET" -eq 1 ]; then
+  BRANCH=$BRANCH_NAME
+  if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+    echo "error: --branch-name is not a usable git branch name: $BRANCH" >&2
+    exit 1
+  fi
+else
+  BRANCH="$BRANCH_PREFIX$ID"
+  if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
+    echo "error: --branch-prefix and task id must form a valid git branch (got '$BRANCH')" >&2
+    exit 1
+  fi
+fi
+if [ "$BASE_BRANCH_SET" -eq 1 ]; then
+  if ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
+    echo "error: --base-branch is not a usable git branch name: $BASE_BRANCH" >&2
+    exit 1
+  fi
+  if [ "$KIND" = ship ] && [ "$BASE_BRANCH" = "$BRANCH" ]; then
+    echo "error: --base-branch cannot be the crew branch ($BRANCH); choose a different --branch-name" >&2
+    exit 1
+  fi
 fi
 printf -v BRANCH_Q '%q' "$BRANCH"
+SETUP_HEAD='a clean default branch'
+if [ -n "$BASE_BRANCH" ]; then
+  SETUP_HEAD="\`$BASE_BRANCH\`"
+fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -534,7 +590,7 @@ $TASK_SECTION
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO, at a detached HEAD on $SETUP_HEAD.
 This is a SCOUT task: the deliverable is a written report, not a PR.
 The worktree is your laboratory - install, run, edit, and make scratch commits freely; all of it is discarded at teardown.
 The report is the only thing that survives, so anything worth keeping must be in it.
@@ -576,6 +632,9 @@ Before reporting done, read and follow \`$FM_ROOT/.agents/skills/captain-hold-li
 When the report is complete, append \`done [at=<epoch>]: {one-line conclusion}\` to the status file and stop.
 If your findings reveal work that should ship (e.g. you reproduced a bug and the fix is clear), say so in the report; firstmate may promote this task in place, and you would then receive mode-specific ship instructions as a follow-up message.
 EOF
+if [ -n "$BASE_BRANCH" ]; then
+  printf 'Base branch contract: base_branch=%s\n' "$BASE_BRANCH" >> "$BRIEF"
+fi
 append_brief_include
 echo "scaffolded: $BRIEF (scout; replace {TASK} and {FIRSTMATE_SPEC})"
 exit 0
@@ -599,8 +658,8 @@ case "$MODE" in
 2. Run \`no-mistakes doctor\`; if it reports the repo is not initialized here, run \`no-mistakes init\`."
     ;;
 esac
-RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
-DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE") || exit 1
+RULE1=$(fm_ship_rule_one "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$BRANCH" "$FORGE" "$BASE_BRANCH") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -610,7 +669,7 @@ $TASK_SECTION
 $HERDR_SECTION
 
 # Setup
-You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
+You are in a disposable git worktree of $REPO, at a detached HEAD on $SETUP_HEAD.
 
 **Verify isolation before anything else.** Run \`pwd -P\` and \`git rev-parse --show-toplevel\`; both must resolve to the disposable task worktree you were launched in, such as a treehouse pool path or an Orca-managed worktree, not the primary checkout firstmate operates from.
 The path check is authoritative: \`git rev-parse --git-dir\` and \`git rev-parse --git-common-dir\` can help inspect the repo, but they do not prove you are outside the primary checkout.
