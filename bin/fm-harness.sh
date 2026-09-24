@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Detect the agent harness this process tree runs on.
-# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|unknown
+# Usage: fm-harness.sh                  print own harness: claude|codex|opencode|pi|pi-signed|grok|kimi|cursor|gemini|muse|rovo|omp|agy|devin|copilot|unknown
 #        fm-harness.sh crew             print the effective CREWMATE harness
 #                                        (config/crew-harness; "default" resolves to own)
 #        fm-harness.sh secondmate       print the harness the PRIMARY uses to launch
@@ -143,6 +143,18 @@ harness_marker() {
   # identified, and any rule that must be RELIABLE under grok has to test the hook
   # markers too (see .claude/settings.json Stop entries, docs/turnend-guard.md).
   [ "${GROK_AGENT:-}" = "1" ] && { echo grok; return; }
+  # GitHub Copilot CLI sets COPILOT_CLI=1 in its own process environment and
+  # it was observed reaching a tool subprocess (verified live, copilot CLI
+  # 1.0.88: a bash tool process launched by an interactive copilot session
+  # carried COPILOT_CLI=1 alongside COPILOT_CLI_BINARY_VERSION,
+  # COPILOT_AGENT_SESSION_ID, and COPILOT_LOADER_PID). Whether it survives
+  # being inherited into a DIFFERENT harness's tool subprocess (the same
+  # hazard documented above for cursor/gemini/rovo) is unverified: no other
+  # harness was installed on the machine this was captured from. Checked last
+  # among markers so an unverified survival hazard cannot outrank an already
+  # verified one; the comm-strength ancestry arm below is what actually
+  # guarantees copilot is identified against a foreign marker.
+  [ "${COPILOT_CLI:-}" = "1" ] && { echo copilot; return; }
   # codex, opencode, kimi, muse, agy, and devin publish no harness-identity marker at all, so
   # they are never named here and are identified by ancestry alone. That is the
   # whole reason a foreign marker must not outrank ancestry: with markers winning
@@ -239,6 +251,11 @@ harness_process_verdict() {  # <pid>
     # detected by ancestry alone.
     agy) echo "comm agy"; return ;;
     devin) echo "comm devin"; return ;;
+    # copilot (GitHub Copilot CLI) is a single binary whose process name is
+    # exactly `copilot` (verified, copilot CLI 1.0.88: `ps -o comm=` reports
+    # copilot two levels above a launched bash tool process). Anchored, never
+    # *copilot*, so unrelated commands cannot be misread as this harness.
+    copilot) echo "comm copilot"; return ;;
     node*|python*)
       # Bare interpreter: match the harness name in its script path.
       args=$(ps -o args= -p "$pid" 2>/dev/null)

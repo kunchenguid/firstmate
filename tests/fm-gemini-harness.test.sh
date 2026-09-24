@@ -136,7 +136,7 @@ test_gemini_node_bundle_is_not_ancestry_detectable() {
 const { spawnSync } = require('child_process');
 const env = { ...process.env };
 for (const k of ['GEMINI_CLI', 'CLAUDECODE', 'CURSOR_AGENT', 'CURSOR_INVOKED_AS',
-                 'PI_CODING_AGENT', 'GROK_AGENT']) delete env[k];
+                 'PI_CODING_AGENT', 'GROK_AGENT', 'COPILOT_CLI']) delete env[k];
 const r = spawnSync(process.env.FM_HARNESS_BIN, { env, encoding: 'utf8' });
 process.stdout.write(r.stdout || '');
 JS
@@ -153,7 +153,7 @@ JS
 const { spawnSync } = require('child_process');
 const env = { ...process.env };
 for (const k of ['GEMINI_CLI', 'CLAUDECODE', 'CURSOR_AGENT', 'CURSOR_INVOKED_AS',
-                 'PI_CODING_AGENT', 'GROK_AGENT']) delete env[k];
+                 'PI_CODING_AGENT', 'GROK_AGENT', 'COPILOT_CLI']) delete env[k];
 const r = spawnSync(process.env.FM_HARNESS_BIN, { env, encoding: 'utf8' });
 process.stdout.write(r.stdout || '');
 JS

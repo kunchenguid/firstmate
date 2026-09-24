@@ -3,7 +3,7 @@ name: harness-adapters
 description: >-
   Agent-only reference for firstmate harness operations.
   Use before spawning or recovering a crewmate or secondmate, handling a trust dialog, sending a harness-specific skill invocation, interrupting or exiting an agent, resuming an exited agent, or verifying a new harness adapter.
-  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, agy, and devin.
+  Contains verified facts for claude, codex, opencode, pi, pi-signed, grok, kimi, cursor, gemini, muse, rovo, omp, agy, devin, and copilot.
 user-invocable: false
 metadata:
   internal: true
@@ -36,6 +36,7 @@ Deliver lifecycle actions only through `../../../bin/fm-control.sh <task-id> int
 Never type an interrupt key or exit command through `fm-send`, where routing-marked lifecycle text becomes chat.
 Trust handling is complete only when inspection proves the target started processing its instructions; delivery success alone is not proof.
 Muse, Gemini, AGY, and Devin are verified only for crewmate and scout work, never a secondmate or primary.
+Copilot CLI is verified for harness DETECTION only; it is not verified for crewmate, scout, secondmate, or primary dispatch - see `references/harness/copilot.md`.
 
 ## Detection
 
@@ -96,7 +97,8 @@ A new tool remains undispatchable until the `verify` plan, its harness entry, ev
     "rovo": "references/harness/rovo.md",
     "omp": "references/harness/omp.md",
     "agy": "references/harness/agy.md",
-    "devin": "references/harness/devin.md"
+    "devin": "references/harness/devin.md",
+    "copilot": "references/harness/copilot.md"
   }
 }
 ```

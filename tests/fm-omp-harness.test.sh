@@ -61,10 +61,27 @@ make_named_shells() {  # <dir> -> echoes <bindir>
   printf '%s' "$dir"
 }
 
+# A fake ps that reports a bash ancestor terminating at pid 1, so the ancestry
+# layer proves nothing and the leaked-marker assertion below cannot depend on
+# whatever real harness (if any) happens to be running this suite itself.
+blind_ancestry_bin() {  # <dir>
+  local fakebin=$1
+  mkdir -p "$fakebin"
+  cat > "$fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'ppid='*) printf '%s\n' 1 ;;
+  *) printf '%s\n' bash ;;
+esac
+SH
+  chmod +x "$fakebin/ps"
+  printf '%s\n' "$fakebin"
+}
+
 # --- 1. Detection --------------------------------------------------------------
 
 test_detection_anchored_name_and_marker_precedence() {
-  local bin out
+  local bin out blindbin
   bin=$(make_named_shells "$TMP_ROOT/named")
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
   out=$(env -u CLAUDECODE -u FM_OMP_HARNESS -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS \
@@ -81,9 +98,13 @@ test_detection_anchored_name_and_marker_precedence() {
   out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
     "$bin/omp" -c '"$1"; :' _ "$HARNESS")
   [ "$out" = omp ] || fail "FM_OMP_HARNESS under an omp ancestor must outrank an inherited CLAUDECODE, got '$out'"
-  # ...and is inert when it leaks into a worker with no omp ancestor.
+  # ...and is inert when it leaks into a worker with no omp ancestor. Ancestry
+  # is blinded here so this assertion never depends on whatever real harness (if
+  # any) is actually running the test suite itself.
+  blindbin=$(blind_ancestry_bin "$TMP_ROOT/blind")
   # shellcheck disable=SC2016 # the quoted body expands inside the named shell
-  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDECODE=1 FM_OMP_HARNESS=omp \
+  out=$(env -u PI_CODING_AGENT -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u COPILOT_CLI \
+    CLAUDECODE=1 FM_OMP_HARNESS=omp PATH="$blindbin:$PATH" \
     bash -c '"$1"; :' _ "$HARNESS")
   [ "$out" = claude ] || fail "a leaked FM_OMP_HARNESS without an omp ancestor must not relabel a claude worker, got '$out'"
   pass "fm-harness: omp detects by its anchored name; the marker is a precedence override that needs real omp ancestry"
