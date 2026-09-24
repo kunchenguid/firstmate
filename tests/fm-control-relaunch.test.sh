@@ -25,6 +25,8 @@ set -u
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
+# shellcheck source=/dev/null
+. "$ROOT/bin/fm-tasks-axi-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
 SPAWN="$ROOT/bin/fm-spawn.sh"
@@ -2294,6 +2296,10 @@ test_relaunch_reverifies_an_already_in_flight_item_instead_of_rewriting_it() {
     pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
     return 0
   }
+  fm_tasks_axi_compatible || {
+    pass "skipped: installed tasks-axi predates ${FM_TASKS_AXI_MIN}, so dispatch refuses automatic backlog transitions"
+    return 0
+  }
   dir=$(new_case reverify rl40)
   add_ship_task "$dir" rl40 claude
   seed_backlog "$dir" rl40 in_flight
@@ -2310,6 +2316,10 @@ test_relaunch_moves_a_drifted_item_back_in_flight() {
   local dir out rc=0
   command -v tasks-axi >/dev/null 2>&1 || {
     pass "skipped: tasks-axi is not installed, so the backlog transition is inert"
+    return 0
+  }
+  fm_tasks_axi_compatible || {
+    pass "skipped: installed tasks-axi predates ${FM_TASKS_AXI_MIN}, so dispatch refuses automatic backlog transitions"
     return 0
   }
   dir=$(new_case drifted rl41)
