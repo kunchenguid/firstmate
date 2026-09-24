@@ -34,18 +34,20 @@ Attended supervision on the host, other primary harnesses, `/quiet` on the host,
 On each actionable close under the away record, the host first starts and verifies the successor watcher cycle and confirms the handling handoff, so the fleet stays supervised while the engine works.
 It then computes the branch-claimable rows, publishes the grant, and runs one bounded engine turn with the branch prompt and the wake message carrying the record's read-back.
 The engine drains, handles, reports through `bin/fm-branch-report.sh`, and acknowledges, exactly as the Pi branch does.
-The host counts the wake handled only when the turn exited cleanly and recorded at least one report; it then releases the branch's leases and grant and parks on the successor.
+The host counts the wake handled only when the turn exited cleanly, recorded at least one report, and left none of its granted rows in the wake queue; it releases the branch's leases and grant either way and parks on the successor only for a handled wake.
 A handled wake never reaches main, whether its outcome was routine or captain: captain outcomes wait in the outcome store, and the return brief (`bin/fm-afk-return.sh`) presents them.
-The one exception is a captain who returns while a turn is still running: the return brief was rendered before that turn's outcomes existed, so the host hands the close to main with those outcomes for main to relay.
+The one exception is a captain who returns while a turn is still running: the return brief was rendered before that turn's outcomes existed, so the host hands the close to main with those outcomes for main to relay, whether or not the turn handled its wake.
 
 ## Failure direction
 
 Every path that cannot finish an away wake on the engine hands that wake to main, with one `supervision-host: <why>` line after the close.
 Before handing it back, the host stops its successor cycle, so main's next turn end starts from the same state as without the host and the wake stays durable in the queue.
-That covers an unverified successor, a refused handoff, an unreadable queue, rows main already claimed, a missing engine or node, a turn that timed out or failed, and a turn that recorded no report.
+That covers an unverified successor, a refused handoff, an unreadable queue, rows main already claimed, a missing engine or node, a turn that timed out or failed, a turn that recorded no report, and a turn that reported but left any of its granted rows unacknowledged.
+The last names those rows, which stay durable in the queue for main's drain.
 A turn that fails also starts the next wake on a fresh engine conversation.
-Rows the engine claimed but did not acknowledge stay durable and are presented again by the next drain, whichever actor runs it.
+When the captain returned during a failed turn that recorded outcomes, the handback carries those outcomes too, for main to relay.
 When the host loses session-lock ownership or its auto-arm generation, it stands down silently and leaves continuity to whoever owns it now.
+A host that starts without that ownership stands down before activation, so it never stops the owner's host or watcher or releases its leases.
 A host that dies without a close is retried by the auto-arm, and the next host stops, by recorded identity, whatever its predecessor left running before it arms.
 
 ## The park boundary
@@ -53,6 +55,8 @@ A host that dies without a close is retried by the auto-arm, and the next host s
 Claude drops the exit 2 of a Stop hook it terminated at the hook timeout ([verification](verification/supervision.md#claude-drops-the-exit-2-of-a-hook-it-timed-out-2026-09-23)).
 A plain watcher park rarely lasts that long, because heartbeat closes wake main, but a host absorbs its own wakes, so it ends its park itself before the tracked 28,800-second registration.
 At the boundary it stops the home's watcher and exits with one `supervision-host: cycle boundary` line; main drains, acknowledges, and ends its turn, and that turn end starts the next park.
+The host checks the boundary on every loop pass, so closes that are already waiting cannot carry it past the boundary.
+It also starts no engine turn that could still be running at the boundary (the turn bound plus the engine grace): that close reaches main ahead of the boundary line instead, and its wake stays durable in the queue.
 One short main turn per boundary is the cost of never losing the park silently.
 
 ## Engine conversations
@@ -73,7 +77,7 @@ Today the only verified engine is Claude's print mode, measured on Claude Code 2
 - The conversation starts with `--session-id` and continues with `--resume`; the prompt is the first argument and stdin is `/dev/null`, because an open stdin costs a three-second wait.
 - `--output-format json` carries the error flag, turn count, usage, and the tool's own cost estimate; on a resumed conversation that cost is the conversation's running total while the usage and turn count are the turn's own, so the engine lib derives each turn's cost from the total the host recorded after the previous turn.
 - The engine runs from the tracked code root, so its session files land in Claude's own project store for that directory and appear in that directory's resume list.
-- Tool commands run in process groups of their own, which a bound's group signal cannot reach, so the engine lib reaps them by recorded identity after every turn.
+- Tool commands run in process groups of their own, which a bound's group signal cannot reach, so the engine lib records the engine's descendants once a second and reaps them by recorded identity after every turn; the reap is best-effort for what it observed, not a bound, so a process that a tool detaches into a process group of its own and that loses its ancestry to the engine between two snapshots is never recorded and survives the turn, the same residual `bin/fm-timeout-lib.sh` names.
 - From inside the engine's shell the primary is not in the harness ancestry, so the engine can never act as the session-lock owner.
 
 The default model is `sonnet`, which handled every measured wake correctly at a fraction of a larger model's cost; `config/supervision-host` can name another.

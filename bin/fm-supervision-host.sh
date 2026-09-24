@@ -26,18 +26,20 @@
 #     (bin/fm-supervision-engine-lib.sh) with the generated branch prompt
 #     (bin/fm-branch-prompt.sh) and the away tail, releases the branch's
 #     leases and grant, and counts the wake handled only when that turn
-#     recorded a durable report (bin/fm-branch-report.sh). A handled wake - a
+#     exited cleanly, recorded a durable report (bin/fm-branch-report.sh), and
+#     left none of its granted rows in the wake queue. A handled wake - a
 #     routine or a captain outcome alike - never wakes main: captain outcomes
 #     wait in the outcome store for the return brief. It then parks on the
-#     successor, unless the captain returned during that turn: the return
-#     brief was rendered before the turn's outcomes existed, so the host
-#     exits with the close and one "supervision-host:" line naming them, plus
-#     one line per outcome, for main to relay.
+#     successor.
 # Every other outcome exits with the close's own reason line plus one
 # "supervision-host:" line saying why main has this wake, after stopping the
 # successor cycle so main's next turn end starts from the same state as
-# without the host. The host injects nothing and has no delivery path of its
-# own; the owner's existing wake path is the only way main hears from it.
+# without the host. Whenever the captain returned during an engine turn that
+# recorded outcomes, handled or not, the return brief was rendered before they
+# existed, so the host exits with the close, one "supervision-host:" line
+# naming them, and one line per outcome, for main to relay. The host injects
+# nothing and has no delivery path of its own; the owner's existing wake path
+# is the only way main hears from it.
 #
 # THE PARK BOUNDARY. Claude drops the exit 2 of a Stop hook it terminated at
 # the hook's configured timeout (docs/verification/supervision.md), and a host
@@ -46,14 +48,20 @@
 # 27000, under the tracked 28800-second registration) it stops this home's
 # watcher and exits with one "supervision-host: cycle boundary" line, which the
 # owner delivers as an ordinary wake; main drains, acknowledges, and ends its
-# turn, and that turn end starts the next park.
+# turn, and that turn end starts the next park. The boundary is checked on
+# every loop pass, however many closes are already waiting, and an away close
+# arriving when an engine turn could no longer finish before the boundary
+# (the turn bound plus the engine grace) is not handled: the host exits
+# through the same boundary with that close printed ahead of the line.
 #
-# OWNERSHIP. Before every successor cycle and every engine turn the host
-# proves this session still holds the fleet lock (bin/fm-session-lock-lib.sh)
-# and, when launched by the auto-arm, that the auto-arm generation it serves
-# (FM_SUPERVISION_HOST_AUTOARM_GEN owned by FM_SUPERVISION_HOST_OWNER_PID) is
-# still current; otherwise it stands down with a "supervision-host:" line and
-# leaves the decision to its owner. The engine runs with
+# OWNERSHIP. Before activation, every successor cycle, and every engine turn
+# the host proves this session still holds the fleet lock
+# (bin/fm-session-lock-lib.sh) and, when launched by the auto-arm, that the
+# auto-arm generation it serves (FM_SUPERVISION_HOST_AUTOARM_GEN owned by
+# FM_SUPERVISION_HOST_OWNER_PID) is still current; otherwise it stands down
+# with a "supervision-host:" line and leaves the decision to its owner; a
+# host that stands down before activation leaves the owner's host record,
+# processes, arms, and leases alone. The engine runs with
 # FM_SUPERVISION_ACTOR=branch, the session-lock holder as FM_LEASE_HOLDER_PID,
 # the primary's harness pin, and this turn's report id, so every guarded
 # script applies the same partition, leases, and away relocation it applies to
@@ -103,6 +111,7 @@ numeric_or() {  # <value> <default>
 }
 
 GRACE=${FM_GUARD_GRACE:-$(fm_poll_derived_grace)}
+ENGINE_GRACE=$(numeric_or "${FM_SUPERVISION_ENGINE_GRACE:-}" 30)
 PARK_SECONDS=$(numeric_or "${FM_SUPERVISION_HOST_PARK_SECONDS:-}" 27000)
 TURN_TIMEOUT=$(numeric_or "${FM_SUPERVISION_HOST_TURN_TIMEOUT:-}" 1200)
 ROTATE_TURNS=$(numeric_or "${FM_SUPERVISION_HOST_ROTATE_TURNS:-}" 20)
@@ -210,21 +219,20 @@ release_branch_leases() {
 # auto-arm admits one generation at a time, so a predecessor still alive here
 # was superseded (its owner died or went stale) or crashed mid-cleanup.
 activate() {
-  local role pid identity grace
+  local role pid identity
   mkdir -p "$STATE" || return 1
-  grace=$(numeric_or "${FM_SUPERVISION_ENGINE_GRACE:-}" 30)
   if [ -f "$HOST_RECORD" ]; then
     # The predecessor host first, with room for its own cleanup (which stops
     # its engine and arms), before anything it left is stopped individually.
     while IFS="$(printf '\t')" read -r role pid identity; do
       [ "$role" = host ] || continue
       [ "$pid" != "$HOST_PID" ] || continue
-      stop_recorded "$pid" "$identity" $((grace + 20))
+      stop_recorded "$pid" "$identity" $((ENGINE_GRACE + 20))
     done < "$HOST_RECORD"
   fi
   if [ -f "$ENGINE_PID_FILE" ]; then
     IFS="$(printf '\t')" read -r pid identity < "$ENGINE_PID_FILE" || true
-    stop_recorded "${pid:-}" "${identity:-}" $((grace + 5))
+    stop_recorded "${pid:-}" "${identity:-}" $((ENGINE_GRACE + 5))
     rm -f "$ENGINE_PID_FILE"
   fi
   if [ -f "$HOST_RECORD" ]; then
@@ -246,7 +254,7 @@ stop_engine_turn() {
   if [ -n "$pid" ] && fm_pid_alive "$pid" && [ "$(identity_of "$pid")" = "$identity" ]; then
     kill -TERM "$pid" 2>/dev/null || true
   fi
-  limit=$(( ($(numeric_or "${FM_SUPERVISION_ENGINE_GRACE:-}" 30) + 10) * 10 ))
+  limit=$(( (ENGINE_GRACE + 10) * 10 ))
   i=0
   while [ -n "$ENGINE_SUBSHELL" ] && fm_pid_alive "$ENGINE_SUBSHELL" && [ "$i" -lt "$limit" ]; do
     sleep 0.1
@@ -275,11 +283,6 @@ cleanup() {
   fi
   exit "$rc"
 }
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 143' TERM
-trap 'exit 130' INT
-
 # Stop one arm this host started (its TERM handler stops the watcher it owns)
 # and drop its output file.
 retire_arm() {  # <pid> <output-file>
@@ -324,6 +327,24 @@ boundary_reached() {
   [ $(( $(date +%s) - HOST_STARTED )) -ge "$PARK_SECONDS" ]
 }
 
+# True when an engine turn started now could still be running at the boundary.
+turn_crosses_boundary() {
+  [ $(( $(date +%s) - HOST_STARTED + TURN_TIMEOUT + ENGINE_GRACE )) -ge "$PARK_SECONDS" ]
+}
+
+# End the park at the boundary: stop the current arm and this home's watcher,
+# print any close already read so main drains it, then the boundary line.
+boundary_exit() {
+  retire_arm "$ARM_PID" "$ARM_OUT"
+  ARM_PID=
+  ARM_OUT=
+  "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
+  print_close
+  log_line "boundary	after $(( $(date +%s) - HOST_STARTED ))s"
+  printf 'supervision-host: cycle boundary - the host ended its park before the Stop hook timeout; drain, acknowledge, and end the turn, and the next park starts on its own\n'
+  exit 0
+}
+
 # Wait for the current arm to close. Returns 0 with ARM_TEXT set,
 # or 1 when the park boundary arrives first.
 await_close() {
@@ -361,6 +382,15 @@ exit_to_main() {  # <why> [further lines]
   [ -z "${2:-}" ] || printf '%s\n' "$2"
   log_line "to-main	$1"
   exit 0
+}
+
+# True when the captain returned during this close's engine turn and that turn
+# recorded outcomes; sets RETURNED_SEQS to their store rows.
+returned_during_turn() {
+  RETURNED_SEQS=
+  [ -n "$LAST_TURN" ] && [ ! -f "$STATE/.afk-contract" ] || return 1
+  RETURNED_SEQS=$(awk -F '\t' -v turn="$LAST_TURN" '$1 == turn { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null)
+  [ -n "$RETURNED_SEQS" ]
 }
 
 # The outcomes one turn recorded, one "supervision-host:" line each, from its
@@ -465,7 +495,8 @@ write_engine_record() {  # <turns> <conversation-cost>
 # advances the host's grant and turn state.
 handle_away() {  # <reason-lines>
   local reason=$1 first scope status corrupted rows tasks unscoped rc turn readback
-  local receipts usage result errors
+  local receipts usage result errors unacked
+  LAST_TURN=
   first=$(printf '%s\n' "$reason" | head -n 1)
   set --
   case "$first" in heartbeat*) set -- --heartbeat ;; esac
@@ -555,12 +586,16 @@ handle_away() {  # <reason-lines>
   ENGINE_SUBSHELL=
   ENGINE_RUNNING=0
   release_branch_leases
+  # shellcheck disable=SC2086 # rows is a space-separated list of sequence numbers.
+  unacked=$(fm_wake_rows_queued $rows) || unacked=$rows
+  unacked=$(printf '%s\n' "$unacked" | awk 'NF { printf "%s%s", sep, $1; sep = " " }')
   "$SCRIPT_DIR/fm-wake-grant.sh" release "$GEN" >/dev/null 2>&1 || true
   rm -f "$TURN_FILE"
   receipts=$(awk -F '\t' -v turn="$turn" '$1 == turn { n++ } END { print n + 0 }' "$RECEIPTS" 2>/dev/null)
   usage=$(fm_supervision_engine_result "$FM_SUPERVISION_ENGINE" "$result" "${ENGINE_COST:-0}" 2>/dev/null || true)
   [ "$result" = /dev/null ] || rm -f "$result"
-  if [ "$rc" -eq 0 ] && [ "${receipts:-0}" -gt 0 ] && [ -n "$usage" ] && [ "${usage#error=0}" != "$usage" ]; then
+  if [ "$rc" -eq 0 ] && [ "${receipts:-0}" -gt 0 ] && [ -z "$unacked" ] \
+    && [ -n "$usage" ] && [ "${usage#error=0}" != "$usage" ]; then
     write_engine_record $((ENGINE_TURNS + 1)) "$(printf '%s\n' "$usage" | sed -n 's/.* conversation_cost=\([^ ]*\).*/\1/p')" \
       || rm -f "$ENGINE_RECORD"
     [ "$errors" = /dev/null ] || rm -f "$errors"
@@ -570,7 +605,7 @@ handle_away() {  # <reason-lines>
   # A turn that did not handle its wake starts the next one on a new
   # conversation, so whatever went wrong in this one is not carried forward.
   rm -f "$ENGINE_RECORD"
-  log_line "failed	turn=$turn	rc=$rc	reports=${receipts:-0}	${usage:-no-result}	$(head -c 300 "$errors" 2>/dev/null | tr '\t\n' '  ')	$first"
+  log_line "failed	turn=$turn	rc=$rc	reports=${receipts:-0}	unacked=${unacked:-none}	${usage:-no-result}	$(head -c 300 "$errors" 2>/dev/null | tr '\t\n' '  ')	$first"
   [ "$errors" = /dev/null ] || rm -f "$errors"
   if fm_timed_out "$rc"; then
     HANDLE_WHY="the engine turn hit its ${TURN_TIMEOUT}s bound"
@@ -578,34 +613,34 @@ handle_away() {  # <reason-lines>
     HANDLE_WHY="the $FM_SUPERVISION_ENGINE engine could not run"
   elif [ "$rc" -ne 0 ] || [ "${usage#error=0}" = "$usage" ]; then
     HANDLE_WHY="the engine turn failed (exit $rc)"
-  else
+  elif [ "${receipts:-0}" -eq 0 ]; then
     HANDLE_WHY="the engine turn recorded no outcome for its wake"
+  else
+    HANDLE_WHY="the engine turn left its granted wake rows $unacked unacknowledged"
   fi
   return 1
 }
 
+# Ownership first: a host that does not own supervision leaves the owner's
+# host, processes, arms, and leases alone.
+if ! host_still_owner; then
+  stand_down "this session does not own supervision"
+fi
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 143' TERM
+trap 'exit 130' INT
 activate || { echo "supervision-host stood down: the host record could not be written"; exit 0; }
 log_line "start	gen=$GEN	primary=$PRIMARY"
 
 # The first cycle.
-if ! host_still_owner; then
-  stand_down "this session does not own supervision"
-fi
 start_arm "" || { echo "watcher: FAILED - the supervision host could not start a watcher cycle"; exit 1; }
 ARM_PID=$STARTED_ARM_PID
 ARM_OUT=$STARTED_ARM_OUT
 
 while :; do
-  if ! await_close; then
-    retire_arm "$ARM_PID" "$ARM_OUT"
-    ARM_PID=
-    ARM_OUT=
-    "$SCRIPT_DIR/fm-watch-arm.sh" --stop >/dev/null 2>&1 || true
-    ARM_TEXT=
-    log_line "boundary	after $((PARK_SECONDS))s"
-    printf 'supervision-host: cycle boundary - the host ended its park before the Stop hook timeout; drain, acknowledge, and end the turn, and the next park starts on its own\n'
-    exit 0
-  fi
+  boundary_reached && boundary_exit
+  await_close || boundary_exit
   REASON=$(printf '%s\n' "$ARM_TEXT" | grep -E '^(signal:|stale:|check:|heartbeat($|:))' || true)
 
   # The away daemon owns triage while its flag exists; the owner stands down.
@@ -641,6 +676,8 @@ while :; do
     exit_to_main "node is required to compute branch eligibility; this wake is yours"
   fi
 
+  # A turn that could outlive the boundary would outlive the hook registration.
+  turn_crosses_boundary && boundary_exit
   if ! start_successor "$CLOSED_ARM_PID"; then
     exit_to_main "the successor watcher cycle could not be verified before handling; this wake is yours"
   fi
@@ -650,14 +687,17 @@ while :; do
     fi
   fi
 
+  # The captain returned during that turn: the return brief was rendered
+  # before its outcomes existed, so main relays them now, handled or not.
   if ! handle_away "$REASON"; then
+    if returned_during_turn; then
+      exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours, and the captain returned during its turn, so relay the outcomes it recorded (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
+        "$(turn_outcome_lines "$LAST_TURN")"
+    fi
     exit_to_main "the away session could not take this wake: $HANDLE_WHY; this wake is yours"
   fi
-  # The captain returned during that turn: the return brief was rendered
-  # before its outcomes existed, so main relays them now.
-  if [ ! -f "$STATE/.afk-contract" ]; then
-    seqs=$(awk -F '\t' -v turn="$LAST_TURN" '$1 == turn { printf "%s%s", sep, $2; sep = ", " }' "$RECEIPTS" 2>/dev/null)
-    exit_to_main "the captain returned while the away session was handling this wake, which it finished after the return brief was rendered; relay its outcomes (store rows $seqs, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
+  if returned_during_turn; then
+    exit_to_main "the captain returned while the away session was handling this wake, which it finished after the return brief was rendered; relay its outcomes (store rows $RETURNED_SEQS, listed next and in bin/fm-branch-outcome.sh list) to the captain" \
       "$(turn_outcome_lines "$LAST_TURN")"
   fi
 

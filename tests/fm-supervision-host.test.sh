@@ -36,6 +36,10 @@ FAKE_CLAUDE="$FAKEBIN/claude"
 #   hold-lease  the same, but leave the lease held (the host must release it)
 #   return      handle, but the captain returns (the record is archived) before
 #               the turn ends
+#   return-fail the same, then exit nonzero without a result
+#   noack       the same as handle, but skip the acknowledgement
+#   chain       handle, then append a status line, so the next close is already
+#               waiting when the turn ends
 #   noreport    drain and exit cleanly without a report
 #   hang        start a descendant in a process group of its own, then block
 STUB="$TMP_ROOT/engine-stub"
@@ -61,14 +65,18 @@ ack=$(printf '%s\n' "$drain" | sed -n 's/^WAKE_ACK_REQUIRED: after handling comp
 task=$(sed -n 's/^tasks=//p' "$STATE/.supervision-host-turn" | awk '{ print $1 }')
 [ -n "$task" ] || task=fleet
 case "$mode" in
-  handle|hold-lease|return)
+  handle|hold-lease|return|return-fail|noack|chain)
     "$FM_REPO/bin/fm-lease.sh" claim "$task" >> "$FM_HOME/engine-lease.log" 2>&1
     "$FM_REPO/bin/fm-branch-report.sh" --task "$task" --verdict routine --summary "stub handled $task" \
       >> "$FM_HOME/engine-report.log" 2>&1
     # shellcheck disable=SC2086 # the printed acknowledgement arguments
-    [ -z "$ack" ] || "$FM_REPO/bin/fm-wake-drain.sh" $ack >> "$FM_HOME/engine-ack.log" 2>&1
+    [ -z "$ack" ] || [ "$mode" = noack ] || "$FM_REPO/bin/fm-wake-drain.sh" $ack >> "$FM_HOME/engine-ack.log" 2>&1
     [ "$mode" = hold-lease ] || "$FM_REPO/bin/fm-lease.sh" release "$task" >> "$FM_HOME/engine-lease.log" 2>&1
-    [ "$mode" != return ] || "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1
+    case "$mode" in
+      return|return-fail) "$FM_REPO/bin/fm-afk-contract.sh" archive >> "$FM_HOME/engine-return.log" 2>&1 ;;
+      chain) printf 'working [at=%s]: chained %s\n' "$(date +%s)" "$n" >> "$STATE/demo.status" ;;
+    esac
+    [ "$mode" != return-fail ] || exit 3
     result
     ;;
   noreport) result ;;
@@ -358,6 +366,44 @@ test_return_during_an_engine_turn_hands_its_outcomes_to_main() {
   pass "host: a captain return during an engine turn hands that turn's outcomes to main"
 }
 
+test_report_without_acknowledgement_hands_the_wake_to_main() {
+  local home
+  home=$(make_home away-noack away)
+  echo noack > "$home/stub-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "noack: the host never started a watcher cycle"
+  append_status "$home" 'reported, never acknowledged'
+  wait_until 250 host_exited "$home" || fail "noack: the host counted an unacknowledged wake handled: $(cat "$home/state/.supervision-host.log")"
+  expect_code 0 "$(cat "$home/host.rc")" "a handed-back wake must exit 0 for the owner to deliver"
+  assert_grep '"task":"demo"' "$home/state/branch-outcomes.jsonl" "fixture: the stub did not report"
+  assert_re '^signal: .*demo.status' "$home/host.out" "the handed-back close must carry the reason line"
+  assert_re '^supervision-host: .*the engine turn left its granted wake rows [0-9]+( [0-9]+)* unacknowledged; this wake is yours$' "$home/host.out" \
+    "the handback must name the rows the turn left unacknowledged"
+  assert_grep 'demo.status' "$home/state/.wake-queue" "the unacknowledged wake must stay durable for main"
+  assert_re '	failed	turn=.*	unacked=[0-9]' "$home/state/.supervision-host.log" "the ledger must record the turn as failed"
+  assert_absent "$home/state/.supervision-host-engine" "a turn that did not handle its wake must not keep its conversation"
+  watcher_live "$home" && fail "the host left its successor cycle running when it handed the wake to main"
+  pass "host: a turn that reports but leaves its granted rows queued hands the wake to main"
+}
+
+test_return_during_a_failed_turn_still_hands_its_outcomes_to_main() {
+  local home
+  home=$(make_home away-return-fail away)
+  echo return-fail > "$home/stub-mode"
+  start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "return-fail: the host never started a watcher cycle"
+  append_status "$home" 'mid-task, then a crash'
+  wait_until 250 host_exited "$home" || fail "return-fail: the host did not hand the wake to main"
+  expect_code 0 "$(cat "$home/host.rc")" "a failed turn's handback must exit 0 for the owner to deliver"
+  assert_absent "$home/state/.afk-contract" "fixture: the stub's return did not archive the record"
+  assert_re '^supervision-host: the away session could not take this wake: the engine turn failed \(exit 3\); .*captain returned during its turn.*store rows 1[,)]' "$home/host.out" \
+    "the handback must say the turn failed, that the captain returned, and name the store rows"
+  assert_re '^supervision-host: outcome 1 for demo \[routine\]: stub handled demo$' "$home/host.out" \
+    "the handback must carry the failed turn's outcome for main to relay"
+  assert_re '	failed	turn=' "$home/state/.supervision-host.log" "the turn itself failed"
+  pass "host: a captain return during a failed engine turn still hands that turn's outcomes to main"
+}
+
 test_engine_turn_is_bounded_and_its_descendants_reaped() {
   local home orphan
   home=$(make_home away-hang away)
@@ -408,6 +454,23 @@ test_park_boundary_ends_the_park_before_the_hook_timeout() {
   pass "host: the park ends itself with a boundary wake and a stopped watcher"
 }
 
+test_park_boundary_holds_under_back_to_back_closes() {
+  local home
+  home=$(make_home boundary-busy away)
+  echo chain > "$home/stub-mode"
+  FM_SUPERVISION_HOST_PARK_SECONDS=20 FM_SUPERVISION_HOST_TURN_TIMEOUT=3 FM_SUPERVISION_ENGINE_GRACE=1 start_host "$home"
+  wait_until 150 watcher_live "$home" || fail "boundary-busy: the host never started a watcher cycle"
+  append_status "$home" 'the first of many'
+  wait_until 450 host_exited "$home" \
+    || fail "the host kept handling back-to-back closes past its park boundary: $(cat "$home/state/.supervision-host.log")"
+  handled_at_least "$home" 2 || fail "fixture: closes did not arrive back to back: $(cat "$home/state/.supervision-host.log")"
+  assert_re '^supervision-host: cycle boundary - ' "$home/host.out" "the park boundary must reach main as a host line"
+  [ "$(tail -n 1 "$home/host.out")" = "$(grep '^supervision-host: cycle boundary - ' "$home/host.out")" ] \
+    || fail "a close read at the boundary must be printed ahead of the boundary line: $(cat "$home/host.out")"
+  watcher_live "$home" && fail "the park boundary left the watcher running"
+  pass "host: waiting closes cannot carry the park past its boundary"
+}
+
 test_unverified_engine_hands_every_away_wake_to_main() {
   local home
   home=$(make_home no-engine away 'pi')
@@ -436,14 +499,57 @@ test_host_outside_the_lock_owner_stands_down() {
   pass "host: a host outside the session-lock owner stands down without arming"
 }
 
+test_superseded_host_leaves_the_owner_untouched() {
+  local home owner watcher lock_pid
+  home=$(make_home superseded away)
+  # One fake harness runs the owner host, then, on a signal file, a second host
+  # under an auto-arm generation the ledger has already superseded.
+  FM_HOME="$home" FM_CREW_STATE_BIN="$home/fakebin/fm-crew-state.sh" PATH="$home/fakebin:$PATH" \
+    "$FAKE_CLAUDE" -c '
+      printf "%s\n" "$$" > "$FM_HOME/state/.lock"
+      printf "%s\n" "$$" >> "$FM_HOME/claude-pids"
+      "$0" park > "$FM_HOME/host.out" 2>&1 &
+      while [ ! -e "$FM_HOME/go-second" ]; do sleep 0.1; done
+      FM_SUPERVISION_HOST_AUTOARM_GEN=1 FM_SUPERVISION_HOST_OWNER_PID=$$ "$0" park > "$FM_HOME/host2.out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/host2.rc"
+      wait
+    ' "$HOST" 2>> "$home/claude.err" &
+  wait_until 150 watcher_live "$home" || fail "superseded: the owner host never started a watcher cycle"
+  owner=$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")
+  watcher=$(cat "$home/state/.watch.lock/pid")
+  lock_pid=$(cat "$home/state/.lock")
+  printf 'epoch=2 owner_pid=%s outcome=arming\n' "$lock_pid" > "$home/state/.claude-autoarm-epoch"
+  FM_HOME="$home" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID="$lock_pid" "$LEASE" claim demo >/dev/null 2>&1 \
+    || fail "fixture: could not hold a branch lease"
+  : > "$home/go-second"
+  wait_until 200 sh -c '[ -s "$1" ]' _ "$home/host2.rc" || fail "superseded: the second host did not return"
+  expect_code 0 "$(cat "$home/host2.rc")" "a superseded host exits 0"
+  assert_grep 'supervision-host stood down: this session does not own supervision' "$home/host2.out" "the stand-down must say why"
+  kill -0 "$owner" 2>/dev/null || fail "a superseded host stopped the owner host"
+  [ "$(awk -F '\t' '$1 == "host" { print $2 }' "$home/state/.supervision-host")" = "$owner" ] \
+    || fail "a superseded host took the owner's host record"
+  if [ "$(cat "$home/state/.watch.lock/pid" 2>/dev/null)" != "$watcher" ] || ! kill -0 "$watcher" 2>/dev/null; then
+    fail "a superseded host stopped the owner's watcher"
+  fi
+  FM_HOME="$home" "$LEASE" check demo 2>/dev/null | grep -q '^branch ' || fail "a superseded host released the owner's branch leases"
+  kill -TERM "$owner"
+  wait_until 200 sh -c '! kill -0 "$1" 2>/dev/null && ! kill -0 "$2" 2>/dev/null' _ "$owner" "$watcher" \
+    || fail "superseded: the owner host did not stop on TERM"
+  pass "host: a host under a superseded auto-arm generation stands down without touching the owner"
+}
+
 test_report_surface_enforces_actor_turn_and_scope
 test_dispatch_entry_scopes_rows_and_renders_the_away_tail
 test_attended_close_passes_straight_to_main
 test_away_wake_is_handled_on_the_engine_and_never_reaches_main
 test_away_turn_without_a_report_hands_the_wake_to_main
 test_return_during_an_engine_turn_hands_its_outcomes_to_main
+test_report_without_acknowledgement_hands_the_wake_to_main
+test_return_during_a_failed_turn_still_hands_its_outcomes_to_main
 test_engine_turn_is_bounded_and_its_descendants_reaped
 test_restarted_host_stops_what_a_killed_predecessor_left
 test_park_boundary_ends_the_park_before_the_hook_timeout
+test_park_boundary_holds_under_back_to_back_closes
 test_unverified_engine_hands_every_away_wake_to_main
 test_host_outside_the_lock_owner_stands_down
+test_superseded_host_leaves_the_owner_untouched
