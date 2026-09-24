@@ -550,17 +550,33 @@ wrap_forge() { # home: log gh calls and apply per-call faults from $FORGE/fault
   cat > "$home/fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 set -eu
+# Advance the mock clock by publishing a whole value. A bare
+# `printf > "$FORGE/clock"` truncates in place, so another writer running
+# concurrently in the same parallel read wave can read the file mid-write, get
+# an empty string, compute $(( + N )), and collapse the clock to the bare
+# offset. The pair that raced was the issues/<n>/comments and issues/<n>/events
+# reads observe() runs in parallel for an issue, back when the reserve fault
+# matched both. The narrowed reserve pattern below removes that pair for the
+# reserve test, but exhaust and fail-late still advance the clock from inside
+# a parallel wave, so the primitive itself must be safe.
+advance_clock() { # seconds
+  local current
+  current=$(cat "$FORGE/clock")
+  case "$current" in
+    '' | *[!0-9]*) printf 'fixture clock is not an epoch: [%s]\n' "$current" >&2; exit 1 ;;
+  esac
+  printf '%s\n' "$(( current + $1 ))" > "$FORGE/clock.$$"
+  mv -f -- "$FORGE/clock.$$" "$FORGE/clock"
+}
 printf '%s\n' "$*" >> "$FORGE/calls"
 fault=$(cat "$FORGE/fault" 2>/dev/null || true)
 case "$fault" in latency) sleep "${FORGE_LATENCY:-2}" ;; esac
 case "$fault:$*" in
   # Advance once before the parallel read wave; its readers share this clock.
-  reserve:'api repos/o/r/issues/9')
-    printf '%s\n' "$(( $(cat "$FORGE/clock") + 6 ))" > "$FORGE/clock" ;;
-  exhaust:'api repos/o/r/issues/8/comments?'*)
-    printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock" ;;
+  reserve:'api repos/o/r/issues/9') advance_clock 6 ;;
+  exhaust:'api repos/o/r/issues/8/comments?'*) advance_clock 100 ;;
   fail-late:'api repos/o/r/pulls/8/reviews?'*)
-    printf '%s\n' "$(( $(cat "$FORGE/clock") + 100 ))" > "$FORGE/clock"
+    advance_clock 100
     printf 'HTTP 502\n' >&2; exit 1 ;;
   fail:'api repos/o/r/pulls/8/reviews?'*) printf 'HTTP 502\n' >&2; exit 1 ;;
   down:*) printf 'HTTP 502\n' >&2; exit 1 ;;
