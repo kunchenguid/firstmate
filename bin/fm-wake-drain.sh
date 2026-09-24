@@ -5,7 +5,8 @@
 # informational status lines, latest captain-facing statuses not covered by a
 # newer branch outcome, OPEN DECISIONS, and captain-call record divergence,
 # then assert liveness.
-#
+# Main wake acknowledgement retains an inbox check row while its note is pending;
+# bin/fm-inbox.sh drain --ack handles the note, after which the row can be consumed.
 # Keep sequence-bound row consumption independent from generation-bound episode
 # retirement; docs/watcher-continuity.md owns the recovery contract.
 # FM_STATUS_PRESENTATION_LOCK_TIMEOUT sets the positive whole-second wait for
@@ -38,6 +39,7 @@ ACK_REMOVED=0
 PRESENTED_MAX=0
 ACK_FINGERPRINTS=
 ACK_NOTICE_FINGERPRINTS=
+RETAINED_NOTE_ROWS=
 PRESENTATION_LOCK_TIMEOUT=${FM_STATUS_PRESENTATION_LOCK_TIMEOUT:-10}
 case "$PRESENTATION_LOCK_TIMEOUT" in ''|*[!0-9]*|0) PRESENTATION_LOCK_TIMEOUT=10 ;; esac
 
@@ -239,6 +241,23 @@ inactive_outcome_fingerprints() { # <sequence> <key-prefix> [<rows-file>]
       "$prefix"*) printf '%s\n' "${key#"$prefix"}" ;;
     esac
   done < "$FM_WAKE_QUEUE"
+}
+
+pending_inbox_note_rows() { # <cutoff> <rows-file> <output-file>
+  local cutoff=$1 rows=$2 output=$3 seq id
+  while IFS=$(printf '\t') read -r seq id; do
+    case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    if [ -f "$STATE/inbox/$id.note" ]; then
+      printf '%s\n' "$seq" >> "$output"
+    fi
+  done <<EOF
+$(awk -F '\t' -v cutoff="$cutoff" -v seqs="$rows" '
+  BEGIN { while ((getline line < seqs) > 0) owned[line]=1 }
+  NF >= 5 && $3 == "check" && $2 ~ /^[0-9]+$/ && $2 <= cutoff && ($2 in owned) && $4 ~ /^inbox:/ {
+    print $2 "\t" substr($4, 7)
+  }
+' "$FM_WAKE_QUEUE")
+EOF
 }
 
 acknowledge_inactive_outcomes() { # <mode> <newline-separated-fingerprints>
@@ -685,19 +704,28 @@ if [ -n "$ACK_THROUGH" ]; then
   DRAIN_LOCK_HELD=true
   DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || exit 1
   chmod 0600 "$DRAIN_TMP" || exit 1
+  RETAINED_NOTE_ROWS=$(mktemp "$STATE/.wake-inbox-retained.XXXXXX") || exit 1
   if [ "$ACTOR" = branch ]; then
     require_branch_eligible_rows || exit 1
+    pending_inbox_note_rows "$ACK_THROUGH" "$ELIGIBLE_ROWS_FILE" "$RETAINED_NOTE_ROWS" || exit 1
     # Delete a row only when its sequence is <= cutoff AND it is named in the
     # extension's eligible snapshot; every other row - including one whose
     # sequence is below cutoff but not in the snapshot - is kept untouched.
-    awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$ELIGIBLE_ROWS_FILE" '
-      BEGIN { while ((getline line < seqs) > 0) if (line ~ /^[0-9]+$/) keep[line] = 1 }
-      NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in keep) { print }
+    awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$ELIGIBLE_ROWS_FILE" -v retained="$RETAINED_NOTE_ROWS" '
+      BEGIN {
+        while ((getline line < seqs) > 0) if (line ~ /^[0-9]+$/) owned[line]=1
+        while ((getline line < retained) > 0) keep[line]=1
+      }
+      NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in owned) || ($2 in keep) { print }
     ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
   else
-    awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$MAIN_ROWS_FILE" '
-      BEGIN { while ((getline line < seqs) > 0) owned[line]=1 }
-      NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in owned) { print }
+    pending_inbox_note_rows "$ACK_THROUGH" "$MAIN_ROWS_FILE" "$RETAINED_NOTE_ROWS" || exit 1
+    awk -F '\t' -v cutoff="$ACK_THROUGH" -v seqs="$MAIN_ROWS_FILE" -v retained="$RETAINED_NOTE_ROWS" '
+      BEGIN {
+        while ((getline line < seqs) > 0) owned[line]=1
+        while ((getline line < retained) > 0) keep[line]=1
+      }
+      NF < 5 || $2 !~ /^[0-9]+$/ || $2 > cutoff || !($2 in owned) || ($2 in keep) { print }
     ' "$FM_WAKE_QUEUE" > "$DRAIN_TMP" || exit 1
     fm_wake_commit_secondmate_stall_receipts_through "$ACK_THROUGH" "$MAIN_ROWS_FILE" || {
       echo "wake drain: secondmate stall receipt could not be recorded safely" >&2
@@ -732,7 +760,11 @@ if [ -n "$ACK_THROUGH" ]; then
     consume_actor_rows_locked "$ELIGIBLE_ROWS_FILE" "$ACK_THROUGH" || exit 1
   else
     consume_actor_rows_locked "$MAIN_ROWS_FILE" "$ACK_THROUGH" || exit 1
+    if [ -s "$RETAINED_NOTE_ROWS" ]; then
+      claim_main_rows_locked || exit 1
+    fi
   fi
+  rm -f -- "$RETAINED_NOTE_ROWS"
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=false
   if [ "$ACK_REMOVED" -eq 0 ] && [ "$PRESENTED_MAX" -gt "$ACK_THROUGH" ]; then
