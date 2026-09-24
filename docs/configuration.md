@@ -401,7 +401,7 @@ The [Claude adapter reference](../.agents/skills/harness-adapters/references/har
 
 ## Worker account pin (config/claude-account, config/pi-account)
 
-A home that mixes accounts for one runner, such as a work login and a personal one, can pin the account its own Claude and Pi workers launch on.
+Each home names the account its own Claude and Pi workers launch on, so a home that mixes accounts for one runner, such as a work login and a personal one, never spends the wrong one.
 A Claude, Pi, or Pi-signed launch without its own runner's file refuses and names the file to create, even when the other runner's file exists.
 `ordinary` is how a home explicitly selects the vendor default.
 An absent file is not that selection, and Firstmate does not spend an ambient login in its place.

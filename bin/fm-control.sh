@@ -852,8 +852,9 @@ resolve_relaunch_profile() {
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
   # The launch owner applies this home's worker account pin too, but only after
-  # the old agent has been stopped, so a pin that no longer resolves or is
-  # signed out must refuse here, while nothing has changed yet.
+  # the old agent has been stopped, so a missing file, a pin that no longer
+  # resolves, or a signed-out account must refuse here, while nothing has
+  # changed yet.
   local account_model=$TARGET_MODEL
   [ "$account_model" != default ] || account_model=
   fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
