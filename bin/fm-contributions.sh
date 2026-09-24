@@ -18,7 +18,8 @@
 #
 # This script owns fm-contributions.v1: one atomic file per durable task with
 # task and records[]. Each record contains url, kind, checked_at, error,
-# observation, verdict, seen event tokens, pending events, and notified tokens.
+# last_failure, observation, verdict, seen event tokens, pending events, and
+# notified tokens.
 # observation is one coherent forge read (a PR head is rechecked after fetching
 # checks/reviews). Checks are normalized by name, id, started_at, status and
 # conclusion; projection picks the newest attempt per distinct name. The last
@@ -42,8 +43,9 @@
 # unmeasured, rather than being mislabeled unavailable. Each distinct URL is
 # observed once per poll and applied to every owner. A final observation applies
 # to every owner without another forge read. When the budget runs out
-# mid-observation, the poll ends with that URL's records untouched; only a
-# genuine forge failure or head change records an error.
+# mid-observation, the poll ends without changing that URL's measured state,
+# error, pending events, or wake behavior; existing records receive only the
+# diagnostic. Only a non-budget observation failure records an error.
 # API failure leaves error evidence; an expired or absent observation is not
 # silence. FM_CONTRIBUTIONS_MAX_AGE (default 900 seconds) bounds freshness.
 # A URL whose last good observation is merged or closed is final: it is
@@ -56,7 +58,7 @@
 # head-mismatch (with before_head and after_head), jq-validation, or
 # record-validation. Each parallel read keeps its own entry. last_failure
 # survives later successful reads until the next failure replaces it. A
-# budget-cut observation leaves measured state untouched and updates only last_failure.
+# budget-cut observation updates only last_failure on existing records.
 # FM_CONTRIBUTIONS_NOW supplies an ISO UTC clock for tests, otherwise UTC now.
 # FM_CONTRIBUTIONS_READY_LABEL selects the equivalent triage label, default
 # ready-for-pr. Labels are matched case-insensitively and exactly.
