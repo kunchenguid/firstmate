@@ -56,7 +56,6 @@ READ_LIMIT = 20
 MAX_AFK_BODY_BYTES = 256 * 1024
 MAX_AFK_BATCH_BODY_BYTES = 1024 * 1024
 MAX_AFK_REPLY_CHARS = 8000
-AFK_EMAIL_RE = re.compile(r'[^@\s<>]+@[^@\s<>]+')
 
 
 def afk_record_field(name):
@@ -73,9 +72,9 @@ def afk_record_field(name):
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def afk_email_enabled():
+def afk_email_recipient():
     if os.environ.get('FM_AFK_POSTURE') != '1':
-        return False
+        return None
     contract = os.path.join(os.path.dirname(__file__), 'fm-afk-contract.sh')
     env = os.environ.copy()
     env.setdefault('FM_HOME', os.path.dirname(os.path.dirname(__file__)))
@@ -85,15 +84,18 @@ def afk_email_enabled():
         stderr=subprocess.DEVNULL,
         env=env,
     )
-    recipient = os.environ.get('FM_AFK_EMAIL_TO', '').strip()
-    addresses = getaddresses([recipient])
-    return (
-        validated.returncode == 0
-        and afk_record_field('reach_channels') == 'email'
-        and bool(AFK_EMAIL_RE.fullmatch(recipient))
-        and len(addresses) == 1
-        and addresses[0][1].casefold() == recipient.casefold()
+    if validated.returncode != 0 or afk_record_field('reach_channels') != 'email':
+        return None
+    helper = os.path.join(os.path.dirname(__file__), 'fm-afk-email.py')
+    configured = subprocess.run(
+        [sys.executable, helper, 'configured'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        env=env,
     )
+    recipient = configured.stdout.strip()
+    return recipient if configured.returncode == 0 and recipient else None
 
 
 def fetched_literal(data):
@@ -405,8 +407,8 @@ def cmd_poll_list():
         # retry set.
         retry_window = retry_scan_window(retry_order, retry_pos, window)
         retry_candidates = [u for u in retry_window if u in seen]
-        recipient = os.environ.get('FM_AFK_EMAIL_TO', '').strip()
-        afk_enabled = afk_email_enabled()
+        recipient = afk_email_recipient()
+        afk_enabled = recipient is not None
         afk_messages = []
         afk_body_budget = MAX_AFK_BATCH_BODY_BYTES
         turn_path = os.environ.get('FM_MAIL_TURN', '')

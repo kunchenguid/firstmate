@@ -20,6 +20,10 @@ if [ "${1:-}" = afk-email ]; then
   exec "$(dirname "$0")/fm-mail-real.sh" "$@"
 fi
 [ "${1:-}" = send ] || exit 2
+if [ "${FM_TEST_SMTP_FAIL:-}" = 1 ]; then
+  printf 'fake SMTP rejected message\n' >&2
+  exit 1
+fi
 count=$(find "$CAPTURE" -maxdepth 1 -name '*.txt' | wc -l | tr -d ' ')
 path="$CAPTURE/$count.txt"
 printf 'to=%s\nsubject=%s\n' "$2" "$3" > "$path"
@@ -110,6 +114,7 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
   out=$(run_contract "$home" FM_TEST_HARNESS=pi 2>&1) || fail "configured Pi entry failed: $out"
   assert_contains "$out" 'email reach active.' 'configured Pi entry announces email reach'
   assert_contains "$out" 'Captain-facing outcomes are emailed to the configured address' 'record announces email delivery'
+  [ "$(run_email "$home" configured)" = owner@example.com ] || fail "mail config did not return the helper's canonical recipient"
   [ "$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field reach_channels)" = email ] \
     || fail "configured Pi posture did not record email reach"
   entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
@@ -171,6 +176,23 @@ test_batched_mail_redacts_secrets_and_replies_are_item_bound() {
     || fail "replayed code handoff errored: $out"
   assert_contains "$out" 'received 0 verified and 1 untrusted' 'a one-time code cannot be replayed'
   pass "captain outcomes batch with full URLs and redaction, while reply codes are item-bound, one-use, and sender-checked"
+}
+
+test_failed_send_keeps_outcomes_queued() {
+  local home entered out
+  home=$(make_home failed-send configured)
+  run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
+  entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
+  write_outcomes "$home" "$entered"
+  run_email "$home" queue-unprocessed >/dev/null || fail "queueing outcomes failed"
+  if out=$(FM_TEST_SMTP_FAIL=1 run_email "$home" flush 2>&1); then
+    fail "flush reported success after the SMTP command failed: $out"
+  fi
+  assert_contains "$out" 'outbound message was not confirmed' 'the failed send is reported'
+  [ -f "$home/state/afk-email/pending/1.json" ] || fail "failed send removed the first pending item"
+  [ -f "$home/state/afk-email/pending/2.json" ] || fail "failed send removed the second pending item"
+  [ ! -e "$home/state/afk-email/sent/1.json" ] || fail "failed send recorded an item as sent"
+  pass "failed SMTP delivery leaves captain outcomes queued for retry"
 }
 
 test_invalid_away_record_does_not_enable_email() {
@@ -298,6 +320,7 @@ PY
 test_unconfigured_and_non_pi_retain_existing_behavior
 # The active feature is tested with synthetic mail and a local fake SMTP command; no network or mailbox is used.
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
+test_failed_send_keeps_outcomes_queued
 test_invalid_away_record_does_not_enable_email
 test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit
 test_expired_and_unknown_codes_are_untrusted

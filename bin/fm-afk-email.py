@@ -372,7 +372,11 @@ def receive_batch():
 def main():
     command = sys.argv[1] if len(sys.argv) > 1 else ""
     if command == "configured":
-        return 0 if mail_configuration() else 1
+        config = mail_configuration()
+        if not config:
+            return 1
+        print(config["recipient"])
+        return 0
     if command == "queue-unprocessed":
         return queue_unprocessed()
     if command == "flush":

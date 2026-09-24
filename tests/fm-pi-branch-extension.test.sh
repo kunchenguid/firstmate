@@ -1843,6 +1843,85 @@ EOF
 # cancelled rather than re-presented; and the first run boundary after the
 # record is archived presents the accumulated rows with a fresh triggered
 # budget. Every record read goes through the real bin/fm-afk-contract.sh.
+test_away_email_failure_is_visible_and_retried() {
+  local repo home status_file out status
+  repo="$TMP_ROOT/away-email-failure-root"
+  home="$TMP_ROOT/away-email-failure-home"
+  status_file="$home/state/mail-status"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  cp -R "$ROOT/bin/." "$repo/bin/"
+  cat > "$repo/bin/fm-mail.sh" <<'SH'
+#!/usr/bin/env bash
+case "${2:-}" in
+  configured) printf 'owner@example.com\n'; exit 0 ;;
+  queue-unprocessed) printf 'queued 1 away-email item(s)\n'; exit 0 ;;
+  flush)
+    if [ "$(cat "$FM_TEST_MAIL_STATUS_FILE")" = sent ]; then
+      printf 'sent 1 away-email item(s)\n'
+      exit 0
+    fi
+    printf 'simulated SMTP failure\n' >&2
+    exit 1
+    ;;
+esac
+exit 2
+SH
+  chmod +x "$repo/bin/fm-mail.sh"
+  printf 'fail\n' > "$status_file"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
+    FM_TEST_MAIL_STATUS_FILE="$status_file" DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, defaultSessionCtx, sentToMain }; })()`);
+const { fire, defaultSessionCtx, sentToMain } = globalThis.__t;
+import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+
+const contract = spawnSync("bash", [`${process.env.FM_ROOT_OVERRIDE}/bin/fm-afk-contract.sh`, "enter"], {
+  encoding: "utf8",
+  env: { ...process.env, FM_TEST_HARNESS: "pi", FM_HOME: process.env.FM_HOME, FM_STATE_OVERRIDE: `${process.env.FM_HOME}/state` },
+});
+if (contract.status !== 0) throw new Error(`could not enter away posture: ${contract.stderr}`);
+const realSetTimeout = globalThis.setTimeout;
+const timers = [];
+globalThis.setTimeout = (callback, delay, ...args) => {
+  if (delay === 0 || delay === 15000 || delay === 60000) {
+    const timer = realSetTimeout(() => {}, 24 * 60 * 60 * 1000);
+    timer.unref();
+    timer.run = () => callback(...args);
+    timer.delay = delay;
+    timers.push(timer);
+    return timer;
+  }
+  return realSetTimeout(callback, delay, ...args);
+};
+await fire("session_start", {}, defaultSessionCtx);
+const warnings = () => sentToMain.filter((item) => item.message.content.includes("Away email delivery failed"));
+const runNextTimer = async () => {
+  const timer = timers.shift();
+  if (!timer) throw new Error("the retry timer was not scheduled");
+  await timer.run();
+};
+await runNextTimer();
+if (warnings().length !== 1 || warnings()[0].message.display !== true) {
+  throw new Error(`SMTP failure was not shown to the captain: ${JSON.stringify(sentToMain)}`);
+}
+await runNextTimer();
+if (warnings().length !== 1) throw new Error("repeated SMTP failures spammed the captain");
+writeFileSync(process.env.FM_TEST_MAIL_STATUS_FILE, "sent\n");
+await runNextTimer();
+writeFileSync(process.env.FM_TEST_MAIL_STATUS_FILE, "fail\n");
+await runNextTimer();
+if (warnings().length !== 2) throw new Error("a new failure after successful delivery was not reported");
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "away email failures must be visible and retried without notification spam: $out"
+  pass "failed away-email delivery is shown to the captain, retried, and re-alerted after recovery"
+}
+
 test_away_record_parks_main_and_presents_after_archive() {
   local repo home out status
   repo="$TMP_ROOT/away-root"
@@ -5811,6 +5890,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_dispatch_routes_secondmate_signal_by_new_span
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
+test_away_email_failure_is_visible_and_retried
 test_away_record_parks_main_and_presents_after_archive
 test_away_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
 test_away_only_wake_rejects_when_record_is_archived_before_drain
