@@ -1163,7 +1163,7 @@ export default async function compatProbe(pi) {
     assert.equal(options.timeoutMs, 23000);
     assert.equal(options.maxRetries, 0);
     assert.equal(options.maxRetryDelayMs, 1234);
-    assert(!context.systemPrompt.includes("UNWANTED_CONTEXT"));
+    assert(!JSON.stringify(context.messages).includes("UNWANTED_CONTEXT"));
     return originalStream.call(this, model, context, options);
   };
   let websocketAttempts = 0;
