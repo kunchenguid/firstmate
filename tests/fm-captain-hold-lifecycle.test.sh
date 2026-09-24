@@ -791,6 +791,33 @@ EOF
   pass "the completion gate attests captain-held inventory and transfers open status decisions"
 }
 
+# A desk-parked row is not a captain call: every closer's plain `open` keeps
+# reading it as not held, and only the watcher's `--include-parked` admits it,
+# with an identity bound to the parked reason so re-parking starts a new window.
+test_open_admits_parked_rows_only_when_asked() {
+  local home rc first second
+  home=$(make_home open-parked)
+  tasks_in "$home" add parked-lane 'parked lane' --file data/backlog.md >/dev/null
+  tasks_in "$home" hold parked-lane --reason 'desk parked preserve only' --kind parked \
+    --file data/backlog.md >/dev/null
+  rc=0; run_captain "$home" open parked-lane >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail "plain open read a parked row as a captain call (exit $rc)"
+  rc=0; run_captain "$home" open parked-lane --distinguish-absent >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail "open --distinguish-absent read a parked row as held (exit $rc)"
+  first=$(run_captain "$home" open parked-lane --identity --include-parked) \
+    || fail "open --include-parked did not admit an open parked row"
+  case "$first" in parked:?*) ;; *) fail "parked identity is not parked-scoped: $first" ;; esac
+  tasks_in "$home" hold parked-lane --reason 'desk parked for a new reason' --kind parked \
+    --file data/backlog.md >/dev/null
+  second=$(run_captain "$home" open parked-lane --identity --include-parked) \
+    || fail "open --include-parked lost a re-parked row"
+  [ "$first" != "$second" ] || fail "re-parking with a new reason kept the same identity"
+  tasks_in "$home" done parked-lane --file data/backlog.md >/dev/null
+  rc=0; run_captain "$home" open parked-lane --include-parked >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] || fail "open --include-parked admitted a Done row (exit $rc)"
+  pass "open admits parked rows only under --include-parked, with a reason-bound identity"
+}
+
 # The recorded-answer rule: answering closes with the captain's exact words, an
 # exact retry is idempotent, a drifted retry is rejected, dependent work routed
 # behind the answered task is released by the close, and the completion gate is
@@ -4031,6 +4058,7 @@ test_uninventoried_report_decision_refuses_completion
 test_hold_decodes_a_bare_scalar_body_without_the_nonref_default
 test_retained_body_keeps_its_utf8_bytes
 test_completion_gate_attests_and_transfers
+test_open_admits_parked_rows_only_when_asked
 test_answer_records_and_closes
 test_release_frees_held_work
 test_hold_stamp_precedes_hold_visibility

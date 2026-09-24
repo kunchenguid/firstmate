@@ -30,7 +30,7 @@
 #   fm-captain-hold.sh binding <source-id>
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
-#   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent] [--include-parked]
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -181,6 +181,11 @@
 # crew task reaches a due stale alarm - its open backlog hold need not appear in
 # the task's last status line - and on a 0 bounds repeated alarms from new pane
 # hashes for the decision.
+# `--include-parked` widens the positive verdict to a not-Done row held with
+# hold kind `parked`, a desk disposition that is not a captain call; its
+# `--identity` is `parked:` plus a checksum of the hold reason, so re-parking
+# with a new reason starts a new lifecycle. Only the watcher's stale bound asks
+# for it; every closer keeps the captain-only meaning above.
 #
 # `diverged` is the read-only guard over the seam between the two records of
 # one captain call. See "record divergence" beside command_diverged below.
@@ -1858,11 +1863,12 @@ EOF
 # printed to stderr, because a mechanical closer must never read "cannot tell"
 # as permission to close.
 command_open() {  # <task-id> [--identity] [--distinguish-absent]
-  local id='' identity=0 distinguish_absent=0 data state root file backend show shown_body
+  local id='' identity=0 distinguish_absent=0 include_parked=0 data state root file backend show shown_body
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --identity) identity=1 ;;
       --distinguish-absent) distinguish_absent=1 ;;
+      --include-parked) include_parked=1 ;;
       -*) usage >&2; exit 2 ;;
       *)
         [ -z "$id" ] || { usage >&2; exit 2; }
@@ -1910,6 +1916,18 @@ command_open() {  # <task-id> [--identity] [--distinguish-absent]
         printf '%s#%s\n' \
           "$(body_hold_set_timestamp "$(decode_shown_value "$shown_body")")" \
           "$(resolution_record_count "$shown_body")"
+      fi
+      return 0
+    fi
+    if [ "$include_parked" -eq 1 ] && [ "$state" != "done" ] \
+      && [ "$FM_BACKLOG_ROW_HOLD_KIND" = parked ]; then
+      if [ "$identity" -eq 1 ]; then
+        task_show "$id" || {
+          printf 'fm-captain-hold: parked hold %s is open but its record could not be read\n' "$id" >&2
+          exit 2
+        }
+        printf 'parked:%s\n' \
+          "$(show_field_value "$TASK_SHOW_OUTPUT" hold_reason | cksum | cut -d' ' -f1)"
       fi
       return 0
     fi

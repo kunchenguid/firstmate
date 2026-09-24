@@ -3728,7 +3728,7 @@ run_hold() {  # <dir> <args...>
     FM_CONFIG_OVERRIDE="$dir/config" "$ROOT/bin/fm-captain-hold.sh" "$@" >/dev/null 2>&1
 }
 
-make_hold_home() {  # <name> <status-line> <hold|nohold>
+make_hold_home() {  # <name> <status-line> <hold|parked|nohold>
   local name=$1 line=$2 hold=$3 dir state
   dir=$(make_case "$name"); state="$dir/state"
   mkdir -p "$dir/data" "$dir/config"
@@ -3738,6 +3738,9 @@ make_hold_home() {  # <name> <status-line> <hold|nohold>
     || return 1
   if [ "$hold" = hold ]; then
     run_hold "$dir" hold held-merge --reason 'awaiting the captain on the merge' || return 1
+  elif [ "$hold" = parked ]; then
+    (cd "$dir" && tasks-axi hold held-merge --reason 'desk parked, preserve only' --kind parked \
+      --file data/backlog.md) >/dev/null 2>&1 || return 1
   fi
   printf 'window=test:fm-held-merge\nkind=ship\nharness=grok\nbackend=tmux\n' \
     > "$state/held-merge.meta"
@@ -3806,17 +3809,21 @@ hold_stale_wakes() {  # <state>
 # the captain-relevant stale branch, and a worker line that routes through the
 # inconclusive one. The hold is invisible to the status line in both, so both
 # branches had the same blindness and both are covered.
+# A desk-parked row (`hold-kind: parked`) records the same kind of intended quiet
+# and takes the same bound; <hold-mode> selects which backlog hold the fixture carries.
 test_open_captain_call_bounds_stale_churn() {
-  local spec name line dir state out capture throttle wakes
+  local mode=${1:-hold} label=captain spec name line dir state out capture throttle wakes
+  [ "$mode" = hold ] || label=$mode
   command -v tasks-axi >/dev/null 2>&1 \
     || { echo "skip: tasks-axi not found (captain-hold stale bound)"; return 0; }
   for spec in \
     'held-delivery|done: PR https://example.invalid/pull/1 checks green' \
-    'held-worker-line|working: still tidying the branch'
+    'held-worker-line|working: still tidying the branch' \
+    'held-resolved-line|resolved: gate cleared'
   do
-    name=${spec%%|*}; line=${spec#*|}
-    dir=$(make_hold_home "$name" "$line" hold) \
-      || fail "[$name] could not build a captain-held backlog fixture"
+    name=$mode-${spec%%|*}; line=${spec#*|}
+    dir=$(make_hold_home "$name" "$line" "$mode") \
+      || fail "[$name] could not build a $mode backlog fixture"
     state="$dir/state"; out="$dir/watch.out"; capture="$dir/pane.txt"
     throttle="$state/.paused-resurfaced-$(hold_key)"
 
@@ -3844,7 +3851,11 @@ test_open_captain_call_bounds_stale_churn() {
     [ "$wakes" -eq 1 ] \
       || fail "[$name] elapsed re-surface window produced $wakes wakes instead of one"
   done
-  pass "work under an open captain call surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
+  pass "work under an open $label backlog hold surfaces once, absorbs pane churn, then re-surfaces when the window elapses"
+}
+
+test_parked_hold_bounds_stale_churn() {
+  test_open_captain_call_bounds_stale_churn parked
 }
 
 
@@ -6259,6 +6270,7 @@ test_wedge_threshold_parked_gate_needs_an_unanswered_decision
 test_wedge_threshold_parked_gate_is_off_until_armed
 test_wedge_defer_refuses_a_half_filled_wait_record
 test_open_captain_call_bounds_stale_churn
+test_parked_hold_bounds_stale_churn
 test_stale_churn_without_a_captain_call_still_alarms
 test_failed_wake_append_does_not_arm_the_captain_hold_throttle
 test_reheld_captain_call_starts_its_own_resurface_window
