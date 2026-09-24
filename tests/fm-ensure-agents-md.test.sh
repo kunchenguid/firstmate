@@ -7,7 +7,7 @@ set -u
 
 TMP_ROOT=$(fm_test_tmproot fm-ensure-agents-md)
 
-# Public contract: CLAUDE.md is this exact two-line pointer, never a symlink.
+# Legacy input contract: an existing pointer must remain byte-identical.
 assert_claude_pointer() {
   local path=$1
   [ -e "$path" ] || fail "CLAUDE.md is missing"
@@ -33,7 +33,8 @@ test_created_agents_md_includes_self_governance() {
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "fm-ensure-agents-md.sh failed for empty project"
   agents="$repo/AGENTS.md"
   assert_present "$agents" "AGENTS.md was not created"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_absent "$repo/CLAUDE.md" "ensure created an unsupported pointer"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "ensure created a legacy link"
   assert_grep "## Maintaining this file" "$agents" "self-governance section heading missing"
   assert_grep "Keep this file for knowledge useful to almost every future agent session in this project." "$agents" \
     "self-governance section lost the future-session bar"
@@ -46,16 +47,17 @@ test_created_agents_md_includes_self_governance() {
   pass "fm-ensure-agents-md.sh: created AGENTS.md includes self-governance section"
 }
 
-test_fresh_setup_writes_real_claude_pointer() {
+test_fresh_setup_creates_only_agents() {
   local repo out
   repo="$TMP_ROOT/fresh-pointer-project"
   mkdir -p "$repo"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
     || fail "fm-ensure-agents-md.sh failed creating a fresh pointer"
   assert_contains "$out" "created:" "fresh setup did not report created"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_absent "$repo/CLAUDE.md" "ensure created an unsupported pointer"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "ensure created a legacy link"
   [ ! -L "$repo/CLAUDE.md" ] || fail "fresh setup created a CLAUDE.md symlink"
-  pass "fm-ensure-agents-md.sh: fresh setup writes a real @AGENTS.md pointer"
+  pass "fm-ensure-agents-md.sh: fresh setup creates only AGENTS.md"
 }
 
 test_promoted_claude_md_includes_self_governance() {
@@ -67,16 +69,21 @@ test_promoted_claude_md_includes_self_governance() {
 
 Run tests with `make test`.
 EOF
+  cp "$repo/CLAUDE.md" "$repo/.legacy-before"
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "fm-ensure-agents-md.sh failed for CLAUDE.md promotion"
   agents="$repo/AGENTS.md"
   assert_present "$agents" "AGENTS.md was not created during promotion"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  cmp -s "$repo/.legacy-before" "$repo/CLAUDE.md" || fail "legacy knowledge changed"
   assert_grep "Run tests with \`make test\`." "$agents" \
     "promotion lost existing CLAUDE.md content"
   count=$(grep -Fc "## Maintaining this file" "$agents")
   [ "$count" -eq 1 ] || fail "promotion wrote $count self-governance sections"
   assert_grep "Keep this file for knowledge useful to almost every future agent session in this project." "$agents" \
     "promoted AGENTS.md missing self-governance wording"
+  cp "$agents" "$repo/.agents-after"
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "copied legacy knowledge is not idempotent"
+  cmp -s "$repo/.agents-after" "$agents" || fail "copied knowledge changed on re-run"
+  cmp -s "$repo/.legacy-before" "$repo/CLAUDE.md" || fail "legacy knowledge changed on re-run"
   pass "fm-ensure-agents-md.sh: promoted CLAUDE.md includes self-governance section"
 }
 
@@ -85,6 +92,7 @@ test_promoted_claude_md_without_trailing_newline_keeps_blank_separator() {
   repo="$TMP_ROOT/no-trailing-newline-project"
   mkdir -p "$repo"
   printf '# Existing agent memory\n\nRun tests with make test.' > "$repo/CLAUDE.md"
+  cp "$repo/CLAUDE.md" "$repo/.legacy-before"
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "fm-ensure-agents-md.sh failed for newline-less CLAUDE.md promotion"
   agents="$repo/AGENTS.md"
   assert_grep "Run tests with make test." "$agents" \
@@ -93,7 +101,11 @@ test_promoted_claude_md_without_trailing_newline_keeps_blank_separator() {
     "newline-less promotion did not append the self-governance section"
   before=$(grep -B1 -Fx '## Maintaining this file' "$agents" | head -n 1)
   [ -z "$before" ] || fail "self-governance heading not preceded by a blank line (got: $before)"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  cmp -s "$repo/.legacy-before" "$repo/CLAUDE.md" || fail "legacy knowledge changed"
+  cp "$agents" "$repo/.agents-after"
+  "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "copied legacy knowledge is not idempotent"
+  cmp -s "$repo/.agents-after" "$agents" || fail "copied knowledge changed on re-run"
+  cmp -s "$repo/.legacy-before" "$repo/CLAUDE.md" || fail "legacy knowledge changed on re-run"
   pass "fm-ensure-agents-md.sh: newline-less promotion keeps a blank separator line"
 }
 
@@ -111,7 +123,7 @@ test_existing_agents_md_with_symlink_gains_self_governance() {
   assert_grep "## Maintaining this file" "$agents" "existing AGENTS.md did not gain the self-governance section"
   count=$(grep -Fc "## Maintaining this file" "$agents")
   [ "$count" -eq 1 ] || fail "injection wrote $count self-governance sections"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  [ -L "$repo/CLAUDE.md" ] && [ "$(readlink "$repo/CLAUDE.md")" = AGENTS.md ] || fail "legacy symlink changed"
   # Re-run must be a byte-exact no-op reporting unchanged.
   cp "$agents" "$repo/.after-first"
   cp "$repo/CLAUDE.md" "$repo/.claude-after-first"
@@ -125,7 +137,7 @@ test_existing_agents_md_with_symlink_gains_self_governance() {
   pass "fm-ensure-agents-md.sh: existing symlinked AGENTS.md gains the section idempotently"
 }
 
-test_correct_symlink_migrates_to_pointer_without_clobbering_agents() {
+test_correct_symlink_is_preserved_without_clobbering_agents() {
   local repo agents out
   repo="$TMP_ROOT/symlink-migrate-project"
   mkdir -p "$repo"
@@ -135,8 +147,8 @@ test_correct_symlink_migrates_to_pointer_without_clobbering_agents() {
   cp "$agents" "$repo/.before"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
     || fail "fm-ensure-agents-md.sh failed migrating a correct CLAUDE.md symlink"
-  assert_contains "$out" "updated:" "symlink migration did not report an update"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_contains "$out" "unchanged:" "preserved symlink reported a mutation"
+  [ -L "$repo/CLAUDE.md" ] && [ "$(readlink "$repo/CLAUDE.md")" = AGENTS.md ] || fail "legacy symlink changed"
   cmp -s "$repo/.before" "$agents" \
     || fail "symlink migration clobbered AGENTS.md"
   assert_grep "Do not clobber this payload." "$agents" \
@@ -150,10 +162,10 @@ test_correct_symlink_migrates_to_pointer_without_clobbering_agents() {
     || fail "post-migration re-run modified AGENTS.md"
   cmp -s "$repo/.claude-after-first" "$repo/CLAUDE.md" \
     || fail "post-migration re-run modified CLAUDE.md"
-  pass "fm-ensure-agents-md.sh: correct symlink migrates to pointer without clobbering AGENTS.md"
+  pass "fm-ensure-agents-md.sh: correct symlink remains intact without clobbering AGENTS.md"
 }
 
-test_existing_agents_md_without_claude_gains_section_and_pointer() {
+test_existing_agents_md_without_claude_gains_only_section() {
   local repo agents out count
   repo="$TMP_ROOT/existing-bare-project"
   mkdir -p "$repo"
@@ -162,31 +174,30 @@ test_existing_agents_md_without_claude_gains_section_and_pointer() {
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
     || fail "fm-ensure-agents-md.sh failed for existing AGENTS.md without CLAUDE.md"
   assert_contains "$out" "updated:" "injection without CLAUDE.md did not report an update"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_absent "$repo/CLAUDE.md" "ensure created an unsupported pointer"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "ensure created a legacy link"
   assert_grep "Deploy with kubectl." "$agents" "injection dropped existing AGENTS.md content"
   count=$(grep -Fc "## Maintaining this file" "$agents")
   [ "$count" -eq 1 ] || fail "injection wrote $count self-governance sections"
-  pass "fm-ensure-agents-md.sh: existing AGENTS.md without CLAUDE.md gains section and pointer"
+  pass "fm-ensure-agents-md.sh: existing AGENTS.md without CLAUDE.md gains only the section"
 }
 
 test_existing_agents_md_with_section_reports_unchanged() {
   local repo agents out
   repo="$TMP_ROOT/fully-formed-project"
   mkdir -p "$repo"
-  # Build a fully-formed project (AGENTS.md with the section + canonical pointer).
+  # Build a fully-formed project (AGENTS.md with the section only).
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
     || fail "fm-ensure-agents-md.sh failed building the fully-formed fixture"
   agents="$repo/AGENTS.md"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  assert_absent "$repo/CLAUDE.md" "ensure created an unsupported pointer"
+  [ ! -L "$repo/CLAUDE.md" ] || fail "ensure created a legacy link"
   cp "$agents" "$repo/.before"
-  cp "$repo/CLAUDE.md" "$repo/.claude-before"
   out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
     || fail "fm-ensure-agents-md.sh failed on already-formed project"
   assert_contains "$out" "unchanged:" "already-formed project was not reported unchanged"
   diff "$repo/.before" "$agents" >/dev/null \
     || fail "already-formed AGENTS.md was modified"
-  cmp -s "$repo/.claude-before" "$repo/CLAUDE.md" \
-    || fail "already-formed CLAUDE.md was modified"
   pass "fm-ensure-agents-md.sh: AGENTS.md that already has the section stays unchanged"
 }
 
@@ -210,13 +221,23 @@ test_marked_project_guidance_stays_unchanged() {
         || fail "ensure failed for marked project ($route)"
       cmp -s "$repo/.before" "$repo/AGENTS.md" \
         || fail "marked project guidance was modified ($route)"
-      assert_claude_pointer "$repo/CLAUDE.md"
+      case "$route" in
+        bare) assert_absent "$repo/CLAUDE.md" "created legacy pointer" ;;
+        pointer) assert_claude_pointer "$repo/CLAUDE.md" ;;
+        symlink) [ -L "$repo/CLAUDE.md" ] && [ "$(readlink "$repo/CLAUDE.md")" = AGENTS.md ] || fail "changed legacy symlink" ;;
+        promotion) cmp -s "$repo/.before" "$repo/CLAUDE.md" || fail "changed legacy knowledge" ;;
+      esac
       out=$("$ROOT/bin/fm-ensure-agents-md.sh" "$repo" 2>&1) \
         || fail "ensure failed on marked project re-run ($route)"
       assert_contains "$out" "unchanged:" "marked project re-run did not report unchanged"
       cmp -s "$repo/.before" "$repo/AGENTS.md" \
         || fail "marked project re-run modified guidance ($route)"
-      assert_claude_pointer "$repo/CLAUDE.md"
+      case "$route" in
+        bare) assert_absent "$repo/CLAUDE.md" "created legacy pointer" ;;
+        pointer) assert_claude_pointer "$repo/CLAUDE.md" ;;
+        symlink) [ -L "$repo/CLAUDE.md" ] && [ "$(readlink "$repo/CLAUDE.md")" = AGENTS.md ] || fail "changed legacy symlink" ;;
+        promotion) cmp -s "$repo/.before" "$repo/CLAUDE.md" || fail "changed legacy knowledge" ;;
+      esac
     done
   done
   pass "fm-ensure-agents-md.sh: marked project guidance is preserved across ensure paths and line endings"
@@ -241,7 +262,8 @@ test_reworded_guidance_requires_first_line_marker() {
       assert_grep '## Editing these notes' "$repo/AGENTS.md" "ensure removed project guidance"
       count=$(grep -Fxc "## Maintaining this file${eol%$'\n'}" "$repo/AGENTS.md")
       [ "$count" -eq 1 ] || fail "guidance without a first-line mark did not gain the canonical section"
-      assert_claude_pointer "$repo/CLAUDE.md"
+      assert_absent "$repo/CLAUDE.md" "ensure created an unsupported pointer"
+      [ ! -L "$repo/CLAUDE.md" ] || fail "ensure created a legacy link"
       cp "$repo/AGENTS.md" "$repo/.after-first"
       "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
         || fail "ensure failed on unmarked project re-run"
@@ -307,7 +329,7 @@ test_existing_crlf_agents_md_without_section_preserves_crlf() {
     'When updating this file, preserve this bar for all agents and keep entries concise.' > "$repo/.expected"
   cmp -s "$repo/.expected" "$agents" \
     || fail "CRLF AGENTS.md injection did not preserve CRLF line endings"
-  assert_claude_pointer "$repo/CLAUDE.md"
+  [ -L "$repo/CLAUDE.md" ] && [ "$(readlink "$repo/CLAUDE.md")" = AGENTS.md ] || fail "legacy symlink changed"
   cp "$agents" "$repo/.after-first"
   cp "$repo/CLAUDE.md" "$repo/.claude-after-first"
   "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 \
@@ -415,13 +437,44 @@ test_lowercase_agents_md_refuses_case_fragile_pointer() {
   pass "fm-ensure-agents-md.sh: refuses a case-variant lowercase agents.md (issue #389)"
 }
 
+test_legacy_only_inputs_remain_intact() {
+  local repo route
+  for route in pointer symlink knowledge; do
+    repo="$TMP_ROOT/legacy-only-$route"
+    mkdir -p "$repo"
+    case "$route" in
+      pointer) write_fixture_claude_pointer "$repo"; cp "$repo/CLAUDE.md" "$repo/.legacy-before" ;;
+      symlink) ln -s AGENTS.md "$repo/CLAUDE.md" ;;
+      knowledge) printf '# Legacy knowledge\r\n\r\nPreserve these bytes.\r\n' > "$repo/CLAUDE.md"; cp "$repo/CLAUDE.md" "$repo/.legacy-before" ;;
+    esac
+    "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "legacy-only $route rejected"
+    assert_present "$repo/AGENTS.md" "legacy-only $route did not get canonical memory"
+    "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1 || fail "legacy-only $route re-run rejected"
+    if [ "$route" = symlink ]; then
+      [ -L "$repo/CLAUDE.md" ] && [ "$(readlink "$repo/CLAUDE.md")" = AGENTS.md ] || fail "legacy link rewritten"
+    else
+      cmp -s "$repo/.legacy-before" "$repo/CLAUDE.md" || fail "legacy bytes overwritten"
+    fi
+    if [ "$route" = knowledge ]; then
+      assert_grep 'Preserve these bytes.' "$repo/AGENTS.md" "legacy knowledge lost"
+      printf 'new independent knowledge\n' >> "$repo/CLAUDE.md"
+      cp "$repo/AGENTS.md" "$repo/.agents-before"
+      cp "$repo/CLAUDE.md" "$repo/.legacy-changed"
+      if "$ROOT/bin/fm-ensure-agents-md.sh" "$repo" >/dev/null 2>&1; then fail "diverged legacy copy accepted"; fi
+      cmp -s "$repo/.agents-before" "$repo/AGENTS.md" || fail "conflict changed canonical memory"
+      cmp -s "$repo/.legacy-changed" "$repo/CLAUDE.md" || fail "conflict changed legacy memory"
+    fi
+  done
+  pass "legacy-only inputs survive migration, re-run, and later conflict"
+}
+
 test_created_agents_md_includes_self_governance
-test_fresh_setup_writes_real_claude_pointer
+test_fresh_setup_creates_only_agents
 test_promoted_claude_md_includes_self_governance
 test_promoted_claude_md_without_trailing_newline_keeps_blank_separator
 test_existing_agents_md_with_symlink_gains_self_governance
-test_correct_symlink_migrates_to_pointer_without_clobbering_agents
-test_existing_agents_md_without_claude_gains_section_and_pointer
+test_correct_symlink_is_preserved_without_clobbering_agents
+test_existing_agents_md_without_claude_gains_only_section
 test_existing_agents_md_with_section_reports_unchanged
 test_existing_crlf_agents_md_with_section_stays_unchanged
 test_existing_crlf_agents_md_without_section_preserves_crlf
@@ -433,3 +486,5 @@ test_agents_md_symlink_is_refused
 test_wrong_target_symlink_is_refused
 test_non_regular_claude_md_is_refused
 test_lowercase_agents_md_refuses_case_fragile_pointer
+
+test_legacy_only_inputs_remain_intact
