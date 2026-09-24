@@ -36,9 +36,12 @@ cleanup_remote_job_fixture() {
   [ -z "$RESTART_SUPERVISOR_PID" ] || kill -KILL "$RESTART_SUPERVISOR_PID" 2>/dev/null || true
   [ -z "$LOST_TERM_PID" ] || kill -KILL "$LOST_TERM_PID" 2>/dev/null || true
   [ -z "$REPLACEMENT_OWNER_PID" ] || kill -KILL "$REPLACEMENT_OWNER_PID" 2>/dev/null || true
-  [ -z "$STALL_WORKER_PID" ] || kill -KILL "$STALL_WORKER_PID" 2>/dev/null || true
-  [ -z "$STALL_DECOY_PID" ] || kill -KILL "$STALL_DECOY_PID" 2>/dev/null || true
-  [ -z "$STALL_REPLACEMENT_PID" ] || kill -KILL "$STALL_REPLACEMENT_PID" 2>/dev/null || true
+  local stall_pid
+  for stall_pid in "$STALL_WORKER_PID" "$STALL_DECOY_PID" "$STALL_REPLACEMENT_PID"; do
+    [ -n "$stall_pid" ] || continue
+    kill -KILL "$stall_pid" 2>/dev/null || true
+    wait "$stall_pid" 2>/dev/null || true
+  done
   if [ -f "$STATE_ROOT/worker.pid" ]; then
     fm_remote_job_stop_worker_tree "$(cat "$STATE_ROOT/worker.pid")" || true
   fi
@@ -938,34 +941,37 @@ HOME="$STALL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$ST
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
   > "$TMP_ROOT/stall-lost.out" 2> "$TMP_ROOT/stall-lost.err" &
 STALL_WORKER_PID=$!
-for _ in $(seq 1 300); do
-  [ -f "$STALL_STATE/worker.ready" ] && break
-  sleep 0.05
-done
+STALL_DEADLINE=$((SECONDS + 30))
+until [ -f "$STALL_STATE/worker.ready" ] || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do sleep 0.05; done
 assert_present "$STALL_STATE/worker.ready" "the worker stalled in shutdown did not become ready"
 FM_REMOTE_JOB_STATE_ROOT="$STALL_STATE" FM_REMOTE_JOB_TIMEOUT=20 \
   fm_remote_job_stage "$STALL_HOME" "$REMOTE_ROOT" "$REMOTE_HOME" \
   fm-hold-job.sh "$STALL_STARTED" "$STALL_SIDE_EFFECT" < /dev/null > /dev/null
-for _ in $(seq 1 100); do
-  [ -f "$STALL_STARTED" ] && break
-  sleep 0.05
-done
+STALL_DEADLINE=$((SECONDS + 30))
+until [ -f "$STALL_STARTED" ] || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do sleep 0.05; done
 assert_present "$STALL_STARTED" "the command that keeps shutdown in its stop loop did not start"
 STALL_JOB="$STALL_STATE/jobs/$FM_REMOTE_JOB_ID"
+STALL_LANE_PID=$(cat "$STALL_JOB/.claim/owner")
 set -m
 sleep 30 &
 STALL_DECOY_PID=$!
 set +m
 printf '%s\n' "$STALL_DECOY_PID" > "$STALL_JOB/.claim/group"
 printf 'unconfirmed\nstart\n' > "$STALL_JOB/.claim/group_start"
+# Shutdown publishes quarantine, then kills and reaps its lane, then retries
+# the live decoy group in a bounded stop loop. Stopping the worker only once
+# both of those are visible pins it inside that loop. The short poll interval
+# keeps the stop well inside the loop's bounded retry window.
 kill -TERM "$STALL_WORKER_PID"
-for _ in $(seq 1 200); do
-  [ -f "$STALL_STATE/worker.lock/quarantine" ] && break
+STALL_DEADLINE=$((SECONDS + 30))
+until { [ -f "$STALL_STATE/worker.lock/quarantine" ] && ! kill -0 "$STALL_LANE_PID" 2>/dev/null; } \
+  || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
   sleep 0.01
 done
 kill -STOP "$STALL_WORKER_PID"
-for _ in $(seq 1 100); do
-  [ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = T ] && break
+STALL_DEADLINE=$((SECONDS + 30))
+until [ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = T ] \
+  || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
   sleep 0.05
 done
 [ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = T ] \
@@ -977,30 +983,45 @@ HOME="$STALL_HOME" FM_ROOT_OVERRIDE="$REMOTE_ROOT" FM_REMOTE_JOB_STATE_ROOT="$ST
   FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux "$REMOTE_ROOT/bin/fm-remote-job-worker.sh" --serve \
   > "$TMP_ROOT/stall-replacement.out" 2> "$TMP_ROOT/stall-replacement.err" &
 STALL_REPLACEMENT_PID=$!
-for _ in $(seq 1 300); do
-  [ -f "$STALL_STATE/worker.lock/pid" ] && [ "$(cat "$STALL_STATE/worker.lock/pid")" = "$STALL_REPLACEMENT_PID" ] && break
+STALL_DEADLINE=$((SECONDS + 30))
+until [ "$(cat "$STALL_STATE/worker.lock/pid" 2>/dev/null || true)" = "$STALL_REPLACEMENT_PID" ] \
+  || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
   sleep 0.05
 done
 [ "$(cat "$STALL_STATE/worker.lock/pid" 2>/dev/null || true)" = "$STALL_REPLACEMENT_PID" ] \
   || fail "the replacement did not take ownership while the old worker was stopped in shutdown"
 printf 'replacement guard\n' > "$STALL_STATE/worker.lock/quarantine"
 STALL_QUARANTINE_INODE=$(file_inode "$STALL_STATE/worker.lock/quarantine")
+# Both workers stop the job's recorded execution and then delete its records.
+# A worker resumed while the other is deleting can lose a record read and exit
+# before its quarantine clear, so freeze the replacement until the ousted
+# worker has finished.
+kill -STOP "$STALL_REPLACEMENT_PID"
+STALL_DEADLINE=$((SECONDS + 30))
+until [ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = T ] \
+  || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
+  sleep 0.05
+done
+[ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = T ] \
+  || fail "the replacement could not be held while the ousted worker resumed"
 kill -KILL "$STALL_DECOY_PID" 2>/dev/null || true
 wait "$STALL_DECOY_PID" 2>/dev/null || true
 STALL_DECOY_PID=
 kill -CONT "$STALL_WORKER_PID"
-for _ in $(seq 1 200); do
-  kill -0 "$STALL_WORKER_PID" 2>/dev/null || break
+STALL_DEADLINE=$((SECONDS + 30))
+until [ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+  || ! kill -0 "$STALL_WORKER_PID" 2>/dev/null || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
   sleep 0.05
 done
-if kill -0 "$STALL_WORKER_PID" 2>/dev/null; then
-  fail "the ousted worker did not exit after shutdown resumed"
-fi
-wait "$STALL_WORKER_PID" 2>/dev/null
-STALL_WORKER_RC=$?
+[ "$(ps -o state= -p "$STALL_WORKER_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+  || ! kill -0 "$STALL_WORKER_PID" 2>/dev/null \
+  || fail "the ousted worker did not exit after shutdown resumed"
+STALL_WORKER_RC=0
+wait "$STALL_WORKER_PID" 2>/dev/null || STALL_WORKER_RC=$?
 STALL_WORKER_PID=
 [ "$STALL_WORKER_RC" -eq 0 ] \
-  || fail "the ousted worker did not finish shutdown through its lost-ownership exit"
+  || fail "the ousted worker did not finish shutdown through its lost-ownership exit (exit $STALL_WORKER_RC: $(cat "$TMP_ROOT/stall-lost.err"))"
+kill -CONT "$STALL_REPLACEMENT_PID"
 kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null \
   || fail "the ousted worker's resumed shutdown terminated the replacement"
 [ "$(cat "$STALL_STATE/worker.lock/pid" 2>/dev/null || true)" = "$STALL_REPLACEMENT_PID" ] \
@@ -1009,10 +1030,14 @@ kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null \
   && [ "$(file_inode "$STALL_STATE/worker.lock/quarantine")" = "$STALL_QUARANTINE_INODE" ] \
   || fail "the ousted worker wrote or cleared the replacement quarantine during shutdown"
 kill -TERM "$STALL_REPLACEMENT_PID"
-for _ in $(seq 1 100); do
-  kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null || break
+STALL_DEADLINE=$((SECONDS + 30))
+until [ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+  || ! kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null || [ "$SECONDS" -ge "$STALL_DEADLINE" ]; do
   sleep 0.05
 done
+[ "$(ps -o state= -p "$STALL_REPLACEMENT_PID" 2>/dev/null | tr -d ' ')" = Z ] \
+  || ! kill -0 "$STALL_REPLACEMENT_PID" 2>/dev/null \
+  || fail "the replacement did not finish its own TERM shutdown"
 wait "$STALL_REPLACEMENT_PID" 2>/dev/null || true
 STALL_REPLACEMENT_PID=
 pass "an ousted worker in shutdown leaves the replacement quarantine untouched"
