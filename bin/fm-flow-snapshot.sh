@@ -131,19 +131,37 @@ path_mtime() {  # <path>
 }
 
 # `no-mistakes axi status` emits TOON on stdout; the version banner goes to
-# stderr, so stdout needs no pre-filtering. The steps block is a header line
-# naming the columns followed by one comma-separated row per step.
+# stderr, so stdout needs no pre-filtering. A block is a header line naming its
+# columns followed by one comma-separated row per entry.
+#
+# Both parsers below index by the COLUMN NAMES that header declares, never by
+# position. The tool has already inserted a column mid-block between versions -
+# `round_active_for` arrives fourth in active_steps on some builds and not at
+# all on others - and a positional read silently relabels every column after it,
+# so the row would still parse and every value in it would be wrong.
 steps_json() {  # <axi-status-output>
   printf '%s\n' "$1" | awk '
-    /^  steps\[[0-9]+\]\{/ { in_steps = 1; next }
+    function read_header(line,   body, names, i, n) {
+      body = line
+      sub(/^[^{]*\{/, "", body)
+      sub(/\}:[[:space:]]*$/, "", body)
+      n = split(body, names, ",")
+      for (i = 1; i <= n; i++) {
+        gsub(/^[ \t]+/, "", names[i]); gsub(/[ \t]+$/, "", names[i])
+        col[names[i]] = i
+      }
+      return n
+    }
+    /^  steps\[[0-9]+\]\{/ { read_header($0); in_steps = 1; next }
     in_steps {
       if ($0 !~ /^    [a-z]/) { in_steps = 0; next }
       line = $0
       sub(/^    /, "", line)
       n = split(line, f, ",")
-      if (n < 4) next
+      if (!col["step"] || !col["status"] || n < col["duration_ms"]) next
       printf "%s{\"step\":\"%s\",\"status\":\"%s\",\"findings\":%d,\"duration_ms\":%d}",
-        (emitted++ ? "," : ""), f[1], f[2], f[3], f[4]
+        (emitted++ ? "," : ""), f[col["step"]], f[col["status"]],
+        f[col["findings"]], f[col["duration_ms"]]
     }
   ' | awk 'BEGIN { printf "[" } { printf "%s", $0 } END { printf "]\n" }'
 }
@@ -172,7 +190,26 @@ active_steps_json() {  # <axi-status-output>
       }
       return sprintf("%d", total)
     }
-    /^  active_steps\[[0-9]+\]\{/ { in_a = 1; next }
+    function read_header(line,   body, names, i, n) {
+      body = line
+      sub(/^[^{]*\{/, "", body)
+      sub(/\}:[[:space:]]*$/, "", body)
+      n = split(body, names, ",")
+      for (i = 1; i <= n; i++) {
+        gsub(/^[ \t]+/, "", names[i]); gsub(/[ \t]+$/, "", names[i])
+        col[names[i]] = i
+      }
+      return n
+    }
+    # An optional column the running build does not declare reads as empty
+    # rather than as whichever value happens to sit at that position.
+    function field(name,   v) {
+      if (!col[name] || col[name] > n) return ""
+      v = f[col[name]]
+      gsub(/\\/, "\\\\", v); gsub(/"/, "\\\"", v)
+      return v
+    }
+    /^  active_steps\[[0-9]+\]\{/ { read_header($0); in_a = 1; next }
     in_a {
       if ($0 !~ /^    [a-z]/) { in_a = 0; next }
       line = $0
@@ -188,10 +225,11 @@ active_steps_json() {  # <axi-status-output>
         cur = cur c
       }
       f[++n] = cur
-      if (n < 6) next
-      gsub(/\\/, "\\\\", f[4]); gsub(/"/, "\\\"", f[4])
+      if (!col["step"] || !col["status"] || !col["active_for"] || n < col["active_for"]) next
       printf "%s{\"step\":\"%s\",\"status\":\"%s\",\"active_for\":\"%s\",\"active_ms\":%s,\"last_activity\":\"%s\",\"agent_pid\":\"%s\",\"round\":\"%s\"}",
-        (emitted++ ? "," : ""), f[1], f[2], f[3], active_ms(f[3]), f[4], f[5], f[6]
+        (emitted++ ? "," : ""), field("step"), field("status"), field("active_for"),
+        active_ms(field("active_for")), field("last_activity"), field("agent_pid"),
+        field("round")
     }
   ' | awk 'BEGIN { printf "[" } { printf "%s", $0 } END { printf "]\n" }'
 }

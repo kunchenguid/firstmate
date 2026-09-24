@@ -58,7 +58,8 @@ write_task ship-closed ship no-mistakes fm:5 https://github.com/example/project/
 write_task ship-gitlab ship no-mistakes fm:6 https://gitlab.example.com/group/project/-/merge_requests/7
 write_task ship-badrun ship no-mistakes fm:7
 write_task ship-odd    ship no-mistakes fm:8
-write_task scout-one   scout local-only fm:9
+write_task ship-wide   ship no-mistakes fm:9
+write_task scout-one   scout local-only fm:10
 write_task gone-one    ship no-mistakes fm:99
 
 # --- the pipeline runs the fake CLI reports ---------------------------------
@@ -69,13 +70,14 @@ write_task gone-one    ship no-mistakes fm:99
 cat > "$TMP_ROOT/overview.txt" <<'TOON'
 current_branch: main
 runs_on_current_branch: 0
-count: 5 of 5 total
-runs[5]{id,branch,status,head,pr}:
+count: 6 of 6 total
+runs[6]{id,branch,status,head,pr}:
   "01FLOWRUNAAAAAAAAAAAAAAAA1",fm/ship-run,running,"bb73f233","https://github.com/example/project/pull/25"
   "01FLOWRUNAAAAAAAAAAAAAAAA2",fm/ship-run,failed,"a1b2c3d4",""
   "01FLOWRUNAAAAAAAAAAAAAAAA3",fm/ship-badrun,running,"c0ffee11",""
   "01FLOWRUNAAAAAAAAAAAAAAAA4",fm/ship-odd,running,"d00d1234",""
   "01FLOWRUNAAAAAAAAAAAAAAAA5",fm/ship-merged,completed,"feedbeef",""
+  "01FLOWRUNAAAAAAAAAAAAAAAA6",fm/ship-wide,running,"ab12cd34",""
 TOON
 
 cat > "$TOON_DIR/01FLOWRUNAAAAAAAAAAAAAAAA1.txt" <<'TOON'
@@ -124,6 +126,24 @@ run:
   steps[2]{step,status,findings,duration_ms}:
     intent,completed,0,10
     review,completed,0,20
+TOON
+
+# The tool has inserted a column mid-block between versions: `round_active_for`
+# arrives fourth in active_steps on newer builds, and `attempt` is a plausible
+# future addition to steps. A parser that indexed by position rather than by the
+# header's own column names would relabel every column after the new one and
+# still emit a well-formed row.
+cat > "$TOON_DIR/01FLOWRUNAAAAAAAAAAAAAAAA6.txt" <<'TOON'
+run:
+  id: "01FLOWRUNAAAAAAAAAAAAAAAA6"
+  branch: fm/ship-wide
+  status: running
+  head: ab12cd34
+  steps[2]{step,status,attempt,findings,duration_ms}:
+    intent,completed,1,0,44
+    review,running,2,3,0
+  active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:
+    review,running,2m30s,30s,"9s ago: log: still going","4242",second
 TOON
 
 cat > "$FAKEBIN/no-mistakes" <<SH
@@ -215,7 +235,7 @@ case "${1:-}" in
   list-windows)
     printf 'fm:1 fm-ship-run\nfm:2 fm-ship-norun\nfm:3 fm-ship-direct\nfm:4 fm-ship-merged\n'
     printf 'fm:5 fm-ship-closed\nfm:6 fm-ship-gitlab\nfm:7 fm-ship-badrun\nfm:8 fm-ship-odd\n'
-    printf 'fm:9 fm-scout-one\n'
+    printf 'fm:9 fm-ship-wide\nfm:10 fm-scout-one\n'
     ;;
   list-panes)
     printf '%s\n' "${target##*:}"
@@ -337,6 +357,27 @@ assert_equals "37s ago: log: waiting, then polling" \
 assert_equals "null" \
   "$(agent ship-odd '[.active_steps[] | select(.step == "review")][0].active_ms')" \
   "an elapsed carrying an unknown unit is reported as unknown, not partially summed"
+
+# --- a block whose columns moved ---------------------------------------------
+
+assert_equals "150000" \
+  "$(agent ship-wide '[.active_steps[] | select(.step == "review")][0].active_ms')" \
+  "a block carrying an extra column still reads its elapsed from the right one"
+assert_equals "9s ago: log: still going" \
+  "$(agent ship-wide '[.active_steps[] | select(.step == "review")][0].last_activity')" \
+  "and every column after the new one keeps its own name's value"
+assert_equals "4242" \
+  "$(agent ship-wide '[.active_steps[] | select(.step == "review")][0].agent_pid')" \
+  "the process id is not the column that used to sit at its index"
+assert_equals "second" \
+  "$(agent ship-wide '[.active_steps[] | select(.step == "review")][0].round')" \
+  "nor is the round"
+assert_equals "44" \
+  "$(agent ship-wide '[.steps[] | select(.step == "intent")][0].duration_ms')" \
+  "a step block carrying an extra column reads its duration by name too"
+assert_equals "3" \
+  "$(agent ship-wide '[.steps[] | select(.step == "review")][0].findings')" \
+  "and its finding count by name"
 
 # --- GitHub check classes ---------------------------------------------------
 
