@@ -279,6 +279,22 @@ For the duplicate-turn fix and the latest presentation change, the launch templa
 The canonical encoder and every non-Pi delivery path remain unchanged, and the tmux, Herdr, Zellij, Orca, and cmux runtime surfaces continue to transport the same input selected by the harness adapter.
 Pi's Calm implementation changed only to consume the shared sprite core, while the new Claude Code mod changes drawings only; every producer and non-Pi transport remains unchanged.
 
+## Queued operational-row retention
+
+On Pi 0.87.1 with Calm persisted on, a Firstmate watcher notification sent while a tool held the turn was listed under the running turn as `Follow-up: FIRSTMATE_OP: v1 watcher: ...`, identical to Calm off.
+Pressing Escape moved that raw text into the editor and removed it from Pi's queue, and the session recorded no delivery of it, so a captain who cleared the editor lost the notification.
+The initiating trigger was a notification queued during a run.
+The exposure condition was that Pi draws queued input in `InteractiveMode.updatePendingMessagesDisplay` and restores it through `restoreQueuedMessagesToEditor`, a path separate from the `addMessageToChat` path the operational-user adapter covers.
+The visible symptom was the listed row and, after Escape, the raw text in the editor.
+
+Hiding the listed row alone would turn the Escape path into the defect issue #1588 describes: stock restore joins the whole queue into the editor, so a hidden notification would reappear as raw text.
+Keeping it queued across the restore needs the session's already-expanded queueing entry points (`_queueSteer` and `_queueFollowUp`) and, for the delivery below, `clearQueue`, `waitForIdle`, `sendUserMessage`, and `isIdle`.
+Those live on the session instance reached through `InteractiveMode.session`, so they are checked per session before the first row is hidden rather than at extension load.
+
+A counterfactual built from the closed PR #1620 adapter hid the row and kept the notification out of the editor, but Pi 0.87.1's `AgentSession._runAgentPrompt` stops continuing once an abort was requested, so the kept follow-up stayed queued until the captain's next prompt while the adapter announced a new turn.
+The shipped adapter therefore starts that turn itself once the aborted run settles: it takes the first queued message out, sends it with `sendUserMessage`, and puts the rest back behind it in Pi's delivery order.
+The same real-Pi reproduction then delivered the notification exactly once in a new turn, returned a queued captain message to the editor, and left Calm off stock.
+
 ## Regression coverage
 
 `tests/fm-calm-pi-extension.test.sh` compares wrapped and stock renderers and verifies all seven built-ins plus `fm_watch_arm_pi`; `tests/fm-pi-branch-extension.test.sh` verifies `fm_branch_outcomes` Calm toggling, capability-probed all-line versus collapsed stock output, exact expanded output, and export rendering.
@@ -288,6 +304,8 @@ A native deterministic `/skill:ahoy` turn produces thinking, tool-call, and tool
 The operational provider path covers Calm loaded on, loaded off, default preference, extension absent, exact watcher delivery, narrow bare-marker legacy input, persisted restart replay, a genuine captain prompt, and adjacent notifications coalesced into one intended processing turn.
 It asserts one persisted and rendered captain answer, exact user-role operational envelopes in order, no replacement custom messages, one processing result, zero operational transcript rows, and the two-row neighboring-assistant geometry for live, adjacent, and restart paths.
 Quoted current markers, ASCII-only labels, ordinary text before a marker, unrelated U+2063 placement, and image-bearing input remain visible in component and native transcript checks.
+Queued-row coverage drives Pi's real listing and restore methods over a stand-in session for each capability-check branch, including a hidden row kept when the classifier cannot answer again and a refused continuation that re-queues instead of dropping, and repeats Escape in a real Pi TUI with Calm on, with a captain message queued beside the notification, and with Calm off.
+`tests/fm-calm-pi-queue-retention-live-e2e.test.sh` is the default-on, token-free guard that probes a running Pi session for every member the check requires and fails naming the installed Pi version.
 `tests/fm-pi-primary-live-e2e.test.sh` also proves the working ship replaces the built-in `Working...` row while Calm is active on the credentialed provider path, and that it clears when the run settles, before continuing its ordinary watcher lifecycle.
 `tests/fm-pi-primary-types.test.sh` performs strict no-emit TypeScript checking against whichever Pi declarations are installed, without pinning a version of its own.
 `tests/fm-calm-claude-mod.test.sh` needs no Claude Code binary: it proves the mod is one hooks module with no command, skill, agent, or classic hook path around its opt-in, that Pi's working ship renders byte-for-byte the shared sprite core painted in ANSI at every width and step, that the Raster packing lays that frame out exactly, that the mod resolves its home like Pi, that its live and restored working-note classifiers enforce the visibility boundaries [`calm.md`](calm.md#claude-code) owns, and that its operational-input classifier agrees with `bin/fm-operational-input.sh` on a corpus the shell owner itself encodes plus legacy shapes and near misses.
@@ -301,6 +319,7 @@ tests/fm-calm-pi-extension.test.sh
 tests/fm-pi-branch-extension.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 tests/fm-pi-primary-types.test.sh
+tests/fm-calm-pi-queue-retention-live-e2e.test.sh
 tests/fm-calm-claude-mod.test.sh
 tests/fm-calm-claude-mod-plugin.test.sh
 FM_CLAUDE_CALM_LIVE_E2E=1 tests/fm-calm-claude-mod-live-e2e.test.sh
