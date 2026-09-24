@@ -1537,6 +1537,11 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
     exit 1
   fi
 fi
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = scout ] && [ "$BASE_BRANCH_SET" -eq 1 ] &&
+  [ "$BASE_BRANCH" = "fm/$ID" ]; then
+  echo "error: --base-branch cannot be the scout's default crew branch (fm/$ID); choose a different base branch" >&2
+  exit 1
+fi
 if [ -e "$STATE" ] || [ -L "$STATE" ]; then
   fm_backlog_directory_present "$STATE" "state directory" || {
     echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
@@ -3147,12 +3152,32 @@ refuse_named_crew_branch_collision() {
 }
 
 ensure_named_base_present() { # <repo> <branch>
-  local repo=$1 branch=$2
+  local repo=$1 branch=$2 remote_refs
   if [ "$MODE" = local-only ]; then
     if git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null; then
       return 0
     fi
     echo "error: named base '$branch' does not exist locally in $repo; refusing to launch" >&2
+    return 1
+  fi
+  if [ "$KIND" = scout ]; then
+    if spawn_worktree_has_origin_config "$repo"; then
+      if ! remote_refs=$(git -C "$repo" ls-remote --heads origin "refs/heads/$branch" 2>/dev/null); then
+        echo "error: could not check named base '$branch' on origin for $repo; refusing to launch" >&2
+        return 1
+      fi
+      if [ -n "$remote_refs" ]; then
+        if ! git -C "$repo" fetch --quiet origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+          echo "error: could not fetch named base '$branch' for $repo; refusing to launch" >&2
+          return 1
+        fi
+        return 0
+      fi
+    fi
+    if git -C "$repo" rev-parse --verify --quiet "refs/heads/$branch^{commit}" >/dev/null; then
+      return 0
+    fi
+    echo "error: named base '$branch' does not exist locally or on origin for $repo; refusing to launch" >&2
     return 1
   fi
   if spawn_worktree_has_origin_config "$repo"; then
@@ -3333,15 +3358,33 @@ EOF
 }
 
 freshen_named_base() { # <worktree>
-  local worktree=$1 target expected actual
+  local worktree=$1 target expected actual remote_refs
   if [ "$MODE" = local-only ]; then
     target="refs/heads/$BASE_BRANCH"
+  elif [ "$KIND" = scout ]; then
+    if spawn_worktree_has_origin_config "$worktree"; then
+      if ! remote_refs=$(git -C "$worktree" ls-remote --heads origin "refs/heads/$BASE_BRANCH" 2>/dev/null); then
+        echo "error: could not check named base '$BASE_BRANCH' on origin for pooled worktree '$worktree'; refusing to launch" >&2
+        return 1
+      fi
+      if [ -n "$remote_refs" ]; then
+        if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"; then
+          echo "error: could not fetch named base '$BASE_BRANCH' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
+          return 1
+        fi
+        target="refs/remotes/origin/$BASE_BRANCH"
+      else
+        target="refs/heads/$BASE_BRANCH"
+      fi
+    else
+      target="refs/heads/$BASE_BRANCH"
+    fi
   elif spawn_worktree_has_origin_config "$worktree"; then
     if ! git -C "$worktree" fetch --quiet origin "+refs/heads/$BASE_BRANCH:refs/remotes/origin/$BASE_BRANCH"; then
       echo "error: could not fetch named base '$BASE_BRANCH' for pooled worktree '$worktree'; refusing to launch from a potentially stale base" >&2
       return 1
     fi
-    target="origin/$BASE_BRANCH"
+    target="refs/remotes/origin/$BASE_BRANCH"
   else
     target="refs/heads/$BASE_BRANCH"
   fi

@@ -322,9 +322,11 @@ if [ "$BASE_BRANCH_SET" -eq 1 ]; then
     echo "error: --base-branch is not a usable git branch name: $BASE_BRANCH" >&2
     exit 1
   fi
-  if [ "$KIND" = ship ] && [ "$BASE_BRANCH" = "$BRANCH" ]; then
-    echo "error: --base-branch cannot be the crew branch ($BRANCH); choose a different --branch-name" >&2
-    exit 1
+  if [ "$KIND" = ship ] || [ "$KIND" = scout ]; then
+    if [ "$BASE_BRANCH" = "$BRANCH" ]; then
+      echo "error: --base-branch cannot be the crew branch ($BRANCH); choose a different base branch" >&2
+      exit 1
+    fi
   fi
 fi
 printf -v BRANCH_Q '%q' "$BRANCH"
