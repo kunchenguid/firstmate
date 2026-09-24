@@ -269,10 +269,6 @@ test_pi_coordinator_waits_for_safe_settle_and_bounds_redelivery() {
   local home session out
   home=$(new_home extension)
   session=$(seed_session "$home" session)
-  cat >"$home/config/periodic-stow.json" <<'JSON'
-{"version":1,"enabled":true,"interval_seconds":3600,"min_interval_seconds":3600}
-JSON
-  touch -d '2 hours ago' "$home/config/periodic-stow.json"
   out=$(env -i PATH="${PATH:-/usr/bin:/bin}" HOME="${HOME:-/tmp}" FM_HOME="$home" \
     FM_ROOT_OVERRIDE="$ROOT" FM_PERIODIC_STOW_TICK_MS=5 PLUGIN="$ROOT/.pi/extensions/fm-periodic-stow.ts" \
     SESSION_FILE="$session" bash -c 'exec -a pi node --input-type=module' launcher 2>&1 <<'EOF'
@@ -320,6 +316,10 @@ const emit = async (name, event = { type: name }) => {
   for (const handler of handlers.get(name) || []) await handler(event, ctx);
 };
 
+await emit("session_start", { type: "session_start", reason: "startup" });
+if (messages.length !== 0 || existsSync(`${process.env.FM_HOME}/state/stow/state.json`)) {
+  throw new Error("absent default-off configuration registered work");
+}
 writeFileSync(`${process.env.FM_HOME}/config/periodic-stow.json`,
   JSON.stringify({ version: 1, enabled: true, interval_seconds: 60, min_interval_seconds: 60 }));
 await emit("session_start", { type: "session_start", reason: "startup" });
@@ -370,7 +370,7 @@ EOF
   ) || fail "Pi coordinator lifecycle failed: $out"
   [ "$(printf '%s' "$out" | tail -1 | jq -r '.messages')" -eq 3 ] || fail "bounded redelivery evidence missing: $out"
   [ "$(printf '%s' "$out" | tail -1 | jq -r '.attempts')" -eq 3 ] || fail "durable attempt count missing: $out"
-  pass "Pi coordinator waits for tools, queues, and editor input, then redelivers one run at most three times"
+  pass "Pi coordinator stays default-off, waits for tools, queues, and editor input, then redelivers one run at most three times"
 }
 
 test_status_is_read_only_and_default_idle

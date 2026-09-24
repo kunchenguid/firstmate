@@ -61,7 +61,7 @@ Strict no-emit checks passed against the supported Pi 0.84.4 baseline and instal
 ```text
 $ tests/fm-periodic-stow.test.sh
 ok - budget, proven no-op, unchanged memory, full-pass clock, and corrupt-state guards are observable
-ok - Pi coordinator waits for tools, queues, and editor input, then redelivers one run at most three times
+ok - Pi coordinator stays default-off, waits for tools, queues, and editor input, then redelivers one run at most three times
 $ FM_PI_PACKAGE_DIR=<isolated-pi-0.84.4> tests/fm-pi-primary-types.test.sh
 ok - tracked Pi extensions pass strict no-emit typecheck against Pi 0.84.4
 $ tests/fm-pi-primary-types.test.sh

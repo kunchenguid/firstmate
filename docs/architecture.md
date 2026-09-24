@@ -498,7 +498,7 @@ The stow pass never writes a skill, but a separately executed, captain-approved 
 Invoked in a primary home, `/stow` then cascades the same sweep to every registered secondmate, enumerated through `bin/fm-stow-cascade.sh`: each home is accounted and curated against its own startup-memory allowance, a live secondmate sweeps its own session, and a slow or unreachable home is reported as an exception rather than blocking the primary.
 When a home explicitly enables periodic stow, the Pi main-session extension only registers one due request, waits for `agent_settled` plus empty tool, queue, editor, UI, and compaction state, and offers a stable `run_id` back to that same session as a follow-up.
 `bin/fm-stow-run.sh` binds the physical home, session file, session-tree fingerprint, generation, compare-and-swap revision, fixed cutoff, prepared operations, readback receipts, and bounded redelivery; it never decides what knowledge to keep and never treats message delivery or `agent_end` as success.
-The extension is default-off, creates no daemon or agent, grants the supervision branch no memory-write authority, and preserves unresolved partial work instead of claiming a cross-file transaction.
+The extension is default-off, creates no cron entry, daemon, or agent, grants the supervision branch no memory-write authority, and preserves unresolved partial work instead of claiming a cross-file transaction.
 
 ## Local clones stay fresh
 
