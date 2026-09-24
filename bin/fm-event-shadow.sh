@@ -82,8 +82,14 @@ else
       fi
     done
     [ "$matches" = 1 ] && [ -f "$match" ] && [ ! -L "$match" ] || continue
-    # Never let a history line masquerade as fresh deterministic evidence.
-    tail -n 8 "$match" | head -c 4096 > "$TMP/text"
+    tail -n 8 "$match" > "$TMP/recent"
+    if [ "$(wc -c < "$TMP/recent")" -gt 4096 ]; then
+      tail -c 4096 "$TMP/recent" > "$TMP/bounded"
+      tail -n +2 "$TMP/bounded" > "$TMP/text"
+      [ -s "$TMP/text" ] || printf 'truncated declaration\n' > "$TMP/text"
+    else
+      cp "$TMP/recent" "$TMP/text"
+    fi
     jq --arg id "$seq" --rawfile text "$TMP/text" '. + [{id:$id,text:$text}]' "$TMP/events" > "$TMP/next" || exit 0
     mv "$TMP/next" "$TMP/events"
     count=$((count + 1)); [ "$count" -lt 8 ] || break

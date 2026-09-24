@@ -56,11 +56,22 @@ row | "$TOOL" >/dev/null
 [ "$(wc -l < "$CALLS" | tr -d ' ')" = 3 ] || fail 'unexpected cache'
 jq -e '.state.events[0].text|contains("need assistance")' "$RECORD" >/dev/null || fail 'stale evidence'
 pass 'no cache survives identical or changed evidence'
+printf 'paused: waiting for upstream\n' > "$STATE_DIR/task.status"
+head -c 5000 /dev/zero | tr '\0' x >> "$STATE_DIR/task.status"
+printf '\nblocked: need assistance\n' >> "$STATE_DIR/task.status"
+row | "$TOOL" >/dev/null
+jq -e '.state.events[0].text|contains("blocked: need assistance")' "$RECORD" >/dev/null || fail 'newest declaration dropped'
+printf 'paused: waiting for upstream\n' > "$STATE_DIR/task.status"
+head -c 5000 /dev/zero | tr '\0' x >> "$STATE_DIR/task.status"
+printf '\n' >> "$STATE_DIR/task.status"
+row | "$TOOL" >/dev/null
+jq -e '.state.events[0].text=="truncated declaration\n"' "$RECORD" >/dev/null || fail 'clipped declaration treated as complete'
+pass 'bounded evidence retains newest complete declaration and flags clipped lines'
 for reason in 'quota-exhausted' 'trust-prompt' 'CI failed' 'process dead'; do
   printf '1\t2\tstale\tsample:p1\tstale: sample:p1 (%s)\n' "$reason" | "$TOOL" > "$TMP_ROOT/bypass"
   [ ! -s "$TMP_ROOT/bypass" ] || fail 'reasoned wake classified'
 done
-[ "$(wc -l < "$CALLS" | tr -d ' ')" = 3 ] || fail 'deterministic facts reached API'
+[ "$(wc -l < "$CALLS" | tr -d ' ')" = 5 ] || fail 'deterministic facts reached API'
 pass 'reasoned quota/trust/CI/process wakes bypass model'
 for mode in invalid malformed transport multiple; do
   row | MODE="$mode" "$TOOL" > "$TMP_ROOT/error"
