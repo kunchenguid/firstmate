@@ -28,6 +28,7 @@ An auto-detected Herdr spawn stays silent, matching the verified tmux default pa
 
 Spawn stops before creating a Herdr container or acquiring a task worktree when `herdr`, `jq`, or the protocol floor is unavailable.
 No separate first-run provisioning is required.
+On a native-Windows Git Bash/MSYS host, where Herdr panes report no live foreground cwd, spawn takes a durable Treehouse lease from the project side and enters the pane into Git Bash, so that host also needs `cygpath`; `bin/fm-spawn.sh`'s `spawn_herdr_win32_acquire_worktree` header owns the exact contract.
 
 The required CI lane uses the pinned installers in `bin/fm-install-herdr.sh` and `bin/fm-install-treehouse.sh`.
 Those script headers own release assets, checksums, download bounds, and post-install gates.
@@ -366,6 +367,7 @@ Tests use thin compatibility wrappers in `tests/herdr-test-safety.sh` and never 
 
 ```sh
 tests/fm-backend-herdr.test.sh
+tests/fm-spawn-win32-herdr.test.sh
 tests/fm-composer-lib.test.sh
 tests/fm-herdr-submit-confirm-live-e2e.test.sh
 tests/fm-backend-herdr-smoke.test.sh
