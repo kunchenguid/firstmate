@@ -1553,6 +1553,28 @@ test_worktreeless_kind_gates_and_ambiguity_still_refuse() {
   [ ! -s "$dir2/runtime.log" ] \
     || fail "an ambiguous worktree record ran a runtime command: $(cat "$dir2/runtime.log")"
 
+  # An EMPTY-VALUED worktree= line is the same ambiguity: the line exists, so
+  # the carve-out's pending detection never engages, and the shared validator
+  # keeps its refusal for a value it cannot read.
+  local dir3 id3=workless-empty rc3
+  dir3=$(make_case worktreeless-empty-value)
+  mkdir -p "$dir3/home/data/$id3"
+  printf 'findings\n' > "$dir3/home/data/$id3/report.md"
+  fm_write_meta "$dir3/home/state/$id3.meta" \
+    "window=firstmate:fm-$id3" "endpoint_task_id=$id3" "worktree=" \
+    "project=$dir3/project" "kind=scout" \
+    "spawn_gen=s1.42.1" "decisions_reviewed=1" "decision_keys="
+  printf '%s\n' "done: report written" > "$dir3/home/state/$id3.status"
+  set +e
+  run_case_unforced "$dir3" "$id3" > "$dir3/stdout" 2> "$dir3/stderr"
+  rc3=$?
+  set -e
+  [ "$rc3" -ne 0 ] || fail "an empty-valued worktree record unexpectedly tore down"
+  assert_present "$dir3/home/state/$id3.meta" "a refused empty-value record was removed anyway"
+  assert_present "$dir3/worktree/sentinel" "an empty-value record's worktree changed before refusal"
+  [ ! -s "$dir3/runtime.log" ] \
+    || fail "an empty-value worktree record ran a runtime command: $(cat "$dir3/runtime.log")"
+
   pass "fm-teardown: secondmate and ambiguous worktree records keep the shared refusal"
 }
 
