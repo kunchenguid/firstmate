@@ -287,20 +287,34 @@ jq -e --slurpfile rules "$RULES" '
        (.usage.output_tokens | type) == "number"))' \
   "$RESP_FILE" >/dev/null 2>&1 || emit_error "response is not a rule Choice answer"
 
+# ---- quota evidence: one quota-axi --json snapshot -----------------------------
+command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
+quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
+fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
+
 # ---- dynamic catalog evidence for the selected policy, if any ------------------
 CATALOG_HARNESSES=()
 while IFS= read -r catalog_harness; do
   [ -n "$catalog_harness" ] || continue
   CATALOG_HARNESSES[${#CATALOG_HARNESSES[@]}]=$catalog_harness
-done < <(jq -n -r --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" '
+done < <(jq -n -r --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" --slurpfile quota "$QUOTA" "$FM_QUOTA_ROW_JQ"'
   def dynamic($v): ($v | type) == "object" and ((($v.discover // null) | type) == "object");
+  def floor_below($f):
+    if ($f | type) != "object" then false
+    else (quota_row($quota[0]; $f.provider; "")) as $row |
+      if $row == null or ((["known", "partial"] | index($row.quotaSemantics.status)) | not) then false
+      else [($row.quotaSemantics.effectiveAvailability // [])[] | select(.scope == $f.scope)] as $matches |
+        ($matches | length) > 0 and all($matches[]; .status == "known") and
+        any($matches[]; .effectivePercentRemaining < $f.min_percent)
+      end
+    end;
   ($resp[0].answers.rule.choice) as $choice |
   (if ($choice | test("^rule_[1-9][0-9]*$")) then ($choice | ltrimstr("rule_") | tonumber) else null end) as $rule_number |
   (if $choice == "default" then
      [($rules[0].default // null)]
    elif $rule_number != null and $rule_number <= (($rules[0].rules // []) | length) then
      ($rules[0].rules[$rule_number - 1]) as $rule |
-     [$rule.use, (if ($rule | has("floor")) then ($rules[0].default // null) else null end)]
+     [$rule.use, (if floor_below($rule.floor) then ($rules[0].default // null) else null end)]
    else []
    end)[] |
   select(dynamic(.)) |
@@ -309,11 +323,6 @@ done < <(jq -n -r --slurpfile resp "$RESP_FILE" --slurpfile rules "$RULES" '
 if [ "${#CATALOG_HARNESSES[@]}" -gt 0 ]; then
   "$SCRIPT_DIR/fm-model-catalog.sh" "${CATALOG_HARNESSES[@]}" > "$CATALOG" 2>/dev/null || true
 fi
-
-# ---- quota evidence: one quota-axi --json snapshot -----------------------------
-command -v quota-axi >/dev/null 2>&1 || emit_error "quota-axi not installed"
-quota-axi --json > "$QUOTA" 2>/dev/null || emit_error "quota-axi --json failed"
-fm_quota_json_valid < "$QUOTA" || emit_error "quota-axi --json returned an invalid snapshot"
 
 # ---- resolution: declared gates + quota evidence + argmax, all in jq ------------
 RESULT=$(jq -n --arg floor "$CONFIDENCE_FLOOR" --argjson lat "$LAT_MS" --arg none_criterion "$DEFAULT_WHEN" --argjson pmap "$PMAP" \

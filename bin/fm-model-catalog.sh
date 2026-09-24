@@ -398,7 +398,7 @@ catalog_codex() {
   script=$(mktemp) || return 1
   cat > "$script" <<'PY'
 import json, subprocess, sys, time
-cmd = ['codex', 'app-server', '--listen', 'stdio://', '-c', 'analytics.enabled=false']
+cmd = ['codex', 'app-server', '--stdio', '-c', 'analytics.enabled=false']
 proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
 def send(obj):
     proc.stdin.write(json.dumps(obj) + '\n')
