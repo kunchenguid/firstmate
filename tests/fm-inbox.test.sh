@@ -72,6 +72,17 @@ list_out=$(run_inbox "$home" list) || fail "list should succeed"
 assert_contains "$list_out" "hello from the terminal" "list should show the body"
 pass "plain note, list, and wake stay on the historical human path"
 
+home=$(make_home scoped-show)
+selected=$(run_inbox "$home" note --request-id selected-note --json "captain reply note") \
+  || fail "selected note should be created"
+selected_id=$(printf '%s' "$selected" | json_get id)
+run_inbox "$home" note --request-id unrelated-note --json "unrelated private note" \
+  >/dev/null || fail "unrelated note should be created"
+shown=$(run_inbox "$home" show "$selected_id") || fail "show should read the named note"
+assert_contains "$shown" "captain reply note" "show returns the selected note body"
+assert_not_contains "$shown" "unrelated private note" "show does not expose other pending note bodies"
+pass "show reads only the requested inbox note"
+
 # A saved note whose wake fails still exits 1 for callers that omit the new flags.
 isolated="$TMP_ROOT/isolated"
 mkdir -p "$isolated/bin"

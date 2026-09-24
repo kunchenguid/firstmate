@@ -54,8 +54,11 @@ socket.setdefaulttimeout(MAIL_TIMEOUT)
 MAX_PREVIEW = 200
 READ_LIMIT = 20
 MAX_AFK_BODY_BYTES = 256 * 1024
-MAX_AFK_BATCH_BODY_BYTES = 1024 * 1024
 MAX_AFK_REPLY_CHARS = 8000
+
+
+class AfkBodyFetchError(Exception):
+    pass
 
 
 def afk_record_field(name):
@@ -95,7 +98,9 @@ def afk_email_recipient():
         env=env,
     )
     recipient = configured.stdout.strip()
-    return recipient if configured.returncode == 0 and recipient else None
+    if configured.returncode != 0 or not recipient:
+        raise RuntimeError('mail configuration is missing for active email away posture')
+    return recipient
 
 
 def fetched_literal(data):
@@ -145,25 +150,22 @@ def connect_mailbox():
 
 def plain_body(msg):
     """Return decoded text/plain content only; replies are never inferred from HTML."""
-    try:
-        if msg is None:
-            return ''
-        parts = msg.walk() if msg.is_multipart() else [msg]
-        chunks = []
-        for part in parts:
-            if part.get_content_type() != 'text/plain' or part.get_filename():
-                continue
-            payload = part.get_payload(decode=True)
-            if payload is None:
-                continue
-            charset = part.get_content_charset() or 'utf-8'
-            try:
-                chunks.append(payload.decode(charset, 'replace'))
-            except LookupError:
-                chunks.append(payload.decode('utf-8', 'replace'))
-        return '\n'.join(chunks)
-    except Exception:
+    if msg is None:
         return ''
+    parts = msg.walk() if msg.is_multipart() else [msg]
+    chunks = []
+    for part in parts:
+        if part.get_content_type() != 'text/plain' or part.get_filename():
+            continue
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            continue
+        charset = part.get_content_charset() or 'utf-8'
+        try:
+            chunks.append(payload.decode(charset, 'replace'))
+        except LookupError:
+            chunks.append(payload.decode('utf-8', 'replace'))
+    return '\n'.join(chunks)
 
 
 def body_preview(msg):
@@ -410,7 +412,6 @@ def cmd_poll_list():
         recipient = afk_email_recipient()
         afk_enabled = recipient is not None
         afk_messages = []
-        afk_body_budget = MAX_AFK_BATCH_BODY_BYTES
         turn_path = os.environ.get('FM_MAIL_TURN', '')
         next_turn = None
         if cap == 1 and new_candidates and retry_candidates:
@@ -476,18 +477,20 @@ def cmd_poll_list():
                     if from_is_configured(fr, recipient):
                         try:
                             message_size = fetched_size(msg)
-                            body_limit = min(MAX_AFK_BODY_BYTES, afk_body_budget)
-                            if message_size is not None and 0 < message_size <= body_limit:
-                                afk_body_budget -= body_limit
+                            if message_size is None:
+                                raise AfkBodyFetchError('RFC822.SIZE was unavailable for the configured sender')
+                            if message_size <= MAX_AFK_BODY_BYTES:
                                 body_type, body_data = m.uid(
-                                    'fetch', u.encode(), f'(BODY.PEEK[]<0.{body_limit}>)')
+                                    'fetch', u.encode(), f'(BODY.PEEK[]<0.{MAX_AFK_BODY_BYTES}>)')
                                 body_bytes = fetched_literal(body_data) if body_type == 'OK' else None
-                                if body_bytes is not None and len(body_bytes) == message_size and len(body_bytes) <= body_limit:
-                                    body_message = email.message_from_bytes(body_bytes)
-                                    body = plain_body(body_message)[:MAX_AFK_REPLY_CHARS + 1]
-                                    afk_body_budget += body_limit - len(body_bytes)
-                        except Exception:
-                            body = ''
+                                if body_bytes is None or len(body_bytes) != message_size:
+                                    raise AfkBodyFetchError('configured sender body fetch was incomplete')
+                                body_message = email.message_from_bytes(body_bytes)
+                                body = plain_body(body_message)[:MAX_AFK_REPLY_CHARS + 1]
+                        except AfkBodyFetchError:
+                            raise
+                        except Exception as error:
+                            raise AfkBodyFetchError('configured sender body fetch failed') from error
                     afk_messages.append({
                         'uidvalidity': uidv,
                         'uid': uid,
@@ -495,6 +498,8 @@ def cmd_poll_list():
                         'subject': subj,
                         'body': body,
                     })
+            except AfkBodyFetchError:
+                raise
             except Exception:
                 if is_retry:
                     continue

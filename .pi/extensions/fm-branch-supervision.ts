@@ -640,10 +640,9 @@ export default function (pi: ExtensionAPI) {
   const AFK_EMAIL_DEBOUNCE_MS = 15000;
   const AFK_EMAIL_RETRY_MS = 60000;
   let afkEmailFlushTimer: ReturnType<typeof setTimeout> | undefined;
-  let afkEmailFailureNotified = false;
 
   function scheduleAfkEmailFlush(delayMs = AFK_EMAIL_DEBOUNCE_MS): void {
-    if (afkEmailFlushTimer) clearTimeout(afkEmailFlushTimer);
+    if (afkEmailFlushTimer) return;
     afkEmailFlushTimer = setTimeout(async () => {
       afkEmailFlushTimer = undefined;
       if (!afkPostureRecordPresent(state)) return;
@@ -651,10 +650,7 @@ export default function (pi: ExtensionAPI) {
       const flushed = await runCommandAsync(mailScript, ["afk-email", "flush"], { env: scriptEnv });
       if (!afkPostureRecordPresent(state)) return;
       if (queued.status !== 0 || flushed.status !== 0) {
-        if (!afkEmailFailureNotified) {
-          afkEmailFailureNotified = true;
-          deliverBranchHealthNote("Away email delivery failed; captain outcomes remain durably stored and will be retried.");
-        }
+        deliverBranchHealthNote("Away email delivery failed; captain outcomes remain durably stored and will be retried.");
         scheduleAfkEmailFlush(AFK_EMAIL_RETRY_MS);
         return;
       }
@@ -662,7 +658,6 @@ export default function (pi: ExtensionAPI) {
       if (deferred) {
         scheduleAfkEmailFlush(Math.max(1000, Number(deferred[1]) * 1000 + 250));
       } else if (/^sent [1-9][0-9]* away-email item/m.test(flushed.stdout)) {
-        afkEmailFailureNotified = false;
         scheduleAfkEmailFlush(AFK_EMAIL_RETRY_MS);
       }
     }, delayMs);

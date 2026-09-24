@@ -133,11 +133,22 @@ def outcomes_by_seq():
     return rows
 
 
-def queue_unprocessed():
-    config = mail_configuration()
+def live_mail_context():
     posture = live_record()
-    if not config or not posture:
+    if posture is None:
+        return None, None
+    config = mail_configuration()
+    if config is None:
+        print("fm-afk-email: mail configuration is missing for live email away posture", file=sys.stderr)
+    return posture, config
+
+
+def queue_unprocessed():
+    posture, config = live_mail_context()
+    if posture is None:
         return 0
+    if config is None:
+        return 1
     rows = outcomes_by_seq()
     if rows is None:
         print("fm-afk-email: outcome store is unreadable; pending email was not queued", file=sys.stderr)
@@ -180,10 +191,11 @@ def queue_unprocessed():
 
 
 def flush():
-    config = mail_configuration()
-    posture = live_record()
-    if not config or not posture:
+    posture, config = live_mail_context()
+    if posture is None:
         return 0
+    if config is None:
+        return 1
     AFK_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(AFK_DIR, 0o700)
     with LOCK.open("a", encoding="utf-8") as lock_handle:
@@ -302,10 +314,11 @@ def token_record(token):
 
 
 def receive_batch():
-    config = mail_configuration()
-    posture = live_record()
-    if not config or not posture:
+    posture, config = live_mail_context()
+    if posture is None:
         return 0
+    if config is None:
+        return 1
     try:
         messages = json.load(sys.stdin)
     except (ValueError, OSError):

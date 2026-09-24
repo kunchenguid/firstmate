@@ -63,7 +63,9 @@ run_contract() {  # <home> [extra env assignments are supplied by caller]
 run_email() {  # <home> <command>
   local home=$1 command=$2
   shift 2
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+  env -u FM_MAIL_USER -u FM_MAIL_PASS -u FM_IMAP_HOST -u FM_IMAP_PORT \
+    -u FM_SMTP_HOST -u FM_SMTP_PORT -u FM_AFK_EMAIL_TO \
+    FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
     "$REPO/bin/fm-mail.sh" afk-email "$command" "$@"
 }
 
@@ -100,6 +102,10 @@ test_unconfigured_and_non_pi_retain_existing_behavior() {
   [ ! -e "$home/state/afk-email" ] || fail "unconfigured entry created email state"
   out=$(run_email "$home" queue-unprocessed 2>&1) || fail "unconfigured queue check failed: $out"
   [ -z "$out" ] || fail "unconfigured email queue was not silent: $out"
+  out=$(run_email "$home" flush 2>&1) || fail "unconfigured flush check failed: $out"
+  [ -z "$out" ] || fail "unconfigured email flush was not silent: $out"
+  out=$(printf '[]' | run_email "$home" receive-batch 2>&1) || fail "unconfigured receive check failed: $out"
+  [ -z "$out" ] || fail "unconfigured email receive was not silent: $out"
 
   home=$(make_home non-pi configured)
   out=$(run_contract "$home" FM_TEST_HARNESS=claude 2>&1) || fail "non-Pi entry failed: $out"
@@ -195,6 +201,26 @@ test_failed_send_keeps_outcomes_queued() {
   pass "failed SMTP delivery leaves captain outcomes queued for retry"
 }
 
+test_live_email_posture_requires_runtime_config() {
+  local home out
+  home=$(make_home missing-runtime-config configured)
+  run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
+  rm "$home/.env"
+  for command in queue-unprocessed flush; do
+    if out=$(run_email "$home" "$command" 2>&1); then
+      fail "live email posture accepted missing configuration for $command"
+    fi
+    assert_contains "$out" 'mail configuration is missing for live email away posture' \
+      "$command reports missing runtime mail configuration"
+  done
+  if out=$(printf '[]' | run_email "$home" receive-batch 2>&1); then
+    fail "live email posture accepted receive batch without configuration"
+  fi
+  assert_contains "$out" 'mail configuration is missing for live email away posture' \
+    'receive-batch reports missing runtime mail configuration'
+  pass "a live email away posture fails closed when mail settings disappear"
+}
+
 test_invalid_away_record_does_not_enable_email() {
   local home out
   home=$(make_home invalid-record configured)
@@ -219,6 +245,8 @@ test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit() {
 import importlib.util
 import os
 import sys
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 root = Path(sys.argv[1])
@@ -258,6 +286,7 @@ bodies = {
 class FakeMailbox:
     untagged_responses = {"UIDVALIDITY": [b"44"]}
     body_fetches = []
+    fail_body_fetch = False
 
     def login(self, *_): pass
     def select(self, *_): pass
@@ -275,6 +304,8 @@ class FakeMailbox:
             return "OK", [(f"{key} (BODY[HEADER] {{{len(headers[key])}}}".encode(), headers[key]), b")"]
         if "BODY.PEEK[]<0." in fetch_spec:
             self.body_fetches.append(key)
+            if self.fail_body_fetch:
+                return "NO", []
             return "OK", [(f"{key} (BODY[]<0> {{{len(bodies[key])}}}".encode(), bodies[key]), b")"]
         raise AssertionError(f"unexpected fetch spec: {fetch_spec}")
 
@@ -282,12 +313,33 @@ mailbox = FakeMailbox()
 mail.connect_mailbox = lambda: mailbox
 assert mail.cmd_poll_list() == 0
 assert mailbox.body_fetches == ["2"], mailbox.body_fetches
+mailbox.body_fetches.clear()
+mailbox.fail_body_fetch = True
+poll_output = StringIO()
+with redirect_stdout(poll_output):
+    assert mail.cmd_poll_list() == 1
+assert poll_output.getvalue() == "", poll_output.getvalue()
+assert mailbox.body_fetches == ["2"], mailbox.body_fetches
+mailbox.fail_body_fetch = False
+mailbox.body_fetches.clear()
+assert mail.cmd_poll_list() == 0
+assert mailbox.body_fetches == ["2"], mailbox.body_fetches
+recipient = os.environ.pop("FM_AFK_EMAIL_TO")
+try:
+    try:
+        mail.afk_email_recipient()
+    except RuntimeError as error:
+        assert "mail configuration is missing" in str(error), str(error)
+    else:
+        raise AssertionError("live email posture silently disabled when destination is missing")
+finally:
+    os.environ["FM_AFK_EMAIL_TO"] = recipient
 (state / ".afk-contract").write_text("version: 99\nentered_epoch: 1\nreach_channels: email\n")
 mailbox.body_fetches.clear()
 assert mail.cmd_poll_list() == 0
 assert mailbox.body_fetches == [], mailbox.body_fetches
 PY
-  pass "mail polling reads bodies only for the configured sender and within the size limit"
+  pass "mail polling bounds sender-scoped body reads and retries failed fetches"
 }
 
 test_expired_and_unknown_codes_are_untrusted() {
@@ -321,6 +373,7 @@ test_unconfigured_and_non_pi_retain_existing_behavior
 # The active feature is tested with synthetic mail and a local fake SMTP command; no network or mailbox is used.
 test_batched_mail_redacts_secrets_and_replies_are_item_bound
 test_failed_send_keeps_outcomes_queued
+test_live_email_posture_requires_runtime_config
 test_invalid_away_record_does_not_enable_email
 test_poll_fetches_bodies_only_for_configured_sender_and_within_size_limit
 test_expired_and_unknown_codes_are_untrusted

@@ -30,6 +30,7 @@
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
 #   fm-inbox.sh list
+#   fm-inbox.sh show <id>
 #   fm-inbox.sh drain [--ack <id>...]
 #
 # `note --request-id` is the idempotent capture path: a repeat of the same
@@ -81,8 +82,8 @@
 # An absent profile means the call uses whatever credentials are already in the
 # environment, which is also what FM_INBOX_PROFILE= (empty) forces.
 #
-# `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list` and `drain`
-# need NO configuration at all, because they make no model call. The voice
+# `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list`, `show`
+# and `drain` need NO configuration at all, because they make no model call. The voice
 # handover depends on `note`, so it keeps working in a home that has configured
 # nothing. `--json` / `receipts` / `ready` require python3, which a firstmate
 # home already uses for other tools.
@@ -91,8 +92,8 @@
 #   FM_HOME              operational home whose state/ and data/ are used.
 #
 # PRIVACY: `say` sends your audio and `ask` sends your question to Bedrock.
-# `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list` and `drain`
-# make no network call at all.
+# `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list`, `show`
+# and `drain` make no network call at all.
 #
 # `note` is also the queueing half of the spoken interface: when the voice agent
 # in bin/fm-voice-relay.py hands real work over to firstmate, it runs this
@@ -1101,6 +1102,14 @@ PY
 
 # ---------------------------------------------------------------- list / drain
 
+cmd_show() {
+  [ "$#" -eq 1 ] || die "usage: fm-inbox.sh show <id>"
+  valid_note_id "$1" || die "invalid note id: $1"
+  local path
+  path=$(note_path "$1") || die "no such note: $1"
+  read_note_body "$path"
+}
+
 cmd_list() {
   [ -d "$INBOX" ] || { printf '(inbox empty)\n'; return 0; }
   local any=0
@@ -1145,6 +1154,7 @@ case "${1:-}" in
   status)   shift; cmd_status ;;
   ask)      shift; cmd_ask "$@" ;;
   list)     shift; cmd_list ;;
+  show)     shift; cmd_show "$@" ;;
   drain)    shift; cmd_drain "$@" ;;
   ''|-h|--help|help)
     # The whole header block, found rather than counted: everything after the
