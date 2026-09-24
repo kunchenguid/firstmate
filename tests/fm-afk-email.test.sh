@@ -1009,6 +1009,100 @@ PY
 
 }
 
+test_reply_survives_crash_after_smtp_acceptance() {
+  local home entered accepted_body status token expired_token reply_body out pending pending2 note used_before used_after
+  home=$(make_home send-crash configured)
+  run_contract "$home" FM_TEST_HARNESS=pi >/dev/null 2>&1 || fail "configured entry failed"
+  entered=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$REPO/bin/fm-afk-contract.sh" field entered_epoch)
+  write_outcomes "$home" "$entered"
+  run_email "$home" queue-unprocessed >/dev/null || fail "queueing outcomes failed"
+  accepted_body="$home/state/accepted-body.txt"
+  if FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$REPO" \
+    FM_MAIL_USER=owner@example.com FM_MAIL_PASS=test-secret FM_IMAP_HOST=imap.example.test \
+    FM_SMTP_HOST=smtp.example.test FM_AFK_EMAIL_TO=owner@example.com \
+    FM_TEST_ACCEPTED_BODY="$accepted_body" python3 - "$REPO/bin/fm-afk-email.py" <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+spec = importlib.util.spec_from_file_location("afk_email_under_test", sys.argv[1])
+helper = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(helper)
+real_run = helper.subprocess.run
+real_atomic_json = helper.atomic_json
+
+def accept_send(command, *args, **kwargs):
+    if isinstance(command, list) and len(command) > 1 and command[1] == "send":
+        Path(os.environ["FM_TEST_ACCEPTED_BODY"]).write_text(kwargs["input"], encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    return real_run(command, *args, **kwargs)
+
+def stop_before_sent_record(path, value):
+    if Path(path).parent == helper.SENT:
+        raise RuntimeError("simulated process stop after SMTP acceptance")
+    return real_atomic_json(path, value)
+
+helper.subprocess.run = accept_send
+helper.atomic_json = stop_before_sent_record
+try:
+    helper.flush()
+except RuntimeError as error:
+    if str(error) == "simulated process stop after SMTP acceptance":
+        raise SystemExit(77)
+    raise
+raise SystemExit("flush did not reach the simulated crash window")
+PY
+  then
+    fail "simulated post-acceptance process stop unexpectedly succeeded"
+  else
+    status=$?
+  fi
+  [ "$status" = 77 ] || fail "unexpected status for simulated send crash: $status"
+  [ -s "$accepted_body" ] || fail "fake SMTP did not accept and capture the message"
+  [ ! -e "$home/state/afk-email/sent/1.json" ] || fail "the crash simulation unexpectedly wrote a sent record"
+  token=$(grep -oE 'FM-AFK-[A-Za-z0-9_-]{16}' "$accepted_body" | sed -n '1p')
+  expired_token=$(grep -oE 'FM-AFK-[A-Za-z0-9_-]{16}' "$accepted_body" | sed -n '2p')
+  pending="$home/state/afk-email/pending/1.json"
+  pending2="$home/state/afk-email/pending/2.json"
+  [ -n "$token" ] || fail "accepted message did not contain its reply token"
+  [ "$token" = "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["token"])' "$pending")" ] \
+    || fail "the pending record did not retain the accepted reply token"
+
+  reply_body=$(printf 'FM-AFK-REPLY %s\nPlease merge the UI pull request' "$token")
+  out=$(message "$home" 301 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+    || fail "reply to ambiguously sent update errored: $out"
+  assert_contains "$out" 'received 1 verified and 0 untrusted' 'a reply is accepted while its item is still pending'
+  note=$(find "$home/state/inbox" -maxdepth 1 -name '*.note' -print -quit)
+  [ -n "$note" ] || fail "pending-token reply did not enter the captain inbox"
+  assert_contains "$(cat "$note")" 'Please merge the UI pull request' \
+    'the pending-token reply reaches the durable captain inbox'
+  python3 - "$pending2" <<'PY'
+import json, sys
+path = sys.argv[1]
+item = json.load(open(path))
+item['send_expires_epoch'] = 1
+json.dump(item, open(path, 'w'))
+PY
+  reply_body=$(printf 'FM-AFK-REPLY %s\nexpired pending answer' "$expired_token")
+  out=$(message "$home" 303 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+    || fail "expired pending-token reply errored: $out"
+  assert_contains "$out" 'received 0 verified and 1 untrusted' 'pending tokens use the same expiry check as sent tokens'
+  used_before=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["used_epoch"])' "$pending")
+  out=$(run_email "$home" flush) || fail "retry of the ambiguously sent update failed: $out"
+  pending="$home/state/afk-email/sent/1.json"
+  [ -f "$pending" ] || fail "retry did not transition the pending item to sent"
+  [ ! -e "$home/state/afk-email/pending/1.json" ] || fail "sent transition left the pending item behind"
+  used_after=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["used_epoch"])' "$pending")
+  [ "$used_before" = "$used_after" ] || fail "sent transition lost the pending item's consumed state"
+  reply_body=$(printf 'FM-AFK-REPLY %s\nreplay after sent transition' "$token")
+  out=$(message "$home" 302 'owner@example.com' 'Re: Firstmate away update' "$reply_body" 2>&1) \
+    || fail "replayed reply errored: $out"
+  assert_contains "$out" 'received 0 verified and 1 untrusted' 'a pending-token reply remains single-use after the sent transition'
+  pass "reply tokens survive the SMTP-accepted, sent-record-crash window"
+}
+
 test_expired_and_unknown_codes_are_untrusted() {
   local home out entered token sent reply_body send_index
 
@@ -1234,4 +1328,5 @@ test_short_configured_secret_is_redacted_before_storage_and_send
 test_flush_holds_away_lock_until_send_completes
 test_receive_batch_holds_away_lock_through_reply_handoff
 test_branch_prompt_preserves_wake_after_verification_error
+
 

@@ -145,6 +145,7 @@ def afk_contract_lock():
 
 
 
+
 def atomic_json(path, value):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -326,6 +327,7 @@ def flush_while_contract_locked():
     with afk_state_lock():
 
 
+
         candidates = []
         for path in sorted(PENDING.glob("*.json"), key=lambda item: int(item.stem) if item.stem.isdigit() else 0):
             item = read_json(path)
@@ -344,6 +346,7 @@ def flush_while_contract_locked():
                 ):
                     if field in sent_item:
                         item[field] = sent_item[field]
+
 
             candidates.append((path, item))
             if len(candidates) >= MAX_BATCH_ITEMS:
@@ -384,6 +387,7 @@ def flush_while_contract_locked():
             item["send_expires_epoch"] = send_started_epoch + TOKEN_TTL
             atomic_json(path, item)
 
+
         lines.extend([
             "Replies from the configured address with an unexpired item code are treated as your words for that item only.",
             "Other messages are untrusted and cannot answer an item.",
@@ -414,6 +418,7 @@ def flush_while_contract_locked():
             ):
                 if field in item:
                     sent_item[field] = item[field]
+
 
             atomic_json(SENT / path.name, sent_item)
             path.unlink(missing_ok=True)
@@ -717,6 +722,7 @@ def token_record(token):
             if item.get("token_hash") != digest:
                 continue
             if store == "pending":
+
                 started = item.get("send_started_epoch")
                 expires = item.get("send_expires_epoch")
                 if not isinstance(started, int) or not isinstance(expires, int):
@@ -729,6 +735,7 @@ def token_record(token):
             raise ValueError("away-email token state is ambiguous")
         if matches:
             return matches[0]
+
     return None, None
 
 
@@ -763,6 +770,7 @@ def receive_batch_while_contract_locked():
 
 
 def receive_messages(messages, posture, config):
+
 
     accepted = 0
     untrusted = 0
