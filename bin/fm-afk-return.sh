@@ -127,9 +127,11 @@ remove_superseded_record() {  # <path> <file>
   mv "$pending" "$file"
 }
 
-# The epoch the away window started at, from the gate's retained contract row,
-# else from the live record (before it is archived), else from the legacy away
-# flag's own timestamp, else unknown (empty).
+# The epoch the posture window started at, from the gate's retained contract
+# row, else from the live record (before it is archived), else from the flag's
+# own window-start timestamp (bin/fm-afk-start.sh fm_afk_flag_write: quiet
+# mode's only source, since it writes no record, and a legacy away flag's), else
+# unknown (empty).
 gate_contract_epoch() {
   awk -F '\t' '$1 == "contract" { print $2; exit }' "$GATE" 2>/dev/null || true
 }
