@@ -310,7 +310,7 @@
 #   on every spawn and relaunch, so a change reaches the next launch without a
 #   restart, and it is inherited into secondmate homes (bin/fm-config-inherit-lib.sh).
 # Worker account pin (config/claude-account, config/pi-account):
-#   Opt-in. With no file, a Claude or Pi launch is unchanged: Claude still
+#   Opt-in. With no file, a new Claude or Pi launch is unchanged: Claude still
 #   receives this process's own CLAUDE_CONFIG_DIR when it is set, and Pi the
 #   destination pane's ambient account. A present file pins every new launch of
 #   that runner from this home - ship, scout, local secondmate, and raw Claude
@@ -318,7 +318,7 @@
 #   endpoint, worktree, or record exists when the file is malformed, the root is
 #   unusable, or the runner's own check says it is not signed in. A --relaunch
 #   keeps its task on the account already recorded for it instead, and refuses
-#   when the pin has moved to a different account directory since that launch,
+#   when the pin, or its removal, now selects a different account directory,
 #   because the replacement would start without the outgoing worker's session
 #   state, which stays under the recorded root
 #   (fm_worker_account_relaunch_guard). A pinned Claude launch sheds the
