@@ -1862,10 +1862,50 @@ EOF
 # A later done, failed, needs-decision, blocked, or resolved event carrying that
 # key closes the phase, because it has moved to a terminal or separately tracked
 # state.
-# A bare legacy event uses the default key, preserving one-phase behavior.
+# A bare legacy event prints as the default key, preserving one-phase behavior.
+# That printed key is not the decision fold's shared default bucket: a line with
+# no stated key is a different phase from an explicit "[key=default]" line, so a
+# stated default-key retraction cannot cancel an unrelated keyless wait, while a
+# keyless retraction still closes only the keyless phase.
 # This fold is evidence about whether a parent event was explicitly superseded.
 # It is never authoritative current crew state, and consumers must not let an open
 # phase outrank a structured home snapshot or fm-crew-state result.
+# Internal stand-in for a keyless phase. Outside the decision-key charset so it
+# cannot collide with a stated slug, and rewritten to "default" only on output.
+_FM_CLASSIFY_KEYLESS_PHASE=$'\036default'
+
+# Phase key for one status line. A stated slug is itself, including an explicit
+# "default". A line with no token uses the keyless stand-in. A stated slug that
+# fails the charset is rejected, the same way _fm_decision_key rejects it.
+_fm_activity_phase_key() {  # <status-line> -> phase key
+  local k unstamped
+  _fm_status_unstamped "$1" unstamped
+  if _fm_key_before_colon "$unstamped"; then
+    k=${unstamped%%:*}
+    k=${k#*\[key=}
+    k=${k%%\]*}
+  else
+    k=$(_fm_key_at_note_head "$unstamped") || { printf '%s' "$_FM_CLASSIFY_KEYLESS_PHASE"; return 0; }
+  fi
+  _fm_decision_slug_ok "$k" || return 1
+  printf '%s' "$k"
+}
+
+# Rewrite the keyless stand-in back to the public "default" key. Only the key
+# field is rewritten, so a note that happens to contain the stand-in stays put.
+_fm_activity_publish_keys() {  # <open-set>
+  local line key rest
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    key=${line%%$'\t'*}
+    rest=${line#*$'\t'}
+    [ "$key" = "$_FM_CLASSIFY_KEYLESS_PHASE" ] && key=default
+    printf '%s\t%s\n' "$key" "$rest"
+  done <<EOF
+$1
+EOF
+}
+
 _fm_status_open_activities_stream() {
   local line verb key note resolve held open='' pause
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
@@ -1878,7 +1918,7 @@ _fm_status_open_activities_stream() {
       *) continue ;;
     esac
     verb=$(status_line_verb "$line")
-    key=$(_fm_decision_key "$line") || continue
+    key=$(_fm_activity_phase_key "$line") || continue
     case "$verb" in
       working|"$pause")
         note=$(status_line_note "$line")
@@ -1892,7 +1932,7 @@ _fm_status_open_activities_stream() {
         ;;
     esac
   done
-  printf '%s' "$open"
+  _fm_activity_publish_keys "$open"
 }
 
 status_open_activities() {  # <status-file-or-dash>
