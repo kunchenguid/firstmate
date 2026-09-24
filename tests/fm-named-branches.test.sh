@@ -303,6 +303,7 @@ test_promote_rejects_base_changes_and_branch_collisions() {
   git -C "$project" push -q origin refs/heads/office:refs/heads/release
   git -C "$project" checkout -q main
   git -C "$project" branch -D office >/dev/null
+  git -C "$project" fetch -q origin refs/heads/release:refs/remotes/origin/release
   id=named-promote-remote-base
   printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=release\n' "$id" "$project" > "$home/state/$id.meta"
   FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
@@ -311,6 +312,20 @@ test_promote_rejects_base_changes_and_branch_collisions() {
     --mode direct-PR --yolo off --branch-name feature/remote-base >/dev/null
   assert_grep 'refs/remotes/origin/release' "$home/data/$id/ship-instructions.md" \
     "remote promotion instructions did not name the qualified base ref"
+
+  git -C "$project" update-ref -d refs/remotes/origin/release
+  id=named-promote-missing-local-remote-base
+  printf 'window=fm-%s\nkind=scout\nworktree=/tmp/wt\nproject=%s\nbase_branch=release\n' "$id" "$project" > "$home/state/$id.meta"
+  FM_HOME="$home" "$BRIEF" "$id" proj --scout --base-branch release >/dev/null
+  fill_brief "$home/data/$id/brief.md"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" "$id" \
+    --mode direct-PR --yolo off --branch-name feature/missing-local-remote-base 2>&1); status=$?
+  expect_code 1 "$status" "promotion accepted a missing local remote-tracking base"
+  assert_contains "$out" "not available in the scout project checkout" \
+    "missing local remote-tracking base was not refused"
+  assert_grep 'kind=scout' "$home/state/$id.meta" "missing local remote-tracking base published ship metadata"
+  assert_absent "$home/data/$id/ship-instructions.md" \
+    "missing local remote-tracking base published ship instructions"
 
   git -C "$project" branch office main
   id=named-promote-remote-base-local-only
@@ -387,6 +402,38 @@ test_local_merge_refuses_a_linked_landing_checkout() {
   [ "$(git -C "$proj" rev-parse refs/heads/office)" = "$old" ] \
     || fail "linked landing refusal changed the landing ref"
   pass "fm-merge-local: a linked landing checkout is protected"
+}
+
+test_local_merge_refuses_a_bare_linked_landing_checkout() {
+  local home seed bare linked id out status old
+  home="$TMP_ROOT/bare-linked/home"
+  seed="$TMP_ROOT/bare-linked/seed"
+  bare="$TMP_ROOT/bare-linked/proj.git"
+  linked="$TMP_ROOT/bare-linked/office-worktree"
+  id=named-bare-linked
+  mkdir -p "$home/data" "$home/state" "$seed"
+  git init -q -b main "$seed"
+  git_identity "$seed"
+  commit_file "$seed" base base base
+  git init -q --bare "$bare"
+  git -C "$seed" remote add origin "$bare"
+  git -C "$seed" push -q origin main
+  git -C "$seed" checkout -qb office
+  commit_file "$seed" office office office
+  git -C "$seed" push -q origin office
+  git -C "$seed" checkout -qb feature/widget
+  commit_file "$seed" change change change
+  git -C "$seed" push -q origin feature/widget
+  git -C "$bare" worktree add -q "$linked" office
+  old=$(git -C "$bare" rev-parse refs/heads/office)
+  printf 'project=%s\nmode=local-only\nbranch=feature/widget\nbase_branch=office\n' "$bare" \
+    > "$home/state/$id.meta"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$id" 2>&1); status=$?
+  expect_code 1 "$status" "a bare linked landing checkout was advanced"
+  assert_contains "$out" "checked out in linked worktree" "a bare linked landing checkout was not refused"
+  [ "$(git -C "$bare" rev-parse refs/heads/office)" = "$old" ] \
+    || fail "bare linked landing refusal changed the landing ref"
+  pass "fm-merge-local: a bare linked landing checkout is protected"
 }
 
 test_local_merge_fast_forwards_a_bare_repository() {
@@ -473,5 +520,6 @@ promote_keeps_the_named_branches
 test_promote_rejects_base_changes_and_branch_collisions
 test_local_merge_lands_on_the_recorded_base
 test_local_merge_refuses_a_linked_landing_checkout
+test_local_merge_refuses_a_bare_linked_landing_checkout
 test_local_merge_fast_forwards_a_bare_repository
 test_review_uses_the_recorded_base

@@ -168,7 +168,7 @@ case "$hold_status" in
     ;;
 esac
 merge_status=0
-if [ "$BARE" = false ] && [ -n "$RECORDED_BASE" ] && [ "$cur" != "$DEFAULT" ]; then
+if [ "$BARE" = true ] || { [ -n "$RECORDED_BASE" ] && [ "$cur" != "$DEFAULT" ]; }; then
   landing_worktree=
   worktree_path=
   while IFS= read -r worktree_line; do
