@@ -227,9 +227,13 @@
 #   the same isolation test screens every read: a pane still showing the project
 #   or the repository primary while `treehouse get` prepares the slot is waited
 #   out as a transient rather than adopted and then refused, so a home that is
-#   itself a linked worktree of the project repository still launches. A pane
-#   that never reaches an isolated worktree refuses at the end of that wait,
-#   naming the last path seen and why it was rejected.
+#   itself a linked worktree of the project repository still launches. A slot
+#   whose checkout is still being written (git's `initializing` worktree lock,
+#   or a Treehouse pool slot the pool state does not yet list with a live
+#   owner) is waited out the same way, on a separate longer allowance, so a
+#   slow first checkout is neither refused as uncommitted work nor abandoned
+#   half-written. A pane that never reaches an isolated worktree refuses at the
+#   end of that wait, naming the last path seen and why it was rejected.
 #   That placement is proven only at launch. Every ship or scout pane therefore
 #   also receives `export FM_TASK_ID=<task-id>` before the launch command, on
 #   the same channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -3073,6 +3077,27 @@ spawn_worktree_isolated() { # <path>
   return 0
 }
 
+# A worktree whose checkout is still being written already passes the isolation
+# test: `git worktree add` creates its .git link first and runs its checkout
+# inside it, so a pane reporting its foreground cwd reads the new slot from the
+# first poll while `git status` still lists every file not yet written. Git
+# marks such a worktree with an `initializing` lock until the checkout ends, and
+# a Treehouse pool slot is not handed out until the pool state records its live
+# owner. Sets SPAWN_WT_REASON when the worktree is still settling.
+spawn_worktree_settling() { # <path>
+  local path=$1 git_dir reason=
+  git_dir=$(git -C "$path" rev-parse --absolute-git-dir 2>/dev/null) || git_dir=
+  if [ -n "$git_dir" ] && [ -f "$git_dir/locked" ]; then
+    IFS= read -r reason <"$git_dir/locked" 2>/dev/null || true
+  fi
+  if [ "$reason" = initializing ] ||
+    { fm_treehouse_pool_slot "$PROJ_ABS" "$path" && ! fm_treehouse_slot_acquired "$path"; }; then
+    SPAWN_WT_REASON="its checkout is still being written (treehouse get has not finished handing it out)"
+    return 0
+  fi
+  return 1
+}
+
 validate_spawn_worktree() { # <source> <inspect-target>
   local source=$1 inspect_target=$2
   if ! spawn_worktree_isolated "$WT"; then
@@ -4044,13 +4069,28 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # misconfiguration would need machinery this path does not want - so the
   # refusal has to be self-explaining instead: carry the last path seen and the
   # reason it was rejected, and report both at the deadline.
+  #
+  # A candidate whose checkout is still being written is screened the same way
+  # (spawn_worktree_settling): adopting it would misread the files not yet
+  # written as uncommitted work, and giving up on it would abort the spawn while
+  # git is still writing, leaving a partial slot folder behind. Polls that see a
+  # checkout in progress therefore do not spend the ordinary 60s window; they
+  # draw on a separate 600s allowance instead, so a slow first checkout of a
+  # large repository is waited out while a pane that never settles still ends.
   candidate=""
   last_seen=""
   last_reason="the pane reported no path"
-  for _ in $(seq 1 60); do
+  wt_waited=0
+  wt_settle_waited=0
+  while [ "$wt_waited" -lt 60 ]; do
+    wt_settling=0
     p=$(spawn_current_path "$WT_TARGET" || true)
     [ -z "$p" ] || last_seen="$p"
-    if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
+    if [ -n "$p" ] && spawn_worktree_isolated "$p" && spawn_worktree_settling "$p"; then
+      wt_settling=1
+      candidate=""
+      last_reason=$SPAWN_WT_REASON
+    elif [ -n "$p" ] && spawn_worktree_isolated "$p"; then
       p_real=$(real_path_or_raw "$p")
       last_reason="it is an isolated worktree, but no second read agreed with it"
       if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
@@ -4063,9 +4103,14 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       [ -z "$p" ] || last_reason=$SPAWN_WT_REASON
     fi
     sleep 1
+    if [ "$wt_settling" = 1 ] && [ "$wt_settle_waited" -lt 600 ]; then
+      wt_settle_waited=$((wt_settle_waited + 1))
+    else
+      wt_waited=$((wt_waited + 1))
+    fi
   done
   if [ -z "$WT" ]; then
-    echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
+    echo "error: treehouse get did not enter an isolated worktree within $((wt_waited + wt_settle_waited))s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); inspect window $T" >&2
     exit 1
   fi
 
