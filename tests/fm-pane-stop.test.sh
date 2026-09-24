@@ -16,10 +16,11 @@ done
 old=$(printf 'You hit your weekly limit\n'; printf 'normal line\n%.0s' {1..13})
 ! fm_pane_stop grok "$old" || fail 'old scrollback'
 while IFS='|' read -r harness text label; do
-  [ "$(fm_pane_stop "$harness" "$text")" = "$(printf 'blocked-at-prompt\t%s\t-\t%s' "$harness" "$label")" ] || fail "missed $harness dialog"
-  ! fm_pane_stop "$harness" "Example: $text" || fail 'quoted dialog matched'
+  [ "$(fm_pane_stop "$harness" "$text"$'\nDo not trust')" = "$(printf 'blocked-at-prompt\t%s\t-\t%s' "$harness" "$label")" ] || fail "missed $harness dialog"
+  ! fm_pane_stop "$harness" "$text" || fail 'lone heading matched'
+  ! fm_pane_stop "$harness" "Example: $text"$'\nDo not trust' || fail 'quoted dialog matched'
 done <<'DIALOGS'
-pi|Trust project folder|trust
+pi|Trust project folder?|trust
 pi-signed|Trust project folder?|trust
 DIALOGS
 while IFS='|' read -r harness text label; do

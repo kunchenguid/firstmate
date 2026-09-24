@@ -2255,7 +2255,7 @@ test_quota_stale_surfaced() {
     case "$harness" in
       grok) pane='You hit your weekly limit' ;;
       pi) pane='Error: Quota reached. Please wait 2h29m27s' ;;
-      pi-trust) pane='Trust project folder' ;;
+      pi-trust) pane=$'Trust project folder?\nDo not trust' ;;
     esac
     printf '%s' "$pane" > "$capture_file"
     printf 'window=%s\nkind=ship\nharness=%s\n' "$window" "${harness%-trust}" > "$state/quota.meta"
